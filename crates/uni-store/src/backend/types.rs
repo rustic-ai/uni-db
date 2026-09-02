@@ -225,6 +225,100 @@ impl Default for FilterExpr {
     }
 }
 
+/// Replace same-column `IN` conjuncts with a single `IN` over their intersection.
+///
+/// `col IN A AND col IN B` is exactly `col IN (A ∩ B)` in three-valued logic: on
+/// a non-NULL column both say TRUE iff the value is in both sets, and on a NULL
+/// column both are unknown. The fold is therefore semantics-preserving, and it
+/// is also strictly more selective.
+///
+/// It exists for rendering, not for optimisation. Two `InList`s over one column
+/// are what triggers the Lance rewrite that loses the unknown — the rewrite
+/// folds a disjoint conjunction to FALSE, which is sound in two-valued logic and
+/// wrong wherever the column is NULL, since the conjunction is unknown there.
+/// `NOT` over that returned every row, NULLs included. Leaving one `InList` gives
+/// the rewrite nothing to pair. See issue #212.
+///
+/// Only NULL-free lists fold. A list containing NULL already renders as
+/// `(col IN (…) OR CAST(NULL AS BOOLEAN))` rather than a bare `InList`, so it
+/// cannot feed the rewrite, and its unknown-on-miss semantics do not survive a
+/// naive set intersection.
+fn fold_same_column_ins(parts: &[FilterExpr]) -> Vec<FilterExpr> {
+    use std::collections::HashMap;
+
+    let foldable = |e: &FilterExpr| {
+        matches!(e, FilterExpr::In { values, .. }
+            if !values.is_empty() && !values.iter().any(|v| matches!(v, Scalar::Null)))
+    };
+
+    // Which columns appear in more than one foldable `IN`. Nothing else moves.
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for p in parts {
+        if let FilterExpr::In { column, .. } = p
+            && foldable(p)
+        {
+            *counts.entry(column.as_str()).or_default() += 1;
+        }
+    }
+    if !counts.values().any(|n| *n > 1) {
+        return parts.to_vec();
+    }
+
+    let mut out: Vec<FilterExpr> = Vec::with_capacity(parts.len());
+    let mut emitted: Vec<&str> = Vec::new();
+    for p in parts {
+        let FilterExpr::In { column, .. } = p else {
+            out.push(p.clone());
+            continue;
+        };
+        if !foldable(p) || counts.get(column.as_str()).copied().unwrap_or(0) < 2 {
+            out.push(p.clone());
+            continue;
+        }
+        if emitted.contains(&column.as_str()) {
+            continue; // already folded into the first occurrence
+        }
+        emitted.push(column.as_str());
+
+        // Intersect every foldable `IN` on this column, order-preserving.
+        let mut acc: Option<Vec<Scalar>> = None;
+        for q in parts {
+            if let FilterExpr::In { column: c, values } = q
+                && c == column
+                && foldable(q)
+            {
+                acc = Some(match acc {
+                    None => values.clone(),
+                    Some(prev) => prev
+                        .into_iter()
+                        .filter(|v| values.iter().any(|w| w == v))
+                        .collect(),
+                });
+            }
+        }
+        let values = acc.unwrap_or_default();
+        if values.is_empty() {
+            // An empty intersection is FALSE on a non-NULL column and *unknown*
+            // on a NULL one — not the plain `false` an empty `IN` renders as.
+            // `col IS NULL AND unknown` gives exactly that: NULL where the
+            // column is NULL, FALSE everywhere else.
+            out.push(FilterExpr::And(vec![
+                FilterExpr::IsNull(column.clone()),
+                FilterExpr::In {
+                    column: column.clone(),
+                    values: vec![Scalar::Null],
+                },
+            ]));
+        } else {
+            out.push(FilterExpr::In {
+                column: column.clone(),
+                values,
+            });
+        }
+    }
+    out
+}
+
 impl FilterExpr {
     /// `_deleted = false` — the soft-delete visibility predicate.
     ///
@@ -367,8 +461,9 @@ impl FilterExpr {
                 if parts.is_empty() {
                     return Ok("true".to_string());
                 }
+                let folded = fold_same_column_ins(parts);
                 let rendered: Result<Vec<_>, _> =
-                    parts.iter().map(|p| p.to_sql().map(paren)).collect();
+                    folded.iter().map(|p| p.to_sql().map(paren)).collect();
                 Ok(rendered?.join(" AND "))
             }
             FilterExpr::Or(parts) => {
@@ -410,6 +505,24 @@ impl FilterExpr {
                 let (nulls, non_nulls): (Vec<_>, Vec<_>) =
                     values.iter().partition(|v| matches!(v, Scalar::Null));
                 if nulls.is_empty() {
+                    // A single candidate renders as `=`, never as a one-element
+                    // `IN`. The two are identical in three-valued logic — both
+                    // are NULL on a NULL column — but only the `IN` form feeds
+                    // the multi-`InList` rewrite described above, and that
+                    // rewrite loses the unknown whether the NULL arrives in the
+                    // list *or in the column*.
+                    //
+                    // The list-side hole was closed above. The column-side one
+                    // was still open: with `f` NULL on some rows,
+                    // `NOT ((f IN (1.0)) AND (f IN (2.5)))` returned every row,
+                    // including the NULLs, because Lance folded the disjoint
+                    // conjunction to FALSE — sound in two-valued logic, wrong
+                    // when the column can be NULL, where the conjunction is
+                    // unknown. Emitting `=` leaves no `InList` for the rewrite
+                    // to pair. See issue #212.
+                    if let [only] = non_nulls.as_slice() {
+                        return Ok(format!("{} = {}", column, scalar_to_sql(only)));
+                    }
                     let items: Vec<_> = non_nulls.iter().map(|v| scalar_to_sql(v)).collect();
                     return Ok(format!("{} IN ({})", column, items.join(", ")));
                 }

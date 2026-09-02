@@ -41,6 +41,7 @@ use lance::Dataset;
 use lance::dataset::builder::DatasetBuilder;
 use lance::dataset::{WriteMode, WriteParams};
 use lance::io::{ObjectStore, ObjectStoreParams, ObjectStoreRegistry, StorageOptionsAccessor};
+use lance::session::Session;
 use object_store::path::Path as ObjectPath;
 
 /// Directory suffix marking a Lance dataset. Matches lancedb's
@@ -62,6 +63,21 @@ pub struct LanceDirectory {
     base_path: ObjectPath,
     /// Cloud credentials / tuning knobs, re-applied on every dataset open.
     storage_options: Option<HashMap<String, String>>,
+    /// Shared Lance session, reused by every dataset open.
+    ///
+    /// The session owns Lance's index and metadata caches. Without it each
+    /// `DatasetBuilder` gets `session: None`, i.e. a *fresh* cache, so an ANN
+    /// index is re-read and re-decoded on every single query. Measured on
+    /// SIFT-1M: HNSW query cost was linear in corpus size and unaffected by
+    /// `ef_search`, `m`, partition count or payload encoding, with the graph
+    /// search itself only ~6% of samples and the rest in page decode, memmove
+    /// and allocation.
+    ///
+    /// Sharing the session does **not** reintroduce the staleness the
+    /// `open` docs warn about: that concern is caching the `Dataset` *handle*,
+    /// which pins a manifest version. Every open still loads the current
+    /// manifest; only content-addressed index and metadata blocks are reused.
+    session: Arc<Session>,
 }
 
 impl std::fmt::Debug for LanceDirectory {
@@ -106,6 +122,7 @@ impl LanceDirectory {
             store,
             base_path,
             storage_options,
+            session: Arc::new(Session::default()),
         })
     }
 
@@ -199,7 +216,7 @@ impl LanceDirectory {
     /// A [`DatasetBuilder`] for `uri` carrying this directory's storage
     /// options.
     fn builder(&self, uri: &str) -> DatasetBuilder {
-        let builder = DatasetBuilder::from_uri(uri);
+        let builder = DatasetBuilder::from_uri(uri).with_session(self.session.clone());
         match &self.storage_options {
             Some(opts) => builder.with_storage_options(opts.clone()),
             None => builder,

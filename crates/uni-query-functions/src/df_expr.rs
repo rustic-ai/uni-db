@@ -233,6 +233,17 @@ pub enum VariableKind {
     NodeList,
     /// Path variable - kept as-is (struct with nodes/relationships)
     Path,
+    /// A value bound by `UNWIND`: one column, whose shape is known only at
+    /// runtime.
+    ///
+    /// Distinct from *absent* on purpose. Absent means "nothing below bound this
+    /// name", which lets a later operator supply a binding; this says "the name
+    /// is bound, and not to the `{var}._vid` / `{var}.{prop}` columns a scan
+    /// produces". Rewrites that reach for those columns must not fire for it —
+    /// an entity that has been through `collect()` and `UNWIND` is a single
+    /// CypherValue blob, and reaching for `{var}._vid` produced
+    /// `Schema error: No field named "f._vid"`.
+    Opaque,
 }
 
 impl VariableKind {
@@ -616,6 +627,17 @@ pub struct TranslationContext {
     /// edge identity as `_eid` instead of the default `_vid`.
     pub mutation_edge_hints: Vec<String>,
 
+    /// Columns that actually exist in the schema these expressions compile
+    /// against, when the caller knows it.
+    ///
+    /// `variable_kinds` is collected by walking the whole logical subtree, so it
+    /// keeps naming variables a `WITH` has since dropped. `startNode`/`endNode`
+    /// inject one column per known node variable, and injecting a name the
+    /// schema no longer has fails the whole query with `No field named _anon_1`
+    /// (#187). `None` means "unknown, inject everything" — the behaviour before
+    /// this field existed.
+    pub available_columns: Option<std::collections::HashSet<String>>,
+
     /// Frozen statement clock for consistent temporal function evaluation.
     /// All bare temporal constructors (`time()`, `datetime()`, etc.) and their
     /// `.statement()`/`.transaction()` variants use this frozen instant so that
@@ -632,6 +654,7 @@ impl Default for TranslationContext {
             variable_kinds: std::collections::HashMap::new(),
             node_variable_hints: Vec::new(),
             mutation_edge_hints: Vec::new(),
+            available_columns: None,
             statement_time: chrono::Utc::now(),
         }
     }
@@ -681,7 +704,12 @@ fn translate_null_check(
         let col_name = match kind {
             VariableKind::Node => format!("{}.{}", var, COL_VID),
             VariableKind::Edge => format!("{}.{}", var, COL_EID),
-            VariableKind::Path | VariableKind::EdgeList | VariableKind::NodeList => var.clone(),
+            // These are each carried in a single column, so the column itself is
+            // the thing to test for null — there is no identity column beside it.
+            VariableKind::Path
+            | VariableKind::EdgeList
+            | VariableKind::NodeList
+            | VariableKind::Opaque => var.clone(),
         };
         let col_expr = DfExpr::Column(Column::from_name(col_name));
         return Ok(if is_null {
@@ -1595,9 +1623,12 @@ fn translate_aggregate_function(
         }
         "COLLECT" => {
             check_args!(1, df_args, "COLLECT");
+            // No execution context reaches this translator, so nothing is
+            // interned here; the list is carried inline as it always was.
             Some(Ok(crate::df_udfs::create_cypher_collect_expr(
                 first_arg(df_args),
                 distinct,
+                None,
             )))
         }
         // BTIC aggregates
@@ -2036,10 +2067,26 @@ fn translate_graph_function(
             // When called with a bare variable (ID(n)), rewrite to the internal
             // identity column reference (_vid for nodes, _eid for edges).
             if let Some(Expr::Variable(var)) = args.first() {
-                let is_edge = context.is_some_and(|ctx| {
-                    ctx.variable_kinds.get(var) == Some(&VariableKind::Edge)
-                        || ctx.mutation_edge_hints.iter().any(|h| h == var)
-                });
+                let kind = context.and_then(|ctx| ctx.variable_kinds.get(var));
+                let is_edge = kind == Some(&VariableKind::Edge)
+                    || context.is_some_and(|ctx| ctx.mutation_edge_hints.iter().any(|h| h == var));
+                // Only rewrite to the identity column when the variable really is
+                // bound to one. A variable bound by `UNWIND` over a collected list
+                // is a single CypherValue column with no `{var}._vid` beside it,
+                // and rewriting regardless produced `Schema error: No field named
+                // "f._vid"`. Handing the whole entity to the `id` UDF lets it read
+                // the id out of the encoding instead.
+                // A CREATE/MERGE-bound entity is bound to identity columns just
+                // as a scan-bound one is; it is simply tracked in the hint lists
+                // rather than in `variable_kinds`, so both have to be consulted.
+                let is_bound_entity = matches!(kind, Some(VariableKind::Node | VariableKind::Edge))
+                    || context.is_some_and(|ctx| {
+                        ctx.mutation_edge_hints.iter().any(|h| h == var)
+                            || ctx.node_variable_hints.iter().any(|h| h == var)
+                    });
+                if !is_bound_entity {
+                    return Some(Ok(dummy_udf_expr("id", df_args.to_vec())));
+                }
                 let id_suffix = if is_edge { COL_EID } else { COL_VID };
                 Some(Ok(DfExpr::Column(Column::from_name(format!(
                     "{}.{}",
@@ -2150,16 +2197,27 @@ fn translate_graph_function(
             let mut udf_args = df_args.to_vec();
             let mut seen = std::collections::HashSet::new();
             if let Some(ctx) = context {
+                // Only inject a column the schema actually has. `variable_kinds`
+                // is collected from the whole subtree, so after `WITH e AS rel`
+                // it still names the traversal's `_anon_0`/`_anon_1`; injecting
+                // those failed the query outright (#187).
+                let exists = |var: &String| {
+                    ctx.available_columns
+                        .as_ref()
+                        .is_none_or(|cols| cols.contains(var))
+                };
                 // Add node variables from MATCH (registered in variable_kinds)
                 for (var, kind) in &ctx.variable_kinds {
-                    if matches!(kind, VariableKind::Node) && seen.insert(var.clone()) {
+                    if matches!(kind, VariableKind::Node) && exists(var) && seen.insert(var.clone())
+                    {
                         udf_args.push(DfExpr::Column(Column::from_name(var.clone())));
                     }
                 }
                 // Add node variables from CREATE/MERGE patterns (not in variable_kinds
-                // to avoid affecting ID/TYPE/HASLABEL dotted-column resolution)
+                // to avoid affecting ID/TYPE/HASLABEL dotted-column resolution),
+                // plus any endpoint column `EndpointHydrateExec` materialised.
                 for var in &ctx.node_variable_hints {
-                    if seen.insert(var.clone()) {
+                    if exists(var) && seen.insert(var.clone()) {
                         udf_args.push(DfExpr::Column(Column::from_name(var.clone())));
                     }
                 }
@@ -3310,6 +3368,33 @@ fn coerce_scalar_function(
         .iter()
         .map(|a| apply_type_coercion(a, schema))
         .collect::<Result<Vec<_>>>()?;
+
+    // A Cypher list literal is heterogeneous by definition, but `make_array`
+    // requires one child type. `translate_list_literal` routes mixed lists to
+    // `_make_cypher_list`, yet it decides *syntactically* — `TranslationContext`
+    // carries no field types, so `[u.name, u.classYear]` looks uniform to it and
+    // lowers to `make_array` whatever the columns hold. Here the `DFSchema` is
+    // available, so the same decision can be made on actual types.
+    //
+    // Worth doing even though a plan-time error would be survivable: `make_array`
+    // over `[Utf8, Int64]` *plans* successfully and then trips an assertion in
+    // Arrow's `MutableArrayData`, which aborts the process. Only lists that are
+    // genuinely mixed are rewritten, so the native path — and with it the
+    // `uni_raw_bytes` list-child marking invariant, which `is_markable_list`
+    // already declines to apply to mixed lists — is untouched.
+    if func.func.name().eq_ignore_ascii_case("make_array") && coerced_args.len() > 1 {
+        let types: Vec<_> = coerced_args
+            .iter()
+            .filter_map(|a| a.get_type(schema).ok())
+            .filter(|t| !matches!(t, DataType::Null))
+            .collect();
+        let has_mixed_types = types.windows(2).any(|w| w[0] != w[1]);
+        if has_mixed_types {
+            // `_make_cypher_list` is `VariadicAny` and converts every argument
+            // through `Value`, so the arguments need no casting first.
+            return Ok(dummy_udf_expr("_make_cypher_list", coerced_args));
+        }
+    }
 
     if func.func.name().eq_ignore_ascii_case("coalesce") && coerced_args.len() > 1 {
         let types: Vec<_> = coerced_args

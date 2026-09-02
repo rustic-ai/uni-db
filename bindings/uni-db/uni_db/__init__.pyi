@@ -536,6 +536,9 @@ class QueryMetrics:
     index_scans: int
     index_comparisons: int
     scans_reported: int
+    vector_index_scans: int
+    fts_index_scans: int
+    searches_reported: int
 
 class QueryWarning:
     """A query warning emitted during execution (e.g., missing index)."""

@@ -365,3 +365,48 @@ async fn a_scan_without_an_index_reports_zero_rather_than_unknown() {
         scan.index_hits
     );
 }
+
+// ---------------------------------------------------------------------------
+// `scans_reported` has to cover the scans a query actually performs
+// ---------------------------------------------------------------------------
+//
+// `scans_reported` is the denominator that lets `index_scans == 0` be told
+// apart from silence. It only counts a scan whose `ScanRequest` carries the
+// query's counters, and exactly one producer set them: the labelled vertex
+// scan. A schemaless vertex scan and every edge scan passed `None`, so a query
+// made entirely of those reported `scans_reported = 0` — and a zero denominator
+// makes the numerator unreadable, which is the failure this counter pair was
+// introduced to prevent.
+//
+// `docs/perf/index-scan-counter-2026-08-27.md` has the full audit, including
+// the two thirds of the gap that are *not* a wiring omission and are
+// deliberately left alone: Lance's `nearest()` path, which builds no
+// `ScanRequest`, and the traversal, which serves from the in-memory adjacency
+// and issues no Lance scan to count.
+
+/// A schemaless scan is a real Lance scan and must be reported.
+#[tokio::test]
+async fn a_schemaless_scan_reaches_the_denominator() -> anyhow::Result<()> {
+    let db = uni_db::Uni::in_memory().build().await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:Loose {k: 1}), (:Loose {k: 2})")
+        .await?;
+    tx.commit().await?;
+    db.flush().await?;
+
+    let m = db
+        .session()
+        .query("MATCH (n:Loose) RETURN count(n) AS c")
+        .await?
+        .metrics()
+        .clone();
+
+    assert!(
+        m.scans_reported > 0,
+        "a schemaless vertex scan reported no scan at all, so `index_scans` \
+         has no denominator: scans_reported={}, index_scans={}",
+        m.scans_reported,
+        m.index_scans
+    );
+    Ok(())
+}

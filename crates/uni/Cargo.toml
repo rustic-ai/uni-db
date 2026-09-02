@@ -201,6 +201,23 @@ harness = false
 name = "dense_retrieval"
 harness = false
 
+# ann-benchmarks protocol: recall@10 vs QPS on SIFT-1M, against SIFT's own
+# ground truth. Separate from `dense_retrieval` because that bench measures
+# single-query latency on a synthetic corpus against an oracle we compute;
+# this one measures a Pareto curve on a real corpus against external truth.
+# Needs the pinned fixtures -- see docs/fixtures.md.
+[[bench]]
+name = "ann_pareto"
+harness = false
+
+# LDBC SNB Interactive: loads SF1 from the pinned CSV fixtures and runs the 14
+# complex reads. Doubles as a correctness benchmark — the results are compared
+# against a second engine running LDBC's official Cypher unmodified. Needs the
+# `ldbc-sf1-*` fixtures; see docs/fixtures.md.
+[[bench]]
+name = "ldbc_snb"
+harness = false
+
 [[bench]]
 name = "multivec_retrieval"
 harness = false

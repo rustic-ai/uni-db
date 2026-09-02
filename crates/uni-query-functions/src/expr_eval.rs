@@ -157,6 +157,32 @@ pub fn cypher_eq(left: &Value, right: &Value) -> Option<bool> {
         return Some(l == r);
     }
 
+    // Graph entities compare by identity, never structurally.
+    //
+    // Two nodes are the same node iff they have the same id — properties and
+    // labels are attributes of that one entity, not part of what distinguishes
+    // it. Without this arm the derived `PartialEq` on `Node` compared the vid,
+    // the labels *and* the whole property map, so the same node hydrated with
+    // different property sets on either side of the comparison comes back
+    // unequal. That is a well-formed wrong answer with no error: `n IN [n]`
+    // returned false.
+    //
+    // The `Value::Map` arm below already does exactly this for the legacy
+    // `_vid` / `_eid` map encoding of an entity; the typed `Node` / `Edge`
+    // variants were simply never given the same treatment. `=` did not expose
+    // it because the planner lowers node equality to a VID comparison — only
+    // the paths routed through `cypher_eq` (`IN`, list membership) inherited
+    // the structural comparison.
+    match (left, right) {
+        (Value::Node(l), Value::Node(r)) => return Some(l.vid == r.vid),
+        (Value::Edge(l), Value::Edge(r)) => return Some(l.eid == r.eid),
+        // A node is never equal to an edge, whatever their ids.
+        (Value::Node(_), Value::Edge(_)) | (Value::Edge(_), Value::Node(_)) => {
+            return Some(false);
+        }
+        _ => {}
+    }
+
     // Structural equality for Lists
     if let (Value::List(l), Value::List(r)) = (left, right) {
         if l.len() != r.len() {

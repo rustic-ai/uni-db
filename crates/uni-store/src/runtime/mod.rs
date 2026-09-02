@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
+pub mod columnar_scan;
 pub mod context;
 pub mod counters;
 /// Embedding-capability mapping (task→heads) and per-alias head requirements,

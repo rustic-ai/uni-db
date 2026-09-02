@@ -20,7 +20,7 @@ use uni_cypher::ast::{
     CreateLabel, CypherLiteral, Direction, DropConstraint, DropEdgeType, DropLabel, Expr,
     MatchClause, MergeClause, NodePattern, PathPattern, Pattern, PatternElement, Query,
     RelationshipPattern, RemoveItem, ReturnClause, ReturnItem, SchemaCommand, SetClause, SetItem,
-    ShortestPathMode, ShowConstraints, SortItem, Statement, WindowSpec, WithClause,
+    ShortestPathMode, ShowConstraints, SortItem, Statement, UnaryOp, WindowSpec, WithClause,
     WithRecursiveClause,
 };
 
@@ -58,6 +58,23 @@ pub(crate) const WITH_PASSTHROUGH_SENTINEL: &str = "__with_passthrough__";
 /// Recorded by [`collect_properties_from_plan`] during the same complete plan
 /// walk that gathers properties — so alias discovery is guaranteed complete —
 /// and consumed and removed by [`reconcile_passthrough_properties`]. Never
+/// Reserved key in the collected-properties map holding the UNWIND source
+/// variables that nothing else in the plan reads.
+///
+/// Not a Cypher variable: the leading and trailing double underscores keep it
+/// out of the namespace user variables live in, the same trick the sentinels
+/// below use for property names.
+pub(crate) const DEAD_UNWIND_SOURCES_KEY: &str = "__dead_unwind_sources__";
+
+/// Key recorded when a subquery body projects `RETURN *`.
+///
+/// `mark_dead_unwind_sources` reasons from absence, so a projection that names
+/// nothing proves nothing. It already stands down for a `LogicalPlan`-level
+/// wildcard; a body-level one is the same hazard reached through the AST, and
+/// measurement confirms `RETURN *` inside a body does export outer-scope
+/// variables (a correlated `q` shows up beside the body's own bindings).
+pub(crate) const SUBQUERY_WILDCARD_KEY: &str = "__subquery_wildcard__";
+
 /// reaches scan planning.
 pub(crate) const ALIAS_OF_PREFIX: &str = "__alias_of__";
 
@@ -156,6 +173,76 @@ fn contains_pattern_predicate(expr: &Expr) -> bool {
     found
 }
 
+/// Does a pattern predicate appear somewhere a boolean is not expected?
+///
+/// A pattern in an expression is a *predicate*, not a value. openCypher permits
+/// one wherever a boolean belongs and rejects it everywhere else, and the TCK
+/// pins both halves:
+///
+/// - `Pattern1` [22] / [23] — `RETURN (n)-[]->()` and `WITH (n)-[]->() AS x`
+///   are `SyntaxError: UnexpectedSyntax`: a projection is not a boolean context.
+/// - `List6` [6] — `RETURN size((a)-->())` likewise; `size` wants a list.
+/// - `Pattern1` [19]-[21] — `WHERE NOT (n)-[:REL2]-()` and conjunctions of
+///   pattern predicates must *work*.
+/// - `List6` [7] — `size([(a)-->(b) | b])`, a pattern *comprehension*, is a list
+///   and is fine.
+///
+/// So the test cannot be "does this expression contain a pattern predicate",
+/// which was the original guard and rejected the legal cases along with the
+/// illegal ones, nor "is the projected expression itself one", which lets
+/// `size((a)-->())` through. It is positional: descend, tracking whether the
+/// current position expects a boolean.
+fn pattern_predicate_in_non_boolean_position(expr: &Expr) -> bool {
+    fn walk(e: &Expr, boolean_ok: bool) -> bool {
+        match e {
+            Expr::Exists {
+                from_pattern_predicate: true,
+                ..
+            } => !boolean_ok,
+            // Boolean connectives propagate a boolean context to their operands.
+            Expr::UnaryOp {
+                op: UnaryOp::Not,
+                expr: inner,
+            } => walk(inner, true),
+            Expr::BinaryOp {
+                left,
+                op: BinaryOp::And | BinaryOp::Or | BinaryOp::Xor,
+                right,
+            } => walk(left, true) || walk(right, true),
+            // `NOT` also reaches here spelled as a call, which is how LDBC writes
+            // it: `not((liker)-[:KNOWS]-(person))`.
+            Expr::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("not") => {
+                args.iter().any(|a| walk(a, true))
+            }
+            // A comprehension's filter is a boolean context; the list it draws
+            // from and the value it produces are not.
+            Expr::ListComprehension {
+                list,
+                map_expr,
+                where_clause,
+                ..
+            } => {
+                walk(list, false)
+                    || walk(map_expr, false)
+                    || where_clause.as_ref().is_some_and(|w| walk(w, true))
+            }
+            // Anything else: children sit in a non-boolean position unless one of
+            // the arms above says otherwise.
+            other => {
+                let mut found = false;
+                other.for_each_child(&mut |child| {
+                    if !found {
+                        found = walk(child, false);
+                    }
+                });
+                found
+            }
+        }
+    }
+    // A projection is not a boolean context.
+    walk(expr, false)
+}
+
 /// Add a variable to scope with type conflict validation.
 /// Returns an error if the variable already exists with a different type.
 fn add_var_to_scope(
@@ -247,16 +334,22 @@ fn infer_with_output_type(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Variab
                 VariableType::EdgeList
             } else if lower == "collect" && !args.is_empty() {
                 let collected = infer_with_output_type(&args[0], vars_in_scope);
-                if matches!(
-                    collected,
-                    VariableType::Node
-                        | VariableType::Edge
-                        | VariableType::Path
-                        | VariableType::Imported
-                ) {
-                    collected
-                } else {
-                    VariableType::Scalar
+                match collected {
+                    // `collect` aggregates *into a list*, so collecting nodes
+                    // yields a node list, exactly as `nodes()` does above.
+                    // Returning the element type unchanged made
+                    // `WITH collect(n) AS ns` look like a single node, which
+                    // rejected `size(ns)` as "size() requires a string, list, or
+                    // path argument" and would equally have let `MATCH (ns)-->()`
+                    // through. `unwrap_list_type` maps these back for `UNWIND`,
+                    // so consuming the list one element at a time is unaffected.
+                    VariableType::Node => VariableType::NodeList,
+                    VariableType::Edge => VariableType::EdgeList,
+                    // `Path` has no list counterpart to map to, and `Imported`
+                    // is deliberately opaque; both are carried through as before
+                    // rather than collapsed to `Scalar`.
+                    VariableType::Path | VariableType::Imported => collected,
+                    _ => VariableType::Scalar,
                 }
             } else {
                 VariableType::Scalar
@@ -2180,6 +2273,65 @@ impl LogicalPlan {
         }
     }
 
+    /// This node's child plans, in evaluation order.
+    ///
+    /// The immutable counterpart to [`Self::input_mut`], widened to the
+    /// multi-child variants so a read-only survey can reach every node. A
+    /// missing arm here silently hides a subtree from any analysis built on it,
+    /// so the single-input list is kept identical to `input_mut`'s.
+    fn children(&self) -> Vec<&LogicalPlan> {
+        match self {
+            LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right, .. } => {
+                vec![left, right]
+            }
+            LogicalPlan::Apply {
+                input, subquery, ..
+            }
+            | LogicalPlan::SubqueryCall { input, subquery } => vec![input, subquery],
+            LogicalPlan::RecursiveCTE {
+                initial, recursive, ..
+            } => vec![initial, recursive],
+            LogicalPlan::Explain { plan } => vec![plan],
+            LogicalPlan::QuantifiedPattern {
+                input,
+                pattern_plan,
+                ..
+            } => vec![input, pattern_plan],
+            LogicalPlan::Foreach { input, body, .. } => {
+                let mut kids = vec![&**input];
+                kids.extend(body.iter());
+                kids
+            }
+            LogicalPlan::Unwind { input, .. }
+            | LogicalPlan::Traverse { input, .. }
+            | LogicalPlan::TraverseMainByType { input, .. }
+            | LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Create { input, .. }
+            | LogicalPlan::CreateBatch { input, .. }
+            | LogicalPlan::Merge { input, .. }
+            | LogicalPlan::Set { input, .. }
+            | LogicalPlan::Remove { input, .. }
+            | LogicalPlan::Delete { input, .. }
+            | LogicalPlan::Sort { input, .. }
+            | LogicalPlan::Limit { input, .. }
+            | LogicalPlan::Aggregate { input, .. }
+            | LogicalPlan::Distinct { input, .. }
+            | LogicalPlan::Window { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::ShortestPath { input, .. }
+            | LogicalPlan::AllShortestPaths { input, .. }
+            | LogicalPlan::BindZeroLengthPath { input, .. }
+            | LogicalPlan::BindPath { input, .. }
+            | LogicalPlan::FusedIndexScanWrapped { inner: input, .. }
+            | LogicalPlan::LocyFold { input, .. }
+            | LogicalPlan::LocyBestBy { input, .. }
+            | LogicalPlan::LocyPriority { input, .. }
+            | LogicalPlan::LocyProject { input, .. }
+            | LogicalPlan::LocyModelInvoke { input, .. } => vec![input],
+            _ => Vec::new(),
+        }
+    }
+
     /// Replace this node's single child input, leaving every other field intact.
     ///
     /// Rust has no functional update (`..rest`) for enum struct-variants, so
@@ -2722,7 +2874,22 @@ impl QueryPlanner {
     ///
     /// `vars` lists variable names already in scope before this query executes
     /// (e.g., from an enclosing Locy rule body).
+    ///
+    /// Every logical plan this crate hands out is produced here, so this is
+    /// where a rewrite that the plan is not *valid* without belongs — as
+    /// opposed to `rewrite_for_fork_fusion` and `fuse_create_set`, which need
+    /// live storage state and only forfeit an optimisation when skipped, and so
+    /// are applied by the API layer. `resolve_traversal_endpoints` is of the
+    /// first kind: eight call sites construct a plan from Cypher and each one
+    /// that skipped it would fail `startNode(r)` over a MATCH-bound
+    /// relationship rather than merely plan it worse.
     pub fn plan_with_scope(&self, query: Query, vars: Vec<String>) -> Result<LogicalPlan> {
+        Ok(resolve_traversal_endpoints(
+            self.plan_with_scope_unresolved(query, vars)?,
+        ))
+    }
+
+    fn plan_with_scope_unresolved(&self, query: Query, vars: Vec<String>) -> Result<LogicalPlan> {
         // Apply query rewrites before planning
         let rewritten_query = crate::query::rewrite::rewrite_query(query)?;
         // M5 follow-up #5: function-call rewrite via ReplacementScanProvider.
@@ -2800,37 +2967,13 @@ impl QueryPlanner {
         format!("_anon_{}", id)
     }
 
-    /// Extract projection column names from a logical plan.
-    /// Used for UNION column validation.
+    /// Column names used to validate that both `UNION` branches agree.
+    ///
+    /// Delegates to [`projection_columns`]; an unknown shape yields an empty
+    /// list, which compares equal to another unknown and so does not reject
+    /// the union on its own.
     fn extract_projection_columns(plan: &LogicalPlan) -> Vec<String> {
-        match plan {
-            LogicalPlan::Project { projections, .. } => projections
-                .iter()
-                .map(|(expr, alias)| alias.clone().unwrap_or_else(|| expr.to_string_repr()))
-                .collect(),
-            LogicalPlan::Limit { input, .. }
-            | LogicalPlan::Sort { input, .. }
-            | LogicalPlan::Distinct { input, .. }
-            | LogicalPlan::Filter { input, .. } => Self::extract_projection_columns(input),
-            LogicalPlan::Union { left, right, .. } => {
-                let left_cols = Self::extract_projection_columns(left);
-                if left_cols.is_empty() {
-                    Self::extract_projection_columns(right)
-                } else {
-                    left_cols
-                }
-            }
-            LogicalPlan::Aggregate {
-                group_by,
-                aggregates,
-                ..
-            } => {
-                let mut cols: Vec<String> = group_by.iter().map(|e| e.to_string_repr()).collect();
-                cols.extend(aggregates.iter().map(|e| e.to_string_repr()));
-                cols
-            }
-            _ => Vec::new(),
-        }
+        projection_columns(plan).unwrap_or_default()
     }
 
     fn plan_return_clause(
@@ -2892,8 +3035,10 @@ impl QueryPlanner {
                         validate_expression_variables(expr, vars_in_scope)?;
                         // Validate function argument types and boolean operators
                         validate_expression(expr, vars_in_scope)?;
-                        // Pattern predicates are not allowed in RETURN
-                        if contains_pattern_predicate(expr) {
+                        // A pattern is a predicate, not a value, so it cannot be
+                        // projected on its own — but it may appear inside an
+                        // expression here, as it may inside WHERE.
+                        if pattern_predicate_in_non_boolean_position(expr) {
                             return Err(anyhow!(
                                 "SyntaxError: UnexpectedSyntax - Pattern predicates are not allowed in RETURN"
                             ));
@@ -4486,6 +4631,81 @@ impl QueryPlanner {
         Ok(plan)
     }
 
+    /// A path rewritten to start at its bound end, or `None` to plan as written.
+    ///
+    /// [`Self::plan_path`] walks elements left to right and scans the first node
+    /// when it is unbound. If the *last* node is the bound one, that scan is a
+    /// full `ScanAll` cross-joined against the incoming rows, and the binding is
+    /// only reapplied as a filter above the traversal — where
+    /// `try_plan_cross_join_as_hash_join` can no longer recover it. Measured at
+    /// SF1: `(forum)-[:CONTAINER_OF]->(post)` 349 ms against
+    /// `(post)<-[:CONTAINER_OF]-(forum)` not finishing, for the same rows.
+    ///
+    /// Reversing is semantics-preserving because `source_variable` names the
+    /// traversal *start*, not the arrow's tail: `endpoints_for_direction`
+    /// resolves `(source = a, Incoming)` and `(source = b, Outgoing)` to the
+    /// same start and end, so `startNode`/`endNode` are unaffected. `Incoming`
+    /// is not a slow path either — the CSR is keyed by `(edge_type, Direction)`
+    /// with separate `fwd`/`bwd` datasets.
+    ///
+    /// Deliberately narrow. A bound node in the *middle* is a join-ordering
+    /// problem that reversal does not solve, and paths carrying a path variable,
+    /// a quantified segment, or a shortestPath mode are left alone rather than
+    /// reversed with their accompanying machinery.
+    fn reversed_for_bound_anchor(
+        path: &PathPattern,
+        vars_in_scope: &[VariableInfo],
+    ) -> Option<PathPattern> {
+        // A path variable binds nodes and edges in traversal order, so a
+        // reversed plan would bind `p` backwards. Out of scope here.
+        if path.variable.is_some() || path.shortest_path_mode.is_some() {
+            return None;
+        }
+        // Fewer than three elements is a bare node: nothing to reorder.
+        if path.elements.len() < 3 {
+            return None;
+        }
+        // Quantified segments carry per-step directions of their own.
+        if path
+            .elements
+            .iter()
+            .any(|e| matches!(e, PatternElement::Parenthesized { .. }))
+        {
+            return None;
+        }
+
+        let bound_node = |element: &PatternElement| match element {
+            PatternElement::Node(n) => n
+                .variable
+                .as_deref()
+                .is_some_and(|v| !v.is_empty() && is_var_in_scope(vars_in_scope, v)),
+            _ => false,
+        };
+
+        // Only the both-ends case is decidable here: reversal helps exactly when
+        // the far end is bound and the near end is not.
+        if bound_node(path.elements.first()?) || !bound_node(path.elements.last()?) {
+            return None;
+        }
+
+        let mut elements: Vec<PatternElement> = path.elements.iter().rev().cloned().collect();
+        for element in &mut elements {
+            if let PatternElement::Relationship(rel) = element {
+                rel.direction = match rel.direction {
+                    Direction::Outgoing => Direction::Incoming,
+                    Direction::Incoming => Direction::Outgoing,
+                    Direction::Both => Direction::Both,
+                };
+            }
+        }
+
+        Some(PathPattern {
+            variable: None,
+            elements,
+            shortest_path_mode: None,
+        })
+    }
+
     /// Plan a regular MATCH path (not shortestPath).
     fn plan_path(
         &self,
@@ -4495,6 +4715,17 @@ impl QueryPlanner {
         optional: bool,
         vars_before_pattern: usize,
     ) -> Result<LogicalPlan> {
+        // Start the walk at the bound end when the pattern was written from the
+        // unbound one; see `reversed_for_bound_anchor`.
+        let reversed_storage;
+        let path = match Self::reversed_for_bound_anchor(path, vars_in_scope) {
+            Some(reversed) => {
+                reversed_storage = reversed;
+                &reversed_storage
+            }
+            None => path,
+        };
+
         let mut plan = plan;
         let elements = &path.elements;
         let mut i = 0;
@@ -5286,6 +5517,12 @@ impl QueryPlanner {
 
         let mut edge_type_ids = Vec::new();
         let mut dst_labels = Vec::new();
+        // Endpoint-label inference for an *unlabelled* target has to know which
+        // side of the edge the traversal actually lands on, so both sides are
+        // collected. Using `dst_labels` regardless of direction constrained an
+        // incoming traversal to the label it started from and silently returned
+        // no rows.
+        let mut src_labels = Vec::new();
         let mut unknown_types = Vec::new();
 
         if params.rel.types.is_empty() {
@@ -5294,6 +5531,7 @@ impl QueryPlanner {
             edge_type_ids = self.schema.all_edge_type_ids();
             for meta in self.schema.edge_types.values() {
                 dst_labels.extend(meta.dst_labels.iter().cloned());
+                src_labels.extend(meta.src_labels.iter().cloned());
             }
         } else {
             for type_name in &params.rel.types {
@@ -5301,6 +5539,7 @@ impl QueryPlanner {
                     // Known type - use standard Traverse with type_id
                     edge_type_ids.push(edge_meta.id);
                     dst_labels.extend(edge_meta.dst_labels.iter().cloned());
+                    src_labels.extend(edge_meta.src_labels.iter().cloned());
                 } else if let Some((vid, _)) = self.allocate_virtual_edge_type(type_name)? {
                     // M5b.3: virtual edge type (plugin-registered CatalogTable).
                     // Resolving it into `edge_type_ids` (not `unknown_types`)
@@ -5569,17 +5808,42 @@ impl QueryPlanner {
                 }
             }
         } else if !target_is_bound {
-            // Infer from edge type(s)
-            let unique_dsts: Vec<_> = dst_labels
+            // Infer the unlabelled target's label from the edge type(s) — but
+            // from the side the traversal actually *lands on*, which depends on
+            // direction:
+            //
+            //   (a:A)-[:R]->(x)   x is on the destination side  -> dst_labels
+            //   (a:A)<-[:R]-(x)   x is on the source side       -> src_labels
+            //   (a:A)-[:R]-(x)    either side                   -> no constraint
+            //
+            // Using `dst_labels` unconditionally constrained an incoming
+            // traversal to the label it had just come *from*, so
+            // `MATCH (b:B)<-[:R]-()` matched nothing at all while
+            // `MATCH (b:B)<-[:R]-(a:A)` returned the right rows — a silent wrong
+            // answer, with the data untouched on disk.
+            //
+            // The single-label guard below is why this hid for so long: an edge
+            // type with two or more labels on the inferred side already fell
+            // through to "allow any target" and behaved correctly.
+            let candidates = match params.rel.direction {
+                Direction::Outgoing => Some(dst_labels),
+                Direction::Incoming => Some(src_labels),
+                // Undirected reaches both sides. Constraining to either would
+                // drop the other half, so leave the target unconstrained; a
+                // `WHERE x:Label` still narrows it.
+                Direction::Both => None,
+            };
+            let unique: Vec<_> = candidates
+                .unwrap_or_default()
                 .into_iter()
                 .collect::<HashSet<_>>()
                 .into_iter()
                 .collect();
-            if unique_dsts.len() == 1 {
-                let label_name = &unique_dsts[0];
+            if unique.len() == 1 {
+                let label_name = &unique[0];
                 self.schema.get_label_case_insensitive(label_name)
             } else {
-                // Multiple or no destination labels inferred - allow any target
+                // Multiple or no labels inferred - allow any target.
                 // This supports patterns like MATCH (a)-[:EDGE_TYPE]-(b) WHERE b:Label
                 // where the edge type can connect to multiple labels
                 None
@@ -7080,8 +7344,8 @@ impl QueryPlanner {
                         // Validate expression variables and syntax
                         validate_expression_variables(expr, vars_in_scope)?;
                         validate_expression(expr, vars_in_scope)?;
-                        // Pattern predicates are not allowed in WITH
-                        if contains_pattern_predicate(expr) {
+                        // See the RETURN projection above: bare pattern only.
+                        if pattern_predicate_in_non_boolean_position(expr) {
                             return Err(anyhow!(
                                 "SyntaxError: UnexpectedSyntax - Pattern predicates are not allowed in WITH"
                             ));
@@ -8381,6 +8645,119 @@ impl QueryPlanner {
     }
 }
 
+/// The user-visible output column names of `plan`, in query order.
+///
+/// `None` means the plan carries no projection at its top level. That is a
+/// genuine answer for DDL and admin plans, and callers must treat it as
+/// "unknown" rather than reconstructing a column list from the result rows:
+/// a row map carries the traversal's internal helper columns (`b._vid`,
+/// `b._labels`, `b.name`) alongside the projected ones, so guessing from it
+/// returns whichever key happens to sort first. That is how
+/// `MATCH (a:P)-[:KNOWS]->(b:P) RETURN b AS n UNION ALL ...` came to return
+/// the node's `_labels` list instead of the node (#190), and why
+/// `RETURN DISTINCT b AS n` did the same with no union in sight.
+///
+/// The match is deliberately exhaustive. Two copies of this logic existed and
+/// disagreed about `Union` and `Distinct`; each disagreement was a silent
+/// wrong answer, and neither is a shape anyone would call exotic. A new
+/// `LogicalPlan` variant must be a compile error here rather than a variant
+/// that quietly joins the guessing path.
+pub fn projection_columns(plan: &LogicalPlan) -> Option<Vec<String>> {
+    match plan {
+        LogicalPlan::Project { projections, .. } => Some(
+            projections
+                .iter()
+                .map(|(expr, alias)| alias.clone().unwrap_or_else(|| expr.to_string_repr()))
+                .collect(),
+        ),
+        LogicalPlan::Aggregate {
+            group_by,
+            aggregates,
+            ..
+        } => {
+            let mut names: Vec<String> = group_by.iter().map(|e| e.to_string_repr()).collect();
+            names.extend(aggregates.iter().map(|e| e.to_string_repr()));
+            Some(names)
+        }
+        // Row-preserving wrappers: the columns are whatever the input projects.
+        LogicalPlan::Limit { input, .. }
+        | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::Distinct { input, .. }
+        | LogicalPlan::Filter { input, .. } => projection_columns(input),
+        // Both branches are validated to carry the same column names when the
+        // union is built (`plan_with_scope`), so either side answers for both.
+        // The right side is consulted only when the left cannot answer.
+        LogicalPlan::Union { left, right, .. } => {
+            projection_columns(left).or_else(|| projection_columns(right))
+        }
+        // No top-level projection. Listed rather than matched with `_` so that
+        // adding a variant forces a decision here.
+        LogicalPlan::Scan { .. }
+        | LogicalPlan::FusedIndexScan { .. }
+        | LogicalPlan::FusedIndexScanWrapped { .. }
+        | LogicalPlan::ExtIdLookup { .. }
+        | LogicalPlan::ScanAll { .. }
+        | LogicalPlan::ScanMainByLabels { .. }
+        | LogicalPlan::Empty
+        | LogicalPlan::Unwind { .. }
+        | LogicalPlan::Traverse { .. }
+        | LogicalPlan::TraverseMainByType { .. }
+        | LogicalPlan::Create { .. }
+        | LogicalPlan::CreateBatch { .. }
+        | LogicalPlan::Merge { .. }
+        | LogicalPlan::Set { .. }
+        | LogicalPlan::Remove { .. }
+        | LogicalPlan::Delete { .. }
+        | LogicalPlan::Foreach { .. }
+        | LogicalPlan::Window { .. }
+        | LogicalPlan::CrossJoin { .. }
+        | LogicalPlan::Apply { .. }
+        | LogicalPlan::RecursiveCTE { .. }
+        | LogicalPlan::ProcedureCall { .. }
+        | LogicalPlan::SubqueryCall { .. }
+        | LogicalPlan::VectorKnn { .. }
+        | LogicalPlan::InvertedIndexLookup { .. }
+        | LogicalPlan::ShortestPath { .. }
+        | LogicalPlan::AllShortestPaths { .. }
+        | LogicalPlan::QuantifiedPattern { .. }
+        | LogicalPlan::CreateVectorIndex { .. }
+        | LogicalPlan::CreateSparseIndex { .. }
+        | LogicalPlan::CreateFullTextIndex { .. }
+        | LogicalPlan::CreateScalarIndex { .. }
+        | LogicalPlan::CreateJsonFtsIndex { .. }
+        | LogicalPlan::DropIndex { .. }
+        | LogicalPlan::ShowIndexes { .. }
+        | LogicalPlan::Copy { .. }
+        | LogicalPlan::Backup { .. }
+        | LogicalPlan::Explain { .. }
+        | LogicalPlan::ShowDatabase
+        | LogicalPlan::ShowConfig
+        | LogicalPlan::ShowStatistics
+        | LogicalPlan::Vacuum
+        | LogicalPlan::Checkpoint
+        | LogicalPlan::CopyTo { .. }
+        | LogicalPlan::CopyFrom { .. }
+        | LogicalPlan::CreateLabel(..)
+        | LogicalPlan::CreateEdgeType(..)
+        | LogicalPlan::AlterLabel(..)
+        | LogicalPlan::AlterEdgeType(..)
+        | LogicalPlan::DropLabel(..)
+        | LogicalPlan::DropEdgeType(..)
+        | LogicalPlan::CreateConstraint(..)
+        | LogicalPlan::DropConstraint(..)
+        | LogicalPlan::ShowConstraints(..)
+        | LogicalPlan::BindZeroLengthPath { .. }
+        | LogicalPlan::BindPath { .. }
+        | LogicalPlan::LocyProgram { .. }
+        | LogicalPlan::LocyFold { .. }
+        | LogicalPlan::LocyBestBy { .. }
+        | LogicalPlan::LocyPriority { .. }
+        | LogicalPlan::LocyDerivedScan { .. }
+        | LogicalPlan::LocyProject { .. }
+        | LogicalPlan::LocyModelInvoke { .. } => None,
+    }
+}
+
 /// Get the expected column name for an aggregate expression.
 ///
 /// This is the single source of truth for aggregate column naming, used by:
@@ -8820,6 +9197,10 @@ impl QueryPlanner {
                     index_type,
                     embedding_config,
                     metadata: Default::default(),
+                    // Resolved from the column's dimensionality by
+                    // `resolve_vector_index_defaults` before the definition is
+                    // persisted.
+                    default_refine_factor: None,
                 };
                 Ok(LogicalPlan::CreateVectorIndex {
                     config,
@@ -9289,6 +9670,168 @@ fn terminal_projection(plan: &LogicalPlan) -> Option<&Vec<(Expr, Option<String>)
     }
 }
 
+/// Record, under [`DEAD_UNWIND_SOURCES_KEY`], every `UNWIND` source variable
+/// that nothing else in the plan reads.
+///
+/// `UNWIND xs AS x` consumes `xs`, but the list column keeps flowing: every
+/// operator above it copies its input columns forward, and a traversal copies
+/// them once **per fan-out row**. So a collected list of *n* entities unwound
+/// and then traversed is re-materialised `rows × n` times, in
+/// `GraphUnwindStream::build_output_batch`'s `take` over the input columns —
+/// which is `rows × list_size` bytes and is the 14 TB allocation that aborts
+/// the process on LDBC SNB IC6 and IC9 at SF1 (#184). Inserting a bare `WITH f`
+/// after the `UNWIND` makes the identical query answer correctly, because the
+/// projection drops the list; this does the same thing without the user having
+/// to know.
+///
+/// Liveness is decided by absence, not by a top-down required-set walk: a
+/// source is dead when the *whole* plan, with the `UNWIND` expressions
+/// themselves blanked out, never mentions it. Re-using
+/// [`collect_properties_from_plan`] for that is the point — it is the
+/// exhaustive walker this crate already maintains, so a plan variant added
+/// later cannot quietly escape the analysis and leave a live column pruned.
+///
+/// Three deliberate refusals, each of which would otherwise be a wrong answer
+/// rather than a slow query:
+///
+/// - **`RETURN *` / `WITH *`.** A wildcard names nothing, so absence proves
+///   nothing. Any wildcard anywhere and the whole analysis stands down — both a
+///   `LogicalPlan::Project` wildcard and one inside a subquery body, which is
+///   AST hanging off an expression and so invisible to the plan-level survey.
+/// - **A source unwound more than once.** Blanking removes every `UNWIND`
+///   expression at once, so two `UNWIND xs` nodes would each look unreferenced
+///   by the other. Only a source used by exactly one is considered.
+/// - **A non-variable source.** `UNWIND range(1,10) AS i` has no column to
+///   drop; only a bare variable is a candidate.
+pub(crate) fn mark_dead_unwind_sources(
+    plan: &LogicalPlan,
+    properties: &mut HashMap<String, HashSet<String>>,
+) {
+    let mut sources: HashMap<String, usize> = HashMap::new();
+    let mut saw_wildcard = false;
+    survey_unwind_sources(plan, &mut sources, &mut saw_wildcard);
+    if saw_wildcard || sources.is_empty() {
+        return;
+    }
+
+    let blanked = blank_unwind_sources(plan.clone());
+    let referenced = collect_properties_from_plan(&blanked);
+    // A `RETURN *` in a subquery body is a wildcard the plan-level survey above
+    // cannot see, because the body is AST hanging off an expression rather than
+    // a `LogicalPlan::Project`. It names nothing, so absence proves nothing.
+    if referenced.contains_key(SUBQUERY_WILDCARD_KEY) {
+        return;
+    }
+
+    let dead: HashSet<String> = sources
+        .into_iter()
+        .filter(|(name, uses)| *uses == 1 && !is_read_anywhere(&referenced, name))
+        .map(|(name, _)| name)
+        .collect();
+    if !dead.is_empty() {
+        properties.insert(DEAD_UNWIND_SOURCES_KEY.to_string(), dead);
+    }
+}
+
+/// True when the collected map records an actual *read* of `name`.
+///
+/// Presence in the map is not enough. `WITH collect(x) AS xs` records
+/// `xs → __alias_of__collect(x)` on the alias, which is provenance for
+/// `reconcile_passthrough_properties` — a note about where `xs` came *from*,
+/// not evidence that anyone consumes it. Counting that as a read makes every
+/// collected list look live, which is exactly the case #184 is about. A genuine
+/// read leaves a property name, a `*`, or a passthrough sentinel.
+fn is_read_anywhere(referenced: &HashMap<String, HashSet<String>>, name: &str) -> bool {
+    referenced
+        .get(name)
+        .is_some_and(|props| props.iter().any(|p| !p.starts_with(ALIAS_OF_PREFIX)))
+}
+
+/// Count `UNWIND` sources that are bare variables, and notice any wildcard.
+fn survey_unwind_sources(
+    plan: &LogicalPlan,
+    sources: &mut HashMap<String, usize>,
+    saw_wildcard: &mut bool,
+) {
+    if let LogicalPlan::Unwind { expr, .. } = plan
+        && let Expr::Variable(name) = expr
+        && !name.contains('.')
+    {
+        *sources.entry(name.clone()).or_insert(0) += 1;
+    }
+    // Only a projection that *is* a wildcard — `RETURN *` / `WITH *`. Not a
+    // wildcard nested inside an expression: `count(*)` carries an
+    // `Expr::Wildcard` argument and names nothing extra, so treating it as one
+    // would disable pruning for essentially every aggregate query, including
+    // the LDBC shapes this exists for.
+    if let LogicalPlan::Project { projections, .. } = plan
+        && projections.iter().any(|(e, _)| matches!(e, Expr::Wildcard))
+    {
+        *saw_wildcard = true;
+    }
+    for child in plan.children() {
+        survey_unwind_sources(child, sources, saw_wildcard);
+    }
+}
+
+/// Replace each `UNWIND`'s source expression with a null literal, so the only
+/// remaining mentions of a source variable are genuine other readers.
+fn blank_unwind_sources(plan: LogicalPlan) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Unwind {
+            input,
+            expr,
+            variable,
+        } => {
+            let expr = if matches!(&expr, Expr::Variable(v) if !v.contains('.')) {
+                Expr::Literal(CypherLiteral::Null)
+            } else {
+                expr
+            };
+            LogicalPlan::Unwind {
+                input: Box::new(blank_unwind_sources(*input)),
+                expr,
+                variable,
+            }
+        }
+        LogicalPlan::Union { left, right, all } => LogicalPlan::Union {
+            left: Box::new(blank_unwind_sources(*left)),
+            right: Box::new(blank_unwind_sources(*right)),
+            all,
+        },
+        LogicalPlan::CrossJoin { left, right } => LogicalPlan::CrossJoin {
+            left: Box::new(blank_unwind_sources(*left)),
+            right: Box::new(blank_unwind_sources(*right)),
+        },
+        LogicalPlan::Apply {
+            input,
+            subquery,
+            input_filter,
+        } => LogicalPlan::Apply {
+            input: Box::new(blank_unwind_sources(*input)),
+            subquery: Box::new(blank_unwind_sources(*subquery)),
+            input_filter,
+        },
+        LogicalPlan::SubqueryCall { input, subquery } => LogicalPlan::SubqueryCall {
+            input: Box::new(blank_unwind_sources(*input)),
+            subquery: Box::new(blank_unwind_sources(*subquery)),
+        },
+        LogicalPlan::RecursiveCTE {
+            cte_name,
+            initial,
+            recursive,
+        } => LogicalPlan::RecursiveCTE {
+            cte_name,
+            initial: Box::new(blank_unwind_sources(*initial)),
+            recursive: Box::new(blank_unwind_sources(*recursive)),
+        },
+        LogicalPlan::Explain { plan } => LogicalPlan::Explain {
+            plan: Box::new(blank_unwind_sources(*plan)),
+        },
+        other => other.map_input(blank_unwind_sources),
+    }
+}
+
 /// Recursively walk the LogicalPlan tree and collect all property references.
 fn collect_properties_recursive(
     plan: &LogicalPlan,
@@ -9356,9 +9899,39 @@ fn collect_properties_recursive(
             aggregates,
         } => {
             for expr in group_by {
-                collect_properties_from_expr_into(expr, properties);
+                // A bare entity variable used as a group key needs only the
+                // entity's *identity*; grouping cannot depend on a property the
+                // query never reads. Left to the bare-`Variable` arm it marks
+                // the source "*", which pulls the full schema — `_all_props`
+                // and `overflow_json` included — into the scan *and* into the
+                // physical group key, which appends every `{v}.`-prefixed
+                // column beside the entity struct.
+                //
+                // On LDBC SF1 that is what made
+                // `MATCH (p:Person)-[:KNOWS]-() WITH p, count(*) RETURN p.id`
+                // request 1.76 GB and blow the query memory pool, for a query
+                // that reads one property (#196).
+                //
+                // Same provenance marker the `Project` arm above emits, and the
+                // same downstream treatment: `reconcile_passthrough_properties`
+                // keeps "*" for variables returned whole and downgrades the
+                // rest to a struct-only projection of the properties actually
+                // accessed.
+                if let Expr::Variable(src) = expr
+                    && !src.contains('.')
+                {
+                    properties
+                        .entry(src.clone())
+                        .or_default()
+                        .insert(WITH_PASSTHROUGH_SENTINEL.to_string());
+                } else {
+                    collect_properties_from_expr_into(expr, properties);
+                }
             }
             for expr in aggregates {
+                // Aggregate *arguments* are unchanged: `collect(n)` really does
+                // return the entity whole, and narrowing it would be a wrong
+                // answer rather than a smaller one.
                 collect_properties_from_expr_into(expr, properties);
             }
             collect_properties_recursive(input, properties);
@@ -9756,13 +10329,16 @@ fn collect_properties_from_expr_into(
 ) {
     match expr {
         Expr::PatternComprehension {
+            pattern,
             where_clause,
             map_expr,
             ..
         } => {
-            // Collect properties from the WHERE clause and map expression.
-            // The pattern itself creates local bindings that don't need
-            // property collection from the outer scope.
+            // The pattern's *variables* are local bindings and need nothing
+            // collected. Its inline property maps and element-level WHERE
+            // clauses are a different matter — they read outer scope, and
+            // missing them let a live UNWIND source be pruned (#197).
+            collect_properties_from_pattern(pattern, properties);
             if let Some(where_expr) = where_clause {
                 collect_properties_from_expr_into(where_expr, properties);
             }
@@ -10009,11 +10585,122 @@ fn collect_properties_from_expr_into(
     }
 }
 
+/// Walk an AST pattern and collect the property references its elements carry.
+///
+/// A node or relationship pattern holds two expressions besides its label and
+/// variable — an inline property map (`(r:P {name: xs[0]})`) and an inline
+/// `WHERE` (`(r:P WHERE r.name IN xs)`) — and both can read outer-scope
+/// variables. The pattern's *variables* are local bindings and need nothing
+/// collected; its *expressions* are not.
+///
+/// Missing these is not merely pessimistic. `mark_dead_unwind_sources` proves an
+/// `UNWIND` source dead by absence, so a read it cannot see is a read that does
+/// not exist, and the source column is dropped out from under the reader
+/// (#197).
+fn collect_properties_from_pattern(
+    pattern: &Pattern,
+    properties: &mut HashMap<String, HashSet<String>>,
+) {
+    for path in &pattern.paths {
+        collect_properties_from_path_pattern(path, properties);
+    }
+}
+
+/// Walk one path of a pattern, recursing through parenthesized sub-paths.
+fn collect_properties_from_path_pattern(
+    path: &PathPattern,
+    properties: &mut HashMap<String, HashSet<String>>,
+) {
+    for element in &path.elements {
+        match element {
+            PatternElement::Node(NodePattern {
+                properties: props,
+                where_clause,
+                ..
+            })
+            | PatternElement::Relationship(RelationshipPattern {
+                properties: props,
+                where_clause,
+                ..
+            }) => {
+                if let Some(props) = props {
+                    collect_properties_from_expr_into(props, properties);
+                }
+                if let Some(where_clause) = where_clause {
+                    collect_properties_from_expr_into(where_clause, properties);
+                }
+            }
+            PatternElement::Parenthesized { pattern, .. } => {
+                collect_properties_from_path_pattern(pattern, properties);
+            }
+        }
+    }
+}
+
+/// Collect the property references carried by a list of `SET` items.
+fn collect_properties_from_set_items(
+    items: &[SetItem],
+    properties: &mut HashMap<String, HashSet<String>>,
+) {
+    for item in items {
+        match item {
+            SetItem::Property { expr, value } => {
+                collect_properties_from_expr_into(expr, properties);
+                collect_properties_from_expr_into(value, properties);
+            }
+            SetItem::Variable { value, .. } | SetItem::VariablePlus { value, .. } => {
+                collect_properties_from_expr_into(value, properties);
+            }
+            // Label mutation names a variable and literal labels, no expression.
+            SetItem::Labels { .. } => {}
+        }
+    }
+}
+
+/// Collect the property references carried by a projection list plus its
+/// `ORDER BY` / `SKIP` / `LIMIT` tail.
+fn collect_properties_from_return_items(
+    items: &[ReturnItem],
+    order_by: Option<&Vec<SortItem>>,
+    skip: Option<&Expr>,
+    limit: Option<&Expr>,
+    properties: &mut HashMap<String, HashSet<String>>,
+) {
+    for item in items {
+        match item {
+            ReturnItem::Expr { expr, .. } => collect_properties_from_expr_into(expr, properties),
+            // `RETURN *` names nothing, so it cannot be recorded as a read of
+            // anything — and that is exactly why it is dangerous to an analysis
+            // that reasons from absence. Flag it and let
+            // `mark_dead_unwind_sources` stand down.
+            ReturnItem::All => {
+                properties
+                    .entry(SUBQUERY_WILDCARD_KEY.to_string())
+                    .or_default()
+                    .insert("*".to_string());
+            }
+        }
+    }
+    for sort in order_by.into_iter().flatten() {
+        collect_properties_from_expr_into(&sort.expr, properties);
+    }
+    for expr in skip.into_iter().chain(limit) {
+        collect_properties_from_expr_into(expr, properties);
+    }
+}
+
 /// Walk a subquery (EXISTS/COUNT/COLLECT body) and collect property references.
 ///
 /// This is needed so that correlated property accesses like `a.city` inside
 /// `WHERE EXISTS { (a)-[:KNOWS]->(b) WHERE b.city = a.city }` cause the outer
 /// scan to include `a.city` in its projected columns.
+///
+/// Both matches below are **exhaustive on purpose**. For most consumers of the
+/// property map an under-report costs a wasted column; for
+/// `mark_dead_unwind_sources` it inverts — an unrecorded read is
+/// indistinguishable from no read, so the source is proven dead and deleted
+/// (#197). A new `Clause` or `Query` variant must therefore be a compile error
+/// here, not a silent gap. Do not add a `_ => {}` arm.
 fn collect_properties_from_subquery(
     query: &Query,
     properties: &mut HashMap<String, HashSet<String>>,
@@ -10021,38 +10708,96 @@ fn collect_properties_from_subquery(
     match query {
         Query::Single(stmt) => {
             for clause in &stmt.clauses {
-                match clause {
-                    Clause::Match(m) => {
-                        if let Some(ref wc) = m.where_clause {
-                            collect_properties_from_expr_into(wc, properties);
-                        }
-                    }
-                    Clause::With(w) => {
-                        for item in &w.items {
-                            if let ReturnItem::Expr { expr, .. } = item {
-                                collect_properties_from_expr_into(expr, properties);
-                            }
-                        }
-                        if let Some(ref wc) = w.where_clause {
-                            collect_properties_from_expr_into(wc, properties);
-                        }
-                    }
-                    Clause::Return(r) => {
-                        for item in &r.items {
-                            if let ReturnItem::Expr { expr, .. } = item {
-                                collect_properties_from_expr_into(expr, properties);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+                collect_properties_from_subquery_clause(clause, properties);
             }
         }
         Query::Union { left, right, .. } => {
             collect_properties_from_subquery(left, properties);
             collect_properties_from_subquery(right, properties);
         }
-        _ => {}
+        Query::Explain(inner) => collect_properties_from_subquery(inner, properties),
+        Query::TimeTravel { query, .. } => collect_properties_from_subquery(query, properties),
+        // DDL and admin commands read no query variables.
+        Query::Schema(_) => {}
+    }
+}
+
+/// Collect the property references one clause of a subquery body carries.
+///
+/// See [`collect_properties_from_subquery`] for why this match is exhaustive.
+fn collect_properties_from_subquery_clause(
+    clause: &Clause,
+    properties: &mut HashMap<String, HashSet<String>>,
+) {
+    match clause {
+        Clause::Match(m) => {
+            collect_properties_from_pattern(&m.pattern, properties);
+            if let Some(ref wc) = m.where_clause {
+                collect_properties_from_expr_into(wc, properties);
+            }
+        }
+        Clause::With(w) => {
+            collect_properties_from_return_items(
+                &w.items,
+                w.order_by.as_ref(),
+                w.skip.as_ref(),
+                w.limit.as_ref(),
+                properties,
+            );
+            if let Some(ref wc) = w.where_clause {
+                collect_properties_from_expr_into(wc, properties);
+            }
+        }
+        Clause::Return(r) => collect_properties_from_return_items(
+            &r.items,
+            r.order_by.as_ref(),
+            r.skip.as_ref(),
+            r.limit.as_ref(),
+            properties,
+        ),
+        Clause::WithRecursive(wr) => {
+            collect_properties_from_subquery(&wr.query, properties);
+            collect_properties_from_return_items(&wr.items, None, None, None, properties);
+        }
+        Clause::Unwind(u) => collect_properties_from_expr_into(&u.expr, properties),
+        Clause::Call(c) => {
+            match &c.kind {
+                CallKind::Procedure { arguments, .. } => {
+                    for arg in arguments {
+                        collect_properties_from_expr_into(arg, properties);
+                    }
+                }
+                CallKind::Subquery(inner) => collect_properties_from_subquery(inner, properties),
+            }
+            if let Some(ref wc) = c.where_clause {
+                collect_properties_from_expr_into(wc, properties);
+            }
+        }
+        // Mutation clauses cannot appear in an EXISTS/COUNT/COLLECT body today,
+        // but they are cheap to handle and must not become a silent gap if the
+        // grammar ever admits them.
+        Clause::Create(c) => collect_properties_from_pattern(&c.pattern, properties),
+        Clause::Merge(m) => {
+            collect_properties_from_pattern(&m.pattern, properties);
+            collect_properties_from_set_items(&m.on_match, properties);
+            collect_properties_from_set_items(&m.on_create, properties);
+        }
+        Clause::Set(s) => collect_properties_from_set_items(&s.items, properties),
+        Clause::Remove(r) => {
+            for item in &r.items {
+                match item {
+                    RemoveItem::Property(expr) => {
+                        collect_properties_from_expr_into(expr, properties)
+                    }
+                    RemoveItem::Labels { .. } => {}
+                }
+            }
+        }
+        Clause::Delete(d) => {
+            for expr in &d.items {
+                collect_properties_from_expr_into(expr, properties);
+            }
+        }
     }
 }
 
@@ -10453,6 +11198,589 @@ fn set_map_property(props: &mut Option<Expr>, prop: &str, value: Expr) -> bool {
             true
         }
         Some(_) => false,
+    }
+}
+
+/// Resolve `startNode(r)` / `endNode(r)` to the node variable the traversal that
+/// bound `r` already has in scope.
+///
+/// A relationship bound by a MATCH traversal has no whole-entity column: the
+/// traversal produces `r._eid` and `r._type` and nothing else, so the
+/// `startnode`/`endnode` UDF — which expects the relationship value as its first
+/// argument — plans against a bare `r` column that does not exist and the query
+/// fails with `Schema error: No field named r` (#187). The endpoint VIDs are not
+/// on the edge columns either; what *is* available is the traversal's own
+/// `source_variable` and `target_variable`, which are exactly the two nodes the
+/// functions have to return.
+///
+/// So the resolution is static. For a single-hop traversal with a known
+/// direction, `startNode(r)` is the variable bound at the relationship's tail and
+/// `endNode(r)` the one at its head — reversed when the traversal runs against
+/// the arrow. Rewriting to that variable makes the endpoint an ordinary variable
+/// reference, which is worth more than making the UDF work: this pass runs before
+/// `collect_properties_from_plan`, so `startNode(r).name` narrows to the single
+/// column `n.name` instead of materialising the whole endpoint entity.
+///
+/// Deliberately **not** rewritten, each falling through to the UDF unchanged:
+/// - undirected patterns (`-[r]-`), where which end is the start is a per-row
+///   fact the plan cannot know;
+/// - variable-length and quantified patterns, where the step variable holds a
+///   *list* of relationships rather than one;
+/// - a relationship that reaches the call any other way — bound by
+///   `MERGE`/`CREATE`, or carried in a list through `UNWIND`/`collect` — where a
+///   whole-entity column genuinely exists and the UDF path already works.
+///
+/// A binding stops being usable where its endpoints stop being projected, so at
+/// each `Project` the map is narrowed to the relationships whose two endpoints
+/// both survive, following bare-variable renames (`WITH n AS m`). `UNWIND` over a
+/// name drops that name's binding for the same reason.
+///
+/// Idempotent: a rewritten plan holds no `startNode`/`endNode` call over a
+/// traversal-bound relationship, so a second run changes nothing.
+#[must_use]
+pub fn resolve_traversal_endpoints(plan: LogicalPlan) -> LogicalPlan {
+    let mut endpoints = EndpointScope::default();
+    resolve_endpoints_node(plan, &mut endpoints)
+}
+
+/// The column an undirected traversal carries its per-row orientation on.
+///
+/// True when the row's *source* variable is bound to the vid Lance stores as the
+/// edge's `_src_vid` — that is, when the traversal walked the edge forwards.
+pub(crate) const COL_FWD: &str = "_fwd";
+
+/// The node variables a traversal binds at the two ends of its relationship.
+#[derive(Clone, Debug)]
+enum TraversalEndpoints {
+    /// The hop's direction is known at plan time, so each end is one variable.
+    Static {
+        /// Bound at the relationship's tail — what `startNode` returns.
+        start: String,
+        /// Bound at the relationship's head — what `endNode` returns.
+        end: String,
+    },
+    /// An undirected hop. Which end is the relationship's tail is a per-row
+    /// fact, so both candidates are kept and the choice is deferred to a `CASE`
+    /// over the traversal's [`COL_FWD`] column.
+    PerRow {
+        /// The traversal's own source variable — the tail when `_fwd` is true.
+        source: String,
+        /// The traversal's own target variable — the tail when `_fwd` is false.
+        target: String,
+    },
+}
+
+impl TraversalEndpoints {
+    /// The two node variables this binding depends on, in no particular order.
+    ///
+    /// Used to decide whether the binding survives a projection: it does only
+    /// while both variables are still in scope.
+    fn variables(&self) -> (&str, &str) {
+        match self {
+            Self::Static { start, end } => (start, end),
+            Self::PerRow { source, target } => (source, target),
+        }
+    }
+
+    /// The same binding with its two variables renamed, preserving the variant.
+    fn renamed(&self, first: String, second: String) -> Self {
+        match self {
+            Self::Static { .. } => Self::Static {
+                start: first,
+                end: second,
+            },
+            Self::PerRow { .. } => Self::PerRow {
+                source: first,
+                target: second,
+            },
+        }
+    }
+}
+
+/// What the endpoint pass carries up the plan tree.
+///
+/// `bindings` is the relationship -> endpoints map. `renames` exists because
+/// this pass runs *after* planning: an `Aggregate`'s output columns were already
+/// named by `Expr::to_string_repr()`, and the projection above refers to them by
+/// that rendered string. Rewriting `collect(startNode(e).name)` into
+/// `collect(x.name)` therefore changes the column's name out from under its own
+/// consumer, which surfaces as `No field named "collect(startNode(e).name)"`.
+/// Recording old-repr -> new-repr here and applying it to every expression above
+/// keeps the two in step.
+#[derive(Clone, Default)]
+struct EndpointScope {
+    bindings: HashMap<String, TraversalEndpoints>,
+    renames: HashMap<String, String>,
+}
+
+/// Rewrite one expression for this scope: resolve endpoint calls, then follow
+/// any aggregate-output renames the rewrite caused below.
+fn rewrite_scoped(expr: Expr, scope: &EndpointScope) -> Expr {
+    let expr = rewrite_endpoint_calls(expr, &scope.bindings);
+    apply_renames(expr, &scope.renames)
+}
+
+/// Apply [`rewrite_scoped`] through an `Option<Expr>`.
+fn rewrite_scoped_opt(expr: Option<Expr>, scope: &EndpointScope) -> Option<Expr> {
+    expr.map(|e| rewrite_scoped(e, scope))
+}
+
+/// Follow renamed aggregate outputs, which are referenced as bare variables.
+fn apply_renames(expr: Expr, renames: &HashMap<String, String>) -> Expr {
+    if renames.is_empty() {
+        return expr;
+    }
+    if let Expr::Variable(name) = &expr
+        && let Some(renamed) = renames.get(name)
+    {
+        return Expr::Variable(renamed.clone());
+    }
+    expr.map_children(&mut |child| apply_renames(child, renames))
+}
+
+/// Pair a traversal's source/target variables with the relationship's ends.
+///
+/// `Direction::Incoming` means the traversal walks against the arrow, so the
+/// traversal's *target* is the relationship's tail. `Direction::Both` cannot be
+/// settled at plan time and becomes a [`TraversalEndpoints::PerRow`] binding
+/// rather than nothing: the orientation is a fact the traversal knows per row
+/// and reports on [`COL_FWD`], so the call is still resolvable — just not to a
+/// single variable.
+fn endpoints_for_direction(
+    direction: &Direction,
+    source_variable: &str,
+    target_variable: &str,
+) -> Option<TraversalEndpoints> {
+    Some(match direction {
+        Direction::Outgoing => TraversalEndpoints::Static {
+            start: source_variable.to_string(),
+            end: target_variable.to_string(),
+        },
+        Direction::Incoming => TraversalEndpoints::Static {
+            start: target_variable.to_string(),
+            end: source_variable.to_string(),
+        },
+        Direction::Both => TraversalEndpoints::PerRow {
+            source: source_variable.to_string(),
+            target: target_variable.to_string(),
+        },
+    })
+}
+
+/// The relationship an endpoint call names, when it is one of ours.
+///
+/// Returns the relationship variable and whether the call was `startNode`.
+fn endpoint_call_target<'e>(
+    expr: &'e Expr,
+    endpoints: &HashMap<String, TraversalEndpoints>,
+) -> Option<(&'e str, bool)> {
+    let Expr::FunctionCall { name, args, .. } = expr else {
+        return None;
+    };
+    if args.len() != 1 {
+        return None;
+    }
+    let Expr::Variable(rel) = &args[0] else {
+        return None;
+    };
+    if !endpoints.contains_key(rel) {
+        return None;
+    }
+    match name.to_ascii_lowercase().as_str() {
+        "startnode" => Some((rel.as_str(), true)),
+        "endnode" => Some((rel.as_str(), false)),
+        _ => None,
+    }
+}
+
+/// Replace every `startNode(r)`/`endNode(r)` over a known relationship with the
+/// endpoint variable, leaving every other call untouched.
+///
+/// A statically-directed hop resolves outright. An undirected one cannot: which
+/// end is the relationship's tail is a per-row fact, so there is no single
+/// variable to rewrite to. Those are handled by
+/// [`lift_per_row_endpoints`] in a second pass.
+fn rewrite_endpoint_calls(expr: Expr, endpoints: &HashMap<String, TraversalEndpoints>) -> Expr {
+    let expr = rewrite_static_endpoint_calls(expr, endpoints);
+    lift_per_row_endpoints(expr, endpoints)
+}
+
+/// Resolve the calls whose endpoint is known at plan time.
+fn rewrite_static_endpoint_calls(
+    expr: Expr,
+    endpoints: &HashMap<String, TraversalEndpoints>,
+) -> Expr {
+    if let Some((rel, is_start)) = endpoint_call_target(&expr, endpoints)
+        && let Some(TraversalEndpoints::Static { start, end }) = endpoints.get(rel)
+    {
+        return Expr::Variable(if is_start { start.clone() } else { end.clone() });
+    }
+    expr.map_children(&mut |child| rewrite_static_endpoint_calls(child, endpoints))
+}
+
+/// The first undirected relationship an endpoint call in `expr` names.
+fn first_per_row_rel(
+    expr: &Expr,
+    endpoints: &HashMap<String, TraversalEndpoints>,
+) -> Option<String> {
+    if let Some((rel, _)) = endpoint_call_target(expr, endpoints)
+        && matches!(endpoints.get(rel), Some(TraversalEndpoints::PerRow { .. }))
+    {
+        return Some(rel.to_string());
+    }
+    let mut found = None;
+    expr.for_each_child(&mut |child| {
+        if found.is_none() {
+            found = first_per_row_rel(child, endpoints);
+        }
+    });
+    found
+}
+
+/// Replace `startNode(rel)`/`endNode(rel)` with fixed variables for one orientation.
+fn substitute_endpoints(
+    expr: Expr,
+    rel: &str,
+    start: &str,
+    end: &str,
+    endpoints: &HashMap<String, TraversalEndpoints>,
+) -> Expr {
+    if let Some((called, is_start)) = endpoint_call_target(&expr, endpoints)
+        && called == rel
+    {
+        return Expr::Variable(if is_start {
+            start.to_string()
+        } else {
+            end.to_string()
+        });
+    }
+    expr.map_children(&mut |child| substitute_endpoints(child, rel, start, end, endpoints))
+}
+
+/// Resolve undirected endpoint calls by duplicating their enclosing expression
+/// under a `CASE` on the traversal's per-row orientation.
+///
+/// `startNode(r).name` becomes
+/// `CASE WHEN r._fwd THEN x.name ELSE y.name END`. Both branches reference
+/// variables already in scope, so the endpoint's properties are materialised by
+/// the ordinary property-collection pass — there is no lookup, and no
+/// `{_vid}`-only stand-in that would make `id(startNode(r))` work while
+/// `startNode(r).name` returned NULL.
+///
+/// **The `CASE` is never lifted across an aggregate.** `_fwd` varies per row
+/// while an aggregate spans rows, so
+/// `CASE WHEN r._fwd THEN count(x) ELSE count(y) END` is not
+/// `count(CASE WHEN r._fwd THEN x ELSE y END)`: the first splits one group into
+/// two and silently undercounts. Where the expression contains an aggregate the
+/// rewrite descends into it instead, so the `CASE` lands inside the aggregate's
+/// argument where it belongs.
+fn lift_per_row_endpoints(expr: Expr, endpoints: &HashMap<String, TraversalEndpoints>) -> Expr {
+    let Some(rel) = first_per_row_rel(&expr, endpoints) else {
+        return expr;
+    };
+    if expr.is_aggregate() {
+        return expr.map_children(&mut |child| lift_per_row_endpoints(child, endpoints));
+    }
+    let Some(TraversalEndpoints::PerRow { source, target }) = endpoints.get(&rel) else {
+        return expr;
+    };
+    let forward = substitute_endpoints(expr.clone(), &rel, source, target, endpoints);
+    let reverse = substitute_endpoints(expr, &rel, target, source, endpoints);
+    Expr::Case {
+        expr: None,
+        when_then: vec![(
+            Expr::Property(Box::new(Expr::Variable(rel.clone())), COL_FWD.to_string()),
+            lift_per_row_endpoints(forward, endpoints),
+        )],
+        else_expr: Some(Box::new(lift_per_row_endpoints(reverse, endpoints))),
+    }
+}
+
+/// Drop every binding that names `variable`, which is about to be rebound.
+fn invalidate_binding(endpoints: &mut EndpointScope, variable: &str) {
+    endpoints.bindings.retain(|rel, bound| {
+        let (a, b) = bound.variables();
+        rel != variable && a != variable && b != variable
+    });
+}
+
+/// Narrow the bindings to those whose relationship and both endpoints survive a
+/// projection, renaming through bare-variable aliases (`WITH n AS m`).
+fn narrow_endpoints_through_projection(
+    endpoints: &mut EndpointScope,
+    projections: &[(Expr, Option<String>)],
+) {
+    // `WITH *` / `RETURN *` forwards the whole scope, so nothing is lost.
+    if projections.iter().any(|(e, _)| matches!(e, Expr::Wildcard)) {
+        return;
+    }
+    // Variable -> the names it is visible under above this projection. A dotted
+    // name is a property access that survived an earlier transform, not a
+    // whole-entity passthrough.
+    let mut visible_as: HashMap<&str, String> = HashMap::new();
+    for (expr, alias) in projections {
+        if let Expr::Variable(v) = expr
+            && !v.contains('.')
+        {
+            visible_as
+                .entry(v.as_str())
+                .or_insert_with(|| alias.clone().unwrap_or_else(|| v.clone()));
+        }
+    }
+    let narrowed: HashMap<String, TraversalEndpoints> = endpoints
+        .bindings
+        .iter()
+        .filter_map(|(rel, bound)| {
+            let rel_out = visible_as.get(rel.as_str())?;
+            let (a, b) = bound.variables();
+            let first = visible_as.get(a)?;
+            let second = visible_as.get(b)?;
+            Some((
+                rel_out.clone(),
+                bound.renamed(first.clone(), second.clone()),
+            ))
+        })
+        .collect();
+    endpoints.bindings = narrowed;
+}
+
+/// The relationship binding a traversal contributes, when it is a single hop in
+/// a known direction. Anything else — a variable-length step variable holding a
+/// list, an undirected pattern, an unnamed relationship — contributes nothing.
+fn single_hop_binding(
+    direction: &Direction,
+    source_variable: &str,
+    target_variable: &str,
+    step_variable: Option<&String>,
+    is_variable_length: bool,
+    min_hops: usize,
+    max_hops: usize,
+) -> Option<(String, TraversalEndpoints)> {
+    let step = step_variable?;
+    if is_variable_length || min_hops != 1 || max_hops != 1 {
+        return None;
+    }
+    let bound = endpoints_for_direction(direction, source_variable, target_variable)?;
+    Some((step.clone(), bound))
+}
+
+/// Rewrite one node, then update `endpoints` to what is in scope above it.
+///
+/// `endpoints` is threaded in/out: on entry it holds the bindings visible from
+/// below, on return the bindings visible to this node's parent.
+fn resolve_endpoints_node(plan: LogicalPlan, endpoints: &mut EndpointScope) -> LogicalPlan {
+    match plan {
+        // A traversal both carries expressions of its own and contributes the
+        // binding every rewrite above it depends on.
+        plan @ (LogicalPlan::Traverse { .. } | LogicalPlan::TraverseMainByType { .. }) => {
+            let mut plan = plan.map_input(|input| resolve_endpoints_node(input, endpoints));
+            let binding = match &mut plan {
+                LogicalPlan::Traverse {
+                    direction,
+                    source_variable,
+                    target_variable,
+                    step_variable,
+                    is_variable_length,
+                    min_hops,
+                    max_hops,
+                    target_filter,
+                    edge_filter_expr,
+                    ..
+                }
+                | LogicalPlan::TraverseMainByType {
+                    direction,
+                    source_variable,
+                    target_variable,
+                    step_variable,
+                    is_variable_length,
+                    min_hops,
+                    max_hops,
+                    target_filter,
+                    edge_filter_expr,
+                    ..
+                } => {
+                    *target_filter = rewrite_scoped_opt(target_filter.take(), endpoints);
+                    *edge_filter_expr = rewrite_scoped_opt(edge_filter_expr.take(), endpoints);
+                    single_hop_binding(
+                        direction,
+                        source_variable,
+                        target_variable,
+                        step_variable.as_ref(),
+                        *is_variable_length,
+                        *min_hops,
+                        *max_hops,
+                    )
+                }
+                _ => None,
+            };
+            if let Some((step, bound)) = binding {
+                endpoints.bindings.insert(step, bound);
+            }
+            plan
+        }
+        LogicalPlan::Filter {
+            input,
+            predicate,
+            optional_variables,
+        } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            LogicalPlan::Filter {
+                input,
+                predicate: rewrite_scoped(predicate, endpoints),
+                optional_variables,
+            }
+        }
+        LogicalPlan::Project { input, projections } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let projections: Vec<(Expr, Option<String>)> = projections
+                .into_iter()
+                .map(|(expr, alias)| (rewrite_scoped(expr, endpoints), alias))
+                .collect();
+            narrow_endpoints_through_projection(endpoints, &projections);
+            LogicalPlan::Project { input, projections }
+        }
+        LogicalPlan::Sort { input, order_by } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let order_by = order_by
+                .into_iter()
+                .map(|item| SortItem {
+                    expr: rewrite_scoped(item.expr, endpoints),
+                    ascending: item.ascending,
+                })
+                .collect();
+            LogicalPlan::Sort { input, order_by }
+        }
+        LogicalPlan::Aggregate {
+            input,
+            group_by,
+            aggregates,
+        } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            // An aggregate's outputs are named by their rendered expression, and
+            // the projection above refers to them by that name, so a rewrite here
+            // has to be published upward or it renames a column its own consumer
+            // is still looking for.
+            let rewrite_and_record = |expr: Expr, scope: &mut EndpointScope| -> Expr {
+                let before = expr.to_string_repr();
+                let after = rewrite_scoped(expr, scope);
+                let after_repr = after.to_string_repr();
+                if before != after_repr {
+                    scope.renames.insert(before, after_repr);
+                }
+                after
+            };
+            let group_by: Vec<Expr> = group_by
+                .into_iter()
+                .map(|expr| rewrite_and_record(expr, endpoints))
+                .collect();
+            let aggregates = aggregates
+                .into_iter()
+                .map(|expr| rewrite_and_record(expr, endpoints))
+                .collect();
+            // Only the grouping keys survive an aggregation, so a binding
+            // outlives it on exactly the terms a projection would give it.
+            let surviving: Vec<(Expr, Option<String>)> =
+                group_by.iter().map(|e| (e.clone(), None)).collect();
+            narrow_endpoints_through_projection(endpoints, &surviving);
+            LogicalPlan::Aggregate {
+                input,
+                group_by,
+                aggregates,
+            }
+        }
+        LogicalPlan::Window {
+            input,
+            window_exprs,
+        } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let window_exprs = window_exprs
+                .into_iter()
+                .map(|expr| rewrite_scoped(expr, endpoints))
+                .collect();
+            LogicalPlan::Window {
+                input,
+                window_exprs,
+            }
+        }
+        LogicalPlan::Unwind {
+            input,
+            expr,
+            variable,
+        } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let expr = rewrite_scoped(expr, endpoints);
+            invalidate_binding(endpoints, &variable);
+            LogicalPlan::Unwind {
+                input,
+                expr,
+                variable,
+            }
+        }
+        LogicalPlan::Delete {
+            input,
+            items,
+            detach,
+        } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let items = items
+                .into_iter()
+                .map(|expr| rewrite_scoped(expr, endpoints))
+                .collect();
+            LogicalPlan::Delete {
+                input,
+                items,
+                detach,
+            }
+        }
+        // Each branch is its own scope, and nothing a branch binds is reliably
+        // addressable above the union, so the outer scope keeps only what it
+        // arrived with.
+        LogicalPlan::Union { left, right, all } => {
+            let outer = endpoints.clone();
+            let mut left_scope = outer.clone();
+            let left = Box::new(resolve_endpoints_node(*left, &mut left_scope));
+            let mut right_scope = outer.clone();
+            let right = Box::new(resolve_endpoints_node(*right, &mut right_scope));
+            *endpoints = outer;
+            LogicalPlan::Union { left, right, all }
+        }
+        // A cross join concatenates two disjoint sets of variables, so both
+        // sides' bindings are addressable above it.
+        LogicalPlan::CrossJoin { left, right } => {
+            let left = Box::new(resolve_endpoints_node(*left, endpoints));
+            let right = Box::new(resolve_endpoints_node(*right, endpoints));
+            LogicalPlan::CrossJoin { left, right }
+        }
+        // The subquery sees the outer bindings but does not export its own.
+        LogicalPlan::Apply {
+            input,
+            subquery,
+            input_filter,
+        } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let input_filter = rewrite_scoped_opt(input_filter, endpoints);
+            let mut inner = endpoints.clone();
+            let subquery = Box::new(resolve_endpoints_node(*subquery, &mut inner));
+            LogicalPlan::Apply {
+                input,
+                subquery,
+                input_filter,
+            }
+        }
+        LogicalPlan::SubqueryCall { input, subquery } => {
+            let input = Box::new(resolve_endpoints_node(*input, endpoints));
+            let mut inner = endpoints.clone();
+            let subquery = Box::new(resolve_endpoints_node(*subquery, &mut inner));
+            LogicalPlan::SubqueryCall { input, subquery }
+        }
+        LogicalPlan::Explain { plan } => LogicalPlan::Explain {
+            plan: Box::new(resolve_endpoints_node(*plan, endpoints)),
+        },
+        // Everything else either carries no expression that can name a
+        // relationship endpoint or is a leaf. `map_input` still walks the single
+        // child, so a traversal underneath is reached and a rewrite above it
+        // still fires.
+        other => other.map_input(|input| resolve_endpoints_node(input, endpoints)),
     }
 }
 
@@ -11193,6 +12521,87 @@ mod pushdown_tests {
         props
     }
 
+    fn aggregate(input: LogicalPlan, group_by: Vec<Expr>, aggregates: Vec<Expr>) -> LogicalPlan {
+        LogicalPlan::Aggregate {
+            input: Box::new(input),
+            group_by,
+            aggregates,
+        }
+    }
+
+    /// `MATCH (p)-[]-() WITH p, count(*) RETURN p.id` must materialise only
+    /// `id` for `p`.
+    ///
+    /// A group key needs the entity's *identity*; grouping cannot depend on a
+    /// property the query never reads. Marking it "*" pulled the whole schema —
+    /// `_all_props` and `overflow_json` included — into both the scan and the
+    /// physical group key, which is what made this shape request 1.76 GB at
+    /// LDBC SF1 for a query that reads one property (#196).
+    #[test]
+    fn test_group_key_entity_does_not_widen() {
+        let plan = project(
+            aggregate(
+                scan("p"),
+                vec![Expr::Variable("p".to_string())],
+                vec![func("count", vec![Expr::Wildcard])],
+            ),
+            vec![(prop("p", "id"), Some("id".to_string()))],
+        );
+        let props = reconciled(&plan, &["p"]);
+        assert!(
+            !widened(&props, "p"),
+            "a bare group key widened p to '*': {:?}",
+            props.get("p")
+        );
+        assert!(
+            props.get("p").unwrap().contains("id"),
+            "the property the query actually reads must survive: {:?}",
+            props.get("p")
+        );
+    }
+
+    /// The control that must not move. `collect(n)` returns the entity whole, so
+    /// narrowing it would be a wrong answer rather than a smaller one — and the
+    /// fix above touches group keys only, never aggregate arguments.
+    #[test]
+    fn test_group_key_narrowing_does_not_touch_aggregate_arguments() {
+        let plan = project(
+            aggregate(
+                scan("n"),
+                vec![],
+                vec![func("collect", vec![Expr::Variable("n".to_string())])],
+            ),
+            vec![(Expr::Variable("collect(n)".to_string()), None)],
+        );
+        let props = reconciled(&plan, &["n"]);
+        assert!(
+            widened(&props, "n"),
+            "collect(n) must still widen n to '*': {:?}",
+            props.get("n")
+        );
+    }
+
+    /// A group key that *is* returned whole stays wide. `reconcile_passthrough_properties`
+    /// already makes that call for projections; this pins that the group-key
+    /// marker reaches the same decision rather than narrowing unconditionally.
+    #[test]
+    fn test_group_key_returned_whole_stays_wide() {
+        let plan = project(
+            aggregate(
+                scan("p"),
+                vec![Expr::Variable("p".to_string())],
+                vec![func("count", vec![Expr::Wildcard])],
+            ),
+            vec![(Expr::Variable("p".to_string()), None)],
+        );
+        let props = reconciled(&plan, &["p"]);
+        assert!(
+            widened(&props, "p"),
+            "a group key returned whole must stay '*': {:?}",
+            props.get("p")
+        );
+    }
+
     #[test]
     fn test_with_passthrough_narrows_forwarded_variable() {
         // MATCH (n) WITH n RETURN n.title → n materializes only {title}.
@@ -11258,6 +12667,55 @@ mod pushdown_tests {
             props.get("n").unwrap().contains("*"),
             "source of a whole-returned alias stays wide"
         );
+    }
+
+    /// Locates where IC4's oversized `DISTINCT` key comes from (#203).
+    ///
+    /// `WITH DISTINCT tag, post RETURN count(*)` reads no property of either
+    /// entity, yet at LDBC SF1 it asks for 1.4 GB in
+    /// `GroupedHashAggregateStream` — `DISTINCT` plans as a grouped aggregate
+    /// keyed on every projected column, so an entity's full struct becomes hash
+    /// key material. Measured on the same store, the identical query keyed on
+    /// `tag.id, post.id` at the same 522 952 distinct rows completes.
+    ///
+    /// **This is a control, not a repro — it passed the first time it was run.**
+    /// It was written to test whether the width enters through the *projection*
+    /// path, and the answer is no: both variables narrow here, and
+    /// `resolve_properties` turns a sentinel-only set into an empty projection.
+    /// The `Traverse` arm likewise collects only from `target_filter`, so the
+    /// whole logical layer is exonerated and #203's width enters below it, in
+    /// physical target hydration.
+    ///
+    /// Kept because it pins that exoneration: if this ever goes red, the
+    /// projection path has regressed and #203's analysis needs revisiting.
+    #[test]
+    fn test_issue_203_distinct_over_entities_narrows_when_nothing_is_read() {
+        let forwarded = project(
+            scan("post"),
+            vec![
+                (Expr::Variable("tag".to_string()), None),
+                (Expr::Variable("post".to_string()), None),
+            ],
+        );
+        let plan = project(
+            LogicalPlan::Distinct {
+                input: Box::new(forwarded),
+            },
+            vec![(func("count", vec![]), Some("n".to_string()))],
+        );
+
+        let props = reconciled(&plan, &["tag", "post"]);
+        for var in ["tag", "post"] {
+            let set = props
+                .get(var)
+                .unwrap_or_else(|| panic!("{var} must be collected"));
+            assert!(
+                !set.contains("*"),
+                "{var} is forwarded only into a DISTINCT and no property of it is \
+                 ever read, so its identity suffices — keeping it wide puts the \
+                 whole struct in the hash key (#203). Got: {set:?}"
+            );
+        }
     }
 
     #[test]
@@ -11423,5 +12881,381 @@ mod fts_tokenizer_option_tests {
             }
             other => panic!("expected Analyzer, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod dead_unwind_source_tests {
+    use super::*;
+
+    /// `WITH collect(x) AS xs UNWIND xs AS f …`, with `body` above the UNWIND.
+    ///
+    /// The lower projection is a bare-variable passthrough of the aggregate's
+    /// output column, which is the shape the real planner produces and the one
+    /// that matters: it records `xs → __alias_of__collect(friend)`, so a
+    /// liveness test based on mere presence in the properties map calls `xs`
+    /// live and prunes nothing.
+    fn collect_unwind_plan(body: Vec<(Expr, Option<String>)>) -> LogicalPlan {
+        let collected = LogicalPlan::Project {
+            input: Box::new(LogicalPlan::Empty),
+            projections: vec![(
+                Expr::Variable("collect(friend)".to_string()),
+                Some("xs".to_string()),
+            )],
+        };
+        let unwound = LogicalPlan::Unwind {
+            input: Box::new(collected),
+            expr: Expr::Variable("xs".to_string()),
+            variable: "f".to_string(),
+        };
+        LogicalPlan::Project {
+            input: Box::new(unwound),
+            projections: body,
+        }
+    }
+
+    fn dead(plan: &LogicalPlan) -> HashSet<String> {
+        let mut properties = HashMap::new();
+        mark_dead_unwind_sources(plan, &mut properties);
+        properties
+            .get(DEAD_UNWIND_SOURCES_KEY)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_collected_list_is_dead_once_unwind_has_consumed_it() {
+        // Only `f` is read above, so the list must not ride through (#184).
+        let plan = collect_unwind_plan(vec![(Expr::Variable("f".to_string()), None)]);
+        assert!(dead(&plan).contains("xs"), "xs should be prunable");
+    }
+
+    #[test]
+    fn a_list_still_returned_is_not_dead() {
+        let plan = collect_unwind_plan(vec![
+            (Expr::Variable("f".to_string()), None),
+            (Expr::Variable("xs".to_string()), None),
+        ]);
+        assert!(
+            !dead(&plan).contains("xs"),
+            "xs is returned, so pruning it would lose a column"
+        );
+    }
+
+    #[test]
+    fn a_property_read_of_the_list_keeps_it() {
+        let plan = collect_unwind_plan(vec![(
+            Expr::FunctionCall {
+                name: "size".to_string(),
+                args: vec![Expr::Variable("xs".to_string())],
+                distinct: false,
+                window_spec: None,
+            },
+            Some("n".to_string()),
+        )]);
+        assert!(!dead(&plan).contains("xs"), "size(xs) reads xs");
+    }
+
+    #[test]
+    fn a_wildcard_anywhere_stands_the_analysis_down() {
+        // `RETURN *` names nothing, so absence from the map proves nothing.
+        let plan = collect_unwind_plan(vec![(Expr::Wildcard, None)]);
+        assert!(
+            dead(&plan).is_empty(),
+            "a wildcard must disable pruning entirely"
+        );
+    }
+
+    #[test]
+    fn a_list_unwound_twice_is_not_pruned() {
+        // Blanking removes both UNWIND expressions at once, so each would look
+        // unreferenced by the other. Only a single use is safe.
+        let inner = collect_unwind_plan(vec![(Expr::Variable("f".to_string()), None)]);
+        let plan = LogicalPlan::Unwind {
+            input: Box::new(inner),
+            expr: Expr::Variable("xs".to_string()),
+            variable: "g".to_string(),
+        };
+        assert!(
+            !dead(&plan).contains("xs"),
+            "two UNWINDs over one list must not prune it"
+        );
+    }
+
+    #[test]
+    fn a_non_variable_source_has_no_column_to_drop() {
+        let plan = LogicalPlan::Project {
+            input: Box::new(LogicalPlan::Unwind {
+                input: Box::new(LogicalPlan::Empty),
+                expr: Expr::List(vec![Expr::Literal(CypherLiteral::Integer(1))]),
+                variable: "i".to_string(),
+            }),
+            projections: vec![(Expr::Variable("i".to_string()), None)],
+        };
+        assert!(dead(&plan).is_empty());
+    }
+
+    // ---- #197: a read hidden inside a subquery body ----
+    //
+    // `mark_dead_unwind_sources` proves a source dead by *absence*, so any read
+    // the AST walker cannot see is a read that does not exist and the column is
+    // dropped out from under its reader. Each case below is a shape whose only
+    // read of `xs` sits somewhere the walker used to skip; all four were
+    // measured returning `{"xs"}` — wrongly dead — before the fix.
+
+    use uni_cypher::ast::{LabelExpr, UnwindClause};
+
+    /// A one-element MATCH pattern, `(r:P {name: <value>})`.
+    fn match_with_inline_property(value: Expr) -> Clause {
+        Clause::Match(MatchClause {
+            optional: false,
+            pattern: Pattern {
+                paths: vec![PathPattern {
+                    variable: None,
+                    elements: vec![PatternElement::Node(NodePattern {
+                        variable: Some("r".to_string()),
+                        labels: LabelExpr::Conjunction(vec!["P".to_string()]),
+                        properties: Some(Expr::Map(vec![("name".to_string(), value)])),
+                        where_clause: None,
+                    })],
+                    shortest_path_mode: None,
+                }],
+            },
+            where_clause: None,
+            for_update: false,
+        })
+    }
+
+    fn single(clauses: Vec<Clause>) -> Box<Query> {
+        Box::new(Query::Single(Statement { clauses }))
+    }
+
+    /// `… RETURN f, EXISTS { <body> }` above the UNWIND.
+    fn plan_with_exists_body(body: Box<Query>) -> LogicalPlan {
+        collect_unwind_plan(vec![
+            (Expr::Variable("f".to_string()), None),
+            (
+                Expr::Exists {
+                    query: body,
+                    from_pattern_predicate: false,
+                },
+                Some("e".to_string()),
+            ),
+        ])
+    }
+
+    #[test]
+    fn a_read_in_an_exists_pattern_property_map_keeps_the_list() {
+        // `EXISTS { MATCH (r:P {name: xs}) }` — the read is in the pattern, not
+        // in the clause's WHERE, so the Match arm used to walk straight past it.
+        let plan = plan_with_exists_body(single(vec![match_with_inline_property(Expr::Variable(
+            "xs".to_string(),
+        ))]));
+        assert!(
+            !dead(&plan).contains("xs"),
+            "an inline property map reads xs"
+        );
+    }
+
+    #[test]
+    fn a_read_in_a_pattern_element_where_keeps_the_list() {
+        // `EXISTS { MATCH (r WHERE xs) }` — a pattern element carries its own
+        // WHERE, distinct from the clause's.
+        let body = single(vec![Clause::Match(MatchClause {
+            optional: false,
+            pattern: Pattern {
+                paths: vec![PathPattern {
+                    variable: None,
+                    elements: vec![PatternElement::Node(NodePattern {
+                        variable: Some("r".to_string()),
+                        labels: LabelExpr::Empty,
+                        properties: None,
+                        where_clause: Some(Expr::Variable("xs".to_string())),
+                    })],
+                    shortest_path_mode: None,
+                }],
+            },
+            where_clause: None,
+            for_update: false,
+        })]);
+        assert!(
+            !dead(&plan_with_exists_body(body)).contains("xs"),
+            "a pattern-element WHERE reads xs"
+        );
+    }
+
+    #[test]
+    fn a_read_in_a_subquery_unwind_keeps_the_list() {
+        // `COUNT { UNWIND xs AS y }`. `survey_unwind_sources` walks the
+        // LogicalPlan, so an UNWIND living in an AST subquery body is invisible
+        // to it — the read has to come from this walker or from nowhere.
+        let body = single(vec![Clause::Unwind(UnwindClause {
+            expr: Expr::Variable("xs".to_string()),
+            variable: "y".to_string(),
+        })]);
+        let plan = collect_unwind_plan(vec![
+            (Expr::Variable("f".to_string()), None),
+            (Expr::CountSubquery(body), Some("c".to_string())),
+        ]);
+        assert!(!dead(&plan).contains("xs"), "the body's UNWIND reads xs");
+    }
+
+    #[test]
+    fn a_read_in_a_pattern_comprehension_property_map_keeps_the_list() {
+        // Same omission, different consumer: the comprehension arm collected
+        // its WHERE and map expression but never its pattern.
+        let plan = collect_unwind_plan(vec![
+            (Expr::Variable("f".to_string()), None),
+            (
+                Expr::PatternComprehension {
+                    path_variable: None,
+                    pattern: Pattern {
+                        paths: vec![PathPattern {
+                            variable: None,
+                            elements: vec![PatternElement::Node(NodePattern {
+                                variable: Some("b".to_string()),
+                                labels: LabelExpr::Empty,
+                                properties: Some(Expr::Map(vec![(
+                                    "tag".to_string(),
+                                    Expr::Variable("xs".to_string()),
+                                )])),
+                                where_clause: None,
+                            })],
+                            shortest_path_mode: None,
+                        }],
+                    },
+                    where_clause: None,
+                    map_expr: Box::new(Expr::Variable("b.id".to_string())),
+                },
+                Some("l".to_string()),
+            ),
+        ]);
+        assert!(
+            !dead(&plan).contains("xs"),
+            "the comprehension's pattern reads xs"
+        );
+    }
+
+    #[test]
+    fn a_read_in_an_exists_where_keeps_the_list() {
+        // The control: this arm was always handled. If it ever reports `xs`
+        // dead the walker has regressed wholesale, not just in the new arms.
+        let body = single(vec![Clause::Match(MatchClause {
+            optional: false,
+            pattern: Pattern { paths: vec![] },
+            where_clause: Some(Expr::Variable("xs".to_string())),
+            for_update: false,
+        })]);
+        assert!(
+            !dead(&plan_with_exists_body(body)).contains("xs"),
+            "a clause WHERE reads xs"
+        );
+    }
+
+    #[test]
+    fn a_wildcard_inside_a_subquery_body_stands_the_analysis_down() {
+        // `EXISTS { MATCH (r:P) RETURN * }`. The body's `*` is AST hanging off
+        // an expression, so `survey_unwind_sources` — which only inspects
+        // `LogicalPlan::Project` — cannot see it. Measured: a body `RETURN *`
+        // does export outer-scope variables, so absence proves nothing here
+        // either and the whole analysis must stand down.
+        let body = single(vec![
+            match_with_inline_property(Expr::Literal(CypherLiteral::String("b".to_string()))),
+            Clause::Return(ReturnClause {
+                distinct: false,
+                items: vec![ReturnItem::All],
+                order_by: None,
+                skip: None,
+                limit: None,
+            }),
+        ]);
+        assert!(
+            dead(&plan_with_exists_body(body)).is_empty(),
+            "a wildcard in a subquery body must disable pruning entirely"
+        );
+    }
+
+    #[test]
+    fn a_subquery_that_never_mentions_the_list_still_prunes() {
+        // The control in the other direction. Collecting more must not make
+        // *everything* look live, or #184's pruning is silently disabled.
+        let body = single(vec![match_with_inline_property(Expr::Literal(
+            CypherLiteral::String("b".to_string()),
+        ))]);
+        assert!(
+            dead(&plan_with_exists_body(body)).contains("xs"),
+            "a body that does not read xs must leave it prunable"
+        );
+    }
+}
+
+#[cfg(test)]
+mod dead_unwind_wildcard_tests {
+    use super::*;
+
+    /// `count(*)` must not read as `RETURN *`.
+    ///
+    /// Both carry an `Expr::Wildcard`, but only the bare projection widens the
+    /// scope. Recursing into expressions to find one made every aggregate query
+    /// opt out of pruning — including LDBC IC6, whose final clause is a
+    /// `count`.
+    #[test]
+    fn count_star_is_not_a_wildcard_projection() {
+        let collected = LogicalPlan::Project {
+            input: Box::new(LogicalPlan::Empty),
+            projections: vec![(
+                Expr::Variable("collect(friend)".to_string()),
+                Some("xs".to_string()),
+            )],
+        };
+        let unwound = LogicalPlan::Unwind {
+            input: Box::new(collected),
+            expr: Expr::Variable("xs".to_string()),
+            variable: "f".to_string(),
+        };
+        let plan = LogicalPlan::Project {
+            input: Box::new(unwound),
+            projections: vec![(
+                Expr::FunctionCall {
+                    name: "count".to_string(),
+                    args: vec![Expr::Wildcard],
+                    distinct: false,
+                    window_spec: None,
+                },
+                Some("c".to_string()),
+            )],
+        };
+        let mut properties = HashMap::new();
+        mark_dead_unwind_sources(&plan, &mut properties);
+        assert!(
+            properties
+                .get(DEAD_UNWIND_SOURCES_KEY)
+                .is_some_and(|d| d.contains("xs")),
+            "count(*) must not stand the analysis down"
+        );
+    }
+
+    /// A bare `RETURN *` still does.
+    #[test]
+    fn a_bare_wildcard_projection_still_stands_it_down() {
+        let collected = LogicalPlan::Project {
+            input: Box::new(LogicalPlan::Empty),
+            projections: vec![(
+                Expr::Variable("collect(friend)".to_string()),
+                Some("xs".to_string()),
+            )],
+        };
+        let unwound = LogicalPlan::Unwind {
+            input: Box::new(collected),
+            expr: Expr::Variable("xs".to_string()),
+            variable: "f".to_string(),
+        };
+        let plan = LogicalPlan::Project {
+            input: Box::new(unwound),
+            projections: vec![(Expr::Wildcard, None)],
+        };
+        let mut properties = HashMap::new();
+        mark_dead_unwind_sources(&plan, &mut properties);
+        assert!(!properties.contains_key(DEAD_UNWIND_SOURCES_KEY));
     }
 }

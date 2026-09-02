@@ -47,7 +47,7 @@ pub use query::df_udfs_plugin::{
 };
 pub use query::planner::{
     CostEstimates, ExplainOutput, ForkIndexLookup, FusionKind, IndexUsage, LogicalPlan,
-    QueryPlanner, fuse_create_set, rewrite_for_fork_fusion,
+    QueryPlanner, fuse_create_set, resolve_traversal_endpoints, rewrite_for_fork_fusion,
 };
 pub use types::{
     Edge, ExecuteResult, FromValue, Node, Path, QueryCursor, QueryMetrics, QueryResult,

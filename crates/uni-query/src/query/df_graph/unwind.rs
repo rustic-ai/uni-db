@@ -74,6 +74,10 @@ pub struct GraphUnwindExec {
     /// Output schema.
     schema: SchemaRef,
 
+    /// Input column indices carried into the output, in order. Anything not
+    /// listed belongs to a consumed UNWIND source and is dropped.
+    kept: Vec<usize>,
+
     /// Cached plan properties.
     properties: Arc<PlanProperties>,
 
@@ -105,10 +109,45 @@ impl GraphUnwindExec {
         variable: impl Into<String>,
         params: HashMap<String, Value>,
     ) -> Self {
-        let variable = variable.into();
+        Self::new_dropping_source(input, expr, variable, params, None)
+    }
 
-        // Build output schema: input schema + new variable column
-        let schema = Self::build_schema(input.schema(), &variable, &expr);
+    /// [`Self::new`], additionally dropping the source variable's columns from
+    /// the output when the planner has proven nothing above reads them.
+    ///
+    /// `UNWIND xs AS x` consumes `xs`, but every input column is copied
+    /// forward — and copied again *per fan-out row* by any traversal above. A
+    /// collected list of *n* entities is therefore re-materialised `rows × n`
+    /// times in the stream's `build_output_batch` `take` over the input columns,
+    /// which is the allocation that aborts the process on LDBC IC6/IC9 at SF1
+    /// (#184).
+    /// Dropping the column here is the whole fix: the list has already been
+    /// expanded into rows, so nothing downstream can want it back.
+    ///
+    /// Liveness is decided in the planner, not here — see
+    /// `mark_dead_unwind_sources`, which refuses the rewrite for `RETURN *`,
+    /// for a list unwound more than once, and for a non-variable source.
+    pub fn new_dropping_source(
+        input: Arc<dyn ExecutionPlan>,
+        expr: Expr,
+        variable: impl Into<String>,
+        params: HashMap<String, Value>,
+        drop_source: Option<&str>,
+    ) -> Self {
+        let variable = variable.into();
+        let input_schema = input.schema();
+
+        // Input column indices that survive into the output. The bare column
+        // and any dotted columns the variable owns both go, so an entity list
+        // does not leave `xs._vid` behind.
+        let kept: Vec<usize> = (0..input_schema.fields().len())
+            .filter(|&i| {
+                let name = input_schema.field(i).name();
+                drop_source.is_none_or(|src| name != src && !name.starts_with(&format!("{src}.")))
+            })
+            .collect();
+
+        let schema = Self::build_schema(&input_schema, &kept, &variable, &expr);
         let properties = compute_plan_properties(schema.clone());
 
         Self {
@@ -117,6 +156,7 @@ impl GraphUnwindExec {
             variable,
             params,
             schema,
+            kept,
             properties,
             metrics: ExecutionPlanMetricsSet::new(),
         }
@@ -176,8 +216,16 @@ impl GraphUnwindExec {
     /// Uses type inference on the UNWIND expression to emit natively-typed
     /// columns when possible. Falls back to JSON-encoded `Utf8` for
     /// heterogeneous or non-inferrable expressions.
-    fn build_schema(input_schema: SchemaRef, variable: &str, expr: &Expr) -> SchemaRef {
-        let mut fields: Vec<Arc<Field>> = input_schema.fields().to_vec();
+    fn build_schema(
+        input_schema: &SchemaRef,
+        kept: &[usize],
+        variable: &str,
+        expr: &Expr,
+    ) -> SchemaRef {
+        let mut fields: Vec<Arc<Field>> = kept
+            .iter()
+            .map(|&i| Arc::clone(&input_schema.fields()[i]))
+            .collect();
 
         let type_info = Self::infer_element_type(expr);
 
@@ -246,6 +294,9 @@ impl ExecutionPlan for GraphUnwindExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
+        // Read the configured batch size before the context is handed to the
+        // input: it is what bounds the output chunks below.
+        let chunk_size = context.session_config().batch_size().max(1);
         let input_stream = self.input.execute(partition, context)?;
         let metrics = BaselineMetrics::new(&self.metrics, partition);
 
@@ -254,6 +305,9 @@ impl ExecutionPlan for GraphUnwindExec {
             expr: self.expr.clone(),
             params: self.params.clone(),
             schema: Arc::clone(&self.schema),
+            kept: self.kept.clone(),
+            chunk_size,
+            pending: None,
             metrics,
         }))
     }
@@ -277,25 +331,81 @@ struct GraphUnwindStream {
     /// Output schema.
     schema: SchemaRef,
 
+    /// Input column indices carried into the output; see `GraphUnwindExec`.
+    kept: Vec<usize>,
+
+    /// Rows per output batch. One input batch is emitted as however many
+    /// batches this takes, which is what bounds the peak allocation — see
+    /// [`GraphUnwindStream::fill_chunk`].
+    chunk_size: usize,
+
+    /// An input batch part way through its expansion, carried across polls.
+    pending: Option<Pending>,
+
     /// Metrics.
     metrics: BaselineMetrics,
 }
 
+/// An input batch mid-expansion.
+struct Pending {
+    /// The batch being expanded; its columns are `take`n per output chunk.
+    batch: RecordBatch,
+
+    /// Index of the next input row to evaluate.
+    row: usize,
+
+    /// Elements of `row - 1`'s list not yet emitted, and that row's index.
+    /// A list longer than `chunk_size` spans several chunks, so the position
+    /// within it has to survive the poll that emitted the last one.
+    rest: Option<(usize, std::vec::IntoIter<Value>)>,
+}
+
 impl GraphUnwindStream {
-    /// Process a single input batch.
-    fn process_batch(&self, batch: RecordBatch) -> DFResult<RecordBatch> {
-        // For each row, evaluate the expression and expand if it's a list
+    /// Take up to `chunk_size` expansions from `pending`, in input order.
+    ///
+    /// Expansion is driven row by row rather than materialised up front: the
+    /// whole-batch form accumulated `input_rows × list_size` owned values and
+    /// then `take`-replicated every carried column over all of them in one
+    /// allocation, which is what reached tens of gigabytes against a 1 GiB
+    /// query-memory pool at LDBC SF1 (issue #198). Peak is now
+    /// `chunk_size × columns` plus the one list currently being expanded.
+    ///
+    /// Row order is unchanged — rows are still visited in index order and
+    /// elements in list order; only the batch boundary moves.
+    ///
+    /// What this does *not* bound: a single row's list is still materialised
+    /// whole, because expression evaluation is row-at-a-time and hands back an
+    /// owned [`Value::List`]. The shape that reached those figures is
+    /// `rows × list_size`; one row is bounded by what that row itself holds.
+    /// Whether these allocations should reserve through the memory pool at all
+    /// is the separate question #198 leaves open.
+    ///
+    /// Returns the expansions and whether the batch is now exhausted. An empty
+    /// return with `true` means the batch produced no rows at all.
+    fn fill_chunk(&self, pending: &mut Pending) -> DFResult<(Vec<(usize, Value)>, bool)> {
         let mut expansions: Vec<(usize, Value)> = Vec::new(); // (input_row_idx, list_element)
 
-        for row_idx in 0..batch.num_rows() {
-            // Evaluate expression for this row
-            let list_value = self.evaluate_expr_for_row(&batch, row_idx)?;
-
-            match list_value {
-                Value::List(items) => {
-                    for item in items {
-                        expansions.push((row_idx, item));
+        loop {
+            if let Some((row_idx, items)) = pending.rest.as_mut() {
+                let row_idx = *row_idx;
+                for item in items.by_ref() {
+                    expansions.push((row_idx, item));
+                    if expansions.len() >= self.chunk_size {
+                        return Ok((expansions, false));
                     }
+                }
+                pending.rest = None;
+            }
+
+            if pending.row >= pending.batch.num_rows() {
+                return Ok((expansions, true));
+            }
+
+            let row_idx = pending.row;
+            pending.row += 1;
+            match self.evaluate_expr_for_row(&pending.batch, row_idx)? {
+                Value::List(items) => {
+                    pending.rest = Some((row_idx, items.into_iter()));
                 }
                 Value::Null => {
                     // UNWIND on null produces no rows (Cypher semantics)
@@ -303,11 +413,12 @@ impl GraphUnwindStream {
                 other => {
                     // Non-list values: treat as single-element list
                     expansions.push((row_idx, other));
+                    if expansions.len() >= self.chunk_size {
+                        return Ok((expansions, false));
+                    }
                 }
             }
         }
-
-        self.build_output_batch(&batch, &expansions)
     }
 
     /// Evaluate the expression for a specific row.
@@ -561,9 +672,12 @@ impl GraphUnwindStream {
         let indices_array = UInt64Array::from(indices);
 
         // Expand input columns
-        let mut columns: Vec<ArrayRef> = Vec::new();
-        for col in input.columns() {
-            let expanded = take(col.as_ref(), &indices_array, None)?;
+        // Expand only the surviving input columns. Skipping a dropped column
+        // skips its `take`, which is the point: that `take` is what replicated
+        // a whole collected list onto every fan-out row.
+        let mut columns: Vec<ArrayRef> = Vec::with_capacity(self.kept.len() + 1);
+        for &i in &self.kept {
+            let expanded = take(input.column(i).as_ref(), &indices_array, None)?;
             columns.push(expanded);
         }
 
@@ -660,14 +774,41 @@ impl Stream for GraphUnwindStream {
     type Item = DFResult<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let metrics = self.metrics.clone();
-        let _timer = metrics.elapsed_compute().timer();
-        match self.input.poll_next_unpin(cx) {
-            Poll::Ready(Some(Ok(batch))) => {
-                let result = self.process_batch(batch);
-                Poll::Ready(Some(result))
+        loop {
+            if let Some(mut pending) = self.pending.take() {
+                let metrics = self.metrics.clone();
+                let _timer = metrics.elapsed_compute().timer();
+                let (expansions, exhausted) = match self.fill_chunk(&mut pending) {
+                    Ok(v) => v,
+                    Err(e) => return Poll::Ready(Some(Err(e))),
+                };
+                if expansions.is_empty() {
+                    // Nothing survived this batch; ask the input for the next
+                    // one rather than emitting an empty batch. (`fill_chunk`
+                    // only stops early with a full chunk, so this implies
+                    // `exhausted`, but do not rely on that here.)
+                    if !exhausted {
+                        self.pending = Some(pending);
+                    }
+                    continue;
+                }
+                let result = self.build_output_batch(&pending.batch, &expansions);
+                if !exhausted {
+                    self.pending = Some(pending);
+                }
+                return Poll::Ready(Some(result));
             }
-            other => other,
+
+            match self.input.poll_next_unpin(cx) {
+                Poll::Ready(Some(Ok(batch))) => {
+                    self.pending = Some(Pending {
+                        batch,
+                        row: 0,
+                        rest: None,
+                    });
+                }
+                other => return other,
+            }
         }
     }
 }
@@ -783,7 +924,12 @@ mod tests {
 
         // Variable reference -> falls back to JSON-encoded Utf8
         let expr = Expr::Variable("some_list".to_string());
-        let output_schema = GraphUnwindExec::build_schema(input_schema, "item", &expr);
+        let output_schema = GraphUnwindExec::build_schema(
+            &input_schema,
+            &(0..input_schema.fields().len()).collect::<Vec<_>>(),
+            "item",
+            &expr,
+        );
 
         assert_eq!(output_schema.fields().len(), 3);
         assert_eq!(output_schema.field(0).name(), "n._vid");
@@ -813,7 +959,12 @@ mod tests {
             Expr::Literal(CypherLiteral::Bool(false)),
             Expr::Literal(CypherLiteral::Null),
         ]);
-        let output_schema = GraphUnwindExec::build_schema(input_schema, "a", &expr);
+        let output_schema = GraphUnwindExec::build_schema(
+            &input_schema,
+            &(0..input_schema.fields().len()).collect::<Vec<_>>(),
+            "a",
+            &expr,
+        );
 
         let field = output_schema.field(1);
         assert_eq!(field.name(), "a");
@@ -834,7 +985,12 @@ mod tests {
             Expr::Literal(CypherLiteral::Integer(2)),
             Expr::Literal(CypherLiteral::Integer(3)),
         ]);
-        let output_schema = GraphUnwindExec::build_schema(input_schema, "x", &expr);
+        let output_schema = GraphUnwindExec::build_schema(
+            &input_schema,
+            &(0..input_schema.fields().len()).collect::<Vec<_>>(),
+            "x",
+            &expr,
+        );
 
         let field = output_schema.field(1);
         assert_eq!(field.name(), "x");
@@ -854,7 +1010,12 @@ mod tests {
             Expr::Literal(CypherLiteral::Float(1.5)),
             Expr::Literal(CypherLiteral::Float(2.5)),
         ]);
-        let output_schema = GraphUnwindExec::build_schema(input_schema, "x", &expr);
+        let output_schema = GraphUnwindExec::build_schema(
+            &input_schema,
+            &(0..input_schema.fields().len()).collect::<Vec<_>>(),
+            "x",
+            &expr,
+        );
 
         let field = output_schema.field(1);
         assert_eq!(field.name(), "x");
@@ -874,7 +1035,12 @@ mod tests {
             Expr::Literal(CypherLiteral::String("hello".to_string())),
             Expr::Literal(CypherLiteral::String("world".to_string())),
         ]);
-        let output_schema = GraphUnwindExec::build_schema(input_schema, "x", &expr);
+        let output_schema = GraphUnwindExec::build_schema(
+            &input_schema,
+            &(0..input_schema.fields().len()).collect::<Vec<_>>(),
+            "x",
+            &expr,
+        );
 
         let field = output_schema.field(1);
         assert_eq!(field.name(), "x");
@@ -895,7 +1061,12 @@ mod tests {
             Expr::Literal(CypherLiteral::Integer(1)),
             Expr::Literal(CypherLiteral::String("hello".to_string())),
         ]);
-        let output_schema = GraphUnwindExec::build_schema(input_schema, "x", &expr);
+        let output_schema = GraphUnwindExec::build_schema(
+            &input_schema,
+            &(0..input_schema.fields().len()).collect::<Vec<_>>(),
+            "x",
+            &expr,
+        );
 
         let field = output_schema.field(1);
         assert_eq!(field.name(), "x");
@@ -944,10 +1115,14 @@ mod tests {
                 Expr::Literal(CypherLiteral::Integer(3)),
             ]),
             params: HashMap::new(),
+            // These fixtures feed a one-column input and keep it.
+            kept: vec![0],
             schema: Arc::new(Schema::new(vec![
                 Field::new("n._vid", DataType::UInt64, false),
                 Field::new("x", DataType::Utf8, true),
             ])),
+            chunk_size: 8192,
+            pending: None,
             metrics: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
         };
 
@@ -999,10 +1174,14 @@ mod tests {
                 ),
             ]),
             params: HashMap::new(),
+            // These fixtures feed a one-column input and keep it.
+            kept: vec![0],
             schema: Arc::new(Schema::new(vec![
                 Field::new("n._vid", DataType::UInt64, false),
                 Field::new("x", DataType::LargeBinary, true),
             ])),
+            chunk_size: 8192,
+            pending: None,
             metrics: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
         };
 
@@ -1056,10 +1235,14 @@ mod tests {
             input: Box::pin(empty_stream),
             expr: prop_expr.clone(),
             params: HashMap::new(),
+            // These fixtures feed a one-column input and keep it.
+            kept: vec![0],
             schema: Arc::new(Schema::new(vec![
                 Field::new("n._vid", DataType::UInt64, false),
                 Field::new("x", DataType::LargeBinary, true),
             ])),
+            chunk_size: 8192,
+            pending: None,
             metrics: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
         };
 
@@ -1109,7 +1292,11 @@ mod tests {
             input: Box::pin(empty_stream),
             expr: expr.clone(),
             params: HashMap::new(),
+            // This harness only evaluates an expression; no column is dropped.
+            kept: (0..schema.fields().len()).collect(),
             schema,
+            chunk_size: 8192,
+            pending: None,
             metrics: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
         };
         stream.evaluate_expr_impl(&expr, &batch, 0)
@@ -1162,5 +1349,161 @@ mod tests {
         .unwrap();
         // 5 chars, but 6 UTF-8 bytes — must be 5.
         assert_eq!(result, Value::Int(5));
+    }
+
+    /// Drive the stream to completion, returning `(batch sizes, rows)` where a
+    /// row is `(carried vid, unwound value)`.
+    async fn drive(
+        input: Vec<RecordBatch>,
+        expr: Expr,
+        out_field: Field,
+        chunk_size: usize,
+    ) -> (Vec<usize>, Vec<(u64, Value)>) {
+        use arrow_array::UInt64Array;
+        use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
+
+        let input_schema = input[0].schema();
+        let schema = Arc::new(Schema::new(vec![
+            input_schema.field(0).clone(),
+            out_field.clone(),
+        ]));
+        let adapter = RecordBatchStreamAdapter::new(
+            Arc::clone(&input_schema),
+            futures::stream::iter(input.into_iter().map(Ok)),
+        );
+        let stream = GraphUnwindStream {
+            input: Box::pin(adapter),
+            expr,
+            params: HashMap::new(),
+            // Only the vid column is carried; the last output field is the
+            // unwound variable, which the operator appends itself.
+            kept: vec![0],
+            schema,
+            chunk_size,
+            pending: None,
+            metrics: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+        };
+
+        let batches: Vec<RecordBatch> = stream.map(|b| b.unwrap()).collect().await;
+        let sizes = batches.iter().map(|b| b.num_rows()).collect();
+        let mut rows = Vec::new();
+        for b in &batches {
+            assert!(b.num_rows() > 0, "an empty batch must not be emitted");
+            let vids = b
+                .column(0)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("vid column");
+            for i in 0..b.num_rows() {
+                rows.push((vids.value(i), arrow_to_json_value(b.column(1).as_ref(), i)));
+            }
+        }
+        (sizes, rows)
+    }
+
+    fn vid_batch(vids: &[u64]) -> RecordBatch {
+        use arrow_array::UInt64Array;
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "n._vid",
+                DataType::UInt64,
+                false,
+            )])),
+            vec![Arc::new(UInt64Array::from(vids.to_vec()))],
+        )
+        .unwrap()
+    }
+
+    /// Chunking changes where the batch boundaries fall and nothing else: the
+    /// same rows, in the same order, carrying the same input columns (#198).
+    #[tokio::test]
+    async fn expansion_is_chunked_without_changing_rows_or_order() {
+        let expr = Expr::List(vec![
+            Expr::Literal(CypherLiteral::Integer(1)),
+            Expr::Literal(CypherLiteral::Integer(2)),
+            Expr::Literal(CypherLiteral::Integer(3)),
+        ]);
+        let field = Field::new("x", DataType::Int64, true);
+
+        // Three input rows × a three-element list = nine output rows.
+        let expected: Vec<(u64, Value)> = [10u64, 20, 30]
+            .iter()
+            .flat_map(|&v| (1..=3).map(move |i| (v, Value::Int(i))))
+            .collect();
+
+        let (whole, rows) = drive(
+            vec![vid_batch(&[10, 20, 30])],
+            expr.clone(),
+            field.clone(),
+            8192,
+        )
+        .await;
+        assert_eq!(whole, vec![9], "one chunk when the budget fits the batch");
+        assert_eq!(rows, expected);
+
+        // A chunk boundary that lands mid-list is the case the cursor exists
+        // for: 2 does not divide 3.
+        let (sizes, rows) = drive(vec![vid_batch(&[10, 20, 30])], expr, field, 2).await;
+        assert_eq!(sizes, vec![2, 2, 2, 2, 1]);
+        assert_eq!(rows, expected, "chunking must not reorder or drop rows");
+    }
+
+    /// A row that expands to nothing must not desynchronise the cursor, and
+    /// must not cause an empty batch to be emitted.
+    #[tokio::test]
+    async fn rows_that_expand_to_nothing_are_skipped() {
+        use arrow_array::builder::LargeBinaryBuilder;
+        use uni_common::cypher_value_codec::encode;
+
+        // `xs` per row: empty list, two elements, null, one element.
+        let sources = [
+            Value::List(vec![]),
+            Value::List(vec![Value::Int(1), Value::Int(2)]),
+            Value::Null,
+            Value::List(vec![Value::Int(3)]),
+        ];
+        let mut xs = LargeBinaryBuilder::new();
+        for v in &sources {
+            if v.is_null() {
+                xs.append_null();
+            } else {
+                xs.append_value(encode(v));
+            }
+        }
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("n._vid", DataType::UInt64, false),
+                Field::new("xs", DataType::LargeBinary, true),
+            ])),
+            vec![
+                Arc::new(arrow_array::UInt64Array::from(vec![10u64, 20, 30, 40])),
+                Arc::new(xs.finish()),
+            ],
+        )
+        .unwrap();
+
+        let field = Field::new("x", DataType::Int64, true);
+        let (sizes, rows) = drive(vec![batch], Expr::Variable("xs".to_string()), field, 8192).await;
+        assert_eq!(sizes, vec![3]);
+        assert_eq!(
+            rows,
+            vec![
+                (20, Value::Int(1)),
+                (20, Value::Int(2)),
+                (40, Value::Int(3)),
+            ]
+        );
+
+        // Every row expanding to nothing must end the stream, not emit an
+        // empty batch — `drive` asserts that for each batch it sees.
+        let (sizes, rows) = drive(
+            vec![vid_batch(&[10, 20])],
+            Expr::Literal(CypherLiteral::Null),
+            Field::new("x", DataType::Int64, true),
+            8192,
+        )
+        .await;
+        assert!(sizes.is_empty(), "got batches: {sizes:?}");
+        assert!(rows.is_empty());
     }
 }

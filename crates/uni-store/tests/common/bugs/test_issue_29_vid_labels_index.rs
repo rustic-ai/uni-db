@@ -266,3 +266,67 @@ async fn pinned_view_label_index_is_isolated_from_parent() -> Result<()> {
 
     Ok(())
 }
+
+/// `REMOVE n:Label` must be honoured by the batch label read.
+///
+/// `get_batch_labels` unioned labels across L0 buffers with `.extend` and never
+/// consulted `vertex_label_overwrites`, so a label removal was a no-op and the
+/// label came back on the next read. It also skipped storage entirely for any
+/// vid present in L0, truncating a flushed multi-label vertex to whatever
+/// labels one write happened to carry.
+///
+/// The columnar path already gets both right in
+/// `build_labels_column_for_known_label` — union for plain writes, newest
+/// overwrite replaces — so this pins the row-wise path to the same rule.
+#[tokio::test]
+async fn batch_labels_honour_an_l0_label_overwrite() -> Result<()> {
+    use parking_lot::RwLock;
+    use uni_common::core::id::Vid;
+    use uni_store::runtime::context::QueryContext;
+    use uni_store::runtime::l0::L0Buffer;
+
+    let dir = tempdir()?;
+    let path = dir.path().to_str().unwrap().to_string();
+    let store = Arc::new(LocalFileSystem::new_with_prefix(dir.path())?);
+    let schema_path = ObjectStorePath::from("schema.json");
+    let schema_manager = Arc::new(SchemaManager::load_from_store(store, &schema_path).await?);
+    schema_manager.add_label("Person")?;
+    schema_manager.add_label("Staff")?;
+    schema_manager.save().await?;
+
+    let storage = Arc::new(StorageManager::new(&path, schema_manager.clone()).await?);
+    let pm = PropertyManager::new(storage.clone(), schema_manager.clone(), 0);
+    let vid = Vid::new(1);
+
+    // A plain L0 write adds labels: they union.
+    let plain = Arc::new(RwLock::new(L0Buffer::new(0, None)));
+    plain
+        .write()
+        .vertex_labels
+        .insert(vid, vec!["Person".to_string(), "Staff".to_string()]);
+    let ctx = QueryContext::new(plain.clone());
+    let got = pm.get_batch_labels(&[vid], Some(&ctx)).await?;
+    assert_eq!(
+        got.get(&vid),
+        Some(&vec!["Person".to_string(), "Staff".to_string()]),
+        "a plain L0 write unions its labels"
+    );
+
+    // `REMOVE n:Staff` in a NEWER buffer, over the write that added it. The
+    // removal has to sit in the same visibility chain as the label it removes:
+    // a fresh buffer on its own would union to the right answer by accident and
+    // the assertion would pass whether or not overwrites are honoured.
+    let removed = Arc::new(RwLock::new(L0Buffer::new(0, None)));
+    removed
+        .write()
+        .set_vertex_labels(vid, &["Person".to_string()]);
+    let ctx = QueryContext::new_with_pending(removed.clone(), None, vec![plain.clone()]);
+    let got = pm.get_batch_labels(&[vid], Some(&ctx)).await?;
+    assert_eq!(
+        got.get(&vid),
+        Some(&vec!["Person".to_string()]),
+        "an overwrite replaces the set; Staff must not survive the removal"
+    );
+
+    Ok(())
+}

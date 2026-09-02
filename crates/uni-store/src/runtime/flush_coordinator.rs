@@ -130,6 +130,10 @@ pub struct FlushCoordinator {
     /// Counter exposed for `drop_fork` to wait on. Incremented at rotate,
     /// decremented after finalize.
     pending_count: Arc<std::sync::atomic::AtomicUsize>,
+    /// Flushes whose stream phase failed. Their rotated L0 stays on
+    /// `pending_flush` and is never re-flushed inline, so this is
+    /// monotonic until a restart replays the WAL.
+    flush_failures: Arc<AtomicU64>,
     drain_notify: Arc<tokio::sync::Notify>,
     max_pending_flushes: usize,
     /// Wall-clock bound on a single stream phase. A stream that exceeds this
@@ -214,9 +218,11 @@ impl FlushCoordinator {
         let next_seq = AtomicU64::new(0);
         let (submit_tx, submit_rx) = mpsc::unbounded_channel::<FlushSubmit>();
         let pending_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let flush_failures = Arc::new(AtomicU64::new(0));
         let drain_notify = Arc::new(tokio::sync::Notify::new());
 
         let pending_count_for_task = pending_count.clone();
+        let flush_failures_for_task = flush_failures.clone();
         let drain_notify_for_task = drain_notify.clone();
         let handle = tokio::spawn(finalizer_loop(
             submit_rx,
@@ -224,6 +230,7 @@ impl FlushCoordinator {
             finalize_fn,
             pending_count_for_task,
             drain_notify_for_task,
+            flush_failures_for_task,
         ));
 
         Self {
@@ -231,6 +238,7 @@ impl FlushCoordinator {
             next_seq,
             submit_tx: parking_lot::Mutex::new(Some(submit_tx)),
             pending_count,
+            flush_failures,
             drain_notify,
             max_pending_flushes,
             stream_timeout,
@@ -318,6 +326,18 @@ impl FlushCoordinator {
 
     pub fn pending_flush_count(&self) -> usize {
         self.pending_count.load(Ordering::Acquire)
+    }
+
+    /// Flushes whose stream phase failed since this coordinator started.
+    ///
+    /// Nonzero means at least one rotated L0 is stranded on `pending_flush`:
+    /// its data is safe (the WAL retains it and replay recovers it on restart)
+    /// but it is **not** in Lance, and no later inline flush picks it up —
+    /// `flush_inline_under_lock` only ever writes `get_current()`. A caller
+    /// relying on `flush_to_l1` as a durability barrier must treat this as the
+    /// barrier having failed.
+    pub fn failed_flush_count(&self) -> u64 {
+        self.flush_failures.load(Ordering::Acquire)
     }
 
     /// Submit a completed-stream flush for ordered finalization.
@@ -434,21 +454,46 @@ impl FlushCoordinator {
     }
 
     /// Wait until pending_count drops to zero. Used by `drop_fork`.
-    pub async fn drain(&self, timeout: std::time::Duration) -> Result<(), &'static str> {
-        let deadline = tokio::time::Instant::now() + timeout;
+    /// `stall_timeout` bounds **time without progress**, not total drain time.
+    ///
+    /// A total deadline cannot tell a large legitimate backlog from a wedged
+    /// coordinator, and the two need opposite responses. Ingesting a million
+    /// rows queues roughly one flush per `auto_flush_threshold` mutations, so the
+    /// backlog scales with the data and no fixed total is correct for every load.
+    /// What distinguishes a wedge is that `pending_flush_count` stops falling.
+    /// The deadline therefore resets on every observed decrease, and only a
+    /// genuine stall returns an error.
+    pub async fn drain(&self, stall_timeout: std::time::Duration) -> Result<(), &'static str> {
+        let mut last = self.pending_flush_count();
+        if last == 0 {
+            return Ok(());
+        }
+        let mut deadline = tokio::time::Instant::now() + stall_timeout;
         loop {
-            if self.pending_flush_count() == 0 {
-                return Ok(());
-            }
             let notified = self.drain_notify.notified();
             tokio::select! {
-                _ = notified => continue,
+                _ = notified => {
+                    let now = self.pending_flush_count();
+                    if now == 0 {
+                        return Ok(());
+                    }
+                    if now < last {
+                        last = now;
+                        deadline = tokio::time::Instant::now() + stall_timeout;
+                    }
+                }
                 _ = tokio::time::sleep_until(deadline) => {
-                    return if self.pending_flush_count() == 0 {
-                        Ok(())
-                    } else {
-                        Err("pending flushes did not drain before deadline")
-                    };
+                    let now = self.pending_flush_count();
+                    if now == 0 {
+                        return Ok(());
+                    }
+                    // Progress since the deadline was set: not a stall, extend.
+                    if now < last {
+                        last = now;
+                        deadline = tokio::time::Instant::now() + stall_timeout;
+                        continue;
+                    }
+                    return Err("pending flushes made no progress before deadline");
                 }
             }
         }
@@ -510,6 +555,7 @@ async fn finalizer_loop(
     finalize_fn: Arc<dyn FinalizeFn>,
     pending_count: Arc<std::sync::atomic::AtomicUsize>,
     drain_notify: Arc<tokio::sync::Notify>,
+    flush_failures: Arc<AtomicU64>,
 ) {
     // Reorder-by-seq using a min-heap; finalize strictly in seq order.
     let mut pending: BinaryHeap<Reverse<(u64, FlushSubmit)>> = BinaryHeap::new();
@@ -533,6 +579,10 @@ async fn finalizer_loop(
                     let _err = finalize_fn
                         .finalize_failure(rotated, e, shared.clone())
                         .await;
+                    // Recorded so `flush_to_l1` can refuse to claim a barrier it
+                    // cannot honour: the rotated L0 stays on `pending_flush` and
+                    // nothing re-flushes it.
+                    flush_failures.fetch_add(1, Ordering::AcqRel);
                     Err(anyhow::anyhow!("flush stream failed: {}", _err))
                 }
             };

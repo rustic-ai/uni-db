@@ -22,9 +22,13 @@ async fn test_create_edge_type_with_properties() -> Result<()> {
     assert!(schema.edge_types.contains_key("WORKS_AT"));
     let works_at_props = schema.properties.get("WORKS_AT").unwrap();
     assert!(works_at_props.contains_key("since"));
+    // `INT` is a 64-bit Cypher integer. This asserted `Int32`, which is what the
+    // DDL path used to produce: values beyond 32 bits were silently wrapped on
+    // write, so `4294967296` read back as `0`. The assertion pinned the defect
+    // rather than the intent.
     assert_eq!(
         works_at_props.get("since").unwrap().r#type,
-        uni_db::DataType::Int32
+        uni_db::DataType::Int64
     );
 
     // Test 2: CREATE EDGE TYPE with multiple properties

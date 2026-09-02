@@ -34,7 +34,7 @@
 //! | 12 | Time | msgpack i64 (nanoseconds since midnight) |
 //! | 13 | DateTime | msgpack i64 (nanoseconds since epoch) |
 //! | 14 | Duration | msgpack {months, days, nanos} |
-//! | 15 | Point | msgpack {srid, coords} |
+//! | 15 | Handle | 8-byte id of an interned value (see [`handle`]) |
 //! | 16 | Vector | msgpack array of f32 |
 //! | 17 | LocalTime | msgpack i64 (nanoseconds since midnight) |
 //! | 18 | LocalDateTime | msgpack i64 (nanoseconds since epoch) |
@@ -67,13 +67,123 @@ pub const TAG_DATE: u8 = 11;
 pub const TAG_TIME: u8 = 12;
 pub const TAG_DATETIME: u8 = 13;
 pub const TAG_DURATION: u8 = 14;
-// pub const TAG_POINT: u8 = 15;
+/// An interned value: an 8-byte id naming an entry in [`handle`]'s registry.
+///
+/// A `collect()` of *n* entities is one opaque blob, and every operator above
+/// copies its input columns forward once per output row — so a traversal
+/// re-materialises the whole list per fan-out row, `rows × list_size` bytes,
+/// which is what OOM-kills LDBC IC3 and IC12 at SF1. A handle makes the copy
+/// 9 bytes regardless of the list's size. See the module docs on [`handle`].
+pub const TAG_HANDLE: u8 = 15;
 pub const TAG_VECTOR: u8 = 16;
 pub const TAG_LOCALTIME: u8 = 17;
 pub const TAG_LOCALDATETIME: u8 = 18;
 pub const TAG_BTIC: u8 = 19;
 pub const TAG_SPARSE_VECTOR: u8 = 20;
 pub const TAG_BINARY_VECTOR: u8 = 21;
+
+pub mod handle {
+    //! Interning for values whose encoded form is large and copied per row.
+    //!
+    //! [`super::TAG_HANDLE`] blobs carry an id into the registry here instead
+    //! of the value's own bytes, so `arrow::compute::take` and
+    //! `ScalarValue::to_array_of_size` copy 9 bytes per row rather than the
+    //! whole encoding. [`super::decode`] resolves a handle transparently, which
+    //! is why none of its ~45 call sites had to change.
+    //!
+    //! # Why the registry is global
+    //!
+    //! Resolution has to be ambient: `decode(&[u8])` cannot grow a registry
+    //! argument without touching every call site. A thread-local will not do
+    //! either — DataFusion encodes on the worker thread that ran the aggregate
+    //! and decodes on whichever thread later evaluates a predicate, so a
+    //! thread-local would strand the value and fail an otherwise sound query.
+    //!
+    //! Lifetime is bounded by [`HandleScope`], not by the process: the scope
+    //! owns every id registered through it and removes them on drop. One scope
+    //! lives for one query execution.
+    //!
+    //! # A handle must never escape
+    //!
+    //! It is meaningless in another process and dangling after its scope ends,
+    //! so it must not reach durable storage, a plugin, or a returned result.
+    //! Use [`super::materialize`] at those boundaries. Resolution fails loudly rather
+    //! than yielding `Null`, so an escape is a visible error and never a
+    //! silently wrong answer.
+
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, OnceLock, RwLock};
+
+    use crate::value::Value;
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn registry() -> &'static RwLock<HashMap<u64, Arc<Value>>> {
+        static REGISTRY: OnceLock<RwLock<HashMap<u64, Arc<Value>>>> = OnceLock::new();
+        REGISTRY.get_or_init(|| RwLock::new(HashMap::new()))
+    }
+
+    /// Owns the ids registered through it and releases them when dropped.
+    ///
+    /// Hold one for the duration of a query execution. Dropping it is what
+    /// keeps the global registry from growing without bound.
+    #[derive(Debug, Default)]
+    pub struct HandleScope {
+        ids: RwLock<Vec<u64>>,
+    }
+
+    impl HandleScope {
+        /// A scope owning no ids yet.
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        /// Intern `value`, returning the id that names it.
+        pub fn register(&self, value: Arc<Value>) -> u64 {
+            let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            if let Ok(mut reg) = registry().write() {
+                reg.insert(id, value);
+            }
+            if let Ok(mut ids) = self.ids.write() {
+                ids.push(id);
+            }
+            id
+        }
+
+        /// Ids this scope currently owns — for tests and diagnostics.
+        pub fn len(&self) -> usize {
+            self.ids.read().map(|i| i.len()).unwrap_or(0)
+        }
+
+        /// Whether this scope owns no ids.
+        pub fn is_empty(&self) -> bool {
+            self.len() == 0
+        }
+    }
+
+    impl Drop for HandleScope {
+        fn drop(&mut self) {
+            let ids = match self.ids.get_mut() {
+                Ok(ids) => std::mem::take(ids),
+                Err(poisoned) => std::mem::take(poisoned.into_inner()),
+            };
+            if ids.is_empty() {
+                return;
+            }
+            if let Ok(mut reg) = registry().write() {
+                for id in ids {
+                    reg.remove(&id);
+                }
+            }
+        }
+    }
+
+    /// The interned value for `id`, or `None` if no live scope owns it.
+    pub fn resolve(id: u64) -> Option<Arc<Value>> {
+        registry().read().ok()?.get(&id).cloned()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // rmp_serde + UniError::Storage wrappers
@@ -133,6 +243,41 @@ pub fn encode(value: &Value) -> Vec<u8> {
     buf
 }
 
+/// Encode a reference to an interned value: `[TAG_HANDLE][id as 8 LE bytes]`.
+///
+/// Nine bytes regardless of how large the interned value is — that is the
+/// entire point. See [`handle`] for the lifetime rules, and [`materialize`]
+/// for the boundaries at which this must be turned back into real bytes.
+pub fn encode_handle(id: u64) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(9);
+    buf.push(TAG_HANDLE);
+    buf.extend_from_slice(&id.to_le_bytes());
+    buf
+}
+
+/// Whether `bytes` is a handle blob rather than a self-contained encoding.
+pub fn is_handle(bytes: &[u8]) -> bool {
+    bytes.first() == Some(&TAG_HANDLE)
+}
+
+/// Resolve any handle in `bytes` into a self-contained encoding.
+///
+/// Call this at every boundary a handle must not cross — durable storage, the
+/// plugin/IPC surface, and returned results. Bytes that contain no handle are
+/// returned unchanged, so this is safe to apply broadly.
+///
+/// # Errors
+///
+/// If a handle's scope has already ended. That is a bug in scoping rather than
+/// bad input, and failing here is deliberate: the alternative is persisting an
+/// id that means nothing.
+pub fn materialize(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, UniError> {
+    if !is_handle(bytes) {
+        return Ok(std::borrow::Cow::Borrowed(bytes));
+    }
+    Ok(std::borrow::Cow::Owned(encode(&decode(bytes)?)))
+}
+
 /// Decode tagged MessagePack bytes to a Value.
 pub fn decode(bytes: &[u8]) -> Result<Value, UniError> {
     if bytes.is_empty() {
@@ -146,6 +291,25 @@ pub fn decode(bytes: &[u8]) -> Result<Value, UniError> {
 
     match tag {
         TAG_NULL => Ok(Value::Null),
+        // Resolved through the registry rather than parsed. Fails loudly on a
+        // dangling id: a handle that outlived its scope is a scoping bug, and
+        // returning Null here would turn it into a wrong answer.
+        TAG_HANDLE => {
+            let id_bytes: [u8; 8] = payload.try_into().map_err(|_| UniError::Storage {
+                message: format!("handle payload must be 8 bytes, got {}", payload.len()),
+                source: None,
+            })?;
+            let id = u64::from_le_bytes(id_bytes);
+            handle::resolve(id)
+                .map(|v| (*v).clone())
+                .ok_or_else(|| UniError::Storage {
+                    message: format!(
+                        "interned value {id} is no longer live — a handle escaped the query \
+                         scope that owned it"
+                    ),
+                    source: None,
+                })
+        }
         TAG_BOOL => Ok(Value::Bool(decode_msgpack(payload, "bool")?)),
         TAG_INT => Ok(Value::Int(decode_msgpack(payload, "int")?)),
         TAG_FLOAT => Ok(Value::Float(decode_msgpack(payload, "float")?)),
@@ -967,5 +1131,132 @@ mod tests {
         let bytes = encode(&v);
         let decoded = decode(&bytes).unwrap();
         assert_eq!(decoded, v);
+    }
+}
+
+#[cfg(test)]
+mod handle_tests {
+    use super::handle::{HandleScope, resolve};
+    use super::*;
+    use std::sync::Arc;
+
+    fn list_of(n: usize) -> Value {
+        Value::List((0..n).map(|i| Value::Int(i as i64)).collect())
+    }
+
+    #[test]
+    fn a_handle_round_trips_to_the_interned_value() {
+        let scope = HandleScope::new();
+        let v = list_of(64);
+        let id = scope.register(Arc::new(v.clone()));
+        assert_eq!(decode(&encode_handle(id)).unwrap(), v);
+    }
+
+    /// The reason for the whole design: the blob a row carries is 9 bytes
+    /// however large the value is, so replicating it costs nothing.
+    #[test]
+    fn a_handle_blob_does_not_grow_with_the_value() {
+        let scope = HandleScope::new();
+        let small = scope.register(Arc::new(list_of(1)));
+        let large = scope.register(Arc::new(list_of(10_000)));
+        assert_eq!(encode_handle(small).len(), 9);
+        assert_eq!(encode_handle(large).len(), 9);
+        assert!(
+            encode(&list_of(10_000)).len() > 10_000,
+            "the inline encoding is what we are avoiding"
+        );
+    }
+
+    #[test]
+    fn a_handle_nested_in_a_list_or_map_resolves() {
+        let scope = HandleScope::new();
+        let inner = Value::String("interned".to_string());
+        let id = scope.register(Arc::new(inner.clone()));
+
+        // Hand-build the nesting the way encode_to_buf would, with the handle
+        // blob in place of a self-contained element encoding.
+        let nested_list: Vec<Vec<u8>> = vec![encode(&Value::Int(1)), encode_handle(id)];
+        let mut buf = vec![TAG_LIST];
+        buf.extend_from_slice(&rmp_serde::to_vec(&nested_list).unwrap());
+        assert_eq!(
+            decode(&buf).unwrap(),
+            Value::List(vec![Value::Int(1), inner])
+        );
+    }
+
+    /// A dangling handle must be a loud error. Returning Null would convert a
+    /// scoping bug into a silently wrong answer.
+    #[test]
+    fn a_handle_whose_scope_ended_fails_loudly() {
+        let id = {
+            let scope = HandleScope::new();
+            scope.register(Arc::new(list_of(8)))
+        };
+        assert!(resolve(id).is_none(), "drop must release the id");
+        let err = decode(&encode_handle(id)).expect_err("must not resolve");
+        assert!(
+            err.to_string().contains("no longer live"),
+            "unhelpful error: {err}"
+        );
+    }
+
+    #[test]
+    fn scopes_do_not_release_each_others_ids() {
+        let outer = HandleScope::new();
+        let kept = outer.register(Arc::new(Value::Int(7)));
+        {
+            let inner = HandleScope::new();
+            inner.register(Arc::new(Value::Int(8)));
+            assert_eq!(inner.len(), 1);
+        }
+        assert!(resolve(kept).is_some(), "the outer scope still owns its id");
+    }
+
+    /// DataFusion encodes on the worker thread that ran the aggregate and
+    /// decodes on whichever thread evaluates the predicate later. A
+    /// thread-local registry would strand the value; this test is what pins
+    /// that choice.
+    #[test]
+    fn a_handle_registered_on_one_thread_resolves_on_another() {
+        let scope = HandleScope::new();
+        let v = list_of(32);
+        let id = scope.register(Arc::new(v.clone()));
+        let decoded = std::thread::spawn(move || decode(&encode_handle(id)).unwrap())
+            .join()
+            .expect("decoder thread panicked");
+        assert_eq!(decoded, v);
+    }
+
+    #[test]
+    fn materialize_replaces_a_handle_and_leaves_other_bytes_alone() {
+        let scope = HandleScope::new();
+        let v = list_of(16);
+        let id = scope.register(Arc::new(v.clone()));
+
+        let blob = encode_handle(id);
+        let materialized = materialize(&blob).unwrap();
+        assert!(!is_handle(&materialized));
+        assert_eq!(decode(&materialized).unwrap(), v);
+
+        // Self-contained bytes are returned untouched, so applying this
+        // broadly at a boundary costs nothing.
+        let plain = encode(&Value::Int(3));
+        assert!(matches!(
+            materialize(&plain).unwrap(),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    /// Materialized bytes must survive their scope — that is what makes them
+    /// safe to persist.
+    #[test]
+    fn materialized_bytes_outlive_the_scope() {
+        let v = list_of(24);
+        let bytes = {
+            let scope = HandleScope::new();
+            let id = scope.register(Arc::new(v.clone()));
+            materialize(&encode_handle(id)).unwrap().into_owned()
+        };
+        assert_eq!(decode(&bytes).unwrap(), v);
     }
 }

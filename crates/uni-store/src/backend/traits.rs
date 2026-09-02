@@ -265,6 +265,10 @@ pub trait StorageBackend: Send + Sync + 'static {
     // ========================
 
     /// Perform a vector similarity search.
+    ///
+    /// `counters`, when present, records whether the search consulted an index.
+    /// This is the only channel for it: unlike the scan path there is no
+    /// `ScanRequest` here to carry one.
     #[expect(clippy::too_many_arguments)]
     async fn vector_search(
         &self,
@@ -275,6 +279,7 @@ pub trait StorageBackend: Send + Sync + 'static {
         _metric: DistanceMetric,
         _filter: FilterExpr,
         _opts: VectorQueryOpts,
+        _counters: Option<std::sync::Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<Vec<RecordBatch>> {
         anyhow::bail!("Vector search not supported by this backend")
     }
@@ -293,11 +298,14 @@ pub trait StorageBackend: Send + Sync + 'static {
         _metric: DistanceMetric,
         _filter: FilterExpr,
         _opts: VectorQueryOpts,
+        _counters: Option<std::sync::Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<Vec<RecordBatch>> {
         anyhow::bail!("Multi-vector search not supported by this backend")
     }
 
     /// Perform a full-text search.
+    ///
+    /// See [`StorageBackend::vector_search`] for what `counters` records.
     async fn full_text_search(
         &self,
         _table: &str,
@@ -305,6 +313,7 @@ pub trait StorageBackend: Send + Sync + 'static {
         _query: &str,
         _k: usize,
         _filter: FilterExpr,
+        _counters: Option<std::sync::Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<Vec<RecordBatch>> {
         anyhow::bail!("Full-text search not supported by this backend")
     }

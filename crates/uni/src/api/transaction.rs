@@ -42,14 +42,27 @@ async fn with_optional_timeout<T>(
     timeout: Option<Duration>,
     fut: impl std::future::Future<Output = Result<T>>,
 ) -> Result<T> {
-    match timeout {
-        Some(t) => tokio::time::timeout(t, fut)
-            .await
-            .map_err(|_| UniError::Timeout {
-                timeout_ms: t.as_millis() as u64,
-            })?,
-        None => fut.await,
+    let Some(t) = timeout else {
+        return fut.await;
+    };
+    let started = std::time::Instant::now();
+    let out = tokio::time::timeout(t, fut)
+        .await
+        .map_err(|_| UniError::Timeout {
+            timeout_ms: t.as_millis() as u64,
+        })??;
+    // `tokio::time::timeout` polls the inner future before arming its timer, so
+    // a statement that finishes inside a single poll returns `Ok` no matter how
+    // small the budget — the timer never gets a chance to fire. Comparing the
+    // elapsed time closes that hole, which is why the session terminals carry
+    // the same check; without it `.timeout()` was silently inert on every
+    // transaction statement fast enough not to yield.
+    if started.elapsed() > t {
+        return Err(UniError::Timeout {
+            timeout_ms: t.as_millis() as u64,
+        });
     }
+    Ok(out)
 }
 
 /// Transaction isolation level.
@@ -752,20 +765,59 @@ impl Transaction {
     ///
     /// Mutations are written to the transaction's private L0 and become
     /// visible on commit. Returns the allocated VIDs in input order.
+    ///
+    /// For vertices carrying more than one label, see
+    /// [`Self::bulk_insert_vertices_labeled`].
     #[instrument(skip(self, properties_list), fields(transaction_id = %self.id))]
     pub async fn bulk_insert_vertices(
         &self,
         label: &str,
         properties_list: Vec<uni_common::Properties>,
     ) -> Result<Vec<uni_common::core::id::Vid>> {
+        self.bulk_insert_vertices_labeled(&[label], properties_list)
+            .await
+    }
+
+    /// Bulk insert vertices carrying **one or more** labels.
+    ///
+    /// The storage layer has always stored a vertex's labels as a set
+    /// (`Writer::insert_vertices_batch` takes `Vec<String>`), but until this
+    /// existed the only public bulk path hardcoded a single label — so
+    /// multi-label vertices could be stored by the engine and not created by a
+    /// caller. Data whose nodes are genuinely multi-labelled (an LDBC `Place`
+    /// that is also a `City`) had to drop labels at load time, and a later
+    /// `MATCH (p:Place)` would return nothing at all, with no error.
+    ///
+    /// Mutations are written to the transaction's private L0 and become visible
+    /// on commit. Returns the allocated VIDs in input order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UniError::LabelNotFound`] if any label is undeclared, or
+    /// [`UniError::Schema`] if `labels` is empty — a vertex with no label cannot
+    /// be matched by any pattern, so it is rejected rather than stored.
+    #[instrument(skip(self, properties_list), fields(transaction_id = %self.id))]
+    pub async fn bulk_insert_vertices_labeled(
+        &self,
+        labels: &[&str],
+        properties_list: Vec<uni_common::Properties>,
+    ) -> Result<Vec<uni_common::core::id::Vid>> {
         self.check_completed()?;
+        if labels.is_empty() {
+            return Err(UniError::Schema {
+                message: "bulk_insert_vertices_labeled requires at least one label; a vertex                           with no label cannot be matched by any pattern"
+                    .to_string(),
+            });
+        }
         let schema = self.db.schema.schema();
-        schema
-            .labels
-            .get(label)
-            .ok_or_else(|| UniError::LabelNotFound {
-                label: label.to_string(),
-            })?;
+        for label in labels {
+            schema
+                .labels
+                .get(*label)
+                .ok_or_else(|| UniError::LabelNotFound {
+                    label: (*label).to_string(),
+                })?;
+        }
         let writer_lock = self.db.writer.as_ref().ok_or_else(|| UniError::ReadOnly {
             operation: "bulk_insert_vertices".to_string(),
         })?;
@@ -782,7 +834,7 @@ impl Transaction {
             .insert_vertices_batch(
                 vids.clone(),
                 properties_list,
-                vec![label.to_string()],
+                labels.iter().map(|l| (*l).to_string()).collect(),
                 Some(&self.tx_l0),
             )
             .await

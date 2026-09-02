@@ -797,6 +797,13 @@ async fn sparse_recovered_delta_queryable_without_rebuild() -> anyhow::Result<()
 /// Regression: a recovered-but-unflushed UPDATE to an indexed sparse column is
 /// honored without a rebuild — the stale flushed posting must NOT win.
 ///
+/// Was flaky under parallel load with Lance's own "Retryable commit conflict …
+/// preempted by concurrent transaction", and passed when run alone. The cause
+/// was not in the test: `SparseIndex::write_postings` committed to Lance
+/// without going through `retry_on_lance_conflict`, so a losing commit reached
+/// the caller instead of being retried — as did the three sibling secondary
+/// index writers. Retrying here would have hidden a defect users could hit.
+///
 /// `target` is flushed as the exact query match (the high-scoring L1 posting),
 /// then overwritten in an unflushed commit with a disjoint vector. After a crash
 /// (drop) + reopen the recovered L0 value must override the stale L1 posting, so

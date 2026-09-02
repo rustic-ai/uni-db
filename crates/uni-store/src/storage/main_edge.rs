@@ -29,6 +29,37 @@ use std::sync::Arc;
 use uni_common::Properties;
 use uni_common::core::id::{Eid, UniId, Vid};
 
+/// Maximum EIDs per `_eid IN (...)` chunk in
+/// [`MainEdgeDataset::find_props_by_eids`].
+///
+/// Mirrors `MAX_VIDS_PER_CHUNK` on the vertex side: an unbounded `IN` list
+/// inflates the scan request and stops the scalar index earning its keep, while
+/// a bounded one preserves the indexed lookup at any set size.
+const MAX_EIDS_PER_CHUNK: usize = 10_000;
+
+/// Requested EIDs per table row at which one full scan beats chunked lookups.
+///
+/// A request covering more than `rows / EID_SCAN_CROSSOVER_RATIO` EIDs is a
+/// candidate for a single pass. Measured, not guessed: see
+/// [`MainEdgeDataset::prefers_full_scan`].
+const EID_SCAN_CROSSOVER_RATIO: usize = 4_096;
+
+/// How much of the table the requested EIDs must range over before scanning.
+///
+/// A request is only worth one pass if its EIDs are spread thinly. A dense
+/// request of the same size reads far fewer pages per lookup and stays cheaper
+/// chunked — measured at ~24 us per EID dense against ~78 us sparse.
+const EID_SPAN_RATIO: usize = 32;
+
+/// Below this many EIDs, never scan — a point lookup on a small table would
+/// otherwise pay the scan's fixed cost for a handful of rows.
+///
+/// Deliberately low. It guards the degenerate case only; the two ratios above
+/// are what actually choose between the arms, and raising this to do their job
+/// would also stop small fixtures from ever reaching the scan path, leaving it
+/// untested.
+const MIN_EIDS_FOR_FULL_SCAN: usize = 64;
+
 /// One candidate row for an edge, while ranking a type scan by `_version`.
 ///
 /// Carries `deleted` because a tombstone is a *winning* row, not an absent one:
@@ -401,6 +432,201 @@ impl MainEdgeDataset {
     }
 
     /// Parse props_json from a LargeBinaryArray (JSONB) at the given index.
+    /// Properties for many edges by EID, resolved in one scan per chunk.
+    ///
+    /// The batched counterpart of [`MainEdgeDataset::find_props_by_eid`]. Any
+    /// caller resolving a whole traversal's edges must use this form: the
+    /// singular one issues a separate `ScanRequest` per edge, measured at
+    /// ~1.5 ms each against a persisted SF1 store, so a 4809-edge traversal
+    /// spent 7.3 s of its 7.4 s in that loop alone. The batched scan keeps the
+    /// `_eid` BTree index in play while collapsing N round trips into one.
+    ///
+    /// EIDs with no row, and those whose winning row is a tombstone, are absent
+    /// from the returned map — the batched spelling of the singular form's
+    /// `Ok(None)`.
+    ///
+    /// Version selection matches [`MainEdgeDataset::find_props_by_eid`] exactly,
+    /// per EID: the highest `_version` wins with tombstones included in the
+    /// contest, so a delete cannot be undone by an older live row. Ties resolve
+    /// to the later row, as they do there.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table query fails or a `props_json` blob cannot
+    /// be decoded.
+    pub async fn find_props_by_eids(
+        backend: &dyn StorageBackend,
+        eids: &[Eid],
+        version: Option<u64>,
+    ) -> Result<HashMap<Eid, Properties>> {
+        if eids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let table_name = table_names::main_edge_table_name();
+        if !backend.table_exists(table_name).await? {
+            return Ok(HashMap::new());
+        }
+
+        // Winner per EID: (version, deleted, props). Tombstones stay in the map
+        // until the end so a lower-version live row cannot displace them.
+        let mut best: HashMap<Eid, (u64, bool, Properties)> = HashMap::new();
+        let columns = vec!["_eid", "props_json", "_version", "_deleted"];
+
+        if Self::prefers_full_scan(backend, table_name, eids).await? {
+            // One pass, filtered in memory. Streamed rather than collected: the
+            // whole table's `props_json` would otherwise be resident at once.
+            let wanted: std::collections::HashSet<u64> = eids.iter().map(Eid::as_u64).collect();
+            let filter = super::with_version_bound(FilterExpr::Literal(true), version);
+            let request = ScanRequest::all(table_name)
+                .with_filter(filter)
+                .with_columns(columns.into_iter().map(String::from).collect());
+
+            let mut stream = backend.scan_stream(request).await?;
+            while let Some(batch) = futures::TryStreamExt::try_next(&mut stream).await? {
+                Self::merge_winning_props(&batch, Some(&wanted), &mut best)?;
+            }
+        } else {
+            for chunk in eids.chunks(MAX_EIDS_PER_CHUNK) {
+                let filter = super::with_version_bound(
+                    FilterExpr::one_of("_eid", chunk.iter().map(|e| Scalar::UInt(e.as_u64()))),
+                    version,
+                );
+                let batches = Self::execute_query(backend, filter, Some(columns.clone())).await?;
+                for batch in &batches {
+                    Self::merge_winning_props(batch, None, &mut best)?;
+                }
+            }
+        }
+
+        Ok(best
+            .into_iter()
+            .filter_map(|(eid, (_, deleted, props))| (!deleted).then_some((eid, props)))
+            .collect())
+    }
+
+    /// Whether one unfiltered pass beats chunked `_eid IN (...)` lookups.
+    ///
+    /// The two strategies scale differently: a full scan costs the table, an
+    /// indexed lookup costs the request. Measured at LDBC SF1 against a
+    /// 17 256 038-row edge table: ~330 ms flat for the scan, against ~78 us per
+    /// EID when the request is spread thinly and ~24 us when it is dense. Hence
+    /// two conditions rather than one — size alone picks the wrong arm for a
+    /// large *dense* request, which is a measured regression, not a hypothetical.
+    ///
+    /// Both arms return identical results; only the read strategy differs.
+    /// Thresholds derive from the row count rather than being fixed, because the
+    /// scan arm scales with the table and the lookup arm does not.
+    ///
+    /// The constants are fitted to one dataset on one machine. They are honest
+    /// about direction and rough about magnitude; a selectivity estimate from
+    /// real statistics would beat them.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the row count cannot be read.
+    async fn prefers_full_scan(
+        backend: &dyn StorageBackend,
+        table_name: &str,
+        eids: &[Eid],
+    ) -> Result<bool> {
+        // Cheap tests first: a small request can never repay a scan, whatever
+        // the table looks like, and this avoids the row count entirely.
+        let requested = eids.len();
+        if requested < MIN_EIDS_FOR_FULL_SCAN {
+            return Ok(false);
+        }
+
+        // Unfiltered, so this reads fragment metadata rather than rows.
+        let rows = backend.count_rows(table_name, None).await?;
+
+        // Enough of the table to repay reading all of it.
+        if requested.saturating_mul(EID_SCAN_CROSSOVER_RATIO) < rows {
+            return Ok(false);
+        }
+
+        // ...and spread thinly enough that the lookups would range over it
+        // anyway. Without this a *dense* request of the same size is pushed onto
+        // a scan that costs it roughly double: measured at SF1, 28 909 clustered
+        // EIDs took 702 ms chunked against 1 572 ms scanned, while 11 653 thinly
+        // spread ones went the other way, 1 152 ms chunked against 772 ms scanned.
+        let (Some(lo), Some(hi)) = (
+            eids.iter().map(Eid::as_u64).min(),
+            eids.iter().map(Eid::as_u64).max(),
+        ) else {
+            return Ok(false);
+        };
+        let span = hi.saturating_sub(lo) as usize;
+        Ok(span.saturating_mul(EID_SPAN_RATIO) >= rows)
+    }
+
+    /// Fold one batch into the per-EID winner map, optionally filtering to `wanted`.
+    ///
+    /// Shared by both read strategies so the MVCC rule cannot drift between
+    /// them: highest `_version` wins with tombstones in the contest, ties to the
+    /// later row.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a `props_json` blob cannot be decoded.
+    fn merge_winning_props(
+        batch: &RecordBatch,
+        wanted: Option<&std::collections::HashSet<u64>>,
+        best: &mut HashMap<Eid, (u64, bool, Properties)>,
+    ) -> Result<()> {
+        let eid_arr = batch
+            .column_by_name("_eid")
+            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+        let props_arr = batch
+            .column_by_name("props_json")
+            .and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>());
+        let ver_arr = batch
+            .column_by_name("_version")
+            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+        let deleted_col = batch
+            .column_by_name("_deleted")
+            .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
+
+        let (Some(eid_arr), Some(props_arr), Some(ver_arr)) = (eid_arr, props_arr, ver_arr) else {
+            return Ok(());
+        };
+
+        for i in 0..batch.num_rows() {
+            if eid_arr.is_null(i) {
+                continue;
+            }
+            let raw_eid = eid_arr.value(i);
+            if wanted.is_some_and(|w| !w.contains(&raw_eid)) {
+                continue;
+            }
+            let eid = Eid::from(raw_eid);
+            let row_version = if ver_arr.is_null(i) {
+                0
+            } else {
+                ver_arr.value(i)
+            };
+
+            // Strictly-older rows lose; `>=` keeps the singular form's
+            // tie-breaking, where the later row wins.
+            if best
+                .get(&eid)
+                .is_some_and(|(winning, _, _)| row_version < *winning)
+            {
+                continue;
+            }
+
+            let deleted = deleted_col.is_some_and(|d| d.value(i));
+            let props = if deleted {
+                Properties::new()
+            } else {
+                Self::parse_props_json(props_arr, i)?
+            };
+            best.insert(eid, (row_version, deleted, props));
+        }
+
+        Ok(())
+    }
+
     fn parse_props_json(arr: &arrow_array::LargeBinaryArray, idx: usize) -> Result<Properties> {
         if arr.is_null(idx) || arr.value(idx).is_empty() {
             return Ok(Properties::new());

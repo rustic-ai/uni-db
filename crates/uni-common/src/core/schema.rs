@@ -2759,6 +2759,7 @@ mod tests {
                     status: IndexStatus::Stale,
                     ..Default::default()
                 },
+                default_refine_factor: None,
             }));
 
         // Stale index should NOT be returned

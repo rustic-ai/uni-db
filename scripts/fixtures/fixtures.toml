@@ -1,0 +1,598 @@
+# Benchmark fixtures too large to commit, pinned by digest.
+#
+# Every entry is fetched and verified by `scripts/fixtures/fetch.py`. Read
+# `docs/fixtures.md` before adding one.
+#
+# The three rules that make a pin mean something:
+#
+#   1. `revision` is a 40-hex commit sha, never a branch. A branch moves, which
+#      turns a pinned digest into a spurious failure and makes a published
+#      benchmark number unreproducible.
+#   2. `digest` is what the *Hub publishes* for that path at that revision --
+#      `lfs.oid` (sha256) for LFS-backed files, the git blob sha1 for small
+#      plain ones. Generate an entry with
+#      `fetch.py --emit-entry REPO PATH --revision SHA` rather than by hand, and
+#      re-assert it with `fetch.py --check-upstream`.
+#   3. Nothing here is optional. A missing digest is a hard error, not an
+#      unverified download.
+
+schema = 1
+
+# --- BEIR SciFact -----------------------------------------------------------
+#
+# Corpus and queries live in `BeIR/scifact`; the relevance judgements are a
+# separate repo. Two repos and both digest algorithms, which is why this is the
+# fixture the fetch layer was first proven against.
+
+[[fixture]]
+name        = "beir-scifact-corpus"
+repo        = "BeIR/scifact"
+repo_type   = "dataset"
+revision    = "b3b5335604bf5ee3c4447671af975ea25143d4f5"
+path        = "corpus/corpus-00000-of-00001.parquet"
+digest_algo = "sha256"
+digest      = "243324b35f03d82bd6d98a5f575966876e86cad7ce16e5333a35b1b793dc4f45"
+bytes       = 4469916
+license     = "cc-by-sa-4.0"
+consumer    = "E2b -- BEIR nDCG@10"
+produced_by = "upstream: BeIR/scifact"
+
+[[fixture]]
+name        = "beir-scifact-queries"
+repo        = "BeIR/scifact"
+repo_type   = "dataset"
+revision    = "b3b5335604bf5ee3c4447671af975ea25143d4f5"
+path        = "queries/queries-00000-of-00001.parquet"
+digest_algo = "sha256"
+digest      = "1c37956c5dc8b810b60302323c24d1a9e79e26411ba8f5ad9d0888642e2a9034"
+bytes       = 64982
+license     = "cc-by-sa-4.0"
+consumer    = "E2b -- BEIR nDCG@10"
+produced_by = "upstream: BeIR/scifact"
+
+# Small enough that the Hub stores it as a plain git blob rather than LFS, so
+# the published digest is a git blob sha1. Verified with the same rigour as the
+# sha256 entries -- skipping the non-LFS case would be a silent-pass path.
+[[fixture]]
+name        = "beir-scifact-qrels-test"
+repo        = "BeIR/scifact-qrels"
+repo_type   = "dataset"
+revision    = "2938d17dc3b09882fdb8c12bbbe2e2dc0e75a029"
+path        = "test.tsv"
+digest_algo = "sha1-git"
+digest      = "c62f58c75f10c0cee23483b7269bff2902ae4080"
+bytes       = 5389
+license     = "cc-by-sa-4.0"
+consumer    = "E2b -- BEIR nDCG@10"
+produced_by = "upstream: BeIR/scifact-qrels"
+
+# --- SIFT-1M (TEXMEX/INRIA), mirrored on the Hub ---------------------------
+#
+# The canonical ANN benchmark corpus. Byte sizes are structurally exact and are
+# asserted by the consumer, not merely recorded:
+#
+#   base   1_000_000 x (4 + 128*4) =   516_000_000
+#   query     10_000 x (4 + 128*4) =     5_160_000
+#   gt        10_000 x (4 + 100*4) =     4_040_000
+#
+# A file of the right length in the wrong slot -- query pinned as base, say --
+# cannot survive that arithmetic, which is why the reader recomputes it rather
+# than trusting the manifest's `bytes`.
+#
+# Provenance note: upstream is TEXMEX at INRIA, served over FTP, which publishes
+# no checksum of its own. These digests pin *this Hub mirror*, which is the
+# strongest honest claim available -- see docs/fixtures.md, "What verified
+# means". The mirror declares apache-2.0.
+
+[[fixture]]
+name        = "sift1m-base"
+repo        = "qbo-odp/sift1m"
+repo_type   = "dataset"
+revision    = "bd8ccad6c2a0a0a3a7519f6d37c0e5a2d59fe55b"
+path        = "sift_base.fvecs"
+digest_algo = "sha256"
+digest      = "21f66e2975057b5728ba56de1c825bac4f4d89d596609ae985741c6242631816"
+bytes       = 516000000
+license     = "apache-2.0 (mirror); upstream TEXMEX/INRIA states none"
+consumer    = "E2a -- ANN recall-vs-QPS curves"
+produced_by = "upstream: TEXMEX ftp://ftp.irisa.fr/local/texmex/corpus/sift.tar.gz, via qbo-odp/sift1m"
+
+[[fixture]]
+name        = "sift1m-query"
+repo        = "qbo-odp/sift1m"
+repo_type   = "dataset"
+revision    = "bd8ccad6c2a0a0a3a7519f6d37c0e5a2d59fe55b"
+path        = "sift_query.fvecs"
+digest_algo = "sha256"
+digest      = "f7fc9be140accdfd64116c2fa2365ecdb69b8f084970c6b0532db5ff79ac8fdc"
+bytes       = 5160000
+license     = "apache-2.0 (mirror); upstream TEXMEX/INRIA states none"
+consumer    = "E2a -- ANN recall-vs-QPS curves"
+produced_by = "upstream: TEXMEX, via qbo-odp/sift1m"
+
+[[fixture]]
+name        = "sift1m-groundtruth"
+repo        = "qbo-odp/sift1m"
+repo_type   = "dataset"
+revision    = "bd8ccad6c2a0a0a3a7519f6d37c0e5a2d59fe55b"
+path        = "sift_groundtruth.ivecs"
+digest_algo = "sha256"
+digest      = "2b71de0a8d5a83e6a84eec3e23fb8b611d8801dd9b3a6cd62f070ab65ea65f4f"
+bytes       = 4040000
+license     = "apache-2.0 (mirror); upstream TEXMEX/INRIA states none"
+consumer    = "E2a -- ANN recall-vs-QPS curves; externally-defined top-100 per query"
+produced_by = "upstream: TEXMEX, via qbo-odp/sift1m"
+
+# --- GIST-1M (TEXMEX/INRIA), mirrored on the Hub -------------------------------
+#
+# A second ANN corpus with a deliberately different shape from SIFT: 960-d GIST
+# descriptors rather than 128-d SIFT, and 1,000 queries rather than 10,000. Used
+# to test whether a `refine_factor` policy generalises across dimensionality and
+# distribution rather than being fitted to one dataset.
+#
+#   base    1_000_000 x (4 + 960*4) = 3_844_000_000
+#   query       1_000 x (4 + 960*4) =     3_844_000
+#   gt          1_000 x (4 + 100*4) =       404_000
+#
+# The mirror declares **no license**, and upstream TEXMEX/INRIA publishes neither
+# a license nor a checksum. These digests pin this mirror and nothing more; see
+# docs/fixtures.md, "What verified means". Do not redistribute from here.
+
+[[fixture]]
+name        = "gist1m-base"
+repo        = "SkyTbac/ANNS_GIST1M"
+repo_type   = "dataset"
+revision    = "dc84faaeda80a6ca5d7bd3f75a068d5ad81b8f4d"
+path        = "gist_base.fvecs"
+digest_algo = "sha256"
+digest      = "73418110328f5aa522d9f6b0cd9115a6c515dc44e3c48420e506ddeddbdbdbc0"
+bytes       = 3844000000
+license     = "none declared (mirror); upstream TEXMEX/INRIA states none"
+consumer    = "refine_factor policy measurement"
+produced_by = "upstream: TEXMEX, via SkyTbac/ANNS_GIST1M"
+
+[[fixture]]
+name        = "gist1m-query"
+repo        = "SkyTbac/ANNS_GIST1M"
+repo_type   = "dataset"
+revision    = "dc84faaeda80a6ca5d7bd3f75a068d5ad81b8f4d"
+path        = "gist_query.fvecs"
+digest_algo = "sha256"
+digest      = "0d1d620049de12da455ed7201e97cbab372c4d54d0e6dedbc8c503f62c911299"
+bytes       = 3844000
+license     = "none declared (mirror); upstream TEXMEX/INRIA states none"
+consumer    = "refine_factor policy measurement"
+produced_by = "upstream: TEXMEX, via SkyTbac/ANNS_GIST1M"
+
+[[fixture]]
+name        = "gist1m-groundtruth"
+repo        = "SkyTbac/ANNS_GIST1M"
+repo_type   = "dataset"
+revision    = "dc84faaeda80a6ca5d7bd3f75a068d5ad81b8f4d"
+path        = "gist_groundtruth.ivecs"
+digest_algo = "sha256"
+digest      = "01f7eda9dc98600c6288f606e55f94f13ae95f8b07d818572260440062d609f6"
+bytes       = 404000
+license     = "none declared (mirror); upstream TEXMEX/INRIA states none"
+consumer    = "refine_factor policy measurement"
+produced_by = "upstream: TEXMEX, via SkyTbac/ANNS_GIST1M"
+
+# --- LDBC SNB Interactive SF1 ------------------------------------------------
+#
+# The canonical social-network benchmark. Used by E3 for the 14 Interactive
+# complex reads, which double as a correctness benchmark: LDBC publishes official
+# Cypher and SQL implementations of the same 14 queries, so a second engine
+# running the Cypher unmodified reconstructs the reference answers LDBC does not
+# distribute (they are generated by their Java driver).
+#
+# Format is Neo4j admin-import: pipe-delimited, typed headers (`id:ID(Person)`,
+# `:START_ID(Person)`), and `creationDate:LONG` as epoch milliseconds. The
+# dataset is LDBC datagen output renamed to that convention; the mapping is
+# recorded in the dataset's own `ldbc_change_file_name_dynamic.sh`.
+#
+# The mirror declares **no license** and LDBC datagen output has its own terms.
+# These digests pin this mirror and nothing more — see docs/fixtures.md, "What
+# verified means". Do not redistribute from here.
+[[fixture]]
+name        = "ldbc-sf1-comment"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Comment.csv"
+digest_algo = "sha256"
+digest      = "60860babbee16ab313edbda0f5709b452d87696e752e9a9cf1841921ac7aca26"
+bytes       = 180754077
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-comment-hascreator-person"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Comment_hasCreator_Person.csv"
+digest_algo = "sha256"
+digest      = "dfb7a9cf6557207b8dc29747b671b9085c4a9760b23d7603636f34480675777d"
+bytes       = 54900530
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-comment-hastag-tag"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Comment_hasTag_Tag.csv"
+digest_algo = "sha256"
+digest      = "81e3a5cd7973a5be2b741bbbdffc18b01ed83c2403fa16a6d330d2c5f5613b5a"
+bytes       = 50398795
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-comment-islocatedin-place"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Comment_isLocatedIn_Place.csv"
+digest_algo = "sha256"
+digest      = "9601b9aa1b66955b23017226b81e11980ea49e45ecd740935c432e49f732b24e"
+bytes       = 33715238
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-comment-replyof-comment"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Comment_replyOf_Comment.csv"
+digest_algo = "sha256"
+digest      = "bc171e42499bf5f7f0136fc717a04cee687d03f33c9fd453e038976f2500ca26"
+bytes       = 28431018
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-comment-replyof-post"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Comment_replyOf_Post.csv"
+digest_algo = "sha256"
+digest      = "2f9e08cc49809b8388f3abe5bf5efcdb1312b3db38f56e17ff2d5f844c918f96"
+bytes       = 27631965
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-forum"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Forum.csv"
+digest_algo = "sha1-git"
+digest      = "bb7bfbed196eb17223052f57ea5bd7fc64f1ff60"
+bytes       = 4731510
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-forum-containerof-post"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Forum_containerOf_Post.csv"
+digest_algo = "sha256"
+digest      = "27042e6e46e7330496d008cc283e0098abcb8d93d1f41e9eaa1bd687394c90a3"
+bytes       = 27228464
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-forum-hasmember-person"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Forum_hasMember_Person.csv"
+digest_algo = "sha256"
+digest      = "e913aac3aabe3e45dba7252ac3708359c517395e40f2732556827776c1bd1262"
+bytes       = 66786911
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-forum-hasmoderator-person"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Forum_hasModerator_Person.csv"
+digest_algo = "sha1-git"
+digest      = "3df416abc10ac30830d225863ad53a6245f65cc3"
+bytes       = 2448059
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-forum-hastag-tag"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Forum_hasTag_Tag.csv"
+digest_algo = "sha1-git"
+digest      = "29eac7b7ee2fc5a20033bb280aacda522ebb59d1"
+bytes       = 5597711
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-person"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Person.csv"
+digest_algo = "sha1-git"
+digest      = "27fc69eafc7aeebc50391d18ec68b8176adc4bc5"
+bytes       = 1519349
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-person-hasinterest-tag"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Person_hasInterest_Tag.csv"
+digest_algo = "sha1-git"
+digest      = "1e405c2c33ab6991322c969ee260bee8b14dd1ac"
+bytes       = 4349264
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-person-islocatedin-place"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Person_isLocatedIn_Place.csv"
+digest_algo = "sha1-git"
+digest      = "9e1366a17e44889e3a9ca5dae527e7dfb2ef779c"
+bytes       = 182751
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-person-knows-person"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Person_knows_Person.csv"
+digest_algo = "sha256"
+digest      = "45abcb092c0f06db9367bdb920a54cbdd52dffcabfeb269f17c294d50df513f9"
+bytes       = 7603287
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-person-likes-comment"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Person_likes_Comment.csv"
+digest_algo = "sha256"
+digest      = "51cfdf8483e0c0c7b12e7a0bf929ce549831c14ee45e45d1dad02490336c84be"
+bytes       = 60202851
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-person-likes-post"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Person_likes_Post.csv"
+digest_algo = "sha256"
+digest      = "2774d8ef56b34249644ad42ec1990eb1e8da2794c903e8776a80e780e1fdd82e"
+bytes       = 31391388
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-person-studyat-organisation"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Person_studyAt_Organisation.csv"
+digest_algo = "sha1-git"
+digest      = "c37c0faad0c0fdc3ed3694f8900080253a542d41"
+bytes       = 191701
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-person-workat-organisation"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Person_workAt_Organisation.csv"
+digest_algo = "sha1-git"
+digest      = "11930e3b6690fbc79ce895363f6573568441e80e"
+bytes       = 504461
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-post"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Post.csv"
+digest_algo = "sha256"
+digest      = "fb937e43d1cf822c4a11436df6beae3c33da88fe247d17053c0c049b924dde02"
+bytes       = 98658095
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-post-hascreator-person"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Post_hasCreator_Person.csv"
+digest_algo = "sha256"
+digest      = "182f8a22e70d461493e7f01f86d8f3e8c194623dfa6aa3ba5dc815dd2be22e45"
+bytes       = 27095733
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-post-hastag-tag"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Post_hasTag_Tag.csv"
+digest_algo = "sha256"
+digest      = "e38ce8cc92e31070737e24566a689527c6a88933a44a94b7479ef42aec609289"
+bytes       = 13168943
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-post-islocatedin-place"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "dynamic/Post_isLocatedIn_Place.csv"
+digest_algo = "sha256"
+digest      = "74cf47ec9320bd38ef614d7725ed742c0f66fcef6ec515cd5e0e641a91063181"
+bytes       = 16550773
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-organisation"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "static/Organisation.csv"
+digest_algo = "sha1-git"
+digest      = "1394a2f11c4519b7b4219b2bbfe6106dffcbf9a8"
+bytes       = 923374
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-organisation-islocatedin-place"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "static/Organisation_isLocatedIn_Place.csv"
+digest_algo = "sha1-git"
+digest      = "03ba2845457af7fb0bce804cda800333cd74f066"
+bytes       = 70942
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-place"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "static/Place.csv"
+digest_algo = "sha1-git"
+digest      = "dfc73abe2d4ab367927e0a035a0c950a4a1a3a80"
+bytes       = 90670
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-place-ispartof-place"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "static/Place_isPartOf_Place.csv"
+digest_algo = "sha1-git"
+digest      = "2069dfd2fb933b74b46ca9bd4996bef2f524831d"
+bytes       = 10472
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-tag"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "static/Tag.csv"
+digest_algo = "sha1-git"
+digest      = "f835b2a7b1db66384e5325dac445d28ae1118011"
+bytes       = 1106370
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-tagclass"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "static/TagClass.csv"
+digest_algo = "sha1-git"
+digest      = "a01f741c6bec9a996663cbac6f974e8fc0d9e5db"
+bytes       = 3901
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-tagclass-issubclassof-tagclass"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "static/TagClass_isSubclassOf_TagClass.csv"
+digest_algo = "sha1-git"
+digest      = "93492fe5e5f03296da328e891a3af196327f951c"
+bytes       = 559
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+
+[[fixture]]
+name        = "ldbc-sf1-tag-hastype-tagclass"
+repo        = "HuggignHajae/TurboLynx-LDBC-SF1"
+repo_type   = "dataset"
+revision    = "d64048ea776b11f506ed6233b7d0c2c9ffa8d19c"
+path        = "static/Tag_hasType_TagClass.csv"
+digest_algo = "sha1-git"
+digest      = "2ee733411e4ade34a60a2a61794cb84e6806d592"
+bytes       = 147281
+license     = "none declared (mirror); LDBC datagen output, see docs/fixtures.md"
+consumer    = "E3 -- LDBC SNB Interactive"
+produced_by = "LDBC SNB datagen SF1, renamed to Neo4j-import convention; via HuggignHajae/TurboLynx-LDBC-SF1"
+

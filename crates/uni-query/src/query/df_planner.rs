@@ -54,8 +54,8 @@ use crate::query::df_graph::{
     OptionalFilterExec,
 };
 use crate::query::planner::{
-    LogicalPlan, STRUCT_ONLY_SENTINEL, WITH_PASSTHROUGH_SENTINEL, aggregate_column_name,
-    collect_properties_from_plan, reconcile_passthrough_properties,
+    COL_FWD, LogicalPlan, STRUCT_ONLY_SENTINEL, WITH_PASSTHROUGH_SENTINEL, aggregate_column_name,
+    collect_properties_from_plan, projection_columns, reconcile_passthrough_properties,
 };
 use anyhow::{Result, anyhow};
 use arrow_schema::{DataType, Schema, SchemaRef};
@@ -260,8 +260,9 @@ impl HybridPhysicalPlanner {
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Vec<String> {
         // System columns managed by the engine — never treat as user properties.
-        const SYSTEM_COLUMNS: &[&str] =
-            &["_vid", "_labels", "_eid", "_src_vid", "_dst_vid", "_type"];
+        const SYSTEM_COLUMNS: &[&str] = &[
+            "_vid", "_labels", "_eid", "_src_vid", "_dst_vid", "_type", "_fwd",
+        ];
 
         all_properties
             .get(variable)
@@ -359,50 +360,47 @@ impl HybridPhysicalPlanner {
         }
     }
 
-    /// Unwrap the inner `GraphExecutionContext` from its `Arc`, preserving all
-    /// existing registries. If other Arc references exist, clones the base context
-    /// and re-attaches the saved registries.
+    /// Produce an owned `GraphExecutionContext` for the consuming `with_*`
+    /// builders, preserving every field.
+    ///
+    /// This used to rebuild from the *base* constructor and re-attach six fields
+    /// by hand, which silently dropped everything not on that list — `deadline`,
+    /// `cancellation_token`, `warnings` and `handle_scope` were all reset by the
+    /// next `with_*` call, and `read.rs` makes several per query. A plain clone
+    /// carries the whole struct, so no future field can fall through the same
+    /// gap. The clone is a handful of refcount bumps and happens only while the
+    /// plan is being built.
+    ///
+    /// Every caller immediately reinstalls the result via
+    /// `self.graph_ctx = Arc::new(ctx)`, so leaving the original in place here
+    /// is intentional.
     fn take_graph_ctx(&mut self) -> GraphExecutionContext {
-        let algo_registry = self.graph_ctx.algo_registry().cloned();
-        let procedure_registry = self.graph_ctx.procedure_registry().cloned();
-        let xervo_runtime = self.graph_ctx.xervo_runtime().cloned();
-        let plugin_registry = self.graph_ctx.plugin_registry().cloned();
-        let writer = self.graph_ctx.writer().cloned();
-        // Must be preserved like every other attachment: `take_graph_ctx`
-        // rebuilds from the *base* constructor, so anything not re-attached here
-        // is silently dropped by the next `with_*` call.
-        let counters = self.graph_ctx.counters().cloned();
+        (*self.graph_ctx).clone()
+    }
 
-        let new_base = |ctx: &Arc<GraphExecutionContext>| {
-            GraphExecutionContext::with_l0_context(
-                ctx.storage().clone(),
-                ctx.l0_context().clone(),
-                ctx.property_manager().clone(),
-            )
-        };
-        let placeholder = Arc::new(new_base(&self.graph_ctx));
-        let arc = std::mem::replace(&mut self.graph_ctx, placeholder);
-        let mut ctx = Arc::try_unwrap(arc).unwrap_or_else(|arc| new_base(&arc));
-
-        if let Some(registry) = algo_registry {
-            ctx = ctx.with_algo_registry(registry);
+    /// Thread the surrounding query's deadline and cancellation token into the
+    /// graph context every physical operator receives.
+    ///
+    /// Without this the operator-level `check_timeout` calls in `scan`,
+    /// `traverse`, `shortest_path`, `vector_knn`, `procedure_call` and
+    /// `ext_id_lookup` compare against `None` and can never fire, so
+    /// `query_timeout` is bounded only by the outer `tokio::time::timeout` —
+    /// which cannot preempt work that never yields. See issue #207.
+    #[must_use]
+    pub fn with_deadline_and_cancellation(
+        mut self,
+        deadline: Option<std::time::Instant>,
+        token: Option<tokio_util::sync::CancellationToken>,
+    ) -> Self {
+        let mut ctx = self.take_graph_ctx();
+        if let Some(deadline) = deadline {
+            ctx = ctx.with_deadline(deadline);
         }
-        if let Some(registry) = procedure_registry {
-            ctx = ctx.with_procedure_registry(registry);
+        if let Some(token) = token {
+            ctx = ctx.with_cancellation_token(token);
         }
-        if let Some(runtime) = xervo_runtime {
-            ctx = ctx.with_xervo_runtime(runtime);
-        }
-        if let Some(registry) = plugin_registry {
-            ctx = ctx.with_plugin_registry(registry);
-        }
-        if let Some(w) = writer {
-            ctx = ctx.with_writer(w);
-        }
-        if counters.is_some() {
-            ctx = ctx.with_counters(counters);
-        }
-        ctx
+        self.graph_ctx = Arc::new(ctx);
+        self
     }
 
     /// Attach the per-query counter set, threading it into the graph context
@@ -713,6 +711,9 @@ impl HybridPhysicalPlanner {
         // Resolve WITH-passthrough markers: narrow forwarded entities to the
         // properties actually accessed downstream (issue #134 family).
         apply_passthrough_reconciliation(&logical_rewritten, &mut all_properties);
+        // Record which UNWIND sources are dead so `plan_unwind` can stop
+        // carrying them past the operator that consumed them (#184).
+        crate::query::planner::mark_dead_unwind_sources(&logical_rewritten, &mut all_properties);
 
         // Delegate to internal planning with properties context
         self.plan_internal(&logical_rewritten, &all_properties)
@@ -735,6 +736,7 @@ impl HybridPhysicalPlanner {
             all_properties.entry(var).or_default().extend(props);
         }
         apply_passthrough_reconciliation(&logical_rewritten, &mut all_properties);
+        crate::query::planner::mark_dead_unwind_sources(&logical_rewritten, &mut all_properties);
         self.plan_internal(&logical_rewritten, &all_properties)
     }
 
@@ -1948,7 +1950,24 @@ impl HybridPhysicalPlanner {
         // Recursively plan the input
         let input_plan = self.plan_internal(&input, all_properties)?;
 
-        let unwind = GraphUnwindExec::new(input_plan, expr, variable, self.params.clone());
+        // Drop the source list when the planner proved nothing above reads it.
+        // Without this the list rides through every operator above, and a
+        // traversal replicates it once per fan-out row (#184).
+        let drop_source = match &expr {
+            Expr::Variable(name) => all_properties
+                .get(crate::query::planner::DEAD_UNWIND_SOURCES_KEY)
+                .filter(|dead| dead.contains(name))
+                .map(|_| name.clone()),
+            _ => None,
+        };
+
+        let unwind = GraphUnwindExec::new_dropping_source(
+            input_plan,
+            expr,
+            variable,
+            self.params.clone(),
+            drop_source.as_deref(),
+        );
 
         Ok(Arc::new(unwind))
     }
@@ -2509,6 +2528,11 @@ impl HybridPhysicalPlanner {
 
     /// Conditionally add edge structural projection when the edge variable has wildcard access.
     /// Skips if `skip_if_vlp` is true (VLP step variables are already `List<Edge>`).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "direction joins seven existing plan-context parameters; grouping \
+                  them into a struct is a wider refactor than this fix warrants"
+    )]
     fn maybe_add_edge_structural_projection(
         &self,
         plan: Arc<dyn ExecutionPlan>,
@@ -2517,6 +2541,7 @@ impl HybridPhysicalPlanner {
         target_variable: &str,
         all_properties: &HashMap<String, HashSet<String>>,
         skip_if_vlp: bool,
+        direction: &AstDirection,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         if skip_if_vlp {
             return Ok(plan);
@@ -2549,6 +2574,7 @@ impl HybridPhysicalPlanner {
             &edge_props,
             source_variable,
             target_variable,
+            direction,
         )
     }
 
@@ -3098,6 +3124,7 @@ impl HybridPhysicalPlanner {
             target_variable,
             all_properties,
             false,
+            &direction,
         )?;
 
         if let Some(filter_expr) = target_filter {
@@ -3306,6 +3333,28 @@ impl HybridPhysicalPlanner {
                 if has_wildcard && !edge_properties.contains(&"_all_props".to_string()) {
                     edge_properties.push("_all_props".to_string());
                 }
+
+                // An undirected hop files the edge under both endpoints, so the
+                // traversal's source is whichever end this row matched from —
+                // not the edge's stored tail. Materialising the whole
+                // relationship without knowing which is which reports the same
+                // edge as `b->a` on the row that walked it backwards. `_fwd`
+                // carries the per-row answer; `add_edge_structural_projection`
+                // uses it to put `_src`/`_dst` back the way they are stored.
+                //
+                // Requested only when a struct will actually be built: tracking
+                // orientation costs the traversal a second adjacency probe, and
+                // a directed hop knows the answer statically.
+                let builds_struct = all_properties.get(edge_var).is_some_and(|props| {
+                    props.contains("*") || props.contains(STRUCT_ONLY_SENTINEL)
+                });
+                if matches!(direction, uni_cypher::ast::Direction::Both)
+                    && !is_variable_length
+                    && builds_struct
+                    && !edge_properties.iter().any(|p| p == COL_FWD)
+                {
+                    edge_properties.push(COL_FWD.to_string());
+                }
             }
 
             // Extract target vertex properties, expanding "*" wildcards
@@ -3320,12 +3369,22 @@ impl HybridPhysicalPlanner {
             // names.
             target_properties.retain(|p| p != "*" && p != STRUCT_ONLY_SENTINEL);
 
-            // When wildcard access was requested but no specific properties resolved,
-            // add _all_props to ensure properties are loaded (mirrors plan_scan_all behavior).
+            // When wildcard access was requested, add `_all_props` — the same
+            // rule `plan_scan_*` applies, and the same rule the two schemaless
+            // traverse planners below already apply.
+            //
+            // This used to require `target_properties.is_empty()` as well, so a
+            // schema-defined label never reached it: `resolve_properties`
+            // expands `"*"` into the declared property names, leaving the list
+            // non-empty. The result was that `RETURN n` produced a node struct
+            // carrying `_all_props` from a scan and not from a traversal — the
+            // same Cypher type with two Arrow types, which `UNION` rejects
+            // outright (#191). The comment claimed to mirror `plan_scan_all`
+            // and did not.
             let target_has_wildcard = all_properties
                 .get(target_variable)
                 .is_some_and(|p| p.contains("*"));
-            if target_has_wildcard && target_properties.is_empty() {
+            if target_has_wildcard && !target_properties.iter().any(|p| p == "_all_props") {
                 target_properties.push("_all_props".to_string());
             }
 
@@ -3337,11 +3396,34 @@ impl HybridPhysicalPlanner {
             } else {
                 None
             };
+            // Whether a name is declared by the schema, when the target's label
+            // is known and when it is not.
+            //
+            // An uninferable label is not the same as a schemaless property. A
+            // traversal whose edge type has several source labels — LDBC's
+            // `HAS_CREATOR`, whose sources are `Comment` and `Post` — leaves
+            // `target_label_id` at 0, and treating every name as non-schema
+            // then forced `_all_props` onto a read that had asked for one
+            // column. `_all_props` subsumes the narrow list downstream
+            // (`build_target_property_columns`), so the traversal encoded every
+            // property of every target row: at LDBC SF1, reading an 8-byte
+            // `creationDate` off 83k rows cost 1131 MiB against 185 MiB for
+            // binding the entity and reading nothing, and reading the 2000-char
+            // `content` instead cost 1232 MiB — within 6%, because the name
+            // requested made no difference (#209).
+            //
+            // So when the label is unknown, ask whether *any* label declares
+            // the name. Only a name no label declares is genuinely schemaless
+            // and needs the wildcard payload.
+            let is_schema_prop = |p: &str| match target_label_props {
+                Some(lp) => lp.contains_key(p),
+                None => self.schema.properties.values().any(|lp| lp.contains_key(p)),
+            };
             let has_non_schema_props = target_properties.iter().any(|p| {
                 p != "overflow_json"
                     && p != "_all_props"
                     && !p.starts_with('_')
-                    && !target_label_props.is_some_and(|lp| lp.contains_key(p.as_str()))
+                    && !is_schema_prop(p.as_str())
             });
             if has_non_schema_props && !target_properties.iter().any(|p| p == "_all_props") {
                 target_properties.push("_all_props".to_string());
@@ -3349,11 +3431,12 @@ impl HybridPhysicalPlanner {
             // Also check the filter for non-schema property references
             if let Some(filter_expr) = target_filter {
                 let filter_props = crate::query::df_expr::collect_properties(filter_expr);
+                // Same reasoning as above: an unknown label does not make a
+                // filtered property schemaless.
                 let has_overflow_filter = filter_props.iter().any(|(var, prop)| {
                     var == target_variable
                         && !prop.starts_with('_')
-                        && !target_label_props
-                            .is_some_and(|props| props.contains_key(prop.as_str()))
+                        && !is_schema_prop(prop.as_str())
                 });
                 if has_overflow_filter && !target_properties.iter().any(|p| p == "_all_props") {
                     target_properties.push("_all_props".to_string());
@@ -3679,6 +3762,7 @@ impl HybridPhysicalPlanner {
             target_variable,
             all_properties,
             is_variable_length,
+            &direction,
         )?;
 
         // Apply target filter if present
@@ -3756,7 +3840,7 @@ impl HybridPhysicalPlanner {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = self.plan_internal(input, all_properties)?;
 
-        let adj_direction = convert_direction(direction);
+        let adj_direction = convert_direction(direction.clone());
         let (input_plan, source_col) = Self::resolve_source_vid_col(input_plan, source_variable)?;
 
         // Check if target variable is already bound (for patterns where target is in scope)
@@ -3846,6 +3930,7 @@ impl HybridPhysicalPlanner {
             target_variable,
             all_properties,
             false, // not variable-length
+            &direction,
         )?;
 
         Ok(result_plan)
@@ -4035,7 +4120,9 @@ impl HybridPhysicalPlanner {
 
         // Use CypherPhysicalExprCompiler for all filters (handles both schema-typed
         // and schemaless LargeBinary/CypherValue columns without coercion failures).
-        let ctx = self.translation_context_for_plan(input);
+        let mut ctx = self.translation_context_for_plan(input);
+        ctx.available_columns = Some(schema.fields().iter().map(|f| f.name().clone()).collect());
+        let ctx = ctx;
         let session = self.session_ctx.read();
         let state = session.state();
         let compiler = self.expr_compiler(&state, Some(&ctx));
@@ -4498,6 +4585,50 @@ impl HybridPhysicalPlanner {
         self.plan_project_from_input(input_plan, projections, Some(input))
     }
 
+    /// Wrap `input_plan` so every relationship an unresolved `startNode` /
+    /// `endNode` call names has its endpoints materialised as node values.
+    ///
+    /// A call only reaches here when `resolve_traversal_endpoints` could not
+    /// rewrite it to a variable — either a projection dropped the endpoints
+    /// (`WITH e AS rel`) or the relationship never came from a traversal
+    /// (`relationships(path)`). In both cases the relationship value still
+    /// carries `_src` / `_dst`; what it lacks is the endpoint's properties.
+    ///
+    /// Relationships whose column is not in the input schema are skipped —
+    /// nothing can be read for them here, and the existing error is a better
+    /// report than a column of nulls.
+    fn hydrate_endpoints_for(
+        &self,
+        input_plan: Arc<dyn ExecutionPlan>,
+        projections: &[(Expr, Option<String>)],
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        use crate::query::df_graph::endpoint_hydrate::EndpointHydrateExec;
+
+        let mut rels: Vec<String> = Vec::new();
+        for (expr, _) in projections {
+            collect_endpoint_relationships(expr, &mut rels);
+        }
+        if rels.is_empty() {
+            return Ok(input_plan);
+        }
+
+        let mut plan = input_plan;
+        for rel in rels {
+            let schema = plan.schema();
+            if schema.index_of(&rel).is_err()
+                || schema
+                    .index_of(&crate::query::df_graph::endpoint_hydrate::endpoint_column(
+                        &rel, true,
+                    ))
+                    .is_ok()
+            {
+                continue;
+            }
+            plan = Arc::new(EndpointHydrateExec::new(plan, rel, self.graph_ctx.clone()));
+        }
+        Ok(plan)
+    }
+
     /// Build projection expressions from an already-planned input.
     fn plan_project_from_input(
         &self,
@@ -4505,13 +4636,29 @@ impl HybridPhysicalPlanner {
         projections: &[(Expr, Option<String>)],
         context_plan: Option<&LogicalPlan>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        // `startNode(r)` normally never reaches the UDF — the planner rewrites
+        // it to the traversal's endpoint variable. Once a projection stops
+        // carrying those variables, or the relationship never came from a
+        // traversal at all, the call survives and the UDF has only the
+        // relationship to work with. Materialise its endpoints first.
+        let input_plan = self.hydrate_endpoints_for(input_plan, projections)?;
         let schema = input_plan.schema();
 
         let session = self.session_ctx.read();
         let state = session.state();
 
         // Build translation context with variable kinds if we have a logical plan
-        let ctx = context_plan.map(|p| self.translation_context_for_plan(p));
+        let mut ctx = context_plan.map(|p| self.translation_context_for_plan(p));
+        if let Some(ctx) = ctx.as_mut() {
+            ctx.available_columns =
+                Some(schema.fields().iter().map(|f| f.name().clone()).collect());
+            for name in schema.fields().iter().map(|f| f.name()) {
+                if name.starts_with(ENDPOINT_COLUMN_PREFIX) {
+                    ctx.node_variable_hints.push(name.clone());
+                }
+            }
+        }
+        let ctx = ctx;
 
         let mut exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> = Vec::new();
 
@@ -5139,8 +5286,16 @@ impl HybridPhysicalPlanner {
                 "collect" => {
                     // Use custom Cypher collect UDAF that filters nulls and returns
                     // empty list (not null) when all inputs are null.
+                    //
+                    // The query's interning scope goes with it: a large enough
+                    // list then travels as a handle, so the operators above copy
+                    // 9 bytes per row instead of the whole list.
                     let arg = get_arg()?;
-                    crate::query::df_udfs::create_cypher_collect_expr(arg, *distinct)
+                    crate::query::df_udfs::create_cypher_collect_expr(
+                        arg,
+                        *distinct,
+                        Some(Arc::clone(self.graph_ctx.handle_scope())),
+                    )
                 }
                 "btic_min" => {
                     let arg = get_arg()?;
@@ -5491,6 +5646,123 @@ impl HybridPhysicalPlanner {
         }
     }
 
+    /// Project `plan` down to `cols`, in that order.
+    ///
+    /// Returns the plan untouched when any name is missing from its schema —
+    /// a naming mismatch is a separate defect, and silently dropping a column
+    /// here would turn it into a wrong answer. The caller's schema check then
+    /// reports it.
+    fn narrow_to_columns(
+        plan: Arc<dyn ExecutionPlan>,
+        cols: &[String],
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let schema = plan.schema();
+        let mut exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
+            Vec::with_capacity(cols.len());
+        for name in cols {
+            let Ok(idx) = schema.index_of(name) else {
+                return Ok(plan);
+            };
+            exprs.push((
+                Arc::new(datafusion::physical_plan::expressions::Column::new(
+                    name, idx,
+                )),
+                name.clone(),
+            ));
+        }
+        if exprs.len() == schema.fields().len()
+            && exprs
+                .iter()
+                .enumerate()
+                .all(|(i, (_, name))| schema.field(i).name() == name)
+        {
+            // Already exactly these columns in this order.
+            return Ok(plan);
+        }
+        Ok(Arc::new(ProjectionExec::try_new(exprs, plan)?))
+    }
+
+    /// Encode a column as CypherValue `LargeBinary`.
+    ///
+    /// The same conversion `coerce_branch_to` applies for `CASE`; reused here
+    /// so the two paths agree on what a mixed pair of entities becomes.
+    fn encode_column_as_cypher_value(
+        expr: Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+        name: &str,
+    ) -> Arc<dyn datafusion::physical_expr::PhysicalExpr> {
+        let udf = Arc::new(crate::query::df_udfs::create_cypher_scalar_to_cv_udf());
+        Arc::new(datafusion::physical_expr::ScalarFunctionExpr::new(
+            "_cypher_scalar_to_cv",
+            udf,
+            vec![expr],
+            Arc::new(arrow_schema::Field::new(name, DataType::LargeBinary, true)),
+            Arc::new(datafusion::config::ConfigOptions::default()),
+        ))
+    }
+
+    /// Reconcile per-position type differences between two union branches.
+    ///
+    /// Two branches can return the same *Cypher* type as different *Arrow*
+    /// types. `MATCH (p:P) RETURN p UNION ALL MATCH (q:Q) RETURN q` is valid
+    /// openCypher, but `P` and `Q` have different properties, so their node
+    /// structs differ by construction and no amount of consistency work
+    /// between the scan and traversal paths can make them identical.
+    ///
+    /// `find_common_result_type` already answers this for `CASE`: entities
+    /// coerce to the CypherValue `LargeBinary` encoding, which represents any
+    /// entity. This applies the same rule to union branches, so both clauses
+    /// agree on what a mixed pair becomes rather than one working and the
+    /// other reporting a planner bug.
+    ///
+    /// Only entity columns are touched. A genuine conflict between, say, an
+    /// `Int64` and a `Utf8` is left for the caller's schema check to reject —
+    /// coercing that pair would invent a conversion the user did not ask for.
+    fn coerce_union_entity_columns(
+        left: Arc<dyn ExecutionPlan>,
+        right: Arc<dyn ExecutionPlan>,
+    ) -> Result<(Arc<dyn ExecutionPlan>, Arc<dyn ExecutionPlan>)> {
+        let (ls, rs) = (left.schema(), right.schema());
+        if ls.fields().len() != rs.fields().len() {
+            return Ok((left, right));
+        }
+        let coercible = |l: &DataType, r: &DataType| {
+            l != r
+                && [l, r].iter().all(|t| {
+                    uni_query_functions::cypher_type_coerce::is_entity_struct(t)
+                        || matches!(t, DataType::LargeBinary)
+                })
+        };
+        let positions: Vec<usize> = (0..ls.fields().len())
+            .filter(|&i| coercible(ls.field(i).data_type(), rs.field(i).data_type()))
+            .collect();
+        if positions.is_empty() {
+            return Ok((left, right));
+        }
+        let project = |plan: Arc<dyn ExecutionPlan>| -> Result<Arc<dyn ExecutionPlan>> {
+            let schema = plan.schema();
+            let exprs = schema
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let col: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
+                        datafusion::physical_plan::expressions::Column::new(f.name(), i),
+                    );
+                    let expr = if positions.contains(&i)
+                        && !matches!(f.data_type(), DataType::LargeBinary)
+                    {
+                        Self::encode_column_as_cypher_value(col, f.name())
+                    } else {
+                        col
+                    };
+                    (expr, f.name().clone())
+                })
+                .collect::<Vec<_>>();
+            Ok(Arc::new(ProjectionExec::try_new(exprs, plan)?) as Arc<dyn ExecutionPlan>)
+        };
+        Ok((project(left)?, project(right)?))
+    }
+
     /// Plan a union operation.
     fn plan_union(
         &self,
@@ -5501,6 +5773,36 @@ impl HybridPhysicalPlanner {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let left_plan = self.plan_internal(left, all_properties)?;
         let right_plan = self.plan_internal(right, all_properties)?;
+
+        // Narrow each branch to the columns the query actually projects.
+        //
+        // A branch's physical schema carries the internal helper columns its
+        // operators emitted (`y._vid`, `z.overflow_json`) beside the projected
+        // one, and which helpers appear depends on how the branch reached its
+        // rows. A scan of `:P` produces six columns where a traversal to the
+        // same label produces four, so two branches returning the same node
+        // could not be unioned at all (#191).
+        //
+        // Narrowing here rather than teaching the union to reconcile widths
+        // also stops the helpers escaping above the union, which is the leak
+        // that let a result's columns be named `b._labels` (#190).
+        let (left_plan, right_plan) =
+            match projection_columns(left).or_else(|| projection_columns(right)) {
+                Some(cols) => (
+                    Self::narrow_to_columns(left_plan, &cols)?,
+                    Self::narrow_to_columns(right_plan, &cols)?,
+                ),
+                // No projection to narrow to. Leave both branches alone; the
+                // width/type check below still guards DataFusion's panicking
+                // `union_schema`.
+                None => (left_plan, right_plan),
+            };
+
+        // Two branches can return the same Cypher type as different Arrow
+        // types — most obviously two different labels, whose node structs
+        // differ by their property columns. Reconcile those the way `CASE`
+        // already does, before the schema check below rejects the pair.
+        let (left_plan, right_plan) = Self::coerce_union_entity_columns(left_plan, right_plan)?;
 
         // Guard against schema mismatches reaching DataFusion's
         // `union_schema`, which panics with `index out of bounds` rather
@@ -6123,6 +6425,7 @@ impl HybridPhysicalPlanner {
         properties: &[String],
         source_variable: &str,
         target_variable: &str,
+        direction: &AstDirection,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         use datafusion::functions::expr_fn::named_struct;
         use datafusion::logical_expr::lit;
@@ -6167,17 +6470,49 @@ impl HybridPhysicalPlanner {
                 var.to_string()
             }
         };
+        // The traversal's source is the end this row *walked from*, which is not
+        // the arrow's tail. `Traverse` encodes the arrow as (source, direction):
+        // `endpoints_for_direction` reads `Incoming` as start = target, end =
+        // source. Taking traversal order directly therefore reports an
+        // `Incoming` hop reversed — `MATCH (b)<-[r]-(a) RETURN r` gives
+        // `r.src = b`.
+        //
+        // Newly load-bearing: `reversed_for_bound_anchor` rewrites a pattern
+        // written from its unbound end into the opposite direction, so an
+        // `Outgoing` pattern can now reach this as `Incoming`. Before that
+        // rewrite the same query planned the slow way and got this right.
+        let (source_variable, target_variable) = match direction {
+            AstDirection::Incoming => (target_variable, source_variable),
+            AstDirection::Outgoing | AstDirection::Both => (source_variable, target_variable),
+        };
         let src_col_name = resolve_vid_col(source_variable);
         let dst_col_name = resolve_vid_col(target_variable);
+        let src_col = DfExpr::Column(datafusion::common::Column::from_name(src_col_name));
+        let dst_col = DfExpr::Column(datafusion::common::Column::from_name(dst_col_name));
+
+        // For an undirected hop the traversal's source is whichever end this row
+        // matched from, so using it directly reports the edge reversed on every
+        // row that walked it backwards — the same relationship coming back as
+        // `b->a`. `_fwd` says whether this row walked it forwards; when the
+        // traversal published it, put the endpoints back the way they are
+        // stored.
+        let fwd_col = format!("{}.{}", variable, crate::query::planner::COL_FWD);
+        let (src_expr, dst_expr) = if input_schema.column_with_name(&fwd_col).is_some() {
+            let fwd = DfExpr::Column(datafusion::common::Column::from_name(fwd_col));
+            (
+                datafusion::logical_expr::when(fwd.clone(), src_col.clone())
+                    .otherwise(dst_col.clone())?,
+                datafusion::logical_expr::when(fwd, dst_col).otherwise(src_col)?,
+            )
+        } else {
+            (src_col, dst_col)
+        };
+
         struct_args.push(lit("_src"));
-        struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
-            src_col_name,
-        )));
+        struct_args.push(src_expr);
 
         struct_args.push(lit("_dst"));
-        struct_args.push(DfExpr::Column(datafusion::common::Column::from_name(
-            dst_col_name,
-        )));
+        struct_args.push(dst_expr);
 
         // Include _all_props if present (for keys()/properties() on schemaless edges)
         let all_props_col = format!("{}._all_props", variable);
@@ -6719,6 +7054,48 @@ fn apply_passthrough_reconciliation(
 ///
 /// This information is used by the expression translator to resolve bare variable
 /// references to their identity columns (e.g., `n` → `n._vid` for nodes).
+/// Prefix of the columns `EndpointHydrateExec` appends.
+pub(crate) const ENDPOINT_COLUMN_PREFIX: &str = "_endpoint.";
+
+/// Collect the relationship variables named by `startNode(x)` / `endNode(x)`.
+///
+/// Only a bare variable argument is collected. `startNode(<expr>)` has no column
+/// to read endpoints from, so there is nothing to hydrate and the call keeps
+/// whatever behaviour it had.
+fn collect_endpoint_relationships(expr: &Expr, out: &mut Vec<String>) {
+    if let Expr::FunctionCall { name, args, .. } = expr {
+        let upper = name.to_uppercase();
+        if (upper == "STARTNODE" || upper == "ENDNODE")
+            && let Some(Expr::Variable(rel)) = args.first()
+            && !out.contains(rel)
+        {
+            out.push(rel.clone());
+        }
+    }
+    // `[r IN rels | startNode(r).id]` names `r`, which is a loop variable and
+    // never a column. What has to be hydrated is the *list* it iterates, so the
+    // per-element endpoints can be carried into the comprehension's inner batch
+    // alongside the element itself.
+    if let Expr::ListComprehension {
+        variable,
+        list,
+        where_clause,
+        map_expr,
+    } = expr
+        && let Expr::Variable(list_var) = list.as_ref()
+    {
+        let mut inner = Vec::new();
+        collect_endpoint_relationships(map_expr, &mut inner);
+        if let Some(w) = where_clause {
+            collect_endpoint_relationships(w, &mut inner);
+        }
+        if inner.contains(variable) && !out.contains(list_var) {
+            out.push(list_var.clone());
+        }
+    }
+    expr.for_each_child(&mut |child| collect_endpoint_relationships(child, out));
+}
+
 fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, VariableKind>) {
     match plan {
         // Phase 5b followup: recurse into the wrapped node so the
@@ -6754,7 +7131,13 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
             ..
         } => {
             collect_variable_kinds(input, kinds);
-            kinds.insert(source_variable.clone(), VariableKind::Node);
+            // The target's columns are produced *here*, so the traversal is
+            // authoritative for it. The source is only consumed — whatever bound
+            // it below stays authoritative, or this would overwrite an `UNWIND`
+            // rebinding with a `Node` whose columns do not exist.
+            kinds
+                .entry(source_variable.clone())
+                .or_insert(VariableKind::Node);
             kinds.insert(target_variable.clone(), VariableKind::Node);
             if let Some(sv) = step_variable {
                 kinds.insert(sv.clone(), VariableKind::edge_for(*is_variable_length));
@@ -6865,7 +7248,6 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
         | LogicalPlan::Aggregate { input, .. }
         | LogicalPlan::Distinct { input, .. }
         | LogicalPlan::Window { input, .. }
-        | LogicalPlan::Unwind { input, .. }
         | LogicalPlan::Create { input, .. }
         | LogicalPlan::CreateBatch { input, .. }
         | LogicalPlan::Merge { input, .. }
@@ -6875,6 +7257,22 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
         | LogicalPlan::Foreach { input, .. }
         | LogicalPlan::SubqueryCall { input, .. } => {
             collect_variable_kinds(input, kinds);
+        }
+        // UNWIND *rebinds* its variable; it is not a pass-through for that name.
+        // The element it binds is a single CypherValue column, with none of the
+        // `{var}._vid` / `{var}.{prop}` columns a scan produces — so when the
+        // alias shadows a scan variable below (`... collect(friend) AS friends
+        // UNWIND friends AS friend`), leaving the scan's `Node` kind in place made
+        // every consumer above reach for columns that are not in the schema.
+        //
+        // Rebinding is correctly scoped: `translation_context_for_plan` is built
+        // from each operator's own input, so expressions *below* the UNWIND still
+        // see the scan binding.
+        LogicalPlan::Unwind {
+            input, variable, ..
+        } => {
+            collect_variable_kinds(input, kinds);
+            kinds.insert(variable.clone(), VariableKind::Opaque);
         }
         LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right, .. } => {
             collect_variable_kinds(left, kinds);
@@ -7236,7 +7634,17 @@ fn sanitize_vlp_target_properties(
 ) -> Vec<String> {
     properties.retain(|p| p != "*");
 
-    if target_has_wildcard && properties.is_empty() {
+    // A wildcard needs `_all_props` whether or not named properties survived
+    // it. `resolve_properties` has already expanded `"*"` into the label's full
+    // declared set, so requiring `properties.is_empty()` here meant a label
+    // that declares anything never got `_all_props` -- and schemaless
+    // properties, which live only in the overflow blob that `_all_props`
+    // carries, were dropped from every whole-entity VLP result. `RETURN n`
+    // over `(h)-[:R*1..2]->(n)` returned the declared columns and silently lost
+    // the rest, where the same match at fixed length returned all of them.
+    // This is the single-hop rule at the `target_has_wildcard` site in
+    // `plan_traverse_main_by_type`, which never carried the extra condition.
+    if target_has_wildcard && !properties.iter().any(|p| p == "_all_props") {
         properties.push("_all_props".to_string());
     }
 
@@ -8512,13 +8920,26 @@ mod tests {
         ));
     }
 
+    /// The `"*"` marker itself is dropped, but the wildcard still demands
+    /// `_all_props`.
+    ///
+    /// This previously asserted `["name"]` -- that a wildcard alongside named
+    /// properties added nothing. That was the defect, not the contract:
+    /// `resolve_properties` expands `"*"` to the declared set before this runs,
+    /// so on any label that declares a property the list is non-empty and
+    /// `_all_props` was never added, dropping every schemaless property from
+    /// whole-entity VLP results. `whole_entity_results_carry_every_property`
+    /// covers it end to end.
     #[test]
     fn test_sanitize_vlp_target_properties_removes_wildcard() {
         let props = vec!["*".to_string(), "name".to_string()];
         let label_props = HashSet::from(["name".to_string()]);
         let sanitized = sanitize_vlp_target_properties(props, true, Some(&label_props));
 
-        assert_eq!(sanitized, vec!["name".to_string()]);
+        assert_eq!(
+            sanitized,
+            vec!["name".to_string(), "_all_props".to_string()]
+        );
     }
 
     #[test]

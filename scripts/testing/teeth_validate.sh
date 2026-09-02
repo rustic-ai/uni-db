@@ -51,6 +51,7 @@ ENTRIES=(
   "issue_103|issue_103_nested_fork_schemaless_edge_reads_inherited|-"
   "issue_110|typed_fork_set_reverse_reach_is_complete|-"
   "issue_135|issue_135_traversal_props_survive_flush|-"
+  "compaction_property_loss|vacuum_preserves_schemaless_properties|-"
 )
 
 only=("$@")

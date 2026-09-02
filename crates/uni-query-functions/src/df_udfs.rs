@@ -41,6 +41,7 @@ use std::any::Any;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use uni_common::Value;
+use uni_common::cypher_value_codec::handle::HandleScope;
 use uni_cypher::ast::BinaryOp;
 use uni_store::storage::arrow_convert::values_to_array;
 
@@ -415,10 +416,11 @@ struct IdUdf {
 impl IdUdf {
     fn new() -> Self {
         Self {
-            signature: Signature::new(
-                TypeSignature::Exact(vec![DataType::UInt64]),
-                Volatility::Immutable,
-            ),
+            // `Any`, not `Exact(UInt64)`: an entity that reached here as a
+            // CypherValue blob — anything that has been through `collect()` and
+            // `UNWIND` — is a `LargeBinary`, and an exact signature would reject
+            // it before `invoke` could decode it.
+            signature: Signature::any(1, Volatility::Immutable),
         }
     }
 }
@@ -443,13 +445,72 @@ impl ScalarUDFImpl for IdUdf {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
-        // id() is a pass-through - the VID/EID is already stored as UInt64
         if args.args.is_empty() {
             return Err(datafusion::error::DataFusionError::Execution(
                 "id(): requires 1 argument".to_string(),
             ));
         }
-        Ok(args.args[0].clone())
+        // Usually a pass-through: the planner rewrites `id(n)` to the `n._vid`
+        // column, which is already `UInt64`. But when `n` is an entity carried as
+        // a single CypherValue column — what `UNWIND` over a collected list binds
+        // — there is no `_vid` column to rewrite to, so the whole entity arrives
+        // here and its id has to be read out of the encoding.
+        // `return_type` promises `UInt64`, and DataFusion asserts that at
+        // runtime, so every branch here has to produce one — passing an argument
+        // straight through is only correct when it is already `UInt64`.
+        let arg = args.args[0].clone();
+        match arg.data_type() {
+            DataType::UInt64 => Ok(arg),
+            DataType::LargeBinary => {
+                let array = arg.to_array(args.number_rows)?;
+                let blobs = array
+                    .as_any()
+                    .downcast_ref::<LargeBinaryArray>()
+                    .ok_or_else(|| {
+                        datafusion::error::DataFusionError::Execution(
+                            "id(): expected a LargeBinary entity column".to_string(),
+                        )
+                    })?;
+                let ids: UInt64Array = (0..blobs.len())
+                    .map(|i| {
+                        if blobs.is_null(i) {
+                            return None;
+                        }
+                        let value = uni_common::cypher_value_codec::decode(blobs.value(i)).ok()?;
+                        entity_identity(&value)
+                    })
+                    .collect();
+                Ok(ColumnarValue::Array(Arc::new(ids)))
+            }
+            other => {
+                let array = arg.to_array(args.number_rows)?;
+                arrow::compute::cast(&array, &DataType::UInt64)
+                    .map(ColumnarValue::Array)
+                    .map_err(|_| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "id(): expected an entity or an identity column, got {other}"
+                        ))
+                    })
+            }
+        }
+    }
+}
+
+/// The id of an entity, whichever way it is encoded.
+///
+/// A typed `Value::Node` / `Value::Edge` and the `Value::Map` form carrying
+/// `_vid` / `_eid` are both live representations of the same thing, and code that
+/// handles only one of them silently does nothing for the other.
+pub(crate) fn entity_identity(value: &Value) -> Option<u64> {
+    match value {
+        Value::Node(n) => Some(n.vid.as_u64()),
+        Value::Edge(e) => Some(e.eid.as_u64()),
+        Value::Map(m) => m
+            .get("_vid")
+            .or_else(|| m.get("_eid"))
+            .and_then(|id| id.as_i64())
+            .map(|id| id as u64),
+        _ => None,
     }
 }
 
@@ -1144,10 +1205,20 @@ fn startnode_endnode_impl(val_args: &[Value], is_start: bool) -> DFResult<Value>
         }
     }
 
-    // Fallback: return minimal node map with just _vid
-    let mut map = std::collections::HashMap::new();
-    map.insert("_vid".to_string(), Value::Int(target_vid as i64));
-    Ok(Value::Map(map))
+    // No node argument matched the endpoint. This used to answer with a map
+    // holding only `_vid`, which reads as a node and answers `id()` correctly
+    // while every property on it is NULL — the silent trade #188 refused in
+    // writing, and the shape #187's remaining case produced.
+    //
+    // The endpoint is materialised by `EndpointHydrateExec` wherever the
+    // planner can reach the relationship. Somewhere it could not, so say so
+    // rather than return a node that is not one.
+    let fn_name = if is_start { "startNode" } else { "endNode" };
+    Err(datafusion::error::DataFusionError::Execution(format!(
+        "{fn_name}(): the relationship's endpoint (vid {target_vid}) is not \
+         available in this scope, so its properties cannot be read. This is a \
+         planner gap; please file an issue with the query."
+    )))
 }
 
 /// Extract the src or dst VID from an edge value.
@@ -1179,12 +1250,22 @@ fn extract_endpoint_vid(val: &Value, is_start: bool) -> Option<u64> {
     }
 }
 
-/// Extract _vid from a node value.
+/// Extract the VID of a node argument.
+///
+/// Delegates to [`uni_common::Value::entity_vid`]: the narrow reader is the
+/// right one here, because this decides whether a *node argument* is the
+/// endpoint being looked for. A lenient reader would let a plain integer column
+/// match an endpoint by coincidence and be returned as the node.
+///
+/// Recognising only `Value::Map` — as this did — meant a node arriving in its
+/// native `Value::Node` encoding never matched, and `startNode(r)` silently
+/// returned the vid-only stand-in instead of the node, so `startNode(r).name`
+/// came back NULL. That is not reachable through the node-argument path today
+/// (a structural projection always yields the map form) but it costs nothing to
+/// be correct for both, and the divergence is exactly what this consolidation
+/// exists to remove.
 fn extract_vid(val: &Value) -> Option<u64> {
-    match val {
-        Value::Map(map) => map.get("_vid").and_then(|v| v.as_u64()),
-        _ => None,
-    }
+    val.entity_vid().map(|vid| vid.as_u64())
 }
 
 // ============================================================================
@@ -4706,6 +4787,54 @@ cypher_scalar_udf! {
     }
 }
 
+/// Equality for `IN`, which must reconcile the two ways an entity reaches this
+/// UDF.
+///
+/// `translate_in_expression` rewrites a node/edge variable on the *left* of `IN`
+/// down to its bare `_vid` / `_eid` `Int64` column, because a list injected from
+/// a parameter holds ids rather than entities. It does not rewrite the right
+/// side, so a list built in the query itself — `[countryX, countryY]`, or
+/// anything from `collect()` — still holds whole entities. The comparison was
+/// then `Int` against `Node`, which is unequal for every row: `n IN [n]`
+/// returned false, silently and with no error.
+///
+/// Matching an entity against a bare id here restores the id-list contract the
+/// left-hand rewrite assumes, in the one place that can see both sides. It adds
+/// no new looseness to `IN`: because that rewrite already replaces the entity
+/// with its id, `n IN [1, 2]` compares ids today regardless.
+///
+/// Entity-against-entity is left to `cypher_eq`, which compares by identity.
+fn entity_aware_eq(left: &Value, right: &Value) -> Option<bool> {
+    fn entity_id(v: &Value) -> Option<i64> {
+        match v {
+            Value::Node(n) => Some(n.vid.as_u64() as i64),
+            Value::Edge(e) => Some(e.eid.as_u64() as i64),
+            // An entity that came through a projection arrives as a map carrying
+            // `_vid` / `_eid` alongside its properties, not as a typed `Node` or
+            // `Edge`. Both encodings are live: `cypher_eq`'s own entity arms are
+            // split the same way. Missing this one is what made the first attempt
+            // at this fix a no-op.
+            Value::Map(m) => m
+                .get("_vid")
+                .or_else(|| m.get("_eid"))
+                .and_then(|id| id.as_i64()),
+            _ => None,
+        }
+    }
+    match (entity_id(left), entity_id(right)) {
+        // Exactly one side is an entity and the other is a bare id.
+        (Some(id), None) => match right.as_i64() {
+            Some(other) => Some(id == other),
+            None => cypher_eq(left, right),
+        },
+        (None, Some(id)) => match left.as_i64() {
+            Some(other) => Some(id == other),
+            None => cypher_eq(left, right),
+        },
+        _ => cypher_eq(left, right),
+    }
+}
+
 // ============================================================================
 // _cypher_in(element, list) -> Boolean (nullable)
 // ============================================================================
@@ -4765,7 +4894,7 @@ cypher_scalar_udf! {
         // 3-valued comparison: cypher_eq returns Some(true/false) or None (indeterminate)
         let mut has_null = false;
         for item in items {
-            match cypher_eq(element, item) {
+            match entity_aware_eq(element, item) {
                 Some(true) => return Ok(Value::Bool(true)),
                 None => has_null = true,
                 Some(false) => {}
@@ -5841,17 +5970,32 @@ pub fn create_cypher_sum_udaf() -> AggregateUDF {
 // Cypher-aware COLLECT UDAF
 // ============================================================================
 
+/// Encoded size above which a collected list is interned rather than carried
+/// inline.
+///
+/// The criterion is bytes, not element count, because bytes are what gets
+/// copied: interning costs one registry insert per group and saves
+/// `encoded_len - 9` bytes on every row the list is carried onto. An element
+/// count is a poor proxy for that — twenty entities is ~6 KB (LDBC IC3, whose
+/// list a 32-element threshold skipped entirely) while thirty-two small
+/// integers is ~160 bytes. Below this the list stays on the path it has always
+/// taken, which bounds what this change can regress.
+const COLLECT_INTERN_MIN_BYTES: usize = 1024;
+
 /// Custom UDAF for Cypher collect() that filters nulls and returns [] (not null)
 /// when all inputs are null.
 #[derive(Debug, Clone)]
 struct CypherCollectUdaf {
     signature: Signature,
+    /// Scope owning anything this aggregate interns; `None` disables interning.
+    scope: Option<Arc<HandleScope>>,
 }
 
 impl CypherCollectUdaf {
-    fn new() -> Self {
+    fn new(scope: Option<Arc<HandleScope>>) -> Self {
         Self {
             signature: Signature::new(TypeSignature::Any(1), Volatility::Immutable),
+            scope,
         }
     }
 }
@@ -5902,6 +6046,7 @@ impl AggregateUDFImpl for CypherCollectUdaf {
             values: Vec::new(),
             distinct: acc_args.is_distinct,
             raw_bytes,
+            scope: self.scope.clone(),
         }))
     }
     fn state_fields(
@@ -5923,6 +6068,8 @@ struct CypherCollectAccumulator {
     /// Input column is a raw `DataType::Bytes` column (`uni_raw_bytes=true`); its
     /// `LargeBinary` elements are verbatim bytes, not tagged CypherValue payloads.
     raw_bytes: bool,
+    /// Scope owning anything this accumulator interns; `None` disables it.
+    scope: Option<Arc<HandleScope>>,
 }
 
 impl CypherCollectAccumulator {
@@ -6008,6 +6155,22 @@ impl DfAccumulator for CypherCollectAccumulator {
         // Always return a list (empty list, not null)
         let val = Value::List(self.values.clone());
         let bytes = uni_common::cypher_value_codec::encode(&val);
+        // Past the threshold the list travels as a handle, so every operator
+        // above copies 9 bytes per row rather than the whole encoding.
+        // `decode` resolves it transparently, so consumers are unchanged.
+        //
+        // The encoding above is measured and then dropped on this path. That is
+        // one wasted encode per group, against a saving on every row the group
+        // fans out to — and the inline path below needs those bytes anyway, so
+        // nothing is spent when interning does not fire.
+        if bytes.len() >= COLLECT_INTERN_MIN_BYTES
+            && let Some(scope) = &self.scope
+        {
+            let id = scope.register(Arc::new(val));
+            return Ok(ScalarValue::LargeBinary(Some(
+                uni_common::cypher_value_codec::encode_handle(id),
+            )));
+        }
         Ok(ScalarValue::LargeBinary(Some(bytes)))
     }
     fn size(&self) -> usize {
@@ -6038,18 +6201,25 @@ impl DfAccumulator for CypherCollectAccumulator {
     }
 }
 
+/// The name-registered `_cypher_collect`, reachable when an expression names
+/// the UDAF rather than being built by the planner. It has no scope, so it
+/// never interns — correct, just without the saving.
 pub fn create_cypher_collect_udaf() -> AggregateUDF {
-    AggregateUDF::from(CypherCollectUdaf::new())
+    AggregateUDF::from(CypherCollectUdaf::new(None))
 }
 
 /// Create a Cypher collect() UDAF expression with optional distinct.
+///
+/// `scope` is the query's interning scope; pass `None` where no execution
+/// context is available and the list will simply be carried inline.
 pub fn create_cypher_collect_expr(
     arg: datafusion::logical_expr::Expr,
     distinct: bool,
+    scope: Option<Arc<HandleScope>>,
 ) -> datafusion::logical_expr::Expr {
     // We use the UDAF's call() but need to set distinct separately.
     // For now, always include arg directly - distinct is handled in the accumulator.
-    let udaf = Arc::new(create_cypher_collect_udaf());
+    let udaf = Arc::new(AggregateUDF::from(CypherCollectUdaf::new(scope)));
     if distinct {
         // Create with distinct flag set
         datafusion::logical_expr::Expr::AggregateFunction(

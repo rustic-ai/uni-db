@@ -118,27 +118,40 @@ impl StatefulLever for IndexLever {
         Ok(())
     }
 
-    /// Before: no index existed to consult. After: one was consulted.
+    /// The transition must cause an index scan that side A did not perform.
     ///
-    /// Both clauses are load-bearing and neither is redundant.
-    ///
-    /// `a.index_scans == 0` proves side A genuinely had no index. Without it, an
-    /// index left over from a previous batch — or a fixture that quietly gained
-    /// one — would make both sides identical while the second clause still held.
-    ///
-    /// `b.index_scans > 0` proves the transition took effect *and* that the
-    /// generated predicate actually reached the pushdown path. This is the
-    /// clause that catches a `transition` that silently became a no-op, and the
-    /// one that would collapse if the lever were ever run on a case kind whose
-    /// predicates cannot consult an index.
+    /// This proves the transition took effect *and* that the generated predicate
+    /// actually reached the pushdown path — it catches a `transition` that
+    /// silently became a no-op, and would collapse if the lever were ever run on
+    /// a case kind whose predicates cannot consult an index. An index left over
+    /// from a previous batch, or a fixture that quietly gained one, still fails
+    /// here: it would raise side A too, leaving no difference to score.
     ///
     /// Deliberately **no** `rows_scanned` clause. An index that narrows the scan
     /// is the expected case and was measured at 1 000 → 103, but it is not
     /// guaranteed: a predicate matching most of the table would legitimately
     /// scan nearly all of it while still consulting the index. A third clause
     /// would fail runs for a reason unrelated to what this lever measures.
+    /// (Re-examined when #203 invalidated the absolute form of the clause below,
+    /// and the reasoning still holds — a rows clause was reconsidered and
+    /// rejected again.)
+    ///
+    /// This read `a.witness.index_scans == 0`, which encoded an
+    /// unstated premise: that the only index scan a query can perform is the one
+    /// serving the filter under test. #203 made that false. Registering
+    /// `hasLabel` in `FUNCTION_SPECS` stopped labelled traversal targets being
+    /// wildcarded, so a target like `(b:Company)` now hydrates through the
+    /// columnar path, which consults an index — in *both* states. On
+    /// `MATCH (a:Person)-[:WORKS_AT]->(b:Company) WHERE a.age = 30 …` that gives
+    /// `A: index_scans=1, rows=1040` against `B: index_scans=2, rows=143`: the
+    /// transition plainly took effect, and the old predicate scored it as a
+    /// non-activation because the un-indexed side was no longer exactly zero.
+    ///
+    /// Comparing the two sides keeps what the clause was for — creating the
+    /// index must cause an index scan that was not there before — without
+    /// assuming the un-indexed side performs none at all.
     fn activated(&self, a: &Observed, b: &Observed) -> bool {
-        a.witness.index_scans == 0 && b.witness.index_scans > 0
+        b.witness.index_scans > a.witness.index_scans
     }
 }
 

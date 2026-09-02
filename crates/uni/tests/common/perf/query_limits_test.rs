@@ -560,3 +560,268 @@ async fn test_uncancelled_locy_program_still_runs() -> Result<()> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// `max_query_memory` must bound execution, not only the result set — #185
+// ---------------------------------------------------------------------------
+//
+// `enforce_memory_limit` runs *after* `executor.execute(...)` and measures the
+// finished rows. A query that returns a handful of rows passed it while peak
+// RSS reached tens of gigabytes on the way there, because the limit never
+// reached DataFusion: the `SessionContext` was built with `SessionContext::new()`
+// and therefore with DataFusion's default unbounded memory pool, which never
+// refuses a reservation and never spills.
+//
+// It is now built with a `GreedyMemoryPool` sized from `max_query_memory`, so
+// operators that reserve through the pool are bounded. Two limits are honest
+// and deliberate: the pool sits on the shared session template, so it is a
+// budget across concurrent queries rather than strictly per query; and an
+// operator that allocates an Arrow buffer directly without reserving (the
+// `MutableArrayData` path behind #184) is still unbounded.
+
+/// A database whose only unusual setting is a small query-memory ceiling.
+async fn db_with_memory_limit(bytes: usize) -> Result<Uni> {
+    let mut config = uni_db::UniConfig::default();
+    config.max_query_memory = bytes;
+    Ok(Uni::in_memory().config(config).build().await?)
+}
+
+/// The discriminating shape from #185: **one row out**, a large intermediate.
+/// The post-hoc result-size check cannot see this query at all — one integer
+/// is far below any ceiling — so if it is rejected, the rejection came from
+/// the execution-time pool.
+#[tokio::test]
+async fn max_query_memory_bounds_execution_not_just_results() -> Result<()> {
+    // 256 KiB: comfortably above what the seeding writes need, far below the
+    // distinct-value hash table built below.
+    let db = db_with_memory_limit(256 * 1024).await?;
+    db.schema()
+        .label("W")
+        .property("k", uni_db::DataType::String)
+        .apply()
+        .await?;
+
+    let tx = db.session().tx().await?;
+    tx.execute(
+        "UNWIND range(0, 40000) AS i CREATE (:W {k: 'key-that-is-long-enough-to-matter-' + toString(i)})",
+    )
+    .await?;
+    tx.commit().await?;
+
+    // A *grouped* aggregate, because that is what reserves through the pool:
+    // `count(DISTINCT x)` with no grouping keys uses a plain accumulator that
+    // allocates its hash set directly. The inner aggregate builds 40k groups;
+    // the outer collapses them so only one row is ever returned, which is what
+    // keeps the post-hoc result-size check out of the picture.
+    let res = db
+        .session()
+        .query("MATCH (n:W) WITH n.k AS k, count(*) AS per RETURN count(k) AS c")
+        .await;
+
+    match res {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("memory") || msg.contains("Resources") || msg.contains("resources"),
+                "expected a memory-exhaustion error, got: {msg}"
+            );
+        }
+        Ok(rows) => panic!(
+            "a 256 KiB ceiling accepted a 40k-distinct-value aggregation returning {:?}; \
+             the limit is still measuring the result set rather than execution",
+            rows.rows()[0].values()[0]
+        ),
+    }
+    Ok(())
+}
+
+/// The same ceiling must not reject an ordinary query. Guards against "fixed"
+/// meaning "everything now fails".
+#[tokio::test]
+async fn a_modest_query_is_unaffected_by_the_execution_pool() -> Result<()> {
+    let db = db_with_memory_limit(256 * 1024).await?;
+    db.schema()
+        .label("S")
+        .property("k", uni_db::DataType::String)
+        .apply()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute("UNWIND range(0, 50) AS i CREATE (:S {k: toString(i)})")
+        .await?;
+    tx.commit().await?;
+
+    let rows = db
+        .session()
+        .query("MATCH (n:S) RETURN count(*) AS c")
+        .await?;
+    assert_eq!(rows.rows()[0].values()[0], uni_db::Value::Int(51));
+    Ok(())
+}
+
+/// The result-size estimator has to count heap bytes.
+///
+/// It was `size_of_val(v) + 64` — the size of the `Value` enum's discriminant,
+/// a constant — so a row holding a megabyte string was charged the same as a
+/// row holding a small integer, and the "byte" limit was really a row count.
+/// One row of ~1 MB must exceed a 64 KiB ceiling.
+#[tokio::test]
+async fn the_memory_estimator_counts_heap_bytes() -> Result<()> {
+    let db = db_with_memory_limit(64 * 1024).await?;
+
+    let res = db
+        .session()
+        .query("RETURN reduce(s = '', x IN range(0, 4000) | s + '0123456789abcdefghij') AS big")
+        .await;
+
+    let err = res
+        .err()
+        .expect("one ~80 KB string must exceed a 64 KiB ceiling; a per-value constant would not");
+    assert!(
+        err.to_string().contains("Query exceeded memory limit"),
+        "expected the result-size limit, got: {err}"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// A transaction statement must be time-bounded, like its session twin
+// ---------------------------------------------------------------------------
+//
+// The session paths wrapped execution in `tokio::time::timeout`; the two
+// transaction paths raced only the cancellation scope, so a statement run
+// inside a transaction had no wall-clock bound at all.
+
+#[tokio::test]
+async fn a_transaction_statement_honours_query_timeout() -> Result<()> {
+    let db = seeded_db().await?;
+    let session = db.session();
+    let tx = session.tx().await?;
+
+    let res = tx
+        .query_with("MATCH (n:Node) RETURN n")
+        .timeout(Duration::from_nanos(1))
+        .fetch_all()
+        .await;
+
+    let err = res
+        .err()
+        .expect("a 1ns timeout must reject a transaction statement on the materializing terminal");
+    assert!(
+        matches!(err, uni_db::UniError::Timeout { .. }),
+        "expected UniError::Timeout, got: {err:?}"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// A whole-node group key must not materialise the whole node — #196
+// ---------------------------------------------------------------------------
+//
+// `WITH p, count(*)` needs only the entity's *identity*: grouping cannot depend
+// on a property the query never reads. The analysis marked a bare group-key
+// variable `"*"` anyway, which pulled the full schema — `_all_props` and
+// `overflow_json` included — into the scan, and the physical group key then
+// appends every `{v}.`-prefixed column beside the entity struct. The node is
+// hashed and copied per group, twice over.
+//
+// At LDBC SF1 that made
+// `MATCH (p:Person)-[:KNOWS]-() WITH p, count(*) RETURN p.id` request 1.76 GB
+// against a 1 GiB pool and abort the bench during parameter derivation, for a
+// query that reads one property.
+//
+// The test below is that shape at a scale the suite can afford: wide payload
+// properties the query never touches, a ceiling sized so materialising them
+// would exceed it, and a single property actually read.
+
+/// Adding a property the query never reads must not change what the aggregate
+/// costs.
+///
+/// Measured on this fixture, 20 001 groups, before and after the fix:
+///
+/// | `pad` length | before | after |
+/// |---|---|---|
+/// | 4 chars   |  9.8 MB | 4.4 MB |
+/// | 256 chars | 65.5 MB | 4.4 MB |
+///
+/// The ceiling below sits above the constant cost and far below the 256-char
+/// figure, so this passes only if the group key is insensitive to the payload.
+/// Asserting insensitivity rather than an absolute number is deliberate: the
+/// first version of this test asserted a ceiling, and a ceiling cannot tell a
+/// materialised payload from an aggregate that is simply large. Both arms run
+/// at the same limit for the same reason.
+#[tokio::test]
+async fn an_unread_property_does_not_change_what_a_group_key_costs() -> Result<()> {
+    async fn run(pad_len: usize) -> Result<()> {
+        // 16 MiB: above the ~4.4 MB the 20k groups genuinely need, well below
+        // the ~65 MB the same query cost when the payload rode along.
+        let db = db_with_memory_limit(16 * 1024 * 1024).await?;
+        db.schema()
+            .label("G")
+            .property("tag", uni_db::DataType::String)
+            .property("pad", uni_db::DataType::String)
+            .apply()
+            .await?;
+        let pad = "x".repeat(pad_len);
+        let tx = db.session().tx().await?;
+        tx.execute(&format!(
+            "UNWIND range(0, 20000) AS i CREATE (:G {{tag: 'tag-' + toString(i % 50), \
+             pad: '{pad}' + toString(i)}})"
+        ))
+        .await?;
+        tx.commit().await?;
+
+        db.session()
+            // No ORDER BY: sorting 20k rows reserves through the same pool and
+            // would make this a test of the sorter instead of the group key.
+            // The outer aggregate collapses the groups to one row, which also
+            // keeps the post-hoc result-size check out of the picture.
+            .query("MATCH (p:G) WITH p, count(*) AS c RETURN count(c) AS n")
+            .await
+            .map(|_| ())
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "grouping by a whole node exhausted the ceiling with pad_len={pad_len}: {e}. \
+                     The query reads only `tag`; a property it never mentions must not be \
+                     materialised into the group key."
+                )
+            })
+    }
+
+    // The narrow arm establishes the ceiling is workable at all; the wide arm
+    // is the one that fails when the payload is carried.
+    run(4).await?;
+    run(256).await?;
+    Ok(())
+}
+
+/// The control: the same shape where the node *is* returned whole must still
+/// work, and must still carry its properties. Narrowing a group key that is
+/// genuinely returned would be a wrong answer, not a smaller one.
+#[tokio::test]
+async fn a_group_key_returned_whole_still_carries_its_properties() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    db.schema()
+        .label("G")
+        .property("tag", uni_db::DataType::String)
+        .apply()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute("UNWIND range(0, 5) AS i CREATE (:G {tag: 'tag-' + toString(i)})")
+        .await?;
+    tx.commit().await?;
+
+    let rows = db
+        .session()
+        .query("MATCH (p:G) WITH p, count(*) AS c RETURN p ORDER BY p.tag LIMIT 1")
+        .await?;
+
+    match &rows.rows()[0].values()[0] {
+        uni_db::Value::Node(n) => assert_eq!(
+            n.properties.get("tag"),
+            Some(&uni_db::Value::String("tag-0".to_string())),
+            "a group key returned whole lost its properties"
+        ),
+        other => panic!("expected a Node, got {other:?}"),
+    }
+    Ok(())
+}

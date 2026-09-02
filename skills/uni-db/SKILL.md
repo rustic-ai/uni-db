@@ -287,6 +287,15 @@ CALL uni.vector.query('Document', 'embedding', $query_vector, 10)
 YIELD node, score
 RETURN node.title, score ORDER BY score DESC
 
+// IVF-PQ is the DEFAULT index and stores lossy codes. Since 3.5 a refine pass is
+// applied automatically (0.978 measured on SIFT-1M vs 0.562 without); pass
+// refine_factor to tune it, or refine_factor: 1 to opt out. nprobes alone does
+// not lift the quantization ceiling.
+CALL uni.vector.query('Document', 'embedding', $query_vector, 10, NULL, NULL,
+    { nprobes: 64, refine_factor: 20 })
+YIELD node, score
+RETURN node.title, score ORDER BY score DESC
+
 // ~= operator (shorthand for vector top-K scan, desugars to uni.vector.query)
 MATCH (d:Doc) WHERE d.embedding ~= $query_vector RETURN d.title LIMIT 10
 

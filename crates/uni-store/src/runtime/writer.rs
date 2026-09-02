@@ -4510,10 +4510,49 @@ impl Writer {
         // `flush_to_l1` returns, leaving a window where forks branch
         // off pre-write Lance state and lose data.
         if let Some(coord) = self.flush_coordinator.as_ref() {
-            let _ = coord.drain(self.config.drop_fork_drain_timeout).await;
+            // Propagated, not discarded. A drain that does not finish means the
+            // barrier this function documents has not been established, and
+            // returning Ok would hand the caller a guarantee it does not have.
+            coord
+                .drain(self.config.flush_drain_timeout)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "flush_to_l1 barrier not established: {e} (waited {:?}); \
+                         writes are not yet durable in Lance",
+                        self.config.flush_drain_timeout
+                    )
+                })?;
         }
         let _flush_lock_guard = self.flush_lock.lock().await;
-        self.flush_inline_under_lock(name).await
+        let manifest = self.flush_inline_under_lock(name).await?;
+
+        // The barrier's contract is "all writes are now durably in Lance", so a
+        // flush whose stream phase FAILED must not be reported as success.
+        //
+        // Draining does not surface it: the failure decrements `pending_count`,
+        // so the drain completes normally. And the inline flush above cannot
+        // repair it, because it only ever writes `get_current()` — never an L0
+        // stranded on `pending_flush` by an earlier failure. So `flush_to_l1`
+        // would return Ok having flushed nothing. Observed with a Lance write
+        // failing on `Disk quota exceeded`: the ANN index build then found no
+        // table, declined at debug level, and every query silently served an
+        // exact scan from L0.
+        //
+        // The count is used rather than `pending_flush.len()`, which was tried
+        // first and is a false-positive proxy: under load a buffer can sit there
+        // transiently for a perfectly healthy in-flight flush.
+        if let Some(coord) = self.flush_coordinator.as_ref() {
+            let failed = coord.failed_flush_count();
+            if failed > 0 {
+                return Err(anyhow::anyhow!(
+                    "flush_to_l1 barrier not established: {failed} async flush(es) have failed and \
+                     their L0 is stranded; the WAL retains that data and replay recovers it on \
+                     restart, but it is NOT in Lance and no later flush picks it up"
+                ));
+            }
+        }
+        Ok(manifest)
     }
 
     /// Flush L0→L1 and capture the fork point under one held `flush_lock`.
@@ -4945,12 +4984,39 @@ impl Writer {
                     vertex_updated_at.insert(vid, ts);
                 }
                 if let Some(labels) = old_l0.vertex_labels.get(&vid) {
+                    // Union the L0 set with the in-memory label index before
+                    // bucketing. The L0 entry carries whatever the caller
+                    // supplied, and callers that never went through a scan —
+                    // `Uni::delete_vertex_by_vid`, the fork-promote path — pass
+                    // a single label. A truncated set here leaves a live row in
+                    // every unlisted label's table, i.e. the vertex reappears
+                    // through its other labels.
+                    //
+                    // `get_labels_from_index` is sync and O(1), which matters:
+                    // the `old_l0` read lock is held here and cannot await. The
+                    // index is pruned later in this same flush, so it still
+                    // holds the pre-delete set at this point.
+                    //
+                    // Union is sound for TOMBSTONES ONLY. Writing a tombstone
+                    // into a table the vertex has already left is a no-op, so
+                    // the index's known staleness and its rebuild row cap can
+                    // only ever cost a missed extra tombstone, never a wrong
+                    // one. Do NOT generalize this to SET/REMOVE, where the
+                    // label set is a replacement and a union would resurrect
+                    // removed labels.
+                    let mut labels = labels.clone();
+                    for extra in self.storage.get_labels_from_index(vid).unwrap_or_default() {
+                        if !labels.contains(&extra) {
+                            labels.push(extra);
+                        }
+                    }
+
                     // Round-12 §B: tombstones flush via Lance MergeInsert
                     // (just `_vid`, `_deleted=true`, `_version`,
                     // `_updated_at`) — skipping the wide-row Append.
                     // Unconditional (no `partial_lance_writes` gating);
                     // tombstone Append carries no useful payload.
-                    for label in labels {
+                    for label in &labels {
                         if let Some(label_id) = schema.label_id_by_name(label) {
                             tombstones_by_label
                                 .entry(label_id)

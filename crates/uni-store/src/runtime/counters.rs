@@ -58,6 +58,23 @@ pub struct QueryCounters {
     index_comparisons: AtomicU64,
     lance_iops: AtomicU64,
     scans_reported: AtomicU64,
+    vector_index_scans: AtomicU64,
+    fts_index_scans: AtomicU64,
+    searches_reported: AtomicU64,
+}
+
+/// Which kind of index a search consulted.
+///
+/// Kept separate from the scalar counters rather than folded into
+/// [`QueryCounters::index_scans`]: that field means "a `ScanRequest`-based Lance
+/// scan reported index activity" and is a public metric, so widening it would
+/// silently change the meaning of every existing assertion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchKind {
+    /// Approximate nearest-neighbour over a vector index.
+    Vector,
+    /// Full-text search over an inverted index.
+    FullText,
 }
 
 impl QueryCounters {
@@ -120,6 +137,43 @@ impl QueryCounters {
         self.index_comparisons
             .fetch_add(comparisons as u64, Ordering::Relaxed);
         self.lance_iops.fetch_add(iops as u64, Ordering::Relaxed);
+    }
+
+    /// Records one vector or full-text search and whether it consulted an index.
+    ///
+    /// Always bumps [`Self::searches_reported`], including when no index was
+    /// consulted — the same denominator role [`Self::scans_reported`] plays for
+    /// scans. Without it, a zero cannot be told apart from "no search ran" or
+    /// "the callback was never wired".
+    pub fn add_search(&self, kind: SearchKind, consulted: bool) {
+        self.searches_reported.fetch_add(1, Ordering::Relaxed);
+        if consulted {
+            match kind {
+                SearchKind::Vector => self.vector_index_scans.fetch_add(1, Ordering::Relaxed),
+                SearchKind::FullText => self.fts_index_scans.fetch_add(1, Ordering::Relaxed),
+            };
+        }
+    }
+
+    /// Vector searches that consulted a vector index.
+    ///
+    /// Nonzero proves an ANN index was searched. Zero with
+    /// [`Self::searches_reported`] nonzero proves one was not — the search ran
+    /// brute force. Zero with `searches_reported` zero proves only that no
+    /// search executed.
+    pub fn vector_index_scans(&self) -> u64 {
+        self.vector_index_scans.load(Ordering::Relaxed)
+    }
+
+    /// Full-text searches that consulted an inverted index.
+    pub fn fts_index_scans(&self) -> u64 {
+        self.fts_index_scans.load(Ordering::Relaxed)
+    }
+
+    /// Vector and full-text searches that reported at all — the denominator for
+    /// the two counters above.
+    pub fn searches_reported(&self) -> u64 {
+        self.searches_reported.load(Ordering::Relaxed)
     }
 
     /// Rows served from L0.
@@ -212,6 +266,12 @@ impl QueryCounters {
             .fetch_add(other.lance_iops(), Ordering::Relaxed);
         self.scans_reported
             .fetch_add(other.scans_reported(), Ordering::Relaxed);
+        self.vector_index_scans
+            .fetch_add(other.vector_index_scans(), Ordering::Relaxed);
+        self.fts_index_scans
+            .fetch_add(other.fts_index_scans(), Ordering::Relaxed);
+        self.searches_reported
+            .fetch_add(other.searches_reported(), Ordering::Relaxed);
     }
 
     /// Resets every counter to zero, for reuse across executions.
@@ -225,6 +285,9 @@ impl QueryCounters {
         self.index_comparisons.store(0, Ordering::Relaxed);
         self.lance_iops.store(0, Ordering::Relaxed);
         self.scans_reported.store(0, Ordering::Relaxed);
+        self.vector_index_scans.store(0, Ordering::Relaxed);
+        self.fts_index_scans.store(0, Ordering::Relaxed);
+        self.searches_reported.store(0, Ordering::Relaxed);
     }
 
     /// A by-value copy of every counter, for handing across a crate boundary.
@@ -246,6 +309,9 @@ impl QueryCounters {
             index_comparisons: self.index_comparisons(),
             lance_iops: self.lance_iops(),
             scans_reported: self.scans_reported(),
+            vector_index_scans: self.vector_index_scans(),
+            fts_index_scans: self.fts_index_scans(),
+            searches_reported: self.searches_reported(),
         }
     }
 }
@@ -272,11 +338,17 @@ pub struct CounterSnapshot {
     pub lance_iops: u64,
     /// Lance scans for which the stats callback fired at all.
     pub scans_reported: u64,
+    /// Vector searches that consulted a vector index.
+    pub vector_index_scans: u64,
+    /// Full-text searches that consulted an inverted index.
+    pub fts_index_scans: u64,
+    /// Vector and full-text searches that reported at all.
+    pub searches_reported: u64,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::QueryCounters;
+    use super::{QueryCounters, SearchKind};
     use std::sync::Arc;
 
     #[test]
@@ -360,6 +432,8 @@ mod tests {
         b.add_branch_scan();
         b.add_snapshot_read();
         b.add_lance_scan(true, 4, 2);
+        b.add_search(SearchKind::Vector, true);
+        b.add_search(SearchKind::FullText, true);
         a.merge_from(&b);
 
         let m = a.snapshot();
@@ -375,6 +449,9 @@ mod tests {
                 index_comparisons: 4,
                 lance_iops: 2,
                 scans_reported: 1,
+                vector_index_scans: 1,
+                fts_index_scans: 1,
+                searches_reported: 2,
             },
             "a counter is missing from merge_from"
         );

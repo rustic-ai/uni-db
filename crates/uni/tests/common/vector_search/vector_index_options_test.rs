@@ -835,3 +835,61 @@ async fn test_l1_metric_nearest_differs_from_l2() -> Result<()> {
     );
     Ok(())
 }
+
+/// A wide-embedding index must pick `sub_vectors` from the column's dimension,
+/// not the historical fixed 16.
+///
+/// At 768-d the old default compressed 192x (768*4/16) and measured 0.30 recall
+/// before any refine pass; 96 sub-vectors holds it at 32x. The value is asserted
+/// off the *persisted* schema, because the whole point is that the sentinel is
+/// resolved before it is stored.
+#[tokio::test]
+async fn default_sub_vectors_is_dimension_aware_for_wide_embeddings() -> Result<()> {
+    let db = Uni::temporary().build().await?;
+
+    db.schema()
+        .label("Wide")
+        .property("emb", DataType::Vector { dimensions: 768 })
+        .apply()
+        .await?;
+
+    db.session()
+        .query(
+            r#"CALL uni.schema.createIndex('Wide', 'emb', {
+                "type": "VECTOR"
+            })"#,
+        )
+        .await?;
+
+    let schema = db.schema().current();
+    let idx = schema
+        .indexes
+        .iter()
+        .find(|i| matches!(i, IndexDefinition::Vector(v) if v.label == "Wide"))
+        .expect("index not found");
+
+    let IndexDefinition::Vector(cfg) = idx else {
+        panic!("expected a vector index");
+    };
+
+    // 768 * 4 / 96 == 32x, and 96 divides 768 so Lance can encode it.
+    assert_eq!(
+        cfg.index_type,
+        VectorIndexType::IvfPq {
+            num_partitions: 256,
+            num_sub_vectors: 96,
+            bits_per_subvector: 8,
+        },
+        "wide embeddings must not keep the dimension-blind default"
+    );
+
+    // A quantized index also carries a refine default, so a query that passes no
+    // `refine_factor` still re-scores against the original vectors.
+    assert!(
+        cfg.default_refine_factor.is_some_and(|r| r >= 8),
+        "quantized index should carry a refine default, got {:?}",
+        cfg.default_refine_factor
+    );
+
+    Ok(())
+}

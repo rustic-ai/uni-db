@@ -59,6 +59,8 @@ mod session_tx;
 // Shared infra for the SSI release-readiness suite (metrics capture, reopen
 // harness, conflict assertions, invariant oracles). Must precede the modules
 // that use it.
+#[path = "common/compaction_resilience.rs"]
+mod compaction_resilience;
 #[path = "common/crash_harness.rs"]
 mod crash_harness;
 #[path = "common/dense_resilience.rs"]

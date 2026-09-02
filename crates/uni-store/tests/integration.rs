@@ -16,6 +16,12 @@ mod crdt;
 // Failing storage-race regression repros. Gated on `failpoints` (the file
 // itself carries `#![cfg(feature = "failpoints")]`) so the production seams it
 // drives are compiled in.
+// Crash consistency for the compaction path. Gated on `failpoints` (the file
+// itself carries the attribute) so the seams it drives are compiled in.
+#[cfg(feature = "failpoints")]
+#[path = "common/compaction_resilience.rs"]
+mod compaction_resilience;
+
 #[cfg(feature = "failpoints")]
 #[path = "common/flush_resilience.rs"]
 mod flush_resilience;

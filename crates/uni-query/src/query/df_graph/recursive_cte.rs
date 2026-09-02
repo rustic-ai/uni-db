@@ -257,24 +257,28 @@ fn batches_to_values(batches: &[RecordBatch]) -> Vec<Value> {
 
 /// Extract the VID from a CTE result value.
 ///
-/// CTE result values can be:
-/// - A Map with a `*._vid` key (from multi-column scan results)
-/// - A raw integer (from single-column VID returns)
-/// - A Map with a `_vid` key
+/// A CTE working-set row legitimately carries a raw id as well as an entity —
+/// a single-column `RETURN id(n)` recursion produces integers — so this uses
+/// the lenient [`uni_common::Value::coerce_vid`].
+///
+/// The one thing it adds over the shared reader is the qualified-column form:
+/// a multi-column scan result arrives as a map keyed `n._vid` rather than
+/// `_vid`. Picking that key by iterating the map chose arbitrarily between
+/// several candidates, since `HashMap` iteration order is not stable — two
+/// entity columns in the working set meant a per-run coin flip over which
+/// entity the recursion followed. The smallest key by name is picked instead,
+/// so the choice is at least the same on every run.
 fn extract_vid(val: &Value) -> Option<u64> {
-    match val {
-        Value::Int(v) => Some(*v as u64),
-        Value::Map(map) => {
-            // Look for any key ending in `._vid` or exactly `_vid`
-            for (k, v) in map {
-                if k == "_vid" || k.ends_with("._vid") {
-                    return v.as_u64();
-                }
-            }
-            None
-        }
-        _ => val.as_u64(),
+    if let Some(vid) = val.coerce_vid() {
+        return Some(vid.as_u64());
     }
+    let Value::Map(map) = val else {
+        return None;
+    };
+    map.iter()
+        .filter(|(k, _)| k.ends_with("._vid"))
+        .min_by(|(a, _), (b, _)| a.cmp(b))
+        .and_then(|(_, v)| v.as_u64())
 }
 
 /// Run the full recursive CTE iteration loop and produce the output batch.

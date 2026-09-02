@@ -258,6 +258,7 @@ async fn query_topk(
                 nprobes,
                 ..Default::default()
             },
+            None,
         )
         .await?;
 

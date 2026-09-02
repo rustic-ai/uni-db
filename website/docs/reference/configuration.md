@@ -182,7 +182,8 @@ pub struct UniConfig {
 | `auto_flush_interval` | duration | 5s | Time-based flush interval (None to disable) |
 | `auto_flush_min_mutations` | count | 1 | Minimum mutations for time-based flush |
 | `wal_enabled` | bool | true | Enable write-ahead logging |
-| `query_timeout` | duration | 30s | Default query execution timeout |
+| `flush_drain_timeout` | duration | 120s | Max time `flush()` waits for in-flight async flushes to drain. Exceeding it is an **error**, never a silent partial flush |
+| `query_timeout` | duration | 30s | Default query execution timeout. An exact (`Flat`) scan over ~1M vectors runs past this — raise it for brute-force vector work |
 | `commit_timeout` | duration | 5s | Max wall time a commit may take before `CommitTimeout` abort |
 | `max_query_memory` | bytes | 1 GB | Maximum memory per query |
 | `max_transaction_memory` | bytes | 1 GB | Maximum memory per transaction |

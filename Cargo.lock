@@ -12360,6 +12360,7 @@ version = "3.4.0"
 dependencies = [
  "anyhow",
  "arrow-array",
+ "arrow-schema",
  "async-stream",
  "futures",
  "fxhash",

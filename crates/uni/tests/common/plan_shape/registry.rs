@@ -217,6 +217,14 @@ pub const OPERATORS: &[Operator] = &[
         status: Status::Unproven,
     },
     Operator {
+        ty: "EndpointHydrateExec",
+        runtime_name: "EndpointHydrateExec",
+        status: Status::Proven {
+            by: "the_post_with_endpoint_query_runs_the_hydration_operator",
+            in_file: "crates/uni/tests/common/cypher_read/start_end_node_test.rs",
+        },
+    },
+    Operator {
         ty: "ReadSetRecordingExec",
         runtime_name: "ReadSetRecordingExec",
         status: Status::Unproven,

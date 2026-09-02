@@ -42,6 +42,7 @@ ignore = [
   { id = "RUSTSEC-2026-0149", reason = "wasmtime-wasi 43.0.2 pinned by extism 1.30.0. path_open(TRUNCATE) bypasses FilePerms::WRITE." },
   { id = "RUSTSEC-2026-0182", reason = "wasmtime-wasi 43.0.2 pinned by extism 1.30.0. Leak in WASIp1 fd_renumber." },
   { id = "RUSTSEC-2026-0188", reason = "wasmtime-wasi 43.0.2 pinned by extism 1.30.0. Hard links/renames bypass the preopen sandbox." },
+  { id = "RUSTSEC-2026-0269", reason = "wasmtime 43.0.2 pinned by extism 1.30.0. Trailing-slash path/symlink sandbox escape. Verified 2026-09-02: the advisory's patched ranges are >=24.0.13, >=36.0.14, >=46.0.3, >=47.0.4 -- 43 was never backported and crates.io has no 43.x above 43.0.2, so `cargo update -p wasmtime` cannot clear it. extism 1.30.0 is still the newest release." },
 
   # ---- ours, and actionable ----
   # The only advisory here on a crate WE declare directly (Cargo.toml:158,

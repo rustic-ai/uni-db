@@ -165,22 +165,68 @@ impl Drop for FlushInProgressGuard {
 /// Overwrite (create_table). See the Lance commit-conflict-resolver in
 /// `lance-3.0.1/src/io/commit/conflict_resolver.rs`.
 fn is_lance_conflict(err: &anyhow::Error) -> bool {
+    // Match the typed error, not its message. The message is Lance's to
+    // reword, and matching it got this wrong twice in the same way: the
+    // concurrent-creation case reaches us as `DatasetAlreadyExists` (Lance
+    // maps `CommitError::CommitConflict` onto it, so the name is misleading
+    // rather than the classification) and `TooMuchWriteContention` displays
+    // as "Too many concurrent writers" -- neither contains "conflict" or
+    // "Incompatible transaction", so both were treated as fatal.
+    let mut saw_lance_error = false;
+    for cause in err.chain() {
+        if let Some(lance_err) = cause.downcast_ref::<lance::Error>() {
+            saw_lance_error = true;
+            if matches!(
+                lance_err,
+                lance::Error::CommitConflict { .. }
+                    | lance::Error::RetryableCommitConflict { .. }
+                    | lance::Error::IncompatibleTransaction { .. }
+                    | lance::Error::TooMuchWriteContention { .. }
+                    | lance::Error::DatasetAlreadyExists { .. }
+            ) {
+                return true;
+            }
+            // Keep walking rather than returning: `Error::Wrapped` and
+            // `Error::External` can carry a retryable error underneath.
+        }
+    }
+    if saw_lance_error {
+        return false;
+    }
+
+    // Fallback for an error that crossed a boundary erasing the concrete type
+    // (stringified across a task, or re-wrapped by a caller). Deliberately
+    // second: it cannot distinguish a retryable conflict from a message that
+    // merely mentions one.
     let msg = err.to_string();
-    msg.contains("Incompatible transaction") || msg.contains("conflict")
+    msg.contains("Incompatible transaction")
+        || msg.contains("conflict")
+        || msg.contains("already exists")
+        || msg.contains("Too many concurrent writers")
 }
 
 /// Runs `op` with exponential-backoff retry on Lance commit conflicts.
 /// Up to 10 attempts (~10s worst case); backoff is 1ms, 2ms, 4ms, ...,
 /// 512ms. Non-conflict errors return immediately. `op` is re-invoked each
 /// attempt so it can re-check table existence and adjust strategy.
-async fn retry_on_lance_conflict<F, Fut>(mut op: F) -> anyhow::Result<()>
+///
+/// Every Lance commit belongs inside this, not just the vertex and delta
+/// writes it was introduced for. Lance reports a losing commit as a
+/// *retryable* conflict — "Retryable commit conflict … preempted by concurrent
+/// transaction" — and a writer that propagates it instead of retrying turns a
+/// scheduling coincidence into a user-visible failure. The secondary-index
+/// writers (`index`, `json_index`, `inverted_index`, `sparse_index`) each
+/// committed unguarded, which is what made
+/// `sparse_recovered_update_overrides_stale_posting_without_rebuild` fail under
+/// parallel load and pass alone.
+pub(crate) async fn retry_on_lance_conflict<T, F, Fut>(mut op: F) -> anyhow::Result<T>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<()>>,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
 {
     for attempt in 0u32..10 {
         match op().await {
-            Ok(()) => return Ok(()),
+            Ok(v) => return Ok(v),
             Err(e) => {
                 if !is_lance_conflict(&e) || attempt == 9 {
                     return Err(e);
@@ -191,6 +237,48 @@ where
         }
     }
     unreachable!("retry loop exits via Ok or Err")
+}
+
+/// Write `batches` to the Lance dataset at `uri`, retrying a losing commit.
+///
+/// One concrete function rather than a closure per call site, for two reasons.
+/// It is the whole of what the four secondary-index writers were doing by hand,
+/// so a single definition keeps them from drifting apart again. And it keeps the
+/// future's type flat: wrapping each site's write in its own async closure
+/// nested another layer of anonymous future inside already-`#[instrument]`ed
+/// flush paths, and the compiler gave up proving `Send` for the result
+/// (`E0275`, overflow evaluating the requirement) in
+/// `repro_16_compact_vertices_concurrent_flush`.
+pub(crate) async fn write_dataset_with_lance_conflict_retry(
+    uri: &str,
+    schema: Arc<arrow_schema::Schema>,
+    batches: Vec<arrow_array::RecordBatch>,
+    mode: lance::dataset::WriteMode,
+) -> anyhow::Result<lance::Dataset> {
+    // The attempt future is boxed, which is load-bearing rather than stylistic.
+    // Unboxed, each retry layer nests `lance::Dataset::write`'s anonymous future
+    // inside this one, inside the `#[instrument]`ed flush future above it, and
+    // the trait solver gives up proving `Send` while unrolling Lance's internal
+    // moka cache types — `E0275`, reported against
+    // `repro_16_compact_vertices_concurrent_flush`'s `tokio::spawn`, several
+    // crates away from the cause. `Box::pin` erases the inner type and the
+    // nesting stops.
+    type Attempt<'a> = std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<lance::Dataset>> + Send + 'a>,
+    >;
+    retry_on_lance_conflict(|| -> Attempt<'_> {
+        let schema = Arc::clone(&schema);
+        let batches = batches.clone();
+        Box::pin(async move {
+            let reader = arrow_array::RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
+            let params = lance::dataset::WriteParams {
+                mode,
+                ..Default::default()
+            };
+            Ok(lance::Dataset::write(Box::new(reader), uri, Some(params)).await?)
+        })
+    })
+    .await
 }
 
 /// Combine a version high-water-mark predicate with an optional caller filter.
@@ -423,6 +511,16 @@ impl Drop for CompactionGuard {
         }
     }
 }
+
+/// Upper bound on candidates a **defaulted** refine pass may re-score
+/// (`fetch_k * refine_factor`).
+///
+/// Refine cost scales with `k`: measured on SIFT-1M, `refine_factor = 20` costs
+/// ~5% throughput at k=10 but 19% at k=100. Bounding the multiplier alone would
+/// therefore get expensive exactly where result sets are large, so the *work* is
+/// what is capped. An explicit `refine_factor` from the caller is honoured
+/// verbatim and never clamped.
+const REFINE_CANDIDATE_CAP: usize = 10_000;
 
 impl StorageManager {
     /// Create a new StorageManager with a pre-configured backend.
@@ -1393,10 +1491,30 @@ impl StorageManager {
             return Ok(());
         }
 
-        // Scan all non-deleted vertices and collect (VID, labels)
+        // Scan all non-deleted vertices and collect (VID, labels).
+        //
+        // No limit, deliberately. This index is not a cache that may miss — a
+        // traversal's target-label filter consults it and *keeps* the row when a
+        // vid does not resolve (`df_graph/traverse.rs`, "trust storage-level
+        // filtering"), so a truncated index silently disables label filtering
+        // for every vertex it omits.
+        //
+        // It carried `.with_limit(100_000)`. At LDBC SF1 (~3.6M vertices) that
+        // left everything past the first 100k unresolvable, and
+        // `MATCH (p:Person)<-[:HAS_CREATOR]-(post:Post)` returned 3 055 774 rows
+        // — Comments included — against the 1 003 605 the scan-anchored form
+        // returns. No test caught it because every fixture in the repo is
+        // smaller than the cap, so the truncation never fired. See issue #211.
+        // Projected to the two columns actually read below. `ScanRequest::all`
+        // means `ColumnProjection::All`, and the backend materialises every
+        // batch before returning, so without this the rebuild pulls each
+        // vertex's whole row — `content`, `imageFile` and every other wide
+        // column — to extract `_vid` and `labels`. Under the old row cap that
+        // was bounded waste; unbounded it would be the entire vertex table in
+        // memory at once.
         let request = ScanRequest::all(vtable)
-            .with_filter(FilterExpr::not_deleted())
-            .with_limit(100_000);
+            .with_columns(vec!["_vid".to_string(), "labels".to_string()])
+            .with_filter(FilterExpr::not_deleted());
         let batches = backend
             .scan(request)
             .await
@@ -1636,6 +1754,25 @@ impl StorageManager {
         columns: &[&str],
         additional_filter: Option<&FilterExpr>,
     ) -> Result<Option<arrow_array::RecordBatch>> {
+        self.scan_delta_table_counted(edge_type, direction, columns, additional_filter, None)
+            .await
+    }
+
+    /// [`Self::scan_delta_table`], carrying a query's counters into the backend.
+    ///
+    /// Edge scans were invisible to `idx_scans` and, more importantly, to
+    /// `scans_reported` — the denominator that lets a zero in `idx_scans` be
+    /// told apart from silence. See `docs/perf/index-scan-counter-2026-08-27.md`
+    /// for what the counter does and does not observe; this closes the part of
+    /// the gap that was purely an omission.
+    pub async fn scan_delta_table_counted(
+        &self,
+        edge_type: &str,
+        direction: &str,
+        columns: &[&str],
+        additional_filter: Option<&FilterExpr>,
+        counters: Option<&Arc<crate::runtime::counters::QueryCounters>>,
+    ) -> Result<Option<arrow_array::RecordBatch>> {
         // Edge path: manifest pin only. A transaction version pin must NOT
         // version-filter edge reads — the edge tier is not version-pinned
         // (the live AdjacencyManager + tx-L0 overlay carry unflushed and
@@ -1656,7 +1793,9 @@ impl StorageManager {
 
         let filter = combine_hwm_filter(edge_hwm, additional_filter);
 
-        let mut request = ScanRequest::all(&table_name).with_columns(actual_columns);
+        let mut request = ScanRequest::all(&table_name)
+            .with_columns(actual_columns)
+            .with_counters(counters.cloned());
         if let Some(f) = filter {
             request = request.with_filter(f);
         }
@@ -1673,6 +1812,21 @@ impl StorageManager {
         columns: &[&str],
         filter: Option<&FilterExpr>,
     ) -> Result<Option<arrow_array::RecordBatch>> {
+        self.scan_main_vertex_table_counted(columns, filter, None)
+            .await
+    }
+
+    /// [`Self::scan_main_vertex_table`], carrying a query's counters.
+    ///
+    /// Same reason as `scan_delta_table_counted`: a scan the counter never sees
+    /// is missing from `scans_reported` as well as `idx_scans`, and it is the
+    /// denominator that makes the zero readable.
+    pub async fn scan_main_vertex_table_counted(
+        &self,
+        columns: &[&str],
+        filter: Option<&FilterExpr>,
+        counters: Option<&Arc<crate::runtime::counters::QueryCounters>>,
+    ) -> Result<Option<arrow_array::RecordBatch>> {
         let backend = self.backend();
         let table_name = table_names::main_vertex_table_name();
 
@@ -1684,7 +1838,8 @@ impl StorageManager {
         let full_filter = combine_hwm_filter(self.version_high_water_mark(), filter);
 
         let request = ScanRequest::all(table_name)
-            .with_columns(columns.iter().map(|s| s.to_string()).collect());
+            .with_columns(columns.iter().map(|s| s.to_string()).collect())
+            .with_counters(counters.cloned());
         let request = match full_filter {
             Some(f) => request.with_filter(f),
             None => request,
@@ -2015,10 +2170,32 @@ impl StorageManager {
             ));
         }
 
-        let metric = schema
-            .vector_index_for_property(label, property)
+        let index_cfg = schema.vector_index_for_property(label, property);
+        let metric = index_cfg
             .map(|config| config.metric.clone())
             .unwrap_or(DistanceMetric::L2);
+
+        // Quantized indexes rank on lossy codes; without a refine pass recall is
+        // capped by quantization rather than by search breadth (0.56 vs 0.99 on a
+        // 32x-compressed 1M corpus, for ~3% throughput). Prefer the value stored
+        // at index creation, and compute an equivalent for indexes created before
+        // that field existed so they benefit without a rebuild. An explicit
+        // `refine_factor` — including `1`, the documented opt-out — is untouched.
+        let mut opts = opts;
+        let mut defaulted_refine = false;
+        if opts.refine_factor.is_none()
+            && let Some(cfg) = index_cfg
+        {
+            let dim = schema
+                .properties
+                .get(label)
+                .and_then(|props| props.get(property))
+                .and_then(|meta| crate::storage::muvera_index::resolve_vector_dim(&meta.r#type));
+            opts.refine_factor = cfg.default_refine_factor.or_else(|| {
+                uni_common::vector_index_opts::default_refine_factor(&cfg.index_type, dim)
+            });
+            defaulted_refine = opts.refine_factor.is_some();
+        }
 
         let backend = self.backend.as_ref();
         let name = table_names::vertex_table_name(label);
@@ -2057,6 +2234,15 @@ impl StorageManager {
                 k
             };
 
+            // Cap the *work* a defaulted refine may do, now that `fetch_k` is
+            // known. Only `defaulted_refine` is clamped; a caller-supplied value
+            // is left exactly as given.
+            let mut opts = opts;
+            if defaulted_refine && let Some(r) = opts.refine_factor {
+                let budget = (REFINE_CANDIDATE_CAP / fetch_k.max(1)).max(1);
+                opts.refine_factor = Some(r.min(budget as u32).max(1));
+            }
+
             let batches = backend
                 .vector_search(
                     &name,
@@ -2066,6 +2252,7 @@ impl StorageManager {
                     backend_metric,
                     combined_filter,
                     opts,
+                    ctx.and_then(|c| c.counters.clone()),
                 )
                 .await?;
 
@@ -2148,6 +2335,7 @@ impl StorageManager {
                 BackendMetric::Dot,
                 combined_filter,
                 opts,
+                ctx.and_then(|c| c.counters.clone()),
             )
             .await?;
         extract_vid_score_pairs(&batches, "_vid", "_distance")
@@ -2267,6 +2455,7 @@ impl StorageManager {
                     backend_metric,
                     combined_filter,
                     opts,
+                    ctx.and_then(|c| c.counters.clone()),
                 )
                 .await?;
             results = extract_vid_score_pairs(&batches, "_vid", "_distance")?;
@@ -2401,7 +2590,14 @@ impl StorageManager {
             let combined_filter = FilterExpr::all(filter_parts);
 
             let batches = backend
-                .full_text_search(&name, property, query, k, combined_filter)
+                .full_text_search(
+                    &name,
+                    property,
+                    query,
+                    k,
+                    combined_filter,
+                    ctx.and_then(|c| c.counters.clone()),
+                )
                 .await?;
 
             let mut fts_results = extract_vid_score_pairs(&batches, "_vid", "_score")?;
@@ -3004,4 +3200,69 @@ fn merge_l0_into_fts_results(
     // Re-sort by score descending (higher relevance first).
     results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     results.truncate(k);
+}
+
+#[cfg(test)]
+mod conflict_classification_tests {
+    use super::is_lance_conflict;
+
+    /// Concurrent table creation is retryable.
+    ///
+    /// `DatasetAlreadyExists` is what Lance raises when two writers race to
+    /// create the same table -- it maps `CommitError::CommitConflict` onto it,
+    /// so the name understates what it is -- and its message contains neither
+    /// "conflict" nor "Incompatible transaction", so the message matcher
+    /// classified it fatal and stranded a losing async flush's L0
+    /// (`async_flush_repro` R2/R3).
+    #[test]
+    fn concurrent_creation_is_retryable() {
+        let already_exists: anyhow::Error =
+            lance::Error::dataset_already_exists("/tmp/x/index.lance").into();
+        assert!(
+            !already_exists.to_string().contains("conflict"),
+            "precondition: if Lance ever adds 'conflict' to this message the \
+             test stops covering the case it was written for"
+        );
+        assert!(is_lance_conflict(&already_exists));
+    }
+
+    // `TooMuchWriteContention` is the other variant the message matcher missed
+    // ("Too many concurrent writers"), but its Snafu selector lives in
+    // `lance_core::error`, which `lance` does not re-export -- constructing one
+    // would mean a dev-dependency on `lance-core` for a single `matches!` arm.
+    // It is covered by `stringified_conflicts_still_match_via_the_fallback`
+    // instead, which pins the message; the typed arm is unexercised.
+
+    /// A non-conflict Lance error must not be retried, and must not reach the
+    /// string fallback -- which would match any message mentioning a conflict.
+    #[test]
+    fn unrelated_lance_errors_are_not_retryable() {
+        let corrupt: anyhow::Error =
+            lance::Error::io_source("disk quota exceeded".to_string().into()).into();
+        assert!(!is_lance_conflict(&corrupt));
+
+        let misleading: anyhow::Error =
+            lance::Error::io_source("failed while resolving a conflict".to_string().into()).into();
+        assert!(
+            !is_lance_conflict(&misleading),
+            "a typed non-conflict error must not fall through to message matching"
+        );
+    }
+
+    /// Retained for errors that crossed a boundary erasing the concrete type.
+    #[test]
+    fn stringified_conflicts_still_match_via_the_fallback() {
+        for msg in [
+            "Incompatible transaction: ...",
+            "Retryable commit conflict for version 3",
+            "Dataset already exists: /tmp/x",
+            "Too many concurrent writers. retry limit reached",
+        ] {
+            assert!(
+                is_lance_conflict(&anyhow::anyhow!("{msg}")),
+                "fallback missed: {msg}"
+            );
+        }
+        assert!(!is_lance_conflict(&anyhow::anyhow!("schema mismatch")));
+    }
 }

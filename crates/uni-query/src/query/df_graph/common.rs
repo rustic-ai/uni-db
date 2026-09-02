@@ -27,6 +27,59 @@ use super::GraphExecutionContext;
 use super::procedure_call::map_yield_to_canonical;
 use super::unwind::arrow_to_json_value;
 use crate::query::df_graph::MutationContext;
+
+/// Replace any interned-value handle in `batches` with its self-contained
+/// encoding.
+///
+/// A handle is only meaningful while the query scope that registered it is
+/// alive, and results outlive that scope — `execute_datafusion_with_plan`
+/// returns its batches and drops the planner that owns the scope. So the
+/// engine's boundary is where handles stop: call this before results escape.
+///
+/// Cheap when there is nothing to do — a column with no handle in it is passed
+/// through by `Arc` rather than rebuilt — and it operates on the *final* row
+/// count, not the intermediate fan-out the interning existed to protect.
+///
+/// # Errors
+///
+/// If a handle can no longer be resolved, which means its scope ended early.
+pub(crate) fn materialize_handles_in_batches(batches: &mut [RecordBatch]) -> DFResult<()> {
+    use arrow_array::LargeBinaryArray;
+    use uni_common::cypher_value_codec::{is_handle, materialize};
+
+    for batch in batches.iter_mut() {
+        let mut replaced: Option<Vec<ArrayRef>> = None;
+        for (idx, col) in batch.columns().iter().enumerate() {
+            let Some(lb) = col.as_any().downcast_ref::<LargeBinaryArray>() else {
+                continue;
+            };
+            if !(0..lb.len()).any(|i| !lb.is_null(i) && is_handle(lb.value(i))) {
+                continue;
+            }
+            let mut out: Vec<Option<Vec<u8>>> = Vec::with_capacity(lb.len());
+            for i in 0..lb.len() {
+                if lb.is_null(i) {
+                    out.push(None);
+                    continue;
+                }
+                let bytes = materialize(lb.value(i))
+                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+                out.push(Some(bytes.into_owned()));
+            }
+            let rebuilt: ArrayRef = Arc::new(LargeBinaryArray::from_iter(out));
+            if let Some(slot) = replaced
+                .get_or_insert_with(|| batch.columns().to_vec())
+                .get_mut(idx)
+            {
+                *slot = rebuilt;
+            }
+        }
+        if let Some(columns) = replaced {
+            *batch = RecordBatch::try_new(batch.schema(), columns).map_err(arrow_err)?;
+        }
+    }
+    Ok(())
+}
 use crate::query::df_planner::HybridPhysicalPlanner;
 use crate::query::executor::core::{OperatorStats, collect_plan_metrics};
 use crate::query::planner::LogicalPlan;
@@ -250,40 +303,13 @@ pub fn used_edge_id_arrays<'a>(
         .collect()
 }
 
-/// Extract a VID from a CypherValue.
+/// Extract a VID from a CypherValue that is a vertex.
 ///
-/// Handles both `Value::Node` (native node) and `Value::Map` with `_id` field
-/// (JSON round-tripped node from `cv_array_to_large_list`).
+/// Delegates to [`uni_common::Value::entity_vid`], the one definition of vertex
+/// identity. Kept as a named wrapper because this module's callers work in
+/// `u64` rather than `Vid`.
 fn extract_vid_from_value(val: &Value) -> Option<u64> {
-    match val {
-        Value::Node(node) => Some(node.vid.as_u64()),
-        Value::Map(map) => {
-            // Handle round-tripped nodes that became Maps.
-            // Path nodes use struct fields (_vid, _label, properties) which
-            // round-trip through arrow_to_json_value as { "_vid": Int(N), ... }.
-            // Value::Node → serde_json uses { "_id": "N", ... }.
-            // Check both keys to handle either path.
-
-            // Check _vid first (from path struct → arrow_to_json_value round-trip)
-            if let Some(Value::Int(vid)) = map.get("_vid") {
-                return Some(*vid as u64);
-            }
-            // Also check _id (from Value::Node → serde_json round-trip)
-            if let Some(Value::String(id_str)) = map.get("_id") {
-                return id_str
-                    .strip_prefix("Vid(")
-                    .and_then(|s| s.strip_suffix(')'))
-                    .unwrap_or(id_str)
-                    .parse::<u64>()
-                    .ok();
-            }
-            if let Some(Value::Int(id)) = map.get("_id") {
-                return Some(*id as u64);
-            }
-            None
-        }
-        _ => None,
-    }
+    val.entity_vid().map(|vid| vid.as_u64())
 }
 
 /// Extract VIDs from a `LargeBinaryArray` of CypherValue-encoded values.
@@ -571,7 +597,7 @@ impl EntityPropertyCache {
         Ok(cache)
     }
 
-    fn vertex(&self, vid: uni_common::core::id::Vid) -> Option<&uni_common::Properties> {
+    pub(crate) fn vertex(&self, vid: uni_common::core::id::Vid) -> Option<&uni_common::Properties> {
         self.vertices.get(&vid)
     }
 
@@ -608,7 +634,7 @@ impl EdgeAppendCtx<'_> {
     /// endpoint sibling), and the adjacency probe identifies a flushed edge's
     /// type as a by-product of locating it but never runs for a resident one.
     /// Consulting both is what keeps `_type_name` correct across a flush.
-    fn type_name(&self, eid: Eid, probed_type_id: Option<u32>) -> String {
+    pub(crate) fn type_name(&self, eid: Eid, probed_type_id: Option<u32>) -> String {
         if let Some(name) = uni_store::runtime::l0_visibility::get_edge_type(eid, self.query_ctx) {
             return name;
         }
@@ -1437,6 +1463,15 @@ pub async fn execute_subplan_with_outer_vars(
         outer_values.clone(),
     );
     planner.set_outer_entity_vars(outer_entity_vars.clone());
+
+    // A sub-plan inherits the outer query's budget: the planner builds its own
+    // `GraphExecutionContext` from the L0 context alone, so without this the
+    // deadline stops at the subquery boundary and a correlated comprehension
+    // re-enters unbounded work once per outer row. See #207.
+    planner = planner.with_deadline_and_cancellation(
+        graph_ctx.deadline_for_host(),
+        graph_ctx.cancellation_token_for_host(),
+    );
 
     // Propagate registries from parent context so procedures remain available
     // inside correlated subqueries (Apply operator).

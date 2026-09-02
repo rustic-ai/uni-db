@@ -2,6 +2,26 @@
 
 Uni provides native vector search over embedding properties with 8 single-vector ANN index algorithms (Flat, IVF-Flat/SQ/PQ/RQ, HNSW-Flat/SQ/PQ) featuring scalar, product, and RaBitQ quantization — plus MUVERA for multi-vector (ColBERT / late-interaction) columns. The default algorithm is IVF-PQ with cosine distance. Use it for semantic search, RAG, and similarity-based retrieval.
 
+!!! tip "IVF-PQ refines by default (since 3.5); override or opt out explicitly"
+
+    The default algorithm is IVF-PQ, which stores lossy compressed codes.
+    Ranking on those approximate distances alone caps recall at roughly **0.56**
+    on a 1M-vector benchmark, so a quantized index now applies a
+    `refine_factor` derived from its compression ratio — the same benchmark
+    measures **0.978** with nothing passed. Set it explicitly to tune, or
+    `refine_factor: 1` to opt out:
+
+    ```cypher
+    CALL uni.vector.query('Document', 'embedding', $q, 10, NULL, NULL,
+      { nprobes: 64, refine_factor: 20 })
+    YIELD node, score
+    RETURN node.title, score
+    ```
+
+    Raising `nprobes` alone does not fix it. See
+    [Indexing — Query-Time Tuning](../concepts/indexing.md#query-time-tuning)
+    for the measured numbers and the equivalent `ef_search` guidance for HNSW.
+
 ## What It Provides
 
 - Vector properties stored alongside graph data.

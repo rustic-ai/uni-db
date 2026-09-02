@@ -41,6 +41,16 @@ fn base_tokens() -> Vec<Vec<f32>> {
     vec![basis(4), basis(5)]
 }
 
+/// The doomed doc's tokens — orthogonal to [`target_tokens`], so MaxSim against
+/// the query is 0 and it can never outrank `target`.
+///
+/// They must not be the query tokens: `commit::after-wal-flush` is the commit
+/// point, so the doomed write is durable and comes back on replay, and reusing
+/// `target_tokens()` made the top-1 assertions a scan-order tie at MaxSim 2.0.
+fn doomed_tokens() -> Vec<Vec<f32>> {
+    vec![basis(6), basis(7)]
+}
+
 fn to_value(tokens: &[Vec<f32>]) -> Value {
     Value::List(
         tokens
@@ -169,7 +179,7 @@ async fn multi_create_that_crashes(db: Arc<Uni>, title: &'static str) {
         let tx = s.tx().await.unwrap();
         tx.execute_with("CREATE (:Doc {title: $t, tokens: $toks})")
             .param("t", Value::String(title.to_string()))
-            .param("toks", to_value(&target_tokens()))
+            .param("toks", to_value(&doomed_tokens()))
             .run()
             .await
             .unwrap();
@@ -205,6 +215,13 @@ async fn multivector_committed_value_survives_crash_recovery() -> Result<()> {
         doc_count(&db, "target").await?,
         1,
         "committed multi-vector doc lost across crash recovery"
+    );
+    // The seam IS the commit point, so the doomed write is durable and must come
+    // back as well; it simply must not outrank `target`.
+    assert_eq!(
+        doc_count(&db, "doomed").await?,
+        1,
+        "a multi-vector write already durable in the WAL at the crash must recover"
     );
     assert_eq!(
         top_multi_title(&db).await?.as_deref(),
@@ -366,11 +383,11 @@ async fn multivector_abort_child() {
     match scenario.as_str() {
         "after-wal-flush" => {
             crate::crash_harness::abort_at("commit::after-wal-flush");
-            let _ = insert_doc(&db, "doomed", &target_tokens()).await;
+            let _ = insert_doc(&db, "doomed", &doomed_tokens()).await;
         }
         "after-validate" => {
             crate::crash_harness::abort_at("commit::after-validate");
-            let _ = insert_doc(&db, "doomed", &target_tokens()).await;
+            let _ = insert_doc(&db, "doomed", &doomed_tokens()).await;
         }
         "during-flush" => {
             crate::crash_harness::abort_at("flush::after-rotate-before-lance");

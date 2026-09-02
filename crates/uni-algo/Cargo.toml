@@ -20,4 +20,5 @@ rayon = { workspace = true }
 fxhash = { workspace = true }
 rand = { workspace = true }
 arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
 async-stream = "0.3"

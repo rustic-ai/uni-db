@@ -6,7 +6,9 @@ use crate::storage::manager::StorageManager;
 use anyhow::{Result, anyhow};
 use arrow_array::Array;
 use arrow_array::builder::{ListBuilder, UInt64Builder};
-use arrow_array::{ListArray, RecordBatch, UInt64Array};
+use arrow_array::{
+    LargeBinaryArray, ListArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt64Array,
+};
 use metrics;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -42,6 +44,23 @@ impl Compactor {
                 Ok(_) => {}
                 Err(e) => error!("Failed to compact vertices for {}: {}", label, e),
             }
+
+            // Crash window: some labels' vertex tables have been replaced and
+            // the rest have not, and no adjacency has been compacted at all
+            // (that phase runs after this loop). A vertex carrying two labels
+            // therefore lives in one compacted table and one uncompacted table
+            // simultaneously.
+            //
+            // Recovery duty: both label anchors must agree about it. The
+            // tombstone fan-out writes a tombstone into EVERY label's table, and
+            // this pass physically drops tombstones — so one anchor can lose the
+            // evidence of a delete while the other keeps it, and
+            // `find_props_by_vid` takes a global best version across all of the
+            // vid's labels.
+            //
+            // `schema.labels` is a map, so which label this fires after is not
+            // defined. Assertions must hold whichever one ran.
+            fail::fail_point!("compaction::between-labels");
         }
 
         // Compact Edges
@@ -59,6 +78,18 @@ impl Compactor {
                     }
                 }
             }
+
+            // Crash window: for this edge type, `adj_..._fwd` is merged AND its
+            // deltas are cleared, while `adj_..._bwd` and its deltas are
+            // untouched. The two directions therefore disagree about every edge
+            // deleted since the last compaction.
+            //
+            // Recovery duty: reads must still agree in both directions — the
+            // bwd side resolves through its intact L1 overlay — and the next
+            // compaction must converge them. Nothing in this loop ties the two
+            // directions together, so the agreement is a claim about the read
+            // path's delta overlay, not about compaction.
+            fail::fail_point!("compaction::between-fwd-and-bwd");
 
             // Incoming: dst_labels
             for label in &meta.dst_labels {
@@ -149,6 +180,8 @@ impl Compactor {
         let mut vertex_state: HashMap<Vid, (Properties, bool)> = HashMap::new();
         let mut vertex_versions: HashMap<Vid, u64> = HashMap::new();
         let mut vertex_labels: HashMap<Vid, Vec<String>> = HashMap::new();
+        let mut created_at: HashMap<Vid, i64> = HashMap::new();
+        let mut updated_at: HashMap<Vid, i64> = HashMap::new();
 
         let mut rows_processed = 0;
 
@@ -177,6 +210,27 @@ impl Compactor {
             let labels_col = batch
                 .column_by_name("_labels")
                 .and_then(|c| c.as_any().downcast_ref::<arrow_array::ListArray>());
+
+            // `ext_id` and `overflow_json` are on the reserved-property list, so
+            // they can NEVER appear in `label_props` — the schema-driven rebuild
+            // below is structurally incapable of seeing them. Read them from
+            // their physical columns and put them back into the property map, so
+            // `build_record_batch_with_timestamps` re-derives `ext_id`, `_uid`
+            // and `overflow_json` from the same inputs the flush path used.
+            let ext_id_col = batch
+                .column_by_name("ext_id")
+                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+            let overflow_col = batch
+                .column_by_name("overflow_json")
+                .and_then(|c| c.as_any().downcast_ref::<LargeBinaryArray>());
+            // Timestamps are metadata rather than properties, so they are
+            // carried in side maps and handed to the batch builder directly.
+            let created_col = batch
+                .column_by_name("_created_at")
+                .and_then(|c| c.as_any().downcast_ref::<TimestampNanosecondArray>());
+            let updated_col = batch
+                .column_by_name("_updated_at")
+                .and_then(|c| c.as_any().downcast_ref::<TimestampNanosecondArray>());
 
             for i in 0..batch.num_rows() {
                 let vid = Vid::from(vid_col.value(i));
@@ -234,6 +288,45 @@ impl Compactor {
                     }
                 }
 
+                // Restore the reserved columns the loop above cannot reach.
+                if let Some(col) = ext_id_col
+                    && !col.is_null(i)
+                {
+                    row_props.insert(
+                        "ext_id".to_string(),
+                        Value::String(col.value(i).to_string()),
+                    );
+                }
+                if let Some(col) = overflow_col
+                    && !col.is_null(i)
+                    && let Value::Map(overflow) =
+                        uni_common::cypher_value_codec::decode(col.value(i))?
+                {
+                    // Schemaless properties merge exactly like declared ones;
+                    // `build_overflow_json_column` re-splits them on the way out.
+                    crate::storage::property_builder::merge_overflow_into(&mut row_props, overflow);
+                }
+
+                // `_created_at` is the earliest we have seen for this vid and
+                // `_updated_at` the latest: rows arrive unordered, so taking the
+                // row's own value would depend on scan order.
+                if let Some(col) = created_col
+                    && !col.is_null(i)
+                {
+                    created_at
+                        .entry(vid)
+                        .and_modify(|existing| *existing = (*existing).min(col.value(i)))
+                        .or_insert(col.value(i));
+                }
+                if let Some(col) = updated_col
+                    && !col.is_null(i)
+                {
+                    updated_at
+                        .entry(vid)
+                        .and_modify(|existing| *existing = (*existing).max(col.value(i)))
+                        .or_insert(col.value(i));
+                }
+
                 crdt_merges += Self::merge_row_into_state(
                     row_props,
                     null_props,
@@ -263,16 +356,29 @@ impl Compactor {
         }
 
         if !valid_vertices.is_empty() {
-            let batch = dataset.build_record_batch(
+            let batch = dataset.build_record_batch_with_timestamps(
                 &valid_vertices,
                 &valid_deleted,
                 &valid_versions,
                 &schema,
+                Some(&created_at),
+                Some(&updated_at),
             )?;
             dataset
                 .replace(self.storage.backend(), batch, &schema)
                 .await?;
         }
+
+        // Crash window: the per-label table has been replaced with the merged,
+        // tombstone-free row set, while `main_vertices` still holds the original
+        // rows INCLUDING the `_deleted = true` tombstones. The two tables
+        // disagree by construction until the next compaction.
+        //
+        // Recovery duty: a vertex deleted before the crash must stay deleted —
+        // the surviving main-table row must not resurrect it — and a survivor
+        // must keep every property, including the reserved columns this pass
+        // reconstructs.
+        fail::fail_point!("compaction::after-vertex-replace");
 
         let duration = start.elapsed();
         let rows_reclaimed = rows_processed as u64 - valid_vertices.len() as u64;
@@ -563,6 +669,18 @@ impl Compactor {
             // Replace the table with compacted data
             adj_ds.replace(self.storage.backend(), batch).await?;
         }
+
+        // Crash window: L2 `adj_{et}_{dir}` has been fully overwritten with
+        // merge(L2, deltas), but `delta_{et}_{dir}` still holds every merged row
+        // at `_version <= clear_hwm`. This is the only genuine write-then-delete
+        // window in the compaction path.
+        //
+        // Recovery duty: none — the redo must be a no-op. Re-applying the same
+        // deltas onto an already-merged L2 is safe only because
+        // `apply_deltas_to_edges` is a per-op HashMap insert/remove. That is a
+        // property of the merge, not a protocol guarantee, so it is asserted
+        // rather than assumed.
+        fail::fail_point!("compaction::after-adj-replace-before-delta-clear");
 
         // CRITICAL: Clear Delta L1 after compaction
         // Topology ops from Delta L1 are now incorporated into L2 adjacency.

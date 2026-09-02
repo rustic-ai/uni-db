@@ -20,7 +20,7 @@ YIELD node, score, distance, vector_score, rerank_score, vid
 | `k` | Integer | Yes | Number of results |
 | `filter` | String | No | Lance/DataFusion WHERE predicate for **pre-filtering** |
 | `threshold` | Float | No | Minimum similarity score (0-1); results below are excluded |
-| `options` | Map | No | Reranker configuration (see [Section 12](#12-cross-encoder-reranking)) |
+| `options` | Map | No | ANN tuning (`nprobes`, `refine_factor`, `ef_search`) plus reranker configuration (see [ANN tuning](#ann-tuning-knobs) and [Section 12](#12-cross-encoder-reranking)) |
 
 | YIELD Column | Type | Description |
 |---|---|---|
@@ -53,6 +53,53 @@ CALL uni.vector.query('Document', 'embedding', 'graph databases for beginners', 
 YIELD node, score
 RETURN node.title, score
 ```
+
+### ANN tuning knobs
+
+| Option | Applies to | Effect |
+|---|---|---|
+| `refine_factor` | IVF-PQ / IVF-SQ | Re-score `refine_factor x k` candidates against the original vectors |
+| `nprobes` | all IVF families | How many IVF partitions to probe |
+| `ef_search` | HNSW families | Search beam width |
+
+**Since 3.5 a quantized index applies a `refine_factor` by default**, derived
+from its compression ratio; pass one explicitly to tune, or `refine_factor: 1` to
+opt out. The reason it exists: IVF-PQ is the *default* algorithm and stores lossy
+codes, so ranking on approximate distances alone caps recall — with no error and
+nothing unusual in the output. Measured on SIFT-1M (1M x 128-d, L2, K=10, against the dataset's own
+ground truth):
+
+| index | knob | recall@10 | QPS |
+|---|---|---:|---:|
+| ivf_pq | `nprobes=64` (no refine) | 0.562 | 50.8 |
+| ivf_pq | `nprobes=128` (no refine) | 0.562 | 45.4 |
+| ivf_pq | `nprobes=64, refine_factor=5` | 0.926 | 52.3 |
+| ivf_pq | `nprobes=64, refine_factor=20` | **0.992** | 49.1 |
+| hnsw | `ef_search=50` | 0.980 | 32.6 |
+| flat | exact | 1.000 | 6.3 |
+
+Raising `nprobes` alone does not help — recall is flat from 64 to 128, because
+the ceiling is quantization precision, not search breadth. With the default in
+place that `nprobes=64` cell measures **0.978**.
+
+`sub_vectors` is also dimension-aware since 3.5: it was a fixed 16, which
+compressed 192x at 768-d and 384x at 1536-d. It now targets ~32x by picking the
+smallest divisor of `dim` at or above `dim/8` (768-d -> 96).
+
+```cypher
+CALL uni.vector.query('Document', 'embedding', $q, 10, NULL, NULL,
+    { nprobes: 64, refine_factor: 20 })
+YIELD node, score
+RETURN node.title, score
+```
+
+For HNSW, `ef_search` recall saturates at ~50 and throughput declines after it;
+25-50 is the useful band. The underlying default (`1.5 x k`) is usually too low
+for recall-sensitive work.
+
+Source: `crates/uni/benches/ann_pareto.rs`, analysis in
+`docs/perf/ann-2026-08-25.md`. One machine, one corpus — treat as a starting
+band, not a guarantee.
 
 ---
 

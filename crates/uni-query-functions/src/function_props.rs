@@ -73,6 +73,24 @@ static FUNCTION_SPECS: LazyLock<HashMap<&'static str, FunctionPropertySpec>> =
             ("ID", entity_arg_only),
             ("ELEMENTID", entity_arg_only),
             ("TYPE", entity_arg_only),
+            // `hasLabel(entity, 'Label')` is the planner's own predicate for a
+            // labelled traversal target. It reads `_labels`, which the traversal
+            // emits unconditionally, so the entity needs no property
+            // materialisation.
+            //
+            // Missing here it took the unknown-function fallback and was marked
+            // "*": every labelled traversal target hydrated its whole declared
+            // schema plus `_all_props`, and LDBC IC4's `DISTINCT tag, post`
+            // asked for 1.4 GB against a 1 GiB pool. A scan applies its label by
+            // pushdown and synthesises no predicate, which is why the same
+            // entity was cheap from a scan and ruinous from a traversal.
+            //
+            // Third instance of this fallback biting; see #62 and #134 above.
+            // The registry fails open — an unregistered function silently
+            // degrades to full materialisation, which is always correct and
+            // sometimes ruinous. `planner::entity_widening_test` guards the
+            // class at the plan level rather than by name. See issue #203.
+            ("HASLABEL", entity_arg_only),
             // Relationship endpoint accessors: need only the edge's
             // `_src_vid` / `_dst_vid` metadata, never its property bag.
             // Without these entries the unknown-function fallback marks the
@@ -168,6 +186,26 @@ mod tests {
                 "{func} must not need full entity materialization"
             );
         }
+    }
+
+    /// `hasLabel` must not widen its entity (#203).
+    ///
+    /// The planner synthesises this predicate for every labelled traversal
+    /// target. Unregistered it takes the unknown-function fallback and marks the
+    /// entity `"*"`, so the target hydrates its whole declared schema plus
+    /// `_all_props` — 1.4 GB against a 1 GiB pool on LDBC IC4. It reads
+    /// `_labels`, which the traversal emits unconditionally.
+    #[test]
+    fn test_haslabel_does_not_need_the_entity() {
+        let spec = get_function_spec("hasLabel").expect(
+            "hasLabel must be registered — the unknown-function fallback wildcards \
+             its entity argument",
+        );
+        assert_eq!(spec.entity_args, &[0], "the entity is argument 0");
+        assert!(
+            !spec.needs_full_entity,
+            "hasLabel reads _labels only; requiring the full entity is what #203 fixed"
+        );
     }
 
     #[test]

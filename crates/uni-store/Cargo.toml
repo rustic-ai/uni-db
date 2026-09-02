@@ -82,6 +82,12 @@ loom = { version = "0.7", optional = true }
 shuttle = { version = "0.9", optional = true }
 
 [dev-dependencies]
+# `test-util` (NOT in tokio's `full`) enables the paused clock:
+# `#[tokio::test(start_paused = true)]` plus `time::advance`. It lets a test
+# drive a timer-driven background loop deterministically and in ~0 wall-clock,
+# instead of sleeping for real. See `docs/testing/madsim-spike-2026-08-25.md`
+# for why this is preferred over a deterministic-runtime simulator here.
+tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }
 proptest = { workspace = true }
 # Capture emitted `metrics` counters in-process so tests can assert on

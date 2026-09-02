@@ -330,6 +330,7 @@ async fn create_index_internal(
                 metric,
                 embedding_config,
                 metadata: Default::default(),
+                default_refine_factor: None,
             })
         }
         "SCALAR" | "BTREE" => IndexDefinition::Scalar(ScalarIndexConfig {

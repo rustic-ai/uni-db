@@ -782,6 +782,10 @@ impl PropertyManager {
         // one (finding [3]); without this, an out-of-order DELETE/live pair
         // resurrected a deleted edge's props depending on scan order.
         let mut best_version: HashMap<uni_common::core::id::Eid, u64> = HashMap::new();
+        // Eids whose winning delta row is a delete. Gates the main-edges
+        // fallback below so a tombstoned edge is not resurrected (C2).
+        let mut tombstoned: std::collections::HashSet<uni_common::core::id::Eid> =
+            std::collections::HashSet::new();
 
         // In the new storage model, EIDs are pure auto-increment and don't embed type info.
         // We need to scan all edge type datasets to find the edges.
@@ -895,8 +899,16 @@ impl PropertyManager {
                     // op=1 is Delete
                     if op_col.value(row) == 1 {
                         result.remove(&Vid::from(eid.as_u64()));
+                        // Record it, or the main-edges fallback below will
+                        // re-hydrate the edge precisely *because* it is
+                        // missing from `result` -- review finding C2, which
+                        // the vertex path guards with its own `tombstoned`
+                        // set and this one did not.
+                        tombstoned.insert(eid);
                         continue;
                     }
+                    // A newer live row un-deletes the edge.
+                    tombstoned.remove(&eid);
 
                     let mut props =
                         Self::extract_row_properties(&batch, row, &valid_props, type_props)?;
@@ -948,12 +960,24 @@ impl PropertyManager {
         // zero after a few hundred write transactions. Weighted algorithms
         // degraded at the same instant, defaulting to unit weights.
         //
-        // Only unresolved EIDs pay the per-EID lookup, so the batch fast path is
+        // Only unresolved EIDs reach the main-edges scan, so the fast path is
         // unchanged for edges whose properties are still in the delta runs.
+        //
+        // The misses are gathered first and resolved in **one** batched scan.
+        // Resolving them one at a time is what made LDBC IC5 unanswerable: each
+        // EID cost its own `ScanRequest` at ~1.5 ms, and because adjacency
+        // compaction deletes the delta rows it folds into L2, every edge on a
+        // compacted or reloaded store misses and pays it. A 4809-edge traversal
+        // spent 7.3 s of 7.4 s in this block; IC5's ~1.6M edges extrapolated to
+        // ~41 min against a 300 s budget.
         {
             use crate::storage::main_edge::MainEdgeDataset;
+
+            let mut unresolved: Vec<uni_common::core::id::Eid> = Vec::new();
             for &eid in eids {
-                if l0_visibility::is_edge_deleted(eid, ctx) {
+                // Skip both L0 deletes and delta-table deletes: either is a
+                // tombstone the fallback must not undo (C2).
+                if l0_visibility::is_edge_deleted(eid, ctx) || tombstoned.contains(&eid) {
                     continue;
                 }
                 // This map is keyed by Vid-from-Eid, matching the delta scan above.
@@ -962,16 +986,20 @@ impl PropertyManager {
                     None => true,
                     Some(found) => properties.iter().any(|p| !found.contains_key(*p)),
                 };
-                if !missing_any {
-                    continue;
+                if missing_any {
+                    unresolved.push(eid);
                 }
-                if let Some(props) = MainEdgeDataset::find_props_by_eid(
+            }
+
+            if !unresolved.is_empty() {
+                let fetched = MainEdgeDataset::find_props_by_eids(
                     self.storage.backend(),
-                    eid,
+                    &unresolved,
                     self.storage.version_high_water_mark(),
                 )
-                .await?
-                {
+                .await?;
+                for (eid, props) in fetched {
+                    let key = uni_common::core::id::Vid::from(eid.as_u64());
                     let entry = result.entry(key).or_default();
                     for (k, v) in props {
                         entry.entry(k).or_insert(v);
@@ -1045,11 +1073,25 @@ impl PropertyManager {
             return Ok(result);
         }
 
-        // Phase 1: Get from L0 layers (oldest to newest)
+        // Phase 1: Get from L0 layers (oldest to newest).
+        //
+        // A plain write adds labels, so it unions; a `SET`/`REMOVE` label
+        // *replaces* the set and records `vertex_label_overwrites`. Unioning
+        // both alike ignored removals entirely -- `REMOVE n:Label` was a no-op
+        // and the label came back on the next read. This mirrors
+        // `columnar_scan::build_labels_column_for_known_label`, which already
+        // gets the rule right: union for plain writes, newest overwrite wins.
+        let mut overwritten: HashMap<Vid, Vec<String>> = HashMap::new();
         if let Some(ctx) = ctx {
             let mut collect_labels = |l0: &L0Buffer| {
                 for &vid in vids {
-                    if let Some(labels) = l0.get_vertex_labels(vid) {
+                    let Some(labels) = l0.get_vertex_labels(vid) else {
+                        continue;
+                    };
+                    if l0.vertex_label_overwrites.contains(&vid) {
+                        // Newest wins: buffers are visited oldest to newest.
+                        overwritten.insert(vid, labels.to_vec());
+                    } else {
                         result
                             .entry(vid)
                             .or_default()
@@ -1080,10 +1122,15 @@ impl PropertyManager {
         }
 
         for &vid in vids {
-            if result.contains_key(&vid) {
-                continue; // Already have labels from L0
+            // An overwrite is authoritative: the stored set is exactly what it
+            // replaced, so merging it back would undo the removal.
+            if overwritten.contains_key(&vid) {
+                continue;
             }
-
+            // Otherwise the stored set is still merged in even when L0 has
+            // entries for this vid. Skipping it truncated a flushed
+            // multi-label vertex to whatever labels one `SET n.prop` happened
+            // to carry.
             if let Some(labels) = self.storage.get_labels_from_index(vid) {
                 merge_labels(result.entry(vid).or_default(), labels);
             } else {
@@ -1105,6 +1152,11 @@ impl PropertyManager {
             for (vid, labels) in storage_labels {
                 merge_labels(result.entry(vid).or_default(), labels);
             }
+        }
+
+        // Apply overwrites last: they replace whatever was accumulated.
+        for (vid, labels) in overwritten {
+            result.insert(vid, labels);
         }
 
         // Deduplicate and sort labels
@@ -1210,10 +1262,30 @@ impl PropertyManager {
                 continue;
             }
             let l0_props = l0_visibility::accumulate_vertex_props(vid, ctx);
-            if let Some(props) = l0_props {
-                result.insert(vid, props);
-            } else {
-                need_storage.push(vid);
+            // Skipping storage when L0 has the vid is only sound while L0 rows
+            // are *complete* -- the invariant `insert_vertex_partial_full`
+            // documents, and the default write path upholds by merging a full
+            // map before staging.
+            //
+            // `partial_lance_writes` breaks it: `insert_vertex_partial` stages
+            // only the touched keys, so the L0 row is a delta and the stored
+            // properties are still the rest of the truth. Reading L0 alone
+            // dropped them -- and since the SET prefetch merges over this map
+            // and writes the result back, a dropped property was deleted, not
+            // just missing from one read.
+            let partial = l0_visibility::has_partial_vertex_keys(vid, ctx);
+            match l0_props {
+                Some(props) if !partial => {
+                    result.insert(vid, props);
+                }
+                Some(props) => {
+                    // Delta row: keep it, but read storage underneath. The L0
+                    // values win on shared keys, applied after the storage
+                    // merge below.
+                    result.insert(vid, props);
+                    need_storage.push(vid);
+                }
+                None => need_storage.push(vid),
             }
         }
 
@@ -1532,6 +1604,9 @@ impl PropertyManager {
             }
         }
 
+        // Eids whose replay ends in a delete; gates the fallback below (C2).
+        let mut replay_tombstoned: std::collections::HashSet<uni_common::core::id::Eid> =
+            std::collections::HashSet::new();
         for (eid, mut rows) in per_eid_rows {
             rows.sort_by_key(|(ver, _, _)| *ver);
 
@@ -1569,6 +1644,11 @@ impl PropertyManager {
                 // have been recorded under this EID by Phase 1 (matches
                 // is_edge_deleted single-EID semantics).
                 result.remove(&eid);
+                // And record it, or the main-edges fallback below re-hydrates
+                // the edge *because* its entry is now missing -- review
+                // finding C2, which the vertex path guards and this one did
+                // not.
+                replay_tombstoned.insert(eid);
                 continue;
             }
 
@@ -1590,22 +1670,33 @@ impl PropertyManager {
         // relationship read an empty prefetch and wiped the edge's untouched
         // properties (#102). Only misses pay the per-EID lookup, so the batch
         // fast-path is preserved for fully-typed edges.
+        //
+        // The misses are gathered first and resolved in one batched scan, for
+        // the reason given on the sibling fallback in `get_batch_edge_props`:
+        // an entirely schemaless relationship type misses on *every* EID, so a
+        // per-EID lookup here is a full `ScanRequest` per edge.
         use crate::storage::main_edge::MainEdgeDataset;
+
+        let mut unresolved: Vec<uni_common::core::id::Eid> = Vec::new();
         for &eid in eids {
-            if l0_visibility::is_edge_deleted(eid, ctx) {
+            // Skip both L0 deletes and edges whose replay ended in a delete:
+            // either is a tombstone the fallback must not undo (C2).
+            if l0_visibility::is_edge_deleted(eid, ctx) || replay_tombstoned.contains(&eid) {
                 continue;
             }
-            let needs_fallback = result.get(&eid).is_none_or(|p| p.is_empty());
-            if !needs_fallback {
-                continue;
+            if result.get(&eid).is_none_or(|p| p.is_empty()) {
+                unresolved.push(eid);
             }
-            if let Some(props) = MainEdgeDataset::find_props_by_eid(
+        }
+
+        if !unresolved.is_empty() {
+            let fetched = MainEdgeDataset::find_props_by_eids(
                 self.storage.backend(),
-                eid,
+                &unresolved,
                 self.storage.version_high_water_mark(),
             )
-            .await?
-            {
+            .await?;
+            for (eid, props) in fetched {
                 let entry = result.entry(eid).or_default();
                 for (k, v) in props {
                     entry.entry(k).or_insert(v);

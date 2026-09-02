@@ -451,8 +451,46 @@ pub(crate) fn find_common_result_type(
         return DataType::LargeBinary;
     }
 
-    // Rule 7: Fallback → Utf8
+    // Rule 7: All graph entities → LargeBinary (CypherValue).
+    //
+    // Two node structs are the *same* Cypher type but not the same Arrow type:
+    // the shape depends on which properties the plan materialised for each
+    // variable, so a scanned anchor carrying `_all_props` and a traversal target
+    // without it differ by a field, and two different labels differ by their
+    // property columns outright. Rule 1 only catches the case where they happen
+    // to coincide, and without this the pair falls through to the Utf8 fallback
+    // below and dies on `Unsupported CAST from Struct(..) to Utf8`.
+    //
+    // CypherValue is the encoding that already represents any entity, so it is
+    // the common type here for the same reason it is in Rule 6. This is what
+    // makes `CASE WHEN .. THEN a ELSE b END` over two node variables work at
+    // all — including `startNode(r)` over an undirected relationship, which the
+    // planner rewrites into exactly that shape.
+    if non_null_types.iter().all(|t| is_entity_struct(t)) {
+        return DataType::LargeBinary;
+    }
+
+    // Rule 8: Fallback → Utf8
     DataType::Utf8
+}
+
+/// Is this Arrow type a graph entity struct — a node or a relationship?
+///
+/// Identified by the identity field the plan always materialises for one
+/// (`_vid` for a node, `_eid` for a relationship) rather than by the full field
+/// list, which varies with the properties a given query asked for.
+///
+/// Public because `UNION` needs the same judgement the `CASE` coercion above
+/// makes: two branches returning entities of different labels are the same
+/// Cypher type with different Arrow types, and both paths resolve that by
+/// coercing to the CypherValue encoding.
+pub fn is_entity_struct(t: &DataType) -> bool {
+    let DataType::Struct(fields) = t else {
+        return false;
+    };
+    fields
+        .iter()
+        .any(|f| f.name() == "_vid" || f.name() == "_eid")
 }
 
 /// Coerce a single CASE branch expression from `from_type` to `target_type`.
@@ -825,6 +863,71 @@ mod tests {
         let schema = datafusion::common::DFSchema::empty();
         let common = find_common_result_type(&types, &schema);
         assert_eq!(common, DataType::Utf8);
+    }
+
+    /// Two node structs of differing shape unify to CypherValue, not Utf8.
+    ///
+    /// The shapes below are the ones a real plan produces: a scanned anchor
+    /// carries `_all_props` and a traversal target does not. Before this rule
+    /// the pair matched nothing and fell through to the Utf8 fallback, and the
+    /// physical planner then died on `Unsupported CAST from Struct(..) to
+    /// Utf8`.
+    #[test]
+    fn test_find_common_result_type_entity_structs_differing_in_shape() {
+        use datafusion::arrow::datatypes::Field;
+        let scanned = DataType::Struct(
+            vec![
+                Field::new("_vid", DataType::UInt64, true),
+                Field::new("name", DataType::Utf8, true),
+                Field::new("_all_props", DataType::LargeBinary, true),
+            ]
+            .into(),
+        );
+        let traversed = DataType::Struct(
+            vec![
+                Field::new("_vid", DataType::UInt64, true),
+                Field::new("name", DataType::Utf8, true),
+            ]
+            .into(),
+        );
+        let schema = datafusion::common::DFSchema::empty();
+        let common = find_common_result_type(&[scanned, traversed], &schema);
+        assert_eq!(common, DataType::LargeBinary);
+    }
+
+    /// Identical entity structs still take Rule 1 and stay a struct.
+    ///
+    /// Without this, the rule above would silently widen the common case —
+    /// every same-shape `CASE` over nodes would start round-tripping through
+    /// CypherValue for no reason.
+    #[test]
+    fn test_find_common_result_type_identical_entity_structs_are_unchanged() {
+        use datafusion::arrow::datatypes::Field;
+        let node = DataType::Struct(
+            vec![
+                Field::new("_vid", DataType::UInt64, true),
+                Field::new("name", DataType::Utf8, true),
+            ]
+            .into(),
+        );
+        let schema = datafusion::common::DFSchema::empty();
+        let common = find_common_result_type(&[node.clone(), node.clone()], &schema);
+        assert_eq!(common, node);
+    }
+
+    /// A non-entity struct is not an entity: it has no identity field, so it
+    /// keeps the old fallback rather than being encoded as an entity.
+    #[test]
+    fn test_find_common_result_type_plain_structs_are_not_entities() {
+        use datafusion::arrow::datatypes::Field;
+        let a = DataType::Struct(vec![Field::new("a", DataType::Int64, true)].into());
+        let b = DataType::Struct(vec![Field::new("b", DataType::Int64, true)].into());
+        let schema = datafusion::common::DFSchema::empty();
+        assert_eq!(
+            find_common_result_type(&[a, b], &schema),
+            DataType::Utf8,
+            "only structs carrying `_vid`/`_eid` are entities"
+        );
     }
 
     #[test]

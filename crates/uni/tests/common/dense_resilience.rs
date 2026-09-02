@@ -37,6 +37,17 @@ fn base_emb() -> Value {
     Value::Vector(vec![-0.8, 0.7, -0.6, 0.5, -0.4, 0.3, -0.2, 0.1])
 }
 
+/// The doomed doc's vector — anti-parallel to [`target_emb`], so its cosine
+/// similarity to the query is -1 and it can never outrank `target`.
+///
+/// It must not be the query vector. `commit::after-wal-flush` is the commit
+/// point, so the doomed write is durable and *does* come back on replay. Giving
+/// it `target_emb()` left two docs at distance 0 and made the top-1 assertions
+/// below a tie broken by replay and scan order.
+fn doomed_emb() -> Value {
+    Value::Vector(vec![-0.1, -0.2, -0.3, -0.4, -0.5, -0.6, -0.7, -0.8])
+}
+
 /// `Doc(title, emb: Vector)` + an exact `Flat`/Cosine index over `emb`.
 async fn define_dense_schema(db: &Uni) -> Result<()> {
     db.schema()
@@ -105,7 +116,7 @@ async fn dense_create_that_crashes(db: Arc<Uni>, title: &'static str) {
         let tx = s.tx().await.unwrap();
         tx.execute_with("CREATE (:Doc {title: $t, emb: $emb})")
             .param("t", Value::String(title.to_string()))
-            .param("emb", target_emb())
+            .param("emb", doomed_emb())
             .run()
             .await
             .unwrap();
@@ -141,6 +152,14 @@ async fn dense_committed_value_survives_crash_recovery() -> Result<()> {
         read_emb(&db, "target").await?,
         Some(target_emb()),
         "committed dense value corrupted or lost across crash recovery"
+    );
+    // The seam IS the commit point, so the doomed write is durable and must come
+    // back as well. Nothing asserted this before, which is how it went unnoticed
+    // that the doomed doc joins `target` in the ranking below.
+    assert_eq!(
+        read_emb(&db, "doomed").await?,
+        Some(doomed_emb()),
+        "a dense write already durable in the WAL at the crash must recover"
     );
     // Usable post-recovery WITHOUT a rebuild: the recovered doc is in L0 and the
     // dense read path unions it, so it is the top match with the dataset cold.
@@ -319,11 +338,11 @@ async fn dense_abort_child() {
     match scenario.as_str() {
         "after-wal-flush" => {
             crate::crash_harness::abort_at("commit::after-wal-flush");
-            let _ = insert_doc(&db, "doomed", target_emb()).await;
+            let _ = insert_doc(&db, "doomed", doomed_emb()).await;
         }
         "after-validate" => {
             crate::crash_harness::abort_at("commit::after-validate");
-            let _ = insert_doc(&db, "doomed", target_emb()).await;
+            let _ = insert_doc(&db, "doomed", doomed_emb()).await;
         }
         "during-flush" => {
             crate::crash_harness::abort_at("flush::after-rotate-before-lance");

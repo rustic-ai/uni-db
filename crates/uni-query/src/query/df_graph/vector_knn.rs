@@ -884,7 +884,8 @@ async fn build_result_batch(
             let data_type = resolve_property_type(prop_name, label_props);
             let column = crate::query::df_graph::scan::build_property_column_static(
                 vids, &props_map, prop_name, &data_type,
-            )?;
+            )
+            .map_err(exec_err)?;
             columns.push(column);
         }
     }

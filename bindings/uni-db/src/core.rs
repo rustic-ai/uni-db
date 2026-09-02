@@ -666,6 +666,9 @@ pub fn create_index_definition(
                 .unwrap_or(DistanceMetric::Cosine),
             embedding_config: None,
             metadata: Default::default(),
+            // `None` defers to the dimension-aware default, matching the DDL,
+            // procedure and config-map paths this arm exists to mirror.
+            default_refine_factor: None,
         })),
         "inverted" => Ok(IndexDefinition::Inverted(InvertedIndexConfig {
             name: format!("idx_{}_{}_inv", label, property),
@@ -777,6 +780,7 @@ pub fn create_index_definition_from_config(
                 metric,
                 embedding_config,
                 metadata: Default::default(),
+                default_refine_factor: None,
             }))
         }
 

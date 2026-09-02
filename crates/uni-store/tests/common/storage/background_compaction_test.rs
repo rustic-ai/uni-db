@@ -175,6 +175,18 @@ async fn write_and_flush(
 
 /// Helper: run background compaction for a given duration, then shut it down
 /// and return the final compaction status.
+/// Run the background compaction loop for `run_duration` of **virtual** time.
+///
+/// Every caller is a `#[tokio::test(start_paused = true)]`, so the clock only
+/// advances when this function advances it — and only when every task is idle.
+/// That makes tick delivery deterministic and costs no wall-clock: the same
+/// coverage that used to take a 2-second real sleep now takes milliseconds.
+///
+/// The stepping is load-bearing. A single bulk `advance(run_duration)` fires
+/// the timers and returns before the loop has polled them, so the shutdown
+/// below wins the `select!` and no compaction ever runs. Advancing in small
+/// steps and yielding between lets each tick's work — which is real Lance IO
+/// through `spawn_blocking` — finish before the clock moves again.
 async fn run_compaction_cycle(
     storage: &Arc<StorageManager>,
     run_duration: Duration,
@@ -182,7 +194,14 @@ async fn run_compaction_cycle(
     let (shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
     let handle = storage.clone().start_background_compaction(shutdown_rx);
 
-    tokio::time::sleep(run_duration).await;
+    let step = Duration::from_millis(50);
+    let steps = (run_duration.as_millis() / step.as_millis()).max(1);
+    for _ in 0..steps {
+        tokio::time::advance(step).await;
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+    }
 
     let _ = shutdown_tx.send(());
     handle.await.unwrap();
@@ -192,7 +211,7 @@ async fn run_compaction_cycle(
 
 /// Verify that background compaction runs Tier 2 semantic compaction
 /// (L1 deltas cleared, total_compactions >= 1).
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_background_compaction_runs_semantic() {
     let dir = tempdir().unwrap();
     let db_path_str = dir.path().to_str().unwrap();
@@ -233,7 +252,7 @@ async fn test_background_compaction_runs_semantic() {
 }
 
 /// Verify that the BySize trigger fires when max_l1_size_bytes is exceeded.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_compaction_by_size_trigger() {
     let dir = tempdir().unwrap();
     let db_path_str = dir.path().to_str().unwrap();
@@ -259,7 +278,7 @@ async fn test_compaction_by_size_trigger() {
 }
 
 /// Verify that the ByAge trigger fires when max_l1_age is exceeded.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_compaction_by_age_trigger() {
     let dir = tempdir().unwrap();
     let db_path_str = dir.path().to_str().unwrap();
@@ -277,7 +296,12 @@ async fn test_compaction_by_age_trigger() {
     write_and_flush(&storage, &schema_manager, edge_type_id, config).await;
 
     // Wait for data to age past the threshold
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // A REAL sleep, deliberately. `oldest_l1_age` is computed from
+    // `SystemTime::now()` (`storage/manager.rs`), not from tokio's clock, so a
+    // paused-clock `tokio::time::sleep` would auto-advance instantly and the
+    // data would never age past `max_l1_age`. Only the loop's ticking below is
+    // virtual; the aging itself has to be real.
+    std::thread::sleep(Duration::from_millis(200));
 
     let status = run_compaction_cycle(&storage, Duration::from_secs(2)).await;
 
@@ -291,7 +315,7 @@ async fn test_compaction_by_age_trigger() {
 /// Verify that l1_runs only counts non-empty delta tables.
 /// After semantic compaction clears deltas, l1_runs should be 0
 /// even though the tables still exist.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_l1_runs_counts_non_empty_only() {
     let dir = tempdir().unwrap();
     let db_path_str = dir.path().to_str().unwrap();
@@ -324,7 +348,7 @@ async fn test_l1_runs_counts_non_empty_only() {
 }
 
 /// Verify l1_estimated_bytes is computed from row counts, not hardcoded to 0.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_compaction_status_tracks_data_size() {
     let dir = tempdir().unwrap();
     let db_path_str = dir.path().to_str().unwrap();
@@ -356,7 +380,7 @@ async fn test_compaction_status_tracks_data_size() {
 
 /// Verify that background compaction handles an empty DB gracefully
 /// (no crash, no panic, 0 total_compactions).
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn test_background_compaction_handles_empty_db() {
     let dir = tempdir().unwrap();
     let db_path_str = dir.path().to_str().unwrap();

@@ -200,6 +200,70 @@ document deliberately does not guess.
 
 ---
 
+## Confirmed defects of this class, found later by LDBC SNB — 2026-08-26
+
+Both were found by running LDBC SNB Interactive against SF1, and neither is a
+planner fallback: they are a **different mechanism reaching the same outcome**.
+No guard is involved, nothing is attempted-then-abandoned. A comparison simply
+answers `false` where it should answer `true`, and every layer above it behaves
+correctly given that answer. So the catalogue's own qualification test — "it
+attempts something faster, falls back correctly, and says nothing" — does not
+match either of them, while the *symptom* is identical: a well-formed wrong
+answer with no error.
+
+That is worth recording here, because the document's premise is that
+result-only tests cannot see a silent fallback. These two show that result-only
+tests also cannot see a silent *comparison* failure unless the fixture makes the
+true and false answers differ — and against a graph where the affected filter
+matched nothing, "0 rows" looked like a legitimate result.
+
+### Backward adjacency after a bulk load
+
+`MATCH (t:Tag)<-[:HAS_TAG]-()` returned **zero rows** in the process that had
+just loaded the data, and the correct 24 311 after reopening the same graph. An
+*undirected* aggregation in the same run was correct throughout. Fixed in
+`uni-query`'s planner, which inferred traversal endpoint labels from the
+destination side regardless of direction; the regression test is
+`crates/uni/tests/common/storage/incoming_after_bulk_load.rs`.
+
+**Still open next door:** `crates/uni-bulk/src/bulk.rs` warms adjacency with
+`let _ = ... .warm_adjacency(...)`. A failure there is invisible and leaves
+backward rows unreachable for the life of the process — Site 20's shape exactly.
+
+### Graph entities were never members of a list
+
+`n IN [n]` — the same node, the same row — was **false**, while `n = n` was true.
+Every `IN` over a list of nodes or edges answered false.
+
+The mechanism is a representation mismatch rather than a guard.
+`translate_in_expression` (`crates/uni-query-functions/src/df_expr.rs`) rewrites a
+node/edge variable on the *left* of `IN` down to its bare `_vid` / `_eid` `Int64`
+column, because a list injected from a parameter holds ids. It does not rewrite
+the right side, so a list built inside the query still holds whole entities, and
+`_cypher_in` compared `Int` against an entity. `=` never took that path, which is
+why equality stayed correct and only `IN` was wrong.
+
+Fixed in `_cypher_in` via `entity_aware_eq`, the one place that can see both
+sides. Two details cost a full cycle each and are worth carrying forward:
+
+- **An entity has two live encodings.** A projected entity arrives as a
+  `Value::Map` carrying `_vid`, not as a typed `Value::Node`. A first fix that
+  handled only the typed variants was a complete no-op, and every test stayed
+  red. `cypher_eq` splits the same way — it grew a `Map`/`_vid` identity arm and
+  never grew the `Node` one, so entities there compared by vid **and** labels
+  **and** the whole property map.
+- **`EXPLAIN` did not settle this one.** Both the working and failing forms
+  produced the same `In { expr, list }` node; the divergence was below the plan,
+  in what the UDF received at runtime. What settled it was printing the actual
+  `Value`s inside `_cypher_in` — after three hypotheses that were each plausible,
+  each consistent with the plan, and each wrong.
+
+Regression tests: `crates/uni/tests/common/cypher_read/entity_identity_in_list_test.rs`.
+LDBC IC3 went from `0 rows` to matching, which is what the non-vacuity gate in
+the runner is for.
+
+---
+
 ## How to work this list
 
 Per site, following the retrofit recipe in

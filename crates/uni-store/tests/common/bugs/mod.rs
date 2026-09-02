@@ -2,6 +2,7 @@ pub mod test_issue_112_transaction_edge_versions;
 pub mod test_issue_143_oom_guards;
 pub mod test_issue_18_150_poisoned_mutex;
 pub mod test_issue_19_tx_memory_limit;
+pub mod test_issue_211_vid_labels_index_rebuild;
 pub mod test_issue_25_cascade_deletion;
 pub mod test_issue_27_chunked_index;
 pub mod test_issue_29_vid_labels_index;

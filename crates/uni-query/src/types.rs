@@ -82,6 +82,11 @@ pub struct QueryMetrics {
     /// outside every page range performs no comparisons. Two paths are also
     /// structurally invisible: `count_rows` builds no scanner, and a scan whose
     /// stream is dropped before it drains never reports.
+    /// Counts **scalar** index consultation only — `ScanRequest`-based Lance
+    /// scans. Vector and full-text searches go through Lance's `nearest()` /
+    /// `full_text_search()`, build no `ScanRequest`, and are counted separately
+    /// by [`Self::vector_index_scans`] and [`Self::fts_index_scans`]. A vector
+    /// query therefore leaves this field at zero however it executed.
     pub index_scans: u64,
     /// Sum of Lance's `index_comparisons` across the scans in this query.
     ///
@@ -110,6 +115,30 @@ pub struct QueryMetrics {
     /// wired — and this field is what separates those. Check it is nonzero
     /// whenever you rely on `index_scans` being zero.
     pub scans_reported: u64,
+    /// Vector searches that consulted a vector index.
+    ///
+    /// Nonzero proves an ANN index was searched. Zero, with
+    /// [`Self::searches_reported`] nonzero, proves the search ran brute force —
+    /// which happens whenever no vector index exists, and also when one exists
+    /// but was never built against the data.
+    ///
+    /// Derived from Lance's `partitions_searched`, which counts IVF partitions
+    /// probed. It answers *was* an index searched, never how hard: Lance wraps
+    /// HNSW as an IVF sub-index, and a `Flat` index is a single partition, so a
+    /// consulted `Flat` index reads 1.
+    pub vector_index_scans: u64,
+    /// Full-text searches that consulted an inverted index.
+    ///
+    /// The FTS counterpart of [`Self::vector_index_scans`], with the same
+    /// meaning and the same denominator.
+    pub fts_index_scans: u64,
+    /// Vector and full-text searches for which the stats callback fired.
+    ///
+    /// The denominator for the two fields above, and the reason a zero in
+    /// either is falsifiable rather than merely absent. Separate from
+    /// [`Self::scans_reported`] because they count different things: that one
+    /// counts `ScanRequest` scans, this one counts searches.
+    pub searches_reported: u64,
 }
 
 /// Single result row from a query.
@@ -390,6 +419,9 @@ impl QueryResult {
         self.metrics.index_comparisons = counters.index_comparisons;
         self.metrics.lance_iops = counters.lance_iops;
         self.metrics.scans_reported = counters.scans_reported;
+        self.metrics.vector_index_scans = counters.vector_index_scans;
+        self.metrics.fts_index_scans = counters.fts_index_scans;
+        self.metrics.searches_reported = counters.searches_reported;
     }
 }
 

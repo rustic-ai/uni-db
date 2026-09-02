@@ -172,82 +172,80 @@ collection gap shows as `2 of 20` rather than passing as a clean mean.
 
 ---
 
-## 4. Cross-runner variance — **UNRESOLVED**
+## 4. Cross-runner variance — **RESOLVED 2026-08-25**
 
-The phase's exit criterion asked for ≥ 20 runs across ≥ 3 CI runner
-instantiations. Only the first half is satisfied: all 20 runs are from **one
-machine**. Per decision at planning time, the cross-runner leg is deferred.
+Measured. `Perf Qualify (cross-runner iai)`
+[run 32810181500](https://github.com/rustic-ai/uni-db/actions/runs/32810181500),
+5 runner instantiations x 5 runs = **25 samples per target**, `ubuntu-xlarge`.
 
-What this means concretely:
+| target | mean Ir | cross CV% | within CV% | spread% |
+|---|---:|---:|---:|---:|
+| `read_paths::hnsw_top10_search` | 55,541,789 | **0.07** | 0.13 | 0.17 |
+| `write_paths::l0_to_l1_flush` | 28,685,212 | 0.08 | 0.24 | 0.19 |
+| `read_paths::property_read_across_l0_l1` | 24,180,164 | 0.11 | 0.27 | 0.30 |
+| `read_paths::vertex_lookup_by_id` | 21,739,530 | 0.11 | 0.46 | 0.28 |
+| `read_paths::expand_batch_one_hop_warm` | 52,709,284 | 0.14 | 0.31 | 0.36 |
+| `read_paths::parse_and_plan_cold` | 20,792,255 | 0.18 | 0.32 | 0.41 |
+| `baselines::baseline_session_only` | 4,765,940 | 0.19 | 0.33 | 0.39 |
+| `write_paths::transaction_commit_wal_on` | 12,418,002 | 0.20 | 0.37 | 0.47 |
 
-- The CV figures above characterize **run-to-run** variance on fixed hardware.
-  They say nothing about variance **across** GitHub runners, which is what a PR
-  gate actually experiences.
-- Instruction counts are expected to be far more portable than wall-clock, but
-  microarchitecture, allocator behaviour and dependency versions can all shift
-  them. This is an expectation, not a measurement.
-- **Closing this is a prerequisite of Phase 7**, before any threshold is set.
-  Collect ≥ 3 runner instantiations, recompute CV across them, and set the gate
-  threshold from the cross-runner figure — not from the 0.21–0.96% measured here.
+**Cross-runner CV is 0.07-0.20%** — *lower* than within-runner CV (0.13-0.46%)
+on every target. The machine-to-machine spread this section was opened to worry
+about is smaller than the run-to-run spread on a fixed machine, so the
+single-machine figures in §1 were, if anything, pessimistic. `baseline_noop`
+returned exactly 4 Ir on all 25 runs, which is the collection sanity check
+passing.
 
-### How to close it
+### 4.1 The threshold, derived rather than adopted
 
-The mechanism now exists and is dispatch-only; it has **not been run**, so this
-section describes the procedure, not a result.
+CV describes the samples; a gate compares a **median of N runs** against a
+committed baseline, so the number that matters is how far that median can drift
+with no code change. Computed exhaustively over every N-subset of the 25
+samples, restricted to the five **gated** targets:
 
-```
-Actions → "Perf Qualify (cross-runner iai)" → Run workflow
-```
+| runs per gate | worst false-positive delta | measure time |
+|---:|---:|---:|
+| 3 | **0.997%** | ~7.0 min |
+| 5 | **0.599%** | ~11.7 min |
+| 7 | 0.581% | ~16.3 min |
 
-Defaults are **5 runners × 5 runs = 25 samples**. Each matrix shard is a fresh
-VM, so five shards on one label is five runner instantiations; they run in
-parallel, so wall-clock is one shard (~27 min: a ~15 min cold bench compile plus
-5 × ~2.3 min of Valgrind). The runner label is hardcoded `ubuntu-xlarge` rather
-than routed through `vars.CI_RUNNER_*`, because Phase 7 puts `perf-gate` in
-`pr.yml` — whose heavy jobs use that label — and because the variable could
-otherwise land every shard on one self-hosted box and collapse the measurement
-without changing the workflow file.
+`vertex_lookup_by_id` can move 0.997% at 3 runs on its own, so **a 1% gate at 3
+runs would false-fire**. The curve flattens after 5 — 7 runs buys 0.018
+percentage points for another 4.6 minutes.
 
-The `aggregate` job runs `scripts/perf/iai_cross_runner.py`, which reports per
-target:
+**Settled: 5 runs, fail at 2%, warn at 1%** — 3.3x headroom over the worst
+measured false positive. The proposal's 5% predated any cross-runner
+measurement and is 8.3x headroom, which would let a real 4% regression through.
 
-| column | meaning |
-|---|---|
-| cross-runner CV % | spread of the per-runner means ← **the Phase-7 figure** |
-| within-runner CV % | mean repeatability on fixed hardware — comparable to §1 |
-| spread % | max-to-min across runner means, as a sanity read |
+Validated against the samples themselves: all five real shards pass against the
+pooled baseline (worst +0.46%), an injected +2.5% fails, an injected +1.4%
+warns.
 
-`iai_cv.py` cannot answer this and was not extended to: it pools every run into a
-single CV, conflating the two columns above. A target with perfect repeatability
-and wild machine-to-machine spread produces the same pooled number as the
-reverse, and only one of those threatens a gate.
+### 4.2 What is gated, and what is merely recorded
 
-The script **exits non-zero** on a collection gap or any zero-instruction target,
-rather than warning. That is deliberate — §3.4 above is the record of a
-zero-instruction target being dropped silently, and a CI job that inherited
-`iai_collect.py`'s warn-and-exit-0 behaviour would report a clean cross-runner
-qualification computed over no data.
+`docs/perf/iai-baseline.json` records **all nine** targets and gates **five**.
 
-Then replace this section with the measured table and a recommended threshold.
-**The `baselines::` group is excluded from the headline figure** — the report
-already classes them as non-candidates, and `baseline_noop` is 4 Ir, where a
-one-instruction difference is a double-digit percentage.
+The two `write_paths` targets stay non-gated: they were rejected on the
+*wall-clock-correlation* leg (measured 2.9x and 2.0x IO-driven slowdowns
+invisible to an instruction count), and this run does nothing to rehabilitate
+that — their variance was never the problem. They are recorded anyway so a
+future re-qualification has a reference, and so a change in their instruction
+count is visible without being fatal.
 
-Also recorded for Phase 7 while the cost is fresh:
-
-- The Swatinem cache's only saver is `ci.yml:56` (`tck-full`), which never builds
-  `--benches`, so a perf job pays a cold bench compile every run. Observed here:
-  **15 min** for a full bench-profile build, then ~140 s per Valgrind pass.
-- `iai-callgrind` pulls `proc-macro-error2 v2.0.1`, which cargo already flags as
-  containing code that a future Rust version will reject. Harmless today; worth
-  watching before this lands in a gating job.
-
----
+`hot_paths_iai.rs` therefore **keeps all seven pilot targets** rather than being
+trimmed to five, which is a deliberate deviation from the Phase-7 acceptance
+criterion. Trimming would delete the only baseline the rejected targets have and
+remove the `baselines::` calibration group, whose fixed 4 Ir is what
+distinguishes "no regression" from "collection is broken". The gate ignores
+every non-gated target, so carrying them costs measurement time and nothing else.
 
 ## 5. Recommendation for Phase 7
 
-Gate these five, at **>5% fail / 2% warn** on instruction count, once the
-cross-runner variance leg (§4) sets the real threshold:
+Gate these five on instruction count. The threshold this section originally
+proposed — >5% fail / 2% warn — was a placeholder pending §4, and §4 has now
+**superseded it with a measured 2% fail / 1% warn at 5 runs per gate**. 5% was
+never wrong so much as untested; at the measured variance it is 8.3x headroom
+and would pass a real 4% regression.
 
 - `parse_and_plan_cold`
 - `expand_batch_one_hop_warm`

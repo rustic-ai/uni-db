@@ -4,10 +4,10 @@
 use crate::backend::types::{FilterExpr, Scalar};
 use anyhow::{Result, anyhow};
 use arrow_array::builder::{ListBuilder, StringBuilder, UInt64Builder};
-use arrow_array::{Array, ListArray, RecordBatch, RecordBatchIterator, UInt64Array};
+use arrow_array::{Array, ListArray, RecordBatch, UInt64Array};
 use arrow_schema::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
 use futures::TryStreamExt;
-use lance::dataset::{Dataset, WriteMode, WriteParams};
+use lance::dataset::{Dataset, WriteMode};
 use std::sync::Arc;
 use uni_common::core::id::Vid;
 
@@ -61,14 +61,14 @@ impl JsonPathIndex {
             ],
         )?;
 
-        let reader = RecordBatchIterator::new(std::iter::once(Ok(batch)), schema);
-
-        let params = WriteParams {
-            mode: WriteMode::Append,
-            ..Default::default()
-        };
-
-        Dataset::write(Box::new(reader), &self.uri, Some(params)).await?;
+        // Retried: a losing Lance commit is retryable.
+        crate::storage::manager::write_dataset_with_lance_conflict_retry(
+            &self.uri,
+            schema,
+            vec![batch],
+            WriteMode::Append,
+        )
+        .await?;
         Ok(())
     }
 

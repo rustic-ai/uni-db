@@ -142,17 +142,34 @@ fn into_execution_error(
 
 /// Map a streaming-execution error into the appropriate `UniError`.
 ///
-/// This is the [`into_execution_error`] classification minus its cancellation
-/// and timeout arms. Those are still not reachable *here* — the cursor's own
-/// guard in [`UniInner::build_guarded_cursor`] raises them around the stream
-/// rather than letting the executor surface them through this function — so
-/// there is nothing for those two arms to match.
-fn into_stream_error(e: impl std::fmt::Display, cypher: &str) -> UniError {
+/// Mirrors [`into_execution_error`], including its cancellation and timeout
+/// arms. Those arms were previously absent on the grounds that only the
+/// cursor's own guard in [`UniInner::build_guarded_cursor`] could raise an
+/// abort, and it raises one already typed. That held solely because
+/// `GraphExecutionContext` carried no deadline or token, so no operator-level
+/// `check_timeout` could fire; once #207 plumbed them through, an operator
+/// aborting mid-stream reached this function and was reported as a generic
+/// `UniError::Query`. Keep the two classifications in step.
+fn into_stream_error(
+    e: impl std::fmt::Display,
+    cypher: &str,
+    timeout: std::time::Duration,
+) -> UniError {
     let msg = normalize_error_message(&e.to_string(), cypher);
     if let Some(detail) = uni_common::GraphComputeIncomplete::from_tagged_message(&msg) {
         UniError::GraphComputeIncomplete {
             detail: Box::new(detail),
         }
+    } else if msg.contains("Query cancelled") {
+        // Reachable only since #207: before the deadline and token were plumbed
+        // into `GraphExecutionContext`, no operator-level check could fire, so a
+        // streamed abort always came from the outer `timeout_at`/`cancelled`
+        // race below and arrived already typed. An operator raising it now must
+        // land on the same variants, or the cursor reports a cooperative abort
+        // as a generic `Query` error.
+        UniError::Cancelled
+    } else if msg.contains("Query timed out") {
+        query_timed_out_error(timeout)
     } else if msg.contains("TypeError:") {
         UniError::Type {
             expected: msg,
@@ -188,23 +205,61 @@ fn split_time_travel(
     }
 }
 
+/// Internal helper columns a plan emits beside the projected ones.
+///
+/// A traversal row carries `b._vid`, `b._labels`, `b.name` next to the `n` the
+/// user asked for. These names are the fingerprint of the guessing path below
+/// having been handed rows it cannot name.
+const INTERNAL_COLUMN_SUFFIXES: [&str; 6] = [
+    "._vid",
+    "._labels",
+    "._eid",
+    "._type",
+    "._all_props",
+    ".overflow_json",
+];
+
 /// Determine the output column order for a result set.
 ///
 /// Uses the planner's projection order when available; otherwise falls back to
 /// the first row's keys, sorted for deterministic output. An empty result set
 /// yields no columns.
+///
+/// # Errors
+///
+/// Returns [`UniError::Query`] when the projection order is unknown *and* the
+/// rows carry internal helper columns. That combination is never a valid
+/// answer: the guess would order `b._labels` ahead of `n` and the caller,
+/// which reads column 0, would receive the label list instead of the node
+/// (#190). Failing here is the loud version of a defect that was silent for as
+/// long as this function was allowed to guess.
 fn columns_for_results(
     results: &[HashMap<String, ApiValue>],
     projection_order: Option<Vec<String>>,
-) -> Arc<Vec<String>> {
+) -> Result<Arc<Vec<String>>> {
     if results.is_empty() {
-        Arc::new(vec![])
+        Ok(Arc::new(vec![]))
     } else if let Some(order) = projection_order {
-        Arc::new(order)
+        Ok(Arc::new(order))
     } else {
         let mut cols: Vec<String> = results[0].keys().cloned().collect();
         cols.sort();
-        Arc::new(cols)
+        if let Some(internal) = cols.iter().find(|c| {
+            INTERNAL_COLUMN_SUFFIXES
+                .iter()
+                .any(|suffix| c.ends_with(suffix))
+        }) {
+            return Err(UniError::Query {
+                message: format!(
+                    "Plan: cannot name the result columns — no projection was found at the \
+                     top of the plan, and the rows carry the internal column `{internal}`. \
+                     Naming them by guesswork here would return an internal column in place \
+                     of a projected one. This is a planner bug; please file an issue."
+                ),
+                query: None,
+            });
+        }
+        Ok(Arc::new(cols))
     }
 }
 
@@ -237,22 +292,72 @@ fn rows_for_results(
         .collect()
 }
 
-/// Coarse in-memory size estimate for a result batch: a per-value size plus a
-/// fixed 64-byte overhead.
+/// In-memory size estimate for a result batch, counting heap bytes.
 ///
 /// Shared by the materializing and cursor paths so the two cannot drift — the
 /// cursor previously had no accounting at all, and a second copy of this
 /// formula would have let the same query be accepted by one path and rejected
 /// by the other.
+///
+/// This used to be `size_of_val(v) + 64`, which is the size of the `Value`
+/// enum's *discriminant* — a constant. It ignored everything on the heap, so a
+/// row of megabyte strings and a row of small integers were charged the same
+/// and the figure was really a row count wearing a byte label. A limit
+/// expressed in bytes has to count bytes.
 fn estimate_result_bytes(results: &[HashMap<String, ApiValue>]) -> usize {
     results
         .iter()
         .map(|row| {
-            row.values()
-                .map(|v| std::mem::size_of_val(v) + 64)
+            row.iter()
+                .map(|(key, v)| key.capacity() + ROW_ENTRY_OVERHEAD + value_bytes(v))
                 .sum::<usize>()
         })
         .sum()
+}
+
+/// Per-entry bookkeeping charged on top of the key and value: the `HashMap`
+/// slot, its hash, and the `Value` discriminant.
+const ROW_ENTRY_OVERHEAD: usize = 64;
+
+/// Heap bytes a single result value holds, including anything it owns.
+///
+/// Containers recurse, so a list of long strings is charged for the strings.
+/// Approximate by construction — it does not chase `Arc` sharing or allocator
+/// slack — but it moves with the data, which the previous constant did not.
+fn value_bytes(v: &ApiValue) -> usize {
+    let own = std::mem::size_of_val(v);
+    own + match v {
+        ApiValue::String(s) => s.capacity(),
+        ApiValue::Bytes(b) => b.capacity(),
+        ApiValue::Vector(f) => f.capacity() * std::mem::size_of::<f32>(),
+        ApiValue::BinaryVector(b) => b.capacity(),
+        ApiValue::SparseVector { indices, values } => {
+            indices.capacity() * std::mem::size_of::<u32>()
+                + values.capacity() * std::mem::size_of::<f32>()
+        }
+        ApiValue::List(items) => items.iter().map(value_bytes).sum(),
+        ApiValue::Map(entries) => entries
+            .iter()
+            .map(|(k, val)| k.capacity() + ROW_ENTRY_OVERHEAD + value_bytes(val))
+            .sum(),
+        ApiValue::Node(node) => {
+            node.labels.iter().map(String::capacity).sum::<usize>()
+                + node
+                    .properties
+                    .iter()
+                    .map(|(k, val)| k.capacity() + ROW_ENTRY_OVERHEAD + value_bytes(val))
+                    .sum::<usize>()
+        }
+        ApiValue::Edge(edge) => {
+            edge.edge_type.capacity()
+                + edge
+                    .properties
+                    .iter()
+                    .map(|(k, val)| k.capacity() + ROW_ENTRY_OVERHEAD + value_bytes(val))
+                    .sum::<usize>()
+        }
+        _ => 0,
+    }
 }
 
 /// The error both paths raise when `max_query_memory` is exceeded.
@@ -378,30 +483,16 @@ fn enforce_memory_limit(
     Ok(())
 }
 
-/// Extract projection column names from a LogicalPlan, preserving query order.
-/// Returns None if the plan doesn't have projections at the top level.
+/// Output column names for a plan, in query order, or `None` when the plan
+/// has no top-level projection.
+///
+/// Delegates to the planner's canonical [`projection_columns`]. This used to
+/// be a second, independent copy that had no `Union` and no `Distinct` arm,
+/// so those two shapes fell through to the row-key guess in
+/// [`columns_for_results`] and returned an internal helper column where the
+/// user asked for a node (#190).
 fn extract_projection_order(plan: &LogicalPlan) -> Option<Vec<String>> {
-    match plan {
-        LogicalPlan::Project { projections, .. } => Some(
-            projections
-                .iter()
-                .map(|(expr, alias)| alias.clone().unwrap_or_else(|| expr.to_string_repr()))
-                .collect(),
-        ),
-        LogicalPlan::Aggregate {
-            group_by,
-            aggregates,
-            ..
-        } => {
-            let mut names: Vec<String> = group_by.iter().map(|e| e.to_string_repr()).collect();
-            names.extend(aggregates.iter().map(|e| e.to_string_repr()));
-            Some(names)
-        }
-        LogicalPlan::Limit { input, .. }
-        | LogicalPlan::Sort { input, .. }
-        | LogicalPlan::Filter { input, .. } => extract_projection_order(input),
-        _ => None,
-    }
+    uni_query::query::planner::projection_columns(plan)
 }
 
 impl crate::api::UniInner {
@@ -456,6 +547,12 @@ impl crate::api::UniInner {
     /// invariant, any planner call site that skips it makes fork-local indexes
     /// silently stop fusing. `fuse_create_set` follows it. Centralised here so
     /// the pair cannot drift apart across the call sites in this file.
+    ///
+    /// Rewrites a plan is not *valid* without do not belong here — this helper
+    /// is one of eight places a plan is built from Cypher, and the other seven
+    /// would silently skip them. Those live at the end of
+    /// `QueryPlanner::plan_with_scope`, which every one of the eight goes
+    /// through.
     fn plan_and_rewrite(
         &self,
         planner: &uni_query::QueryPlanner,
@@ -563,7 +660,7 @@ impl crate::api::UniInner {
             .await
             .map_err(|e| into_execution_error(e, cypher, self.config.query_timeout))?;
 
-        let columns = columns_for_results(&results, projection_order);
+        let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
 
         // PROFILE used to return `Default::default()` here, i.e. a result whose
@@ -674,7 +771,8 @@ impl crate::api::UniInner {
         // Convert raw hash-map batches to Row batches, chunked by batch_size.
         let row_stream = stream
             .map(move |batch_res| {
-                let results = batch_res.map_err(|e| into_stream_error(e, &cypher_for_error))?;
+                let results = batch_res
+                    .map_err(|e| into_stream_error(e, &cypher_for_error, query_timeout))?;
                 // Applied to the executor's own output, not to the re-chunked
                 // pieces below, so a slow consumer paging an already-computed
                 // result is not charged against the query's execution budget.
@@ -694,7 +792,7 @@ impl crate::api::UniInner {
                 if results.is_empty() {
                     return Ok(vec![]);
                 }
-                let columns = columns_for_results(&results, projection_order_for_rows.clone());
+                let columns = columns_for_results(&results, projection_order_for_rows.clone())?;
                 Ok(rows_for_results(results, &columns, false))
             })
             // Re-chunk into batch_size-sized pieces
@@ -894,18 +992,37 @@ impl crate::api::UniInner {
         let projection_order = extract_projection_order(&logical_plan);
 
         let exec_start = Instant::now();
+        let timeout_duration = self.config.query_timeout;
+        let deadline = exec_start + timeout_duration;
         // The transaction's own scope reaches execution here. Without this the
         // token accepted by `TxQueryBuilder::cancellation_token` was discarded
         // for want of a parameter to put it in, and `Transaction::cancel()`
         // cancelled a token nothing was listening to.
+        //
+        // `query_timeout` is enforced here too, for the same reason the memory
+        // ceiling below is: the session paths wrapped execution in
+        // `tokio::time::timeout` and the transaction paths did not, so a
+        // statement run inside a transaction had a cancellation scope but no
+        // wall-clock bound whatsoever. An asymmetry between the two surfaces is
+        // the shape of defect this work removes, not one to add to.
         let results = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(UniError::Cancelled),
-            res = executor.execute(logical_plan, &self.properties, &params) => {
-                res.map_err(|e| into_execution_error(e, cypher, self.config.query_timeout))?
-            }
+            res = tokio::time::timeout(
+                timeout_duration,
+                executor.execute(logical_plan, &self.properties, &params),
+            ) => res
+                .map_err(|_| query_timed_out_error(timeout_duration))?
+                .map_err(|e| into_execution_error(e, cypher, self.config.query_timeout))?,
         };
         let exec_time = exec_start.elapsed();
+
+        // A query that completes inside a single poll never lets the timer
+        // fire, so the elapsed time is compared directly as well — the same
+        // guard the session paths carry.
+        if Instant::now() > deadline {
+            return Err(query_timed_out_error(timeout_duration));
+        }
 
         // `max_query_memory` was previously enforced only on the session's
         // materializing paths, so a transaction query had no ceiling at all.
@@ -914,7 +1031,7 @@ impl crate::api::UniInner {
         // materializing — which is the shape of defect this work removes.
         enforce_memory_limit(&results, self.config.max_query_memory, cypher)?;
 
-        let columns = columns_for_results(&results, projection_order);
+        let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
 
         let metrics = QueryMetrics {
@@ -978,7 +1095,7 @@ impl crate::api::UniInner {
             .await
             .map_err(|e| into_execution_error(e, cypher, self.config.query_timeout))?;
 
-        let columns = columns_for_results(&results, projection_order);
+        let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
 
         let metrics = QueryMetrics {
@@ -1119,20 +1236,34 @@ impl crate::api::UniInner {
         let projection_order = extract_projection_order(&logical_plan);
 
         let exec_start = Instant::now();
+        let timeout_duration = config.query_timeout;
+        let deadline = exec_start + timeout_duration;
         // Mirrors `execute_ast_internal`: the executor's own token only reaches
         // operators that happen to call `check_timeout`, so correctness comes
         // from racing the scope against execution here. This twin was the one
         // AST path that did neither, which is why `Transaction::cancel()` was
         // inert for `Transaction::apply` and tx-bound Locy.
+        //
+        // The wall-clock bound is here for the same reason as in
+        // `execute_tx_query_internal`: without it a transaction statement was
+        // cancellable but not time-bounded.
         let results = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(UniError::Cancelled),
-            res = executor.execute(logical_plan, &self.properties, &params) => res
+            res = tokio::time::timeout(
+                timeout_duration,
+                executor.execute(logical_plan, &self.properties, &params),
+            ) => res
+                .map_err(|_| query_timed_out_error(timeout_duration))?
                 .map_err(|e| into_execution_error(e, cypher, config.query_timeout))?,
         };
         let exec_time = exec_start.elapsed();
 
-        let columns = columns_for_results(&results, projection_order);
+        if Instant::now() > deadline {
+            return Err(query_timed_out_error(timeout_duration));
+        }
+
+        let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
 
         let metrics = QueryMetrics {
@@ -1200,7 +1331,7 @@ impl crate::api::UniInner {
 
         enforce_memory_limit(&results, config.max_query_memory, cypher)?;
 
-        let columns = columns_for_results(&results, projection_order);
+        let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
 
         let metrics = QueryMetrics {
@@ -1299,7 +1430,7 @@ impl crate::api::UniInner {
 
         enforce_memory_limit(&results, config.max_query_memory, cypher)?;
 
-        let columns = columns_for_results(&results, projection_order);
+        let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
 
         let metrics = QueryMetrics {
@@ -1314,5 +1445,69 @@ impl crate::api::UniInner {
         let mut result = QueryResult::new(columns, rows, executor.take_warnings(), metrics);
         result.set_counters(executor.take_counters());
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(keys: &[&str]) -> HashMap<String, ApiValue> {
+        keys.iter()
+            .map(|k| ((*k).to_string(), ApiValue::Null))
+            .collect()
+    }
+
+    /// The planner's order wins, and it wins *unsorted* — query order is the
+    /// contract, not alphabetical order.
+    #[test]
+    fn a_known_projection_order_is_used_verbatim() {
+        let results = vec![row(&["zeta", "alpha"])];
+        let cols =
+            columns_for_results(&results, Some(vec!["zeta".into(), "alpha".into()])).unwrap();
+        assert_eq!(*cols, vec!["zeta".to_string(), "alpha".to_string()]);
+    }
+
+    /// DDL and admin plans have no projection and no internal columns. The
+    /// measured shapes across the integration suite are all of this form
+    /// (`success`, `registered`, `plan`, `labels`), so the fallback has to
+    /// keep working for them.
+    #[test]
+    fn an_unknown_order_still_falls_back_for_plain_column_names() {
+        let results = vec![row(&["success"])];
+        let cols = columns_for_results(&results, None).unwrap();
+        assert_eq!(*cols, vec!["success".to_string()]);
+    }
+
+    /// The guard. These are exactly the row keys a traversal produced under a
+    /// `UNION`, where the fallback sorted `b._labels` into position 0 and the
+    /// caller returned the label list in place of the node (#190).
+    #[test]
+    fn an_unknown_order_over_internal_columns_is_an_error_not_a_guess() {
+        let results = vec![row(&["b._labels", "b._vid", "b.name", "n"])];
+        let err = columns_for_results(&results, None)
+            .expect_err("guessing here returns an internal column as if it were the answer");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("b._labels"),
+            "error must name the column: {msg}"
+        );
+        assert!(
+            msg.contains("please file an issue"),
+            "the guard reports a planner bug, not user error: {msg}"
+        );
+    }
+
+    /// A user property named with a dot-suffix that merely *resembles* an
+    /// internal column must not trip the guard — `RETURN n.name` legitimately
+    /// produces the column name `n.name`.
+    #[test]
+    fn a_dotted_user_column_does_not_trip_the_guard() {
+        let results = vec![row(&["n.name", "n.type_of_thing"])];
+        let cols = columns_for_results(&results, None).unwrap();
+        assert_eq!(
+            *cols,
+            vec!["n.name".to_string(), "n.type_of_thing".to_string()]
+        );
     }
 }

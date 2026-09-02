@@ -42,6 +42,7 @@ pub mod bitmap;
 pub mod catalog_scan;
 pub mod common;
 pub mod comprehension;
+pub mod endpoint_hydrate;
 pub mod expr_compiler;
 pub mod ext_id_lookup;
 pub mod iteration_driver;
@@ -108,6 +109,7 @@ pub mod search_procedures;
 use uni_xervo::runtime::ModelRuntime;
 
 use crate::types::QueryWarning;
+use uni_common::cypher_value_codec::handle::HandleScope;
 
 pub use apply::GraphApplyExec;
 pub use ext_id_lookup::GraphExtIdLookupExec;
@@ -162,6 +164,14 @@ pub use locy_traits::{DerivedFactSource, LocyExecutionContext};
 /// // Get neighbors with L0 overlay
 /// let neighbors = ctx.get_neighbors(vid, edge_type_id, Direction::Outgoing);
 /// ```
+/// `Clone` is load-bearing, not a convenience: the physical planner has to take
+/// an owned context out of its `Arc` to run the consuming `with_*` builders, and
+/// it used to do that by rebuilding from the base constructor and re-attaching
+/// fields by hand. Every field not listed in that re-attachment was silently
+/// dropped — which is how `deadline`, `cancellation_token`, `warnings` and
+/// `handle_scope` came to be reset on every query. Cloning preserves the whole
+/// struct by construction, so a field added later cannot reintroduce the bug.
+#[derive(Clone)]
 pub struct GraphExecutionContext {
     /// Storage manager for schema and dataset access.
     storage: Arc<StorageManager>,
@@ -208,6 +218,15 @@ pub struct GraphExecutionContext {
     /// the outer transaction's L0. `Arc<Writer>` (interior-mutable,
     /// no outer lock) matches the executor's writer handle type.
     writer: Option<Arc<uni_store::Writer>>,
+
+    /// Owns the values interned during this query.
+    ///
+    /// A `collect()` large enough to be worth interning registers its list here
+    /// and travels as a 9-byte handle, so the operators above copy the handle
+    /// per row instead of the whole list. The scope is dropped with the
+    /// context, which is what releases the ids — see
+    /// `uni_common::cypher_value_codec::handle`.
+    handle_scope: Arc<HandleScope>,
 }
 
 impl std::fmt::Debug for GraphExecutionContext {
@@ -221,67 +240,11 @@ impl std::fmt::Debug for GraphExecutionContext {
 
 /// L0 buffer visibility context for MVCC reads.
 ///
-/// Maintains references to all L0 buffers that should be visible to a query:
-/// - Current L0: The active write buffer
-/// - Transaction L0: Buffer for the current transaction (if any)
-/// - Pending flush L0s: Buffers being flushed to disk (still visible to reads)
-///
-/// The visibility order is: pending flush L0s (oldest first) → current L0 → transaction L0.
-#[derive(Clone, Default)]
-pub struct L0Context {
-    /// Current active L0 buffer.
-    pub current_l0: Option<Arc<RwLock<L0Buffer>>>,
-
-    /// Transaction-local L0 buffer (if in a transaction).
-    pub transaction_l0: Option<Arc<RwLock<L0Buffer>>>,
-
-    /// L0 buffers pending flush to disk.
-    /// These remain visible until flush completes.
-    pub pending_flush_l0s: Vec<Arc<RwLock<L0Buffer>>>,
-}
-
-impl std::fmt::Debug for L0Context {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("L0Context")
-            .field("current_l0", &self.current_l0.is_some())
-            .field("transaction_l0", &self.transaction_l0.is_some())
-            .field("pending_flush_l0s_count", &self.pending_flush_l0s.len())
-            .finish()
-    }
-}
-
-impl L0Context {
-    /// Create an empty L0 context with no buffers.
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    /// Create L0 context with just a current buffer.
-    pub fn with_current(l0: Arc<RwLock<L0Buffer>>) -> Self {
-        Self {
-            current_l0: Some(l0),
-            ..Self::default()
-        }
-    }
-
-    /// Create L0 context from a query context.
-    pub fn from_query_context(ctx: &QueryContext) -> Self {
-        Self {
-            current_l0: Some(ctx.l0.clone()),
-            transaction_l0: ctx.transaction_l0.clone(),
-            pending_flush_l0s: ctx.pending_flush_l0s.clone(),
-        }
-    }
-
-    /// Iterate over all L0 buffers in visibility order.
-    /// Order: pending flush L0s (oldest first), then current L0, then transaction L0.
-    pub fn iter_l0_buffers(&self) -> impl Iterator<Item = &Arc<RwLock<L0Buffer>>> {
-        self.pending_flush_l0s
-            .iter()
-            .chain(self.current_l0.iter())
-            .chain(self.transaction_l0.iter())
-    }
-}
+/// Defined in `uni-store` beside the rest of the L0 visibility machinery — it
+/// is made entirely of `uni-store` types and the storage layer needs it too.
+/// Re-exported here so the ~30 references across the workspace, including the
+/// struct-literal constructions in `crates/uni/src/api/`, are unaffected.
+pub use uni_store::runtime::l0_visibility::L0Context;
 
 /// An edge's stored orientation, plus the type the probe identified on the way.
 ///
@@ -321,7 +284,13 @@ impl GraphExecutionContext {
             counters: None,
             cancellation_token,
             writer: None,
+            handle_scope: Arc::new(HandleScope::new()),
         }
+    }
+
+    /// The interning scope owning values registered during this query.
+    pub fn handle_scope(&self) -> &Arc<HandleScope> {
+        &self.handle_scope
     }
 
     /// Create a new graph execution context.
@@ -411,8 +380,19 @@ impl GraphExecutionContext {
     }
 
     /// Set query timeout deadline.
+    #[must_use]
     pub fn with_deadline(mut self, deadline: Instant) -> Self {
         self.deadline = Some(deadline);
+        self
+    }
+
+    /// Attach the cooperative cancellation token for the surrounding query.
+    ///
+    /// Paired with [`Self::with_deadline`]: `check_timeout` consults both, and a
+    /// context carrying neither cannot abort anything it is asked to guard.
+    #[must_use]
+    pub fn with_cancellation_token(mut self, token: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation_token = Some(token);
         self
     }
 
@@ -587,6 +567,14 @@ impl GraphExecutionContext {
         );
         if let Some(deadline) = self.deadline {
             ctx.set_deadline(deadline);
+        }
+        // Carry the counters through. The scan path does not need this — it
+        // builds a `ScanRequest` and puts them there directly — but vector and
+        // FTS search have no `ScanRequest`, so this `QueryContext` is the only
+        // channel by which their index-consultation counts can be attributed to
+        // the query that caused them.
+        if let Some(counters) = self.counters.clone() {
+            ctx.set_counters(counters);
         }
         ctx
     }

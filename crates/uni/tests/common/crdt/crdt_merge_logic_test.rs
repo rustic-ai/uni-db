@@ -128,3 +128,60 @@ async fn test_gset_merge_on_read() -> Result<()> {
 
     Ok(())
 }
+
+/// An unflushed CRDT written in its string form must read back as a CRDT.
+///
+/// Cypher stores a CRDT literal verbatim: `DataType::accepts` passes a
+/// `Value::String` through untouched, and `prepare_vertex_upsert` only parses
+/// when a prior value exists, so a fresh `CREATE` leaves a string in L0.
+///
+/// The columnar read path builds its `Binary` column with
+/// `serde_json::from_value::<Crdt>`, which rejects a string and emits null —
+/// where the flush-side builder in `arrow_convert` handles exactly this case.
+/// So the value is readable after a flush and null before one.
+///
+/// The traversal arm matters most: target hydration moved onto the columnar
+/// path recently, and previously went through `get_batch_vertex_props_for_label`,
+/// which normalises the string form.
+#[tokio::test]
+async fn an_unflushed_string_form_crdt_reads_back_through_scan_and_traversal() -> Result<()> {
+    let db = test_helpers::create_db().await?;
+
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE LABEL Holder (id INT)").await?;
+    tx.execute("CREATE EDGE TYPE HAS FROM Holder TO CrdtCounter")
+        .await?;
+    tx.execute(
+        r#"CREATE (c:CrdtCounter {id: 7, count: '{"t": "gc", "d": {"counts": {"A": 10}}}'})"#,
+    )
+    .await?;
+    tx.execute("CREATE (:Holder {id: 1})").await?;
+    tx.execute("MATCH (h:Holder {id: 1}), (c:CrdtCounter {id: 7}) CREATE (h)-[:HAS]->(c)")
+        .await?;
+    tx.commit().await?;
+    // Deliberately no flush: the value is still a string in L0.
+
+    let scanned = db
+        .session()
+        .query("MATCH (c:CrdtCounter {id: 7}) RETURN c.count")
+        .await?;
+    assert_eq!(scanned.len(), 1);
+    let via_scan = scanned.rows()[0].value("c.count").unwrap().clone();
+    assert!(
+        !via_scan.is_null(),
+        "an unflushed string-form CRDT must not read back as null through a scan"
+    );
+
+    let traversed = db
+        .session()
+        .query("MATCH (h:Holder)-[:HAS]->(c:CrdtCounter) RETURN c.count")
+        .await?;
+    assert_eq!(traversed.len(), 1);
+    let via_traversal = traversed.rows()[0].value("c.count").unwrap().clone();
+    assert!(
+        !via_traversal.is_null(),
+        "nor through a traversal target: {via_traversal:?}"
+    );
+
+    Ok(())
+}

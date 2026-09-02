@@ -581,6 +581,42 @@ pub struct UniConfig {
     /// when `async_flush_enabled` is true. Default: 10s.
     pub drop_fork_drain_timeout: Duration,
 
+    /// Maximum time `flush_to_l1` will wait **without progress** while draining
+    /// in-flight async flushes, before failing. Default: 900s.
+    ///
+    /// This bounds a *stall*, not total drain time. Ingesting a million rows
+    /// queues roughly one flush per `auto_flush_threshold` mutations, so the
+    /// backlog scales with the data and no fixed total is right for every load —
+    /// a 3.8 GB corpus legitimately drains for well past any constant worth
+    /// setting. What marks a wedged coordinator is that the pending count stops
+    /// falling, which is what this measures.
+    ///
+    /// The default is deliberately generous because this is a backstop, not a
+    /// control: its job is to stop a wedged coordinator hanging forever, and the
+    /// per-stream `flush_stream_timeout` is what is meant to catch a stuck
+    /// stream first. **Known gap:** a single large flush (measured on a 3.8 GB,
+    /// 960-d corpus) can run past `flush_stream_timeout` without the pending
+    /// count moving, so at this layer a legitimately slow flush and a stalled
+    /// one are indistinguishable. Until that is resolved the bound has to exceed
+    /// the longest single flush a deployment expects. Erring high is the right
+    /// side to err on: the failure this replaced returned success while not
+    /// having flushed.
+    ///
+    /// `flush_to_l1` is a **synchronization barrier**: fork setup, shutdown and
+    /// test fixtures rely on it meaning "all writes are now durably in Lance".
+    /// It previously bounded this wait with `drop_fork_drain_timeout` (10s) and
+    /// **discarded the result**, so above roughly 600k rows the drain silently
+    /// did not finish and the barrier returned success anyway. Downstream, the
+    /// index build found no flushed table, declined at `debug!` level, and
+    /// reported `Online` — measured consequence was an ANN index that was never
+    /// built while every query quietly fell back to an exact scan.
+    ///
+    /// This is a backstop against a wedged coordinator, not a normal control:
+    /// each individual stream is already bounded by `flush_stream_timeout`, so a
+    /// healthy drain finishes far inside it (a 1M-row flush measures ~27s).
+    /// Exceeding it is an error, never a silent partial flush.
+    pub flush_drain_timeout: Duration,
+
     /// Phase 4a: cap on total fork count (Active + Pending + Tombstoned).
     /// `None` = unbounded. When set, `Session::fork(name).await` errors
     /// with `UniError::ForkBudgetExceeded` once the cap is reached.
@@ -724,6 +760,7 @@ impl Default for UniConfig {
                 .map(Duration::from_secs)
                 .unwrap_or(Duration::from_secs(60)),
             drop_fork_drain_timeout: Duration::from_secs(10),
+            flush_drain_timeout: Duration::from_secs(900),
             max_forks: None,
             fork_default_ttl: None,
             fork_sweeper_interval: Duration::from_secs(60),

@@ -15,18 +15,22 @@ use crate::query::df_graph::quantifier::{QuantifierExecExpr, QuantifierType};
 use crate::query::df_graph::raw_bytes_marker;
 use crate::query::df_graph::reduce::ReduceExecExpr;
 use crate::query::df_graph::similar_to_expr::SimilarToExecExpr;
+use crate::query::df_graph::unwind::arrow_to_json_value;
 use crate::query::planner::QueryPlanner;
 use crate::query::similar_to::SimilarToError;
 use anyhow::{Result, anyhow};
 use arrow_array::builder::BooleanBuilder;
 use arrow_schema::{DataType, Field, Schema};
+use datafusion::arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use datafusion::execution::context::SessionState;
 use datafusion::physical_expr::expressions::binary;
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_planner::PhysicalPlanner;
 use datafusion::prelude::SessionContext;
 use parking_lot::RwLock;
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use uni_common::Value;
 use uni_common::core::schema::{DistanceMetric, IndexDefinition, Schema as UniSchema};
@@ -235,6 +239,49 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     ///
     /// The caller must own `scoped_ctx_slot` and keep it alive for the returned compiler's
     /// lifetime.
+    /// A scoped compiler that also advertises extra node columns.
+    ///
+    /// `startNode`/`endNode` resolve by being handed every in-scope node column
+    /// as an extra argument. Inside a comprehension the hydrated endpoint columns
+    /// are exactly that, but they exist only in the *inner* schema, so they have
+    /// to be added to the hints and to `available_columns` — which otherwise
+    /// filters them out as names the outer schema does not have.
+    fn scoped_compiler_with_hints<'b>(
+        &'b self,
+        exclude_vars: &[&str],
+        extra_node_hints: &[String],
+        available: &[String],
+        scoped_ctx_slot: &'b mut Option<TranslationContext>,
+    ) -> CypherPhysicalExprCompiler<'b>
+    where
+        'a: 'b,
+    {
+        let mut ctx = self.translation_ctx.cloned().unwrap_or_default();
+        for v in exclude_vars {
+            ctx.variable_kinds.remove(*v);
+        }
+        for hint in extra_node_hints {
+            if !ctx.node_variable_hints.contains(hint) {
+                ctx.node_variable_hints.push(hint.clone());
+            }
+        }
+        // The body compiles against the inner schema, so that is the set of
+        // columns an injected argument may name.
+        ctx.available_columns = Some(available.iter().cloned().collect());
+        *scoped_ctx_slot = Some(ctx);
+
+        CypherPhysicalExprCompiler {
+            state: self.state,
+            translation_ctx: scoped_ctx_slot.as_ref(),
+            graph_ctx: self.graph_ctx.clone(),
+            uni_schema: self.uni_schema.clone(),
+            session_ctx: self.session_ctx.clone(),
+            storage: self.storage.clone(),
+            params: self.params.clone(),
+            outer_entity_vars: self.outer_entity_vars.clone(),
+        }
+    }
+
     fn scoped_compiler<'b>(
         &'b self,
         exclude_vars: &[&str],
@@ -262,11 +309,68 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 variable_kinds: new_kinds,
                 node_variable_hints: ctx.node_variable_hints.clone(),
                 mutation_edge_hints: ctx.mutation_edge_hints.clone(),
+                available_columns: ctx.available_columns.clone(),
                 statement_time: ctx.statement_time,
             });
             scoped_ctx_slot.as_ref()
         } else {
             self.translation_ctx
+        };
+
+        CypherPhysicalExprCompiler {
+            state: self.state,
+            translation_ctx: ctx_ref,
+            graph_ctx: self.graph_ctx.clone(),
+            uni_schema: self.uni_schema.clone(),
+            session_ctx: self.session_ctx.clone(),
+            storage: self.storage.clone(),
+            params: self.params.clone(),
+            outer_entity_vars: self.outer_entity_vars.clone(),
+        }
+    }
+
+    /// Build a compiler that treats `entity_vars` as graph entities.
+    ///
+    /// The mirror of [`Self::scoped_compiler`]. A pattern comprehension compiles
+    /// its predicate and map expression against an *inner* schema whose entity
+    /// columns are flat — `x._vid`, `x.name` — but the translation context it
+    /// inherits describes only the outer scope. `translate_property_access`
+    /// picks between `Column("x.name")` and `index(Column("x"), 'name')` on
+    /// exactly that context, so without this the inner variables compile to an
+    /// index into a bare `x` the inner schema does not carry (#189).
+    ///
+    /// A context is created even when there is none to inherit: absent context
+    /// means "not a graph entity", which is the wrong answer here rather than an
+    /// unknown one.
+    ///
+    /// The caller must own `scoped_ctx_slot` and keep it alive for the returned
+    /// compiler's lifetime.
+    fn entity_scoped_compiler<'b>(
+        &'b self,
+        entity_vars: &[(String, VariableKind)],
+        available: &[String],
+        scoped_ctx_slot: &'b mut Option<TranslationContext>,
+    ) -> CypherPhysicalExprCompiler<'b>
+    where
+        'a: 'b,
+    {
+        let ctx_ref = if entity_vars.is_empty() && available.is_empty() {
+            self.translation_ctx
+        } else {
+            let mut ctx = self.translation_ctx.cloned().unwrap_or_default();
+            for (var, kind) in entity_vars {
+                ctx.variable_kinds.insert(var.clone(), *kind);
+            }
+            // The comprehension's entity variables are *flat* here — `a._vid`,
+            // `a.id` — with no bare `a` column. `startNode`/`endNode` inject one
+            // column per known node variable, so without this they ask for a
+            // bare `a` the inner schema does not have and the whole sub-plan
+            // fails (LDBC IC14).
+            if !available.is_empty() {
+                ctx.available_columns = Some(available.iter().cloned().collect());
+            }
+            *scoped_ctx_slot = Some(ctx);
+            scoped_ctx_slot.as_ref()
         };
 
         CypherPhysicalExprCompiler {
@@ -462,6 +566,16 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 } else {
                     self.compile_exists(query)
                 }
+            }
+
+            // The other two members of the subquery family. They reach here
+            // rather than the aggregate machinery because they are scalar
+            // subqueries, evaluated once per outer row.
+            Expr::CountSubquery(query) => {
+                self.compile_scalar_subquery(query, SubqueryResult::Count)
+            }
+            Expr::CollectSubquery(query) => {
+                self.compile_scalar_subquery(query, SubqueryResult::Collect)
             }
 
             // FunctionCall wrapping a custom expression (e.g. size(comprehension))
@@ -764,6 +878,102 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         )
     }
 
+    /// Evaluate a pattern comprehension as `MATCH <pattern> WHERE <w> RETURN <map>`,
+    /// run per outer row.
+    ///
+    /// Used when the pattern has no node bound in the outer scope. The synthesized
+    /// query is the comprehension's own semantics written out longhand, so the
+    /// existing correlated-subquery machinery — `rewrite_query_correlated`,
+    /// `plan_with_scope`, `execute_subplan_with_outer_vars` — evaluates it without
+    /// needing to understand pattern comprehensions at all.
+    fn compile_pattern_comprehension_as_subquery(
+        &self,
+        pattern: &uni_cypher::ast::Pattern,
+        where_clause: Option<&Expr>,
+        map_expr: &Expr,
+        input_schema: &Schema,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        use uni_cypher::ast::{Clause, MatchClause, Query, ReturnClause, ReturnItem, Statement};
+
+        let err = |dep: &str| anyhow!("Pattern comprehension fallback requires {}", dep);
+
+        // `startNode(r)` resolves its endpoint by scanning the node arguments in
+        // scope, which only ever succeeds when the endpoint happens to be one of
+        // the pattern's own bindings. IC14's `WHERE` compares every matching
+        // `(a, b)` pair against the relationship's endpoints, so for all the
+        // pairs that do *not* match there is no such node and the lookup fails
+        // outright instead of evaluating false.
+        //
+        // `EndpointHydrateExec` already materialised the endpoint on the outer
+        // row, and `extract_row_params` supplies every outer column by name.
+        // Passing it in as an extra argument lets the UDF's existing vid search
+        // find it by construction, whatever the pattern bound.
+        let where_clause = where_clause.map(|w| rewrite_endpoint_calls(w.clone(), input_schema));
+        let where_clause = where_clause.as_ref();
+        let map_expr = &rewrite_endpoint_calls(map_expr.clone(), input_schema);
+
+        let query = Query::Single(Statement {
+            clauses: vec![
+                Clause::Match(MatchClause {
+                    optional: false,
+                    pattern: pattern.clone(),
+                    where_clause: where_clause.cloned(),
+                    for_update: false,
+                }),
+                Clause::Return(ReturnClause {
+                    distinct: false,
+                    items: vec![ReturnItem::Expr {
+                        expr: map_expr.clone(),
+                        alias: Some("__pc_item".to_string()),
+                        source_text: None,
+                    }],
+                    order_by: None,
+                    skip: None,
+                    limit: None,
+                }),
+            ],
+        });
+
+        let mut pattern_vars: HashSet<String> = HashSet::new();
+        for path in &pattern.paths {
+            if let Some(v) = &path.variable {
+                pattern_vars.insert(v.clone());
+            }
+            for elem in &path.elements {
+                match elem {
+                    uni_cypher::ast::PatternElement::Node(n) => {
+                        if let Some(v) = &n.variable {
+                            pattern_vars.insert(v.clone());
+                        }
+                    }
+                    uni_cypher::ast::PatternElement::Relationship(r) => {
+                        if let Some(v) = &r.variable {
+                            pattern_vars.insert(v.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(Arc::new(PatternComprehensionSubqueryExpr {
+            query,
+            pattern_vars,
+            graph_ctx: self
+                .graph_ctx
+                .clone()
+                .ok_or_else(|| err("GraphExecutionContext"))?,
+            session_ctx: self
+                .session_ctx
+                .clone()
+                .ok_or_else(|| err("SessionContext"))?,
+            storage: self.storage.clone().ok_or_else(|| err("StorageManager"))?,
+            uni_schema: self.uni_schema.clone().ok_or_else(|| err("UniSchema"))?,
+            params: self.params.clone(),
+            outer_entity_vars: self.outer_entity_vars.clone(),
+        }))
+    }
+
     /// Compile bracket access on a struct column (e.g. `x['a']` where `x` is Struct).
     fn compile_array_index(
         &self,
@@ -797,16 +1007,38 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         )
     }
 
-    /// Compile EXISTS subquery expression.
+    /// Compile an `EXISTS { … }` subquery expression.
     fn compile_exists(&self, query: &Query) -> Result<Arc<dyn PhysicalExpr>> {
-        // 7.1: Validate no mutation clauses in EXISTS body
+        self.compile_scalar_subquery(query, SubqueryResult::Exists)
+    }
+
+    /// Compile `EXISTS { … }` / `COUNT { … }` / `COLLECT { … }`.
+    ///
+    /// All three are per-row scalar subqueries over the same body and differ
+    /// only in what they report, so they share one operator. `COUNT` and
+    /// `COLLECT` used to be classified as *aggregates* by the AST, which routed
+    /// them into the planner's aggregate list where the physical planner
+    /// expects an `Expr::FunctionCall`; every such query died with `Expected
+    /// aggregate function, got: CountSubquery(…)`. `EXISTS` was never
+    /// classified that way, which is the only reason it worked.
+    fn compile_scalar_subquery(
+        &self,
+        query: &Query,
+        mode: SubqueryResult,
+    ) -> Result<Arc<dyn PhysicalExpr>> {
+        let form = match mode {
+            SubqueryResult::Exists => "EXISTS",
+            SubqueryResult::Count => "COUNT",
+            SubqueryResult::Collect => "COLLECT",
+        };
+        // A subquery in an expression position cannot write.
         if has_mutation_clause(query) {
             return Err(anyhow!(
-                "SyntaxError: InvalidClauseComposition - EXISTS subquery cannot contain updating clauses"
+                "SyntaxError: InvalidClauseComposition - {form} subquery cannot contain updating clauses"
             ));
         }
 
-        let err = |dep: &str| anyhow!("EXISTS requires {}", dep);
+        let err = |dep: &str| anyhow!("{form} requires {}", dep);
 
         let graph_ctx = self
             .graph_ctx
@@ -821,6 +1053,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
 
         Ok(Arc::new(ExistsExecExpr::new(
             query.clone(),
+            mode,
             graph_ctx,
             session_ctx,
             storage,
@@ -969,7 +1202,23 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         )))
     }
 
-    /// Check if map_expr or where_clause contains a pattern comprehension that references the variable.
+    /// Does the comprehension body need a `{var}._vid` column materialized from
+    /// its CypherValue loop variable?
+    ///
+    /// A nested pattern needs an anchor, and the anchor is found by looking for
+    /// `{var}._vid` in the input schema. The loop variable of a comprehension is
+    /// a single CypherValue column, so that column has to be derived.
+    ///
+    /// A pattern *predicate* needs this exactly as much as a pattern
+    /// *comprehension* does, and only the latter was checked: with
+    /// `[q IN ps WHERE (q)-[:KNOWS]-(:P)]` no `q._vid` was produced, the predicate
+    /// could not bind its anchor, and it **failed open** — every element passed
+    /// the filter. A wrong count, with no error.
+    ///
+    /// The pattern-predicate case is answered conservatively rather than by
+    /// walking the subquery for a reference to the variable: an unnecessary vid
+    /// column is one nullable column nothing reads, while a missing one is a
+    /// silent wrong answer.
     fn needs_vid_extraction_for_variable(
         variable: &str,
         map_expr: &Expr,
@@ -1016,6 +1265,13 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                             .as_ref()
                             .is_some_and(|w| expr_has_pattern_comp_referencing(w, var))
                 }
+                // A bare pattern predicate. Its pattern lives inside a whole
+                // subquery rather than beside it, so this does not try to prove
+                // the variable is referenced — see the note above.
+                Expr::Exists {
+                    from_pattern_predicate: true,
+                    ..
+                } => true,
                 _ => false,
             }
         }
@@ -1056,6 +1312,9 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 Self::contains_custom_expr(l) || Self::contains_custom_expr(r)
             }
             Expr::Exists { .. } => true,
+            // Same reason as EXISTS: a per-row subquery has no DataFusion
+            // translation and must be compiled as a custom physical expression.
+            Expr::CountSubquery(_) | Expr::CollectSubquery(_) => true,
             Expr::LabelCheck { expr, .. } => Self::contains_custom_expr(expr),
             _ => false,
         }
@@ -1124,8 +1383,34 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     /// access on graph-scan variables is compiled as a direct column reference
     /// rather than an ArrayIndex UDF call, which would fail when the variable
     /// column holds a VID integer instead of a Map/Node struct.
+    ///
+    /// The match is **exhaustive on purpose** (#192). It previously covered five
+    /// of `Expr`'s 27 variants behind `other => other.clone()`, so a `Property`
+    /// nested inside a `Case`, `In`, `Map` or `ArrayIndex` kept its UDF form and
+    /// surfaced far from its cause — as `No field named x`, or as a null. A new
+    /// variant must be a compile error here, not a silently missing rewrite.
+    ///
+    /// Three groups, and the third is the one worth reading:
+    ///
+    /// - **Leaves** — nothing to rewrite.
+    /// - **Structural** — rewrite every child.
+    /// - **Scope-introducing** — a subquery body, or a comprehension body whose
+    ///   loop variable shadows the outer scope. `schema` describes the *outer*
+    ///   row, so rewriting a body against it would bind the wrong column. These
+    ///   are listed individually with that reason rather than swept into a
+    ///   wildcard. Where such a node also has an outer-scope child — the list a
+    ///   comprehension iterates, `reduce`'s initial value — that child *is*
+    ///   rewritten, because it is evaluated in the outer row.
     fn resolve_flat_column_properties(expr: &Expr, schema: &Schema) -> Expr {
+        // Shorthand for the common "rewrite this child" step.
+        let go = |e: &Expr| Box::new(Self::resolve_flat_column_properties(e, schema));
+        let go_opt = |e: &Option<Box<Expr>>| {
+            e.as_ref()
+                .map(|inner| Box::new(Self::resolve_flat_column_properties(inner, schema)))
+        };
+
         match expr {
+            // ---- the rewrite itself ----
             Expr::Property(base, prop) => {
                 if let Expr::Variable(var) = base.as_ref() {
                     let flat_col = format!("{}.{}", var, prop);
@@ -1133,17 +1418,27 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                         return Expr::Variable(flat_col);
                     }
                 }
-                // Recurse into the base expression
-                Expr::Property(
-                    Box::new(Self::resolve_flat_column_properties(base, schema)),
-                    prop.clone(),
-                )
+                Expr::Property(go(base), prop.clone())
             }
-            Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
-                left: Box::new(Self::resolve_flat_column_properties(left, schema)),
-                op: *op,
-                right: Box::new(Self::resolve_flat_column_properties(right, schema)),
-            },
+
+            // ---- leaves ----
+            Expr::Literal(_) | Expr::Parameter(_) | Expr::Variable(_) | Expr::Wildcard => {
+                expr.clone()
+            }
+
+            // ---- structural: rewrite every child ----
+            Expr::List(items) => Expr::List(
+                items
+                    .iter()
+                    .map(|i| Self::resolve_flat_column_properties(i, schema))
+                    .collect(),
+            ),
+            Expr::Map(entries) => Expr::Map(
+                entries
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Self::resolve_flat_column_properties(v, schema)))
+                    .collect(),
+            ),
             Expr::FunctionCall {
                 name,
                 args,
@@ -1158,18 +1453,126 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 distinct: *distinct,
                 window_spec: window_spec.clone(),
             },
+            Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
+                left: go(left),
+                op: *op,
+                right: go(right),
+            },
             Expr::UnaryOp { op, expr: inner } => Expr::UnaryOp {
                 op: *op,
-                expr: Box::new(Self::resolve_flat_column_properties(inner, schema)),
+                expr: go(inner),
             },
-            Expr::List(items) => Expr::List(
-                items
+            Expr::Case {
+                expr: subject,
+                when_then,
+                else_expr,
+            } => Expr::Case {
+                expr: go_opt(subject),
+                when_then: when_then
                     .iter()
-                    .map(|i| Self::resolve_flat_column_properties(i, schema))
+                    .map(|(w, t)| {
+                        (
+                            Self::resolve_flat_column_properties(w, schema),
+                            Self::resolve_flat_column_properties(t, schema),
+                        )
+                    })
                     .collect(),
-            ),
-            // For all other expression types, return as-is (literals, variables, etc.)
-            other => other.clone(),
+                else_expr: go_opt(else_expr),
+            },
+            Expr::IsNull(inner) => Expr::IsNull(go(inner)),
+            Expr::IsNotNull(inner) => Expr::IsNotNull(go(inner)),
+            Expr::IsUnique(inner) => Expr::IsUnique(go(inner)),
+            Expr::In { expr: inner, list } => Expr::In {
+                expr: go(inner),
+                list: go(list),
+            },
+            Expr::ArrayIndex { array, index } => Expr::ArrayIndex {
+                array: go(array),
+                index: go(index),
+            },
+            Expr::ArraySlice { array, start, end } => Expr::ArraySlice {
+                array: go(array),
+                start: go_opt(start),
+                end: go_opt(end),
+            },
+            Expr::ValidAt {
+                entity,
+                timestamp,
+                start_prop,
+                end_prop,
+            } => Expr::ValidAt {
+                entity: go(entity),
+                timestamp: go(timestamp),
+                start_prop: start_prop.clone(),
+                end_prop: end_prop.clone(),
+            },
+            Expr::MapProjection { base, items } => Expr::MapProjection {
+                base: go(base),
+                items: items
+                    .iter()
+                    .map(|item| match item {
+                        uni_cypher::ast::MapProjectionItem::LiteralEntry(k, v) => {
+                            uni_cypher::ast::MapProjectionItem::LiteralEntry(k.clone(), go(v))
+                        }
+                        // `.prop`, `.*` and a bare variable name no expression.
+                        other => other.clone(),
+                    })
+                    .collect(),
+            },
+            Expr::LabelCheck {
+                expr: inner,
+                labels,
+            } => Expr::LabelCheck {
+                expr: go(inner),
+                labels: labels.clone(),
+            },
+
+            // ---- scope-introducing: deliberately not rewritten ----
+            //
+            // A subquery body is planned against its own schema, not this one.
+            Expr::Exists { .. } | Expr::CountSubquery(_) | Expr::CollectSubquery(_) => expr.clone(),
+            // The pattern binds its own variables; `schema` describes the outer
+            // row and would resolve them to the wrong columns.
+            Expr::PatternComprehension { .. } => expr.clone(),
+            // The iterated list is an outer-scope expression and is rewritten;
+            // the body is not, because the loop variable shadows the outer row.
+            Expr::Quantifier {
+                quantifier,
+                variable,
+                list,
+                predicate,
+            } => Expr::Quantifier {
+                quantifier: *quantifier,
+                variable: variable.clone(),
+                list: go(list),
+                predicate: predicate.clone(),
+            },
+            Expr::ListComprehension {
+                variable,
+                list,
+                where_clause,
+                map_expr,
+            } => Expr::ListComprehension {
+                variable: variable.clone(),
+                list: go(list),
+                where_clause: where_clause.clone(),
+                map_expr: map_expr.clone(),
+            },
+            // `init` is evaluated once in the outer row; `expr` sees the
+            // accumulator and the loop variable.
+            Expr::Reduce {
+                accumulator,
+                init,
+                variable,
+                list,
+                expr: body,
+            } => Expr::Reduce {
+                accumulator: accumulator.clone(),
+                init: go(init),
+                variable: variable.clone(),
+                list: go(list),
+                expr: body.clone(),
+            },
         }
     }
 
@@ -1244,11 +1647,64 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             fields.push(vid_field);
         }
 
+        // `startNode(r)` inside the body names the loop variable, which is not a
+        // column. `EndpointHydrateExec` materialised the endpoints of the *list*
+        // before this expression runs; carry them into the inner schema under
+        // the loop variable's name so the body can reach them.
+        let endpoint_lists = if let Expr::Variable(list_var) = list {
+            let src = crate::query::df_graph::endpoint_hydrate::endpoint_column(list_var, true);
+            let dst = crate::query::df_graph::endpoint_hydrate::endpoint_column(list_var, false);
+            match (input_schema.index_of(&src), input_schema.index_of(&dst)) {
+                (Ok(si), Ok(di)) => {
+                    for is_start in [true, false] {
+                        fields.push(Arc::new(Field::new(
+                            crate::query::df_graph::endpoint_hydrate::endpoint_column(
+                                variable, is_start,
+                            ),
+                            DataType::LargeBinary,
+                            true,
+                        )));
+                    }
+                    Some((
+                        Arc::new(datafusion::physical_plan::expressions::Column::new(
+                            &src, si,
+                        )) as Arc<dyn PhysicalExpr>,
+                        Arc::new(datafusion::physical_plan::expressions::Column::new(
+                            &dst, di,
+                        )) as Arc<dyn PhysicalExpr>,
+                    ))
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
         let inner_schema = Arc::new(Schema::new(fields));
 
         // Compile inner expressions with scoped translation context
+        let endpoint_hints: Vec<String> = if endpoint_lists.is_some() {
+            [true, false]
+                .iter()
+                .map(|is_start| {
+                    crate::query::df_graph::endpoint_hydrate::endpoint_column(variable, *is_start)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let inner_names: Vec<String> = inner_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
         let mut scoped_ctx = None;
-        let inner_compiler = self.scoped_compiler(&[variable], &mut scoped_ctx);
+        let inner_compiler = self.scoped_compiler_with_hints(
+            &[variable],
+            &endpoint_hints,
+            &inner_names,
+            &mut scoped_ctx,
+        );
 
         let predicate_phy = if let Some(pred) = where_clause {
             Some(inner_compiler.compile(pred, &inner_schema)?)
@@ -1263,10 +1719,13 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             input_list_phy,
             map_phy,
             predicate_phy,
-            variable.to_string(),
+            crate::query::df_graph::comprehension::LoopBindings {
+                variable_name: variable.to_string(),
+                needs_vid_extraction,
+                endpoint_lists,
+            },
             Arc::new(input_schema.clone()),
             output_item_type,
-            needs_vid_extraction,
         )))
     }
 
@@ -1402,8 +1861,29 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             .ok_or_else(|| err("GraphExecutionContext"))?;
         let uni_schema = self.uni_schema.as_ref().ok_or_else(|| err("UniSchema"))?;
 
-        // 1. Analyze pattern to get anchor column and traversal steps
-        let (anchor_col, steps) = analyze_pattern(pattern, input_schema, uni_schema)?;
+        // 1. Analyze pattern to get anchor column and traversal steps.
+        //
+        // Failure here means no pattern node is bound in the outer scope, so
+        // there is nothing to expand CSR adjacency *from*. That is not an invalid
+        // query — `[(a:P)-[:KNOWS]->(b:P) | a.name]` is legal openCypher — it is
+        // only outside what the vectorized operator can do. Fall back to
+        // evaluating the comprehension as a correlated subquery, mirroring what
+        // the `Expr::Exists` arm above already does when `compile_pattern_exists`
+        // cannot vectorize a pattern predicate.
+        let (anchor_col, steps) = match analyze_pattern(pattern, input_schema, uni_schema) {
+            Ok(analysis) => analysis,
+            Err(e) => {
+                log::debug!(
+                    "Pattern comprehension vectorization failed, falling back to subquery: {e}"
+                );
+                return self.compile_pattern_comprehension_as_subquery(
+                    pattern,
+                    where_clause,
+                    map_expr,
+                    input_schema,
+                );
+            }
+        };
 
         // 2. Collect needed properties from where_clause and map_expr
         let (vertex_props, edge_props) = collect_inner_properties(where_clause, map_expr, &steps);
@@ -1417,11 +1897,36 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             path_variable.as_deref(),
         );
 
-        // 4. Compile predicate and map_expr against inner schema
+        // 4. Compile predicate and map_expr against inner schema.
+        //
+        // The pattern's own variables are entities of the inner scope, and the
+        // inner schema carries them as flat `x._vid` / `x.name` columns. The
+        // inherited context knows nothing about them, so they are registered
+        // before compiling — otherwise a property access on one compiles as an
+        // index into a bare `x` that the inner schema does not have (#189).
+        let entity_vars: Vec<(String, VariableKind)> = steps
+            .iter()
+            .flat_map(|s| {
+                s.target_variable
+                    .clone()
+                    .map(|v| (v, VariableKind::Node))
+                    .into_iter()
+                    .chain(s.edge_variable.clone().map(|v| (v, VariableKind::Edge)))
+            })
+            .collect();
+        let inner_names: Vec<String> = inner_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        let mut inner_ctx_slot = None;
+        let inner_compiler =
+            self.entity_scoped_compiler(&entity_vars, &inner_names, &mut inner_ctx_slot);
+
         let pred_phy = where_clause
-            .map(|p| self.compile(p, &inner_schema))
+            .map(|p| inner_compiler.compile(p, &inner_schema))
             .transpose()?;
-        let map_phy = self.compile(map_expr, &inner_schema)?;
+        let map_phy = inner_compiler.compile(map_expr, &inner_schema)?;
         let output_type = map_phy.data_type(&inner_schema)?;
 
         // 5. Return expression
@@ -2261,8 +2766,27 @@ impl PhysicalExpr for StructFieldAccessExpr {
 /// NOT EXISTS is handled by the caller wrapping this in a NOT expression.
 /// Nested EXISTS works because `execute_subplan` creates a full planner that
 /// handles nested EXISTS recursively.
+/// What a per-row scalar subquery reports about its result set.
+///
+/// `EXISTS { … }`, `COUNT { … }` and `COLLECT { … }` differ only in this:
+/// each plans the same body, runs it once per outer row, and then asks a
+/// different question of the rows that come back. Sharing one operator is what
+/// keeps them from drifting — correlated-variable extraction, the nested
+/// runtime, and mutation rejection are subtle and were solved once for EXISTS.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SubqueryResult {
+    /// Whether any row came back.
+    Exists,
+    /// How many rows came back.
+    Count,
+    /// The values of the single column the body returns.
+    Collect,
+}
+
 struct ExistsExecExpr {
     query: Query,
+    /// Which of the three subquery forms this is.
+    mode: SubqueryResult,
     graph_ctx: Arc<GraphExecutionContext>,
     session_ctx: Arc<RwLock<SessionContext>>,
     storage: Arc<StorageManager>,
@@ -2280,8 +2804,13 @@ impl std::fmt::Debug for ExistsExecExpr {
 }
 
 impl ExistsExecExpr {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the subquery's dependencies"
+    )]
     fn new(
         query: Query,
+        mode: SubqueryResult,
         graph_ctx: Arc<GraphExecutionContext>,
         session_ctx: Arc<RwLock<SessionContext>>,
         storage: Arc<StorageManager>,
@@ -2291,6 +2820,7 @@ impl ExistsExecExpr {
     ) -> Self {
         Self {
             query,
+            mode,
             graph_ctx,
             session_ctx,
             storage,
@@ -2342,7 +2872,14 @@ impl PhysicalExpr for ExistsExecExpr {
         &self,
         _input_schema: &Schema,
     ) -> datafusion::error::Result<arrow_schema::DataType> {
-        Ok(DataType::Boolean)
+        Ok(match self.mode {
+            SubqueryResult::Exists => DataType::Boolean,
+            SubqueryResult::Count => DataType::Int64,
+            // The same item type the pattern-comprehension fallback produces,
+            // so a list from `COLLECT { … }` decodes exactly like one from
+            // `[(a)-[:R]->(x) | x]`.
+            SubqueryResult::Collect => DataType::LargeList(comprehension_item_field()),
+        })
     }
 
     fn nullable(&self, _input_schema: &Schema) -> datafusion::error::Result<bool> {
@@ -2354,7 +2891,11 @@ impl PhysicalExpr for ExistsExecExpr {
         batch: &arrow_array::RecordBatch,
     ) -> datafusion::error::Result<datafusion::physical_plan::ColumnarValue> {
         let num_rows = batch.num_rows();
-        let mut builder = BooleanBuilder::with_capacity(num_rows);
+        let mode = self.mode;
+        // Row count and, in `Collect` mode, the body's single column. Gathered
+        // rather than appended to a typed builder because the builder's type
+        // depends on the mode.
+        let mut per_row: Vec<(usize, Vec<Value>)> = Vec::with_capacity(num_rows);
 
         // 7.2: Extract entity variable names from batch schema.
         // Entity columns follow the pattern "varname._vid" (flattened) or are struct columns.
@@ -2430,6 +2971,15 @@ impl PhysicalExpr for ExistsExecExpr {
                 combined_entity_vars.extend(entity_vars.iter().cloned());
 
                 for row_idx in 0..num_rows {
+                    // One full sub-plan execution happens below, inside a single
+                    // `poll_next` on a scoped thread, so nothing between here and
+                    // the end of the batch can be preempted. Checking per row
+                    // caps the overrun at one evaluation instead of `num_rows`
+                    // of them. See #207.
+                    graph_ctx.check_timeout().map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(e.to_string())
+                    })?;
+
                     let row_params = extract_row_params(batch, row_idx);
                     let mut sub_params = base_params.clone();
                     sub_params.extend(row_params);
@@ -2455,8 +3005,13 @@ impl PhysicalExpr for ExistsExecExpr {
                         None, // EXISTS compile-time rejects mutations (expr_compiler:693)
                     ))?;
 
-                    let has_rows = batches.iter().any(|b| b.num_rows() > 0);
-                    builder.append_value(has_rows);
+                    let matched: usize = batches.iter().map(|b| b.num_rows()).sum();
+                    let values = if mode == SubqueryResult::Collect {
+                        collect_single_column(&batches)?
+                    } else {
+                        Vec::new()
+                    };
+                    per_row.push((matched, values));
                 }
 
                 Ok::<_, datafusion::error::DataFusionError>(())
@@ -2476,9 +3031,44 @@ impl PhysicalExpr for ExistsExecExpr {
             )));
         }
 
-        Ok(datafusion::physical_plan::ColumnarValue::Array(Arc::new(
-            builder.finish(),
-        )))
+        let array: arrow_array::ArrayRef = match self.mode {
+            SubqueryResult::Exists => {
+                let mut builder = BooleanBuilder::with_capacity(num_rows);
+                for (matched, _) in &per_row {
+                    builder.append_value(*matched > 0);
+                }
+                Arc::new(builder.finish())
+            }
+            SubqueryResult::Count => {
+                let mut builder = arrow_array::builder::Int64Builder::with_capacity(num_rows);
+                for (matched, _) in &per_row {
+                    builder.append_value(*matched as i64);
+                }
+                Arc::new(builder.finish())
+            }
+            SubqueryResult::Collect => {
+                let mut values = arrow_array::builder::LargeBinaryBuilder::new();
+                let mut offsets: Vec<i64> = Vec::with_capacity(num_rows + 1);
+                offsets.push(0);
+                let mut total: i64 = 0;
+                for (_, row_values) in &per_row {
+                    for v in row_values {
+                        values.append_value(uni_common::cypher_value_codec::encode(v));
+                        total += 1;
+                    }
+                    offsets.push(total);
+                }
+                Arc::new(arrow_array::LargeListArray::new(
+                    comprehension_item_field(),
+                    datafusion::arrow::buffer::OffsetBuffer::new(
+                        datafusion::arrow::buffer::ScalarBuffer::from(offsets),
+                    ),
+                    Arc::new(values.finish()),
+                    None,
+                ))
+            }
+        };
+        Ok(datafusion::physical_plan::ColumnarValue::Array(array))
     }
 
     fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
@@ -2499,6 +3089,313 @@ impl PhysicalExpr for ExistsExecExpr {
 
     fn fmt_sql(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unanchored pattern comprehension
+// ---------------------------------------------------------------------------
+
+/// A pattern comprehension evaluated as a correlated subquery, one row at a time.
+///
+/// The vectorized operator (`PatternComprehensionExecExpr`) anchors on a pattern
+/// node that is already bound in the outer scope and walks CSR adjacency from its
+/// VID. When every pattern variable is fresh there is no such node, and
+/// `analyze_pattern` fails.
+///
+/// That is not a reason to reject the query: `[(a:P)-[:KNOWS]->(b:P) | a.name]`
+/// is legal openCypher, and pattern *predicates* in the same position already
+/// worked — `compile_pattern_exists` falls back to `ExistsExecExpr` when
+/// anchoring fails (see the `Expr::Exists` arm of `compile`). Comprehensions
+/// simply had no equivalent, which is the asymmetry this closes.
+///
+/// This is deliberately the *slow* path: the subquery is planned once and then
+/// executed per outer row, so an uncorrelated comprehension pays for a full
+/// evaluation on every row even though its value is identical each time. Making
+/// that case cheap is a planner rewrite (hoist it, evaluate once, broadcast) and
+/// is separate work; correctness comes first, and it gives that work a working
+/// baseline to be measured against.
+struct PatternComprehensionSubqueryExpr {
+    query: Query,
+    /// Names the pattern itself binds. An outer column of the same name must not
+    /// be declared in scope, or the planner would treat the pattern's fresh
+    /// binding as a reference to the outer one and silently change the query.
+    pattern_vars: HashSet<String>,
+    graph_ctx: Arc<GraphExecutionContext>,
+    session_ctx: Arc<RwLock<SessionContext>>,
+    storage: Arc<StorageManager>,
+    uni_schema: Arc<UniSchema>,
+    params: HashMap<String, Value>,
+    outer_entity_vars: HashSet<String>,
+}
+
+impl std::fmt::Debug for PatternComprehensionSubqueryExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PatternComprehensionSubqueryExpr")
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for PatternComprehensionSubqueryExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PatternComprehensionSubquery")
+    }
+}
+
+impl PartialEq for PatternComprehensionSubqueryExpr {
+    fn eq(&self, other: &Self) -> bool {
+        self.query == other.query
+    }
+}
+
+impl Eq for PatternComprehensionSubqueryExpr {}
+
+impl Hash for PatternComprehensionSubqueryExpr {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        format!("{:?}", self.query).hash(state);
+    }
+}
+
+/// The values of the single column a `COLLECT { … }` body returns.
+///
+/// openCypher requires the body to end in a `RETURN` of exactly one column, so
+/// anything else is a query error rather than an arbitrary pick — silently
+/// taking the first of several would make the answer depend on column order.
+fn collect_single_column(
+    batches: &[arrow_array::RecordBatch],
+) -> datafusion::error::Result<Vec<Value>> {
+    let mut out = Vec::new();
+    for batch in batches {
+        if batch.num_columns() != 1 {
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "COLLECT {{ … }} must return exactly one column, got {}",
+                batch.num_columns()
+            )));
+        }
+        let column = batch.column(0);
+        for row in 0..batch.num_rows() {
+            out.push(arrow_to_json_value(column, row));
+        }
+    }
+    Ok(out)
+}
+
+/// The item type of the produced list.
+///
+/// `LargeBinary` CypherValue, matching what the vectorized path produces for the
+/// common case of a property projection: `build_inner_schema` types vertex and
+/// edge properties as `LargeBinary`, so `[... | a.name]` is a
+/// `LargeList(LargeBinary)` there too. A fixed item type is required at plan
+/// time and the map expression's type is not known on this path, so encoding
+/// every element as a CypherValue is the one choice that cannot be wrong for a
+/// particular map expression.
+fn comprehension_item_field() -> Arc<Field> {
+    Arc::new(Field::new("item", DataType::LargeBinary, true))
+}
+
+impl PhysicalExpr for PatternComprehensionSubqueryExpr {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn data_type(
+        &self,
+        _input_schema: &Schema,
+    ) -> datafusion::error::Result<arrow_schema::DataType> {
+        Ok(DataType::LargeList(comprehension_item_field()))
+    }
+
+    fn nullable(&self, _input_schema: &Schema) -> datafusion::error::Result<bool> {
+        Ok(true)
+    }
+
+    fn evaluate(
+        &self,
+        batch: &arrow_array::RecordBatch,
+    ) -> datafusion::error::Result<datafusion::physical_plan::ColumnarValue> {
+        let num_rows = batch.num_rows();
+
+        // Identify the outer scope's entity variables from the batch schema, the
+        // same way `ExistsExecExpr` does, so correlated references inside the
+        // comprehension resolve against the current row.
+        let schema = batch.schema();
+        let mut entity_vars: HashSet<String> = HashSet::new();
+        for field in schema.fields() {
+            let name = field.name();
+            if let Some(base) = name.strip_suffix("._vid") {
+                entity_vars.insert(base.to_string());
+            }
+            if matches!(field.data_type(), DataType::Struct(_)) {
+                entity_vars.insert(name.to_string());
+            }
+            if !name.contains('.')
+                && !name.starts_with('_')
+                && matches!(field.data_type(), DataType::Int64 | DataType::UInt64)
+            {
+                entity_vars.insert(name.to_string());
+            }
+        }
+        // Everything the outer row carries under a bare name is in scope for the
+        // subquery, not just entity variables: a comprehension may correlate
+        // through any value, and `startNode(r).id` — how LDBC IC14 correlates —
+        // reaches `r` inside a function call rather than as a property access, so
+        // the property-access rewrite below never sees it. `extract_row_params`
+        // already supplies these by column name, and `arrow_to_json_value`
+        // decodes a CypherValue column, so an edge arrives as an edge.
+        let mut vars_in_scope: HashSet<String> = entity_vars.clone();
+        for field in schema.fields() {
+            let name = field.name();
+            if !name.contains('.') && !name.starts_with('_') {
+                vars_in_scope.insert(name.clone());
+            }
+        }
+        // A pattern variable shadows an outer column of the same name.
+        for v in &self.pattern_vars {
+            vars_in_scope.remove(v);
+        }
+        let vars_in_scope: Vec<String> = vars_in_scope.into_iter().collect();
+
+        // Only genuine entity variables drive the property-access rewrite; a
+        // shadowed name must not be rewritten to an outer parameter either.
+        let correlated_vars: HashSet<String> = entity_vars
+            .difference(&self.pattern_vars)
+            .cloned()
+            .collect();
+        let rewritten_query = rewrite_query_correlated(&self.query, &correlated_vars);
+
+        // Planned once; the rewrite turned correlated references into parameters,
+        // so the plan is the same for every row.
+        let planner = QueryPlanner::new(self.uni_schema.clone());
+        let logical_plan = planner
+            .plan_with_scope(rewritten_query, vars_in_scope)
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "pattern comprehension subquery planning failed: {e}"
+                ))
+            })?;
+
+        let graph_ctx = self.graph_ctx.clone();
+        let session_ctx = self.session_ctx.clone();
+        let storage = self.storage.clone();
+        let uni_schema = self.uni_schema.clone();
+        let base_params = self.params.clone();
+
+        // One list per outer row, flattened into `values` with `offsets` marking
+        // the boundaries — the LargeListArray layout.
+        let mut values: Vec<Option<Vec<u8>>> = Vec::new();
+        let mut offsets: Vec<i64> = Vec::with_capacity(num_rows + 1);
+        offsets.push(0);
+
+        let result = std::thread::scope(|s| {
+            s.spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "failed to create runtime for pattern comprehension: {e}"
+                        ))
+                    })?;
+
+                let mut combined_entity_vars = self.outer_entity_vars.clone();
+                combined_entity_vars.extend(correlated_vars.iter().cloned());
+
+                for row_idx in 0..num_rows {
+                    // Same shape as `ExistsExecExpr` above: a whole sub-plan per
+                    // outer row inside one `poll_next`. This is the site #207
+                    // names, and the checkpoint is what bounds IC14's overrun.
+                    graph_ctx.check_timeout().map_err(|e| {
+                        datafusion::error::DataFusionError::Execution(e.to_string())
+                    })?;
+
+                    let row_params = extract_row_params(batch, row_idx);
+                    let mut sub_params = base_params.clone();
+                    sub_params.extend(row_params);
+                    for var in &correlated_vars {
+                        let vid_key = format!("{}._vid", var);
+                        if let Some(vid_val) = sub_params.get(&vid_key).cloned() {
+                            sub_params.insert(var.clone(), vid_val);
+                        }
+                    }
+
+                    let (batches, _plan) = rt.block_on(execute_subplan_with_outer_vars(
+                        &logical_plan,
+                        &sub_params,
+                        &HashMap::new(),
+                        &graph_ctx,
+                        &session_ctx,
+                        &storage,
+                        &uni_schema,
+                        &combined_entity_vars,
+                        None,
+                    ))?;
+
+                    // The synthesized query returns exactly one column — the
+                    // comprehension's map expression.
+                    for b in &batches {
+                        if b.num_columns() == 0 {
+                            continue;
+                        }
+                        let col = b.column(0);
+                        for i in 0..b.num_rows() {
+                            let v = arrow_to_json_value(col.as_ref(), i);
+                            values.push(Some(uni_common::cypher_value_codec::encode(&v)));
+                        }
+                    }
+                    offsets.push(values.len() as i64);
+                }
+
+                Ok::<_, datafusion::error::DataFusionError>(())
+            })
+            .join()
+            .unwrap_or_else(|_| {
+                Err(datafusion::error::DataFusionError::Execution(
+                    "pattern comprehension subquery thread panicked".to_string(),
+                ))
+            })
+        });
+        result?;
+
+        let values_array = arrow_array::LargeBinaryArray::from_iter(values);
+        // No null buffer: a row that matched nothing gets an empty list, never
+        // null — the same contract the vectorized path has.
+        let list = arrow_array::LargeListArray::new(
+            comprehension_item_field(),
+            OffsetBuffer::new(ScalarBuffer::from(offsets)),
+            Arc::new(values_array),
+            None,
+        );
+        Ok(datafusion::physical_plan::ColumnarValue::Array(Arc::new(
+            list,
+        )))
+    }
+
+    fn children(&self) -> Vec<&Arc<dyn PhysicalExpr>> {
+        vec![]
+    }
+
+    fn with_new_children(
+        self: Arc<Self>,
+        children: Vec<Arc<dyn PhysicalExpr>>,
+    ) -> datafusion::error::Result<Arc<dyn PhysicalExpr>> {
+        if !children.is_empty() {
+            return Err(datafusion::error::DataFusionError::Plan(
+                "PatternComprehensionSubqueryExpr has no children".to_string(),
+            ));
+        }
+        Ok(self)
+    }
+
+    fn fmt_sql(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
+impl PartialEq<dyn Any> for PatternComprehensionSubqueryExpr {
+    fn eq(&self, other: &dyn Any) -> bool {
+        other
+            .downcast_ref::<Self>()
+            .is_some_and(|o| self.query == o.query)
     }
 }
 
@@ -2567,6 +3464,47 @@ fn has_mutation_in_expr(expr: &Expr) -> bool {
 /// For each `Property(Variable(v), key)` where `v` is an outer-scope entity variable,
 /// replaces it with `Parameter("{v}.{key}")`. This enables plan-once optimization since
 /// the rewritten query is parameterized (same structure for every row).
+/// Pass the hydrated endpoint node to `startNode(r)` / `endNode(r)` as an extra
+/// argument, when the outer row carries one.
+///
+/// The UDF finds the endpoint by scanning its node arguments for a matching
+/// vid. In a correlated pattern-comprehension subquery the only nodes in scope
+/// are the pattern's own bindings, so the lookup succeeds only for rows where
+/// the endpoint coincides with one of them — and errors on every other row
+/// rather than letting the predicate be false. LDBC IC14 is that shape: its
+/// `WHERE` tests `a.id = startNode(r).id` across all matching `(a, b)` pairs.
+///
+/// `EndpointHydrateExec` put the endpoint on the outer row as
+/// `_endpoint.src.<rel>`, and `extract_row_params` supplies every outer column
+/// as a parameter, so referencing it here resolves per row.
+fn rewrite_endpoint_calls(expr: Expr, schema: &Schema) -> Expr {
+    if let Expr::FunctionCall {
+        ref name, ref args, ..
+    } = expr
+    {
+        let upper = name.to_uppercase();
+        if (upper == "STARTNODE" || upper == "ENDNODE")
+            && let Some(Expr::Variable(rel)) = args.first()
+        {
+            let col = crate::query::df_graph::endpoint_hydrate::endpoint_column(
+                rel,
+                upper == "STARTNODE",
+            );
+            if schema.index_of(&col).is_ok() {
+                let mut args = args.clone();
+                args.push(Expr::Parameter(col));
+                return Expr::FunctionCall {
+                    name: name.clone(),
+                    args,
+                    distinct: false,
+                    window_spec: None,
+                };
+            }
+        }
+    }
+    expr.map_children(&mut |c| rewrite_endpoint_calls(c, schema))
+}
+
 fn rewrite_query_correlated(query: &Query, outer_vars: &HashSet<String>) -> Query {
     match query {
         Query::Single(stmt) => Query::Single(Statement {
@@ -2744,4 +3682,152 @@ fn resolve_metric_for_property(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod flat_column_resolution_tests {
+    use super::*;
+    use arrow_schema::{DataType, Field, Schema};
+    use uni_cypher::ast::Expr;
+
+    /// A schema holding the flat column `n.name` and nothing else.
+    fn flat_schema() -> Schema {
+        Schema::new(vec![Field::new("n.name", DataType::Utf8, true)])
+    }
+
+    fn n_name() -> Expr {
+        Expr::Property(
+            Box::new(Expr::Variable("n".to_string())),
+            "name".to_string(),
+        )
+    }
+
+    fn resolved(expr: &Expr) -> Expr {
+        CypherPhysicalExprCompiler::resolve_flat_column_properties(expr, &flat_schema())
+    }
+
+    /// The baseline the five original arms already covered.
+    #[test]
+    fn a_bare_property_resolves_to_the_flat_column() {
+        assert_eq!(resolved(&n_name()), Expr::Variable("n.name".to_string()));
+    }
+
+    /// #192: every one of these sat behind `other => other.clone()` and kept its
+    /// UDF form. Each asserts the *nested* property is now rewritten.
+    #[test]
+    fn a_property_nested_in_a_previously_unhandled_variant_resolves() {
+        let flat = Expr::Variable("n.name".to_string());
+
+        // CASE WHEN n.name ... THEN n.name ELSE n.name END
+        let case = Expr::Case {
+            expr: Some(Box::new(n_name())),
+            when_then: vec![(n_name(), n_name())],
+            else_expr: Some(Box::new(n_name())),
+        };
+        assert_eq!(
+            resolved(&case),
+            Expr::Case {
+                expr: Some(Box::new(flat.clone())),
+                when_then: vec![(flat.clone(), flat.clone())],
+                else_expr: Some(Box::new(flat.clone())),
+            }
+        );
+
+        // n.name IN n.name
+        assert_eq!(
+            resolved(&Expr::In {
+                expr: Box::new(n_name()),
+                list: Box::new(n_name()),
+            }),
+            Expr::In {
+                expr: Box::new(flat.clone()),
+                list: Box::new(flat.clone()),
+            }
+        );
+
+        // {k: n.name}
+        assert_eq!(
+            resolved(&Expr::Map(vec![("k".to_string(), n_name())])),
+            Expr::Map(vec![("k".to_string(), flat.clone())])
+        );
+
+        // n.name[n.name]
+        assert_eq!(
+            resolved(&Expr::ArrayIndex {
+                array: Box::new(n_name()),
+                index: Box::new(n_name()),
+            }),
+            Expr::ArrayIndex {
+                array: Box::new(flat.clone()),
+                index: Box::new(flat.clone()),
+            }
+        );
+
+        // n.name IS NOT NULL
+        assert_eq!(
+            resolved(&Expr::IsNotNull(Box::new(n_name()))),
+            Expr::IsNotNull(Box::new(flat.clone()))
+        );
+
+        // n.name[n.name..n.name]
+        assert_eq!(
+            resolved(&Expr::ArraySlice {
+                array: Box::new(n_name()),
+                start: Some(Box::new(n_name())),
+                end: Some(Box::new(n_name())),
+            }),
+            Expr::ArraySlice {
+                array: Box::new(flat.clone()),
+                start: Some(Box::new(flat.clone())),
+                end: Some(Box::new(flat.clone())),
+            }
+        );
+
+        // n:Label over a property expression
+        assert_eq!(
+            resolved(&Expr::LabelCheck {
+                expr: Box::new(n_name()),
+                labels: vec!["L".to_string()],
+            }),
+            Expr::LabelCheck {
+                expr: Box::new(flat.clone()),
+                labels: vec!["L".to_string()],
+            }
+        );
+    }
+
+    /// The deliberate non-recursion, which is the half that would be a *bug* if
+    /// it changed: a comprehension body binds its own variable, and `schema`
+    /// describes the outer row.
+    #[test]
+    fn a_comprehension_body_is_left_alone_but_its_list_is_not() {
+        let comp = Expr::ListComprehension {
+            variable: "n".to_string(),
+            list: Box::new(n_name()),
+            where_clause: Some(Box::new(n_name())),
+            map_expr: Box::new(n_name()),
+        };
+        assert_eq!(
+            resolved(&comp),
+            Expr::ListComprehension {
+                variable: "n".to_string(),
+                // the iterated list is outer-scope, so it resolves
+                list: Box::new(Expr::Variable("n.name".to_string())),
+                // the body is not, so it must be untouched
+                where_clause: Some(Box::new(n_name())),
+                map_expr: Box::new(n_name()),
+            }
+        );
+    }
+
+    /// A property whose flat column does not exist must keep its UDF form —
+    /// otherwise the rewrite would invent columns.
+    #[test]
+    fn an_absent_flat_column_is_not_invented() {
+        let other = Expr::Property(Box::new(Expr::Variable("n".to_string())), "age".to_string());
+        assert_eq!(
+            resolved(&Expr::IsNull(Box::new(other.clone()))),
+            Expr::IsNull(Box::new(other))
+        );
+    }
 }

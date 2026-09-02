@@ -175,6 +175,57 @@ ORDER BY score DESC
 
 `refine_factor` is the load-bearing recall knob for quantized (PQ/SQ) indexes — even a small value (e.g. `10`) typically recovers most of the recall lost to quantization.
 
+!!! tip "IVF-PQ applies a `refine_factor` by default (since 3.5)"
+
+    A quantized index now carries a `refine_factor` default derived from its
+    compression ratio, so a query that passes nothing still re-scores candidates
+    against the original vectors. Pass `refine_factor` explicitly to override it,
+    or `refine_factor: 1` to opt out entirely.
+
+    This matters because the un-refined answer is much worse than the index is
+    capable of, with no error and nothing unusual in the result. Measured on
+    SIFT-1M (1M x 128-d vectors, L2, K=10, recall@10 against the
+    dataset's own published ground truth):
+
+    | `nprobes` | `refine_factor` | recall@10 | QPS |
+    |---:|---:|---:|---:|
+    | 64 | *(none)* | 0.562 | 50.8 |
+    | 64 | 5 | 0.926 | 52.3 |
+    | 64 | 20 | **0.992** | 49.1 |
+    | 128 | *(none)* | 0.562 | 45.4 |
+
+    Raising `nprobes` alone does **not** help — recall is flat from 64 to 128,
+    because the ceiling is quantization precision rather than how much of the
+    index was searched. `refine_factor` is what lifts it. With the default in
+    place the same `nprobes=64` cell measures **0.978** rather than 0.562.
+
+    For comparison, the same corpus with HNSW reaches 0.980 recall at 32.6 QPS
+    (`ef_search=50`), and an exact brute-force scan reaches 1.000 at 6.3 QPS. So
+    IVF-PQ **with** refine is both the most accurate approximate option and the
+    fastest — but only with the knob set.
+
+### Choosing `ef_search` for HNSW
+
+`ef_search` widens the HNSW search beam. On the same SIFT-1M corpus recall
+saturates early and throughput then declines, so there is a useful band rather
+than "higher is better":
+
+| `ef_search` | recall@10 | QPS |
+|---:|---:|---:|
+| 10 | 0.862 | 20.4 |
+| 25 | 0.960 | 32.6 |
+| 50 | **0.980** | 32.6 |
+| 100 | 0.980 | 32.1 |
+| 400 | 0.980 | 27.6 |
+
+Recall stops improving at 50 and QPS falls monotonically after it. The
+underlying default (`1.5 x k`, i.e. 15 for `k=10`) lands near 0.86 and is
+usually too low for recall-sensitive work; 25–50 is the band worth setting.
+
+Numbers from `crates/uni/benches/ann_pareto.rs`; full method and caveats in
+`docs/perf/ann-2026-08-25.md`. They are one machine, one corpus, and a
+sanity-check band rather than a guarantee — re-measure on your own data.
+
 ### Querying Vector Indexes
 
 **Procedure Call:**

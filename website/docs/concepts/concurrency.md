@@ -124,6 +124,32 @@ session.transact_with_retry(RetryOptions::default(), |tx| async move {
 session.execute_with_retry("MERGE (u:User {email:'a@b.com'})").await?;
 ```
 
+!!! warning "The default retry budget has a ceiling"
+
+    `RetryOptions::default()` allows **5 attempts**. Under heavy key skew that
+    is not enough, and the operations that run out do not retry forever — they
+    return an error to the caller.
+
+    Measured on 256 counters with Zipf-skewed read-modify-write (24 writers,
+    abort rate = serialization conflicts / writing commit attempts):
+
+    | skew (Zipf θ) | abort rate | ops that exhausted all 5 attempts |
+    |---:|---:|---:|
+    | 0.00 | 8.8% | 0 |
+    | 0.90 | 40.2% | 1334 |
+    | 1.20 | 59.4% | 3353 |
+
+    Past roughly a 40% abort rate, plan for it: raise `max_attempts`, add
+    application-level backoff, or take `FOR UPDATE` row locks on the hot keys so
+    writers serialize instead of racing to validation.
+
+    Note also that **uniform access is not conflict-free** — spreading writes
+    over 256 keys still aborts 8.8% of commits at 24 writers. Spreading keys
+    reduces contention; it does not remove it.
+
+    Numbers from `crates/uni/benches/ssi_contention.rs`; full analysis in
+    `docs/perf/contention-2026-08-25.md`.
+
 ### `FOR UPDATE` Row Locks
 
 For read-modify-write hotspots, `FOR UPDATE` provides pessimistic per-key row locks held from `MATCH` until commit, serializing contending writers on those keys instead of letting them race to validation:

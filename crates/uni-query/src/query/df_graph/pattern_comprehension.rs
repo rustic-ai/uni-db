@@ -28,14 +28,15 @@ use datafusion::physical_plan::PhysicalExpr;
 use uni_common::core::id::{Eid, Vid};
 use uni_common::core::schema::Schema as UniSchema;
 use uni_cypher::ast::{
-    Direction as AstDirection, Expr, NodePattern, Pattern, PatternElement, RelationshipPattern,
+    Direction as AstDirection, Expr, MapProjectionItem, NodePattern, Pattern, PatternElement,
+    RelationshipPattern,
 };
 use uni_store::QueryContext;
 use uni_store::storage::direction::Direction;
 
 use super::GraphExecutionContext;
 use crate::query::df_graph::common::{
-    block_on_scoped, build_path_struct_field, column_as_vid_array,
+    block_on_scoped, build_path_struct_field, column_as_vid_array, exec_err,
 };
 use crate::query::df_graph::scan::build_property_column_static;
 
@@ -294,7 +295,18 @@ impl PhysicalExpr for PatternComprehensionExecExpr {
                     .map(|v| Vid::from(*v))
                     .collect();
 
-                let prop_refs: Vec<&str> = props.iter().map(|s| s.as_str()).collect();
+                let prop_refs: Vec<&str> = props
+                    .iter()
+                    .map(|s| {
+                        if s == WHOLE_ENTITY {
+                            // The wildcard the storage layer understands; the
+                            // marker itself is not a property name.
+                            "_all_props"
+                        } else {
+                            s.as_str()
+                        }
+                    })
+                    .collect();
 
                 let props_map = block_on_scoped(
                     "Vertex prop load",
@@ -306,12 +318,17 @@ impl PhysicalExpr for PatternComprehensionExecExpr {
                 )?;
 
                 for prop in props {
-                    let col = build_property_column_static(
-                        &vids,
-                        &props_map,
-                        prop,
-                        &DataType::LargeBinary,
-                    )?;
+                    let col = if prop == WHOLE_ENTITY {
+                        build_node_entity_column(&vids, &props_map, &query_ctx)
+                    } else {
+                        build_property_column_static(
+                            &vids,
+                            &props_map,
+                            prop,
+                            &DataType::LargeBinary,
+                        )
+                        .map_err(exec_err)?
+                    };
                     inner_columns.push(col);
                 }
             }
@@ -325,7 +342,16 @@ impl PhysicalExpr for PatternComprehensionExecExpr {
                     .map(|e| Eid::from(*e))
                     .collect();
 
-                let prop_refs: Vec<&str> = props.iter().map(|s| s.as_str()).collect();
+                let prop_refs: Vec<&str> = props
+                    .iter()
+                    .map(|s| {
+                        if s == WHOLE_ENTITY {
+                            "_all_props"
+                        } else {
+                            s.as_str()
+                        }
+                    })
+                    .collect();
 
                 let props_map = block_on_scoped(
                     "Edge prop load",
@@ -339,12 +365,34 @@ impl PhysicalExpr for PatternComprehensionExecExpr {
                 // Edge props use Eid mapped to Vid keys in the HashMap
                 let vid_keys: Vec<Vid> = eids.iter().map(|e| Vid::from(e.as_u64())).collect();
                 for prop in props {
-                    let col = build_property_column_static(
-                        &vid_keys,
-                        &props_map,
-                        prop,
-                        &DataType::LargeBinary,
-                    )?;
+                    let col = if prop == WHOLE_ENTITY {
+                        // `src` is the node before this edge — the anchor on the
+                        // first hop, the previous hop's target after that — and
+                        // `dst` is this hop's target, the same orientation
+                        // `build_path_column` uses.
+                        let src_vids: Vec<u64> = if step_idx == 0 {
+                            expansion.anchor_vids.clone()
+                        } else {
+                            expansion.step_target_vids[step_idx - 1].clone()
+                        };
+                        self.build_edge_entity_column(
+                            &eids,
+                            &src_vids,
+                            &expansion.step_target_vids[step_idx],
+                            &expansion.step_edge_type_ids[step_idx],
+                            &vid_keys,
+                            &props_map,
+                            &query_ctx,
+                        )
+                    } else {
+                        build_property_column_static(
+                            &vid_keys,
+                            &props_map,
+                            prop,
+                            &DataType::LargeBinary,
+                        )
+                        .map_err(exec_err)?
+                    };
                     inner_columns.push(col);
                 }
             }
@@ -593,6 +641,55 @@ impl PatternComprehensionExecExpr {
     /// Each path consists of: nodes = [anchor, step0_target, step1_target, ...]
     /// and relationships = [step0_edge, step1_edge, ...].
     /// The path struct follows the schema from `build_path_struct_field()`.
+    /// Build the CypherValue column for a bare *relationship* reference.
+    ///
+    /// The edge twin of [`build_node_entity_column`]: one `Value::Edge` per row
+    /// carrying the type name, both endpoints and every property. Endpoints are
+    /// in the edge's stored orientation, which is what `startNode`/`endNode`
+    /// and equality against a `MATCH`-bound relationship both depend on.
+    ///
+    /// The type name goes through `EdgeAppendCtx::type_name` rather than a
+    /// local lookup: a resident edge's type is known only to the L0 visibility
+    /// chain and a flushed edge's only to the adjacency probe, so a single
+    /// source would be wrong on one side of a flush.
+    #[expect(clippy::too_many_arguments, reason = "one column, seven inputs")]
+    fn build_edge_entity_column(
+        &self,
+        eids: &[Eid],
+        src_vids: &[u64],
+        dst_vids: &[u64],
+        type_ids: &[u32],
+        prop_keys: &[Vid],
+        props_map: &HashMap<Vid, uni_common::Properties>,
+        query_ctx: &QueryContext,
+    ) -> ArrayRef {
+        use arrow_array::builder::LargeBinaryBuilder;
+
+        let mut builder = LargeBinaryBuilder::new();
+        for (i, eid) in eids.iter().enumerate() {
+            let ctx = super::common::EdgeAppendCtx {
+                graph_ctx: &self.graph_ctx,
+                query_ctx,
+                edge_type_ids: type_ids.get(i).map(std::slice::from_ref).unwrap_or(&[]),
+                prop_cache: None,
+                fixed_type_name: None,
+            };
+            let edge = uni_common::Value::Edge(uni_common::Edge {
+                eid: *eid,
+                edge_type: ctx.type_name(*eid, type_ids.get(i).copied()),
+                src: Vid::from(src_vids.get(i).copied().unwrap_or_default()),
+                dst: Vid::from(dst_vids.get(i).copied().unwrap_or_default()),
+                properties: prop_keys
+                    .get(i)
+                    .and_then(|k| props_map.get(k))
+                    .cloned()
+                    .unwrap_or_default(),
+            });
+            builder.append_value(uni_common::cypher_value_codec::encode(&edge));
+        }
+        Arc::new(builder.finish()) as ArrayRef
+    }
+
     fn build_path_column(
         &self,
         expansion: &PatternExpansion,
@@ -915,11 +1012,87 @@ fn convert_direction(ast_dir: &AstDirection) -> Direction {
     }
 }
 
+/// Build the CypherValue column for a bare entity reference in a comprehension.
+///
+/// One `Value::Node` per row, carrying the vertex's labels and every property,
+/// encoded exactly as the non-vectorised comprehension path encodes its items —
+/// so `[(n)-[:R]->(x) | x]` returns the same node whichever path plans it.
+///
+/// Labels come from the visibility layer rather than the property fetch: they
+/// are not properties, and a node whose labels were dropped here would compare
+/// unequal to the same node returned by an ordinary `MATCH`.
+fn build_node_entity_column(
+    vids: &[Vid],
+    props_map: &HashMap<Vid, uni_common::Properties>,
+    query_ctx: &QueryContext,
+) -> ArrayRef {
+    use arrow_array::builder::LargeBinaryBuilder;
+    use uni_store::runtime::l0_visibility;
+
+    let mut builder = LargeBinaryBuilder::new();
+    for vid in vids {
+        let labels = l0_visibility::get_vertex_labels(*vid, query_ctx);
+        let properties = props_map
+            .get(vid)
+            .cloned()
+            .or_else(|| l0_visibility::get_vertex_properties(*vid, query_ctx))
+            .unwrap_or_default();
+        let node = uni_common::Value::Node(uni_common::Node {
+            vid: *vid,
+            labels,
+            properties,
+        });
+        builder.append_value(uni_common::cypher_value_codec::encode(&node));
+    }
+    Arc::new(builder.finish()) as ArrayRef
+}
+
+/// Marker in the collected property lists meaning "the whole entity", not one
+/// property of it.
+///
+/// `[(n)-[:R]->(x) | x]` has to yield a node, so the inner batch needs a column
+/// carrying the entity itself. Only property columns were ever built, so the
+/// map expression's bare `x` resolved against a schema holding `x._vid` and
+/// nothing else and the query failed to plan with `No field named x`.
+pub const WHOLE_ENTITY: &str = "*";
+
+/// Record one property reference against whichever inner map owns `var`.
+///
+/// A variable that is neither a node nor an edge of this pattern belongs to the
+/// outer scope and is left alone.
+fn record_inner_prop(
+    var: &str,
+    prop: &str,
+    node_vars: &HashSet<String>,
+    edge_vars: &HashSet<String>,
+    vertex_props: &mut HashMap<String, Vec<String>>,
+    edge_props: &mut HashMap<String, Vec<String>>,
+) {
+    if node_vars.contains(var) {
+        vertex_props
+            .entry(var.to_string())
+            .or_default()
+            .push(prop.to_string());
+    } else if edge_vars.contains(var) {
+        edge_props
+            .entry(var.to_string())
+            .or_default()
+            .push(prop.to_string());
+    }
+}
+
 /// Collect property references from expressions that refer to inner variables.
 ///
 /// Walks expression trees looking for `Expr::Property(Expr::Variable(v), prop)`
 /// where `v` is in `inner_vars`. Separates vertex props from edge props based on
 /// whether the variable is a node or edge variable.
+///
+/// The match below is **exhaustive on purpose** — there is no catch-all arm. A
+/// variant that is silently skipped here does not fail loudly; it produces an
+/// inner schema missing a column, and the failure surfaces much later as
+/// `No field named x`. That is how a map projection over an inner property
+/// (#189) went unnoticed while the list form worked. Adding a variant to `Expr`
+/// must therefore be a compile error here, not a silent omission.
 pub fn collect_inner_properties(
     where_clause: Option<&Expr>,
     map_expr: &Expr,
@@ -948,20 +1121,89 @@ pub fn collect_inner_properties(
         match expr {
             Expr::Property(base, prop) => {
                 if let Expr::Variable(var) = base.as_ref() {
-                    if node_vars.contains(var) {
-                        vertex_props
-                            .entry(var.clone())
-                            .or_default()
-                            .push(prop.clone());
-                    } else if edge_vars.contains(var) {
-                        edge_props
-                            .entry(var.clone())
-                            .or_default()
-                            .push(prop.clone());
+                    record_inner_prop(
+                        var,
+                        prop,
+                        &node_vars,
+                        &edge_vars,
+                        &mut vertex_props,
+                        &mut edge_props,
+                    );
+                    // Deliberately *not* re-pushed. `x.name` names one property
+                    // of `x`, not the whole of `x`; walking the base would hit
+                    // the bare-variable arm below and widen it to the entire
+                    // entity.
+                } else {
+                    // A nested base — `f(x).name`, a map projection — still has
+                    // to be walked.
+                    exprs_to_visit.push(base);
+                }
+            }
+            // A bare entity reference: `[(n)-[:R]->(x) | x]` wants the whole
+            // node, not one of its properties.
+            Expr::Variable(var) => {
+                record_inner_prop(
+                    var,
+                    WHOLE_ENTITY,
+                    &node_vars,
+                    &edge_vars,
+                    &mut vertex_props,
+                    &mut edge_props,
+                );
+            }
+            // `x {.name, .age}` names properties of `x` exactly as `x.name`
+            // does, so it must narrow the same way rather than widen `x` to the
+            // whole entity. `.*` is the one item that genuinely needs all of it.
+            Expr::MapProjection { base, items } => {
+                let base_var = match base.as_ref() {
+                    Expr::Variable(v) => Some(v.as_str()),
+                    _ => {
+                        exprs_to_visit.push(base);
+                        None
+                    }
+                };
+                for item in items {
+                    match item {
+                        MapProjectionItem::Property(prop) => {
+                            if let Some(var) = base_var {
+                                record_inner_prop(
+                                    var,
+                                    prop,
+                                    &node_vars,
+                                    &edge_vars,
+                                    &mut vertex_props,
+                                    &mut edge_props,
+                                );
+                            }
+                        }
+                        MapProjectionItem::AllProperties => {
+                            if let Some(var) = base_var {
+                                record_inner_prop(
+                                    var,
+                                    WHOLE_ENTITY,
+                                    &node_vars,
+                                    &edge_vars,
+                                    &mut vertex_props,
+                                    &mut edge_props,
+                                );
+                            }
+                        }
+                        // `x {y}` splices another variable in whole.
+                        MapProjectionItem::Variable(var) => {
+                            record_inner_prop(
+                                var,
+                                WHOLE_ENTITY,
+                                &node_vars,
+                                &edge_vars,
+                                &mut vertex_props,
+                                &mut edge_props,
+                            );
+                        }
+                        MapProjectionItem::LiteralEntry(_, value) => {
+                            exprs_to_visit.push(value);
+                        }
                     }
                 }
-                // Also walk the base in case it's nested
-                exprs_to_visit.push(base);
             }
             Expr::BinaryOp { left, right, .. } => {
                 exprs_to_visit.push(left);
@@ -976,10 +1218,13 @@ pub fn collect_inner_properties(
                 }
             }
             Expr::Case {
+                expr: subject,
                 when_then,
                 else_expr,
-                ..
             } => {
+                if let Some(s) = subject {
+                    exprs_to_visit.push(s);
+                }
                 for (w, t) in when_then {
                     exprs_to_visit.push(w);
                     exprs_to_visit.push(t);
@@ -988,7 +1233,7 @@ pub fn collect_inner_properties(
                     exprs_to_visit.push(e);
                 }
             }
-            Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            Expr::IsNull(inner) | Expr::IsNotNull(inner) | Expr::IsUnique(inner) => {
                 exprs_to_visit.push(inner);
             }
             Expr::List(items) => {
@@ -1005,7 +1250,77 @@ pub fn collect_inner_properties(
                 exprs_to_visit.push(l);
                 exprs_to_visit.push(r);
             }
-            _ => {}
+            Expr::ArrayIndex { array, index } => {
+                exprs_to_visit.push(array);
+                exprs_to_visit.push(index);
+            }
+            Expr::ArraySlice { array, start, end } => {
+                exprs_to_visit.push(array);
+                if let Some(s) = start {
+                    exprs_to_visit.push(s);
+                }
+                if let Some(e) = end {
+                    exprs_to_visit.push(e);
+                }
+            }
+            Expr::LabelCheck { expr: inner, .. } => {
+                exprs_to_visit.push(inner);
+            }
+            Expr::ValidAt {
+                entity, timestamp, ..
+            } => {
+                exprs_to_visit.push(entity);
+                exprs_to_visit.push(timestamp);
+            }
+            // These bind a variable of their own. Its name could shadow one of
+            // this pattern's, in which case a property is recorded that the
+            // entity does not have — an unused NULL column, never a missing one.
+            // Under-collecting is the failure that matters, so walk them.
+            Expr::Quantifier {
+                list, predicate, ..
+            } => {
+                exprs_to_visit.push(list);
+                exprs_to_visit.push(predicate);
+            }
+            Expr::Reduce {
+                init, list, expr, ..
+            } => {
+                exprs_to_visit.push(init);
+                exprs_to_visit.push(list);
+                exprs_to_visit.push(expr);
+            }
+            Expr::ListComprehension {
+                list,
+                where_clause,
+                map_expr,
+                ..
+            } => {
+                exprs_to_visit.push(list);
+                if let Some(w) = where_clause {
+                    exprs_to_visit.push(w);
+                }
+                exprs_to_visit.push(map_expr);
+            }
+            // A nested comprehension has inner variables of its own, but its
+            // body may still correlate to ours, so it is walked for the same
+            // reason as the binders above.
+            Expr::PatternComprehension {
+                where_clause,
+                map_expr,
+                ..
+            } => {
+                if let Some(w) = where_clause {
+                    exprs_to_visit.push(w);
+                }
+                exprs_to_visit.push(map_expr);
+            }
+            // Subqueries carry a `Query`, not an `Expr`, so this walker cannot
+            // reach into them. A correlated reference from inside one is not
+            // collected here; that is a pre-existing limit, recorded rather than
+            // hidden behind a catch-all.
+            Expr::Exists { .. } | Expr::CountSubquery(_) | Expr::CollectSubquery(_) => {}
+            // Genuine leaves.
+            Expr::Literal(_) | Expr::Parameter(_) | Expr::Wildcard => {}
         }
     }
 
@@ -1020,6 +1335,25 @@ pub fn collect_inner_properties(
     }
 
     (vertex_props, edge_props)
+}
+
+/// The field for one entry of a collected property list.
+///
+/// [`WHOLE_ENTITY`] names the entity itself and becomes a bare `{var}` column;
+/// anything else is one property and becomes `{var}.{prop}`. Both are
+/// CypherValue `LargeBinary`, so the entity column carries a `Value::Node` or
+/// `Value::Edge` exactly as the non-vectorised comprehension path produces —
+/// the two paths must agree on what `| x` evaluates to.
+fn entity_or_property_field(var: &str, prop: &str) -> Field {
+    if prop == WHOLE_ENTITY {
+        Field::new(var, DataType::LargeBinary, true).with_metadata(
+            [("cv_encoded".to_string(), "true".to_string())]
+                .into_iter()
+                .collect(),
+        )
+    } else {
+        Field::new(format!("{var}.{prop}"), DataType::LargeBinary, true)
+    }
 }
 
 /// Build the inner schema for the expanded batch.
@@ -1056,32 +1390,31 @@ pub fn build_inner_schema(
         }
     }
 
-    // Add property columns for vertex variables
+    // Property columns, interleaved per step: this step's vertex properties,
+    // then this step's edge properties.
+    //
+    // The order has to match `build_inner_batch`, which fills the columns in
+    // exactly that sequence. This used to emit every step's vertex properties
+    // and then every step's edge properties, which agrees only while at most
+    // one step contributes. With an edge property on an early hop and a vertex
+    // property on a later one the two orders diverge — and because every
+    // property column is `LargeBinary`, `RecordBatch::try_new` accepts the
+    // mismatch and the values silently swap:
+    // `[(n)-[r:R1]->(m)-[:R2]->(x:Q) | r.since + '/' + x.tag]` returned
+    // `TAGGED/YEAR`.
     for step in steps {
         if let Some(ref target_var) = step.target_variable
             && let Some(props) = vertex_props.get(target_var)
         {
             for prop in props {
-                fields.push(Arc::new(Field::new(
-                    format!("{}.{}", target_var, prop),
-                    DataType::LargeBinary,
-                    true,
-                )));
+                fields.push(Arc::new(entity_or_property_field(target_var, prop)));
             }
         }
-    }
-
-    // Add property columns for edge variables
-    for step in steps {
         if let Some(ref edge_var) = step.edge_variable
             && let Some(props) = edge_props.get(edge_var)
         {
             for prop in props {
-                fields.push(Arc::new(Field::new(
-                    format!("{}.{}", edge_var, prop),
-                    DataType::LargeBinary,
-                    true,
-                )));
+                fields.push(Arc::new(entity_or_property_field(edge_var, prop)));
             }
         }
     }

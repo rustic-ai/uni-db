@@ -15,7 +15,9 @@
 
 use crate::runtime::context::QueryContext;
 use crate::runtime::l0::L0Buffer;
+use parking_lot::RwLock;
 use std::collections::HashMap;
+use std::sync::Arc;
 use uni_common::Properties;
 use uni_common::Value;
 use uni_common::core::id::{Eid, Vid};
@@ -33,6 +35,23 @@ pub fn is_vertex_deleted(vid: Vid, ctx: Option<&QueryContext>) -> bool {
     record_vertex_read(ctx, vid);
 
     visit_l0_buffers(Some(ctx), |buf| buf.vertex_tombstones.contains(&vid))
+}
+
+/// Whether any L0 buffer holds a *partial* property row for this vid.
+///
+/// `Writer::insert_vertex_partial` stages only the touched keys when
+/// `partial_lance_writes` is on, recording them in `vertex_partial_keys`. Such
+/// a row is a delta, not the complete property set, so a reader must not treat
+/// its presence as "L0 has everything" and skip storage.
+pub fn has_partial_vertex_keys(vid: Vid, ctx: Option<&QueryContext>) -> bool {
+    let Some(ctx) = ctx else {
+        return false;
+    };
+    visit_l0_buffers(Some(ctx), |buf| {
+        buf.vertex_partial_keys
+            .get(&vid)
+            .is_some_and(|keys| !keys.is_empty())
+    })
 }
 
 /// Check if an edge is deleted in the L0 chain.
@@ -693,5 +712,69 @@ mod tests {
         // No transaction_l0 / occ_read_set: must not panic and must behave as before.
         assert!(is_vertex_deleted(Vid::from(1), Some(&ctx)));
         assert!(get_vertex_labels(Vid::from(2), &ctx).is_empty());
+    }
+}
+
+/// L0 buffer visibility context for MVCC reads.
+///
+/// Maintains references to all L0 buffers that should be visible to a query:
+/// - Current L0: The active write buffer
+/// - Transaction L0: Buffer for the current transaction (if any)
+/// - Pending flush L0s: Buffers being flushed to disk (still visible to reads)
+///
+/// The visibility order is: pending flush L0s (oldest first) → current L0 → transaction L0.
+#[derive(Clone, Default)]
+pub struct L0Context {
+    /// Current active L0 buffer.
+    pub current_l0: Option<Arc<RwLock<L0Buffer>>>,
+
+    /// Transaction-local L0 buffer (if in a transaction).
+    pub transaction_l0: Option<Arc<RwLock<L0Buffer>>>,
+
+    /// L0 buffers pending flush to disk.
+    /// These remain visible until flush completes.
+    pub pending_flush_l0s: Vec<Arc<RwLock<L0Buffer>>>,
+}
+
+impl std::fmt::Debug for L0Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("L0Context")
+            .field("current_l0", &self.current_l0.is_some())
+            .field("transaction_l0", &self.transaction_l0.is_some())
+            .field("pending_flush_l0s_count", &self.pending_flush_l0s.len())
+            .finish()
+    }
+}
+
+impl L0Context {
+    /// Create an empty L0 context with no buffers.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Create L0 context with just a current buffer.
+    pub fn with_current(l0: Arc<RwLock<L0Buffer>>) -> Self {
+        Self {
+            current_l0: Some(l0),
+            ..Self::default()
+        }
+    }
+
+    /// Create L0 context from a query context.
+    pub fn from_query_context(ctx: &QueryContext) -> Self {
+        Self {
+            current_l0: Some(ctx.l0.clone()),
+            transaction_l0: ctx.transaction_l0.clone(),
+            pending_flush_l0s: ctx.pending_flush_l0s.clone(),
+        }
+    }
+
+    /// Iterate over all L0 buffers in visibility order.
+    /// Order: pending flush L0s (oldest first), then current L0, then transaction L0.
+    pub fn iter_l0_buffers(&self) -> impl Iterator<Item = &Arc<RwLock<L0Buffer>>> {
+        self.pending_flush_l0s
+            .iter()
+            .chain(self.current_l0.iter())
+            .chain(self.transaction_l0.iter())
     }
 }

@@ -27,6 +27,25 @@ use uni_query::query::df_graph::locy_eval::record_batches_to_locy_rows;
 use uni_query::query::df_graph::locy_explain::ProvenanceStore;
 use uni_query::query::df_graph::{DerivedFactSource, LocyExecutionContext};
 
+/// Copy `parent`'s deadline and cancellation token onto a derived context.
+///
+/// The Locy paths build a fresh `GraphExecutionContext` when a transaction
+/// changes L0 visibility. That constructor takes no budget, so the derived
+/// context would start unbounded even though it stands in for the parent for
+/// the rest of the query. See issue #207.
+fn carry_budget(
+    mut ctx: uni_query::query::df_graph::GraphExecutionContext,
+    parent: &uni_query::query::df_graph::GraphExecutionContext,
+) -> uni_query::query::df_graph::GraphExecutionContext {
+    if let Some(deadline) = parent.deadline_for_host() {
+        ctx = ctx.with_deadline(deadline);
+    }
+    if let Some(token) = parent.cancellation_token_for_host() {
+        ctx = ctx.with_cancellation_token(token);
+    }
+    ctx
+}
+
 /// Session-level registry for pre-compiled Locy rules.
 ///
 /// Rules registered here are automatically merged into subsequent `evaluate()`
@@ -1258,13 +1277,17 @@ impl DerivedFactSource for NativeExecutionAdapter<'_> {
                         transaction_l0: tx_l0_for_ctx,
                         pending_flush_l0s,
                     };
-                    Some(Arc::new(
+                    // Derived from `self.graph_ctx`, so it inherits that
+                    // context's budget too — otherwise the transaction-scoped
+                    // context silently drops the deadline. See #207.
+                    Some(Arc::new(carry_budget(
                         uni_query::query::df_graph::GraphExecutionContext::with_l0_context(
                             effective_storage.clone(),
                             l0_ctx,
                             self.graph_ctx.property_manager().clone(),
                         ),
-                    ))
+                        &self.graph_ctx,
+                    )))
                 } else {
                     None
                 }
@@ -1604,13 +1627,14 @@ impl LocyExecutionContext for NativeExecutionAdapter<'_> {
                     transaction_l0: tx_l0_for_ctx,
                     pending_flush_l0s,
                 };
-                Arc::new(
+                Arc::new(carry_budget(
                     uni_query::query::df_graph::GraphExecutionContext::with_l0_context(
                         enrich_storage.clone(),
                         l0_ctx,
                         self.graph_ctx.property_manager().clone(),
                     ),
-                )
+                    &self.graph_ctx,
+                ))
             } else {
                 self.graph_ctx.clone()
             }
