@@ -938,6 +938,8 @@ impl StorageBackend for LanceDbBackend {
 
         if !filter.is_trivially_true() {
             let sql = filter.to_sql()?;
+            // Prefilter so excluded rows do not consume the FTS top-k slots.
+            scanner.prefilter(true);
             scanner
                 .filter(&sql)
                 .map_err(|e| anyhow!("FTS filter '{}' on '{}': {}", sql, table, e))?;

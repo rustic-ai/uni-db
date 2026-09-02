@@ -529,3 +529,71 @@ async fn test_fts_query_score_increases_with_relevance() -> Result<()> {
 
     Ok(())
 }
+
+/// A filtered FTS query must apply its predicate before the top-k limit.
+///
+/// The excluded documents deliberately score higher than the matching
+/// documents, so applying the filter after the FTS limit starves the result.
+/// Regression for #194.
+#[tokio::test]
+async fn test_filtered_fts_query_prefilters_before_k() -> Result<()> {
+    let _ = env_logger::builder().is_test(true).try_init();
+
+    let dir = tempdir()?;
+    let path = dir.path();
+    let schema_manager = SchemaManager::load(&path.join("schema.json")).await?;
+    schema_manager.add_label("Doc")?;
+    schema_manager.add_property("Doc", "body", DataType::String, false)?;
+    schema_manager.add_property("Doc", "tag", DataType::String, false)?;
+    schema_manager.save().await?;
+
+    let db = uni_db::Uni::open(path.to_str().unwrap()).build().await?;
+
+    let tx = db.session().tx().await?;
+    tx.execute(
+        "UNWIND range(0, 49) AS i \
+         CREATE (:Doc {tag: 'drop', body: 'gamma gamma gamma gamma gamma drop-' + toString(i)})",
+    )
+    .await?;
+    tx.execute(
+        "UNWIND range(0, 49) AS i \
+         CREATE (:Doc {tag: 'keep', body: 'gamma filler filler filler filler keep-' + toString(i)})",
+    )
+    .await?;
+    tx.commit().await?;
+    db.flush().await?;
+
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE FULLTEXT INDEX doc_body_fts FOR (d:Doc) ON EACH [d.body]")
+        .await?;
+    tx.commit().await?;
+
+    let result = db
+        .session()
+        .query(
+            "CALL uni.fts.query('Doc', 'body', 'gamma', 10, \"tag = 'keep'\", null, {}) \
+             YIELD node \
+             RETURN node.tag AS tag",
+        )
+        .await?;
+
+    let tags: Vec<String> = result
+        .rows()
+        .iter()
+        .map(|row| {
+            row.get("tag")
+                .map_err(|error| anyhow::anyhow!(error.to_string()))
+        })
+        .collect::<Result<_>>()?;
+    assert_eq!(
+        tags.len(),
+        10,
+        "filtered FTS should fill all requested slots"
+    );
+    assert!(
+        tags.iter().all(|tag| tag == "keep"),
+        "filtered FTS returned excluded rows: {tags:?}"
+    );
+
+    Ok(())
+}
