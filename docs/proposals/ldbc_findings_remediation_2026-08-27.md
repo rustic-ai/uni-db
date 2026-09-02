@@ -1663,9 +1663,43 @@ suspiciously identical one means the same.
 **IC5 (#204)** is the only query left. Then **#199**, **#206**, Wave
 5.2–5.5, hygiene (**#205**, **#195**), **#200**, and **Track 0** last.
 
-Open and unfiled: a spillable TopK, incremental scan materialisation (the
-scan still builds its whole result before slicing), and the root-entity
-widening visible in IC9's physical plan.
+The three carried as open-and-unfiled are now filed, each against the code
+rather than against the observation that prompted it:
+
+- **#213** — a spillable TopK. `ORDER BY … LIMIT n` is always a full sort;
+  `SortExec::new` is called without a fetch and DataFusion's limit-pushdown pass
+  never runs. Filed with the measured reason the one-line fix is wrong, so the
+  next reader does not re-land the IC2 regression.
+- **#214** — incremental scan materialisation. The scan still builds its whole
+  result before slicing; `GraphScanState` has no `Chunking` state, where
+  `TraverseStreamState` does. This is the half of the batch_size-slicing pair
+  (scan and traversal output) that did not get the follow-up.
+- **#215** — the root-entity widening. Traced to a mechanism:
+  `collect_properties_from_expr_into` recurses through `Expr::BinaryOp` into two
+  bare `Expr::Variable` operands, each of which takes the bare-variable arm and
+  inserts `"*"`. `friend = root` therefore widens `root` to the full schema, and
+  nothing else in IC9 reads a property off it.
+
+#215 makes four instances of the same shape — #62, #134, #196, #203 — an
+expression that needs only identity requesting every column, each fixed where it
+was found. The issue asks whether the collector should be identity-aware by
+default rather than gaining a fifth special case. That is the round's own
+lesson, applied before the next instance rather than after it.
+
+One claim in #215 was a read and was labelled as one: that `df_planner` already
+resolves the comparison's operands to `_vid`, which would make the widening pure
+waste. **Since verified, with the location corrected.** The rewrite is real but
+lives in the physical expression compiler, not `df_planner` —
+`expr_compiler.rs::compile_binary_op_dispatch` turns `a = b` over two node
+variables into `Property(a, "_vid") op Property(b, "_vid")`, and it survives
+`NOT` because the `UnaryOp` arm re-enters dispatch. So the compiled predicate
+touches only `_vid` while the collector has already marked both operands `"*"`:
+the widening is pure waste and #215's proposed fix direction is the right one.
+
+Measured on IC5's shape at SF1, the widening costs about 83 ms — real, worth
+removing, and not a latency emergency. It was the first of three mechanisms
+suspected of blocking IC5 and none of them were; the blockers were the
+edge-property read path and pattern anchoring.
 
 Suite at the tip: 4549/4549 across `uni-db`, `uni-query`, `uni-store` and
 `uni-query-functions`; fmt and clippy clean.
