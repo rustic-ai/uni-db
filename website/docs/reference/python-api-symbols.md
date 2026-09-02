@@ -1674,6 +1674,9 @@ Query performance metrics returned with every query result.
 | `index_scans` | `int` |
 | `index_comparisons` | `int` |
 | `scans_reported` | `int` |
+| `vector_index_scans` | `int` |
+| `fts_index_scans` | `int` |
+| `searches_reported` | `int` |
 
 ---
 
