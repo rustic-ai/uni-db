@@ -36,7 +36,7 @@ use uni_query::query::planner::{QueryPlanner, collect_properties_from_plan};
 async fn planner() -> QueryPlanner {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
-    let mut sm = SchemaManager::load(&path.join("schema.json"))
+    let sm = SchemaManager::load(&path.join("schema.json"))
         .await
         .unwrap();
 
