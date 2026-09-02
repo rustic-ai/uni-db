@@ -29,6 +29,14 @@ use std::sync::Arc;
 use uni_common::Properties;
 use uni_common::core::id::{Eid, UniId, Vid};
 
+/// Maximum EIDs per `_eid IN (...)` chunk in
+/// [`MainEdgeDataset::find_props_by_eids`].
+///
+/// Mirrors `MAX_VIDS_PER_CHUNK` on the vertex side: an unbounded `IN` list
+/// inflates the scan request and stops the scalar index earning its keep, while
+/// a bounded one preserves the indexed lookup at any set size.
+const MAX_EIDS_PER_CHUNK: usize = 10_000;
+
 /// One candidate row for an edge, while ranking a type scan by `_version`.
 ///
 /// Carries `deleted` because a tombstone is a *winning* row, not an absent one:
@@ -401,6 +409,109 @@ impl MainEdgeDataset {
     }
 
     /// Parse props_json from a LargeBinaryArray (JSONB) at the given index.
+    /// Properties for many edges by EID, resolved in one scan per chunk.
+    ///
+    /// The batched counterpart of [`MainEdgeDataset::find_props_by_eid`]. Any
+    /// caller resolving a whole traversal's edges must use this form: the
+    /// singular one issues a separate `ScanRequest` per edge, measured at
+    /// ~1.5 ms each against a persisted SF1 store, so a 4809-edge traversal
+    /// spent 7.3 s of its 7.4 s in that loop alone. The batched scan keeps the
+    /// `_eid` BTree index in play while collapsing N round trips into one.
+    ///
+    /// EIDs with no row, and those whose winning row is a tombstone, are absent
+    /// from the returned map — the batched spelling of the singular form's
+    /// `Ok(None)`.
+    ///
+    /// Version selection matches [`MainEdgeDataset::find_props_by_eid`] exactly,
+    /// per EID: the highest `_version` wins with tombstones included in the
+    /// contest, so a delete cannot be undone by an older live row. Ties resolve
+    /// to the later row, as they do there.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table query fails or a `props_json` blob cannot
+    /// be decoded.
+    pub async fn find_props_by_eids(
+        backend: &dyn StorageBackend,
+        eids: &[Eid],
+        version: Option<u64>,
+    ) -> Result<HashMap<Eid, Properties>> {
+        if eids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Winner per EID: (version, deleted, props). Tombstones stay in the map
+        // until the end so a lower-version live row cannot displace them.
+        let mut best: HashMap<Eid, (u64, bool, Properties)> = HashMap::new();
+
+        for chunk in eids.chunks(MAX_EIDS_PER_CHUNK) {
+            let filter = super::with_version_bound(
+                FilterExpr::one_of("_eid", chunk.iter().map(|e| Scalar::UInt(e.as_u64()))),
+                version,
+            );
+            let batches = Self::execute_query(
+                backend,
+                filter,
+                Some(vec!["_eid", "props_json", "_version", "_deleted"]),
+            )
+            .await?;
+
+            for batch in &batches {
+                let eid_arr = batch
+                    .column_by_name("_eid")
+                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+                let props_arr = batch
+                    .column_by_name("props_json")
+                    .and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>());
+                let ver_arr = batch
+                    .column_by_name("_version")
+                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+                let deleted_col = batch
+                    .column_by_name("_deleted")
+                    .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
+
+                let (Some(eid_arr), Some(props_arr), Some(ver_arr)) = (eid_arr, props_arr, ver_arr)
+                else {
+                    continue;
+                };
+
+                for i in 0..batch.num_rows() {
+                    if eid_arr.is_null(i) {
+                        continue;
+                    }
+                    let eid = Eid::from(eid_arr.value(i));
+                    let row_version = if ver_arr.is_null(i) {
+                        0
+                    } else {
+                        ver_arr.value(i)
+                    };
+
+                    // Strictly-older rows lose; `>=` keeps the singular form's
+                    // tie-breaking, where the later row wins.
+                    if best
+                        .get(&eid)
+                        .is_some_and(|(winning, _, _)| row_version < *winning)
+                    {
+                        continue;
+                    }
+
+                    let deleted = deleted_col.is_some_and(|d| d.value(i));
+                    let props = if deleted {
+                        Properties::new()
+                    } else {
+                        Self::parse_props_json(props_arr, i)?
+                    };
+                    best.insert(eid, (row_version, deleted, props));
+                }
+            }
+        }
+
+        Ok(best
+            .into_iter()
+            .filter_map(|(eid, (_, deleted, props))| (!deleted).then_some((eid, props)))
+            .collect())
+    }
+
     fn parse_props_json(arr: &arrow_array::LargeBinaryArray, idx: usize) -> Result<Properties> {
         if arr.is_null(idx) || arr.value(idx).is_empty() {
             return Ok(Properties::new());

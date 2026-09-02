@@ -960,13 +960,21 @@ impl PropertyManager {
         // zero after a few hundred write transactions. Weighted algorithms
         // degraded at the same instant, defaulting to unit weights.
         //
-        // Only unresolved EIDs pay the per-EID lookup, so the batch fast path is
+        // Only unresolved EIDs reach the main-edges scan, so the fast path is
         // unchanged for edges whose properties are still in the delta runs.
+        //
+        // The misses are gathered first and resolved in **one** batched scan.
+        // Resolving them one at a time is what made LDBC IC5 unanswerable: each
+        // EID cost its own `ScanRequest` at ~1.5 ms, and because adjacency
+        // compaction deletes the delta rows it folds into L2, every edge on a
+        // compacted or reloaded store misses and pays it. A 4809-edge traversal
+        // spent 7.3 s of 7.4 s in this block; IC5's ~1.6M edges extrapolated to
+        // ~41 min against a 300 s budget.
         {
             use crate::storage::main_edge::MainEdgeDataset;
+
+            let mut unresolved: Vec<uni_common::core::id::Eid> = Vec::new();
             for &eid in eids {
-                // Skip both L0 deletes and delta-table deletes: either is a
-                // tombstone the fallback must not undo.
                 // Skip both L0 deletes and delta-table deletes: either is a
                 // tombstone the fallback must not undo (C2).
                 if l0_visibility::is_edge_deleted(eid, ctx) || tombstoned.contains(&eid) {
@@ -978,16 +986,20 @@ impl PropertyManager {
                     None => true,
                     Some(found) => properties.iter().any(|p| !found.contains_key(*p)),
                 };
-                if !missing_any {
-                    continue;
+                if missing_any {
+                    unresolved.push(eid);
                 }
-                if let Some(props) = MainEdgeDataset::find_props_by_eid(
+            }
+
+            if !unresolved.is_empty() {
+                let fetched = MainEdgeDataset::find_props_by_eids(
                     self.storage.backend(),
-                    eid,
+                    &unresolved,
                     self.storage.version_high_water_mark(),
                 )
-                .await?
-                {
+                .await?;
+                for (eid, props) in fetched {
+                    let key = uni_common::core::id::Vid::from(eid.as_u64());
                     let entry = result.entry(key).or_default();
                     for (k, v) in props {
                         entry.entry(k).or_insert(v);
