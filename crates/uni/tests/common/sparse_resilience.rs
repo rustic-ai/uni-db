@@ -38,6 +38,20 @@ fn target_emb() -> Value {
     }
 }
 
+/// The doomed doc's sparse vector — indices disjoint from [`target_emb`], so
+/// the dot product against the query is exactly 0 and it can never outrank
+/// `target`.
+///
+/// It must not be the query vector: `commit::after-wal-flush` is the commit
+/// point, so the doomed write is durable and comes back on replay, and sharing
+/// the query's indices made the top-1 assertions a scan-order tie.
+fn doomed_emb() -> Value {
+    Value::SparseVector {
+        indices: vec![2, 6, 10, 43],
+        values: vec![1.0, 2.0, 3.0, 0.5],
+    }
+}
+
 /// `Doc(title, emb: SparseVector)` + a scored sparse index over `emb`.
 async fn define_sparse_schema(db: &Uni) -> Result<()> {
     db.schema()
@@ -100,7 +114,7 @@ async fn sparse_create_that_crashes(db: Arc<Uni>, title: &'static str) {
         let tx = s.tx().await.unwrap();
         tx.execute_with("CREATE (:Doc {title: $t, emb: $emb})")
             .param("t", Value::String(title.to_string()))
-            .param("emb", target_emb())
+            .param("emb", doomed_emb())
             .run()
             .await
             .unwrap();
@@ -155,6 +169,13 @@ async fn sparse_committed_value_survives_crash_recovery() -> Result<()> {
     // Usable post-recovery WITHOUT a rebuild: the recovered doc is in L0 and the
     // sparse read path unions it, so it is the top sparse match with the index
     // still cold.
+    // The seam IS the commit point, so the doomed write is durable and must come
+    // back as well; it simply must not outrank `target`.
+    assert_eq!(
+        read_emb(&db, "doomed").await?,
+        Some(doomed_emb()),
+        "a sparse write already durable in the WAL at the crash must recover"
+    );
     assert_eq!(
         top_sparse_title(&db).await?.as_deref(),
         Some("target"),
@@ -461,11 +482,11 @@ async fn sparse_abort_child() {
     match scenario.as_str() {
         "after-wal-flush" => {
             crate::crash_harness::abort_at("commit::after-wal-flush");
-            let _ = insert_doc(&db, "doomed", target_emb()).await;
+            let _ = insert_doc(&db, "doomed", doomed_emb()).await;
         }
         "after-validate" => {
             crate::crash_harness::abort_at("commit::after-validate");
-            let _ = insert_doc(&db, "doomed", target_emb()).await;
+            let _ = insert_doc(&db, "doomed", doomed_emb()).await;
         }
         "during-flush" => {
             crate::crash_harness::abort_at("flush::after-rotate-before-lance");
