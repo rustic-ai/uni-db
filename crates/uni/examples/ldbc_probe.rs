@@ -13,8 +13,16 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(30);
+    // `PROBE_BATCH_SIZE` holds the edge set fixed while varying the morsel
+    // size: a per-batch cost scales with it, a per-row cost does not.
+    let batch_size: usize = std::env::var("PROBE_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1024);
+    eprintln!("[probe] batch_size={batch_size} query_timeout={secs}s");
     let config = uni_db::UniConfig {
         query_timeout: std::time::Duration::from_secs(secs),
+        batch_size,
         ..Default::default()
     };
     let db = Uni::open_existing(std::env::var("LDBC_DB")?)
@@ -27,13 +35,18 @@ async fn main() -> anyhow::Result<()> {
         if q.is_empty() || q.starts_with('#') {
             continue;
         }
-        match db.session().query(q).await {
+        // Elapsed is printed per query: a bisection ladder without per-step
+        // timing cannot attribute a cost to a step, only observe that it ran.
+        let t = std::time::Instant::now();
+        let outcome = db.session().query(q).await;
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        match outcome {
             Ok(r) => println!(
-                "rows={:<4} first={:?}\n  {q}",
+                "rows={:<8} ms={ms:>10.1} first={:?}\n  {q}",
                 r.rows().len(),
                 r.rows().first().map(|x| x.values().to_vec())
             ),
-            Err(e) => println!("ERROR {e}\n  {q}"),
+            Err(e) => println!("ERROR ms={ms:>10.1} {e}\n  {q}"),
         }
     }
     Ok(())
