@@ -895,3 +895,92 @@ ORDER BY pathWeight desc";
         "one qualifying comment path contributes weight 1.0"
     );
 }
+
+/// A returned relationship value carries the stored orientation, not the
+/// traversal's.
+///
+/// `Traverse` encodes the arrow as `(source_variable, direction)`, where the
+/// source is the end the row *walked from* — for an `Incoming` hop that is the
+/// arrow's **head**. `endpoints_for_direction` knows this and is what makes
+/// `startNode`/`endNode` correct above. The edge struct built for `RETURN r` is
+/// a separate, fourth derivation of the same fact, and it read traversal order
+/// directly: `MATCH (b)<-[r]-(a) RETURN r` reported `r.src = b`.
+///
+/// # Why this was not caught
+///
+/// Every test in this file asks `startNode(r)` / `endNode(r)`, which take the
+/// planner-rewrite path and were always right. Nothing asserted on the
+/// relationship **value**. Two derivations of one fact, one tested — the same
+/// shape that hid #193.
+///
+/// The stakes rose with `reversed_for_bound_anchor`, which rewrites a pattern
+/// written from its unbound end into the opposite direction for performance. An
+/// `Outgoing` pattern with its far end bound now reaches this code as
+/// `Incoming`, so a query that was correct-but-slow became fast-and-wrong.
+/// Both spellings are asserted below for that reason.
+#[tokio::test]
+async fn a_returned_relationship_keeps_its_stored_direction() {
+    let db = fixture().await;
+    let session = db.session();
+
+    // Written Incoming. `b` is the arrow's head, so it must be `dst`.
+    let incoming = session
+        .query(
+            "MATCH (y:P {name:'b'})<-[r:KNOWS]-(x:P) \
+             RETURN startNode(r).name AS s, endNode(r).name AS e",
+        )
+        .await
+        .unwrap();
+    assert_eq!(incoming.rows()[0].values()[0], Value::String("a".into()));
+    assert_eq!(incoming.rows()[0].values()[1], Value::String("b".into()));
+
+    // The same edge as a *value*. This is the derivation that was wrong.
+    let as_value = session
+        .query("MATCH (y:P {name:'b'})<-[r:KNOWS]-(x:P) RETURN r")
+        .await
+        .unwrap();
+    let rel = format!("{:?}", as_value.rows()[0].values()[0]);
+
+    // Resolve the two vids so the assertion names nodes rather than integers.
+    let ids = session
+        .query("MATCH (n:P) RETURN n.name AS name, id(n) AS vid ORDER BY name")
+        .await
+        .unwrap();
+    let vid_of = |name: &str| -> i64 {
+        ids.rows()
+            .iter()
+            .find(|r| r.values()[0] == Value::String(name.into()))
+            .and_then(|r| match r.values()[1] {
+                Value::Int(v) => Some(v),
+                _ => None,
+            })
+            .expect("vid")
+    };
+    let (a, b) = (vid_of("a"), vid_of("b"));
+
+    assert!(
+        rel.contains(&format!("src: Vid({a})")),
+        "the arrow runs a->b, so src must be `a`; got {rel}"
+    );
+    assert!(
+        rel.contains(&format!("dst: Vid({b})")),
+        "the arrow runs a->b, so dst must be `b`; got {rel}"
+    );
+
+    // The Outgoing spelling with the far end bound: `reversed_for_bound_anchor`
+    // turns this into an Incoming plan, so it exercises the same code path by a
+    // different route and must agree.
+    let reversed = session
+        .query(
+            "MATCH (y:P {name:'b'}) WITH DISTINCT y \
+             MATCH (x:P)-[r:KNOWS]->(y) RETURN r",
+        )
+        .await
+        .unwrap();
+    let rel2 = format!("{:?}", reversed.rows()[0].values()[0]);
+    assert!(
+        rel2.contains(&format!("src: Vid({a})")) && rel2.contains(&format!("dst: Vid({b})")),
+        "an anchor-reversed plan must report the same orientation as the \
+         spelling it was rewritten from; got {rel2}"
+    );
+}

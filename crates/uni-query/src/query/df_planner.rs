@@ -2528,6 +2528,11 @@ impl HybridPhysicalPlanner {
 
     /// Conditionally add edge structural projection when the edge variable has wildcard access.
     /// Skips if `skip_if_vlp` is true (VLP step variables are already `List<Edge>`).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "direction joins seven existing plan-context parameters; grouping \
+                  them into a struct is a wider refactor than this fix warrants"
+    )]
     fn maybe_add_edge_structural_projection(
         &self,
         plan: Arc<dyn ExecutionPlan>,
@@ -2536,6 +2541,7 @@ impl HybridPhysicalPlanner {
         target_variable: &str,
         all_properties: &HashMap<String, HashSet<String>>,
         skip_if_vlp: bool,
+        direction: &AstDirection,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         if skip_if_vlp {
             return Ok(plan);
@@ -2568,6 +2574,7 @@ impl HybridPhysicalPlanner {
             &edge_props,
             source_variable,
             target_variable,
+            direction,
         )
     }
 
@@ -3117,6 +3124,7 @@ impl HybridPhysicalPlanner {
             target_variable,
             all_properties,
             false,
+            &direction,
         )?;
 
         if let Some(filter_expr) = target_filter {
@@ -3754,6 +3762,7 @@ impl HybridPhysicalPlanner {
             target_variable,
             all_properties,
             is_variable_length,
+            &direction,
         )?;
 
         // Apply target filter if present
@@ -3831,7 +3840,7 @@ impl HybridPhysicalPlanner {
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let input_plan = self.plan_internal(input, all_properties)?;
 
-        let adj_direction = convert_direction(direction);
+        let adj_direction = convert_direction(direction.clone());
         let (input_plan, source_col) = Self::resolve_source_vid_col(input_plan, source_variable)?;
 
         // Check if target variable is already bound (for patterns where target is in scope)
@@ -3921,6 +3930,7 @@ impl HybridPhysicalPlanner {
             target_variable,
             all_properties,
             false, // not variable-length
+            &direction,
         )?;
 
         Ok(result_plan)
@@ -6415,6 +6425,7 @@ impl HybridPhysicalPlanner {
         properties: &[String],
         source_variable: &str,
         target_variable: &str,
+        direction: &AstDirection,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         use datafusion::functions::expr_fn::named_struct;
         use datafusion::logical_expr::lit;
@@ -6459,6 +6470,21 @@ impl HybridPhysicalPlanner {
                 var.to_string()
             }
         };
+        // The traversal's source is the end this row *walked from*, which is not
+        // the arrow's tail. `Traverse` encodes the arrow as (source, direction):
+        // `endpoints_for_direction` reads `Incoming` as start = target, end =
+        // source. Taking traversal order directly therefore reports an
+        // `Incoming` hop reversed — `MATCH (b)<-[r]-(a) RETURN r` gives
+        // `r.src = b`.
+        //
+        // Newly load-bearing: `reversed_for_bound_anchor` rewrites a pattern
+        // written from its unbound end into the opposite direction, so an
+        // `Outgoing` pattern can now reach this as `Incoming`. Before that
+        // rewrite the same query planned the slow way and got this right.
+        let (source_variable, target_variable) = match direction {
+            AstDirection::Incoming => (target_variable, source_variable),
+            AstDirection::Outgoing | AstDirection::Both => (source_variable, target_variable),
+        };
         let src_col_name = resolve_vid_col(source_variable);
         let dst_col_name = resolve_vid_col(target_variable);
         let src_col = DfExpr::Column(datafusion::common::Column::from_name(src_col_name));
@@ -6469,7 +6495,7 @@ impl HybridPhysicalPlanner {
         // row that walked it backwards — the same relationship coming back as
         // `b->a`. `_fwd` says whether this row walked it forwards; when the
         // traversal published it, put the endpoints back the way they are
-        // stored. A directed hop has no `_fwd` column and needs none.
+        // stored.
         let fwd_col = format!("{}.{}", variable, crate::query::planner::COL_FWD);
         let (src_expr, dst_expr) = if input_schema.column_with_name(&fwd_col).is_some() {
             let fwd = DfExpr::Column(datafusion::common::Column::from_name(fwd_col));
