@@ -107,7 +107,7 @@ pub mod handle {
     //!
     //! It is meaningless in another process and dangling after its scope ends,
     //! so it must not reach durable storage, a plugin, or a returned result.
-    //! Use [`materialize`] at those boundaries. Resolution fails loudly rather
+    //! Use [`super::materialize`] at those boundaries. Resolution fails loudly rather
     //! than yielding `Null`, so an escape is a visible error and never a
     //! silently wrong answer.
 
