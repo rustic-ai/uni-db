@@ -2278,6 +2278,20 @@ fn get_value_from_array(
     }
 }
 
+/// The raw bytes of `arr` at `row`, if it is a non-null `LargeBinary` value.
+///
+/// `LargeBinary` is the tagged-CypherValue encoding and the only arm of
+/// [`get_value_from_array`] whose decode is expensive enough to be worth
+/// avoiding; every other arm is a primitive read. `None` covers both "not that
+/// type" and "null here", and either way the caller decodes.
+fn large_binary_row(arr: &ArrayRef, row: usize) -> Option<&[u8]> {
+    if !matches!(arr.data_type(), DataType::LargeBinary) {
+        return None;
+    }
+    let typed = arr.as_any().downcast_ref::<LargeBinaryArray>()?;
+    typed.is_valid(row).then(|| typed.value(row))
+}
+
 /// Convert DataFusion `ColumnarValue` arguments to `uni_common::Value` for UDF evaluation.
 ///
 /// `arg_fields` is positional to `args` (DataFusion `ScalarFunctionArgs::arg_fields`) and
@@ -2339,9 +2353,64 @@ where
         return value_to_columnar(&res);
     }
 
+    // An argument that does not vary across the batch is decoded once. A tagged
+    // CypherValue is expensive to decode — a full msgpack walk, or a deep clone
+    // of an interned list behind a process-global lock — and a constant list
+    // argument, the shape `x IN <collected list>` produces, otherwise pays that
+    // on every row. Measured at 96% of that predicate's cost (#229); the
+    // membership scan it was attributed to is 4%.
+    //
+    // The decoded value stays in place in `row_args` across iterations rather
+    // than being cloned back in, so this removes the per-row clone as well as
+    // the per-row decode.
+    // An argument is re-decoded only when its bytes differ from the row before.
+    //
+    // A tagged CypherValue is expensive to decode — a full msgpack walk, or a
+    // deep clone of an interned list behind a process-global lock — and the
+    // decoded value is a pure function of the bytes, so a run of equal rows
+    // needs one decode. Measured on LDBC IC5, where `WHERE friend IN friends`
+    // reads a list collected per forum: 1 808 724 per-row argument decodes cost
+    // **218.2 s of the UDF's 220.5 s total** (#245), and rows arrive grouped by
+    // forum, so the list changes about once every eleven rows.
+    //
+    // This subsumes the batch-constant case (a column constant across the batch
+    // is a single run) without the O(rows) pre-pass that only that case could
+    // use, and it catches the per-row-varying case that pre-pass could not.
+    //
+    // The decoded value stays in place in `row_args` rather than being cloned
+    // back in, so a repeat costs one byte comparison and nothing else. Scalars
+    // never vary and are decoded once, at row 0.
+    let mut last_bytes: Vec<Option<Vec<u8>>> = vec![None; args.args.len()];
+
     let mut results = Vec::with_capacity(len);
+    let mut row_args: Vec<Value> = Vec::new();
     for i in 0..len {
-        let row_args = get_value_args_for_row(&args.args, &args.arg_fields, i)?;
+        if i == 0 {
+            row_args = get_value_args_for_row(&args.args, &args.arg_fields, 0)?;
+            for (idx, arg) in args.args.iter().enumerate() {
+                if let ColumnarValue::Array(arr) = arg {
+                    last_bytes[idx] = large_binary_row(arr, 0).map(<[u8]>::to_vec);
+                }
+            }
+        } else {
+            for (idx, arg) in args.args.iter().enumerate() {
+                let ColumnarValue::Array(arr) = arg else {
+                    // A scalar is the same on every row; row 0 already decoded it.
+                    continue;
+                };
+                match large_binary_row(arr, i) {
+                    Some(bytes) if last_bytes[idx].as_deref() == Some(bytes) => continue,
+                    Some(bytes) => last_bytes[idx] = Some(bytes.to_vec()),
+                    // A null row, or a column this memo does not cover, still
+                    // overwrites `row_args[idx]` — so the remembered bytes must
+                    // be cleared, or a later row repeating the pre-null value
+                    // would skip the decode and inherit the `Null` left behind.
+                    None => last_bytes[idx] = None,
+                }
+                row_args[idx] =
+                    get_value_from_array(arr, i, args.arg_fields.get(idx).map(|f| f.as_ref()))?;
+            }
+        }
         results.push(f(&row_args)?);
     }
 
@@ -6736,6 +6805,32 @@ cypher_scalar_udf! {
 mod tests {
     use super::*;
     use datafusion::execution::FunctionRegistry;
+
+    /// `large_binary_row` gates the run-length memo that decides whether a UDF
+    /// argument is re-decoded for a row (#245). A wrong `Some` there makes the
+    /// previous row's decoded value stand in for this one, silently.
+    #[test]
+    fn large_binary_row_reports_only_real_bytes() {
+        use arrow::array::LargeBinaryArray;
+
+        let arr: ArrayRef = Arc::new(LargeBinaryArray::from(vec![
+            Some(b"abc".as_ref()),
+            None,
+            Some(b"abd".as_ref()),
+        ]));
+        assert_eq!(large_binary_row(&arr, 0), Some(b"abc".as_ref()));
+        // A null must not compare equal to the previous row's bytes, or the memo
+        // would reuse a value where `Value::Null` is required.
+        assert_eq!(large_binary_row(&arr, 1), None);
+        // Equal length, different bytes: the memo compares bytes, not lengths.
+        assert_eq!(large_binary_row(&arr, 2), Some(b"abd".as_ref()));
+        assert_ne!(large_binary_row(&arr, 0), large_binary_row(&arr, 2));
+
+        // A non-LargeBinary column is never memoised: its per-row read is cheap
+        // and the comparison would not repay itself.
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![7i64, 7, 7]));
+        assert_eq!(large_binary_row(&ints, 0), None);
+    }
 
     #[test]
     fn test_register_udfs() {

@@ -142,3 +142,146 @@ async fn an_edge_is_in_a_list_containing_itself() {
         .unwrap();
     assert_eq!(one_int(&r), 1);
 }
+
+/// A per-row entity list must not be hoisted as a batch constant, even when a
+/// constant list is in scope on the same row.
+///
+/// `invoke_cypher_udf` re-decodes an argument only when its bytes differ from
+/// the row before, because per-row argument decoding is 99% of that UDF's cost
+/// on LDBC IC5 (#245). The saving is sound only if the byte comparison is
+/// exact: a false match makes the previous row's value stand in for this one.
+///
+/// The shape here is the one that check has to get right and that
+/// `a_node_is_in_a_list_containing_itself` does not reach: a collected list —
+/// genuinely constant, and the argument the hoist exists for — held in scope
+/// alongside a per-row list, with the predicate reading the per-row one. A
+/// check that answered "constant" from the wrong column, or from a length
+/// comparison alone, would test every row against row 0's list.
+///
+/// Confirmed discriminating: with the memo's byte comparison weakened to a
+/// length comparison, this returns 1 instead of 3. Only entity-valued lists
+/// reach that path — a list of strings takes a different lowering and cannot
+/// exercise it, which is why this test uses nodes.
+#[tokio::test]
+async fn a_per_row_list_is_not_hoisted_as_constant() {
+    let db = fixture().await;
+
+    let r = db
+        .session()
+        .query(
+            "MATCH (c:Country) WITH collect(c) AS xs \
+             MATCH (d:Country) WITH d, xs, [d] AS own \
+             WHERE d IN own RETURN count(d)",
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        one_int(&r),
+        3,
+        "each row must be tested against its own list, not row 0's"
+    );
+
+    // The complement, so a hoist that happened to pick a list every row matches
+    // is not mistaken for correctness: here no row is a member of its own
+    // single-element list, and a wrongly-hoisted argument would report one.
+    let r = db
+        .session()
+        .query(
+            "MATCH (c:Country) WITH collect(c) AS xs \
+             MATCH (d:Country)-[]->() WITH d, xs, [d] AS own \
+             WHERE NOT d IN own RETURN count(d)",
+        )
+        .await
+        .unwrap();
+    assert_eq!(one_int(&r), 0);
+}
+
+/// The constant case the hoist exists for still answers correctly, on both
+/// sides of the 1 KiB interning threshold.
+///
+/// Below the threshold the list argument is a msgpack blob repeated per row;
+/// above it, a 9-byte handle into the global registry. Both are one long run,
+/// so both are decoded once and must read the same on every row.
+#[tokio::test]
+async fn a_collected_list_is_read_the_same_on_every_row() {
+    let db = Uni::in_memory().build().await.unwrap();
+    let tx = db.session().tx().await.unwrap();
+    tx.execute("CREATE LABEL P (idx INT, pad STRING)")
+        .await
+        .unwrap();
+    // 60 elements, each padded well past 1 KiB in total, so `collect()` interns.
+    let pad = "y".repeat(64);
+    for i in 0..60 {
+        tx.execute(&format!("CREATE (:P {{idx: {i}, pad: '{pad}'}})"))
+            .await
+            .unwrap();
+    }
+    tx.commit().await.unwrap();
+
+    // The lower half is collected; every P is then tested against it, so a list
+    // read correctly on every row yields exactly half.
+    let r = db
+        .session()
+        .query(
+            "MATCH (c:P) WHERE c.idx < 30 WITH collect(c) AS xs \
+             MATCH (p:P) WHERE p IN xs RETURN count(p)",
+        )
+        .await
+        .unwrap();
+    assert_eq!(one_int(&r), 30);
+
+    // The same shape with a short list, below the interning threshold.
+    let r = db
+        .session()
+        .query(
+            "MATCH (c:P) WHERE c.idx < 3 WITH collect(c.idx) AS xs \
+             MATCH (p:P) WHERE p.idx IN xs RETURN count(p)",
+        )
+        .await
+        .unwrap();
+    assert_eq!(one_int(&r), 3);
+}
+
+/// A null between two equal values must not let the second reuse the first.
+///
+/// The run-length memo in `invoke_cypher_udf` (#245) skips re-decoding an
+/// argument whose bytes match the previous row. A null row still overwrites the
+/// argument slot with `Value::Null`, so the remembered bytes have to be cleared
+/// with it — otherwise the pattern `X, null, X` leaves the third row reading the
+/// `Null` the second one wrote.
+///
+/// Found by openCypher TCK `WithWhere2` scenario [1], which regressed to a wrong
+/// answer on the first version of the memo: `(a:A)` has no `id`, so the property
+/// column carries exactly this shape.
+#[tokio::test]
+async fn a_null_row_between_two_equal_rows_clears_the_memo() {
+    let db = Uni::in_memory().build().await.unwrap();
+    let tx = db.session().tx().await.unwrap();
+    tx.execute("CREATE (a:A), (b:B {id: 1}), (c:C {id: 2}), (d:D)")
+        .await
+        .unwrap();
+    tx.execute(
+        "MATCH (a:A), (b:B), (c:C), (d:D) \
+         CREATE (a)-[:T]->(b), (a)-[:T]->(c), (a)-[:T]->(d), \
+                (b)-[:T]->(c), (b)-[:T]->(d), (c)-[:T]->(d)",
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let r = db
+        .session()
+        .query(
+            "MATCH (a)--(b)--(c)--(d)--(a), (b)--(d) \
+             WITH a, c, d WHERE a.id = 1 AND c.id = 2 RETURN d",
+        )
+        .await
+        .unwrap();
+    let mut labels: Vec<String> = r
+        .rows()
+        .iter()
+        .map(|row| format!("{:?}", row.values()[0]))
+        .collect();
+    labels.sort();
+    assert_eq!(labels.len(), 2, "expected two rows, got {labels:?}");
+}
