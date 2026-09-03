@@ -1703,3 +1703,81 @@ edge-property read path and pattern anchoring.
 
 Suite at the tip: 4549/4549 across `uni-db`, `uni-query`, `uni-store` and
 `uni-query-functions`; fmt and clippy clean.
+
+---
+
+## Status — 2026-09-03
+
+**SF1 is 14 of 14 for the first time.** IC5, the last query over its 300 s
+budget, answers in 132.6 s.
+
+| query | ms | | query | ms |
+|---|---:|---|---|---:|
+| IC1 | 1 369.4 | | IC8 | 1 145.8 |
+| IC2 | 4 585.8 | | IC9 | 36 464.5 |
+| IC3 | 86 181.5 | | IC10 | 3 636.4 |
+| IC4 | 3 595.5 | | IC11 | 798.4 |
+| **IC5** | **132 621.3** | | IC12 | 14 800.8 |
+| IC6 | 8 837.2 | | IC13 | 32.7 |
+| IC7 | 2 497.5 | | IC14 | 51 904.0 |
+
+`systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -p
+OOMPolicy=continue`, store reused, post-#208 parameters.
+
+### What it was
+
+`invoke_cypher_udf` re-decoded **every argument on every row**: measured
+1 808 724 per-row decodes for 904 477 rows, **218.2 s of the function's 220.5 s**
+(100% accounted). Fixed by re-decoding only when an argument's bytes differ from
+the row before — a run-length memo. `OptionalFilterExec` 337.2 s -> 126.0 s.
+
+### The instrument is the finding
+
+The round took four wrong attributions before the right one, and the pattern in
+each is the same: **an inference that resembles a measurement.**
+
+1. **#229's ladder.** `RETURN count(*)` 125 s versus `WHERE friend IN friends`
+   347 s. That is an A/B on *query text*. It proves the predicate's presence
+   costs 222 s and says nothing about where. It was read as the latter.
+2. **A micro-probe.** Isolating the clause showed the per-row list decode was 96%
+   of it and the scan 4% — a correct answer to a question IC5 was not asking, and
+   the basis for a projection (345 s -> 131 s) that a same-binary A/B then
+   falsified at 0.15%.
+3. **Two hypotheses filed instead of run.** `OptionalFilterExec`'s per-row
+   grouping key and its one-`RecordBatch`-per-group NULL recovery, both named
+   with the test that would kill them. Measured: **0.18 s and 1.8 s**. Both dead.
+   Writing the experiment had felt like doing it.
+4. **A broken timer believed over a total.** A per-argument decode timer read
+   0.0 ms while reporting the argument as non-constant — contradictory — and
+   ~226 s was attributed by subtraction rather than by resolving it.
+
+What ended it was `PROFILE` plus a phase timer that reported the **function's own
+total** next to its parts, so `accounted = 100% of TOTAL` could be checked. Every
+earlier instrument measured a part and left the whole unmeasured, which is
+exactly the condition under which a part reading zero looks like a finding.
+
+The cheap rules, both of which would have cut this short:
+
+- **A differential needs to vary one mechanism, not one line of query text.**
+  The switch that settles it is a runtime flag in one binary, not two trees.
+- **Report the total beside the parts.** An instrument that cannot say what it
+  failed to account for cannot be checked.
+
+### The first fix shipped a wrong answer, and the TCK caught it
+
+The initial memo regressed `WithWhere2` scenario [1] from correct to **wrong**
+(3925/3925 -> 3924/3925). A null row overwrites the argument slot with
+`Value::Null`, and the remembered bytes were not cleared with it, so `X, null, X`
+left the third row reading the second's `Null`.
+
+Neither of the two targeted tests written for the change caught it. The TCK did.
+On a path shared by 41 UDFs, the conformance suite is not optional belt-and-braces.
+
+Gates at the tip: 4670/4670 across `uni-db`, `uni-query`, `uni-query-functions`,
+`uni-store`, `uni-cypher`; TCK 3925/3925, 0 failed; fmt and clippy clean.
+
+### Remaining
+
+IC3 at 86.2 s and IC14 at 51.9 s are the slowest that answer; neither is over
+budget. #204 should close against this run. Peak RSS still reaches 14.5 GiB,
+which is #198's open half and unaffected by this work.
