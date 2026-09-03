@@ -26,18 +26,31 @@ and `docs/proposals/test_harness_and_benchmarks_2026-08-11.md` §7.1 has the
 argument: wall-clock in CI cannot carry a threshold, so instruction counts are
 the only thing gated, and only on targets that passed a qualification pilot.
 
-**Machine identity is load-bearing, and one tool is blind to it.** A local run of
-*unchanged* code measured 25–56% below the CI-generated `iai-baseline.json`, and
-`iai_gate.py` reported "all 5 gated targets within 2.0%" — because it only fails
-on regressions, so an implausible improvement passes silently. Two consequences:
+**An implausible improvement now fails the gate (#230).** A local run of
+*unchanged* code measured 25–56% below the CI-generated `iai-baseline.json` and
+`iai_gate.py` reported "all 5 gated targets within 2.0%", because every
+comparison was one-sided. A later run reached 88–97% below baseline and still
+printed `worst +0.00%`. Both directions are checked now:
+
+- `--fail-improve-pct` is required and must exceed `--fail-pct`. CI passes 50,
+  which is far above the measured same-runner drift (0.599%) and far below the
+  observed collapse, so it cannot fire on noise. A genuine optimization past 50%
+  on a gated hot path stops for a human on purpose.
+- The summary reports `worst` **and** `best`, and states which checks ran, so a
+  green line cannot imply a check that did not happen.
+- **Running locally against the committed baseline?** Pass
+  `--allow-foreign-machine`, which downgrades the collapse check to a warning.
+  CI never passes it. The arming is deliberately *not* inferred from machine
+  identity: `generated_from.runners` holds the qualify workflow's shard artifact
+  names, which no machine can match, so a check gated on that would have been
+  permanently and silently off.
+- `scripts/perf/test_iai_gate.py` pins all of the above and runs as a step of
+  the perf job itself, because no lane runs tests under `scripts/`.
 
 - **Never regenerate `iai-baseline.json` locally.** Dispatch
   `Perf Qualify (cross-runner iai)` and rebuild from its artifacts. Writing local
   numbers into the committed baseline would poison the gate far worse than the
   regression it exists to catch.
-- Recording the machine in the baseline and warning on a mismatch is an open
-  follow-up, along with treating a large negative delta as suspicious rather than
-  free.
 
 **A measurement that refuted its own design is the document succeeding.**
 `dqp-feasibility` exists because the proposal committed to a tier table nobody
