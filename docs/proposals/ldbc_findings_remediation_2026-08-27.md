@@ -1781,3 +1781,73 @@ Gates at the tip: 4670/4670 across `uni-db`, `uni-query`, `uni-query-functions`,
 IC3 at 86.2 s and IC14 at 51.9 s are the slowest that answer; neither is over
 budget. #204 should close against this run. Peak RSS still reaches 14.5 GiB,
 which is #198's open half and unaffected by this work.
+
+---
+
+## Progress against this document's own plan — 2026-09-03
+
+The post-triage order was written on 2026-08-29 and amended on 2026-09-01. This
+is where it actually stands, including where it was bypassed.
+
+| step | item | now |
+|---|---|---|
+| 0 | #208 parameter determinism | closed |
+| 1 | #198 unwind chunking | closed — but see the note below |
+| 2 | #207 deadline checkpoint | closed |
+| 3 | #203 + marker audit | closed |
+| 4 | #202 sort spill | closed |
+| 5 | #199 `COUNT { UNWIND outer … }` | **not started** |
+| 6 | #206 + #204 + Wave 5.2–5.5 | #204 closed; #206 open; **5.2, 5.3 and 5.5 not started** |
+| 7 | hygiene — #205, #195 | not started |
+| 8 | #200 flush-barrier flake | open, no recurrence |
+| 9 | Track 0 differential oracle | not started |
+
+Steps 0 through 4 are discharged. Steps 5 and 7 through 9 have had no work.
+
+### The latency strategy in this document was never executed
+
+Wave 5.2–5.5 is comprehension hoisting, predicate-driven anchoring and
+decorrelation. None of it was done. **IC5 was fixed by per-row argument decoding
+in the UDF layer** — a mechanism this document does not mention.
+
+Sharper still: 5.2–5.4 were gated here on attribution being possible, with
+#175's index counters named as the witness — *"none of them consulted an index.
+That is the gate on 5.2–5.4, not effort."* **That gate is still shut** (now
+#247: the indexes are built and nothing reads them). The work went around it,
+attributing with `PROFILE` instead.
+
+So this document was wrong twice about what blocked latency: the instrument it
+nominated was not the one that worked, and the wave it queued was not the fix.
+Worth keeping visible, because the wave is still queued and its stated
+justification has not survived.
+
+### #198 is closed and this document says its criterion is unmet
+
+The 2026-08-31 status reads: *"#198's own success criterion — the process
+surviving with peak RSS bounded — is therefore not met, and the issue stays
+open."* It is now closed. Half is satisfied: no SIGKILLs under a 16 GiB cap.
+The bounded half is not — the 2026-09-03 run peaks at **14 547 MiB against a
+1 GiB pool**, a ~14x gap, which is #242 (no first-party operator reserves from
+the pool). Recorded rather than reopened.
+
+### Peak RSS doubled since 2026-09-01, probably benignly
+
+7 748 -> 14 547 MiB. `VmHWM` is a process high-water mark, IC5 did not complete
+on 2026-09-01, and it now peaks at 10 536 MiB — which lifts the watermark for
+every query after it. That explanation is plausible and **untested**; it is an
+open question, not a finding.
+
+### This document is no longer the index of what is in flight
+
+Open issues went 57 -> 35 (22 closed once the branch reached `origin/main`) ->
+45. The additions are `docs/proposals/issue_class_review_2026-09-01.md`'s
+filings (#233–#243), #245, #247, and #213–#228 from the IC5 round. That was a
+deliberate change of frame rather than drift — Class 7 there, "optimizations
+invisible to result-only tests", is Track 0's question reached by another route
+— but the order above has not been re-derived against it.
+
+### The order from here
+
+Unchanged in shape, with the discharged items removed: **#199**, then **#206**,
+then a re-derivation of Wave 5.2–5.5 against the fact that its gating argument
+no longer holds, then hygiene (**#205**, **#195**), **#200**, and **Track 0**.
