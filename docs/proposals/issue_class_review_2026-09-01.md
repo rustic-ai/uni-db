@@ -547,3 +547,102 @@ need design rather than patches.
 - Impact ordering within every class. Ranked by reasoning, not measurement.
 - Plugin, CLI, bulk and CRDT crates were not audited for Class 1; roughly 25
   further warn sites exist there, mostly scheduler and CDC paths.
+
+---
+
+## Status — 2026-09-02
+
+**The branch is pushed.** `origin/main` carries every commit this review was
+written against (PR #232). The 22 issues listed above as "fixed but reading
+OPEN" are now closed against shipped code. The ledger section is history.
+
+**All 11 proposed issues are filed**, and six corrections were posted to
+existing ones.
+
+| proposal | filed as |
+|---|---|
+| Class: fail-open | #233 |
+| Class: entity identity hand-rolled ~30 times | #234 |
+| `COUNT(DISTINCT n)` has no entity arm | #235 |
+| Locy join keys order-nondeterministic | #236 |
+| The vertex path's selectivity blindness | #237 |
+| Two comments assert no disk spill | #238 |
+| `ScanRequest::limit` never set | #239 |
+| `execute_stream` is not a stream | #240 |
+| Variable-length traversal has no chunking | #241 |
+| No operator reserves from the memory pool | #242 |
+| Class: orientation re-derived four ways | #243 |
+
+Corrections posted to #198, #205, #213, #214, #217 and #220.
+
+### What re-verification changed
+
+Eleven claims were re-read against the tree before filing. All held. Four came
+back **sharper than this document states**, and the direction is consistent —
+each was understated, not overstated.
+
+- **`Value::entity_vid` has two call sites, not four** (`df_graph/common.rs:312`,
+  `df_udfs.rs:1268`, plus one internal self-call). Against ~30 hand-rolled
+  identity checks, the consolidation is weaker than "written and never applied";
+  it is essentially unused.
+- **`common.rs:1883` fails in two directions, not one.** The catch-all yields
+  `ScalarKey::Utf8(format!("opaque@{row_idx}"))`, so within a batch every row
+  gets a distinct grouping key *and across batches rows at the same index
+  falsely collide*. This document recorded only the first half. The swallowed
+  error is also `ArrayFormatter::try_new` failing, not a per-row list decode.
+- **`prefers_full_scan` has exactly one caller.** #221's selectivity helper
+  (`main_edge.rs:528-560`) is consulted only from the eid path at `:476`. The
+  endpoint-vid arm 160 lines below it chooses between `VID_CHUNK` chunking and a
+  full scan by which `match` arm the caller lands in. The fix and the unfixed
+  sibling are in the same file.
+- **#202 corrected the spill premise in its commit message and new comments and
+  left both `GreedyMemoryPool` justifications standing.** The tree now holds the
+  correct fact (`scan.rs:526-528`) and the incorrect one (`read.rs:648-652`,
+  `api/mod.rs:2074-2079`) about a hundred lines apart, with the incorrect one
+  load-bearing on a configuration decision.
+
+One structural finding is new and belongs to Class 8:
+
+**The orientation fix's test is discriminating and still cannot reach the
+sibling path.** `add_edge_structural_projection` now consults `direction`, but
+is complete only where `_fwd` is available, and `plan_traverse_main_by_type`
+(`df_planner.rs:3828`) never requests it. So the test that was confirmed
+discriminating — 1 of 27 fails when reverted — covers the schema'd path by
+construction and the schemaless one not at all.
+
+Stated generally, because it sharpens Class 7's rule rather than merely adding
+to it: **discrimination bounds a test from below, never from above.** Showing a
+test fails when the bug is restored proves it exercises *that* path. It says
+nothing about the sibling paths the same mechanism lives on, and those are
+exactly what a class issue exists to enumerate.
+
+### The state of the paths
+
+The var-length traversal's absence of bounding was confirmed by enumerating the
+state machines, which is worth keeping as a table:
+
+| state enum | location | variants | bounded |
+|---|---|---|---|
+| `TraverseStreamState` | traverse.rs:677 | `Warming`, `Reading`, `Materializing`, `Chunking`, `MaterializingChunk`, `Slicing`, `Done` | chunks and slices |
+| `GraphScanState` | scan.rs:515 | `Init`, `Executing`, `Slicing`, `Done` | slices only (#214) |
+| `VarLengthStreamState` | traverse.rs:4072 | `Warming`, `Reading`, `PrefetchingProperties`, `Materializing`, `Done` | neither (#241) |
+| `VarLengthMainStreamState` | traverse.rs:5158 | `Loading`, `Processing`, `PrefetchingProperties`, `Materializing`, `Done` | neither (#241) |
+
+#202 added slicing to "scan and traversal"; its three commits reached the scan
+and the **single-hop** traversal. Ten of the fourteen LDBC queries use
+variable-length paths.
+
+### A note on this document's own paths
+
+Every source path in the sections above omits the `query/` segment —
+`crates/uni-query/src/executor/core.rs` is really
+`crates/uni-query/src/query/executor/core.rs`. Line numbers are accurate.
+
+### Remaining
+
+**IC5 is the only unanswered SF1 query**, and #229 is 64% of it with no fix
+commit. #219's anchoring landed but does not reach MERGE (#225) or Locy (#226).
+
+Class 7 continues to generate instances faster than it is closed: **#230 was
+filed after this review** and is the same mechanism — `iai_gate.py` reporting
+"worst +0.00%" while 5 of 5 gated targets sat 88-97% below baseline.

@@ -2783,6 +2783,65 @@ enum SubqueryResult {
     Collect,
 }
 
+/// Names the subquery body binds for itself: pattern variables and `UNWIND`
+/// aliases, across every clause of the query and both sides of a `UNION`.
+///
+/// An outer column of the same name must not be put in scope for the body, or
+/// the body's own binding and the imported one collide. `PatternComprehensionSubqueryExpr`
+/// carries the equivalent set as `pattern_vars`; a general subquery has to walk
+/// its clauses for it.
+fn body_bound_vars(query: &Query) -> HashSet<String> {
+    fn walk_clauses(clauses: &[Clause], out: &mut HashSet<String>) {
+        for clause in clauses {
+            match clause {
+                Clause::Match(m) => {
+                    for path in &m.pattern.paths {
+                        if let Some(v) = &path.variable {
+                            out.insert(v.clone());
+                        }
+                        for elem in &path.elements {
+                            match elem {
+                                uni_cypher::ast::PatternElement::Node(n) => {
+                                    if let Some(v) = &n.variable {
+                                        out.insert(v.clone());
+                                    }
+                                }
+                                uni_cypher::ast::PatternElement::Relationship(r) => {
+                                    if let Some(v) = &r.variable {
+                                        out.insert(v.clone());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                Clause::Unwind(u) => {
+                    out.insert(u.variable.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = HashSet::new();
+    // Every variant listed rather than swept into a wildcard: a wrapper whose
+    // inner query went unwalked would under-report the body's bindings, and an
+    // under-reported binding is the direction that silently imports an outer
+    // column over one the body defines.
+    match query {
+        Query::Single(single) => walk_clauses(&single.clauses, &mut out),
+        Query::Union { left, right, .. } => {
+            out.extend(body_bound_vars(left));
+            out.extend(body_bound_vars(right));
+        }
+        Query::Explain(inner) => out.extend(body_bound_vars(inner)),
+        Query::TimeTravel { query, .. } => out.extend(body_bound_vars(query)),
+        // A schema command binds no query variables.
+        Query::Schema(_) => {}
+    }
+    out
+}
+
 struct ExistsExecExpr {
     query: Query,
     /// Which of the three subquery forms this is.
@@ -2927,7 +2986,34 @@ impl PhysicalExpr for ExistsExecExpr {
                 entity_vars.insert(name.to_string());
             }
         }
-        let vars_in_scope: Vec<String> = entity_vars.iter().cloned().collect();
+        // Outer *non-entity* variables — a scalar or a list bound by the enclosing
+        // query, e.g. `WITH collect(...) AS names UNWIND names AS n`. These must be
+        // in scope for the body too: without them `UNWIND names AS y` fails at
+        // execution with "Column 'names' not found", and a body that reads `n`
+        // fails earlier still with `UndefinedVariable` (#199).
+        //
+        // They are added to `vars_in_scope` only, never to `entity_vars`. The
+        // correlated rewrite below turns `v.prop` into `Parameter("v.prop")`, which
+        // is meaningful for an entity and wrong for a scalar; the value itself
+        // arrives through `extract_row_params`, which already copies every batch
+        // column into `sub_params`, so the projection `plan_single_typed` emits for
+        // an in-scope variable resolves without any further plumbing.
+        //
+        // Dotted and underscore-prefixed columns stay excluded for the reason the
+        // comment above gives: they collide with traverse output columns.
+        let bound_in_body = body_bound_vars(&self.query);
+        let mut vars_in_scope: Vec<String> = entity_vars.iter().cloned().collect();
+        for field in schema.fields() {
+            let name = field.name();
+            if name.contains('.')
+                || name.starts_with('_')
+                || entity_vars.contains(name)
+                || bound_in_body.contains(name)
+            {
+                continue;
+            }
+            vars_in_scope.push(name.clone());
+        }
 
         // 7.3: Rewrite correlated property accesses to parameter references.
         // e.g., `n.prop` where `n` is an outer entity → `$param("n.prop")`
