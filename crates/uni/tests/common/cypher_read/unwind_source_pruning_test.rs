@@ -369,3 +369,106 @@ async fn empty_and_null_rows_do_not_desynchronise_the_expansion() {
         vec!["b:b1".to_string(), "b:b2".to_string(), "d:d1".to_string()]
     );
 }
+
+/// A subquery body can read an outer-scope variable that is not an entity.
+///
+/// `ExistsExecExpr` derived the body's in-scope variables by sniffing the outer
+/// batch schema for entity shapes — a `._vid` suffix, a struct column, or a bare
+/// integer. A scalar or a list bound by the enclosing query matched none of
+/// them, so the body could not see it at all. Two error modes, one cause: a
+/// direct read failed at planning with `UndefinedVariable`, and an `UNWIND` over
+/// it failed later with `Column '<name>' not found for UNWIND` (#199, which
+/// reported only the second).
+///
+/// The values matter more than the row counts here. Every shape below returns
+/// two rows either way once it stops erroring, so asserting the count alone
+/// would pass without the body ever reading the outer variable.
+#[tokio::test]
+async fn a_subquery_body_reads_an_outer_scalar_and_list() {
+    let db = fixture().await;
+    let head = "MATCH (person:P {name:'a'})-[:KNOWS]->(friend:P) \
+                WITH collect(DISTINCT friend.name) AS names UNWIND names AS n ";
+
+    // `names` is ['b','c'], so `n` takes each in turn and there are three P nodes.
+    for (q, want) in [
+        // The outer scalar, read in a predicate.
+        (
+            "RETURN n, COUNT { MATCH (z:P) WHERE z.name = n RETURN z } AS c",
+            1,
+        ),
+        // The outer scalar, read in the body's RETURN: the count is of P nodes.
+        ("RETURN n, COUNT { MATCH (z:P) RETURN n } AS c", 3),
+        // The outer list, unwound inside the body.
+        ("RETURN n, COUNT { UNWIND names AS y RETURN y } AS c", 2),
+        (
+            "RETURN n, COUNT { UNWIND names AS y MATCH (z:P) WHERE z.name = y RETURN z } AS c",
+            2,
+        ),
+        // The outer list, read without unwinding.
+        (
+            "RETURN n, COUNT { MATCH (z:P) WHERE z.name IN names RETURN z } AS c",
+            2,
+        ),
+    ] {
+        let r = db.session().query(&format!("{head}{q}")).await.unwrap();
+        let mut got: Vec<i64> = r
+            .rows()
+            .iter()
+            .map(|row| match row.values()[1] {
+                Value::Int(i) => i,
+                ref other => panic!("expected an integer count, got {other:?} for {q}"),
+            })
+            .collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![want, want], "wrong counts for {q}");
+    }
+
+    // The same body under EXISTS rather than COUNT.
+    let r = db
+        .session()
+        .query(&format!(
+            "{head}RETURN n, EXISTS {{ UNWIND names AS y MATCH (z:P) WHERE z.name = y RETURN z }} AS e"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.rows().len(), 2);
+    for row in r.rows() {
+        assert_eq!(row.values()[1], Value::Bool(true));
+    }
+}
+
+/// A variable the subquery body binds itself is not overwritten by an outer
+/// column of the same name.
+///
+/// Putting outer columns in scope is only sound with this guard: the body's own
+/// `MATCH`/`UNWIND` bindings are removed from the imported set, or the body's
+/// binding and the import collide. `PatternComprehensionSubqueryExpr` carries
+/// the equivalent as `pattern_vars`; a general subquery walks its clauses.
+///
+/// Here the outer `n` is the string 'b' or 'c' while the body binds `n` to a
+/// node, so an import that won over the body's binding would change the answer
+/// rather than raise an error.
+#[tokio::test]
+async fn a_body_binding_shadows_an_outer_column_of_the_same_name() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query(
+            "MATCH (person:P {name:'a'})-[:KNOWS]->(friend:P) \
+             WITH collect(DISTINCT friend.name) AS names UNWIND names AS n \
+             RETURN n, COUNT { MATCH (n:P) RETURN n } AS c",
+        )
+        .await
+        .unwrap();
+    let mut got: Vec<i64> = r
+        .rows()
+        .iter()
+        .map(|row| match row.values()[1] {
+            Value::Int(i) => i,
+            ref other => panic!("expected an integer count, got {other:?}"),
+        })
+        .collect();
+    got.sort_unstable();
+    // The body's `n` ranges over all three P nodes, independent of the outer `n`.
+    assert_eq!(got, vec![3, 3]);
+}
