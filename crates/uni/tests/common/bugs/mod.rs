@@ -129,6 +129,7 @@ pub mod repro_issue_182_delete_before_first_flush;
 // the Lance dataset unchanged, so the next write to that label is rejected.
 pub mod repro_issue_249_add_property_to_existing_label;
 pub mod repro_registry_monotonicity_oracle;
+pub mod repro_schemaless_pattern_comprehension_empty;
 pub mod repro_stream_error_loses_abort_type;
 pub mod vid_lookup_join_payoff;
 pub mod vid_lookup_join_reachability;
