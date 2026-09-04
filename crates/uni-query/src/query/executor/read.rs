@@ -2217,20 +2217,25 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Map(map) = &val {
-                            // Check for _vid (vertex) first
-                            if let Some(vid_val) = map.get("_vid") {
-                                return Ok(vid_val.clone());
-                            }
-                            // Check for _eid (edge/relationship)
-                            if let Some(eid_val) = map.get("_eid") {
-                                return Ok(eid_val.clone());
-                            }
-                            // Check for _id (fallback)
-                            if let Some(id_val) = map.get("_id") {
-                                return Ok(id_val.clone());
-                            }
+                        // Only the map encoding was handled, so `id(n)` on a
+                        // native `Value::Node` returned NULL — an entity right
+                        // there in the row reading as "not an entity" (#233,
+                        // #234). `entity_vid` is the one definition of vertex
+                        // identity and covers `Node` and every map form; edges
+                        // stay explicit because it has no `Edge`/`_eid` arm.
+                        if let Some(vid) = val.entity_vid() {
+                            return Ok(Value::Int(vid.as_u64() as i64));
                         }
+                        if let Value::Edge(edge) = &val {
+                            return Ok(Value::Int(edge.eid.as_u64() as i64));
+                        }
+                        if let Value::Map(map) = &val
+                            && let Some(eid_val) = map.get("_eid")
+                        {
+                            return Ok(eid_val.clone());
+                        }
+                        // A genuinely non-entity argument, `id(null)` included,
+                        // is NULL by Cypher's rules.
                         return Ok(Value::Null);
                     }
 
@@ -2242,17 +2247,20 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Map(map) = &val {
-                            // Check for _vid (vertex) first
-                            // In new storage model, VIDs are pure auto-increment - return as simple ID string
-                            if let Some(vid_val) = map.get("_vid").and_then(|v| v.as_u64()) {
-                                return Ok(Value::String(vid_val.to_string()));
-                            }
-                            // Check for _eid (edge/relationship)
-                            // In new storage model, EIDs are pure auto-increment - return as simple ID string
-                            if let Some(eid_val) = map.get("_eid").and_then(|v| v.as_u64()) {
-                                return Ok(Value::String(eid_val.to_string()));
-                            }
+                        // Same two gaps as `id()` above, plus one of its own: the
+                        // `_vid` arm required `as_u64`, so a map carrying the id
+                        // only as `_id` fell through to NULL even though the
+                        // entity was present. `entity_vid` accepts every form.
+                        if let Some(vid) = val.entity_vid() {
+                            return Ok(Value::String(vid.as_u64().to_string()));
+                        }
+                        if let Value::Edge(edge) = &val {
+                            return Ok(Value::String(edge.eid.as_u64().to_string()));
+                        }
+                        if let Value::Map(map) = &val
+                            && let Some(eid_val) = map.get("_eid").and_then(|v| v.as_u64())
+                        {
+                            return Ok(Value::String(eid_val.to_string()));
                         }
                         return Ok(Value::Null);
                     }

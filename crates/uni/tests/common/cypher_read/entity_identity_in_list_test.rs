@@ -285,3 +285,62 @@ async fn a_null_row_between_two_equal_rows_clears_the_memo() {
     labels.sort();
     assert_eq!(labels.len(), 2, "expected two rows, got {labels:?}");
 }
+
+/// `id()` answers for an entity in either encoding.
+///
+/// Both functions matched only `Value::Map`, so a native `Value::Node` — which
+/// `pattern_comprehension` produces directly — returned NULL: an entity present
+/// in the row reading as "not an entity", with no error (#233, #234).
+/// `elementId()` had a second gap of its own — it required `_vid` to be
+/// `as_u64`-able, so a map carrying the id only as `_id` also fell through — and
+/// is fixed the same way, but cannot be asserted here: `ELEMENTID` is known to
+/// `function_props` and `expr_eval` and never registered as a UDF, so a query
+/// using it fails at planning with "UDF 'elementid' is not registered". That is
+/// its own defect, of the shape #176 describes.
+///
+/// Routed through `Value::entity_vid`, the one definition of vertex identity —
+/// which is also the consolidation #234 asks for, one call site at a time.
+///
+/// `id(null)` stays NULL, which is Cypher's rule and not the defect.
+///
+/// **This test does not cover the arm it was written for, and says so rather
+/// than implying otherwise.** Neutralising `read.rs`'s `id()` back to its
+/// map-only form leaves it green: these queries resolve `id()` through the
+/// `entity_identity` UDF in `df_udfs`, not through the row-oriented executor.
+/// So it stands as a behaviour guard on the reachable path, and the `read.rs`
+/// arm's fix is unverified for want of a query shape that reaches it.
+#[tokio::test]
+async fn id_accepts_every_entity_encoding() {
+    let db = fixture().await;
+
+    // Scan-produced and comprehension-produced bindings of the same node reach
+    // these functions under different encodings; both must answer.
+    let r = db
+        .session()
+        .query(
+            "MATCH (c:Country {name:'Egypt'}) \
+             RETURN id(c) AS direct, \
+                    [x IN [c] | id(x)] AS through_comprehension",
+        )
+        .await
+        .unwrap();
+    let row = &r.rows()[0];
+    let direct = match row.values()[0] {
+        Value::Int(i) => i,
+        ref other => panic!("id() must return an integer, got {other:?}"),
+    };
+    let through = match &row.values()[1] {
+        Value::List(items) => match items.first() {
+            Some(Value::Int(i)) => *i,
+            other => panic!("id() inside a comprehension returned {other:?}"),
+        },
+        other => panic!("expected a list, got {other:?}"),
+    };
+    assert_eq!(
+        direct, through,
+        "the same node must have the same id under both encodings"
+    );
+    // Cypher's rule for a null argument is preserved.
+    let r = db.session().query("RETURN id(null) AS a").await.unwrap();
+    assert_eq!(r.rows()[0].values()[0], Value::Null);
+}

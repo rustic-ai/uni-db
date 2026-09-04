@@ -816,6 +816,14 @@ impl Writer {
                 }
             }
         }
+        // Nulling here is deliberate and is the only safe option — refusing the
+        // value would leave the buffer permanently unflushable (#137). But it
+        // *destroys data*, and a `warn!` is the weakest possible record of that:
+        // greppable if someone thinks to look, invisible otherwise. Count it, so
+        // a recovery that discarded values is visible without reading the log
+        // (#233).
+        metrics::counter!("uni_wal_replay_dims_nulled_total", "kind" => "vertex")
+            .increment(vertex_fixes.len() as u64);
         for (vid, prop) in vertex_fixes {
             if let Some(props) = l0_guard.vertex_properties.get_mut(&vid) {
                 props.insert(prop, Value::Null);
@@ -846,6 +854,8 @@ impl Writer {
                 }
             }
         }
+        metrics::counter!("uni_wal_replay_dims_nulled_total", "kind" => "edge")
+            .increment(edge_fixes.len() as u64);
         for (eid, prop) in edge_fixes {
             if let Some(props) = l0_guard.edge_properties.get_mut(&eid) {
                 props.insert(prop, Value::Null);

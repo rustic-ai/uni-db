@@ -2123,17 +2123,30 @@ impl PropertyManager {
         ctx: Option<&QueryContext>,
     ) -> Result<Value> {
         let mut merged = Value::Null;
+        // The visitor returns `bool` rather than a `Result`, so a failed merge
+        // used to be skipped and the accumulator returned as if that layer had
+        // not existed — a silently short CRDT value. The error is carried out of
+        // the closure instead, and visiting stops at the first one: continuing
+        // would keep folding layers onto an accumulator already known to be
+        // wrong (#233).
+        let mut failure: Option<anyhow::Error> = None;
         l0_visibility::visit_l0_buffers(ctx, |l0| {
             if let Some(props) = l0.vertex_properties.get(&vid)
                 && let Some(val) = props.get(prop)
             {
-                // Note: merge_crdt_values can't fail in practice for valid CRDTs
-                if let Ok(new_merged) = self.merge_crdt_values(&merged, val) {
-                    merged = new_merged;
+                match self.merge_crdt_values(&merged, val) {
+                    Ok(new_merged) => merged = new_merged,
+                    Err(e) => {
+                        failure = Some(e);
+                        return true; // Stop visiting
+                    }
                 }
             }
             false // Continue visiting all layers
         });
+        if let Some(e) = failure {
+            return Err(e);
+        }
         Ok(merged)
     }
 

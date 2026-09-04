@@ -444,10 +444,21 @@ impl L0Buffer {
                             // is a bug, not a variant mismatch, and the two used to
                             // share one `if let` and one warning — so the only
                             // signal for it was a message naming the wrong cause
-                            // (#233). Still last-writer-wins, because propagating
-                            // needs `merge_crdt_properties` and the L0 insert API
-                            // above it to become fallible; logged distinctly and at
-                            // `error` so it cannot be read as the routine case.
+                            // (#233).
+                            //
+                            // Still last-writer-wins. Propagating would make
+                            // `merge_crdt_properties`, `apply_vertex_write`,
+                            // `insert_vertex_with_labels_impl`, `_partial_impl` and
+                            // the three public inserts above them fallible, which is
+                            // 52 non-test call sites across five crates — for a
+                            // value that was deserialized as a `Crdt` moments
+                            // earlier and merged successfully, so re-serializing it
+                            // can realistically only fail on OOM. Kept fail-open
+                            // deliberately, and made *observable* instead: a metric
+                            // and an `error` log of its own, so discarded state is
+                            // countable rather than only greppable.
+                            metrics::counter!("uni_crdt_merge_serialize_failures_total")
+                                .increment(1);
                             tracing::error!(
                                 property = %k,
                                 error = %e,
