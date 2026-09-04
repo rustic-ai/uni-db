@@ -410,3 +410,78 @@ async fn a_schemaless_scan_reaches_the_denominator() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// A BTree index serves an equality lookup, exactly as a Hash index does.
+///
+/// `IndexAwareAnalyzer::indexed_equality_column` accepted only
+/// `ScalarIndexType::Hash`, so a BTree index was never collected, no indexed
+/// pushdown was built, the predicate became an in-process Arrow filter, and
+/// Lance was handed nothing it could serve from an index. Every LDBC SF1 index
+/// is a BTree, which is why all fourteen queries reported `index_scans=0`
+/// against indexes that were present on disk (#247).
+///
+/// The assertions mirror the Hash test deliberately: `scans_reported > 0` so a
+/// deleted callback cannot make this pass, and `index_comparisons > 0` because
+/// a BTree records comparisons on the search path — `index_scans` alone would
+/// also be satisfied by a cache-miss load counter.
+#[tokio::test]
+async fn a_btree_index_also_serves_an_equality_lookup() {
+    let db = Uni::temporary().build().await.unwrap();
+    db.schema()
+        .label("Item")
+        .property("name", DataType::String)
+        .property("age", DataType::Int)
+        .done()
+        .apply()
+        .await
+        .unwrap();
+
+    let s = db.session();
+    let tx = s.tx().await.unwrap();
+    tx.query_with(
+        "UNWIND range(0, $n - 1) AS i \
+         CREATE (:Item {name: 'name-' + toString(i), age: i % 90})",
+    )
+    .param("n", Value::Int(N))
+    .fetch_all()
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    db.flush().await.unwrap();
+
+    db.schema()
+        .label("Item")
+        .index("name", IndexType::Scalar(ScalarType::BTree))
+        .apply()
+        .await
+        .unwrap();
+
+    let r = db.session().query(EQ_QUERY).await.unwrap();
+    let m = r.metrics().clone();
+
+    assert!(
+        m.scans_reported > 0,
+        "no Lance scan reported at all, so this test measured nothing"
+    );
+    assert!(
+        m.index_scans >= 1,
+        "an `=` on a BTree-indexed column did not consult the index \
+         (index_scans={}, comparisons={}, scans_reported={})",
+        m.index_scans,
+        m.index_comparisons,
+        m.scans_reported
+    );
+    assert!(
+        m.index_comparisons > 0,
+        "the index was opened but performed no comparisons"
+    );
+
+    // The rows must be unchanged by the routing decision: an index that returns
+    // a different answer from a scan is worse than one that is never used.
+    assert_eq!(r.rows().len(), 1, "the indexed lookup changed the result");
+    assert_eq!(
+        r.rows()[0].values()[0],
+        Value::Int(42 % 90),
+        "the indexed lookup returned the wrong row"
+    );
+}

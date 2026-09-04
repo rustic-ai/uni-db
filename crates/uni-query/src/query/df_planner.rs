@@ -1737,11 +1737,11 @@ impl HybridPhysicalPlanner {
         let filter = filter?;
         let analyzer = crate::query::pushdown::IndexAwareAnalyzer::new(&self.schema);
         let strategy = analyzer.analyze(filter, variable, label_id);
-        if strategy.hash_index_columns.is_empty() {
+        if strategy.indexed_equality_columns.is_empty() {
             return None;
         }
 
-        // Collect lance_predicates that touch a hash-indexed column. Other
+        // Collect lance_predicates that touch an indexed column. Other
         // lance_predicates (e.g. range on non-indexed props) are deliberately
         // left for the outer FilterExec: pushing them inside the scan
         // would also filter L0 rows that match the indexed conjunct but not
@@ -1753,7 +1753,10 @@ impl HybridPhysicalPlanner {
         let mut indexed_preds: Vec<Expr> = Vec::new();
         for pred in &strategy.lance_predicates {
             if let Some(col) = crate::query::pushdown::predicate_target_column(pred, variable)
-                && strategy.hash_index_columns.iter().any(|c| c == &col)
+                && strategy
+                    .indexed_equality_columns
+                    .iter()
+                    .any(|(c, _)| c == &col)
             {
                 let resolved = crate::query::pushdown::substitute_params(pred, &self.params)?;
                 indexed_preds.push(resolved);
