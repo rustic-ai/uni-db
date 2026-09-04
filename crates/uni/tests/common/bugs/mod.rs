@@ -125,6 +125,9 @@ pub mod repro_issue_181_flush_resurrects_detached_edge;
 // #182: flush() raised an internal error after deleting a vertex that had never
 // been flushed — the tombstone had no table to merge into.
 pub mod repro_issue_182_delete_before_first_flush;
+// #249: declaring a property on a label that already has flushed data leaves
+// the Lance dataset unchanged, so the next write to that label is rejected.
+pub mod repro_issue_249_add_property_to_existing_label;
 pub mod repro_registry_monotonicity_oracle;
 pub mod repro_stream_error_loses_abort_type;
 pub mod vid_lookup_join_payoff;
