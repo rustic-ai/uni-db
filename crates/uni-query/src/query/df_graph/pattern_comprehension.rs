@@ -674,11 +674,25 @@ impl PatternComprehensionExecExpr {
                 prop_cache: None,
                 fixed_type_name: None,
             };
+            // The vids handed in are the *traversal's* order — for an undirected
+            // hop, whichever end this row matched from. Taking them verbatim
+            // reported the same edge as `a->b` from one anchor and `b->a` from
+            // the other (#193). Ask storage instead, exactly as the type name
+            // above does and for the same reason: the L0 chain knows a resident
+            // edge and the adjacency probe knows a flushed one, so neither source
+            // alone is right across a flush. The traversal's order stays as the
+            // fallback for an edge no probe resolves.
+            let (stored_src, stored_dst) = self.graph_ctx.resolve_stored_edge_endpoints(
+                *eid,
+                Vid::from(src_vids.get(i).copied().unwrap_or_default()),
+                Vid::from(dst_vids.get(i).copied().unwrap_or_default()),
+                type_ids.get(i).map(std::slice::from_ref).unwrap_or(&[]),
+            );
             let edge = uni_common::Value::Edge(uni_common::Edge {
                 eid: *eid,
                 edge_type: ctx.type_name(*eid, type_ids.get(i).copied()),
-                src: Vid::from(src_vids.get(i).copied().unwrap_or_default()),
-                dst: Vid::from(dst_vids.get(i).copied().unwrap_or_default()),
+                src: Vid::from(stored_src),
+                dst: Vid::from(stored_dst),
                 properties: prop_keys
                     .get(i)
                     .and_then(|k| props_map.get(k))

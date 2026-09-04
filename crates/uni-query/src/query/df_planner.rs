@@ -3849,15 +3849,50 @@ impl HybridPhysicalPlanner {
         // Check if target variable is already bound (for patterns where target is in scope)
         let bound_target_column = Self::detect_bound_target(&input_plan.schema(), target_variable);
 
-        // Extract edge properties for schemaless edges (all treated as Utf8/JSON)
+        // Extract edge properties for schemaless edges (all treated as Utf8/JSON).
+        // `*` and the struct-only sentinel drive structural projection below and
+        // are not column names — every other property list in this planner drops
+        // both, and requesting `__set_struct__` as an edge column asks storage
+        // for a property that cannot exist.
         let mut edge_properties: Vec<String> = if let Some(edge_var) = step_variable {
             all_properties
                 .get(edge_var)
-                .map(|props| props.iter().filter(|p| *p != "*").cloned().collect())
+                .map(|props| {
+                    props
+                        .iter()
+                        .filter(|p| *p != "*" && *p != STRUCT_ONLY_SENTINEL)
+                        .cloned()
+                        .collect()
+                })
                 .unwrap_or_default()
         } else {
             Vec::new()
         };
+
+        // An undirected hop may walk an edge from either end, so which end is the
+        // stored source is only knowable per row. Request `_fwd` so the structural
+        // projection below can restore `_src`/`_dst` to the way the edge is
+        // stored, exactly as the schema'd `Traverse` path does.
+        //
+        // Without it that projection still runs but silently takes its no-`_fwd`
+        // fallback — raw traversal order — and the same edge comes back as `a->b`
+        // on one row and `b->a` on the other. The schema'd path was fixed for
+        // this; this one kept the defect because no test covered it (#193).
+        //
+        // Gated on a struct actually being built: tracking orientation costs the
+        // traversal a second adjacency probe, and a directed hop knows the answer
+        // statically.
+        if let Some(edge_var) = step_variable {
+            let builds_struct = all_properties
+                .get(edge_var)
+                .is_some_and(|props| props.contains("*") || props.contains(STRUCT_ONLY_SENTINEL));
+            if matches!(direction, AstDirection::Both)
+                && builds_struct
+                && !edge_properties.iter().any(|p| p == COL_FWD)
+            {
+                edge_properties.push(COL_FWD.to_string());
+            }
+        }
 
         // If edge has wildcard, include _all_props for keys()/properties() support
         if let Some(edge_var) = step_variable
