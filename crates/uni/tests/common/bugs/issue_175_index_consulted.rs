@@ -485,3 +485,82 @@ async fn a_btree_index_also_serves_an_equality_lookup() {
         "the indexed lookup returned the wrong row"
     );
 }
+
+/// A scalar index survives a subsequent write.
+///
+/// On the LDBC SF1 store, `Dataset::load_indices()` returns **empty** while six
+/// index directories sit in `vertices_Person.lance/_indices/`. Walking the
+/// dataset versions shows why: indices accumulate 1..6 across v2-v7 as they are
+/// created, then drop to **0 at v8** and stay there, with the row count constant
+/// at 9 892 throughout — so no data change caused it. The `_transactions` files
+/// confirm the shape: v2-v7 are index creations, v8 onward are data rewrites.
+///
+/// That is the whole of #247's remaining half: the predicate reaches Lance as
+/// index-servable and Lance declines because, from its manifest, there is no
+/// index to use. The files on disk are orphaned.
+///
+/// This pins the property that matters — an index, once built, is still
+/// consulted after more data is written, and after a compaction. The write half
+/// passes; the compaction half is the one SF1's version history points at,
+/// since a rewrite at constant row count is compaction's signature and not an
+/// append's.
+#[tokio::test]
+async fn a_scalar_index_survives_a_later_write() {
+    let db = fixture().await;
+
+    // Baseline: the index is consulted before any further write.
+    let before = db
+        .session()
+        .query(EQ_QUERY)
+        .await
+        .unwrap()
+        .metrics()
+        .clone();
+    assert!(
+        before.index_scans >= 1 && before.index_comparisons > 0,
+        "the index was not consulted even before the extra write, so this test \
+         would prove nothing about the write (index_scans={}, comparisons={})",
+        before.index_scans,
+        before.index_comparisons
+    );
+
+    // A second write, through the same bulk path the LDBC loader uses
+    // (`bulk_insert_vertices_labeled`) rather than Cypher CREATE — the ordinary
+    // path was checked first and preserves the index, so the bulk path is the
+    // remaining candidate for what dropped it on SF1.
+    let s = db.session();
+    let tx = s.tx().await.unwrap();
+    let rows: Vec<std::collections::HashMap<String, Value>> = (N..N + 100)
+        .map(|i| {
+            let mut m = std::collections::HashMap::new();
+            m.insert("name".to_string(), Value::String(format!("name-{i}")));
+            m.insert("age".to_string(), Value::Int(i % 90));
+            m
+        })
+        .collect();
+    tx.bulk_insert_vertices_labeled(&["Item"], rows)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    db.flush().await.unwrap();
+
+    let after = db
+        .session()
+        .query(EQ_QUERY)
+        .await
+        .unwrap()
+        .metrics()
+        .clone();
+    assert!(
+        after.scans_reported > 0,
+        "no Lance scan reported, so this measured nothing"
+    );
+    assert!(
+        after.index_scans >= 1,
+        "the index stopped being consulted after a later write \
+         (index_scans={}, comparisons={}, scans_reported={})",
+        after.index_scans,
+        after.index_comparisons,
+        after.scans_reported
+    );
+}
