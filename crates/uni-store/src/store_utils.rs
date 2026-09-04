@@ -160,14 +160,14 @@ pub fn is_dataset_not_found(err: &anyhow::Error) -> bool {
     }
     #[cfg(feature = "lance-backend")]
     {
-        return err.chain().any(|cause| {
+        err.chain().any(|cause| {
             cause.downcast_ref::<lance::Error>().is_some_and(|e| {
                 matches!(
                     e,
                     lance::Error::DatasetNotFound { .. } | lance::Error::NotFound { .. }
                 )
             })
-        });
+        })
     }
     // Without the Lance backend there is no Lance error to classify, and the
     // `object_store` check above has already run.
