@@ -118,3 +118,47 @@ their remaining justification is throughput, which is Tier 4's business.
 It also drops Wave 5.2–5.5 from the front of the queue. Its gating argument —
 that latency work needed the index counters as a witness — did not survive: the
 gate is still shut (#247) and IC5 was attributed with `PROFILE` instead.
+
+---
+
+## Status — 2026-09-04
+
+46 open. Worked through the recommended order; four items closed.
+
+| # | state |
+|---|---|
+| #230 | fixed — one-sided comparison, `--fail-improve-pct` added |
+| #231 | not started |
+| #233 | **Tier 1 and Tier 3 fixed; Tier 2 (silent slowness) is what remains** |
+| #199 | fixed (not in this document's order; it was the remediation doc's step 5) |
+| #247 | fixed — root cause below |
+| #234, #243 | not started — the two remaining Tier 1 classes |
+
+### One correction to this document
+
+**#247 is listed under Tier 4 as a `#224` instance ("no cost model").** That is
+wrong and should not be planned from. It was not a planning decision at all:
+semantic compaction overwrites the per-label table, Lance drops the dataset's
+indexes on an overwrite, and nothing rebuilt them. A pushdown gate
+(Hash-only, so a BTree could never be collected) was a real second blocker and
+is also fixed, but it was not the cause of the reported symptom.
+
+The general lesson for the class/instance table above: **#247 was filed against
+a symptom and grouped by the mechanism its title guessed at.** Two of the four
+class groupings in this document rest on the same kind of guess and have not
+been verified against the code the way #233's and #243's were.
+
+### New since this document
+
+- **#249** — adding a property to a label with flushed data makes every
+  subsequent write to it fail. Reproducible, loud, and unrelated to #247 despite
+  being found while bisecting it. Belongs in Tier 1 by severity: not a wrong
+  answer, but it leaves a label unwritable.
+
+### Recommended next
+
+Unchanged in shape: **#234**, taking #216/#217/#235/#236 with it, then **#243**
+taking #193. #233's Tier 2 and #249 are both small and self-contained.
+
+**17 commits are unpushed**, and three closing keywords (`Fixes #199`,
+`Fixes #230`, `Fixes #247`) cannot fire until they merge.

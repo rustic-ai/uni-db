@@ -1851,3 +1851,76 @@ invisible to result-only tests", is Track 0's question reached by another route
 Unchanged in shape, with the discharged items removed: **#199**, then **#206**,
 then a re-derivation of Wave 5.2–5.5 against the fact that its gating argument
 no longer holds, then hygiene (**#205**, **#195**), **#200**, and **Track 0**.
+
+---
+
+## Status — 2026-09-04
+
+### The order, as it stands
+
+| step | item | state |
+|---|---|---|
+| 0-4 | #208, #198, #207, #203, #202 | closed |
+| 5 | #199 `COUNT { UNWIND outer … }` | **fixed** |
+| 6 | #204, #206, Wave 5.2-5.5 | #204 closed; #206 open; wave still not started |
+| 7 | #205, #195 | not started |
+| 8 | #200 | open, no recurrence |
+| 9 | Track 0 | not started |
+
+### Fixed since 2026-09-03
+
+- **#199** — `ExistsExecExpr` derived a subquery body's in-scope variables by
+  sniffing the outer batch schema for entity shapes, so no outer scalar or list
+  was visible at all. The issue reports only the `UNWIND` half; a direct read
+  failed earlier still with `UndefinedVariable`.
+- **#230** — the iai gate compared one-sidedly, so five targets 88-97% *below*
+  baseline reported `worst +0.00%`. Added `--fail-improve-pct`, `best` beside
+  `worst`, and a self-check that runs as a step of the perf job.
+- **#233 Tier 1 and Tier 3.** Tier 1: six read paths that answered "absent" for
+  "could not read", four CRDT-merge sites that resolved the same failure three
+  different ways, and two sites kept deliberately fail-open with a metric. Tier
+  3: `Stale` was a status nothing acted on — `labels_needing_rebuild` selected
+  by growth or age only — and three `let _ = update_index_metadata(...)` sites
+  left an index reporting its previous status. **Tier 2 (silent slowness) is the
+  only tier left.**
+- **#247** — root cause found and fixed. See below.
+
+### #247, and why it took four wrong readings
+
+`Compactor::compact_vertices` rewrites the per-label table through
+`VertexDataset::replace` -> `replace_table_atomic` -> `WriteMode::Overwrite`.
+Lance drops every index on a dataset it overwrites, and nothing put them back:
+`optimize_indices` runs only on the *other* compaction path (`optimize_table`,
+via `compact_files`). uni's schema kept reporting `status: Online` with the
+original `last_built_at`, so every query on that label fell back to a full scan
+for the life of the store. Fixed by restoring both index kinds after the
+replace, and failing the compaction if that fails.
+
+The readings that were wrong, in order:
+
+1. **"Indexes are never consulted"** — true but unhelpful; it named a symptom.
+2. **"The pushdown is Hash-only"** — a real gate, fixed, and *not* the cause.
+   SF1 was unchanged afterwards.
+3. **"Lance is declining the index"** — false. Lance's manifest had no index to
+   decline; the six directories in `_indices/` were orphaned files.
+4. **"v8 is a metadata-only transaction"** — false, from reading fragment ids as
+   stable when `WriteMode::Overwrite` renumbers them to `[0]`. Transaction sizes
+   showed v8 was the same shape as the initial data write.
+
+What ended it was following `VertexDataset::replace` to its caller and then
+asking why the caller never ran in a test: `compact_label` runs Lance's
+`compact_files` alone, and `trigger_async_compaction` has no callers, so
+semantic compaction is reachable only from the background scheduler. An earlier
+test called `compact()` and passed without ever reaching `replace`.
+
+### Filed on the way
+
+- **#249** — declaring a property on a label that already has flushed data
+  leaves the Lance dataset untouched, so every subsequent write to that label
+  fails with `Append with different schema`. Loud, not silent, but the label is
+  unwritable until the property is removed. Not #247.
+
+### Open, unpushed
+
+**17 commits ahead of `origin/main`.** Two carry closing keywords that cannot
+fire until they merge: `Fixes #199`, `Fixes #230`, plus `Fixes #247`.
