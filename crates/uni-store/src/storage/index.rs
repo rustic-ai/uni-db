@@ -201,9 +201,14 @@ impl UidIndex {
     }
 
     pub async fn get_vid(&self, uid: &UniId) -> Result<Option<Vid>> {
+        // Only an absent dataset means "no UID registered". Any other failure —
+        // permissions, a corrupt manifest, IO — used to read the same way, so a
+        // broken index was indistinguishable from an empty one and MERGE went on
+        // to create a duplicate (#233).
         let ds = match self.open().await {
             Ok(ds) => ds,
-            Err(_) => return Ok(None),
+            Err(e) if crate::store_utils::is_dataset_not_found(&e) => return Ok(None),
+            Err(e) => return Err(e),
         };
 
         // Use filter pushdown on _uid_hex for O(log N) or better lookup
@@ -321,8 +326,12 @@ impl UidIndex {
         if uids.is_empty() {
             return Ok(HashMap::new());
         }
-        let Ok(ds) = self.open().await else {
-            return Ok(HashMap::new());
+        let ds = match self.open().await {
+            Ok(ds) => ds,
+            Err(e) if crate::store_utils::is_dataset_not_found(&e) => {
+                return Ok(HashMap::new());
+            }
+            Err(e) => return Err(e),
         };
 
         // Deterministic resolution (review C3): keep the highest-`_version` vid

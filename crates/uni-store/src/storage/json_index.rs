@@ -73,9 +73,12 @@ impl JsonPathIndex {
     }
 
     pub async fn get_vids(&self, value: &str) -> Result<Vec<Vid>> {
+        // An absent dataset is an empty index; anything else is a failure and
+        // must not read as "no matches" (#233).
         let ds = match self.open().await {
             Ok(ds) => ds,
-            Err(_) => return Ok(vec![]),
+            Err(e) if crate::store_utils::is_dataset_not_found(&e) => return Ok(vec![]),
+            Err(e) => return Err(e),
         };
 
         // Scan and filter (MVP). Quoting and escaping are `FilterExpr::to_sql`'s

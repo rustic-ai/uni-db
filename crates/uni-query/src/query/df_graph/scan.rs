@@ -1444,10 +1444,17 @@ fn map_to_schemaless_output_schema(
                 let vids: Vec<Vid> = (0..batch.num_rows())
                     .map(|i| Vid::from(vid_arr.value(i)))
                     .collect();
+                // A build failure used to become an all-NULL column of the right
+                // type, with no log: every row of the property read as absent and
+                // nothing distinguished that from the property genuinely being
+                // absent (#233). The enclosing function already returns a
+                // `DFResult`, so the failure has somewhere to go.
                 let col = build_property_column_static(&vids, &prop_values, prop, &expected_type)
-                    .unwrap_or_else(|_| {
-                        arrow_array::new_null_array(&expected_type, batch.num_rows())
-                    });
+                    .map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "building column for property '{prop}': {e}"
+                    ))
+                })?;
                 columns.push(col);
             }
         }

@@ -97,3 +97,40 @@ async fn test_json_index_open_nonexistent() {
     let vids = index.get_vids("anything").await.unwrap();
     assert!(vids.is_empty());
 }
+
+/// A dataset that exists but cannot be opened must fail, not read as empty.
+///
+/// `get_vids` swallowed **every** `open()` error and returned no matches, so a
+/// corrupt or unreadable index was indistinguishable from one holding nothing
+/// (#233). Only an absent dataset may answer "empty"; the narrowing is what
+/// makes the empty answer meaningful.
+///
+/// The fault is injected by creating the index directory with a `_versions`
+/// entry that is not a manifest, so Lance finds something at the path and fails
+/// to read it — a different error from the not-found this call may absorb.
+#[tokio::test]
+async fn a_corrupt_json_index_errors_rather_than_reading_as_empty() {
+    let dir = tempdir().unwrap();
+    let base_uri = dir.path().to_str().unwrap();
+    let index = JsonPathIndex::new(base_uri, "X", "$.y");
+
+    // Mirrors `JsonPathIndex::new`'s URI construction rather than guessing at
+    // it: every non-alphanumeric character of the path becomes `_`.
+    let safe_path: String = "$.y"
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect();
+    let idx_dir = dir
+        .path()
+        .join("indexes")
+        .join(format!("idx_X_{safe_path}"));
+    let versions = idx_dir.join("_versions");
+    std::fs::create_dir_all(&versions).unwrap();
+    std::fs::write(versions.join("1.manifest"), b"not a manifest").unwrap();
+
+    let got = index.get_vids("anything").await;
+    assert!(
+        got.is_err(),
+        "a present-but-unreadable index must not answer 'no matches', got {got:?}"
+    );
+}

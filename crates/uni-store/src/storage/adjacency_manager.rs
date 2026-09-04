@@ -429,8 +429,9 @@ impl AdjacencyManager {
     ///
     /// Summed rather than maxed so that an advance in *any* contributing table
     /// changes the stamp — a max would miss a bump in one table masked by a
-    /// higher version in another. Returns `None` if the edge type is unknown or
-    /// a version read fails, which callers treat as "assume stale".
+    /// higher version in another. Returns `None` if the edge type is unknown, a
+    /// dataset handle cannot be opened, or a version read fails — callers treat
+    /// that as "assume stale" and re-warm.
     async fn source_version(
         storage: &StorageManager,
         edge_type: u32,
@@ -454,20 +455,28 @@ impl AdjacencyManager {
             }
         };
 
+        // A failed read makes the stamp unknown, so this returns `None` and the
+        // caller re-warms. Contributing 0 instead — which is what an `if let Ok`
+        // that swallows the error does — produces a stamp that compares *equal*
+        // to a previous one taken when the same read also failed, so a stale
+        // adjacency CSR is served as fresh and a traversal silently misses edges.
+        //
+        // `Ok(None)` is not a failure: a table with no version yet has nothing to
+        // contribute, and the stamp moves as soon as it gains one.
         let backend = storage.backend();
         let mut total: u64 = 0;
         for &read_dir in direction.expand() {
             let dir_str = read_dir.as_str();
             for label in &labels {
-                if let Ok(ds) = storage.adjacency_dataset(&edge_type_name, label, dir_str)
-                    && let Ok(Some(v)) = backend.get_table_version(&ds.table_name()).await
-                {
+                let ds = storage
+                    .adjacency_dataset(&edge_type_name, label, dir_str)
+                    .ok()?;
+                if let Some(v) = backend.get_table_version(&ds.table_name()).await.ok()? {
                     total = total.wrapping_add(v);
                 }
             }
-            if let Ok(ds) = storage.delta_dataset(&edge_type_name, dir_str)
-                && let Ok(Some(v)) = backend.get_table_version(&ds.table_name()).await
-            {
+            let ds = storage.delta_dataset(&edge_type_name, dir_str).ok()?;
+            if let Some(v) = backend.get_table_version(&ds.table_name()).await.ok()? {
                 total = total.wrapping_add(v);
             }
         }

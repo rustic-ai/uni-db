@@ -140,6 +140,41 @@ pub fn is_not_found(err: &anyhow::Error) -> bool {
         .is_some_and(|e| matches!(e, object_store::Error::NotFound { .. }))
 }
 
+/// Returns `true` when an error means a Lance dataset does not exist.
+///
+/// Distinguishes "this index was never created" — where an empty result is the
+/// correct answer — from a permission, IO or manifest failure, which must
+/// propagate. `Dataset::open` on an absent path is the normal state of an index
+/// before its first write, so a caller cannot simply propagate every error; it
+/// also cannot swallow every error, which is how a broken index came to read as
+/// "nothing registered" (#233).
+///
+/// Deliberately narrow, for the same reason [`is_not_found`] is: widening this
+/// to "any Lance error" would restore the fail-open behaviour it exists to
+/// replace. `object_store::Error::NotFound` is accepted too, because Lance
+/// surfaces a missing path either way depending on the store.
+#[must_use]
+pub fn is_dataset_not_found(err: &anyhow::Error) -> bool {
+    if is_not_found(err) {
+        return true;
+    }
+    #[cfg(feature = "lance-backend")]
+    {
+        return err.chain().any(|cause| {
+            cause.downcast_ref::<lance::Error>().is_some_and(|e| {
+                matches!(
+                    e,
+                    lance::Error::DatasetNotFound { .. } | lance::Error::NotFound { .. }
+                )
+            })
+        });
+    }
+    // Without the Lance backend there is no Lance error to classify, and the
+    // `object_store` check above has already run.
+    #[cfg(not(feature = "lance-backend"))]
+    false
+}
+
 /// Puts an object to the store with a timeout and retries.
 ///
 /// # Errors

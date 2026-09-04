@@ -2542,7 +2542,11 @@ impl StorageManager {
                 .await
             {
                 Ok(idx) => idx.query_topk(query, k).await,
-                Err(_) => Ok(Vec::new()),
+                // No index for this label/property is an empty result; an index
+                // that exists and cannot be opened is a failure, and returning
+                // zero hits for it made a broken index look like a miss (#233).
+                Err(e) if crate::store_utils::is_dataset_not_found(&e) => Ok(Vec::new()),
+                Err(e) => Err(e),
             }
         }
         #[cfg(not(feature = "lance-backend"))]
