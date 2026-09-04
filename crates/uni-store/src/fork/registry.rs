@@ -508,7 +508,12 @@ impl ForkRegistryHandle {
                     message: format!("parse fork_schemas/{id}.json: {e}"),
                 })
             }
-            Err(_) => Ok(SchemaDelta::empty()),
+            // Only a genuine absence means "this fork has no overlay". A
+            // timeout, an auth failure or an IO fault used to read the same way,
+            // and the fork then ran on the *parent's* schema without anything
+            // surfacing (#233).
+            Err(e) if crate::store_utils::is_not_found(&e) => Ok(SchemaDelta::empty()),
+            Err(e) => Err(lifecycle_anyhow("<schema-overlay>", "schema_overlay", e)),
         }
     }
 

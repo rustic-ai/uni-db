@@ -340,9 +340,13 @@ impl PropertyManager {
                         if is_crdt {
                             // Merge CRDT values
                             if let Some(existing) = merged_props.get(&p_name) {
-                                if let Ok(merged) = self.merge_crdt_values(existing, &p_val) {
-                                    merged_props.insert(p_name, merged);
-                                }
+                                // A failed merge used to drop `p_val` and keep the
+                                // older value, silently. Two other sites resolved
+                                // the same failure the opposite way; propagating
+                                // removes the choice rather than picking a winner
+                                // nobody has the information to pick (#233).
+                                let merged = self.merge_crdt_values(existing, &p_val)?;
+                                merged_props.insert(p_name, merged);
                             } else {
                                 merged_props.insert(p_name, p_val);
                             }
@@ -656,12 +660,12 @@ impl PropertyManager {
             // First, overlay pending flush L0s in order (oldest first, so iterate forward)
             for pending_l0_arc in &ctx.pending_flush_l0s {
                 let pending_l0 = pending_l0_arc.read();
-                l0_served += self.overlay_l0_batch(vids, &pending_l0, properties, &mut result);
+                l0_served += self.overlay_l0_batch(vids, &pending_l0, properties, &mut result)?;
             }
 
             // Then overlay current L0 (newer than pending)
             let l0 = ctx.l0.read();
-            l0_served += self.overlay_l0_batch(vids, &l0, properties, &mut result);
+            l0_served += self.overlay_l0_batch(vids, &l0, properties, &mut result)?;
 
             // Finally overlay transaction L0 (newest)
             // Skip transaction L0 if querying a snapshot
@@ -670,7 +674,7 @@ impl PropertyManager {
                 && let Some(tx_l0_arc) = &ctx.transaction_l0
             {
                 let tx_l0 = tx_l0_arc.read();
-                l0_served += self.overlay_l0_batch(vids, &tx_l0, properties, &mut result);
+                l0_served += self.overlay_l0_batch(vids, &tx_l0, properties, &mut result)?;
             }
             ctx.count_l0_rows(l0_served);
         }
@@ -692,7 +696,7 @@ impl PropertyManager {
         l0: &L0Buffer,
         properties: &[&str],
         result: &mut HashMap<Vid, Properties>,
-    ) -> usize {
+    ) -> Result<usize> {
         let mut served = 0usize;
         let schema = self.schema_manager.schema();
         // `_all_props` is a wildcard sentinel: overlay every L0 property, not just
@@ -752,7 +756,11 @@ impl PropertyManager {
 
                         if is_crdt {
                             let existing = entry.entry(k.clone()).or_insert(Value::Null);
-                            *existing = self.merge_crdt_values(existing, v).unwrap_or(v.clone());
+                            // `unwrap_or(v.clone())` discarded the merged CRDT
+                            // state on failure and let the newer value win --
+                            // the opposite default to the two sites above, for
+                            // the same failure (#233).
+                            *existing = self.merge_crdt_values(existing, v)?;
                         } else {
                             entry.insert(k.clone(), v.clone());
                         }
@@ -761,7 +769,7 @@ impl PropertyManager {
                 served += 1;
             }
         }
-        served
+        Ok(served)
     }
 
     /// Load properties as Arrow columns for vectorized processing
@@ -924,12 +932,12 @@ impl PropertyManager {
             // First, overlay pending flush L0s in order (oldest first, so iterate forward)
             for pending_l0_arc in &ctx.pending_flush_l0s {
                 let pending_l0 = pending_l0_arc.read();
-                self.overlay_l0_edge_batch(eids, &pending_l0, properties, &mut result);
+                self.overlay_l0_edge_batch(eids, &pending_l0, properties, &mut result)?;
             }
 
             // Then overlay current L0 (newer than pending)
             let l0 = ctx.l0.read();
-            self.overlay_l0_edge_batch(eids, &l0, properties, &mut result);
+            self.overlay_l0_edge_batch(eids, &l0, properties, &mut result)?;
 
             // Finally overlay transaction L0 (newest)
             // Skip transaction L0 if querying a snapshot
@@ -938,7 +946,7 @@ impl PropertyManager {
                 && let Some(tx_l0_arc) = &ctx.transaction_l0
             {
                 let tx_l0 = tx_l0_arc.read();
-                self.overlay_l0_edge_batch(eids, &tx_l0, properties, &mut result);
+                self.overlay_l0_edge_batch(eids, &tx_l0, properties, &mut result)?;
             }
         }
 
@@ -1017,7 +1025,7 @@ impl PropertyManager {
         l0: &L0Buffer,
         properties: &[&str],
         result: &mut HashMap<Vid, Properties>,
-    ) {
+    ) -> Result<()> {
         let schema = self.schema_manager.schema();
         for &eid in eids {
             let vid_key = Vid::from(eid.as_u64());
@@ -1052,7 +1060,11 @@ impl PropertyManager {
 
                         if is_crdt {
                             let existing = entry.entry(k.clone()).or_insert(Value::Null);
-                            *existing = self.merge_crdt_values(existing, v).unwrap_or(v.clone());
+                            // `unwrap_or(v.clone())` discarded the merged CRDT
+                            // state on failure and let the newer value win --
+                            // the opposite default to the two sites above, for
+                            // the same failure (#233).
+                            *existing = self.merge_crdt_values(existing, v)?;
                         } else {
                             entry.insert(k.clone(), v.clone());
                         }
@@ -1060,6 +1072,7 @@ impl PropertyManager {
                 }
             }
         }
+        Ok(())
     }
 
     /// Batch load labels for multiple vertices.
@@ -1626,9 +1639,13 @@ impl PropertyManager {
                             .unwrap_or(false);
                         if is_crdt {
                             if let Some(existing) = merged_props.get(&p_name) {
-                                if let Ok(merged) = self.merge_crdt_values(existing, &p_val) {
-                                    merged_props.insert(p_name, merged);
-                                }
+                                // A failed merge used to drop `p_val` and keep the
+                                // older value, silently. Two other sites resolved
+                                // the same failure the opposite way; propagating
+                                // removes the choice rather than picking a winner
+                                // nobody has the information to pick (#233).
+                                let merged = self.merge_crdt_values(existing, &p_val)?;
+                                merged_props.insert(p_name, merged);
                             } else {
                                 merged_props.insert(p_name, p_val);
                             }

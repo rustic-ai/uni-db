@@ -433,13 +433,34 @@ impl L0Buffer {
                     Some(reg) => new_crdt.merge_via_registry(&existing_crdt, reg).is_ok(),
                     None => new_crdt.try_merge(&existing_crdt).is_ok(),
                 };
-                if merged && let Ok(merged_json) = serde_json::to_value(new_crdt) {
-                    entry.insert(k, uni_common::Value::from(merged_json));
-                    continue;
+                if merged {
+                    match serde_json::to_value(new_crdt) {
+                        Ok(merged_json) => {
+                            entry.insert(k, uni_common::Value::from(merged_json));
+                            continue;
+                        }
+                        Err(e) => {
+                            // A merge that succeeded and then failed to serialize
+                            // is a bug, not a variant mismatch, and the two used to
+                            // share one `if let` and one warning — so the only
+                            // signal for it was a message naming the wrong cause
+                            // (#233). Still last-writer-wins, because propagating
+                            // needs `merge_crdt_properties` and the L0 insert API
+                            // above it to become fallible; logged distinctly and at
+                            // `error` so it cannot be read as the routine case.
+                            tracing::error!(
+                                property = %k,
+                                error = %e,
+                                "merged CRDT failed to serialize; falling back to \
+                                 last-writer-wins and discarding the merged state"
+                            );
+                            entry.insert(k, v);
+                            continue;
+                        }
+                    }
                 }
-                // CRDT variant mismatch (or a failed re-serialize): fall through to
-                // a last-writer-wins overwrite, discarding the existing CRDT's
-                // merged state. The OCC commit-time carve-out check
+                // CRDT variant mismatch: fall through to a last-writer-wins
+                // overwrite, discarding the existing CRDT's merged state. The OCC commit-time carve-out check
                 // (`occ::crdt_carveout_overwrite`) aborts a *concurrent* writer
                 // before reaching here, and write-time schema enforcement rejects a
                 // wrong declared variant; this warns on any residual (e.g. a

@@ -415,6 +415,18 @@ impl AdjacencyManager {
         }
     }
 
+    /// Drops every cached Main CSR, so the next warm of any edge type re-reads
+    /// from storage.
+    ///
+    /// For the case where something rewrote adjacency but cannot say what: a
+    /// semantic compaction that fails part way has already changed an unknown
+    /// subset of the tables and reports none of them, so re-warming only the
+    /// tables it names would leave the rest stale (#233).
+    pub fn invalidate_all_csr(&self) {
+        self.main_csr.clear();
+        self.csr_source_stamp.clear();
+    }
+
     /// Drops the cached Main CSR so the next warm re-reads from storage.
     pub fn invalidate_csr(&self, edge_type: u32, direction: Direction) {
         let key = (edge_type, direction);

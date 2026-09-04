@@ -1280,13 +1280,27 @@ impl StorageManager {
         // On failure the default report leaves `semantic_passes` at zero, which
         // correctly reads as "no CRDT merge count was measured" rather than
         // "no CRDT merges happened".
-        let semantic = compactor.compact_all().await.unwrap_or_else(|e| {
-            log::error!(
-                "Semantic compaction failed (continuing with backend optimize): {}",
-                e
-            );
-            SemanticCompactionReport::default()
-        });
+        //
+        // The report also drives the CSR re-warm below, and *that* cannot absorb
+        // a failure the same way: a pass that failed part way has already
+        // rewritten an unknown subset of the adjacency tables and names none of
+        // them, so re-warming only what it reports leaves the rest stale and a
+        // traversal reads the old edges (#233). Continue with backend optimize as
+        // before -- a persistent semantic failure must not block fragment
+        // compaction -- but drop every cached CSR, because what changed is
+        // exactly what is not known.
+        let semantic = match compactor.compact_all().await {
+            Ok(report) => report,
+            Err(e) => {
+                log::error!(
+                    "Semantic compaction failed (continuing with backend optimize; \
+                     invalidating every cached adjacency CSR): {}",
+                    e
+                );
+                this.adjacency_manager().invalidate_all_csr();
+                SemanticCompactionReport::default()
+            }
+        };
         stats.semantic_passes = semantic.vertex_passes;
         stats.crdt_merges = semantic.crdt_merges;
 
