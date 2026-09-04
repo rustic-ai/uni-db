@@ -121,6 +121,27 @@ async fn main() -> anyhow::Result<()> {
             tx.commit().await?;
             db.flush().await?;
         }
+        // Give semantic compaction actual work. `VertexDataset::replace` is
+        // documented as "used by compaction to rewrite the table with merged
+        // data" and goes through `replace_table_atomic` -> `WriteMode::Overwrite`,
+        // which drops every index. It is only reached when there is something to
+        // merge, which is why a compaction over a clean fixture preserves the
+        // index and this one may not.
+        8 => {
+            let s = db.session();
+            let tx = s.tx().await?;
+            tx.execute("MATCH (a:A) WHERE a.num < 100 DETACH DELETE a")
+                .await?;
+            tx.commit().await?;
+            db.flush().await?;
+            let n = db
+                .session()
+                .query("MATCH (a:A) RETURN count(a) AS c")
+                .await?;
+            println!("  rows after delete: {:?}", n.rows()[0].values()[0]);
+            let stats = db.compaction().compact("A").await?;
+            println!("  compaction stats: {stats:?}");
+        }
         n => anyhow::bail!("unknown step {n}"),
     }
     println!("step {step} done");
