@@ -31,9 +31,19 @@ use lance::index::DatasetIndexExt;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = std::env::var("LDBC_DB")?;
-    let uri = format!("{root}/storage/vertices_Person.lance");
+    let table = std::env::var("LANCE_TABLE").unwrap_or_else(|_| "vertices_Person".into());
+    let uri = format!("{root}/storage/{table}.lance");
     let dataset = Dataset::open(&uri).await?;
 
+    if std::env::var("LANCE_BRIEF").is_ok() {
+        let n = dataset.load_indices().await?.len();
+        println!(
+            "  {table}: version={} rows={} indices={n}",
+            dataset.version().version,
+            dataset.count_rows(None).await?
+        );
+        return Ok(());
+    }
     println!("dataset version {}", dataset.version().version);
     println!("rows: {}", dataset.count_rows(None).await?);
 
@@ -59,8 +69,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match dataset.checkout_version(v).await {
             Ok(d) => {
                 let n = d.load_indices().await.map(|i| i.len()).unwrap_or(0);
+                let ids: Vec<u64> = d.get_fragments().iter().map(|f| f.id() as u64).collect();
                 println!(
-                    "  v{v}: indices={n} rows={}",
+                    "  v{v}: indices={n} rows={} fragments={ids:?}",
                     d.count_rows(None).await.unwrap_or(0)
                 );
             }
