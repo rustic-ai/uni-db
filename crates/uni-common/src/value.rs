@@ -418,6 +418,22 @@ use chrono::Timelike as _;
 /// all zeros hash alike and all NaNs hash alike. All other floats compare and
 /// hash by their (canonical) bit representation. This affects only internal
 /// bucketing — Cypher `=`/`IN`/`DISTINCT` route through `cypher_eq`, not here.
+/// The identity of a graph entity, independent of how a [`Value`] encodes it.
+///
+/// Produced by [`Value::entity_ref`]. `Copy`, `Eq`, `Hash` and `Ord` so that
+/// equality, `DISTINCT`, join keys, `IN` and `ORDER BY` can all answer the
+/// identity question through one type instead of each re-deriving it.
+///
+/// A vertex and an edge that happen to share a number are **not** equal: the
+/// variant is part of the identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum EntityRef {
+    /// A vertex, identified by its `Vid`.
+    Vertex(Vid),
+    /// An edge, identified by its `Eid`.
+    Edge(Eid),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 #[non_exhaustive]
@@ -500,27 +516,60 @@ impl Value {
     /// value is the number 7" are different claims, and conflating them lets a
     /// plain integer column match an entity by coincidence. Callers that hold a
     /// raw id want [`Value::coerce_vid`].
+    /// The entity this value denotes, whichever of the two encodings it uses.
+    ///
+    /// A vertex or an edge reaches an expression either natively
+    /// ([`Value::Node`] / [`Value::Edge`]) or as a [`Value::Map`] carrying the
+    /// id, and nothing in the pipeline enforces which a given path produces.
+    /// Hand-rolling the check is what this exists to end: a site that matches
+    /// one encoding silently answers "not an entity" for the other, and the
+    /// caller reads that as "not equal", "not a duplicate", or "no such row"
+    /// rather than as the failure it is.
+    ///
+    /// Prefer this over reading `_vid`/`_eid` out of a map. Identity, dedup,
+    /// join keys and `IN` all want the same question answered the same way, and
+    /// [`EntityRef`] is `Copy`, `Eq`, `Hash` and `Ord` so it serves all four.
+    ///
+    /// # Vertices and edges are not interchangeable
+    ///
+    /// `_id` is a spelling **both** encodings accept, so a map is read as an
+    /// edge when it carries edge structure (an endpoint pair, or a relationship
+    /// type) and as a vertex otherwise. Without that split an edge map with
+    /// `_id` reads as the vertex of the same number — two different entities
+    /// reporting one identity.
+    ///
+    /// Deliberately narrow, as [`Value::entity_vid`] is: a bare [`Value::Int`]
+    /// is not an entity. Callers holding a raw id want [`Value::coerce_vid`].
+    #[must_use]
+    pub fn entity_ref(&self) -> Option<EntityRef> {
+        match self {
+            Value::Node(node) => Some(EntityRef::Vertex(node.vid)),
+            Value::Edge(edge) => Some(EntityRef::Edge(edge.eid)),
+            Value::Map(map) => entity_ref_from_map(map),
+            _ => None,
+        }
+    }
+
+    /// The edge id this value denotes, in either encoding.
+    ///
+    /// The edge twin of [`Value::entity_vid`]. It did not exist, which is why
+    /// every site needing an edge's identity read `_eid` out of a map by hand
+    /// and missed [`Value::Edge`], or missed `_eid` entirely.
+    #[must_use]
+    pub fn entity_eid(&self) -> Option<Eid> {
+        match self.entity_ref()? {
+            EntityRef::Edge(eid) => Some(eid),
+            EntityRef::Vertex(_) => None,
+        }
+    }
+
     #[must_use]
     pub fn entity_vid(&self) -> Option<Vid> {
-        match self {
-            Value::Node(node) => Some(node.vid),
-            Value::Map(map) => {
-                if let Some(v) = map.get("_vid").and_then(Value::as_u64) {
-                    return Some(Vid::from(v));
-                }
-                match map.get("_id") {
-                    Some(Value::String(id)) => id
-                        .strip_prefix("Vid(")
-                        .and_then(|s| s.strip_suffix(')'))
-                        .unwrap_or(id)
-                        .parse::<u64>()
-                        .ok()
-                        .map(Vid::from),
-                    Some(Value::Int(id)) if *id >= 0 => Some(Vid::from(*id as u64)),
-                    _ => None,
-                }
-            }
-            _ => None,
+        match self.entity_ref()? {
+            EntityRef::Vertex(vid) => Some(vid),
+            // An edge is an entity, but it is not a vertex. Returning its eid
+            // here would let an edge match a vertex of the same number.
+            EntityRef::Edge(_) => None,
         }
     }
 
@@ -1386,6 +1435,46 @@ fn extract_properties(value: &Value) -> HashMap<String, Value> {
     }
 }
 
+/// [`Value::entity_ref`] for a caller that already holds the map.
+///
+/// Same rules, exposed separately so a hot path (a sort-key encoder, a row
+/// decoder) need not clone the map into a [`Value`] just to ask.
+#[must_use]
+pub fn entity_ref_from_map(map: &HashMap<String, Value>) -> Option<EntityRef> {
+    fn id_from(v: &Value) -> Option<u64> {
+        match v {
+            Value::Int(i) if *i >= 0 => Some(*i as u64),
+            Value::String(s) => s
+                .strip_prefix("Vid(")
+                .or_else(|| s.strip_prefix("Eid("))
+                .and_then(|t| t.strip_suffix(')'))
+                .unwrap_or(s)
+                .parse::<u64>()
+                .ok(),
+            other => other.as_u64(),
+        }
+    }
+
+    // An explicit `_eid`/`_vid` settles it on its own; `_id` needs the
+    // structural tell, since both encodings spell it that way.
+    let looks_like_edge = map.contains_key("_eid")
+        || map.contains_key("eid")
+        || ((map.contains_key("_src") || map.contains_key("src"))
+            && (map.contains_key("_dst") || map.contains_key("dst")))
+        || map.contains_key("_type_name")
+        || map.contains_key("edge_type");
+
+    if looks_like_edge {
+        get_with_fallback(map, &["_eid", "_id", "eid"])
+            .and_then(id_from)
+            .map(|id| EntityRef::Edge(Eid::from(id)))
+    } else {
+        get_with_fallback(map, &["_vid", "_id", "vid"])
+            .and_then(id_from)
+            .map(|id| EntityRef::Vertex(Vid::from(id)))
+    }
+}
+
 impl TryFrom<&Value> for Node {
     type Error = UniError;
 
@@ -1767,6 +1856,134 @@ impl From<f32> for Value {
 
 #[cfg(test)]
 mod tests {
+
+    mod entity_identity {
+        use super::super::{EntityRef, Value};
+        use crate::core::id::{Eid, Vid};
+        use std::collections::HashMap;
+
+        fn node_map(id: Value) -> Value {
+            let mut m = HashMap::new();
+            m.insert("_vid".to_string(), id);
+            m.insert("_labels".to_string(), Value::List(vec![]));
+            Value::Map(m)
+        }
+
+        fn edge_map_with_shared_id(id: Value) -> Value {
+            // The `_id` spelling both encodings accept, plus edge structure.
+            let mut m = HashMap::new();
+            m.insert("_id".to_string(), id);
+            m.insert("_type".to_string(), Value::String("KNOWS".into()));
+            m.insert("_src".to_string(), Value::Int(0));
+            m.insert("_dst".to_string(), Value::Int(1));
+            Value::Map(m)
+        }
+
+        /// Both encodings of one vertex report one identity.
+        ///
+        /// This is the whole point of the accessor: a site that matched only
+        /// `Value::Node` answered "not an entity" for the map form, and the
+        /// caller read that as "not equal" rather than as a failure.
+        #[test]
+        fn the_two_vertex_encodings_agree() {
+            let native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::new(),
+            });
+            let as_map = node_map(Value::Int(7));
+            assert_eq!(native.entity_ref(), Some(EntityRef::Vertex(Vid::from(7))));
+            assert_eq!(as_map.entity_ref(), native.entity_ref());
+        }
+
+        /// Both encodings of one edge report one identity.
+        #[test]
+        fn the_two_edge_encodings_agree() {
+            let native = Value::Edge(crate::value::Edge {
+                eid: Eid::from(7),
+                edge_type: "KNOWS".into(),
+                src: Vid::from(0),
+                dst: Vid::from(1),
+                properties: HashMap::new(),
+            });
+            assert_eq!(native.entity_ref(), Some(EntityRef::Edge(Eid::from(7))));
+            assert_eq!(
+                edge_map_with_shared_id(Value::Int(7)).entity_ref(),
+                native.entity_ref()
+            );
+        }
+
+        /// An edge is not the vertex of the same number.
+        ///
+        /// `_id` is a spelling both encodings use, so without the structural
+        /// tell an edge map resolved to `Vertex(7)` — two different entities
+        /// reporting one identity, which is a wrong answer in whichever
+        /// direction the comparison then went.
+        #[test]
+        fn an_edge_is_not_the_vertex_of_the_same_number() {
+            let edge = edge_map_with_shared_id(Value::Int(7));
+            let vertex = node_map(Value::Int(7));
+            assert_eq!(edge.entity_ref(), Some(EntityRef::Edge(Eid::from(7))));
+            assert_eq!(vertex.entity_ref(), Some(EntityRef::Vertex(Vid::from(7))));
+            assert_ne!(edge.entity_ref(), vertex.entity_ref());
+            // And the narrow accessors do not cross over.
+            assert_eq!(edge.entity_vid(), None);
+            assert_eq!(vertex.entity_eid(), None);
+        }
+
+        /// The serde spelling `"Vid(7)"` resolves, and so does its edge twin.
+        #[test]
+        fn the_debug_rendered_id_spellings_resolve() {
+            assert_eq!(
+                node_map(Value::String("Vid(7)".into())).entity_vid(),
+                Some(Vid::from(7))
+            );
+            assert_eq!(
+                edge_map_with_shared_id(Value::String("Eid(7)".into())).entity_eid(),
+                Some(Eid::from(7))
+            );
+            // A plain numeric string is still accepted.
+            assert_eq!(
+                node_map(Value::String("7".into())).entity_vid(),
+                Some(Vid::from(7))
+            );
+        }
+
+        /// A bare integer is not an entity, and a negative id is not one either.
+        #[test]
+        fn non_entities_stay_non_entities() {
+            assert_eq!(Value::Int(7).entity_ref(), None);
+            assert_eq!(Value::String("7".into()).entity_ref(), None);
+            assert_eq!(Value::Null.entity_ref(), None);
+            assert_eq!(node_map(Value::Int(-1)).entity_ref(), None);
+        }
+
+        /// `EntityRef` is usable as a dedup/join key, which is what lets one
+        /// type serve equality, DISTINCT, joins and IN alike.
+        #[test]
+        fn entity_ref_is_a_usable_key() {
+            use std::collections::HashSet;
+            let mut seen = HashSet::new();
+            assert!(
+                seen.insert(
+                    Value::Node(crate::value::Node {
+                        vid: Vid::from(7),
+                        labels: vec!["A".into()],
+                        properties: HashMap::new(),
+                    })
+                    .entity_ref()
+                )
+            );
+            // The same vertex in the other encoding, with different properties
+            // and labels, must not count twice.
+            assert!(!seen.insert(node_map(Value::Int(7)).entity_ref()));
+            // A different vertex must.
+            assert!(seen.insert(node_map(Value::Int(8)).entity_ref()));
+            // An edge of the same number is a distinct entity.
+            assert!(seen.insert(edge_map_with_shared_id(Value::Int(7)).entity_ref()));
+        }
+    }
+
     use super::*;
     use std::cmp::Ordering;
 

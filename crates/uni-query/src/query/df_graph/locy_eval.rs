@@ -684,7 +684,19 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Int(x), Value::Float(y)) => (*x as f64) == *y,
         (Value::Float(x), Value::Int(y)) => *x == (*y as f64),
-        _ => a == b,
+        _ => {
+            // Entities compare by identity here too. Falling through to derived
+            // equality compared a node's vid, labels *and* whole property map,
+            // so the same entity hydrated differently on either side — or
+            // arriving in the other encoding — came back unequal. `IN` on the
+            // in-memory path routes through this function, so that was a silent
+            // membership miss rather than an error.
+            match (a.entity_ref(), b.entity_ref()) {
+                (Some(x), Some(y)) => x == y,
+                (Some(_), None) | (None, Some(_)) => false,
+                (None, None) => a == b,
+            }
+        }
     }
 }
 
@@ -696,11 +708,11 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 /// executions (e.g., schema mode adds `overflow_json: Null` in some paths
 /// but not others). For non-graph values, falls back to `values_equal`.
 pub fn values_equal_for_join(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Node(na), Value::Node(nb)) => na.vid == nb.vid,
-        (Value::Edge(ea), Value::Edge(eb)) => ea.eid == eb.eid,
-        _ => values_equal(a, b),
-    }
+    // `values_equal` now answers the identity question itself, through
+    // `entity_ref`, which also covers the map encoding and the mixed pairings
+    // the two arms here used to miss. Kept as a named entry point because the
+    // IS-ref call sites read better for it.
+    values_equal(a, b)
 }
 
 /// Compare two values returning an Ordering.

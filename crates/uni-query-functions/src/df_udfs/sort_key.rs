@@ -272,8 +272,14 @@ fn encode_map_as_node_payload(map: &std::collections::HashMap<String, Value>, bu
     }
     labels.sort();
 
-    // Extract vid
-    let vid = map.get("_vid").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
+    // Extract vid. Reading `_vid` as an integer specifically meant every other
+    // spelling of the same id — `_id`, or the serde form `"Vid(7)"` — collapsed
+    // to 0, so every such node compared equal and `ORDER BY n` returned them in
+    // an arbitrary order that looked deterministic.
+    let vid = match uni_common::value::entity_ref_from_map(map) {
+        Some(uni_common::value::EntityRef::Vertex(vid)) => vid.as_u64(),
+        _ => 0,
+    };
 
     // Labels
     let labels_joined = labels.join("\x01");
@@ -310,7 +316,10 @@ fn encode_map_as_edge_payload(map: &std::collections::HashMap<String, Value>, bu
 
     let src = map.get("_src").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
     let dst = map.get("_dst").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
-    let eid = map.get("_eid").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
+    let eid = match uni_common::value::entity_ref_from_map(map) {
+        Some(uni_common::value::EntityRef::Edge(eid)) => eid.as_u64(),
+        _ => 0,
+    };
 
     buf.extend_from_slice(&src.to_be_bytes());
     buf.extend_from_slice(&dst.to_be_bytes());
