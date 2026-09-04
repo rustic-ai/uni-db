@@ -136,67 +136,110 @@ async fn main() -> Result<()> {
         }
         Commands::Query { statement, path } => {
             let db = open_db(&path).await?;
+            let succeeded = repl::execute_query(&db, &statement).await;
+            // Close before exiting: `std::process::exit` runs no destructors, and
+            // the durability flush lives in shutdown rather than in `Drop`.
+            close_db(db).await?;
             // Exit non-zero when the one-shot query fails, so scripts and CI can
             // detect failure instead of the previous always-0 exit.
-            if !repl::execute_query(&db, &statement).await {
+            if !succeeded {
                 std::process::exit(1);
             }
         }
         Commands::Repl { path } => {
             let db = open_db(&path).await?;
-            repl::run_repl(db).await?;
+            let outcome = repl::run_repl(&db).await;
+            close_db(db).await?;
+            outcome?;
         }
         Commands::Plugin { command, path } => {
             let db = open_db(&path).await?;
-            match command {
+            let outcome = match command {
                 PluginCmd::Install { source, grants } => {
-                    install_plugin(&db, &source, grants.as_deref()).await?;
+                    install_plugin(&db, &source, grants.as_deref()).await
                 }
-            }
+            };
+            close_db(db).await?;
+            outcome?;
         }
         Commands::Snapshot { command, path } => {
             let db = open_db(&path).await?;
-
-            match command {
-                SnapshotCmd::List => {
-                    let snapshots = db.list_snapshots().await?;
-                    if snapshots.is_empty() {
-                        println!("No snapshots found.");
-                    } else {
-                        let mut table = Table::new();
-                        table.add_row(Row::new(vec![
-                            Cell::new("ID").style_spec("bf"),
-                            Cell::new("Name").style_spec("bf"),
-                            Cell::new("Created At").style_spec("bf"),
-                            Cell::new("Schema Ver").style_spec("bf"),
-                        ]));
-
-                        for s in snapshots {
-                            table.add_row(Row::new(vec![
-                                Cell::new(&s.snapshot_id),
-                                Cell::new(s.name.as_deref().unwrap_or("-")),
-                                Cell::new(&s.created_at.to_string()),
-                                Cell::new(&s.schema_version.to_string()),
-                            ]));
-                        }
-                        table.printstd();
-                    }
-                }
-                SnapshotCmd::Create { name } => {
-                    let id = db.create_snapshot(&name).await?;
-                    println!("{} Snapshot created: {}", "Success:".green(), id);
-                }
-                SnapshotCmd::Restore { id } => {
-                    db.restore_snapshot(&id).await?;
-                    println!("{} Restored to snapshot: {}", "Success:".green(), id);
-                    println!(
-                        "Note: You may need to restart any running servers/REPLs for changes to fully take effect."
-                    );
-                }
-            }
+            let outcome = run_snapshot_command(&db, command).await;
+            close_db(db).await?;
+            outcome?;
         }
     }
 
+    Ok(())
+}
+
+/// Run a `uni snapshot` subcommand against an already-open database.
+///
+/// Split out of `main` so the caller keeps ownership of the handle and can
+/// close it on both the success and the error path — see [`close_db`].
+async fn run_snapshot_command(db: &uni_db::Uni, command: SnapshotCmd) -> Result<()> {
+    match command {
+        SnapshotCmd::List => {
+            let snapshots = db.list_snapshots().await?;
+            if snapshots.is_empty() {
+                println!("No snapshots found.");
+            } else {
+                let mut table = Table::new();
+                table.add_row(Row::new(vec![
+                    Cell::new("ID").style_spec("bf"),
+                    Cell::new("Name").style_spec("bf"),
+                    Cell::new("Created At").style_spec("bf"),
+                    Cell::new("Schema Ver").style_spec("bf"),
+                ]));
+
+                for s in snapshots {
+                    table.add_row(Row::new(vec![
+                        Cell::new(&s.snapshot_id),
+                        Cell::new(s.name.as_deref().unwrap_or("-")),
+                        Cell::new(&s.created_at.to_string()),
+                        Cell::new(&s.schema_version.to_string()),
+                    ]));
+                }
+                table.printstd();
+            }
+        }
+        SnapshotCmd::Create { name } => {
+            let id = db.create_snapshot(&name).await?;
+            println!("{} Snapshot created: {}", "Success:".green(), id);
+        }
+        SnapshotCmd::Restore { id } => {
+            db.restore_snapshot(&id).await?;
+            println!("{} Restored to snapshot: {}", "Success:".green(), id);
+            println!(
+                "Note: You may need to restart any running servers/REPLs for changes to fully take effect."
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Close the database opened by [`open_db`], making its writes durable.
+///
+/// `Drop for Uni` only signals the background tasks; the L0 -> L1 flush that
+/// writes the snapshot manifest happens in `shutdown`. A CLI process that
+/// returns without calling this leaves a store carrying WAL segments and no
+/// manifest, which the next `Uni::open` refuses to reopen.
+///
+/// The flush is issued explicitly rather than left to shutdown, which logs a
+/// flush failure instead of propagating it. A CLI write that did not reach
+/// disk must not report success.
+///
+/// # Errors
+///
+/// Returns an error if the final flush or the shutdown fails. Both are run
+/// before either is reported, so a failed flush still stops the background
+/// tasks.
+async fn close_db(db: uni_db::Uni) -> Result<()> {
+    let flushed = db.flush().await;
+    let stopped = db.shutdown().await;
+    flushed?;
+    stopped?;
     Ok(())
 }
 

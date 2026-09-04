@@ -103,3 +103,5 @@ dist/
 # uni-plugin-lua's lua-host subcrate is a standalone workspace
 # building to wasm32-wasip2 — keep its target/ out.
 /crates/uni-plugin-lua/lua-host/target/
+# The CLI REPL writes its rustyline history into the working directory.
+/history.txt
