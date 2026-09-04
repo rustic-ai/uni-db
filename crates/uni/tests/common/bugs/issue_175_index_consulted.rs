@@ -564,3 +564,113 @@ async fn a_scalar_index_survives_a_later_write() {
         after.scans_reported
     );
 }
+
+/// A scalar index survives semantic compaction.
+///
+/// `Compactor::compact_vertices` rewrites the per-label table through
+/// `VertexDataset::replace` -> `replace_table_atomic` -> `WriteMode::Overwrite`,
+/// and Lance drops every index on a dataset it overwrites. Nothing put them
+/// back: `optimize_indices` runs only on the other compaction path
+/// (`optimize_table`, via Lance's `compact_files`), and by then there is no
+/// index left to optimize.
+///
+/// The effect was silent and permanent — uni's schema still reported
+/// `status: Online` with the original `last_built_at`, because the status is
+/// truthful about the build and nothing noticed a later write removed the
+/// artifact. On LDBC SF1 that is six Person indexes gone after the first
+/// background compaction tick, and all fourteen queries reporting
+/// `index_scans=0` against indexes present on disk (#247).
+///
+/// Semantic compaction is reached only from the background scheduler:
+/// `compact_label` runs Lance's `compact_files` alone, and
+/// `trigger_async_compaction` has no callers. So this drives the scheduler with
+/// a short interval and a flush to give `pick_compaction_task` something to
+/// pick, which is what the earlier compaction test missed — it called
+/// `compact()` and never reached `replace`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scalar_index_survives_semantic_compaction() {
+    use uni_db::UniConfig;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = UniConfig::default();
+    cfg.compaction.check_interval = std::time::Duration::from_millis(200);
+    cfg.compaction.max_l1_runs = 1;
+    let db = Uni::open(dir.path().to_str().unwrap())
+        .config(cfg)
+        .build()
+        .await
+        .unwrap();
+
+    db.schema()
+        .label("Item")
+        .property("name", DataType::String)
+        .property("age", DataType::Int)
+        .done()
+        .apply()
+        .await
+        .unwrap();
+
+    let s = db.session();
+    let tx = s.tx().await.unwrap();
+    tx.query_with(
+        "UNWIND range(0, $n - 1) AS i \
+         CREATE (:Item {name: 'name-' + toString(i), age: i % 90})",
+    )
+    .param("n", Value::Int(N))
+    .fetch_all()
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    db.flush().await.unwrap();
+
+    db.schema()
+        .label("Item")
+        .index("name", IndexType::Scalar(ScalarType::Hash))
+        .apply()
+        .await
+        .unwrap();
+
+    let before = db
+        .session()
+        .query(EQ_QUERY)
+        .await
+        .unwrap()
+        .metrics()
+        .clone();
+    assert!(
+        before.index_scans >= 1 && before.index_comparisons > 0,
+        "the index was not consulted before compaction, so this proves nothing \
+         about compaction (index_scans={}, comparisons={})",
+        before.index_scans,
+        before.index_comparisons
+    );
+
+    // A second flush raises `l1_runs` so the scheduler picks a task.
+    let tx = s.tx().await.unwrap();
+    tx.execute("CREATE (:Item {name: 'extra', age: 1})")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    db.flush().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let after = db
+        .session()
+        .query(EQ_QUERY)
+        .await
+        .unwrap()
+        .metrics()
+        .clone();
+    assert!(
+        after.scans_reported > 0,
+        "no Lance scan reported after compaction"
+    );
+    assert!(
+        after.index_scans >= 1,
+        "semantic compaction dropped the index (index_scans={}, comparisons={}, \
+         scans_reported={})",
+        after.index_scans,
+        after.index_comparisons,
+        after.scans_reported
+    );
+}

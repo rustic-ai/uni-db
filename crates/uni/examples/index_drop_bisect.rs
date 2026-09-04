@@ -58,7 +58,13 @@ async fn load_label(db: &Uni, label: &str, n: i64) -> anyhow::Result<()> {
 async fn main() -> anyhow::Result<()> {
     let path = std::env::var("UNI_DB")?;
     let step: u32 = std::env::var("STEP")?.parse()?;
-    let db = Uni::open(&path).build().await?;
+    // Background compaction is the only live path to `Compactor::compact_all`:
+    // `compact_label` runs Lance's `compact_files` only, and
+    // `trigger_async_compaction` has no callers. Drive the scheduler directly.
+    let mut cfg = uni_db::UniConfig::default();
+    cfg.compaction.check_interval = std::time::Duration::from_millis(300);
+    cfg.compaction.max_l1_runs = 1;
+    let db = Uni::open(&path).config(cfg).build().await?;
 
     match step {
         // The label whose index we track for the rest of the run.
@@ -141,6 +147,18 @@ async fn main() -> anyhow::Result<()> {
             println!("  rows after delete: {:?}", n.rows()[0].values()[0]);
             let stats = db.compaction().compact("A").await?;
             println!("  compaction stats: {stats:?}");
+        }
+        // Wait for the background compaction scheduler to tick.
+        9 => {
+            // `l1_runs` is in-memory and resets on open, so flush first to give
+            // `pick_compaction_task` something to pick.
+            let s = db.session();
+            let tx = s.tx().await?;
+            tx.bulk_insert_vertices_labeled(&["A"], rows(10, 10_000))
+                .await?;
+            tx.commit().await?;
+            db.flush().await?;
+            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
         }
         n => anyhow::bail!("unknown step {n}"),
     }

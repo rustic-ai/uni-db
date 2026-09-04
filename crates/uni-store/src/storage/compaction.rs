@@ -367,6 +367,48 @@ impl Compactor {
             dataset
                 .replace(self.storage.backend(), batch, &schema)
                 .await?;
+
+            // `replace` goes through `replace_table_atomic`, which is
+            // `WriteMode::Overwrite`, and Lance drops every index on the dataset
+            // when it overwrites. Nothing else puts them back: `optimize_indices`
+            // runs only on the *other* compaction path (`optimize_table`, via
+            // Lance's `compact_files`), and by the time it runs there is no index
+            // left to optimize.
+            //
+            // The effect is silent and permanent. uni's own schema still reports
+            // `status: Online` with the original `last_built_at`, because the
+            // status is truthful about the build and nothing notices a later
+            // write removed the artifact — so every query on this label falls
+            // back to a full scan for the life of the store. On the LDBC SF1
+            // fixture that is all six Person indexes gone after the first
+            // background compaction tick, and all fourteen queries reporting
+            // `index_scans=0` against indexes that are present on disk but
+            // absent from Lance's manifest (#247).
+            // Both kinds, because the overwrite took both. `ensure_default_indexes`
+            // restores the ones uni creates for its own read paths (`_vid` and
+            // friends); `rebuild_indexes_for_label` restores the ones the user
+            // declared. The first is invisible to `schema.indexes`, so rebuilding
+            // only the declared set leaves the table partially indexed — measured:
+            // 4 indexes before the overwrite, 1 after a declared-only rebuild.
+            dataset
+                .ensure_default_indexes(self.storage.backend())
+                .await?;
+
+            #[cfg(feature = "lance-backend")]
+            if let Err(e) = self
+                .storage
+                .index_manager()
+                .rebuild_indexes_for_label(label)
+                .await
+            {
+                // Fail the compaction rather than leave the table silently
+                // unindexed: the rows are already replaced and correct, so the
+                // data is fine, but reporting success here is what made this
+                // invisible for as long as it was.
+                return Err(anyhow::anyhow!(
+                    "vertex compaction replaced '{label}' but could not rebuild its indexes,                      which the overwrite dropped: {e}"
+                ));
+            }
         }
 
         // Crash window: the per-label table has been replaced with the merged,
