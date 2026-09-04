@@ -4181,6 +4181,19 @@ impl Writer {
                 let fde = match encoder.encode_doc(&tokens) {
                     Ok(fde) => fde,
                     Err(e) => {
+                        // Skipping is still the right call (see above), but the
+                        // consequence is a *wrong answer*, not a slow one: this
+                        // vertex is now permanently absent from every accelerated
+                        // multi-vector search over this index, and nothing retries
+                        // it. A `warn!` is the weakest possible record of that —
+                        // greppable if someone thinks to look, invisible otherwise.
+                        // Count it, so silent recall loss is visible without
+                        // reading the log (#233).
+                        metrics::counter!(
+                            "uni_muvera_fde_encode_failures_total",
+                            "index" => spec.index_name.clone()
+                        )
+                        .increment(1);
                         tracing::warn!(
                             index = %spec.index_name,
                             vid = ?vid,

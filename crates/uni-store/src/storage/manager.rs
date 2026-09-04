@@ -522,6 +522,27 @@ impl Drop for CompactionGuard {
 /// verbatim and never clamped.
 const REFINE_CANDIDATE_CAP: usize = 10_000;
 
+/// Clamp a **defaulted** refine factor so a refine pass re-scores at most
+/// [`REFINE_CANDIDATE_CAP`] candidates. A caller-supplied `refine_factor` never
+/// reaches here — it is honoured verbatim.
+///
+/// Extracted from the search path so the arithmetic, and the counter below, are
+/// reachable from a test: exercising this end-to-end needs `fetch_k > 833` and a
+/// trained PQ index, which no unit test can afford to build.
+///
+/// Clamping trades recall for latency and does it silently — the caller asked
+/// for no `refine_factor`, got a default, and now gets less than that default
+/// with no signal at all. Only the case where the cap actually *binds* is
+/// counted; an unclamped default is not an event (#233).
+fn clamp_defaulted_refine(refine_factor: u32, fetch_k: usize) -> u32 {
+    let budget = (REFINE_CANDIDATE_CAP / fetch_k.max(1)).max(1);
+    let clamped = refine_factor.min(budget as u32).max(1);
+    if clamped < refine_factor {
+        metrics::counter!("uni_vector_refine_factor_clamped_total").increment(1);
+    }
+    clamped
+}
+
 impl StorageManager {
     /// Create a new StorageManager with a pre-configured backend.
     pub async fn new_with_backend(
@@ -2253,8 +2274,7 @@ impl StorageManager {
             // is left exactly as given.
             let mut opts = opts;
             if defaulted_refine && let Some(r) = opts.refine_factor {
-                let budget = (REFINE_CANDIDATE_CAP / fetch_k.max(1)).max(1);
-                opts.refine_factor = Some(r.min(budget as u32).max(1));
+                opts.refine_factor = Some(clamp_defaulted_refine(r, fetch_k));
             }
 
             let batches = backend
@@ -3223,6 +3243,85 @@ fn merge_l0_into_fts_results(
 #[cfg(test)]
 mod conflict_classification_tests {
     use super::is_lance_conflict;
+    use super::{REFINE_CANDIDATE_CAP, clamp_defaulted_refine};
+
+    /// A defaulted refine factor is left alone while the work stays under the cap.
+    ///
+    /// The bound is on *candidates re-scored* (`fetch_k * refine_factor`), not on
+    /// the factor, so a small `k` may keep even the maximum default (32) intact.
+    #[test]
+    fn a_defaulted_refine_under_the_cap_is_not_clamped() {
+        // 10 * 32 = 320 candidates, far under the 10_000 cap.
+        assert_eq!(clamp_defaulted_refine(32, 10), 32);
+        // Exactly at the cap: 100 * 100 == 10_000 is affordable, so it stands.
+        assert_eq!(clamp_defaulted_refine(100, 100), 100);
+    }
+
+    /// Past the cap the factor is reduced to the affordable budget.
+    #[test]
+    fn a_defaulted_refine_over_the_cap_is_clamped_to_the_budget() {
+        // fetch_k = 1000 affords 10_000/1000 = 10, below the minimum default 12.
+        assert_eq!(clamp_defaulted_refine(12, 1000), 10);
+        // The reduction tracks fetch_k rather than being a fixed ceiling.
+        assert_eq!(clamp_defaulted_refine(32, 2000), 5);
+    }
+
+    /// The clamp never disables refine entirely, however large `fetch_k` grows.
+    ///
+    /// `refine_factor = 0` would mean "no refine pass"; the floor of 1 keeps the
+    /// exact re-score that the ANN distance is not trusted without.
+    #[test]
+    fn the_clamp_floors_at_one_rather_than_disabling_refine() {
+        assert_eq!(clamp_defaulted_refine(32, REFINE_CANDIDATE_CAP * 10), 1);
+        assert_eq!(clamp_defaulted_refine(32, usize::MAX), 1);
+    }
+
+    /// `fetch_k = 0` must not divide by zero.
+    #[test]
+    fn a_zero_fetch_k_does_not_panic() {
+        assert_eq!(clamp_defaulted_refine(12, 0), 12);
+    }
+
+    /// Clamping is counted, and only when the cap actually binds.
+    ///
+    /// The clamp silently trades recall for latency, so the counter is the only
+    /// signal that it happened (#233). A metering bug is invisible by
+    /// construction — nothing downstream reads the counter — so it is asserted
+    /// here rather than assumed. Installs a `DebuggingRecorder`, which is
+    /// process-global and one-shot, hence the delta-based read.
+    #[test]
+    fn clamping_is_counted_but_only_when_the_cap_binds() {
+        use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        // Another test in this binary may already hold the global slot; in that
+        // case this recorder observes nothing and the assertions below would
+        // read 0, so run against a local recorder instead of the global one.
+        metrics::with_local_recorder(&recorder, || {
+            // Under the cap: no clamp, so nothing to report.
+            assert_eq!(clamp_defaulted_refine(32, 10), 32);
+            // Over the cap: one clamp.
+            assert_eq!(clamp_defaulted_refine(12, 1000), 10);
+            assert_eq!(clamp_defaulted_refine(32, 2000), 5);
+        });
+
+        let total: u64 = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(ckey, _, _, _)| ckey.key().name() == "uni_vector_refine_factor_clamped_total")
+            .map(|(_, _, _, value)| match value {
+                DebugValue::Counter(v) => v,
+                _ => 0,
+            })
+            .sum();
+
+        assert_eq!(
+            total, 2,
+            "expected exactly the two clamped calls to be counted, not the unclamped one"
+        );
+    }
 
     /// Concurrent table creation is retryable.
     ///
