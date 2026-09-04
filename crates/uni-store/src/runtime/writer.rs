@@ -6077,20 +6077,41 @@ impl Writer {
             return;
         }
 
-        // Mark affected indexes as Stale
+        // Mark affected indexes as Stale. A discarded write here left the index
+        // reporting `Online` while drift had already been detected against it
+        // (#233 Tier 3).
         for label in &labels {
             for idx in &schema.indexes {
                 if idx.label() == label {
-                    let _ = schema_manager.update_index_metadata(idx.name(), |m| {
+                    let name = idx.name().to_string();
+                    if let Err(e) = schema_manager.update_index_metadata(&name, |m| {
                         m.status = uni_common::core::schema::IndexStatus::Stale;
-                    });
+                    }) {
+                        metrics::counter!("uni_index_status_write_failures_total").increment(1);
+                        tracing::error!(
+                            index = %name,
+                            error = %e,
+                            "failed to mark index stale after detecting drift; \
+                             it still reports its previous status"
+                        );
+                    }
                 }
             }
         }
 
         tokio::spawn(async move {
             if let Err(e) = rebuild_mgr.schedule(labels).await {
-                tracing::warn!("Failed to schedule index rebuild: {e}");
+                // Recoverable now rather than lost: the indexes above are
+                // `Stale`, and `labels_needing_rebuild` treats that as a trigger,
+                // so the next pass picks them up. Before, `Stale` was a status
+                // nothing acted on and the rebuild waited on an unrelated growth
+                // or time trigger.
+                metrics::counter!("uni_index_rebuild_schedule_failures_total").increment(1);
+                tracing::error!(
+                    error = %e,
+                    "failed to schedule index rebuild; the affected indexes remain \
+                     stale and will be retried by the next trigger pass"
+                );
             }
         });
     }
