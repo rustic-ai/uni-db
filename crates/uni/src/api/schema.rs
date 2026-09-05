@@ -948,7 +948,7 @@ fn index_infos_for(
             name: idx.name().to_string(),
             index_type: idx_type.to_string(),
             properties: idx_props,
-            status: "ONLINE".to_string(), // TODO: Check actual status
+            status: idx.metadata().status.as_str().to_string(),
         });
     }
     indexes
@@ -1256,5 +1256,62 @@ impl Uni {
             ),
             description: edge_meta.description.clone(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod index_status_projection_tests {
+    use super::{index_infos_for, label_index_descriptor};
+    use uni_common::core::schema::{
+        IndexDefinition, IndexMetadata, IndexStatus, ScalarIndexConfig, ScalarIndexType, Schema,
+    };
+
+    fn schema_with_index_status(status: IndexStatus) -> Schema {
+        let mut schema = Schema::default();
+        schema
+            .indexes
+            .push(IndexDefinition::Scalar(ScalarIndexConfig {
+                name: "idx_person_age".to_string(),
+                label: "Person".to_string(),
+                properties: vec!["age".to_string()],
+                index_type: ScalarIndexType::BTree,
+                where_clause: None,
+                metadata: IndexMetadata {
+                    status,
+                    ..IndexMetadata::default()
+                },
+            }));
+        schema
+    }
+
+    /// The projection must report the status the schema actually holds.
+    ///
+    /// This previously hardcoded `"ONLINE"` for every index, so a failed or
+    /// superseded build reported itself healthy — the same defect class as the
+    /// index-build-status honesty fix, surviving on a second reporting path.
+    #[test]
+    fn projects_the_real_status_not_a_hardcoded_online() {
+        for status in [
+            IndexStatus::Online,
+            IndexStatus::Building,
+            IndexStatus::Stale,
+            IndexStatus::Failed,
+        ] {
+            let expected = status.as_str();
+            let schema = schema_with_index_status(status);
+            let infos = index_infos_for(&schema, "Person", label_index_descriptor);
+            assert_eq!(infos.len(), 1, "expected exactly one projected index");
+            assert_eq!(
+                infos[0].status, expected,
+                "projection must not invent a status"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_index_never_reports_itself_online() {
+        let schema = schema_with_index_status(IndexStatus::Failed);
+        let infos = index_infos_for(&schema, "Person", label_index_descriptor);
+        assert_ne!(infos[0].status, "ONLINE");
     }
 }
