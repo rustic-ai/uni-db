@@ -3274,7 +3274,7 @@ fn batch_row_to_value_map(
         .enumerate()
         .map(|(col_idx, field)| {
             let col = batch.column(col_idx);
-            let val = arrow_to_value(col.as_ref(), row_idx, None);
+            let val = arrow_to_value(col.as_ref(), row_idx, None).canonical_entity();
             (field.name().clone(), val)
         })
         .collect()

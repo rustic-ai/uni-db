@@ -187,40 +187,40 @@ It is the storage layer's decoder, with its own contract and its own callers
 inside `uni-store`; the query layer converts at its own boundary instead, which
 is why `read.rs` wraps it rather than changing it.
 
-### What is not done
+### The call sites, 2026-09-05
 
-Ten call sites inside `uni-query` still call the storage decoder directly rather
-than through a query-side wrapper, so they still produce maps:
-`df_udfs_plugin.rs:465`, `locy_eval.rs:648,897`, `endpoint_hydrate.rs:223,242`,
-`mutation_common.rs:349`, `write.rs:1090,1996`, `locy_fixpoint.rs:3268`.
+Eleven decode sites across seven files now return the native form: both in
+`unwind.rs`, three in `read.rs` (the wrapper plus two internal), both in
+`locy_eval.rs`, and one each in `similar_to_expr.rs`, `df_udfs_plugin.rs`,
+`endpoint_hydrate.rs` and `locy_fixpoint.rs`.
 
-**`mutation_common.rs:349` — `batches_to_rows` — must not be converted.** Its own
-comment states the contract: "the write helpers expect variables as bare Maps
-with `_vid`/`_labels` inside". Converting it would break a documented dependency
-rather than expose a defect. The write helpers would have to move to
-`Value::entity_property` first, which is step 1 again for that pipeline.
+Cost of the whole batch: **one failure**, `a5_fork_edge_merge_on_match_inherited`
+— an edge `MERGE … ON MATCH SET` that silently did not apply. Bisected to a
+single site, and it is not a bug but a contract, described below.
 
-The rest are ordinary read paths and should convert cheaply, one at a time, with
-the suite as the check. Step 4 — making the map form unrepresentable — stays open
-until they and the storage decoder are all done.
+### Deliberately not converted, with the reason for each
 
-## What the class cost, as an argument for finishing it
+- **`read.rs:948`, `record_batches_to_rows`** — merges system fields into bare
+  maps *because* the write helpers expect that shape. Converting it made an
+  `ON MATCH SET` stop applying, silently. Same contract as `batches_to_rows`.
+- **`mutation_common.rs:349`, `batches_to_rows`** — states the contract in its
+  own comment: "the write helpers expect variables as bare Maps with
+  `_vid`/`_labels` inside".
+- **`write.rs:1090`** — decodes `COPY FROM` input. An `_id` column there is
+  plausibly *user data*, not an entity, and misreading it would be a new defect
+  rather than a fixed one.
+- **`write.rs:1996`** — scalar key columns; there is no entity to canonicalise.
+- **`endpoint_hydrate.rs:243`** — a `matches!(…, Value::List(_))` shape probe,
+  not an entity read.
 
-Defects closed under #234 that were all this one split, each silent:
+The first two are the same blocker stated twice: **the write helpers read
+`_vid`/`_labels` out of a map.** Migrating them to `Value::entity_property` is
+step 1 for the write pipeline, and until that happens those two decoders must
+keep producing maps. That is the next piece of work, and it is bounded — the
+helpers are named, and the fork MERGE test is a ready acceptance criterion.
 
-- `n._vid` NULL for a native entity, which made `DISTINCT` and `count(DISTINCT)`
-  count one vertex twice
-- `type()` raising "requires a relationship argument" for a `Value::Edge`
-- `properties()` returning null for a native node or edge
-- `id()` returning `_eid` verbatim, so one function returned `Int` or `String`
-  depending on how the row was encoded
-- `validAt` filtering out every row whose relationship was materialised natively
-- `collect(DISTINCT n)` keying `"Vid(7)"` and `7` as different nodes
-- a path silently losing a node or edge whose map spelled the id `_id`
-- `SET` / `DELETE` reporting success having matched nothing
-- the TCK's own snapshot probe contributing zero properties, so side-effect
-  assertions passed on an empty snapshot
+### What remains after that
 
-None of these produced an error. Two were caught by existing tests only once a
-native entity was routed somewhere it had never reached — which is the argument
-for (2): the split hides defects until something forces the other form through.
+`uni-store`'s own `arrow_convert::arrow_to_value`, which the query layer now
+wraps rather than changes, and step 4 — making the map form unrepresentable —
+which stays open until the write pipeline and the storage decoder are both done.

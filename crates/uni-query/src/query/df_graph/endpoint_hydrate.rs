@@ -220,7 +220,8 @@ impl EndpointHydrateStream {
         let mut out = Vec::with_capacity(batch.num_rows());
         for row in 0..batch.num_rows() {
             let value =
-                uni_store::storage::arrow_convert::arrow_to_value(column.as_ref(), row, None);
+                uni_store::storage::arrow_convert::arrow_to_value(column.as_ref(), row, None)
+                    .canonical_entity();
             out.push(match &value {
                 Value::List(items) => items
                     .iter()

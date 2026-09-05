@@ -645,9 +645,9 @@ fn invoke_locy_generator(
     for i in 0..emitted {
         let mut tuple = Vec::with_capacity(out.columns.len());
         for col in &out.columns {
-            tuple.push(uni_store::storage::arrow_convert::arrow_to_value(
-                col, i, None,
-            ));
+            tuple.push(
+                uni_store::storage::arrow_convert::arrow_to_value(col, i, None).canonical_entity(),
+            );
         }
         tuples.push(tuple);
     }
@@ -898,7 +898,8 @@ pub fn record_batches_to_locy_rows(batches: &[RecordBatch]) -> Vec<FactRow> {
                     column.as_ref(),
                     row_idx,
                     data_type,
-                );
+                )
+                .canonical_entity();
                 row.insert(field.name().clone(), value);
             }
             normalize_graph_row(&mut row);

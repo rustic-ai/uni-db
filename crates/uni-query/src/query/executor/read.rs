@@ -4794,7 +4794,8 @@ impl Executor {
                                 // Look up Uni DataType from schema for proper DateTime/Time decoding
                                 let data_type = target_props.get(name).map(|pm| &pm.r#type);
                                 let val =
-                                    arrow_convert::arrow_to_value(col.as_ref(), row, data_type);
+                                    arrow_convert::arrow_to_value(col.as_ref(), row, data_type)
+                                        .canonical_entity();
                                 props.insert(name.clone(), val);
                             }
                         }
@@ -4847,7 +4848,8 @@ impl Executor {
                         } else if let Some(pm) = target_props.get(name) {
                             // Look up Uni DataType from schema for proper DateTime/Time decoding
                             let val =
-                                arrow_convert::arrow_to_value(col.as_ref(), row, Some(&pm.r#type));
+                                arrow_convert::arrow_to_value(col.as_ref(), row, Some(&pm.r#type))
+                                    .canonical_entity();
                             props.insert(name.clone(), val);
                         }
                     }
