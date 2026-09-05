@@ -825,31 +825,45 @@ async fn repro_07_optional_filter_batches() {
 }
 
 // ===========================================================================
-// [8] pattern_comprehension.rs:301 — multi-hop column order mismatch
+// [8] pattern_comprehension.rs — multi-hop inner column order (D7)
 // ===========================================================================
+// FIXED: `build_inner_schema` declared every step's vertex properties and then
+// every step's edge properties, while the batch was filled interleaved per step
+// (this step's vertex props, then this step's edge props). The two agree only
+// while at most one step contributes a property. Here the edge property is on
+// the first hop and the vertex property on the second, so the orders diverge —
+// and because every property column is `LargeBinary`, `RecordBatch::try_new`
+// accepts the mismatch instead of rejecting it. The WHERE predicate then read
+// `r1.w` as `c.name` and the projection returned `c.name`, yielding `TAGGED` in
+// place of `WEIGHT`: a silent wrong answer with no error anywhere.
+//
+// This test asserts rather than prints. It previously only `println!`'d its
+// findings, so it passed identically whether or not the bug was present and
+// guarded nothing (the vacuous-fixture class, #205).
 #[tokio::test]
 async fn repro_08_pattern_comprehension_colorder() {
     let h = Harness::new_schemaless().await;
     h.run_ok("CREATE (a:A {id:1})-[:X {w:'WEIGHT'}]->(b:B {id:2})-[:Y]->(c:C {name:'target'})")
         .await;
-    let res = h
+    let rows = h
         .run("MATCH (a:A) RETURN [(a)-[r1:X]->(b)-[r2:Y]->(c:C) WHERE c.name = 'target' | r1.w] AS out")
-        .await;
-    match res {
-        Ok(rows) => {
-            let out = cell(&rows[0], "out");
-            println!("[8] pattern comprehension out={out:?} (correct=['WEIGHT'])");
-            // BUG: schema declares [c.name, r1.w] but eval pushes [r1.w, c.name],
-            // so predicate reads r1.w as c.name (filters wrong) and map returns c.name.
-            match &out {
-                Value::List(items) if items == &vec![Value::String("WEIGHT".into())] => {
-                    println!("[8] correct output (bug NOT reproduced)");
-                }
-                other => println!("[8] REPRODUCED / divergent output: {other:?}"),
-            }
-        }
-        Err(e) => println!("[8] errored: {e}"),
-    }
+        .await
+        .expect("multi-hop pattern comprehension must execute, not error");
+
+    let out = cell(
+        rows.first().expect("the :A anchor row must be returned"),
+        "out",
+    );
+
+    // The projection yields the EDGE property of the first hop. Reading the
+    // vertex property of the second hop here is the column swap itself.
+    assert_eq!(
+        out,
+        Value::List(vec![Value::String("WEIGHT".into())]),
+        "inner columns must stay in one order: the comprehension projects r1.w \
+         (the first hop's edge property), so anything else — notably c.name \
+         ('target') — means the schema and the batch disagree on column order"
+    );
 }
 
 // ===========================================================================
