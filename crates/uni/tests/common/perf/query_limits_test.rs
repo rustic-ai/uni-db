@@ -579,6 +579,31 @@ async fn test_uncancelled_locy_program_still_runs() -> Result<()> {
 // operator that allocates an Arrow buffer directly without reserving (the
 // `MutableArrayData` path behind #184) is still unbounded.
 
+/// The premise the pool choice rests on: a disk manager *is* configured.
+///
+/// Two comments once justified `GreedyMemoryPool` over `FairSpillPool` on the
+/// claim that no disk-spill path existed, so neither pool could spill (#238).
+/// The claim was false when written — #202's evidence is an `ExternalSorter`
+/// asking for 5.1 GB on LDBC IC9 with a disk manager available throughout — and
+/// the reasoning that replaced it depends on the opposite fact being true.
+///
+/// That fact is a *dependency default*, not something this repo controls. If
+/// DataFusion ever ships `Disabled` as the default, the reasoning on
+/// `memory_bounded_runtime` silently becomes wrong again and the old comment
+/// becomes right by accident. This is the cheapest way to be told.
+#[test]
+fn disk_manager_default_is_a_real_directory() {
+    use datafusion::execution::disk_manager::DiskManagerMode;
+
+    assert!(
+        matches!(DiskManagerMode::default(), DiskManagerMode::OsTmpDirectory),
+        "DataFusion's default disk manager is what makes spilling possible; \
+         the GreedyMemoryPool reasoning in `memory_bounded_runtime` and on the \
+         session template assumes it, and #238 exists because an earlier \
+         comment assumed the reverse"
+    );
+}
+
 /// A database whose only unusual setting is a small query-memory ceiling.
 async fn db_with_memory_limit(bytes: usize) -> Result<Uni> {
     let mut config = uni_db::UniConfig::default();
