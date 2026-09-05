@@ -1,10 +1,14 @@
 # Unifying the two entity encodings
 
-Status: **Done for the query-side decode boundary as of 2026-09-05.** Steps 1 and
-2 below are complete: an entity struct now decodes to its native form, so that
-boundary no longer produces the second encoding. The history of how it was
-sequenced — including an attempt that failed and why — is kept because the
-remaining boundaries will hit the same wall.
+Status: **The query layer is unified as of 2026-09-05.** Every decode site in
+`uni-query`, including the two the mutation pipeline was thought to require,
+returns an entity in its native form. The full suite and the openCypher TCK are
+both green. What remains is `uni-store`'s own decoder and step 4 — making the map
+form unrepresentable — both recorded at the end.
+
+The history below is kept in order, including an attempt that failed and the two
+occasions the integration suite alone gave the wrong answer, because the storage
+boundary will hit the same wall.
 
 ## The problem in one line
 
@@ -216,37 +220,62 @@ single site, and it is not a bug but a contract, described below.
 The first two are the same blocker stated twice: **the write helpers read
 `_vid`/`_labels` out of a map.**
 
-### Write-helper migration — partial, 2026-09-05
+### Write-helper migration — complete, 2026-09-05
 
-Converting both decoders and following the failures gave three, each a silent
-write no-op rather than an error:
+Converting both decoders and following the failures gave the whole list. Every
+one was a silent write no-op or a silently wrong read, never an error:
 
-- `REMOVE n.prop` — the row write-back reached into a `Value::Map`, so a native
-  entity kept the removed property. Migrated to `Value::set_entity_properties`.
-- `SET n:Label` — same shape for labels. Migrated to `Value::set_entity_labels`.
-- Edge `MERGE … ON MATCH SET` in a fork — **not** migrated; see below.
+| symptom | cause |
+|---|---|
+| `REMOVE n.prop` did nothing to the row | write-back reached into a `Value::Map` |
+| `SET n:Label` did nothing to the row | same, for labels |
+| `REMOVE n:Label` did nothing to the row | same |
+| `SET n.p = null` left the property visible | `Null` inserted into a native entity's map, where absence is what removal means |
+| fork edge `MERGE … ON MATCH` matched nothing | see below |
+| `labels(n)` raised "requires a node argument" | map-only arm |
+| `keys(n)` returned `[]`, and no rows under `UNWIND` | **two** implementations, both map-only |
+| `type(r)`, `properties(n)` | map-only arms |
 
-Writing into an entity needs more than the reader: `entity_property` answers a
-field, and a write-back has to *replace* one. The two new methods are the write
-side of the same idea, and they are not symmetric with the reader —
-`set_entity_properties` takes the removed names separately, because a map row
-carries flattened columns that other operators read directly, so a removed
-property must be present-and-null there, while on a native entity absence is the
-correct representation.
+Writing into an entity needed the write side of `entity_property`:
+`set_entity_property`, `set_entity_properties` and `set_entity_labels`. They are
+deliberately **not** symmetric with the reader — assigning `Null` *removes* a
+property from a native entity, because the property graph model says a
+null-valued property does not exist, while a map row keeps it present-and-null so
+its flattened columns stay addressable. `canonical_entity` drops null properties
+for the same reason.
 
-**Neither decoder can be converted yet.** `record_batches_to_rows` still breaks
-the fork edge `MERGE … ON MATCH` — its match phase finds nothing, so ON MATCH
-SET never runs, and the cause is upstream of the SET dispatch, which is never
-reached. `batches_to_rows` passed the full integration suite with the conversion
-applied and then failed nine TCK scenarios and a roundtrip unit test, which is
-worth recording on its own: **the integration suite alone was not sufficient
-evidence for that conversion.**
+### The fork MERGE, which was not a write helper at all
 
-So the migration is partial: two of three helpers moved, both decoders still
-blocked. The remaining work is the fork MERGE match path.
+MERGE's match phase found the edge — `db_matches = 1` — and then a consistency
+filter discarded it, because the row and the database disagreed on
+`b._all_props`: `Map({})` against `Null`. Both mean "no properties", and both
+sides were produced by *different plans* that spell it differently.
 
-### What remains after that
+A dotted column is a **projection** of its variable, not a binding. If the base
+variable is the same entity on both sides, its projections cannot disagree about
+identity, so they must not be allowed to veto the match. That is the fix, and it
+is a defect independent of encodings: any two plans spelling an empty property
+set differently could have triggered it.
 
-`uni-store`'s own `arrow_convert::arrow_to_value`, which the query layer now
-wraps rather than changes, and step 4 — making the map form unrepresentable —
-which stays open until the write pipeline and the storage decoder are both done.
+### Twice, the integration suite was not enough
+
+Both times, converting a decoder left **4766 of 4766 integration tests passing**
+and then failed the TCK — nine scenarios the first time, five the second. Had the
+TCK not been run, both would have been committed as complete. "The suite is
+green" is a claim about the suite.
+
+## What remains
+
+- **`uni-store`'s `arrow_convert::arrow_to_value`.** The query layer wraps it
+  rather than changing it, since storage has its own callers and contract. The
+  same sequencing applies: route a native entity through its consumers, fix what
+  breaks, then convert it.
+- **Step 4 — making the map form unrepresentable.** Now genuinely reachable for
+  the query layer: nothing in `uni-query` decodes an entity into a map any more.
+  It stays open until storage does the same, since a map-encoded entity can still
+  arrive from below.
+
+Three call sites in `uni-query` deliberately do not canonicalise, and should not:
+`write.rs:1090` decodes COPY FROM input, where an `_id` column is plausibly user
+data; `write.rs:1996` decodes scalar key columns; `endpoint_hydrate.rs:243` is a
+`matches!(…, Value::List(_))` shape probe.

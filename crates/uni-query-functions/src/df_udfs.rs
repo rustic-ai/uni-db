@@ -1109,6 +1109,13 @@ impl ScalarUDFImpl for LabelsUdf {
 
             let node = &val_args[0];
             match node {
+                // A vertex reaches here in either encoding, and only the map
+                // form was handled — so `labels(n)` on a native `Value::Node`
+                // raised "requires a node argument" for an argument that is
+                // exactly that (#234).
+                Value::Node(n) => Ok(Value::List(
+                    n.labels.iter().cloned().map(Value::String).collect(),
+                )),
                 Value::Map(map) => {
                     if let Some(Value::List(arr)) = map.get("_labels") {
                         Ok(Value::List(arr.clone()))

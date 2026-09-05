@@ -2632,6 +2632,11 @@ impl Executor {
             let matches = self
                 .execute_merge_match(pattern, &row, prop_manager, params, ctx)
                 .await?;
+            eprintln!(
+                "MERGEPROBE matches={} row_keys={:?}",
+                matches.len(),
+                row.keys().collect::<Vec<_>>()
+            );
             let writer: &uni_store::Writer = writer_lock.as_ref();
 
             let result: Result<Vec<HashMap<String, Value>>> = async {
@@ -3340,10 +3345,11 @@ impl Executor {
                             pv.touched.insert(prop_name.clone());
 
                             // Update the row binding so subsequent RHS sees the new value.
-                            if let Some(Value::Map(node_map)) = row.get_mut(var_name) {
-                                node_map.insert(prop_name.clone(), val);
-                            } else if let Some(Value::Node(node)) = row.get_mut(var_name) {
-                                node.properties.insert(prop_name.clone(), val);
+                            // Assigning null *removes* the property on a native
+                            // entity — inserting `Null` there would leave it
+                            // visible to `properties()` and `keys()` (#234).
+                            if let Some(binding) = row.get_mut(var_name) {
+                                binding.set_entity_property(prop_name, val);
                             }
                         } else if let Value::Map(map) = node_val
                             && map.get("_eid").is_some_and(|v| !v.is_null())
@@ -3410,10 +3416,8 @@ impl Executor {
                             }
 
                             // Update the row object so subsequent RHS sees the new value.
-                            if let Some(Value::Map(edge_map)) = row.get_mut(var_name) {
-                                edge_map.insert(prop_name.clone(), val);
-                            } else if let Some(Value::Edge(edge)) = row.get_mut(var_name) {
-                                edge.properties.insert(prop_name.clone(), val);
+                            if let Some(binding) = row.get_mut(var_name) {
+                                binding.set_entity_property(prop_name, val);
                             }
                         } else if let Value::Edge(edge) = node_val {
                             // Handle Value::Edge directly (when traverse returns Edge objects).
@@ -3469,8 +3473,8 @@ impl Executor {
                             }
 
                             // Update the row object so subsequent RHS sees the new value.
-                            if let Some(Value::Edge(edge)) = row.get_mut(var_name) {
-                                edge.properties.insert(prop_name.clone(), val);
+                            if let Some(binding) = row.get_mut(var_name) {
+                                binding.set_entity_property(prop_name, val);
                             }
                         }
                     }
@@ -3991,9 +3995,10 @@ impl Executor {
                 }
 
                 // Update the node value in the row with the remaining labels.
-                if let Some(Value::Map(obj)) = row.get_mut(variable) {
-                    let labels_list = remaining_labels.into_iter().map(Value::String).collect();
-                    obj.insert("_labels".to_string(), Value::List(labels_list));
+                if let Some(binding) = row.get_mut(variable) {
+                    // Map-only before, so `REMOVE n:Label` left a natively
+                    // encoded vertex showing its old label set (#234).
+                    binding.set_entity_labels(remaining_labels);
                 }
             }
         }
@@ -4722,7 +4727,7 @@ impl Executor {
         }
 
         let db_matches = self
-            .execute_merge_read_plan(plan, prop_manager, params, vars_in_scope.clone())
+            .execute_merge_read_plan(plan.clone(), prop_manager, params, vars_in_scope.clone())
             .await?;
 
         // Keep only DB results that are consistent with the input row bindings.
@@ -4742,6 +4747,22 @@ impl Executor {
                         return true;
                     };
                     if db_val == val {
+                        return true;
+                    }
+                    // A dotted column is a *projection* of its variable, not a
+                    // binding, and the two sides are produced by different plans
+                    // — the outer scan and MERGE's own traversal — which spell
+                    // an absent property set differently (`Map({})` against
+                    // `Null`). Letting such a column veto the match made MERGE
+                    // miss an edge that both sides agree exists, so ON MATCH SET
+                    // silently did not run. If the base variable is the same
+                    // entity on both sides, its projections cannot disagree
+                    // about identity (#234).
+                    if let Some((base, _)) = key.split_once('.')
+                        && let (Some(row_base), Some(db_base)) = (row.get(base), db_match.get(base))
+                        && let (Some(a), Some(b)) = (row_base.entity_ref(), db_base.entity_ref())
+                        && a == b
+                    {
                         return true;
                     }
                     // Values differ -- treat as consistent if they represent the same VID

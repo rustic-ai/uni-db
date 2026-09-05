@@ -945,7 +945,8 @@ impl Executor {
                         None
                     };
                     let mut value =
-                        arrow_convert::arrow_to_value(column.as_ref(), row_idx, data_type);
+                        arrow_convert::arrow_to_value(column.as_ref(), row_idx, data_type)
+                            .canonical_entity();
 
                     // Check if this field contains JSON-encoded values (e.g., from UNWIND)
                     // Parse JSON string to restore the original type

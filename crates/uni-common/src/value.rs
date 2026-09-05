@@ -577,20 +577,36 @@ impl Value {
         // User properties live under `_all_props` for a schemaless entity and
         // under `properties` for a serialised one; otherwise take the
         // non-underscore keys, which is how a flattened projection spells them.
-        let properties: HashMap<String, Value> =
-            match map.get("_all_props").or_else(|| map.get("properties")) {
-                Some(Value::Map(props)) => props.clone(),
-                // Flattened projection: the user properties are the plain keys.
-                // `properties` is excluded by name as well as by the underscore
-                // rule — when it is present but null, meaning an entity with
-                // none, it is still a container key, and collecting it would
-                // invent a user property called "properties" holding null.
-                _ => map
-                    .iter()
-                    .filter(|(k, _)| !k.starts_with('_') && k.as_str() != "properties")
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect(),
-            };
+        // A null-valued property does not exist on an entity under the property
+        // graph model — `SET n.p = null` removes it — so the native form must
+        // not carry one. The map form can: its flattened columns are read
+        // positionally, so a removed property has to stay present-and-null
+        // there. Dropping nulls here is what makes the two forms agree about
+        // which properties an entity has, and it is the same rule
+        // `property_names` applies.
+        let keep = |props: &HashMap<String, Value>| -> HashMap<String, Value> {
+            props
+                .iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        let properties: HashMap<String, Value> = match map
+            .get("_all_props")
+            .or_else(|| map.get("properties"))
+        {
+            Some(Value::Map(props)) => keep(props),
+            // Flattened projection: the user properties are the plain keys.
+            // `properties` is excluded by name as well as by the underscore
+            // rule — when it is present but null, meaning an entity with
+            // none, it is still a container key, and collecting it would
+            // invent a user property called "properties" holding null.
+            _ => map
+                .iter()
+                .filter(|(k, v)| !k.starts_with('_') && k.as_str() != "properties" && !v.is_null())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        };
 
         match entity {
             EntityRef::Vertex(vid) => {
@@ -700,6 +716,34 @@ impl Value {
             .collect();
         names.sort();
         Some(names)
+    }
+
+    /// Set one property on an entity, in whichever encoding it uses.
+    ///
+    /// Assigning `Null` **removes** the property from a native entity: under the
+    /// property graph model `SET n.p = null` deletes it, and an entity that
+    /// carried `p: Null` would still report it through `properties()` and
+    /// `keys()`. The map form keeps it present-and-null instead, because its
+    /// flattened columns are read directly and a removed property has to remain
+    /// addressable there.
+    ///
+    /// Returns `false` for a value that is not an entity.
+    pub fn set_entity_property(&mut self, name: &str, value: Value) -> bool {
+        let props = match self {
+            Value::Node(node) => &mut node.properties,
+            Value::Edge(edge) => &mut edge.properties,
+            Value::Map(map) => {
+                map.insert(name.to_string(), value);
+                return true;
+            }
+            _ => return false,
+        };
+        if value.is_null() {
+            props.remove(name);
+        } else {
+            props.insert(name.to_string(), value);
+        }
+        true
     }
 
     /// Replace an entity's user properties, in whichever encoding it uses.
@@ -2438,6 +2482,55 @@ mod tests {
             // An edge has no labels.
             let mut e = edge_map_with_shared_id(Value::Int(1));
             assert!(!e.set_entity_labels(vec!["X".into()]));
+        }
+
+        /// Assigning null removes a property from an entity, but not from a map.
+        ///
+        /// `SET n.p = null` deletes the property under the property graph model.
+        /// An entity left carrying `p: Null` would still report it through
+        /// `properties()` and `keys()`. A map row keeps it present-and-null,
+        /// because its flattened columns are read directly and must stay
+        /// addressable.
+        #[test]
+        fn assigning_null_removes_a_property_from_an_entity() {
+            let mut native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec![],
+                properties: HashMap::from([("p".to_string(), Value::Int(1))]),
+            });
+            assert!(native.set_entity_property("p", Value::Null));
+            assert_eq!(native.property_names(), Some(vec![]));
+            assert_eq!(native.entity_property("p"), Value::Null);
+
+            assert!(native.set_entity_property("q", Value::Int(2)));
+            assert_eq!(native.property_names(), Some(vec!["q".to_string()]));
+
+            // The map form keeps the key, present and null.
+            let mut as_map = node_map(Value::Int(7));
+            assert!(as_map.set_entity_property("p", Value::Null));
+            let Value::Map(m) = &as_map else { panic!() };
+            assert!(
+                m.contains_key("p"),
+                "a map row keeps the column addressable"
+            );
+
+            assert!(!Value::Int(1).set_entity_property("p", Value::Int(2)));
+        }
+
+        /// Canonicalising drops null properties, matching the entity model.
+        #[test]
+        fn canonicalising_drops_null_properties() {
+            let mut m = HashMap::new();
+            m.insert("_vid".to_string(), Value::Int(7));
+            m.insert(
+                "_all_props".to_string(),
+                Value::Map(HashMap::from([
+                    ("kept".to_string(), Value::Int(1)),
+                    ("removed".to_string(), Value::Null),
+                ])),
+            );
+            let entity = Value::Map(m).canonical_entity();
+            assert_eq!(entity.property_names(), Some(vec!["kept".to_string()]));
         }
 
         /// A bare integer is not an entity, and a negative id is not one either.

@@ -346,7 +346,8 @@ pub fn batches_to_rows(batches: &[RecordBatch]) -> Result<Vec<HashMap<String, Va
                 } else {
                     None
                 };
-                let mut value = arrow_convert::arrow_to_value(column.as_ref(), row_idx, data_type);
+                let mut value = arrow_convert::arrow_to_value(column.as_ref(), row_idx, data_type)
+                    .canonical_entity();
 
                 // Check if this field contains JSON-encoded values (e.g., from UNWIND)
                 // Parse JSON string to restore the original type
@@ -1544,9 +1545,18 @@ mod tests {
         let rows = batches_to_rows(&[batch]).unwrap();
         assert_eq!(rows.len(), 1);
 
-        // The decoded value should be a Map
+        // The decoded value is the entity itself, in its native form: the
+        // decoder canonicalises an entity map so one entity has one encoding
+        // (#234). Asserting identity and properties rather than the variant is
+        // the stronger check — it is what the round-trip has to preserve, and it
+        // holds whichever encoding the decoder settles on.
         let val = rows[0].get("n").unwrap();
-        assert!(matches!(val, Value::Map(_)));
+        assert_eq!(
+            val.entity_vid(),
+            Some(uni_common::Vid::from(1)),
+            "the entity's identity must survive the round-trip"
+        );
+        assert_eq!(val.entity_property("name"), Value::String("Alice".into()));
 
         let output_batches = rows_to_batches(&rows, &schema).unwrap();
         assert_eq!(output_batches[0].num_rows(), 1);
