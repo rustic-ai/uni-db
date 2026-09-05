@@ -962,15 +962,17 @@ pub(crate) fn normalize_graph_row(row: &mut FactRow) {
 
 /// Convert a map with internal graph fields to `Value::Node` or `Value::Edge`.
 fn map_to_graph_entity(map: HashMap<String, Value>) -> Value {
-    use uni_common::core::id::{Eid, Vid};
+    use uni_common::core::id::Vid;
     use uni_common::value::{Edge, Node};
 
-    // Edge: has _eid
-    if let Some(eid_val) = map.get("_eid") {
-        let eid = match eid_val {
-            Value::Int(i) => Eid::new(*i as u64),
-            _ => return Value::Map(map),
-        };
+    // Edge. Requiring `Value::Int` under `_eid` specifically meant an `_id`
+    // spelling or the string form `"Eid(7)"` fell back out as an unconverted
+    // map, and the `as u64` cast turned a negative id into `u64::MAX` (#234).
+    // The accessor knows this decoder's `_src_vid`/`_dst_vid` endpoint
+    // spelling, so an edge here is never mistaken for a vertex.
+    if let Some(uni_common::value::EntityRef::Edge(eid)) =
+        uni_common::value::entity_ref_from_map(&map)
+    {
         let edge_type = match map.get("_type") {
             Some(Value::String(s)) => s.clone(),
             _ => String::new(),

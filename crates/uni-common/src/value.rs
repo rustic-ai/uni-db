@@ -1492,6 +1492,10 @@ pub fn entity_ref_from_map(map: &HashMap<String, Value>) -> Option<EntityRef> {
         || map.contains_key("eid")
         || ((map.contains_key("_src") || map.contains_key("src"))
             && (map.contains_key("_dst") || map.contains_key("dst")))
+        // Locy's row decoder spells the endpoints `_src_vid` / `_dst_vid`. An
+        // edge map in that vocabulary carrying only `_id` would otherwise read
+        // as the *vertex* of that number and be converted into a `Node`.
+        || (map.contains_key("_src_vid") && map.contains_key("_dst_vid"))
         || map.contains_key("_type_name")
         || map.contains_key("edge_type");
 
@@ -1978,6 +1982,23 @@ mod tests {
                 node_map(Value::String("7".into())).entity_vid(),
                 Some(Vid::from(7))
             );
+        }
+
+        /// An edge map in Locy's endpoint vocabulary is an edge, not a vertex.
+        ///
+        /// That decoder spells the endpoints `_src_vid` / `_dst_vid`. Without
+        /// this tell, such a map carrying only `_id` resolved to the vertex of
+        /// the same number, and the row decoder would convert an edge into a
+        /// `Node`.
+        #[test]
+        fn the_locy_endpoint_spelling_reads_as_an_edge() {
+            let mut m = HashMap::new();
+            m.insert("_id".to_string(), Value::Int(7));
+            m.insert("_src_vid".to_string(), Value::Int(0));
+            m.insert("_dst_vid".to_string(), Value::Int(1));
+            let v = Value::Map(m);
+            assert_eq!(v.entity_ref(), Some(EntityRef::Edge(Eid::from(7))));
+            assert_eq!(v.entity_vid(), None);
         }
 
         /// A bare integer is not an entity, and a negative id is not one either.

@@ -55,12 +55,6 @@ fn budget() -> BTreeMap<&'static str, usize> {
         // `properties(n)` on an unmatched OPTIONAL MATCH would return `{}`
         // instead of null.
         ("crates/uni-query-functions/src/df_udfs.rs", 2),
-        // `map_to_graph_entity`'s edge branch. Blocked, not declined: this row
-        // shape spells its endpoints `_src_vid` / `_dst_vid`, which the
-        // accessor's edge tells do not yet include, so routing it would classify
-        // an `_id`-only edge map as a *vertex* and convert it into a `Node`.
-        // Teach `entity_ref_from_map` that vocabulary first.
-        ("crates/uni-query/src/query/df_graph/locy_eval.rs", 1),
     ])
 }
 
