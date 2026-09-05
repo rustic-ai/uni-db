@@ -302,13 +302,13 @@ fn edge_eid_and_type(val: &Value) -> Option<(Eid, String)> {
                 Some(uni_common::value::EntityRef::Edge(eid)) => eid,
                 _ => return None,
             };
-            let type_name = map
-                .get("_type_name")
-                .or_else(|| map.get("_type"))
-                .and_then(|v| match v {
-                    Value::String(s) => Some(s.clone()),
-                    _ => None,
-                })
+            // Through the accessor, so every spelling of the type resolves
+            // here and not just the two this knew. An id cannot become a name
+            // without the schema, and the empty string is what this reported
+            // for an unreadable type before.
+            let type_name = val
+                .edge_type_ref()
+                .and_then(|t| t.name().map(str::to_string))
                 .unwrap_or_default();
             Some((eid, type_name))
         }

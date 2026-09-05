@@ -300,17 +300,19 @@ fn encode_map_as_node_payload(map: &std::collections::HashMap<String, Value>, bu
 
 /// Encode a map that looks like an edge into the edge sort key payload.
 fn encode_map_as_edge_payload(map: &std::collections::HashMap<String, Value>, buf: &mut Vec<u8>) {
-    let edge_type = map
-        .get("_type")
-        .or_else(|| map.get("_type_name"))
-        .and_then(|v| {
-            if let Value::String(s) = v {
-                Some(s.as_str())
-            } else {
-                None
-            }
+    // Through the accessor: reading `_type`/`_type_name` by hand meant a
+    // numeric `_type` (how CREATE spells it) silently sorted under the empty
+    // string, so every such edge tied.
+    let edge_type = Value::Map(map.clone())
+        .edge_type_ref()
+        .map(|t| match t {
+            uni_common::value::EdgeTypeRef::Name(n) => n,
+            // No schema here, so an id cannot become a name. A U+0001 prefix
+            // keeps distinct ids distinct and sorts them ahead of every real
+            // name, instead of collapsing them all onto "".
+            uni_common::value::EdgeTypeRef::Id(id) => format!("\u{1}{id}"),
         })
-        .unwrap_or("");
+        .unwrap_or_default();
 
     byte_stuff_terminate(edge_type.as_bytes(), buf);
 

@@ -264,18 +264,105 @@ and then failed the TCK — nine scenarios the first time, five the second. Had 
 TCK not been run, both would have been committed as complete. "The suite is
 green" is a claim about the suite.
 
+## `uni-store` — the premise was wrong, 2026-09-05
+
+The plan said storage was the next decoder to convert. It is not, because
+**`uni-store` has no entity encoding to unify.**
+
+Measured, not assumed:
+
+- `Value::Node` and `Value::Edge` appear **zero** times in `crates/uni-store/src`.
+- No `Value::Map` in that crate carries `_vid`, `_eid`, `_id`, `_src`, `_dst`,
+  `_labels`, `_type_name` or `edge_type`. Every occurrence of those strings is
+  an *Arrow* column name — `Field::new`, `column_by_name`, `FilterExpr`, a
+  `ScanRequest` projection — which is the physical layout, not the `Value`
+  encoding.
+- No public function returns a `Value` meaning a whole vertex or edge. Whole
+  entities leave storage as `uni_common::Properties` — a property bag with no
+  identity keys — with the id passed separately.
+
+`arrow_convert::arrow_to_value` decodes a *property* value, one Arrow cell at a
+time. It yields an entity-shaped map only when the query layer hands it an
+entity *struct column* that the query layer itself built. Pushing entity
+canonicalisation into it would move a query-layer concept below the layer
+boundary, and would apply it to the callers that decode genuine user data —
+`uni-bulk`'s `record_batch_to_property_maps`, the trigger pre-image builder, and
+`COPY FROM` — where an `_id` column is plausibly a user column. That is the
+defect `write.rs:1090` already opts out of; it should not be reintroduced one
+level down.
+
+**So the boundary already holds.** What was left was not below the query layer
+but inside it: the places that still *construct* the map form, and the readers
+that only understood it.
+
+## The construction sites, and what they were hiding
+
+Four sites built an entity as a `Value::Map`. Converting them exposed the same
+class of latent wrong answer as the decoder conversions, one level over:
+
+| site | was |
+|---|---|
+| `write.rs::build_node_map` | MERGE's node binding, whose own doc claimed it "matches the binding the MATCH path produces" — which by then produced `Value::Node` |
+| `write.rs`, CREATE node | the same shape built a second time, inline |
+| `write.rs`, CREATE edge | spelled the type as a numeric `type_id`, which several readers never resolved |
+| `endpoint_hydrate::hydrate_node` | inline map "so a projection decodes to the same shape" — a reason that expired when projections went native |
+
+## Two more accessors, for the same reason as the first
+
+Identity had an accessor. **Labels, edge type and endpoints did not**, and each
+had grown the identical defect: several spellings, a different subset understood
+at each site, and a silent wrong answer for whichever one the reader did not
+know.
+
+- `Value::edge_endpoints` — `_src_vid`/`_dst_vid`, `_src`/`_dst`, `src`/`dst`,
+  and `Value::Edge`. Three hand-rolled versions existed.
+- `Value::edge_type_ref` — `_type` holding a *name*, `_type` holding a numeric
+  *id*, `_type_name`, `edge_type`, and `Value::Edge`. Returns `EdgeTypeRef`
+  rather than a `String`, because resolving an id needs the schema and
+  `uni-common` does not have it: the id survives into the return type instead of
+  being silently dropped, which is what the old readers did.
+- `Value::entity_labels` and `Value::entity_properties` — the value halves of
+  `property_names`.
+
+### What the readers were doing
+
+Every one of these is a silent wrong answer, never an error:
+
+| symptom | cause |
+|---|---|
+| `WHERE n:Person` excluded every row | `LabelCheck` matched `Value::Map` only; a native node hit the catch-all `false` |
+| `hasLabel(n, 'Person')` answered false | two arms, one *labelled* "handle proper Value::Node type", neither handling it |
+| `type(r)` answered `null` | the interpreted evaluator read `_type` out of a map only |
+| `labels(n)` answered `null` | same |
+| `properties(n)` answered `null` | same |
+| `type(r)` raised "requires a relationship argument" | the UDF accepted `_type` only as a *name*, and CREATE spells it as an id |
+| an edge sorted under `""` | the sort key silently used the empty string for a numeric `_type`, so every such edge tied |
+
+`type()`, `labels()`, `properties()` and `hasLabel` each existed **twice** — once
+as a UDF and once in the interpreted evaluator — and the second copy knew only
+the map form in every case. That is the `keys()` lesson from the first pass,
+repeated four more times: consolidating one implementation is not the same as
+finding the other one.
+
+## The ratchet now covers shape, not just identity
+
+`arch_entity_identity.rs` grew a second budget over `_labels`, `_type`,
+`_type_name`, `edge_type`, `_src`, `_dst`, `_src_vid`, `_dst_vid`. The entries
+that remain are decoders and dispatch guards — code whose job *is* to recognise
+the map form and convert it, or to decide which of two shapes a value has. A
+reader that merely wants the labels of an entity it already has does not qualify,
+and the ratchet only turns down.
+
 ## What remains
 
-- **`uni-store`'s `arrow_convert::arrow_to_value`.** The query layer wraps it
-  rather than changing it, since storage has its own callers and contract. The
-  same sequencing applies: route a native entity through its consumers, fix what
-  breaks, then convert it.
-- **Step 4 — making the map form unrepresentable.** Now genuinely reachable for
-  the query layer: nothing in `uni-query` decodes an entity into a map any more.
-  It stays open until storage does the same, since a map-encoded entity can still
-  arrive from below.
-
-Three call sites in `uni-query` deliberately do not canonicalise, and should not:
-`write.rs:1090` decodes COPY FROM input, where an `_id` column is plausibly user
-data; `write.rs:1996` decodes scalar key columns; `endpoint_hydrate.rs:243` is a
-`matches!(…, Value::List(_))` shape probe.
+- **Step 4, making the map form unrepresentable in the type system.** Every
+  construction site in `uni-query` is gone and storage never had one, so the map
+  form now arises only where a decoder produces it and immediately canonicalises.
+  What blocks a hard type-level ban is the legitimate remainder: `COPY FROM`
+  input and user map properties can carry `_id`, and the dispatch guards need to
+  ask "is this the map form?" to answer at all. The ratchet is the guard for
+  that boundary, not a compiler check.
+- Three query-side call sites deliberately do not canonicalise, and should not:
+  `write.rs:1090` decodes COPY FROM input, where an `_id` column is plausibly
+  user data; `write.rs:1996` decodes scalar key columns; `endpoint_hydrate.rs:243`
+  is a `matches!(…, Value::List(_))` shape probe.

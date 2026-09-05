@@ -434,6 +434,38 @@ pub enum EntityRef {
     Edge(Eid),
 }
 
+/// The relationship type of an edge, as the value actually spells it.
+///
+/// Produced by [`Value::edge_type_ref`]. An edge names its type four different
+/// ways depending on which plan produced it — `_type` holding a name, `_type`
+/// holding a numeric type id, `_type_name`, or `edge_type` — and
+/// [`Value::Edge`] holds the name directly. Every reader hand-rolled its own
+/// subset, so `type(r)` raised "requires a relationship argument" on an edge
+/// straight out of `CREATE` (numeric `_type`), and a sort key silently used the
+/// empty string for the same edge.
+///
+/// Resolving [`EdgeTypeRef::Id`] to a name needs the schema, which this crate
+/// does not have; that is why the id survives into the return type instead of
+/// being resolved here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EdgeTypeRef {
+    /// The type name, already resolved.
+    Name(String),
+    /// A numeric edge-type id, to be resolved against the schema.
+    Id(u32),
+}
+
+impl EdgeTypeRef {
+    /// The name, when the value carried one. `None` for an unresolved id.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            EdgeTypeRef::Name(n) => Some(n.as_str()),
+            EdgeTypeRef::Id(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 #[non_exhaustive]
@@ -718,6 +750,70 @@ impl Value {
         Some(names)
     }
 
+    /// An entity's user properties, in whichever encoding it uses.
+    ///
+    /// The value half of [`Value::property_names`], and it applies the same
+    /// rule: a null-valued property does not exist on an entity, so it is
+    /// dropped. `None` for a value that is not an entity — which is what lets
+    /// `properties()` tell "not an entity" (null) from "an entity with none"
+    /// (`{}`).
+    #[must_use]
+    pub fn entity_properties(&self) -> Option<HashMap<String, Value>> {
+        let props: &HashMap<String, Value> = match self {
+            Value::Node(node) => &node.properties,
+            Value::Edge(edge) => &edge.properties,
+            Value::Map(map) => {
+                entity_ref_from_map(map)?;
+                match map.get("_all_props") {
+                    Some(Value::Map(all)) => all,
+                    _ => map,
+                }
+            }
+            _ => return None,
+        };
+        Some(
+            props
+                .iter()
+                .filter(|(k, v)| !k.starts_with('_') && !v.is_null())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        )
+    }
+
+    /// The labels of the vertex this value denotes, in either encoding.
+    ///
+    /// `None` when the value is not a vertex. An edge has no labels, and
+    /// answering `Some(vec![])` for one would let `labels(r)` succeed where it
+    /// should not.
+    #[must_use]
+    pub fn entity_labels(&self) -> Option<Vec<String>> {
+        match self {
+            Value::Node(node) => Some(node.labels.clone()),
+            Value::Map(map) => {
+                // A vertex, or a projection carrying `_labels` without an id —
+                // the readers this replaced accepted both, and one of them was
+                // the only path that answered for the id-less shape.
+                match entity_ref_from_map(map) {
+                    Some(EntityRef::Edge(_)) => return None,
+                    Some(EntityRef::Vertex(_)) => {}
+                    None if map.contains_key("_labels") => {}
+                    None => return None,
+                }
+                Some(match map.get("_labels") {
+                    Some(Value::List(items)) => items
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::String(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Set one property on an entity, in whichever encoding it uses.
     ///
     /// Assigning `Null` **removes** the property from a native entity: under the
@@ -825,6 +921,71 @@ impl Value {
         match self.entity_ref()? {
             EntityRef::Edge(eid) => Some(eid),
             EntityRef::Vertex(_) => None,
+        }
+    }
+
+    /// The relationship type of the edge this value denotes, in any spelling.
+    ///
+    /// Prefers a name over an id: a value carrying both is answered with the
+    /// name, so a caller without a schema still gets one. See [`EdgeTypeRef`]
+    /// for why the id is not resolved here.
+    #[must_use]
+    pub fn edge_type_ref(&self) -> Option<EdgeTypeRef> {
+        match self {
+            Value::Edge(e) => Some(EdgeTypeRef::Name(e.edge_type.clone())),
+            Value::Map(m) => {
+                let named =
+                    ["_type_name", "edge_type", "_type"]
+                        .iter()
+                        .find_map(|k| match m.get(*k) {
+                            Some(Value::String(s)) => Some(EdgeTypeRef::Name(s.clone())),
+                            _ => None,
+                        });
+                if named.is_some() {
+                    return named;
+                }
+                ["_type", "_type_id"]
+                    .iter()
+                    .find_map(|k| m.get(*k))
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok())
+                    .map(EdgeTypeRef::Id)
+            }
+            _ => None,
+        }
+    }
+
+    /// The endpoints of the edge this value denotes, in either encoding.
+    ///
+    /// The endpoint twin of [`Value::entity_ref`]. Identity had an accessor and
+    /// endpoints did not, so `startNode`/`endNode` grew a native arm and a map
+    /// arm side by side, each spelling the endpoints differently — `_src_vid`
+    /// in one vocabulary, `_src` in another. Either side missing a spelling is
+    /// a silent `null`, not an error.
+    ///
+    /// Each endpoint is independently optional: a projection may carry the
+    /// source and not the destination. `None` means "this is not an edge, or it
+    /// does not say".
+    #[must_use]
+    pub fn edge_endpoints(&self) -> Option<(Option<Vid>, Option<Vid>)> {
+        match self {
+            Value::Edge(e) => Some((Some(e.src), Some(e.dst))),
+            Value::Map(m) => {
+                // Only answer for a map that actually denotes an edge, so a
+                // vertex map carrying a user property called `src` cannot be
+                // read as one.
+                if !matches!(entity_ref_from_map(m), Some(EntityRef::Edge(_))) {
+                    return None;
+                }
+                let endpoint = |keys: &[&str]| -> Option<Vid> {
+                    get_with_fallback(m, keys).and_then(Value::coerce_vid)
+                };
+                Some((
+                    endpoint(&["_src_vid", "_src", "src"]),
+                    endpoint(&["_dst_vid", "_dst", "dst"]),
+                ))
+            }
+            _ => None,
         }
     }
 
@@ -2161,6 +2322,70 @@ mod tests {
         use super::super::{EntityRef, Value};
         use crate::core::id::{Eid, Vid};
         use std::collections::HashMap;
+
+        /// Both encodings must report the same endpoints, or `startNode` is a
+        /// silent `null` on whichever one the caller did not anticipate.
+        #[test]
+        fn edge_endpoints_agree_across_encodings() {
+            let native = Value::Edge(crate::Edge {
+                eid: Eid::from(7u64),
+                edge_type: "KNOWS".into(),
+                src: Vid::from(1u64),
+                dst: Vid::from(2u64),
+                properties: HashMap::new(),
+            });
+            assert_eq!(
+                native.edge_endpoints(),
+                Some((Some(Vid::from(1u64)), Some(Vid::from(2u64))))
+            );
+
+            // The two map vocabularies the query layer actually emits.
+            for (src_key, dst_key) in [("_src_vid", "_dst_vid"), ("_src", "_dst")] {
+                let mut m = HashMap::new();
+                m.insert("_eid".to_string(), Value::Int(7));
+                m.insert(src_key.to_string(), Value::Int(1));
+                m.insert(dst_key.to_string(), Value::Int(2));
+                assert_eq!(
+                    Value::Map(m).edge_endpoints(),
+                    Some((Some(Vid::from(1u64)), Some(Vid::from(2u64)))),
+                    "endpoints missed for the `{src_key}`/`{dst_key}` spelling"
+                );
+            }
+        }
+
+        /// A vertex is not an edge, and a plain map is neither. Answering here
+        /// would let `startNode(n)` invent an endpoint from a user property.
+        #[test]
+        fn edge_endpoints_declines_non_edges() {
+            assert_eq!(node_map(Value::Int(3)).edge_endpoints(), None);
+            assert_eq!(
+                Value::Node(crate::Node {
+                    vid: Vid::from(3u64),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                })
+                .edge_endpoints(),
+                None
+            );
+            // A bare map whose `src` is user data, with nothing marking it as
+            // an edge, must not be read as one.
+            let mut m = HashMap::new();
+            m.insert("src".to_string(), Value::Int(1));
+            assert_eq!(Value::Map(m).edge_endpoints(), None);
+        }
+
+        /// A projection may carry one endpoint and not the other; that is a
+        /// missing endpoint, not a missing edge.
+        #[test]
+        fn edge_endpoints_are_independently_optional() {
+            let mut m = HashMap::new();
+            m.insert("_eid".to_string(), Value::Int(7));
+            m.insert("_src_vid".to_string(), Value::Int(1));
+            assert_eq!(
+                Value::Map(m).edge_endpoints(),
+                Some((Some(Vid::from(1u64)), None))
+            );
+        }
 
         fn node_map(id: Value) -> Value {
             let mut m = HashMap::new();

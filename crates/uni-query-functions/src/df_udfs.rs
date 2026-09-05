@@ -664,17 +664,25 @@ impl ScalarUDFImpl for TypeUdf {
                 // raised "requires a relationship argument" for an argument that
                 // is exactly that (#234).
                 Value::Edge(edge) => Ok(Value::String(edge.edge_type.clone())),
-                // Edge represented as a map (from CypherValue encoding)
-                Value::Map(map) => {
-                    if let Some(Value::String(t)) = map.get("_type") {
-                        Ok(Value::String(t.clone()))
-                    } else {
-                        // Map without _type key is not a relationship
-                        Err(datafusion::error::DataFusionError::Execution(
-                            "TypeError: InvalidArgumentValue - type() requires a relationship argument".to_string(),
-                        ))
+                // Edge represented as a map (from CypherValue encoding). Read
+                // through the accessor: this arm knew only `_type` holding a
+                // *name*, so an edge straight out of CREATE — which spells the
+                // type as a numeric id — was rejected as not a relationship.
+                // Without a schema here an id cannot become a name, so it is
+                // still an error, but a different and honest one.
+                Value::Map(map) => match Value::Map(map.clone()).edge_type_ref() {
+                    Some(uni_common::value::EdgeTypeRef::Name(t)) => Ok(Value::String(t)),
+                    Some(uni_common::value::EdgeTypeRef::Id(id)) => {
+                        Err(datafusion::error::DataFusionError::Execution(format!(
+                            "type(): relationship carries edge-type id {id} with no name; \
+                             the type name was not projected into this row"
+                        )))
                     }
-                }
+                    None => Err(datafusion::error::DataFusionError::Execution(
+                        "TypeError: InvalidArgumentValue - type() requires a relationship argument"
+                            .to_string(),
+                    )),
+                },
                 Value::Null => Ok(Value::Null),
                 _ => Err(datafusion::error::DataFusionError::Execution(
                     "TypeError: InvalidArgumentValue - type() requires a relationship argument"
@@ -1281,31 +1289,22 @@ fn startnode_endnode_impl(val_args: &[Value], is_start: bool) -> DFResult<Value>
 
 /// Extract the src or dst VID from an edge value.
 fn extract_endpoint_vid(val: &Value, is_start: bool) -> Option<u64> {
-    match val {
-        Value::Edge(edge) => {
-            let vid = if is_start { edge.src } else { edge.dst };
-            Some(vid.as_u64())
-        }
-        Value::Map(map) => {
-            // Try _src_vid / _dst_vid first
-            let key = if is_start { "_src_vid" } else { "_dst_vid" };
-            if let Some(v) = map.get(key) {
-                return v.as_u64();
-            }
-            // Try _src / _dst
-            let key2 = if is_start { "_src" } else { "_dst" };
-            if let Some(v) = map.get(key2) {
-                return v.as_u64();
-            }
-            // Try _startNode / _endNode (return VID from nested node)
-            let node_key = if is_start { "_startNode" } else { "_endNode" };
-            if let Some(node_val) = map.get(node_key) {
-                return extract_vid(node_val);
-            }
-            None
-        }
-        _ => None,
+    // Through the accessor, which knows every spelling of the endpoints in
+    // both encodings — this was the third place to enumerate them by hand.
+    if let Some((src, dst)) = val.edge_endpoints()
+        && let Some(vid) = if is_start { src } else { dst }
+    {
+        return Some(vid.as_u64());
     }
+    // A nested whole node under `_startNode`/`_endNode`, which is a shape the
+    // accessor does not cover: the endpoint is the node, not an id.
+    if let Value::Map(map) = val {
+        let node_key = if is_start { "_startNode" } else { "_endNode" };
+        if let Some(node_val) = map.get(node_key) {
+            return extract_vid(node_val);
+        }
+    }
+    None
 }
 
 /// Extract the VID of a node argument.
@@ -1318,10 +1317,9 @@ fn extract_endpoint_vid(val: &Value, is_start: bool) -> Option<u64> {
 /// Recognising only `Value::Map` — as this did — meant a node arriving in its
 /// native `Value::Node` encoding never matched, and `startNode(r)` silently
 /// returned the vid-only stand-in instead of the node, so `startNode(r).name`
-/// came back NULL. That is not reachable through the node-argument path today
-/// (a structural projection always yields the map form) but it costs nothing to
-/// be correct for both, and the divergence is exactly what this consolidation
-/// exists to remove.
+/// came back NULL. A structural projection used to always yield the map form,
+/// which is why that was unreachable; it no longer does, so this is now the
+/// path a node argument actually takes.
 fn extract_vid(val: &Value) -> Option<u64> {
     val.entity_vid().map(|vid| vid.as_u64())
 }

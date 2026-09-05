@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-//! A ratchet on hand-rolled entity identity (#234).
+//! A ratchet on hand-rolled entity identity and shape (#234).
 //!
 //! Entity identity has one accessor — `Value::entity_ref` / `entity_vid` /
 //! `entity_eid` / `entity_ref_from_map`. Reading `_vid`, `_eid` or `_id` out of
@@ -58,8 +58,59 @@ fn budget() -> BTreeMap<&'static str, usize> {
     ])
 }
 
+/// Files still permitted to read an entity's labels, edge type or endpoints out
+/// of a map by hand. Same rule as [`budget`]: audited, and the ratchet only
+/// turns down.
+///
+/// Every entry here is a *decoder* or a *dispatch guard* — code whose job is to
+/// recognise the map form and convert it, or to decide which of two shapes it
+/// has. Those must read the keys; that is what makes them the boundary. A
+/// reader that merely wants the labels of an entity it already has does not
+/// belong here.
+fn shape_budget() -> BTreeMap<&'static str, usize> {
+    BTreeMap::from([
+        // `is_node_map` / `is_edge_map` and the map -> native conversion they
+        // guard. Reading the keys *is* the conversion.
+        (
+            "crates/uni-query/src/query/executor/result_normalizer.rs",
+            4,
+        ),
+        // `extract_edge_identity` and the SET/REMOVE edge-map dispatch guard:
+        // they decide whether a value is an edge *map* specifically, and the
+        // accessor is deliberately wider. Plus `resolve_edge_type_id`, which
+        // takes the raw value so it can accept either an id or a name.
+        ("crates/uni-query/src/query/executor/write.rs", 10),
+        // Locy's row decoder converting its own map vocabulary to native.
+        ("crates/uni-query/src/query/df_graph/locy_eval.rs", 3),
+        // `edge_eid_and_type`'s vertex twin, decoding a map to native.
+        ("crates/uni-query/src/query/df_graph/mutation_common.rs", 1),
+        // Sort-key payload encoders that are map-shaped by construction; the
+        // native forms have their own encoders alongside.
+        ("crates/uni-query-functions/src/df_udfs/sort_key.rs", 3),
+        // `labels()`'s map arm, which must accept a `_labels`-only map that
+        // carries no id at all — wider than `entity_labels` allows.
+        ("crates/uni-query-functions/src/df_udfs.rs", 1),
+    ])
+}
+
 /// The extraction idiom: pulling an entity id straight out of a map.
 const PATTERNS: [&str; 3] = ["get(\"_vid\")", "get(\"_eid\")", "get(\"_id\")"];
+
+/// The same idiom for an entity's *shape* rather than its id: labels, edge
+/// type, endpoints. Each of these had the identical failure — several
+/// spellings, a different subset understood at each site, and a silent wrong
+/// answer for whichever the reader did not know. They now have accessors too:
+/// `Value::entity_labels`, `Value::edge_type_ref`, `Value::edge_endpoints`.
+const SHAPE_PATTERNS: [&str; 8] = [
+    "get(\"_labels\")",
+    "get(\"_type\")",
+    "get(\"_type_name\")",
+    "get(\"edge_type\")",
+    "get(\"_src\")",
+    "get(\"_dst\")",
+    "get(\"_src_vid\")",
+    "get(\"_dst_vid\")",
+];
 
 fn workspace_root() -> PathBuf {
     // CARGO_MANIFEST_DIR is `<root>/crates/uni`.
@@ -101,6 +152,7 @@ fn no_new_site_hand_rolls_entity_identity() {
 
     let budget = budget();
     let mut actual: BTreeMap<String, usize> = BTreeMap::new();
+    let mut shape_actual: BTreeMap<String, usize> = BTreeMap::new();
 
     for file in &files {
         let rel = file
@@ -122,7 +174,11 @@ fn no_new_site_hand_rolls_entity_identity() {
         };
         let hits: usize = PATTERNS.iter().map(|p| text.matches(p).count()).sum();
         if hits > 0 {
-            actual.insert(rel, hits);
+            actual.insert(rel.clone(), hits);
+        }
+        let shape_hits: usize = SHAPE_PATTERNS.iter().map(|p| text.matches(p).count()).sum();
+        if shape_hits > 0 {
+            shape_actual.insert(rel, shape_hits);
         }
     }
 
@@ -148,6 +204,32 @@ fn no_new_site_hand_rolls_entity_identity() {
         if count < *allowed {
             problems.push(format!(
                 "{file}: budget {allowed} but only {count} found — lower it to {count} \
+                 (or remove the entry) so the ratchet stays tight."
+            ));
+        }
+    }
+
+    // The same ratchet for labels / edge type / endpoints.
+    let shape = shape_budget();
+    for (file, count) in &shape_actual {
+        match shape.get(file.as_str()) {
+            None => problems.push(format!(
+                "{file}: {count} hand-rolled read(s) of an entity's labels, edge type or \
+                 endpoints in a file with no budget. Use Value::entity_labels / \
+                 edge_type_ref / edge_endpoints."
+            )),
+            Some(&allowed) if *count > allowed => problems.push(format!(
+                "{file}: {count} hand-rolled shape read(s), budget {allowed}. \
+                 The ratchet only turns one way — route the new one through the accessor."
+            )),
+            Some(_) => {}
+        }
+    }
+    for (file, allowed) in &shape {
+        let count = shape_actual.get(*file).copied().unwrap_or(0);
+        if count < *allowed {
+            problems.push(format!(
+                "{file}: shape budget {allowed} but only {count} found — lower it to {count} \
                  (or remove the entry) so the ratchet stays tight."
             ));
         }

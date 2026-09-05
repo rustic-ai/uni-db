@@ -974,10 +974,10 @@ fn map_to_graph_entity(map: HashMap<String, Value>) -> Value {
     if let Some(uni_common::value::EntityRef::Edge(eid)) =
         uni_common::value::entity_ref_from_map(&map)
     {
-        let edge_type = match map.get("_type") {
-            Some(Value::String(s)) => s.clone(),
-            _ => String::new(),
-        };
+        let edge_type = Value::Map(map.clone())
+            .edge_type_ref()
+            .and_then(|t| t.name().map(str::to_string))
+            .unwrap_or_default();
         let src = match map.get("_src_vid") {
             Some(Value::Int(i)) => Vid::new(*i as u64),
             _ => Vid::new(0),

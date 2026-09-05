@@ -288,11 +288,18 @@ impl Executor {
             };
 
             if let Some(expr) = filter {
-                let mut props_map: HashMap<String, Value> = props;
-                props_map.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-
+                // Labels are deliberately empty: the map form this replaced
+                // carried no `_labels` either, so a label predicate answered
+                // false then and answers false now.
                 let mut row = HashMap::new();
-                row.insert(variable.to_string(), Value::Map(props_map));
+                row.insert(
+                    variable.to_string(),
+                    Value::Node(uni_common::Node {
+                        vid,
+                        labels: Vec::new(),
+                        properties: props,
+                    }),
+                );
 
                 let res = self
                     .evaluate_expr(expr, &row, prop_manager, params, ctx)
@@ -381,8 +388,8 @@ impl Executor {
     /// Find a node value in the row by VID.
     ///
     /// Scans all values in the row, looking for a node (Map or Node) whose VID
-    /// matches the target. Returns the full node value if found, or a minimal
-    /// Map with just `_vid` as fallback.
+    /// matches the target. Returns the full node value if found, or a bare
+    /// `Value::Node` carrying just the identity as fallback.
     fn find_node_by_vid(row: &HashMap<String, Value>, target_vid: Vid) -> Value {
         for val in row.values() {
             if let Ok(vid) = Self::vid_from_value(val)
@@ -391,11 +398,12 @@ impl Executor {
                 return val.clone();
             }
         }
-        // Fallback: return minimal node map
-        Value::Map(HashMap::from([(
-            "_vid".to_string(),
-            Value::Int(target_vid.as_u64() as i64),
-        )]))
+        // Nothing in the row denotes it, so answer with the identity alone.
+        Value::Node(uni_common::Node {
+            vid: target_vid,
+            labels: Vec::new(),
+            properties: HashMap::new(),
+        })
     }
 
     /// Create L0 context, session, and planner for DataFusion execution.
@@ -2286,13 +2294,15 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Map(map) = &val
-                            && let Some(type_val) = map.get("_type")
-                        {
-                            // Numeric _type is an edge type ID; string _type is already a name
-                            if let Some(type_id) =
-                                type_val.as_u64().and_then(|v| u32::try_from(v).ok())
-                            {
+                        // Through the accessor. Reading `_type` out of a map
+                        // by hand meant a native `Value::Edge` — every edge the
+                        // write path now binds — fell straight through to
+                        // `Null`, silently.
+                        match val.edge_type_ref() {
+                            Some(uni_common::value::EdgeTypeRef::Name(name)) => {
+                                return Ok(Value::String(name));
+                            }
+                            Some(uni_common::value::EdgeTypeRef::Id(type_id)) => {
                                 if let Some(name) = this
                                     .storage
                                     .schema_manager()
@@ -2300,9 +2310,8 @@ impl Executor {
                                 {
                                     return Ok(Value::String(name));
                                 }
-                            } else if let Some(name) = type_val.as_str() {
-                                return Ok(Value::String(name.to_string()));
                             }
+                            None => {}
                         }
                         return Ok(Value::Null);
                     }
@@ -2315,10 +2324,12 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Map(map) = &val
-                            && let Some(labels_val) = map.get("_labels")
-                        {
-                            return Ok(labels_val.clone());
+                        // `labels(n)` answered `Null` for a native node, for
+                        // the same reason `type(r)` did.
+                        if let Some(labels) = val.entity_labels() {
+                            return Ok(Value::List(
+                                labels.into_iter().map(Value::String).collect(),
+                            ));
                         }
                         return Ok(Value::Null);
                     }
@@ -2331,15 +2342,18 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Map(map) = &val {
-                            // Filter out internal properties (those starting with _)
-                            let mut props = HashMap::new();
-                            for (k, v) in map.iter() {
-                                if !k.starts_with('_') {
-                                    props.insert(k.clone(), v.clone());
-                                }
-                            }
+                        if let Some(props) = val.entity_properties() {
                             return Ok(Value::Map(props));
+                        }
+                        // A plain map is its own properties; only a non-map,
+                        // non-entity is `Null`.
+                        if let Value::Map(map) = &val {
+                            return Ok(Value::Map(
+                                map.iter()
+                                    .filter(|(k, _)| !k.starts_with('_'))
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect(),
+                            ));
                         }
                         return Ok(Value::Null);
                     }
@@ -2352,25 +2366,15 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Edge(edge) = &val {
-                            return Ok(Self::find_node_by_vid(row, edge.src));
+                        // A nested `_startNode` is a whole node the plan
+                        // already resolved; prefer it over re-deriving one.
+                        if let Value::Map(map) = &val
+                            && let Some(start_node) = map.get("_startNode")
+                        {
+                            return Ok(start_node.clone());
                         }
-                        if let Value::Map(map) = &val {
-                            if let Some(start_node) = map.get("_startNode") {
-                                return Ok(start_node.clone());
-                            }
-                            if let Some(src_vid) = map.get("_src_vid") {
-                                return Ok(Value::Map(HashMap::from([(
-                                    "_vid".to_string(),
-                                    src_vid.clone(),
-                                )])));
-                            }
-                            // Resolve _src VID by looking up node in row
-                            if let Some(src_id) = map.get("_src")
-                                && let Some(u) = src_id.as_u64()
-                            {
-                                return Ok(Self::find_node_by_vid(row, Vid::new(u)));
-                            }
+                        if let Some((Some(src), _)) = val.edge_endpoints() {
+                            return Ok(Self::find_node_by_vid(row, src));
                         }
                         return Ok(Value::Null);
                     }
@@ -2383,25 +2387,13 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Edge(edge) = &val {
-                            return Ok(Self::find_node_by_vid(row, edge.dst));
+                        if let Value::Map(map) = &val
+                            && let Some(end_node) = map.get("_endNode")
+                        {
+                            return Ok(end_node.clone());
                         }
-                        if let Value::Map(map) = &val {
-                            if let Some(end_node) = map.get("_endNode") {
-                                return Ok(end_node.clone());
-                            }
-                            if let Some(dst_vid) = map.get("_dst_vid") {
-                                return Ok(Value::Map(HashMap::from([(
-                                    "_vid".to_string(),
-                                    dst_vid.clone(),
-                                )])));
-                            }
-                            // Resolve _dst VID by looking up node in row
-                            if let Some(dst_id) = map.get("_dst")
-                                && let Some(u) = dst_id.as_u64()
-                            {
-                                return Ok(Self::find_node_by_vid(row, Vid::new(u)));
-                            }
+                        if let Some((_, Some(dst))) = val.edge_endpoints() {
+                            return Ok(Self::find_node_by_vid(row, dst));
                         }
                         return Ok(Value::Null);
                     }
@@ -2423,29 +2415,14 @@ impl Executor {
                             anyhow!("Second argument to hasLabel must be a string")
                         })?;
 
-                        let has_label = match &node_val {
-                            // Handle proper Value::Node type (from result normalization)
-                            Value::Map(map) if map.contains_key("_vid") => {
-                                if let Some(Value::List(labels_arr)) = map.get("_labels") {
-                                    labels_arr
-                                        .iter()
-                                        .any(|l| l.as_str() == Some(label_to_check))
-                                } else {
-                                    false
-                                }
-                            }
-                            // Also handle legacy Object format
-                            Value::Map(map) => {
-                                if let Some(Value::List(labels_arr)) = map.get("_labels") {
-                                    labels_arr
-                                        .iter()
-                                        .any(|l| l.as_str() == Some(label_to_check))
-                                } else {
-                                    false
-                                }
-                            }
-                            _ => false,
-                        };
+                        // Both arms this replaced matched `Value::Map` and read
+                        // `_labels` by hand — the first even claimed to "handle
+                        // proper Value::Node", which it did not: a natively
+                        // encoded node fell to the catch-all and answered
+                        // `false`.
+                        let has_label = node_val
+                            .entity_labels()
+                            .is_some_and(|labels| labels.iter().any(|l| l == label_to_check));
                         return Ok(Value::Bool(has_label));
                     }
 
@@ -2663,45 +2640,35 @@ impl Executor {
                     let val = this
                         .evaluate_expr(expr, row, prop_manager, params, ctx)
                         .await?;
-                    match &val {
-                        Value::Null => Ok(Value::Null),
-                        Value::Map(map) => {
-                            // Check if this is an edge (has _eid) or node (has _vid)
-                            let is_edge = map.contains_key("_eid")
-                                || map.contains_key("_type_name")
-                                || (map.contains_key("_type") && !map.contains_key("_vid"));
-
-                            if is_edge {
-                                // Edges have a single type
-                                if labels.len() > 1 {
-                                    return Ok(Value::Bool(false));
-                                }
-                                let label_to_check = &labels[0];
-                                let has_type = if let Some(Value::String(t)) = map.get("_type_name")
-                                {
-                                    t == label_to_check
-                                } else if let Some(Value::String(t)) = map.get("_type") {
-                                    t == label_to_check
-                                } else {
-                                    false
-                                };
-                                Ok(Value::Bool(has_type))
-                            } else {
-                                // Node: check all labels
-                                let has_all = labels.iter().all(|label_to_check| {
-                                    if let Some(Value::List(labels_arr)) = map.get("_labels") {
-                                        labels_arr
-                                            .iter()
-                                            .any(|l| l.as_str() == Some(label_to_check.as_str()))
-                                    } else {
-                                        false
-                                    }
-                                });
-                                Ok(Value::Bool(has_all))
-                            }
-                        }
-                        _ => Ok(Value::Bool(false)),
+                    // Both encodings, through the accessors. This matched on
+                    // `Value::Map` alone, so `WHERE n:Person` against a natively
+                    // encoded node fell to the catch-all and answered `false` —
+                    // a predicate that silently excludes every row.
+                    if matches!(val, Value::Null) {
+                        return Ok(Value::Null);
                     }
+                    if let Some(node_labels) = val.entity_labels() {
+                        let has_all = labels
+                            .iter()
+                            .all(|want| node_labels.iter().any(|have| have == want));
+                        return Ok(Value::Bool(has_all));
+                    }
+                    if let Some(edge_type) = val.edge_type_ref() {
+                        // An edge has exactly one type, so more than one label
+                        // can never all match.
+                        if labels.len() != 1 {
+                            return Ok(Value::Bool(false));
+                        }
+                        let name = match edge_type {
+                            uni_common::value::EdgeTypeRef::Name(n) => Some(n),
+                            uni_common::value::EdgeTypeRef::Id(id) => this
+                                .storage
+                                .schema_manager()
+                                .edge_type_name_by_id_unified(id),
+                        };
+                        return Ok(Value::Bool(name.as_deref() == Some(labels[0].as_str())));
+                    }
+                    Ok(Value::Bool(false))
                 }
 
                 Expr::MapProjection { base, items } => {

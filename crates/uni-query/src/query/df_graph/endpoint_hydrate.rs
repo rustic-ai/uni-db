@@ -299,28 +299,16 @@ impl EndpointHydrateStream {
 /// Mirrors `extract_endpoint_vid` in the UDF layer: the struct form uses
 /// `_src` / `_dst`, and the traversal's flat columns use `_src_vid` / `_dst_vid`.
 fn endpoint_vid(value: &Value, is_start: bool) -> Option<Vid> {
-    match value {
-        Value::Edge(edge) => Some(if is_start { edge.src } else { edge.dst }),
-        Value::Map(map) => {
-            let keys: [&str; 2] = if is_start {
-                ["_src", "_src_vid"]
-            } else {
-                ["_dst", "_dst_vid"]
-            };
-            keys.iter()
-                .find_map(|k| map.get(*k))
-                .and_then(|v| v.as_u64())
-                .map(Vid::from)
-        }
-        _ => None,
-    }
+    let (src, dst) = value.edge_endpoints()?;
+    if is_start { src } else { dst }
 }
 
-/// Build the node value for `vid`, with its labels and properties inline.
+/// Build the node value for `vid`, with its labels and properties.
 ///
-/// Inline rather than nested under a `properties` blob so the result decodes to
-/// the same shape a structural projection produces — that is what lets
-/// `startNode(rel).name` resolve through the ordinary property path.
+/// Natively encoded, which is what a structural projection now produces too —
+/// that is what lets `startNode(rel).name` resolve through the ordinary
+/// property path. It used to be an inline `Value::Map` for the same reason,
+/// back when the map was the shape a projection produced.
 fn hydrate_node(
     vid: Vid,
     query_ctx: &uni_store::runtime::context::QueryContext,
@@ -328,27 +316,25 @@ fn hydrate_node(
 ) -> Value {
     use uni_store::runtime::l0_visibility;
 
-    let mut map: HashMap<String, Value> = HashMap::new();
-    map.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-
     let labels = l0_visibility::get_vertex_labels(vid, query_ctx);
-    map.insert(
-        "_labels".to_string(),
-        Value::List(labels.into_iter().map(Value::String).collect()),
-    );
 
     let props = match cache.vertex(vid) {
         Some(p) => Some(std::borrow::Cow::Borrowed(p)),
         None => l0_visibility::get_vertex_properties(vid, query_ctx).map(std::borrow::Cow::Owned),
     };
+    let mut properties: HashMap<String, Value> = HashMap::new();
     if let Some(props) = props {
         for (k, v) in props.iter() {
             if !k.starts_with('_') {
-                map.insert(k.clone(), v.clone());
+                properties.insert(k.clone(), v.clone());
             }
         }
     }
-    Value::Map(map)
+    Value::Node(uni_common::Node {
+        vid,
+        labels,
+        properties,
+    })
 }
 
 impl Stream for EndpointHydrateStream {

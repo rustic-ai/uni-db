@@ -205,23 +205,9 @@ impl Executor {
     ///
     /// Returns `None` when the value is not a node or has no labels.
     pub(crate) fn extract_labels_from_node(node_val: &Value) -> Option<Vec<String>> {
-        match node_val {
-            Value::Map(map) => {
-                // Map-encoded node: look for _labels array
-                if let Some(Value::List(labels_arr)) = map.get("_labels") {
-                    let labels: Vec<String> = labels_arr
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                    if !labels.is_empty() {
-                        return Some(labels);
-                    }
-                }
-                None
-            }
-            Value::Node(node) => (!node.labels.is_empty()).then(|| node.labels.clone()),
-            _ => None,
-        }
+        // Both encodings through one accessor. "No labels" stays `None` rather
+        // than `Some(vec![])`: callers here branch on the option.
+        node_val.entity_labels().filter(|l| !l.is_empty())
     }
 
     /// Extracts user-visible properties from a value that represents a node or edge.
@@ -446,10 +432,9 @@ impl Executor {
                 let current =
                     read_edge_props_with_prefetch(ei.eid, prefetched, prop_manager, ctx).await?;
                 let write_props = Self::merge_props(current, new_props, replace);
-                let edge_type_name = map
-                    .get("_type")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
+                let edge_type_name = Value::Map(map.clone())
+                    .edge_type_ref()
+                    .and_then(|t| t.name().map(str::to_string))
                     .or_else(|| {
                         self.storage
                             .schema_manager()
@@ -2147,24 +2132,24 @@ impl Executor {
         })
     }
 
-    /// Build a node Map value (`{_vid, _labels, ...props}`) for binding a MERGE
-    /// node variable.
+    /// Build the node binding for a MERGE node variable.
     ///
-    /// Matches the binding shape produced by `execute_create_pattern` and the
-    /// general MATCH path, so ON MATCH SET, RETURN, and downstream operators
-    /// resolve the variable identically — a bare `Value::Int(vid)` is not a
-    /// valid node binding for those consumers.
+    /// Matches the binding the general MATCH path produces, so ON MATCH SET,
+    /// RETURN and downstream operators resolve the variable identically — a
+    /// bare `Value::Int(vid)` is not a valid node binding for those consumers.
+    /// It said the same thing while producing a `Value::Map` and MATCH produced
+    /// a `Value::Node`, which is the divergence this closes.
     fn build_node_map(vid: Vid, label: &str, props: uni_common::Properties) -> Value {
-        let mut obj = HashMap::new();
-        obj.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-        obj.insert(
-            "_labels".to_string(),
-            Value::List(vec![Value::String(label.to_string())]),
-        );
-        for (k, v) in props {
-            obj.insert(k, v);
-        }
-        Value::Map(obj)
+        Self::bind_node(vid, std::slice::from_ref(&label.to_string()), props)
+    }
+
+    /// The one node binding: MERGE and CREATE built the same shape twice.
+    fn bind_node(vid: Vid, labels: &[String], props: uni_common::Properties) -> Value {
+        Value::Node(uni_common::Node {
+            vid,
+            labels: labels.to_vec(),
+            properties: props.into_iter().collect(),
+        })
     }
 
     /// True if an L0-only vertex has every key column set to the requested
@@ -2867,16 +2852,10 @@ impl Executor {
 
                             // Build node object with final properties (includes embeddings)
                             if let Some(var) = &n.variable {
-                                let mut obj = HashMap::new();
-                                obj.insert("_vid".to_string(), Value::Int(new_vid.as_u64() as i64));
-                                let labels_list: Vec<Value> =
-                                    n.labels.iter().map(|l| Value::String(l.clone())).collect();
-                                obj.insert("_labels".to_string(), Value::List(labels_list));
-                                for (k, v) in &final_props {
-                                    obj.insert(k.clone(), v.clone());
-                                }
-                                // Store node as a Map with _vid, matching MATCH behavior
-                                row.insert(var.clone(), Value::Map(obj));
+                                row.insert(
+                                    var.clone(),
+                                    Self::bind_node(new_vid, &n.labels, final_props.clone()),
+                                );
                             }
                             vid = Some(new_vid);
                         }
@@ -2940,26 +2919,22 @@ impl Executor {
                                 // Edge type name is now stored by insert_edge
 
                                 if store_props {
-                                    let mut edge_map = HashMap::new();
-                                    edge_map.insert(
-                                        "_eid".to_string(),
-                                        Value::Int(eid.as_u64() as i64),
+                                    // The map form spelled the type as the
+                                    // numeric `type_id`, which readers had to
+                                    // resolve against the schema — and several
+                                    // did not, so `type(r)` on a freshly
+                                    // created edge answered nothing. The name
+                                    // is in hand right here.
+                                    row.insert(
+                                        rel_var,
+                                        Value::Edge(uni_common::Edge {
+                                            eid,
+                                            edge_type: type_name.clone(),
+                                            src: edge_src,
+                                            dst: edge_dst,
+                                            properties: user_props.into_iter().collect(),
+                                        }),
                                     );
-                                    edge_map.insert(
-                                        "_src".to_string(),
-                                        Value::Int(edge_src.as_u64() as i64),
-                                    );
-                                    edge_map.insert(
-                                        "_dst".to_string(),
-                                        Value::Int(edge_dst.as_u64() as i64),
-                                    );
-                                    edge_map
-                                        .insert("_type".to_string(), Value::Int(type_id as i64));
-                                    // Include user properties so downstream RETURN sees them
-                                    for (k, v) in user_props {
-                                        edge_map.insert(k, v);
-                                    }
-                                    row.insert(rel_var, Value::Map(edge_map));
                                 }
                             }
                         }
@@ -3879,10 +3854,9 @@ impl Executor {
                             .collect(),
                     );
                     if any_exist {
-                        let edge_type_name = map
-                            .get("_type")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
+                        let edge_type_name = Value::Map(map.clone())
+                            .edge_type_ref()
+                            .and_then(|t| t.name().map(str::to_string))
                             .or_else(|| {
                                 self.storage
                                     .schema_manager()
@@ -4888,19 +4862,7 @@ impl Executor {
                 else {
                     return None;
                 };
-                let labels = if let Some(Value::List(l)) = map.get("_labels") {
-                    l.iter()
-                        .filter_map(|v| {
-                            if let Value::String(s) = v {
-                                Some(s.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                };
+                let labels = val.entity_labels().unwrap_or_default();
                 let properties: HashMap<String, Value> = map
                     .iter()
                     .filter(|(k, _)| !k.starts_with('_'))
@@ -4930,19 +4892,13 @@ impl Executor {
                 else {
                     return None;
                 };
-                let edge_type = map
-                    .get("_type_name")
-                    .and_then(|v| {
-                        if let Value::String(s) = v {
-                            Some(s.clone())
-                        } else {
-                            None
-                        }
-                    })
+                let edge_type = val
+                    .edge_type_ref()
+                    .and_then(|t| t.name().map(str::to_string))
                     .or_else(|| type_names.first().cloned())
                     .unwrap_or_default();
-                let src = map.get("_src").and_then(|v| v.as_u64()).map(Vid::new)?;
-                let dst = map.get("_dst").and_then(|v| v.as_u64()).map(Vid::new)?;
+                let (src, dst) = val.edge_endpoints()?;
+                let (src, dst) = (src?, dst?);
                 let properties: HashMap<String, Value> = map
                     .iter()
                     .filter(|(k, _)| !k.starts_with('_'))
