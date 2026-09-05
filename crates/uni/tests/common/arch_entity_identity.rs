@@ -1,0 +1,142 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2024-2026 Dragonscale Team
+
+//! A ratchet on hand-rolled entity identity (#234).
+//!
+//! Entity identity has one accessor — `Value::entity_ref` / `entity_vid` /
+//! `entity_eid` / `entity_ref_from_map`. Reading `_vid`, `_eid` or `_id` out of
+//! a map by hand re-derives it, and every such site has silently answered "not
+//! an entity" for the encoding it did not match, which callers read as "not
+//! equal", "not a duplicate" or "no such row".
+//!
+//! Comparison, dedup and hashing are handled at the boundary — `Value`'s own
+//! `PartialEq`/`Hash` compare entities by identity — so a site cannot get those
+//! wrong any more. Extraction is what remains, and Rust gives no cheap way to
+//! forbid a string literal at compile time. This test is that guard instead:
+//! CI-time rather than compile-time, and a **ratchet**, not a ban. The counts
+//! below are what exists today; a new hand-rolled site fails this test, and
+//! every count is free to go down.
+//!
+//! If you are here because this test failed: use the accessor. If you are here
+//! because you *removed* a site, lower its number (or delete the entry).
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+/// Files permitted to read an entity id out of a map by hand, and how many
+/// times each still does. Lower these as sites are routed through the accessor.
+///
+/// `crates/uni-common/src/value.rs` is absent deliberately: it *is* the
+/// accessor, and is excluded by the walk below rather than budgeted here.
+fn budget() -> BTreeMap<&'static str, usize> {
+    BTreeMap::from([
+        ("crates/uni-query/src/query/executor/read.rs", 11),
+        ("crates/uni-query-functions/src/df_udfs.rs", 8),
+        ("crates/uni-query/src/query/executor/write.rs", 6),
+        (
+            "crates/uni-query/src/query/executor/result_normalizer.rs",
+            6,
+        ),
+        ("crates/uni/src/api/impl_locy.rs", 3),
+        ("crates/uni-tck/src/world.rs", 2),
+        ("crates/uni-query/src/query/df_graph/locy_eval.rs", 2),
+    ])
+}
+
+/// The extraction idiom: pulling an entity id straight out of a map.
+const PATTERNS: [&str; 3] = ["get(\"_vid\")", "get(\"_eid\")", "get(\"_id\")"];
+
+fn workspace_root() -> PathBuf {
+    // CARGO_MANIFEST_DIR is `<root>/crates/uni`.
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workspace root is two levels above crates/uni")
+        .to_path_buf()
+}
+
+/// Recursively collect `.rs` files under `crates/*/src`.
+fn source_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            source_files(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+}
+
+#[test]
+fn no_new_site_hand_rolls_entity_identity() {
+    let root = workspace_root();
+    let crates = root.join("crates");
+    let mut files = Vec::new();
+    source_files(&crates, &mut files);
+    assert!(
+        files.len() > 100,
+        "found only {} source files under {} — the walk is not finding the tree, \
+         so a green result here would prove nothing",
+        files.len(),
+        crates.display()
+    );
+
+    let budget = budget();
+    let mut actual: BTreeMap<String, usize> = BTreeMap::new();
+
+    for file in &files {
+        let rel = file
+            .strip_prefix(&root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        // Only `src`, not tests: a test may construct either encoding on
+        // purpose, which is the point of several of them.
+        if !rel.contains("/src/") {
+            continue;
+        }
+        // The accessor itself.
+        if rel == "crates/uni-common/src/value.rs" {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        let hits: usize = PATTERNS.iter().map(|p| text.matches(p).count()).sum();
+        if hits > 0 {
+            actual.insert(rel, hits);
+        }
+    }
+
+    let mut problems = Vec::new();
+    for (file, count) in &actual {
+        match budget.get(file.as_str()) {
+            None => problems.push(format!(
+                "{file}: {count} hand-rolled entity-id read(s) in a file with no budget. \
+                 Use Value::entity_ref / entity_vid / entity_eid / entity_ref_from_map."
+            )),
+            Some(&allowed) if *count > allowed => problems.push(format!(
+                "{file}: {count} hand-rolled entity-id read(s), budget {allowed}. \
+                 The ratchet only turns one way — route the new one through the accessor."
+            )),
+            Some(_) => {}
+        }
+    }
+
+    // A budget entry that is now too generous should be tightened, so the
+    // ratchet keeps its teeth as sites are fixed.
+    for (file, allowed) in &budget {
+        let count = actual.get(*file).copied().unwrap_or(0);
+        if count < *allowed {
+            problems.push(format!(
+                "{file}: budget {allowed} but only {count} found — lower it to {count} \
+                 (or remove the entry) so the ratchet stays tight."
+            ));
+        }
+    }
+
+    assert!(problems.is_empty(), "\n{}", problems.join("\n"));
+}

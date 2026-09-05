@@ -867,6 +867,25 @@ impl PartialEq for Value {
     /// exactly. Container variants (`List`, `Map`, `Node`, `Edge`, `Path`)
     /// recurse through this same impl, so nested floats normalize too.
     fn eq(&self, other: &Self) -> bool {
+        // Graph entities compare by identity, in whichever encoding each side
+        // happens to use. Structural comparison here was a wrong answer that no
+        // site could see: `Node`'s derive compares the vid, the labels *and* the
+        // whole property map, so one vertex hydrated with different property
+        // sets on either side came back unequal, and the two encodings of one
+        // vertex were never equal at all.
+        //
+        // The comment this impl used to carry — that it affects only internal
+        // bucketing because Cypher routes through `cypher_eq` — was not true.
+        // `HashSet<Value>` backs `count(DISTINCT …)` and the recursive-CTE
+        // cycle-detection set, and Locy's `values_equal` falls through to here,
+        // so this equality reaches results.
+        match (self.entity_ref(), other.entity_ref()) {
+            (Some(a), Some(b)) => return a == b,
+            // An entity is never equal to a non-entity.
+            (Some(_), None) | (None, Some(_)) => return false,
+            (None, None) => {}
+        }
+
         match (self, other) {
             // Normalized float arm — the whole point of this hand-written impl.
             (Value::Float(a), Value::Float(b)) => float_eq_normalized(*a, *b),
@@ -941,6 +960,18 @@ fn hash_f32_normalized<H: Hasher>(f: f32, state: &mut H) {
 
 impl Hash for Value {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        // Entities hash by identity, to agree with `PartialEq` above.
+        //
+        // The discriminant is deliberately *not* mixed in here: the two
+        // encodings of one entity are different variants, and hashing the
+        // variant would put equal values in different buckets — a broken
+        // `Hash`/`Eq` contract, and silently wrong `HashSet`/`HashMap` results
+        // rather than a visible failure.
+        if let Some(entity) = self.entity_ref() {
+            entity.hash(state);
+            return;
+        }
+
         // Discriminant first for type safety
         std::mem::discriminant(self).hash(state);
         match self {
@@ -1956,6 +1987,88 @@ mod tests {
             assert_eq!(Value::String("7".into()).entity_ref(), None);
             assert_eq!(Value::Null.entity_ref(), None);
             assert_eq!(node_map(Value::Int(-1)).entity_ref(), None);
+        }
+
+        fn hash_of(v: &Value) -> u64 {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            v.hash(&mut h);
+            h.finish()
+        }
+
+        /// `Value`'s own `==` compares entities by identity, so a site that
+        /// never heard of `entity_ref` still gets the right answer.
+        ///
+        /// This is the boundary fix: `HashSet<Value>` backs `count(DISTINCT …)`
+        /// and the recursive-CTE cycle-detection set, and Locy's `values_equal`
+        /// falls through to here, so this operator reaches user-visible results.
+        #[test]
+        fn value_equality_compares_entities_by_identity() {
+            let mut props = HashMap::new();
+            props.insert("name".to_string(), Value::String("a".into()));
+            let hydrated = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into(), "Q".into()],
+                properties: props,
+            });
+            let bare = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::new(),
+            });
+            // Same vertex, different hydration.
+            assert_eq!(hydrated, bare);
+            // Same vertex, different encoding.
+            assert_eq!(hydrated, node_map(Value::Int(7)));
+            // Different vertices stay different.
+            assert_ne!(hydrated, node_map(Value::Int(8)));
+            // An entity is not a bare number, and not an edge of that number.
+            assert_ne!(hydrated, Value::Int(7));
+            assert_ne!(hydrated, edge_map_with_shared_id(Value::Int(7)));
+        }
+
+        /// `Hash` agrees with `Eq`, including across the two encodings.
+        ///
+        /// If these disagreed, equal values would land in different buckets and
+        /// every `HashSet`/`HashMap` keyed on `Value` would silently keep
+        /// duplicates — a wrong answer rather than a visible failure. The
+        /// discriminant is therefore not hashed for entities, since the two
+        /// encodings are different variants.
+        #[test]
+        fn value_hash_agrees_with_equality_across_encodings() {
+            let native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::new(),
+            });
+            let as_map = node_map(Value::Int(7));
+            assert_eq!(native, as_map);
+            assert_eq!(
+                hash_of(&native),
+                hash_of(&as_map),
+                "equal values must hash alike or HashSet keeps both"
+            );
+        }
+
+        /// The dedup a `HashSet<Value>` performs is now identity-based.
+        #[test]
+        fn a_value_set_dedups_one_entity_across_encodings() {
+            use std::collections::HashSet;
+            let mut set: HashSet<Value> = HashSet::new();
+            set.insert(Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::new(),
+            }));
+            set.insert(node_map(Value::Int(7)));
+            set.insert(edge_map_with_shared_id(Value::Int(7)));
+            set.insert(node_map(Value::Int(8)));
+            assert_eq!(
+                set.len(),
+                3,
+                "one vertex twice-encoded is one member; the edge and the other vertex are two more"
+            );
         }
 
         /// `EntityRef` is usable as a dedup/join key, which is what lets one
