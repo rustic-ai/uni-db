@@ -645,9 +645,9 @@ fn invoke_locy_generator(
     for i in 0..emitted {
         let mut tuple = Vec::with_capacity(out.columns.len());
         for col in &out.columns {
-            tuple.push(uni_store::storage::arrow_convert::arrow_to_value(
-                col, i, None,
-            ));
+            tuple.push(
+                uni_store::storage::arrow_convert::arrow_to_value(col, i, None).canonical_entity(),
+            );
         }
         tuples.push(tuple);
     }
@@ -684,7 +684,19 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Int(x), Value::Float(y)) => (*x as f64) == *y,
         (Value::Float(x), Value::Int(y)) => *x == (*y as f64),
-        _ => a == b,
+        _ => {
+            // Entities compare by identity here too. Falling through to derived
+            // equality compared a node's vid, labels *and* whole property map,
+            // so the same entity hydrated differently on either side — or
+            // arriving in the other encoding — came back unequal. `IN` on the
+            // in-memory path routes through this function, so that was a silent
+            // membership miss rather than an error.
+            match (a.entity_ref(), b.entity_ref()) {
+                (Some(x), Some(y)) => x == y,
+                (Some(_), None) | (None, Some(_)) => false,
+                (None, None) => a == b,
+            }
+        }
     }
 }
 
@@ -696,11 +708,11 @@ pub fn values_equal(a: &Value, b: &Value) -> bool {
 /// executions (e.g., schema mode adds `overflow_json: Null` in some paths
 /// but not others). For non-graph values, falls back to `values_equal`.
 pub fn values_equal_for_join(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Node(na), Value::Node(nb)) => na.vid == nb.vid,
-        (Value::Edge(ea), Value::Edge(eb)) => ea.eid == eb.eid,
-        _ => values_equal(a, b),
-    }
+    // `values_equal` now answers the identity question itself, through
+    // `entity_ref`, which also covers the map encoding and the mixed pairings
+    // the two arms here used to miss. Kept as a named entry point because the
+    // IS-ref call sites read better for it.
+    values_equal(a, b)
 }
 
 /// Compare two values returning an Ordering.
@@ -886,7 +898,8 @@ pub fn record_batches_to_locy_rows(batches: &[RecordBatch]) -> Vec<FactRow> {
                     column.as_ref(),
                     row_idx,
                     data_type,
-                );
+                )
+                .canonical_entity();
                 row.insert(field.name().clone(), value);
             }
             normalize_graph_row(&mut row);
@@ -950,19 +963,21 @@ pub(crate) fn normalize_graph_row(row: &mut FactRow) {
 
 /// Convert a map with internal graph fields to `Value::Node` or `Value::Edge`.
 fn map_to_graph_entity(map: HashMap<String, Value>) -> Value {
-    use uni_common::core::id::{Eid, Vid};
+    use uni_common::core::id::Vid;
     use uni_common::value::{Edge, Node};
 
-    // Edge: has _eid
-    if let Some(eid_val) = map.get("_eid") {
-        let eid = match eid_val {
-            Value::Int(i) => Eid::new(*i as u64),
-            _ => return Value::Map(map),
-        };
-        let edge_type = match map.get("_type") {
-            Some(Value::String(s)) => s.clone(),
-            _ => String::new(),
-        };
+    // Edge. Requiring `Value::Int` under `_eid` specifically meant an `_id`
+    // spelling or the string form `"Eid(7)"` fell back out as an unconverted
+    // map, and the `as u64` cast turned a negative id into `u64::MAX` (#234).
+    // The accessor knows this decoder's `_src_vid`/`_dst_vid` endpoint
+    // spelling, so an edge here is never mistaken for a vertex.
+    if let Some(uni_common::value::EntityRef::Edge(eid)) =
+        uni_common::value::entity_ref_from_map(&map)
+    {
+        let edge_type = Value::Map(map.clone())
+            .edge_type_ref()
+            .and_then(|t| t.name().map(str::to_string))
+            .unwrap_or_default();
         let src = match map.get("_src_vid") {
             Some(Value::Int(i)) => Vid::new(*i as u64),
             _ => Vid::new(0),
@@ -981,12 +996,15 @@ fn map_to_graph_entity(map: HashMap<String, Value>) -> Value {
         });
     }
 
-    // Node: has _vid
-    if let Some(vid_val) = map.get("_vid") {
-        let vid = match vid_val {
-            Value::Int(i) => Vid::new(*i as u64),
-            _ => return Value::Map(map),
-        };
+    // Node: carries a vertex id. Requiring `Value::Int` meant an `_id`/`vid`
+    // spelling, or the string form `"Vid(7)"`, fell straight back out as an
+    // unconverted map — so any downstream `Value::Node` match silently saw
+    // nothing. The `Int` cast also turned a negative id into `u64::MAX`
+    // rather than rejecting it (#234). The edge branch above has already
+    // returned, so a vertex answer here is the only one that applies.
+    if let Some(uni_common::value::EntityRef::Vertex(vid)) =
+        uni_common::value::entity_ref_from_map(&map)
+    {
         let labels = match map.get("_labels") {
             Some(Value::List(list)) => list
                 .iter()

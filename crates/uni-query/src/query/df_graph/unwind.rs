@@ -533,21 +533,14 @@ impl GraphUnwindStream {
                     "keys" => {
                         if args.len() == 1 {
                             let val = self.evaluate_expr_impl(&args[0], batch, row_idx)?;
-                            if let Value::Map(map) = val {
-                                // Use _all_props sub-map for schemaless entities
-                                // when present; otherwise use the top-level map.
-                                let source = match map.get("_all_props") {
-                                    Some(Value::Map(all)) => all,
-                                    _ => &map,
-                                };
-                                let mut key_strings: Vec<String> = source
-                                    .iter()
-                                    .filter(|(k, v)| !v.is_null() && !k.starts_with('_'))
-                                    .map(|(k, _)| k.clone())
-                                    .collect();
-                                key_strings.sort();
+                            // This is the second `keys()` implementation — the
+                            // UDF is the other — and it knew only the map
+                            // encoding, so `UNWIND keys(n)` over a natively
+                            // encoded entity produced no rows at all. Both now
+                            // ask `Value::property_names` (#234).
+                            if let Some(names) = val.property_names() {
                                 let keys: Vec<Value> =
-                                    key_strings.into_iter().map(Value::String).collect();
+                                    names.into_iter().map(Value::String).collect();
                                 return Ok(Value::List(keys));
                             }
                             if val.is_null() {
@@ -740,7 +733,15 @@ impl GraphUnwindStream {
                     if value.is_null() {
                         builder.append_null();
                     } else {
-                        let encoded = uni_common::cypher_value_codec::encode(value);
+                        // A list can hold the same entity under both encodings —
+                        // `collect()` over a scan projection yields the `_vid`
+                        // map, a pattern comprehension yields a native `Node` —
+                        // and encoding them as they arrive puts two different
+                        // byte strings in this column for one vertex. Every
+                        // operator above compares the bytes, so `DISTINCT` and
+                        // `count(DISTINCT)` reported two (#234, #235).
+                        let canonical = value.clone().canonical_entity();
+                        let encoded = uni_common::cypher_value_codec::encode(&canonical);
                         builder.append_value(&encoded);
                     }
                 }
@@ -902,7 +903,7 @@ pub(crate) fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
                 arrow_to_json_value(child.as_ref(), row),
             );
         }
-        return Value::Map(map);
+        return Value::Map(map).canonical_entity();
     }
 
     // Fallback

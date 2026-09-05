@@ -205,23 +205,9 @@ impl Executor {
     ///
     /// Returns `None` when the value is not a node or has no labels.
     pub(crate) fn extract_labels_from_node(node_val: &Value) -> Option<Vec<String>> {
-        match node_val {
-            Value::Map(map) => {
-                // Map-encoded node: look for _labels array
-                if let Some(Value::List(labels_arr)) = map.get("_labels") {
-                    let labels: Vec<String> = labels_arr
-                        .iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect();
-                    if !labels.is_empty() {
-                        return Some(labels);
-                    }
-                }
-                None
-            }
-            Value::Node(node) => (!node.labels.is_empty()).then(|| node.labels.clone()),
-            _ => None,
-        }
+        // Both encodings through one accessor. "No labels" stays `None` rather
+        // than `Some(vec![])`: callers here branch on the option.
+        node_val.entity_labels().filter(|l| !l.is_empty())
     }
 
     /// Extracts user-visible properties from a value that represents a node or edge.
@@ -446,10 +432,9 @@ impl Executor {
                 let current =
                     read_edge_props_with_prefetch(ei.eid, prefetched, prop_manager, ctx).await?;
                 let write_props = Self::merge_props(current, new_props, replace);
-                let edge_type_name = map
-                    .get("_type")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
+                let edge_type_name = Value::Map(map.clone())
+                    .edge_type_ref()
+                    .and_then(|t| t.name().map(str::to_string))
                     .or_else(|| {
                         self.storage
                             .schema_manager()
@@ -535,11 +520,19 @@ impl Executor {
 
     /// Extract edge identity fields (`_eid`, `_src`, `_dst`, `_type`) from a map.
     fn extract_edge_identity(&self, map: &HashMap<String, Value>) -> Result<EdgeIdentity> {
-        let eid = Eid::from(
-            map.get("_eid")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| anyhow!("Invalid _eid"))?,
-        );
+        // `_eid` read as an integer rejected the serde string forms `"Eid(7)"`
+        // and `"7"`, which a map that round-tripped through JSON carries — the
+        // edge then failed identity extraction outright (#234).
+        //
+        // Precondition, relied on by every caller and worth keeping that way:
+        // callers reach here only after proving `_eid` is present and non-null.
+        // The accessor would otherwise also accept an `_id` on an edge-shaped
+        // map, and this is a mutation path where that widening is not wanted.
+        let Some(uni_common::value::EntityRef::Edge(eid)) =
+            uni_common::value::entity_ref_from_map(map)
+        else {
+            return Err(anyhow!("Invalid _eid"));
+        };
         let src = Vid::from(
             map.get("_src")
                 .and_then(|v| v.as_u64())
@@ -2139,24 +2132,24 @@ impl Executor {
         })
     }
 
-    /// Build a node Map value (`{_vid, _labels, ...props}`) for binding a MERGE
-    /// node variable.
+    /// Build the node binding for a MERGE node variable.
     ///
-    /// Matches the binding shape produced by `execute_create_pattern` and the
-    /// general MATCH path, so ON MATCH SET, RETURN, and downstream operators
-    /// resolve the variable identically — a bare `Value::Int(vid)` is not a
-    /// valid node binding for those consumers.
+    /// Matches the binding the general MATCH path produces, so ON MATCH SET,
+    /// RETURN and downstream operators resolve the variable identically — a
+    /// bare `Value::Int(vid)` is not a valid node binding for those consumers.
+    /// It said the same thing while producing a `Value::Map` and MATCH produced
+    /// a `Value::Node`, which is the divergence this closes.
     fn build_node_map(vid: Vid, label: &str, props: uni_common::Properties) -> Value {
-        let mut obj = HashMap::new();
-        obj.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-        obj.insert(
-            "_labels".to_string(),
-            Value::List(vec![Value::String(label.to_string())]),
-        );
-        for (k, v) in props {
-            obj.insert(k, v);
-        }
-        Value::Map(obj)
+        Self::bind_node(vid, std::slice::from_ref(&label.to_string()), props)
+    }
+
+    /// The one node binding: MERGE and CREATE built the same shape twice.
+    fn bind_node(vid: Vid, labels: &[String], props: uni_common::Properties) -> Value {
+        Value::Node(uni_common::Node {
+            vid,
+            labels: labels.to_vec(),
+            properties: props.into_iter().collect(),
+        })
     }
 
     /// True if an L0-only vertex has every key column set to the requested
@@ -2624,6 +2617,11 @@ impl Executor {
             let matches = self
                 .execute_merge_match(pattern, &row, prop_manager, params, ctx)
                 .await?;
+            eprintln!(
+                "MERGEPROBE matches={} row_keys={:?}",
+                matches.len(),
+                row.keys().collect::<Vec<_>>()
+            );
             let writer: &uni_store::Writer = writer_lock.as_ref();
 
             let result: Result<Vec<HashMap<String, Value>>> = async {
@@ -2854,16 +2852,10 @@ impl Executor {
 
                             // Build node object with final properties (includes embeddings)
                             if let Some(var) = &n.variable {
-                                let mut obj = HashMap::new();
-                                obj.insert("_vid".to_string(), Value::Int(new_vid.as_u64() as i64));
-                                let labels_list: Vec<Value> =
-                                    n.labels.iter().map(|l| Value::String(l.clone())).collect();
-                                obj.insert("_labels".to_string(), Value::List(labels_list));
-                                for (k, v) in &final_props {
-                                    obj.insert(k.clone(), v.clone());
-                                }
-                                // Store node as a Map with _vid, matching MATCH behavior
-                                row.insert(var.clone(), Value::Map(obj));
+                                row.insert(
+                                    var.clone(),
+                                    Self::bind_node(new_vid, &n.labels, final_props.clone()),
+                                );
                             }
                             vid = Some(new_vid);
                         }
@@ -2927,26 +2919,22 @@ impl Executor {
                                 // Edge type name is now stored by insert_edge
 
                                 if store_props {
-                                    let mut edge_map = HashMap::new();
-                                    edge_map.insert(
-                                        "_eid".to_string(),
-                                        Value::Int(eid.as_u64() as i64),
+                                    // The map form spelled the type as the
+                                    // numeric `type_id`, which readers had to
+                                    // resolve against the schema — and several
+                                    // did not, so `type(r)` on a freshly
+                                    // created edge answered nothing. The name
+                                    // is in hand right here.
+                                    row.insert(
+                                        rel_var,
+                                        Value::Edge(uni_common::Edge {
+                                            eid,
+                                            edge_type: type_name.clone(),
+                                            src: edge_src,
+                                            dst: edge_dst,
+                                            properties: user_props.into_iter().collect(),
+                                        }),
                                     );
-                                    edge_map.insert(
-                                        "_src".to_string(),
-                                        Value::Int(edge_src.as_u64() as i64),
-                                    );
-                                    edge_map.insert(
-                                        "_dst".to_string(),
-                                        Value::Int(edge_dst.as_u64() as i64),
-                                    );
-                                    edge_map
-                                        .insert("_type".to_string(), Value::Int(type_id as i64));
-                                    // Include user properties so downstream RETURN sees them
-                                    for (k, v) in user_props {
-                                        edge_map.insert(k, v);
-                                    }
-                                    row.insert(rel_var, Value::Map(edge_map));
                                 }
                             }
                         }
@@ -3332,10 +3320,11 @@ impl Executor {
                             pv.touched.insert(prop_name.clone());
 
                             // Update the row binding so subsequent RHS sees the new value.
-                            if let Some(Value::Map(node_map)) = row.get_mut(var_name) {
-                                node_map.insert(prop_name.clone(), val);
-                            } else if let Some(Value::Node(node)) = row.get_mut(var_name) {
-                                node.properties.insert(prop_name.clone(), val);
+                            // Assigning null *removes* the property on a native
+                            // entity — inserting `Null` there would leave it
+                            // visible to `properties()` and `keys()` (#234).
+                            if let Some(binding) = row.get_mut(var_name) {
+                                binding.set_entity_property(prop_name, val);
                             }
                         } else if let Value::Map(map) = node_val
                             && map.get("_eid").is_some_and(|v| !v.is_null())
@@ -3402,10 +3391,8 @@ impl Executor {
                             }
 
                             // Update the row object so subsequent RHS sees the new value.
-                            if let Some(Value::Map(edge_map)) = row.get_mut(var_name) {
-                                edge_map.insert(prop_name.clone(), val);
-                            } else if let Some(Value::Edge(edge)) = row.get_mut(var_name) {
-                                edge.properties.insert(prop_name.clone(), val);
+                            if let Some(binding) = row.get_mut(var_name) {
+                                binding.set_entity_property(prop_name, val);
                             }
                         } else if let Value::Edge(edge) = node_val {
                             // Handle Value::Edge directly (when traverse returns Edge objects).
@@ -3461,8 +3448,8 @@ impl Executor {
                             }
 
                             // Update the row object so subsequent RHS sees the new value.
-                            if let Some(Value::Edge(edge)) = row.get_mut(var_name) {
-                                edge.properties.insert(prop_name.clone(), val);
+                            if let Some(binding) = row.get_mut(var_name) {
+                                binding.set_entity_property(prop_name, val);
                             }
                         }
                     }
@@ -3518,11 +3505,12 @@ impl Executor {
                                 l0.write().set_vertex_labels(vid, &new_labels);
                             }
 
-                            // Update the node value in the row with the new labels.
-                            if let Some(Value::Map(obj)) = row.get_mut(variable) {
-                                let labels_list =
-                                    new_labels.into_iter().map(Value::String).collect();
-                                obj.insert("_labels".to_string(), Value::List(labels_list));
+                            // Update the node value in the row with the new
+                            // labels. This reached into a `Value::Map` only, so a
+                            // natively-encoded vertex kept its old label set even
+                            // though the relabel had reached storage (#234).
+                            if let Some(binding) = row.get_mut(variable) {
+                                binding.set_entity_labels(new_labels);
                             }
                         }
                     }
@@ -3829,13 +3817,12 @@ impl Executor {
                         .await?;
                 }
 
-                // Update the row map: set removed props to Null
-                if let Some(Value::Map(node_map)) = row.get_mut(var_name) {
-                    for prop_name in prop_names {
-                        node_map.insert(prop_name.clone(), Value::Null);
-                    }
-                    // Set _all_props to the complete effective property set
-                    node_map.insert("_all_props".to_string(), Value::Map(effective));
+                // Update the row's binding so the rest of the statement sees the
+                // post-REMOVE value. This reached into a `Value::Map` only, so a
+                // natively-encoded entity was left holding the old properties —
+                // the removal reached storage but not the row (#234).
+                if let Some(binding) = row.get_mut(var_name) {
+                    binding.set_entity_properties(effective, prop_names);
                 }
             } else if let Value::Map(map) = node_val {
                 // Edge property removal (map-encoded)
@@ -3867,10 +3854,9 @@ impl Executor {
                             .collect(),
                     );
                     if any_exist {
-                        let edge_type_name = map
-                            .get("_type")
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
+                        let edge_type_name = Value::Map(map.clone())
+                            .edge_type_ref()
+                            .and_then(|t| t.name().map(str::to_string))
                             .or_else(|| {
                                 self.storage
                                     .schema_manager()
@@ -3983,9 +3969,10 @@ impl Executor {
                 }
 
                 // Update the node value in the row with the remaining labels.
-                if let Some(Value::Map(obj)) = row.get_mut(variable) {
-                    let labels_list = remaining_labels.into_iter().map(Value::String).collect();
-                    obj.insert("_labels".to_string(), Value::List(labels_list));
+                if let Some(binding) = row.get_mut(variable) {
+                    // Map-only before, so `REMOVE n:Label` left a natively
+                    // encoded vertex showing its old label set (#234).
+                    binding.set_entity_labels(remaining_labels);
                 }
             }
         }
@@ -4714,7 +4701,7 @@ impl Executor {
         }
 
         let db_matches = self
-            .execute_merge_read_plan(plan, prop_manager, params, vars_in_scope.clone())
+            .execute_merge_read_plan(plan.clone(), prop_manager, params, vars_in_scope.clone())
             .await?;
 
         // Keep only DB results that are consistent with the input row bindings.
@@ -4734,6 +4721,22 @@ impl Executor {
                         return true;
                     };
                     if db_val == val {
+                        return true;
+                    }
+                    // A dotted column is a *projection* of its variable, not a
+                    // binding, and the two sides are produced by different plans
+                    // — the outer scan and MERGE's own traversal — which spell
+                    // an absent property set differently (`Map({})` against
+                    // `Null`). Letting such a column veto the match made MERGE
+                    // miss an edge that both sides agree exists, so ON MATCH SET
+                    // silently did not run. If the base variable is the same
+                    // entity on both sides, its projections cannot disagree
+                    // about identity (#234).
+                    if let Some((base, _)) = key.split_once('.')
+                        && let (Some(row_base), Some(db_base)) = (row.get(base), db_match.get(base))
+                        && let (Some(a), Some(b)) = (row_base.entity_ref(), db_base.entity_ref())
+                        && a == b
+                    {
                         return true;
                     }
                     // Values differ -- treat as consistent if they represent the same VID
@@ -4850,20 +4853,16 @@ impl Executor {
         match val {
             Value::Node(n) => Some(n.clone()),
             Value::Map(map) => {
-                let vid = map.get("_vid").and_then(|v| v.as_u64()).map(Vid::new)?;
-                let labels = if let Some(Value::List(l)) = map.get("_labels") {
-                    l.iter()
-                        .filter_map(|v| {
-                            if let Value::String(s) = v {
-                                Some(s.clone())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                } else {
-                    vec![]
+                // A node map keyed `_id`, or carrying `"Vid(7)"`, resolved to
+                // `None` here — and `None` drops the node from the constructed
+                // path silently, so `RETURN p` came back short rather than
+                // erroring (#234).
+                let uni_common::value::EntityRef::Vertex(vid) =
+                    uni_common::value::entity_ref_from_map(map)?
+                else {
+                    return None;
                 };
+                let labels = val.entity_labels().unwrap_or_default();
                 let properties: HashMap<String, Value> = map
                     .iter()
                     .filter(|(k, _)| !k.starts_with('_'))
@@ -4887,20 +4886,19 @@ impl Executor {
         match val {
             Value::Edge(e) => Some(e.clone()),
             Value::Map(map) => {
-                let eid = map.get("_eid").and_then(|v| v.as_u64()).map(Eid::new)?;
-                let edge_type = map
-                    .get("_type_name")
-                    .and_then(|v| {
-                        if let Value::String(s) = v {
-                            Some(s.clone())
-                        } else {
-                            None
-                        }
-                    })
+                // Twin of the node case above: a silent drop from the path.
+                let uni_common::value::EntityRef::Edge(eid) =
+                    uni_common::value::entity_ref_from_map(map)?
+                else {
+                    return None;
+                };
+                let edge_type = val
+                    .edge_type_ref()
+                    .and_then(|t| t.name().map(str::to_string))
                     .or_else(|| type_names.first().cloned())
                     .unwrap_or_default();
-                let src = map.get("_src").and_then(|v| v.as_u64()).map(Vid::new)?;
-                let dst = map.get("_dst").and_then(|v| v.as_u64()).map(Vid::new)?;
+                let (src, dst) = val.edge_endpoints()?;
+                let (src, dst) = (src?, dst?);
                 let properties: HashMap<String, Value> = map
                     .iter()
                     .filter(|(k, _)| !k.starts_with('_'))

@@ -80,3 +80,71 @@ fn one_shot_query_failure_exits_nonzero_and_errors_to_stderr() {
         "error unexpectedly appeared on stdout; stdout was:\n{stdout}"
     );
 }
+
+/// A CLI write must survive the process that made it.
+///
+/// Repro for the store left with WAL segments and no snapshot manifest: every
+/// subcommand built a `Uni` and dropped it, and `Drop for Uni` only signals the
+/// background tasks — the L0 -> L1 flush that writes the manifest lives in
+/// `shutdown`. So `uni query "CREATE ..."` printed success and exited `0` while
+/// the write never landed, and the next `Uni::open` refused the store with
+/// "Database has WAL segments but no snapshot manifest".
+///
+/// Before the fix this reproduced 9/9. The assertion that matters is the second
+/// invocation: a store that cannot be reopened is indistinguishable from one
+/// whose data was never written.
+#[test]
+fn a_cli_write_is_durable_and_the_store_reopens() {
+    let bin = env!("CARGO_BIN_EXE_uni");
+    let db_path = unique_tmp_dir("durable");
+
+    let write = Command::new(bin)
+        .arg("query")
+        .arg("--path")
+        .arg(&db_path)
+        .arg("CREATE (n:Person {name: 'durable'})")
+        .output()
+        .expect("failed to spawn uni binary for the write");
+
+    let write_stderr = String::from_utf8_lossy(&write.stderr);
+    assert_eq!(
+        write.status.code(),
+        Some(0),
+        "the write itself should succeed; stderr was:\n{write_stderr}"
+    );
+    // The write must not report success from a process that panicked on the way
+    // out — that panic was how the truncated shutdown first surfaced.
+    assert!(
+        !write_stderr.contains("panicked"),
+        "the write panicked during shutdown; stderr was:\n{write_stderr}"
+    );
+
+    // A second process: this is the half that failed before the fix.
+    let read = Command::new(bin)
+        .arg("query")
+        .arg("--path")
+        .arg(&db_path)
+        .arg("MATCH (n:Person) RETURN n.name")
+        .output()
+        .expect("failed to spawn uni binary for the read");
+
+    let read_stdout = String::from_utf8_lossy(&read.stdout);
+    let read_stderr = String::from_utf8_lossy(&read.stderr);
+
+    let _ = std::fs::remove_dir_all(&db_path);
+
+    assert_eq!(
+        read.status.code(),
+        Some(0),
+        "the store did not reopen after a CLI write; stderr was:\n{read_stderr}"
+    );
+    assert!(
+        !read_stderr.contains("no snapshot manifest"),
+        "store reopened into the WAL-without-manifest state; stderr was:\n{read_stderr}"
+    );
+    // Reopening is necessary but not sufficient — the row has to be there too.
+    assert!(
+        read_stdout.contains("durable"),
+        "the written row did not survive the writing process; stdout was:\n{read_stdout}"
+    );
+}

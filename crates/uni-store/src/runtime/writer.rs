@@ -816,6 +816,14 @@ impl Writer {
                 }
             }
         }
+        // Nulling here is deliberate and is the only safe option — refusing the
+        // value would leave the buffer permanently unflushable (#137). But it
+        // *destroys data*, and a `warn!` is the weakest possible record of that:
+        // greppable if someone thinks to look, invisible otherwise. Count it, so
+        // a recovery that discarded values is visible without reading the log
+        // (#233).
+        metrics::counter!("uni_wal_replay_dims_nulled_total", "kind" => "vertex")
+            .increment(vertex_fixes.len() as u64);
         for (vid, prop) in vertex_fixes {
             if let Some(props) = l0_guard.vertex_properties.get_mut(&vid) {
                 props.insert(prop, Value::Null);
@@ -846,6 +854,8 @@ impl Writer {
                 }
             }
         }
+        metrics::counter!("uni_wal_replay_dims_nulled_total", "kind" => "edge")
+            .increment(edge_fixes.len() as u64);
         for (eid, prop) in edge_fixes {
             if let Some(props) = l0_guard.edge_properties.get_mut(&eid) {
                 props.insert(prop, Value::Null);
@@ -4171,6 +4181,19 @@ impl Writer {
                 let fde = match encoder.encode_doc(&tokens) {
                     Ok(fde) => fde,
                     Err(e) => {
+                        // Skipping is still the right call (see above), but the
+                        // consequence is a *wrong answer*, not a slow one: this
+                        // vertex is now permanently absent from every accelerated
+                        // multi-vector search over this index, and nothing retries
+                        // it. A `warn!` is the weakest possible record of that —
+                        // greppable if someone thinks to look, invisible otherwise.
+                        // Count it, so silent recall loss is visible without
+                        // reading the log (#233).
+                        metrics::counter!(
+                            "uni_muvera_fde_encode_failures_total",
+                            "index" => spec.index_name.clone()
+                        )
+                        .increment(1);
                         tracing::warn!(
                             index = %spec.index_name,
                             vid = ?vid,
@@ -6067,20 +6090,41 @@ impl Writer {
             return;
         }
 
-        // Mark affected indexes as Stale
+        // Mark affected indexes as Stale. A discarded write here left the index
+        // reporting `Online` while drift had already been detected against it
+        // (#233 Tier 3).
         for label in &labels {
             for idx in &schema.indexes {
                 if idx.label() == label {
-                    let _ = schema_manager.update_index_metadata(idx.name(), |m| {
+                    let name = idx.name().to_string();
+                    if let Err(e) = schema_manager.update_index_metadata(&name, |m| {
                         m.status = uni_common::core::schema::IndexStatus::Stale;
-                    });
+                    }) {
+                        metrics::counter!("uni_index_status_write_failures_total").increment(1);
+                        tracing::error!(
+                            index = %name,
+                            error = %e,
+                            "failed to mark index stale after detecting drift; \
+                             it still reports its previous status"
+                        );
+                    }
                 }
             }
         }
 
         tokio::spawn(async move {
             if let Err(e) = rebuild_mgr.schedule(labels).await {
-                tracing::warn!("Failed to schedule index rebuild: {e}");
+                // Recoverable now rather than lost: the indexes above are
+                // `Stale`, and `labels_needing_rebuild` treats that as a trigger,
+                // so the next pass picks them up. Before, `Stale` was a status
+                // nothing acted on and the rebuild waited on an unrelated growth
+                // or time trigger.
+                metrics::counter!("uni_index_rebuild_schedule_failures_total").increment(1);
+                tracing::error!(
+                    error = %e,
+                    "failed to schedule index rebuild; the affected indexes remain \
+                     stale and will be retried by the next trigger pass"
+                );
             }
         });
     }

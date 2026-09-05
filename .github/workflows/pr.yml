@@ -409,10 +409,28 @@ jobs:
           RUNS: "5"
         run: bash scripts/perf/iai_pilot.sh "$RUNS"
 
+      # The gate is the last thing standing between a broken measurement and a
+      # green check, so it verifies itself in the same job that trusts it. No
+      # lane runs tests under scripts/, so a test file alone would never execute
+      # — which is the shape the gate was found to have.
+      - name: Self-check the gate
+        run: python3 scripts/perf/test_iai_gate.py
+
       # Thresholds are explicit arguments — iai_gate.py has no defaults — so the
       # number a build fails on is visible here and traceable to the measurement
       # that produced it. 2% is 3.3x the worst measured false positive (0.599%).
       # The proposal's original 5% predated any cross-runner measurement.
+      #
+      # FAIL_IMPROVE_PCT is the other side: an implausible *drop* is a collection
+      # failure, and used to pass green — a run with all 5 gated targets 88–97%
+      # below baseline reported "worst +0.00%". 50 sits far above the measured
+      # same-runner drift (0.599%) and far below that observed collapse, so it
+      # cannot fire on noise; a genuine optimization past 50% on a gated hot path
+      # is rare enough that stopping for a human to confirm it is the point, not
+      # a cost. The check is armed unless --allow-foreign-machine is passed, and
+      # CI never passes it: gating it on machine identity instead would have left
+      # it permanently off, since `generated_from.runners` holds the qualify
+      # workflow's shard artifact names rather than any machine's.
       - name: Compare against committed baseline
         run: |
           python3 scripts/perf/iai_gate.py \
@@ -420,10 +438,12 @@ jobs:
             --current target/iai-pilot \
             --fail-pct "${FAIL_PCT}" \
             --warn-pct "${WARN_PCT}" \
+            --fail-improve-pct "${FAIL_IMPROVE_PCT}" \
             --markdown | tee -a "$GITHUB_STEP_SUMMARY"
         env:
           FAIL_PCT: "2"
           WARN_PCT: "1"
+          FAIL_IMPROVE_PCT: "50"
 
       # A regression and a collection failure are different problems that look
       # identical in a red X. Keep the samples so they can be told apart.

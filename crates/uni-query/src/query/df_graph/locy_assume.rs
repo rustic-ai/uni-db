@@ -28,6 +28,27 @@ pub async fn evaluate_assume(
     stats: &mut LocyStats,
 ) -> Result<Vec<FactRow>, LocyError> {
     // 1. Fork L0 for hypothetical reasoning
+    //
+    // The fork/restore pair below is deliberately NOT exception-safe: every `?`
+    // between here and step 6 skips `restore_l0()`, leaving the hypothetical
+    // clone installed. That is sound, but for a non-local reason worth stating
+    // because it does not read as sound locally.
+    //
+    // `fork_l0` swaps only the `NativeExecutionAdapter`'s own `locy_l0` pointer
+    // to a deep clone and parks the real `Arc` on `l0_save_stack`; hypothetical
+    // mutations land in the clone. A `Transaction` holds its *own* `Arc` to the
+    // original buffer, so it never observes the fork -- and the adapter is built
+    // fresh per evaluation and dropped when this call returns, error or not, so
+    // an un-restored clone dies with it. The command dispatch loop propagates
+    // errors immediately, so no later command runs against a forked adapter.
+    //
+    // Verified 2026-09-05 against the transaction path (where `locy_l0` *is*
+    // `tx_l0`): with a failing `THEN` body, the hypothetical row is materialized
+    // in the fork and still absent from the transaction and the commit.
+    //
+    // Two changes would make the leak real, so pair either with a drop guard:
+    // reusing one adapter across evaluations, or catching an ASSUME/ABDUCE error
+    // and continuing the dispatch loop instead of propagating it.
     ctx.fork_l0()
         .await
         .map_err(|e| LocyError::SavepointFailed {

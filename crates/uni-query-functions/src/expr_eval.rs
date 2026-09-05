@@ -173,14 +173,22 @@ pub fn cypher_eq(left: &Value, right: &Value) -> Option<bool> {
     // it because the planner lowers node equality to a VID comparison — only
     // the paths routed through `cypher_eq` (`IN`, list membership) inherited
     // the structural comparison.
-    match (left, right) {
-        (Value::Node(l), Value::Node(r)) => return Some(l.vid == r.vid),
-        (Value::Edge(l), Value::Edge(r)) => return Some(l.eid == r.eid),
-        // A node is never equal to an edge, whatever their ids.
-        (Value::Node(_), Value::Edge(_)) | (Value::Edge(_), Value::Node(_)) => {
-            return Some(false);
-        }
-        _ => {}
+    // Asked once, through `entity_ref`, so the four encoding pairings cannot
+    // disagree. The previous arms matched `Node`/`Node` and `Edge`/`Edge` and
+    // left the *mixed* pairings to fall through to structural comparison, so
+    // one vertex compared to itself was `false` whenever the two sides came
+    // from different producers — a pattern comprehension emits a native
+    // `Value::Node`, a scan projection emits the `_vid` map, and nothing makes
+    // a path produce one rather than the other.
+    //
+    // `EntityRef` carries the vertex/edge distinction, so a node and an edge
+    // sharing a number remain unequal without a separate arm for it.
+    match (left.entity_ref(), right.entity_ref()) {
+        (Some(l), Some(r)) => return Some(l == r),
+        // An entity is not equal to a non-entity. Numbers were settled above,
+        // so the other side here is a list, a plain map or a scalar.
+        (Some(_), None) | (None, Some(_)) => return Some(false),
+        (None, None) => {}
     }
 
     // Structural equality for Lists
@@ -201,14 +209,10 @@ pub fn cypher_eq(left: &Value, right: &Value) -> Option<bool> {
 
     // Structural equality for Maps
     if let (Value::Map(l), Value::Map(r)) = (left, right) {
-        // If both are nodes (have _vid), compare by _vid ONLY
-        if let (Some(vid_l), Some(vid_r)) = (l.get("_vid"), r.get("_vid")) {
-            return Some(vid_l == vid_r);
-        }
-        // If both are edges (have _eid), compare by _eid ONLY
-        if let (Some(eid_l), Some(eid_r)) = (l.get("_eid"), r.get("_eid")) {
-            return Some(eid_l == eid_r);
-        }
+        // Entity maps never reach here — `entity_ref` above answered for them.
+        // The arms that used to live at this point compared the raw `_vid`
+        // *values* with derived equality, so `Int(7)` and `String("7")` for one
+        // vertex disagreed; `entity_ref` normalises both.
 
         if l.len() != r.len() {
             return Some(false);
@@ -246,19 +250,24 @@ pub fn eval_in_op(left: &Value, right: &Value) -> Result<Value> {
             }
         }
 
-        // Fallback: Check for Node Object vs VID mismatch.
-        // When left is a node map, compare its _vid against list items that may
-        // be raw VID integers or "label:offset" strings.
-        if let Value::Map(map) = left
-            && let Some(vid_val) = map.get("_vid")
-            && let Some(vid_u64) = vid_val.as_u64()
-        {
-            let vid = uni_common::core::id::Vid::from(vid_u64);
-            let vid_str = vid.to_string();
+        // Fallback: an entity tested against a list of *raw ids* rather than of
+        // entities — a `$vids` parameter, a single-column working set. This
+        // tested `Value::Map` carrying `_vid`, so the same vertex arriving as a
+        // native `Value::Node` was simply not in the list, and an edge had no
+        // arm at all. Asking `entity_ref` covers both encodings and both kinds.
+        if let Some(entity) = left.entity_ref() {
+            let (id_u64, id_str) = match entity {
+                uni_common::value::EntityRef::Vertex(vid) => (vid.as_u64(), vid.to_string()),
+                uni_common::value::EntityRef::Edge(eid) => (eid.as_u64(), eid.to_string()),
+            };
             for item in arr {
                 match item {
-                    Value::String(s) if s == &vid_str => return Ok(Value::Bool(true)),
-                    Value::Int(n) if *n as u64 == vid_u64 => return Ok(Value::Bool(true)),
+                    Value::String(s) if s == &id_str => return Ok(Value::Bool(true)),
+                    // A negative integer is not an id; casting it would wrap to
+                    // a huge u64 rather than simply failing to match.
+                    Value::Int(n) if *n >= 0 && *n as u64 == id_u64 => {
+                        return Ok(Value::Bool(true));
+                    }
                     _ => {}
                 }
             }
@@ -2677,6 +2686,143 @@ fn eval_bitwise_function(name: &str, args: &[Value]) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
+
+    mod mixed_entity_encodings {
+        use super::super::cypher_eq;
+        use std::collections::HashMap;
+        use uni_common::core::id::Eid;
+        use uni_common::value::{Edge, Node};
+        use uni_common::{Value, Vid};
+
+        fn native_node(vid: u64) -> Value {
+            Value::Node(Node {
+                vid: Vid::from(vid),
+                labels: vec!["P".into()],
+                properties: HashMap::new(),
+            })
+        }
+
+        fn map_node(vid: u64) -> Value {
+            let mut m = HashMap::new();
+            m.insert("_vid".to_string(), Value::Int(vid as i64));
+            m.insert("_labels".to_string(), Value::List(vec![]));
+            Value::Map(m)
+        }
+
+        fn native_edge(eid: u64) -> Value {
+            Value::Edge(Edge {
+                eid: Eid::from(eid),
+                edge_type: "KNOWS".into(),
+                src: Vid::from(0),
+                dst: Vid::from(1),
+                properties: HashMap::new(),
+            })
+        }
+
+        fn map_edge(eid: u64) -> Value {
+            let mut m = HashMap::new();
+            m.insert("_eid".to_string(), Value::Int(eid as i64));
+            m.insert("_type".to_string(), Value::String("KNOWS".into()));
+            m.insert("_src".to_string(), Value::Int(0));
+            m.insert("_dst".to_string(), Value::Int(1));
+            Value::Map(m)
+        }
+
+        /// One vertex is equal to itself across the two encodings.
+        ///
+        /// Both encodings occur — a pattern comprehension emits a native
+        /// `Value::Node`, a scan projection emits the `_vid` map — and nothing
+        /// makes a path produce one rather than the other. Comparing across
+        /// them answered `false`, so `n IN [n]` was false whenever the two
+        /// sides came from different producers.
+        #[test]
+        fn a_vertex_equals_itself_across_encodings() {
+            assert_eq!(cypher_eq(&native_node(7), &map_node(7)), Some(true));
+            assert_eq!(cypher_eq(&map_node(7), &native_node(7)), Some(true));
+        }
+
+        /// And an edge does too.
+        #[test]
+        fn an_edge_equals_itself_across_encodings() {
+            assert_eq!(cypher_eq(&native_edge(7), &map_edge(7)), Some(true));
+            assert_eq!(cypher_eq(&map_edge(7), &native_edge(7)), Some(true));
+        }
+
+        /// Different entities stay different, in any encoding pairing.
+        #[test]
+        fn different_entities_are_not_equal() {
+            assert_eq!(cypher_eq(&native_node(7), &map_node(8)), Some(false));
+            assert_eq!(cypher_eq(&native_edge(7), &map_edge(8)), Some(false));
+        }
+
+        /// A vertex is never an edge, whatever their numbers, in any pairing.
+        #[test]
+        fn a_vertex_is_never_an_edge() {
+            assert_eq!(cypher_eq(&native_node(7), &native_edge(7)), Some(false));
+            assert_eq!(cypher_eq(&native_node(7), &map_edge(7)), Some(false));
+            assert_eq!(cypher_eq(&map_node(7), &native_edge(7)), Some(false));
+            assert_eq!(cypher_eq(&map_node(7), &map_edge(7)), Some(false));
+        }
+
+        /// The raw-id fallback works for every encoding, not just a `_vid` map.
+        ///
+        /// `IN` against a list of raw ids is a real shape (a `$vids` parameter,
+        /// a single-column working set). The fallback that serves it tested
+        /// `Value::Map` with `_vid` specifically, so the same vertex arriving as
+        /// a native `Value::Node` — which is what a pattern comprehension
+        /// produces — was simply not in the list.
+        #[test]
+        fn the_raw_id_fallback_covers_every_encoding() {
+            let list = Value::List(vec![Value::Int(7)]);
+            assert_eq!(
+                super::super::eval_in_op(&native_node(7), &list).unwrap(),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                super::super::eval_in_op(&map_node(7), &list).unwrap(),
+                Value::Bool(true)
+            );
+        }
+
+        /// And it covers edges, which had no arm at all.
+        #[test]
+        fn the_raw_id_fallback_covers_edges() {
+            let list = Value::List(vec![Value::Int(7)]);
+            assert_eq!(
+                super::super::eval_in_op(&native_edge(7), &list).unwrap(),
+                Value::Bool(true)
+            );
+            assert_eq!(
+                super::super::eval_in_op(&map_edge(7), &list).unwrap(),
+                Value::Bool(true)
+            );
+        }
+
+        /// A raw id that is not in the list is still absent.
+        #[test]
+        fn the_raw_id_fallback_does_not_invent_membership() {
+            let list = Value::List(vec![Value::Int(8)]);
+            assert_eq!(
+                super::super::eval_in_op(&native_node(7), &list).unwrap(),
+                Value::Bool(false)
+            );
+        }
+
+        /// Identity ignores attributes: the same vertex carrying different
+        /// property sets on either side is still the same vertex.
+        #[test]
+        fn identity_ignores_properties_and_labels() {
+            let mut rich = HashMap::new();
+            rich.insert("name".to_string(), Value::String("a".into()));
+            let hydrated = Value::Node(Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into(), "Q".into()],
+                properties: rich,
+            });
+            assert_eq!(cypher_eq(&hydrated, &map_node(7)), Some(true));
+        }
+    }
+
     use super::*;
     /// Helper to create string values in tests (replaces s("..."))
     fn s(v: &str) -> Value {

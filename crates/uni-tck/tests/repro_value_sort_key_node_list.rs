@@ -65,7 +65,11 @@ fn permuted_node_list_should_be_equal_ignoring_order() {
     let mut same_order_expected = HashMap::new();
     same_order_expected.insert("l".to_string(), Value::List(vec![node(1), node(2)]));
     assert!(
-        match_result_ignoring_list_order(&same_order_actual, &vec![same_order_expected]).is_ok(),
+        match_result_ignoring_list_order(
+            &same_order_actual,
+            std::slice::from_ref(&same_order_expected)
+        )
+        .is_ok(),
         "identical-order node lists must match"
     );
 }
@@ -77,6 +81,6 @@ fn permuted_node_list_correct_behavior() {
     let mut expected_row = HashMap::new();
     expected_row.insert("l".to_string(), Value::List(vec![node(2), node(1)]));
 
-    match_result_ignoring_list_order(&actual, &vec![expected_row])
+    match_result_ignoring_list_order(&actual, std::slice::from_ref(&expected_row))
         .expect("permuted node lists should compare equal when ignoring element order");
 }

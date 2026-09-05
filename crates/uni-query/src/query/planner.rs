@@ -8857,21 +8857,39 @@ impl QueryPlanner {
                 filter: Some(filter),
                 ..
             } => {
-                // Detect indexed-property pushdown — issue #57. Run the same
-                // analyzer the physical planner uses; if it reports a
-                // hash-index hit, surface it in EXPLAIN.
+                // Detect indexed-property pushdown — issues #57, #247. Run the
+                // same analyzer the physical planner uses; if it reports an
+                // index hit, surface it in EXPLAIN under the type that serves
+                // it, so a BTree is not reported as a HASH.
                 if let Some(label_name) = self.schema.label_name_by_id(*label_id) {
                     let analyzer = crate::query::pushdown::IndexAwareAnalyzer::new(&self.schema);
                     let strategy = analyzer.analyze(filter, variable, *label_id);
-                    for prop in strategy.hash_index_columns {
+                    for (prop, kind) in strategy.indexed_equality_columns {
+                        let kind_name = match kind {
+                            ScalarIndexType::Hash => "HASH",
+                            ScalarIndexType::BTree => "BTREE",
+                            ref other => {
+                                usage.push(IndexUsage {
+                                    label_or_type: label_name.to_string(),
+                                    property: prop,
+                                    index_type: format!("{other:?}").to_uppercase(),
+                                    used: true,
+                                    reason: Some(
+                                        "Scalar index point lookup pushed into Lance scan"
+                                            .to_string(),
+                                    ),
+                                });
+                                continue;
+                            }
+                        };
                         usage.push(IndexUsage {
                             label_or_type: label_name.to_string(),
                             property: prop,
-                            index_type: "HASH".to_string(),
+                            index_type: kind_name.to_string(),
                             used: true,
-                            reason: Some(
-                                "Hash index point lookup pushed into Lance scan".to_string(),
-                            ),
+                            reason: Some(format!(
+                                "{kind_name} index point lookup pushed into Lance scan"
+                            )),
                         });
                     }
                 }

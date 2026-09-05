@@ -433,13 +433,45 @@ impl L0Buffer {
                     Some(reg) => new_crdt.merge_via_registry(&existing_crdt, reg).is_ok(),
                     None => new_crdt.try_merge(&existing_crdt).is_ok(),
                 };
-                if merged && let Ok(merged_json) = serde_json::to_value(new_crdt) {
-                    entry.insert(k, uni_common::Value::from(merged_json));
-                    continue;
+                if merged {
+                    match serde_json::to_value(new_crdt) {
+                        Ok(merged_json) => {
+                            entry.insert(k, uni_common::Value::from(merged_json));
+                            continue;
+                        }
+                        Err(e) => {
+                            // A merge that succeeded and then failed to serialize
+                            // is a bug, not a variant mismatch, and the two used to
+                            // share one `if let` and one warning — so the only
+                            // signal for it was a message naming the wrong cause
+                            // (#233).
+                            //
+                            // Still last-writer-wins. Propagating would make
+                            // `merge_crdt_properties`, `apply_vertex_write`,
+                            // `insert_vertex_with_labels_impl`, `_partial_impl` and
+                            // the three public inserts above them fallible, which is
+                            // 52 non-test call sites across five crates — for a
+                            // value that was deserialized as a `Crdt` moments
+                            // earlier and merged successfully, so re-serializing it
+                            // can realistically only fail on OOM. Kept fail-open
+                            // deliberately, and made *observable* instead: a metric
+                            // and an `error` log of its own, so discarded state is
+                            // countable rather than only greppable.
+                            metrics::counter!("uni_crdt_merge_serialize_failures_total")
+                                .increment(1);
+                            tracing::error!(
+                                property = %k,
+                                error = %e,
+                                "merged CRDT failed to serialize; falling back to \
+                                 last-writer-wins and discarding the merged state"
+                            );
+                            entry.insert(k, v);
+                            continue;
+                        }
+                    }
                 }
-                // CRDT variant mismatch (or a failed re-serialize): fall through to
-                // a last-writer-wins overwrite, discarding the existing CRDT's
-                // merged state. The OCC commit-time carve-out check
+                // CRDT variant mismatch: fall through to a last-writer-wins
+                // overwrite, discarding the existing CRDT's merged state. The OCC commit-time carve-out check
                 // (`occ::crdt_carveout_overwrite`) aborts a *concurrent* writer
                 // before reaching here, and write-time schema enforcement rejects a
                 // wrong declared variant; this warns on any residual (e.g. a

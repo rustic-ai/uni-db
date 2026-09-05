@@ -172,7 +172,7 @@ fn collect_leaf_candidates(
                             element_var: key.clone(),
                             property: prop_name.clone(),
                             old_value: Box::new(prop_val.clone()),
-                            new_value: Box::new(Value::Float(0.0)),
+                            new_value: Box::new(zero_like(prop_val)),
                         });
                     }
                 }
@@ -182,7 +182,7 @@ fn collect_leaf_candidates(
                     element_var: key.clone(),
                     property: key.clone(),
                     old_value: Box::new(value.clone()),
-                    new_value: Box::new(Value::Float(0.0)),
+                    new_value: Box::new(zero_like(value)),
                 });
             }
         }
@@ -190,6 +190,23 @@ fn collect_leaf_candidates(
 
     for child in &node.children {
         collect_leaf_candidates(child, rule, program, candidates);
+    }
+}
+
+/// Build the zero proposal for `old`, preserving its numeric type.
+///
+/// An abduced `ChangeProperty` is applied through Cypher `SET`, which enforces
+/// the property's *declared* type. Proposing `Float(0.0)` for an `Int64`
+/// property is rejected at write time, so the whole abduction fails rather than
+/// the candidate simply being ruled out. Mirroring the old value's variant keeps
+/// the proposal representable in the column it targets.
+///
+/// Non-numeric values have no zero and are returned as `Float(0.0)`; callers
+/// only reach this for values that answered `as_f64()`.
+fn zero_like(old: &Value) -> Value {
+    match old {
+        Value::Int(_) => Value::Int(0),
+        _ => Value::Float(0.0),
     }
 }
 
@@ -304,6 +321,21 @@ async fn validate_modification(
     let mutation_query = modification_to_cypher(modification);
 
     // Fork L0 for hypothetical reasoning
+    //
+    // As in `locy_assume::evaluate_assume`, the fork/restore pair is not
+    // exception-safe: an `Err` from the mutation or the re-evaluation below
+    // returns without reaching `restore_l0()`. It is sound for the same
+    // non-local reason -- `fork_l0` swaps only the per-evaluation
+    // `NativeExecutionAdapter`'s own pointer to a deep clone, and that adapter
+    // is dropped when the evaluation returns -- so the un-restored clone is
+    // discarded rather than observed. See that function for the full argument
+    // and the measurement.
+    //
+    // Coverage note: the reasoning was confirmed empirically at the ASSUME site.
+    // The same could not be exercised here, because no ABDUCE failure between
+    // fork and restore could be constructed on the transaction path (neither a
+    // 1 ms timeout nor `max_iterations(1)` errors there). The invariant is
+    // shared, not separately measured.
     ctx.fork_l0()
         .await
         .map_err(|e| LocyError::SavepointFailed {

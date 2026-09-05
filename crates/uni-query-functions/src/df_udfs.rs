@@ -42,6 +42,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use uni_common::Value;
 use uni_common::cypher_value_codec::handle::HandleScope;
+use uni_common::value::EntityRef;
 use uni_cypher::ast::BinaryOp;
 use uni_store::storage::arrow_convert::values_to_array;
 
@@ -502,16 +503,15 @@ impl ScalarUDFImpl for IdUdf {
 /// `_vid` / `_eid` are both live representations of the same thing, and code that
 /// handles only one of them silently does nothing for the other.
 pub(crate) fn entity_identity(value: &Value) -> Option<u64> {
-    match value {
-        Value::Node(n) => Some(n.vid.as_u64()),
-        Value::Edge(e) => Some(e.eid.as_u64()),
-        Value::Map(m) => m
-            .get("_vid")
-            .or_else(|| m.get("_eid"))
-            .and_then(|id| id.as_i64())
-            .map(|id| id as u64),
-        _ => None,
-    }
+    // The map arm read `_vid`/`_eid` as integers, so an entity spelling its id
+    // `_id` — the serde round-trip of a `Value::Node` — or carrying the string
+    // form `"Vid(7)"` resolved to `None`, and `id(x)` returned NULL for an
+    // entity sitting right there in the row. It also cast a negative id with
+    // `as u64`, wrapping to `u64::MAX` rather than rejecting it (#234).
+    value.entity_ref().map(|e| match e {
+        EntityRef::Vertex(vid) => vid.as_u64(),
+        EntityRef::Edge(eid) => eid.as_u64(),
+    })
 }
 
 // ============================================================================
@@ -659,17 +659,30 @@ impl ScalarUDFImpl for TypeUdf {
             }
             let val = &val_args[0];
             match val {
-                // Edge represented as a map (from CypherValue encoding)
-                Value::Map(map) => {
-                    if let Some(Value::String(t)) = map.get("_type") {
-                        Ok(Value::String(t.clone()))
-                    } else {
-                        // Map without _type key is not a relationship
-                        Err(datafusion::error::DataFusionError::Execution(
-                            "TypeError: InvalidArgumentValue - type() requires a relationship argument".to_string(),
-                        ))
+                // A relationship reaches here in either encoding. Only the map
+                // form was handled, so `type(r)` on a native `Value::Edge`
+                // raised "requires a relationship argument" for an argument that
+                // is exactly that (#234).
+                Value::Edge(edge) => Ok(Value::String(edge.edge_type.clone())),
+                // Edge represented as a map (from CypherValue encoding). Read
+                // through the accessor: this arm knew only `_type` holding a
+                // *name*, so an edge straight out of CREATE — which spells the
+                // type as a numeric id — was rejected as not a relationship.
+                // Without a schema here an id cannot become a name, so it is
+                // still an error, but a different and honest one.
+                Value::Map(map) => match Value::Map(map.clone()).edge_type_ref() {
+                    Some(uni_common::value::EdgeTypeRef::Name(t)) => Ok(Value::String(t)),
+                    Some(uni_common::value::EdgeTypeRef::Id(id)) => {
+                        Err(datafusion::error::DataFusionError::Execution(format!(
+                            "type(): relationship carries edge-type id {id} with no name; \
+                             the type name was not projected into this row"
+                        )))
                     }
-                }
+                    None => Err(datafusion::error::DataFusionError::Execution(
+                        "TypeError: InvalidArgumentValue - type() requires a relationship argument"
+                            .to_string(),
+                    )),
+                },
                 Value::Null => Ok(Value::Null),
                 _ => Err(datafusion::error::DataFusionError::Execution(
                     "TypeError: InvalidArgumentValue - type() requires a relationship argument"
@@ -761,6 +774,19 @@ impl ScalarUDFImpl for KeysUdf {
                         .map(Value::String)
                         .collect::<Vec<_>>()
                 }
+                // Native encodings. Only the map form was handled, so
+                // `keys(n)` on a `Value::Node` fell to the catch-all and
+                // returned an empty list — a wrong answer with no error, and
+                // indistinguishable from an entity that genuinely has no
+                // properties (#234). A null-valued property does not exist on
+                // an entity, per the property graph model, so it is filtered
+                // out here exactly as the map arm above does.
+                Value::Node(_) | Value::Edge(_) => arg
+                    .property_names()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
                 Value::Null => {
                     return Ok(Value::Null);
                 }
@@ -860,6 +886,13 @@ impl ScalarUDFImpl for PropertiesUdf {
                         .collect();
                     Ok(Value::Map(filtered))
                 }
+                // Native encodings. Falling through to `Value::Null` meant
+                // `properties(n)` silently returned null for an entity that was
+                // present — the same shape as the map arm above, one encoding
+                // short (#234). Their property maps hold user properties only,
+                // so no `_`-filtering is needed here.
+                Value::Node(node) => Ok(Value::Map(node.properties.clone())),
+                Value::Edge(edge) => Ok(Value::Map(edge.properties.clone())),
                 _ => Ok(Value::Null),
             }
         })
@@ -971,7 +1004,26 @@ impl ScalarUDFImpl for IndexUdf {
                 }
                 Value::Node(node) => {
                     if let Some(key) = index.as_str() {
-                        node.properties.get(key).cloned().unwrap_or(Value::Null)
+                        // System fields come from the entity, not from its user
+                        // properties. The `Value::Map` arm above answers `_vid`
+                        // because the map literally carries that key; a native
+                        // `Value::Node` carries it in `node.vid`, so looking it
+                        // up as a property found nothing and returned NULL.
+                        //
+                        // The two encodings are produced by different operators
+                        // for the same vertex — a scan projection makes the map,
+                        // a pattern comprehension makes the `Node` — so the same
+                        // vertex answered `n._vid` differently depending on which
+                        // one produced it. A DISTINCT downstream then separated
+                        // two rows holding that one vertex, because one of them
+                        // had the NULL (#234, #235).
+                        match key {
+                            "_vid" | "_id" => Value::Int(node.vid.as_u64() as i64),
+                            "_labels" => Value::List(
+                                node.labels.iter().cloned().map(Value::String).collect(),
+                            ),
+                            _ => node.properties.get(key).cloned().unwrap_or(Value::Null),
+                        }
                     } else if !index.is_null() {
                         return Err(datafusion::error::DataFusionError::Execution(
                             "index(): node index must be a string".to_string(),
@@ -982,7 +1034,14 @@ impl ScalarUDFImpl for IndexUdf {
                 }
                 Value::Edge(edge) => {
                     if let Some(key) = index.as_str() {
-                        edge.properties.get(key).cloned().unwrap_or(Value::Null)
+                        // Twin of the node arm above.
+                        match key {
+                            "_eid" | "_id" => Value::Int(edge.eid.as_u64() as i64),
+                            "_type" | "_type_name" => Value::String(edge.edge_type.clone()),
+                            "_src" | "_src_vid" => Value::Int(edge.src.as_u64() as i64),
+                            "_dst" | "_dst_vid" => Value::Int(edge.dst.as_u64() as i64),
+                            _ => edge.properties.get(key).cloned().unwrap_or(Value::Null),
+                        }
                     } else if !index.is_null() {
                         return Err(datafusion::error::DataFusionError::Execution(
                             "index(): edge index must be a string".to_string(),
@@ -1058,6 +1117,13 @@ impl ScalarUDFImpl for LabelsUdf {
 
             let node = &val_args[0];
             match node {
+                // A vertex reaches here in either encoding, and only the map
+                // form was handled — so `labels(n)` on a native `Value::Node`
+                // raised "requires a node argument" for an argument that is
+                // exactly that (#234).
+                Value::Node(n) => Ok(Value::List(
+                    n.labels.iter().cloned().map(Value::String).collect(),
+                )),
                 Value::Map(map) => {
                     if let Some(Value::List(arr)) = map.get("_labels") {
                         Ok(Value::List(arr.clone()))
@@ -1223,31 +1289,22 @@ fn startnode_endnode_impl(val_args: &[Value], is_start: bool) -> DFResult<Value>
 
 /// Extract the src or dst VID from an edge value.
 fn extract_endpoint_vid(val: &Value, is_start: bool) -> Option<u64> {
-    match val {
-        Value::Edge(edge) => {
-            let vid = if is_start { edge.src } else { edge.dst };
-            Some(vid.as_u64())
-        }
-        Value::Map(map) => {
-            // Try _src_vid / _dst_vid first
-            let key = if is_start { "_src_vid" } else { "_dst_vid" };
-            if let Some(v) = map.get(key) {
-                return v.as_u64();
-            }
-            // Try _src / _dst
-            let key2 = if is_start { "_src" } else { "_dst" };
-            if let Some(v) = map.get(key2) {
-                return v.as_u64();
-            }
-            // Try _startNode / _endNode (return VID from nested node)
-            let node_key = if is_start { "_startNode" } else { "_endNode" };
-            if let Some(node_val) = map.get(node_key) {
-                return extract_vid(node_val);
-            }
-            None
-        }
-        _ => None,
+    // Through the accessor, which knows every spelling of the endpoints in
+    // both encodings — this was the third place to enumerate them by hand.
+    if let Some((src, dst)) = val.edge_endpoints()
+        && let Some(vid) = if is_start { src } else { dst }
+    {
+        return Some(vid.as_u64());
     }
+    // A nested whole node under `_startNode`/`_endNode`, which is a shape the
+    // accessor does not cover: the endpoint is the node, not an id.
+    if let Value::Map(map) = val {
+        let node_key = if is_start { "_startNode" } else { "_endNode" };
+        if let Some(node_val) = map.get(node_key) {
+            return extract_vid(node_val);
+        }
+    }
+    None
 }
 
 /// Extract the VID of a node argument.
@@ -1260,10 +1317,9 @@ fn extract_endpoint_vid(val: &Value, is_start: bool) -> Option<u64> {
 /// Recognising only `Value::Map` — as this did — meant a node arriving in its
 /// native `Value::Node` encoding never matched, and `startNode(r)` silently
 /// returned the vid-only stand-in instead of the node, so `startNode(r).name`
-/// came back NULL. That is not reachable through the node-argument path today
-/// (a structural projection always yields the map form) but it costs nothing to
-/// be correct for both, and the divergence is exactly what this consolidation
-/// exists to remove.
+/// came back NULL. A structural projection used to always yield the map form,
+/// which is why that was unreachable; it no longer does, so this is now the
+/// path a node argument actually takes.
 fn extract_vid(val: &Value) -> Option<u64> {
     val.entity_vid().map(|vid| vid.as_u64())
 }
@@ -4875,20 +4931,16 @@ cypher_scalar_udf! {
 /// Entity-against-entity is left to `cypher_eq`, which compares by identity.
 fn entity_aware_eq(left: &Value, right: &Value) -> Option<bool> {
     fn entity_id(v: &Value) -> Option<i64> {
-        match v {
-            Value::Node(n) => Some(n.vid.as_u64() as i64),
-            Value::Edge(e) => Some(e.eid.as_u64() as i64),
-            // An entity that came through a projection arrives as a map carrying
-            // `_vid` / `_eid` alongside its properties, not as a typed `Node` or
-            // `Edge`. Both encodings are live: `cypher_eq`'s own entity arms are
-            // split the same way. Missing this one is what made the first attempt
-            // at this fix a no-op.
-            Value::Map(m) => m
-                .get("_vid")
-                .or_else(|| m.get("_eid"))
-                .and_then(|id| id.as_i64()),
-            _ => None,
-        }
+        // An entity that came through a projection arrives as a map carrying
+        // `_vid` / `_eid` alongside its properties, not as a typed `Node` or
+        // `Edge`. Both encodings are live, and missing one is what made the
+        // first attempt at this fix a no-op — so the question is asked once,
+        // through the accessor, which also covers the `_id` spelling and the
+        // serde string form that the hand-rolled map arm still missed (#234).
+        v.entity_ref().map(|e| match e {
+            EntityRef::Vertex(vid) => vid.as_u64() as i64,
+            EntityRef::Edge(eid) => eid.as_u64() as i64,
+        })
     }
     match (entity_id(left), entity_id(right)) {
         // Exactly one side is an entity and the other is a bare id.
@@ -6164,19 +6216,18 @@ impl CypherCollectAccumulator {
     /// representation, as before. The `\0` prefixes keep entity keys from
     /// colliding with any scalar's string form.
     fn distinct_key(val: &Value) -> String {
-        match val {
-            Value::Node(n) => format!("\0n{}", n.vid),
-            Value::Edge(e) => format!("\0e{}", e.eid),
-            Value::Map(m) => {
-                if let Some(vid) = m.get("_vid") {
-                    format!("\0n{vid}")
-                } else if let Some(eid) = m.get("_eid") {
-                    format!("\0e{eid}")
-                } else {
-                    val.to_string()
-                }
-            }
-            other => other.to_string(),
+        // The `\0n` / `\0e` prefixes carry the vertex/edge distinction, so a
+        // vertex and an edge of the same number stay apart. What the map arm
+        // this replaces did *not* handle: an `_id`-spelled entity fell through
+        // to `val.to_string()` over a `HashMap`, whose rendering is
+        // order-nondeterministic, and a `_vid` carrying the serde string
+        // `"Vid(7)"` keyed as `"\0nVid(7)"` — neither matching the native
+        // form's `"\0n7"`, so `collect(DISTINCT n)` emitted the same node
+        // twice (#234).
+        match val.entity_ref() {
+            Some(EntityRef::Vertex(vid)) => format!("\0n{vid}"),
+            Some(EntityRef::Edge(eid)) => format!("\0e{eid}"),
+            None => val.to_string(),
         }
     }
 }

@@ -75,6 +75,22 @@ impl RebuildTriggerChecker {
 
             let label = idx.label();
 
+            // `Stale` means "needs building", and nothing acted on it: only the
+            // growth and time triggers below could pick an index up, so a stale
+            // index was rebuilt just in case one of them happened to fire later.
+            // Every writer of `Stale` means the same thing — a retryable rebuild
+            // failure (`handle_rebuild_failure`), a failed Lance build
+            // (`BuildOutcome::Failed`), drift detected at flush, and bulk load —
+            // so the status is a trigger in its own right (#233 Tier 3).
+            //
+            // This is also what makes a dropped rebuild schedule recoverable:
+            // the index stays `Stale` and the next trigger pass picks it up,
+            // where before it waited on an unrelated trigger.
+            if meta.status == IndexStatus::Stale {
+                labels.insert(label.to_string());
+                continue;
+            }
+
             // Growth trigger: current count exceeds row_count_at_build * (1 + ratio)
             if self.config.growth_trigger_ratio > 0.0
                 && let Some(built_count) = meta.row_count_at_build
@@ -480,9 +496,25 @@ impl IndexRebuildManager {
         let schema = self.schema_manager.schema();
         for idx in &schema.indexes {
             if idx.label() == label {
-                let _ = self.schema_manager.update_index_metadata(idx.name(), |m| {
+                let name = idx.name().to_string();
+                if let Err(e) = self.schema_manager.update_index_metadata(&name, |m| {
                     m.status = status.clone();
-                });
+                }) {
+                    // A discarded status write leaves the index reporting its
+                    // *previous* status, so an index that just failed to build
+                    // still reads `Online` and every gate that consults the
+                    // status is misled — the shape the index-status-honesty work
+                    // already fixed once elsewhere. There is no caller to
+                    // propagate to on these background paths, so it is recorded
+                    // loudly and counted instead (#233 Tier 3).
+                    metrics::counter!("uni_index_status_write_failures_total").increment(1);
+                    tracing::error!(
+                        index = %name,
+                        target_status = ?status,
+                        error = %e,
+                        "failed to record index status; the index still reports its previous status"
+                    );
+                }
             }
         }
     }
@@ -498,7 +530,8 @@ impl IndexRebuildManager {
         let schema = self.schema_manager.schema();
         for idx in &schema.indexes {
             if idx.label() == label {
-                let _ = self.schema_manager.update_index_metadata(idx.name(), |m| {
+                let name = idx.name().to_string();
+                if let Err(e) = self.schema_manager.update_index_metadata(&name, |m| {
                     m.status = status.clone();
                     if let Some(ts) = last_built_at {
                         m.last_built_at = Some(ts);
@@ -506,7 +539,16 @@ impl IndexRebuildManager {
                     if let Some(count) = row_count {
                         m.row_count_at_build = Some(count);
                     }
-                });
+                }) {
+                    metrics::counter!("uni_index_status_write_failures_total").increment(1);
+                    tracing::error!(
+                        index = %name,
+                        target_status = ?status,
+                        error = %e,
+                        "failed to record index build metadata; the index still \
+                         reports its previous status and build time"
+                    );
+                }
             }
         }
     }
@@ -671,6 +713,59 @@ mod tests {
 
         let labels = checker.labels_needing_rebuild(&manifest, &indexes);
         assert_eq!(labels.len(), 1);
+    }
+
+    /// A `Stale` index is rebuilt because it is stale, not by coincidence.
+    ///
+    /// `Stale` is written by every path that means "this needs building" — a
+    /// retryable rebuild failure, a failed Lance build (`BuildOutcome::Failed`),
+    /// drift detected at flush, and bulk load — and nothing acted on it: only the
+    /// growth and time triggers could pick an index up, so a stale index waited
+    /// on an unrelated trigger happening to fire (#233 Tier 3).
+    ///
+    /// Both triggers are disabled here, so the only thing that can select this
+    /// index is its status.
+    #[test]
+    fn test_trigger_fires_on_stale_status_alone() {
+        let config = IndexRebuildConfig {
+            growth_trigger_ratio: 0.0,
+            max_index_age: None,
+            ..Default::default()
+        };
+        let checker = RebuildTriggerChecker::new(config);
+
+        let manifest = make_test_manifest("Person", 100);
+        let stale = make_scalar_index(
+            "Person",
+            IndexStatus::Stale,
+            IndexMetadata {
+                // Matching the manifest, so growth could not fire even if enabled.
+                row_count_at_build: Some(100),
+                last_built_at: Some(Utc::now()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            checker.labels_needing_rebuild(&manifest, &[stale]),
+            vec!["Person".to_string()]
+        );
+
+        // The control: identical metadata, `Online`, must not be selected — or
+        // the assertion above would pass for any index at all.
+        let online = make_scalar_index(
+            "Person",
+            IndexStatus::Online,
+            IndexMetadata {
+                row_count_at_build: Some(100),
+                last_built_at: Some(Utc::now()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            checker
+                .labels_needing_rebuild(&manifest, &[online])
+                .is_empty()
+        );
     }
 
     #[test]

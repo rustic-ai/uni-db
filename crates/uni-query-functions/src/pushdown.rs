@@ -40,15 +40,28 @@ pub struct PushdownStrategy {
     /// Predicates pushable to Lance scan filter.
     pub lance_predicates: Vec<Expr>,
 
-    /// Property columns that have an Online Hash scalar index AND a pushable
-    /// equality / IN predicate in this scan. Recorded for two reasons:
-    ///   1. Telemetry — EXPLAIN reports these as `IndexUsage { used: true }`.
+    /// Property columns that have an Online scalar index AND a pushable
+    /// equality / IN predicate in this scan, paired with the index type that
+    /// serves them. Recorded for two reasons:
+    ///   1. Telemetry — EXPLAIN reports these as `IndexUsage { used: true }`,
+    ///      naming the real index type.
     ///   2. Routing — the planner pushes the matching `lance_predicates` into
     ///      `GraphScanExec`'s scan-time filter (rather than a `FilterExec` on
-    ///      top), so Lance's scalar-hash index turns the lookup into O(1).
+    ///      top), so Lance can serve the lookup from the index.
     ///
-    /// See issue #57.
-    pub hash_index_columns: Vec<String>,
+    /// **Both `Hash` and `BTree` qualify.** This was `Hash`-only, so a BTree
+    /// index could never be consulted: nothing was collected, no indexed
+    /// pushdown was built, the predicate became an in-process Arrow filter, and
+    /// Lance was handed nothing index-servable. Every LDBC SF1 index is a BTree,
+    /// which is why all fourteen queries reported `index_scans=0` (#247).
+    ///
+    /// Equality and `IN` only, for both types. A BTree can also serve ranges,
+    /// but pushing a range inside the scan is a different question from pushing
+    /// a point lookup — see the boundary note in
+    /// `build_indexed_property_pushdown` — and is left alone here.
+    ///
+    /// See issues #57, #247.
+    pub indexed_equality_columns: Vec<(String, ScalarIndexType)>,
 
     /// Residual predicates (not pushable to storage).
     pub residual: Vec<Expr>,
@@ -112,15 +125,19 @@ impl<'a> IndexAwareAnalyzer<'a> {
 
             // 4. Check if pushable to Lance
             if lance_analyzer.is_pushable(&conj, variable) {
-                // 4a. Hash-index point lookup: equality / IN against an
-                // Online hash-indexed property. Record the column so the
-                // planner can push this predicate into the scan filter
-                // (Lance turns it into an O(1) hash-index lookup) and
-                // EXPLAIN can report `used: true`.
-                if let Some(col) = self.hash_index_column(&conj, variable, label_id)
-                    && !strategy.hash_index_columns.contains(&col)
+                // 4a. Indexed point lookup: equality / IN against an Online
+                // scalar-indexed property, Hash or BTree. Record the column and
+                // its index type so the planner can push this predicate into the
+                // scan filter — where Lance can serve it from the index — and so
+                // EXPLAIN reports `used: true` against the type that actually
+                // serves it.
+                if let Some((col, kind)) = self.indexed_equality_column(&conj, variable, label_id)
+                    && !strategy
+                        .indexed_equality_columns
+                        .iter()
+                        .any(|(c, _)| c == &col)
                 {
-                    strategy.hash_index_columns.push(col);
+                    strategy.indexed_equality_columns.push((col, kind));
                 }
                 strategy.lance_predicates.push(conj);
             } else {
@@ -134,7 +151,12 @@ impl<'a> IndexAwareAnalyzer<'a> {
     /// If `expr` is an equality or IN predicate of the form
     /// `variable.prop = ...` / `variable.prop IN ...` where `(label, prop)`
     /// has an Online `ScalarIndexType::Hash` index, return the column name.
-    fn hash_index_column(&self, expr: &Expr, variable: &str, label_id: u16) -> Option<String> {
+    fn indexed_equality_column(
+        &self,
+        expr: &Expr,
+        variable: &str,
+        label_id: u16,
+    ) -> Option<(String, ScalarIndexType)> {
         let prop = match expr {
             Expr::BinaryOp {
                 left,
@@ -162,10 +184,13 @@ impl<'a> IndexAwareAnalyzer<'a> {
             if let IndexDefinition::Scalar(cfg) = idx
                 && cfg.label == *label_name
                 && cfg.properties.contains(&prop)
-                && cfg.index_type == ScalarIndexType::Hash
+                && matches!(
+                    cfg.index_type,
+                    ScalarIndexType::Hash | ScalarIndexType::BTree
+                )
                 && cfg.metadata.status == IndexStatus::Online
             {
-                return Some(prop);
+                return Some((prop, cfg.index_type.clone()));
             }
         }
         None

@@ -104,8 +104,15 @@ async fn hydrate_entity_if_needed(
     prop_manager: &PropertyManager,
     ctx: Option<&QueryContext>,
 ) {
+    // Which kind of entity this is, and its id, asked once. Reading `_eid` and
+    // `_vid` as integers meant a map spelling its id `_id`, or carrying the
+    // serde form `"Vid(7)"`, was hydrated as neither — so `n.prop` came back
+    // NULL after a pushdown that emitted only the system fields (#234).
+    let entity = uni_common::value::entity_ref_from_map(map);
+
     // Check for edge entity
-    if let Some(eid_u64) = map.get("_eid").and_then(|v| v.as_u64()) {
+    if let Some(uni_common::value::EntityRef::Edge(eid)) = entity {
+        let eid_u64 = eid.as_u64();
         if map.len() <= EDGE_SYSTEM_FIELD_COUNT {
             tracing::debug!(
                 "Pushdown fallback: hydrating edge {} at execution time",
@@ -130,7 +137,8 @@ async fn hydrate_entity_if_needed(
     }
 
     // Check for vertex entity
-    if let Some(vid_u64) = map.get("_vid").and_then(|v| v.as_u64()) {
+    if let Some(uni_common::value::EntityRef::Vertex(vid)) = entity {
+        let vid_u64 = vid.as_u64();
         if map.len() <= VERTEX_SYSTEM_FIELD_COUNT {
             tracing::debug!(
                 "Pushdown fallback: hydrating vertex {} at execution time",
@@ -280,11 +288,18 @@ impl Executor {
             };
 
             if let Some(expr) = filter {
-                let mut props_map: HashMap<String, Value> = props;
-                props_map.insert("_vid".to_string(), Value::Int(vid.as_u64() as i64));
-
+                // Labels are deliberately empty: the map form this replaced
+                // carried no `_labels` either, so a label predicate answered
+                // false then and answers false now.
                 let mut row = HashMap::new();
-                row.insert(variable.to_string(), Value::Map(props_map));
+                row.insert(
+                    variable.to_string(),
+                    Value::Node(uni_common::Node {
+                        vid,
+                        labels: Vec::new(),
+                        properties: props,
+                    }),
+                );
 
                 let res = self
                     .evaluate_expr(expr, &row, prop_manager, params, ctx)
@@ -373,8 +388,8 @@ impl Executor {
     /// Find a node value in the row by VID.
     ///
     /// Scans all values in the row, looking for a node (Map or Node) whose VID
-    /// matches the target. Returns the full node value if found, or a minimal
-    /// Map with just `_vid` as fallback.
+    /// matches the target. Returns the full node value if found, or a bare
+    /// `Value::Node` carrying just the identity as fallback.
     fn find_node_by_vid(row: &HashMap<String, Value>, target_vid: Vid) -> Value {
         for val in row.values() {
             if let Ok(vid) = Self::vid_from_value(val)
@@ -383,11 +398,12 @@ impl Executor {
                 return val.clone();
             }
         }
-        // Fallback: return minimal node map
-        Value::Map(HashMap::from([(
-            "_vid".to_string(),
-            Value::Int(target_vid.as_u64() as i64),
-        )]))
+        // Nothing in the row denotes it, so answer with the identity alone.
+        Value::Node(uni_common::Node {
+            vid: target_vid,
+            labels: Vec::new(),
+            properties: HashMap::new(),
+        })
     }
 
     /// Create L0 context, session, and planner for DataFusion execution.
@@ -937,7 +953,8 @@ impl Executor {
                         None
                     };
                     let mut value =
-                        arrow_convert::arrow_to_value(column.as_ref(), row_idx, data_type);
+                        arrow_convert::arrow_to_value(column.as_ref(), row_idx, data_type)
+                            .canonical_entity();
 
                     // Check if this field contains JSON-encoded values (e.g., from UNWIND)
                     // Parse JSON string to restore the original type
@@ -1495,8 +1512,14 @@ impl Executor {
 
     /// Converts an Arrow array element at a given row index to a Value.
     /// Delegates to the shared implementation in arrow_convert module.
+    /// Decode one Arrow cell into a `Value` for the query layer.
+    ///
+    /// An entity struct becomes its native form rather than a map. The storage
+    /// decoder this delegates to is shared with `uni-store`, which has its own
+    /// contract, so the conversion belongs here on the query side rather than
+    /// down there (#234).
     pub(crate) fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
-        arrow_convert::arrow_to_value(col, row, None)
+        arrow_convert::arrow_to_value(col, row, None).canonical_entity()
     }
 
     pub(crate) fn evaluate_expr<'a>(
@@ -1659,25 +1682,28 @@ impl Executor {
                         {
                             return Ok(val.clone());
                         }
-                        // Fallback to storage lookup using _vid or _id
-                        let vid_opt = map.get("_vid").and_then(|v| v.as_u64()).or_else(|| {
-                            map.get("_id")
-                                .and_then(|v| v.as_str())
-                                .and_then(|s| s.parse::<u64>().ok())
-                        });
-                        if let Some(id) = vid_opt {
-                            let vid = Vid::from(id);
-                            if let Ok(val) = prop_manager
-                                .get_vertex_prop_with_ctx(vid, prop_name, ctx)
-                                .await
-                            {
-                                return Ok(val);
+                        // Fallback to a storage lookup, whichever encoding carries
+                        // the identity. `_id` used to be read only as a *string*,
+                        // so a map spelling its id `_id` as an integer resolved to
+                        // neither vertex nor edge and the whole property access
+                        // returned NULL — a wrong answer with no error (#234).
+                        match uni_common::value::entity_ref_from_map(map) {
+                            Some(uni_common::value::EntityRef::Vertex(vid)) => {
+                                if let Ok(val) = prop_manager
+                                    .get_vertex_prop_with_ctx(vid, prop_name, ctx)
+                                    .await
+                                {
+                                    return Ok(val);
+                                }
                             }
-                        } else if let Some(id) = map.get("_eid").and_then(|v| v.as_u64()) {
-                            let eid = uni_common::core::id::Eid::from(id);
-                            if let Ok(val) = prop_manager.get_edge_prop(eid, prop_name, ctx).await {
-                                return Ok(val);
+                            Some(uni_common::value::EntityRef::Edge(eid)) => {
+                                if let Ok(val) =
+                                    prop_manager.get_edge_prop(eid, prop_name, ctx).await
+                                {
+                                    return Ok(val);
+                                }
                             }
+                            None => {}
                         }
                         return Ok(Value::Null);
                     }
@@ -2217,20 +2243,25 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Map(map) = &val {
-                            // Check for _vid (vertex) first
-                            if let Some(vid_val) = map.get("_vid") {
-                                return Ok(vid_val.clone());
-                            }
-                            // Check for _eid (edge/relationship)
-                            if let Some(eid_val) = map.get("_eid") {
-                                return Ok(eid_val.clone());
-                            }
-                            // Check for _id (fallback)
-                            if let Some(id_val) = map.get("_id") {
-                                return Ok(id_val.clone());
-                            }
+                        // Only the map encoding was handled, so `id(n)` on a
+                        // native `Value::Node` returned NULL — an entity right
+                        // there in the row reading as "not an entity" (#233,
+                        // #234). `entity_vid` is the one definition of vertex
+                        // identity and covers `Node` and every map form; edges
+                        // stay explicit because it has no `Edge`/`_eid` arm.
+                        if let Some(vid) = val.entity_vid() {
+                            return Ok(Value::Int(vid.as_u64() as i64));
                         }
+                        // The edge half now has an accessor too. The map arm it
+                        // replaces returned `_eid` *verbatim*, so an id carried as
+                        // the string `"Eid(7)"` came back as that string while the
+                        // vertex arm beside it returned an `Int` — one function,
+                        // two return types, decided by how a row was encoded.
+                        if let Some(eid) = val.entity_eid() {
+                            return Ok(Value::Int(eid.as_u64() as i64));
+                        }
+                        // A genuinely non-entity argument, `id(null)` included,
+                        // is NULL by Cypher's rules.
                         return Ok(Value::Null);
                     }
 
@@ -2242,17 +2273,15 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Map(map) = &val {
-                            // Check for _vid (vertex) first
-                            // In new storage model, VIDs are pure auto-increment - return as simple ID string
-                            if let Some(vid_val) = map.get("_vid").and_then(|v| v.as_u64()) {
-                                return Ok(Value::String(vid_val.to_string()));
-                            }
-                            // Check for _eid (edge/relationship)
-                            // In new storage model, EIDs are pure auto-increment - return as simple ID string
-                            if let Some(eid_val) = map.get("_eid").and_then(|v| v.as_u64()) {
-                                return Ok(Value::String(eid_val.to_string()));
-                            }
+                        // Same two gaps as `id()` above, plus one of its own: the
+                        // `_vid` arm required `as_u64`, so a map carrying the id
+                        // only as `_id` fell through to NULL even though the
+                        // entity was present. `entity_vid` accepts every form.
+                        if let Some(vid) = val.entity_vid() {
+                            return Ok(Value::String(vid.as_u64().to_string()));
+                        }
+                        if let Some(eid) = val.entity_eid() {
+                            return Ok(Value::String(eid.as_u64().to_string()));
                         }
                         return Ok(Value::Null);
                     }
@@ -2265,13 +2294,15 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Map(map) = &val
-                            && let Some(type_val) = map.get("_type")
-                        {
-                            // Numeric _type is an edge type ID; string _type is already a name
-                            if let Some(type_id) =
-                                type_val.as_u64().and_then(|v| u32::try_from(v).ok())
-                            {
+                        // Through the accessor. Reading `_type` out of a map
+                        // by hand meant a native `Value::Edge` — every edge the
+                        // write path now binds — fell straight through to
+                        // `Null`, silently.
+                        match val.edge_type_ref() {
+                            Some(uni_common::value::EdgeTypeRef::Name(name)) => {
+                                return Ok(Value::String(name));
+                            }
+                            Some(uni_common::value::EdgeTypeRef::Id(type_id)) => {
                                 if let Some(name) = this
                                     .storage
                                     .schema_manager()
@@ -2279,9 +2310,8 @@ impl Executor {
                                 {
                                     return Ok(Value::String(name));
                                 }
-                            } else if let Some(name) = type_val.as_str() {
-                                return Ok(Value::String(name.to_string()));
                             }
+                            None => {}
                         }
                         return Ok(Value::Null);
                     }
@@ -2294,10 +2324,12 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Map(map) = &val
-                            && let Some(labels_val) = map.get("_labels")
-                        {
-                            return Ok(labels_val.clone());
+                        // `labels(n)` answered `Null` for a native node, for
+                        // the same reason `type(r)` did.
+                        if let Some(labels) = val.entity_labels() {
+                            return Ok(Value::List(
+                                labels.into_iter().map(Value::String).collect(),
+                            ));
                         }
                         return Ok(Value::Null);
                     }
@@ -2310,15 +2342,18 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Map(map) = &val {
-                            // Filter out internal properties (those starting with _)
-                            let mut props = HashMap::new();
-                            for (k, v) in map.iter() {
-                                if !k.starts_with('_') {
-                                    props.insert(k.clone(), v.clone());
-                                }
-                            }
+                        if let Some(props) = val.entity_properties() {
                             return Ok(Value::Map(props));
+                        }
+                        // A plain map is its own properties; only a non-map,
+                        // non-entity is `Null`.
+                        if let Value::Map(map) = &val {
+                            return Ok(Value::Map(
+                                map.iter()
+                                    .filter(|(k, _)| !k.starts_with('_'))
+                                    .map(|(k, v)| (k.clone(), v.clone()))
+                                    .collect(),
+                            ));
                         }
                         return Ok(Value::Null);
                     }
@@ -2331,25 +2366,15 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Edge(edge) = &val {
-                            return Ok(Self::find_node_by_vid(row, edge.src));
+                        // A nested `_startNode` is a whole node the plan
+                        // already resolved; prefer it over re-deriving one.
+                        if let Value::Map(map) = &val
+                            && let Some(start_node) = map.get("_startNode")
+                        {
+                            return Ok(start_node.clone());
                         }
-                        if let Value::Map(map) = &val {
-                            if let Some(start_node) = map.get("_startNode") {
-                                return Ok(start_node.clone());
-                            }
-                            if let Some(src_vid) = map.get("_src_vid") {
-                                return Ok(Value::Map(HashMap::from([(
-                                    "_vid".to_string(),
-                                    src_vid.clone(),
-                                )])));
-                            }
-                            // Resolve _src VID by looking up node in row
-                            if let Some(src_id) = map.get("_src")
-                                && let Some(u) = src_id.as_u64()
-                            {
-                                return Ok(Self::find_node_by_vid(row, Vid::new(u)));
-                            }
+                        if let Some((Some(src), _)) = val.edge_endpoints() {
+                            return Ok(Self::find_node_by_vid(row, src));
                         }
                         return Ok(Value::Null);
                     }
@@ -2362,25 +2387,13 @@ impl Executor {
                         let val = this
                             .evaluate_expr(&args[0], row, prop_manager, params, ctx)
                             .await?;
-                        if let Value::Edge(edge) = &val {
-                            return Ok(Self::find_node_by_vid(row, edge.dst));
+                        if let Value::Map(map) = &val
+                            && let Some(end_node) = map.get("_endNode")
+                        {
+                            return Ok(end_node.clone());
                         }
-                        if let Value::Map(map) = &val {
-                            if let Some(end_node) = map.get("_endNode") {
-                                return Ok(end_node.clone());
-                            }
-                            if let Some(dst_vid) = map.get("_dst_vid") {
-                                return Ok(Value::Map(HashMap::from([(
-                                    "_vid".to_string(),
-                                    dst_vid.clone(),
-                                )])));
-                            }
-                            // Resolve _dst VID by looking up node in row
-                            if let Some(dst_id) = map.get("_dst")
-                                && let Some(u) = dst_id.as_u64()
-                            {
-                                return Ok(Self::find_node_by_vid(row, Vid::new(u)));
-                            }
+                        if let Some((_, Some(dst))) = val.edge_endpoints() {
+                            return Ok(Self::find_node_by_vid(row, dst));
                         }
                         return Ok(Value::Null);
                     }
@@ -2402,29 +2415,14 @@ impl Executor {
                             anyhow!("Second argument to hasLabel must be a string")
                         })?;
 
-                        let has_label = match &node_val {
-                            // Handle proper Value::Node type (from result normalization)
-                            Value::Map(map) if map.contains_key("_vid") => {
-                                if let Some(Value::List(labels_arr)) = map.get("_labels") {
-                                    labels_arr
-                                        .iter()
-                                        .any(|l| l.as_str() == Some(label_to_check))
-                                } else {
-                                    false
-                                }
-                            }
-                            // Also handle legacy Object format
-                            Value::Map(map) => {
-                                if let Some(Value::List(labels_arr)) = map.get("_labels") {
-                                    labels_arr
-                                        .iter()
-                                        .any(|l| l.as_str() == Some(label_to_check))
-                                } else {
-                                    false
-                                }
-                            }
-                            _ => false,
-                        };
+                        // Both arms this replaced matched `Value::Map` and read
+                        // `_labels` by hand — the first even claimed to "handle
+                        // proper Value::Node", which it did not: a natively
+                        // encoded node fell to the catch-all and answered
+                        // `false`.
+                        let has_label = node_val
+                            .entity_labels()
+                            .is_some_and(|labels| labels.iter().any(|l| l == label_to_check));
                         return Ok(Value::Bool(has_label));
                     }
 
@@ -2499,33 +2497,28 @@ impl Executor {
                         })?;
 
                         // Fetch temporal property values - supports both vertices and edges
-                        let valid_from_val: Option<Value> = if let Ok(vid) =
-                            Self::vid_from_value(&node_val)
-                        {
-                            // Vertex case - VID string format
-                            prop_manager
-                                .get_vertex_prop_with_ctx(vid, &start_prop, ctx)
-                                .await
-                                .ok()
-                        } else if let Value::Map(map) = &node_val {
-                            // Check for embedded _vid or _eid in object
-                            if let Some(vid_val) = map.get("_vid").and_then(|v| v.as_u64()) {
-                                let vid = Vid::from(vid_val);
+                        let valid_from_val: Option<Value> =
+                            if let Ok(vid) = Self::vid_from_value(&node_val) {
+                                // Vertex case - VID string format
                                 prop_manager
                                     .get_vertex_prop_with_ctx(vid, &start_prop, ctx)
                                     .await
                                     .ok()
-                            } else if let Some(eid_val) = map.get("_eid").and_then(|v| v.as_u64()) {
-                                // Edge case
-                                let eid = uni_common::core::id::Eid::from(eid_val);
+                            } else if let Some(eid) = node_val.entity_eid() {
+                                // Edge case. This used to be reachable only through the
+                                // `Value::Map` arm below, so a native `Value::Edge`
+                                // matched nothing and fell to the `false` return —
+                                // `validAt` silently filtered out every row whose
+                                // relationship happened to be materialised natively
+                                // rather than as a map (#234).
                                 prop_manager.get_edge_prop(eid, &start_prop, ctx).await.ok()
-                            } else {
-                                // Inline object - property embedded directly
+                            } else if let Value::Map(map) = &node_val {
+                                // Inline object - property embedded directly. Entity
+                                // maps are handled above, by the vid/eid accessors.
                                 map.get(&start_prop).cloned()
-                            }
-                        } else {
-                            return Ok(Value::Bool(false));
-                        };
+                            } else {
+                                return Ok(Value::Bool(false));
+                            };
 
                         let valid_from = match valid_from_val {
                             Some(ref v) => match value_to_datetime_utc(v) {
@@ -2541,33 +2534,28 @@ impl Executor {
                             None => return Ok(Value::Bool(false)),
                         };
 
-                        let valid_to_val: Option<Value> = if let Ok(vid) =
-                            Self::vid_from_value(&node_val)
-                        {
-                            // Vertex case - VID string format
-                            prop_manager
-                                .get_vertex_prop_with_ctx(vid, &end_prop, ctx)
-                                .await
-                                .ok()
-                        } else if let Value::Map(map) = &node_val {
-                            // Check for embedded _vid or _eid in object
-                            if let Some(vid_val) = map.get("_vid").and_then(|v| v.as_u64()) {
-                                let vid = Vid::from(vid_val);
+                        let valid_to_val: Option<Value> =
+                            if let Ok(vid) = Self::vid_from_value(&node_val) {
+                                // Vertex case - VID string format
                                 prop_manager
                                     .get_vertex_prop_with_ctx(vid, &end_prop, ctx)
                                     .await
                                     .ok()
-                            } else if let Some(eid_val) = map.get("_eid").and_then(|v| v.as_u64()) {
-                                // Edge case
-                                let eid = uni_common::core::id::Eid::from(eid_val);
+                            } else if let Some(eid) = node_val.entity_eid() {
+                                // Edge case. This used to be reachable only through the
+                                // `Value::Map` arm below, so a native `Value::Edge`
+                                // matched nothing and fell to the `false` return —
+                                // `validAt` silently filtered out every row whose
+                                // relationship happened to be materialised natively
+                                // rather than as a map (#234).
                                 prop_manager.get_edge_prop(eid, &end_prop, ctx).await.ok()
-                            } else {
-                                // Inline object - property embedded directly
+                            } else if let Value::Map(map) = &node_val {
+                                // Inline object - property embedded directly. Entity
+                                // maps are handled above, by the vid/eid accessors.
                                 map.get(&end_prop).cloned()
-                            }
-                        } else {
-                            return Ok(Value::Bool(false));
-                        };
+                            } else {
+                                return Ok(Value::Bool(false));
+                            };
 
                         let valid_to = match valid_to_val {
                             Some(ref v) => match value_to_datetime_utc(v) {
@@ -2652,45 +2640,35 @@ impl Executor {
                     let val = this
                         .evaluate_expr(expr, row, prop_manager, params, ctx)
                         .await?;
-                    match &val {
-                        Value::Null => Ok(Value::Null),
-                        Value::Map(map) => {
-                            // Check if this is an edge (has _eid) or node (has _vid)
-                            let is_edge = map.contains_key("_eid")
-                                || map.contains_key("_type_name")
-                                || (map.contains_key("_type") && !map.contains_key("_vid"));
-
-                            if is_edge {
-                                // Edges have a single type
-                                if labels.len() > 1 {
-                                    return Ok(Value::Bool(false));
-                                }
-                                let label_to_check = &labels[0];
-                                let has_type = if let Some(Value::String(t)) = map.get("_type_name")
-                                {
-                                    t == label_to_check
-                                } else if let Some(Value::String(t)) = map.get("_type") {
-                                    t == label_to_check
-                                } else {
-                                    false
-                                };
-                                Ok(Value::Bool(has_type))
-                            } else {
-                                // Node: check all labels
-                                let has_all = labels.iter().all(|label_to_check| {
-                                    if let Some(Value::List(labels_arr)) = map.get("_labels") {
-                                        labels_arr
-                                            .iter()
-                                            .any(|l| l.as_str() == Some(label_to_check.as_str()))
-                                    } else {
-                                        false
-                                    }
-                                });
-                                Ok(Value::Bool(has_all))
-                            }
-                        }
-                        _ => Ok(Value::Bool(false)),
+                    // Both encodings, through the accessors. This matched on
+                    // `Value::Map` alone, so `WHERE n:Person` against a natively
+                    // encoded node fell to the catch-all and answered `false` —
+                    // a predicate that silently excludes every row.
+                    if matches!(val, Value::Null) {
+                        return Ok(Value::Null);
                     }
+                    if let Some(node_labels) = val.entity_labels() {
+                        let has_all = labels
+                            .iter()
+                            .all(|want| node_labels.iter().any(|have| have == want));
+                        return Ok(Value::Bool(has_all));
+                    }
+                    if let Some(edge_type) = val.edge_type_ref() {
+                        // An edge has exactly one type, so more than one label
+                        // can never all match.
+                        if labels.len() != 1 {
+                            return Ok(Value::Bool(false));
+                        }
+                        let name = match edge_type {
+                            uni_common::value::EdgeTypeRef::Name(n) => Some(n),
+                            uni_common::value::EdgeTypeRef::Id(id) => this
+                                .storage
+                                .schema_manager()
+                                .edge_type_name_by_id_unified(id),
+                        };
+                        return Ok(Value::Bool(name.as_deref() == Some(labels[0].as_str())));
+                    }
+                    Ok(Value::Bool(false))
                 }
 
                 Expr::MapProjection { base, items } => {
@@ -4784,7 +4762,8 @@ impl Executor {
                                 // Look up Uni DataType from schema for proper DateTime/Time decoding
                                 let data_type = target_props.get(name).map(|pm| &pm.r#type);
                                 let val =
-                                    arrow_convert::arrow_to_value(col.as_ref(), row, data_type);
+                                    arrow_convert::arrow_to_value(col.as_ref(), row, data_type)
+                                        .canonical_entity();
                                 props.insert(name.clone(), val);
                             }
                         }
@@ -4837,7 +4816,8 @@ impl Executor {
                         } else if let Some(pm) = target_props.get(name) {
                             // Look up Uni DataType from schema for proper DateTime/Time decoding
                             let val =
-                                arrow_convert::arrow_to_value(col.as_ref(), row, Some(&pm.r#type));
+                                arrow_convert::arrow_to_value(col.as_ref(), row, Some(&pm.r#type))
+                                    .canonical_entity();
                             props.insert(name.clone(), val);
                         }
                     }

@@ -410,3 +410,267 @@ async fn a_schemaless_scan_reaches_the_denominator() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// A BTree index serves an equality lookup, exactly as a Hash index does.
+///
+/// `IndexAwareAnalyzer::indexed_equality_column` accepted only
+/// `ScalarIndexType::Hash`, so a BTree index was never collected, no indexed
+/// pushdown was built, the predicate became an in-process Arrow filter, and
+/// Lance was handed nothing it could serve from an index. Every LDBC SF1 index
+/// is a BTree, which is why all fourteen queries reported `index_scans=0`
+/// against indexes that were present on disk (#247).
+///
+/// The assertions mirror the Hash test deliberately: `scans_reported > 0` so a
+/// deleted callback cannot make this pass, and `index_comparisons > 0` because
+/// a BTree records comparisons on the search path — `index_scans` alone would
+/// also be satisfied by a cache-miss load counter.
+#[tokio::test]
+async fn a_btree_index_also_serves_an_equality_lookup() {
+    let db = Uni::temporary().build().await.unwrap();
+    db.schema()
+        .label("Item")
+        .property("name", DataType::String)
+        .property("age", DataType::Int)
+        .done()
+        .apply()
+        .await
+        .unwrap();
+
+    let s = db.session();
+    let tx = s.tx().await.unwrap();
+    tx.query_with(
+        "UNWIND range(0, $n - 1) AS i \
+         CREATE (:Item {name: 'name-' + toString(i), age: i % 90})",
+    )
+    .param("n", Value::Int(N))
+    .fetch_all()
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    db.flush().await.unwrap();
+
+    db.schema()
+        .label("Item")
+        .index("name", IndexType::Scalar(ScalarType::BTree))
+        .apply()
+        .await
+        .unwrap();
+
+    let r = db.session().query(EQ_QUERY).await.unwrap();
+    let m = r.metrics().clone();
+
+    assert!(
+        m.scans_reported > 0,
+        "no Lance scan reported at all, so this test measured nothing"
+    );
+    assert!(
+        m.index_scans >= 1,
+        "an `=` on a BTree-indexed column did not consult the index \
+         (index_scans={}, comparisons={}, scans_reported={})",
+        m.index_scans,
+        m.index_comparisons,
+        m.scans_reported
+    );
+    assert!(
+        m.index_comparisons > 0,
+        "the index was opened but performed no comparisons"
+    );
+
+    // The rows must be unchanged by the routing decision: an index that returns
+    // a different answer from a scan is worse than one that is never used.
+    assert_eq!(r.rows().len(), 1, "the indexed lookup changed the result");
+    assert_eq!(
+        r.rows()[0].values()[0],
+        Value::Int(42 % 90),
+        "the indexed lookup returned the wrong row"
+    );
+}
+
+/// A scalar index survives a subsequent write.
+///
+/// On the LDBC SF1 store, `Dataset::load_indices()` returns **empty** while six
+/// index directories sit in `vertices_Person.lance/_indices/`. Walking the
+/// dataset versions shows why: indices accumulate 1..6 across v2-v7 as they are
+/// created, then drop to **0 at v8** and stay there, with the row count constant
+/// at 9 892 throughout — so no data change caused it. The `_transactions` files
+/// confirm the shape: v2-v7 are index creations, v8 onward are data rewrites.
+///
+/// That is the whole of #247's remaining half: the predicate reaches Lance as
+/// index-servable and Lance declines because, from its manifest, there is no
+/// index to use. The files on disk are orphaned.
+///
+/// This pins the property that matters — an index, once built, is still
+/// consulted after more data is written, and after a compaction. The write half
+/// passes; the compaction half is the one SF1's version history points at,
+/// since a rewrite at constant row count is compaction's signature and not an
+/// append's.
+#[tokio::test]
+async fn a_scalar_index_survives_a_later_write() {
+    let db = fixture().await;
+
+    // Baseline: the index is consulted before any further write.
+    let before = db
+        .session()
+        .query(EQ_QUERY)
+        .await
+        .unwrap()
+        .metrics()
+        .clone();
+    assert!(
+        before.index_scans >= 1 && before.index_comparisons > 0,
+        "the index was not consulted even before the extra write, so this test \
+         would prove nothing about the write (index_scans={}, comparisons={})",
+        before.index_scans,
+        before.index_comparisons
+    );
+
+    // A second write, through the same bulk path the LDBC loader uses
+    // (`bulk_insert_vertices_labeled`) rather than Cypher CREATE — the ordinary
+    // path was checked first and preserves the index, so the bulk path is the
+    // remaining candidate for what dropped it on SF1.
+    let s = db.session();
+    let tx = s.tx().await.unwrap();
+    let rows: Vec<std::collections::HashMap<String, Value>> = (N..N + 100)
+        .map(|i| {
+            let mut m = std::collections::HashMap::new();
+            m.insert("name".to_string(), Value::String(format!("name-{i}")));
+            m.insert("age".to_string(), Value::Int(i % 90));
+            m
+        })
+        .collect();
+    tx.bulk_insert_vertices_labeled(&["Item"], rows)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    db.flush().await.unwrap();
+
+    let after = db
+        .session()
+        .query(EQ_QUERY)
+        .await
+        .unwrap()
+        .metrics()
+        .clone();
+    assert!(
+        after.scans_reported > 0,
+        "no Lance scan reported, so this measured nothing"
+    );
+    assert!(
+        after.index_scans >= 1,
+        "the index stopped being consulted after a later write \
+         (index_scans={}, comparisons={}, scans_reported={})",
+        after.index_scans,
+        after.index_comparisons,
+        after.scans_reported
+    );
+}
+
+/// A scalar index survives semantic compaction.
+///
+/// `Compactor::compact_vertices` rewrites the per-label table through
+/// `VertexDataset::replace` -> `replace_table_atomic` -> `WriteMode::Overwrite`,
+/// and Lance drops every index on a dataset it overwrites. Nothing put them
+/// back: `optimize_indices` runs only on the other compaction path
+/// (`optimize_table`, via Lance's `compact_files`), and by then there is no
+/// index left to optimize.
+///
+/// The effect was silent and permanent — uni's schema still reported
+/// `status: Online` with the original `last_built_at`, because the status is
+/// truthful about the build and nothing noticed a later write removed the
+/// artifact. On LDBC SF1 that is six Person indexes gone after the first
+/// background compaction tick, and all fourteen queries reporting
+/// `index_scans=0` against indexes present on disk (#247).
+///
+/// Semantic compaction is reached only from the background scheduler:
+/// `compact_label` runs Lance's `compact_files` alone, and
+/// `trigger_async_compaction` has no callers. So this drives the scheduler with
+/// a short interval and a flush to give `pick_compaction_task` something to
+/// pick, which is what the earlier compaction test missed — it called
+/// `compact()` and never reached `replace`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_scalar_index_survives_semantic_compaction() {
+    use uni_db::UniConfig;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = UniConfig::default();
+    cfg.compaction.check_interval = std::time::Duration::from_millis(200);
+    cfg.compaction.max_l1_runs = 1;
+    let db = Uni::open(dir.path().to_str().unwrap())
+        .config(cfg)
+        .build()
+        .await
+        .unwrap();
+
+    db.schema()
+        .label("Item")
+        .property("name", DataType::String)
+        .property("age", DataType::Int)
+        .done()
+        .apply()
+        .await
+        .unwrap();
+
+    let s = db.session();
+    let tx = s.tx().await.unwrap();
+    tx.query_with(
+        "UNWIND range(0, $n - 1) AS i \
+         CREATE (:Item {name: 'name-' + toString(i), age: i % 90})",
+    )
+    .param("n", Value::Int(N))
+    .fetch_all()
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    db.flush().await.unwrap();
+
+    db.schema()
+        .label("Item")
+        .index("name", IndexType::Scalar(ScalarType::Hash))
+        .apply()
+        .await
+        .unwrap();
+
+    let before = db
+        .session()
+        .query(EQ_QUERY)
+        .await
+        .unwrap()
+        .metrics()
+        .clone();
+    assert!(
+        before.index_scans >= 1 && before.index_comparisons > 0,
+        "the index was not consulted before compaction, so this proves nothing \
+         about compaction (index_scans={}, comparisons={})",
+        before.index_scans,
+        before.index_comparisons
+    );
+
+    // A second flush raises `l1_runs` so the scheduler picks a task.
+    let tx = s.tx().await.unwrap();
+    tx.execute("CREATE (:Item {name: 'extra', age: 1})")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    db.flush().await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let after = db
+        .session()
+        .query(EQ_QUERY)
+        .await
+        .unwrap()
+        .metrics()
+        .clone();
+    assert!(
+        after.scans_reported > 0,
+        "no Lance scan reported after compaction"
+    );
+    assert!(
+        after.index_scans >= 1,
+        "semantic compaction dropped the index (index_scans={}, comparisons={}, \
+         scans_reported={})",
+        after.index_scans,
+        after.index_comparisons,
+        after.scans_reported
+    );
+}

@@ -222,7 +222,9 @@ fn arrow_to_value_at(col: &dyn Array, row: usize) -> Value {
                     .collect(),
             )
         }
-        _ => uni_store::storage::arrow_convert::arrow_to_value(col, row, None),
+        // Same boundary as the other query-side decoders: an entity struct
+        // decodes to its native form rather than a second encoding of it.
+        _ => uni_store::storage::arrow_convert::arrow_to_value(col, row, None).canonical_entity(),
     }
 }
 

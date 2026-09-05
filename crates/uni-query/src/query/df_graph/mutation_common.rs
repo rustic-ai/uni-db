@@ -254,12 +254,14 @@ fn vertex_vid_and_labels(val: &Value) -> Option<(Vid, Vec<String>)> {
     match val {
         Value::Node(node) => Some((node.vid, node.labels.clone())),
         Value::Map(map) => {
-            if map.contains_key("_eid") {
-                return None;
-            }
-            let vid_val = map.get("_vid")?;
-            let vid = match vid_val {
-                Value::Int(i) if *i >= 0 => Vid::from(*i as u64),
+            // Requiring `_vid` to be a `Value::Int` meant every other spelling
+            // of the same id resolved to `None`, and `None` here is not an
+            // error — the row is dropped, so the SET or DELETE reports success
+            // having touched nothing. `entity_ref_from_map` accepts every
+            // spelling and still refuses an edge, which is what the `_eid`
+            // guard here used to do by hand.
+            let vid = match uni_common::value::entity_ref_from_map(map) {
+                Some(uni_common::value::EntityRef::Vertex(vid)) => vid,
                 _ => return None,
             };
             let labels = map
@@ -294,23 +296,19 @@ fn edge_eid_and_type(val: &Value) -> Option<(Eid, String)> {
     match val {
         Value::Edge(edge) => Some((edge.eid, edge.edge_type.clone())),
         Value::Map(map) => {
-            // Must be edge-shaped: _eid, _src, _dst.
-            let eid_val = map.get("_eid")?;
-            if !map.contains_key("_src") || !map.contains_key("_dst") {
-                return None;
-            }
-            let eid = match eid_val {
-                Value::Int(i) if *i >= 0 => Eid::from(*i as u64),
-                Value::Null => return None,
+            // Must be edge-shaped, and the id may be spelled several ways —
+            // see the vertex twin above for why a silent `None` is costly here.
+            let eid = match uni_common::value::entity_ref_from_map(map) {
+                Some(uni_common::value::EntityRef::Edge(eid)) => eid,
                 _ => return None,
             };
-            let type_name = map
-                .get("_type_name")
-                .or_else(|| map.get("_type"))
-                .and_then(|v| match v {
-                    Value::String(s) => Some(s.clone()),
-                    _ => None,
-                })
+            // Through the accessor, so every spelling of the type resolves
+            // here and not just the two this knew. An id cannot become a name
+            // without the schema, and the empty string is what this reported
+            // for an unreadable type before.
+            let type_name = val
+                .edge_type_ref()
+                .and_then(|t| t.name().map(str::to_string))
                 .unwrap_or_default();
             Some((eid, type_name))
         }
@@ -348,7 +346,8 @@ pub fn batches_to_rows(batches: &[RecordBatch]) -> Result<Vec<HashMap<String, Va
                 } else {
                     None
                 };
-                let mut value = arrow_convert::arrow_to_value(column.as_ref(), row_idx, data_type);
+                let mut value = arrow_convert::arrow_to_value(column.as_ref(), row_idx, data_type)
+                    .canonical_entity();
 
                 // Check if this field contains JSON-encoded values (e.g., from UNWIND)
                 // Parse JSON string to restore the original type
@@ -431,8 +430,16 @@ fn sync_dotted_columns(rows: &mut [HashMap<String, Value>], schema: &SchemaRef) 
             if let Some(dot_pos) = name.find('.') {
                 let var_name = &name[..dot_pos];
                 let prop_name = &name[dot_pos + 1..];
-                if let Some(Value::Map(map)) = row.get(var_name) {
-                    let val = map.get(prop_name).cloned().unwrap_or(Value::Null);
+                // Syncing only from a `Value::Map` left every dotted column of a
+                // natively-encoded entity unwritten, and a non-nullable
+                // `{var}._vid` then failed batch reconstruction outright (#234).
+                let synced = match row.get(var_name) {
+                    Some(v @ (Value::Map(_) | Value::Node(_) | Value::Edge(_))) => {
+                        Some(v.entity_property(prop_name))
+                    }
+                    _ => None,
+                };
+                if let Some(val) = synced {
                     row.insert(name.clone(), val);
                 }
             }
@@ -1538,9 +1545,18 @@ mod tests {
         let rows = batches_to_rows(&[batch]).unwrap();
         assert_eq!(rows.len(), 1);
 
-        // The decoded value should be a Map
+        // The decoded value is the entity itself, in its native form: the
+        // decoder canonicalises an entity map so one entity has one encoding
+        // (#234). Asserting identity and properties rather than the variant is
+        // the stronger check — it is what the round-trip has to preserve, and it
+        // holds whichever encoding the decoder settles on.
         let val = rows[0].get("n").unwrap();
-        assert!(matches!(val, Value::Map(_)));
+        assert_eq!(
+            val.entity_vid(),
+            Some(uni_common::Vid::from(1)),
+            "the entity's identity must survive the round-trip"
+        );
+        assert_eq!(val.entity_property("name"), Value::String("Alice".into()));
 
         let output_batches = rows_to_batches(&rows, &schema).unwrap();
         assert_eq!(output_batches[0].num_rows(), 1);

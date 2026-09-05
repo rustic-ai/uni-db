@@ -9,7 +9,7 @@ use rustyline::error::ReadlineError;
 use std::time::Instant;
 use uni_db::{ExplainOutput, ProfileOutput, QueryResult, Uni};
 
-pub async fn run_repl(db: Uni) -> Result<()> {
+pub async fn run_repl(db: &Uni) -> Result<()> {
     let mut rl = DefaultEditor::new()?;
 
     // Load history if it exists; absence is not an error.
@@ -37,7 +37,7 @@ pub async fn run_repl(db: Uni) -> Result<()> {
                         continue;
                     }
                     _ => {
-                        execute_query(&db, line).await;
+                        execute_query(db, line).await;
                     }
                 }
             }

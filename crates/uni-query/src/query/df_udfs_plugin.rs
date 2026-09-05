@@ -461,8 +461,10 @@ fn coerce_plugin_scalar_arg(
         ))
     };
 
-    let decoded =
-        |row: usize| uni_store::storage::arrow_convert::arrow_to_value(array.as_ref(), row, None);
+    let decoded = |row: usize| {
+        uni_store::storage::arrow_convert::arrow_to_value(array.as_ref(), row, None)
+            .canonical_entity()
+    };
 
     let out: ArrayRef = match target {
         DataType::Int64 => {

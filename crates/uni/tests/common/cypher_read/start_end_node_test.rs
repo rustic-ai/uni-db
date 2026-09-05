@@ -293,6 +293,93 @@ async fn an_undirected_match_does_not_reverse_the_relationship_it_returns() {
     );
 }
 
+/// `a` -[:LIKES]-> `b`, with no `CREATE EDGE TYPE` — the schemaless path.
+///
+/// A type with no DDL is planned by `plan_traverse_main_by_type` against the
+/// main edges table, which is a different planner path from the schema'd
+/// `Traverse` the fixture above exercises.
+async fn schemaless_fixture() -> Uni {
+    let db = Uni::in_memory().build().await.unwrap();
+    let tx = db.session().tx().await.unwrap();
+    tx.execute("CREATE LABEL P (name STRING)").await.unwrap();
+    tx.execute("CREATE (:P {name:'a'}), (:P {name:'b'})")
+        .await
+        .unwrap();
+    tx.execute("MATCH (x:P {name:'a'}), (y:P {name:'b'}) CREATE (x)-[:LIKES]->(y)")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    db
+}
+
+/// The same guarantee as the schema'd test above, on the schemaless path.
+///
+/// The fix for the schema'd path pushed `_fwd` into the traversal's requested
+/// edge properties so the structural projection could put `_src`/`_dst` back the
+/// way the edge is stored. `plan_traverse_main_by_type` still called that same
+/// projection but never requested the column, so the projection silently took
+/// its no-`_fwd` fallback — raw traversal order — and the defect survived
+/// untouched on a path no test covered (#193).
+///
+/// Both tests are needed: neither path can stand in for the other, and the
+/// schema'd one passes while this shape is broken.
+#[tokio::test]
+async fn a_schemaless_undirected_match_does_not_reverse_the_relationship_it_returns() {
+    let db = schemaless_fixture().await;
+    let r = db
+        .session()
+        .query("MATCH ()-[e:LIKES]-() RETURN e AS r")
+        .await
+        .unwrap();
+    let edges: Vec<(u64, u64)> = r
+        .rows()
+        .iter()
+        .map(|row| match &row.values()[0] {
+            Value::Edge(e) => (e.src.as_u64(), e.dst.as_u64()),
+            other => panic!("expected an Edge, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(edges.len(), 2, "the edge is walked from each end");
+    let (a, b) = (edges[0], edges[1]);
+    assert_eq!(
+        a, b,
+        "the same edge came back with its endpoints reversed: {a:?} then {b:?}"
+    );
+}
+
+/// A relationship yielded by a pattern comprehension keeps its stored direction.
+///
+/// Third path to the same guarantee. Comprehensions build their edge column in
+/// `build_edge_entity_column` rather than through the traversal's structural
+/// projection, so neither of the two tests above constrains it. The anchor is
+/// `b`, the edge's *head*, so a comprehension that pairs src/dst with the walk
+/// order rather than the stored orientation reports `b->a` (#193).
+#[tokio::test]
+async fn a_comprehension_relationship_keeps_its_stored_direction() {
+    let db = fixture().await;
+    let r = db
+        .session()
+        .query("MATCH (a:P {name:'b'}) RETURN [ (a)-[e:KNOWS]-(x) | e ] AS es")
+        .await
+        .unwrap();
+    let edges: Vec<(u64, u64)> = match &r.rows()[0].values()[0] {
+        Value::List(items) => items
+            .iter()
+            .map(|v| match v {
+                Value::Edge(e) => (e.src.as_u64(), e.dst.as_u64()),
+                other => panic!("expected an Edge, got {other:?}"),
+            })
+            .collect(),
+        other => panic!("expected a List, got {other:?}"),
+    };
+    assert_eq!(edges.len(), 1, "b has exactly one KNOWS edge");
+    assert_eq!(
+        edges[0],
+        (0, 1),
+        "the edge is stored a->b; anchoring the comprehension on b must not report b->a"
+    );
+}
+
 /// Direction is what makes the rewrite sound, so it is worth a test of its own:
 /// `<-[e]-` traverses against the arrow, so the relationship's start node is the
 /// traversal's *target*, not its source. Getting this backwards would swap the

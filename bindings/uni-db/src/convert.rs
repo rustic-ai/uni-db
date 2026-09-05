@@ -1039,6 +1039,9 @@ pub fn locy_result_to_py(py: Python, result: uni_db::locy::LocyResult) -> PyResu
             uni_locy::RuntimeWarningCode::TopKPruningCrossedDependency => {
                 "top_k_pruning_crossed_dependency"
             }
+            uni_locy::RuntimeWarningCode::EntityHydrationIncomplete => {
+                "entity_hydration_incomplete"
+            }
         };
         wd.set_item("code", code_str)?;
         wd.set_item("message", &w.message)?;
@@ -1169,6 +1172,9 @@ pub fn locy_result_to_py_class(
             uni_locy::RuntimeWarningCode::FuzzyNotProbabilistic => "fuzzy_not_probabilistic",
             uni_locy::RuntimeWarningCode::TopKPruningCrossedDependency => {
                 "top_k_pruning_crossed_dependency"
+            }
+            uni_locy::RuntimeWarningCode::EntityHydrationIncomplete => {
+                "entity_hydration_incomplete"
             }
         };
         wd.set_item("code", code_str)?;

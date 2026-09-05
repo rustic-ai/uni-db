@@ -293,10 +293,15 @@ impl UniWorld {
 
         match entity {
             Value::Map(map) => {
-                let id = map
-                    .get("_vid")
-                    .or_else(|| map.get("_eid"))
-                    .and_then(|v| v.as_u64());
+                // Narrow: missed `_id`, the serde string forms, and did no
+                // vertex/edge disambiguation. The snapshot key is `prefix:id:prop`,
+                // so a map carrying only `_id` contributed zero property entries
+                // and a TCK side-effect assertion passed on an empty snapshot —
+                // failing open (#234).
+                let id = uni_common::value::entity_ref_from_map(map).map(|e| match e {
+                    uni_common::value::EntityRef::Vertex(vid) => vid.as_u64(),
+                    uni_common::value::EntityRef::Edge(eid) => eid.as_u64(),
+                });
                 if let Some(id) = id {
                     insert_props(snapshot, id, map);
                 }

@@ -1337,7 +1337,18 @@ fn value_to_scalar(value: &Value) -> Result<ScalarValue> {
             Ok(ScalarValue::LargeBinary(Some(cv_bytes)))
         }
         Value::Bytes(b) => Ok(ScalarValue::LargeBinary(Some(b.clone()))),
-        // For complex graph types, fall back to JSON encoding
+        // Graph entities encode as CypherValue, like `Value::Vector` above.
+        //
+        // They used to fall into the JSON catch-all below, which puts a JSON
+        // blob into a `LargeBinary` column that every consumer decodes as
+        // CypherValue — so a native entity passed as a correlated-subquery
+        // parameter decoded to nothing and the column came back null. The map
+        // encoding took the `Value::Map` arm and survived, which is why this
+        // only bites where a native entity reaches a parameter (#234).
+        Value::Node(_) | Value::Edge(_) | Value::Path(_) => Ok(ScalarValue::LargeBinary(Some(
+            uni_common::cypher_value_codec::encode(value),
+        ))),
+        // For other complex types, fall back to JSON encoding
         other => {
             let json_val: serde_json::Value = other.clone().into();
             let json_str = serde_json::to_string(&json_val)
@@ -3556,6 +3567,59 @@ fn coerce_aggregate_function(
 
 #[cfg(test)]
 mod tests {
+
+    mod native_entity_scalars {
+        use super::super::value_to_scalar;
+        use datafusion::common::ScalarValue;
+        use std::collections::HashMap;
+        use uni_common::core::id::Eid;
+        use uni_common::value::{Edge, Node};
+        use uni_common::{Value, Vid};
+
+        /// A native entity becomes a CypherValue blob, not a JSON one.
+        ///
+        /// Correlated-subquery parameters go through here into a `LargeBinary`
+        /// column, and every consumer of such a column decodes it as
+        /// CypherValue. A JSON blob therefore decodes to nothing and the column
+        /// comes back null — while the map encoding, taking the `Value::Map`
+        /// arm, survived. Same entity, two encodings, one of them dropped.
+        #[test]
+        fn a_native_node_encodes_as_cypher_value() {
+            let node = Value::Node(Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::new(),
+            });
+            let scalar = value_to_scalar(&node).expect("node must convert");
+            let ScalarValue::LargeBinary(Some(bytes)) = scalar else {
+                panic!("expected a LargeBinary scalar, got {scalar:?}");
+            };
+            // The bytes must be the CypherValue encoding, so they decode back.
+            let decoded =
+                uni_common::cypher_value_codec::decode(&bytes).expect("must decode as CypherValue");
+            assert_eq!(decoded.entity_vid(), Some(Vid::from(7)));
+        }
+
+        /// The edge twin.
+        #[test]
+        fn a_native_edge_encodes_as_cypher_value() {
+            let edge = Value::Edge(Edge {
+                eid: Eid::from(3),
+                edge_type: "KNOWS".into(),
+                src: Vid::from(0),
+                dst: Vid::from(1),
+                properties: HashMap::new(),
+            });
+            let scalar = value_to_scalar(&edge).expect("edge must convert");
+            let ScalarValue::LargeBinary(Some(bytes)) = scalar else {
+                panic!("expected a LargeBinary scalar, got {scalar:?}");
+            };
+            let decoded =
+                uni_common::cypher_value_codec::decode(&bytes).expect("must decode as CypherValue");
+            assert_eq!(decoded.entity_eid(), Some(Eid::from(3)));
+        }
+    }
+
     use super::*;
     use arrow_array::{
         Array, Int32Array, StringArray, Time64NanosecondArray, TimestampNanosecondArray,

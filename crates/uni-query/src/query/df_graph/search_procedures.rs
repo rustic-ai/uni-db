@@ -470,7 +470,15 @@ pub(crate) async fn multivector_rerank(
     // rows) unordered, so truncating would silently drop recall — score them
     // all (brute-force). On the main path Lance pre-limits to `retrieval_k`, so
     // the cap is just a safety net.
-    if storage.fork_scope().is_none() {
+    if storage.fork_scope().is_none() && candidates.len() > MULTIVECTOR_MAX_CANDIDATES {
+        // Reaching here means the "Lance pre-limits to retrieval_k" assumption
+        // above did not hold, and the cap stopped being a safety net and became
+        // the thing deciding the answer: every candidate past the bound is
+        // dropped before the exact re-rank ever sees it, silently costing recall.
+        // Count what was dropped so the assumption is falsifiable in production
+        // rather than only in review (#233).
+        metrics::counter!("uni_multivector_candidates_truncated_total")
+            .increment((candidates.len() - MULTIVECTOR_MAX_CANDIDATES) as u64);
         candidates.truncate(MULTIVECTOR_MAX_CANDIDATES);
     }
 

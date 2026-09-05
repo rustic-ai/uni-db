@@ -18,22 +18,28 @@ async fn main() -> anyhow::Result<()> {
         .build()
         .await?;
     for (label, q) in [
+        // The shape LDBC uses: an inline property map in the pattern.
         (
-            "indexed id equality",
+            "inline map on indexed id",
             "MATCH (p:Person {id: 2199023262543}) RETURN p.firstName",
         ),
+        // The same predicate written as a WHERE.
         (
-            "indexed name equality",
-            "MATCH (t:Tag {name: 'Augustine_of_Hippo'}) RETURN t.name",
+            "WHERE on indexed id",
+            "MATCH (p:Person) WHERE p.id = 2199023262543 RETURN p.firstName",
         ),
-        // Defeats predicate pushdown, so this is what touching every row costs.
+        (
+            "WHERE on indexed name",
+            "MATCH (t:Tag) WHERE t.name = 'Augustine_of_Hippo' RETURN t.name",
+        ),
+        (
+            "WHERE IN on indexed id",
+            "MATCH (p:Person) WHERE p.id IN [2199023262543] RETURN p.firstName",
+        ),
+        // Controls.
         (
             "scan control: id+0 = X",
             "MATCH (p:Person) WHERE p.id + 0 = 2199023262543 RETURN p.firstName",
-        ),
-        (
-            "scan control: count(*) all",
-            "MATCH (p:Person) RETURN count(p)",
         ),
         (
             "unindexed column equality",
@@ -43,6 +49,13 @@ async fn main() -> anyhow::Result<()> {
         let t = Instant::now();
         let r = db.session().query(q).await?;
         let ms = t.elapsed().as_secs_f64() * 1000.0;
+        let ex = db
+            .session()
+            .query_with(q)
+            .explain()
+            .await
+            .map(|e| format!("{:?}", e.index_usage))
+            .unwrap_or_else(|e| format!("explain failed: {e}"));
         let m = r.metrics();
         println!(
             "{label:<30} rows={:<3} {ms:>9.1} ms  scalar_idx={} cmp={} scans_reported={}",
@@ -51,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
             m.index_comparisons,
             m.scans_reported
         );
+        println!("      EXPLAIN index_usage: {}", &ex[..ex.len().min(240)]);
     }
     Ok(())
 }

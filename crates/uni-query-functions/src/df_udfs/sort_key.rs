@@ -272,8 +272,14 @@ fn encode_map_as_node_payload(map: &std::collections::HashMap<String, Value>, bu
     }
     labels.sort();
 
-    // Extract vid
-    let vid = map.get("_vid").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
+    // Extract vid. Reading `_vid` as an integer specifically meant every other
+    // spelling of the same id — `_id`, or the serde form `"Vid(7)"` — collapsed
+    // to 0, so every such node compared equal and `ORDER BY n` returned them in
+    // an arbitrary order that looked deterministic.
+    let vid = match uni_common::value::entity_ref_from_map(map) {
+        Some(uni_common::value::EntityRef::Vertex(vid)) => vid.as_u64(),
+        _ => 0,
+    };
 
     // Labels
     let labels_joined = labels.join("\x01");
@@ -294,23 +300,28 @@ fn encode_map_as_node_payload(map: &std::collections::HashMap<String, Value>, bu
 
 /// Encode a map that looks like an edge into the edge sort key payload.
 fn encode_map_as_edge_payload(map: &std::collections::HashMap<String, Value>, buf: &mut Vec<u8>) {
-    let edge_type = map
-        .get("_type")
-        .or_else(|| map.get("_type_name"))
-        .and_then(|v| {
-            if let Value::String(s) = v {
-                Some(s.as_str())
-            } else {
-                None
-            }
+    // Through the accessor: reading `_type`/`_type_name` by hand meant a
+    // numeric `_type` (how CREATE spells it) silently sorted under the empty
+    // string, so every such edge tied.
+    let edge_type = Value::Map(map.clone())
+        .edge_type_ref()
+        .map(|t| match t {
+            uni_common::value::EdgeTypeRef::Name(n) => n,
+            // No schema here, so an id cannot become a name. A U+0001 prefix
+            // keeps distinct ids distinct and sorts them ahead of every real
+            // name, instead of collapsing them all onto "".
+            uni_common::value::EdgeTypeRef::Id(id) => format!("\u{1}{id}"),
         })
-        .unwrap_or("");
+        .unwrap_or_default();
 
     byte_stuff_terminate(edge_type.as_bytes(), buf);
 
     let src = map.get("_src").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
     let dst = map.get("_dst").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
-    let eid = map.get("_eid").and_then(|v| v.as_i64()).unwrap_or(0) as u64;
+    let eid = match uni_common::value::entity_ref_from_map(map) {
+        Some(uni_common::value::EntityRef::Edge(eid)) => eid.as_u64(),
+        _ => 0,
+    };
 
     buf.extend_from_slice(&src.to_be_bytes());
     buf.extend_from_slice(&dst.to_be_bytes());

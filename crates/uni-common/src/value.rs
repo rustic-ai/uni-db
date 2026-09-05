@@ -418,6 +418,54 @@ use chrono::Timelike as _;
 /// all zeros hash alike and all NaNs hash alike. All other floats compare and
 /// hash by their (canonical) bit representation. This affects only internal
 /// bucketing — Cypher `=`/`IN`/`DISTINCT` route through `cypher_eq`, not here.
+/// The identity of a graph entity, independent of how a [`Value`] encodes it.
+///
+/// Produced by [`Value::entity_ref`]. `Copy`, `Eq`, `Hash` and `Ord` so that
+/// equality, `DISTINCT`, join keys, `IN` and `ORDER BY` can all answer the
+/// identity question through one type instead of each re-deriving it.
+///
+/// A vertex and an edge that happen to share a number are **not** equal: the
+/// variant is part of the identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum EntityRef {
+    /// A vertex, identified by its `Vid`.
+    Vertex(Vid),
+    /// An edge, identified by its `Eid`.
+    Edge(Eid),
+}
+
+/// The relationship type of an edge, as the value actually spells it.
+///
+/// Produced by [`Value::edge_type_ref`]. An edge names its type four different
+/// ways depending on which plan produced it — `_type` holding a name, `_type`
+/// holding a numeric type id, `_type_name`, or `edge_type` — and
+/// [`Value::Edge`] holds the name directly. Every reader hand-rolled its own
+/// subset, so `type(r)` raised "requires a relationship argument" on an edge
+/// straight out of `CREATE` (numeric `_type`), and a sort key silently used the
+/// empty string for the same edge.
+///
+/// Resolving [`EdgeTypeRef::Id`] to a name needs the schema, which this crate
+/// does not have; that is why the id survives into the return type instead of
+/// being resolved here.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EdgeTypeRef {
+    /// The type name, already resolved.
+    Name(String),
+    /// A numeric edge-type id, to be resolved against the schema.
+    Id(u32),
+}
+
+impl EdgeTypeRef {
+    /// The name, when the value carried one. `None` for an unresolved id.
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            EdgeTypeRef::Name(n) => Some(n.as_str()),
+            EdgeTypeRef::Id(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 #[non_exhaustive]
@@ -500,27 +548,454 @@ impl Value {
     /// value is the number 7" are different claims, and conflating them lets a
     /// plain integer column match an entity by coincidence. Callers that hold a
     /// raw id want [`Value::coerce_vid`].
+    /// The entity this value denotes, whichever of the two encodings it uses.
+    ///
+    /// A vertex or an edge reaches an expression either natively
+    /// ([`Value::Node`] / [`Value::Edge`]) or as a [`Value::Map`] carrying the
+    /// id, and nothing in the pipeline enforces which a given path produces.
+    /// Hand-rolling the check is what this exists to end: a site that matches
+    /// one encoding silently answers "not an entity" for the other, and the
+    /// caller reads that as "not equal", "not a duplicate", or "no such row"
+    /// rather than as the failure it is.
+    ///
+    /// Prefer this over reading `_vid`/`_eid` out of a map. Identity, dedup,
+    /// join keys and `IN` all want the same question answered the same way, and
+    /// [`EntityRef`] is `Copy`, `Eq`, `Hash` and `Ord` so it serves all four.
+    ///
+    /// # Vertices and edges are not interchangeable
+    ///
+    /// `_id` is a spelling **both** encodings accept, so a map is read as an
+    /// edge when it carries edge structure (an endpoint pair, or a relationship
+    /// type) and as a vertex otherwise. Without that split an edge map with
+    /// `_id` reads as the vertex of the same number — two different entities
+    /// reporting one identity.
+    ///
+    /// Deliberately narrow, as [`Value::entity_vid`] is: a bare [`Value::Int`]
+    /// is not an entity. Callers holding a raw id want [`Value::coerce_vid`].
     #[must_use]
-    pub fn entity_vid(&self) -> Option<Vid> {
+    pub fn entity_ref(&self) -> Option<EntityRef> {
         match self {
-            Value::Node(node) => Some(node.vid),
+            Value::Node(node) => Some(EntityRef::Vertex(node.vid)),
+            Value::Edge(edge) => Some(EntityRef::Edge(edge.eid)),
+            Value::Map(map) => entity_ref_from_map(map),
+            _ => None,
+        }
+    }
+
+    /// This value with an entity map rewritten into its native form.
+    ///
+    /// The two encodings of one entity carry the same information but different
+    /// bytes, and anything comparing *encoded* values — a group-by, a join key,
+    /// a `DISTINCT` — sees two different things. Identity-aware comparison fixes
+    /// that wherever a `Value` is compared, but an Arrow column holds bytes, and
+    /// the operators over it never see a `Value` at all.
+    ///
+    /// So where a column is built from values that may mix encodings, run them
+    /// through this first: one entity then has one encoding, and byte equality
+    /// agrees with identity again.
+    ///
+    /// Non-entities, and entities already in native form, are returned
+    /// unchanged. A map that names an entity but carries no recoverable shape is
+    /// also left alone rather than guessed at.
+    #[must_use]
+    pub fn canonical_entity(self) -> Value {
+        let Value::Map(map) = &self else {
+            return self;
+        };
+        let Some(entity) = entity_ref_from_map(map) else {
+            return self;
+        };
+
+        // User properties live under `_all_props` for a schemaless entity and
+        // under `properties` for a serialised one; otherwise take the
+        // non-underscore keys, which is how a flattened projection spells them.
+        // A null-valued property does not exist on an entity under the property
+        // graph model — `SET n.p = null` removes it — so the native form must
+        // not carry one. The map form can: its flattened columns are read
+        // positionally, so a removed property has to stay present-and-null
+        // there. Dropping nulls here is what makes the two forms agree about
+        // which properties an entity has, and it is the same rule
+        // `property_names` applies.
+        let keep = |props: &HashMap<String, Value>| -> HashMap<String, Value> {
+            props
+                .iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        let properties: HashMap<String, Value> = match map
+            .get("_all_props")
+            .or_else(|| map.get("properties"))
+        {
+            Some(Value::Map(props)) => keep(props),
+            // Flattened projection: the user properties are the plain keys.
+            // `properties` is excluded by name as well as by the underscore
+            // rule — when it is present but null, meaning an entity with
+            // none, it is still a container key, and collecting it would
+            // invent a user property called "properties" holding null.
+            _ => map
+                .iter()
+                .filter(|(k, v)| !k.starts_with('_') && k.as_str() != "properties" && !v.is_null())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        };
+
+        match entity {
+            EntityRef::Vertex(vid) => {
+                let labels = match map.get("_labels") {
+                    Some(Value::List(items)) => items
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::String(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                Value::Node(Node {
+                    vid,
+                    labels,
+                    properties,
+                })
+            }
+            EntityRef::Edge(eid) => {
+                let edge_type = match get_with_fallback(map, &["_type", "_type_name", "edge_type"])
+                {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                let endpoint = |keys: &[&str]| {
+                    get_with_fallback(map, keys)
+                        .and_then(Value::as_u64)
+                        .map(Vid::from)
+                        .unwrap_or_default()
+                };
+                Value::Edge(Edge {
+                    eid,
+                    edge_type,
+                    src: endpoint(&["_src", "_src_vid", "src"]),
+                    dst: endpoint(&["_dst", "_dst_vid", "dst"]),
+                    properties,
+                })
+            }
+        }
+    }
+
+    /// Read a named field from this value, whichever encoding an entity uses.
+    ///
+    /// A map answers from its own keys. A native entity answers its *system*
+    /// fields — `_vid`, `_labels`, `_eid`, `_type`, endpoints — from itself and
+    /// everything else from its property map, because those fields live in the
+    /// struct rather than among the properties. Reading `_vid` off a
+    /// `Value::Node` as a user property finds nothing, and the resulting `Null`
+    /// is indistinguishable from a genuine absent value.
+    ///
+    /// Returns [`Value::Null`] when the field is absent or the value is not an
+    /// entity, matching what a map lookup does.
+    #[must_use]
+    pub fn entity_property(&self, name: &str) -> Value {
+        match self {
+            Value::Map(map) => map.get(name).cloned().unwrap_or(Value::Null),
+            Value::Node(node) => match name {
+                "_vid" | "_id" => Value::Int(node.vid.as_u64() as i64),
+                "_labels" => Value::List(
+                    node.labels
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect::<Vec<_>>(),
+                ),
+                other => node.properties.get(other).cloned().unwrap_or(Value::Null),
+            },
+            Value::Edge(edge) => match name {
+                "_eid" | "_id" => Value::Int(edge.eid.as_u64() as i64),
+                "_type" | "_type_name" => Value::String(edge.edge_type.clone()),
+                "_src" | "_src_vid" => Value::Int(edge.src.as_u64() as i64),
+                "_dst" | "_dst_vid" => Value::Int(edge.dst.as_u64() as i64),
+                other => edge.properties.get(other).cloned().unwrap_or(Value::Null),
+            },
+            _ => Value::Null,
+        }
+    }
+
+    /// The user-visible property names of an entity or map, sorted.
+    ///
+    /// `None` for a value that is neither. One definition, because `keys()` had
+    /// two implementations — a UDF and a separate one inside `UNWIND` — and
+    /// both knew only the map encoding, so `keys(n)` on a native entity
+    /// returned nothing at all.
+    ///
+    /// A null-valued property does not exist on an *entity* under the property
+    /// graph model, so those names are dropped. On a plain map — a literal or a
+    /// parameter — a null value is a legitimate entry and its key is kept.
+    #[must_use]
+    pub fn property_names(&self) -> Option<Vec<String>> {
+        let (props, is_entity): (&HashMap<String, Value>, bool) = match self {
+            Value::Node(node) => (&node.properties, true),
+            Value::Edge(edge) => (&edge.properties, true),
+            Value::Map(map) => match map.get("_all_props") {
+                // A schemaless entity keeps its properties in `_all_props`;
+                // the top level holds system fields only.
+                Some(Value::Map(all)) => (all, true),
+                _ => (map, false),
+            },
+            _ => return None,
+        };
+        let mut names: Vec<String> = props
+            .iter()
+            .filter(|(k, v)| !k.starts_with('_') && (!is_entity || !v.is_null()))
+            .map(|(k, _)| k.clone())
+            .collect();
+        names.sort();
+        Some(names)
+    }
+
+    /// An entity's user properties, in whichever encoding it uses.
+    ///
+    /// The value half of [`Value::property_names`], and it applies the same
+    /// rule: a null-valued property does not exist on an entity, so it is
+    /// dropped. `None` for a value that is not an entity — which is what lets
+    /// `properties()` tell "not an entity" (null) from "an entity with none"
+    /// (`{}`).
+    #[must_use]
+    pub fn entity_properties(&self) -> Option<HashMap<String, Value>> {
+        let props: &HashMap<String, Value> = match self {
+            Value::Node(node) => &node.properties,
+            Value::Edge(edge) => &edge.properties,
             Value::Map(map) => {
-                if let Some(v) = map.get("_vid").and_then(Value::as_u64) {
-                    return Some(Vid::from(v));
-                }
-                match map.get("_id") {
-                    Some(Value::String(id)) => id
-                        .strip_prefix("Vid(")
-                        .and_then(|s| s.strip_suffix(')'))
-                        .unwrap_or(id)
-                        .parse::<u64>()
-                        .ok()
-                        .map(Vid::from),
-                    Some(Value::Int(id)) if *id >= 0 => Some(Vid::from(*id as u64)),
-                    _ => None,
+                entity_ref_from_map(map)?;
+                match map.get("_all_props") {
+                    Some(Value::Map(all)) => all,
+                    _ => map,
                 }
             }
+            _ => return None,
+        };
+        Some(
+            props
+                .iter()
+                .filter(|(k, v)| !k.starts_with('_') && !v.is_null())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        )
+    }
+
+    /// The labels of the vertex this value denotes, in either encoding.
+    ///
+    /// `None` when the value is not a vertex. An edge has no labels, and
+    /// answering `Some(vec![])` for one would let `labels(r)` succeed where it
+    /// should not.
+    #[must_use]
+    pub fn entity_labels(&self) -> Option<Vec<String>> {
+        match self {
+            Value::Node(node) => Some(node.labels.clone()),
+            Value::Map(map) => {
+                // A vertex, or a projection carrying `_labels` without an id —
+                // the readers this replaced accepted both, and one of them was
+                // the only path that answered for the id-less shape.
+                match entity_ref_from_map(map) {
+                    Some(EntityRef::Edge(_)) => return None,
+                    Some(EntityRef::Vertex(_)) => {}
+                    None if map.contains_key("_labels") => {}
+                    None => return None,
+                }
+                Some(match map.get("_labels") {
+                    Some(Value::List(items)) => items
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::String(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                })
+            }
             _ => None,
+        }
+    }
+
+    /// Set one property on an entity, in whichever encoding it uses.
+    ///
+    /// Assigning `Null` **removes** the property from a native entity: under the
+    /// property graph model `SET n.p = null` deletes it, and an entity that
+    /// carried `p: Null` would still report it through `properties()` and
+    /// `keys()`. The map form keeps it present-and-null instead, because its
+    /// flattened columns are read directly and a removed property has to remain
+    /// addressable there.
+    ///
+    /// Returns `false` for a value that is not an entity.
+    pub fn set_entity_property(&mut self, name: &str, value: Value) -> bool {
+        let props = match self {
+            Value::Node(node) => &mut node.properties,
+            Value::Edge(edge) => &mut edge.properties,
+            Value::Map(map) => {
+                map.insert(name.to_string(), value);
+                return true;
+            }
+            _ => return false,
+        };
+        if value.is_null() {
+            props.remove(name);
+        } else {
+            props.insert(name.to_string(), value);
+        }
+        true
+    }
+
+    /// Replace an entity's user properties, in whichever encoding it uses.
+    ///
+    /// The write helpers update the row's binding after a SET or REMOVE so the
+    /// rest of the statement sees the post-write value. They did that by
+    /// reaching into a `Value::Map`, which means a natively-encoded entity was
+    /// left untouched — the write reached storage but the row still showed the
+    /// old value, so a later `RETURN` or predicate read a stale property.
+    ///
+    /// `removed` names properties that must read as `Null` rather than simply be
+    /// absent: a map row carries flattened columns which downstream operators
+    /// read directly, so a removed property has to be present-and-null there. A
+    /// native entity has no such columns, so absence is the correct
+    /// representation and `removed` does not apply.
+    ///
+    /// Returns `false` when this value is not an entity, so a caller can tell
+    /// "nothing to update" from "updated".
+    pub fn set_entity_properties(
+        &mut self,
+        properties: HashMap<String, Value>,
+        removed: &[String],
+    ) -> bool {
+        match self {
+            Value::Node(node) => {
+                node.properties = properties;
+                true
+            }
+            Value::Edge(edge) => {
+                edge.properties = properties;
+                true
+            }
+            Value::Map(map) => {
+                for name in removed {
+                    map.insert(name.clone(), Value::Null);
+                }
+                map.insert("_all_props".to_string(), Value::Map(properties));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Replace a vertex's labels, in whichever encoding it uses.
+    ///
+    /// The label twin of [`Value::set_entity_properties`], and needed for the
+    /// same reason: `SET n:Label` updated the row's binding by reaching into a
+    /// `Value::Map`, so a natively-encoded vertex kept its old label set even
+    /// though the relabel had reached storage.
+    ///
+    /// Returns `false` for anything that is not a vertex.
+    pub fn set_entity_labels(&mut self, labels: Vec<String>) -> bool {
+        match self {
+            Value::Node(node) => {
+                node.labels = labels;
+                true
+            }
+            // A map only takes labels if it is a *vertex* map. Writing `_labels`
+            // onto an edge map would give an edge a label set, which no encoding
+            // of an edge has.
+            Value::Map(map) if matches!(entity_ref_from_map(map), Some(EntityRef::Vertex(_))) => {
+                map.insert(
+                    "_labels".to_string(),
+                    Value::List(labels.into_iter().map(Value::String).collect()),
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The edge id this value denotes, in either encoding.
+    ///
+    /// The edge twin of [`Value::entity_vid`]. It did not exist, which is why
+    /// every site needing an edge's identity read `_eid` out of a map by hand
+    /// and missed [`Value::Edge`], or missed `_eid` entirely.
+    #[must_use]
+    pub fn entity_eid(&self) -> Option<Eid> {
+        match self.entity_ref()? {
+            EntityRef::Edge(eid) => Some(eid),
+            EntityRef::Vertex(_) => None,
+        }
+    }
+
+    /// The relationship type of the edge this value denotes, in any spelling.
+    ///
+    /// Prefers a name over an id: a value carrying both is answered with the
+    /// name, so a caller without a schema still gets one. See [`EdgeTypeRef`]
+    /// for why the id is not resolved here.
+    #[must_use]
+    pub fn edge_type_ref(&self) -> Option<EdgeTypeRef> {
+        match self {
+            Value::Edge(e) => Some(EdgeTypeRef::Name(e.edge_type.clone())),
+            Value::Map(m) => {
+                let named =
+                    ["_type_name", "edge_type", "_type"]
+                        .iter()
+                        .find_map(|k| match m.get(*k) {
+                            Some(Value::String(s)) => Some(EdgeTypeRef::Name(s.clone())),
+                            _ => None,
+                        });
+                if named.is_some() {
+                    return named;
+                }
+                ["_type", "_type_id"]
+                    .iter()
+                    .find_map(|k| m.get(*k))
+                    .and_then(Value::as_u64)
+                    .and_then(|v| u32::try_from(v).ok())
+                    .map(EdgeTypeRef::Id)
+            }
+            _ => None,
+        }
+    }
+
+    /// The endpoints of the edge this value denotes, in either encoding.
+    ///
+    /// The endpoint twin of [`Value::entity_ref`]. Identity had an accessor and
+    /// endpoints did not, so `startNode`/`endNode` grew a native arm and a map
+    /// arm side by side, each spelling the endpoints differently — `_src_vid`
+    /// in one vocabulary, `_src` in another. Either side missing a spelling is
+    /// a silent `null`, not an error.
+    ///
+    /// Each endpoint is independently optional: a projection may carry the
+    /// source and not the destination. `None` means "this is not an edge, or it
+    /// does not say".
+    #[must_use]
+    pub fn edge_endpoints(&self) -> Option<(Option<Vid>, Option<Vid>)> {
+        match self {
+            Value::Edge(e) => Some((Some(e.src), Some(e.dst))),
+            Value::Map(m) => {
+                // Only answer for a map that actually denotes an edge, so a
+                // vertex map carrying a user property called `src` cannot be
+                // read as one.
+                if !matches!(entity_ref_from_map(m), Some(EntityRef::Edge(_))) {
+                    return None;
+                }
+                let endpoint = |keys: &[&str]| -> Option<Vid> {
+                    get_with_fallback(m, keys).and_then(Value::coerce_vid)
+                };
+                Some((
+                    endpoint(&["_src_vid", "_src", "src"]),
+                    endpoint(&["_dst_vid", "_dst", "dst"]),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn entity_vid(&self) -> Option<Vid> {
+        match self.entity_ref()? {
+            EntityRef::Vertex(vid) => Some(vid),
+            // An edge is an entity, but it is not a vertex. Returning its eid
+            // here would let an edge match a vertex of the same number.
+            EntityRef::Edge(_) => None,
         }
     }
 
@@ -818,6 +1293,25 @@ impl PartialEq for Value {
     /// exactly. Container variants (`List`, `Map`, `Node`, `Edge`, `Path`)
     /// recurse through this same impl, so nested floats normalize too.
     fn eq(&self, other: &Self) -> bool {
+        // Graph entities compare by identity, in whichever encoding each side
+        // happens to use. Structural comparison here was a wrong answer that no
+        // site could see: `Node`'s derive compares the vid, the labels *and* the
+        // whole property map, so one vertex hydrated with different property
+        // sets on either side came back unequal, and the two encodings of one
+        // vertex were never equal at all.
+        //
+        // The comment this impl used to carry — that it affects only internal
+        // bucketing because Cypher routes through `cypher_eq` — was not true.
+        // `HashSet<Value>` backs `count(DISTINCT …)` and the recursive-CTE
+        // cycle-detection set, and Locy's `values_equal` falls through to here,
+        // so this equality reaches results.
+        match (self.entity_ref(), other.entity_ref()) {
+            (Some(a), Some(b)) => return a == b,
+            // An entity is never equal to a non-entity.
+            (Some(_), None) | (None, Some(_)) => return false,
+            (None, None) => {}
+        }
+
         match (self, other) {
             // Normalized float arm — the whole point of this hand-written impl.
             (Value::Float(a), Value::Float(b)) => float_eq_normalized(*a, *b),
@@ -892,6 +1386,18 @@ fn hash_f32_normalized<H: Hasher>(f: f32, state: &mut H) {
 
 impl Hash for Value {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        // Entities hash by identity, to agree with `PartialEq` above.
+        //
+        // The discriminant is deliberately *not* mixed in here: the two
+        // encodings of one entity are different variants, and hashing the
+        // variant would put equal values in different buckets — a broken
+        // `Hash`/`Eq` contract, and silently wrong `HashSet`/`HashMap` results
+        // rather than a visible failure.
+        if let Some(entity) = self.entity_ref() {
+            entity.hash(state);
+            return;
+        }
+
         // Discriminant first for type safety
         std::mem::discriminant(self).hash(state);
         match self {
@@ -1386,6 +1892,50 @@ fn extract_properties(value: &Value) -> HashMap<String, Value> {
     }
 }
 
+/// [`Value::entity_ref`] for a caller that already holds the map.
+///
+/// Same rules, exposed separately so a hot path (a sort-key encoder, a row
+/// decoder) need not clone the map into a [`Value`] just to ask.
+#[must_use]
+pub fn entity_ref_from_map(map: &HashMap<String, Value>) -> Option<EntityRef> {
+    fn id_from(v: &Value) -> Option<u64> {
+        match v {
+            Value::Int(i) if *i >= 0 => Some(*i as u64),
+            Value::String(s) => s
+                .strip_prefix("Vid(")
+                .or_else(|| s.strip_prefix("Eid("))
+                .and_then(|t| t.strip_suffix(')'))
+                .unwrap_or(s)
+                .parse::<u64>()
+                .ok(),
+            other => other.as_u64(),
+        }
+    }
+
+    // An explicit `_eid`/`_vid` settles it on its own; `_id` needs the
+    // structural tell, since both encodings spell it that way.
+    let looks_like_edge = map.contains_key("_eid")
+        || map.contains_key("eid")
+        || ((map.contains_key("_src") || map.contains_key("src"))
+            && (map.contains_key("_dst") || map.contains_key("dst")))
+        // Locy's row decoder spells the endpoints `_src_vid` / `_dst_vid`. An
+        // edge map in that vocabulary carrying only `_id` would otherwise read
+        // as the *vertex* of that number and be converted into a `Node`.
+        || (map.contains_key("_src_vid") && map.contains_key("_dst_vid"))
+        || map.contains_key("_type_name")
+        || map.contains_key("edge_type");
+
+    if looks_like_edge {
+        get_with_fallback(map, &["_eid", "_id", "eid"])
+            .and_then(id_from)
+            .map(|id| EntityRef::Edge(Eid::from(id)))
+    } else {
+        get_with_fallback(map, &["_vid", "_id", "vid"])
+            .and_then(id_from)
+            .map(|id| EntityRef::Vertex(Vid::from(id)))
+    }
+}
+
 impl TryFrom<&Value> for Node {
     type Error = UniError;
 
@@ -1767,6 +2317,564 @@ impl From<f32> for Value {
 
 #[cfg(test)]
 mod tests {
+
+    mod entity_identity {
+        use super::super::{EntityRef, Value};
+        use crate::core::id::{Eid, Vid};
+        use std::collections::HashMap;
+
+        /// Both encodings must report the same endpoints, or `startNode` is a
+        /// silent `null` on whichever one the caller did not anticipate.
+        #[test]
+        fn edge_endpoints_agree_across_encodings() {
+            let native = Value::Edge(crate::Edge {
+                eid: Eid::from(7u64),
+                edge_type: "KNOWS".into(),
+                src: Vid::from(1u64),
+                dst: Vid::from(2u64),
+                properties: HashMap::new(),
+            });
+            assert_eq!(
+                native.edge_endpoints(),
+                Some((Some(Vid::from(1u64)), Some(Vid::from(2u64))))
+            );
+
+            // The two map vocabularies the query layer actually emits.
+            for (src_key, dst_key) in [("_src_vid", "_dst_vid"), ("_src", "_dst")] {
+                let mut m = HashMap::new();
+                m.insert("_eid".to_string(), Value::Int(7));
+                m.insert(src_key.to_string(), Value::Int(1));
+                m.insert(dst_key.to_string(), Value::Int(2));
+                assert_eq!(
+                    Value::Map(m).edge_endpoints(),
+                    Some((Some(Vid::from(1u64)), Some(Vid::from(2u64)))),
+                    "endpoints missed for the `{src_key}`/`{dst_key}` spelling"
+                );
+            }
+        }
+
+        /// A vertex is not an edge, and a plain map is neither. Answering here
+        /// would let `startNode(n)` invent an endpoint from a user property.
+        #[test]
+        fn edge_endpoints_declines_non_edges() {
+            assert_eq!(node_map(Value::Int(3)).edge_endpoints(), None);
+            assert_eq!(
+                Value::Node(crate::Node {
+                    vid: Vid::from(3u64),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                })
+                .edge_endpoints(),
+                None
+            );
+            // A bare map whose `src` is user data, with nothing marking it as
+            // an edge, must not be read as one.
+            let mut m = HashMap::new();
+            m.insert("src".to_string(), Value::Int(1));
+            assert_eq!(Value::Map(m).edge_endpoints(), None);
+        }
+
+        /// A projection may carry one endpoint and not the other; that is a
+        /// missing endpoint, not a missing edge.
+        #[test]
+        fn edge_endpoints_are_independently_optional() {
+            let mut m = HashMap::new();
+            m.insert("_eid".to_string(), Value::Int(7));
+            m.insert("_src_vid".to_string(), Value::Int(1));
+            assert_eq!(
+                Value::Map(m).edge_endpoints(),
+                Some((Some(Vid::from(1u64)), None))
+            );
+        }
+
+        fn node_map(id: Value) -> Value {
+            let mut m = HashMap::new();
+            m.insert("_vid".to_string(), id);
+            m.insert("_labels".to_string(), Value::List(vec![]));
+            Value::Map(m)
+        }
+
+        fn edge_map_with_shared_id(id: Value) -> Value {
+            // The `_id` spelling both encodings accept, plus edge structure.
+            let mut m = HashMap::new();
+            m.insert("_id".to_string(), id);
+            m.insert("_type".to_string(), Value::String("KNOWS".into()));
+            m.insert("_src".to_string(), Value::Int(0));
+            m.insert("_dst".to_string(), Value::Int(1));
+            Value::Map(m)
+        }
+
+        /// Both encodings of one vertex report one identity.
+        ///
+        /// This is the whole point of the accessor: a site that matched only
+        /// `Value::Node` answered "not an entity" for the map form, and the
+        /// caller read that as "not equal" rather than as a failure.
+        #[test]
+        fn the_two_vertex_encodings_agree() {
+            let native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::new(),
+            });
+            let as_map = node_map(Value::Int(7));
+            assert_eq!(native.entity_ref(), Some(EntityRef::Vertex(Vid::from(7))));
+            assert_eq!(as_map.entity_ref(), native.entity_ref());
+        }
+
+        /// Both encodings of one edge report one identity.
+        #[test]
+        fn the_two_edge_encodings_agree() {
+            let native = Value::Edge(crate::value::Edge {
+                eid: Eid::from(7),
+                edge_type: "KNOWS".into(),
+                src: Vid::from(0),
+                dst: Vid::from(1),
+                properties: HashMap::new(),
+            });
+            assert_eq!(native.entity_ref(), Some(EntityRef::Edge(Eid::from(7))));
+            assert_eq!(
+                edge_map_with_shared_id(Value::Int(7)).entity_ref(),
+                native.entity_ref()
+            );
+        }
+
+        /// An edge is not the vertex of the same number.
+        ///
+        /// `_id` is a spelling both encodings use, so without the structural
+        /// tell an edge map resolved to `Vertex(7)` — two different entities
+        /// reporting one identity, which is a wrong answer in whichever
+        /// direction the comparison then went.
+        #[test]
+        fn an_edge_is_not_the_vertex_of_the_same_number() {
+            let edge = edge_map_with_shared_id(Value::Int(7));
+            let vertex = node_map(Value::Int(7));
+            assert_eq!(edge.entity_ref(), Some(EntityRef::Edge(Eid::from(7))));
+            assert_eq!(vertex.entity_ref(), Some(EntityRef::Vertex(Vid::from(7))));
+            assert_ne!(edge.entity_ref(), vertex.entity_ref());
+            // And the narrow accessors do not cross over.
+            assert_eq!(edge.entity_vid(), None);
+            assert_eq!(vertex.entity_eid(), None);
+        }
+
+        /// The serde spelling `"Vid(7)"` resolves, and so does its edge twin.
+        #[test]
+        fn the_debug_rendered_id_spellings_resolve() {
+            assert_eq!(
+                node_map(Value::String("Vid(7)".into())).entity_vid(),
+                Some(Vid::from(7))
+            );
+            assert_eq!(
+                edge_map_with_shared_id(Value::String("Eid(7)".into())).entity_eid(),
+                Some(Eid::from(7))
+            );
+            // A plain numeric string is still accepted.
+            assert_eq!(
+                node_map(Value::String("7".into())).entity_vid(),
+                Some(Vid::from(7))
+            );
+        }
+
+        /// An edge map in Locy's endpoint vocabulary is an edge, not a vertex.
+        ///
+        /// That decoder spells the endpoints `_src_vid` / `_dst_vid`. Without
+        /// this tell, such a map carrying only `_id` resolved to the vertex of
+        /// the same number, and the row decoder would convert an edge into a
+        /// `Node`.
+        #[test]
+        fn the_locy_endpoint_spelling_reads_as_an_edge() {
+            let mut m = HashMap::new();
+            m.insert("_id".to_string(), Value::Int(7));
+            m.insert("_src_vid".to_string(), Value::Int(0));
+            m.insert("_dst_vid".to_string(), Value::Int(1));
+            let v = Value::Map(m);
+            assert_eq!(v.entity_ref(), Some(EntityRef::Edge(Eid::from(7))));
+            assert_eq!(v.entity_vid(), None);
+        }
+
+        /// One entity, two encodings, one set of bytes after canonicalisation.
+        ///
+        /// Identity-aware `PartialEq` is not enough on its own: an Arrow column
+        /// holds encoded bytes and the operators over it never see a `Value`, so
+        /// a group-by compares the encodings rather than the entities.
+        #[test]
+        fn canonicalising_makes_the_two_encodings_encode_alike() {
+            use crate::cypher_value_codec::encode;
+
+            let native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::from([("name".to_string(), Value::String("b".into()))]),
+            });
+
+            let mut m = HashMap::new();
+            m.insert("_vid".to_string(), Value::Int(7));
+            m.insert(
+                "_labels".to_string(),
+                Value::List(vec![Value::String("P".into())]),
+            );
+            m.insert(
+                "_all_props".to_string(),
+                Value::Map(HashMap::from([(
+                    "name".to_string(),
+                    Value::String("b".into()),
+                )])),
+            );
+            let as_map = Value::Map(m);
+
+            assert_ne!(
+                encode(&native),
+                encode(&as_map),
+                "the two encodings genuinely differ as bytes — that is the problem"
+            );
+            assert_eq!(
+                encode(&native.clone().canonical_entity()),
+                encode(&as_map.canonical_entity()),
+                "after canonicalisation one entity has one encoding"
+            );
+        }
+
+        /// Canonicalising leaves everything that is not an entity map alone.
+        #[test]
+        fn canonicalising_is_a_no_op_for_everything_else() {
+            assert_eq!(Value::Int(7).canonical_entity(), Value::Int(7));
+            let plain = Value::Map(HashMap::from([("a".to_string(), Value::Int(1))]));
+            assert_eq!(plain.clone().canonical_entity(), plain);
+            let native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec![],
+                properties: HashMap::new(),
+            });
+            assert_eq!(native.clone().canonical_entity(), native);
+        }
+
+        /// A system field is readable from a native entity, not just from a map.
+        ///
+        /// `_vid` lives in `node.vid`, never among the properties, so reading it
+        /// as a user property finds nothing — and the `Null` that produces is
+        /// indistinguishable from a genuinely absent value.
+        #[test]
+        fn a_system_field_reads_from_either_encoding() {
+            let native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::from([("name".to_string(), Value::String("b".into()))]),
+            });
+            assert_eq!(native.entity_property("_vid"), Value::Int(7));
+            assert_eq!(
+                native.entity_property("_labels"),
+                Value::List(vec![Value::String("P".into())])
+            );
+            assert_eq!(native.entity_property("name"), Value::String("b".into()));
+            assert_eq!(native.entity_property("absent"), Value::Null);
+
+            // And the map form answers the same questions the same way.
+            assert_eq!(
+                node_map(Value::Int(7)).entity_property("_vid"),
+                Value::Int(7)
+            );
+        }
+
+        /// The edge twin, including its endpoints under both spellings.
+        #[test]
+        fn an_edge_answers_its_system_fields() {
+            let e = Value::Edge(crate::value::Edge {
+                eid: Eid::from(3),
+                edge_type: "KNOWS".into(),
+                src: Vid::from(0),
+                dst: Vid::from(1),
+                properties: HashMap::from([("since".to_string(), Value::String("Y".into()))]),
+            });
+            assert_eq!(e.entity_property("_eid"), Value::Int(3));
+            assert_eq!(e.entity_property("_type"), Value::String("KNOWS".into()));
+            assert_eq!(e.entity_property("_src"), Value::Int(0));
+            assert_eq!(e.entity_property("_dst_vid"), Value::Int(1));
+            assert_eq!(e.entity_property("since"), Value::String("Y".into()));
+        }
+
+        /// Property names come from one definition, whichever encoding is used.
+        ///
+        /// `keys()` had two implementations — a UDF and a separate one inside
+        /// `UNWIND` — and both knew only the map form, so `keys(n)` on a native
+        /// entity returned nothing.
+        #[test]
+        fn property_names_agree_across_encodings() {
+            let native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::from([
+                    ("surname".to_string(), Value::String("Lopez".into())),
+                    ("name".to_string(), Value::String("Andres".into())),
+                ]),
+            });
+            assert_eq!(
+                native.property_names(),
+                Some(vec!["name".to_string(), "surname".to_string()]),
+                "sorted, and system fields are not properties"
+            );
+
+            let mut m = HashMap::new();
+            m.insert("_vid".to_string(), Value::Int(7));
+            m.insert(
+                "_all_props".to_string(),
+                Value::Map(HashMap::from([
+                    ("surname".to_string(), Value::String("Lopez".into())),
+                    ("name".to_string(), Value::String("Andres".into())),
+                ])),
+            );
+            assert_eq!(Value::Map(m).property_names(), native.property_names());
+        }
+
+        /// A null property does not exist on an entity, but does in a plain map.
+        ///
+        /// The property graph model says an entity has no null-valued property;
+        /// a map literal or parameter may legitimately hold one.
+        #[test]
+        fn a_null_property_exists_on_a_map_but_not_on_an_entity() {
+            let entity = Value::Node(crate::value::Node {
+                vid: Vid::from(1),
+                labels: vec![],
+                properties: HashMap::from([
+                    ("set".to_string(), Value::Int(1)),
+                    ("unset".to_string(), Value::Null),
+                ]),
+            });
+            assert_eq!(entity.property_names(), Some(vec!["set".to_string()]));
+
+            let plain = Value::Map(HashMap::from([
+                ("set".to_string(), Value::Int(1)),
+                ("unset".to_string(), Value::Null),
+            ]));
+            assert_eq!(
+                plain.property_names(),
+                Some(vec!["set".to_string(), "unset".to_string()])
+            );
+
+            assert_eq!(Value::Int(1).property_names(), None);
+        }
+
+        /// A write-back reaches the entity in either encoding.
+        ///
+        /// The write helpers update the row's binding after a SET or REMOVE so
+        /// the rest of the statement sees the new value. Reaching into a
+        /// `Value::Map` only meant the write landed in storage while the row
+        /// still showed the old value.
+        #[test]
+        fn setting_properties_reaches_either_encoding() {
+            let mut native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::from([("old".to_string(), Value::Int(1))]),
+            });
+            let new_props = HashMap::from([("fresh".to_string(), Value::Int(2))]);
+            assert!(native.set_entity_properties(new_props.clone(), &["old".to_string()]));
+            assert_eq!(native.entity_property("fresh"), Value::Int(2));
+            // A removed property is simply absent on a native entity, which is
+            // what `entity_property` reports as Null.
+            assert_eq!(native.entity_property("old"), Value::Null);
+            // Identity is untouched by a property write.
+            assert_eq!(native.entity_vid(), Some(Vid::from(7)));
+
+            // The map form keeps a removed property present-and-null, because
+            // its flattened columns are read directly by other operators.
+            let mut as_map = node_map(Value::Int(7));
+            assert!(as_map.set_entity_properties(new_props, &["old".to_string()]));
+            assert_eq!(as_map.entity_property("old"), Value::Null);
+
+            assert!(!Value::Int(1).set_entity_properties(HashMap::new(), &[]));
+        }
+
+        /// Labels are writable in either encoding.
+        #[test]
+        fn setting_labels_reaches_either_encoding() {
+            let mut native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["A".into()],
+                properties: HashMap::new(),
+            });
+            assert!(native.set_entity_labels(vec!["A".into(), "B".into()]));
+            assert_eq!(
+                native.entity_property("_labels"),
+                Value::List(vec![Value::String("A".into()), Value::String("B".into())])
+            );
+
+            let mut as_map = node_map(Value::Int(7));
+            assert!(as_map.set_entity_labels(vec!["B".into()]));
+            assert_eq!(
+                as_map.entity_property("_labels"),
+                Value::List(vec![Value::String("B".into())])
+            );
+
+            // An edge has no labels.
+            let mut e = edge_map_with_shared_id(Value::Int(1));
+            assert!(!e.set_entity_labels(vec!["X".into()]));
+        }
+
+        /// Assigning null removes a property from an entity, but not from a map.
+        ///
+        /// `SET n.p = null` deletes the property under the property graph model.
+        /// An entity left carrying `p: Null` would still report it through
+        /// `properties()` and `keys()`. A map row keeps it present-and-null,
+        /// because its flattened columns are read directly and must stay
+        /// addressable.
+        #[test]
+        fn assigning_null_removes_a_property_from_an_entity() {
+            let mut native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec![],
+                properties: HashMap::from([("p".to_string(), Value::Int(1))]),
+            });
+            assert!(native.set_entity_property("p", Value::Null));
+            assert_eq!(native.property_names(), Some(vec![]));
+            assert_eq!(native.entity_property("p"), Value::Null);
+
+            assert!(native.set_entity_property("q", Value::Int(2)));
+            assert_eq!(native.property_names(), Some(vec!["q".to_string()]));
+
+            // The map form keeps the key, present and null.
+            let mut as_map = node_map(Value::Int(7));
+            assert!(as_map.set_entity_property("p", Value::Null));
+            let Value::Map(m) = &as_map else { panic!() };
+            assert!(
+                m.contains_key("p"),
+                "a map row keeps the column addressable"
+            );
+
+            assert!(!Value::Int(1).set_entity_property("p", Value::Int(2)));
+        }
+
+        /// Canonicalising drops null properties, matching the entity model.
+        #[test]
+        fn canonicalising_drops_null_properties() {
+            let mut m = HashMap::new();
+            m.insert("_vid".to_string(), Value::Int(7));
+            m.insert(
+                "_all_props".to_string(),
+                Value::Map(HashMap::from([
+                    ("kept".to_string(), Value::Int(1)),
+                    ("removed".to_string(), Value::Null),
+                ])),
+            );
+            let entity = Value::Map(m).canonical_entity();
+            assert_eq!(entity.property_names(), Some(vec!["kept".to_string()]));
+        }
+
+        /// A bare integer is not an entity, and a negative id is not one either.
+        #[test]
+        fn non_entities_stay_non_entities() {
+            assert_eq!(Value::Int(7).entity_ref(), None);
+            assert_eq!(Value::String("7".into()).entity_ref(), None);
+            assert_eq!(Value::Null.entity_ref(), None);
+            assert_eq!(node_map(Value::Int(-1)).entity_ref(), None);
+        }
+
+        fn hash_of(v: &Value) -> u64 {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            v.hash(&mut h);
+            h.finish()
+        }
+
+        /// `Value`'s own `==` compares entities by identity, so a site that
+        /// never heard of `entity_ref` still gets the right answer.
+        ///
+        /// This is the boundary fix: `HashSet<Value>` backs `count(DISTINCT …)`
+        /// and the recursive-CTE cycle-detection set, and Locy's `values_equal`
+        /// falls through to here, so this operator reaches user-visible results.
+        #[test]
+        fn value_equality_compares_entities_by_identity() {
+            let mut props = HashMap::new();
+            props.insert("name".to_string(), Value::String("a".into()));
+            let hydrated = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into(), "Q".into()],
+                properties: props,
+            });
+            let bare = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::new(),
+            });
+            // Same vertex, different hydration.
+            assert_eq!(hydrated, bare);
+            // Same vertex, different encoding.
+            assert_eq!(hydrated, node_map(Value::Int(7)));
+            // Different vertices stay different.
+            assert_ne!(hydrated, node_map(Value::Int(8)));
+            // An entity is not a bare number, and not an edge of that number.
+            assert_ne!(hydrated, Value::Int(7));
+            assert_ne!(hydrated, edge_map_with_shared_id(Value::Int(7)));
+        }
+
+        /// `Hash` agrees with `Eq`, including across the two encodings.
+        ///
+        /// If these disagreed, equal values would land in different buckets and
+        /// every `HashSet`/`HashMap` keyed on `Value` would silently keep
+        /// duplicates — a wrong answer rather than a visible failure. The
+        /// discriminant is therefore not hashed for entities, since the two
+        /// encodings are different variants.
+        #[test]
+        fn value_hash_agrees_with_equality_across_encodings() {
+            let native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::new(),
+            });
+            let as_map = node_map(Value::Int(7));
+            assert_eq!(native, as_map);
+            assert_eq!(
+                hash_of(&native),
+                hash_of(&as_map),
+                "equal values must hash alike or HashSet keeps both"
+            );
+        }
+
+        /// The dedup a `HashSet<Value>` performs is now identity-based.
+        #[test]
+        fn a_value_set_dedups_one_entity_across_encodings() {
+            use std::collections::HashSet;
+            let mut set: HashSet<Value> = HashSet::new();
+            set.insert(Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::new(),
+            }));
+            set.insert(node_map(Value::Int(7)));
+            set.insert(edge_map_with_shared_id(Value::Int(7)));
+            set.insert(node_map(Value::Int(8)));
+            assert_eq!(
+                set.len(),
+                3,
+                "one vertex twice-encoded is one member; the edge and the other vertex are two more"
+            );
+        }
+
+        /// `EntityRef` is usable as a dedup/join key, which is what lets one
+        /// type serve equality, DISTINCT, joins and IN alike.
+        #[test]
+        fn entity_ref_is_a_usable_key() {
+            use std::collections::HashSet;
+            let mut seen = HashSet::new();
+            assert!(
+                seen.insert(
+                    Value::Node(crate::value::Node {
+                        vid: Vid::from(7),
+                        labels: vec!["A".into()],
+                        properties: HashMap::new(),
+                    })
+                    .entity_ref()
+                )
+            );
+            // The same vertex in the other encoding, with different properties
+            // and labels, must not count twice.
+            assert!(!seen.insert(node_map(Value::Int(7)).entity_ref()));
+            // A different vertex must.
+            assert!(seen.insert(node_map(Value::Int(8)).entity_ref()));
+            // An edge of the same number is a distinct entity.
+            assert!(seen.insert(edge_map_with_shared_id(Value::Int(7)).entity_ref()));
+        }
+    }
+
     use super::*;
     use std::cmp::Ordering;
 

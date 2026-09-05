@@ -12,7 +12,7 @@
 use crate::types::{Edge, Node, Path, Value};
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
-use uni_common::core::id::{Eid, Vid};
+use uni_common::core::id::Vid;
 
 /// Converts raw executor output into clean user-facing value types.
 ///
@@ -226,12 +226,16 @@ impl ResultNormalizer {
 
     /// Convert map to Node, extracting properties and stripping internal fields.
     fn map_to_node(map: HashMap<String, Value>) -> Result<Value> {
-        let vid = map
-            .get("_vid")
-            .or_else(|| map.get("_id"))
-            .and_then(Self::value_to_u64)
-            .map(Vid::new)
-            .ok_or_else(|| anyhow!("Missing or invalid _vid in node map"))?;
+        // `value_to_u64` parses a string with a bare `parse()`, so `_vid` carrying
+        // the serde `Display` form of a `Vid` — `"Vid(7)"` — resolved to `None`
+        // and the whole node errored out of the result set. `is_node_map` has
+        // already gated entry here, so the accessor is only being asked to read
+        // an id it has already been decided is a vertex's (#234).
+        let Some(uni_common::value::EntityRef::Vertex(vid)) =
+            uni_common::value::entity_ref_from_map(&map)
+        else {
+            return Err(anyhow!("Missing or invalid _vid in node map"));
+        };
 
         let labels = if let Some(Value::List(label_list)) = map.get("_labels") {
             label_list
@@ -265,12 +269,12 @@ impl ResultNormalizer {
 
     /// Convert map to Edge, extracting properties and stripping internal fields.
     fn map_to_edge(map: HashMap<String, Value>) -> Result<Value> {
-        let eid = map
-            .get("_eid")
-            .or_else(|| map.get("_id"))
-            .and_then(Self::value_to_u64)
-            .map(Eid::new)
-            .ok_or_else(|| anyhow!("Missing or invalid _eid in edge map"))?;
+        // Twin of `map_to_node`: `"Eid(7)"` and the `eid` spelling both failed.
+        let Some(uni_common::value::EntityRef::Edge(eid)) =
+            uni_common::value::entity_ref_from_map(&map)
+        else {
+            return Err(anyhow!("Missing or invalid _eid in edge map"));
+        };
 
         // Prefer _type_name (string) over _type (numeric ID) for user-facing output
         let edge_type = ["_type_name", "_type", "type"]

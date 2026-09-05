@@ -55,3 +55,5 @@ pub mod locy_issue_162_prob_fold_consumer;
 pub mod locy_issue_162_shape_matrix;
 // Issue #162: scaling guard for the per-iteration folded view.
 pub mod locy_issue_162_fold_scaling;
+// Repros for the two Debug-fallback nondeterminism defects (#236 + sibling).
+pub mod locy_debug_fallback_nondeterminism;

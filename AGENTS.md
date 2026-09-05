@@ -59,6 +59,27 @@
 ## Agent Git Safety Rule
 - Do not perform any git action unless the user has explicitly instructed it in the current conversation turn.
 - This includes all git commands and git-related workflows (for example: `status`, `diff`, `add`, `commit`, `push`, `pull`, `checkout`, `reset`, `merge`, `rebase`, `tag`, `stash`, `cherry-pick`).
+- **Never `git commit` without the user's explicit approval in the current turn.**
+  Staging, writing files, and reporting what *would* be committed are fine;
+  creating the commit is not. The same applies to `push`.
+
+## Agent GitHub Safety Rule
+- **Do not create GitHub issues** unless it is genuinely a bug you have
+  identified *and* have a working reproduction for. No speculative filings, no
+  "class" or "proposal" issues, no filing a batch because a review or audit
+  produced a list. Report findings in the conversation, or in
+  `docs/proposals/`, instead.
+- **Do not comment on existing issues or PRs, and do not post progress to
+  GitHub.** Status belongs in the conversation and in this repo's own
+  documents. `gh issue comment` / `gh pr comment` are off-limits.
+- **Do not close issues by hand** (`gh issue close`). An issue closes only
+  through a `Fixes #N` / `Closes #N` keyword in the body of the commit that
+  resolves it, so the close follows the merge.
+- Read-only `gh` usage (`issue list`, `issue view`, `pr view`) is fine.
+- Rationale: an issue or comment is an outward-facing, hard-to-retract claim
+  other people schedule work around. A filing without a repro asserts a defect
+  that has not been shown to exist; a progress comment asserts a state the
+  merged code has not reached, since local commits sit unpushed.
 
 ## Fork system — current invariants (post Phase 7)
 
