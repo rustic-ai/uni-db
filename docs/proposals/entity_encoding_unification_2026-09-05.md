@@ -214,10 +214,36 @@ single site, and it is not a bug but a contract, described below.
   not an entity read.
 
 The first two are the same blocker stated twice: **the write helpers read
-`_vid`/`_labels` out of a map.** Migrating them to `Value::entity_property` is
-step 1 for the write pipeline, and until that happens those two decoders must
-keep producing maps. That is the next piece of work, and it is bounded — the
-helpers are named, and the fork MERGE test is a ready acceptance criterion.
+`_vid`/`_labels` out of a map.**
+
+### Write-helper migration — partial, 2026-09-05
+
+Converting both decoders and following the failures gave three, each a silent
+write no-op rather than an error:
+
+- `REMOVE n.prop` — the row write-back reached into a `Value::Map`, so a native
+  entity kept the removed property. Migrated to `Value::set_entity_properties`.
+- `SET n:Label` — same shape for labels. Migrated to `Value::set_entity_labels`.
+- Edge `MERGE … ON MATCH SET` in a fork — **not** migrated; see below.
+
+Writing into an entity needs more than the reader: `entity_property` answers a
+field, and a write-back has to *replace* one. The two new methods are the write
+side of the same idea, and they are not symmetric with the reader —
+`set_entity_properties` takes the removed names separately, because a map row
+carries flattened columns that other operators read directly, so a removed
+property must be present-and-null there, while on a native entity absence is the
+correct representation.
+
+**Neither decoder can be converted yet.** `record_batches_to_rows` still breaks
+the fork edge `MERGE … ON MATCH` — its match phase finds nothing, so ON MATCH
+SET never runs, and the cause is upstream of the SET dispatch, which is never
+reached. `batches_to_rows` passed the full integration suite with the conversion
+applied and then failed nine TCK scenarios and a roundtrip unit test, which is
+worth recording on its own: **the integration suite alone was not sufficient
+evidence for that conversion.**
+
+So the migration is partial: two of three helpers moved, both decoders still
+blocked. The remaining work is the fork MERGE match path.
 
 ### What remains after that
 

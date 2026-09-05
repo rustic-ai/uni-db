@@ -3526,11 +3526,12 @@ impl Executor {
                                 l0.write().set_vertex_labels(vid, &new_labels);
                             }
 
-                            // Update the node value in the row with the new labels.
-                            if let Some(Value::Map(obj)) = row.get_mut(variable) {
-                                let labels_list =
-                                    new_labels.into_iter().map(Value::String).collect();
-                                obj.insert("_labels".to_string(), Value::List(labels_list));
+                            // Update the node value in the row with the new
+                            // labels. This reached into a `Value::Map` only, so a
+                            // natively-encoded vertex kept its old label set even
+                            // though the relabel had reached storage (#234).
+                            if let Some(binding) = row.get_mut(variable) {
+                                binding.set_entity_labels(new_labels);
                             }
                         }
                     }
@@ -3837,13 +3838,12 @@ impl Executor {
                         .await?;
                 }
 
-                // Update the row map: set removed props to Null
-                if let Some(Value::Map(node_map)) = row.get_mut(var_name) {
-                    for prop_name in prop_names {
-                        node_map.insert(prop_name.clone(), Value::Null);
-                    }
-                    // Set _all_props to the complete effective property set
-                    node_map.insert("_all_props".to_string(), Value::Map(effective));
+                // Update the row's binding so the rest of the statement sees the
+                // post-REMOVE value. This reached into a `Value::Map` only, so a
+                // natively-encoded entity was left holding the old properties —
+                // the removal reached storage but not the row (#234).
+                if let Some(binding) = row.get_mut(var_name) {
+                    binding.set_entity_properties(effective, prop_names);
                 }
             } else if let Value::Map(map) = node_val {
                 // Edge property removal (map-encoded)

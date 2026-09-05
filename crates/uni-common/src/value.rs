@@ -702,6 +702,75 @@ impl Value {
         Some(names)
     }
 
+    /// Replace an entity's user properties, in whichever encoding it uses.
+    ///
+    /// The write helpers update the row's binding after a SET or REMOVE so the
+    /// rest of the statement sees the post-write value. They did that by
+    /// reaching into a `Value::Map`, which means a natively-encoded entity was
+    /// left untouched — the write reached storage but the row still showed the
+    /// old value, so a later `RETURN` or predicate read a stale property.
+    ///
+    /// `removed` names properties that must read as `Null` rather than simply be
+    /// absent: a map row carries flattened columns which downstream operators
+    /// read directly, so a removed property has to be present-and-null there. A
+    /// native entity has no such columns, so absence is the correct
+    /// representation and `removed` does not apply.
+    ///
+    /// Returns `false` when this value is not an entity, so a caller can tell
+    /// "nothing to update" from "updated".
+    pub fn set_entity_properties(
+        &mut self,
+        properties: HashMap<String, Value>,
+        removed: &[String],
+    ) -> bool {
+        match self {
+            Value::Node(node) => {
+                node.properties = properties;
+                true
+            }
+            Value::Edge(edge) => {
+                edge.properties = properties;
+                true
+            }
+            Value::Map(map) => {
+                for name in removed {
+                    map.insert(name.clone(), Value::Null);
+                }
+                map.insert("_all_props".to_string(), Value::Map(properties));
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Replace a vertex's labels, in whichever encoding it uses.
+    ///
+    /// The label twin of [`Value::set_entity_properties`], and needed for the
+    /// same reason: `SET n:Label` updated the row's binding by reaching into a
+    /// `Value::Map`, so a natively-encoded vertex kept its old label set even
+    /// though the relabel had reached storage.
+    ///
+    /// Returns `false` for anything that is not a vertex.
+    pub fn set_entity_labels(&mut self, labels: Vec<String>) -> bool {
+        match self {
+            Value::Node(node) => {
+                node.labels = labels;
+                true
+            }
+            // A map only takes labels if it is a *vertex* map. Writing `_labels`
+            // onto an edge map would give an edge a label set, which no encoding
+            // of an edge has.
+            Value::Map(map) if matches!(entity_ref_from_map(map), Some(EntityRef::Vertex(_))) => {
+                map.insert(
+                    "_labels".to_string(),
+                    Value::List(labels.into_iter().map(Value::String).collect()),
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// The edge id this value denotes, in either encoding.
     ///
     /// The edge twin of [`Value::entity_vid`]. It did not exist, which is why
@@ -2312,6 +2381,63 @@ mod tests {
             );
 
             assert_eq!(Value::Int(1).property_names(), None);
+        }
+
+        /// A write-back reaches the entity in either encoding.
+        ///
+        /// The write helpers update the row's binding after a SET or REMOVE so
+        /// the rest of the statement sees the new value. Reaching into a
+        /// `Value::Map` only meant the write landed in storage while the row
+        /// still showed the old value.
+        #[test]
+        fn setting_properties_reaches_either_encoding() {
+            let mut native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::from([("old".to_string(), Value::Int(1))]),
+            });
+            let new_props = HashMap::from([("fresh".to_string(), Value::Int(2))]);
+            assert!(native.set_entity_properties(new_props.clone(), &["old".to_string()]));
+            assert_eq!(native.entity_property("fresh"), Value::Int(2));
+            // A removed property is simply absent on a native entity, which is
+            // what `entity_property` reports as Null.
+            assert_eq!(native.entity_property("old"), Value::Null);
+            // Identity is untouched by a property write.
+            assert_eq!(native.entity_vid(), Some(Vid::from(7)));
+
+            // The map form keeps a removed property present-and-null, because
+            // its flattened columns are read directly by other operators.
+            let mut as_map = node_map(Value::Int(7));
+            assert!(as_map.set_entity_properties(new_props, &["old".to_string()]));
+            assert_eq!(as_map.entity_property("old"), Value::Null);
+
+            assert!(!Value::Int(1).set_entity_properties(HashMap::new(), &[]));
+        }
+
+        /// Labels are writable in either encoding.
+        #[test]
+        fn setting_labels_reaches_either_encoding() {
+            let mut native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["A".into()],
+                properties: HashMap::new(),
+            });
+            assert!(native.set_entity_labels(vec!["A".into(), "B".into()]));
+            assert_eq!(
+                native.entity_property("_labels"),
+                Value::List(vec![Value::String("A".into()), Value::String("B".into())])
+            );
+
+            let mut as_map = node_map(Value::Int(7));
+            assert!(as_map.set_entity_labels(vec!["B".into()]));
+            assert_eq!(
+                as_map.entity_property("_labels"),
+                Value::List(vec![Value::String("B".into())])
+            );
+
+            // An edge has no labels.
+            let mut e = edge_map_with_shared_id(Value::Int(1));
+            assert!(!e.set_entity_labels(vec!["X".into()]));
         }
 
         /// A bare integer is not an entity, and a negative id is not one either.
