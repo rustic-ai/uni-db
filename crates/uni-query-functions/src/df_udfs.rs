@@ -766,6 +766,19 @@ impl ScalarUDFImpl for KeysUdf {
                         .map(Value::String)
                         .collect::<Vec<_>>()
                 }
+                // Native encodings. Only the map form was handled, so
+                // `keys(n)` on a `Value::Node` fell to the catch-all and
+                // returned an empty list — a wrong answer with no error, and
+                // indistinguishable from an entity that genuinely has no
+                // properties (#234). A null-valued property does not exist on
+                // an entity, per the property graph model, so it is filtered
+                // out here exactly as the map arm above does.
+                Value::Node(_) | Value::Edge(_) => arg
+                    .property_names()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
                 Value::Null => {
                     return Ok(Value::Null);
                 }

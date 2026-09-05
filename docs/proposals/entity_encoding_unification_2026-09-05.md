@@ -1,7 +1,10 @@
 # Unifying the two entity encodings
 
-Status: **#234's class work is complete. The encoding split is not, and this
-records what it would actually take — including a measured attempt that failed.**
+Status: **Done for the query-side decode boundary as of 2026-09-05.** Steps 1 and
+2 below are complete: an entity struct now decodes to its native form, so that
+boundary no longer produces the second encoding. The history of how it was
+sequenced — including an attempt that failed and why — is kept because the
+remaining boundaries will hit the same wall.
 
 ## The problem in one line
 
@@ -141,6 +144,41 @@ on end-to-end coverage.
    cannot reintroduce it.
 
 Doing (2) before (1) is the failure recorded above.
+
+## Outcome — 2026-09-05
+
+Steps 1 and 2 are **done for the query-side struct decoder**. It now returns
+`Value::Node` / `Value::Edge`, and the full suite plus the TCK are green with it
+in place.
+
+Step 1 took six Map-only sites, found one at a time by re-running step 2 and
+following each failure. Three were batch builders and three were readers:
+
+| site | what it did with a native entity |
+|---|---|
+| `value_to_scalar` | JSON-encoded it into a CypherValue column — decoded to nothing |
+| `sync_dotted_columns` | skipped it, leaving `{var}._vid` unwritten |
+| `apply::rows_to_batch` | read every column flat; a dotted column does not exist |
+| `apply` unit-subquery refresh | read `.properties` only, so `_vid` kept a stale value |
+| `apply` kept-input override | read `.properties` only, writing `Null` into a non-nullable column |
+| `keys()` — **two** implementations | returned an empty list, and no rows at all |
+
+The last is the one worth remembering: `keys()` existed twice, as a UDF and again
+inside `UNWIND`, and both knew only the map form. Fixing one left the TCK red.
+They now share `Value::property_names`, as the other readers share
+`Value::entity_property`.
+
+**Every one of these was a latent wrong answer** that no test could reach while
+the native form never got that far. Two were caught by existing tests and three
+by the TCK — the split was hiding them, exactly as predicted above.
+
+### What is not done
+
+Only the query-side struct decoder was converted. `uni-store`'s
+`arrow_convert::arrow_to_value` and the other decoders still produce maps, so the
+second encoding still exists elsewhere. The same sequencing applies to each:
+route a native entity through, fix what breaks, then convert the decoder. Step 4
+— making the map form unrepresentable — stays open until they all are.
 
 ## What the class cost, as an argument for finishing it
 

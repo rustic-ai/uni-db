@@ -580,9 +580,14 @@ impl Value {
         let properties: HashMap<String, Value> =
             match map.get("_all_props").or_else(|| map.get("properties")) {
                 Some(Value::Map(props)) => props.clone(),
+                // Flattened projection: the user properties are the plain keys.
+                // `properties` is excluded by name as well as by the underscore
+                // rule — when it is present but null, meaning an entity with
+                // none, it is still a container key, and collecting it would
+                // invent a user property called "properties" holding null.
                 _ => map
                     .iter()
-                    .filter(|(k, _)| !k.starts_with('_'))
+                    .filter(|(k, _)| !k.starts_with('_') && k.as_str() != "properties")
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
             };
@@ -663,6 +668,38 @@ impl Value {
             },
             _ => Value::Null,
         }
+    }
+
+    /// The user-visible property names of an entity or map, sorted.
+    ///
+    /// `None` for a value that is neither. One definition, because `keys()` had
+    /// two implementations — a UDF and a separate one inside `UNWIND` — and
+    /// both knew only the map encoding, so `keys(n)` on a native entity
+    /// returned nothing at all.
+    ///
+    /// A null-valued property does not exist on an *entity* under the property
+    /// graph model, so those names are dropped. On a plain map — a literal or a
+    /// parameter — a null value is a legitimate entry and its key is kept.
+    #[must_use]
+    pub fn property_names(&self) -> Option<Vec<String>> {
+        let (props, is_entity): (&HashMap<String, Value>, bool) = match self {
+            Value::Node(node) => (&node.properties, true),
+            Value::Edge(edge) => (&edge.properties, true),
+            Value::Map(map) => match map.get("_all_props") {
+                // A schemaless entity keeps its properties in `_all_props`;
+                // the top level holds system fields only.
+                Some(Value::Map(all)) => (all, true),
+                _ => (map, false),
+            },
+            _ => return None,
+        };
+        let mut names: Vec<String> = props
+            .iter()
+            .filter(|(k, v)| !k.starts_with('_') && (!is_entity || !v.is_null()))
+            .map(|(k, _)| k.clone())
+            .collect();
+        names.sort();
+        Some(names)
     }
 
     /// The edge id this value denotes, in either encoding.
@@ -2214,6 +2251,67 @@ mod tests {
             assert_eq!(e.entity_property("_src"), Value::Int(0));
             assert_eq!(e.entity_property("_dst_vid"), Value::Int(1));
             assert_eq!(e.entity_property("since"), Value::String("Y".into()));
+        }
+
+        /// Property names come from one definition, whichever encoding is used.
+        ///
+        /// `keys()` had two implementations — a UDF and a separate one inside
+        /// `UNWIND` — and both knew only the map form, so `keys(n)` on a native
+        /// entity returned nothing.
+        #[test]
+        fn property_names_agree_across_encodings() {
+            let native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::from([
+                    ("surname".to_string(), Value::String("Lopez".into())),
+                    ("name".to_string(), Value::String("Andres".into())),
+                ]),
+            });
+            assert_eq!(
+                native.property_names(),
+                Some(vec!["name".to_string(), "surname".to_string()]),
+                "sorted, and system fields are not properties"
+            );
+
+            let mut m = HashMap::new();
+            m.insert("_vid".to_string(), Value::Int(7));
+            m.insert(
+                "_all_props".to_string(),
+                Value::Map(HashMap::from([
+                    ("surname".to_string(), Value::String("Lopez".into())),
+                    ("name".to_string(), Value::String("Andres".into())),
+                ])),
+            );
+            assert_eq!(Value::Map(m).property_names(), native.property_names());
+        }
+
+        /// A null property does not exist on an entity, but does in a plain map.
+        ///
+        /// The property graph model says an entity has no null-valued property;
+        /// a map literal or parameter may legitimately hold one.
+        #[test]
+        fn a_null_property_exists_on_a_map_but_not_on_an_entity() {
+            let entity = Value::Node(crate::value::Node {
+                vid: Vid::from(1),
+                labels: vec![],
+                properties: HashMap::from([
+                    ("set".to_string(), Value::Int(1)),
+                    ("unset".to_string(), Value::Null),
+                ]),
+            });
+            assert_eq!(entity.property_names(), Some(vec!["set".to_string()]));
+
+            let plain = Value::Map(HashMap::from([
+                ("set".to_string(), Value::Int(1)),
+                ("unset".to_string(), Value::Null),
+            ]));
+            assert_eq!(
+                plain.property_names(),
+                Some(vec!["set".to_string(), "unset".to_string()])
+            );
+
+            assert_eq!(Value::Int(1).property_names(), None);
         }
 
         /// A bare integer is not an entity, and a negative id is not one either.

@@ -1110,15 +1110,27 @@ fn append_cross_join_row(
     // when applicable (see fn-doc).
     for (col_idx, arr) in input_row_arrays.iter().enumerate() {
         if let Some(Some((var, prop))) = kept_input_overrides.get(col_idx) {
-            let extracted = match sub_row.get(var) {
-                Some(Value::Map(m)) => m.get(prop).cloned().unwrap_or(Value::Null),
-                Some(Value::Node(n)) => n.properties.get(prop).cloned().unwrap_or(Value::Null),
-                Some(Value::Edge(e)) => e.properties.get(prop).cloned().unwrap_or(Value::Null),
-                _ => Value::Null,
-            };
+            // The native arms read only the *property* map, so a system field —
+            // `_vid` above all — became `Value::Null` and was written straight
+            // into a non-nullable column, failing batch construction. The map
+            // arm answered it, because a map carries `_vid` among its keys: the
+            // same asymmetry, at the last place the entity is read (#234).
+            //
+            // Falling back to the input column when the entity cannot answer is
+            // deliberate: a genuinely absent property must stay absent, but a
+            // field the entity simply does not carry must not overwrite a value
+            // the input already had.
+            let extracted = sub_row.get(var).map(|v| v.entity_property(prop));
             let field = &output_schema.fields()[col_idx];
-            let new_arr = value_to_single_row_array(&extracted, field.data_type())?;
-            column_arrays[col_idx].push(new_arr);
+            if let Some(val) = extracted.filter(|v| !v.is_null()) {
+                let new_arr = value_to_single_row_array(&val, field.data_type())?;
+                column_arrays[col_idx].push(new_arr);
+            } else if field.is_nullable() {
+                let new_arr = value_to_single_row_array(&Value::Null, field.data_type())?;
+                column_arrays[col_idx].push(new_arr);
+            } else {
+                column_arrays[col_idx].push(arr.clone());
+            }
             continue;
         }
         if is_unit_subquery {
