@@ -104,8 +104,15 @@ async fn hydrate_entity_if_needed(
     prop_manager: &PropertyManager,
     ctx: Option<&QueryContext>,
 ) {
+    // Which kind of entity this is, and its id, asked once. Reading `_eid` and
+    // `_vid` as integers meant a map spelling its id `_id`, or carrying the
+    // serde form `"Vid(7)"`, was hydrated as neither — so `n.prop` came back
+    // NULL after a pushdown that emitted only the system fields (#234).
+    let entity = uni_common::value::entity_ref_from_map(map);
+
     // Check for edge entity
-    if let Some(eid_u64) = map.get("_eid").and_then(|v| v.as_u64()) {
+    if let Some(uni_common::value::EntityRef::Edge(eid)) = entity {
+        let eid_u64 = eid.as_u64();
         if map.len() <= EDGE_SYSTEM_FIELD_COUNT {
             tracing::debug!(
                 "Pushdown fallback: hydrating edge {} at execution time",
@@ -130,7 +137,8 @@ async fn hydrate_entity_if_needed(
     }
 
     // Check for vertex entity
-    if let Some(vid_u64) = map.get("_vid").and_then(|v| v.as_u64()) {
+    if let Some(uni_common::value::EntityRef::Vertex(vid)) = entity {
+        let vid_u64 = vid.as_u64();
         if map.len() <= VERTEX_SYSTEM_FIELD_COUNT {
             tracing::debug!(
                 "Pushdown fallback: hydrating vertex {} at execution time",
@@ -1659,25 +1667,28 @@ impl Executor {
                         {
                             return Ok(val.clone());
                         }
-                        // Fallback to storage lookup using _vid or _id
-                        let vid_opt = map.get("_vid").and_then(|v| v.as_u64()).or_else(|| {
-                            map.get("_id")
-                                .and_then(|v| v.as_str())
-                                .and_then(|s| s.parse::<u64>().ok())
-                        });
-                        if let Some(id) = vid_opt {
-                            let vid = Vid::from(id);
-                            if let Ok(val) = prop_manager
-                                .get_vertex_prop_with_ctx(vid, prop_name, ctx)
-                                .await
-                            {
-                                return Ok(val);
+                        // Fallback to a storage lookup, whichever encoding carries
+                        // the identity. `_id` used to be read only as a *string*,
+                        // so a map spelling its id `_id` as an integer resolved to
+                        // neither vertex nor edge and the whole property access
+                        // returned NULL — a wrong answer with no error (#234).
+                        match uni_common::value::entity_ref_from_map(map) {
+                            Some(uni_common::value::EntityRef::Vertex(vid)) => {
+                                if let Ok(val) = prop_manager
+                                    .get_vertex_prop_with_ctx(vid, prop_name, ctx)
+                                    .await
+                                {
+                                    return Ok(val);
+                                }
                             }
-                        } else if let Some(id) = map.get("_eid").and_then(|v| v.as_u64()) {
-                            let eid = uni_common::core::id::Eid::from(id);
-                            if let Ok(val) = prop_manager.get_edge_prop(eid, prop_name, ctx).await {
-                                return Ok(val);
+                            Some(uni_common::value::EntityRef::Edge(eid)) => {
+                                if let Ok(val) =
+                                    prop_manager.get_edge_prop(eid, prop_name, ctx).await
+                                {
+                                    return Ok(val);
+                                }
                             }
+                            None => {}
                         }
                         return Ok(Value::Null);
                     }
@@ -2226,13 +2237,13 @@ impl Executor {
                         if let Some(vid) = val.entity_vid() {
                             return Ok(Value::Int(vid.as_u64() as i64));
                         }
-                        if let Value::Edge(edge) = &val {
-                            return Ok(Value::Int(edge.eid.as_u64() as i64));
-                        }
-                        if let Value::Map(map) = &val
-                            && let Some(eid_val) = map.get("_eid")
-                        {
-                            return Ok(eid_val.clone());
+                        // The edge half now has an accessor too. The map arm it
+                        // replaces returned `_eid` *verbatim*, so an id carried as
+                        // the string `"Eid(7)"` came back as that string while the
+                        // vertex arm beside it returned an `Int` — one function,
+                        // two return types, decided by how a row was encoded.
+                        if let Some(eid) = val.entity_eid() {
+                            return Ok(Value::Int(eid.as_u64() as i64));
                         }
                         // A genuinely non-entity argument, `id(null)` included,
                         // is NULL by Cypher's rules.
@@ -2254,13 +2265,8 @@ impl Executor {
                         if let Some(vid) = val.entity_vid() {
                             return Ok(Value::String(vid.as_u64().to_string()));
                         }
-                        if let Value::Edge(edge) = &val {
-                            return Ok(Value::String(edge.eid.as_u64().to_string()));
-                        }
-                        if let Value::Map(map) = &val
-                            && let Some(eid_val) = map.get("_eid").and_then(|v| v.as_u64())
-                        {
-                            return Ok(Value::String(eid_val.to_string()));
+                        if let Some(eid) = val.entity_eid() {
+                            return Ok(Value::String(eid.as_u64().to_string()));
                         }
                         return Ok(Value::Null);
                     }
@@ -2507,33 +2513,28 @@ impl Executor {
                         })?;
 
                         // Fetch temporal property values - supports both vertices and edges
-                        let valid_from_val: Option<Value> = if let Ok(vid) =
-                            Self::vid_from_value(&node_val)
-                        {
-                            // Vertex case - VID string format
-                            prop_manager
-                                .get_vertex_prop_with_ctx(vid, &start_prop, ctx)
-                                .await
-                                .ok()
-                        } else if let Value::Map(map) = &node_val {
-                            // Check for embedded _vid or _eid in object
-                            if let Some(vid_val) = map.get("_vid").and_then(|v| v.as_u64()) {
-                                let vid = Vid::from(vid_val);
+                        let valid_from_val: Option<Value> =
+                            if let Ok(vid) = Self::vid_from_value(&node_val) {
+                                // Vertex case - VID string format
                                 prop_manager
                                     .get_vertex_prop_with_ctx(vid, &start_prop, ctx)
                                     .await
                                     .ok()
-                            } else if let Some(eid_val) = map.get("_eid").and_then(|v| v.as_u64()) {
-                                // Edge case
-                                let eid = uni_common::core::id::Eid::from(eid_val);
+                            } else if let Some(eid) = node_val.entity_eid() {
+                                // Edge case. This used to be reachable only through the
+                                // `Value::Map` arm below, so a native `Value::Edge`
+                                // matched nothing and fell to the `false` return —
+                                // `validAt` silently filtered out every row whose
+                                // relationship happened to be materialised natively
+                                // rather than as a map (#234).
                                 prop_manager.get_edge_prop(eid, &start_prop, ctx).await.ok()
-                            } else {
-                                // Inline object - property embedded directly
+                            } else if let Value::Map(map) = &node_val {
+                                // Inline object - property embedded directly. Entity
+                                // maps are handled above, by the vid/eid accessors.
                                 map.get(&start_prop).cloned()
-                            }
-                        } else {
-                            return Ok(Value::Bool(false));
-                        };
+                            } else {
+                                return Ok(Value::Bool(false));
+                            };
 
                         let valid_from = match valid_from_val {
                             Some(ref v) => match value_to_datetime_utc(v) {
@@ -2549,33 +2550,28 @@ impl Executor {
                             None => return Ok(Value::Bool(false)),
                         };
 
-                        let valid_to_val: Option<Value> = if let Ok(vid) =
-                            Self::vid_from_value(&node_val)
-                        {
-                            // Vertex case - VID string format
-                            prop_manager
-                                .get_vertex_prop_with_ctx(vid, &end_prop, ctx)
-                                .await
-                                .ok()
-                        } else if let Value::Map(map) = &node_val {
-                            // Check for embedded _vid or _eid in object
-                            if let Some(vid_val) = map.get("_vid").and_then(|v| v.as_u64()) {
-                                let vid = Vid::from(vid_val);
+                        let valid_to_val: Option<Value> =
+                            if let Ok(vid) = Self::vid_from_value(&node_val) {
+                                // Vertex case - VID string format
                                 prop_manager
                                     .get_vertex_prop_with_ctx(vid, &end_prop, ctx)
                                     .await
                                     .ok()
-                            } else if let Some(eid_val) = map.get("_eid").and_then(|v| v.as_u64()) {
-                                // Edge case
-                                let eid = uni_common::core::id::Eid::from(eid_val);
+                            } else if let Some(eid) = node_val.entity_eid() {
+                                // Edge case. This used to be reachable only through the
+                                // `Value::Map` arm below, so a native `Value::Edge`
+                                // matched nothing and fell to the `false` return —
+                                // `validAt` silently filtered out every row whose
+                                // relationship happened to be materialised natively
+                                // rather than as a map (#234).
                                 prop_manager.get_edge_prop(eid, &end_prop, ctx).await.ok()
-                            } else {
-                                // Inline object - property embedded directly
+                            } else if let Value::Map(map) = &node_val {
+                                // Inline object - property embedded directly. Entity
+                                // maps are handled above, by the vid/eid accessors.
                                 map.get(&end_prop).cloned()
-                            }
-                        } else {
-                            return Ok(Value::Bool(false));
-                        };
+                            } else {
+                                return Ok(Value::Bool(false));
+                            };
 
                         let valid_to = match valid_to_val {
                             Some(ref v) => match value_to_datetime_utc(v) {

@@ -42,6 +42,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use uni_common::Value;
 use uni_common::cypher_value_codec::handle::HandleScope;
+use uni_common::value::EntityRef;
 use uni_cypher::ast::BinaryOp;
 use uni_store::storage::arrow_convert::values_to_array;
 
@@ -502,16 +503,15 @@ impl ScalarUDFImpl for IdUdf {
 /// `_vid` / `_eid` are both live representations of the same thing, and code that
 /// handles only one of them silently does nothing for the other.
 pub(crate) fn entity_identity(value: &Value) -> Option<u64> {
-    match value {
-        Value::Node(n) => Some(n.vid.as_u64()),
-        Value::Edge(e) => Some(e.eid.as_u64()),
-        Value::Map(m) => m
-            .get("_vid")
-            .or_else(|| m.get("_eid"))
-            .and_then(|id| id.as_i64())
-            .map(|id| id as u64),
-        _ => None,
-    }
+    // The map arm read `_vid`/`_eid` as integers, so an entity spelling its id
+    // `_id` — the serde round-trip of a `Value::Node` — or carrying the string
+    // form `"Vid(7)"` resolved to `None`, and `id(x)` returned NULL for an
+    // entity sitting right there in the row. It also cast a negative id with
+    // `as u64`, wrapping to `u64::MAX` rather than rejecting it (#234).
+    value.entity_ref().map(|e| match e {
+        EntityRef::Vertex(vid) => vid.as_u64(),
+        EntityRef::Edge(eid) => eid.as_u64(),
+    })
 }
 
 // ============================================================================
@@ -4875,20 +4875,16 @@ cypher_scalar_udf! {
 /// Entity-against-entity is left to `cypher_eq`, which compares by identity.
 fn entity_aware_eq(left: &Value, right: &Value) -> Option<bool> {
     fn entity_id(v: &Value) -> Option<i64> {
-        match v {
-            Value::Node(n) => Some(n.vid.as_u64() as i64),
-            Value::Edge(e) => Some(e.eid.as_u64() as i64),
-            // An entity that came through a projection arrives as a map carrying
-            // `_vid` / `_eid` alongside its properties, not as a typed `Node` or
-            // `Edge`. Both encodings are live: `cypher_eq`'s own entity arms are
-            // split the same way. Missing this one is what made the first attempt
-            // at this fix a no-op.
-            Value::Map(m) => m
-                .get("_vid")
-                .or_else(|| m.get("_eid"))
-                .and_then(|id| id.as_i64()),
-            _ => None,
-        }
+        // An entity that came through a projection arrives as a map carrying
+        // `_vid` / `_eid` alongside its properties, not as a typed `Node` or
+        // `Edge`. Both encodings are live, and missing one is what made the
+        // first attempt at this fix a no-op — so the question is asked once,
+        // through the accessor, which also covers the `_id` spelling and the
+        // serde string form that the hand-rolled map arm still missed (#234).
+        v.entity_ref().map(|e| match e {
+            EntityRef::Vertex(vid) => vid.as_u64() as i64,
+            EntityRef::Edge(eid) => eid.as_u64() as i64,
+        })
     }
     match (entity_id(left), entity_id(right)) {
         // Exactly one side is an entity and the other is a bare id.
@@ -6164,19 +6160,18 @@ impl CypherCollectAccumulator {
     /// representation, as before. The `\0` prefixes keep entity keys from
     /// colliding with any scalar's string form.
     fn distinct_key(val: &Value) -> String {
-        match val {
-            Value::Node(n) => format!("\0n{}", n.vid),
-            Value::Edge(e) => format!("\0e{}", e.eid),
-            Value::Map(m) => {
-                if let Some(vid) = m.get("_vid") {
-                    format!("\0n{vid}")
-                } else if let Some(eid) = m.get("_eid") {
-                    format!("\0e{eid}")
-                } else {
-                    val.to_string()
-                }
-            }
-            other => other.to_string(),
+        // The `\0n` / `\0e` prefixes carry the vertex/edge distinction, so a
+        // vertex and an edge of the same number stay apart. What the map arm
+        // this replaces did *not* handle: an `_id`-spelled entity fell through
+        // to `val.to_string()` over a `HashMap`, whose rendering is
+        // order-nondeterministic, and a `_vid` carrying the serde string
+        // `"Vid(7)"` keyed as `"\0nVid(7)"` — neither matching the native
+        // form's `"\0n7"`, so `collect(DISTINCT n)` emitted the same node
+        // twice (#234).
+        match val.entity_ref() {
+            Some(EntityRef::Vertex(vid)) => format!("\0n{vid}"),
+            Some(EntityRef::Edge(eid)) => format!("\0e{eid}"),
+            None => val.to_string(),
         }
     }
 }

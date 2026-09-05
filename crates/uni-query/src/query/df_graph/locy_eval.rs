@@ -993,12 +993,15 @@ fn map_to_graph_entity(map: HashMap<String, Value>) -> Value {
         });
     }
 
-    // Node: has _vid
-    if let Some(vid_val) = map.get("_vid") {
-        let vid = match vid_val {
-            Value::Int(i) => Vid::new(*i as u64),
-            _ => return Value::Map(map),
-        };
+    // Node: carries a vertex id. Requiring `Value::Int` meant an `_id`/`vid`
+    // spelling, or the string form `"Vid(7)"`, fell straight back out as an
+    // unconverted map — so any downstream `Value::Node` match silently saw
+    // nothing. The `Int` cast also turned a negative id into `u64::MAX`
+    // rather than rejecting it (#234). The edge branch above has already
+    // returned, so a vertex answer here is the only one that applies.
+    if let Some(uni_common::value::EntityRef::Vertex(vid)) =
+        uni_common::value::entity_ref_from_map(&map)
+    {
         let labels = match map.get("_labels") {
             Some(Value::List(list)) => list
                 .iter()

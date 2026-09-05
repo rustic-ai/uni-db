@@ -535,11 +535,19 @@ impl Executor {
 
     /// Extract edge identity fields (`_eid`, `_src`, `_dst`, `_type`) from a map.
     fn extract_edge_identity(&self, map: &HashMap<String, Value>) -> Result<EdgeIdentity> {
-        let eid = Eid::from(
-            map.get("_eid")
-                .and_then(|v| v.as_u64())
-                .ok_or_else(|| anyhow!("Invalid _eid"))?,
-        );
+        // `_eid` read as an integer rejected the serde string forms `"Eid(7)"`
+        // and `"7"`, which a map that round-tripped through JSON carries — the
+        // edge then failed identity extraction outright (#234).
+        //
+        // Precondition, relied on by every caller and worth keeping that way:
+        // callers reach here only after proving `_eid` is present and non-null.
+        // The accessor would otherwise also accept an `_id` on an edge-shaped
+        // map, and this is a mutation path where that widening is not wanted.
+        let Some(uni_common::value::EntityRef::Edge(eid)) =
+            uni_common::value::entity_ref_from_map(map)
+        else {
+            return Err(anyhow!("Invalid _eid"));
+        };
         let src = Vid::from(
             map.get("_src")
                 .and_then(|v| v.as_u64())
@@ -4850,7 +4858,15 @@ impl Executor {
         match val {
             Value::Node(n) => Some(n.clone()),
             Value::Map(map) => {
-                let vid = map.get("_vid").and_then(|v| v.as_u64()).map(Vid::new)?;
+                // A node map keyed `_id`, or carrying `"Vid(7)"`, resolved to
+                // `None` here — and `None` drops the node from the constructed
+                // path silently, so `RETURN p` came back short rather than
+                // erroring (#234).
+                let uni_common::value::EntityRef::Vertex(vid) =
+                    uni_common::value::entity_ref_from_map(map)?
+                else {
+                    return None;
+                };
                 let labels = if let Some(Value::List(l)) = map.get("_labels") {
                     l.iter()
                         .filter_map(|v| {
@@ -4887,7 +4903,12 @@ impl Executor {
         match val {
             Value::Edge(e) => Some(e.clone()),
             Value::Map(map) => {
-                let eid = map.get("_eid").and_then(|v| v.as_u64()).map(Eid::new)?;
+                // Twin of the node case above: a silent drop from the path.
+                let uni_common::value::EntityRef::Edge(eid) =
+                    uni_common::value::entity_ref_from_map(map)?
+                else {
+                    return None;
+                };
                 let edge_type = map
                     .get("_type_name")
                     .and_then(|v| {

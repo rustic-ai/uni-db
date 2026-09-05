@@ -23,23 +23,44 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Files permitted to read an entity id out of a map by hand, and how many
-/// times each still does. Lower these as sites are routed through the accessor.
+/// Files still permitted to read an entity id out of a map by hand, how many
+/// times each does, and **why that use is not identity extraction**. Every entry
+/// here was audited; none is a leftover. Lower a number only by removing a use.
 ///
 /// `crates/uni-common/src/value.rs` is absent deliberately: it *is* the
 /// accessor, and is excluded by the walk below rather than budgeted here.
 fn budget() -> BTreeMap<&'static str, usize> {
     BTreeMap::from([
-        ("crates/uni-query/src/query/executor/read.rs", 11),
-        ("crates/uni-query-functions/src/df_udfs.rs", 8),
-        ("crates/uni-query/src/query/executor/write.rs", 6),
+        // `"_vid"` here is a *result-column alias* this code emits itself —
+        // `RETURN id(n) AS _vid, n` — read back off a Locy `FactRow`. The value
+        // is a scalar from `id(n)`, and the row is not an entity map at all.
+        // Routing would tie an internal alias to the entity-encoding contract.
+        ("crates/uni/src/api/impl_locy.rs", 3),
+        // `_eid`-presence guards on the SET / REMOVE / DELETE arms, plus the
+        // node-vs-edge map discriminator. These decide *whether to mutate*, and
+        // the accessor is deliberately wider: it also answers "edge" for a map
+        // carrying only endpoints or a type name. Widening a delete guard
+        // changes what gets deleted.
+        ("crates/uni-query/src/query/executor/write.rs", 3),
+        // `is_node_map` / `is_edge_map` dispatch discriminators. Their leniency
+        // is deliberate and paired with `normalize_property_value`, so that user
+        // data merely *containing* `_vid` is not converted into a node.
         (
             "crates/uni-query/src/query/executor/result_normalizer.rs",
-            6,
+            2,
         ),
-        ("crates/uni/src/api/impl_locy.rs", 3),
-        ("crates/uni-tck/src/world.rs", 2),
-        ("crates/uni-query/src/query/df_graph/locy_eval.rs", 2),
+        // A presence-and-nullness probe for an all-null OPTIONAL MATCH struct,
+        // not an id read. `entity_ref` returns `None` both for "key absent" and
+        // "key present but null", collapsing the distinction this depends on —
+        // `properties(n)` on an unmatched OPTIONAL MATCH would return `{}`
+        // instead of null.
+        ("crates/uni-query-functions/src/df_udfs.rs", 2),
+        // `map_to_graph_entity`'s edge branch. Blocked, not declined: this row
+        // shape spells its endpoints `_src_vid` / `_dst_vid`, which the
+        // accessor's edge tells do not yet include, so routing it would classify
+        // an `_id`-only edge map as a *vertex* and convert it into a `Node`.
+        // Teach `entity_ref_from_map` that vocabulary first.
+        ("crates/uni-query/src/query/df_graph/locy_eval.rs", 1),
     ])
 }
 
