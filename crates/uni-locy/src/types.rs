@@ -352,6 +352,14 @@ pub enum RuntimeWarningCode {
     /// fuzzy truth values are not probabilities, and silent conflation is
     /// the dominant pitfall in neuro-symbolic systems (LTN, NTP).
     FuzzyNotProbabilistic,
+    /// Entity hydration did not complete, so KEY columns for the named rule
+    /// carry raw integer VIDs instead of full `Value::Node` objects.
+    ///
+    /// The encoding of a result must not depend on timing. When the VID lookup
+    /// cannot finish, callers that reach for node properties (`r.properties`)
+    /// silently see nothing rather than an error, so this degradation is
+    /// reported rather than swallowed.
+    EntityHydrationIncomplete,
     /// Phase C C0: a `TopKProofs::plus` operation discarded a proof
     /// whose `base_rvs` overlapped a retained proof — top-K is too
     /// small for the program's dependency structure (impl plan §3.0,

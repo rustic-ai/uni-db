@@ -15,7 +15,7 @@ use uni_cypher::locy_ast::RuleOutput;
 use uni_locy::types::CompiledCommand;
 use uni_locy::{
     CommandResult, CompiledProgram, DerivedFactSet, FactRow, LocyCompileError, LocyConfig,
-    LocyError, LocyStats, RuntimeWarning,
+    LocyError, LocyStats, RuntimeWarning, RuntimeWarningCode,
 };
 use uni_query::{QueryMetrics, QueryPlanner};
 
@@ -852,7 +852,7 @@ impl<'a> LocyEngine<'a> {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.rows.clone()))
                 .collect();
-            let enriched_rows = enrich_vids_with_nodes(
+            let (enriched_rows, hydration_warnings) = enrich_vids_with_nodes(
                 self.db,
                 &native_store,
                 orch_rows,
@@ -860,6 +860,11 @@ impl<'a> LocyEngine<'a> {
                 planner.session_ctx(),
             )
             .await;
+            if !hydration_warnings.is_empty()
+                && let Ok(mut w) = warnings_slot.write()
+            {
+                w.extend(hydration_warnings);
+            }
             for (name, rows) in enriched_rows {
                 if let Some(rel) = orch_store.get_mut(&name) {
                     rel.rows = rows;
@@ -956,7 +961,7 @@ impl<'a> LocyEngine<'a> {
             }
         }
 
-        let enriched_derived = enrich_vids_with_nodes(
+        let (enriched_derived, hydration_warnings) = enrich_vids_with_nodes(
             self.db,
             &native_store,
             base_derived,
@@ -964,6 +969,11 @@ impl<'a> LocyEngine<'a> {
             planner.session_ctx(),
         )
         .await;
+        if !hydration_warnings.is_empty()
+            && let Ok(mut w) = warnings_slot.write()
+        {
+            w.extend(hydration_warnings);
+        }
 
         // 10. Build DerivedFactSet from collected derives (session path only)
         let derived_fact_set = if !collected_derives.is_empty() {
@@ -1639,7 +1649,7 @@ impl LocyExecutionContext for NativeExecutionAdapter<'_> {
                 self.graph_ctx.clone()
             }
         };
-        let enriched = enrich_vids_with_nodes(
+        let (enriched, hydration_warnings) = enrich_vids_with_nodes(
             self.db,
             &native_store,
             store_rows,
@@ -1647,6 +1657,9 @@ impl LocyExecutionContext for NativeExecutionAdapter<'_> {
             &self.session_ctx,
         )
         .await;
+        for w in &hydration_warnings {
+            tracing::warn!(rule = %w.rule_name, "{}", w.message);
+        }
         for (name, rows) in enriched {
             if let Some(rel) = store.get_mut(&name) {
                 rel.rows = rows;
@@ -1841,15 +1854,44 @@ fn substitute_nodes(
         .collect()
 }
 
+/// Minimum wall-clock budget granted to a VID hydration lookup.
+///
+/// Hydration is bounded work — one `id(n) IN [...]` lookup over a known VID
+/// list — but it runs *after* the fixpoint, so it inherits whatever is left of
+/// the evaluation deadline. A fixpoint that consumed the budget used to leave
+/// hydration racing a few microseconds, and the resulting timeout was swallowed:
+/// the rule's KEY columns silently stayed raw integers while every other rule in
+/// the same run came back as `Value::Node`. The encoding of a result must not
+/// depend on timing, so an inherited remainder below this floor is raised to it.
+/// A caller whose deadline is already more generous keeps their own.
+const VID_HYDRATION_MIN_BUDGET: Duration = Duration::from_secs(30);
+
+/// Hydrate raw VID columns in `derived` into full `Value::Node` objects.
+///
+/// Returns the enriched rows and any warnings describing rules whose hydration
+/// could not complete; those rules keep integer VIDs, and the warning is how a
+/// caller learns the shape it got is not the shape it expected.
 async fn enrich_vids_with_nodes(
     db: &crate::api::UniInner,
     native_store: &uni_query::query::df_graph::DerivedStore,
     derived: HashMap<String, Vec<FactRow>>,
     graph_ctx: &Arc<uni_query::query::df_graph::GraphExecutionContext>,
     session_ctx: &Arc<parking_lot::RwLock<datafusion::prelude::SessionContext>>,
-) -> HashMap<String, Vec<FactRow>> {
+) -> (HashMap<String, Vec<FactRow>>, Vec<RuntimeWarning>) {
     use arrow_schema::DataType;
     let mut enriched = HashMap::new();
+    let mut warnings: Vec<RuntimeWarning> = Vec::new();
+
+    // Give the bounded lookup a usable budget when the inherited one is spent.
+    let now = std::time::Instant::now();
+    let floor = now + VID_HYDRATION_MIN_BUDGET;
+    // `None` means "no deadline at all" and must stay unbounded — only an
+    // inherited deadline too small for the bounded lookup is raised to the floor.
+    let enrich_ctx: Arc<uni_query::query::df_graph::GraphExecutionContext> =
+        match graph_ctx.deadline_for_host() {
+            Some(d) if d < floor => Arc::new((**graph_ctx).clone().with_deadline(floor)),
+            _ => graph_ctx.clone(),
+        };
 
     for (name, rows) in derived {
         let vid_columns: HashSet<String> = native_store
@@ -1880,38 +1922,72 @@ async fn enrich_vids_with_nodes(
 
         let query_str = vid_lookup_query(&unique_vids);
         let mut vid_to_node: HashMap<i64, Value> = HashMap::new();
-        if let Ok(ast) = uni_cypher::parse(&query_str) {
-            let schema = db.schema.schema();
-            if let Ok(logical_plan) = uni_query::QueryPlanner::new(schema).plan(ast)
-                && let Ok(batches) = uni_query::query::df_graph::common::execute_subplan(
-                    &logical_plan,
-                    &HashMap::new(),
-                    &HashMap::new(),
-                    graph_ctx,
-                    session_ctx,
-                    // Use the (snapshot-pinned, when in a tx) storage carried by
-                    // graph_ctx rather than live `db.storage`, so node enrichment
-                    // honors the same L1 version boundary as the fixpoint and
-                    // does not leak post-snapshot rows from a mid-tx flush
-                    // (REQ-1b, C2 storage pin).
-                    graph_ctx.storage(),
-                    &db.schema.schema(),
-                    None, // Locy inline Cypher path is read-only
-                )
-                .await
-            {
-                for row in record_batches_to_locy_rows(&batches) {
-                    if let (Some(Value::Int(vid)), Some(node)) = (row.get("_vid"), row.get("n")) {
-                        vid_to_node.insert(*vid, node.clone());
+        // Why every failure is recorded: an unhydrated rule is indistinguishable
+        // from an empty one to a caller doing `hasattr(r, "properties")`, so a
+        // swallowed error here reads downstream as "no rows matched".
+        let mut failure: Option<String> = None;
+        match uni_cypher::parse(&query_str) {
+            Err(e) => failure = Some(format!("VID lookup failed to parse: {e}")),
+            Ok(ast) => {
+                let schema = db.schema.schema();
+                match uni_query::QueryPlanner::new(schema).plan(ast) {
+                    Err(e) => failure = Some(format!("VID lookup failed to plan: {e}")),
+                    Ok(logical_plan) => {
+                        match uni_query::query::df_graph::common::execute_subplan(
+                            &logical_plan,
+                            &HashMap::new(),
+                            &HashMap::new(),
+                            &enrich_ctx,
+                            session_ctx,
+                            // Use the (snapshot-pinned, when in a tx) storage carried by
+                            // graph_ctx rather than live `db.storage`, so node enrichment
+                            // honors the same L1 version boundary as the fixpoint and
+                            // does not leak post-snapshot rows from a mid-tx flush
+                            // (REQ-1b, C2 storage pin).
+                            enrich_ctx.storage(),
+                            &db.schema.schema(),
+                            None, // Locy inline Cypher path is read-only
+                        )
+                        .await
+                        {
+                            Err(e) => failure = Some(format!("VID lookup failed to execute: {e}")),
+                            Ok(batches) => {
+                                for row in record_batches_to_locy_rows(&batches) {
+                                    if let (Some(Value::Int(vid)), Some(node)) =
+                                        (row.get("_vid"), row.get("n"))
+                                    {
+                                        vid_to_node.insert(*vid, node.clone());
+                                    }
+                                }
+                                if vid_to_node.len() < unique_vids.len() {
+                                    failure = Some(format!(
+                                        "VID lookup resolved {}/{} entities",
+                                        vid_to_node.len(),
+                                        unique_vids.len()
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
+        if let Some(message) = failure {
+            tracing::warn!(rule = %name, "{message}; KEY columns keep raw VIDs");
+            warnings.push(RuntimeWarning {
+                code: RuntimeWarningCode::EntityHydrationIncomplete,
+                message: format!("{message}; KEY columns keep raw VIDs"),
+                rule_name: name.clone(),
+                variable_count: None,
+                key_group: None,
+            });
+        }
+
         enriched.insert(name, substitute_nodes(rows, &vid_columns, &vid_to_node));
     }
 
-    enriched
+    (enriched, warnings)
 }
 
 #[allow(clippy::too_many_arguments)]
