@@ -400,6 +400,23 @@ fn evaluate_comparison(
 ///
 /// For each row, looks up `col_name`, applies `extract` to get an `Option<T>`,
 /// and appends the value or null to the builder.
+/// The value for `col_name` in `row`, deriving `{var}.{prop}` from the entity
+/// bound to `var` when the flat column is absent.
+///
+/// A row carries an entity either as a `Value::Map` — from which the planner's
+/// dotted columns were split out alongside it — or natively, in which case those
+/// dotted columns were never materialised and `{var}._vid` is simply missing.
+/// Reading it flat then yields a null, and a non-nullable `{var}._vid` fails
+/// batch construction outright (#234).
+fn row_column(row: &HashMap<String, Value>, col_name: &str) -> Option<Value> {
+    if let Some(v) = row.get(col_name) {
+        return Some(v.clone());
+    }
+    let (var, prop) = col_name.split_once('.')?;
+    let derived = row.get(var)?.entity_property(prop);
+    (!derived.is_null()).then_some(derived)
+}
+
 fn build_column<B, T>(
     rows: &[HashMap<String, Value>],
     col_name: &str,
@@ -411,7 +428,7 @@ where
     B: PrimitiveAppend<T>,
 {
     for row in rows {
-        match row.get(col_name).and_then(&extract) {
+        match row_column(row, col_name).as_ref().and_then(&extract) {
             Some(v) => builder.append_typed_value(v),
             None => builder.append_typed_null(),
         }
@@ -498,9 +515,9 @@ fn rows_to_batch(rows: &[HashMap<String, Value>], schema: &SchemaRef) -> DFResul
                     num_rows * 64,
                 );
                 for row in rows {
-                    match row.get(col_name) {
+                    match row_column(row, col_name) {
                         Some(val) if !val.is_null() => {
-                            let cv_bytes = uni_common::cypher_value_codec::encode(val);
+                            let cv_bytes = uni_common::cypher_value_codec::encode(&val);
                             builder.append_value(&cv_bytes);
                         }
                         _ => builder.append_null(),
@@ -511,9 +528,9 @@ fn rows_to_batch(rows: &[HashMap<String, Value>], schema: &SchemaRef) -> DFResul
             DataType::List(inner_field) if inner_field.data_type() == &DataType::Utf8 => {
                 let mut builder = arrow_array::builder::ListBuilder::new(StringBuilder::new());
                 for row in rows {
-                    match row.get(col_name) {
+                    match row_column(row, col_name) {
                         Some(Value::List(items)) => {
-                            for item in items {
+                            for item in &items {
                                 match item {
                                     Value::String(s) => builder.values().append_value(s),
                                     Value::Null => builder.values().append_null(),
@@ -1121,10 +1138,16 @@ fn append_cross_join_row(
             let refreshed: Option<Value> = if let Some(dot) = field.name().find('.') {
                 let base = &field.name()[..dot];
                 let prop = &field.name()[dot + 1..];
+                // The native arms read only the *property* map, so a system
+                // field — `_vid` above all — resolved to `None` and the column
+                // kept its stale input value, which for a natively-encoded
+                // entity was never materialised at all. A non-nullable
+                // `{var}._vid` then failed batch construction (#234).
                 match sub_row.get(base) {
-                    Some(Value::Map(m)) => m.get(prop).cloned(),
-                    Some(Value::Node(n)) => n.properties.get(prop).cloned(),
-                    Some(Value::Edge(e)) => e.properties.get(prop).cloned(),
+                    Some(v @ (Value::Map(_) | Value::Node(_) | Value::Edge(_))) => {
+                        let val = v.entity_property(prop);
+                        (!val.is_null()).then_some(val)
+                    }
                     _ => None,
                 }
             } else {
@@ -1225,6 +1248,83 @@ impl RecordBatchStream for ApplyStream {
 
 #[cfg(test)]
 mod tests {
+
+    mod dotted_column_resolution {
+        use super::super::row_column;
+        use std::collections::HashMap;
+        use uni_common::core::id::Eid;
+        use uni_common::value::{Edge, Node};
+        use uni_common::{Value, Vid};
+
+        /// A dotted column resolves from the entity when it was not materialised.
+        ///
+        /// The planner splits `{var}._vid` out alongside a map-encoded entity,
+        /// so the flat column is there to read. A natively-encoded entity has no
+        /// such column, and reading it flat yields a null that a non-nullable
+        /// `{var}._vid` then rejects at batch construction.
+        #[test]
+        fn a_dotted_column_falls_back_to_the_entity() {
+            let mut row: HashMap<String, Value> = HashMap::new();
+            row.insert(
+                "n".to_string(),
+                Value::Node(Node {
+                    vid: Vid::from(7),
+                    labels: vec!["P".into()],
+                    properties: HashMap::from([("name".to_string(), Value::String("b".into()))]),
+                }),
+            );
+            assert_eq!(row_column(&row, "n._vid"), Some(Value::Int(7)));
+            assert_eq!(row_column(&row, "n.name"), Some(Value::String("b".into())));
+            assert_eq!(row_column(&row, "n.absent"), None);
+        }
+
+        /// The flat column still wins when it exists, so nothing is recomputed.
+        #[test]
+        fn an_existing_flat_column_is_preferred() {
+            let mut row: HashMap<String, Value> = HashMap::new();
+            row.insert("n._vid".to_string(), Value::Int(42));
+            row.insert(
+                "n".to_string(),
+                Value::Node(Node {
+                    vid: Vid::from(7),
+                    labels: vec![],
+                    properties: HashMap::new(),
+                }),
+            );
+            assert_eq!(row_column(&row, "n._vid"), Some(Value::Int(42)));
+        }
+
+        /// An edge answers its own system fields too.
+        #[test]
+        fn an_edge_resolves_its_dotted_columns() {
+            let mut row: HashMap<String, Value> = HashMap::new();
+            row.insert(
+                "r".to_string(),
+                Value::Edge(Edge {
+                    eid: Eid::from(3),
+                    edge_type: "KNOWS".into(),
+                    src: Vid::from(0),
+                    dst: Vid::from(1),
+                    properties: HashMap::new(),
+                }),
+            );
+            assert_eq!(row_column(&row, "r._eid"), Some(Value::Int(3)));
+            assert_eq!(
+                row_column(&row, "r._type"),
+                Some(Value::String("KNOWS".into()))
+            );
+        }
+
+        /// A non-entity base resolves nothing rather than inventing a value.
+        #[test]
+        fn a_non_entity_base_resolves_nothing() {
+            let mut row: HashMap<String, Value> = HashMap::new();
+            row.insert("x".to_string(), Value::Int(1));
+            assert_eq!(row_column(&row, "x._vid"), None);
+            assert_eq!(row_column(&row, "missing._vid"), None);
+        }
+    }
+
     use super::*;
 
     fn params(pairs: &[(&str, Value)]) -> HashMap<String, Value> {

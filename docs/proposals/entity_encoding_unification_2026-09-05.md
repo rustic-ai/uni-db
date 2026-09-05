@@ -90,14 +90,34 @@ covered by direct unit tests:
   and everything else from its properties.
 
 **The 3 that remain** are all `set_projection_test` CALL-subquery round-trips
-(`l2q`, `l2r`, `l2s` — set-then-return shapes). They fail with
+(`l2q`, `l2r`, `l2s` — set-then-return shapes), failing with
 
     Arrow error: Column 'n._vid' is declared as non-nullable but contains null
 
-and, unlike the original 18, *without* the `Failed to reconstruct batches:`
-prefix — so they come from a different batch builder than `rows_to_batches`,
-somewhere in the CALL-subquery result path. That builder has not been located.
-It is the remaining step-1 work.
+### The third builder, and why it is not the defect
+
+Located by marking each candidate's error text: `concat_column_arrays` in
+`df_graph/apply.rs`, the Apply/CALL result assembler. Two further Map-only sites
+were found and fixed on the way there, both now unit-tested:
+
+- `rows_to_batch` read every column flat by name, so a dotted `{var}.{prop}` of a
+  natively-encoded entity — which has no such column — became null. It now
+  resolves through a new `row_column` helper that derives the field from the
+  entity bound to the base variable.
+- The unit-subquery refresh path *had* `Value::Node` / `Value::Edge` arms, but
+  read only their `.properties`, so a system field like `_vid` resolved to `None`
+  and the column silently kept its stale input value. It now goes through
+  `Value::entity_property`.
+
+Neither closed the three tests, and instrumenting `concat_column_arrays` explains
+why: **the null arrives in its input.** The assembler is reached through the
+pass-through arms (`column_arrays[col_idx].push(arr.clone())`), copying an input
+column that is already null — so it is propagating the defect, not creating it.
+
+That relocates the remaining step-1 work: it is **upstream of Apply**, wherever
+the child plan materialises `{var}._vid` for a natively-encoded entity, and not
+in any batch builder. Worth stating because three builders have now been checked
+and each turned out to be a carrier.
 
 Both fixes are kept without the decode-side change, since each is a real defect
 in its own right; neither is exercised by the current suite, which is expected —
