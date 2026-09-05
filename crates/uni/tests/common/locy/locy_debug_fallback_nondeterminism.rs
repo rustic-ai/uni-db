@@ -4,8 +4,10 @@
 //! Repros for the two `format!("{v:?}")` fallback arms that render a
 //! `std::collections::HashMap` and therefore produce a *run-varying* string.
 //!
-//! Both tests are `#[ignore]`d because they FAIL today — they are the
-//! executable statement of the defect, not a regression guard yet.
+//! Both tests now gate. They were `#[ignore]`d while they failed, as the
+//! executable statement of the defect; `Value::canonical_string` fixed both and
+//! the attribute came off in the same change. A repro left `#[ignore]`d after
+//! its fix lands protects nothing.
 //!
 //! 1. `locy_validate.rs::canonical_key` has no arm for `Value::Map`, so a
 //!    path-valued KEY column (which arrives as a nested `Value::Map`)
@@ -29,7 +31,6 @@ use uni_db::Uni;
 /// Observed across 14 separate processes: n_samples 1, 2, 3, 5, or an
 /// "empty join" hard error; accuracy 0.0 / 0.333 / 0.4 / 0.5 / 0.667 / 1.0.
 #[tokio::test]
-#[ignore = "repro for #236: canonical_key Debug-renders Value::Map; currently fails"]
 async fn validate_path_key_joins_a_random_subset() -> Result<()> {
     let db = Uni::in_memory().build().await?;
     let session = db.session();
@@ -67,7 +68,6 @@ async fn validate_path_key_joins_a_random_subset() -> Result<()> {
 /// `properties` HashMap is Debug-rendered into the `_skolem_id` string.
 /// Five evaluations in one process yield five different IDs.
 #[tokio::test]
-#[ignore = "repro for the value_to_string sibling defect: currently fails"]
 async fn derive_skolem_id_is_not_deterministic() -> Result<()> {
     let mut ids = Vec::new();
     for _ in 0..5 {

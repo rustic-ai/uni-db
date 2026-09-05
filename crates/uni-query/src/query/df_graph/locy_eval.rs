@@ -501,7 +501,9 @@ fn eval_function(name: &str, args: &[Value]) -> Result<Value, LocyError> {
                 Value::Float(f) => Ok(Value::String(f.to_string())),
                 Value::Bool(b) => Ok(Value::String(b.to_string())),
                 Value::Null => Ok(Value::Null),
-                _ => Ok(Value::String(format!("{v:?}"))),
+                // `toString` over a map, node or path handed the *user* a
+                // `Debug` rendering whose field order varied per call.
+                other => Ok(Value::String(other.canonical_string())),
             }
         }
         "ABS" => {
