@@ -20,6 +20,26 @@
 //! DISTINCT operator to group on identity would hide that NULL rather than fix
 //! it, and the same NULL is presumably visible to anything else reading that
 //! column. Pin first, attribute second (#234, #235).
+//!
+//! ## What the NULL is not — ruled out with evidence
+//!
+//! Three plausible sites were checked and are innocent, recorded so the next
+//! attempt does not re-walk them:
+//!
+//! - `executor/read.rs`'s property evaluator has a correct `Value::Node` arm
+//!   answering `_vid` from `node.vid`.
+//! - `df_graph/unwind.rs`'s `evaluate_expr_impl` *does* answer `Value::Null` for
+//!   a non-map base, which looks exactly like the defect — but instrumenting it
+//!   showed it is never called for this query. A fix there would have been
+//!   unverifiable, and was reverted rather than kept on the strength of looking
+//!   right.
+//! - `GraphUnwindExec::build_schema` emits only the kept input columns plus the
+//!   bare variable, so it does not produce an `n._vid` column at all.
+//!
+//! `EXPLAIN` shows the plan is `Project{ Property(n, "_vid") }` directly over
+//! `Unwind`, and the two rows differ — `Int(1)` and `Null` — so whatever
+//! evaluates that projection resolves the identity for one encoding and not the
+//! other. That evaluator has not been located, and is where to start.
 
 use uni_db::{Uni, Value};
 
