@@ -1503,8 +1503,14 @@ impl Executor {
 
     /// Converts an Arrow array element at a given row index to a Value.
     /// Delegates to the shared implementation in arrow_convert module.
+    /// Decode one Arrow cell into a `Value` for the query layer.
+    ///
+    /// An entity struct becomes its native form rather than a map. The storage
+    /// decoder this delegates to is shared with `uni-store`, which has its own
+    /// contract, so the conversion belongs here on the query side rather than
+    /// down there (#234).
     pub(crate) fn arrow_to_value(col: &dyn Array, row: usize) -> Value {
-        arrow_convert::arrow_to_value(col, row, None)
+        arrow_convert::arrow_to_value(col, row, None).canonical_entity()
     }
 
     pub(crate) fn evaluate_expr<'a>(

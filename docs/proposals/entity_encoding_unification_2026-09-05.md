@@ -172,13 +172,37 @@ They now share `Value::property_names`, as the other readers share
 the native form never got that far. Two were caught by existing tests and three
 by the TCK — the split was hiding them, exactly as predicted above.
 
+### All three query-side decoders converted
+
+`df_graph/unwind.rs::arrow_to_json_value`, `executor/read.rs::arrow_to_value` and
+`df_graph/similar_to_expr.rs::arrow_to_value_at` now all return the native form.
+
+The second and third cost **nothing** — zero test failures, TCK unchanged. That
+is the shape of this work: the first conversion pays for the readers, and every
+one after it is free. Six readers were fixed for the first decoder; the other two
+needed none.
+
+`uni-store`'s `arrow_convert::arrow_to_value` is deliberately **not** converted.
+It is the storage layer's decoder, with its own contract and its own callers
+inside `uni-store`; the query layer converts at its own boundary instead, which
+is why `read.rs` wraps it rather than changing it.
+
 ### What is not done
 
-Only the query-side struct decoder was converted. `uni-store`'s
-`arrow_convert::arrow_to_value` and the other decoders still produce maps, so the
-second encoding still exists elsewhere. The same sequencing applies to each:
-route a native entity through, fix what breaks, then convert the decoder. Step 4
-— making the map form unrepresentable — stays open until they all are.
+Ten call sites inside `uni-query` still call the storage decoder directly rather
+than through a query-side wrapper, so they still produce maps:
+`df_udfs_plugin.rs:465`, `locy_eval.rs:648,897`, `endpoint_hydrate.rs:223,242`,
+`mutation_common.rs:349`, `write.rs:1090,1996`, `locy_fixpoint.rs:3268`.
+
+**`mutation_common.rs:349` — `batches_to_rows` — must not be converted.** Its own
+comment states the contract: "the write helpers expect variables as bare Maps
+with `_vid`/`_labels` inside". Converting it would break a documented dependency
+rather than expose a defect. The write helpers would have to move to
+`Value::entity_property` first, which is step 1 again for that pipeline.
+
+The rest are ordinary read paths and should convert cheaply, one at a time, with
+the suite as the check. Step 4 — making the map form unrepresentable — stays open
+until they and the storage decoder are all done.
 
 ## What the class cost, as an argument for finishing it
 
