@@ -628,6 +628,43 @@ impl Value {
         }
     }
 
+    /// Read a named field from this value, whichever encoding an entity uses.
+    ///
+    /// A map answers from its own keys. A native entity answers its *system*
+    /// fields — `_vid`, `_labels`, `_eid`, `_type`, endpoints — from itself and
+    /// everything else from its property map, because those fields live in the
+    /// struct rather than among the properties. Reading `_vid` off a
+    /// `Value::Node` as a user property finds nothing, and the resulting `Null`
+    /// is indistinguishable from a genuine absent value.
+    ///
+    /// Returns [`Value::Null`] when the field is absent or the value is not an
+    /// entity, matching what a map lookup does.
+    #[must_use]
+    pub fn entity_property(&self, name: &str) -> Value {
+        match self {
+            Value::Map(map) => map.get(name).cloned().unwrap_or(Value::Null),
+            Value::Node(node) => match name {
+                "_vid" | "_id" => Value::Int(node.vid.as_u64() as i64),
+                "_labels" => Value::List(
+                    node.labels
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect::<Vec<_>>(),
+                ),
+                other => node.properties.get(other).cloned().unwrap_or(Value::Null),
+            },
+            Value::Edge(edge) => match name {
+                "_eid" | "_id" => Value::Int(edge.eid.as_u64() as i64),
+                "_type" | "_type_name" => Value::String(edge.edge_type.clone()),
+                "_src" | "_src_vid" => Value::Int(edge.src.as_u64() as i64),
+                "_dst" | "_dst_vid" => Value::Int(edge.dst.as_u64() as i64),
+                other => edge.properties.get(other).cloned().unwrap_or(Value::Null),
+            },
+            _ => Value::Null,
+        }
+    }
+
     /// The edge id this value denotes, in either encoding.
     ///
     /// The edge twin of [`Value::entity_vid`]. It did not exist, which is why
@@ -2133,6 +2170,50 @@ mod tests {
                 properties: HashMap::new(),
             });
             assert_eq!(native.clone().canonical_entity(), native);
+        }
+
+        /// A system field is readable from a native entity, not just from a map.
+        ///
+        /// `_vid` lives in `node.vid`, never among the properties, so reading it
+        /// as a user property finds nothing — and the `Null` that produces is
+        /// indistinguishable from a genuinely absent value.
+        #[test]
+        fn a_system_field_reads_from_either_encoding() {
+            let native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::from([("name".to_string(), Value::String("b".into()))]),
+            });
+            assert_eq!(native.entity_property("_vid"), Value::Int(7));
+            assert_eq!(
+                native.entity_property("_labels"),
+                Value::List(vec![Value::String("P".into())])
+            );
+            assert_eq!(native.entity_property("name"), Value::String("b".into()));
+            assert_eq!(native.entity_property("absent"), Value::Null);
+
+            // And the map form answers the same questions the same way.
+            assert_eq!(
+                node_map(Value::Int(7)).entity_property("_vid"),
+                Value::Int(7)
+            );
+        }
+
+        /// The edge twin, including its endpoints under both spellings.
+        #[test]
+        fn an_edge_answers_its_system_fields() {
+            let e = Value::Edge(crate::value::Edge {
+                eid: Eid::from(3),
+                edge_type: "KNOWS".into(),
+                src: Vid::from(0),
+                dst: Vid::from(1),
+                properties: HashMap::from([("since".to_string(), Value::String("Y".into()))]),
+            });
+            assert_eq!(e.entity_property("_eid"), Value::Int(3));
+            assert_eq!(e.entity_property("_type"), Value::String("KNOWS".into()));
+            assert_eq!(e.entity_property("_src"), Value::Int(0));
+            assert_eq!(e.entity_property("_dst_vid"), Value::Int(1));
+            assert_eq!(e.entity_property("since"), Value::String("Y".into()));
         }
 
         /// A bare integer is not an entity, and a negative id is not one either.

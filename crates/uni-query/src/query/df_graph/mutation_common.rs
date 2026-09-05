@@ -429,8 +429,16 @@ fn sync_dotted_columns(rows: &mut [HashMap<String, Value>], schema: &SchemaRef) 
             if let Some(dot_pos) = name.find('.') {
                 let var_name = &name[..dot_pos];
                 let prop_name = &name[dot_pos + 1..];
-                if let Some(Value::Map(map)) = row.get(var_name) {
-                    let val = map.get(prop_name).cloned().unwrap_or(Value::Null);
+                // Syncing only from a `Value::Map` left every dotted column of a
+                // natively-encoded entity unwritten, and a non-nullable
+                // `{var}._vid` then failed batch reconstruction outright (#234).
+                let synced = match row.get(var_name) {
+                    Some(v @ (Value::Map(_) | Value::Node(_) | Value::Edge(_))) => {
+                        Some(v.entity_property(prop_name))
+                    }
+                    _ => None,
+                };
+                if let Some(val) = synced {
                     row.insert(name.clone(), val);
                 }
             }

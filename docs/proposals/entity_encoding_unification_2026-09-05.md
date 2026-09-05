@@ -71,6 +71,40 @@ path has no arm for a `Value::Node`, so the column reconstructs as null.
 This is worth stating plainly because the decode-side change *looks* like a
 one-line structural win, and it is not one. The change was reverted.
 
+## Step 1 progress — measured, 2026-09-05
+
+Re-ran the decode-side change with step 1 partly done. **18 failures fell to 3.**
+
+Two reconstruction sites did not accept a native entity, both now fixed and
+covered by direct unit tests:
+
+- `value_to_scalar` sent `Value::Node` / `Edge` / `Path` into its JSON catch-all,
+  putting a JSON blob in a `LargeBinary` column that every consumer decodes as
+  CypherValue. It decoded to nothing, so the column came back null. The map form
+  took the `Value::Map` arm and survived — the asymmetry again. Entities now
+  encode as CypherValue, exactly as `Value::Vector` beside them already did.
+- `sync_dotted_columns` copied `{var}.{prop}` only from a `Value::Map`, leaving
+  every dotted column of a native entity unwritten, so a non-nullable
+  `{var}._vid` failed reconstruction outright. It now reads through
+  `Value::entity_property`, which answers system fields from the entity itself
+  and everything else from its properties.
+
+**The 3 that remain** are all `set_projection_test` CALL-subquery round-trips
+(`l2q`, `l2r`, `l2s` — set-then-return shapes). They fail with
+
+    Arrow error: Column 'n._vid' is declared as non-nullable but contains null
+
+and, unlike the original 18, *without* the `Failed to reconstruct batches:`
+prefix — so they come from a different batch builder than `rows_to_batches`,
+somewhere in the CALL-subquery result path. That builder has not been located.
+It is the remaining step-1 work.
+
+Both fixes are kept without the decode-side change, since each is a real defect
+in its own right; neither is exercised by the current suite, which is expected —
+step 1 exists to make step 2 possible, and until step 2 lands no native entity
+reaches these paths. That is why they carry direct unit tests rather than relying
+on end-to-end coverage.
+
 ## What unification actually requires, in order
 
 1. **Teach the batch-reconstruction path to accept a native entity.** Anywhere a
