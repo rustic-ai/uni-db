@@ -514,7 +514,7 @@ impl DeltaDataset {
                 .create_scalar_index(&table_name, &["eid"], ScalarIndexType::BTree, None)
                 .await
             {
-                log::warn!("Failed to create eid index for '{}': {}", self.edge_type, e);
+                crate::storage::record_default_index_failure(&table_name, "eid", &e);
             }
         }
 

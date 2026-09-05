@@ -178,24 +178,45 @@ impl UidIndex {
         Ok(())
     }
 
-    /// Create a BTree scalar index on _uid_hex for O(log N) lookups.
-    /// Non-fatal: if index creation fails, filter pushdown still works without the index.
+    /// Create a BTree scalar index on `_uid_hex` for O(log N) lookups.
+    ///
+    /// Fail-open by design: without the index a UID lookup falls back to a scan,
+    /// which is slower but not wrong, and this runs on the write path — refusing
+    /// the write would be the worse failure. What changed is that both ways it
+    /// can fail are now recorded (#233, Tier 2). The build discarded its error
+    /// with `.ok()` and no log whatsoever, so a store could carry no index with
+    /// nothing anywhere saying so.
+    ///
+    /// The open is also no longer read as "absent". Only a genuinely missing
+    /// dataset means "no UIDs registered yet"; permissions, a corrupt manifest
+    /// or IO used to reach the same `Ok(())`, which is the fail-open shape this
+    /// class is about — the same distinction `get_vid` below already draws.
     pub async fn ensure_uid_hex_index(&self) -> Result<()> {
         let mut ds = match Dataset::open(&self.uri).await {
             Ok(ds) => ds,
-            Err(_) => return Ok(()), // Index doesn't exist yet, skip
+            Err(e) => {
+                let err = anyhow::Error::from(e);
+                if !crate::store_utils::is_dataset_not_found(&err) {
+                    crate::storage::record_default_index_failure(&self.uri, "_uid_hex", &err);
+                }
+                // Nothing is written yet, so there is nothing to index. The
+                // append path calls this again after it writes.
+                return Ok(());
+            }
         };
 
-        // Create BTree index on _uid_hex column for faster lookups
-        ds.create_index(
-            &["_uid_hex"],
-            lance_index::IndexType::Scalar,
-            Some("idx_uid_hex".to_string()),
-            &lance_index::scalar::ScalarIndexParams::default(),
-            true, // replace if exists
-        )
-        .await
-        .ok(); // Non-fatal: filter pushdown works without index
+        if let Err(e) = ds
+            .create_index(
+                &["_uid_hex"],
+                lance_index::IndexType::Scalar,
+                Some("idx_uid_hex".to_string()),
+                &lance_index::scalar::ScalarIndexParams::default(),
+                true, // replace if exists
+            )
+            .await
+        {
+            crate::storage::record_default_index_failure(&self.uri, "_uid_hex", &e);
+        }
 
         Ok(())
     }
@@ -477,5 +498,88 @@ mod tests {
             "table should have been migrated to include _version"
         );
         assert_eq!(index.get_vid(&uid).await.unwrap(), Some(Vid::new(200)));
+    }
+}
+
+#[cfg(test)]
+mod uid_hex_index_failure_tests {
+    use super::*;
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+    use tempfile::TempDir;
+
+    /// Total of `uni_default_index_build_failures_total` recorded while `body` ran.
+    fn failures_during(body: impl FnOnce()) -> u64 {
+        let recorder = DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        // The global recorder slot is one-shot and another test in this binary
+        // may hold it, so record against a local one.
+        metrics::with_local_recorder(&recorder, body);
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(ckey, _, _, _)| ckey.key().name() == "uni_default_index_build_failures_total")
+            .map(|(_, _, _, value)| match value {
+                DebugValue::Counter(v) => v,
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// An index that was never written is not a failure.
+    ///
+    /// This is the arm that must stay quiet: the write path calls this before
+    /// anything is on disk, so counting here would report a failure on every
+    /// healthy store and make the counter useless.
+    #[tokio::test]
+    async fn a_missing_dataset_is_not_recorded_as_a_failure() {
+        let dir = TempDir::new().unwrap();
+        let index = UidIndex::new(dir.path().to_str().unwrap(), "Person");
+
+        let mut result = None;
+        let counted = failures_during(|| {
+            result = Some(futures::executor::block_on(index.ensure_uid_hex_index()));
+        });
+
+        assert!(result.unwrap().is_ok(), "a missing dataset is not an error");
+        assert_eq!(counted, 0, "nothing failed, so nothing may be counted");
+    }
+
+    /// An open that fails for any *other* reason is recorded.
+    ///
+    /// Both arms used to reach the same `Ok(())` through `Err(_) => return`, so
+    /// a corrupt manifest or a permissions failure was indistinguishable from
+    /// "no UIDs registered yet" — the fail-open shape #233 is about. The call
+    /// still succeeds, because this runs on the write path and a degraded index
+    /// must not become a failed insert; the difference is that it is now
+    /// countable.
+    #[tokio::test]
+    async fn an_unexpected_open_failure_is_recorded() {
+        let dir = TempDir::new().unwrap();
+        let index = UidIndex::new(dir.path().to_str().unwrap(), "Person");
+
+        // A corrupt manifest, which is one of the cases the old `Err(_)` arm
+        // read as "absent". Measured, not assumed: an empty directory and a
+        // `_versions` written as a *file* both classify as not-found, so those
+        // would not exercise this arm. A junk manifest inside `_versions/`
+        // yields `LanceError(IO)`, which does not.
+        let uri = std::path::Path::new(dir.path())
+            .join("indexes/uni_id_to_vid/Person/index.lance/_versions");
+        std::fs::create_dir_all(&uri).unwrap();
+        std::fs::write(uri.join("1.manifest"), b"not-a-manifest").unwrap();
+
+        let mut result = None;
+        let counted = failures_during(|| {
+            result = Some(futures::executor::block_on(index.ensure_uid_hex_index()));
+        });
+
+        assert!(
+            result.unwrap().is_ok(),
+            "the build stays fail-open: a missing index is slower, not wrong"
+        );
+        assert_eq!(
+            counted, 1,
+            "a corrupt dataset must be counted, not read as `absent`"
+        );
     }
 }
