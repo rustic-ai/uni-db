@@ -11276,6 +11276,8 @@ enum TraversalEndpoints {
         start: String,
         /// Bound at the relationship's head — what `endNode` returns.
         end: String,
+        /// The hop is OPTIONAL, so the rewrite needs a null guard.
+        optional: bool,
     },
     /// An undirected hop. Which end is the relationship's tail is a per-row
     /// fact, so both candidates are kept and the choice is deferred to a `CASE`
@@ -11285,6 +11287,8 @@ enum TraversalEndpoints {
         source: String,
         /// The traversal's own target variable — the tail when `_fwd` is false.
         target: String,
+        /// The hop is OPTIONAL, so the rewrite needs a null guard.
+        optional: bool,
     },
 }
 
@@ -11295,21 +11299,27 @@ impl TraversalEndpoints {
     /// while both variables are still in scope.
     fn variables(&self) -> (&str, &str) {
         match self {
-            Self::Static { start, end } => (start, end),
-            Self::PerRow { source, target } => (source, target),
+            Self::Static { start, end, .. } => (start, end),
+            Self::PerRow { source, target, .. } => (source, target),
         }
     }
 
     /// The same binding with its two variables renamed, preserving the variant.
+    ///
+    /// `optional` rides along: a rename through `WITH a AS x` does not make the
+    /// hop non-optional, and dropping the flag here would silently remove the
+    /// null guard from every binding that survives a projection.
     fn renamed(&self, first: String, second: String) -> Self {
         match self {
-            Self::Static { .. } => Self::Static {
+            Self::Static { optional, .. } => Self::Static {
                 start: first,
                 end: second,
+                optional: *optional,
             },
-            Self::PerRow { .. } => Self::PerRow {
+            Self::PerRow { optional, .. } => Self::PerRow {
                 source: first,
                 target: second,
+                optional: *optional,
             },
         }
     }
@@ -11368,19 +11378,23 @@ fn endpoints_for_direction(
     direction: &Direction,
     source_variable: &str,
     target_variable: &str,
+    optional: bool,
 ) -> Option<TraversalEndpoints> {
     Some(match direction {
         Direction::Outgoing => TraversalEndpoints::Static {
             start: source_variable.to_string(),
             end: target_variable.to_string(),
+            optional,
         },
         Direction::Incoming => TraversalEndpoints::Static {
             start: target_variable.to_string(),
             end: source_variable.to_string(),
+            optional,
         },
         Direction::Both => TraversalEndpoints::PerRow {
             source: source_variable.to_string(),
             target: target_variable.to_string(),
+            optional,
         },
     })
 }
@@ -11423,15 +11437,47 @@ fn rewrite_endpoint_calls(expr: Expr, endpoints: &HashMap<String, TraversalEndpo
     lift_per_row_endpoints(expr, endpoints)
 }
 
+/// Wrap an endpoint rewrite so it answers NULL when the relationship is NULL.
+///
+/// The rewrite resolves `startNode(r)` to an endpoint variable and so never
+/// reads `r`. On an OPTIONAL hop that variable may be the anchor from the
+/// enclosing scope, which stays bound on a row the pattern did not match — the
+/// endpoint call would then return a node where Cypher requires null. Keying
+/// the guard on `r._eid` rather than on the endpoint column is deliberate: the
+/// endpoint being non-null is exactly the condition that does *not* hold for
+/// the leaking side.
+fn guard_optional_endpoint(resolved: Expr, rel: &str) -> Expr {
+    Expr::Case {
+        expr: None,
+        when_then: vec![(
+            Expr::IsNotNull(Box::new(Expr::Property(
+                Box::new(Expr::Variable(rel.to_string())),
+                "_eid".to_string(),
+            ))),
+            resolved,
+        )],
+        else_expr: Some(Box::new(Expr::Literal(CypherLiteral::Null))),
+    }
+}
+
 /// Resolve the calls whose endpoint is known at plan time.
 fn rewrite_static_endpoint_calls(
     expr: Expr,
     endpoints: &HashMap<String, TraversalEndpoints>,
 ) -> Expr {
     if let Some((rel, is_start)) = endpoint_call_target(&expr, endpoints)
-        && let Some(TraversalEndpoints::Static { start, end }) = endpoints.get(rel)
+        && let Some(TraversalEndpoints::Static {
+            start,
+            end,
+            optional,
+        }) = endpoints.get(rel)
     {
-        return Expr::Variable(if is_start { start.clone() } else { end.clone() });
+        let resolved = Expr::Variable(if is_start { start.clone() } else { end.clone() });
+        return if *optional {
+            guard_optional_endpoint(resolved, rel)
+        } else {
+            resolved
+        };
     }
     expr.map_children(&mut |child| rewrite_static_endpoint_calls(child, endpoints))
 }
@@ -11499,18 +11545,31 @@ fn lift_per_row_endpoints(expr: Expr, endpoints: &HashMap<String, TraversalEndpo
     if expr.is_aggregate() {
         return expr.map_children(&mut |child| lift_per_row_endpoints(child, endpoints));
     }
-    let Some(TraversalEndpoints::PerRow { source, target }) = endpoints.get(&rel) else {
+    let Some(TraversalEndpoints::PerRow {
+        source,
+        target,
+        optional,
+    }) = endpoints.get(&rel)
+    else {
         return expr;
     };
     let forward = substitute_endpoints(expr.clone(), &rel, source, target, endpoints);
     let reverse = substitute_endpoints(expr, &rel, target, source, endpoints);
-    Expr::Case {
+    let per_row = Expr::Case {
         expr: None,
         when_then: vec![(
             Expr::Property(Box::new(Expr::Variable(rel.clone())), COL_FWD.to_string()),
             lift_per_row_endpoints(forward, endpoints),
         )],
         else_expr: Some(Box::new(lift_per_row_endpoints(reverse, endpoints))),
+    };
+    // An undirected OPTIONAL hop leaks the same way a directed one does: on a
+    // miss row `_fwd` is null, the `CASE` takes its ELSE, and the endpoint that
+    // is still bound comes back. Guard the whole thing, not one branch.
+    if *optional {
+        guard_optional_endpoint(per_row, &rel)
+    } else {
+        per_row
     }
 }
 
@@ -11565,21 +11624,44 @@ fn narrow_endpoints_through_projection(
 /// The relationship binding a traversal contributes, when it is a single hop in
 /// a known direction. Anything else — a variable-length step variable holding a
 /// list, an undirected pattern, an unnamed relationship — contributes nothing.
+///
+/// An OPTIONAL hop still binds, but the binding is marked so the rewrite can
+/// guard it. The rewrite replaces `startNode(r)` with a reference to an endpoint
+/// *variable*, so it never consults `r`; on a row where the pattern did not
+/// match, the endpoint that the OPTIONAL MATCH hangs off is still bound to the
+/// anchor from the enclosing scope, and is returned in place of the null Cypher
+/// requires. Which endpoint that is follows the direction, so `startNode` leaks
+/// on an outgoing hop and `endNode` on an incoming one.
+///
+/// Suppressing the binding here instead does not work: the fallback path reads
+/// the endpoint off the relationship *value*, and that column is only
+/// materialised when something else in the query asks for `r`. A query that
+/// only asks `startNode(r)` would fail to plan with `No field named r`.
 fn single_hop_binding(
     direction: &Direction,
     source_variable: &str,
     target_variable: &str,
     step_variable: Option<&String>,
+    shape: HopShape,
+) -> Option<(String, TraversalEndpoints)> {
+    let step = step_variable?;
+    if shape.is_variable_length || shape.min_hops != 1 || shape.max_hops != 1 {
+        return None;
+    }
+    let bound =
+        endpoints_for_direction(direction, source_variable, target_variable, shape.optional)?;
+    Some((step.clone(), bound))
+}
+
+/// The part of a traversal's shape that decides whether, and how, it binds
+/// endpoints: whether it is a single hop at all, and whether that hop is
+/// OPTIONAL.
+#[derive(Clone, Copy)]
+struct HopShape {
     is_variable_length: bool,
     min_hops: usize,
     max_hops: usize,
-) -> Option<(String, TraversalEndpoints)> {
-    let step = step_variable?;
-    if is_variable_length || min_hops != 1 || max_hops != 1 {
-        return None;
-    }
-    let bound = endpoints_for_direction(direction, source_variable, target_variable)?;
-    Some((step.clone(), bound))
+    optional: bool,
 }
 
 /// Rewrite one node, then update `endpoints` to what is in scope above it.
@@ -11603,6 +11685,7 @@ fn resolve_endpoints_node(plan: LogicalPlan, endpoints: &mut EndpointScope) -> L
                     max_hops,
                     target_filter,
                     edge_filter_expr,
+                    optional,
                     ..
                 }
                 | LogicalPlan::TraverseMainByType {
@@ -11615,6 +11698,7 @@ fn resolve_endpoints_node(plan: LogicalPlan, endpoints: &mut EndpointScope) -> L
                     max_hops,
                     target_filter,
                     edge_filter_expr,
+                    optional,
                     ..
                 } => {
                     *target_filter = rewrite_scoped_opt(target_filter.take(), endpoints);
@@ -11624,9 +11708,12 @@ fn resolve_endpoints_node(plan: LogicalPlan, endpoints: &mut EndpointScope) -> L
                         source_variable,
                         target_variable,
                         step_variable.as_ref(),
-                        *is_variable_length,
-                        *min_hops,
-                        *max_hops,
+                        HopShape {
+                            is_variable_length: *is_variable_length,
+                            min_hops: *min_hops,
+                            max_hops: *max_hops,
+                            optional: *optional,
+                        },
                     )
                 }
                 _ => None,

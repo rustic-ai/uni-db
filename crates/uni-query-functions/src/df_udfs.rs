@@ -483,6 +483,53 @@ impl ScalarUDFImpl for IdUdf {
                     .collect();
                 Ok(ColumnarValue::Array(Arc::new(ids)))
             }
+            // An entity carried as the query layer's own struct column — what a
+            // `CASE` over an entity variable materialises, as the guarded
+            // `startNode(r)` rewrite on an OPTIONAL hop does. Identity already
+            // understood the `UInt64` and `LargeBinary` spellings; this is the
+            // third shape the query layer builds, and it had no accessor (#234).
+            // The struct's own null is the entity being absent, and must win
+            // over whatever the id field holds on that row.
+            DataType::Struct(fields) => {
+                let array = arg.to_array(args.number_rows)?;
+                let entities = array
+                    .as_any()
+                    .downcast_ref::<arrow::array::StructArray>()
+                    .ok_or_else(|| {
+                        datafusion::error::DataFusionError::Execution(
+                            "id(): expected a struct entity column".to_string(),
+                        )
+                    })?;
+                let id_field = fields
+                    .iter()
+                    .position(|f| f.name() == "_vid" || f.name() == "_eid")
+                    .ok_or_else(|| {
+                        datafusion::error::DataFusionError::Execution(format!(
+                            "id(): struct entity column carries no `_vid` or `_eid` field, got {fields:?}"
+                        ))
+                    })?;
+                let ids = arrow::compute::cast(entities.column(id_field), &DataType::UInt64)
+                    .map_err(|_| {
+                        datafusion::error::DataFusionError::Execution(
+                            "id(): struct entity column's identity field is not an id".to_string(),
+                        )
+                    })?;
+                let ids = ids.as_any().downcast_ref::<UInt64Array>().ok_or_else(|| {
+                    datafusion::error::DataFusionError::Execution(
+                        "id(): identity field did not cast to UInt64".to_string(),
+                    )
+                })?;
+                let out: UInt64Array = (0..entities.len())
+                    .map(|i| {
+                        if entities.is_null(i) || ids.is_null(i) {
+                            None
+                        } else {
+                            Some(ids.value(i))
+                        }
+                    })
+                    .collect();
+                Ok(ColumnarValue::Array(Arc::new(out)))
+            }
             other => {
                 let array = arg.to_array(args.number_rows)?;
                 arrow::compute::cast(&array, &DataType::UInt64)
