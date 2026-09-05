@@ -14,32 +14,31 @@
 //! that backs DISTINCT is separating rows on that NULL rather than on anything
 //! visible in the result.
 //!
-//! Recorded rather than fixed, and the distinction matters: the planner's
-//! group-by is behaving correctly *given its input*. The defect is upstream, in
-//! whatever emits a NULL `_vid` for a natively-encoded entity. Rewriting the
-//! DISTINCT operator to group on identity would hide that NULL rather than fix
-//! it, and the same NULL is presumably visible to anything else reading that
-//! column. Pin first, attribute second (#234, #235).
+//! Fixed by two changes, each verified load-bearing by reverting it alone:
 //!
-//! ## What the NULL is not — ruled out with evidence
+//! 1. `IndexUdf` answered a system field from a `Value::Map` (which literally
+//!    carries `_vid`) but read it as a *user property* on a native
+//!    `Value::Node`, which finds nothing — so `n._vid` was NULL for one of the
+//!    two producers, and DISTINCT correctly separated rows differing in that
+//!    NULL. Reverting this alone fails `the_vid_of_a_vertex_is_never_null`.
+//! 2. Even with `_vid` right, the entity column still held two *encodings* of
+//!    one vertex, and a group-by compares encoded bytes, never `Value`s — so
+//!    identity-aware `PartialEq` could not help. UNWIND now canonicalises entity
+//!    elements before encoding them. Reverting this alone fails both DISTINCT
+//!    assertions.
 //!
-//! Three plausible sites were checked and are innocent, recorded so the next
-//! attempt does not re-walk them:
+//! The attribution took four wrong readings, kept here because each was
+//! plausible: that DISTINCT compares entities structurally (it does not — the
+//! decoded rows are identical); that `executor/read.rs` mishandles the entity
+//! (its `Value::Node` arm is correct); that `unwind.rs`'s `evaluate_expr_impl`
+//! was the NULL (instrumented — never called for this query, and that fix was
+//! reverted); and that `GraphUnwindExec::build_schema` synthesises the column
+//! (it does not). `EXPLAIN` plus a per-row dump is what finally located it.
 //!
-//! - `executor/read.rs`'s property evaluator has a correct `Value::Node` arm
-//!   answering `_vid` from `node.vid`.
-//! - `df_graph/unwind.rs`'s `evaluate_expr_impl` *does* answer `Value::Null` for
-//!   a non-map base, which looks exactly like the defect — but instrumenting it
-//!   showed it is never called for this query. A fix there would have been
-//!   unverifiable, and was reverted rather than kept on the strength of looking
-//!   right.
-//! - `GraphUnwindExec::build_schema` emits only the kept input columns plus the
-//!   bare variable, so it does not produce an `n._vid` column at all.
-//!
-//! `EXPLAIN` shows the plan is `Project{ Property(n, "_vid") }` directly over
-//! `Unwind`, and the two rows differ — `Int(1)` and `Null` — so whatever
-//! evaluates that projection resolves the identity for one encoding and not the
-//! other. That evaluator has not been located, and is where to start.
+//! Canonicalising then exposed two more instances of the same class, since the
+//! native encoding had simply never reached them: `type()` raised "requires a
+//! relationship argument" for a `Value::Edge`, and `properties()` returned null
+//! for a native node or edge. Both fixed alongside.
 
 use uni_db::{Uni, Value};
 
@@ -90,7 +89,6 @@ async fn collect_distinct_collapses_the_duplicate() {
 
 /// `RETURN DISTINCT n` must yield the vertex once.
 #[tokio::test]
-#[ignore = "open defect: DISTINCT separates rows on a hidden NULL _vid column"]
 async fn return_distinct_yields_one_row_per_vertex() {
     let db = fixture().await;
     let r = db
@@ -103,7 +101,6 @@ async fn return_distinct_yields_one_row_per_vertex() {
 
 /// `count(DISTINCT n)` must agree with `collect(DISTINCT n)`.
 #[tokio::test]
-#[ignore = "open defect: count(DISTINCT) falls back to byte comparison for an UNWIND-rebound entity"]
 async fn count_distinct_agrees_with_collect_distinct() {
     let db = fixture().await;
     let r = db
@@ -122,7 +119,6 @@ async fn count_distinct_agrees_with_collect_distinct() {
 /// This is the thing to fix. Both rows decode to the identical vertex, so a
 /// system field of that vertex must not read as NULL for either of them.
 #[tokio::test]
-#[ignore = "open defect: _vid reads NULL for a natively-encoded entity"]
 async fn the_vid_of_a_vertex_is_never_null() {
     let db = fixture().await;
     let r = db

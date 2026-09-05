@@ -659,6 +659,11 @@ impl ScalarUDFImpl for TypeUdf {
             }
             let val = &val_args[0];
             match val {
+                // A relationship reaches here in either encoding. Only the map
+                // form was handled, so `type(r)` on a native `Value::Edge`
+                // raised "requires a relationship argument" for an argument that
+                // is exactly that (#234).
+                Value::Edge(edge) => Ok(Value::String(edge.edge_type.clone())),
                 // Edge represented as a map (from CypherValue encoding)
                 Value::Map(map) => {
                     if let Some(Value::String(t)) = map.get("_type") {
@@ -860,6 +865,13 @@ impl ScalarUDFImpl for PropertiesUdf {
                         .collect();
                     Ok(Value::Map(filtered))
                 }
+                // Native encodings. Falling through to `Value::Null` meant
+                // `properties(n)` silently returned null for an entity that was
+                // present — the same shape as the map arm above, one encoding
+                // short (#234). Their property maps hold user properties only,
+                // so no `_`-filtering is needed here.
+                Value::Node(node) => Ok(Value::Map(node.properties.clone())),
+                Value::Edge(edge) => Ok(Value::Map(edge.properties.clone())),
                 _ => Ok(Value::Null),
             }
         })
@@ -971,7 +983,26 @@ impl ScalarUDFImpl for IndexUdf {
                 }
                 Value::Node(node) => {
                     if let Some(key) = index.as_str() {
-                        node.properties.get(key).cloned().unwrap_or(Value::Null)
+                        // System fields come from the entity, not from its user
+                        // properties. The `Value::Map` arm above answers `_vid`
+                        // because the map literally carries that key; a native
+                        // `Value::Node` carries it in `node.vid`, so looking it
+                        // up as a property found nothing and returned NULL.
+                        //
+                        // The two encodings are produced by different operators
+                        // for the same vertex — a scan projection makes the map,
+                        // a pattern comprehension makes the `Node` — so the same
+                        // vertex answered `n._vid` differently depending on which
+                        // one produced it. A DISTINCT downstream then separated
+                        // two rows holding that one vertex, because one of them
+                        // had the NULL (#234, #235).
+                        match key {
+                            "_vid" | "_id" => Value::Int(node.vid.as_u64() as i64),
+                            "_labels" => Value::List(
+                                node.labels.iter().cloned().map(Value::String).collect(),
+                            ),
+                            _ => node.properties.get(key).cloned().unwrap_or(Value::Null),
+                        }
                     } else if !index.is_null() {
                         return Err(datafusion::error::DataFusionError::Execution(
                             "index(): node index must be a string".to_string(),
@@ -982,7 +1013,14 @@ impl ScalarUDFImpl for IndexUdf {
                 }
                 Value::Edge(edge) => {
                     if let Some(key) = index.as_str() {
-                        edge.properties.get(key).cloned().unwrap_or(Value::Null)
+                        // Twin of the node arm above.
+                        match key {
+                            "_eid" | "_id" => Value::Int(edge.eid.as_u64() as i64),
+                            "_type" | "_type_name" => Value::String(edge.edge_type.clone()),
+                            "_src" | "_src_vid" => Value::Int(edge.src.as_u64() as i64),
+                            "_dst" | "_dst_vid" => Value::Int(edge.dst.as_u64() as i64),
+                            _ => edge.properties.get(key).cloned().unwrap_or(Value::Null),
+                        }
                     } else if !index.is_null() {
                         return Err(datafusion::error::DataFusionError::Execution(
                             "index(): edge index must be a string".to_string(),

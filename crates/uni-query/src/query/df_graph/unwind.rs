@@ -740,7 +740,15 @@ impl GraphUnwindStream {
                     if value.is_null() {
                         builder.append_null();
                     } else {
-                        let encoded = uni_common::cypher_value_codec::encode(value);
+                        // A list can hold the same entity under both encodings —
+                        // `collect()` over a scan projection yields the `_vid`
+                        // map, a pattern comprehension yields a native `Node` —
+                        // and encoding them as they arrive puts two different
+                        // byte strings in this column for one vertex. Every
+                        // operator above compares the bytes, so `DISTINCT` and
+                        // `count(DISTINCT)` reported two (#234, #235).
+                        let canonical = value.clone().canonical_entity();
+                        let encoded = uni_common::cypher_value_codec::encode(&canonical);
                         builder.append_value(&encoded);
                     }
                 }

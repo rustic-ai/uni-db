@@ -550,6 +550,84 @@ impl Value {
         }
     }
 
+    /// This value with an entity map rewritten into its native form.
+    ///
+    /// The two encodings of one entity carry the same information but different
+    /// bytes, and anything comparing *encoded* values — a group-by, a join key,
+    /// a `DISTINCT` — sees two different things. Identity-aware comparison fixes
+    /// that wherever a `Value` is compared, but an Arrow column holds bytes, and
+    /// the operators over it never see a `Value` at all.
+    ///
+    /// So where a column is built from values that may mix encodings, run them
+    /// through this first: one entity then has one encoding, and byte equality
+    /// agrees with identity again.
+    ///
+    /// Non-entities, and entities already in native form, are returned
+    /// unchanged. A map that names an entity but carries no recoverable shape is
+    /// also left alone rather than guessed at.
+    #[must_use]
+    pub fn canonical_entity(self) -> Value {
+        let Value::Map(map) = &self else {
+            return self;
+        };
+        let Some(entity) = entity_ref_from_map(map) else {
+            return self;
+        };
+
+        // User properties live under `_all_props` for a schemaless entity and
+        // under `properties` for a serialised one; otherwise take the
+        // non-underscore keys, which is how a flattened projection spells them.
+        let properties: HashMap<String, Value> =
+            match map.get("_all_props").or_else(|| map.get("properties")) {
+                Some(Value::Map(props)) => props.clone(),
+                _ => map
+                    .iter()
+                    .filter(|(k, _)| !k.starts_with('_'))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            };
+
+        match entity {
+            EntityRef::Vertex(vid) => {
+                let labels = match map.get("_labels") {
+                    Some(Value::List(items)) => items
+                        .iter()
+                        .filter_map(|v| match v {
+                            Value::String(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                Value::Node(Node {
+                    vid,
+                    labels,
+                    properties,
+                })
+            }
+            EntityRef::Edge(eid) => {
+                let edge_type = match get_with_fallback(map, &["_type", "_type_name", "edge_type"])
+                {
+                    Some(Value::String(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                let endpoint = |keys: &[&str]| {
+                    get_with_fallback(map, keys)
+                        .and_then(Value::as_u64)
+                        .map(Vid::from)
+                        .unwrap_or_default()
+                };
+                Value::Edge(Edge {
+                    eid,
+                    edge_type,
+                    src: endpoint(&["_src", "_src_vid", "src"]),
+                    dst: endpoint(&["_dst", "_dst_vid", "dst"]),
+                    properties,
+                })
+            }
+        }
+    }
+
     /// The edge id this value denotes, in either encoding.
     ///
     /// The edge twin of [`Value::entity_vid`]. It did not exist, which is why
@@ -1999,6 +2077,62 @@ mod tests {
             let v = Value::Map(m);
             assert_eq!(v.entity_ref(), Some(EntityRef::Edge(Eid::from(7))));
             assert_eq!(v.entity_vid(), None);
+        }
+
+        /// One entity, two encodings, one set of bytes after canonicalisation.
+        ///
+        /// Identity-aware `PartialEq` is not enough on its own: an Arrow column
+        /// holds encoded bytes and the operators over it never see a `Value`, so
+        /// a group-by compares the encodings rather than the entities.
+        #[test]
+        fn canonicalising_makes_the_two_encodings_encode_alike() {
+            use crate::cypher_value_codec::encode;
+
+            let native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec!["P".into()],
+                properties: HashMap::from([("name".to_string(), Value::String("b".into()))]),
+            });
+
+            let mut m = HashMap::new();
+            m.insert("_vid".to_string(), Value::Int(7));
+            m.insert(
+                "_labels".to_string(),
+                Value::List(vec![Value::String("P".into())]),
+            );
+            m.insert(
+                "_all_props".to_string(),
+                Value::Map(HashMap::from([(
+                    "name".to_string(),
+                    Value::String("b".into()),
+                )])),
+            );
+            let as_map = Value::Map(m);
+
+            assert_ne!(
+                encode(&native),
+                encode(&as_map),
+                "the two encodings genuinely differ as bytes — that is the problem"
+            );
+            assert_eq!(
+                encode(&native.clone().canonical_entity()),
+                encode(&as_map.canonical_entity()),
+                "after canonicalisation one entity has one encoding"
+            );
+        }
+
+        /// Canonicalising leaves everything that is not an entity map alone.
+        #[test]
+        fn canonicalising_is_a_no_op_for_everything_else() {
+            assert_eq!(Value::Int(7).canonical_entity(), Value::Int(7));
+            let plain = Value::Map(HashMap::from([("a".to_string(), Value::Int(1))]));
+            assert_eq!(plain.clone().canonical_entity(), plain);
+            let native = Value::Node(crate::value::Node {
+                vid: Vid::from(7),
+                labels: vec![],
+                properties: HashMap::new(),
+            });
+            assert_eq!(native.clone().canonical_entity(), native);
         }
 
         /// A bare integer is not an entity, and a negative id is not one either.
