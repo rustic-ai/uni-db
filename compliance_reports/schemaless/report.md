@@ -1,19 +1,17 @@
 # TCK Compliance Report
 
-**Generated:** 2026-09-03 11:01:00
-**Results:** `results_20260903_110059.json`
-**Compared to:** `results_20260903_104930.json`
+**Generated:** 2026-09-05 13:41:36
+**Results:** `results_20260905_134136.json`
+**Compared to:** `results_20260903_110059.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 3926 | 3926 |  |
-| Passed | 3925 | 3924 | +1 |
-| Failed | 0 | 1 | -1 |
-| Pass Rate | 100.0% | 99.9% | 📈 +0.0pp |
-
-**🟢 Fixed:** 1 scenarios now passing
+| Passed | 3925 | 3925 |  |
+| Failed | 0 | 0 |  |
+| Pass Rate | 100.0% | 100.0% | ➡️ +0.0pp |
 
 ## Feature Breakdown
 
@@ -206,18 +204,12 @@
 | ✅ WithSkipLimit2 | 4 | 4 | 0 | 100% |  |
 | ✅ WithSkipLimit3 | 3 | 3 | 0 | 100% |  |
 | ✅ WithWhere1 | 4 | 4 | 0 | 100% |  |
-| ✅ WithWhere2 | 2 | 2 | 0 | 100% | +50pp |
+| ✅ WithWhere2 | 2 | 2 | 0 | 100% |  |
 | ✅ WithWhere3 | 3 | 3 | 0 | 100% |  |
 | ✅ WithWhere4 | 2 | 2 | 0 | 100% |  |
 | ✅ WithWhere5 | 4 | 4 | 0 | 100% |  |
 | ✅ WithWhere6 | 1 | 1 | 0 | 100% |  |
 | ✅ WithWhere7 | 3 | 3 | 0 | 100% |  |
-
-## 🟢 Newly Passing
-
-Scenarios that were failing but are now passing:
-
-- **WithWhere2** — [1] Filter nodes with conjunctive two-part property predicate on multi variables with multiple bindings (line 33)
 
 ## Failed Scenarios
 
