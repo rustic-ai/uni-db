@@ -1446,6 +1446,52 @@ async fn repro_find14_recursive_cte_multicol_cycle() {
 }
 
 // ===========================================================================
+// A recursive CTE over a 2-cycle terminates and reaches exactly both nodes.
+//
+// Coverage for a shape the suite did not have: an entity-valued `WITH RECURSIVE`
+// whose anchor is a label scan and whose recursion is a traversal.
+//
+// What this test does NOT show, stated because it was checked: it passes
+// identically with and without identity-based `Value` equality, so it does not
+// discriminate on that. `RETURN n` is expanded by the planner into several
+// columns, so a CTE row is a `Value::Map` keyed by *column* name, never a bare
+// entity — identity equality is not consulted at all here.
+//
+// Instrumenting the loop shows the seen-set reaching 3 entries for a 2-node
+// cycle, because the anchor's row is keyed `n.*` and the recursion's rows `q.*`:
+// the anchor can never compare equal to a recursive row whatever the values,
+// so one spurious entry survives per anchor row. It is bounded (dedup within
+// the recursive part still works), it terminates, and the final `IN reachable`
+// node-dedup masks it at the endpoint — which is why the count below is right.
+// Recorded here rather than filed: no user-visible wrong answer was produced.
+// ===========================================================================
+#[tokio::test]
+async fn recursive_cte_single_column_entity_cycle_terminates() {
+    let h = Harness::new_schemaless().await;
+    h.run_ok("CREATE (a:N {name:'A'})").await;
+    h.run_ok("CREATE (b:N {name:'B'})").await;
+    h.run_ok("MATCH (a:N {name:'A'}), (b:N {name:'B'}) CREATE (a)-[:E]->(b), (b)-[:E]->(a)")
+        .await;
+    let res = h
+        .run(
+            "WITH RECURSIVE reachable AS ( \
+                MATCH (n:N {name:'A'}) RETURN n \
+                UNION \
+                MATCH (p:N)-[:E]->(q:N) WHERE p IN reachable RETURN q \
+             ) MATCH (m:N) WHERE m IN reachable RETURN count(m) AS c",
+        )
+        .await;
+    println!("[cte-1col] -> {res:?}");
+    match res {
+        Ok(rows) => {
+            let c = as_int(&cell(&rows[0], "c"));
+            assert_eq!(c, 2, "the 2-cycle must reach exactly both nodes");
+        }
+        Err(e) => panic!("single-column recursive CTE did not run: {e}"),
+    }
+}
+
+// ===========================================================================
 // FINDING [16] vid_lookup_join.rs:561 — values_equal compares non-anchor
 // equi-pair cells with ScalarValue PartialEq under which NULL == NULL is true,
 // so rows join on NULL keys, contradicting Cypher's NULL = NULL -> NULL.
