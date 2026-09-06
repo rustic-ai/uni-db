@@ -1273,6 +1273,21 @@ impl BulkWriter {
                         .backend()
                         .count_rows(&vtable_name, None)
                         .await
+                        // #233: `.ok()` persisted `row_count_at_build = None`,
+                        // and `index_rebuild.rs`'s growth trigger is gated on
+                        // `if let Some(built_count)` — so that index never
+                        // auto-rebuilt on growth again, silently, until some
+                        // later build happened to write a count. Recorded so
+                        // the lost trigger is visible.
+                        .inspect_err(|e| {
+                            tracing::error!(
+                                table = %vtable_name,
+                                error = %e,
+                                "bulk commit: could not read the row count for a rebuilt index; \
+                                 its growth-based auto-rebuild stays disabled until a later \
+                                 build records one",
+                            );
+                        })
                         .ok()
                         .map(|c| c as u64);
 

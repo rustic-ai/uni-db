@@ -34,14 +34,43 @@ on whether it comes back.
 | ~~`uni-plugin-rhai/src/manifest.rs:154`~~ **DONE** (declared-but-wrong-typed only; the absent-key default is unchanged and remains a product decision) | `optional_string(&map, "determinism").unwrap_or_else(\|\| "pure")`. A mistyped key or non-string value yields `"pure"` → `Volatility::Immutable`, so DataFusion may constant-fold or CSE a **nondeterministic** Rhai scalar or aggregate. The *value* path is already fail-safe (an unknown string maps to `Volatile`); only the absent / wrong-type path fails open. | **TRIVIAL** — one line, plus the existing test that asserts the `"pure"` default |
 | ~~`uni-plugin-host/src/triggers.rs:2005`~~ **DONE** | A deferral sidecar read error logs at `debug!` and returns 0 deferrals; the next `push` then `persist_locked`s the whole in-memory map, **overwriting the rows it failed to read**. The retry is what makes a transient failure permanent. Strictly worse than the scheduler site it resembles: `scheduler.rs:304` is survivable precisely because that path does not rewrite the sidecar. | TRIVIAL–MODERATE — latch a `load_failed` flag and refuse to persist while set, mirroring `persistence_degraded` |
 
-## P1 — no wrong answer, but nothing self-corrects
+## P1 — no wrong answer, but nothing self-corrects — **CLOSED 2026-09-06**
 
 | site | consequence | cost |
 |---|---|---|
-| `uni-crdt/src/registry_dispatch.rs:104` | **`merge_via_registry` has never dispatched to a shipped provider.** `Crdt::kind()` emits `uni-crdt:g-counter` / `uni-crdt:or-set` / `uni-crdt:lww-register`; `uni-plugin-builtin/src/crdts.rs:34-38` registers `g-counter` / `or-set` / `lww-register`. Every host enabling the builtin CRDT plugin silently gets native merge. No wrong answer *today* — the fallback is the correct native merge — but the feature's whole purpose is to let semantics differ, and a user plugin that genuinely differs is bypassed without a trace. | MODERATE — alias map or an opt-in strict-dispatch flag; ~5 call sites |
-| `uni-bulk/src/bulk.rs:1270` | `count_rows(...).ok()` persists `row_count_at_build = None`, and `index_rebuild.rs:94-96` gates its growth trigger on `if let Some(built_count)` — so that index **never auto-rebuilds on growth again**, until some later build happens to write a count. | TRIVIAL |
-| `uni-plugin-pyo3/src/watchdog.rs:106` | `.spawn(...).ok()` — on thread-spawn failure the forced-deadline layer is silently absent, and a pure-Python `while True: pass` guest becomes unbounded, hanging the query. OS-exhaustion-only trigger. | TRIVIAL fix; needs new fault-injection machinery to test |
-| `uni-store/src/runtime/l0.rs:433` (`:470`) | `merge_via_registry(...).is_ok()` collapses a *provider* failure into the same `false` as a variant mismatch, so the fall-through warns "overwriting CRDT property with a different CRDT variant" — a misattributed cause — and LWW-discards merged state. Masked in-tree today by the kind mismatch above. | TRIVIAL — split the `Result` before the bool |
+| ~~`uni-crdt/src/registry_dispatch.rs:104`~~ **NOT A DEFECT — see below** | **`merge_via_registry` has never dispatched to a shipped provider.** `Crdt::kind()` emits `uni-crdt:g-counter` / `uni-crdt:or-set` / `uni-crdt:lww-register`; `uni-plugin-builtin/src/crdts.rs:34-38` registers `g-counter` / `or-set` / `lww-register`. Every host enabling the builtin CRDT plugin silently gets native merge. No wrong answer *today* — the fallback is the correct native merge — but the feature's whole purpose is to let semantics differ, and a user plugin that genuinely differs is bypassed without a trace. | MODERATE — alias map or an opt-in strict-dispatch flag; ~5 call sites |
+| ~~`uni-bulk/src/bulk.rs:1270`~~ **DONE** | `count_rows(...).ok()` persists `row_count_at_build = None`, and `index_rebuild.rs:94-96` gates its growth trigger on `if let Some(built_count)` — so that index **never auto-rebuilds on growth again**, until some later build happens to write a count. | TRIVIAL |
+| ~~`uni-plugin-pyo3/src/watchdog.rs:106`~~ **DONE** | `.spawn(...).ok()` — on thread-spawn failure the forced-deadline layer is silently absent, and a pure-Python `while True: pass` guest becomes unbounded, hanging the query. OS-exhaustion-only trigger. | TRIVIAL fix; needs new fault-injection machinery to test |
+| ~~`uni-store/src/runtime/l0.rs:433`~~ **DONE** | `merge_via_registry(...).is_ok()` collapses a *provider* failure into the same `false` as a variant mismatch, so the fall-through warns "overwriting CRDT property with a different CRDT variant" — a misattributed cause — and LWW-discards merged state. Masked in-tree today by the kind mismatch above. | TRIVIAL — split the `Result` before the bool |
+
+## The CRDT registry dispatch, reversed
+
+I described this as a dead feature — `merge_via_registry` never dispatching to
+a shipped provider — and as a fourth instance of infrastructure wired and never
+consumed. **That was wrong, and fixing the names would have been harmful.**
+
+The two sides are deliberately different surfaces that happen to share
+`CrdtKind`:
+
+- A provider registered under **`uni-crdt:<kind>`** overrides *host merge* and
+  must speak the `Crdt` MessagePack envelope, because that is what
+  `to_msgpack` hands it. `uni-store/tests/l0_crdt_registry_dispatch.rs`
+  registers exactly such a provider and round-trips through
+  `Crdt::from_msgpack` — the feature works and is tested.
+- `uni-plugin-builtin`'s **unprefixed** providers (`or-set`, `g-counter`, …)
+  are the *plugin CRDT-kind* surface — `empty` / `apply(CrdtOp)` / `value` —
+  and speak their own JSON shapes. `OrSetProvider::from_persisted` parses
+  `serde_json` of `(Vec<(String, u64)>, Vec<u64>)`.
+
+Renaming either side to make them match would not enable anything:
+`from_persisted` would fail on the wrong format, `merge_via_registry` would
+return `Serialization`, and the `l0.rs` caller would discard merged state under
+a last-writer-wins overwrite. **The namespace is what keeps two incompatible
+wire formats from colliding.** The contract is now written at the fallback
+site, with a `debug!` so a genuine registration mistake is greppable.
+
+The sibling at `l0.rs:433` was real and is fixed: a provider failure no longer
+reports itself as a variant mismatch.
 
 ## P2 — observability
 

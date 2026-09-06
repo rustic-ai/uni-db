@@ -101,6 +101,32 @@ impl Crdt {
         let kind = self.kind();
         let Some(provider) = registry.crdt_kind(&kind) else {
             // No provider registered → fall back to the native dispatch.
+            //
+            // #233 audited this as a silent substitution of the user's merge
+            // semantics, on the grounds that `kind()` emits `uni-crdt:or-set`
+            // while `uni-plugin-builtin`'s CRDT plugin registers `or-set`, so
+            // no shipped provider is ever found here. The names differ
+            // DELIBERATELY and the miss is correct:
+            //
+            // - A provider registered under `uni-crdt:<kind>` overrides *host
+            //   merge* and must speak the `Crdt` MessagePack envelope, because
+            //   that is what `to_msgpack` hands it below. See
+            //   `uni-store/tests/l0_crdt_registry_dispatch.rs`, which registers
+            //   exactly that and round-trips through `Crdt::from_msgpack`.
+            // - `uni-plugin-builtin`'s unprefixed providers are the *plugin
+            //   CRDT-kind* surface (`empty` / `apply(CrdtOp)` / `value`) and
+            //   speak their own JSON shapes.
+            //
+            // Renaming either side to make them match would not enable the
+            // feature — `from_persisted` would fail on the wrong format, this
+            // function would return `Serialization`, and the caller in
+            // `l0.rs` would discard merged state under a
+            // last-writer-wins overwrite. The namespace is what keeps two
+            // incompatible wire formats from colliding.
+            tracing::debug!(
+                kind = ?kind,
+                "no CRDT provider registered for this kind; using native merge"
+            );
             return self.try_merge(other);
         };
 

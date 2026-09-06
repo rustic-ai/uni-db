@@ -155,3 +155,79 @@ fn l0_merge_falls_back_to_native_without_provider() {
         other => panic!("expected GCounter, got {other:?}"),
     }
 }
+
+/// A provider whose `from_persisted` always fails.
+#[derive(Default)]
+struct FailingProvider;
+
+impl CrdtKindProvider for FailingProvider {
+    fn kind(&self) -> CrdtKind {
+        CrdtKind::new("uni-crdt:g-counter")
+    }
+    fn empty(&self) -> Box<dyn CrdtState> {
+        Box::new(NativeState {
+            inner: Crdt::GCounter(GCounter::new()),
+        })
+    }
+    fn from_persisted(&self, _bytes: &[u8]) -> Result<Box<dyn CrdtState>, FnError> {
+        Err(FnError::new(0xDEAD, "provider is broken"))
+    }
+}
+
+/// A provider failure is not a variant mismatch, and must not be reported as one.
+///
+/// #233. The L0 merge used `merge_via_registry(..).is_ok()`, collapsing a
+/// provider's `from_persisted` / `merge` / `persist` failure into the same
+/// `false` as a genuine `TypeMismatch`. It then fell through to a warning
+/// reading "overwriting CRDT property with a different CRDT variant" — naming
+/// the wrong cause — while discarding merged state. Both cases still end in
+/// last-writer-wins; what changed is that the provider failure is now counted
+/// and named.
+#[test]
+fn a_provider_failure_is_counted_separately_from_a_variant_mismatch() {
+    use metrics_util::debugging::{DebugValue, DebuggingRecorder};
+
+    let registry = Arc::new(PluginRegistry::new());
+    let caps = CapabilitySet::from_iter_of([Capability::Crdt]);
+    let mut r = PluginRegistrar::new(PluginId::new("test.failing-gcounter"), &caps, &registry);
+    r.crdt_kind(
+        CrdtKind::new("uni-crdt:g-counter"),
+        Arc::new(FailingProvider) as Arc<dyn CrdtKindProvider>,
+    )
+    .expect("register provider");
+    r.commit_to_registry().expect("commit");
+
+    let recorder = DebuggingRecorder::new();
+    let snapshotter = recorder.snapshotter();
+    metrics::with_local_recorder(&recorder, || {
+        let mut buf = L0Buffer::new(0, None);
+        buf.set_plugin_registry(Arc::clone(&registry));
+        let vid = Vid::new(1);
+
+        let mut p1 = Properties::new();
+        p1.insert("counter".to_string(), gcounter_value("r1", 5));
+        buf.insert_vertex(vid, p1);
+
+        // Same variant on both sides, so any failure here is the provider's.
+        let mut p2 = Properties::new();
+        p2.insert("counter".to_string(), gcounter_value("r2", 7));
+        buf.insert_vertex(vid, p2);
+    });
+
+    let failures: u64 = snapshotter
+        .snapshot()
+        .into_vec()
+        .into_iter()
+        .filter(|(ckey, _, _, _)| ckey.key().name() == "uni_crdt_provider_merge_failures_total")
+        .map(|(_, _, _, value)| match value {
+            DebugValue::Counter(v) => v,
+            _ => 0,
+        })
+        .sum();
+
+    assert_eq!(
+        failures, 1,
+        "a broken provider must be counted as a provider failure, not reported as a CRDT \
+         variant mismatch"
+    );
+}

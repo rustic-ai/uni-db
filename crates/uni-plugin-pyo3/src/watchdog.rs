@@ -96,15 +96,26 @@ pub struct DeadlineWatchdog {
 
 impl DeadlineWatchdog {
     /// Arms a watchdog that interrupts Python thread `tid` once `deadline` passes.
-    #[must_use]
-    pub fn arm(tid: c_long, deadline: Instant) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns the spawn error if the watchdog thread cannot be started.
+    ///
+    /// #233: this used `.ok()`, so on a spawn failure the forced-deadline layer
+    /// was silently absent while the caller believed it was armed. The
+    /// cooperative per-kernel check only fires when the guest calls back, so a
+    /// pure-Python `while True: pass` then became unbounded and hung the query
+    /// — the exact case this watchdog exists to bound.
+    pub fn arm(tid: c_long, deadline: Instant) -> std::io::Result<Self> {
         let done = Arc::new(AtomicBool::new(false));
         let done_bg = Arc::clone(&done);
         let handle = std::thread::Builder::new()
             .name("uni-pyo3-graph-watchdog".to_owned())
-            .spawn(move || run(tid, deadline, &done_bg))
-            .ok();
-        Self { done, handle }
+            .spawn(move || run(tid, deadline, &done_bg))?;
+        Ok(Self {
+            done,
+            handle: Some(handle),
+        })
     }
 }
 
