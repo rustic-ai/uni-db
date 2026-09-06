@@ -143,6 +143,7 @@ fn notification(version: u64, mutations_failed: bool) -> Arc<CommitNotification>
         causal_version: version - 1,
         mutations: None,
         mutations_failed,
+        dropped_before: 0,
     })
 }
 

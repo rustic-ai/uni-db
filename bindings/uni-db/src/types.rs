@@ -1383,14 +1383,23 @@ pub struct PyCommitNotification {
     pub session_id: String,
     /// Database version when the transaction started.
     pub causal_version: u64,
+    /// Commits this stream lost, immediately before this one, because the
+    /// consumer fell behind.
+    ///
+    /// `0` normally. A non-zero value means the broadcaster evicted that many
+    /// older commits; they cannot be redelivered. Filtered skips are never
+    /// counted here. A consumer doing idempotent work (invalidate and re-read)
+    /// can ignore this; one doing non-idempotent per-commit work must check
+    /// it, or use the CDC surface, which guarantees a contiguous feed (#233).
+    pub dropped_before: u64,
 }
 
 #[pymethods]
 impl PyCommitNotification {
     fn __repr__(&self) -> String {
         format!(
-            "CommitNotification(version={}, mutations={}, labels={:?})",
-            self.version, self.mutation_count, self.labels_affected
+            "CommitNotification(version={}, mutations={}, labels={:?}, dropped_before={})",
+            self.version, self.mutation_count, self.labels_affected, self.dropped_before
         )
     }
 }
@@ -1407,6 +1416,7 @@ impl From<::uni_db::CommitNotification> for PyCommitNotification {
             tx_id: n.tx_id,
             session_id: n.session_id,
             causal_version: n.causal_version,
+            dropped_before: n.dropped_before,
         }
     }
 }

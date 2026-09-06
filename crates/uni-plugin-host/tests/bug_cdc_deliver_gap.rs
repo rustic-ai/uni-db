@@ -108,6 +108,7 @@ fn commit(version: u64) -> Arc<CommitNotification> {
         // deliver/checkpoint/gap machinery under test is unaffected.
         mutations: None,
         mutations_failed: false,
+        dropped_before: 0,
     })
 }
 

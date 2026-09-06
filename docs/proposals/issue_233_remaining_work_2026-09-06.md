@@ -26,13 +26,13 @@ on whether it comes back.
 
 ---
 
-## P0 — silent wrong answers
+## P0 — silent wrong answers — **CLOSED 2026-09-06**
 
 | site | consequence | cost |
 |---|---|---|
-| `uni-plugin-host/src/notifications.rs:117` | `RecvError::Lagged` on the **public** `session.watch()` / `CommitStream` surface (also `PyCommitStream`, `AsyncCommitStream`), over a 256-slot channel. A slow consumer silently loses commits and `next()` returns the following one as if contiguous, so an incremental view built on `watch()` is permanently wrong with no signal. **`CdcRuntime` treats this exact condition as fatal** (`halt_all_streams`); the user-facing stream logs and continues. One mechanism, two opposite policies, and the safe one is on the internal path. | **DESIGN** — needs a lag signal on the API. Breaking: 2 Rust call sites (`session.rs:1233/1239`, `sync.rs:184/189`), 3 Python wrappers, `.pyi` |
-| `uni-plugin-rhai/src/manifest.rs:154` | `optional_string(&map, "determinism").unwrap_or_else(\|\| "pure")`. A mistyped key or non-string value yields `"pure"` → `Volatility::Immutable`, so DataFusion may constant-fold or CSE a **nondeterministic** Rhai scalar or aggregate. The *value* path is already fail-safe (an unknown string maps to `Volatile`); only the absent / wrong-type path fails open. | **TRIVIAL** — one line, plus the existing test that asserts the `"pure"` default |
-| `uni-plugin-host/src/triggers.rs:2005` | A deferral sidecar read error logs at `debug!` and returns 0 deferrals; the next `push` then `persist_locked`s the whole in-memory map, **overwriting the rows it failed to read**. The retry is what makes a transient failure permanent. Strictly worse than the scheduler site it resembles: `scheduler.rs:304` is survivable precisely because that path does not rewrite the sidecar. | TRIVIAL–MODERATE — latch a `load_failed` flag and refuse to persist while set, mirroring `persistence_degraded` |
+| ~~`uni-plugin-host/src/notifications.rs:117`~~ **DONE** | `RecvError::Lagged` on the **public** `session.watch()` / `CommitStream` surface (also `PyCommitStream`, `AsyncCommitStream`), over a 256-slot channel. A slow consumer silently loses commits and `next()` returns the following one as if contiguous, so an incremental view built on `watch()` is permanently wrong with no signal. **`CdcRuntime` treats this exact condition as fatal** (`halt_all_streams`); the user-facing stream logs and continues. One mechanism, two opposite policies, and the safe one is on the internal path. | **DESIGN** — needs a lag signal on the API. Breaking: 2 Rust call sites (`session.rs:1233/1239`, `sync.rs:184/189`), 3 Python wrappers, `.pyi` |
+| ~~`uni-plugin-rhai/src/manifest.rs:154`~~ **DONE** (declared-but-wrong-typed only; the absent-key default is unchanged and remains a product decision) | `optional_string(&map, "determinism").unwrap_or_else(\|\| "pure")`. A mistyped key or non-string value yields `"pure"` → `Volatility::Immutable`, so DataFusion may constant-fold or CSE a **nondeterministic** Rhai scalar or aggregate. The *value* path is already fail-safe (an unknown string maps to `Volatile`); only the absent / wrong-type path fails open. | **TRIVIAL** — one line, plus the existing test that asserts the `"pure"` default |
+| ~~`uni-plugin-host/src/triggers.rs:2005`~~ **DONE** | A deferral sidecar read error logs at `debug!` and returns 0 deferrals; the next `push` then `persist_locked`s the whole in-memory map, **overwriting the rows it failed to read**. The retry is what makes a transient failure permanent. Strictly worse than the scheduler site it resembles: `scheduler.rs:304` is survivable precisely because that path does not rewrite the sidecar. | TRIVIAL–MODERATE — latch a `load_failed` flag and refuse to persist while set, mirroring `persistence_degraded` |
 
 ## P1 — no wrong answer, but nothing self-corrects
 
@@ -99,14 +99,48 @@ fact about the crate rather than as an absence of looking.
 
 ---
 
+## The `CommitStream` decision, as taken
+
+Investigating it changed the answer, so the reasoning is recorded rather than
+just the outcome.
+
+The severity was **over-stated**. No doc claims delivery, ordering or
+completeness; the only documented loss mode is `debounce`. All six in-repo
+callers take exactly one notification, and no test counts commits or asserts
+contiguity. So nothing in-tree was getting a wrong answer — what existed was a
+public API that silently permits an incorrect usage pattern, with no way to
+detect it and (capacity hardcoded twice) no way to avoid it.
+
+The CDC contrast is real but does not carry the conclusion. CDC halts because
+**it is a feed**; `watch()` is not documented as one, and a halt-on-lag policy
+here would have broken the debounced invalidate-and-re-read use the API was
+built for — a fix making the common path worse to protect a path that should
+be using CDC.
+
+Rejected: widening `next() -> Option<CommitNotification>` to a `Result`. It is
+breaking across 2 Rust call sites, 3 Python wrappers, the `.pyi` and 5 variant
+wheels, and it taxes the majority use for a case no in-tree consumer has.
+
+Shipped instead, all additive:
+
+1. `CommitNotification::dropped_before: u64`, matching the `mutations_failed`
+   idiom added to the same struct earlier in this cycle — put the
+   discriminator on the payload, not in the control flow. Because it is
+   attached on delivery and set only from the lag path, a filter skip cannot
+   produce a false alarm **by construction**.
+2. The delivery contract documented on `next()`, in `rust-api.md` and
+   `python-api.md`, each pointing completeness-needing consumers at CDC.
+3. `UniConfig::commit_channel_capacity`, replacing the 256 hardcoded at two
+   sites.
+
+Left open deliberately: the absent-key `determinism` default of `"pure"` is
+documented, tested and shared with the Python binding, so changing it is a
+product decision, not a bug fix.
+
 ## Sequencing
 
-1. **The two trivial P0s** — the `determinism` default and the deferral latch.
-2. **The `CommitStream` decision**, which is a product call and not a patch:
-   a `Lagged { n }` variant on `next()` versus a `lagged()` flag. Either is
-   breaking across Rust and Python. The argument for doing it at all is that
-   CDC already decided this same question the other way.
-3. **P1**, with the CRDT registry dispatch split out into **its own issue** —
+1. ~~The two trivial P0s~~ and ~~the `CommitStream` decision~~ — **done**.
+2. **P1**, with the CRDT registry dispatch split out into **its own issue** —
    it is a dead feature, not a fail-open, and will be lost inside #233. It is
    also the fourth instance this cycle of infrastructure wired and never
    consumed (`ScanRequest::with_limit` #239, `index_consulted` #195,

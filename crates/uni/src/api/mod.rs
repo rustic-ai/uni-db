@@ -442,7 +442,7 @@ impl UniInner {
         locy_rule_registry: Arc<std::sync::RwLock<impl_locy::LocyRuleRegistry>>,
         executor_template: Arc<uni_query::Executor>,
     ) -> UniInner {
-        let (commit_tx, _) = tokio::sync::broadcast::channel(256);
+        let (commit_tx, _) = tokio::sync::broadcast::channel(self.config.commit_channel_capacity);
         UniInner {
             storage,
             schema,
@@ -2017,7 +2017,7 @@ impl UniBuilder {
             track_task_with_scratch_claim(&shutdown_handle, scratch_dir.as_ref(), handle);
         }
 
-        let (commit_tx, _) = tokio::sync::broadcast::channel(256);
+        let (commit_tx, _) = tokio::sync::broadcast::channel(self.config.commit_channel_capacity);
         // Lift the L0 tier out BEFORE the writer is dropped on a read-only open.
         // The WAL replay above landed committed-but-unflushed mutations in it;
         // dropping the only handle would make every read on this database

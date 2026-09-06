@@ -1437,6 +1437,10 @@ impl Transaction {
             causal_version: self.started_at_version,
             mutations: mutations_batch,
             mutations_failed,
+            // Always 0 at the producer. Lag is a per-consumer property — one
+            // `CommitStream` may fall behind while another keeps up — so the
+            // count is attached by the stream on delivery, not broadcast.
+            dropped_before: 0,
         };
         let _ = self.db.commit_tx.send(Arc::new(notif));
 
