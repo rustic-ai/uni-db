@@ -646,3 +646,225 @@ commit. #219's anchoring landed but does not reach MERGE (#225) or Locy (#226).
 Class 7 continues to generate instances faster than it is closed: **#230 was
 filed after this review** and is the same mechanism — `iai_gate.py` reporting
 "worst +0.00%" while 5 of 5 gated targets sat 88-97% below baseline.
+
+---
+
+## Status — 2026-09-05
+
+Every class in this document re-read against the source, four days after it was
+written. Ledger is in `issue_triage_2026-09-03.md`'s *Status — 2026-09-05, third
+pass*; this records what happened to the **classes**, which is what this document
+is for.
+
+| class | state |
+|---|---|
+| 1 — fail-open | **Tiers 2 and 3 closed; Tier 1 open.** The inverse of what the tracking ledger recorded |
+| 2 — entity identity hand-rolled | **substantively closed**, and the remedy was the one this document argued for |
+| 3 — unbounded materialisation | open; partially accounted, not bounded |
+| 4 — fixed constants for a cost decision | open, unchanged |
+| 5 — plan shape is syntax-driven (#224) | open, unchanged; #226's claim narrowed |
+| 6 — per-item round-trips (#220) | open, unchanged |
+| 7 — invisible to result-only tests | open; **still generating instances faster than it is closed** |
+| 8 — orientation re-derived four ways | **substantively closed.** All four live faces fixed |
+
+### Class 2 is the one that worked, and it worked the way this document said
+
+The suggested handling was *"not 'fix the sites' — make `entity_vid` the only way
+to ask, then the remaining sites fail to compile rather than failing to match."*
+What shipped is that argument with one substitution: `Value`'s own `PartialEq`
+now compares entities by identity (`value.rs:1421-1426`), so comparison, dedup
+and hash sites cannot get it wrong without opting out. `entity_ref` is at 65
+workspace hits against the two `entity_vid` had when this was written.
+
+The boundary that could not be closed by types is held by a ratchet instead:
+`crates/uni/tests/common/arch_entity_identity.rs`, wired at `integration.rs:62`,
+greps `src/` against a per-file budget and **fails in both directions** — over
+budget flags a new site, under budget demands the budget be tightened. Ten
+hand-rolled id reads remain, each with an audited rationale, against the "~20
+extractors and 10 classifiers" this document counted.
+
+That is the first class here to be closed at the mechanism rather than the sites,
+and it is worth reading as the template for Classes 1 and 8.
+
+### Class 8 closed, and the residual is the right shape
+
+All four faces listed as live are fixed. `wants_orientation_column`
+(`df_planner.rs:174`) is now the single predicate for the schema'd and schemaless
+paths both, and `add_edge_structural_projection` **hard-errors** on a missing
+`_fwd` for `Direction::Both` rather than falling through to traversal order —
+which is exactly the `Option<bool>` discipline this document nominated as "the
+counter-example worth copying" from `traverse.rs:806-813`. Pattern comprehension
+now normalises through `resolve_stored_edge_endpoints`, i.e. mechanism C, the
+storage probe, which was the other suggested remedy.
+
+Two residuals, both narrower than any filed face: `plan_traverse_virtual_edge`
+has no `COL_FWD` request site, so a `Both` virtual-edge hop hits the new error —
+**loud, not silent**, which is the point of the error. And `resolve_stored_edge`'s
+inconclusive fallback still yields traversal order for an edge type with no CSR
+adjacency.
+
+### Class 1: the tiering worked and then chose for us
+
+This document proposed tiering the 27 sites *because* "a fix pass that starts at
+the top of the table removes wrong answers, one that starts at the bottom removes
+log noise." Both bottom tiers are done and the top one is not.
+
+The two project-wide sub-decisions this document asked to make once were in fact
+made, and correctly — a failed *index or status write* is now recorded rather
+than dropped (Tier 3: no `let _ = update_index_metadata` remains, all three sites
+count `uni_index_status_write_failures_total`), and five default-index sites route
+through one `record_default_index_failure` helper (Tier 2). The first
+sub-decision — *does a failed read ever return a default?* — is the one still
+unanswered, and it is the one that owns every remaining wrong answer:
+
+- `common.rs:1949` — `ScalarKey::Utf8(format!("opaque@{row_idx}"))`, no log.
+  DISTINCT and GROUP BY silently stop deduplicating.
+- `writer.rs:2194`, `:2418` — the ext_id uniqueness probe still admits a
+  duplicate on an I/O error.
+- `value_codec.rs:214` — a CRDT counter silently reads 0.
+- `writer.rs:5064` — a label lookup swallowing `Err`; **not in this document's
+  table**, found on the re-read.
+
+Two fixed and worth recording as evidence the approach works: `scan.rs:1470`
+propagates instead of returning an all-NULL column, and **zero `new_null_array`
+error-fallbacks remain repo-wide**; `storage/index.rs:230`/`:350` now discriminate
+`is_dataset_not_found` from a real error, so a broken index no longer reads as
+"no such UID". Two unaudited siblings of that same pattern remain at
+`inverted_index.rs:78` and `sparse_index.rs:225`.
+
+### Class 3, and a hazard this document's own framing created
+
+Class 3's #242 was filed on a countable headline — "zero `try_grow` sites". Six
+operators now reserve, so the headline is false and a status check by grep would
+close the issue. **The mechanism is 55 of 58 intact**: every other `df_graph`
+exec has no `MemoryConsumer`, including `shortest_path`, `recursive_cte`,
+`vector_knn`, `pattern_comprehension`, the mutation execs and the whole Locy
+runtime.
+
+Worse for the class as stated: `scan.rs:1552-1560` concedes the reservation
+happens **after** the batch is built. That converts an OOM into an error — a real
+improvement in blast radius — but it is not the bound the class asks for, and it
+cannot be until the scan is genuinely incremental. Which is why #214 with #240
+correctly sits ahead of #242 rather than beside it.
+
+**A class issue whose title states a countable fact gets closed by fixing the
+count.** This document's own advice was that a class issue listing 30 sites
+invites 30 patches and a 31st site next quarter; the sharper version is that a
+class issue listing a *number* invites moving the number.
+
+### Class 7, and the finding that extends it
+
+Still open, still generating instances: `repro_commit_timeout_after_durable.rs`
+asserts that a single-writer commit must not report `CommitTimeout`, and asserts
+it **only** with `async_flush_enabled: false` — the path where the lock is
+uncontended by construction. #177's ratchet is also pinned rather than
+ratcheting: `MAX_UNPROVEN = 32` unchanged, 32 of ~37 rows `Unproven`, only **2**
+`Proven`, and the gate asserts *equality*, so proving an operator fails the build
+until someone edits the constant. And `registry.rs:155-158` classifies
+`ForeachExec` as `Unproven` where no grammar path exists — it is `Unreachable`,
+so the row is false and inflates the budget by one.
+
+The extension this round earned, and it is about documents rather than tests:
+
+> **A completion claim with no discriminating check is indistinguishable from no
+> claim.**
+
+Class 7's rule is applied here to test coverage throughout and was never turned
+on the project's own status tables. Three entries in
+`issue_triage_2026-09-03.md` were wrong on re-read — #233's tier assignment,
+#216's second clause, #178 never checked at all — by exactly the mechanism this
+class describes. The 2026-09-02 addendum above already sharpened the rule once
+(*discrimination bounds a test from below, never from above*); this is the same
+rule applied to a ledger.
+
+### A class this review missed
+
+**Infrastructure wired and never consumed** — five sites, filed as five unrelated
+issues, none referencing another: `ScanRequest::with_limit` (#239, zero callers),
+`index_consulted` (#195, a real metric with zero benchmark hits), `max_impact`
+(#118, stored and unread for scoring), `get_batch_edge_props_for_type` (#222,
+exists while the hot caller holds the ids it needs), `prefers_full_scan` (#237,
+one caller from the eid path while the endpoint-vid arm 160 lines below chooses
+by `match` arm).
+
+It passes this document's own test for a class — one mechanism, sites that do not
+know about each other — and it has a cheap detector the project already trusts: a
+single-caller / dead-surface ratchet in the style of `arch_entity_identity.rs`.
+Two of the five are inputs #224 would want to consume, so it is worth doing
+before Class 4 rather than after.
+
+---
+
+## Status — 2026-09-06
+
+Class 1 is closed for silent wrong answers across the whole workspace, not
+just the crates this review audited. The ledger is in
+`issue_triage_2026-09-03.md`'s *Status — 2026-09-06*; what belongs here is
+what it says about **this document's method**.
+
+### The scope note at the bottom of this review was the load-bearing error
+
+Under *What this review could not determine*, this document records:
+
+> Plugin, CLI, bulk and CRDT crates were not audited for Class 1; roughly 25
+> further warn sites exist there, mostly scheduler and CDC paths.
+
+Both halves are wrong in the same direction. Measured: **~40 Tier 1 sites**
+in that scope — more than the 27 this review catalogued in total — and only 8
+of the 29 in the plugin crates are in scheduler/CDC code.
+
+The mechanism of the error is the part worth keeping. **The estimate counted
+`warn!` sites.** 28 of 36 warns in those crates genuinely are in
+scheduler/CDC/trigger files, so the characterization is a correct description
+of the *logging*. But 98 `let _ =` swallows there log nothing at all, and most
+of the worst findings emit no diagnostic whatsoever — including the two that
+outrank anything in this document's own table (an ABI-incompatible plugin
+loading, and a scan returning rows that violate its `WHERE` clause).
+
+> **Counting the failures that announce themselves cannot measure the failures
+> that do not** — and a class defined by silence is exactly where that bites.
+
+This review's Class 7 says an optimization with a correctness-preserving
+fallback is invisible to result-only tests. The scope note is the same
+sentence about auditing: a swallowed error with no log is invisible to a
+warn-site census. The census was the instrument, and it could not fail.
+
+### The remedy this review argued for, applied to Class 1
+
+Class 2 closed at the boundary and Class 8 closed by making absence an error.
+Class 1 had no equivalent, because "a failed read" is not one call site — so
+it closed twice at the sites and came back the second time in the crates
+nobody had walked.
+
+`crates/uni/tests/common/arch_fail_open.rs` is the boundary it can have: a
+CI ratchet on the **decisions**, not on the class. Three rules, each with a
+canonical remedy — an index dataset opened with `.ok()`, an index-status
+write dropped with `let _ =`, not-found classified by matching error text.
+Deliberately narrow: a general "no swallowed error" scan would budget
+hundreds of ordinary `unwrap_or_default` uses and the real entries would
+drown, which is the inflation that makes an audit worthless.
+
+It earned itself immediately. Writing it turned up **a second
+`let _ = update_index_metadata` in a file that same session had already
+audited and fixed by hand**, plus a `DROP INDEX ... IF EXISTS` that decided
+"no such index" by looking for "not found" in an error message.
+
+### One correction to this document's own table
+
+`df_graph/common.rs` is listed under *The worst instances* as making DISTINCT
+and GROUP BY stop deduplicating. **Measured against arrow 58: unreachable.**
+`ArrayFormatter::try_new` succeeds for all 26 constructible types, so the
+`opaque@{row_idx}` arm cannot be reached by any array that can be built. It
+is defense in depth, now pinned by a test that fails if an arrow upgrade ever
+introduces an unformattable type. Both the original review and a later reader
+reached "probably unreachable" by reading arrow's match arms; running it is
+what made the difference between a guess and a licence to ship without a test.
+
+### And one about audits generally
+
+Three sites on the audit list were not defects: one unreachable, one a
+documented contract (`Float64Column::get`), one a documented shorthand (the
+Rhai `col{i}` yield name) whose "fix" **broke four passing tests**. Three real
+defects were absent from the list entirely. An audit's tiering is a starting
+hypothesis about extent — the same thing this project already knows about a
+defect's filed description — and it is wrong in both directions.

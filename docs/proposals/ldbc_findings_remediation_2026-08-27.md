@@ -2121,3 +2121,135 @@ Two items this round leaves open rather than closes:
 round. Five closing keywords cannot fire until they merge: `Fixes #231`,
 `Fixes #236`, `Fixes #238`, `Fixes #252` and `Fixes #253`. #231's already failed
 to fire once, when its commit was the one left out of PR #250.
+
+---
+
+## Status — 2026-09-05, later
+
+No measurement this round and no code change: a full re-verification of all 44
+open issues against the source, six readers in parallel, one per cluster. The
+ledger is in `issue_triage_2026-09-03.md`'s *Status — 2026-09-05, third pass*
+and the class-level outcome in `issue_class_review_2026-09-01.md`'s *Status —
+2026-09-05*. What belongs here is the part that bears on this document's own
+plan.
+
+### The queue is unchanged, with two items inserted ahead of it
+
+**#214 with #240**, then **#239**, then **#224** — unchanged, and everything
+verified this round supports it. Two insertions:
+
+1. **Merge PR #255 and the five commits above it.** Five closing keywords are
+   held: `Fixes #231`, `#236`, `#238`, `#252`, `#253`. #231's has already failed
+   to fire once, when its commit was the one left out of PR #250. This is the
+   second recurrence of what the class review identified on 2026-09-01 as *"the
+   single highest-value action in this document and it is not a code change."*
+2. **#233 Tier 1.** Four silent wrong-answer sites survive, and this document's
+   own ordering principle — wrong answers before crashes before gaps before speed
+   — puts them above every Tier 2 item in the queue. They are currently recorded
+   as done.
+
+**#249 should be scoped rather than queued.** The 2026-09-04 status calls it
+"Loud, not silent," which is true and was the reason it went to the tail. But
+`add_columns` / `alter_columns` / `NewColumnTransform` return **zero hits** across
+`crates/uni-store/src`: there is no add-column path at all, so a label that gets
+a property after it has flushed data is permanently unwritable, and reopen does
+not clear it. That is a design gap sized like #224, not a defect sized like
+#253. Loudness is detectability, not severity, and the tiering in use has no row
+for it.
+
+### #242's scope item 2 is unblocked and its headline is spent
+
+Six operators now reserve (`vid_lookup_join.rs`, `scan.rs`, `traverse.rs`), so
+the filed headline — zero `try_grow` sites — is false while the mechanism is 55
+of 58 intact. Every other `df_graph` exec still has no `MemoryConsumer`.
+
+The part that bears on this document: `scan.rs:1552-1560` records that the
+reservation happens **after** the batch is built. That is why peak RSS can still
+run far past the pool, and it is the same fact as #214 — the scan bounds
+survival, not construction. The 2026-09-03 note that 14.5 GiB against a 1 GiB
+pool "is #242" is right about the issue number and incomplete about the cause:
+until the scan is incremental, reserving cannot happen early enough to bound
+anything. #214 with #240 is therefore not merely *ahead of* #242, it is a
+precondition for #242 meaning what it says.
+
+### Wave 5.2–5.5, third time of asking
+
+Still not started, and this round adds a fact that bears on whether it should
+be. **#224 is confirmed at the strongest reading yet**: `estimate_costs` ignores
+its plan and returns constants, there are **zero `fn statistics` across all 39
+`impl ExecutionPlan` blocks** in `uni-query`, and **no `OptimizerRule` is defined
+in the crate at all** — pinned by `pattern_anchor_test.rs:115-129`, which asserts
+a middle-bound pattern still cross-joins.
+
+So the wave's remaining justification is throughput against a planner with no
+cardinality information whatsoever. #237, #219, #225 and #226 are all decisions
+made without it. Sequencing any of them before #224 fits more constants to one
+dataset, which is the concern `prefers_full_scan`'s own rustdoc already conceded
+about itself.
+
+A related confirmation for #213: `QueryPlanner::plan` returns the hand-built plan
+with **no physical-optimizer pass**, so DataFusion's `LimitPushdown` cannot
+rescue the fetch-less `SortExec` even in principle. The issue's diagnosis — this
+needs a spillable TopK, not a one-line pushdown — is stronger than it was filed.
+
+### The instrument lesson, applied to this document
+
+The 2026-09-03 status named two cheap rules: *a differential needs to vary one
+mechanism, not one line of query text*, and *report the total beside the parts*.
+Both are about measurement. This round found the same failure in the tracking
+instead.
+
+Three entries in the sibling ledger were wrong on re-read — #233's tier
+assignment (recorded backwards: Tiers 2 and 3 are closed, Tier 1 is open),
+#216's second clause (closed on its first), and #178 (fixed by the #181/#182
+work; never checked). None was a careless entry. Each was written from a real
+observation that answered a narrower question than the one being recorded.
+
+The generalisation, which extends Class 7 rather than repeating it:
+
+> **A completion claim with no discriminating check is indistinguishable from no
+> claim.**
+
+And the reason #233 in particular drifted is worth stating, because it will
+recur: Tiers 2 and 3 had countable, greppable completion criteria and Tier 1 did
+not. Work moved toward the tier that could be *declared* finished. The same
+pressure applies to any issue whose title states a number — #242 is the live
+example, where fixing six operators falsifies the headline and leaves the
+mechanism intact.
+
+### Two things this round did not do
+
+It measured nothing. Every verdict is a source read, and where an issue's
+reachability by a user query was already unproven it remains unproven — the
+limitation the class review recorded under *Method, and its limits* is
+untouched. Nothing here revises SF1; the 2026-09-03 numbers stand.
+
+---
+
+## Status — 2026-09-06
+
+No measurement and no latency work: #233's remaining scope was audited and
+closed for silent wrong answers. Details are in
+`issue_triage_2026-09-03.md`'s *Status — 2026-09-06*. What bears on this
+document is a single point, and it is one this document has now made three
+times in three different registers.
+
+The 2026-09-03 status named two rules from the IC5 round: *a differential
+needs to vary one mechanism, not one line of query text*, and *report the
+total beside the parts*. Both are about an instrument that measures a part and
+leaves the whole unmeasured. #233's scope estimate — "roughly 25 further warn
+sites" — is the same error in a third register: it counted the failures that
+log, in order to size a class defined by failures that do not. Measured, the
+scope held ~40 silent wrong answers, and 98 swallows in those crates log
+nothing at all.
+
+So the rule generalises past profiling:
+
+> An instrument that can only observe the loud cases cannot bound the quiet
+> ones — whether it is a profiler, a test, or a census used to scope work.
+
+**The queue is unchanged and now unblocked.** #233 stays open for Tier 2
+(silent slowness) in the newly-audited crates, ~7 sites, none of them wrong
+answers. Next is **#214 with #240**, still one change and still the single
+fact behind #202's unspillable sort; then **#239**; then **#224** and the rest
+of Tier 4.
