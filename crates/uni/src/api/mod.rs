@@ -708,11 +708,16 @@ impl Uni {
     /// (via `PluginRegistrar::background_job` during plugin
     /// registration); otherwise the scheduler driver logs a warning
     /// on each tick that `id` is due.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the registration could not be made durable, in
+    /// which case the job runs now but will not survive a restart.
     pub fn periodic_schedule(
         &self,
         id: uni_plugin::QName,
         schedule: uni_plugin::traits::background::Schedule,
-    ) {
+    ) -> Result<()> {
         // Route through the `SchedulerHost`'s `SchedulerControl` impl
         // (not the bare `Scheduler`) so the persistence layer captures
         // the schedule kind for restart durability.
@@ -720,14 +725,30 @@ impl Uni {
             &self.inner.scheduler_host,
             id,
             schedule,
-        );
+        )
+        .map_err(|e| UniError::Internal(anyhow::anyhow!("{e}")))
     }
 
     /// Cancel a scheduled job. Returns `true` if a job with this id
     /// was registered; `false` otherwise. Rust analogue of
     /// `CALL uni.periodic.cancel(...)`.
-    pub fn periodic_cancel(&self, id: &uni_plugin::QName) -> bool {
-        self.inner.scheduler_host.scheduler().cancel(id)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the cancellation could not be made durable, in
+    /// which case the job is cancelled in memory but its persisted row
+    /// survives and it resurrects on the next restart.
+    pub fn periodic_cancel(&self, id: &uni_plugin::QName) -> Result<bool> {
+        // #233 Tier 1: this called the bare `Scheduler`, bypassing the
+        // `SchedulerControl` impl that deletes the persisted row — so a
+        // cancelled job came back at the next restart. `periodic_schedule`
+        // above already routes through the host for exactly this reason; the
+        // two were asymmetric.
+        <crate::scheduler::SchedulerHost as uni_plugin::scheduler::SchedulerControl>::cancel(
+            &self.inner.scheduler_host,
+            id,
+        )
+        .map_err(|e| UniError::Internal(anyhow::anyhow!("{e}")))
     }
 
     /// Snapshot every known job and its current lifecycle state.

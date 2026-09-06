@@ -547,10 +547,24 @@ impl SchedulerPersistence for MemoryPersistence {
 /// time.
 pub trait SchedulerControl: Send + Sync + std::fmt::Debug {
     /// Register a job to fire on `schedule`.
-    fn add_scheduled_job(&self, id: QName, schedule: Schedule);
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::FnError`] if the registration could not be made
+    /// durable. #233 Tier 1: this returned `()`, so a failed persist was
+    /// logged and the caller was told the job was registered — it then
+    /// vanished at the next restart.
+    fn add_scheduled_job(&self, id: QName, schedule: Schedule) -> Result<(), crate::FnError>;
 
     /// Cancel a job by id. Returns `true` if it existed.
-    fn cancel(&self, id: &QName) -> bool;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::FnError`] if the cancellation could not be made
+    /// durable. #233 Tier 1: this returned a bare `bool`, so a failed
+    /// persist still reported `true` and the job resurrected on restart
+    /// while the caller had been told it was cancelled.
+    fn cancel(&self, id: &QName) -> Result<bool, crate::FnError>;
 
     /// Snapshot of every known job.
     fn list(&self) -> Vec<SchedulerJobRecord>;
@@ -594,12 +608,15 @@ pub trait SchedulerControl: Send + Sync + std::fmt::Debug {
 }
 
 impl SchedulerControl for Scheduler {
-    fn add_scheduled_job(&self, id: QName, schedule: Schedule) {
+    // The in-memory primitive has no durability to lose, so both are
+    // infallible here.
+    fn add_scheduled_job(&self, id: QName, schedule: Schedule) -> Result<(), crate::FnError> {
         Self::add_scheduled_job(self, id, schedule);
+        Ok(())
     }
 
-    fn cancel(&self, id: &QName) -> bool {
-        Self::cancel(self, id)
+    fn cancel(&self, id: &QName) -> Result<bool, crate::FnError> {
+        Ok(Self::cancel(self, id))
     }
 
     fn list(&self) -> Vec<SchedulerJobRecord> {
