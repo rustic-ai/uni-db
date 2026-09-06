@@ -611,6 +611,90 @@ async fn db_with_memory_limit(bytes: usize) -> Result<Uni> {
     Ok(Uni::in_memory().config(config).build().await?)
 }
 
+/// A first-party operator reserves what it materializes (#242).
+///
+/// `VidLookupJoinExec` replaced `HashJoinExec` on this shape by deliberate
+/// plan-shape choice. The one it replaced is pool-accounted and spillable; it
+/// was neither, so the choice narrowed the pool's coverage on purpose, for
+/// unrelated reasons. Across the whole workspace there were zero `try_grow`
+/// sites, which is why multi-GB peaks in graph operators never tripped a pool
+/// that was configured and working the entire time — every failure it ever
+/// produced came from a stock DataFusion operator.
+///
+/// **The build side has to be large.** The operator's whole point is that a
+/// small, scattered build set becomes a handful of indexed lookups, and in that
+/// regime it materializes almost nothing — an earlier version of this test used
+/// 50 sources and passed a 64 KiB ceiling honestly, because 50 probe rows really
+/// do fit. Memory only matters once the distinct-vid set is big enough that the
+/// probe fetches a large slice of the table, and past `MAX_VIDS_PER_CHUNK` it is
+/// also concatenated, which holds the chunks and the combined batch at once.
+#[tokio::test]
+async fn a_vid_lookup_join_reserves_what_it_materializes() -> Result<()> {
+    const ROWS: usize = 20_000;
+    // Above what the seeding writes reserve, far below the probe materialization
+    // measured below.
+    let db = db_with_memory_limit(512 * 1024).await?;
+    db.schema()
+        .label("Target")
+        .property("name", uni_db::DataType::String)
+        .done()
+        .label("Source")
+        .property_nullable("linked_vid", uni_db::DataType::Int64)
+        .done()
+        .apply()
+        .await?;
+
+    let session = db.session();
+    let tx = session.tx().await?;
+    tx.execute(&format!(
+        "UNWIND range(0, {}) AS i CREATE (:Target {{name: \
+         'a-name-long-enough-that-twenty-thousand-of-them-are-megabytes-' + toString(i)}})",
+        ROWS - 1
+    ))
+    .await?;
+    tx.commit().await?;
+
+    // One Source per Target: the distinct-vid set is the whole table, which is
+    // both the regime where this operator materializes and, being over
+    // `MAX_VIDS_PER_CHUNK`, the one that concatenates.
+    let tx = session.tx().await?;
+    tx.execute(&format!(
+        "UNWIND range(0, {}) AS i CREATE (:Source {{linked_vid: i}})",
+        ROWS - 1
+    ))
+    .await?;
+    tx.commit().await?;
+    db.flush().await?;
+
+    let res = session
+        .query("MATCH (a:Source) MATCH (b:Target) WHERE id(b) = a.linked_vid RETURN b.name AS bn")
+        .await;
+
+    match res {
+        Err(e) => {
+            let msg = e.to_string();
+            // Naming the operator is what makes this discriminating. An earlier
+            // version accepted any message containing "memory" and passed with
+            // the reservations removed, because the post-hoc result-size check
+            // rejects this query at this ceiling too — 20k rows of names exceed
+            // it on their own. Two mechanisms, one indistinguishable assertion.
+            // The pool names the consumer that asked; the result-size check
+            // cannot.
+            assert!(
+                msg.contains("VidLookupJoinExec"),
+                "the refusal must come from the join's own reservation, not from \
+                 some other limit that happens to reject this query: {msg}"
+            );
+        }
+        Ok(rows) => panic!(
+            "a 512 KiB ceiling accepted a join that materialized {} rows; the \
+             operator is allocating outside the pool again",
+            rows.rows().len()
+        ),
+    }
+    Ok(())
+}
+
 /// The discriminating shape from #185: **one row out**, a large intermediate.
 /// The post-hoc result-size check cannot see this query at all — one integer
 /// is far below any ceiling — so if it is rejected, the rejection came from
