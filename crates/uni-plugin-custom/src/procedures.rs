@@ -964,7 +964,18 @@ macro_rules! declare_kind_procedure {
                                     let mut shadowed = record.clone();
                                     shadowed.active = false;
                                     self.store.replace(shadowed.clone());
-                                    let _ = self.persistence.save(&shadowed);
+                                    // #233 P3: propagated, matching the
+                                    // `declareFunction` shadow path (0xB20)
+                                    // which already does. The caller asked to
+                                    // declare something; if the durable half
+                                    // failed they should be told, not left
+                                    // believing it survives a restart.
+                                    self.persistence.save(&shadowed).map_err(|e| {
+                                        FnError::new(
+                                            0xB22,
+                                            format!("declare persist (native shadow): {e}"),
+                                        )
+                                    })?;
                                 }
                                 // Unsupported filter (e.g. `[SYNC]`)
                                 // or bad body: roll back the
@@ -1009,7 +1020,18 @@ macro_rules! declare_kind_procedure {
                                     let mut shadowed = record.clone();
                                     shadowed.active = false;
                                     self.store.replace(shadowed.clone());
-                                    let _ = self.persistence.save(&shadowed);
+                                    // #233 P3: propagated, matching the
+                                    // `declareFunction` shadow path (0xB20)
+                                    // which already does. The caller asked to
+                                    // declare something; if the durable half
+                                    // failed they should be told, not left
+                                    // believing it survives a restart.
+                                    self.persistence.save(&shadowed).map_err(|e| {
+                                        FnError::new(
+                                            0xB22,
+                                            format!("declare persist (native shadow): {e}"),
+                                        )
+                                    })?;
                                 }
                                 other => {
                                     return Err(FnError::new(

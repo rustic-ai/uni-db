@@ -60,7 +60,19 @@ impl ShutdownHandle {
 
             let wait_future = async {
                 for handle in handles {
-                    let _ = handle.await;
+                    // #233 P3: `let _ =` made a PANICKING background task
+                    // indistinguishable from one that exited cleanly, so
+                    // "Background tasks completed gracefully" was logged either
+                    // way. Nothing can be done about it at shutdown, but it
+                    // should not be silent.
+                    if let Err(e) = handle.await
+                        && !e.is_cancelled()
+                    {
+                        tracing::error!(
+                            error = %e,
+                            "background task did not exit cleanly during shutdown",
+                        );
+                    }
                 }
             };
 

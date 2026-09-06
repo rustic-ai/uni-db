@@ -35,6 +35,9 @@ thiserror = { workspace = true }
 futures = { workspace = true }
 smol_str = "0.3"
 # observability — OpenTelemetry tracing-subscriber layer + traceparent helpers
+# #233 P2: a halted CDC stream and a degraded scheduler were readable only
+# from inside this crate; both are now emitted as metrics.
+metrics = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-opentelemetry = { workspace = true }

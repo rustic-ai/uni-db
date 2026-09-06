@@ -155,6 +155,27 @@ struct ActiveStream {
     halted: bool,
 }
 
+/// Halt `active`, counting the transition so an operator can see it.
+///
+/// #233 P2: `halted` was a private `bool` whose only reader outside this
+/// module was `halted_stream_count()`, which nothing outside the crate called.
+/// A halted feed is correct-but-stopped and was therefore invisible. Counting
+/// only the `false -> true` edge keeps the total meaningful when
+/// `halt_all_streams` sweeps a list that is already partly halted.
+fn halt(active: &mut ActiveStream, reason: &'static str) {
+    if active.halted {
+        return;
+    }
+    active.halted = true;
+    metrics::counter!("uni_cdc_stream_halted_total").increment(1);
+    tracing::error!(
+        provider = %active.name,
+        reason,
+        "CdcRuntime: stream halted; its checkpoint stays at the last contiguous commit and it \
+         will not resume without a restart",
+    );
+}
+
 /// Resume `provider` from its persisted LSN and start its stream.
 ///
 /// Returns the [`ActiveStream`] on success, or `None` (logged) on failure so
@@ -328,7 +349,7 @@ impl CdcRuntime {
     /// dropped commits that cannot be redelivered.
     fn halt_all_streams(&self) {
         for active in self.streams.lock().iter_mut() {
-            active.halted = true;
+            halt(active, "broadcaster lagged");
         }
     }
 
@@ -389,7 +410,7 @@ impl CdcRuntime {
                     "CdcRuntime: commit mutations could not be materialized; halting stream to \
                      avoid a silent feed gap (its checkpoint stays at the last delivered commit)",
                 );
-                active.halted = true;
+                halt(active, "mutations could not be materialized");
             }
             return;
         }
@@ -420,7 +441,7 @@ impl CdcRuntime {
                     "CdcRuntime: deliver failed; halting stream to avoid a silent feed gap \
                      (its checkpoint stays at the last delivered commit)",
                 );
-                active.halted = true;
+                halt(active, "deliver failed");
                 continue;
             }
             match active.stream.checkpoint() {
@@ -428,10 +449,16 @@ impl CdcRuntime {
                     if let Some(sidecar) = &self.checkpoint
                         && let Err(e) = sidecar.write_one(&active.name, lsn)
                     {
-                        tracing::debug!(
+                        // #233 P3: was `debug!`, i.e. below the default level, so
+                        // a lost checkpoint was invisible in a normal
+                        // deployment. Not a gap — the commit WAS delivered —
+                        // but the provider will be redelivered it after a
+                        // restart, which is at-least-once and worth saying.
+                        tracing::warn!(
                             provider = %active.name,
                             error = %e,
-                            "CdcRuntime: checkpoint write failed",
+                            "CdcRuntime: checkpoint write failed; this commit will be \
+                             redelivered after a restart (at-least-once)",
                         );
                     }
                 }

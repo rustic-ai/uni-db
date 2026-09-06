@@ -77,10 +77,19 @@ impl PyPluginHandle {
 }
 
 fn build_manifest(outcome: &LoadOutcome) -> PluginManifest {
-    let version = outcome
-        .version
-        .parse::<Version>()
-        .unwrap_or_else(|_| Version::new(0, 0, 0));
+    // #233 P3: a malformed guest version becomes `0.0.0`, which then fails any
+    // `depends_on` semver constraint — loudly, at registration, so this is not
+    // a wrong answer. It is reported so the cause is the version string rather
+    // than a mysterious unsatisfied dependency.
+    let version = outcome.version.parse::<Version>().unwrap_or_else(|e| {
+        tracing::warn!(
+            version = %outcome.version,
+            error = %e,
+            "plugin declared an unparseable version; reporting it as 0.0.0, which will fail \
+             any dependency constraint on this plugin",
+        );
+        Version::new(0, 0, 0)
+    });
 
     // Declared capabilities are the effective set the loader resolved.
     // For PyO3 we also fold in `Scope::Session` as the default.

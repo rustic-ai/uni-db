@@ -12777,6 +12777,7 @@ dependencies = [
  "chrono",
  "datafusion",
  "futures",
+ "metrics",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

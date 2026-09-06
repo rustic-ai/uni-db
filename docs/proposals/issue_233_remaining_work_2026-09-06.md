@@ -72,15 +72,24 @@ site, with a `debug!` so a genuine registration mistake is greppable.
 The sibling at `l0.rs:433` was real and is fixed: a provider failure no longer
 reports itself as a variant mismatch.
 
-## P2 — observability
+## P2 — observability — **CLOSED 2026-09-06**
 
-`cdc_runtime.rs:323` `halted_stream_count()` and `scheduler.rs:378`
-`persistence_degraded()` are **read by nothing outside their own crates**. A
-halted CDC feed and a scheduler that could not load its jobs are both
-correct-but-stopped, and invisible to an operator. Surface them through a
-`uni.system.*` procedure or a gauge. MODERATE.
+~~`cdc_runtime.rs:323` `halted_stream_count()` and `scheduler.rs:378`
+`persistence_degraded()` are read by nothing outside their own crates.~~
+**Done via metrics**, which needs no new API surface and no breaking change:
 
-## P3 — trivial honesty fixes
+- `uni_cdc_stream_halted_total` — incremented on the `false -> true` edge only,
+  through a `halt()` helper shared by all three halt sites, so the total stays
+  meaningful when `halt_all_streams` sweeps a partly-halted list. The helper
+  also logs at `error` with the reason.
+- `uni_scheduler_persistence_degraded` — a gauge set on both the healthy and
+  the degraded startup path, so its absence means "no scheduler", not "fine".
+
+A `uni.system.*` procedure was considered and not built: it is a larger surface
+for the same information, and an operator watching a halted feed wants a
+scrape, not a query.
+
+## P3 — trivial honesty fixes — **CLOSED 2026-09-06**
 
 - `uni-plugin-builtin/.../graph_compute/scratch.rs:1153,1165,1175` — a
   `ScratchResponse` that fails to serialize returns the **empty string** to the
@@ -177,3 +186,35 @@ product decision, not a bug fix.
 4. **P2**, then **P3** as a single sweep.
 
 #233 itself should close on a judgement about tiers, not by reaching zero.
+
+---
+
+## Closing state — 2026-09-06
+
+**P0, P1, P2 and P3 are all closed.** Tier 1, Tier 2 and Tier 3 of #233 are
+now discharged in every crate the issue names, and in the crates it scoped out.
+
+Two P3 candidates were audited and deliberately left alone, for the reason
+that closes this document rather than despite it:
+
+- **`uni-plugin-conformance/src/lib.rs:276`** — the always-pass
+  `capabilities.declared` probe is documented in place as deliberate,
+  reserving a stable `id` for future capability cross-checks. It inflates the
+  conformance count by one and says so.
+- **The absent-key `determinism` default** of `"pure"` — documented, tested,
+  and shared with the Python binding. Changing it is a product decision.
+
+Two more were split rather than uniformly fixed, on the principle this whole
+round converged on: **propagate where a caller asked for the work, record
+where there is nobody to tell.**
+
+- `uni-plugin-custom/procedures.rs` (x2) propagates, matching its
+  `declareFunction` sibling — the user invoked a declare, and the durable half
+  failing is theirs to know.
+- `uni-plugin-custom/lib.rs:380` records, because it is boot hydration and the
+  downgrade is re-derived on every restart. Failing startup over a
+  self-healing condition would be worse than the condition.
+
+That distinction, not the tier label, is what did the work throughout: the
+useful question was never "how bad is this" but **"does anything correct it,
+and is there anyone to tell?"**

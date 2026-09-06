@@ -293,6 +293,7 @@ impl SchedulerHost {
                 }
                 // Anything previously stuck in `Running` is now
                 // `Pending` and will fire on next tick.
+                metrics::gauge!("uni_scheduler_persistence_degraded").set(0.0);
                 let requeued = scheduler.requeue_orphaned_runs();
                 if requeued > 0 {
                     tracing::info!(
@@ -314,6 +315,11 @@ impl SchedulerHost {
                      lost on disk, but none will run in this process and list() will report none",
                 );
                 persistence_degraded = true;
+                // #233 P2: `persistence_degraded` is readable only through an
+                // accessor nothing outside this crate calls, so a scheduler
+                // that silently lost its whole persisted job set looked
+                // identical to an empty one. Emit it.
+                metrics::gauge!("uni_scheduler_persistence_degraded").set(1.0);
             }
         }
 
@@ -466,11 +472,17 @@ fn dispatch_one_tick(
                 job = %id,
                 "scheduler: circuit breaker open; skipping this tick"
             );
-            // Mark finished with success=false so the schedule
-            // recomputes a next fire instead of leaving the job stuck
-            // Running. We intentionally don't `record_failure` here —
-            // the breaker is already open; recording would only add
-            // noise.
+            // Mark finished with success=false so the schedule recomputes a
+            // next fire instead of leaving the job stuck Running. We
+            // intentionally don't `record_failure` here — the breaker is
+            // already open; recording would only add noise.
+            //
+            // #233 P3: `success=false` also increments `consecutive_failures`
+            // for a run that never happened, so the in-memory counter drifts
+            // above the number of real failures while the breaker is open. It
+            // is reset by the next success, so this is drift rather than a
+            // wrong answer — counted so the drift is attributable.
+            metrics::counter!("uni_scheduler_breaker_skipped_total").increment(1);
             scheduler.mark_finished(&id, false);
             continue;
         }

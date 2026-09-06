@@ -1437,11 +1437,25 @@ impl BulkWriter {
             if let Some(meta) = schema.edge_types.get(edge_type_name.as_str()) {
                 let type_id = meta.id;
                 for &dir in uni_store::storage::direction::Direction::Both.expand() {
-                    let _ = self
+                    // #233 P3: pure prewarm. `uni-query`'s
+                    // `ensure_adjacency_warmed` warms lazily and PROPAGATES,
+                    // so a failure here costs first-query latency and nothing
+                    // else — which is why it stays fail-open. Logged at debug
+                    // so an unexplained first-query cost is attributable.
+                    if let Err(e) = self
                         .backend
                         .storage
                         .warm_adjacency(type_id, dir, None)
-                        .await;
+                        .await
+                    {
+                        tracing::debug!(
+                            edge_type = type_id,
+                            ?dir,
+                            error = %e,
+                            "bulk commit: adjacency prewarm failed; the first traversal will \
+                             build it instead",
+                        );
+                    }
                 }
             }
         }
