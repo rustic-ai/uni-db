@@ -246,3 +246,65 @@ happen after the scan becomes incremental.
 
 Tier 2's remaining memory items (#241, #214, #213) still share one root and
 should still move as one track rather than singly.
+
+---
+
+## Status — 2026-09-05, later
+
+A second pass the same day, prompted by re-running this document's own order
+against the tree. Narrative and measurements are in the 2026-09-05 status of
+`ldbc_findings_remediation_2026-08-27.md`; this is the ledger.
+
+### Verified against the source, not the filing
+
+The previous status recorded that #243 and #234 had been *overtaken* — fixed
+while still listed here as work. Checking the rest of the Tier 1 instances the
+same way finds two more:
+
+| # | state | evidence |
+|---|---|---|
+| #216 | **closed in fact** | `locy_eval.rs` matches on `(a.entity_ref(), b.entity_ref())`, with the mixed pairings documented beside it |
+| #217 | **closed in fact** | `expr_eval.rs` carries a comment saying the raw `_vid` arms were deleted for `entity_ref`; `entity_aware_eq` routes through it too |
+| #234 | **closed in substance** | `entity_vid` / `entity_ref` is at 28 call sites, against the two it was filed on; `arch_entity_identity.rs` is the ratchet. The remaining boundary should stay open — `COPY FROM` input and user map properties can legitimately carry `_id` |
+| #239 | still holds | `ScanRequest::with_limit` has zero callers; the `scan_all_backend_with_limit` hits are a differently-named store method |
+| #176, #174 | still hold | as filed |
+| #254 | spam | auto-submitted promotion for an unrelated project; its title is a truncated copy of this repo's tagline |
+
+So four of this document's Tier 1 rows are done and one is spam. **The count of
+open issues is now a poor proxy for the work twice over** — once for the
+class/instance double-count at the top of this document, and once because closed
+work reads as open until someone opens the file.
+
+### Worked since
+
+| # | state |
+|---|---|
+| #253 | **fixed.** The schemaless edge-type registry was never persisted. The issue reports the pattern comprehension; the untyped `MATCH (a)-[e]-(x)` was also returning nothing, which is the wider and louder case |
+| *(unfiled)* | **fixed.** A path's relationship type and its nodes' labels were read from L0-only sources, so both were lost once the data was flushed. Five live call sites for the label half. Needs an issue — its commit closes nothing |
+| CI | **green.** `repro_get_edges_scales_with_graph_size` failed on a `CommitTimeout`; three tests shared the exposure and now configure the guard. `--no-fail-fast` added to the PR workflow, which had been hiding 2171 of 6869 tests behind the first failure |
+
+### Recommended next
+
+Step 1 of the previous list is discharged in intent — the branch is now **20
+commits ahead of `origin/main`**, and five closing keywords are waiting on the
+merge: `Fixes #231`, `#236`, `#238`, `#252`, `#253`.
+
+The rest is unchanged, and nothing this round displaces it:
+
+1. **#214 with #240**, still one change and still the single fact behind #202's
+   unspillable sort; it unblocks the #238 revisit that #242's scope item 2 waits
+   on.
+2. **#239** if a small self-contained item is wanted first.
+3. **#224**, then the rest of Tier 4.
+
+Two additions to the tail of the queue, both from this round:
+
+- **File the path/label hydration defect.** It is fixed with gating tests, but
+  nothing tracks it.
+- **A vacuous-coverage instance of #205, on an invariant already written down.**
+  `repro_commit_timeout_after_durable.rs` asserts that a single-writer commit
+  must not report `CommitTimeout`, and asserts it only with
+  `async_flush_enabled: false` — the path where the lock is uncontended by
+  construction. The default path is not covered. Whether a single-writer commit
+  should fail because a *background* flush holds the lock is the product
+  question the CI fix sidesteps rather than answers.
