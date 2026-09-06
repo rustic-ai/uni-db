@@ -27,6 +27,13 @@ use uni_plugin::{FnError, PluginError, PluginRegistrar, QName};
 
 /// Strict-domain violation error code (probability aggregate input ∉ `[0, 1]`).
 const CODE_STRICT_DOMAIN: u32 = 0x501;
+/// A non-null cell could not be read as a value the aggregate accepts.
+///
+/// #233 Tier 1: these cells used to be counted and then skipped, so a column
+/// of a numeric type `numeric_at` did not recognise produced a confident
+/// wrong answer rather than an error — `SUM`/`AVG` of 0.0, `MNOR` of 0.0 (an
+/// assertion of "impossible") and `MPROD` of 1.0 ("certain").
+const CODE_UNREADABLE_CELL: u32 = 0x502;
 
 /// Register all built-in Locy aggregates into `r`.
 ///
@@ -58,11 +65,11 @@ pub fn register_into(r: &mut PluginRegistrar<'_>) -> Result<(), PluginError> {
 /// produces byte-identical `cypher_value_codec` payloads. `LargeBinary`
 /// cells are decoded back through the codec; unsupported types map to
 /// [`uni_common::Value::Null`].
-fn cell_value(col: &dyn Array, row_idx: usize) -> uni_common::Value {
+fn cell_value(col: &dyn Array, row_idx: usize) -> Result<uni_common::Value, FnError> {
     if col.is_null(row_idx) {
-        return uni_common::Value::Null;
+        return Ok(uni_common::Value::Null);
     }
-    match col.data_type() {
+    Ok(match col.data_type() {
         DataType::Int64 => {
             let arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
             uni_common::Value::Int(arr.value(row_idx))
@@ -98,10 +105,25 @@ fn cell_value(col: &dyn Array, row_idx: usize) -> uni_common::Value {
                 .downcast_ref::<arrow_array::LargeBinaryArray>()
                 .unwrap();
             let bytes = arr.value(row_idx);
-            uni_common::cypher_value_codec::decode(bytes).unwrap_or(uni_common::Value::Null)
+            // #233 Tier 1: a failed decode used to become `Value::Null`, so a
+            // COLLECT list carried a null in place of a value that exists and
+            // could not be read — indistinguishable from a genuine null.
+            uni_common::cypher_value_codec::decode(bytes).map_err(|e| {
+                FnError::new(
+                    CODE_UNREADABLE_CELL,
+                    format!("COLLECT: cannot decode a non-null cell: {e}"),
+                )
+            })?
         }
-        _ => uni_common::Value::Null,
-    }
+        // #233 Tier 1: an unsupported type used to collapse to `Value::Null`,
+        // silently replacing every value in the column.
+        other => {
+            return Err(FnError::new(
+                CODE_UNREADABLE_CELL,
+                format!("COLLECT: cannot read a non-null cell of type {other}"),
+            ));
+        }
+    })
 }
 
 fn downcast_state<S: LocyAggState + 'static>(other: &dyn LocyAggState) -> Result<&S, FnError> {
@@ -383,10 +405,13 @@ impl LocyAggState for SumState {
             if col.is_null(i) {
                 continue;
             }
+            // #233 Tier 1: `has_value` used to be set before the read, so an
+            // unreadable cell made SUM report 0.0 instead of null or an error.
+            let Some(v) = numeric_at(col, i) else {
+                return Err(unreadable_cell("SUM", col));
+            };
             self.has_value = true;
-            if let Some(v) = numeric_at(col, i) {
-                self.value += v;
-            }
+            self.value += v;
         }
         Ok(())
     }
@@ -557,10 +582,14 @@ impl LocyAggState for AvgState {
             if col.is_null(i) {
                 continue;
             }
+            // #233 Tier 1: `count` used to be incremented before the read, so
+            // an unreadable cell inflated the divisor without contributing to
+            // the sum — dragging the average toward zero silently.
+            let Some(v) = numeric_at(col, i) else {
+                return Err(unreadable_cell("AVG", col));
+            };
             self.count += 1;
-            if let Some(v) = numeric_at(col, i) {
-                self.sum += v;
-            }
+            self.sum += v;
         }
         Ok(())
     }
@@ -630,7 +659,7 @@ impl LocyAggState for CollectState {
             if col.is_null(i) {
                 continue;
             }
-            self.values.push(cell_value(col, i));
+            self.values.push(cell_value(col, i)?);
         }
         Ok(())
     }
@@ -727,10 +756,13 @@ impl LocyAggState for MnorState {
             if col.is_null(i) {
                 continue;
             }
-            self.has_value = true;
+            // #233 Tier 1: skipping an unreadable cell left the identity
+            // element in place, so MNOR reported a CONFIDENT probability
+            // (0.0 = impossible, 1.0 = certain) built from rows it never read.
             let Some(raw) = numeric_at(col, i) else {
-                continue;
+                return Err(unreadable_cell("MNOR", col));
             };
+            self.has_value = true;
             let p = check_domain(raw, cx.strict, "MNOR")?;
             match cx.semiring {
                 FoldSemiring::AddMult => self.complement_product *= 1.0 - p,
@@ -849,10 +881,13 @@ impl LocyAggState for MprodState {
             if col.is_null(i) {
                 continue;
             }
-            self.has_value = true;
+            // #233 Tier 1: skipping an unreadable cell left the identity
+            // element in place, so MPROD reported a CONFIDENT probability
+            // (0.0 = impossible, 1.0 = certain) built from rows it never read.
             let Some(raw) = numeric_at(col, i) else {
-                continue;
+                return Err(unreadable_cell("MPROD", col));
             };
+            self.has_value = true;
             let p = check_domain(raw, cx.strict, "MPROD")?;
             match cx.semiring {
                 FoldSemiring::AddMult => {
@@ -932,13 +967,39 @@ impl LocyAggState for MprodState {
 
 /// Read row `i` as `f64` (widening `Int64`); `None` for null / non-numeric.
 fn numeric_at(col: &dyn Array, i: usize) -> Option<f64> {
-    if let Some(a) = col.as_any().downcast_ref::<Float64Array>() {
-        Some(a.value(i))
-    } else {
-        col.as_any()
-            .downcast_ref::<Int64Array>()
-            .map(|a| a.value(i) as f64)
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::{
+        Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type,
+        UInt32Type, UInt64Type,
+    };
+
+    // #233 Tier 1: this recognised only Float64 and Int64, so an Int32 or
+    // UInt64 column — perfectly valid numeric input — yielded `None` and the
+    // callers counted the row while contributing nothing to the accumulator.
+    match col.data_type() {
+        DataType::Float64 => Some(col.as_primitive::<Float64Type>().value(i)),
+        DataType::Float32 => Some(f64::from(col.as_primitive::<Float32Type>().value(i))),
+        DataType::Int64 => Some(col.as_primitive::<Int64Type>().value(i) as f64),
+        DataType::Int32 => Some(f64::from(col.as_primitive::<Int32Type>().value(i))),
+        DataType::Int16 => Some(f64::from(col.as_primitive::<Int16Type>().value(i))),
+        DataType::Int8 => Some(f64::from(col.as_primitive::<Int8Type>().value(i))),
+        DataType::UInt64 => Some(col.as_primitive::<UInt64Type>().value(i) as f64),
+        DataType::UInt32 => Some(f64::from(col.as_primitive::<UInt32Type>().value(i))),
+        DataType::UInt16 => Some(f64::from(col.as_primitive::<UInt16Type>().value(i))),
+        DataType::UInt8 => Some(f64::from(col.as_primitive::<UInt8Type>().value(i))),
+        _ => None,
     }
+}
+
+/// The error raised when a non-null cell cannot be read by an aggregate.
+fn unreadable_cell(agg: &str, col: &dyn Array) -> FnError {
+    FnError::new(
+        CODE_UNREADABLE_CELL,
+        format!(
+            "{agg}: cannot read a non-null cell of type {} as a number",
+            col.data_type()
+        ),
+    )
 }
 
 /// Validate a probability-domain input and return the clamped value.
@@ -977,6 +1038,58 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Float64, true)]));
         let arr = Arc::new(Float64Array::from(values));
         RecordBatch::try_new(schema, vec![arr]).unwrap()
+    }
+
+    fn int32_batch(values: Vec<Option<i32>>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, true)]));
+        let arr = Arc::new(arrow_array::Int32Array::from(values));
+        RecordBatch::try_new(schema, vec![arr]).unwrap()
+    }
+
+    /// An Int32 column must aggregate, not silently contribute nothing.
+    ///
+    /// #233 Tier 1. `numeric_at` recognised only Float64 and Int64, and each
+    /// aggregate marked the row as seen BEFORE attempting the read, so an
+    /// Int32 column produced a confident wrong answer instead of an error:
+    /// SUM 0.0, AVG 0.0, MNOR 0.0 (asserting "impossible") and MPROD 1.0
+    /// (asserting "certain") — over rows none of which were ever read.
+    #[test]
+    fn an_int32_column_is_aggregated_rather_than_counted_and_skipped() {
+        let batch = int32_batch(vec![Some(1), None, Some(2), Some(3)]);
+
+        let mut sum = SumAgg.create();
+        sum.ingest(&batch, 0).expect("SUM ingests Int32");
+        match sum.finalize().expect("finalize") {
+            ScalarValue::Float64(Some(v)) => assert_eq!(
+                v, 6.0,
+                "SUM over Int32 must be 6.0; 0.0 is the value the skipped-cell path produced"
+            ),
+            other => panic!("expected Float64(Some), got {other:?}"),
+        }
+
+        let mut avg = AvgAgg.create();
+        avg.ingest(&batch, 0).expect("AVG ingests Int32");
+        match avg.finalize().expect("finalize") {
+            ScalarValue::Float64(Some(v)) => assert!(
+                (v - 2.0).abs() < f64::EPSILON,
+                "AVG over Int32 must be 2.0, got {v}; counting unreadable cells drags it to 0"
+            ),
+            other => panic!("expected Float64(Some), got {other:?}"),
+        }
+    }
+
+    /// A cell no aggregate can read is an error, not a confident probability.
+    #[test]
+    fn an_unreadable_cell_is_an_error_not_a_confident_probability() {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Utf8, true)]));
+        let arr = Arc::new(arrow_array::StringArray::from(vec![Some("nope")]));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+
+        let mut sum = SumAgg.create();
+        let err = sum
+            .ingest(&batch, 0)
+            .expect_err("a non-numeric non-null cell must not be silently skipped");
+        assert_eq!(err.code, CODE_UNREADABLE_CELL);
     }
 
     #[test]
