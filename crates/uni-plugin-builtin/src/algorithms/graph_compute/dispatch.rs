@@ -489,7 +489,15 @@ impl GraphComputeRegistry {
                 .emit_walks(from_i64(req.g))
                 .map(|()| KernelResponse::Unit),
             KernelId::NeighborhoodOverlap => {
-                let source = req.seeds.first().copied().unwrap_or(0);
+                // #233 Tier 1: an empty `seeds` used to default to vertex 0,
+                // and the overlap computed from that unrelated vertex was
+                // returned as if it were the caller's.
+                let Some(source) = req.seeds.first().copied() else {
+                    return Err(FnError::new(
+                        0x86F,
+                        "graph-arena: NeighborhoodOverlap requires a source vertex in `seeds`",
+                    ));
+                };
                 #[expect(clippy::cast_sign_loss, reason = "vertex ids are non-negative")]
                 let source = Vid::new(source as u64);
                 session

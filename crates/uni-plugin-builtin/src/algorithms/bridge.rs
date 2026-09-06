@@ -669,27 +669,49 @@ fn build_record_batch(
                 Arc::new(BooleanArray::from(v))
             }
             ValueType::String | ValueType::Any => {
+                // #233 Tier 1: a JSON null used to render as the literal
+                // string "null" here, while the Int/Float/Bool arms correctly
+                // produce a NULL cell. `to_string` stays as the fallback for
+                // genuinely non-string values, which is the documented
+                // stringify behaviour for `Any`.
                 let v: Vec<Option<String>> = rows
                     .iter()
                     .map(|r| {
-                        r.values.get(idx).map(|x| {
-                            x.as_str()
-                                .map(str::to_owned)
-                                .unwrap_or_else(|| x.to_string())
+                        r.values.get(idx).and_then(|x| {
+                            if x.is_null() {
+                                None
+                            } else {
+                                Some(
+                                    x.as_str()
+                                        .map(str::to_owned)
+                                        .unwrap_or_else(|| x.to_string()),
+                                )
+                            }
                         })
                     })
                     .collect();
                 Arc::new(StringArray::from(v))
             }
             ValueType::List | ValueType::Map | ValueType::Path => {
+                // #233 Tier 1: `unwrap_or_default()` wrote a ZERO-LENGTH blob
+                // when serialization failed (`serde_json` refuses NaN and
+                // +/-inf), so a list or map that could not be encoded decoded
+                // downstream as an empty one rather than surfacing.
                 let v: Vec<Option<Vec<u8>>> = rows
                     .iter()
                     .map(|r| {
                         r.values
                             .get(idx)
-                            .map(|x| serde_json::to_vec(x).unwrap_or_default())
+                            .map(|x| {
+                                serde_json::to_vec(x).map_err(|e| {
+                                    datafusion::error::DataFusionError::Execution(format!(
+                                        "cannot encode a {vt:?} yield value: {e}"
+                                    ))
+                                })
+                            })
+                            .transpose()
                     })
-                    .collect();
+                    .collect::<Result<Vec<Option<Vec<u8>>>, _>>()?;
                 Arc::new(LargeBinaryArray::from_iter(v.iter().map(|o| o.as_deref())))
             }
         };

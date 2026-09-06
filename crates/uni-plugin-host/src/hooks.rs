@@ -361,9 +361,23 @@ fn scalar_to_value(v: &ScalarValue) -> uni_common::Value {
         ScalarValue::UInt16(Some(i)) => Value::Int(i64::from(*i)),
         ScalarValue::UInt32(Some(i)) => Value::Int(i64::from(*i)),
         ScalarValue::UInt64(Some(i)) => {
-            // Truncating cast — values above i64::MAX (extremely rare for
-            // user-supplied params) saturate to i64::MAX.
-            Value::Int(i64::try_from(*i).unwrap_or(i64::MAX))
+            // #233 Tier 1: this saturated to `i64::MAX`, handing the legacy
+            // hook a plausible-looking number that is not the parameter the
+            // caller passed. This module already surfaces every other
+            // unrepresentable value as `Null` with a warning (see the
+            // `params_to_legacy` doc), so follow that convention instead of
+            // fabricating a value.
+            i64::try_from(*i).map_or_else(
+                |_| {
+                    tracing::warn!(
+                        value = *i,
+                        "UInt64 parameter exceeds i64::MAX; surfacing as Null to the legacy hook \
+                         rather than saturating",
+                    );
+                    Value::Null
+                },
+                Value::Int,
+            )
         }
         ScalarValue::Float32(Some(f)) => Value::Float(f64::from(*f)),
         ScalarValue::Float64(Some(f)) => Value::Float(*f),

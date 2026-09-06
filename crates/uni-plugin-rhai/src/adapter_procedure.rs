@@ -119,7 +119,15 @@ fn dynamic_to_record_batch(d: Dynamic, schema: &SchemaRef) -> Result<RecordBatch
             .ok_or_else(|| FnError::new(0x12, format!("procedure row {i} must be a map")))?;
         for (field_idx, field) in schema.fields().iter().enumerate() {
             let key = field.name();
-            let value = m.get(key.as_str()).cloned().unwrap_or(Dynamic::UNIT);
+            // #233 Tier 1: a key absent from the row map became UNIT, so a
+            // misspelled or forgotten yield key produced an entire all-NULL
+            // column rather than reporting that the row did not carry it.
+            let Some(value) = m.get(key.as_str()).cloned() else {
+                return Err(FnError::new(
+                    0x13,
+                    format!("procedure row {i} does not carry the declared yield key `{key}`"),
+                ));
+            };
             // Coerce numeric types — Rhai often returns INT for fields
             // declared as Float (and vice versa for cross-int sizes).
             let value = coerce_for(field.data_type(), value)?;

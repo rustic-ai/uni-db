@@ -296,10 +296,18 @@ pub fn install_aggregate_into_registry(
         .get("finalize")
         .and_then(|v| v.as_str())
         .ok_or_else(|| CustomError::BodyParse("declareAggregate: missing `finalize`".to_owned()))?;
+    // #233 Tier 1: as in `procedures.rs`, these defaulted to `"float"` and an
+    // empty argument list, so a signature that failed to decode came back
+    // after a restart as a different aggregate with the same name. The
+    // sibling `finalize` lookup above already errors; these were the outliers.
     let return_type_str = sig_meta
         .get("return_type")
         .and_then(|v| v.as_str())
-        .unwrap_or("float");
+        .ok_or_else(|| {
+            CustomError::BodyParse(
+                "declareAggregate: missing or non-string `return_type`".to_owned(),
+            )
+        })?;
     let arg_names: Vec<String> = sig_meta
         .get("arg_names")
         .and_then(|v| v.as_array())
@@ -308,7 +316,9 @@ pub fn install_aggregate_into_registry(
                 .filter_map(|v| v.as_str().map(str::to_owned))
                 .collect()
         })
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            CustomError::BodyParse("declareAggregate: missing or non-array `arg_names`".to_owned())
+        })?;
 
     let return_dt = type_str_to_arrow(return_type_str).ok_or_else(|| {
         CustomError::BodyParse(format!("unknown return type `{return_type_str}`"))

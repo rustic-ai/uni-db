@@ -153,7 +153,16 @@ fn parse_config(config_json: &str) -> Result<OverlapArgs, FnError> {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("adjacent");
     let spec = if pair_mode == "topk" {
-        let k = args.get(2).and_then(serde_json::Value::as_u64).unwrap_or(0);
+        // #233 Tier 1: a missing or non-integer `k` used to default to 0,
+        // which is a valid `TopKCandidates` value meaning "return nothing" —
+        // so `uni.gc.overlap` answered with zero rows instead of reporting
+        // that the argument was unusable.
+        let Some(k) = args.get(2).and_then(serde_json::Value::as_u64) else {
+            return Err(FnError::new(
+                0x803,
+                "gcoverlap: pair mode `topk` requires an integer k as the third argument",
+            ));
+        };
         PairSpec::TopKCandidates(u32::try_from(k).unwrap_or(u32::MAX))
     } else {
         PairSpec::AdjacentPairs
