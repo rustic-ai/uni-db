@@ -41,11 +41,12 @@
 //! `_fwd` is computed only when a query asks for it, so an undirected traversal
 //! that never calls `startNode`/`endNode` costs exactly what it cost before.
 //!
-//! One shape is still open, `#[ignore]`d against the issue that tracks it: once
-//! a `WITH` drops the endpoint variables from scope the relationship value is
-//! all that is left, and turning its `_src_vid` back into a node with
-//! properties needs a lookup against the vertex table that a scalar UDF cannot
-//! do — the remaining work under #187.
+//! The shape this file once listed as open is closed: when a `WITH` drops the
+//! endpoint variables from scope, `EndpointHydrateExec` pre-fetches the
+//! endpoints' labels and properties and hands them to the UDF, so there is no
+//! `#[ignore]` left here and no `{_vid}`-only stand-in behind it. A call that
+//! reaches the UDF with neither a rewrite nor a hydration now errors rather
+//! than answering with a properties-less node.
 
 use uni_db::{Uni, Value};
 
@@ -1070,4 +1071,177 @@ async fn a_returned_relationship_keeps_its_stored_direction() {
         "an anchor-reversed plan must report the same orientation as the \
          spelling it was rewritten from; got {rel2}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// OPTIONAL MATCH (#243, face 3)
+// ---------------------------------------------------------------------------
+//
+// The rewrite above resolves `startNode(r)` to an endpoint *variable*, so it
+// never consults `r`. On an OPTIONAL hop the endpoint the pattern hangs off is
+// the anchor from the enclosing scope, and it stays bound on a row that did not
+// match — so the call returned a node where Cypher requires null. Which side
+// leaks follows the direction: `startNode` on an outgoing hop, `endNode` on an
+// incoming one, so a test written only for the outgoing case would miss half of
+// it.
+//
+// Nothing in this file previously used OPTIONAL MATCH at all, which is why the
+// suite could not see this. The fix marks the binding optional and guards the
+// rewrite on `r._eid`; these assert both halves — null on the miss row, and the
+// real endpoint still returned on the row that matched.
+
+/// `a`-[:KNOWS]->`b`, plus `lonely` with no relationships at all.
+///
+/// One query over this fixture produces both a matching and a missing row, so a
+/// guard that over-nulls fails just as loudly as one that leaks.
+async fn optional_fixture() -> Uni {
+    let db = Uni::in_memory().build().await.unwrap();
+    let tx = db.session().tx().await.unwrap();
+    tx.execute("CREATE LABEL P (name STRING)").await.unwrap();
+    tx.execute("CREATE EDGE TYPE KNOWS FROM P TO P")
+        .await
+        .unwrap();
+    tx.execute("CREATE (:P {name:'a'}), (:P {name:'b'}), (:P {name:'lonely'})")
+        .await
+        .unwrap();
+    tx.execute("MATCH (x:P {name:'a'}), (y:P {name:'b'}) CREATE (x)-[:KNOWS]->(y)")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    db
+}
+
+/// `[(anchor, start, end)]`, ordered by anchor, for one OPTIONAL hop spelling.
+async fn optional_endpoints(db: &Uni, pattern: &str) -> Vec<(String, Value, Value)> {
+    let query = format!(
+        "MATCH (n:P) OPTIONAL MATCH {pattern} \
+         RETURN n.name AS anchor, startNode(r).name AS s, endNode(r).name AS e \
+         ORDER BY anchor"
+    );
+    db.session()
+        .query(&query)
+        .await
+        .unwrap()
+        .rows()
+        .iter()
+        .map(|row| {
+            let vals = row.values();
+            let Value::String(anchor) = &vals[0] else {
+                panic!("anchor must be a string, got {:?}", vals[0]);
+            };
+            (anchor.clone(), vals[1].clone(), vals[2].clone())
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn optional_match_outgoing_nulls_both_endpoints_on_a_miss() {
+    let db = optional_fixture().await;
+    let rows = optional_endpoints(&db, "(n)-[r:KNOWS]->(m:P)").await;
+
+    // 'a' matches: both endpoints are real.
+    assert_eq!(
+        rows[0],
+        (
+            "a".to_string(),
+            Value::String("a".to_string()),
+            Value::String("b".to_string())
+        ),
+        "the matching row must keep its endpoints"
+    );
+    // 'b' has no OUTGOING edge, 'lonely' has none at all. `startNode` is the
+    // side that leaked here: it resolves to the still-bound anchor `n`.
+    for row in &rows[1..] {
+        assert_eq!(
+            (&row.1, &row.2),
+            (&Value::Null, &Value::Null),
+            "an unmatched OPTIONAL hop must null both endpoints, got {row:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn optional_match_incoming_nulls_both_endpoints_on_a_miss() {
+    let db = optional_fixture().await;
+    let rows = optional_endpoints(&db, "(n)<-[r:KNOWS]-(m:P)").await;
+
+    // Only 'b' has an incoming edge, and the endpoints stay in stored
+    // orientation regardless of which way the pattern was walked.
+    let b = rows.iter().find(|r| r.0 == "b").expect("row for 'b'");
+    assert_eq!(
+        (&b.1, &b.2),
+        (
+            &Value::String("a".to_string()),
+            &Value::String("b".to_string())
+        ),
+        "the matching row must report stored orientation"
+    );
+    // `endNode` is the leaking side for an incoming hop -- the mirror of the
+    // outgoing case, and the half an outgoing-only test cannot reach.
+    for row in rows.iter().filter(|r| r.0 != "b") {
+        assert_eq!(
+            (&row.1, &row.2),
+            (&Value::Null, &Value::Null),
+            "an unmatched OPTIONAL hop must null both endpoints, got {row:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn optional_match_undirected_nulls_both_endpoints_on_a_miss() {
+    let db = optional_fixture().await;
+    let rows = optional_endpoints(&db, "(n)-[r:KNOWS]-(m:P)").await;
+
+    // An undirected hop takes the `_fwd` CASE. Both 'a' and 'b' match it, from
+    // opposite ends, and both must report the edge as stored.
+    for anchor in ["a", "b"] {
+        let row = rows.iter().find(|r| r.0 == anchor).expect("matching row");
+        assert_eq!(
+            (&row.1, &row.2),
+            (
+                &Value::String("a".to_string()),
+                &Value::String("b".to_string())
+            ),
+            "an undirected match must not depend on the anchor, got {row:?}"
+        );
+    }
+    // On a miss `_fwd` is null, the CASE takes its ELSE, and the still-bound
+    // endpoint came back -- so the guard has to wrap the CASE, not one branch.
+    let lonely = rows.iter().find(|r| r.0 == "lonely").expect("row 'lonely'");
+    assert_eq!(
+        (&lonely.1, &lonely.2),
+        (&Value::Null, &Value::Null),
+        "an unmatched undirected OPTIONAL hop must null both endpoints"
+    );
+}
+
+#[tokio::test]
+async fn id_of_an_unmatched_optional_endpoint_is_null() {
+    let db = optional_fixture().await;
+    let rows = db
+        .session()
+        .query(
+            "MATCH (n:P) OPTIONAL MATCH (n)-[r:KNOWS]->(m:P) \
+             RETURN n.name AS anchor, id(startNode(r)) AS sid ORDER BY anchor",
+        )
+        .await
+        .unwrap();
+
+    // `id()` reads identity out of the guarded rewrite's struct. Asserting it
+    // separately matters: the guard changes the expression's shape, and an
+    // accessor that did not understand that shape would fail here while every
+    // property test above still passed.
+    let ids: Vec<Value> = rows.rows().iter().map(|r| r.values()[1].clone()).collect();
+    assert!(
+        matches!(ids[0], Value::Int(_)),
+        "the matching row's endpoint must still have an id, got {:?}",
+        ids[0]
+    );
+    for id in &ids[1..] {
+        assert_eq!(
+            id,
+            &Value::Null,
+            "id() of an unmatched OPTIONAL endpoint must be null"
+        );
+    }
 }

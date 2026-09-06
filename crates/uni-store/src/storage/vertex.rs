@@ -443,12 +443,7 @@ impl VertexDataset {
                 .create_scalar_index(&table_name, &[*column], ScalarIndexType::BTree, None)
                 .await
             {
-                log::warn!(
-                    "Failed to create {} index for '{}': {}",
-                    column,
-                    self.label,
-                    e
-                );
+                crate::storage::record_default_index_failure(&table_name, column, &e);
             }
         }
 

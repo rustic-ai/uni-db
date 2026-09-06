@@ -34,6 +34,33 @@ pub mod vid_labels;
 
 use crate::backend::types::FilterExpr;
 
+/// Record a default index that could not be built.
+///
+/// These builds are deliberately fail-open, and should stay that way: a missing
+/// index makes queries slower, not wrong, and refusing the write that triggered
+/// it would turn a degraded index into a failed insert. What was wrong is that
+/// the consequence was unrecorded — four sites logged a `warn!` and one
+/// (`UidIndex::ensure_uid_hex_index`) discarded the error with `.ok()` and no
+/// log at all, so a store could end up with **no index** and nothing anywhere
+/// said so. The symptom is a full scan where a lookup was planned, which reads
+/// as "the database is slow" rather than as a failure (#233, Tier 2).
+///
+/// A `warn!` is greppable in a log nobody kept. The counter makes it countable,
+/// which is the same trade the two deliberate Tier 1 fail-open sites took.
+///
+/// One place rather than five, so a caller cannot log without counting.
+pub fn record_default_index_failure(table: &str, column: &str, err: &dyn std::fmt::Display) {
+    metrics::counter!(
+        "uni_default_index_build_failures_total",
+        "table" => table.to_string(),
+        "column" => column.to_string(),
+    )
+    .increment(1);
+    log::warn!(
+        "failed to create the default `{column}` index on `{table}`: {err}.          Queries filtering on it will fall back to a full scan."
+    );
+}
+
 /// Conjoin the snapshot-isolation version bound onto a scan `filter`.
 ///
 /// When `version` is `Some(hwm)`, restricts the scan to rows at or below the

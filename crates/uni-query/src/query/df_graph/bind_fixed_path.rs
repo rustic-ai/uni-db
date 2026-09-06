@@ -45,6 +45,11 @@ pub struct BindFixedPathExec {
     /// Edge variable names in path order (e.g., ["r"] or ["r1", "r2"]).
     edge_variables: Vec<String>,
 
+    /// Relationship types the pattern wrote, one entry per `edge_variables`
+    /// slot. Used only as the last-resort type name for an anonymous
+    /// relationship, which has no `_type` column to read. See its use below.
+    edge_type_names: Vec<Vec<String>>,
+
     /// Path variable name (e.g., "p" in `p = (a)-[r]->(b)`).
     path_variable: String,
 
@@ -76,6 +81,7 @@ impl BindFixedPathExec {
         input: Arc<dyn ExecutionPlan>,
         node_variables: Vec<String>,
         edge_variables: Vec<String>,
+        edge_type_names: Vec<Vec<String>>,
         path_variable: String,
         graph_ctx: Arc<GraphExecutionContext>,
     ) -> Self {
@@ -86,6 +92,7 @@ impl BindFixedPathExec {
             input,
             node_variables,
             edge_variables,
+            edge_type_names,
             path_variable,
             graph_ctx,
             schema,
@@ -142,6 +149,7 @@ impl ExecutionPlan for BindFixedPathExec {
             children[0].clone(),
             self.node_variables.clone(),
             self.edge_variables.clone(),
+            self.edge_type_names.clone(),
             self.path_variable.clone(),
             self.graph_ctx.clone(),
         )))
@@ -159,6 +167,7 @@ impl ExecutionPlan for BindFixedPathExec {
             input: input_stream,
             node_variables: self.node_variables.clone(),
             edge_variables: self.edge_variables.clone(),
+            edge_type_names: self.edge_type_names.clone(),
             schema: self.schema.clone(),
             graph_ctx: self.graph_ctx.clone(),
             metrics,
@@ -182,6 +191,8 @@ struct BindFixedPathStream {
     input: SendableRecordBatchStream,
     node_variables: Vec<String>,
     edge_variables: Vec<String>,
+    /// See [`BindFixedPathExec::edge_type_names`].
+    edge_type_names: Vec<Vec<String>>,
     schema: SchemaRef,
     graph_ctx: Arc<GraphExecutionContext>,
     metrics: BaselineMetrics,
@@ -301,11 +312,37 @@ impl BindFixedPathStream {
                     |arr: &arrow_array::UInt64Array, i| Vid::from(arr.value(i)),
                 );
 
-                super::common::append_node_to_struct_optional_with(
+                // The operator that bound this node already emitted its
+                // labels; the L0 chain inside the appender answers only for a
+                // still-resident vertex, so without this a path over flushed
+                // data reported every node as unlabelled.
+                let labels_col = format!("{}._labels", node_var);
+                let batch_labels = extract_column_value(
+                    &batch,
+                    &labels_col,
+                    row_idx,
+                    |arr: &arrow_array::ListArray, i| {
+                        use arrow_array::Array;
+                        let values = arr.value(i);
+                        values
+                            .as_any()
+                            .downcast_ref::<arrow_array::StringArray>()
+                            .map(|s| {
+                                (0..s.len())
+                                    .filter(|j| !s.is_null(*j))
+                                    .map(|j| s.value(j).to_string())
+                                    .collect::<Vec<String>>()
+                            })
+                            .unwrap_or_default()
+                    },
+                );
+
+                super::common::append_node_to_struct_optional_with_labels(
                     nodes_builder.values(),
                     vid,
                     &query_ctx,
                     prop_cache,
+                    batch_labels,
                 );
             }
             nodes_builder.append(true);
@@ -355,10 +392,19 @@ impl BindFixedPathStream {
                 // so the eid is an `Option` (an unmatched OPTIONAL binding), the
                 // candidate type ids are derived from a *name* rather than given,
                 // and the traversal endpoints may legitimately be 0 when a
-                // `_vid` column is absent. Nothing but the shape is shared. The
-                // type name here comes from the batch `_type` column, which is
-                // storage-backed, so it has none of the flushed-edge problem the
-                // shared helper exists to solve.
+                // `_vid` column is absent. Nothing but the shape is shared.
+                //
+                // The batch `_type` column is storage-backed, but it only exists
+                // for a *named* relationship: an anonymous one is carried by a
+                // bare `__eid_to_<target>` column with no sibling `_type`, which
+                // is why `batch_type_name` is `None` above. That left the L0
+                // chain as the only source, and it answers only for an edge that
+                // is still resident — so `MATCH p = (a)-[:T]->()` reported an
+                // empty relationship type for every flushed edge, declared or
+                // schemaless alike. The adjacency probe below identifies the
+                // type of a flushed edge as a by-product of locating it, which
+                // is the missing third source; `resolve_stored_edge` reports it
+                // rather than `resolve_stored_edge_endpoints`, which drops it.
                 let adjacent = |idx: usize| {
                     self.node_variables
                         .get(idx)
@@ -376,8 +422,12 @@ impl BindFixedPathStream {
                 let traversal_src = adjacent(edge_idx);
                 let traversal_dst = adjacent(edge_idx + 1);
 
-                let (src_vid, dst_vid) = match eid {
+                let (src_vid, dst_vid, probed_type_id) = match eid {
                     Some(e) => {
+                        // `edge_type_id_unified`, not `edge_type_id_by_name`:
+                        // the latter reads only the declared `edge_types` map,
+                        // so an undeclared type resolved to no candidate at all
+                        // and the orientation probe ran blind.
                         let edge_type_ids: Vec<u32> = batch_type_name
                             .as_deref()
                             .and_then(|name| {
@@ -385,7 +435,7 @@ impl BindFixedPathStream {
                                     .storage()
                                     .schema_manager()
                                     .schema()
-                                    .edge_type_id_by_name(name)
+                                    .edge_type_id_unified(name)
                             })
                             .or_else(|| {
                                 uni_store::runtime::l0_visibility::get_edge_type(e, &query_ctx)
@@ -394,27 +444,56 @@ impl BindFixedPathStream {
                                             .storage()
                                             .schema_manager()
                                             .schema()
-                                            .edge_type_id_by_name(&name)
+                                            .edge_type_id_unified(&name)
                                     })
                             })
                             .map(|id| vec![id])
                             .unwrap_or_default();
-                        self.graph_ctx.resolve_stored_edge_endpoints(
+                        let resolved = self.graph_ctx.resolve_stored_edge(
                             e,
                             uni_common::core::id::Vid::from(traversal_src),
                             uni_common::core::id::Vid::from(traversal_dst),
                             &edge_type_ids,
-                        )
+                        );
+                        (resolved.src, resolved.dst, resolved.type_id)
                     }
-                    None => (traversal_src, traversal_dst),
+                    None => (traversal_src, traversal_dst, None),
                 };
+
+                // Batch column first, then the probe. The appender supplies the
+                // L0 chain as the remaining source; the probe and the chain are
+                // mutually exclusive (flushed versus resident), so their order
+                // relative to each other cannot matter.
+                //
+                // The pattern's own type is the last resort, and it is used only
+                // when the slot named exactly one — then every edge the slot
+                // matched has that type by construction. It is what covers an
+                // anonymous relationship over an *undeclared* type, whose
+                // traversal is planned as a main-table scan by name and so warms
+                // no adjacency for the probe to consult. Two or more
+                // alternatives (`-[:A|:B]->`) stay unresolved rather than
+                // guessing which one this edge was.
+                let type_name = batch_type_name
+                    .or_else(|| {
+                        probed_type_id.and_then(|id| {
+                            self.graph_ctx
+                                .storage()
+                                .schema_manager()
+                                .schema()
+                                .edge_type_name_by_id_unified(id)
+                        })
+                    })
+                    .or_else(|| match self.edge_type_names.get(edge_idx) {
+                        Some(types) if types.len() == 1 => Some(types[0].clone()),
+                        _ => None,
+                    });
 
                 super::common::append_edge_to_struct_optional_with(
                     rels_builder.values(),
                     eid,
                     src_vid,
                     dst_vid,
-                    batch_type_name,
+                    type_name,
                     &query_ctx,
                     prop_cache,
                 );

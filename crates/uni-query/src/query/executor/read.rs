@@ -663,12 +663,30 @@ impl Executor {
     /// A DataFusion runtime environment whose memory pool caps execution at
     /// `max_query_memory` bytes, or `None` when the limit is disabled (`0`).
     ///
-    /// `GreedyMemoryPool` rather than `FairSpillPool`: no disk-spill path is
-    /// configured, so neither can spill and the only difference is how the
-    /// budget is divided. The fair pool holds back a share for spilling
-    /// consumers that can never use it, silently halving the usable budget;
-    /// the greedy pool hands out the whole limit and refuses the reservation
-    /// that crosses it.
+    /// `GreedyMemoryPool` rather than `FairSpillPool`, but **not** because
+    /// nothing can spill. This comment used to say a disk-spill path was not
+    /// configured; that is false and was already disproved by #202, whose own
+    /// evidence is an `ExternalSorter` asking for 5.1 GB on LDBC IC9 *with a
+    /// disk manager available the whole time*. `RuntimeEnvBuilder` defaults to
+    /// `DiskManagerMode::OsTmpDirectory`, so DataFusion's own buffering
+    /// operators can spill and do. `disk_manager_default_is_a_real_directory`
+    /// pins that, since the choice below rests on it.
+    ///
+    /// The reason to keep the greedy pool is a different one, and it is a
+    /// judgement rather than a measurement — no benchmark has compared the two
+    /// here. `FairSpillPool` holds back a share to guarantee spilling consumers
+    /// room to spill *into*. That protects the operators that reserve, and the
+    /// ones that dominate this system's peak memory do not reserve at all
+    /// (#242): a graph scan builds one whole `RecordBatch` through
+    /// `MutableArrayData` without asking the pool. Reserving headroom would
+    /// therefore shrink the budget for the DataFusion operators that do ask,
+    /// while protecting nothing from the allocations that actually end the
+    /// process.
+    ///
+    /// That trade inverts once #242 makes first-party operators reserve and
+    /// #214/#240 let the scan emit incrementally — a buffering operator can
+    /// only spill *between* inputs, and today it is handed one indivisible
+    /// batch. Revisit the pool then, not before.
     ///
     /// The bound is real but partial, and deliberately so: a pool only accounts
     /// allocations that *reserve* through it. An operator that builds an Arrow

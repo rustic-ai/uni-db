@@ -295,7 +295,10 @@ impl ProcedurePlugin for SchemaIndexesProc {
                 _ => ("UNKNOWN", String::new()),
             };
             rows.push(HashMap::from([
-                ("state".to_owned(), Value::String("ONLINE".to_owned())),
+                (
+                    "state".to_owned(),
+                    Value::String(idx.metadata().status.as_str().to_owned()),
+                ),
                 ("name".to_owned(), Value::String(idx.name().to_owned())),
                 ("type".to_owned(), Value::String(type_name.to_owned())),
                 ("label".to_owned(), Value::String(idx.label().to_owned())),

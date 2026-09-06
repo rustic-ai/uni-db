@@ -23,7 +23,7 @@
 //!
 //! Uses only the public `uni_db` API, matching what a customer could run.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[allow(unused_imports)] // used when toggling the diagnostic experiment
 use uni_db::UniConfig;
@@ -44,7 +44,21 @@ async fn setup_db() -> Uni {
     // attributes the early step to the timer, swap to:
     //     let config = UniConfig { auto_flush_interval: None, ..UniConfig::default() };
     //     let db = Uni::in_memory().config(config).build().await.unwrap();
-    let db = Uni::in_memory().build().await.unwrap();
+    //
+    // Sequential single-row commits each take the writer's `flush_lock`, and the
+    // default `commit_timeout` (5s) bounds only the wait for that lock -- so a
+    // background flush or compaction holding it surfaces as a retriable
+    // `CommitTimeout` on the next commit. CI runs this unoptimized, where the
+    // same work is several times slower than the release timings it was tuned
+    // against. The signal here is `get_edges` latency against graph size, not
+    // commit latency, so give the guard headroom. Raising the guard rather than
+    // disabling `auto_flush_interval` deliberately leaves the flush timer -- the
+    // mechanism under test -- exactly as it was.
+    let cfg = UniConfig {
+        commit_timeout: Duration::from_secs(120),
+        ..UniConfig::default()
+    };
+    let db = Uni::in_memory().config(cfg).build().await.unwrap();
     db.schema()
         .label("Participant")
         .property("name", uni_db::DataType::String)

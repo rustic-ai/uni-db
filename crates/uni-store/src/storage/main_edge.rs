@@ -293,7 +293,7 @@ impl MainEdgeDataset {
                 .create_scalar_index(table_name, &[column], idx_type, None)
                 .await
             {
-                log::warn!("Failed to create {} index on main_edges: {}", column, e);
+                crate::storage::record_default_index_failure(table_name, column, &e);
             }
         }
 

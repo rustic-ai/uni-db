@@ -49,6 +49,7 @@ use arrow::compute::take;
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
@@ -638,6 +639,9 @@ impl ExecutionPlan for GraphTraverseExec {
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
         let slice_size = context.session_config().batch_size().max(1);
+        // Captured before `context` moves into the input's `execute`.
+        let reservation = MemoryConsumer::new(format!("GraphTraverseExec[{partition}]"))
+            .register(context.memory_pool());
         let input_stream = self.input.execute(partition, context)?;
 
         let metrics = BaselineMetrics::new(&self.metrics, partition);
@@ -647,6 +651,7 @@ impl ExecutionPlan for GraphTraverseExec {
             .warming_future(self.edge_type_ids.clone(), self.direction);
 
         Ok(Box::pin(GraphTraverseStream {
+            reservation,
             slice_size,
             input: input_stream,
             source_column: self.source_column.clone(),
@@ -778,6 +783,16 @@ struct GraphTraverseStream {
 
     /// Metrics.
     metrics: BaselineMetrics,
+
+    /// The query pool's accounting for what this traversal materializes.
+    ///
+    /// A traversal's output is bounded by input rows times the edge type's
+    /// average fan-out, so it is not bounded by its input — the case behind the
+    /// multi-GB LDBC IC9 peaks. Held on the stream because a sliced batch stays
+    /// resident until the last slice is handed out, and released when the
+    /// stream drops, which covers every path to `Done` without tracking each
+    /// transition.
+    reservation: MemoryReservation,
 }
 
 impl GraphTraverseStream {
@@ -1607,6 +1622,12 @@ impl Stream for GraphTraverseStream {
                                 // slicing added for #202 never applied to it.
                                 match result {
                                     Ok(b) if b.num_rows() > self.slice_size => {
+                                        if let Err(e) =
+                                            self.reservation.try_resize(b.get_array_memory_size())
+                                        {
+                                            self.state = TraverseStreamState::Done;
+                                            return Poll::Ready(Some(Err(e)));
+                                        }
                                         self.state = TraverseStreamState::Slicing {
                                             batch: b,
                                             offset: 0,
@@ -1614,6 +1635,7 @@ impl Stream for GraphTraverseStream {
                                         continue;
                                     }
                                     other => {
+                                        self.reservation.free();
                                         self.state = TraverseStreamState::Reading;
                                         return Poll::Ready(Some(other));
                                     }
@@ -1678,9 +1700,23 @@ impl Stream for GraphTraverseStream {
                     Poll::Ready(Ok(batch)) => {
                         self.metrics.record_output(batch.num_rows());
                         if batch.num_rows() > self.slice_size {
+                            // `try_resize` rather than `try_grow`: the
+                            // reservation tracks what this stream *retains* at
+                            // each transition, and a batch handed straight
+                            // downstream is the consumer's from that point.
+                            // Growing for every batch that passes through would
+                            // charge the operator for memory it no longer holds
+                            // and exhaust the pool on a long stream.
+                            if let Err(e) =
+                                self.reservation.try_resize(batch.get_array_memory_size())
+                            {
+                                self.state = TraverseStreamState::Done;
+                                return Poll::Ready(Some(Err(e)));
+                            }
                             self.state = TraverseStreamState::Slicing { batch, offset: 0 };
                             continue;
                         }
+                        self.reservation.free();
                         self.state = TraverseStreamState::Reading;
                         return Poll::Ready(Some(Ok(batch)));
                     }
@@ -1757,6 +1793,12 @@ impl Stream for GraphTraverseStream {
                 TraverseStreamState::Slicing { batch, offset } => {
                     let remaining = batch.num_rows() - offset;
                     if remaining == 0 {
+                        // The parent batch dies here, so the reservation it
+                        // backed is released here. Every slice handed out was a
+                        // zero-copy view onto it, which is why it had to be held
+                        // for the whole slicing phase rather than freed at the
+                        // first emit.
+                        self.reservation.free();
                         // Back to `Reading`, not `Done`: this stream emits one
                         // materialised batch per input batch, and the input may
                         // have more.
@@ -1902,6 +1944,42 @@ impl RecordBatchStream for GraphTraverseStream {
 /// recorded at the point where both endpoints are still in hand. See
 /// [`COL_FWD`].
 type EdgeAdjacencyMap = HashMap<Vid, Vec<(Vid, Eid, Arc<str>, Arc<uni_common::Properties>, bool)>>;
+
+/// Approximate heap bytes held by an [`EdgeAdjacencyMap`].
+///
+/// The pool's other reservations in this file are exact, because Arrow reports
+/// its own buffer sizes. This one cannot be: the map is a Rust `HashMap` of
+/// `Vec`s, and there is no equivalent accessor. An approximation the pool can
+/// see is worth more than an exact number it cannot, since this is frequently
+/// the largest thing a traversal holds — with no source pushdown it is bounded
+/// by the edge type's table size and not by the input at all.
+///
+/// `Arc<str>` and `Arc<Properties>` are counted as pointers. They are shared
+/// across the entries that reference them, so charging their full contents once
+/// per reference would overstate the map by a large factor; the properties are
+/// the property cache's memory, not the adjacency's.
+///
+/// What this deliberately does not cover: `build_edge_adjacency_map` holds an
+/// intermediate `edges` vector and a `unique_edges` dedup copy alive at the
+/// same time as the map it is building, so the true peak inside that function
+/// is a small multiple of what this returns. Reserving there would need the
+/// reservation threaded through four call sites, two of which are inside
+/// futures that have none. The residency is what this bounds; the transient is
+/// recorded here rather than silently ignored.
+fn estimate_adjacency_bytes(adjacency: &EdgeAdjacencyMap) -> usize {
+    const ENTRY: usize =
+        std::mem::size_of::<(Vid, Eid, Arc<str>, Arc<uni_common::Properties>, bool)>();
+    // A `HashMap` slot costs its key, its value handle and the control byte,
+    // and hashbrown keeps load factor below 1, so the per-key overhead is a
+    // meaningful share of a map with short adjacency lists.
+    const SLOT: usize = std::mem::size_of::<Vid>()
+        + std::mem::size_of::<Vec<(Vid, Eid, Arc<str>, Arc<uni_common::Properties>, bool)>>()
+        + 8;
+    adjacency
+        .values()
+        .map(|targets| SLOT + targets.capacity() * ENTRY)
+        .sum()
+}
 
 /// Graph traversal execution plan for schemaless edge types (TraverseMainByType).
 ///
@@ -2190,10 +2268,13 @@ impl ExecutionPlan for GraphTraverseMainExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
+        let reservation = MemoryConsumer::new(format!("GraphTraverseMainExec[{partition}]"))
+            .register(context.memory_pool());
         let input_stream = self.input.execute(partition, context)?;
         let metrics = BaselineMetrics::new(&self.metrics, partition);
 
         Ok(Box::pin(GraphTraverseMainStream::new(
+            reservation,
             input_stream,
             self.source_column.clone(),
             self.type_names.clone(),
@@ -2305,12 +2386,22 @@ struct GraphTraverseMainStream {
 
     /// Metrics.
     metrics: BaselineMetrics,
+
+    /// The query pool's accounting for the buffered input and the adjacency.
+    ///
+    /// This operator is a full pipelining break — it drains its entire input
+    /// before emitting anything, so that the distinct source vids can be pushed
+    /// into the edge scan — and then holds an adjacency map for the whole
+    /// traversal. Without source pushdown that map covers the edge type's whole
+    /// table and is bounded by nothing the query mentions.
+    reservation: MemoryReservation,
 }
 
 impl GraphTraverseMainStream {
     /// Create a new traverse main stream.
     #[expect(clippy::too_many_arguments)]
     fn new(
+        reservation: MemoryReservation,
         input_stream: SendableRecordBatchStream,
         source_column: String,
         type_names: Vec<String>,
@@ -2330,6 +2421,7 @@ impl GraphTraverseMainStream {
         // The input is drained first (CollectingInput) so the edge load can
         // push the bounded source-vid set into the scan.
         Self {
+            reservation,
             source_column,
             target_variable,
             edge_variable,
@@ -3190,6 +3282,19 @@ impl Stream for GraphTraverseMainStream {
                     buffered,
                 } => match future.as_mut().poll(cx) {
                     Poll::Ready(Ok((adjacency, target_props))) => {
+                        // The adjacency is resident from here until the stream
+                        // ends, and is the largest thing this operator holds.
+                        // The buffered input is already reserved; resizing to
+                        // the sum keeps one reservation honest about both.
+                        let buffered_bytes: usize =
+                            buffered.iter().map(|b| b.get_array_memory_size()).sum();
+                        if let Err(e) = self
+                            .reservation
+                            .try_resize(buffered_bytes + estimate_adjacency_bytes(&adjacency))
+                        {
+                            self.state = GraphTraverseMainState::Done;
+                            return Poll::Ready(Some(Err(e)));
+                        }
                         // Move to processing state with loaded adjacency
                         self.state = GraphTraverseMainState::Processing {
                             adjacency,
@@ -3623,6 +3728,9 @@ impl ExecutionPlan for GraphVariableLengthTraverseExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
+        let reservation =
+            MemoryConsumer::new(format!("GraphVariableLengthTraverseExec[{partition}]"))
+                .register(context.memory_pool());
         let input_stream = self.input.execute(partition, context)?;
 
         let metrics = BaselineMetrics::new(&self.metrics, partition);
@@ -3688,6 +3796,7 @@ impl ExecutionPlan for GraphVariableLengthTraverseExec {
             });
 
         Ok(Box::pin(GraphVariableLengthTraverseStream {
+            reservation,
             input: input_stream,
             exec: Arc::new(self.clone_for_stream()),
             schema: self.schema.clone(),
@@ -4103,6 +4212,16 @@ struct GraphVariableLengthTraverseStream {
     edge_property_filters: Vec<EidFilter>,
     vertex_property_filters: Vec<VidFilter>,
     metrics: BaselineMetrics,
+
+    /// The query pool's accounting for this operator's expansion set.
+    ///
+    /// A variable-length expansion carries a node path and an edge path *per
+    /// enumerated path*, so its size is bounded by paths times path length —
+    /// bounded neither by the input nor by any table. The existing
+    /// `MAX_FRONTIER_SIZE` and `MAX_PRED_POOL_SIZE` caps bound the search, not
+    /// the enumeration that follows it, so this is where the query's budget
+    /// gets a say.
+    reservation: MemoryReservation,
 }
 
 impl Stream for GraphVariableLengthTraverseStream {
@@ -4159,6 +4278,28 @@ impl Stream for GraphVariableLengthTraverseStream {
                                     return Poll::Ready(Some(Err(e)));
                                 }
                             };
+
+                            // The expansion set is this operator's peak, and it
+                            // is Rust-side rather than Arrow: each entry owns a
+                            // node path and an edge path. Estimated for the same
+                            // reason the adjacency map is — the pool seeing an
+                            // approximation beats it seeing nothing.
+                            const EXPANSION: usize = std::mem::size_of::<VarLengthExpansion>();
+                            let expansion_bytes: usize = expansions
+                                .iter()
+                                .map(|(_, _, _, nodes, edges)| {
+                                    EXPANSION
+                                        + nodes.capacity() * std::mem::size_of::<Vid>()
+                                        + edges.capacity() * std::mem::size_of::<Eid>()
+                                })
+                                .sum();
+                            if let Err(e) = self
+                                .reservation
+                                .try_resize(expansion_bytes + input.get_array_memory_size())
+                            {
+                                self.state = VarLengthStreamState::Done;
+                                return Poll::Ready(Some(Err(e)));
+                            }
 
                             if self.materializes_entity_structs() && !expansions.is_empty() {
                                 let (vids, eids) = path_entities(&expansions);
@@ -5112,6 +5253,9 @@ impl ExecutionPlan for GraphVariableLengthTraverseMainExec {
         partition: usize,
         context: Arc<TaskContext>,
     ) -> DFResult<SendableRecordBatchStream> {
+        let reservation =
+            MemoryConsumer::new(format!("GraphVariableLengthTraverseMainExec[{partition}]"))
+                .register(context.memory_pool());
         let input_stream = self.input.execute(partition, context)?;
         let metrics = BaselineMetrics::new(&self.metrics, partition);
 
@@ -5125,6 +5269,7 @@ impl ExecutionPlan for GraphVariableLengthTraverseMainExec {
         };
 
         Ok(Box::pin(GraphVariableLengthTraverseMainStream {
+            reservation,
             input: input_stream,
             source_column: self.source_column.clone(),
             type_names: self.type_names.clone(),
@@ -5204,6 +5349,15 @@ struct GraphVariableLengthTraverseMainStream {
     schema: SchemaRef,
     state: VarLengthMainStreamState,
     metrics: BaselineMetrics,
+
+    /// The query pool's accounting for the whole-type adjacency map.
+    ///
+    /// A variable-length frontier is not known ahead of time, so this operator
+    /// loads the edge type's adjacency with **no source pushdown at all** and
+    /// holds it for its whole life. That makes it the clearest case in the file
+    /// of an allocation bounded by the data rather than by the query, and it was
+    /// entirely invisible to the pool.
+    reservation: MemoryReservation,
 }
 
 /// BFS result type: (target_vid, hop_count, node_path, edge_path)
@@ -5592,6 +5746,13 @@ impl Stream for GraphVariableLengthTraverseMainStream {
             match state {
                 VarLengthMainStreamState::Loading(mut fut) => match fut.as_mut().poll(cx) {
                     Poll::Ready(Ok(adjacency)) => {
+                        if let Err(e) = self
+                            .reservation
+                            .try_resize(estimate_adjacency_bytes(&adjacency))
+                        {
+                            self.state = VarLengthMainStreamState::Done;
+                            return Poll::Ready(Some(Err(e)));
+                        }
                         self.state = VarLengthMainStreamState::Processing(adjacency);
                         // Continue loop to start processing
                     }

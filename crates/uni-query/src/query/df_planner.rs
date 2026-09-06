@@ -154,6 +154,35 @@ pub struct HybridPhysicalPlanner {
     plugin_registry: Arc<uni_plugin::PluginRegistry>,
 }
 
+/// Whether a traversal must publish [`COL_FWD`] so the edge struct can carry
+/// stored orientation.
+///
+/// An undirected hop is the only one that cannot answer statically: which end a
+/// row walked from is a per-row fact, and without it `add_edge_structural_projection`
+/// reports the edge reversed on every row that walked it backwards. That
+/// projection now errors rather than guessing, so this predicate and its
+/// consumer are two halves of one contract.
+///
+/// It costs the traversal a second adjacency probe, so it is requested only when
+/// a struct will actually be built — a bare `RETURN r` or a `SET r.p`, which is
+/// what the wildcard and the struct-only sentinel mark.
+///
+/// This exists once because it used to exist twice: the schema'd and schemaless
+/// paths each carried their own copy, they drifted, and the schemaless copy's
+/// omission was #193 — an undirected relationship returning `a->b` from one row
+/// and `b->a` from another, with no error.
+fn wants_orientation_column(
+    direction: &AstDirection,
+    is_variable_length: bool,
+    edge_var: &str,
+    all_properties: &HashMap<String, HashSet<String>>,
+) -> bool {
+    let builds_struct = all_properties
+        .get(edge_var)
+        .is_some_and(|props| props.contains("*") || props.contains(STRUCT_ONLY_SENTINEL));
+    matches!(direction, AstDirection::Both) && !is_variable_length && builds_struct
+}
+
 impl std::fmt::Debug for HybridPhysicalPlanner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HybridPhysicalPlanner")
@@ -1108,11 +1137,13 @@ impl HybridPhysicalPlanner {
                 input,
                 node_variables,
                 edge_variables,
+                edge_type_names,
                 path_variable,
             } => self.plan_bind_path(
                 input,
                 node_variables,
                 edge_variables,
+                edge_type_names,
                 path_variable,
                 all_properties,
             ),
@@ -3348,13 +3379,12 @@ impl HybridPhysicalPlanner {
                 // Requested only when a struct will actually be built: tracking
                 // orientation costs the traversal a second adjacency probe, and
                 // a directed hop knows the answer statically.
-                let builds_struct = all_properties.get(edge_var).is_some_and(|props| {
-                    props.contains("*") || props.contains(STRUCT_ONLY_SENTINEL)
-                });
-                if matches!(direction, uni_cypher::ast::Direction::Both)
-                    && !is_variable_length
-                    && builds_struct
-                    && !edge_properties.iter().any(|p| p == COL_FWD)
+                if wants_orientation_column(
+                    &direction,
+                    is_variable_length,
+                    edge_var,
+                    all_properties,
+                ) && !edge_properties.iter().any(|p| p == COL_FWD)
                 {
                     edge_properties.push(COL_FWD.to_string());
                 }
@@ -3883,11 +3913,11 @@ impl HybridPhysicalPlanner {
         // traversal a second adjacency probe, and a directed hop knows the answer
         // statically.
         if let Some(edge_var) = step_variable {
-            let builds_struct = all_properties
-                .get(edge_var)
-                .is_some_and(|props| props.contains("*") || props.contains(STRUCT_ONLY_SENTINEL));
-            if matches!(direction, AstDirection::Both)
-                && builds_struct
+            // `is_variable_length: false` is structural, not an assumption: a
+            // schemaless variable-length hop is planned by
+            // `plan_traverse_main_by_type_vlp`, never by this function. The
+            // schema'd path needs the flag because one function serves both.
+            if wants_orientation_column(&direction, false, edge_var, all_properties)
                 && !edge_properties.iter().any(|p| p == COL_FWD)
             {
                 edge_properties.push(COL_FWD.to_string());
@@ -6272,6 +6302,7 @@ impl HybridPhysicalPlanner {
         input: &LogicalPlan,
         node_variables: &[String],
         edge_variables: &[String],
+        edge_type_names: &[Vec<String>],
         path_variable: &str,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
@@ -6280,6 +6311,7 @@ impl HybridPhysicalPlanner {
             input_plan,
             node_variables.to_vec(),
             edge_variables.to_vec(),
+            edge_type_names.to_vec(),
             path_variable.to_string(),
             self.graph_ctx.clone(),
         )))
@@ -6542,6 +6574,23 @@ impl HybridPhysicalPlanner {
                     .otherwise(dst_col.clone())?,
                 datafusion::logical_expr::when(fwd, dst_col).otherwise(src_col)?,
             )
+        } else if matches!(direction, AstDirection::Both) {
+            // Falling through to traversal order here is a silent wrong answer,
+            // not a missing optimization: an undirected row that walked the edge
+            // backwards reports it reversed, and the same relationship comes back
+            // as `a->b` from one row and `b->a` from another. Whether `_fwd` is
+            // present is decided by `wants_orientation_column` at the two request
+            // sites; if this is reached, those and this disagree.
+            //
+            // This mirrors the traversal's own contract, which hard-errors when
+            // asked for `_fwd` it did not track rather than emitting a null that
+            // would take a `CASE`'s ELSE. Absence must not be mistaken for
+            // `false`. #193 was exactly this fallback running unnoticed, on the
+            // one of the two paths that had no test.
+            return Err(anyhow!(
+                "relationship `{variable}` is undirected and builds a struct, but the                  traversal did not publish `{}`; its endpoints cannot be put back in                  stored orientation. This is a planner/executor mismatch, not a                  property that happens to be absent.",
+                crate::query::planner::COL_FWD
+            ));
         } else {
             (src_col, dst_col)
         };
@@ -7268,6 +7317,7 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
             node_variables,
             edge_variables,
             path_variable,
+            ..
         } => {
             collect_variable_kinds(input, kinds);
             for nv in node_variables {
@@ -7843,6 +7893,7 @@ fn collect_plan_variables_into(plan: &LogicalPlan, out: &mut HashSet<String>) {
             node_variables,
             edge_variables,
             path_variable,
+            ..
         } => {
             collect_plan_variables_into(input, out);
             for nv in node_variables {
@@ -8941,6 +8992,62 @@ fn unify_join_key_types(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `all_properties` with one edge variable marked as building a struct.
+    fn builds_struct_for(edge_var: &str) -> HashMap<String, HashSet<String>> {
+        HashMap::from([(
+            edge_var.to_string(),
+            HashSet::from([STRUCT_ONLY_SENTINEL.to_string()]),
+        )])
+    }
+
+    /// The predicate and `add_edge_structural_projection` are two halves of one
+    /// contract: whenever this says false for an undirected struct-building hop,
+    /// that projection has no `_fwd` to consult and now errors instead of
+    /// silently reporting traversal order. Pinning it here is what keeps the two
+    /// request sites from drifting apart again — the drift that was #193.
+    #[test]
+    fn orientation_is_wanted_only_for_an_undirected_single_hop_that_builds_a_struct() {
+        let props = builds_struct_for("r");
+
+        assert!(
+            wants_orientation_column(&AstDirection::Both, false, "r", &props),
+            "an undirected single hop building a struct cannot answer statically"
+        );
+        for direction in [AstDirection::Outgoing, AstDirection::Incoming] {
+            assert!(
+                !wants_orientation_column(&direction, false, "r", &props),
+                "a directed hop knows its orientation at plan time"
+            );
+        }
+        assert!(
+            !wants_orientation_column(&AstDirection::Both, true, "r", &props),
+            "a variable-length hop binds a list, not one edge struct"
+        );
+        assert!(
+            !wants_orientation_column(&AstDirection::Both, false, "r", &HashMap::new()),
+            "no struct is built, so nothing consults orientation"
+        );
+        assert!(
+            !wants_orientation_column(&AstDirection::Both, false, "other", &props),
+            "the request is per edge variable"
+        );
+    }
+
+    /// The wildcard is the other spelling that builds a struct (`RETURN r`),
+    /// alongside the struct-only sentinel (`SET r.p`). Both must request it —
+    /// recognising one and not the other would leave the wildcard case reaching
+    /// the projection without a `_fwd` column.
+    #[test]
+    fn orientation_is_wanted_for_both_struct_building_spellings() {
+        for marker in ["*", STRUCT_ONLY_SENTINEL] {
+            let props = HashMap::from([("r".to_string(), HashSet::from([marker.to_string()]))]);
+            assert!(
+                wants_orientation_column(&AstDirection::Both, false, "r", &props),
+                "`{marker}` builds a struct and so needs orientation"
+            );
+        }
+    }
 
     #[test]
     fn test_convert_direction() {

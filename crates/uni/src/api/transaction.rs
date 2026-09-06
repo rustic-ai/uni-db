@@ -1257,6 +1257,35 @@ impl Transaction {
 
         self.completed = true;
 
+        // Persist a schemaless edge type minted while this transaction ran.
+        // `get_or_assign_edge_type_id` interns the name → id mapping on a
+        // synchronous per-row path and so cannot save; this is the first
+        // asynchronous point after the write is durable. Without it the
+        // registry dies with the process and every id-keyed read path answers
+        // from an empty one after a reopen — an untyped `MATCH (a)-[e]-(b)`
+        // finds nothing, a pattern comprehension yields `[]`, and an edge's
+        // `edge_type` comes back blank (rustic-ai/uni-db#253).
+        //
+        // Skipped for a forked session: a fork's `SchemaManager` shares
+        // primary's `path`, so saving it would overwrite primary's catalog
+        // with the fork's merged view. Fork-local additions persist through
+        // `ForkRegistryHandle::update_schema_overlay` instead.
+        //
+        // A failure here cannot fail the commit — the transaction is already
+        // durable, and returning an error would invite a retry that
+        // double-applies it. The manager stays dirty, so the next commit
+        // retries the write rather than dropping it silently.
+        if self.db.storage.fork_scope().is_none()
+            && let Err(e) = self.db.storage.schema_manager().save_if_dirty().await
+        {
+            tracing::error!(
+                error = %e,
+                "failed to persist the schema after commit; \
+                 a newly interned edge type will be lost if the process exits \
+                 before a later commit retries the write"
+            );
+        }
+
         let duration = self.start_time.elapsed();
         tracing::Span::current().record("duration_ms", duration.as_millis());
         metrics::histogram!("uni_transaction_duration_seconds").record(duration.as_secs_f64());

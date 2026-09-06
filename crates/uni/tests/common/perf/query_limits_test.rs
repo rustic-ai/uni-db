@@ -61,7 +61,16 @@ async fn test_query_memory_limit() -> Result<()> {
 
     assert!(res.is_err());
     let err_msg = res.err().unwrap().to_string();
-    assert!(err_msg.contains("Query exceeded memory limit"));
+    // This used to assert the post-hoc message, "Query exceeded memory limit",
+    // which is produced *after* the rows are materialized. `GraphScanExec` now
+    // reserves the batch it builds, so the pool refuses first and names the
+    // operator that asked (#242). The rejection is the same; the mechanism moved
+    // earlier, which is the point of the change, so the assertion follows it
+    // rather than being relaxed to accept either.
+    assert!(
+        err_msg.contains("GraphScanExec"),
+        "expected the scan's own reservation to refuse: {err_msg}"
+    );
 
     Ok(())
 }
@@ -120,9 +129,13 @@ async fn test_query_memory_limit_applies_to_cursor() -> Result<()> {
         "cursor streamed every row under a 100-byte ceiling; `fetch_all` \
          rejects the same query with the same limit",
     );
+    // Parity is what this test is for, so it follows `fetch_all` to the pool's
+    // message rather than staying on the post-hoc one (#242). Both terminals
+    // must be refused by the same mechanism, or the streaming path would once
+    // again be bounded differently from the materializing one.
     assert!(
-        err.to_string().contains("Query exceeded memory limit"),
-        "expected the memory-limit error `fetch_all` produces, got: {err}"
+        err.to_string().contains("GraphScanExec"),
+        "expected the same reservation refusal `fetch_all` produces, got: {err}"
     );
 
     Ok(())
@@ -317,9 +330,14 @@ async fn test_tx_cursor_enforces_configured_memory_limit() -> Result<()> {
     let err = drain_cursor(cursor)
         .await
         .expect("transaction cursor ignored the configured memory ceiling");
+    // Follows the mechanism, not the message: `GraphScanExec` now reserves the
+    // batch it builds, so the pool refuses before the rows exist rather than the
+    // post-hoc check measuring them afterwards (#242). Both terminals moved
+    // together, which is what this pair exists to check -- an asymmetry here
+    // would mean one of them is still bounded only after the fact.
     assert!(
-        err.to_string().contains("Query exceeded memory limit"),
-        "expected the memory-limit error, got: {err}"
+        err.to_string().contains("GraphScanExec"),
+        "expected the scan's own reservation to refuse, got: {err}"
     );
 
     Ok(())
@@ -342,9 +360,14 @@ async fn test_tx_fetch_all_enforces_configured_memory_limit() -> Result<()> {
         .err()
         .expect("transaction fetch_all ignored the configured memory ceiling")
         .to_string();
+    // Follows the mechanism, not the message: `GraphScanExec` now reserves the
+    // batch it builds, so the pool refuses before the rows exist rather than the
+    // post-hoc check measuring them afterwards (#242). Both terminals moved
+    // together, which is what this pair exists to check -- an asymmetry here
+    // would mean one of them is still bounded only after the fact.
     assert!(
-        err.to_string().contains("Query exceeded memory limit"),
-        "expected the memory-limit error, got: {err}"
+        err.to_string().contains("GraphScanExec"),
+        "expected the scan's own reservation to refuse, got: {err}"
     );
 
     Ok(())
@@ -579,11 +602,123 @@ async fn test_uncancelled_locy_program_still_runs() -> Result<()> {
 // operator that allocates an Arrow buffer directly without reserving (the
 // `MutableArrayData` path behind #184) is still unbounded.
 
+/// The premise the pool choice rests on: a disk manager *is* configured.
+///
+/// Two comments once justified `GreedyMemoryPool` over `FairSpillPool` on the
+/// claim that no disk-spill path existed, so neither pool could spill (#238).
+/// The claim was false when written — #202's evidence is an `ExternalSorter`
+/// asking for 5.1 GB on LDBC IC9 with a disk manager available throughout — and
+/// the reasoning that replaced it depends on the opposite fact being true.
+///
+/// That fact is a *dependency default*, not something this repo controls. If
+/// DataFusion ever ships `Disabled` as the default, the reasoning on
+/// `memory_bounded_runtime` silently becomes wrong again and the old comment
+/// becomes right by accident. This is the cheapest way to be told.
+#[test]
+fn disk_manager_default_is_a_real_directory() {
+    use datafusion::execution::disk_manager::DiskManagerMode;
+
+    assert!(
+        matches!(DiskManagerMode::default(), DiskManagerMode::OsTmpDirectory),
+        "DataFusion's default disk manager is what makes spilling possible; \
+         the GreedyMemoryPool reasoning in `memory_bounded_runtime` and on the \
+         session template assumes it, and #238 exists because an earlier \
+         comment assumed the reverse"
+    );
+}
+
 /// A database whose only unusual setting is a small query-memory ceiling.
 async fn db_with_memory_limit(bytes: usize) -> Result<Uni> {
     let mut config = uni_db::UniConfig::default();
     config.max_query_memory = bytes;
     Ok(Uni::in_memory().config(config).build().await?)
+}
+
+/// A first-party operator reserves what it materializes (#242).
+///
+/// `VidLookupJoinExec` replaced `HashJoinExec` on this shape by deliberate
+/// plan-shape choice. The one it replaced is pool-accounted and spillable; it
+/// was neither, so the choice narrowed the pool's coverage on purpose, for
+/// unrelated reasons. Across the whole workspace there were zero `try_grow`
+/// sites, which is why multi-GB peaks in graph operators never tripped a pool
+/// that was configured and working the entire time — every failure it ever
+/// produced came from a stock DataFusion operator.
+///
+/// **The build side has to be large.** The operator's whole point is that a
+/// small, scattered build set becomes a handful of indexed lookups, and in that
+/// regime it materializes almost nothing — an earlier version of this test used
+/// 50 sources and passed a 64 KiB ceiling honestly, because 50 probe rows really
+/// do fit. Memory only matters once the distinct-vid set is big enough that the
+/// probe fetches a large slice of the table, and past `MAX_VIDS_PER_CHUNK` it is
+/// also concatenated, which holds the chunks and the combined batch at once.
+#[tokio::test]
+async fn a_vid_lookup_join_reserves_what_it_materializes() -> Result<()> {
+    const ROWS: usize = 20_000;
+    // The ceiling has to clear the build-side scan and still fall below the
+    // join's probe materialization. Both sides are scans now that
+    // `GraphScanExec` reserves too, and the build side is deliberately the
+    // narrow one -- `linked_vid` only -- while the probe carries long strings,
+    // so there is a wide band between them.
+    let db = db_with_memory_limit(4 * 1024 * 1024).await?;
+    db.schema()
+        .label("Target")
+        .property("name", uni_db::DataType::String)
+        .done()
+        .label("Source")
+        .property_nullable("linked_vid", uni_db::DataType::Int64)
+        .done()
+        .apply()
+        .await?;
+
+    let session = db.session();
+    let tx = session.tx().await?;
+    tx.execute(&format!(
+        "UNWIND range(0, {}) AS i CREATE (:Target {{name: \
+         'a-name-long-enough-that-twenty-thousand-of-them-are-megabytes-' + toString(i)}})",
+        ROWS - 1
+    ))
+    .await?;
+    tx.commit().await?;
+
+    // One Source per Target: the distinct-vid set is the whole table, which is
+    // both the regime where this operator materializes and, being over
+    // `MAX_VIDS_PER_CHUNK`, the one that concatenates.
+    let tx = session.tx().await?;
+    tx.execute(&format!(
+        "UNWIND range(0, {}) AS i CREATE (:Source {{linked_vid: i}})",
+        ROWS - 1
+    ))
+    .await?;
+    tx.commit().await?;
+    db.flush().await?;
+
+    let res = session
+        .query("MATCH (a:Source) MATCH (b:Target) WHERE id(b) = a.linked_vid RETURN b.name AS bn")
+        .await;
+
+    match res {
+        Err(e) => {
+            let msg = e.to_string();
+            // Naming the operator is what makes this discriminating. An earlier
+            // version accepted any message containing "memory" and passed with
+            // the reservations removed, because the post-hoc result-size check
+            // rejects this query at this ceiling too — 20k rows of names exceed
+            // it on their own. Two mechanisms, one indistinguishable assertion.
+            // The pool names the consumer that asked; the result-size check
+            // cannot.
+            assert!(
+                msg.contains("VidLookupJoinExec"),
+                "the refusal must come from the join's own reservation, not from \
+                 some other limit that happens to reject this query: {msg}"
+            );
+        }
+        Ok(rows) => panic!(
+            "a 4 MiB ceiling accepted a join that materialized {} rows; the \
+             operator is allocating outside the pool again",
+            rows.rows().len()
+        ),
+    }
+    Ok(())
 }
 
 /// The discriminating shape from #185: **one row out**, a large intermediate.
@@ -822,6 +957,52 @@ async fn a_group_key_returned_whole_still_carries_its_properties() -> Result<()>
             "a group key returned whole lost its properties"
         ),
         other => panic!("expected a Node, got {other:?}"),
+    }
+    Ok(())
+}
+
+/// The scan reserves the whole-result batch it builds (#242).
+///
+/// `GraphScanExec` builds one `RecordBatch` for the entire result and then
+/// hands it out in slices, so it is the largest single allocation this system
+/// makes and it was invisible to the pool. The reservation is on the *stream*,
+/// not inside the scan future, because the batch stays resident across every
+/// poll that follows — the slices are zero-copy views onto it.
+///
+/// The assertion names the operator for the reason the join test does: at a
+/// ceiling low enough to reject this query, the post-hoc result-size check
+/// rejects it too, and an assertion that accepts any memory-shaped message
+/// passes with the reservation removed.
+#[tokio::test]
+async fn a_graph_scan_reserves_the_batch_it_builds() -> Result<()> {
+    let db = db_with_memory_limit(256 * 1024).await?;
+    db.schema()
+        .label("W")
+        .property("k", uni_db::DataType::String)
+        .apply()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute(
+        "UNWIND range(0, 20000) AS i CREATE (:W {k: \
+         'a-string-long-enough-to-add-up-across-twenty-thousand-rows-' + toString(i)})",
+    )
+    .await?;
+    tx.commit().await?;
+    db.flush().await?;
+
+    match db.session().query("MATCH (n:W) RETURN n.k AS k").await {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("GraphScanExec"),
+                "the refusal must come from the scan's own reservation: {msg}"
+            );
+        }
+        Ok(rows) => panic!(
+            "a 256 KiB ceiling accepted a scan materializing {} rows; the scan \
+             is allocating outside the pool again",
+            rows.rows().len()
+        ),
     }
     Ok(())
 }

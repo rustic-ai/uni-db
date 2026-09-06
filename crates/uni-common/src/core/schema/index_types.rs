@@ -24,6 +24,33 @@ pub enum IndexStatus {
     Failed,
 }
 
+impl IndexStatus {
+    /// Returns the user-visible name of this status.
+    ///
+    /// This is the single rendering used by every surface that reports index
+    /// state — the `Schema` introspection API and the `uni.schema.indexes`
+    /// procedure — so a status can never read differently depending on which
+    /// one is asked. The names are uppercase to match the openCypher
+    /// `SHOW INDEXES` convention that `uni.schema.indexes` implements.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use uni_common::core::schema::IndexStatus;
+    ///
+    /// assert_eq!(IndexStatus::Online.as_str(), "ONLINE");
+    /// assert_eq!(IndexStatus::Stale.as_str(), "STALE");
+    /// ```
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Online => "ONLINE",
+            Self::Building => "BUILDING",
+            Self::Stale => "STALE",
+            Self::Failed => "FAILED",
+        }
+    }
+}
+
 /// Metadata tracking the lifecycle state of an index.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct IndexMetadata {

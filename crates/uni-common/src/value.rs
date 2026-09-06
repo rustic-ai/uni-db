@@ -528,6 +528,119 @@ pub enum Value {
 // ---------------------------------------------------------------------------
 
 impl Value {
+    /// A deterministic, order-independent rendering of this value.
+    ///
+    /// Exists because two call sites built keys with `format!("{v:?}")`. `Debug`
+    /// over [`Value::Map`], [`Node::properties`] or [`Edge::properties`] follows
+    /// `HashMap` iteration order, and `RandomState` is seeded per map *instance*
+    /// — so the same value renders differently within a single process, not just
+    /// between runs. A Locy join key built that way matched a random subset of
+    /// the rows it should have (#236), and a `DERIVE` Skolem id documented as
+    /// deterministic varied per call (#252).
+    ///
+    /// Maps render with their keys sorted, and every branch is prefixed with its
+    /// kind so that values of different kinds cannot collide on the same string
+    /// — `Int(1)` and `String("1")` are not the same join key. Strings carry
+    /// their length so a delimiter inside one cannot imitate a structural one.
+    ///
+    /// Entities render by **identity alone**: two values denoting vertex 7 are
+    /// the same key regardless of which properties each copy happened to carry.
+    ///
+    /// # Determinism
+    ///
+    /// The match is **exhaustive on purpose**: no catch-all. A new [`Value`]
+    /// variant has to be given a rendering here as a compile error, rather than
+    /// silently falling back to `Debug` and reintroducing the defect. The one
+    /// `Display` delegation, [`TemporalValue`], holds only scalars.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    /// use uni_common::Value;
+    ///
+    /// let one = Value::Map(HashMap::from([
+    ///     ("b".to_string(), Value::Int(2)),
+    ///     ("a".to_string(), Value::Int(1)),
+    /// ]));
+    /// let other = Value::Map(HashMap::from([
+    ///     ("a".to_string(), Value::Int(1)),
+    ///     ("b".to_string(), Value::Int(2)),
+    /// ]));
+    /// assert_eq!(one.canonical_string(), other.canonical_string());
+    /// assert_ne!(Value::Int(1).canonical_string(), Value::String("1".into()).canonical_string());
+    /// ```
+    pub fn canonical_string(&self) -> String {
+        fn hex(bytes: &[u8]) -> String {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        }
+        fn joined(values: &[Value]) -> String {
+            values
+                .iter()
+                .map(Value::canonical_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+        fn map_entries(map: &HashMap<String, Value>) -> String {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort_unstable();
+            keys.into_iter()
+                .map(|k| format!("{}:{}={}", k.len(), k, map[k].canonical_string()))
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+        match self {
+            Self::Null => "null".to_string(),
+            Self::Bool(b) => format!("bool:{b}"),
+            Self::Int(i) => format!("int:{i}"),
+            // `{:?}` on f64 round-trips and renders NaN and the infinities
+            // deterministically, which `{}` does not guarantee for all of them.
+            Self::Float(f) => format!("float:{f:?}"),
+            Self::String(s) => format!("str:{}:{s}", s.len()),
+            Self::Bytes(b) => format!("bytes:{}", hex(b)),
+            Self::List(items) => format!("list:[{}]", joined(items)),
+            Self::Map(m) => format!("map:{{{}}}", map_entries(m)),
+            // Identity only: properties are not part of what an entity *is*.
+            Self::Node(n) => format!("node:{}", n.vid.as_u64()),
+            Self::Edge(e) => format!("edge:{}", e.eid.as_u64()),
+            Self::Path(p) => format!(
+                "path:[{}|{}]",
+                p.nodes
+                    .iter()
+                    .map(|n| n.vid.as_u64().to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                p.edges
+                    .iter()
+                    .map(|e| e.eid.as_u64().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Self::Vector(v) => format!(
+                "vector:[{}]",
+                v.iter()
+                    .map(|f| format!("{f:?}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Self::SparseVector { indices, values } => format!(
+                "sparse:[{}|{}]",
+                indices
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+                values
+                    .iter()
+                    .map(|f| format!("{f:?}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Self::BinaryVector(b) => format!("binvector:{}", hex(b)),
+            Self::Temporal(t) => format!("temporal:{t}"),
+        }
+    }
+
     /// The vertex id of a value that *is* a graph vertex.
     ///
     /// One definition, because five hand-rolled ones disagreed. A vertex
@@ -3203,5 +3316,127 @@ mod tests {
             h(&neg),
             "equal Values must hash equally (Hash/Eq contract)"
         );
+    }
+}
+
+#[cfg(test)]
+mod canonical_string_tests {
+    use super::*;
+
+    fn map_of(pairs: &[(&str, Value)]) -> Value {
+        Value::Map(
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), v.clone()))
+                .collect(),
+        )
+    }
+
+    /// The property the two defects violated: the same map must render the same
+    /// way however its `HashMap` happens to be ordered.
+    ///
+    /// `RandomState` is seeded per map *instance*, so building the same logical
+    /// map repeatedly is enough to shuffle it — no separate process needed. That
+    /// is exactly why the defects varied within a single run.
+    #[test]
+    fn a_map_renders_the_same_however_it_was_built() {
+        let pairs = [
+            ("name", Value::String("a".into())),
+            ("age", Value::Int(3)),
+            ("city", Value::String("z".into())),
+            ("tag", Value::Bool(true)),
+            ("k", Value::Float(1.5)),
+        ];
+        let expected = map_of(&pairs).canonical_string();
+
+        // Many fresh instances, each with its own RandomState, inserted in
+        // different orders.
+        for rotation in 0..pairs.len() {
+            let mut rotated = pairs.to_vec();
+            rotated.rotate_left(rotation);
+            for _ in 0..20 {
+                assert_eq!(
+                    map_of(&rotated).canonical_string(),
+                    expected,
+                    "rendering must not depend on insertion order or hash seed"
+                );
+            }
+        }
+    }
+
+    /// Nesting is where the live #236 trigger lived: a path arrives as a map of
+    /// lists of maps, and only the outermost level being sorted would not help.
+    #[test]
+    fn nested_maps_are_canonical_at_every_depth() {
+        let build = || {
+            Value::List(vec![map_of(&[
+                (
+                    "outer",
+                    map_of(&[("b", Value::Int(2)), ("a", Value::Int(1))]),
+                ),
+                ("other", Value::Int(0)),
+            ])])
+        };
+        let first = build().canonical_string();
+        for _ in 0..50 {
+            assert_eq!(build().canonical_string(), first);
+        }
+    }
+
+    /// Different kinds must not collide, or unrelated rows would join.
+    #[test]
+    fn different_kinds_do_not_share_a_rendering() {
+        let values = vec![
+            Value::Null,
+            Value::Bool(true),
+            Value::Int(1),
+            Value::Float(1.0),
+            Value::String("1".into()),
+            Value::Bytes(vec![1]),
+            Value::List(vec![Value::Int(1)]),
+            map_of(&[("1", Value::Int(1))]),
+            Value::Vector(vec![1.0]),
+            Value::BinaryVector(vec![1]),
+        ];
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for (i, v) in values.iter().enumerate() {
+            let key = v.canonical_string();
+            if let Some(prev) = seen.insert(key.clone(), i) {
+                panic!("{:?} and {:?} both render as {key}", values[prev], v);
+            }
+        }
+    }
+
+    /// A delimiter inside a string must not be able to imitate a structural one.
+    #[test]
+    fn a_string_cannot_forge_structure() {
+        let sneaky = Value::List(vec![Value::String("a,b".into())]);
+        let honest = Value::List(vec![Value::String("a".into()), Value::String("b".into())]);
+        assert_ne!(sneaky.canonical_string(), honest.canonical_string());
+    }
+
+    /// Entities are their identity: two copies of vertex 7 are one join key even
+    /// if one carries properties the other lacks. This is what lets a rule side
+    /// and a target side meet.
+    #[test]
+    fn an_entity_renders_by_identity_alone() {
+        let bare = Value::Node(Node {
+            vid: Vid::from(7u64),
+            labels: vec![],
+            properties: HashMap::new(),
+        });
+        let rich = Value::Node(Node {
+            vid: Vid::from(7u64),
+            labels: vec!["P".into()],
+            properties: HashMap::from([("name".to_string(), Value::String("a".into()))]),
+        });
+        assert_eq!(bare.canonical_string(), rich.canonical_string());
+
+        let other = Value::Node(Node {
+            vid: Vid::from(8u64),
+            labels: vec![],
+            properties: HashMap::new(),
+        });
+        assert_ne!(bare.canonical_string(), other.canonical_string());
     }
 }

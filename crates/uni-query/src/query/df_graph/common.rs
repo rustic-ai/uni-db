@@ -540,6 +540,13 @@ pub fn new_node_list_builder()
 pub struct EntityPropertyCache {
     vertices: HashMap<uni_common::core::id::Vid, uni_common::Properties>,
     edges: HashMap<uni_common::core::id::Eid, uni_common::Properties>,
+    /// Labels for the same vertices, for the same reason the properties are
+    /// here: the synchronous accessor beside them reads the L0 write buffers
+    /// alone, so a flushed vertex came back with none. Labels are not
+    /// properties and were never added, which left every path and comprehension
+    /// reporting a flushed node as unlabelled while the properties beside it
+    /// were correct.
+    labels: HashMap<uni_common::core::id::Vid, Vec<String>>,
 }
 
 impl EntityPropertyCache {
@@ -575,6 +582,16 @@ impl EntityPropertyCache {
                 .get_batch_vertex_props(&distinct, &["_all_props"], Some(query_ctx))
                 .await
                 .map_err(to_df)?;
+            // `resolve_vertex_labels` is the L0 chain followed by the in-memory
+            // `VidLabelsIndex`, so this is map lookups rather than a round trip.
+            cache.labels = distinct
+                .iter()
+                .filter_map(|vid| {
+                    graph_ctx
+                        .resolve_vertex_labels(*vid, query_ctx)
+                        .map(|labels| (*vid, labels))
+                })
+                .collect();
         }
 
         if !eids.is_empty() {
@@ -599,6 +616,11 @@ impl EntityPropertyCache {
 
     pub(crate) fn vertex(&self, vid: uni_common::core::id::Vid) -> Option<&uni_common::Properties> {
         self.vertices.get(&vid)
+    }
+
+    /// The vertex's labels, resolved through storage at pre-fetch time.
+    pub(crate) fn vertex_labels(&self, vid: uni_common::core::id::Vid) -> Option<&[String]> {
+        self.labels.get(&vid).map(Vec::as_slice)
     }
 
     fn edge(&self, eid: uni_common::core::id::Eid) -> Option<&uni_common::Properties> {
@@ -862,6 +884,20 @@ pub fn append_node_to_struct_with(
     query_ctx: &uni_store::runtime::context::QueryContext,
     cache: Option<&EntityPropertyCache>,
 ) {
+    append_node_to_struct_with_labels(struct_builder, vid, query_ctx, cache, None)
+}
+
+/// [`append_node_to_struct_with`], with the node's labels supplied.
+///
+/// See [`append_node_to_struct_optional_with_labels`] for why `batch_labels`
+/// exists; the L0 visibility chain is the fallback when it is `None`.
+pub fn append_node_to_struct_with_labels(
+    struct_builder: &mut arrow_array::builder::StructBuilder,
+    vid: uni_common::core::id::Vid,
+    query_ctx: &uni_store::runtime::context::QueryContext,
+    cache: Option<&EntityPropertyCache>,
+    batch_labels: Option<Vec<String>>,
+) {
     use arrow_array::builder::{LargeBinaryBuilder, ListBuilder, StringBuilder, UInt64Builder};
     use uni_store::runtime::l0_visibility;
 
@@ -869,7 +905,16 @@ pub fn append_node_to_struct_with(
         .field_builder::<UInt64Builder>(0)
         .unwrap()
         .append_value(vid.as_u64());
-    let labels = l0_visibility::get_vertex_labels(vid, query_ctx);
+    // The operator's own column first, then the pre-fetch (which consulted
+    // storage), and the L0 chain last — it answers only for a resident vertex,
+    // so on its own it reported a flushed one as unlabelled.
+    let labels = batch_labels
+        .or_else(|| {
+            cache
+                .and_then(|c| c.vertex_labels(vid))
+                .map(<[String]>::to_vec)
+        })
+        .unwrap_or_else(|| l0_visibility::get_vertex_labels(vid, query_ctx));
     let labels_builder = struct_builder
         .field_builder::<ListBuilder<StringBuilder>>(1)
         .unwrap();
@@ -936,8 +981,29 @@ pub fn append_node_to_struct_optional_with(
     query_ctx: &uni_store::runtime::context::QueryContext,
     cache: Option<&EntityPropertyCache>,
 ) {
+    append_node_to_struct_optional_with_labels(struct_builder, vid, query_ctx, cache, None)
+}
+
+/// [`append_node_to_struct_optional_with`], with the node's labels supplied.
+///
+/// `batch_labels` is the operator's own `{var}._labels` column for this row.
+/// It exists because the fallback inside [`append_node_to_struct_with`] reads
+/// the L0 visibility chain, which answers only for a vertex that is still
+/// resident: a flushed one came back with *no* labels, so a path or a
+/// comprehension reported a node that compares unequal to the same node from
+/// an ordinary `MATCH`. Pass `None` when the caller has no such column and the
+/// L0 chain is genuinely the only source.
+pub fn append_node_to_struct_optional_with_labels(
+    struct_builder: &mut arrow_array::builder::StructBuilder,
+    vid: Option<uni_common::core::id::Vid>,
+    query_ctx: &uni_store::runtime::context::QueryContext,
+    cache: Option<&EntityPropertyCache>,
+    batch_labels: Option<Vec<String>>,
+) {
     match vid {
-        Some(v) => append_node_to_struct_with(struct_builder, v, query_ctx, cache),
+        Some(v) => {
+            append_node_to_struct_with_labels(struct_builder, v, query_ctx, cache, batch_labels)
+        }
         None => append_null_node_struct(struct_builder),
     }
 }

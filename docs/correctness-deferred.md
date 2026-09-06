@@ -541,9 +541,25 @@ are not mistaken for regressions:
 `correctness_scan_wave2_progress`). Two L2 sub-findings deferred as larger, non-gating
 planner changes:
 
-## D7 — `uni-query[27]` pattern-comprehension inner column order
+## D7 — `uni-query[27]` pattern-comprehension inner column order — **FIXED**
 
-**Severity:** wrong results for a multi-hop pattern comprehension that references both an edge
+**Status:** fixed. `build_inner_schema` now declares property columns interleaved per step
+(this step's vertex properties, then this step's edge properties), matching the order the batch
+is filled in — see `b9fb7b5de fix(query): keep a pattern comprehension's inner columns in one
+order`, which is on `origin/main`.
+
+The **guard**, however, landed separately and later: `repro_08_pattern_comprehension_colorder`
+only `println!`'d its findings, so it passed identically with and without the bug and protected
+nothing (the vacuous-fixture class, #205). It now asserts the exact projected value and has been
+verified discriminating — reverting `build_inner_schema` to the pre-fix order fails it. The
+observed failure is `List([])` rather than the value swap predicted below: reading `r1.w` as
+`c.name` makes the `WHERE` predicate reject every candidate. Same root cause, different surface,
+which is why asserting on the *correct* value rather than on a predicted *wrong* one matters.
+
+The location line below is also stale: `build_inner_schema` lives in
+`pattern_comprehension.rs`, not `expr_compiler.rs`. Retained for the record.
+
+**Severity (as originally filed):** wrong results for a multi-hop pattern comprehension that references both an edge
 property on one step and a vertex property on a later step (e.g. `[(a)-[r1:X]->(b)-[r2:Y]->(c) |
 r1.w] WHERE c.name = ...`). Both columns are LargeBinary so `RecordBatch::try_new` succeeds, and
 the predicate/map read the wrong column.

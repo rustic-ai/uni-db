@@ -4,8 +4,11 @@ This document lists every CI job from `.github/workflows/pr.yml` and `.github/wo
 with the **exact command** to run it locally, plus prerequisites, ordering, and the local-only
 gotchas that bite.
 
-> **Source of truth = the workflow YAML.** This runbook mirrors the workflows as of 2026-07-26.
+> **Source of truth = the workflow YAML.** This runbook mirrors the workflows as of 2026-09-05.
 > If a command here disagrees with `.github/workflows/{pr,ci}.yml`, the YAML wins — update this doc.
+> **Bump the date above whenever you add a job or change a command.** The stamp is how drift gets
+> noticed: it sat at 2026-07-26 through four later edits while three PR-blocking jobs went
+> undocumented, which is what #231 reported.
 > Run commands from the repo root unless a "working dir" is noted. **Do not substitute workarounds**
 > for the documented commands; if a command fails, that is a real signal — report it.
 
@@ -20,14 +23,33 @@ cargo install cargo-nextest --locked
 cargo install wasm-tools --locked   # only for wasm32-unknown-unknown fixtures;
                                    # the wasip2 ones are components already
 
+# Supply Chain. PINNED in CI: cargo-deny ships new advisory *checks*, so an unpinned
+# install lets the same commit pass today and fail tomorrow. Bump deliberately,
+# alongside re-testing deny.toml's ignores.
+cargo install cargo-deny --version 0.19.8 --locked
+
+# Fuzz Smoke. Needs a nightly toolchain (libFuzzer) in addition to cargo-fuzz.
+rustup toolchain install nightly
+cargo install cargo-fuzz --locked
+
+# Perf Gate. The runner version must equal crates/uni/Cargo.toml's `iai-callgrind`
+# EXACTLY (0.16.1) or it refuses to parse the harness output.
+cargo install iai-callgrind-runner --version 0.16.1 --locked
+
 # Python tooling (bindings)
 #   install uv:  https://docs.astral.sh/uv/   (CI uses python 3.12)
 
 # System deps CI installs (Debian/Ubuntu names; install equivalents on Fedora)
-#   mold, protobuf-compiler
+#   mold, protobuf-compiler, valgrind
+#   valgrind is what makes the perf gate's metric deterministic and is in no
+#   other job. python3 is needed for scripts/perf/*.py and scripts/ci/*.py.
 
 # Docker — only needed for the Cloud/LocalStack job
 ```
+
+The pinned `nightly-2026-07-11` toolchain for miri is installed in its own section
+below (§2), because it is the one pinned toolchain in the repo and the reason is
+specific to that lane.
 
 Network access is required for: HuggingFace model pulls (reranker real-ONNX tests), the ONNX Runtime
 tarball (reranker load-dynamic), and the LocalStack image (cloud).
@@ -45,7 +67,7 @@ export RUSTC_WRAPPER=""
 - **All `cargo`/`maturin` commands serialize on the build-dir lock** — run them one at a time.
 - Docker (LocalStack) and pure-Python (`uv`) steps do **not** contend with a cargo build, so they can
   warm up in parallel (e.g. start LocalStack while a build runs).
-- Heavy builds (provider-onnx static link, release wheel) are best run in the background while you
+- Heavy builds (provider-onnx static link, the notebooks wheel) are best run in the background while you
   watch a log.
 
 ---
@@ -57,6 +79,8 @@ The jobs a Rust change can actually move. Run these first:
 ```bash
 export RUSTC_WRAPPER=""
 cargo fmt --all -- --check
+cargo deny check                      # no build, seconds; the advisory DB floats,
+                                      # so this can go red with no change to the repo
 cargo clippy --workspace \
   --exclude uni-tck --exclude uni-python-cuda --exclude uni-python-metal \
   --exclude uni-python-onnx-cuda --exclude uni-python-onnx-metal \
@@ -86,6 +110,41 @@ cargo clippy --workspace \
   --exclude uni-python-onnx-cuda --exclude uni-python-onnx-metal \
   --all-targets -- -D warnings
 ```
+
+### Supply Chain (cargo-deny)
+```bash
+# All four checks in one invocation so the summary line reports each:
+# `advisories ok, bans ok, licenses ok, sources ok`.
+cargo deny check
+```
+Needs the pinned `cargo-deny 0.19.8` from §0. This lane can go red with **no
+change to this repo** — see §5.
+
+### Fuzz Smoke (parsers & codecs)
+```bash
+# working dir: fuzz (subshell, so a failure does not leave you outside the repo root)
+( cd fuzz
+for target in cypher_parse locy_parse wal_decode btic_decode; do
+  # Corpus-dir order is load-bearing. libFuzzer writes newly-discovered inputs
+  # into the FIRST directory listed and treats the rest as read-only, so
+  # `corpus/$target` must come first: naming `seeds/$target` first makes the
+  # curated, git-tracked seed corpus the output dir, and a single 30 s run
+  # buries its handful of regression inputs under a few hundred generated files.
+  mkdir -p "corpus/$target"
+  seeds=""
+  # Only some targets have a seed dir (today: btic_decode alone), and a missing
+  # path makes libFuzzer error rather than skip it.
+  [ -d "seeds/$target" ] && seeds="seeds/$target"
+  cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \
+    "$target" "corpus/$target" $seeds -- -max_total_time=30 -timeout=10
+done )
+```
+`--target x86_64-unknown-linux-gnu` is load-bearing: without it a musl-built
+cargo-fuzz statically links libc, which AddressSanitizer rejects outright.
+
+The nightly job is the one that finds *new* bugs; this 30 s/target lane exists so
+a parser or codec regression fails the PR that introduces it. Replaying the seed
+corpus is the real regression check — 30 s of blind mutation mostly is not.
 
 ### Rust Tests (workspace suite)
 ```bash
@@ -129,7 +188,7 @@ cargo nextest run -p uni-db -p uni-store --features failpoints --run-ignored all
 # feature, since that is what every other job builds:
 cargo nextest run -p uni-store -E 'test(/resilience|recovery/)'
 ```
-152 tests, 19 s warm. The cold cost is ~3 min 40 s and is almost entirely the
+152 tests, 19 s warm. The cold cost is 3 min 41 s and is almost entirely the
 second feature configuration compiling, so expect a slow first run after any
 dependency change.
 
@@ -160,8 +219,13 @@ cargo +nightly-2026-07-11 miri setup
 # rule. Nextest runs a process per test and each pays a fresh interpreter + std
 # startup; these suites are only affordable because their tests share one
 # interpreted process.
-PROPTEST_CASES=16 cargo +nightly-2026-07-11 miri test -p uni-btic --lib --tests
-PROPTEST_CASES=16 cargo +nightly-2026-07-11 miri test -p uni-sparse-vector --lib --tests
+# No `PROPTEST_CASES` here, deliberately -- and this is the same trap the lane
+# already documents below. Miri's isolation HIDES the environment, so setting it
+# did nothing: the var was silently ignored and the proptests ran at their
+# library default. The case count now lives in `miri_safe_config` in
+# `crates/uni-sparse-vector/tests/proptest.rs`, in code, where miri can see it.
+cargo +nightly-2026-07-11 miri test -p uni-btic --lib --tests
+cargo +nightly-2026-07-11 miri test -p uni-sparse-vector --lib --tests
 
 # uni-common needs -Zmiri-disable-isolation (it calls Utc::now() and does real
 # filesystem I/O through object_store); the two codec crates above deliberately
@@ -175,9 +239,15 @@ MIRIFLAGS="-Zmiri-disable-isolation" \
   cargo +nightly-2026-07-11 miri test -p uni-common --lib --tests \
   -- --test-threads=1 --skip 'muvera::'
 ```
-Measured 2 min 08 s warm for all three. (The older 1 min 41 s figure predates
-the sparse proptests actually running: under isolation they aborted at startup
-on a blocked `getcwd`, so that timing covered a target that verified nothing.)
+Budget ~4 min warm for all three; `uni-sparse-vector`'s proptest target alone was
+3 min 17 s on a 22-core box on 2026-09-05 (single sample, so treat it as an order
+of magnitude, not a threshold). Two older numbers are still quoted elsewhere and
+both understate it: `pr.yml`'s 1 min 41 s predates the sparse proptests actually
+running (under isolation they aborted at startup on a blocked `getcwd`, so that
+timing covered a target that verified nothing), and this document's own earlier
+2 min 08 s predates the case count moving into `miri_safe_config`. The proptest
+target dominates; if the lane ever needs trimming, drop `--tests` from
+`uni-common` before touching a timeout.
 
 Two miri-isolation traps, both silent, both hit by this lane: `current_dir` is
 blocked, which is what aborted the proptest target, and **the environment is
@@ -194,6 +264,35 @@ one here -- a `std::mem::forget(TempDir)` leaking a directory on disk every run
 is upstream, file it and `#[cfg_attr(miri, ignore)]` the single test with a
 comment linking the issue. Do not add `-Zmiri-ignore-leaks`, and do not drop the
 crate from the lane.
+
+### Perf Gate (instruction counts)
+```bash
+# valgrind is what makes this metric deterministic, and is in no other PR job.
+# RUNS=5 is measured, not chosen: against a 25-sample cross-runner set the worst
+# drift of a median with NO code change is 0.997% at 3 runs and 0.599% at 5;
+# 7 runs only reaches 0.581% for another 4.6 minutes.
+bash scripts/perf/iai_pilot.sh 5
+
+# The gate verifies itself in the same run that trusts it. No lane runs tests
+# under scripts/, so a test file alone would never execute -- which is the shape
+# the gate was found to have.
+python3 scripts/perf/test_iai_gate.py
+
+# Thresholds are explicit arguments -- iai_gate.py has no defaults -- so the
+# number a build fails on is visible and traceable to the measurement that
+# produced it. `--fail-improve-pct` is the other side: an implausible *drop* is a
+# collection failure, and used to pass green.
+python3 scripts/perf/iai_gate.py \
+  --baseline docs/perf/iai-baseline.json \
+  --current target/iai-pilot \
+  --fail-pct 2 --warn-pct 1 --fail-improve-pct 50 --markdown
+```
+Expect ~15 min of cold compile (no other lane builds `--benches`) plus ~12 min of
+measurement. The job's 45-minute `timeout-minutes` is the ceiling that budget sits
+under, not the expected runtime.
+
+**This lane does not reproduce off a CI runner — see §5 before believing its
+result.**
 
 ### openCypher TCK (schemaless)
 ```bash
@@ -231,7 +330,12 @@ cargo nextest run -p uni-tck --test tck
 
 ---
 
-## 3. `ci.yml` — main-push thorough suite (everything above, plus)
+## 3. `ci.yml` — main-push thorough suite (the extra lanes ONLY)
+
+`ci.yml` does **not** re-run §2. Its own header says the PR gates (format,
+clippy, workspace suite, openCypher TCK schemaless, ruff + pytest) are
+"deliberately NOT repeated here", and its `gate` job depends on none of them. To
+reproduce a full main-push run you need §2 **and** §3.
 
 ### TCK sidecar + Locy TCK (both lanes)
 ```bash
@@ -261,6 +365,7 @@ unset ORT_DYLIB_PATH
 ### Cloud Integration (LocalStack)
 ```bash
 docker run -d --name uni-localstack -p 4566:4566 \
+  -e SERVICES=s3 \
   -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=us-east-1 \
   localstack/localstack:4.13.1
 timeout 120 bash -c 'until curl -sf http://localhost:4566/_localstack/health >/dev/null 2>&1; do sleep 2; done'
@@ -292,25 +397,40 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace \
   --exclude uni-python-onnx-cuda --exclude uni-python-onnx-metal
 ```
 
-### Flagship Notebooks (heaviest; release wheel + neural execution)
+### Flagship Notebooks (heaviest; built wheel + neural execution)
+
+Called "the wheel" and not "the release wheel" throughout: the lane builds with
+maturin's **dev** profile, so what it exercises is an unoptimized wheel. It is
+still the built *wheel* rather than the editable `maturin develop` install, and
+that distinction is the one the lane exists to protect.
 ```bash
 ( cd bindings/uni-db
   uv sync --group dev --extra notebook-runtime
   rm -f dist/*.whl                         # else the glob below matches two versions
   uv run maturin build --out dist          # NOTE: `dev` profile — maturin only builds
-                                           # release with an explicit `--release`.
-                                           # ci.yml's notebooks job omits it, so the
+                                           # optimized with an explicit profile flag.
+                                           # ci.yml's notebooks job passes none, so the
                                            # notebooks execute an UNOPTIMIZED build.
                                            # The published wheels are unaffected:
-                                           # release-wheels.yml passes `--release`.
+                                           # release-wheels.yml passes `--profile dist`
+                                           # in every build job (NOT `--release` — see §5).
   uv pip install --force-reinstall dist/*.whl
-  # Assert the notebooks will actually run against what was just built.
-  .venv/bin/python3 -c "from importlib.metadata import version; print(version('uni-db'))" )
+  # Assert the notebooks will actually run against what was just built. CI makes
+  # this an ASSERTION that exits non-zero on a mismatch, not a print -- a stale
+  # editable install silently exercises a `maturin develop` debug build instead
+  # of the wheel, and the job then passes having tested the wrong artifact.
+  uv run --no-sync python -c "
+import tomllib, sys
+from importlib.metadata import version
+want = tomllib.load(open('../../Cargo.toml','rb'))['workspace']['package']['version']
+got = version('uni-db')
+sys.exit(f'version mismatch: wheel {got!r} != workspace {want!r}') if got != want else print('ok', got)
+" )
 
 # Run the 6 notebooks SERIALLY (they fail spuriously under concurrent CPU/GIL load).
 # `--no-sync` is REQUIRED: a plain `uv run` re-syncs the project, uninstalls the wheel
 # installed above and restores the editable install, so the notebooks would silently
-# exercise a `maturin develop` build instead of the release wheel.
+# exercise a `maturin develop` build instead of the built wheel.
 for nb in semiconductor pharma cyber predictive_maintenance adverse_drug_reaction drug_drug_interaction; do
   uv run --no-sync --project bindings/uni-db python website/scripts/verify_${nb}_flagship_notebook.py
 done
@@ -326,6 +446,7 @@ done
 # run is vacuously green.
 ( ./scripts/build-wasm-fixtures.sh
   cd bindings/uni-db
+  uv sync --group dev
   uv run maturin develop --features wasm-plugins,extism-plugins
   # Guard: assert the feature build took effect, else the tests below just skip
   # and the lane passes green.
@@ -345,7 +466,10 @@ sys.exit('feature build did not take effect; missing: %r' % missing) if missing 
 ```bash
 python3 scripts/ci/check_wheel_variant_features.py
 python3 scripts/ci/check_version_consistency.py   # pyproject == workspace; no hardcoded __version__
-python3 scripts/ci/check_documented_counts.py     # docs match `assert_eq!(kinds.len(), 22)`
+python3 scripts/ci/check_documented_counts.py     # every documented count claim: plugin
+                                                  # surfaces, graph algorithms, both TCK
+                                                  # suites' feature files + scenario totals,
+                                                  # and the skill reference pages
 python3 scripts/gen_python_api_reference.py --check  # generated symbol page is current
 python3 scripts/ci/check_doc_symbols.py           # documented Python methods exist in __init__.pyi
 python3 scripts/ci/check_publish_list.py
@@ -393,25 +517,24 @@ cargo metadata --format-version=1 --manifest-path bindings/uni-db-cuda/Cargo.tom
   enough — sync still treats the existing install as satisfying.
 - **`uv run` silently reverts a wheel install.** `uv run` syncs the project environment
   first, which uninstalls anything `uv pip install`-ed over the editable project and restores
-  the editable install. In the notebooks job that means the built wheel is discarded before a
-  single notebook runs, and the job passes having tested a `maturin develop` build. Pass
-  `--no-sync` (or invoke `.venv/bin/python3` directly) whenever the installed artifact matters.
+  the editable install — discarding the built wheel before a single notebook runs, so the job
+  passes having tested a `maturin develop` build. `ci.yml`'s notebooks job now passes
+  `--no-sync` on every `uv run`, so it is no longer exposed; the hazard is live for any command
+  you add. Pass `--no-sync` (or invoke `.venv/bin/python3` directly) whenever the installed
+  artifact matters.
 - **Stale wheels in `bindings/uni-db/dist/` after a version bump** — the notebooks job does
   `uv pip install --force-reinstall dist/*.whl`, and that glob matches *every* wheel ever built
   there. Two versions present makes `uv` refuse with "Requirements contain conflicting URLs for
-  package `uni-db`". CI never sees this (fresh checkout, empty `dist/`), so it is local-only —
-  but the failure is quiet in the worst way: the notebooks that run afterwards use whatever
-  `maturin develop` left installed (a *debug* build), so the job appears to pass while never
-  exercising the release wheel it exists to test. `rm bindings/uni-db/dist/*.whl` before the
-  build, and check `importlib.metadata.version('uni-db')` matches the workspace version before
-  trusting a notebook run.
+  package `uni-db`". `ci.yml` guards against it explicitly (`rm -f dist/*.whl`, ci.yml:297) —
+  its own comment cites a cached runner or a local replication after a version bump, so this is
+  not local-only. The failure is quiet in the worst way: the notebooks that run afterwards use
+  whatever `maturin develop` left installed, so the job appears to pass while never exercising
+  the wheel it exists to test. Keep the `rm` before the build, and assert
+  `importlib.metadata.version('uni-db')` matches the workspace version before trusting a run.
 - **`maturin develop` needs a `TMPDIR` that exists** — a missing one fails with
   `Failed to create temporary directory ... (os error 2)`. And never judge it through a pipe:
   `maturin develop | tail -N` returns *tail's* exit status, so a failed build looks like success
   and the tests then run against the previous `.so`.
-- **Python steps need a venv-scoped `LD_PRELOAD`** of the built extension — see
-  `docs/` note on static-TLS exhaustion. A global `export LD_PRELOAD` poisons `uv` and other
-  non-Python subprocesses with `undefined symbol: _Py_IncRef`.
 - **Python static-TLS (glibc)** — on some boxes `uv run pytest` can fail with
   `ImportError: ... cannot allocate memory in static TLS block` (a large debug `.so` exhausting
   glibc's static-TLS surplus; CI runners have more surplus so they never hit it). If it triggers,
@@ -422,7 +545,9 @@ cargo metadata --format-version=1 --manifest-path bindings/uni-db-cuda/Cargo.tom
   PY=bindings/uni-db/.venv/bin/python3
   LD_PRELOAD="$SO" "$PY" -m pytest tests/ -v -n auto
   ```
-  This is a last-resort local fix, not part of the workflow.
+  This is a last-resort local fix, not part of the workflow. Keep the preload **venv-scoped**
+  as above: a global `export LD_PRELOAD` poisons `uv` and other non-Python subprocesses with
+  `undefined symbol: _Py_IncRef`.
 - **Notebooks** — run serially (see §3); concurrent runs fail spuriously, not from a code bug.
 - **Cloud** — always `docker rm -f uni-localstack` when done so the port/container doesn't linger.
 - **Cloud: published ports can be unreachable from the host.** On some machines a
@@ -443,3 +568,32 @@ cargo metadata --format-version=1 --manifest-path bindings/uni-db-cuda/Cargo.tom
   like a code failure. Capture the status and stop if it is non-zero.
 - **Reranker real-ONNX tests** need network (HF). A flaky download is an infra failure, not a code
   failure — re-run before concluding.
+- **The perf gate does not reproduce off a CI runner.** Measured 2026-09-05: every
+  gated target lands **88–97% below** `docs/perf/iai-baseline.json`, which trips
+  `--fail-improve-pct` ("an implausible improvement is a collection failure").
+  Before treating that as a regression in your branch, know what has already been
+  established, so you do not re-derive it:
+  - `baselines::baseline_noop.noop` matches the baseline **exactly** (4 Ir), so
+    collection works and the bench binary is not stripped — `[profile.bench]` in
+    `.cargo/config.toml` is doing its job.
+  - **It reproduces on `origin/main` within ±1.6%**, so it is not introduced by any
+    branch. The meaningful comparison for a PR is branch-vs-main, not
+    branch-vs-baseline.
+  - **The tmpfs theory is falsified.** `Uni::temporary()` honors `TMPDIR`; pointing
+    it at a real disk changed nothing (−83.67% either way). Do not re-run that.
+  - `--allow-foreign-machine` turns the improvement check off and still fails on
+    regressions. It is a **diagnostic**, not the documented command: CI never
+    passes it, and a local pass with it means "no regressions on this machine",
+    not "the perf gate is green".
+  Why a GitHub runner measures ~10x more instructions for identical code is
+  unresolved and needs a CI run, not another local experiment. See #230.
+- **`cargo deny check` can go red with no change to this repo.** The advisory
+  database floats, so a new RUSTSEC entry against a pinned transitive dep turns
+  the lane red on a commit that passed yesterday. That is a real finding to
+  triage (or add to `deny.toml`'s ignores, deliberately) — not a broken local
+  setup, and not something to work around.
+- **`fuzz/artifacts/` is gitignored and outlives the run that produced it.** A
+  crash file there is not evidence *this* run crashed: check its mtime, and
+  replay it (`cargo +nightly fuzz run <target> <artifact>`) before concluding
+  anything. The tracked regression inputs live in `fuzz/seeds/<target>`, which is
+  a different directory for a different purpose.

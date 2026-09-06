@@ -1924,3 +1924,200 @@ test called `compact()` and passed without ever reaching `replace`.
 
 **17 commits ahead of `origin/main`.** Two carry closing keywords that cannot
 fire until they merge: `Fixes #199`, `Fixes #230`, plus `Fixes #247`.
+
+---
+
+## Status — 2026-09-05
+
+This round started as a triage of the 44 open issues against this document and
+`issue_triage_2026-09-03.md`, and turned into three pieces of work: one filed
+defect, one found while fixing it, and a CI failure on the branch carrying all
+of it. The triage's own finding is the one worth keeping.
+
+### The backlog overstates the work, and now in a second way
+
+`issue_triage_2026-09-03.md` already records that fourteen of the open issues
+are instances of a class also filed. The addition is that several filings are
+simply **overtaken** — fixed, but still open because nothing re-checked them.
+Verified against the source rather than against the filings:
+
+- **#216 and #217** — both closed in fact. `expr_eval.rs` carries a comment
+  saying the raw `_vid` arms were deleted in favour of `entity_ref`, and
+  `entity_aware_eq` routes through `entity_ref` too. Both named sites are
+  converted.
+- **#234** — `entity_vid` / `entity_ref` is at **28 call sites**; the issue was
+  filed when it had two. `crates/uni/tests/common/arch_entity_identity.rs` is
+  the ratchet. What remains is a boundary that should stay open: `COPY FROM`
+  input and user map properties can legitimately carry `_id`, so the CI ratchet
+  is the guard, not a compiler check.
+- **#239** still holds — `ScanRequest::with_limit` has zero callers; the
+  `scan_all_backend_with_limit` hits are a differently-named store method.
+- **#176** and **#174** still hold as filed.
+- **#254** is spam: an auto-submitted promotion for an unrelated project whose
+  title is a truncated copy of this repo's tagline.
+
+This is the same planning error the 2026-09-05 status in the triage document
+names, reached from the other side: work sequenced against a description of the
+tree rather than the tree. The remedy is unchanged — re-verify a class issue's
+sites *before* planning from it.
+
+### #253 — the registry was never written, and the comprehension was one face
+
+An edge type used without `CREATE EDGE TYPE` is interned at write time by
+`SchemaManager::get_or_assign_edge_type_id`, which mints a name → id pair into
+`Schema::schemaless_registry` and bumps the schema version. That path is
+synchronous and runs per row, so it cannot `save()`, and nothing else did. The
+persisted catalog came back with an empty registry every time — measured, not
+inferred.
+
+Storage is name-addressed (the main edge table's `type` column is a `Utf8`), so
+nothing on disk was ever wrong, and the typed traversal survived because a type
+it cannot resolve is planned as `TraverseMainByType` and matched by name. Every
+read path that needs the *id* had no such fallback:
+
+| after a reopen | before | correct |
+|---|---|---|
+| `MATCH (a)-[e]-(x)` — the **untyped traversal** | 0 rows | 1 |
+| `[ (a)-[e]-(x) \| e ]` | `[]` | 1 item |
+| `[ (a)-[e:T]-(x) \| e ]` — the reported symptom | `[]` | 1 item |
+
+So the issue reports one third of its own blast radius, and the widest of the
+three is a plain `MATCH` with no comprehension in it.
+
+`SchemaManager` now tracks the version it last wrote and `save_if_dirty`
+persists when the live version has moved past it; the commit path calls it once
+the transaction is durable. A forked session is skipped — a fork's manager
+shares primary's `path`, so saving it would overwrite primary's catalog, which
+is the hazard `CLAUDE.md` already records. Every `bump_version` caller is a DDL
+mutation, so a steady write workload never dirties.
+
+### Found while fixing it — a second defect, unfiled
+
+`MATCH p = (a)-[:T]->(b) RETURN p` returned a path whose relationship had an
+empty type and whose nodes had no labels, as soon as the data left L0. It needs
+only a flush, not a reopen, and it predates #253.
+
+The first reading was wrong in a way this document has a section for. The empty
+type looked specific to an *undeclared* type — from a comparison whose
+declared-type edge had never been flushed. A 2×2 over (anonymous, named) ×
+(declared, undeclared) falsified it in one run and named the real axis:
+
+| relationship | declared | undeclared |
+|---|---|---|
+| anonymous `-[:T]->` | `""` | `""` |
+| named `-[r:T]->` | correct | correct |
+
+An anonymous relationship is carried by a bare `__eid_to_<target>` column with
+no sibling `_type`, so the operator had only the L0 chain, which answers for a
+resident edge and nothing else. Two sources were available and unused: the
+adjacency probe already runs to recover the edge's stored orientation and
+reports the type as a by-product (`resolve_stored_edge` returns it;
+`resolve_stored_edge_endpoints`, which the operator called, drops it), and the
+pattern itself names the type.
+
+The label half was wider. `append_node_to_struct_with` read labels from the L0
+chain only while the properties beside them had a storage-backed pre-fetch. Six
+constructors share it and **five were live**: fixed-length paths, zero-length
+paths, `shortestPath`, variable-length paths and pattern comprehensions all
+returned a flushed node unlabelled, while `MATCH (a) RETURN a` on the same
+vertex was correct. `GraphExecutionContext::resolve_vertex_labels` — the L0
+chain followed by the in-memory `VidLabelsIndex` — already existed, from the
+#99 fork fix, and none of the six called it. The pre-fetch cache now carries
+labels, which reaches every site at once.
+
+### The CI failure, and what it cost to attribute
+
+`repro_get_edges_scales_with_graph_size` failed on a `CommitTimeout` that
+`create_edge` unwraps. `commit_timeout` (5s) bounds only the wait to acquire the
+writer's `flush_lock`, and a background flush or compaction holding that lock
+surfaces as a retriable timeout on the next commit. `fork_writes_soak.rs` and
+`runtime/profile_test.rs` both already document this mechanism, the latter
+naming unoptimized debug builds as what makes it reachable. CI runs debug.
+
+Three tests are exposed, not one, and the one that failed is not the largest
+risk: `issue_55_instrumented` runs twice the volume and was the second-slowest
+test in the same run. All three now configure the guard, with the reason
+recorded at each site. Raising the guard rather than disabling
+`auto_flush_interval` is deliberate — `issue_55_instrumented` keeps the 5-second
+timer "to reproduce the bug as customers see it", so the timer is the mechanism
+under test.
+
+**It was not reproduced locally, and the fix does not rest on a reproduction.**
+Instrumenting the lock across a fully parallel workspace run: the longest wait
+under a default 5s budget is **215 ms**, a 23× margin, and zero commits timed
+out. Waits of ~8s do occur in the suite, but only where a test configures a 30s
+budget.
+
+Two things went wrong on the way there, both of the kind the 2026-09-03 status
+already named:
+
+1. **An instrument that returned silence rather than a result.** The first
+   loaded measurement reported *zero* lock waits. `nextest` captures stderr and
+   prints it only for failing tests, so the probe never reached the reader — and
+   silence is indistinguishable from "no contention". Writing to a file instead
+   produced 44 samples.
+2. **A measurement read as confirmation before it was correlated.** Waits of
+   9796 ms and 7830 ms looked like they exceeded the 5s bound. Logging each
+   wait *beside its own budget* showed both ran under a 30 000 ms budget, and
+   that the default-budget maximum was 215 ms. The number that mattered was the
+   ratio, not the magnitude — the same shape as "report the total beside the
+   parts".
+
+Two candidate causes were killed before they reached a commit message: the
+index-status commits in this branch (reading them showed both are reporting and
+metrics only, and neither changes whether an index is built), and contention
+from the async finalizer, which does re-acquire `flush_lock` — a same-budget
+differential varying only `async_flush_enabled` gave 0/8 timeouts.
+
+The gate itself was also wrong. CI ran without `--no-fail-fast`, so **2171 of
+6869 tests were cancelled** behind the single failure and a second failure would
+have been invisible; nextest reports that as "4698/6869 tests run", which reads
+like a filter. Added, with the reason in the workflow.
+
+### What this round is evidence for
+
+**A repro left non-gating is indistinguishable from no test, and so is an
+instrument that cannot fail.** #253's repro arrived `#[ignore]`d, which is the
+right state for an open defect; the value came from un-ignoring it *and*
+widening it past the reported symptom, since two thirds of the blast radius was
+outside what the issue described. The lock probe failed the same way from the
+other direction: it could not have reported contention if contention existed.
+
+**A defect's filed description is a starting hypothesis about its extent, not a
+boundary.** #253 named the comprehension and the untyped traversal was worse;
+the hydration defect looked schemaless-specific and was not; the label half
+looked like one call site and was five. In all three the widening came from
+probing past the reported symptom, and in all three the first reading would have
+shipped a fix that left most of the defect in place.
+
+### Gates
+
+4907/4907 across `uni-db`, `uni-common`, `uni-store`, `uni-query`,
+`uni-query-functions` and `uni-cypher`; the full workspace under the exact CI
+command 6875/6875; TCK 3925/3925, 0 failed; fmt and clippy clean. Every new
+test was verified to fail without its fix.
+
+### The order from here
+
+Unchanged in shape. **#214 with #240** — making the scan incremental, which is
+the single fact behind #214, #240 and #202's unspillable sort, and which
+unblocks the #238 revisit that #242's scope item 2 is now waiting on. Then
+**#239**, then **#224** and the rest of Tier 4.
+
+Two items this round leaves open rather than closes:
+
+- The hydration defect is fixed and **unfiled**, so its commit closes nothing.
+- The `CommitTimeout` workaround sidesteps a product question rather than
+  answering it: whether a single-writer commit should fail at all because a
+  *background* flush holds the lock. `repro_commit_timeout_after_durable.rs`
+  asserts it should not — and asserts it only with `async_flush_enabled: false`,
+  the path where the lock is uncontended by construction. That is a
+  vacuous-coverage instance of the #205 class, on an invariant the project has
+  already written down.
+
+### Open, unpushed
+
+**20 commits ahead of `origin/main`** — the 15 in PR #255 plus five from this
+round. Five closing keywords cannot fire until they merge: `Fixes #231`,
+`Fixes #236`, `Fixes #238`, `Fixes #252` and `Fixes #253`. #231's already failed
+to fire once, when its commit was the one left out of PR #250.

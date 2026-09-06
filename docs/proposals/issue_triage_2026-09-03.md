@@ -162,3 +162,149 @@ taking #193. #233's Tier 2 and #249 are both small and self-contained.
 
 **17 commits are unpushed**, and three closing keywords (`Fixes #199`,
 `Fixes #230`, `Fixes #247`) cannot fire until they merge.
+
+---
+
+## Status — 2026-09-05
+
+44 open. PR #250 merged, which closed **#193, #230, #235, #247 and #251** — the
+keywords the previous status recorded as blocked. **#231 did not close**: its
+commit was the one commit not pushed to the fork, so it sat outside the PR while
+every other commit in the branch merged. A closing keyword only fires from a
+commit that is actually in the merge.
+
+A further **14 commits are unpushed**, carrying `Fixes #231`, `Fixes #236`,
+`Fixes #238` and `Fixes #252`.
+
+### Worked since
+
+| # | state |
+|---|---|
+| #243 | **all four faces closed.** Faces 1 and 2 merged in #250; face 4 was already closed by the entity-encoding work; face 3 and the class remedy are on the unpushed branch |
+| #236, #252 | fixed — one canonical rendering on `Value`, `Debug` fallback deleted from five sites |
+| #238 | fixed — both comments corrected, pool decision re-made on the true premise |
+| #233 | **Tier 2 done.** All three tiers now closed; the issue stays open for the ~25 unaudited plugin/CLI/bulk/CRDT sites it scopes out |
+| #242 | six operators reserve; the pool is no longer blind to the largest allocations. Scope item 1 done, item 2 now unblocked |
+| #234 | not started as filed, but see below |
+| D7 (`docs/correctness-deferred.md`) | was already fixed; only the guard was missing |
+| *(unfiled)* | index status reported `ONLINE` unconditionally on two surfaces — the `Schema` introspection projection and `uni.schema.indexes`. Same class as the index-build-status honesty fix, which landed and visited neither. Found while reading for #233, not from a report |
+
+### What this round says about the document above
+
+**Three of #243's four faces were already fixed when this document listed it as
+"not started".** Two had merged in #250 and one closed as a side effect of the
+entity-encoding work. The same is true of **#234**, listed here as a remaining
+Tier 1 class: the query layer was unified days earlier, and what is left is a
+boundary that should stay open — `COPY FROM` input and user map properties can
+legitimately carry `_id`, so the CI ratchet is the guard, not a compiler check.
+
+This is the *opposite* failure from the one the "#247 correction" section
+records. That was a filing grouped by a guessed mechanism; these are filings that
+were simply **overtaken**. Both produce the same planning error — work sequenced
+against a description of the tree rather than the tree — and the fix for both is
+the same: re-verify each site before planning from a class issue, not after.
+
+The count is still overstated for the reason the top of this document gives, and
+now also because closed work reads as open until someone checks.
+
+### Two findings worth carrying
+
+**The vacuous-fixture class (#205) is not incidental — it guards real defects.**
+Three separate repros this round protected nothing: D7's printed its result
+instead of asserting, and #236's and #252's shipped `#[ignore]`d because they
+failed. In every case the *fix* was cheap and the *guard* was the missing half.
+A repro left non-gating after its fix lands is indistinguishable from no test.
+
+**`cargo nextest` cancels remaining tests after a failure.** A full run reported
+`2271/2821` and a second failure sat hidden behind the first; the shortfall is
+easy to read as a filter. Use `--no-fail-fast` before concluding a suite is
+green.
+
+### One consequence to record against #238
+
+The reasoning committed for #238 — keep `GreedyMemoryPool`, because the operators
+dominating peak memory do not reserve — was true when written and is now half
+untrue by our own hand: six of them reserve. #238 recorded the condition for
+revisiting rather than a verdict, which is what makes this checkable instead of
+stale. **#242's scope item 2 is now due**, and it is the first thing that should
+happen after the scan becomes incremental.
+
+### Recommended next
+
+1. **Push, and fetch first** — `origin/main` moved under this branch when #250
+   merged, and four closing keywords are waiting on commits that only exist
+   locally.
+2. **#214 with #240.** The scan's new reservation fires *after* the whole batch
+   is built, so today it bounds how long an over-budget result survives rather
+   than whether it is constructed. Making the scan incremental is what converts
+   it into a real bound, and it is the single fact behind #214, #240 and #202's
+   unspillable sort. It also unblocks the #238 revisit above.
+3. **#239** if a small self-contained item is wanted first: `ScanRequest::limit`
+   has zero callers, so `LIMIT 1` reads the whole table.
+4. **#224**, then the rest of Tier 4. Unchanged, and still nothing below it
+   should be sequenced ahead of it.
+
+Tier 2's remaining memory items (#241, #214, #213) still share one root and
+should still move as one track rather than singly.
+
+---
+
+## Status — 2026-09-05, later
+
+A second pass the same day, prompted by re-running this document's own order
+against the tree. Narrative and measurements are in the 2026-09-05 status of
+`ldbc_findings_remediation_2026-08-27.md`; this is the ledger.
+
+### Verified against the source, not the filing
+
+The previous status recorded that #243 and #234 had been *overtaken* — fixed
+while still listed here as work. Checking the rest of the Tier 1 instances the
+same way finds two more:
+
+| # | state | evidence |
+|---|---|---|
+| #216 | **closed in fact** | `locy_eval.rs` matches on `(a.entity_ref(), b.entity_ref())`, with the mixed pairings documented beside it |
+| #217 | **closed in fact** | `expr_eval.rs` carries a comment saying the raw `_vid` arms were deleted for `entity_ref`; `entity_aware_eq` routes through it too |
+| #234 | **closed in substance** | `entity_vid` / `entity_ref` is at 28 call sites, against the two it was filed on; `arch_entity_identity.rs` is the ratchet. The remaining boundary should stay open — `COPY FROM` input and user map properties can legitimately carry `_id` |
+| #239 | still holds | `ScanRequest::with_limit` has zero callers; the `scan_all_backend_with_limit` hits are a differently-named store method |
+| #176, #174 | still hold | as filed |
+| #254 | spam | auto-submitted promotion for an unrelated project; its title is a truncated copy of this repo's tagline |
+
+So four of this document's Tier 1 rows are done and one is spam. **The count of
+open issues is now a poor proxy for the work twice over** — once for the
+class/instance double-count at the top of this document, and once because closed
+work reads as open until someone opens the file.
+
+### Worked since
+
+| # | state |
+|---|---|
+| #253 | **fixed.** The schemaless edge-type registry was never persisted. The issue reports the pattern comprehension; the untyped `MATCH (a)-[e]-(x)` was also returning nothing, which is the wider and louder case |
+| *(unfiled)* | **fixed.** A path's relationship type and its nodes' labels were read from L0-only sources, so both were lost once the data was flushed. Five live call sites for the label half. Needs an issue — its commit closes nothing |
+| CI | **green.** `repro_get_edges_scales_with_graph_size` failed on a `CommitTimeout`; three tests shared the exposure and now configure the guard. `--no-fail-fast` added to the PR workflow, which had been hiding 2171 of 6869 tests behind the first failure |
+
+### Recommended next
+
+Step 1 of the previous list is discharged in intent — the branch is now **20
+commits ahead of `origin/main`**, and five closing keywords are waiting on the
+merge: `Fixes #231`, `#236`, `#238`, `#252`, `#253`.
+
+The rest is unchanged, and nothing this round displaces it:
+
+1. **#214 with #240**, still one change and still the single fact behind #202's
+   unspillable sort; it unblocks the #238 revisit that #242's scope item 2 waits
+   on.
+2. **#239** if a small self-contained item is wanted first.
+3. **#224**, then the rest of Tier 4.
+
+Two additions to the tail of the queue, both from this round:
+
+- **File the path/label hydration defect.** It is fixed with gating tests, but
+  nothing tracks it.
+- **A vacuous-coverage instance of #205, on an invariant already written down.**
+  `repro_commit_timeout_after_durable.rs` asserts that a single-writer commit
+  must not report `CommitTimeout`, and asserts it only with
+  `async_flush_enabled: false` — the path where the lock is uncontended by
+  construction. The default path is not covered. Whether a single-writer commit
+  should fail because a *background* flush holds the lock is the product
+  question the CI fix sidesteps rather than answers.

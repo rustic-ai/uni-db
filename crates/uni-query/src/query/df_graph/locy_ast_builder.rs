@@ -282,6 +282,17 @@ pub fn generate_skolem_id(var_name: &str, bindings: &FactRow) -> String {
     parts.join("::")
 }
 
+/// Render one binding for the Skolem id.
+///
+/// The scalar arms keep their plain spelling because the id is persisted and
+/// human-legible. Everything else — in practice a `Value::Node`, which
+/// `enrich_vids_with_nodes` substitutes for the vid column before this runs —
+/// goes through the canonical rendering.
+///
+/// That catch-all was `format!("{v:?}")`, which put `Node.properties` through
+/// `HashMap` iteration order. Since `RandomState` is seeded per map instance,
+/// a five-property node produced a different "deterministic" id on each call
+/// *within one process* (#252).
 fn value_to_string(v: &Value) -> String {
     match v {
         Value::Null => "null".to_string(),
@@ -289,7 +300,7 @@ fn value_to_string(v: &Value) -> String {
         Value::Int(i) => i.to_string(),
         Value::Float(f) => f.to_string(),
         Value::String(s) => s.clone(),
-        _ => format!("{v:?}"),
+        other => other.canonical_string(),
     }
 }
 
@@ -300,7 +311,10 @@ pub(crate) fn value_to_expr(v: &Value) -> Expr {
         Value::Int(i) => Expr::Literal(CypherLiteral::Integer(*i)),
         Value::Float(f) => Expr::Literal(CypherLiteral::Float(*f)),
         Value::String(s) => Expr::Literal(CypherLiteral::String(s.clone())),
-        _ => Expr::Literal(CypherLiteral::String(format!("{v:?}"))),
+        // Same defect as `value_to_string` above, and with a longer reach: this
+        // literal is spliced into a CREATE, so a `Debug` rendering of a map-
+        // bearing value was *persisted* as a property.
+        other => Expr::Literal(CypherLiteral::String(other.canonical_string())),
     }
 }
 

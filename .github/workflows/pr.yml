@@ -534,6 +534,13 @@ jobs:
         run: ./scripts/build-wasm-fixtures.sh
 
       - name: Run tests
+        # `--no-fail-fast`: nextest cancels every remaining test on the first
+        # failure, so a red run reports one failure and hides the rest --- the
+        # run that prompted this left 2171 of 6869 tests unrun, and the
+        # shortfall reads like a filter rather than a cancellation. A gate that
+        # cannot say what it did not check costs a full CI round trip per
+        # failure after the first.
+        #
         # `uni-python` (bindings/uni-db) and `uni-python-onnx` are
         # cdylib-only crates with zero Rust `#[test]` items — their tests
         # are pytest in the python-tests job. We exclude them from the
@@ -541,7 +548,7 @@ jobs:
         # unifies with `uni-plugin-pyo3`'s test binaries and breaks the
         # linker (no libpython linkage in extension-module mode).
         run: |
-          cargo nextest run --workspace \
+          cargo nextest run --workspace --no-fail-fast \
             --exclude uni-tck \
             --exclude uni-python \
             --exclude uni-python-onnx \

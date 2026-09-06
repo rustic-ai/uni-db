@@ -303,7 +303,17 @@ mod mistralrs_tests {
     }
 }
 
-// FastEmbed tests (only compiled when fastembed feature is enabled)
+// FastEmbed tests (only compiled when fastembed feature is enabled).
+//
+// `#[ignore]`d for the same reason as every other test in this file: a lazily
+// warmed alias downloads its model from the HuggingFace Hub on first use, which
+// puts a third-party service in the critical path of the gate. These two were
+// the only ones left un-ignored, and `provider-onnx` is a default feature, so
+// every CI run fetched BGESmallENV15 and AllMiniLML6V2 and went red whenever
+// that outran the 30s load timeout — passing in 3.6s on one run and timing out
+// at 30.8s on the next, with no change to either the test or the code under it.
+//
+// Run them with `--run-ignored all` when a model cache is warm.
 #[cfg(feature = "provider-onnx")]
 mod fastembed_tests {
     use super::*;
@@ -331,11 +341,19 @@ mod fastembed_tests {
         }
     }
 
-    /// Test that fastembed embedding works without stack overflow.
-    /// This test triggers auto-embedding via CREATE with a vector index
-    /// that has embedding_config set. Without the fix (explicit 8MB stack),
-    /// this would cause a stack overflow on the Tokio blocking thread pool.
+    /// End-to-end fastembed auto-embedding: `CREATE` against a vector index
+    /// carrying an `embedding` config fills the vector in on write.
+    ///
+    /// The name is historical and its original claim was wrong. It read
+    /// "without the fix (explicit 8MB stack), this would cause a stack overflow
+    /// on the Tokio blocking thread pool" — but that stack size is set in the
+    /// PyO3 module initialiser (`bindings/uni-db/src/lib.rs`), for the query
+    /// executor's nested async state machines rather than for fastembed, and a
+    /// `#[tokio::test]` in this crate never loads that module. So this test ran
+    /// on a default stack throughout and cannot have been guarding it; the
+    /// bindings' own runtime is covered by the `Python Tests` job.
     #[tokio::test]
+    #[ignore] // Requires model download from HuggingFace Hub
     async fn test_fastembed_no_stack_overflow() -> Result<()> {
         // BGESmallENV15 produces 384-dimensional embeddings.
         let db = Uni::temporary()
@@ -389,8 +407,10 @@ mod fastembed_tests {
         Ok(())
     }
 
-    /// Test multiple embeddings to ensure thread spawning is stable.
+    /// Several auto-embedded writes in sequence, to exercise repeated loads of
+    /// the same model rather than a single cold one.
     #[tokio::test]
+    #[ignore] // Requires model download from HuggingFace Hub
     async fn test_fastembed_multiple_embeddings() -> Result<()> {
         let db = Uni::temporary()
             .xervo_catalog(vec![fastembed_alias("embed/default", "AllMiniLML6V2")])

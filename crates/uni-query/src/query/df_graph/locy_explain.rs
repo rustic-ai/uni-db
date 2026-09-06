@@ -790,7 +790,10 @@ fn format_value(v: &Value) -> String {
         }
         Value::Node(n) => format!("Node({})", n.vid.as_u64()),
         Value::Edge(e) => format!("Edge({})", e.eid.as_u64()),
-        _ => format!("{v:?}"),
+        // The arms above sort their map entries; this one did not, and it is
+        // reachable for a `Value::Path`, whose nodes carry property maps. An
+        // explain plan that renders differently on each call cannot be diffed.
+        other => other.canonical_string(),
     }
 }
 

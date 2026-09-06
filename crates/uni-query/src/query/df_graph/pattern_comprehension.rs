@@ -319,7 +319,7 @@ impl PhysicalExpr for PatternComprehensionExecExpr {
 
                 for prop in props {
                     let col = if prop == WHOLE_ENTITY {
-                        build_node_entity_column(&vids, &props_map, &query_ctx)
+                        build_node_entity_column(&vids, &props_map, &self.graph_ctx, &query_ctx)
                     } else {
                         build_property_column_static(
                             &vids,
@@ -1038,6 +1038,7 @@ fn convert_direction(ast_dir: &AstDirection) -> Direction {
 fn build_node_entity_column(
     vids: &[Vid],
     props_map: &HashMap<Vid, uni_common::Properties>,
+    graph_ctx: &GraphExecutionContext,
     query_ctx: &QueryContext,
 ) -> ArrayRef {
     use arrow_array::builder::LargeBinaryBuilder;
@@ -1045,7 +1046,13 @@ fn build_node_entity_column(
 
     let mut builder = LargeBinaryBuilder::new();
     for vid in vids {
-        let labels = l0_visibility::get_vertex_labels(*vid, query_ctx);
+        // `resolve_vertex_labels`, not the bare L0 read: the latter answers
+        // only for a resident vertex, so a flushed one was returned with no
+        // labels at all — and then compared unequal to the same node from an
+        // ordinary `MATCH`, which is exactly what the note above requires.
+        let labels = graph_ctx
+            .resolve_vertex_labels(*vid, query_ctx)
+            .unwrap_or_default();
         let properties = props_map
             .get(vid)
             .cloned()

@@ -148,7 +148,20 @@ fn canonical_key(v: &Value) -> String {
         Value::Bool(b) => format!("b:{b}"),
         Value::String(s) => format!("s:{s}"),
         Value::Null => "null".into(),
-        other => format!("{other:?}"),
+        // A vertex also reaches here as a map carrying its id, and it has to
+        // land on the same key as the two arms above or the two join sides
+        // never meet.
+        other => match other.entity_vid() {
+            Some(vid) => format!("v:{}", vid.as_u64()),
+            // Everything else — notably a path-valued KEY, which arrives as a
+            // nested map on both sides — takes the canonical rendering. This was
+            // `format!("{other:?}")`, and `Debug` over the `HashMap` inside a
+            // path rendered its keys in a different order on each side, so
+            // VALIDATE scored a random subset of its target rows and reported a
+            // metric over it without any indication rows had been dropped
+            // (#236).
+            None => other.canonical_string(),
+        },
     }
 }
 

@@ -323,7 +323,7 @@ impl MainVertexDataset {
                 .create_scalar_index(table_name, &[column], idx_type, None)
                 .await
             {
-                log::warn!("Failed to create {} index on main_vertices: {}", column, e);
+                crate::storage::record_default_index_failure(table_name, column, &e);
             }
         }
 

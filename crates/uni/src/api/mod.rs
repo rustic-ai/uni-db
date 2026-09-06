@@ -2071,12 +2071,13 @@ impl UniBuilder {
             // that returns twenty rows can still build a forty-gigabyte hash
             // table on the way there, and nothing observed that.
             //
-            // `GreedyMemoryPool` rather than `FairSpillPool`: no disk-spill
-            // path is configured, so neither pool can spill and the choice is
-            // only about how the budget is divided. The fair pool reserves a
-            // share for spilling consumers that can never use it, which would
-            // silently halve the usable budget; the greedy pool hands out the
-            // whole limit and fails the reservation that crosses it.
+            // `GreedyMemoryPool` rather than `FairSpillPool`, and not for the
+            // reason this comment used to give. It claimed no disk-spill path
+            // was configured; `RuntimeEnvBuilder` defaults to
+            // `DiskManagerMode::OsTmpDirectory`, so DataFusion's buffering
+            // operators can spill, and #202 had already disproved the claim.
+            // The full reasoning, and what would change it, is on
+            // `Executor::memory_bounded_runtime`, which makes the same choice.
             //
             // Two honest limits. The pool is on the shared template, so it is
             // a budget across concurrent queries rather than per query — which

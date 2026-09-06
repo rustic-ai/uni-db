@@ -58,10 +58,11 @@ use arrow_array::builder::UInt32Builder;
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{Field, Schema, SchemaRef};
 use datafusion::common::{Result as DFResult, ScalarValue};
+use datafusion::execution::memory_pool::MemoryConsumer;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
-use futures::{Stream, TryStreamExt};
+use futures::{Stream, StreamExt};
 
 use super::common::compute_plan_properties;
 use super::scan::GraphScanExec;
@@ -373,9 +374,36 @@ async fn run_join(
     partition: usize,
     context: Arc<TaskContext>,
 ) -> DFResult<RecordBatch> {
+    // Everything this operator materializes is reserved from the query's memory
+    // pool. It replaced a `HashJoinExec`, which is pool-accounted and spillable,
+    // with one that is neither, so the plan-shape choice that installed it also
+    // removed the join path's accounting (#242). Nothing first-party reserved at
+    // all, which is why multi-GB peaks here never tripped a pool that was
+    // configured and working the whole time.
+    //
+    // The reservation covers the intermediates for as long as this function
+    // holds them and is released when it returns: the output batch belongs to
+    // the consumer from that point, and holding a reservation against memory
+    // this operator no longer owns would double-count it downstream.
+    //
+    // `try_grow` failing surfaces as `ResourcesExhausted`, which is the point --
+    // a refused reservation is a query that stops, rather than a process that
+    // grows until the OS ends it.
+    let reservation = MemoryConsumer::new(format!("VidLookupJoinExec[{partition}]"))
+        .register(context.memory_pool());
+
     // 1. Materialize the build side fully.
-    let build_stream = build.execute(partition, context)?;
-    let build_batches: Vec<RecordBatch> = build_stream.try_collect().await?;
+    //
+    // Accumulated batch by batch rather than through `try_collect`, so the
+    // budget is checked as the build side grows instead of after all of it is
+    // already resident.
+    let mut build_stream = build.execute(partition, Arc::clone(&context))?;
+    let mut build_batches: Vec<RecordBatch> = Vec::new();
+    while let Some(batch) = build_stream.next().await {
+        let batch = batch?;
+        reservation.try_grow(batch.get_array_memory_size())?;
+        build_batches.push(batch);
+    }
 
     if build_batches.is_empty() {
         return Ok(RecordBatch::new_empty(output_schema));
@@ -409,9 +437,13 @@ async fn run_join(
     } else {
         let vids: Vec<u64> = vid_set.iter().copied().collect();
         let mut chunks: Vec<RecordBatch> = Vec::new();
+        let mut chunk_bytes = 0usize;
         for chunk in vids.chunks(MAX_VIDS_PER_CHUNK) {
             let batch = probe_scan.execute_with_vid_filter(chunk).await?;
             if batch.num_rows() > 0 {
+                let size = batch.get_array_memory_size();
+                reservation.try_grow(size)?;
+                chunk_bytes += size;
                 chunks.push(batch);
             }
         }
@@ -421,8 +453,16 @@ async fn run_join(
             chunks.into_iter().next().unwrap()
         } else {
             let schema = chunks[0].schema();
-            arrow::compute::concat_batches(&schema, &chunks)
-                .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?
+            // `concat_batches` builds the combined batch while every chunk is
+            // still live, so the true peak here is both at once. Reserving only
+            // the result would under-report exactly at the moment this operator
+            // uses the most memory.
+            reservation.try_grow(chunk_bytes)?;
+            let combined = arrow::compute::concat_batches(&schema, &chunks)
+                .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+            drop(chunks);
+            reservation.shrink(chunk_bytes);
+            combined
         }
     };
 

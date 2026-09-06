@@ -15,6 +15,7 @@ use object_store::path::Path as ObjectStorePath;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 mod index_types;
@@ -1143,6 +1144,14 @@ pub struct SchemaManager {
     store: Arc<dyn ObjectStore>,
     path: ObjectStorePath,
     schema: RwLock<Arc<Schema>>,
+    /// `schema_version` as of the last successful [`SchemaManager::save`].
+    ///
+    /// Every mutation that changes the schema's shape ends in
+    /// `Schema::bump_version`, so a difference against the live version is
+    /// exactly "there are changes that were never written". This is what
+    /// [`SchemaManager::save_if_dirty`] tests, so a mint that happens on a
+    /// synchronous path can still be persisted later by an asynchronous one.
+    persisted_version: AtomicU32,
 }
 
 impl SchemaManager {
@@ -1200,31 +1209,66 @@ impl SchemaManager {
                         schema.indexes = dedup;
                     }
                 }
+                let loaded_version = schema.schema_version;
                 Ok(Self {
                     store,
                     path: path.clone(),
                     schema: RwLock::new(Arc::new(schema)),
+                    persisted_version: AtomicU32::new(loaded_version),
                 })
             }
             Err(object_store::Error::NotFound { .. }) => Ok(Self {
                 store,
                 path: path.clone(),
                 schema: RwLock::new(Arc::new(Schema::default())),
+                // Nothing on disk yet, so the default schema counts as
+                // unwritten: the first `save_if_dirty` must actually write.
+                persisted_version: AtomicU32::new(0),
             }),
             Err(e) => Err(anyhow::Error::from(e)),
         }
     }
 
     pub async fn save(&self) -> Result<()> {
-        let content = {
+        let (content, version) = {
             let schema_guard = acquire_read(&self.schema, "schema")?;
-            serde_json::to_string_pretty(&**schema_guard)?
+            (
+                serde_json::to_string_pretty(&**schema_guard)?,
+                schema_guard.schema_version,
+            )
         };
         self.store
             .put(&self.path, content.into())
             .await
             .map_err(anyhow::Error::from)?;
+        // Recorded only after the PUT succeeds, and it is the version that was
+        // actually serialized rather than the live one, so a concurrent bump
+        // between the two leaves the manager dirty instead of falsely clean.
+        self.persisted_version.store(version, Ordering::Release);
         Ok(())
+    }
+
+    /// Persists the schema only when it holds changes that were never written.
+    ///
+    /// The schemaless edge-type registry is interned by
+    /// [`SchemaManager::get_or_assign_edge_type_id`], which is synchronous and
+    /// runs per row, so it cannot save. Without this the registry is lost on
+    /// reopen and every id-keyed read path answers from an empty one: an
+    /// untyped `MATCH (a)-[e]-(b)` finds no edges, a pattern comprehension
+    /// yields `[]`, and an edge's `edge_type` comes back blank. Storage is
+    /// name-addressed, so the loss is silent rather than corrupting.
+    ///
+    /// # Errors
+    /// Propagates the object-store write failure, or a poisoned schema lock.
+    pub async fn save_if_dirty(&self) -> Result<()> {
+        let live = {
+            let schema_guard = acquire_read(&self.schema, "schema")?;
+            schema_guard.schema_version
+        };
+        if live == self.persisted_version.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.save().await
     }
 
     pub fn path(&self) -> &ObjectStorePath {
@@ -1351,10 +1395,17 @@ impl SchemaManager {
             merged
         };
 
+        let merged_version = merged.schema_version;
         Arc::new(Self {
             store: self.store.clone(),
             path: self.path.clone(),
             schema: RwLock::new(Arc::new(merged)),
+            // A fork's manager shares primary's `path`, so saving it would
+            // overwrite primary's catalog with the fork's merged view. Start
+            // clean so `save_if_dirty` is a no-op for a fork that changes
+            // nothing; the commit path guards the rest by refusing to call it
+            // at all for a forked session.
+            persisted_version: AtomicU32::new(merged_version),
         })
     }
 
