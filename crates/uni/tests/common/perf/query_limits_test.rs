@@ -61,7 +61,16 @@ async fn test_query_memory_limit() -> Result<()> {
 
     assert!(res.is_err());
     let err_msg = res.err().unwrap().to_string();
-    assert!(err_msg.contains("Query exceeded memory limit"));
+    // This used to assert the post-hoc message, "Query exceeded memory limit",
+    // which is produced *after* the rows are materialized. `GraphScanExec` now
+    // reserves the batch it builds, so the pool refuses first and names the
+    // operator that asked (#242). The rejection is the same; the mechanism moved
+    // earlier, which is the point of the change, so the assertion follows it
+    // rather than being relaxed to accept either.
+    assert!(
+        err_msg.contains("GraphScanExec"),
+        "expected the scan's own reservation to refuse: {err_msg}"
+    );
 
     Ok(())
 }
@@ -120,9 +129,13 @@ async fn test_query_memory_limit_applies_to_cursor() -> Result<()> {
         "cursor streamed every row under a 100-byte ceiling; `fetch_all` \
          rejects the same query with the same limit",
     );
+    // Parity is what this test is for, so it follows `fetch_all` to the pool's
+    // message rather than staying on the post-hoc one (#242). Both terminals
+    // must be refused by the same mechanism, or the streaming path would once
+    // again be bounded differently from the materializing one.
     assert!(
-        err.to_string().contains("Query exceeded memory limit"),
-        "expected the memory-limit error `fetch_all` produces, got: {err}"
+        err.to_string().contains("GraphScanExec"),
+        "expected the same reservation refusal `fetch_all` produces, got: {err}"
     );
 
     Ok(())
@@ -317,9 +330,14 @@ async fn test_tx_cursor_enforces_configured_memory_limit() -> Result<()> {
     let err = drain_cursor(cursor)
         .await
         .expect("transaction cursor ignored the configured memory ceiling");
+    // Follows the mechanism, not the message: `GraphScanExec` now reserves the
+    // batch it builds, so the pool refuses before the rows exist rather than the
+    // post-hoc check measuring them afterwards (#242). Both terminals moved
+    // together, which is what this pair exists to check -- an asymmetry here
+    // would mean one of them is still bounded only after the fact.
     assert!(
-        err.to_string().contains("Query exceeded memory limit"),
-        "expected the memory-limit error, got: {err}"
+        err.to_string().contains("GraphScanExec"),
+        "expected the scan's own reservation to refuse, got: {err}"
     );
 
     Ok(())
@@ -342,9 +360,14 @@ async fn test_tx_fetch_all_enforces_configured_memory_limit() -> Result<()> {
         .err()
         .expect("transaction fetch_all ignored the configured memory ceiling")
         .to_string();
+    // Follows the mechanism, not the message: `GraphScanExec` now reserves the
+    // batch it builds, so the pool refuses before the rows exist rather than the
+    // post-hoc check measuring them afterwards (#242). Both terminals moved
+    // together, which is what this pair exists to check -- an asymmetry here
+    // would mean one of them is still bounded only after the fact.
     assert!(
-        err.to_string().contains("Query exceeded memory limit"),
-        "expected the memory-limit error, got: {err}"
+        err.to_string().contains("GraphScanExec"),
+        "expected the scan's own reservation to refuse, got: {err}"
     );
 
     Ok(())
@@ -631,9 +654,12 @@ async fn db_with_memory_limit(bytes: usize) -> Result<Uni> {
 #[tokio::test]
 async fn a_vid_lookup_join_reserves_what_it_materializes() -> Result<()> {
     const ROWS: usize = 20_000;
-    // Above what the seeding writes reserve, far below the probe materialization
-    // measured below.
-    let db = db_with_memory_limit(512 * 1024).await?;
+    // The ceiling has to clear the build-side scan and still fall below the
+    // join's probe materialization. Both sides are scans now that
+    // `GraphScanExec` reserves too, and the build side is deliberately the
+    // narrow one -- `linked_vid` only -- while the probe carries long strings,
+    // so there is a wide band between them.
+    let db = db_with_memory_limit(4 * 1024 * 1024).await?;
     db.schema()
         .label("Target")
         .property("name", uni_db::DataType::String)
@@ -687,7 +713,7 @@ async fn a_vid_lookup_join_reserves_what_it_materializes() -> Result<()> {
             );
         }
         Ok(rows) => panic!(
-            "a 512 KiB ceiling accepted a join that materialized {} rows; the \
+            "a 4 MiB ceiling accepted a join that materialized {} rows; the \
              operator is allocating outside the pool again",
             rows.rows().len()
         ),
@@ -931,6 +957,52 @@ async fn a_group_key_returned_whole_still_carries_its_properties() -> Result<()>
             "a group key returned whole lost its properties"
         ),
         other => panic!("expected a Node, got {other:?}"),
+    }
+    Ok(())
+}
+
+/// The scan reserves the whole-result batch it builds (#242).
+///
+/// `GraphScanExec` builds one `RecordBatch` for the entire result and then
+/// hands it out in slices, so it is the largest single allocation this system
+/// makes and it was invisible to the pool. The reservation is on the *stream*,
+/// not inside the scan future, because the batch stays resident across every
+/// poll that follows — the slices are zero-copy views onto it.
+///
+/// The assertion names the operator for the reason the join test does: at a
+/// ceiling low enough to reject this query, the post-hoc result-size check
+/// rejects it too, and an assertion that accepts any memory-shaped message
+/// passes with the reservation removed.
+#[tokio::test]
+async fn a_graph_scan_reserves_the_batch_it_builds() -> Result<()> {
+    let db = db_with_memory_limit(256 * 1024).await?;
+    db.schema()
+        .label("W")
+        .property("k", uni_db::DataType::String)
+        .apply()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute(
+        "UNWIND range(0, 20000) AS i CREATE (:W {k: \
+         'a-string-long-enough-to-add-up-across-twenty-thousand-rows-' + toString(i)})",
+    )
+    .await?;
+    tx.commit().await?;
+    db.flush().await?;
+
+    match db.session().query("MATCH (n:W) RETURN n.k AS k").await {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("GraphScanExec"),
+                "the refusal must come from the scan's own reservation: {msg}"
+            );
+        }
+        Ok(rows) => panic!(
+            "a 256 KiB ceiling accepted a scan materializing {} rows; the scan \
+             is allocating outside the pool again",
+            rows.rows().len()
+        ),
     }
     Ok(())
 }

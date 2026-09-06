@@ -34,6 +34,7 @@ use arrow_array::builder::{ListBuilder, StringBuilder};
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
+use datafusion::execution::memory_pool::{MemoryConsumer, MemoryPool, MemoryReservation};
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::metrics::{
@@ -503,6 +504,7 @@ impl ExecutionPlan for GraphScanExec {
             metrics,
             index_consulted,
             context.session_config().batch_size(),
+            context.memory_pool(),
         )))
     }
 
@@ -583,6 +585,20 @@ struct GraphScanStream {
     /// Per-node count of scans that consulted a scalar index, surfaced as
     /// `OperatorStats::index_hits`.
     index_consulted: Count,
+
+    /// The query pool's accounting for the whole-result batch below.
+    ///
+    /// The scan builds one `RecordBatch` for the entire result and holds it for
+    /// as long as it is slicing, so the reservation lives on the stream rather
+    /// than inside the scan future — the memory is resident across every poll
+    /// that follows, not just while it is being built. It is released when the
+    /// stream is dropped.
+    ///
+    /// The slices handed downstream are zero-copy views onto this batch, so the
+    /// buffers stay alive while any consumer holds one. Accounting for the
+    /// batch once, here, is what makes the pool see the largest single
+    /// allocation this system makes (#242).
+    reservation: MemoryReservation,
 }
 
 impl GraphScanStream {
@@ -602,6 +618,7 @@ impl GraphScanStream {
         metrics: BaselineMetrics,
         index_consulted: Count,
         slice_size: usize,
+        pool: &Arc<dyn MemoryPool>,
     ) -> Self {
         Self {
             graph_ctx,
@@ -618,6 +635,7 @@ impl GraphScanStream {
             metrics,
             index_consulted,
             slice_size: slice_size.max(1),
+            reservation: MemoryConsumer::new("GraphScanExec").register(pool),
         }
     }
 }
@@ -1533,6 +1551,19 @@ impl Stream for GraphScanStream {
                             // Hand the result out in `batch_size` slices rather
                             // than as one batch — see `GraphScanState::Slicing`.
                             Some(b) if b.num_rows() > 0 => {
+                                // Reserve before slicing begins. The batch is
+                                // already built by this point -- the scan is one
+                                // async call that returns the whole result -- so
+                                // this bounds how long an over-budget result
+                                // survives rather than preventing its
+                                // construction. Making the scan itself
+                                // incremental is #214/#240; until then this is
+                                // the earliest point the size is known.
+                                if let Err(e) = self.reservation.try_grow(b.get_array_memory_size())
+                                {
+                                    self.state = GraphScanState::Done;
+                                    return Poll::Ready(Some(Err(e)));
+                                }
                                 self.state = GraphScanState::Slicing {
                                     batch: b,
                                     offset: 0,
