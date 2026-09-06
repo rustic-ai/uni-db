@@ -75,7 +75,22 @@ impl InvertedIndex {
             base_uri, config.label, config.property
         );
 
-        let dataset = (Dataset::open(&path).await).ok();
+        // #233 Tier 1: `.ok()` mapped every open failure — permissions, a
+        // corrupt manifest, IO — to "index not initialized", which a full-text
+        // search reports as zero hits. Only a genuinely absent dataset means
+        // the index has not been built yet. Same discrimination as
+        // `storage/index.rs::get_vid`.
+        let dataset = match Dataset::open(&path).await {
+            Ok(ds) => Some(ds),
+            Err(e) => {
+                let err = anyhow::Error::from(e);
+                if crate::store_utils::is_dataset_not_found(&err) {
+                    None
+                } else {
+                    return Err(err);
+                }
+            }
+        };
 
         Ok(Self {
             dataset,

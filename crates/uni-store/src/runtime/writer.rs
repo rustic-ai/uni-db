@@ -2191,8 +2191,14 @@ impl Writer {
                 // batch insert (e.g. a fork promote onto primary) silently
                 // twins a duplicate ext_id instead of erroring. Mirrors the
                 // single-vertex `check_extid_globally_unique`.
-                if let Ok(Some(found_vid)) =
-                    MainVertexDataset::find_by_ext_id(self.storage.backend(), ext_id, None).await
+                // #233 Tier 1: this was `if let Ok(Some(..))`, so a failed
+                // probe read as "no duplicate" and the constraint admitted the
+                // very duplicate it exists to reject — silently, on an I/O
+                // error. `find_by_ext_id` already answers `Ok(None)` when the
+                // table is absent (see `main_vertex.rs`), so every `Err` here
+                // is a genuine failure with no benign case to absorb.
+                if let Some(found_vid) =
+                    MainVertexDataset::find_by_ext_id(self.storage.backend(), ext_id, None).await?
                 {
                     return Err(anyhow!(
                         "Constraint violation at index {}: ext_id '{}' already exists (vertex {:?})",
@@ -2415,7 +2421,9 @@ impl Writer {
         // Check main vertices table (if it exists)
         // Pass None for global uniqueness check (not snapshot-isolated)
         let backend = self.storage.backend();
-        if let Ok(Some(found_vid)) = MainVertexDataset::find_by_ext_id(backend, ext_id, None).await
+        // #233 Tier 1: see the batch path above — a failed probe must not
+        // read as "no duplicate".
+        if let Some(found_vid) = MainVertexDataset::find_by_ext_id(backend, ext_id, None).await?
             && found_vid != current_vid
         {
             return Err(anyhow!(
@@ -2442,24 +2450,32 @@ impl Writer {
     /// Get vertex labels from all sources: current L0, pending L0s, and storage.
     /// This is the proper way to read vertex labels after a flush, as it checks both
     /// in-memory buffers and persisted storage.
+    ///
+    /// # Errors
+    /// Returns an error if the storage read in step 4 fails. `Ok(None)` means
+    /// the vertex genuinely carries no labels (or is tombstoned); it never
+    /// means the labels could not be read. #233 Tier 1: this returned a bare
+    /// `Option` and mapped a failed read to `None` via `.ok().flatten()`, so
+    /// its one production caller silently skipped the vertex's CRDT property
+    /// handling on an I/O blip.
     pub async fn get_vertex_labels(
         &self,
         vid: Vid,
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
-    ) -> Option<Vec<String>> {
+    ) -> Result<Option<Vec<String>>> {
         // 1. Check current L0
         if let Some(labels) = self.get_vertex_labels_from_l0(vid) {
-            return Some(labels);
+            return Ok(Some(labels));
         }
 
         // 2. Check transaction L0 if present
         if let Some(tx_l0) = tx_l0 {
             let guard = tx_l0.read();
             if guard.vertex_tombstones.contains(&vid) {
-                return None;
+                return Ok(None);
             }
             if let Some(labels) = guard.get_vertex_labels(vid) {
-                return Some(labels.to_vec());
+                return Ok(Some(labels.to_vec()));
             }
         }
 
@@ -2467,15 +2483,15 @@ impl Writer {
         for pending_l0 in self.l0_manager.get_pending_flush() {
             let guard = pending_l0.read();
             if guard.vertex_tombstones.contains(&vid) {
-                return None;
+                return Ok(None);
             }
             if let Some(labels) = guard.get_vertex_labels(vid) {
-                return Some(labels.to_vec());
+                return Ok(Some(labels.to_vec()));
             }
         }
 
         // 4. Check storage
-        self.find_vertex_labels_in_storage(vid).await.ok().flatten()
+        self.find_vertex_labels_in_storage(vid).await
     }
 
     /// Helper to get edge type from L0 buffer.
@@ -2975,7 +2991,7 @@ impl Writer {
         let label_name = if let Some(l) = label {
             Some(l)
         } else {
-            discovered_labels = self.get_vertex_labels(vid, tx_l0).await;
+            discovered_labels = self.get_vertex_labels(vid, tx_l0).await?;
             discovered_labels
                 .as_ref()
                 .and_then(|l| l.first().map(|s| s.as_str()))
@@ -3755,8 +3771,7 @@ impl Writer {
                         "_deleted".to_string(),
                     ]),
             )
-            .await
-            .unwrap_or_default();
+            .await?;
 
         // Find the row with the highest version number
         let mut max_version: Option<u64> = None;
@@ -5061,7 +5076,14 @@ impl Writer {
                 "Tombstones missing labels in L0, querying storage as fallback"
             );
             for (vid, version) in orphaned_tombstones {
-                if let Ok(Some(labels)) = self.find_vertex_labels_in_storage(vid).await
+                // #233 Tier 1: this was `if let Ok(Some(..))`, and the
+                // callee additionally ate its scan error with
+                // `unwrap_or_default()`. Either swallow drops the tombstone
+                // for a vertex whose labels could not be read, so a deleted
+                // vertex stays visible after the flush — a silent
+                // resurrection. A failed flush is retriable; a lost tombstone
+                // is not.
+                if let Some(labels) = self.find_vertex_labels_in_storage(vid).await?
                     && !labels.is_empty()
                 {
                     for label in &labels {

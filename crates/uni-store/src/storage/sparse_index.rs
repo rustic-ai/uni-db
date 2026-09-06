@@ -222,7 +222,20 @@ impl SparseVectorIndex {
     /// Open or initialize a sparse index at `base_uri` for the given config.
     pub async fn new(base_uri: &str, config: SparseVectorIndexConfig) -> Result<Self> {
         let path = Self::postings_path(base_uri, &config.label, &config.property);
-        let dataset = (Dataset::open(&path).await).ok();
+        // #233 Tier 1: see `inverted_index.rs` — `.ok()` made a broken index
+        // indistinguishable from an unbuilt one, so a sparse search returned
+        // zero hits instead of surfacing the failure.
+        let dataset = match Dataset::open(&path).await {
+            Ok(ds) => Some(ds),
+            Err(e) => {
+                let err = anyhow::Error::from(e);
+                if crate::store_utils::is_dataset_not_found(&err) {
+                    None
+                } else {
+                    return Err(err);
+                }
+            }
+        };
         Ok(Self {
             dataset,
             base_uri: base_uri.to_string(),

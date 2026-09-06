@@ -22,7 +22,12 @@ pub enum CrdtDecodeMode {
     /// Return an error on CRDT decode failure (strict validation).
     #[default]
     Strict,
-    /// Log a warning and return a default GCounter on failure (lenient).
+    /// Log a warning and read the value as `Null` on failure (lenient).
+    ///
+    /// Lenient exists so that one unreadable row does not fail an entire
+    /// scan. It does not fabricate a value: substituting a default
+    /// `GCounter` made an unreadable CRDT indistinguishable from a counter
+    /// standing at 0 (#233).
     Lenient,
 }
 
@@ -208,13 +213,22 @@ fn value_from_column_inner(
                         .map_err(|e| anyhow!("CRDT decode error: {}", e))?;
                     Ok(serde_json::to_value(crdt)?)
                 }
-                CrdtDecodeMode::Lenient => {
-                    let crdt = Crdt::from_msgpack(bytes).unwrap_or_else(|e| {
-                        log::warn!("Failed to deserialize CRDT: {}", e);
-                        Crdt::GCounter(uni_crdt::GCounter::new())
-                    });
-                    Ok(serde_json::to_value(crdt).unwrap_or(Value::Null))
-                }
+                CrdtDecodeMode::Lenient => match Crdt::from_msgpack(bytes) {
+                    Ok(crdt) => Ok(serde_json::to_value(crdt)?),
+                    Err(e) => {
+                        // #233 Tier 1: this used to substitute
+                        // `Crdt::GCounter(GCounter::new())`, so an unreadable
+                        // CRDT of *any* variant silently read as a zero-valued
+                        // GCounter — the wrong value and the wrong type, with
+                        // nothing downstream able to tell it apart from a
+                        // counter that genuinely stands at 0. Null is the
+                        // honest answer: the value could not be read. The
+                        // `to_value` failure was swallowed the same way, by
+                        // `unwrap_or(Value::Null)`, and now propagates.
+                        log::warn!("Failed to deserialize CRDT, reading as null: {e}");
+                        Ok(Value::Null)
+                    }
+                },
             }
         }
         DataType::List(inner) => {
@@ -460,6 +474,53 @@ pub fn decode_column_value(
 mod tests {
     use super::*;
     use arrow_array::builder::{Int64Builder, StringBuilder};
+
+    /// A CRDT that cannot be decoded must not read as a zero-valued counter.
+    ///
+    /// #233 Tier 1. `Lenient` substituted `Crdt::GCounter(GCounter::new())`,
+    /// which serializes to a counter standing at 0. A caller could not tell
+    /// that apart from a genuine 0, so an unreadable ORSet, LWWRegister or
+    /// PNCounter silently became "count = 0" — a wrong value of the wrong
+    /// type, on the only path that uses `Lenient` (`delta.rs`).
+    #[test]
+    fn lenient_crdt_decode_failure_reads_as_null_not_a_zero_counter() {
+        use uni_common::core::schema::CrdtType;
+
+        let array = BinaryArray::from(vec![&b"not-valid-msgpack"[..]]);
+        let dt = DataType::Crdt(CrdtType::GCounter);
+
+        let val = value_from_column(&array, &dt, 0, CrdtDecodeMode::Lenient)
+            .expect("lenient decode still yields a value rather than an error");
+
+        assert_eq!(
+            val,
+            Value::Null,
+            "an undecodable CRDT must read as Null, not as a fabricated default"
+        );
+
+        // The specific regression: the old fallback produced a GCounter whose
+        // rendering carries a zero count. Assert the shape is gone, so this
+        // test fails if the substitution is ever restored.
+        let rendered = val.to_string();
+        assert!(
+            !rendered.contains("GCounter"),
+            "must not fabricate a GCounter, got {rendered}"
+        );
+    }
+
+    /// Strict mode keeps propagating the same failure as an error.
+    #[test]
+    fn strict_crdt_decode_failure_is_an_error() {
+        use uni_common::core::schema::CrdtType;
+
+        let array = BinaryArray::from(vec![&b"not-valid-msgpack"[..]]);
+        let dt = DataType::Crdt(CrdtType::GCounter);
+
+        assert!(
+            value_from_column(&array, &dt, 0, CrdtDecodeMode::Strict).is_err(),
+            "strict mode must surface an undecodable CRDT"
+        );
+    }
 
     #[test]
     fn test_decode_string() {
