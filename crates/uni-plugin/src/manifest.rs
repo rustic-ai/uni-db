@@ -34,9 +34,26 @@ use crate::plugin::PluginId;
 /// assert!(r.matches(1));
 /// assert!(!r.matches(2));
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct AbiRange(String);
+
+// #233 Tier 1: `Deserialize` used to be derived alongside `Serialize` with
+// `#[serde(transparent)]`, so a manifest read from TOML or JSON never went
+// through `parse` and ANY string became an `AbiRange`. `matches` then fell
+// back to `VersionReq::STAR`, which matches every version — so a plugin
+// declaring `abi = "not-a-range"` loaded against any host ABI. Validating in
+// `Deserialize` makes the unvalidated state unrepresentable rather than
+// leaving each consumer to re-check.
+impl<'de> Deserialize<'de> for AbiRange {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
+}
 
 impl AbiRange {
     /// Parse an ABI range from a semver requirement string.
@@ -60,8 +77,14 @@ impl AbiRange {
     /// host's major as compatible.
     #[must_use]
     pub fn matches(&self, host_major: u64) -> bool {
-        // `unwrap_or(STAR)` is defensive — the range was validated at parse.
-        let req = VersionReq::parse(&self.0).unwrap_or(VersionReq::STAR);
+        // Fail closed. The range is validated in both `parse` and
+        // `Deserialize`, so this branch is unreachable; if it is ever reached
+        // the safe answer is "does not match", never `VersionReq::STAR`,
+        // which matched every host major and is what let an unvalidated
+        // range load (#233).
+        let Ok(req) = VersionReq::parse(&self.0) else {
+            return false;
+        };
         // The question is "does ANY version with major == host_major satisfy the
         // requirement?". A single high `(major, MAX, MAX)` probe answers that only
         // for caret / lower-bounded ranges — it wrongly fails an upper-bounded
@@ -291,6 +314,55 @@ mod tests {
     #[test]
     fn abi_range_rejects_garbage() {
         assert!(AbiRange::parse("not-semver").is_err());
+    }
+
+    /// An invalid ABI range must be rejected when a manifest is *deserialized*,
+    /// not only when it is built through `parse`.
+    ///
+    /// #233 Tier 1. `AbiRange` derived `Deserialize` under
+    /// `#[serde(transparent)]`, so a manifest loaded from TOML or JSON skipped
+    /// `parse` entirely and carried an arbitrary string. `matches` then fell
+    /// back to `VersionReq::STAR` and returned `true` for every host major, so
+    /// an ABI-incompatible plugin loaded successfully. Both parse entry points
+    /// are covered because the extism loader uses the JSON one and the on-disk
+    /// manifest format is TOML.
+    #[test]
+    fn a_manifest_carrying_an_invalid_abi_range_is_rejected() {
+        let good = sample_manifest().to_json().expect("sample serializes");
+        assert!(
+            good.contains("\"^1\""),
+            "test needs the abi range to appear verbatim in the JSON, got {good}"
+        );
+        let bad_json = good.replace("\"^1\"", "\"not-semver\"");
+
+        let err = PluginManifest::from_json(&bad_json)
+            .expect_err("a manifest with an invalid abi range must not deserialize");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not-semver") || msg.contains("abi range"),
+            "the error should name the offending range, got: {msg}"
+        );
+
+        let bad_toml = toml::to_string(&sample_manifest())
+            .expect("sample serializes to toml")
+            .replace("\"^1\"", "\"not-semver\"");
+        assert!(
+            PluginManifest::from_toml(&bad_toml).is_err(),
+            "the TOML path must reject it too"
+        );
+    }
+
+    /// A range that cannot be parsed must not match every host major.
+    #[test]
+    fn matches_fails_closed_rather_than_matching_everything() {
+        // Reachable only through the crate-private field, which is the point:
+        // if a future change reintroduces an unvalidated construction path,
+        // the answer must be "no match", not `VersionReq::STAR`.
+        let unvalidated = AbiRange("not-semver".to_owned());
+        assert!(
+            !unvalidated.matches(1) && !unvalidated.matches(2),
+            "an unparseable range must fail closed"
+        );
     }
 
     #[test]
