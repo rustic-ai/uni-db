@@ -1279,13 +1279,29 @@ impl BulkWriter {
                     let schema = self.backend.schema.schema();
                     for idx in &schema.indexes {
                         if idx.label() == label.as_str() {
-                            let _ = self.backend.schema.update_index_metadata(idx.name(), |m| {
-                                m.status = uni_common::core::schema::IndexStatus::Online;
-                                m.last_built_at = Some(now);
-                                if let Some(count) = row_count {
-                                    m.row_count_at_build = Some(count);
-                                }
-                            });
+                            // #233: unlike the Stale write above, failing to
+                            // record a SUCCESSFUL build is conservative — the
+                            // index stays `Stale` and the rebuild manager picks
+                            // it up again — so this does not fail the commit.
+                            // It is still recorded rather than dropped: the
+                            // decision is that no index-status write goes
+                            // unrecorded.
+                            if let Err(e) =
+                                self.backend.schema.update_index_metadata(idx.name(), |m| {
+                                    m.status = uni_common::core::schema::IndexStatus::Online;
+                                    m.last_built_at = Some(now);
+                                    if let Some(count) = row_count {
+                                        m.row_count_at_build = Some(count);
+                                    }
+                                })
+                            {
+                                tracing::error!(
+                                    index = %idx.name(),
+                                    error = %e,
+                                    "bulk commit: could not record a successful index build; \
+                                     the index keeps its previous status",
+                                );
+                            }
                         }
                     }
                 }
