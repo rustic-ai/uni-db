@@ -576,6 +576,15 @@ canonical remedy, catch the recurrences without the noise.
 
 ### Recommended next
 
-Unchanged, and now unblocked: **#214 with #240**, then **#239**, then **#224**
-and the rest of Tier 4. #233 stays open for Tier 2 across the newly-audited
-crates — ~7 sites, none of them wrong answers.
+**Superseded — see `issue_233_remaining_work_2026-09-06.md`.** This paragraph
+was written from the audits' own Tier 2 / Tier 3 labels. Re-triaging those
+labels against the source found **three Tier 1 sites still open**, all three
+inside the Tier 2/3 candidate lists: the public `CommitStream` silently
+skipping commits, the Rhai `determinism` default reaching
+`Volatility::Immutable`, and a deferral sidecar whose retry destroys the rows
+it failed to read. "~7 sites, none of them wrong answers" is wrong on the
+second clause, and #233's P0 outranks #214.
+
+~~Unchanged, and now unblocked: **#214 with #240**, then **#239**, then
+**#224** and the rest of Tier 4. #233 stays open for Tier 2 across the
+newly-audited crates — ~7 sites, none of them wrong answers.~~

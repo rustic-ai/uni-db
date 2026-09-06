@@ -1947,6 +1947,17 @@ pub struct DeferralQueue {
     /// state. The persistence sink resolves [`TriggerPlugin`]s by qname
     /// from the host's [`uni_plugin::PluginRegistry`] at load time.
     sidecar: parking_lot::Mutex<Option<DeferralSidecar>>,
+    /// Latched when the sidecar could not be READ at startup.
+    ///
+    /// #233: a failed read returned 0 deferrals and left the in-memory queue
+    /// empty, and the next `push` then wrote that empty map back over the
+    /// sidecar — so a transient read error DESTROYED the rows it could not
+    /// read. The retry is what made the loss permanent. While this is set the
+    /// queue keeps working in memory but refuses to persist, so the on-disk
+    /// rows survive for a later restart. This is the property
+    /// `scheduler.rs`'s equivalent path has for free (it never rewrites its
+    /// sidecar); the deferral queue has to assert it.
+    load_failed: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for DeferralQueue {
@@ -2005,7 +2016,16 @@ impl DeferralQueue {
         let rows = match sidecar.read_all() {
             Ok(rows) => rows,
             Err(e) => {
-                tracing::debug!(error = %e, "DeferralQueue: sidecar read failed");
+                // #233: latch before returning. Without this the next `push`
+                // overwrites the sidecar with an empty map and the unread
+                // deferrals are gone for good.
+                self.load_failed
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                tracing::error!(
+                    error = %e,
+                    "DeferralQueue: sidecar read failed; deferrals will run in memory but will \
+                     NOT be persisted this process, so the unread rows survive on disk",
+                );
                 return 0;
             }
         };
@@ -2114,8 +2134,17 @@ impl DeferralQueue {
                 });
             }
         }
+        if self.load_failed.load(std::sync::atomic::Ordering::SeqCst) {
+            // The in-memory map does not contain whatever the failed read held,
+            // so writing it back would destroy those rows (#233).
+            return;
+        }
         if let Err(e) = sidecar.write_all(&rows) {
-            tracing::debug!(error = %e, "DeferralQueue: sidecar write failed");
+            tracing::warn!(
+                error = %e,
+                "DeferralQueue: sidecar write failed; drained items may fire again after a \
+                 restart (at-least-once)",
+            );
         }
     }
 
@@ -2302,6 +2331,45 @@ mod tests {
         assert_eq!(mask_to_discriminant(TriggerEventMask::EDGE_CREATE), 4);
         assert_eq!(mask_to_discriminant(TriggerEventMask::EDGE_UPDATE), 5);
         assert_eq!(mask_to_discriminant(TriggerEventMask::EDGE_DELETE), 6);
+    }
+
+    /// A sidecar we could not READ must not be overwritten by the next write.
+    ///
+    /// #233. `load_from_sidecar` logged at debug and returned 0, leaving the
+    /// in-memory queue empty — and `push` / `drain_due` then `write_all` the
+    /// whole in-memory map, replacing the rows the read could not see. A
+    /// transient or repairable read failure therefore became permanent data
+    /// loss, and the retry is what caused it. `scheduler.rs`'s equivalent path
+    /// is survivable precisely because it never rewrites its sidecar; this one
+    /// has to assert that property.
+    #[test]
+    fn a_sidecar_that_failed_to_load_is_not_overwritten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = DeferralQueue::with_persistence(dir.path().to_path_buf());
+        let path = queue.sidecar_path().expect("persistence is enabled");
+
+        // Content that exists and is not parseable as the row set. This models
+        // a repairable failure — a version skew or a partial write — where the
+        // bytes still hold the operator's deferrals.
+        std::fs::create_dir_all(path.parent().expect("sidecar has a parent"))
+            .expect("create _system dir");
+        let original = b"{ deferrals the reader cannot parse }";
+        std::fs::write(&path, original).expect("seed the sidecar");
+
+        let registry = Arc::new(uni_plugin::PluginRegistry::new());
+        let restored = queue.load_from_sidecar(&registry);
+        assert_eq!(restored, 0, "control: the corrupt sidecar restores nothing");
+
+        // Any queue mutation persists. Before the fix this wrote the empty
+        // in-memory map straight over the file.
+        let _ = queue.drain_due(StdInstant::now());
+
+        let after = std::fs::read(&path).expect("sidecar still exists");
+        assert_eq!(
+            after, original,
+            "a sidecar that could not be read must be left alone; overwriting it destroys \
+             the deferrals the read failed to see"
+        );
     }
 
     #[test]
