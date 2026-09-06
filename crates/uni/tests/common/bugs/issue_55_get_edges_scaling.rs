@@ -16,8 +16,9 @@
 //! compaction threshold and time-based flush minimum-mutation default
 //! tunable for ingest-heavy workloads.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use uni_common::config::UniConfig;
 use uni_db::{Uni, Value};
 
 /// Number of "sessions" to link to the participant.
@@ -31,7 +32,24 @@ const FILLER_PER_ROUND: usize = 200;
 const ROUNDS: usize = 15;
 
 async fn setup_db() -> Uni {
-    let db = Uni::in_memory().build().await.unwrap();
+    // This test issues ~6 200 single-row transactions, each of which takes the
+    // writer's `flush_lock`. A commit can wait on that lock while a background
+    // flush or compaction holds it, and the default `commit_timeout` (5s) bounds
+    // only that wait -- so a slow background flush surfaces as a retriable
+    // `CommitTimeout` on the next commit. Debug builds make it reachable:
+    // CI runs this unoptimized, where the same work is several times slower than
+    // the release timings this test was tuned against.
+    //
+    // The signal here is `get_edges` latency against graph size (issue #55),
+    // not commit latency, and the regression guard below is release-only. So
+    // give the guard headroom rather than let unrelated write-path contention
+    // decide the result -- the same trade, for the same reason, as
+    // `fork_writes_soak.rs` and `runtime/profile_test.rs`.
+    let cfg = UniConfig {
+        commit_timeout: Duration::from_secs(120),
+        ..UniConfig::default()
+    };
+    let db = Uni::in_memory().config(cfg).build().await.unwrap();
 
     db.schema()
         .label("Participant")
