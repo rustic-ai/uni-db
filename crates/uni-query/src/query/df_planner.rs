@@ -1137,11 +1137,13 @@ impl HybridPhysicalPlanner {
                 input,
                 node_variables,
                 edge_variables,
+                edge_type_names,
                 path_variable,
             } => self.plan_bind_path(
                 input,
                 node_variables,
                 edge_variables,
+                edge_type_names,
                 path_variable,
                 all_properties,
             ),
@@ -6300,6 +6302,7 @@ impl HybridPhysicalPlanner {
         input: &LogicalPlan,
         node_variables: &[String],
         edge_variables: &[String],
+        edge_type_names: &[Vec<String>],
         path_variable: &str,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
@@ -6308,6 +6311,7 @@ impl HybridPhysicalPlanner {
             input_plan,
             node_variables.to_vec(),
             edge_variables.to_vec(),
+            edge_type_names.to_vec(),
             path_variable.to_string(),
             self.graph_ctx.clone(),
         )))
@@ -7313,6 +7317,7 @@ fn collect_variable_kinds(plan: &LogicalPlan, kinds: &mut HashMap<String, Variab
             node_variables,
             edge_variables,
             path_variable,
+            ..
         } => {
             collect_variable_kinds(input, kinds);
             for nv in node_variables {
@@ -7888,6 +7893,7 @@ fn collect_plan_variables_into(plan: &LogicalPlan, out: &mut HashSet<String>) {
             node_variables,
             edge_variables,
             path_variable,
+            ..
         } => {
             collect_plan_variables_into(input, out);
             for nv in node_variables {

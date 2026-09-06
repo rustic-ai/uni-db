@@ -2124,6 +2124,16 @@ pub enum LogicalPlan {
         input: Box<LogicalPlan>,
         node_variables: Vec<String>,
         edge_variables: Vec<String>,
+        /// The relationship types the *pattern* wrote, one entry per slot in
+        /// `edge_variables` and in the same order.
+        ///
+        /// An anonymous relationship is carried by a bare `__eid_to_<target>`
+        /// column with no sibling `_type`, so the executor has no batch column
+        /// to read its type from. When the pattern named exactly one type, that
+        /// type is the answer by construction — every edge the slot matched has
+        /// it. Empty (untyped, or two or more alternatives) leaves the executor
+        /// on its storage probe.
+        edge_type_names: Vec<Vec<String>>,
         path_variable: String,
     },
 
@@ -4860,6 +4870,8 @@ impl QueryPlanner {
         // Collect node/edge variables for BindPath (fixed-length path binding)
         let mut path_node_vars: Vec<String> = Vec::new();
         let mut path_edge_vars: Vec<String> = Vec::new();
+        // Kept exactly parallel to `path_edge_vars`: pushed and taken together.
+        let mut path_edge_types: Vec<Vec<String>> = Vec::new();
         // Track the last processed outer node variable for QPP source binding.
         // In `(a)((x)-[:R]->(y)){n}(b)`, the QPP source is `a`, not `x`.
         let mut last_outer_node_var: Option<String> = None;
@@ -4942,6 +4954,7 @@ impl QueryPlanner {
                                             input: Box::new(plan),
                                             node_variables: std::mem::take(&mut path_node_vars),
                                             edge_variables: std::mem::take(&mut path_edge_vars),
+                                            edge_type_names: std::mem::take(&mut path_edge_types),
                                             path_variable: pv.clone(),
                                         };
                                         if !is_var_in_scope(vars_in_scope, pv) {
@@ -4992,6 +5005,7 @@ impl QueryPlanner {
                                             path_edge_vars
                                                 .push(format!("__eid_to_{}", effective_target));
                                         }
+                                        path_edge_types.push(r.types.iter().cloned().collect());
                                         path_node_vars.push(target_var.clone());
                                     }
 
@@ -5485,6 +5499,7 @@ impl QueryPlanner {
                 input: Box::new(plan),
                 node_variables: path_node_vars,
                 edge_variables: path_edge_vars,
+                edge_type_names: path_edge_types,
                 path_variable: path_var.clone(),
             };
             add_var_to_scope(vars_in_scope, path_var, VariableType::Path)?;
@@ -8372,6 +8387,7 @@ impl QueryPlanner {
                 node_variables,
                 edge_variables,
                 path_variable,
+                ..
             } => {
                 for v in node_variables.iter().chain(edge_variables) {
                     vars.insert(v.clone());
