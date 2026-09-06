@@ -13,6 +13,9 @@ rmp-serde = "1.3"
 uuid = { version = "1.23", features = ["v4", "serde"] }
 fxhash = { workspace = true }
 thiserror = { workspace = true }
+# #233: the merge tie-breaks must be able to report a convergence hazard
+# rather than diverging silently.
+tracing = { workspace = true }
 serde_json = { workspace = true }
 # M10: registry-dispatch path for `Crdt::merge_via_registry`. The
 # dependency direction is uni-crdt → uni-plugin so the framework

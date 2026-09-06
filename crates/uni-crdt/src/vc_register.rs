@@ -78,10 +78,23 @@ impl<T: Clone + Serialize> VCRegister<T> {
                 // Concurrent: deterministic tie-break on the serialized value so
                 // `a.merge(b)` and `b.merge(a)` converge to the same value
                 // (mirrors `LWWRegister`'s equal-timestamp tie-break).
-                let self_bytes = serde_json::to_vec(&self.value).unwrap_or_default();
-                let other_bytes = serde_json::to_vec(&other.value).unwrap_or_default();
-                if other_bytes > self_bytes {
-                    self.value = other.value.clone();
+                // #233 Tier 1: see `LWWRegister::merge`. `unwrap_or_default()`
+                // made two unserializable values compare equal, so concurrent
+                // writes each kept their own and diverged permanently.
+                let self_bytes = serde_json::to_vec(&self.value);
+                let other_bytes = serde_json::to_vec(&other.value);
+                if let (Err(e), Err(_)) = (&self_bytes, &other_bytes) {
+                    tracing::error!(
+                        error = %e,
+                        "VCRegister: neither value could be serialized for the concurrent-write \
+                         tie-break; replicas may diverge permanently",
+                    );
+                } else {
+                    let self_key = self_bytes.ok();
+                    let other_key = other_bytes.ok();
+                    if other_key > self_key {
+                        self.value = other.value.clone();
+                    }
                 }
                 self.clock.merge(&other.clock);
                 MergeResult::Concurrent

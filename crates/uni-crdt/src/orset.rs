@@ -228,12 +228,54 @@ impl<T: Hash + Eq + Clone> From<ORSetWire<T>> for ORSet<T> {
         } = wire;
 
         // v2: use as-is, mint a fresh local actor.
-        if let (Some(dots), Some(vv)) = (dots, vv) {
-            return ORSet {
-                dots,
-                vv,
-                actor: new_actor(),
-            };
+        //
+        // #233 Tier 1: this was a permissive `if let`, so a v2 payload
+        // carrying `dots` but no `vv` fell through to the v1 upgrade branch —
+        // where `elements` is `None` — and decoded to an EMPTY ORSet. Total
+        // silent element loss where the payload plainly identified itself as
+        // v2. This crate's own writer always emits both, so the shape is not
+        // producible here, but the decoder accepts foreign bytes.
+        match (dots, vv) {
+            (Some(dots), Some(vv)) => {
+                return ORSet {
+                    dots,
+                    vv,
+                    actor: new_actor(),
+                };
+            }
+            (Some(dots), None) => {
+                // The version vector is derivable from the dots: every dot an
+                // element carries has been observed by definition. This is a
+                // lower bound (a `vv` entry can legitimately outlive the dots
+                // it dominates), but it keeps every element, where falling
+                // through to the v1 branch dropped all of them.
+                tracing::warn!(
+                    "ORSet decode: v2 payload carries `dots` but no `vv`; deriving the version \
+                     vector from the observed dots rather than decoding an empty set",
+                );
+                let mut vv: FxHashMap<String, u64> = FxHashMap::default();
+                for tags in dots.values() {
+                    for (actor, counter) in tags {
+                        let slot = vv.entry(actor.clone()).or_default();
+                        *slot = (*slot).max(*counter);
+                    }
+                }
+                return ORSet {
+                    dots,
+                    vv,
+                    actor: new_actor(),
+                };
+            }
+            (None, Some(vv)) => {
+                // No dots is a legitimate state (everything removed), so the
+                // version vector alone decodes faithfully to an empty set.
+                return ORSet {
+                    dots: FxHashMap::default(),
+                    vv,
+                    actor: new_actor(),
+                };
+            }
+            (None, None) => {}
         }
 
         // v1 → v2 upgrade: keep elements with at least one live tag, assigning
@@ -276,6 +318,36 @@ impl<T: Hash + Eq + Clone> From<ORSetWire<T>> for ORSet<T> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A v2 payload missing `vv` must keep its elements, not decode as empty.
+    ///
+    /// #233 Tier 1. `From<ORSetWire>` matched `(Some(dots), Some(vv))` with a
+    /// permissive `if let`, so a payload carrying `dots` but no `vv` fell
+    /// through to the v1 upgrade branch — where `elements` is `None` — and
+    /// produced an EMPTY set. Total silent element loss for a payload that
+    /// plainly identified itself as v2. This crate's own writer always emits
+    /// both fields, but the decoder accepts foreign bytes.
+    #[test]
+    fn a_v2_payload_without_a_version_vector_keeps_its_elements() {
+        let mut set: ORSet<String> = ORSet::new();
+        set.add("alpha".to_owned());
+        set.add("beta".to_owned());
+
+        // Round-trip through JSON and drop `vv`, leaving a half-populated v2.
+        let full = serde_json::to_value(&set).expect("serializes");
+        let dots = full.get("dots").expect("v2 payload carries dots").clone();
+        let half = serde_json::json!({ "dots": dots });
+
+        let decoded: ORSet<String> = serde_json::from_value(half).expect("decodes");
+        let mut got: Vec<String> = decoded.elements();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["alpha".to_owned(), "beta".to_owned()],
+            "a v2 payload without `vv` must keep its elements; an empty set here is total \
+             silent element loss"
+        );
+    }
     use super::*;
     use crate::Crdt;
 

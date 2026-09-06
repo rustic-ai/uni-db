@@ -45,10 +45,37 @@ impl<T: Clone + Serialize> CrdtMerge for LWWRegister<T> {
             self.timestamp = other.timestamp;
         } else if other.timestamp == self.timestamp {
             // Deterministic tie-break: compare serialized forms so merge is commutative.
-            let self_bytes = serde_json::to_vec(&self.value).unwrap_or_default();
-            let other_bytes = serde_json::to_vec(&other.value).unwrap_or_default();
-            if other_bytes > self_bytes {
-                self.value = other.value.clone();
+            //
+            // #233 Tier 1: both sides used `unwrap_or_default()`, which yields
+            // EMPTY bytes on failure. If exactly one side fails the order is
+            // still total and both replicas agree, so they converge. If BOTH
+            // fail, both compare equal, each replica keeps its own value at an
+            // identical timestamp, and they diverge permanently with no signal.
+            // Unreachable for the in-tree `T = serde_json::Value` (infallible),
+            // but `T` is public generic API.
+            //
+            // Two unserializable values cannot be ordered, so this cannot be
+            // repaired here: the structural remedy is a fallible `merge` or a
+            // `T: Ord` bound. Reported instead of diverging silently.
+            let self_bytes = serde_json::to_vec(&self.value);
+            let other_bytes = serde_json::to_vec(&other.value);
+            match (&self_bytes, &other_bytes) {
+                (Err(e), Err(_)) => {
+                    tracing::error!(
+                        error = %e,
+                        "LWWRegister: neither value could be serialized for the equal-timestamp \
+                         tie-break; replicas may diverge permanently",
+                    );
+                }
+                _ => {
+                    // `Err` sorts below `Ok`, so a side that failed loses to one
+                    // that did not — computed identically on every replica.
+                    let self_key = self_bytes.ok();
+                    let other_key = other_bytes.ok();
+                    if other_key > self_key {
+                        self.value = other.value.clone();
+                    }
+                }
             }
         }
     }

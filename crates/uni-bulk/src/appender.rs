@@ -118,7 +118,7 @@ impl StreamingAppender {
     /// Columns in the batch become property keys; values are converted from
     /// Arrow types to Uni [`Value`]s via `arrow_to_value`.
     pub async fn write_batch(&mut self, batch: &arrow_array::RecordBatch) -> Result<()> {
-        for props in crate::bulk::record_batch_to_property_maps(batch) {
+        for props in crate::bulk::record_batch_to_property_maps(batch)? {
             self.buffer.push(props);
             if self.buffer.len() >= self.batch_size {
                 self.flush_buffer().await?;

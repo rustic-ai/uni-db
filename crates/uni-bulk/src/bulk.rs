@@ -84,17 +84,21 @@ pub struct BulkBackend {
 /// and `RecordBatch` (Arrow columnar data).
 pub trait IntoArrow {
     /// Convert to a vector of property maps.
-    fn into_property_maps(self) -> Vec<HashMap<String, Value>>;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a row cannot be converted (#233).
+    fn into_property_maps(self) -> Result<Vec<HashMap<String, Value>>>;
 }
 
 impl IntoArrow for Vec<HashMap<String, Value>> {
-    fn into_property_maps(self) -> Vec<HashMap<String, Value>> {
-        self
+    fn into_property_maps(self) -> Result<Vec<HashMap<String, Value>>> {
+        Ok(self)
     }
 }
 
 impl IntoArrow for arrow_array::RecordBatch {
-    fn into_property_maps(self) -> Vec<HashMap<String, Value>> {
+    fn into_property_maps(self) -> Result<Vec<HashMap<String, Value>>> {
         record_batch_to_property_maps(&self)
     }
 }
@@ -103,9 +107,13 @@ impl IntoArrow for arrow_array::RecordBatch {
 ///
 /// Columns become property keys; values are converted from Arrow types to Uni
 /// [`Value`]s via `arrow_to_value`. Null values are omitted from the map.
+///
+/// # Errors
+///
+/// Returns an error if a non-null cell cannot be decoded to a [`Value`].
 pub fn record_batch_to_property_maps(
     batch: &arrow_array::RecordBatch,
-) -> Vec<HashMap<String, Value>> {
+) -> Result<Vec<HashMap<String, Value>>> {
     let schema = batch.schema();
     let num_rows = batch.num_rows();
     let mut rows = Vec::with_capacity(num_rows);
@@ -115,13 +123,27 @@ pub fn record_batch_to_property_maps(
             let col = batch.column(col_idx);
             let value =
                 uni_store::storage::arrow_convert::arrow_to_value(col.as_ref(), row_idx, None);
+            // #233 Tier 1: `arrow_to_value` answers `Null` both for a genuine
+            // null AND for a type it has no decoder arm for. Dropping every
+            // null therefore dropped the whole column for an unsupported type
+            // while `BulkStats` still reported a full ingest. Comparing
+            // against the Arrow null bitmap separates the two.
+            if value.is_null() && !col.is_null(row_idx) {
+                return Err(anyhow::anyhow!(
+                    "bulk ingest: column `{}` of type {} could not be decoded at row {row_idx}; \
+                     silently dropping it would report a full ingest with the property missing \
+                     from every row",
+                    field.name(),
+                    col.data_type()
+                ));
+            }
             if !value.is_null() {
                 props.insert(field.name().clone(), value);
             }
         }
         rows.push(props);
     }
-    rows
+    Ok(rows)
 }
 
 /// Builder for configuring a bulk writer.
@@ -411,7 +433,7 @@ impl BulkWriter {
         label: &str,
         vertices: impl IntoArrow,
     ) -> Result<Vec<Vid>> {
-        let vertices = vertices.into_property_maps();
+        let vertices = vertices.into_property_maps()?;
         let schema = self.backend.schema.schema();
         // Validate label exists in schema
         schema
@@ -1177,9 +1199,27 @@ impl BulkWriter {
                 for label in &labels_to_rebuild {
                     for idx in &schema.indexes {
                         if idx.label() == label.as_str() {
-                            let _ = self.backend.schema.update_index_metadata(idx.name(), |m| {
-                                m.status = uni_common::core::schema::IndexStatus::Stale;
-                            });
+                            // #233 Tier 1: `let _ =` left the index reporting
+                            // `Online` while this load has just grown the table
+                            // and the rebuild is only SCHEDULED. The planner
+                            // trusts `Online`, consults the stale index, and
+                            // rows go missing from query results with no log
+                            // and no metric. Unlike the background paths in
+                            // `uni-store`, this one has a caller: `commit`
+                            // returns `Result`, so it propagates.
+                            self.backend
+                                .schema
+                                .update_index_metadata(idx.name(), |m| {
+                                    m.status = uni_common::core::schema::IndexStatus::Stale;
+                                })
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "bulk commit: could not mark index `{}` Stale before \
+                                         scheduling its rebuild; leaving it Online would make \
+                                         the planner consult a stale index: {e}",
+                                        idx.name()
+                                    )
+                                })?;
                         }
                     }
                 }

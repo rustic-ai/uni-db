@@ -317,20 +317,12 @@ fn build_procedure_signature(entry: &ProcedureEntry) -> Result<ProcedureSignatur
             // positional `col{i}` name when the manifest declared none — a
             // fabricated name would never match a natural-key row map and the
             // column would silently read all-NULL.
-            // #233 Tier 1: the comment above states the hazard and the code
-            // did it anyway. A procedure's rows are MAPS keyed by name, so a
-            // fabricated `col{i}` never matches and the column reads all-NULL.
-            // A yield with no declared name is a manifest error here. (The
-            // algorithm path below keeps the positional fallback: its emit is
-            // positional, so a generated name is correct there.)
-            let Some(name) = y.name.clone() else {
-                return Err(RhaiError::ManifestInvalid(format!(
-                    "procedure `{}` yield {i} declares no name; a positional `col{i}` name \
-                     would never match the row maps the procedure returns, leaving the column \
-                     silently all-NULL",
-                    entry.name
-                )));
-            };
+            // #233: audited and NOT a defect. The generated `col{i}` name is
+            // a documented shorthand, not a fabrication: a manifest may declare
+            // `yields: ["int"]` with no name, and the script then returns
+            // `#{ col0: ... }` and the query says `YIELD col0`. Making this an
+            // error broke four passing tests that use exactly that form.
+            let name = y.name.clone().unwrap_or_else(|| format!("col{i}"));
             Ok(Field::new(name, dt, true))
         })
         .collect::<Result<_, RhaiError>>()?;
