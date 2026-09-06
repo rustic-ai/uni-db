@@ -12457,6 +12457,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
  "uni-plugin",
  "uuid 1.23.3",
 ]
