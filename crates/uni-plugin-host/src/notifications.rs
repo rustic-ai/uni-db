@@ -48,6 +48,15 @@ pub struct CommitNotification {
     ///
     /// [`CdcOutputProvider`]: uni_plugin::traits::cdc::CdcOutputProvider
     pub mutations: Option<Arc<RecordBatch>>,
+    /// True when this commit's mutation batch could not be materialized.
+    ///
+    /// Distinct from `mutations: None`, which means "zero rows, or no CDC
+    /// provider was registered". #233 Tier 1: the two were indistinguishable,
+    /// so a materialization failure was delivered as an EMPTY batch carrying
+    /// the commit's real LSN range and the stream then checkpointed past it —
+    /// exactly the silent feed gap the `halted` flag exists to prevent.
+    /// `CdcRuntime` halts a stream rather than delivering when this is set.
+    pub mutations_failed: bool,
 }
 
 /// An async stream of commit notifications with optional filtering.

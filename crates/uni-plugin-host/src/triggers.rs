@@ -596,7 +596,16 @@ impl TriggerRouter {
                 if !matches!(entry.fire_mode, FireMode::Synchronous) {
                     continue;
                 }
-                let Some(batch) = events.filter_for(entry) else {
+                // A failure here must abort the transaction rather than skip
+                // the trigger: a synchronous before-trigger that could not be
+                // evaluated has not approved the mutation (#233).
+                let filtered = events
+                    .filter_for(entry)
+                    .map_err(|e| UniError::TriggerRejected {
+                        trigger: entry.name.to_string(),
+                        reason: format!("could not evaluate trigger selection: {e}"),
+                    })?;
+                let Some(batch) = filtered else {
                     continue;
                 };
                 let mb = MutationBatch {
@@ -681,7 +690,22 @@ impl TriggerRouter {
         for &phase in &[TriggerPhase::AfterMutation, TriggerPhase::AfterCommit] {
             let routes = &self.by_phase[phase_index(phase)];
             for entry in routes {
-                let Some(batch) = events.filter_for(entry) else {
+                // The commit is already durable, so there is nothing to
+                // abort. Record at error level rather than dropping silently:
+                // this trigger did not observe mutations it was registered
+                // for (#233).
+                let filtered = match events.filter_for(entry) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::error!(
+                            trigger = %entry.name,
+                            error = %e,
+                            "after-trigger selection failed; trigger did not fire for this commit",
+                        );
+                        continue;
+                    }
+                };
+                let Some(batch) = filtered else {
                     continue;
                 };
                 let mb = MutationBatch {
@@ -1019,8 +1043,24 @@ impl PreExistingProbe {
                 .get(vid)
                 .and_then(|labels| labels.first())
                 .cloned();
-            if let Some(label) = label {
-                out.push((*vid, label));
+            match label {
+                Some(label) => out.push((*vid, label)),
+                None => {
+                    // #233 Tier 1, PARTIAL. Skipping the candidate means the
+                    // L1 probe never runs for this vid, so a vertex that DOES
+                    // pre-exist in L1 is reported as NODE_CREATE with no
+                    // pre-image instead of NODE_UPDATE. Resolving it needs a
+                    // label source this layer does not have: the per-label L1
+                    // table cannot be scanned without a label, and the main
+                    // vertices table's `labels` column lives behind
+                    // `uni-store`'s writer. Made visible rather than left
+                    // silent; the fix needs a label lookup threaded in.
+                    warn!(
+                        vid = ?vid,
+                        "no label for a pending vertex; skipping its L1 pre-existence probe, \
+                         so it may be reported as CREATE rather than UPDATE",
+                    );
+                }
             }
         }
         out
@@ -1169,11 +1209,11 @@ impl PreExistingProbe {
     }
 
     fn edge_old_bytes(&self, eid: uni_common::Eid) -> Option<Vec<u8>> {
-        self.edges.get(&eid).map(serialize_properties)
+        self.edges.get(&eid).and_then(serialize_properties)
     }
 
     fn vertex_old_bytes(&self, vid: uni_common::Vid) -> Option<Vec<u8>> {
-        self.vertices.get(&vid).map(serialize_properties)
+        self.vertices.get(&vid).and_then(serialize_properties)
     }
 
     /// Borrow the captured pre-image properties for `vid`, when the
@@ -1199,8 +1239,19 @@ impl PreExistingProbe {
 /// matches the codec other plugin surfaces use for `CypherValue`
 /// payloads and keeps the bytes inspectable in trigger plugins
 /// without pulling a bespoke decoder.
-fn serialize_properties(props: &Properties) -> Vec<u8> {
-    serde_json::to_vec(props).unwrap_or_default()
+fn serialize_properties(props: &Properties) -> Option<Vec<u8>> {
+    // #233 Tier 1: `unwrap_or_default()` produced EMPTY bytes on a
+    // serialization failure. `old_value` is an `Option<Vec<u8>>` whose `None`
+    // means "no pre-image"; empty bytes instead mean "the pre-image was an
+    // empty property map", so a trigger comparing old against new saw a
+    // spurious change. `None` is the honest answer for "could not serialize".
+    match serde_json::to_vec(props) {
+        Ok(bytes) => Some(bytes),
+        Err(e) => {
+            warn!(error = %e, "trigger pre-image serialization failed; emitting no old_value");
+            None
+        }
+    }
 }
 
 impl MutationEvents {
@@ -1210,7 +1261,7 @@ impl MutationEvents {
     /// [`Self::from_l0_with_probe`] with `probe = None`.
     #[must_use]
     pub fn from_l0(l0: &L0Buffer) -> Self {
-        Self::from_l0_with_probe(l0, None, &HashSet::new())
+        Self::from_l0_with_probe(l0, None, &HashSet::new(), &|_| None)
     }
 
     /// Drain the tx-private L0 buffer into a typed event log.
@@ -1231,6 +1282,7 @@ impl MutationEvents {
         l0: &L0Buffer,
         probe: Option<&PreExistingProbe>,
         properties_referenced: &HashSet<String>,
+        resolve_edge_type: &dyn Fn(u32) -> Option<String>,
     ) -> Self {
         let mut rows: Vec<MutationRow> = Vec::with_capacity(l0.mutation_count);
         let track_props = !properties_referenced.is_empty();
@@ -1339,11 +1391,31 @@ impl MutationEvents {
         // Edge writes — CREATE if not pre-existing, else UPDATE.
         // `old_value` carries the pre-image edge properties for UPDATE
         // and is `None` for CREATE.
-        for eid in l0.edge_endpoints.keys() {
+        for (eid, (_, _, type_id)) in &l0.edge_endpoints {
             if l0.tombstones.contains_key(eid) {
                 continue;
             }
-            let etype = l0.edge_types.get(eid).cloned().unwrap_or_default();
+            // #233 Tier 1: `unwrap_or_default()` produced an EMPTY type name,
+            // which the router compares against a trigger's declared type — so
+            // `ON -[:KNOWS]` silently never fired for an edge whose name was
+            // missing from `edge_types` (an edge inserted with `etype_name:
+            // None` has endpoints but no name). The type *id* is carried in
+            // `edge_endpoints` all along, so the name is recoverable through
+            // the schema rather than guessed.
+            let etype = l0.edge_types.get(eid).cloned().or_else(|| {
+                let resolved = resolve_edge_type(*type_id);
+                if resolved.is_none() {
+                    warn!(
+                        eid = ?eid,
+                        type_id = *type_id,
+                        "edge type name unresolvable; trigger routing will not match this edge",
+                    );
+                }
+                resolved
+            });
+            let Some(etype) = etype else {
+                continue;
+            };
             let (kind, old, old_props_map) = match probe {
                 Some(p) if p.edge_pre_existed(*eid) => (
                     TriggerEventMask::EDGE_UPDATE,
@@ -1396,12 +1468,16 @@ impl MutationEvents {
     /// stream of mutations for a committed transaction (M11 FU-4). The
     /// per-trigger filtered shape is built by `Self::filter_for`.
     ///
-    /// Returns `None` when there are zero rows (lets callers skip
+    /// Returns `Ok(None)` when there are zero rows (lets callers skip
     /// constructing an empty `CdcBatch`).
-    #[must_use]
-    pub fn materialize_all(&self) -> Option<RecordBatch> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the event rows cannot be materialized. The caller
+    /// must NOT treat that as "no mutations" — see [`EventRowColumns::into_batch`].
+    pub fn materialize_all(&self) -> anyhow::Result<Option<RecordBatch>> {
         if self.rows.is_empty() {
-            return None;
+            return Ok(None);
         }
         let mut cols = EventRowColumns::with_capacity(self.rows.len());
         for row in &self.rows {
@@ -1411,9 +1487,17 @@ impl MutationEvents {
     }
 
     /// Filter rows matching `entry`'s subscription selectors and
-    /// project them into the §4.18 RecordBatch shape. Returns `None`
-    /// if no rows match (caller skips the `fire` call).
-    fn filter_for(&self, entry: &RouteEntry) -> Option<RecordBatch> {
+    /// project them into the §4.18 RecordBatch shape.
+    ///
+    /// Returns `Ok(None)` if no rows match (caller skips the `fire` call).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the batch cannot be built or the compiled
+    /// predicate cannot be evaluated. #233 Tier 1: both used to collapse into
+    /// `None`, i.e. "no rows match", so a trigger silently failed to fire on
+    /// rows that did match.
+    fn filter_for(&self, entry: &RouteEntry) -> anyhow::Result<Option<RecordBatch>> {
         // property_filter is satisfied vacuously here — per-property
         // event-row population (one row per (vid, property) write) is
         // not the chosen surface; predicate authors instead reference
@@ -1426,22 +1510,25 @@ impl MutationEvents {
                 cols.push_row(row);
             }
         }
-        let batch = cols.into_batch()?;
+        let Some(batch) = cols.into_batch()? else {
+            return Ok(None);
+        };
 
-        // Apply the compiled `predicate_source` boolean mask if any.
-        // Evaluation failures degrade safely to "no rows match" — the
-        // predicate was already validated at router build, so failures
-        // here imply an Arrow/DataFusion bug we'd rather skip than
-        // surface as a commit error.
+        // Apply the compiled `predicate_source` boolean mask if any. An
+        // evaluation failure is an error, not "no rows match": the latter
+        // silently suppresses a trigger that should have fired (#233).
         let batch = match &entry.compiled_predicate {
-            Some(predicate) => apply_predicate(predicate, batch)?,
+            Some(predicate) => match apply_predicate(predicate, batch)? {
+                Some(b) => b,
+                None => return Ok(None),
+            },
             None => batch,
         };
 
         if batch.num_rows() == 0 {
-            return None;
+            return Ok(None);
         }
-        Some(batch)
+        Ok(Some(batch))
     }
 }
 
@@ -1494,11 +1581,21 @@ impl EventRowColumns {
         );
     }
 
-    /// Materialize the columns into a `RecordBatch`. Returns `None`
-    /// when zero rows were collected (callers skip the empty case).
-    fn into_batch(self) -> Option<RecordBatch> {
+    /// Materialize the columns into a `RecordBatch`.
+    ///
+    /// Returns `Ok(None)` when zero rows were collected (callers skip the
+    /// empty case).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the collected columns do not form a valid batch
+    /// against [`event_row_schema`]. #233 Tier 1: this used to be `.ok()`,
+    /// which made that failure indistinguishable from "no rows" — and a whole
+    /// commit's mutations then reached `CdcRuntime` as `None`, which delivered
+    /// an empty batch carrying the real LSN range and checkpointed past it.
+    fn into_batch(self) -> anyhow::Result<Option<RecordBatch>> {
         if self.kinds.is_empty() {
-            return None;
+            return Ok(None);
         }
         // Build a nullable `LargeBinary` column from a `Vec<Option<Vec<u8>>>`.
         let large_binary = |col: &[Option<Vec<u8>>]| -> Arc<dyn arrow_array::Array> {
@@ -1517,41 +1614,40 @@ impl EventRowColumns {
             large_binary(&self.props_old),
         ];
 
-        RecordBatch::try_new(event_row_schema(), columns).ok()
+        Ok(Some(RecordBatch::try_new(event_row_schema(), columns)?))
     }
 }
 
-/// Run a compiled trigger predicate against the candidate batch,
-/// returning `Some(filtered_batch)` when at least one row passes and
-/// `None` when the predicate eliminates every row or the evaluation
-/// fails (logged at warn level, treated as "no match" to avoid
-/// silently firing on rows the predicate would have rejected).
-fn apply_predicate(predicate: &Arc<dyn PhysicalExpr>, batch: RecordBatch) -> Option<RecordBatch> {
+/// Run a compiled trigger predicate against the candidate batch.
+///
+/// Returns `Ok(None)` when the predicate eliminates every row.
+///
+/// # Errors
+///
+/// Returns an error if the predicate cannot be evaluated or does not yield a
+/// Boolean column. #233 Tier 1: these were warn-and-return-`None`, which is
+/// indistinguishable from "the predicate rejected every row" and silently
+/// suppressed triggers that should have fired.
+fn apply_predicate(
+    predicate: &Arc<dyn PhysicalExpr>,
+    batch: RecordBatch,
+) -> anyhow::Result<Option<RecordBatch>> {
     use datafusion::arrow::compute::filter_record_batch;
     use datafusion::logical_expr::ColumnarValue;
 
-    let value = match predicate.evaluate(&batch) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(error = %e, "trigger predicate evaluation failed; dropping batch");
-            return None;
-        }
-    };
+    let value = predicate.evaluate(&batch)?;
     let array = match value {
         ColumnarValue::Array(a) => a,
-        ColumnarValue::Scalar(s) => match s.to_array_of_size(batch.num_rows()) {
-            Ok(a) => a,
-            Err(e) => {
-                warn!(error = %e, "trigger predicate scalar→array failed");
-                return None;
-            }
-        },
+        ColumnarValue::Scalar(s) => s.to_array_of_size(batch.num_rows())?,
     };
     let Some(bool_arr) = array.as_any().downcast_ref::<BooleanArray>() else {
-        warn!("trigger predicate must yield Boolean; dropping batch");
-        return None;
+        anyhow::bail!("trigger predicate must yield a Boolean column");
     };
-    filter_record_batch(&batch, bool_arr).ok()
+    let filtered = filter_record_batch(&batch, bool_arr)?;
+    if filtered.num_rows() == 0 {
+        return Ok(None);
+    }
+    Ok(Some(filtered))
 }
 
 fn mask_to_discriminant(m: TriggerEventMask) -> u8 {

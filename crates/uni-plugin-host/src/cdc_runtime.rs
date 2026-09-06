@@ -103,12 +103,22 @@ impl CdcCheckpointSidecar {
     }
 
     /// Look up the persisted LSN for a single provider.
-    #[must_use]
-    pub fn lookup(&self, name: &str) -> Option<CdcLsn> {
-        self.load_all()
-            .ok()
-            .and_then(|rows| rows.into_iter().find(|r| r.name == name))
-            .map(|r| CdcLsn(r.last_lsn))
+    ///
+    /// `Ok(None)` means the provider has genuinely never checkpointed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the sidecar cannot be read. #233 Tier 1: this was
+    /// `.ok()`, so an unreadable or corrupt sidecar was indistinguishable
+    /// from "never checkpointed" and the provider silently resumed from the
+    /// wrong point — replaying delivered commits, or skipping undelivered
+    /// ones, with no signal either way.
+    pub fn lookup(&self, name: &str) -> Result<Option<CdcLsn>, String> {
+        Ok(self
+            .load_all()?
+            .into_iter()
+            .find(|r| r.name == name)
+            .map(|r| CdcLsn(r.last_lsn)))
     }
 
     /// Replace a single provider's LSN, leaving other providers
@@ -157,7 +167,24 @@ fn start_stream(
     provider: &Arc<dyn uni_plugin::traits::cdc::CdcOutputProvider>,
     late: bool,
 ) -> Option<ActiveStream> {
-    let from_lsn = checkpoint.and_then(|c| c.lookup(name));
+    // #233 Tier 1: a failed checkpoint read must not become `None`. `None`
+    // tells the provider "you have never checkpointed", so it resumes from the
+    // beginning (replaying delivered commits) or from the live tail (skipping
+    // undelivered ones). Refusing to start is the safe answer: a provider that
+    // is not started never checkpoints, so its persisted LSN stays put and a
+    // later successful start resumes from the right place.
+    let from_lsn = match checkpoint.map(|c| c.lookup(name)).transpose() {
+        Ok(lsn) => lsn.flatten(),
+        Err(e) => {
+            tracing::error!(
+                provider = %name,
+                error = %e,
+                "CdcRuntime: checkpoint lookup failed; refusing to start the provider rather \
+                 than resuming from an unknown position",
+            );
+            return None;
+        }
+    };
     match provider.start(CdcStartContext::new(from_lsn)) {
         Ok(stream) => {
             let kind = if late {
@@ -345,6 +372,27 @@ impl CdcRuntime {
         // commit). Fall back to an empty batch matching the canonical
         // event-row schema so downstream filters see consistent
         // column types.
+        // #233 Tier 1: a commit whose mutations could not be materialized must
+        // not be delivered as an empty batch and checkpointed past — that is a
+        // silent feed hole with the LSN range advanced over it. Halt instead,
+        // which is the same contract `deliver` failure already follows: the
+        // checkpoint stays at the last contiguous commit so the gap is visible.
+        if notif.mutations_failed {
+            let mut streams = self.streams.lock();
+            for active in streams.iter_mut() {
+                if active.halted {
+                    continue;
+                }
+                tracing::error!(
+                    provider = %active.name,
+                    version = notif.version,
+                    "CdcRuntime: commit mutations could not be materialized; halting stream to \
+                     avoid a silent feed gap (its checkpoint stays at the last delivered commit)",
+                );
+                active.halted = true;
+            }
+            return;
+        }
         let mutations = notif.mutations.clone().unwrap_or_else(|| {
             Arc::new(arrow_array::RecordBatch::new_empty(
                 crate::triggers::event_row_schema(),
@@ -426,8 +474,8 @@ mod tests {
         s.write_one("pulsar", CdcLsn(7)).unwrap();
         let rows = s.load_all().unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(s.lookup("kafka"), Some(CdcLsn(42)));
-        assert_eq!(s.lookup("pulsar"), Some(CdcLsn(7)));
+        assert_eq!(s.lookup("kafka").unwrap(), Some(CdcLsn(42)));
+        assert_eq!(s.lookup("pulsar").unwrap(), Some(CdcLsn(7)));
     }
 
     #[test]
@@ -438,7 +486,7 @@ mod tests {
             s.write_one("kafka", CdcLsn(99)).unwrap();
         }
         let s2 = CdcCheckpointSidecar::new(tmp.path().to_path_buf());
-        assert_eq!(s2.lookup("kafka"), Some(CdcLsn(99)));
+        assert_eq!(s2.lookup("kafka").unwrap(), Some(CdcLsn(99)));
     }
 
     #[test]
@@ -448,7 +496,7 @@ mod tests {
         s.write_one("kafka", CdcLsn(1)).unwrap();
         s.write_one("kafka", CdcLsn(2)).unwrap();
         s.write_one("kafka", CdcLsn(3)).unwrap();
-        assert_eq!(s.lookup("kafka"), Some(CdcLsn(3)));
+        assert_eq!(s.lookup("kafka").unwrap(), Some(CdcLsn(3)));
         assert_eq!(s.load_all().unwrap().len(), 1);
     }
 }
