@@ -4,7 +4,7 @@
 //! uni.algo.randomWalk procedure implementation.
 
 use crate::algo::algorithms::{Algorithm, RandomWalk, RandomWalkConfig};
-use crate::algo::procedure_template::{GenericAlgoProcedure, GraphAlgoAdapter};
+use crate::algo::procedure_template::{GenericAlgoProcedure, GraphAlgoAdapter, parse_vid_arg};
 use crate::algo::procedures::{AlgoResultRow, ValueType};
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
@@ -41,14 +41,16 @@ impl GraphAlgoAdapter for RandomWalkAdapter {
         let start_nodes = if args[2].is_null() {
             Vec::new()
         } else {
-            let list = args[2].as_array().unwrap();
-            let mut vids = Vec::new();
-            for val in list {
-                if let Ok(v) = vid_from_value(val) {
-                    vids.push(v);
-                }
-            }
-            vids
+            let list = args[2]
+                .as_array()
+                .ok_or_else(|| anyhow!("`startNodes` must be a list of node ids"))?;
+            // A dropped bad entry used to shrink the list; an all-bad list became
+            // empty, which downstream means "start from every node" — so
+            // randomWalk(startNodes: ['abc']) walked the whole graph.
+            list.iter()
+                .enumerate()
+                .map(|(i, val)| parse_vid_arg(val, &format!("startNodes[{i}]")))
+                .collect::<Result<Vec<Vid>>>()?
         };
 
         let return_param = args.get(3).and_then(Value::as_f64).unwrap_or(1.0);
@@ -79,16 +81,48 @@ impl GraphAlgoAdapter for RandomWalkAdapter {
     }
 }
 
-fn vid_from_value(val: &Value) -> Result<Vid> {
-    if let Some(s) = val.as_str()
-        && let Ok(vid) = s.parse::<Vid>()
-    {
-        return Ok(vid);
-    }
-    if let Some(v) = val.as_u64() {
-        return Ok(Vid::from(v));
-    }
-    Err(anyhow!("Invalid Vid format"))
-}
-
 pub type RandomWalkProcedure = GenericAlgoProcedure<RandomWalkAdapter>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(start_nodes: Value) -> Vec<Value> {
+        vec![
+            json!(5),
+            json!(1),
+            start_nodes,
+            json!(1.0),
+            json!(1.0),
+            Value::Null,
+        ]
+    }
+
+    #[test]
+    fn bad_start_node_errors_instead_of_walking_the_whole_graph() {
+        // A2: a dropped entry left an empty start list, which downstream means
+        // "start from every node" — so startNodes:['abc'] walked the whole graph.
+        let cfg = RandomWalkAdapter::to_config(args(json!([3, "5"])))
+            .expect("valid start nodes must parse");
+        assert_eq!(cfg.start_nodes, vec![Vid::from(3u64), Vid::from(5u64)]);
+
+        let err = RandomWalkAdapter::to_config(args(json!(["abc"])))
+            .expect_err("an unparsable startNodes entry must error");
+        assert!(
+            err.to_string().contains("startNodes[0]"),
+            "error must name the offending entry: {err}"
+        );
+
+        // A single bad entry among good ones must not be silently dropped either.
+        let err = RandomWalkAdapter::to_config(args(json!([3, "abc"])))
+            .expect_err("one bad entry must error");
+        assert!(
+            err.to_string().contains("startNodes[1]"),
+            "error must name the offending index: {err}"
+        );
+
+        // null still means "no explicit start nodes".
+        let cfg = RandomWalkAdapter::to_config(args(Value::Null)).expect("null is allowed");
+        assert!(cfg.start_nodes.is_empty());
+    }
+}

@@ -556,27 +556,15 @@ impl ProjectionBuilder {
         label_ids: &[u16],
         l0_snapshot: Option<&uni_store::runtime::l0_manager::SnapshotView>,
     ) -> Result<Vec<Vid>> {
-        use arrow_array::UInt64Array;
-
         let mut all_vids = Vec::new();
 
         for &lid in label_ids {
             let label_name = schema.label_name_by_id(lid).unwrap();
-            if let Ok(Some(batch)) = self
+            let scan = self
                 .storage
                 .scan_vertex_table(label_name, &["_vid"], None)
-                .await
-            {
-                let vid_col = batch
-                    .column_by_name("_vid")
-                    .unwrap()
-                    .as_any()
-                    .downcast_ref::<UInt64Array>()
-                    .unwrap();
-                for i in 0..batch.num_rows() {
-                    all_vids.push(Vid::from(vid_col.value(i)));
-                }
-            }
+                .await;
+            append_scanned_vids(scan, label_name, &mut all_vids)?;
         }
 
         // Overlay L0 vertices (not yet flushed to Lance) from the snapshot
@@ -962,6 +950,12 @@ impl GraphProjection {
         }
         let vertex_count = id_map.len();
 
+        // Did ANY edge row actually carry a numeric value under `weight_column`?
+        // There is no schema on the Cypher/Named path, so this data check is the
+        // only way to catch a misspelled / unprojected weight column before it
+        // becomes a column of silent 1.0s that is indistinguishable from real
+        // weights (Dijkstra/MST/Louvain would return plausible unweighted answers).
+        let mut weight_resolved = false;
         let mut out_edges: WeightedEdgeList = Vec::with_capacity(edge_rows.len());
         let mut in_edges: WeightedEdgeList = if include_reverse {
             Vec::with_capacity(edge_rows.len())
@@ -978,7 +972,13 @@ impl GraphProjection {
                 .and_then(value_as_u64)
                 .ok_or_else(|| anyhow!("edge row {i} missing `target` (Int) column"))?;
             let weight = if let Some(name) = weight_column {
-                row.get(name).and_then(value_as_f64).unwrap_or(1.0)
+                match row.get(name).and_then(value_as_f64) {
+                    Some(w) => {
+                        weight_resolved = true;
+                        w
+                    }
+                    None => 1.0,
+                }
             } else {
                 1.0
             };
@@ -995,6 +995,19 @@ impl GraphProjection {
             if include_reverse {
                 in_edges.push((dst_slot, src_slot, weight));
             }
+        }
+
+        if let Some(name) = weight_column
+            && !edge_rows.is_empty()
+            && !weight_resolved
+        {
+            return Err(anyhow!(
+                "weightColumn `{name}` is not yielded by the edge query (none of the \
+                 {} edge rows carries a numeric value for it) — every weight would \
+                 silently default to 1.0. Check the spelling, or RETURN the column \
+                 from the edgeQuery.",
+                edge_rows.len()
+            ));
         }
 
         // NOTE: deliberately *not* calling `id_map.compact()` — the
@@ -1076,6 +1089,39 @@ impl GraphProjection {
             id_map,
         }
     }
+}
+
+/// Fold one label's `_vid` scan into the accumulating VID list.
+///
+/// A scan failure must NOT be treated as "this label has no vertices": the
+/// previous `if let Ok(Some(batch))` swallowed IO/decode errors and silently
+/// dropped every vertex of that label, so PageRank/WCC scored a subgraph the
+/// caller never asked for. `Ok(None)` (table does not exist) is the one
+/// legitimate empty case and is still skipped.
+fn append_scanned_vids(
+    scan: Result<Option<arrow_array::RecordBatch>>,
+    label_name: &str,
+    out: &mut Vec<Vid>,
+) -> Result<()> {
+    use arrow_array::UInt64Array;
+
+    let Some(batch) = scan.map_err(|e| {
+        anyhow!("projection: scanning vertices for label `{label_name}` failed: {e}")
+    })?
+    else {
+        return Ok(());
+    };
+    let vid_col = batch
+        .column_by_name("_vid")
+        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+        .ok_or_else(|| {
+            anyhow!("projection: vertex table for label `{label_name}` has no UInt64 `_vid` column")
+        })?;
+    out.reserve(batch.num_rows());
+    for i in 0..batch.num_rows() {
+        out.push(Vid::from(vid_col.value(i)));
+    }
+    Ok(())
 }
 
 fn value_as_u64(v: &uni_common::Value) -> Option<u64> {
@@ -1255,5 +1301,91 @@ mod tests {
         assert_eq!(&weights.unwrap()[s..e], &[0.9, 0.5, 0.2]);
         // The property column is permuted identically: dst * 10 for [1, 3, 8].
         assert_eq!(&cols[0][s..e], &[10.0, 30.0, 80.0]);
+    }
+
+    fn vid_batch(vids: &[u64]) -> arrow_array::RecordBatch {
+        use arrow_array::UInt64Array;
+        use arrow_schema::{DataType, Field, Schema};
+        let schema = std::sync::Arc::new(Schema::new(vec![Field::new(
+            "_vid",
+            DataType::UInt64,
+            false,
+        )]));
+        arrow_array::RecordBatch::try_new(
+            schema,
+            vec![std::sync::Arc::new(UInt64Array::from(vids.to_vec()))],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn scan_error_propagates_instead_of_dropping_a_label() {
+        // A1: `if let Ok(Some(batch))` used to swallow the error and leave the
+        // label's vertices out of the projection entirely.
+        let mut out = Vec::new();
+
+        // Happy path still collects — so a typo'd helper can't pass for free.
+        append_scanned_vids(Ok(Some(vid_batch(&[7, 9]))), "Person", &mut out)
+            .expect("a successful scan must contribute its vids");
+        assert_eq!(out, vec![Vid::from(7u64), Vid::from(9u64)]);
+
+        // Ok(None) = table does not exist: legitimately empty, not an error.
+        append_scanned_vids(Ok(None), "Ghost", &mut out).expect("Ok(None) must be skipped");
+        assert_eq!(out, vec![Vid::from(7u64), Vid::from(9u64)]);
+
+        // Err must surface, naming the label.
+        let err = append_scanned_vids(Err(anyhow!("lance decode blew up")), "Person", &mut out)
+            .expect_err("a failed scan must not be silently treated as an empty label");
+        let msg = err.to_string();
+        assert!(msg.contains("Person"), "error must name the label: {msg}");
+        assert!(
+            msg.contains("lance decode blew up"),
+            "error must carry the cause: {msg}"
+        );
+    }
+
+    #[test]
+    fn from_rows_rejects_a_weight_column_no_edge_row_carries() {
+        use std::collections::HashMap;
+        use uni_common::Value;
+
+        let node_rows: Vec<HashMap<String, Value>> = [1u64, 2]
+            .iter()
+            .map(|id| HashMap::from([("id".to_owned(), Value::Int(*id as i64))]))
+            .collect();
+        let edge_with = |w: Option<f64>| {
+            let mut m = HashMap::from([
+                ("source".to_owned(), Value::Int(1)),
+                ("target".to_owned(), Value::Int(2)),
+            ]);
+            if let Some(w) = w {
+                m.insert("cost".to_owned(), Value::Float(w));
+            }
+            m
+        };
+
+        // Happy path: the column is present, weights are real.
+        let ok =
+            GraphProjection::from_rows(&node_rows, &[edge_with(Some(4.5))], Some("cost"), false)
+                .expect("a yielded weight column must build");
+        assert_eq!(ok.out_weights.as_deref(), Some(&[4.5f64][..]));
+
+        // A4: the edge query never yields `cost` -> every weight would be a
+        // silent 1.0, indistinguishable from a real unit-weighted graph.
+        let err = GraphProjection::from_rows(&node_rows, &[edge_with(None)], Some("cost"), false)
+            .expect_err("an unyielded weightColumn must be rejected, not defaulted to 1.0");
+        let msg = err.to_string();
+        assert!(msg.contains("cost"), "error must name the column: {msg}");
+        assert!(
+            msg.contains("1.0"),
+            "error must say what the silent default was: {msg}"
+        );
+
+        // No weight column requested at all is still fine.
+        GraphProjection::from_rows(&node_rows, &[edge_with(None)], None, false)
+            .expect("no weightColumn requested -> no check");
+        // And an edge-less graph can't be checked, so it must not error.
+        GraphProjection::from_rows(&node_rows, &[], Some("cost"), false)
+            .expect("no edges -> nothing to resolve against");
     }
 }
