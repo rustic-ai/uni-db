@@ -41,11 +41,19 @@ const ARROW_EXTENSION_KEY: &str = "ARROW:extension:name";
 /// Called on every encode and decode path ([`encode_batch`],
 /// [`encode_batches`], [`decode_batch`], [`decode_batches`]) via
 /// [`reject_all`] so neither direction can carry a secret-handle column across
-/// the wasm boundary. Nested children (struct fields, list items) are walked
-/// recursively.
+/// the wasm boundary. Every nested `DataType` is walked recursively — struct
+/// fields, the five list flavours, map entries, union variants, run-end-encoded
+/// children and dictionary value types — because `decode_batches` takes its
+/// schema from the guest-supplied IPC stream, so the guest picks the nesting.
 fn reject_secret_handles(batch: &RecordBatch) -> Result<(), IpcError> {
+    reject_secret_handles_in_schema(batch.schema().as_ref())
+}
+
+/// The schema half of [`reject_secret_handles`]. Split out because the membrane
+/// is a property of the schema alone, which lets the exotic nested types be
+/// covered without hand-building a `UnionArray` or `RunArray` per test.
+fn reject_secret_handles_in_schema(schema: &arrow_schema::Schema) -> Result<(), IpcError> {
     fn walk(field: &arrow_schema::Field) -> Result<(), IpcError> {
-        use arrow_schema::DataType;
         if field
             .metadata()
             .get(ARROW_EXTENSION_KEY)
@@ -55,20 +63,72 @@ fn reject_secret_handles(batch: &RecordBatch) -> Result<(), IpcError> {
                 column: field.name().clone(),
             });
         }
-        match field.data_type() {
+        walk_type(field.data_type())
+    }
+
+    // Deny-by-default: every nested variant recurses and every scalar variant
+    // is named. There is deliberately no `_` arm — an allow-list over an open
+    // enum reopens the membrane every time Arrow adds a nested type, which is
+    // how `Union`, `RunEndEncoded`, the two `ListView`s and `Dictionary` came
+    // to be walked past. A future variant must now fail the build here rather
+    // than let a tagged child through.
+    fn walk_type(dt: &arrow_schema::DataType) -> Result<(), IpcError> {
+        use arrow_schema::DataType;
+        match dt {
             DataType::Struct(fields) => fields.iter().try_for_each(|f| walk(f.as_ref())),
-            DataType::List(item) | DataType::LargeList(item) | DataType::FixedSizeList(item, _) => {
-                walk(item.as_ref())
+            DataType::List(item)
+            | DataType::ListView(item)
+            | DataType::LargeList(item)
+            | DataType::LargeListView(item)
+            | DataType::FixedSizeList(item, _)
+            | DataType::Map(item, _) => walk(item.as_ref()),
+            DataType::Union(fields, _) => fields.iter().try_for_each(|(_, f)| walk(f.as_ref())),
+            DataType::RunEndEncoded(run_ends, values) => {
+                walk(run_ends.as_ref())?;
+                walk(values.as_ref())
             }
-            DataType::Map(field, _) => walk(field.as_ref()),
-            _ => Ok(()),
+            // A dictionary's value type is a bare `DataType` with no `Field`
+            // wrapper, so there is no metadata to check — but it can still be a
+            // struct or list holding a tagged child.
+            DataType::Dictionary(key, value) => {
+                walk_type(key.as_ref())?;
+                walk_type(value.as_ref())
+            }
+            DataType::Null
+            | DataType::Boolean
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+            | DataType::Float16
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::Timestamp(_, _)
+            | DataType::Date32
+            | DataType::Date64
+            | DataType::Time32(_)
+            | DataType::Time64(_)
+            | DataType::Duration(_)
+            | DataType::Interval(_)
+            | DataType::Binary
+            | DataType::FixedSizeBinary(_)
+            | DataType::LargeBinary
+            | DataType::BinaryView
+            | DataType::Utf8
+            | DataType::LargeUtf8
+            | DataType::Utf8View
+            | DataType::Decimal32(_, _)
+            | DataType::Decimal64(_, _)
+            | DataType::Decimal128(_, _)
+            | DataType::Decimal256(_, _) => Ok(()),
         }
     }
-    batch
-        .schema()
-        .fields()
-        .iter()
-        .try_for_each(|f| walk(f.as_ref()))
+
+    schema.fields().iter().try_for_each(|f| walk(f.as_ref()))
 }
 
 /// Run [`reject_secret_handles`] over every batch — the FU-2 membrane shared by
@@ -397,6 +457,118 @@ mod tests {
                 SECRET_HANDLE_EXTENSION.to_owned(),
             )]),
         )
+    }
+
+    /// The membrane walked Struct / List / LargeList / FixedSizeList / Map and
+    /// returned `Ok(())` for every other `DataType`, so a tagged field buried in
+    /// a union, a run-end-encoded child, either list-view flavour or a
+    /// dictionary value crossed the boundary unrejected. `decode_batches` takes
+    /// its schema straight from the guest-supplied IPC stream, so the guest
+    /// chooses the nesting — each of these was reachable.
+    #[test]
+    fn membrane_rejects_secret_handle_inside_every_nested_type() {
+        use arrow_schema::{UnionFields, UnionMode};
+        let secret = || Arc::new(secret_tagged_field("handle"));
+        let plain = || Arc::new(Field::new("id", DataType::Int64, false));
+
+        let nested: Vec<(&str, DataType)> = vec![
+            (
+                "union_sparse",
+                DataType::Union(
+                    UnionFields::try_new(vec![0, 1], vec![plain(), secret()]).unwrap(),
+                    UnionMode::Sparse,
+                ),
+            ),
+            (
+                "union_dense",
+                DataType::Union(
+                    UnionFields::try_new(vec![0, 1], vec![plain(), secret()]).unwrap(),
+                    UnionMode::Dense,
+                ),
+            ),
+            (
+                "run_end_values",
+                DataType::RunEndEncoded(
+                    Arc::new(Field::new("run_ends", DataType::Int32, false)),
+                    secret(),
+                ),
+            ),
+            ("list_view", DataType::ListView(secret())),
+            ("large_list_view", DataType::LargeListView(secret())),
+            (
+                "dictionary_value",
+                DataType::Dictionary(
+                    Box::new(DataType::Int32),
+                    Box::new(DataType::Struct(Fields::from(vec![
+                        Field::new("id", DataType::Int64, false),
+                        secret_tagged_field("handle"),
+                    ]))),
+                ),
+            ),
+            // The already-covered cases, kept here so the whole nesting family
+            // is asserted in one place.
+            (
+                "struct",
+                DataType::Struct(Fields::from(vec![secret_tagged_field("handle")])),
+            ),
+            ("list", DataType::List(secret())),
+            ("map", DataType::Map(secret(), false)),
+        ];
+
+        for (name, dt) in nested {
+            let schema = Schema::new(vec![Field::new(name, dt, false)]);
+            match reject_secret_handles_in_schema(&schema) {
+                Err(IpcError::SecretLeakAttempt { column }) => {
+                    assert_eq!(column, "handle", "wrong column named for {name}");
+                }
+                Ok(()) => panic!("{name} let a secret-handle field through the membrane"),
+                Err(other) => panic!("{name}: expected SecretLeakAttempt, got {other:?}"),
+            }
+        }
+    }
+
+    /// The schema-level cases above share their walk with the batch path; this
+    /// proves a real `RecordBatch` carrying a union still reaches it, so the
+    /// seam added for testability did not bypass the membrane.
+    #[test]
+    fn encode_batch_rejects_secret_handle_inside_union() {
+        use arrow::array::{Int64Array, UnionArray};
+        use arrow::buffer::ScalarBuffer;
+        use arrow_schema::{UnionFields, UnionMode};
+
+        let fields = UnionFields::try_new(
+            vec![0, 1],
+            vec![
+                Arc::new(Field::new("id", DataType::Int64, false)),
+                Arc::new(secret_tagged_field("handle")),
+            ],
+        )
+        .unwrap();
+        let ids: Arc<dyn arrow::array::Array> = Arc::new(Int64Array::from(vec![1, 2]));
+        let handles: Arc<dyn arrow::array::Array> = Arc::new(
+            arrow::array::FixedSizeBinaryArray::try_from_iter(
+                [[0u8; 8], [1; 8]].iter().map(|b| b.as_slice()),
+            )
+            .unwrap(),
+        );
+        let union = UnionArray::try_new(
+            fields.clone(),
+            ScalarBuffer::from(vec![0i8, 1]),
+            None,
+            vec![ids, handles],
+        )
+        .unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "u",
+            DataType::Union(fields, UnionMode::Sparse),
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(union)]).unwrap();
+        match encode_batch(&batch) {
+            Err(IpcError::SecretLeakAttempt { column }) => assert_eq!(column, "handle"),
+            Ok(_) => panic!("encode_batch must reject a secret handle inside a union"),
+            Err(other) => panic!("expected SecretLeakAttempt, got {other:?}"),
+        }
     }
 
     /// FU-2 acceptance: `encode_batch` refuses any column tagged with

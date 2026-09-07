@@ -25,6 +25,43 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 /// `uni_plugin_wasm::loader::DEFAULT_MEMORY_MAX_PAGES`.
 const DEFAULT_MEMORY_MAX_PAGES: u32 = 16_384;
 
+/// Extism host-fn surface majors this host implements.
+///
+/// The Component Model path keeps its own list in
+/// `uni_plugin_wasm::multi_version::SUPPORTED_MAJORS` (currently `[1, 2]`,
+/// one per linker version). Extism has a single host-fn surface, so this is
+/// `[1]` — but it is a separate list on purpose: the two ABIs version
+/// independently.
+pub const SUPPORTED_ABI_MAJORS: &[u64] = &[1];
+
+/// Resolve the host major satisfying a plugin's declared `abi-extism` range.
+///
+/// Mirrors `uni_plugin_wasm::multi_version::major_for_abi`. An **absent**
+/// `abi-extism` is treated as `^1`, matching what the Component Model loader
+/// assumes when a manifest omits `abi` — so an existing plugin that never
+/// declared the field keeps loading.
+///
+/// # Errors
+///
+/// - [`ExtismError::ManifestInvalid`] if the range is not a valid semver
+///   requirement.
+/// - [`ExtismError::AbiUnsupported`] if it names no host-supported major.
+fn major_for_abi(plugin: &str, declared: Option<&str>) -> Result<u64, ExtismError> {
+    let requested = declared.unwrap_or("^1");
+    let abi = uni_plugin::AbiRange::parse(requested).map_err(|e| {
+        ExtismError::ManifestInvalid(format!("plugin {plugin}: invalid abi-extism range: {e}"))
+    })?;
+    SUPPORTED_ABI_MAJORS
+        .iter()
+        .copied()
+        .find(|m| abi.matches(*m))
+        .ok_or_else(|| ExtismError::AbiUnsupported {
+            plugin: plugin.to_owned(),
+            required: requested.to_owned(),
+            supported: SUPPORTED_ABI_MAJORS.to_vec(),
+        })
+}
+
 /// Plugin manifest in the Extism plugin's canonical JSON form.
 ///
 /// Returned from the plugin's `manifest` export. Mirrors the shape of
@@ -296,7 +333,7 @@ impl ExtismLoader {
         grants: &uni_plugin::CapabilitySet,
     ) -> Result<PreparedExtismPlugin, ExtismError> {
         let manifest = crate::exports::parse_manifest_json(manifest_json)?;
-        Ok(self.prepare_parsed(manifest, grants))
+        self.prepare_parsed(manifest, grants)
     }
 
     /// Intersect declared/granted capabilities for an already-parsed
@@ -310,12 +347,22 @@ impl ExtismLoader {
     /// wasteful round-trip whose only purpose was reusing the
     /// cap-intersection loop. This entry point preserves the loop and
     /// skips the (de)serialization.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// - [`ExtismError::AbiUnsupported`] if the manifest's `abi-extism` range
+    ///   names no host-supported major.
+    /// - [`ExtismError::ManifestInvalid`] if that range is not valid semver.
     pub fn prepare_parsed(
         &self,
         manifest: ExtismPluginManifest,
         grants: &uni_plugin::CapabilitySet,
-    ) -> PreparedExtismPlugin {
+    ) -> Result<PreparedExtismPlugin, ExtismError> {
+        // ABI gate first: reject before any capability is intersected, so a
+        // guest built against a host-fn surface this host does not implement
+        // never reaches a prepared plugin carrying real grants.
+        major_for_abi(&manifest.id, manifest.abi_extism.as_deref())?;
+
         // Effective = declared ∩ granted (retains per-variant attenuation).
         let declared = manifest.declared_capability_set();
         let effective = declared.intersect(grants);
@@ -331,12 +378,12 @@ impl ExtismLoader {
         // available). Pattern attenuation is enforced in the host-fn body.
         let allowed = self.allowed_host_fn_names(&effective);
 
-        PreparedExtismPlugin {
+        Ok(PreparedExtismPlugin {
             manifest,
             effective,
             allowed_host_fns: allowed,
             denied_capabilities: denied,
-        }
+        })
     }
 
     /// Build an `extism::Plugin` from raw wasm bytes against a prepared
@@ -458,7 +505,7 @@ impl ExtismLoader {
         // fn set, read register export. The parsed manifest from pass 1
         // is reused directly via `prepare_parsed`, avoiding a JSON
         // re-serialize / re-parse round-trip.
-        let prepared = self.prepare_parsed(parsed_manifest, host_grants);
+        let prepared = self.prepare_parsed(parsed_manifest, host_grants)?;
 
         // Build the instance pool: factory closes over owned bytes,
         // prepared (cap-filtered), and the per-load host-fn map (static
@@ -777,6 +824,62 @@ mod tests {
             r#"{{ "id": "ai.example.test", "version": "1.0.0", "capabilities": [{}] }}"#,
             caps_json.join(", ")
         )
+    }
+
+    /// `abi_extism` was declared on the manifest struct and read NOWHERE — a
+    /// workspace-wide grep found only the declaration and a `None` in the
+    /// bootstrap literal. So a guest declaring `"abi-extism": "^9"` loaded
+    /// against a v1 host and called a mismatched host-fn surface. The
+    /// Component Model loader has always gated this via `major_for_abi`.
+    #[test]
+    fn an_unsupported_abi_range_is_refused() {
+        let l = ExtismLoader::new();
+        let grants = CapabilitySet::new();
+        let with_abi = |abi: &str| {
+            format!(r#"{{ "id": "ai.example.test", "version": "1.0.0", "abi-extism": "{abi}" }}"#)
+        };
+
+        // A major this host does not implement is refused, and the error names
+        // both what was asked for and what is on offer.
+        let err = l
+            .prepare(with_abi("^9").as_bytes(), &grants)
+            .expect_err("an unsupported ABI major must be refused");
+        match err {
+            ExtismError::AbiUnsupported {
+                ref plugin,
+                ref required,
+                ref supported,
+            } => {
+                assert_eq!(plugin, "ai.example.test");
+                assert_eq!(required, "^9");
+                assert_eq!(supported, SUPPORTED_ABI_MAJORS);
+            }
+            other => panic!("expected AbiUnsupported, got {other:?}"),
+        }
+
+        // A range that is not valid semver is a manifest error, not a silent pass.
+        assert!(
+            matches!(
+                l.prepare(with_abi("not-a-range").as_bytes(), &grants),
+                Err(ExtismError::ManifestInvalid(_))
+            ),
+            "an unparseable abi-extism range must be refused"
+        );
+
+        // Control: a supported major still loads. Without this the assertions
+        // above could pass because `prepare` rejects everything.
+        assert!(
+            l.prepare(with_abi("^1").as_bytes(), &grants).is_ok(),
+            "a supported ABI major must still load"
+        );
+
+        // An ABSENT abi-extism assumes ^1, matching what the Component Model
+        // loader does for a manifest that omits `abi` — so a plugin that never
+        // declared the field keeps loading.
+        assert!(
+            l.prepare(manifest_json(&[]).as_bytes(), &grants).is_ok(),
+            "an absent abi-extism must default to ^1, not become an error"
+        );
     }
 
     #[test]
