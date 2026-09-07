@@ -348,3 +348,53 @@ one is greppable and belongs in `arch_fail_open.rs` as a fourth rule.
    functions that already return `Result`; then the APOC divergences.
 3. **Extend the ratchet** with the `volatility`/`determinism` rule.
 4. `check_constraint` and the codec quartet are **design calls**, not patches.
+
+---
+
+## Follow-on status — 2026-09-06 (later the same day)
+
+The scope this document hands off in *Recommended handling* was written up as
+`fail_open_workspace_remediation_2026-09-06.md` and is now **complete**: all 21
+items across its five phases, plus its four decisions, are fixed and merged to
+local `main`. Gates and the per-phase breakdown live in that document's Status
+section; they are not duplicated here.
+
+Two things above are superseded and should not be acted on as written.
+
+**Recommendation 2's fix order opens with the three-loader `volatility`
+default. That item was withdrawn.** This document calls it "the *same* defect
+as one fixed earlier this session". Checked against source, it is not. The Rhai
+bug had two halves — a present-but-wrong-typed value silently discarded (fixed)
+and an absent key taking a documented default (left alone deliberately). In
+Extism and Wasm the field is a `String` behind `#[serde(default)]`, so a wrong
+type is already a serde error and the half that was a bug **cannot occur
+there**. Only the absent-field default remains, and it is documented in
+rustdoc, asserted by a test, and shown in three user-facing docs pages. It was
+therefore reclassified from a fix to a product decision, and the decision taken
+was to **keep** `immutable` / `pure` on all four surfaces — Rhai, Extism, Wasm
+and the Python binding — since flipping it costs constant folding for every
+existing plugin that omits the field.
+
+**Recommendation 3 follows from that and is likewise withdrawn.** A fourth
+`arch_fail_open.rs` rule for the `volatility`/`determinism` default would now
+ratchet in a lint against deliberate, documented behaviour. A different fourth
+rule is still worth having — `if let Ok` on a `.query(` / `scan_*` call, the
+shape behind the `uni-algo` and `uni-fork` findings — and remains open, gated
+on checking that its budget is small enough to be a gate rather than noise.
+
+Recommendation 4 was actioned as stated: both were treated as design calls.
+`check_constraint` keeps its documented permissive path and fixes only the
+undocumented spacing bug; the codec quartet moved to `Result<Option<T>>`.
+
+Recommendation 1 stands and is **not** done: this scope has not been filed as
+its own issue. The two documents are the record for now.
+
+The wider point this document keeps making held again. Re-checking the plan
+against source before working it changed six of its claims — in both
+directions, as before. The secret-handle membrane was missing five nested Arrow
+types rather than the two reported, which is what turned that fix from adding
+arms into deleting the catch-all so the next arrow bump fails to compile. And
+one claim was refuted outright: the min/max NULL finding is real as a defect
+but wrong as described, because the accumulator returns early on null, so the
+type rank is unreachable and the symptom is a dropped row rather than a NULL
+that wins. Neither would have been caught by trusting the label.

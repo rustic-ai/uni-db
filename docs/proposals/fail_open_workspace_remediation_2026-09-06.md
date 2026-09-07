@@ -1,12 +1,25 @@
 # Fail-open remediation: the workspace remainder — plan — 2026-09-06
 
-## Status — all 21 items implemented, 2026-09-06
+## Status — COMPLETE, merged to local `main` 2026-09-06
 
 Every item in Phases 1-5 is fixed and every decision D1-D4 is taken (see
 *Decisions taken*, below). Each fix carries a regression test that was
 **verified to fail with the fix reverted**; the observed failure was recorded
-before the fix was restored. Six of the audit's claims changed under
+before the fix was restored. Six of the plan's claims changed under
 verification and are listed in *Corrections found while implementing*.
+
+| phase | items | state |
+|---|---|---|
+| 1 — safety | S1, S2 | done — `fix(plugin): close the two safety properties that failed open` |
+| 2 — corruption | C1-C5 | done — `fix(common,fork): stop manufacturing entity identity from absent data` |
+| 3 — functions | Q1-Q7 (+ D2) | done — `fix(common,query-functions): report a corrupt payload instead of guessing` |
+| 4 — algorithms | A1-A4 | done — `fix(algo): stop scoring a graph the caller did not ask for` |
+| 5 — APOC | P1-P5 | done — `feat(apoc)!: match Neo4j where a plausible answer was hiding a wrong one` |
+| decisions | D1-D4 | D1 in `fix(common): make CHECK constraint enforcement independent of spacing`; D2 with Phase 3; D3 no code change; D4 with S1 |
+
+Seven commits, fast-forwarded onto `main`; 34 files, +3067/-262, 22 new test
+functions. SHAs are deliberately not cited — they are local and a rebase would
+rewrite them.
 
 | gate | result |
 |---|---|
@@ -16,8 +29,40 @@ verification and are listed in *Corrections found while implementing*.
 | `cargo clippy --all-targets` (7 touched crates) | zero warnings |
 | `cargo fmt --all --check` | clean |
 
-22 new test functions; 32 files changed. P1-P5 ship as one `feat!` with a
-release note. Not committed — awaiting review.
+**Not pushed.** `main` tracks `md/main` and is ahead by more than this work
+alone, so what goes out is a separate call.
+
+### Open items carried forward
+
+Three things are deliberately NOT closed by this work.
+
+1. **Structural follow-up 1 — extend `arch_fail_open.rs`** with a rule for
+   `if let Ok` on a `.query(` / `scan_*` call, the `uni-algo` / `uni-fork`
+   shape. Still worth doing, still gated on checking the budget first: a rule
+   with a fifty-entry allowance is noise, not a gate.
+2. **Structural follow-up 2 — the `uni-sidecar` load-token API.** Not a defect
+   in the primitive; the point is to make "failed read, then write destroys the
+   unread rows" unrepresentable rather than fixed in each caller.
+3. **The `RELEASE_NOTES_4.0.0.md` version number is unconfirmed.** The
+   workspace is at `3.4.0` and `RELEASE_NOTES_3.4.0.md` already matches it, so
+   the next file was opened rather than shipped history edited. If 4.0.0 is not
+   the intended number this is a rename, but it is a real decision taken
+   without sign-off.
+
+### Behaviour changes a reader should know about
+
+Only the APOC commit is breaking, and it carries a `BREAKING CHANGE:` footer.
+Two of its items change results for queries that look correct today
+(`apoc.text.indexOf` now returns a character index; the four-function
+string-to-number family parses a leading numeric prefix). One narrowing went
+slightly past the literal P5 ask and is recorded here rather than left to be
+discovered: `apoc.number.parseFloat("inf")` and `"NaN"` used to reach
+`f64::from_str` and now return NULL, which is what `DecimalFormat` does.
+
+Outside APOC, three fixes turn a previously-silent case into an error and could
+surface in a caller that was relying on the quiet answer: `datetime()` /
+`localdatetime()` on a value with no date component, `left`/`right` with a
+negative or non-integer count, and a `weightColumn` no edge row yields.
 
 ## What this is
 
