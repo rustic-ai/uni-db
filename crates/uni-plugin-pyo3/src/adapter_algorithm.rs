@@ -158,7 +158,17 @@ impl AlgorithmProvider for PyAlgorithm {
             // between), so the captured thread id is the one the guest runs on.
             let tid = crate::watchdog::current_thread_id_attached()
                 .map_err(|e| DataFusionError::Execution(format!("python algorithm tid: {e}")))?;
-            let watchdog = deadline_at.map(|d| crate::watchdog::DeadlineWatchdog::arm(tid, d));
+            // #233: a failed spawn used to leave the watchdog silently absent,
+            // so the deadline this block documents would not be enforced.
+            let watchdog = deadline_at
+                .map(|d| crate::watchdog::DeadlineWatchdog::arm(tid, d))
+                .transpose()
+                .map_err(|e| {
+                    DataFusionError::Execution(format!(
+                        "python algorithm: could not arm the deadline watchdog, so the query \
+                         deadline could not be enforced: {e}"
+                    ))
+                })?;
 
             // Drive the guest under the GIL. No await happens inside this block,
             // so the GIL is held only for the synchronous guest run.

@@ -468,36 +468,70 @@ pub fn is_null(bytes: &[u8]) -> bool {
 // Fast typed decode (skip Value construction)
 // ---------------------------------------------------------------------------
 
+// The four fast decoders return `Result<Option<T>>`, not `Option<T>`.
+//
+// #233: they used to end in `rmp_serde::from_slice(..).ok()`, which collapsed
+// two unrelated outcomes into one `None`:
+//
+// - the tag does not match — an ordinary type mismatch the caller handles, and
+// - the tag DID match but the payload is truncated or malformed — corruption.
+//
+// Callers could not tell them apart, so they treated both as "not my type":
+// `decode_bool(..).unwrap_or(false)` in the boolean-cast UDF turned a corrupt
+// payload into `false`, silently making a `WHERE` predicate fail and dropping
+// the row. `Ok(None)` now means the first and `Err` the second, matching the
+// slow-path sibling `decode_msgpack`, which has always returned `Result`.
+
 /// Decode an int directly without constructing a Value.
-pub fn decode_int(bytes: &[u8]) -> Option<i64> {
+///
+/// # Errors
+///
+/// [`UniError::Storage`] if the payload is tagged as an int but does not
+/// decode. `Ok(None)` — not an error — means it carries some other tag.
+pub fn decode_int(bytes: &[u8]) -> Result<Option<i64>, UniError> {
     if bytes.first().copied() != Some(TAG_INT) {
-        return None;
+        return Ok(None);
     }
-    rmp_serde::from_slice(&bytes[1..]).ok()
+    decode_msgpack(&bytes[1..], "i64").map(Some)
 }
 
 /// Decode a float directly without constructing a Value.
-pub fn decode_float(bytes: &[u8]) -> Option<f64> {
+///
+/// # Errors
+///
+/// [`UniError::Storage`] if the payload is tagged as a float but does not
+/// decode. `Ok(None)` means it carries some other tag.
+pub fn decode_float(bytes: &[u8]) -> Result<Option<f64>, UniError> {
     if bytes.first().copied() != Some(TAG_FLOAT) {
-        return None;
+        return Ok(None);
     }
-    rmp_serde::from_slice(&bytes[1..]).ok()
+    decode_msgpack(&bytes[1..], "f64").map(Some)
 }
 
 /// Decode a bool directly without constructing a Value.
-pub fn decode_bool(bytes: &[u8]) -> Option<bool> {
+///
+/// # Errors
+///
+/// [`UniError::Storage`] if the payload is tagged as a bool but does not
+/// decode. `Ok(None)` means it carries some other tag.
+pub fn decode_bool(bytes: &[u8]) -> Result<Option<bool>, UniError> {
     if bytes.first().copied() != Some(TAG_BOOL) {
-        return None;
+        return Ok(None);
     }
-    rmp_serde::from_slice(&bytes[1..]).ok()
+    decode_msgpack(&bytes[1..], "bool").map(Some)
 }
 
 /// Decode a string directly without constructing a Value.
-pub fn decode_string(bytes: &[u8]) -> Option<String> {
+///
+/// # Errors
+///
+/// [`UniError::Storage`] if the payload is tagged as a string but does not
+/// decode. `Ok(None)` means it carries some other tag.
+pub fn decode_string(bytes: &[u8]) -> Result<Option<String>, UniError> {
     if bytes.first().copied() != Some(TAG_STRING) {
-        return None;
+        return Ok(None);
     }
-    rmp_serde::from_slice(&bytes[1..]).ok()
+    decode_msgpack(&bytes[1..], "String").map(Some)
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,33 +1062,87 @@ mod tests {
         assert!(!is_null(&[]));
     }
 
+    /// The four fast decoders used to end in `.ok()`, so a payload whose tag
+    /// matched but whose bytes were truncated returned the same `None` as a
+    /// payload of some other type. Callers read that `None` as "not my type"
+    /// and substituted a default — `decode_bool(..).unwrap_or(false)` turned
+    /// corruption into a `false` that silently dropped rows from a `WHERE`.
+    /// A wrong tag must stay `Ok(None)`; a corrupt payload must be `Err`.
+    #[test]
+    fn fast_decode_separates_a_wrong_tag_from_a_corrupt_payload() {
+        for (tag_of, corrupt, wrong_tag) in [
+            ("int", encode(&Value::Int(42)), encode(&Value::Bool(true))),
+            ("float", encode(&Value::Float(3.15)), encode(&Value::Int(1))),
+            ("bool", encode(&Value::Bool(true)), encode(&Value::Int(1))),
+            (
+                "string",
+                encode(&Value::String("hello".to_string())),
+                encode(&Value::Int(42)),
+            ),
+        ] {
+            // Keep the tag byte, throw the payload away.
+            let truncated = &corrupt[..1];
+            let (corrupt_res, wrong_res) = match tag_of {
+                "int" => (
+                    decode_int(truncated).map(|v| v.map(|_| ())),
+                    decode_int(&wrong_tag).map(|v| v.map(|_| ())),
+                ),
+                "float" => (
+                    decode_float(truncated).map(|v| v.map(|_| ())),
+                    decode_float(&wrong_tag).map(|v| v.map(|_| ())),
+                ),
+                "bool" => (
+                    decode_bool(truncated).map(|v| v.map(|_| ())),
+                    decode_bool(&wrong_tag).map(|v| v.map(|_| ())),
+                ),
+                _ => (
+                    decode_string(truncated).map(|v| v.map(|_| ())),
+                    decode_string(&wrong_tag).map(|v| v.map(|_| ())),
+                ),
+            };
+            assert!(
+                corrupt_res.is_err(),
+                "{tag_of}: a truncated payload under a matching tag must be an \
+                 error, not an absent value"
+            );
+            assert_eq!(
+                wrong_res.unwrap(),
+                None,
+                "{tag_of}: a different tag must stay Ok(None)"
+            );
+        }
+    }
+
     #[test]
     fn test_fast_decode_int() {
         let bytes = encode(&Value::Int(42));
-        assert_eq!(decode_int(&bytes), Some(42));
-        assert_eq!(decode_int(&encode(&Value::Float(42.0))), None);
-        assert_eq!(decode_int(&encode(&Value::String("42".to_string()))), None);
+        assert_eq!(decode_int(&bytes).unwrap(), Some(42));
+        assert_eq!(decode_int(&encode(&Value::Float(42.0))).unwrap(), None);
+        assert_eq!(
+            decode_int(&encode(&Value::String("42".to_string()))).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn test_fast_decode_float() {
         let bytes = encode(&Value::Float(3.15));
-        assert_eq!(decode_float(&bytes), Some(3.15));
-        assert_eq!(decode_float(&encode(&Value::Int(3))), None);
+        assert_eq!(decode_float(&bytes).unwrap(), Some(3.15));
+        assert_eq!(decode_float(&encode(&Value::Int(3))).unwrap(), None);
     }
 
     #[test]
     fn test_fast_decode_bool() {
         let bytes = encode(&Value::Bool(true));
-        assert_eq!(decode_bool(&bytes), Some(true));
-        assert_eq!(decode_bool(&encode(&Value::Int(1))), None);
+        assert_eq!(decode_bool(&bytes).unwrap(), Some(true));
+        assert_eq!(decode_bool(&encode(&Value::Int(1))).unwrap(), None);
     }
 
     #[test]
     fn test_fast_decode_string() {
         let bytes = encode(&Value::String("hello".to_string()));
-        assert_eq!(decode_string(&bytes), Some("hello".to_string()));
-        assert_eq!(decode_string(&encode(&Value::Int(42))), None);
+        assert_eq!(decode_string(&bytes).unwrap(), Some("hello".to_string()));
+        assert_eq!(decode_string(&encode(&Value::Int(42))).unwrap(), None);
     }
 
     #[test]

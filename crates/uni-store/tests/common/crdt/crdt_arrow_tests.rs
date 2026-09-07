@@ -515,6 +515,15 @@ mod decoding {
         assert!(result.is_err(), "Strict mode should error on invalid bytes");
     }
 
+    /// Lenient mode absorbs the failure without fabricating a value.
+    ///
+    /// This test previously asserted the opposite — that an undecodable CRDT
+    /// came back as a default `GCounter` reading 0. #233 Tier 1 identified
+    /// that substitution as a silent wrong answer: a caller cannot tell a
+    /// fabricated zero from a counter that genuinely stands at zero, and the
+    /// substituted variant is wrong for any non-GCounter column. The asserted
+    /// contract has therefore changed, deliberately. What Lenient still
+    /// guarantees is only that one unreadable row does not fail a whole scan.
     #[test]
     fn test_decode_lenient_mode_fallback() {
         let invalid_bytes = vec![0xFF, 0xFE, 0xFD];
@@ -530,13 +539,15 @@ mod decoding {
         )
         .expect("Lenient mode should not error");
 
-        // Should return a default GCounter
-        let decoded: Crdt = serde_json::from_value(val).expect("from_value should succeed");
-        if let Crdt::GCounter(gc) = decoded {
-            assert_eq!(gc.value(), 0);
-        } else {
-            panic!("Expected default GCounter");
-        }
+        assert_eq!(
+            val,
+            serde_json::Value::Null,
+            "an undecodable CRDT must read as Null, not as a fabricated zero counter"
+        );
+        assert!(
+            serde_json::from_value::<Crdt>(val).is_err(),
+            "the Null must not deserialize back into some default CRDT"
+        );
     }
 }
 

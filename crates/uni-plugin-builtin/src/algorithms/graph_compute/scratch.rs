@@ -1146,11 +1146,16 @@ impl ScratchRegistry {
         let req = match serde_json::from_str::<ScratchRequest>(request_json) {
             Ok(r) => r,
             Err(e) => {
+                // #233 P3: `unwrap_or_default()` handed the guest the EMPTY
+                // STRING, which is not a parseable response at all. The
+                // sibling ABI in `dispatch.rs` already answers in-band; match it.
                 return serde_json::to_string(&ScratchResponse::Err {
                     code: error::ARG_VALIDATION,
                     message: format!("bad scratch request json: {e}"),
                 })
-                .unwrap_or_default();
+                .unwrap_or_else(|e| {
+                    format!("{{\"t\":\"e\",\"v\":{{\"code\":2,\"message\":\"encode: {e}\"}}}}")
+                });
             }
         };
         let session = {
@@ -1162,7 +1167,9 @@ impl ScratchRegistry {
                         code: error::EPOCH_MISMATCH,
                         message: format!("unknown or closed scratch session {}", req.session),
                     })
-                    .unwrap_or_default();
+                    .unwrap_or_else(|e| {
+                        format!("{{\"t\":\"e\",\"v\":{{\"code\":2,\"message\":\"encode: {e}\"}}}}")
+                    });
                 }
             }
         };
@@ -1172,7 +1179,9 @@ impl ScratchRegistry {
                 code: 0x86D,
                 message: "scratch: op panicked (isolated)".to_owned(),
             });
-        serde_json::to_string(&resp).unwrap_or_default()
+        serde_json::to_string(&resp).unwrap_or_else(|e| {
+            format!("{{\"t\":\"e\",\"v\":{{\"code\":2,\"message\":\"encode: {e}\"}}}}")
+        })
     }
 }
 

@@ -377,7 +377,19 @@ impl CustomPlugin {
                 Err(CustomError::NativeShadow(_)) => {
                     record.active = false;
                     self.store.replace(record.clone());
-                    let _ = self.persistence.save(&record);
+                    // #233 P3: recorded rather than propagated. This is the
+                    // boot hydration path, and the downgrade is re-derived from
+                    // persisted state on every restart, so a failed write here
+                    // converges by itself — failing startup over it would be
+                    // worse than the condition. Same reasoning as
+                    // `SchedulerHost::spawn`'s degraded load.
+                    if let Err(e) = self.persistence.save(&record) {
+                        tracing::error!(
+                            error = %e,
+                            "could not persist a native-shadow downgrade during reactivation; \
+                             it will be re-derived on the next restart",
+                        );
+                    }
                 }
                 Err(e) => return Err(e),
             }

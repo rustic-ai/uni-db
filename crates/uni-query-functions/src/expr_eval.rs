@@ -1707,16 +1707,46 @@ pub(crate) fn eval_substring(args: &[Value]) -> Result<Value> {
     }
 }
 
+/// Shared count-argument check for `left` / `right`, mirroring the guards
+/// [`eval_substring`] already applies.
+///
+/// Both functions used to read the count as `n.as_i64().unwrap_or(0) as usize`
+/// behind an `n.is_number()` pattern guard, which failed open two ways:
+///
+/// - A negative count cast to `usize::MAX`, so `take(MAX)` /
+///   `saturating_sub(MAX)` returned the **whole string** —
+///   `left('hello', -1)` answered `'hello'`.
+/// - `is_number()` admits a `Float` but `as_i64()` returns `None` for one, so
+///   the guard and the extraction disagreed and `unwrap_or(0)` silently
+///   resolved it to `""` — `left('hello', 2.0)` answered `''`.
+///
+/// Extracting the check once means the two callers cannot drift apart again.
+fn char_count_arg(func: &str, v: &Value) -> Result<usize> {
+    let n = v
+        .as_i64()
+        .ok_or_else(|| anyhow!("{func}() count must be an integer"))?;
+    if n < 0 {
+        return Err(anyhow!(
+            "ArgumentError: NegativeIntegerArgument - {func}() count must be non-negative"
+        ));
+    }
+    Ok(n as usize)
+}
+
 fn eval_left(args: &[Value]) -> Result<Value> {
     if args.len() != 2 {
         return Err(anyhow!("left() requires 2 arguments"));
     }
-    match (&args[0], &args[1]) {
-        (Value::String(s), n) if n.is_number() => {
-            let len = n.as_i64().unwrap_or(0) as usize;
+    // Null in, null out — as `substring` already does, rather than erroring
+    // on a null count.
+    if args.iter().any(Value::is_null) {
+        return Ok(Value::Null);
+    }
+    match &args[0] {
+        Value::String(s) => {
+            let len = char_count_arg("left", &args[1])?;
             Ok(Value::String(s.chars().take(len).collect()))
         }
-        (Value::Null, _) => Ok(Value::Null),
         _ => Err(anyhow!("left() expects a string and integer")),
     }
 }
@@ -1725,14 +1755,16 @@ fn eval_right(args: &[Value]) -> Result<Value> {
     if args.len() != 2 {
         return Err(anyhow!("right() requires 2 arguments"));
     }
-    match (&args[0], &args[1]) {
-        (Value::String(s), n) if n.is_number() => {
-            let len = n.as_i64().unwrap_or(0) as usize;
+    if args.iter().any(Value::is_null) {
+        return Ok(Value::Null);
+    }
+    match &args[0] {
+        Value::String(s) => {
+            let len = char_count_arg("right", &args[1])?;
             let chars: Vec<char> = s.chars().collect();
             let start = chars.len().saturating_sub(len);
             Ok(Value::String(chars[start..].iter().collect()))
         }
-        (Value::Null, _) => Ok(Value::Null),
         _ => Err(anyhow!("right() expects a string and integer")),
     }
 }
@@ -3481,6 +3513,51 @@ mod tests {
             result,
             Value::Int(big % 10),
             "expected exact integer remainder, got {result:?}"
+        );
+    }
+
+    /// `left` / `right` read their count as `as_i64().unwrap_or(0) as usize`
+    /// behind an `is_number()` pattern guard, which failed open two ways:
+    /// a negative count wrapped to `usize::MAX` and returned the WHOLE string,
+    /// and a Float count passed the guard but produced `None` from `as_i64`,
+    /// silently yielding `""`. `substring` already guarded both — with a
+    /// comment describing this exact bug — so the two had drifted apart.
+    #[test]
+    fn left_and_right_reject_a_negative_or_non_integer_count() {
+        for func in ["left", "right"] {
+            let neg = eval_scalar_function(func, &[s("hello"), i(-1)], None);
+            assert!(
+                neg.is_err(),
+                "{func}('hello', -1) must error, got {neg:?} — a negative count \
+                 used to cast to usize::MAX and return the whole string"
+            );
+
+            let float = eval_scalar_function(func, &[s("hello"), Value::Float(2.0)], None);
+            assert!(
+                float.is_err(),
+                "{func}('hello', 2.0) must error, got {float:?} — a Float passed \
+                 the is_number() guard but as_i64() returned None, so the count \
+                 silently became 0"
+            );
+
+            // Null in, null out — matching `substring`.
+            let null = eval_scalar_function(func, &[s("hello"), Value::Null], None);
+            assert_eq!(null.unwrap(), Value::Null, "{func} must propagate null");
+        }
+
+        // The valid cases still answer correctly.
+        assert_eq!(
+            eval_scalar_function("left", &[s("hello"), i(2)], None).unwrap(),
+            s("he")
+        );
+        assert_eq!(
+            eval_scalar_function("right", &[s("hello"), i(2)], None).unwrap(),
+            s("lo")
+        );
+        // A count past the end clamps rather than erroring.
+        assert_eq!(
+            eval_scalar_function("left", &[s("hi"), i(99)], None).unwrap(),
+            s("hi")
         );
     }
 

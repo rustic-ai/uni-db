@@ -12457,6 +12457,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
  "uni-plugin",
  "uuid 1.23.3",
 ]
@@ -12555,6 +12556,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uni-common",
  "uni-query",
  "uni-store",
@@ -12669,6 +12671,7 @@ dependencies = [
  "smol_str",
  "tokio",
  "tracing",
+ "uni-common",
  "uni-plugin",
 ]
 
@@ -12776,6 +12779,7 @@ dependencies = [
  "chrono",
  "datafusion",
  "futures",
+ "metrics",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

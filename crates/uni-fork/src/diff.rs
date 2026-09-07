@@ -479,16 +479,20 @@ async fn batch_resolve_primary_vids<Q: ForkQueryHost + ?Sized>(
 /// content-UID path.
 ///
 /// A failed primary round-trip degrades to an empty map (treated as "not
-/// present" → insert), matching the deliberate non-aborting contract.
+/// present" → insert), matching the deliberate non-aborting contract — but the
+/// second element of the returned pair says so, exactly as
+/// [`batch_resolve_primary_vids`] does. Without it an edited fork vertex whose
+/// lookup failed was inserted as a DUPLICATE instead of updated in place, and
+/// a delete-promotion was silently skipped, both reported as a clean promote.
 async fn batch_resolve_primary_by_ext_id<Q: ForkQueryHost + ?Sized>(
     primary: &Q,
     primary_ext_ids: &HashMap<Vid, String>,
     label: &str,
     ext_ids: &HashSet<String>,
-) -> HashMap<String, (Vid, Properties)> {
+) -> (HashMap<String, (Vid, Properties)>, bool) {
     let mut out: HashMap<String, (Vid, Properties)> = HashMap::new();
     if ext_ids.is_empty() {
-        return out;
+        return (out, false);
     }
     // Invert primary's vid→ext_id map for just the candidate ext_ids.
     // `get_vertex_ext_ids` is not label-scoped, so the Cypher below
@@ -500,7 +504,7 @@ async fn batch_resolve_primary_by_ext_id<Q: ForkQueryHost + ?Sized>(
         }
     }
     if ext_to_vid.is_empty() {
-        return out;
+        return (out, false);
     }
     let cypher = format!(
         "MATCH (n:`{}`) WHERE id(n) IN [{}] RETURN id(n) AS vid, n AS node",
@@ -508,7 +512,7 @@ async fn batch_resolve_primary_by_ext_id<Q: ForkQueryHost + ?Sized>(
         vid_in_list(ext_to_vid.values().map(|v| v.as_u64()))
     );
     let Ok(rs) = primary.query(&cypher).await else {
-        return out;
+        return (out, true);
     };
     let mut vid_to_props: HashMap<u64, Properties> = HashMap::new();
     for row in rs.rows() {
@@ -523,7 +527,7 @@ async fn batch_resolve_primary_by_ext_id<Q: ForkQueryHost + ?Sized>(
             out.insert(eid, (vid, props.clone()));
         }
     }
-    out
+    (out, false)
 }
 
 // ============================================================================
@@ -624,16 +628,31 @@ where
                 // primary by their stable `(label, ext_id)` identity so a
                 // fork EDIT updates the existing vertex instead of inserting
                 // a twin. Only consulted when `options.upsert`.
+                let mut ext_resolve_degraded = false;
                 let ext_resolved: HashMap<String, (Vid, Properties)> = if options.upsert {
                     let ext_ids: HashSet<String> = candidates
                         .iter()
                         .filter_map(|(_, _, e)| e.clone())
                         .collect();
-                    batch_resolve_primary_by_ext_id(primary, &primary_ext_ids, label, &ext_ids)
-                        .await
+                    let (m, degraded) =
+                        batch_resolve_primary_by_ext_id(primary, &primary_ext_ids, label, &ext_ids)
+                            .await;
+                    // A degraded ext_id resolve makes an EDITED fork vertex look
+                    // absent, so it is inserted as a duplicate instead of
+                    // updated in place. Same meaning as the content-UID path's
+                    // flag, so it feeds the same counter.
+                    ext_resolve_degraded = degraded;
+                    m
                 } else {
                     HashMap::new()
                 };
+                if ext_resolve_degraded {
+                    warn!(
+                        label = %label,
+                        "promote could not resolve primary twins by ext_id; edited rows may be \
+                         inserted as duplicates instead of updated in place"
+                    );
+                }
 
                 // Per-label fork-point baseline (merge mode only).
                 let label_baseline = baseline.and_then(|b| b.ext.get(label));
@@ -833,9 +852,10 @@ where
                     }
                 }
                 let mut endpoint_resolved: HashMap<(String, UniId), Vid> = HashMap::new();
+                let mut endpoints_degraded = false;
                 for (lbl, uid_set) in to_resolve {
                     let uid_vec: Vec<UniId> = uid_set.into_iter().collect();
-                    let (resolved, _degraded) = batch_resolve_primary_vids(
+                    let (resolved, degraded) = batch_resolve_primary_vids(
                         primary,
                         &primary_storage,
                         &lbl,
@@ -843,6 +863,10 @@ where
                         &primary_ext_ids,
                     )
                     .await;
+                    // The identical call on the vertex path consumes this; here
+                    // it was bound to `_degraded` and dropped, so an endpoint
+                    // that merely failed to resolve was reported as absent.
+                    endpoints_degraded |= degraded;
                     for (uid, vid) in resolved {
                         endpoint_resolved.insert((lbl.clone(), uid), vid);
                     }
@@ -864,6 +888,7 @@ where
                     }
                 }
                 let mut primary_edge_uids: HashSet<UniId> = HashSet::new();
+                let mut dedup_degraded = false;
                 if !resolved_pairs.is_empty() {
                     let src_vids: HashSet<u64> =
                         resolved_pairs.iter().map(|(s, _)| s.as_u64()).collect();
@@ -877,35 +902,51 @@ where
                         vid_in_list(src_vids),
                         vid_in_list(dst_vids),
                     );
-                    if let Ok(rs) = primary.query(&dedup_cypher).await {
-                        for row in rs.rows() {
-                            let (
-                                Some(Value::Edge(existing)),
-                                Some(Value::Node(ea)),
-                                Some(Value::Node(eb)),
-                            ) = (row.value("r"), row.value("a"), row.value("b"))
-                            else {
-                                continue;
-                            };
-                            let ea_label = ea.labels.first().cloned().unwrap_or_default();
-                            let eb_label = eb.labels.first().cloned().unwrap_or_default();
-                            let esrc = VertexDataset::compute_vertex_uid(
-                                &ea_label,
-                                ext_id_for(&primary_ext_ids, ea.vid),
-                                &ea.properties,
+                    // An `if let Ok` here left `primary_edge_uids` empty on a
+                    // query failure, so EVERY fork edge looked new and promote
+                    // inserted duplicates on primary — reported as a clean
+                    // `edges_inserted` with `edges_skipped_duplicate = 0`, and
+                    // durable. Record the failure instead of assuming absence.
+                    match primary.query(&dedup_cypher).await {
+                        Err(e) => {
+                            dedup_degraded = true;
+                            warn!(
+                                edge_type = %edge_type,
+                                error = %e,
+                                "promote could not pre-fetch primary's existing edges for \
+                                 dedup; inserted edges may be duplicates"
                             );
-                            let edst = VertexDataset::compute_vertex_uid(
-                                &eb_label,
-                                ext_id_for(&primary_ext_ids, eb.vid),
-                                &eb.properties,
-                            );
-                            let euid = MainEdgeDataset::compute_edge_uid(
-                                &esrc,
-                                &edst,
-                                edge_type,
-                                &existing.properties,
-                            );
-                            primary_edge_uids.insert(euid);
+                        }
+                        Ok(rs) => {
+                            for row in rs.rows() {
+                                let (
+                                    Some(Value::Edge(existing)),
+                                    Some(Value::Node(ea)),
+                                    Some(Value::Node(eb)),
+                                ) = (row.value("r"), row.value("a"), row.value("b"))
+                                else {
+                                    continue;
+                                };
+                                let ea_label = ea.labels.first().cloned().unwrap_or_default();
+                                let eb_label = eb.labels.first().cloned().unwrap_or_default();
+                                let esrc = VertexDataset::compute_vertex_uid(
+                                    &ea_label,
+                                    ext_id_for(&primary_ext_ids, ea.vid),
+                                    &ea.properties,
+                                );
+                                let edst = VertexDataset::compute_vertex_uid(
+                                    &eb_label,
+                                    ext_id_for(&primary_ext_ids, eb.vid),
+                                    &eb.properties,
+                                );
+                                let euid = MainEdgeDataset::compute_edge_uid(
+                                    &esrc,
+                                    &edst,
+                                    edge_type,
+                                    &existing.properties,
+                                );
+                                primary_edge_uids.insert(euid);
+                            }
                         }
                     }
                 }
@@ -943,6 +984,19 @@ where
                         .bulk_insert_edges(edge_type, edges_to_insert)
                         .await?;
                     report.edges_inserted += n;
+                    // Mirrors `vertices_inserted_unverified` on the vertex
+                    // path: either the dedup pre-fetch or the endpoint resolve
+                    // degraded, so these inserts may duplicate rows that are
+                    // already on primary.
+                    if dedup_degraded || endpoints_degraded {
+                        report.edges_inserted_unverified += n;
+                        warn!(
+                            edge_type = %edge_type,
+                            count = n,
+                            "promote inserted edges whose primary presence could not be \
+                             confirmed (resolve degraded); they may be duplicates"
+                        );
+                    }
                 }
                 report.per_pattern_inserted[idx] = pattern_inserted;
             }
@@ -1000,13 +1054,25 @@ where
                 if !deleted_ext.is_empty() {
                     // Resolve against primary NOW; delete only those still
                     // present (idempotent if primary already removed them).
-                    let resolved = batch_resolve_primary_by_ext_id(
+                    let (resolved, degraded) = batch_resolve_primary_by_ext_id(
                         primary,
                         &primary_ext_ids,
                         label,
                         &deleted_ext,
                     )
                     .await;
+                    // A degraded resolve here means the delete is silently
+                    // SKIPPED — the row stays on primary and the report says
+                    // nothing. Count it rather than letting it disappear.
+                    if degraded {
+                        report.vertices_deletes_unverified += deleted_ext.len();
+                        warn!(
+                            label = %label,
+                            count = deleted_ext.len(),
+                            "promote could not resolve rows marked for delete-promotion; \
+                             they were left in place on primary"
+                        );
+                    }
                     for (eid, (pvid, pprops)) in resolved {
                         // A fork-delete racing a primary-edit: if primary's
                         // current props diverged from the fork-point baseline,

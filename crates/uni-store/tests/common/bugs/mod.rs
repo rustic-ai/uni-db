@@ -40,6 +40,7 @@ pub mod repro_18_main_vertex_batch_resurrect;
 // Correctness-scan Wave 1 repros (R5 constraint visibility).
 pub mod repro_02_batch_insert_constraint_index;
 pub mod repro_03_batch_constraints_skip_pending;
+pub mod repro_233_failed_read_reads_as_absent;
 
 // Correctness-scan Wave 1 repros (R17 arrow null-on-missing builders).
 pub mod repro_05_06_temporal_missing_not_null;

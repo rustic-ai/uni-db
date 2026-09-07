@@ -753,7 +753,9 @@ impl Value {
                 .collect(),
         };
 
-        match entity {
+        // `Option` so the edge arm can decline: returning `self` directly from
+        // inside the match would move it while `map` still borrows it.
+        let canonical = match entity {
             EntityRef::Vertex(vid) => {
                 let labels = match map.get("_labels") {
                     Some(Value::List(items)) => items
@@ -765,33 +767,49 @@ impl Value {
                         .collect(),
                     _ => Vec::new(),
                 };
-                Value::Node(Node {
+                Some(Value::Node(Node {
                     vid,
                     labels,
                     properties,
-                })
+                }))
             }
             EntityRef::Edge(eid) => {
+                // An edge map that does not say what its type or endpoints are
+                // cannot be canonicalised. `Vid::default()` IS `Vid::INVALID`,
+                // so filling them in did not mark the gap — it manufactured a
+                // plausible answer: `startNode(r)` returned a bogus vid where
+                // the same map, before canonicalisation, correctly yielded
+                // null. The rustdoc above already promises that such a map is
+                // "left alone rather than guessed at"; this makes the code
+                // agree with it. `edge_endpoints` is the sibling that got this
+                // right, keeping each endpoint independently optional.
                 let edge_type = match get_with_fallback(map, &["_type", "_type_name", "edge_type"])
                 {
-                    Some(Value::String(s)) => s.clone(),
-                    _ => String::new(),
+                    Some(Value::String(s)) => Some(s.clone()),
+                    _ => None,
                 };
                 let endpoint = |keys: &[&str]| {
                     get_with_fallback(map, keys)
                         .and_then(Value::as_u64)
                         .map(Vid::from)
-                        .unwrap_or_default()
                 };
-                Value::Edge(Edge {
-                    eid,
+                match (
                     edge_type,
-                    src: endpoint(&["_src", "_src_vid", "src"]),
-                    dst: endpoint(&["_dst", "_dst_vid", "dst"]),
-                    properties,
-                })
+                    endpoint(&["_src", "_src_vid", "src"]),
+                    endpoint(&["_dst", "_dst_vid", "dst"]),
+                ) {
+                    (Some(edge_type), Some(src), Some(dst)) => Some(Value::Edge(Edge {
+                        eid,
+                        edge_type,
+                        src,
+                        dst,
+                        properties,
+                    })),
+                    _ => None,
+                }
             }
-        }
+        };
+        canonical.unwrap_or(self)
     }
 
     /// Read a named field from this value, whichever encoding an entity uses.
@@ -1873,7 +1891,10 @@ impl TryFrom<&Value> for Vid {
                     actual: s.clone(),
                 })
             }
-            Value::Int(i) => Ok(Vid::new(*i as u64)),
+            // A negative integer must not wrap: `-1 as u64` is `u64::MAX`,
+            // which is exactly Vid::INVALID, and it was returned as `Ok`.
+            // `coerce_vid` documents rejecting negatives; match it.
+            Value::Int(i) if *i >= 0 => Ok(Vid::new(*i as u64)),
             _ => Err(type_error("Vid", value)),
         }
     }
@@ -1894,7 +1915,10 @@ impl TryFrom<&Value> for Eid {
                     actual: s.clone(),
                 })
             }
-            Value::Int(i) => Ok(Eid::new(*i as u64)),
+            // A negative integer must not wrap: `-1 as u64` is `u64::MAX`,
+            // which is exactly Eid::INVALID, and it was returned as `Ok`.
+            // `coerce_vid` documents rejecting negatives; match it.
+            Value::Int(i) if *i >= 0 => Ok(Eid::new(*i as u64)),
             _ => Err(type_error("Eid", value)),
         }
     }

@@ -142,7 +142,16 @@ impl Storage for MemoryStorage {
         predicate: Option<&Expr>,
     ) -> Result<SendableRecordBatchStream, FnError> {
         let tables = self.tables.read();
-        let batches = tables.get(table).cloned().unwrap_or_default();
+        // #233 Tier 1: a missing table used to yield zero rows and an EMPTY
+        // schema, indistinguishable from a table that exists and is empty —
+        // so a typo'd or not-yet-created table read as "no data" rather than
+        // "no such table".
+        let Some(batches) = tables.get(table).cloned() else {
+            return Err(FnError::new(
+                0x712,
+                format!("MemoryStorage: no such table `{table}`"),
+            ));
+        };
         let schema = batches
             .first()
             .map(|b| b.schema())

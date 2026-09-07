@@ -469,10 +469,16 @@ pub fn install_function_into_registry(
         parse_expression(&record.body).map_err(|e| CustomError::BodyParse(format!("{e:?}")))?;
     let sig_meta: serde_json::Value = serde_json::from_str(&record.signature_json)
         .map_err(|e| CustomError::BodyParse(format!("signature_json: {e}")))?;
+    // #233 Tier 1: these defaulted to `"string"` and an empty argument list,
+    // so a signature that failed to decode came back after a restart as
+    // `RETURNS string` taking no arguments — a different procedure with the
+    // same name, reported as if it were the declared one.
     let return_type_str = sig_meta
         .get("return_type")
         .and_then(|v| v.as_str())
-        .unwrap_or("string");
+        .ok_or_else(|| {
+            CustomError::BodyParse("signature_json: missing or non-string `return_type`".to_owned())
+        })?;
     let arg_names: Vec<String> = sig_meta
         .get("arg_names")
         .and_then(|v| v.as_array())
@@ -481,7 +487,9 @@ pub fn install_function_into_registry(
                 .filter_map(|v| v.as_str().map(str::to_owned))
                 .collect()
         })
-        .unwrap_or_default();
+        .ok_or_else(|| {
+            CustomError::BodyParse("signature_json: missing or non-array `arg_names`".to_owned())
+        })?;
 
     let return_dt = type_str_to_arrow(return_type_str).ok_or_else(|| {
         CustomError::BodyParse(format!("unknown return type `{return_type_str}`"))
@@ -956,7 +964,18 @@ macro_rules! declare_kind_procedure {
                                     let mut shadowed = record.clone();
                                     shadowed.active = false;
                                     self.store.replace(shadowed.clone());
-                                    let _ = self.persistence.save(&shadowed);
+                                    // #233 P3: propagated, matching the
+                                    // `declareFunction` shadow path (0xB20)
+                                    // which already does. The caller asked to
+                                    // declare something; if the durable half
+                                    // failed they should be told, not left
+                                    // believing it survives a restart.
+                                    self.persistence.save(&shadowed).map_err(|e| {
+                                        FnError::new(
+                                            0xB22,
+                                            format!("declare persist (native shadow): {e}"),
+                                        )
+                                    })?;
                                 }
                                 // Unsupported filter (e.g. `[SYNC]`)
                                 // or bad body: roll back the
@@ -1001,7 +1020,18 @@ macro_rules! declare_kind_procedure {
                                     let mut shadowed = record.clone();
                                     shadowed.active = false;
                                     self.store.replace(shadowed.clone());
-                                    let _ = self.persistence.save(&shadowed);
+                                    // #233 P3: propagated, matching the
+                                    // `declareFunction` shadow path (0xB20)
+                                    // which already does. The caller asked to
+                                    // declare something; if the durable half
+                                    // failed they should be told, not left
+                                    // believing it survives a restart.
+                                    self.persistence.save(&shadowed).map_err(|e| {
+                                        FnError::new(
+                                            0xB22,
+                                            format!("declare persist (native shadow): {e}"),
+                                        )
+                                    })?;
                                 }
                                 other => {
                                     return Err(FnError::new(

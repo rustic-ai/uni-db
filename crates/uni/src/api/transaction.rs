@@ -1186,10 +1186,19 @@ impl Transaction {
         let trigger_events = if need_events {
             let l0 = self.tx_l0.read();
             let props_referenced = trigger_router.properties_referenced();
+            // #233: the edge type NAME may be missing from `edge_types`, but
+            // the type id is always carried in `edge_endpoints`. Give the
+            // event builder a schema-backed resolver so it never falls back to
+            // an empty type name, which the trigger router silently fails to
+            // match.
+            let schema_for_types = self.db.storage.schema_manager();
+            let resolve_edge_type =
+                move |type_id: u32| schema_for_types.edge_type_name_by_id_unified(type_id);
             Some(MutationEvents::from_l0_with_probe(
                 &l0,
                 probe_opt.as_ref(),
                 &props_referenced,
+                &resolve_edge_type,
             ))
         } else {
             None
@@ -1392,11 +1401,27 @@ impl Transaction {
         // `CdcRuntime` can hand subscribers actual rows (not an empty
         // batch). Triggers consumed `trigger_events` synchronously
         // above, so reusing it here is free.
+        // #233 Tier 1: `materialize_all` used to answer `None` both for "zero
+        // rows" and for "the batch could not be built". `CdcRuntime` cannot
+        // tell those apart, so the failure was delivered as an empty batch
+        // carrying this commit's real LSN range and checkpointed past. Carry
+        // the failure explicitly instead so the runtime halts the stream.
+        let mut mutations_failed = false;
         let mutations_batch = if cdc_active {
-            trigger_events
-                .as_ref()
-                .and_then(|e| e.materialize_all())
-                .map(Arc::new)
+            match trigger_events.as_ref().map(MutationEvents::materialize_all) {
+                Some(Ok(batch)) => batch.map(Arc::new),
+                Some(Err(e)) => {
+                    tracing::error!(
+                        error = %e,
+                        version,
+                        "could not materialize this commit's CDC mutation batch; CDC streams \
+                         will halt rather than checkpoint past the gap",
+                    );
+                    mutations_failed = true;
+                    None
+                }
+                None => None,
+            }
         } else {
             None
         };
@@ -1411,6 +1436,11 @@ impl Transaction {
             session_id: self.session_id.clone(),
             causal_version: self.started_at_version,
             mutations: mutations_batch,
+            mutations_failed,
+            // Always 0 at the producer. Lag is a per-consumer property — one
+            // `CommitStream` may fall behind while another keeps up — so the
+            // count is attached by the stream on delivery, not broadcast.
+            dropped_before: 0,
         };
         let _ = self.db.commit_tx.send(Arc::new(notif));
 

@@ -78,7 +78,10 @@ impl CreateProc {
     fn docs(&self) -> &'static str {
         match self {
             Self::Uuid => "Generate a fresh random UUIDv4 as a hyphenated string.",
-            Self::Uuids => "Generate N fresh random UUIDv4 strings, one per row.",
+            Self::Uuids => {
+                "Generate N fresh random UUIDv4 strings, one per row. Errors if N exceeds \
+                 the 1,000,000-row synthesis cap."
+            }
         }
     }
 }
@@ -144,10 +147,16 @@ impl ProcedurePlugin for CreateProc {
                     ));
                 }
                 // Cap at a reasonable upper bound to prevent OOM in
-                // pathological cases; users wanting larger batches can
-                // call repeatedly or open a feature request.
-                let capped = (count as usize).min(MAX_SYNTHESIZED_LEN);
-                (0..capped).map(|_| generate_uuid_v4()).collect()
+                // pathological cases. The cap is enforced by *erroring*, not
+                // by clamping: a silent `min()` returned a truncated row set
+                // that the caller could not distinguish from a complete one.
+                support::reject_over_cap(
+                    "create.uuids",
+                    "UUIDs",
+                    count.unsigned_abs(),
+                    MAX_SYNTHESIZED_LEN as u64,
+                )?;
+                (0..count).map(|_| generate_uuid_v4()).collect()
             }
         };
 

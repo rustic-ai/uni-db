@@ -334,7 +334,10 @@ fn schedule_invoke(
         }
     };
 
-    scheduler.add_scheduled_job(id, schedule);
+    // #233: reporting `registered: true` unconditionally hid a failed
+    // persist, so the caller was told the job was registered and it vanished
+    // at the next restart.
+    scheduler.add_scheduled_job(id, schedule)?;
 
     single_bool("registered", true)
 }
@@ -352,7 +355,9 @@ fn cancel_invoke(
             format!("uni.periodic.cancel: bad qname `{qname_str}`: {e}"),
         )
     })?;
-    let cancelled = scheduler.cancel(&id);
+    // #233: a persistence failure used to be invisible here, so `cancelled`
+    // read `true` while the job resurrected on the next restart.
+    let cancelled = scheduler.cancel(&id)?;
     single_bool("cancelled", cancelled)
 }
 
@@ -456,13 +461,14 @@ mod tests {
     }
 
     impl SchedulerControl for RecordingScheduler {
-        fn add_scheduled_job(&self, id: QName, schedule: Schedule) {
+        fn add_scheduled_job(&self, id: QName, schedule: Schedule) -> Result<(), FnError> {
             self.added.lock().push((id, schedule));
+            Ok(())
         }
 
-        fn cancel(&self, id: &QName) -> bool {
+        fn cancel(&self, id: &QName) -> Result<bool, FnError> {
             self.cancelled.lock().push(id.clone());
-            true
+            Ok(true)
         }
 
         fn list(&self) -> Vec<SchedulerJobRecord> {

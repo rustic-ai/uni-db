@@ -2,10 +2,12 @@
 // Copyright 2024-2026 Dragonscale Team
 
 //! A `StorageBackend` wrapper that delegates to an inner backend but can be
-//! armed to fail `table_exists` with an error — modeling a transient
-//! object-store directory-listing (LIST) failure. Used to show that the
-//! `.unwrap_or(false)` sites collapse such a transient error into "table
-//! absent" and silently return an empty result.
+//! armed to fail reads with an error — modeling a transient object-store
+//! failure. `table_exists` models a directory-listing (LIST) blip; `scan`
+//! models a read that reaches the store and fails.
+//!
+//! Used to show that fail-open call sites collapse such a transient error
+//! into "absent" and silently return an empty result (#233).
 
 #![cfg(feature = "lance-backend")]
 #![allow(dead_code)]
@@ -23,6 +25,7 @@ use uni_store::backend::types::{FilterExpr, ScanRequest, WriteMode};
 pub struct FaultBackend {
     inner: Arc<dyn StorageBackend>,
     fail_table_exists: AtomicBool,
+    fail_scan: AtomicBool,
 }
 
 impl FaultBackend {
@@ -30,11 +33,21 @@ impl FaultBackend {
         Self {
             inner,
             fail_table_exists: AtomicBool::new(false),
+            fail_scan: AtomicBool::new(false),
         }
     }
 
     pub fn set_fail_table_exists(&self, on: bool) {
         self.fail_table_exists.store(on, Ordering::SeqCst);
+    }
+
+    /// Arms `scan` (and `scan_stream`) to fail with a transient read error.
+    ///
+    /// Distinct from `set_fail_table_exists`: a caller that probes existence
+    /// first and then reads has two separate places to swallow the failure,
+    /// and a fix that only covers the probe leaves the read uncovered.
+    pub fn set_fail_scan(&self, on: bool) {
+        self.fail_scan.store(on, Ordering::SeqCst);
     }
 }
 
@@ -68,10 +81,22 @@ impl StorageBackend for FaultBackend {
     }
 
     async fn scan(&self, request: ScanRequest) -> Result<Vec<RecordBatch>> {
+        if self.fail_scan.load(Ordering::SeqCst) {
+            return Err(anyhow!(
+                "injected transient read failure for {}",
+                request.table_name
+            ));
+        }
         self.inner.scan(request).await
     }
 
     async fn scan_stream(&self, request: ScanRequest) -> Result<RecordBatchStream> {
+        if self.fail_scan.load(Ordering::SeqCst) {
+            return Err(anyhow!(
+                "injected transient read failure for {}",
+                request.table_name
+            ));
+        }
         self.inner.scan_stream(request).await
     }
 

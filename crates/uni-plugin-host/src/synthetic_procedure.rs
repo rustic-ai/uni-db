@@ -183,10 +183,20 @@ impl ProcedurePlugin for SyntheticProcedurePlugin {
             DataType::Utf8,
             false,
         )]));
+        // #233 Tier 1: `unwrap_or_else(|_| "{}")` emitted a literal empty
+        // JSON object as a REAL row, indistinguishable from a procedure that
+        // genuinely yielded an empty object.
         let row_jsons: Vec<String> = rows
             .iter()
-            .map(|r| serde_json::to_string(r).unwrap_or_else(|_| "{}".to_owned()))
-            .collect();
+            .map(|r| {
+                serde_json::to_string(r).map_err(|e| {
+                    FnError::new(
+                        0xD05,
+                        format!("declared procedure `{}`: encode row: {e}", self.qname),
+                    )
+                })
+            })
+            .collect::<Result<Vec<String>, FnError>>()?;
         let arr = Arc::new(StringArray::from(row_jsons)) as Arc<dyn Array>;
         let batch = RecordBatch::try_new(schema, vec![arr]).map_err(|e| {
             FnError::new(

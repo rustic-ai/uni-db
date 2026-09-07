@@ -11,10 +11,11 @@
 //! `text.reverse`. Additional procedures (`text.split`, `text.regexGroups`,
 //! `text.distance`, `text.fuzzyMatch`, etc.) land as user demand surfaces.
 //!
-//! Index units differ deliberately between procedures: `text.length`
-//! counts Unicode scalar values (chars), whereas `text.indexOf` returns a
-//! UTF-8 **byte** offset (matching Rust's `str::find`). The two are not
-//! interchangeable for non-ASCII input.
+//! Index units are uniform across this module: every position and length is
+//! counted in Unicode scalar values (chars), matching Neo4j/Java. `text.length`
+//! and `text.indexOf` are therefore interchangeable units — `indexOf` used to
+//! return a UTF-8 **byte** offset (Rust's `str::find`), which disagreed with
+//! both `text.length` and Neo4j (`indexOf('cafés','s')` gave 5, not 4).
 
 use std::sync::OnceLock;
 
@@ -216,14 +217,14 @@ impl TextProc {
             Self::Contains => "Returns true if `text` contains `substring`.",
             Self::StartsWith => "Returns true if `text` starts with `prefix`.",
             Self::EndsWith => "Returns true if `text` ends with `suffix`.",
-            Self::Length => {
-                "Length of a string in Unicode scalar values (chars). Note: this counts \
-                 chars, whereas `text.indexOf` returns a UTF-8 byte offset."
+            Self::Length => "Length of a string in Unicode scalar values (chars).",
+            Self::Repeat => {
+                "Repeat `text` `count` times. Errors if the result would exceed the \
+                 1,000,000-character synthesis cap."
             }
-            Self::Repeat => "Repeat `text` `count` times.",
             Self::IndexOf => {
-                "UTF-8 byte offset of the first occurrence of `substring` in `text`, or -1 if \
-                 not present. Note: this is a byte offset, whereas `text.length` counts chars."
+                "Character index of the first occurrence of `substring` in `text`, or -1 if \
+                 not present. Counted in Unicode scalar values, same unit as `text.length`."
             }
         }
     }
@@ -331,18 +332,32 @@ impl ProcedurePlugin for TextProc {
                 // not the raw count, so `MAX_SYNTHESIZED_LEN` actually bounds the
                 // output size and prevents OOM on pathological inputs. An empty
                 // base yields an empty string for any count, so it needs no cap.
+                //
+                // The cap is enforced by *erroring*, not by clamping: a silent
+                // `min()` returned a truncated string the caller could not tell
+                // apart from a complete one. Same defect, same remedy, same
+                // helper as `create.uuids`.
                 let item_len = s.len();
-                let capped = match MAX_SYNTHESIZED_LEN.checked_div(item_len) {
-                    // Empty base: any count yields an empty string, so no cap.
-                    None => count as usize,
-                    Some(max_reps) => (count as usize).min(max_reps),
-                };
-                string_result(s.repeat(capped))
+                if let Some(max_reps) = MAX_SYNTHESIZED_LEN.checked_div(item_len) {
+                    support::reject_over_cap(
+                        "text.repeat",
+                        "repetitions",
+                        count.unsigned_abs(),
+                        max_reps as u64,
+                    )?;
+                }
+                string_result(s.repeat(count as usize))
             }
             Self::IndexOf => {
                 let haystack = str_arg(0)?;
                 let needle = str_arg(1)?;
-                let idx = haystack.find(needle.as_str()).map_or(-1, |p| p as i64);
+                // Neo4j's `apoc.text.indexOf` returns a CHARACTER index, and
+                // `text.length` here already counts characters. `str::find`
+                // reports a UTF-8 byte offset, so convert: count the chars in
+                // the prefix that precedes the match.
+                let idx = haystack.find(needle.as_str()).map_or(-1, |byte_offset| {
+                    haystack[..byte_offset].chars().count() as i64
+                });
                 int_result(idx)
             }
         };

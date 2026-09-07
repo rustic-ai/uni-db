@@ -111,7 +111,8 @@ async fn host_cancel_does_not_persist_cancellation() {
         &*host,
         id.clone(),
         Schedule::Periodic(Duration::from_millis(50)),
-    );
+    )
+    .expect("registration is durable");
     assert_eq!(
         persistence.record_scheduled_calls.load(Ordering::SeqCst),
         1,
@@ -122,7 +123,7 @@ async fn host_cancel_does_not_persist_cancellation() {
     // 2) Cancel via the host SchedulerControl path (same path
     // `uni.periodic.cancel` takes).
     assert!(
-        SchedulerControl::cancel(&*host, &id),
+        SchedulerControl::cancel(&*host, &id).expect("cancel is durable"),
         "in-memory cancel succeeds"
     );
 

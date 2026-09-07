@@ -39,12 +39,23 @@
 //!
 //! # Scope
 //!
-//! The grammar handled is `prop op value` — three whitespace-separated tokens,
-//! with optional surrounding parentheses and an optional `variable.` prefix.
-//! Anything more complex is *allowed* with a warning rather than rejected, so
-//! that an expression this evaluator cannot parse never silently blocks a
-//! legitimate write. A missing property also passes; absence is `NOT NULL`'s
-//! concern, not `CHECK`'s.
+//! The grammar handled is `prop op value` — one comparison, with optional
+//! surrounding parentheses and an optional `variable.` prefix. Both operands
+//! must be whitespace-free; the operator itself need not be surrounded by
+//! spaces, so `age>=18` and `age >= 18` are the same constraint.
+//!
+//! That last point used to be false. The expression was tokenised with
+//! `split_whitespace()` and required exactly three tokens, so `age>=18` was
+//! *one* token, fell out of the supported grammar, and was silently never
+//! enforced — while the identical `age >= 18` was. Nothing documented that,
+//! and no user could have guessed it from the syntax.
+//!
+//! Anything genuinely more complex — a conjunction, a function call, a
+//! right-hand side naming a second property — is still *allowed* with a
+//! warning rather than rejected, so that an expression this evaluator cannot
+//! parse never silently blocks a legitimate write. That behaviour is
+//! deliberate and documented for users in `website/docs/guides/`. A missing
+//! property also passes; absence is `NOT NULL`'s concern, not `CHECK`'s.
 
 use std::cmp::Ordering;
 
@@ -63,24 +74,19 @@ use crate::{Properties, Value};
 /// `CHECK (name > 5)` against a string. Callers treat that as a failed write,
 /// not as a constraint violation.
 pub fn evaluate(expression: &str, properties: &Properties) -> Result<bool> {
-    let parts: Vec<&str> = expression.split_whitespace().collect();
-    if parts.len() != 3 {
+    let Some((prop_part, op, val_str)) = split_comparison(expression) else {
         tracing::warn!(
             "Complex CHECK constraint expression '{}' not fully supported yet; allowing write.",
             expression
         );
         return Ok(true);
-    }
+    };
 
-    let prop_part = parts[0].trim_start_matches('(');
     // Handle "variable.property" — take the part after the dot.
     let prop_name = match prop_part.find('.') {
         Some(idx) => &prop_part[idx + 1..],
         None => prop_part,
     };
-
-    let op = parts[1];
-    let val_str = parts[2].trim_end_matches(')');
 
     let prop_val = match properties.get(prop_name) {
         Some(v) => v,
@@ -117,10 +123,76 @@ pub fn evaluate(expression: &str, properties: &Properties) -> Result<bool> {
     }
 }
 
+/// Comparison operators, longest first so `>=` is not read as `>` and `<>`
+/// is not read as `<`.
+const OPERATORS: &[&str] = &["==", "!=", "<>", ">=", "<=", "=", ">", "<"];
+
+/// Split `prop op value` into its three parts, tolerating any spacing around
+/// the operator.
+///
+/// Returns `None` when the expression is not a single comparison of two
+/// whitespace-free operands — a conjunction, a function call, a quoted literal
+/// containing a space. The caller then takes the documented permissive path.
+///
+/// Requiring whitespace-free operands is what keeps that path intact: without
+/// it, `age >= 18 AND age < 100` would split into `age`, `>=`,
+/// `18 AND age < 100`, and comparing an `Int` against that as a string yields
+/// an *error* — turning a constraint that used to be permissively allowed into
+/// one that fails every write. Rejecting it here preserves the documented
+/// behaviour while still fixing the spacing bug.
+fn split_comparison(expression: &str) -> Option<(&str, &str, &str)> {
+    let expr = strip_outer_parens(expression.trim());
+
+    // First operator occurrence, longest match at each position. A value
+    // cannot precede the operator, so no quote tracking is needed.
+    let bytes = expr.as_bytes();
+    let (idx, op) = (0..bytes.len()).find_map(|i| {
+        OPERATORS
+            .iter()
+            .find(|o| expr[i..].starts_with(**o))
+            .map(|o| (i, *o))
+    })?;
+
+    let lhs = expr[..idx].trim();
+    let rhs = expr[idx + op.len()..].trim();
+    if lhs.is_empty()
+        || rhs.is_empty()
+        || lhs.chars().any(char::is_whitespace)
+        || rhs.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    Some((lhs, op, rhs))
+}
+
+/// Strip one layer of balanced surrounding parentheses, if present.
+///
+/// `(age >= 18)` and `age >= 18` are the same constraint. Only a *balanced*
+/// outer pair is removed, so `(a) = (b)` is left alone.
+fn strip_outer_parens(s: &str) -> &str {
+    let Some(inner) = s.strip_prefix('(').and_then(|r| r.strip_suffix(')')) else {
+        return s;
+    };
+    let mut depth = 0i32;
+    for c in inner.chars() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth < 0 {
+                    return s;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth == 0 { inner.trim() } else { s }
+}
+
 /// Parse the right-hand token into a [`Value`].
 ///
-/// Note the caller has already applied `trim_end_matches(')')`, so any wrapper
-/// syntax of the form `Name(...)` arrives with its closing paren gone. See the
+/// Note `split_comparison` has already stripped a balanced outer paren pair,
+/// so any wrapper syntax of the form `Name(...)` arrives intact. See the
 /// module docs on the dropped `Number(...)` arm.
 fn parse_target(val_str: &str) -> Value {
     if (val_str.starts_with('\'') && val_str.ends_with('\''))
@@ -232,6 +304,87 @@ mod tests {
     }
 
     /// Unsupported shapes allow the write rather than blocking it.
+    /// The expression was tokenised with `split_whitespace()` and required
+    /// exactly three tokens, so `age>=18` was ONE token, fell out of the
+    /// supported grammar, and was silently never enforced — while the
+    /// identical `age >= 18` was. Nothing documented that; the docs describe
+    /// only the *literal* as needing to be whitespace-free.
+    #[test]
+    fn operator_spacing_does_not_decide_whether_a_constraint_is_enforced() {
+        let mut p = Properties::new();
+        p.insert("age".to_string(), Value::Int(15));
+
+        // Every spelling of the same constraint must reject a 15-year-old.
+        for expr in [
+            "age >= 18",
+            "age>=18",
+            "age>= 18",
+            "age >=18",
+            "(age>=18)",
+            "( age>=18 )",
+            "n.age>=18",
+            "(n.age>=18)",
+        ] {
+            assert!(
+                !evaluate(expr, &p).unwrap(),
+                "`{expr}` must be enforced and reject age=15; a spelling that \
+                 merely omits spaces used to be silently inert"
+            );
+        }
+
+        // Control: the same spellings must ACCEPT a conforming row, so the
+        // assertions above cannot be passing because everything now fails.
+        let mut ok = Properties::new();
+        ok.insert("age".to_string(), Value::Int(21));
+        for expr in ["age >= 18", "age>=18", "(n.age>=18)"] {
+            assert!(evaluate(expr, &ok).unwrap(), "`{expr}` must accept age=21");
+        }
+
+        // Longest-match: `>=` must not be read as `>`, nor `<>` as `<`.
+        let mut exact = Properties::new();
+        exact.insert("age".to_string(), Value::Int(18));
+        assert!(
+            evaluate("age>=18", &exact).unwrap(),
+            ">= must include equality"
+        );
+        assert!(
+            !evaluate("age>18", &exact).unwrap(),
+            "> must exclude equality"
+        );
+        assert!(!evaluate("age<>18", &exact).unwrap(), "<> is not-equal");
+        assert!(!evaluate("age!=18", &exact).unwrap(), "!= is not-equal");
+
+        // A negative literal still parses when the operator is unspaced.
+        let mut neg = Properties::new();
+        neg.insert("t".to_string(), Value::Int(-5));
+        assert!(evaluate("t<-1", &neg).unwrap(), "t=-5 is less than -1");
+    }
+
+    /// Tokenising by operator must NOT convert the documented permissive path
+    /// into a hard error. `age >= 18 AND age < 100` would otherwise split into
+    /// `age`, `>=`, `18 AND age < 100`, and comparing an Int against that as a
+    /// string returns `Err` — failing every write on a constraint that used to
+    /// be allowed. It has to stay `Ok(true)`.
+    #[test]
+    fn a_compound_expression_still_takes_the_documented_permissive_path() {
+        let mut p = Properties::new();
+        p.insert("age".to_string(), Value::Int(15));
+        for expr in [
+            "(n.v > 1 AND n.v < 9)",
+            "age >= 18 AND age < 100",
+            "age>=18 AND age<100",
+            "age >= 18 OR age = 0",
+            "length(name) > 0",
+        ] {
+            let got = evaluate(expr, &p);
+            assert!(
+                matches!(got, Ok(true)),
+                "`{expr}` must stay permissively allowed, got {got:?} — turning \
+                 it into an error would fail writes that used to succeed"
+            );
+        }
+    }
+
     #[test]
     fn unsupported_shapes_allow_the_write() {
         let p = props(&[("v", Value::Int(5))]);

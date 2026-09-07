@@ -362,13 +362,26 @@ impl GraphProjectionSpec {
     #[must_use]
     pub fn from_config_object(cfg: &serde_json::Map<String, serde_json::Value>) -> Self {
         fn string_array(v: &serde_json::Value) -> Vec<String> {
-            v.as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|s| s.as_str().map(str::to_owned))
-                        .collect()
-                })
-                .unwrap_or_default()
+            // #233 Tier 1: a bare string (`edgeTypes: "KNOWS"` rather than
+            // `["KNOWS"]`) yielded an EMPTY vec, and an empty scoping list
+            // means "no restriction" — so the projection silently widened to
+            // every edge type and PageRank / WCC scored a different graph
+            // than the caller asked for. A scalar string is the realistic
+            // mistake, so accept it as a one-element list.
+            if let Some(one) = v.as_str() {
+                return vec![one.to_owned()];
+            }
+            let Some(arr) = v.as_array() else {
+                tracing::warn!(
+                    value = %v,
+                    "projection scoping value is neither a string nor an array; ignoring it, \
+                     which leaves the projection UNSCOPED for this key",
+                );
+                return Vec::new();
+            };
+            arr.iter()
+                .filter_map(|s| s.as_str().map(str::to_owned))
+                .collect()
         }
 
         let node_labels = cfg.get("nodeLabels").map(string_array).unwrap_or_default();
@@ -842,6 +855,43 @@ pub trait AlgorithmProvider: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+
+    use super::GraphProjectionSpec;
+
+    /// A scalar `edgeTypes` must scope the projection, not silently widen it.
+    ///
+    /// #233 Tier 1. `string_array` only accepted an array, so
+    /// `edgeTypes: "KNOWS"` produced an EMPTY `edge_types` — and an empty
+    /// scoping list means "no restriction", so the projection silently
+    /// widened to every edge type and PageRank / WCC scored a different graph
+    /// than the caller asked for. The failure is invisible because the
+    /// algorithm still returns plausible numbers.
+    #[test]
+    fn a_scalar_edge_types_scopes_rather_than_widening_the_projection() {
+        let cfg: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"edgeTypes": "KNOWS"}"#).expect("config parses");
+        let spec = GraphProjectionSpec::from_config_object(&cfg);
+        assert_eq!(
+            spec.edge_types,
+            vec!["KNOWS".to_owned()],
+            "a bare string must scope to that one type; an empty list means NO restriction, \
+             which silently projects every edge type"
+        );
+    }
+
+    /// The array form keeps working, and the alias is still honoured.
+    #[test]
+    fn an_array_edge_types_still_scopes_as_before() {
+        let cfg: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"relationshipTypes": ["KNOWS", "LIKES"]}"#)
+                .expect("config parses");
+        let spec = GraphProjectionSpec::from_config_object(&cfg);
+        assert_eq!(
+            spec.edge_types,
+            vec!["KNOWS".to_owned(), "LIKES".to_owned()],
+            "control: the array form and the relationshipTypes alias are unaffected"
+        );
+    }
     use arrow_schema::DataType;
     use datafusion::scalar::ScalarValue;
 

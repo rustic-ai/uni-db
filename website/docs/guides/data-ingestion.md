@@ -502,7 +502,7 @@ let bulk = tx.bulk_writer()
     .build()?;
 ```
 
-CHECK validation covers a single `property <op> literal` comparison (`=`, `!=`/`<>`, `>`, `<`, `>=`, `<=`) and is identical on the bulk and transactional write paths — both go through one evaluator. An expression that does not reduce to those three tokens is accepted and stored, but logs a warning and permits the write; one that does reduce to three tokens but whose operands cannot be ordered — a right-hand side naming a second property, say — fails the write with a comparison error rather than a constraint violation. Numeric comparisons — including `=` and `!=` — compare across `Int` and `Float`, so `CHECK (score = 5)` holds for a stored `5.0` whether the row arrives via `BulkWriter` or `tx.execute`.
+CHECK validation covers a single `property <op> literal` comparison (`=`, `!=`/`<>`, `>`, `<`, `>=`, `<=`) and is identical on the bulk and transactional write paths — both go through one evaluator. Spacing around the operator is irrelevant: `CHECK (age>=18)` and `CHECK (age >= 18)` are the same constraint. An expression that does not reduce to those three tokens is accepted and stored, but logs a warning and permits the write; one that does reduce to three tokens but whose operands cannot be ordered — a right-hand side naming a second property, say — fails the write with a comparison error rather than a constraint violation. Numeric comparisons — including `=` and `!=` — compare across `Int` and `Float`, so `CHECK (score = 5)` holds for a stored `5.0` whether the row arrives via `BulkWriter` or `tx.execute`.
 
 ### Common Errors
 

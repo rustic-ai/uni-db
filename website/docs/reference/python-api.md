@@ -1129,7 +1129,33 @@ Prepared statements are also available on Transactions via `tx.prepare()` and `t
 
 ### Commit Notifications (Watch)
 
-Subscribe to real-time commit notifications from any session:
+Subscribe to real-time commit notifications from any session.
+
+:::note Best-effort delivery, not a change feed
+
+`watch()` runs over a bounded broadcast channel
+(`commit_channel_capacity`, default 256). A consumer that falls behind loses
+the **oldest** commits and always still receives the newest — which is correct
+for the intended use, invalidate-and-re-read, and is why `debounce()` also
+drops notifications on purpose.
+
+If you do **non-idempotent per-commit work** (an audit mirror, a counter),
+check `notification.dropped_before`: it reports how many commits were lost
+immediately before this one. Filter skips are never counted there, so
+`labels()` or `debounce()` cannot raise a false alarm.
+
+```python
+for notification in stream:
+    if notification.dropped_before:
+        raise RuntimeError(
+            f"lost {notification.dropped_before} commits before v{notification.version}"
+        )
+    audit_log.append(notification)
+```
+
+**If you need a contiguous feed, use CDC instead** — it guarantees contiguity,
+checkpoints, and halts on a gap rather than continuing past one.
+:::
 
 ```python
 session = db.session()

@@ -430,7 +430,31 @@ impl L0Buffer {
                 // (existing_crdt) — existing-into-new. Preserve — a custom
                 // provider's merge may be non-commutative.
                 let merged = match registry {
-                    Some(reg) => new_crdt.merge_via_registry(&existing_crdt, reg).is_ok(),
+                    // #233: `.is_ok()` collapsed a PROVIDER failure
+                    // (`from_persisted` / `merge` / `persist` on a registered
+                    // `CrdtKindProvider`) into the same `false` as a genuine
+                    // variant mismatch, so the fall-through below warned
+                    // "overwriting CRDT property with a different CRDT variant"
+                    // — naming the wrong cause — and discarded merged state. The
+                    // two are distinguishable: only `TypeMismatch` is a variant
+                    // mismatch.
+                    Some(reg) => match new_crdt.merge_via_registry(&existing_crdt, reg) {
+                        Ok(()) => true,
+                        Err(uni_crdt::CrdtError::TypeMismatch(..)) => false,
+                        Err(e) => {
+                            metrics::counter!("uni_crdt_provider_merge_failures_total")
+                                .increment(1);
+                            tracing::error!(
+                                property = %k,
+                                existing_variant = existing_crdt.type_name(),
+                                error = %e,
+                                "registered CRDT provider failed to merge; falling back to \
+                                 last-writer-wins and discarding the merged state (this is a \
+                                 provider failure, NOT a variant mismatch)"
+                            );
+                            false
+                        }
+                    },
                     None => new_crdt.try_merge(&existing_crdt).is_ok(),
                 };
                 if merged {

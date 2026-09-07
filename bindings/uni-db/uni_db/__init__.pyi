@@ -1080,6 +1080,15 @@ class CommitNotification:
     tx_id: str
     session_id: str
     causal_version: int
+    dropped_before: int
+    """Commits lost immediately before this one because the consumer fell behind.
+
+    ``0`` normally. Non-zero means the broadcaster evicted that many older
+    commits; they cannot be redelivered. Filtered skips are never counted here.
+    A consumer that invalidates a cache and re-reads can ignore this; one doing
+    non-idempotent per-commit work must check it, or use the CDC surface, which
+    guarantees a contiguous feed.
+    """
 
 class CancellationToken:
     """A cooperative cancellation token for long-running operations."""
@@ -2757,6 +2766,8 @@ class PromoteReport:
     edges_skipped: int
     edges_skipped_duplicate: int
     edges_skipped_no_endpoint: int
+    edges_inserted_unverified: int
+    vertices_deletes_unverified: int
     per_pattern_inserted: list[int]
 
 # Phase 4b — fork-related typed exceptions

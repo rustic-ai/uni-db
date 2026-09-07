@@ -509,6 +509,16 @@ pub struct PromoteReport {
     /// no UID match on primary. To insert these edges, promote the
     /// missing vertices first via a vertex pattern, then re-run.
     pub edges_skipped_no_endpoint: usize,
+    /// Edges inserted while primary's existing-edge pre-fetch or the endpoint
+    /// resolve was degraded, so they may duplicate rows already on primary.
+    ///
+    /// The edge-side twin of [`Self::vertices_inserted_unverified`]. A nonzero
+    /// value means `edges_skipped_duplicate` under-counts: the dedup set could
+    /// not be built, so every fork edge looked new.
+    pub edges_inserted_unverified: usize,
+    /// Rows marked for delete-promotion whose primary twin could not be
+    /// resolved, so the delete was skipped and the row remains on primary.
+    pub vertices_deletes_unverified: usize,
     /// Number of edges that touched a promoted vertex but were not
     /// themselves promoted (no edge pattern in the call). Phase 6
     /// MVP's behaviour: silently skip + warn. Phase 6b adds explicit

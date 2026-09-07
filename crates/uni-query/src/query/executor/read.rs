@@ -2918,17 +2918,17 @@ impl Executor {
                 }
                 LogicalPlan::ShowConstraints(clause) => Ok(self.execute_show_constraints(clause)),
                 LogicalPlan::DropIndex { name, if_exists } => {
-                    let idx_mgr = self.storage.index_manager();
-                    match idx_mgr.drop_index(&name).await {
-                        Ok(_) => Ok(vec![]),
-                        Err(e) => {
-                            if if_exists && e.to_string().contains("not found") {
-                                Ok(vec![])
-                            } else {
-                                Err(e)
-                            }
-                        }
+                    // #233: this matched the error's rendered STRING, so any
+                    // genuine drop failure whose message happens to contain
+                    // "not found" was swallowed by `IF EXISTS`. Ask the schema
+                    // whether the index exists instead of inferring it from
+                    // error text.
+                    if if_exists && self.storage.schema_manager().get_index(&name).is_none() {
+                        return Ok(vec![]);
                     }
+                    let idx_mgr = self.storage.index_manager();
+                    idx_mgr.drop_index(&name).await?;
+                    Ok(vec![])
                 }
                 LogicalPlan::ShowIndexes { filter } => {
                     Ok(self.execute_show_indexes(filter.as_deref()))

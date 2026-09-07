@@ -107,6 +107,8 @@ fn commit(version: u64) -> Arc<CommitNotification> {
         // None → runtime falls back to an empty event batch; the
         // deliver/checkpoint/gap machinery under test is unaffected.
         mutations: None,
+        mutations_failed: false,
+        dropped_before: 0,
     })
 }
 
@@ -163,8 +165,14 @@ async fn cdc_deliver_failure_creates_permanent_gap() {
     );
     // The durable checkpoint never advances past the undelivered commit — no
     // at-least-once violation.
+    // `lookup` returns `Result` since #233: a read failure is no longer
+    // reported as "no checkpoint", so unwrap first and keep asserting the
+    // original intent — no checkpoint was recorded for the halted stream.
     assert!(
-        sidecar.lookup("flaky").is_none(),
+        sidecar
+            .lookup("flaky")
+            .expect("the sidecar itself is readable")
+            .is_none(),
         "checkpoint must not advance past the undelivered commit; got {:?}",
         sidecar.lookup("flaky")
     );

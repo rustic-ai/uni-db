@@ -10,6 +10,17 @@
 //! Initial set: `convert.toString`, `convert.toBoolean`,
 //! `convert.toInteger`, `convert.toFloat`. NULL-tolerant: invalid
 //! coercions yield NULL rather than erroring.
+//!
+//! Every argument is declared [`ArgType::CypherValue`], so a non-primitive
+//! (list, map, node, …) arrives as an opaque `LargeBinary` envelope rather
+//! than a typed `ScalarValue`. `convert.toString` decodes that envelope and
+//! renders the value the way Neo4j does (`[1, 2, 3]`, `{k: v}`); it used to
+//! fall through a catch-all and return NULL, turning real data into nulls in
+//! any ported query that stringified a collection.
+//!
+//! `convert.toInteger` / `convert.toFloat` parse strings the way APOC's
+//! `DecimalFormat`-backed conversions do — see `number`'s module docs — via
+//! the shared `support::parse_i64_prefix` / `parse_f64_prefix`.
 
 use std::sync::OnceLock;
 
@@ -23,10 +34,45 @@ use uni_plugin::traits::procedure::{
 use uni_plugin::traits::scalar::ArgType;
 use uni_plugin::{FnError, PluginError, PluginRegistrar, QName, SideEffects};
 
+use uni_common::Value;
+
 use super::support::{
     self, ApocProc, batch_err, nullable_bool_result, nullable_float_result, nullable_int_result,
     nullable_string_result,
 };
+
+/// Decode the `LargeBinary` envelope a non-primitive Cypher value arrives in.
+///
+/// Two encoders reach a plugin today and both are live:
+///
+/// * the procedure CALL path (`uni-query`'s `procedure_call::value_to_columnar`)
+///   emits `serde_json` bytes, and
+/// * the scalar-function adapter (`executor::plugin_adapter`) emits the tagged
+///   `cypher_value_codec` encoding.
+///
+/// The two are unambiguous at the first byte — every codec tag is < 22, while
+/// every byte JSON can start a document with is >= `b'"'` (34) — so trying the
+/// codec first and falling back to JSON cannot mis-route a payload.
+fn decode_cypher_envelope(bytes: &[u8]) -> Option<Value> {
+    if let Ok(v) = uni_common::cypher_value_codec::decode(bytes) {
+        return Some(v);
+    }
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .map(Value::from)
+}
+
+/// Render a decoded Cypher value the way Neo4j's `apoc.convert.toString` does.
+///
+/// [`Value`]'s `Display` is already Cypher-shaped — a list renders as
+/// `[1, 2, 3]` and a map as `{k: v}`, matching Java's `Collection::toString` —
+/// so this only has to keep NULL as NULL rather than the literal `"null"`.
+fn render_cypher_value(v: &Value) -> Option<String> {
+    match v {
+        Value::Null => None,
+        other => Some(other.to_string()),
+    }
+}
 
 /// Register `uni.convert.*` procedures into `r`.
 ///
@@ -78,13 +124,20 @@ impl ConvertProc {
     fn docs(&self) -> &'static str {
         match self {
             Self::ToString => {
-                "Coerce a primitive to its default string representation; NULL on null input."
+                "Coerce any Cypher value to its default string representation \
+                 (a list renders as `[1, 2, 3]`, a map as `{k: v}`); NULL on null input."
             }
             Self::ToBoolean => {
                 "Coerce a primitive to boolean. Strings 'true'/'false' match (case-insensitive); other strings yield NULL."
             }
-            Self::ToInteger => "Coerce a primitive to integer; NULL on failure.",
-            Self::ToFloat => "Coerce a primitive to float; NULL on failure.",
+            Self::ToInteger => {
+                "Coerce a primitive to integer. Strings parse Java `DecimalFormat`-style \
+                 (\"1,234\" -> 1234, \"3.7\" -> 3); NULL when no digits are present."
+            }
+            Self::ToFloat => {
+                "Coerce a primitive to float. Strings parse Java `DecimalFormat`-style \
+                 (\"1,234.5\" -> 1234.5); NULL when no digits are present."
+            }
         }
     }
 
@@ -155,6 +208,12 @@ impl ProcedurePlugin for ConvertProc {
                     ScalarValue::Int64(Some(i)) => Some(i.to_string()),
                     ScalarValue::Float64(Some(f)) => Some(f.to_string()),
                     ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => Some(s),
+                    // Non-primitives (list, map, node, …) transport as an
+                    // opaque `LargeBinary` envelope. Decode and render rather
+                    // than falling through to NULL.
+                    ScalarValue::LargeBinary(Some(bytes)) => decode_cypher_envelope(&bytes)
+                        .as_ref()
+                        .and_then(render_cypher_value),
                     _ => None,
                 };
                 nullable_string_result(result)
@@ -185,7 +244,7 @@ impl ProcedurePlugin for ConvertProc {
                     // `math`'s unguarded float→int truncation; preserved as-is.
                     ScalarValue::Float64(Some(f)) if f.is_finite() => Some(f as i64),
                     ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
-                        s.trim().parse().ok()
+                        support::parse_i64_prefix(&s)
                     }
                     _ => None,
                 };
@@ -198,7 +257,7 @@ impl ProcedurePlugin for ConvertProc {
                     ScalarValue::Int64(Some(i)) => Some(i as f64),
                     ScalarValue::Float64(f) => f,
                     ScalarValue::Utf8(Some(s)) | ScalarValue::LargeUtf8(Some(s)) => {
-                        s.trim().parse().ok()
+                        support::parse_f64_prefix(&s)
                     }
                     _ => None,
                 };

@@ -19,6 +19,26 @@ pub enum ExtismError {
     #[error("extism plugin manifest invalid: {0}")]
     ManifestInvalid(String),
 
+    /// The plugin's declared `abi-extism` range does not intersect any
+    /// host-supported major.
+    ///
+    /// Mirrors [`uni_plugin::PluginError::AbiUnsupported`] on the Component
+    /// Model path. Before this existed the Extism loader parsed `abi-extism`
+    /// and read it nowhere, so a guest declaring `"abi-extism": "^9"` loaded
+    /// against a v1 host and called a mismatched host-fn surface.
+    #[error(
+        "extism plugin {plugin} requires ABI {required}; \
+         host supports majors {supported:?}"
+    )]
+    AbiUnsupported {
+        /// Plugin id reporting the mismatch.
+        plugin: String,
+        /// Required ABI range from the manifest.
+        required: String,
+        /// Host-supported major versions.
+        supported: Vec<u64>,
+    },
+
     /// Extism plugin instantiation failed.
     #[error("extism instantiation failed: {0}")]
     Instantiate(String),

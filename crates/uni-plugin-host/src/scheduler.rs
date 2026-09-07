@@ -67,6 +67,13 @@ pub struct SchedulerHost {
     /// prevents a flapping job from monopolizing the spawn-blocking
     /// pool. See [`CircuitBreaker`].
     circuit_breaker: Arc<CircuitBreaker>,
+    /// True when the persisted job set could not be read at startup.
+    ///
+    /// #233 Tier 1: a failed `load_all` starts the scheduler with no jobs,
+    /// and `list()` then reports none — indistinguishable from a genuinely
+    /// empty scheduler. Callers can consult
+    /// [`SchedulerHost::persistence_degraded`] to tell the two apart.
+    persistence_degraded: bool,
     /// Host services passed to each [`JobContext`] on dispatch.
     /// Optional so test fixtures that don't need storage / Uni access
     /// can construct a `SchedulerHost` without a full `Uni`.
@@ -129,37 +136,56 @@ impl SchedulerJobHost {
 /// the `uni.periodic.submit` / `uni.periodic.iterate` procedures
 /// actually run Cypher when invoked.
 impl uni_plugin::scheduler::SchedulerControl for SchedulerHost {
-    fn add_scheduled_job(&self, id: QName, schedule: uni_plugin::traits::background::Schedule) {
-        // Persist the schedule kind before registering so a restart
-        // can replay `Periodic` / `Cron` / `Once` jobs without
-        // downgrading them to `Manual`. Failures are logged and the
-        // registration still proceeds — losing durability is strictly
-        // worse than losing the in-memory job.
-        if let Err(e) = self.persistence.record_scheduled(&id, &schedule) {
-            tracing::warn!(
+    fn add_scheduled_job(
+        &self,
+        id: QName,
+        schedule: uni_plugin::traits::background::Schedule,
+    ) -> Result<(), uni_plugin::FnError> {
+        // Persist the schedule kind before registering so a restart can
+        // replay `Periodic` / `Cron` / `Once` jobs without downgrading them
+        // to `Manual`. #233 Tier 1: a failure here used to be logged while
+        // the caller was told the job was registered, so the job silently
+        // vanished at the next restart. Register in memory anyway — the job
+        // should still run for this process — but report the lost
+        // durability rather than swallowing it.
+        let persisted = self.persistence.record_scheduled(&id, &schedule);
+        self.scheduler.add_scheduled_job(id.clone(), schedule);
+        if let Err(e) = persisted {
+            tracing::error!(
                 qname = %id,
                 error = %e,
-                "SchedulerHost: record_scheduled failed; in-memory registration continues",
+                "SchedulerHost: record_scheduled failed; the job runs now but will not \
+                 survive a restart",
             );
+            return Err(uni_plugin::FnError::new(
+                0x2330,
+                format!("job {id} registered in memory but could not be persisted: {e}"),
+            ));
         }
-        self.scheduler.add_scheduled_job(id, schedule);
+        Ok(())
     }
 
-    fn cancel(&self, id: &QName) -> bool {
+    fn cancel(&self, id: &QName) -> Result<bool, uni_plugin::FnError> {
         let cancelled = self.scheduler.cancel(id);
         // Also delete the persisted sidecar row, otherwise the cancelled job
         // resurrects on the next restart (the host replays persistence). Only
-        // attempt it when the in-memory job actually existed; a persistence
-        // failure is logged but does not un-cancel the live job.
+        // attempt it when the in-memory job actually existed. #233 Tier 1: a
+        // persistence failure used to be logged while `true` was still
+        // returned, so the caller was told the job was cancelled and it came
+        // back at the next restart.
         if cancelled && let Err(e) = self.persistence.cancel(id) {
-            tracing::warn!(
+            tracing::error!(
                 qname = %id,
                 error = %e,
                 "SchedulerHost: persistence.cancel failed; job cancelled in memory but its \
-                 sidecar row survives and may resurrect on restart",
+                 sidecar row survives and will resurrect on restart",
             );
+            return Err(uni_plugin::FnError::new(
+                0x2331,
+                format!("job {id} cancelled in memory but its persisted row survives: {e}"),
+            ));
         }
-        cancelled
+        Ok(cancelled)
     }
 
     fn list(&self) -> Vec<uni_plugin::scheduler::SchedulerJobRecord> {
@@ -255,10 +281,11 @@ impl SchedulerHost {
         job_host: Option<Arc<SchedulerJobHost>>,
     ) -> Arc<Self> {
         let scheduler = Arc::new(Scheduler::new());
+        let mut persistence_degraded = false;
 
-        // Replay persisted job records (if any) so jobs survive
-        // restart. Errors are logged and ignored — a missing or
-        // corrupt backend should not block startup.
+        // Replay persisted job records (if any) so jobs survive restart. A
+        // read failure does not block startup, but it is recorded rather than
+        // swallowed — see `persistence_degraded`.
         match persistence.load_all() {
             Ok(records) => {
                 for record in records {
@@ -266,6 +293,7 @@ impl SchedulerHost {
                 }
                 // Anything previously stuck in `Running` is now
                 // `Pending` and will fire on next tick.
+                metrics::gauge!("uni_scheduler_persistence_degraded").set(0.0);
                 let requeued = scheduler.requeue_orphaned_runs();
                 if requeued > 0 {
                     tracing::info!(
@@ -274,7 +302,25 @@ impl SchedulerHost {
                     );
                 }
             }
-            Err(e) => tracing::warn!(error = %e, "scheduler: load_all failed; starting empty"),
+            Err(e) => {
+                // #233 Tier 1: every persisted job silently vanishes here and
+                // `list()` then reports none, so an operator cannot tell an
+                // empty scheduler from an unreadable one. The sidecar is not
+                // rewritten on this path, so the rows survive on disk for a
+                // later restart; what is wrong is the silence. Recorded on the
+                // host so the degraded state is observable.
+                tracing::error!(
+                    error = %e,
+                    "scheduler: load_all failed; starting with NO persisted jobs. They are not \
+                     lost on disk, but none will run in this process and list() will report none",
+                );
+                persistence_degraded = true;
+                // #233 P2: `persistence_degraded` is readable only through an
+                // accessor nothing outside this crate calls, so a scheduler
+                // that silently lost its whole persisted job set looked
+                // identical to an empty one. Emit it.
+                metrics::gauge!("uni_scheduler_persistence_degraded").set(1.0);
+            }
         }
 
         scheduler.resume();
@@ -285,6 +331,7 @@ impl SchedulerHost {
             scheduler: Arc::clone(&scheduler),
             persistence: Arc::clone(&persistence),
             circuit_breaker: Arc::clone(&circuit_breaker),
+            persistence_degraded,
             job_host: job_host.clone(),
         });
 
@@ -327,6 +374,15 @@ impl SchedulerHost {
     #[must_use]
     pub fn scheduler(&self) -> &Arc<Scheduler> {
         &self.scheduler
+    }
+
+    /// True when persisted jobs could not be read at startup.
+    ///
+    /// When this is set, `list()` reporting no jobs means "the persisted set
+    /// could not be read", not "no jobs are scheduled" (#233).
+    #[must_use]
+    pub fn persistence_degraded(&self) -> bool {
+        self.persistence_degraded
     }
 
     /// Borrow the persistence backend.
@@ -416,11 +472,17 @@ fn dispatch_one_tick(
                 job = %id,
                 "scheduler: circuit breaker open; skipping this tick"
             );
-            // Mark finished with success=false so the schedule
-            // recomputes a next fire instead of leaving the job stuck
-            // Running. We intentionally don't `record_failure` here —
-            // the breaker is already open; recording would only add
-            // noise.
+            // Mark finished with success=false so the schedule recomputes a
+            // next fire instead of leaving the job stuck Running. We
+            // intentionally don't `record_failure` here — the breaker is
+            // already open; recording would only add noise.
+            //
+            // #233 P3: `success=false` also increments `consecutive_failures`
+            // for a run that never happened, so the in-memory counter drifts
+            // above the number of real failures while the breaker is open. It
+            // is reset by the next success, so this is drift rather than a
+            // wrong answer — counted so the drift is attributable.
+            metrics::counter!("uni_scheduler_breaker_skipped_total").increment(1);
             scheduler.mark_finished(&id, false);
             continue;
         }

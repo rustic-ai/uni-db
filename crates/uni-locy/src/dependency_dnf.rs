@@ -271,6 +271,17 @@ fn clause_weight(clause: &BaseRvSet, base_weights: &HashMap<BaseRv, f64>) -> f64
     }
     let mut p = 1.0;
     for rv in clause.iter() {
+        // A missing marginal would silently read as weight 1.0 — "certain" —
+        // which is the `locy_aggregates` shape. It is fenced off here because
+        // the sole caller interns a weight for every RV it puts in a clause,
+        // but this fn is `pub` and re-exported, so a future caller could break
+        // that. Cheap insurance rather than a behaviour change: debug builds
+        // and tests catch it, release keeps the existing default.
+        debug_assert!(
+            base_weights.contains_key(&rv),
+            "clause_weight: no marginal for {rv:?}; a missing weight silently \
+             reads as certainty"
+        );
         let w = base_weights.get(&rv).copied().unwrap_or(1.0);
         p *= w;
     }

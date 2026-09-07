@@ -894,9 +894,17 @@ fn apply_resource_limits(store: &mut Store<HostState>, limits: &EffectiveLimits)
 fn reset_call_limits(store: &mut Store<HostState>, limits: &EffectiveLimits) {
     store.set_epoch_deadline(limits.deadline_ticks());
     if let Some(fuel) = limits.fuel_per_call {
-        // Best-effort fuel cap. Plugins consuming more than this trap
-        // out of fuel; the host surfaces as `WasmError::ResourceLimit`.
-        let _ = store.set_fuel(fuel);
+        // Unreachable as the code stands: `build_engine(&limits)` enables
+        // `consume_fuel` iff `limits.fuel_per_call.is_some()`, and every store
+        // is built from the same `limits`, so this arm only runs on a
+        // fuel-enabled engine. It is `expect` rather than `let _` because it
+        // is one refactor away from silently dropping the cap — a plugin would
+        // then run unmetered instead of trapping as `ResourceLimit`, with
+        // nothing to see. Plugins over budget trap out of fuel; the host
+        // surfaces that as `WasmError::ResourceLimit`.
+        store
+            .set_fuel(fuel)
+            .expect("engine was built with consume_fuel enabled for this limits set");
     }
 }
 

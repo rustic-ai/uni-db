@@ -61,6 +61,8 @@ mod session_tx;
 // that use it.
 #[path = "common/arch_entity_identity.rs"]
 mod arch_entity_identity;
+#[path = "common/arch_fail_open.rs"]
+mod arch_fail_open;
 #[path = "common/compaction_resilience.rs"]
 mod compaction_resilience;
 #[path = "common/crash_harness.rs"]

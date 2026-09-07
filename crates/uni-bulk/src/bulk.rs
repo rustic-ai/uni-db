@@ -84,17 +84,21 @@ pub struct BulkBackend {
 /// and `RecordBatch` (Arrow columnar data).
 pub trait IntoArrow {
     /// Convert to a vector of property maps.
-    fn into_property_maps(self) -> Vec<HashMap<String, Value>>;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a row cannot be converted (#233).
+    fn into_property_maps(self) -> Result<Vec<HashMap<String, Value>>>;
 }
 
 impl IntoArrow for Vec<HashMap<String, Value>> {
-    fn into_property_maps(self) -> Vec<HashMap<String, Value>> {
-        self
+    fn into_property_maps(self) -> Result<Vec<HashMap<String, Value>>> {
+        Ok(self)
     }
 }
 
 impl IntoArrow for arrow_array::RecordBatch {
-    fn into_property_maps(self) -> Vec<HashMap<String, Value>> {
+    fn into_property_maps(self) -> Result<Vec<HashMap<String, Value>>> {
         record_batch_to_property_maps(&self)
     }
 }
@@ -103,9 +107,13 @@ impl IntoArrow for arrow_array::RecordBatch {
 ///
 /// Columns become property keys; values are converted from Arrow types to Uni
 /// [`Value`]s via `arrow_to_value`. Null values are omitted from the map.
+///
+/// # Errors
+///
+/// Returns an error if a non-null cell cannot be decoded to a [`Value`].
 pub fn record_batch_to_property_maps(
     batch: &arrow_array::RecordBatch,
-) -> Vec<HashMap<String, Value>> {
+) -> Result<Vec<HashMap<String, Value>>> {
     let schema = batch.schema();
     let num_rows = batch.num_rows();
     let mut rows = Vec::with_capacity(num_rows);
@@ -115,13 +123,27 @@ pub fn record_batch_to_property_maps(
             let col = batch.column(col_idx);
             let value =
                 uni_store::storage::arrow_convert::arrow_to_value(col.as_ref(), row_idx, None);
+            // #233 Tier 1: `arrow_to_value` answers `Null` both for a genuine
+            // null AND for a type it has no decoder arm for. Dropping every
+            // null therefore dropped the whole column for an unsupported type
+            // while `BulkStats` still reported a full ingest. Comparing
+            // against the Arrow null bitmap separates the two.
+            if value.is_null() && !col.is_null(row_idx) {
+                return Err(anyhow::anyhow!(
+                    "bulk ingest: column `{}` of type {} could not be decoded at row {row_idx}; \
+                     silently dropping it would report a full ingest with the property missing \
+                     from every row",
+                    field.name(),
+                    col.data_type()
+                ));
+            }
             if !value.is_null() {
                 props.insert(field.name().clone(), value);
             }
         }
         rows.push(props);
     }
-    rows
+    Ok(rows)
 }
 
 /// Builder for configuring a bulk writer.
@@ -411,7 +433,7 @@ impl BulkWriter {
         label: &str,
         vertices: impl IntoArrow,
     ) -> Result<Vec<Vid>> {
-        let vertices = vertices.into_property_maps();
+        let vertices = vertices.into_property_maps()?;
         let schema = self.backend.schema.schema();
         // Validate label exists in schema
         schema
@@ -1177,9 +1199,27 @@ impl BulkWriter {
                 for label in &labels_to_rebuild {
                     for idx in &schema.indexes {
                         if idx.label() == label.as_str() {
-                            let _ = self.backend.schema.update_index_metadata(idx.name(), |m| {
-                                m.status = uni_common::core::schema::IndexStatus::Stale;
-                            });
+                            // #233 Tier 1: `let _ =` left the index reporting
+                            // `Online` while this load has just grown the table
+                            // and the rebuild is only SCHEDULED. The planner
+                            // trusts `Online`, consults the stale index, and
+                            // rows go missing from query results with no log
+                            // and no metric. Unlike the background paths in
+                            // `uni-store`, this one has a caller: `commit`
+                            // returns `Result`, so it propagates.
+                            self.backend
+                                .schema
+                                .update_index_metadata(idx.name(), |m| {
+                                    m.status = uni_common::core::schema::IndexStatus::Stale;
+                                })
+                                .map_err(|e| {
+                                    anyhow::anyhow!(
+                                        "bulk commit: could not mark index `{}` Stale before \
+                                         scheduling its rebuild; leaving it Online would make \
+                                         the planner consult a stale index: {e}",
+                                        idx.name()
+                                    )
+                                })?;
                         }
                     }
                 }
@@ -1233,19 +1273,50 @@ impl BulkWriter {
                         .backend()
                         .count_rows(&vtable_name, None)
                         .await
+                        // #233: `.ok()` persisted `row_count_at_build = None`,
+                        // and `index_rebuild.rs`'s growth trigger is gated on
+                        // `if let Some(built_count)` — so that index never
+                        // auto-rebuilt on growth again, silently, until some
+                        // later build happened to write a count. Recorded so
+                        // the lost trigger is visible.
+                        .inspect_err(|e| {
+                            tracing::error!(
+                                table = %vtable_name,
+                                error = %e,
+                                "bulk commit: could not read the row count for a rebuilt index; \
+                                 its growth-based auto-rebuild stays disabled until a later \
+                                 build records one",
+                            );
+                        })
                         .ok()
                         .map(|c| c as u64);
 
                     let schema = self.backend.schema.schema();
                     for idx in &schema.indexes {
                         if idx.label() == label.as_str() {
-                            let _ = self.backend.schema.update_index_metadata(idx.name(), |m| {
-                                m.status = uni_common::core::schema::IndexStatus::Online;
-                                m.last_built_at = Some(now);
-                                if let Some(count) = row_count {
-                                    m.row_count_at_build = Some(count);
-                                }
-                            });
+                            // #233: unlike the Stale write above, failing to
+                            // record a SUCCESSFUL build is conservative — the
+                            // index stays `Stale` and the rebuild manager picks
+                            // it up again — so this does not fail the commit.
+                            // It is still recorded rather than dropped: the
+                            // decision is that no index-status write goes
+                            // unrecorded.
+                            if let Err(e) =
+                                self.backend.schema.update_index_metadata(idx.name(), |m| {
+                                    m.status = uni_common::core::schema::IndexStatus::Online;
+                                    m.last_built_at = Some(now);
+                                    if let Some(count) = row_count {
+                                        m.row_count_at_build = Some(count);
+                                    }
+                                })
+                            {
+                                tracing::error!(
+                                    index = %idx.name(),
+                                    error = %e,
+                                    "bulk commit: could not record a successful index build; \
+                                     the index keeps its previous status",
+                                );
+                            }
                         }
                     }
                 }
@@ -1366,11 +1437,25 @@ impl BulkWriter {
             if let Some(meta) = schema.edge_types.get(edge_type_name.as_str()) {
                 let type_id = meta.id;
                 for &dir in uni_store::storage::direction::Direction::Both.expand() {
-                    let _ = self
+                    // #233 P3: pure prewarm. `uni-query`'s
+                    // `ensure_adjacency_warmed` warms lazily and PROPAGATES,
+                    // so a failure here costs first-query latency and nothing
+                    // else — which is why it stays fail-open. Logged at debug
+                    // so an unexplained first-query cost is attributable.
+                    if let Err(e) = self
                         .backend
                         .storage
                         .warm_adjacency(type_id, dir, None)
-                        .await;
+                        .await
+                    {
+                        tracing::debug!(
+                            edge_type = type_id,
+                            ?dir,
+                            error = %e,
+                            "bulk commit: adjacency prewarm failed; the first traversal will \
+                             build it instead",
+                        );
+                    }
                 }
             }
         }

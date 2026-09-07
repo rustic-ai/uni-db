@@ -110,7 +110,7 @@ mod test_helpers {
     ) -> Result<()> {
         let labels = writer
             .get_vertex_labels(vid, None)
-            .await
+            .await?
             .ok_or_else(|| anyhow::anyhow!("Vid {:?} not found in any source", vid))?;
 
         assert_eq!(
@@ -787,7 +787,7 @@ mod read_tests {
         writer.flush_to_l1(None).await?;
 
         // Verify the vertex doesn't have a non-existent label (persisted to L1)
-        let labels = writer.get_vertex_labels(vid, None).await.unwrap();
+        let labels = writer.get_vertex_labels(vid, None).await?.unwrap();
         assert!(!labels.contains(&"NonExistent".to_string()));
         assert!(labels.contains(&"Person".to_string()));
 
@@ -827,7 +827,7 @@ mod read_tests {
         writer.flush_to_l1(None).await?;
 
         // Test label membership (persisted to L1)
-        let labels = writer.get_vertex_labels(vid, None).await.unwrap();
+        let labels = writer.get_vertex_labels(vid, None).await?.unwrap();
 
         // Test has_label equivalent
         assert!(labels.contains(&"Person".to_string()));
@@ -1051,7 +1051,7 @@ mod update_tests {
         writer.flush_to_l1(None).await?;
 
         // Verify labels are correct (persisted to L1)
-        let labels = writer.get_vertex_labels(vid, None).await.unwrap();
+        let labels = writer.get_vertex_labels(vid, None).await?.unwrap();
 
         // Verify both Person and Employee are present
         assert!(labels.contains(&"Person".to_string()));
@@ -1088,7 +1088,7 @@ mod update_tests {
         writer.flush_to_l1(None).await?;
 
         // Verify the vertex doesn't have Employee label (persisted to L1)
-        let labels = writer.get_vertex_labels(vid, None).await.unwrap();
+        let labels = writer.get_vertex_labels(vid, None).await?.unwrap();
 
         assert!(
             !labels.contains(&"Employee".to_string()),
@@ -1154,7 +1154,7 @@ mod delete_tests {
         writer.flush_to_l1(None).await?;
 
         // Verify deleted (should not be found in any source)
-        let labels = writer.get_vertex_labels(vid, None).await;
+        let labels = writer.get_vertex_labels(vid, None).await?;
         assert!(labels.is_none(), "Deleted vertex should not be found");
 
         Ok(())
@@ -1214,7 +1214,7 @@ mod delete_tests {
         verify_labels_persisted(&writer, vid, &["Person", "Manager"]).await?;
 
         // Verify old Employee label not present
-        let labels = writer.get_vertex_labels(vid, None).await.unwrap();
+        let labels = writer.get_vertex_labels(vid, None).await?.unwrap();
         assert!(!labels.contains(&"Employee".to_string()));
 
         Ok(())
@@ -1269,7 +1269,7 @@ mod delete_tests {
         writer.flush_to_l1(None).await?;
 
         // Verify vid1 is deleted (persisted to L1)
-        let labels1 = writer.get_vertex_labels(vid1, None).await;
+        let labels1 = writer.get_vertex_labels(vid1, None).await?;
         assert!(labels1.is_none(), "Deleted vertex should not be found");
 
         // Verify vid2 still exists (persisted to L1)

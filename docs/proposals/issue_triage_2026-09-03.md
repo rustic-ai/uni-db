@@ -183,7 +183,7 @@ A further **14 commits are unpushed**, carrying `Fixes #231`, `Fixes #236`,
 | #243 | **all four faces closed.** Faces 1 and 2 merged in #250; face 4 was already closed by the entity-encoding work; face 3 and the class remedy are on the unpushed branch |
 | #236, #252 | fixed — one canonical rendering on `Value`, `Debug` fallback deleted from five sites |
 | #238 | fixed — both comments corrected, pool decision re-made on the true premise |
-| #233 | **Tier 2 done.** All three tiers now closed; the issue stays open for the ~25 unaudited plugin/CLI/bulk/CRDT sites it scopes out |
+| #233 | **Tier 2 done.** All three tiers now closed; the issue stays open for the ~25 unaudited plugin/CLI/bulk/CRDT sites it scopes out — **this row is wrong, corrected in [Status — 2026-09-05, third pass](#status--2026-09-05-third-pass): Tier 2 and Tier 3 are closed and Tier 1 is the tier still open** |
 | #242 | six operators reserve; the pool is no longer blind to the largest allocations. Scope item 1 done, item 2 now unblocked |
 | #234 | not started as filed, but see below |
 | D7 (`docs/correctness-deferred.md`) | was already fixed; only the guard was missing |
@@ -308,3 +308,283 @@ Two additions to the tail of the queue, both from this round:
   construction. The default path is not covered. Whether a single-writer commit
   should fail because a *background* flush holds the lock is the product
   question the CI fix sidesteps rather than answers.
+
+---
+
+## Status — 2026-09-05, third pass
+
+A third pass the same day, and the first one that verified **every** open issue
+against the source rather than sampling. Six parallel readers, one per cluster;
+44 issues, no edits. The result changes this document's own ledger in six
+places, and one of those changes is the reason to keep doing this.
+
+### The correction that matters: #233's tiers are recorded backwards
+
+The status above says *"Tier 2 done. All three tiers now closed."* The source
+says Tier 2 and Tier 3 are closed and **Tier 1 — the silent wrong answers, the
+tier that put this class first in the whole backlog — is the one still open.**
+
+| site | still fail-open | consequence |
+|---|---|---|
+| `df_graph/common.rs:1949` | `ScalarKey::Utf8(format!("opaque@{row_idx}"))`, no log | DISTINCT and GROUP BY silently stop deduplicating |
+| `writer.rs:2194`, `:2418` | `if let Ok(Some(found_vid))` | the ext_id uniqueness constraint **admits a duplicate** on an I/O error |
+| `value_codec.rs:214` | substitutes `GCounter::new()` in Lenient mode | a CRDT counter silently reads **0** |
+| `writer.rs:5064` | a label lookup swallowing `Err` | same shape; **not previously listed anywhere** |
+
+Two unaudited instances of the "open failure read as absent" pattern that Tier 1
+just fixed in `storage/index.rs` also remain, at `inverted_index.rs:78` and
+`sparse_index.rs:225`.
+
+What was genuinely fixed: Tier 3 has no `let _ = update_index_metadata` left —
+all three sites check, count `uni_index_status_write_failures_total`, and log.
+Tier 2 routes five default-index sites through `record_default_index_failure`
+(`baffbf498`), leaving ~2 benign sites. Two of the five sampled Tier 1 sites are
+also fixed: `scan.rs:1470` propagates instead of returning `new_null_array` (zero
+such fallbacks remain repo-wide), and `storage/index.rs:230`/`:350` now
+discriminate `is_dataset_not_found` from a real error.
+
+**Why it drifted is the part worth keeping.** Tier 2 and Tier 3 have countable,
+greppable completion criteria — "no `let _ =` remains", "all five sites route
+through one helper". Tier 1 has no such criterion; each site is a judgement about
+whether a default is a lie. The work moved toward the tiers that could be
+*declared* finished, and this ledger recorded the drift as if it were the plan.
+
+That is Class 7's mechanism — an optimization with a correctness-preserving
+fallback is invisible to result-only tests — operating on the project's own
+tracking instead of its tests. **A completion claim with no discriminating check
+is indistinguishable from no claim.** These documents apply that rule rigorously
+to test coverage and have never turned it on their own status tables.
+
+### Five further corrections
+
+| # | recorded | actually |
+|---|---|---|
+| **#216** | "closed in fact" (2026-09-05, later) | **partial.** The structural half is fixed at `locy_eval.rs:697-701`. The three-valued-logic half holds: `Expr::In` at `locy_eval.rs:116-121` is still `Ok(Value::Bool(items.iter().any(...)))` — no `has_null`, so it can never return NULL, unlike `eval_in_op`. The title names two defects and the re-verification checked the first clause only |
+| **#249** | tail hygiene, "loud, not silent" | **worse than filed.** `add_columns`/`alter_columns`/`NewColumnTransform` return **zero hits** across `crates/uni-store/src`. This is not a broken add-column path; there is no add-column path. The label is permanently unwritable — reopen does not clear it, a `SET` on pre-existing columns is accepted but its *flush* is rejected, and a `CREATE` that never mentions the property also fails |
+| **#178** | Tier 5, open | **fixed.** `bindings/uni-db/tests/test_stateful_crud.py:135` already defines `GraphMachine(RuleBasedStateMachine)` with ~10 rules. Satisfied by the #181/#182 work; nothing connected the two |
+| **#226** | as filed | **overstated.** `plan_pattern(&clause.match_pattern, &[])` is real, but anchoring is impossible for the **leading path only**; second-and-later comma-separated paths accumulate vars and can anchor |
+| **#176** | as filed | **wider, and the registry row is wrong.** Dead surface is 263 lines plus planner/executor arms, not 154. `registry.rs:155-158` classifies `ForeachExec` as `Unproven` where no grammar path exists — it is `Unreachable`. Closing #176 therefore tightens #177's ratchet by one |
+
+#216 is the first re-verification in this project to come back **weaker** than
+the filing rather than sharper. The previous two passes both noted that
+re-verification kept finding claims understated, never overstated. That is not a
+rule to lean on.
+
+### The count, a fourth time
+
+Open is 44. Roughly **33** is the real figure, and the eleven split four ways —
+the fourth is new:
+
+| | issues | disposition |
+|---|---|---|
+| spam | #254 | close |
+| fixed in fact, closeable now | #178, #217, #234, #243 | #243 substantively; its residual is loud, not silent |
+| fixed, waiting on the merge | #231, #236, #238, #252, #253 | keyword fires when PR #255 and the five commits above it land |
+| instance of an open class | #216, #219, #221, #222, #228, #235, #237 | keep only where the instance carries a repro the class does not |
+
+The new category is **#178: discharged by a fix that never mentioned it.** The
+three already recorded are class/instance double-count, fixed-but-unchecked, and
+waiting-on-merge. This is a fourth and it is the hardest to detect, because
+nothing in either the issue or the commit points at the other.
+
+### Verified as still holding, no change
+
+Every issue in the cost-model and plan-shape cluster holds as filed: **#224,
+#237, #225, #206, #223, #222, #228, #213**, with #226 as corrected above. Two
+readings are sharper than the filings:
+
+- **#224** — zero `fn statistics` across all **39** `impl ExecutionPlan` blocks in
+  `uni-query`, and no `OptimizerRule` is defined in the crate at all. Pinned by
+  `pattern_anchor_test.rs:115-129`, which asserts a middle-bound pattern still
+  cross-joins.
+- **#213** — `QueryPlanner::plan` returns the hand-built plan with **no
+  physical-optimizer pass**, so DataFusion's `LimitPushdown` cannot rescue the
+  fetch-less `SortExec` even in principle.
+- **#222** — the targeted `get_batch_edge_props_for_type` exists and the hot
+  caller at `traverse.rs:1195` does not use it **while already holding
+  `edge_type_ids`**.
+
+Tier 3 holds throughout: **#177** (`MAX_UNPROVEN = 32` unchanged, 32 of ~37 rows
+`Unproven`, only **2** `Proven`, and the gate asserts *equality* — so it is
+pinned, not ratcheting, and makes no progress as a side effect of other work),
+**#179**, **#205**, **#195**, **#200**, **#174**.
+
+Tier 2 holds except where noted: **#240**, **#239**, **#214**, **#241** (both VLP
+state machines now *account*, so an oversized expansion errors instead of OOMing,
+but neither gained a `Chunking`/`Slicing` variant). **#238** is fixed — both
+comments retract the premise and name `DiskManagerMode::OsTmpDirectory`, with a
+test pinning it; the pool stays `GreedyMemoryPool` deliberately.
+
+**#242 is partial in a way its own title hides.** The filed headline — "zero
+`try_grow` sites" — is now false, so a status check by grep would close it. The
+mechanism is 55 of 58 intact: every other `df_graph` exec still has no
+`MemoryConsumer`, including `shortest_path`, `recursive_cte`, `vector_knn`,
+`pattern_comprehension`, the mutation execs and the whole Locy runtime. And
+`scan.rs:1552-1560` concedes the reservation happens *after* the batch is built,
+so it bounds survival, not construction. **A class issue whose title states a
+countable fact gets closed by fixing the count.**
+
+### A class this document has been filing as five unrelated issues
+
+**Infrastructure wired and never consumed.** Same mechanism, sites that do not
+know about each other, which is this project's own test for a class:
+
+| site | state |
+|---|---|
+| `ScanRequest::with_limit` (#239) | defined, zero callers; the field is still read by `lance.rs`, so the pushdown is wired and dead |
+| `index_consulted` (#195) | a real metric read at `executor/core.rs:1055`; zero hits across all 23 files in `crates/uni/benches/` |
+| `max_impact` (#118) | stored at `sparse_index.rs:351,375,436`; unread for scoring |
+| `get_batch_edge_props_for_type` (#222) | exists; the hot caller holds the ids it needs and calls the untargeted sibling |
+| `prefers_full_scan` (#237) | exactly one caller, from the eid path; the endpoint-vid arm 160 lines below chooses by `match` arm |
+
+It has a cheap detector the project already trusts: a single-caller / dead-surface
+ratchet in the style of `arch_entity_identity.rs`. Worth doing before #224, since
+two of the five are inputs #224 would want to consume anyway.
+
+### Recommended next
+
+Unchanged in shape, with two insertions ahead of it:
+
+1. **Merge PR #255 and the five commits above it.** Five keywords are held, and
+   #231's has already failed to fire once. This is the second recurrence of what
+   the class review called *"the single highest-value action in this document and
+   it is not a code change."*
+2. **Finish #233 Tier 1** — four silent wrong-answer sites, currently recorded as
+   done. By this document's own ordering principle that outranks everything in
+   Tier 2.
+3. **Scope #249 separately.** It is a design gap sized like #224, not a defect
+   sized like #253, and it is ranked as tail hygiene only because it is loud.
+   Loudness is detectability, not severity, and this tiering has no row for
+   *permanently destroys a label's writability with no recovery path*.
+4. Then the existing order: **#214 with #240**, **#239**, **#224** and Tier 4.
+
+### What this round is evidence for
+
+**Re-verification has to reach a document's own status tables, not just its
+filings.** The remedy already written here — "re-verify a class issue's sites
+*before* planning from it" — was applied to the tracker and never to the ledger
+that summarises it. Three of the six corrections above are entries this project
+wrote, in this file, and did not re-check: #233's tier assignment, #216's second
+clause, and #178, which was never checked at all.
+
+**A two-clause title needs two verdicts.** #216 was closed on its first clause.
+That is the same shape as the #219 orientation regression the class review calls
+its strongest evidence — a soundness argument that verified one of four
+derivations — reappearing at the granularity of an issue title.
+
+---
+
+## Status — 2026-09-06, the unaudited-crate audit
+
+The third pass above closed #233's Tier 1 in `uni-store` and `uni-query` and
+left the issue open for what it called *"the ~25 unaudited plugin/CLI/bulk/CRDT
+sites it scopes out"*. That scope has now been audited and worked. It was not
+25 sites, and it was not the tier the estimate implied.
+
+### The estimate could not have been right, and the reason generalises
+
+#233 projected **"roughly 25 further warn sites, mostly scheduler and CDC
+paths"** across plugin + CLI + bulk + CRDT. Measured:
+
+| scope | Tier 1 | Tier 2 | Tier 3 | examined |
+|---|---:|---:|---:|---:|
+| plugin crates | 29 | 1 | 17 | 295 non-test sites |
+| scheduler / CDC (overlaps plugin-host) | +6 | 5 | 7 | — |
+| `uni-bulk` | 2 | 1 | 4 | — |
+| `uni-crdt` | 3 (latent) | 0 | 1 | — |
+| `uni-cli` | **0** | 0 | 1 | — |
+
+Deduped, **~40 silent wrong answers** — more than the 27 the entire original
+issue catalogued, and the tier #233 ranks first in the whole backlog.
+
+The characterization is half right in a way worth keeping: **28 of 36 `warn!`
+sites in the plugin crates really are in scheduler/CDC/trigger files, but only
+8 of 29 Tier 1 sites are.** The estimate counted warn sites, and 98 `let _ =`
+swallows in those crates log nothing at all — most of the worst findings emit
+no diagnostic whatsoever.
+
+> **Counting the failures that announce themselves cannot measure the failures
+> that do not.**
+
+That is the LDBC round's "an instrument that cannot fail" applied to scoping
+rather than to profiling, and it is why this scope sat untouched while four
+sites in `uni-store` were fixed: the phrase *"warn sites"* pre-classified the
+work as low-severity before anyone looked.
+
+### What shipped
+
+Eight commits, `Refs #233` throughout — the issue stays open, since Tier 2
+(silent slowness) across these crates is still unaudited.
+
+| wave | what |
+|---|---|
+| A | `AbiRange` validated on deserialize (an ABI-incompatible plugin loaded against any host); `StorageScanExec` honours its own predicate |
+| B | CDC feed holes: `mutations_failed` halts instead of checkpointing past; checkpoint `lookup` returns `Result`; trigger predicate failures no longer read as "no rows match" |
+| C | Scheduler durability: `periodic_cancel` no longer bypasses the persisting path; `add_scheduled_job`/`cancel` return `Result`; a failed startup load is recorded |
+| D | Locy aggregates: an unread cell no longer yields `SUM 0.0`, `MNOR 0.0` ("impossible") or `MPROD 1.0` ("certain") |
+| E | Eleven plugin sites substituting a default for an unreadable value |
+| F | `uni-bulk` index-status and undecodable columns; `uni-crdt` register tie-breaks and a half-decoded ORSet |
+| G | A cross-crate ratchet on the three settled decisions |
+
+**Three findings were not in the audit at all**, and each came from following a
+mechanism rather than a list:
+
+- `Uni::periodic_cancel` called the bare in-memory scheduler, bypassing the
+  persisting `SchedulerControl` impl. `periodic_schedule`, immediately above
+  it, routes through the host with a comment saying it does so for exactly
+  that reason. The procedure path was never affected, which is why the
+  existing host-level test did not catch it.
+- A second `let _ = update_index_metadata` in `uni-bulk`, found by the
+  ratchet, in the file the same round had just fixed.
+- `DROP INDEX ... IF EXISTS` in `uni-query` classifying not-found by matching
+  the error's rendered text.
+
+### Three sites audited and deliberately not "fixed"
+
+Recorded because reclassifying is the same work as fixing, and because two of
+them were on the list:
+
+- **`Float64Column::get`** returns `()` for an out-of-range index. A
+  documented contract that explicitly matches its sibling column type and is
+  idiomatic for a scripting surface — not a swallowed failure.
+- **The Rhai `col{i}` yield name.** The audit called it a fabrication that
+  "would never match a natural-key row map". It is a documented shorthand:
+  a manifest declares `yields: ["int"]`, the script returns `#{ col0: ... }`,
+  the query says `YIELD col0`. **Rejecting it broke four passing tests**, which
+  is how the mistake surfaced.
+- **`triggers.rs` pending-vertex labels** is fixed only to the extent of being
+  made loud. A vertex with no label in the tx L0 is skipped from the L1
+  pre-existence probe and can be reported as CREATE rather than UPDATE;
+  resolving it needs a label source that layer does not have.
+
+### What this round is evidence for
+
+**An audit's tiering is a hypothesis, and it is wrong in both directions.**
+One listed site was unreachable, one was a documented contract, one was
+three defects rather than one, and three real defects were absent from the
+list entirely. The `col{i}` case is the sharpest: a fix shipped on the audit's
+say-so broke working behaviour, and only the test suite disputed it.
+
+**A ratchet finds what an audit misses, because it does not depend on someone
+having looked.** `arch_fail_open.rs` found a site in a file that had just been
+audited and fixed by hand, in the same session.
+
+**Scope a ratchet to decisions, not to a class.** A general "no swallowed
+error" scan would carry a budget of hundreds of ordinary `unwrap_or_default`
+uses and the real entries would drown. Three narrow rules, each with a
+canonical remedy, catch the recurrences without the noise.
+
+### Recommended next
+
+**Superseded — see `issue_233_remaining_work_2026-09-06.md`.** This paragraph
+was written from the audits' own Tier 2 / Tier 3 labels. Re-triaging those
+labels against the source found **three Tier 1 sites still open**, all three
+inside the Tier 2/3 candidate lists: the public `CommitStream` silently
+skipping commits, the Rhai `determinism` default reaching
+`Volatility::Immutable`, and a deferral sidecar whose retry destroys the rows
+it failed to read. "~7 sites, none of them wrong answers" is wrong on the
+second clause, and #233's P0 outranks #214.
+
+~~Unchanged, and now unblocked: **#214 with #240**, then **#239**, then
+**#224** and the rest of Tier 4. #233 stays open for Tier 2 across the
+newly-audited crates — ~7 sites, none of them wrong answers.~~

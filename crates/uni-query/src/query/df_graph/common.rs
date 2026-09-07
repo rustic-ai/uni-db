@@ -1946,6 +1946,19 @@ pub(crate) fn extract_scalar_key(
                     );
                     match formatter {
                         Ok(f) => ScalarKey::Utf8(f.value(row_idx).to_string()),
+                        // #233 listed this as a silent wrong answer: the key is
+                        // distinct per row within a batch (so DISTINCT and
+                        // GROUP BY stop deduplicating) and collides across
+                        // batches at the same index. Both are true *if* the
+                        // formatter can fail. Measured against arrow 58: it
+                        // cannot — `make_default_display_index` covers every
+                        // `DataType` the crate defines, so there is no array
+                        // this can be reached with. Kept as defense in depth
+                        // and pinned by `array_formatter_covers_every_key_type`
+                        // below, which fails if an arrow upgrade ever
+                        // reintroduces an unformattable type. Do not treat
+                        // this as a live defect without first making that test
+                        // fail.
                         Err(_) => ScalarKey::Utf8(format!("opaque@{row_idx}")),
                     }
                 }
@@ -1964,6 +1977,89 @@ mod tests {
     use super::*;
     use arrow_array::{LargeBinaryArray, UInt64Array};
     use arrow_schema::Schema;
+
+    /// Every type reaching `extract_scalar_key`'s catch-all is formattable.
+    ///
+    /// #233 listed the `opaque@{row_idx}` fallback as a silent wrong answer.
+    /// It is unreachable in arrow 58: `ArrayFormatter::try_new` succeeds for
+    /// every `DataType` the crate defines, so the fallback cannot produce a
+    /// grouping key. This pins that, rather than the fallback's behaviour —
+    /// if an arrow upgrade introduces an unformattable type, the fallback
+    /// becomes live and this test says so.
+    #[test]
+    fn array_formatter_covers_every_key_type() {
+        use arrow::util::display::{ArrayFormatter, FormatOptions};
+        use arrow_array::types::Int32Type;
+        use arrow_array::{
+            Array, ArrayRef, BooleanArray, DictionaryArray, Float64Array, Int64Array, ListArray,
+            MapArray, StringArray, StructArray,
+        };
+
+        let opts = FormatOptions::default();
+
+        // The arms `extract_scalar_key` handles explicitly, plus the nested
+        // and encoded types that fall through to the formatter.
+        let mut cases: Vec<(&str, ArrayRef)> = vec![
+            ("Boolean", Arc::new(BooleanArray::from(vec![true]))),
+            ("Int64", Arc::new(Int64Array::from(vec![1i64]))),
+            ("Float64", Arc::new(Float64Array::from(vec![1.0f64]))),
+            ("Utf8", Arc::new(StringArray::from(vec!["a"]))),
+            (
+                "LargeBinary",
+                Arc::new(LargeBinaryArray::from(vec![&b"a"[..]])),
+            ),
+            ("UInt64", Arc::new(UInt64Array::from(vec![1u64]))),
+        ];
+
+        cases.push((
+            "Struct",
+            Arc::new(StructArray::from(vec![(
+                Arc::new(Field::new("f", DataType::Int64, true)),
+                Arc::new(Int64Array::from(vec![1])) as ArrayRef,
+            )])),
+        ));
+        cases.push((
+            "List",
+            Arc::new(ListArray::from_iter_primitive::<
+                arrow_array::types::Int64Type,
+                _,
+                _,
+            >(vec![Some(vec![Some(1)])])),
+        ));
+        let dict: DictionaryArray<Int32Type> = vec!["a"].into_iter().collect();
+        cases.push(("Dictionary", Arc::new(dict)));
+
+        // A Map array, which the catch-all also routes to the formatter.
+        let map = {
+            let keys = StringArray::from(vec!["k"]);
+            let vals = Int64Array::from(vec![1i64]);
+            let entries = StructArray::from(vec![
+                (
+                    Arc::new(Field::new("keys", DataType::Utf8, false)),
+                    Arc::new(keys) as ArrayRef,
+                ),
+                (
+                    Arc::new(Field::new("values", DataType::Int64, true)),
+                    Arc::new(vals) as ArrayRef,
+                ),
+            ]);
+            let field = Arc::new(Field::new("entries", entries.data_type().clone(), false));
+            let offsets = arrow::buffer::OffsetBuffer::new(vec![0, 1].into());
+            MapArray::try_new(field, offsets, entries, None, false)
+                .expect("map array should be valid")
+        };
+        cases.push(("Map", Arc::new(map)));
+
+        for (name, arr) in cases {
+            assert!(
+                ArrayFormatter::try_new(arr.as_ref(), &opts).is_ok(),
+                "{name} ({}) is not formattable, so extract_scalar_key's \
+                 fallback is now reachable and produces a per-row grouping \
+                 key — see the comment at the fallback site",
+                arr.data_type()
+            );
+        }
+    }
 
     #[test]
     fn test_extract_row_params_loses_uint64_to_int() {

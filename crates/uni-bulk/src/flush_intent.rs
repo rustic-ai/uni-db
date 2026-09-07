@@ -128,8 +128,13 @@ async fn read(store: &Arc<dyn ObjectStore>) -> Result<Option<BulkFlushIntent>> {
     }
 }
 
+/// #233 Tier 1: this matched on the error's rendered STRING, so any genuine
+/// store failure whose text happens to contain "not found" read as "no marker
+/// present" — an interrupted bulk load would then never be reconciled and its
+/// half-written tables would stay. `uni-store` already carries the typed
+/// discrimination this needs.
 fn is_not_found(e: &anyhow::Error) -> bool {
-    e.to_string().to_lowercase().contains("not found")
+    uni_store::store_utils::is_not_found(e)
 }
 
 /// Reconcile an interrupted bulk load at database open. See the module docs for

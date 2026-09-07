@@ -50,6 +50,7 @@ use datafusion::logical_expr::{
     BinaryExpr, Expr, Operator, TableProviderFilterPushDown, TableType,
 };
 use datafusion::physical_expr::EquivalenceProperties;
+use datafusion::physical_expr::create_physical_expr;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
@@ -341,7 +342,29 @@ impl ExecutionPlan for StorageScanExec {
             match storage.read_batch(&table, predicate.as_ref()).await {
                 Ok(s) => Ok(s),
                 Err(e) if e.code == STORAGE_FILTER_UNENCODABLE => {
-                    storage.read_batch(&table, None).await.map_err(fn_err_to_df)
+                    // #233 Tier 1: this used to re-read with `None`, dropping
+                    // the predicate entirely. `StorageFilterPushdown`
+                    // classifies a filter as fully handled whenever
+                    // `expr_to_sql` can render it, and `PushdownNegotiationRule`
+                    // then ELIDES the verifying `Filter` node — so when the
+                    // backend disagreed about encodability at run time, rows
+                    // violating the `WHERE` clause were returned to the user.
+                    // The plan-time classifier and the run-time backend can
+                    // disagree; nothing cross-checks them.
+                    //
+                    // Erroring here would break the sound case (classified
+                    // `Inexact`, `FilterExec` still above us), so instead the
+                    // scan honours the predicate itself. Re-filtering is
+                    // idempotent with a `FilterExec` above, so this is correct
+                    // whether or not the Filter node was elided.
+                    let unfiltered = storage
+                        .read_batch(&table, None)
+                        .await
+                        .map_err(fn_err_to_df)?;
+                    let Some(expr) = predicate.as_ref() else {
+                        return Ok(unfiltered);
+                    };
+                    local_filter_stream(unfiltered, expr)
                 }
                 Err(e) => Err(fn_err_to_df(e)),
             }
@@ -364,6 +387,51 @@ impl ExecutionPlan for StorageScanExec {
     fn partition_statistics(&self, _partition: Option<usize>) -> DfResult<Statistics> {
         Ok(Statistics::new_unknown(&self.projected_schema))
     }
+}
+
+/// Applies `expr` to every batch of `input` in this process.
+///
+/// Used when a storage backend reports a predicate as unencodable at run
+/// time. The scan cannot silently return unfiltered rows: the logical plan
+/// may already have elided the verifying `Filter` node on the strength of
+/// the pushdown marker's plan-time classification (#233).
+///
+/// # Errors
+///
+/// Returns an error if the predicate cannot be compiled against the stream's
+/// schema, or if evaluating it does not yield a boolean column.
+fn local_filter_stream(
+    input: SendableRecordBatchStream,
+    expr: &Expr,
+) -> DfResult<SendableRecordBatchStream> {
+    use datafusion::common::DFSchema;
+    use datafusion::execution::context::ExecutionProps;
+
+    let schema = input.schema();
+    let df_schema = DFSchema::try_from(Arc::clone(&schema))?;
+    let props = ExecutionProps::new();
+    let physical = create_physical_expr(expr, &df_schema, &props)?;
+
+    let filtered_schema = Arc::clone(&schema);
+    let filtered = input.map(move |batch| {
+        let batch = batch?;
+        let evaluated = physical.evaluate(&batch)?;
+        let evaluated = evaluated.into_array(batch.num_rows())?;
+        let mask = evaluated
+            .as_any()
+            .downcast_ref::<arrow_array::BooleanArray>()
+            .ok_or_else(|| {
+                DataFusionError::Execution(
+                    "storage scan predicate did not evaluate to a boolean column".to_owned(),
+                )
+            })?;
+        arrow::compute::filter_record_batch(&batch, mask).map_err(DataFusionError::from)
+    });
+
+    Ok(Box::pin(RecordBatchStreamAdapter::new(
+        filtered_schema,
+        filtered,
+    )))
 }
 
 fn fn_err_to_df(e: uni_plugin::errors::FnError) -> DataFusionError {
@@ -525,6 +593,117 @@ mod tests {
         let p = StorageTableProvider::new(storage, "t".to_owned(), Arc::clone(&schema));
         assert_eq!(p.schema().as_ref(), schema.as_ref());
         assert_eq!(p.table(), "t");
+    }
+
+    /// A backend that accepts writes but declares every predicate unencodable.
+    ///
+    /// Models the real hazard: `StorageFilterPushdown` classifies a filter as
+    /// fully handled whenever `expr_to_sql` renders it, but the run-time
+    /// backend is a separate implementation that may disagree. Nothing
+    /// cross-checks them.
+    struct UnencodableFilterStorage(Arc<dyn Storage>);
+
+    impl fmt::Debug for UnencodableFilterStorage {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("UnencodableFilterStorage")
+        }
+    }
+
+    #[async_trait]
+    impl Storage for UnencodableFilterStorage {
+        async fn read_batch(
+            &self,
+            table: &str,
+            predicate: Option<&Expr>,
+        ) -> Result<SendableRecordBatchStream, uni_plugin::errors::FnError> {
+            if predicate.is_some() {
+                return Err(uni_plugin::errors::FnError {
+                    code: STORAGE_FILTER_UNENCODABLE,
+                    message: "test backend encodes no predicates".to_owned(),
+                    retryable: false,
+                });
+            }
+            self.0.read_batch(table, None).await
+        }
+
+        async fn write_batch(
+            &self,
+            table: &str,
+            batch: &RecordBatch,
+        ) -> Result<uni_plugin::traits::storage::WriteHandle, uni_plugin::errors::FnError> {
+            self.0.write_batch(table, batch).await
+        }
+
+        async fn list_tables(&self) -> Result<Vec<String>, uni_plugin::errors::FnError> {
+            self.0.list_tables().await
+        }
+
+        async fn delete(
+            &self,
+            table: &str,
+            predicate: &Expr,
+        ) -> Result<u64, uni_plugin::errors::FnError> {
+            self.0.delete(table, predicate).await
+        }
+    }
+
+    /// A scan must honour its predicate even when the backend cannot encode it.
+    ///
+    /// #233 Tier 1. The fallback re-read with `None`, dropping the predicate.
+    /// That is safe only while a verifying `FilterExec` survives above the
+    /// scan — and `PushdownNegotiationRule` elides exactly that node when the
+    /// pushdown marker reports the filter fully handled. This exercises
+    /// `StorageScanExec` directly, which is the elided shape: there is no
+    /// operator above to re-apply the predicate, so whatever the scan emits is
+    /// what the user sees.
+    #[tokio::test]
+    async fn a_scan_honours_its_predicate_when_the_backend_cannot_encode_it() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int64, false)]));
+        let inner: Arc<dyn Storage> = Arc::new(MemoryStorage::new());
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![Arc::new(Int64Array::from(vec![1_i64, 2, 3, 4, 5, 6, 7, 8]))],
+        )
+        .unwrap();
+        inner.write_batch("mem", &batch).await.unwrap();
+        let storage: Arc<dyn Storage> = Arc::new(UnencodableFilterStorage(inner));
+
+        let predicate = Expr::Column(Column::new_unqualified("x"))
+            .gt(Expr::Literal(ScalarValue::Int64(Some(5)), None));
+        let exec = StorageScanExec::new(
+            storage,
+            "mem".to_owned(),
+            Arc::clone(&schema),
+            Arc::clone(&schema),
+            None,
+            vec![predicate],
+            None,
+        );
+
+        let ctx = Arc::new(TaskContext::default());
+        let stream = exec.execute(0, ctx).expect("execute");
+        let batches: Vec<RecordBatch> = stream.try_collect().await.expect("collect");
+        let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
+
+        assert_eq!(
+            total, 3,
+            "the scan must emit only x > 5 (6, 7, 8); emitting all 8 rows is the \
+             WHERE-clause violation #233 describes"
+        );
+        for b in &batches {
+            let col = b
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("int column");
+            for i in 0..b.num_rows() {
+                assert!(
+                    col.value(i) > 5,
+                    "row {} violates the predicate",
+                    col.value(i)
+                );
+            }
+        }
     }
 
     #[tokio::test]

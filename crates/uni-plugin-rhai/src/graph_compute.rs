@@ -484,7 +484,15 @@ impl GcSession {
 
     /// The top-`k` `[vertexId, value]` pairs by descending value.
     fn topk(&mut self, m: i64, k: i64) -> Result<Array, Box<EvalAltResult>> {
-        let kk = u32::try_from(k).unwrap_or(0);
+        // #233 Tier 1: a negative or oversized `k` became 0, which is a
+        // valid top-k meaning "return nothing" — so the script got an empty
+        // result instead of being told its argument was unusable.
+        let kk = u32::try_from(k).map_err(|_| {
+            rt(FnError::new(
+                0x803,
+                format!("topk: k must fit in u32, got {k}"),
+            ))
+        })?;
         let mut s = self.session.lock();
         let ranked = s.topk(from_i64(m), kk).map_err(rt)?;
         Ok(ranked
@@ -527,8 +535,20 @@ impl GcSession {
                     .map_err(|_| rt(FnError::new(0x802, "random_walks: seed must be an integer")))
             })
             .collect::<Result<_, _>>()?;
-        let wl = usize::try_from(walk_length).unwrap_or(0);
-        let wn = usize::try_from(walks_per_node).unwrap_or(0);
+        // #233 Tier 1: a negative length or count became 0, so `random_walks`
+        // silently produced no walks rather than reporting the bad argument.
+        let wl = usize::try_from(walk_length).map_err(|_| {
+            rt(FnError::new(
+                0x804,
+                format!("random_walks: walk_length must be non-negative, got {walk_length}"),
+            ))
+        })?;
+        let wn = usize::try_from(walks_per_node).map_err(|_| {
+            rt(FnError::new(
+                0x805,
+                format!("random_walks: walks_per_node must be non-negative, got {walks_per_node}"),
+            ))
+        })?;
         #[expect(clippy::cast_sign_loss, reason = "the rng seed round-trips bit-exact")]
         let rng_seed = seed as u64;
         let mut s = self.session.lock();
@@ -811,7 +831,15 @@ impl GcSession {
         delta: f64,
         bucket: i64,
     ) -> Result<i64, Box<EvalAltResult>> {
-        let b = u32::try_from(bucket).unwrap_or(0);
+        // #233 Tier 1: a negative bucket became bucket 0, and the caller got
+        // bucket 0's answer as if it were the band they asked for — a wrong
+        // SSSP result rather than an error.
+        let b = u32::try_from(bucket).map_err(|_| {
+            rt(FnError::new(
+                0x806,
+                format!("next_bucket: bucket must be non-negative, got {bucket}"),
+            ))
+        })?;
         let mut s = self.session.lock();
         s.next_bucket(from_i64(dist), delta, b)
             .map(to_i64)
@@ -833,7 +861,14 @@ impl GcSession {
     ) -> Result<i64, Box<EvalAltResult>> {
         let m = OverlapMetric::parse(metric.as_str()).map_err(rt)?;
         let spec = if pair_mode.as_str() == "topk" {
-            PairSpec::TopKCandidates(u32::try_from(k).unwrap_or(0))
+            // #233 Tier 1: see `topk` — 0 means "return nothing", so a bad
+            // `k` produced zero pairs instead of an error.
+            PairSpec::TopKCandidates(u32::try_from(k).map_err(|_| {
+                rt(FnError::new(
+                    0x807,
+                    format!("all_pairs_overlap: k must fit in u32, got {k}"),
+                ))
+            })?)
         } else {
             PairSpec::AdjacentPairs
         };

@@ -53,6 +53,7 @@ pub mod issue_93_bytes_round_trip;
 pub mod locy_is_not_complement_recursion;
 pub mod pattern_exists_unbound_param;
 pub mod relationship_uniqueness_invariant;
+pub mod repro_233_periodic_cancel_durability;
 pub mod repro_edge_export;
 // Correctness-scan Wave 0 repros.
 pub mod repro_fork_sweeper_shutdown;

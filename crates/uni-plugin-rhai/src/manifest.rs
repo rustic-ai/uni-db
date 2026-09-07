@@ -151,7 +151,12 @@ pub fn parse_manifest(engine: &Engine, ast: &AST) -> Result<RhaiManifest, RhaiEr
 
     let id = required_string(&map, "id")?;
     let version = required_string(&map, "version")?;
-    let determinism = optional_string(&map, "determinism").unwrap_or_else(|| "pure".into());
+    // An ABSENT `determinism` keeps the documented default of `"pure"`, which
+    // matches the Python binding's `determinism: str = 'pure'`. Changing that
+    // default is a product decision, not a bug fix — see
+    // `docs/proposals/issue_233_remaining_work_2026-09-06.md`. What changed is
+    // that a *declared* value can no longer be silently discarded.
+    let determinism = optional_string(&map, "determinism")?.unwrap_or_else(|| "pure".into());
 
     let scalar_fns = parse_scalar_entries(&map)?;
     let aggregate_fns = parse_aggregate_entries(&map)?;
@@ -203,7 +208,7 @@ fn parse_scalar_entries(map: &Map) -> Result<Vec<ScalarEntry>, RhaiError> {
             name: required_string(m, "name")?,
             args: required_string_array(m, "args")?,
             returns: required_string(m, "returns")?,
-            vectorized: optional_bool(m, "vectorized").unwrap_or(false),
+            vectorized: optional_bool(m, "vectorized")?.unwrap_or(false),
         })
     })
 }
@@ -214,7 +219,7 @@ fn parse_aggregate_entries(map: &Map) -> Result<Vec<AggregateEntry>, RhaiError> 
             name: required_string(m, "name")?,
             args: required_string_array(m, "args")?,
             returns: required_string(m, "returns")?,
-            state: optional_string(m, "state").unwrap_or_else(|| "map".into()),
+            state: optional_string(m, "state")?.unwrap_or_else(|| "map".into()),
         })
     })
 }
@@ -225,7 +230,7 @@ fn parse_procedure_entries(map: &Map) -> Result<Vec<ProcedureEntry>, RhaiError> 
             name: required_string(m, "name")?,
             args: required_string_array(m, "args")?,
             yields: parse_yield_fields(m)?,
-            mode: optional_string(m, "mode").unwrap_or_else(|| "read".into()),
+            mode: optional_string(m, "mode")?.unwrap_or_else(|| "read".into()),
         })
     })
 }
@@ -282,12 +287,48 @@ fn required_string(map: &Map, key: &str) -> Result<String, RhaiError> {
         .map_err(|t| RhaiError::ManifestInvalid(format!("`{key}` must be a string (got {t})")))
 }
 
-fn optional_string(map: &Map, key: &str) -> Option<String> {
-    map.get(key).and_then(|d| d.clone().into_string().ok())
+/// Read an optional string field, rejecting a present-but-wrong-typed value.
+///
+/// # Errors
+///
+/// Returns [`RhaiError::ManifestInvalid`] if `key` is present but is not a
+/// string.
+///
+/// #233: this returned a bare `Option`, so "the author did not declare this"
+/// and "the author declared it and got the type wrong" both became `None` and
+/// took the caller's default. For `determinism` that default is `"pure"`,
+/// which maps to `Volatility::Immutable` — so a declared-but-mistyped value
+/// silently told DataFusion it could constant-fold a nondeterministic
+/// function. An absent key still takes the documented default; a declared one
+/// is no longer discarded.
+fn optional_string(map: &Map, key: &str) -> Result<Option<String>, RhaiError> {
+    let Some(d) = map.get(key) else {
+        return Ok(None);
+    };
+    d.clone().into_string().map(Some).map_err(|actual| {
+        RhaiError::ManifestInvalid(format!(
+            "field `{key}` must be a string, got {actual}; it was declared, so it is not \
+             silently defaulted"
+        ))
+    })
 }
 
-fn optional_bool(map: &Map, key: &str) -> Option<bool> {
-    map.get(key).and_then(|d| d.as_bool().ok())
+/// Read an optional boolean field, rejecting a present-but-wrong-typed value.
+///
+/// # Errors
+///
+/// Returns [`RhaiError::ManifestInvalid`] if `key` is present but is not a
+/// boolean. See [`optional_string`] for why (#233).
+fn optional_bool(map: &Map, key: &str) -> Result<Option<bool>, RhaiError> {
+    let Some(d) = map.get(key) else {
+        return Ok(None);
+    };
+    d.as_bool().map(Some).map_err(|actual| {
+        RhaiError::ManifestInvalid(format!(
+            "field `{key}` must be a boolean, got {actual}; it was declared, so it is not \
+             silently defaulted"
+        ))
+    })
 }
 
 fn required_string_array(map: &Map, key: &str) -> Result<Vec<String>, RhaiError> {
@@ -344,6 +385,66 @@ mod tests {
         assert_eq!(m.scalar_fns[0].args, vec!["float", "float"]);
         assert_eq!(m.scalar_fns[0].returns, "float");
         assert!(!m.scalar_fns[0].vectorized);
+    }
+
+    /// A declared-but-mistyped `determinism` must not become `"pure"`.
+    ///
+    /// #233. `optional_string` returned `None` for both "absent" and "present
+    /// but not a string", and the caller defaulted to `"pure"` →
+    /// `Volatility::Immutable`. So `determinism: 1` told DataFusion it could
+    /// constant-fold or CSE a function the author never claimed was pure —
+    /// a silent wrong answer for any nondeterministic Rhai scalar.
+    ///
+    /// An ABSENT key still defaults to `"pure"` (see the neighbouring
+    /// `minimal_manifest_parses`): that default is documented and shared with
+    /// the Python binding, and changing it is a product decision.
+    #[test]
+    fn a_declared_but_mistyped_determinism_is_rejected_not_defaulted() {
+        let script = r#"
+            fn uni_manifest() {
+                #{
+                    id: "ai.test.mistyped",
+                    version: "0.1.0",
+                    determinism: 1,
+                    scalar_fns: [
+                        #{ name: "score", args: ["float"], returns: "float" },
+                    ],
+                }
+            }
+            fn score(x) { x }
+        "#;
+        let eng = engine();
+        let ast = compile(&eng, script).expect("compiles");
+        let err = parse_manifest(&eng, &ast)
+            .expect_err("a mistyped determinism must not silently become `pure`");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("determinism"),
+            "the error should name the offending field, got: {msg}"
+        );
+    }
+
+    /// The same guard on the other optional fields.
+    #[test]
+    fn a_declared_but_mistyped_vectorized_is_rejected() {
+        let script = r#"
+            fn uni_manifest() {
+                #{
+                    id: "ai.test.mistyped2",
+                    version: "0.1.0",
+                    scalar_fns: [
+                        #{ name: "score", args: ["float"], returns: "float", vectorized: "yes" },
+                    ],
+                }
+            }
+            fn score(x) { x }
+        "#;
+        let eng = engine();
+        let ast = compile(&eng, script).expect("compiles");
+        assert!(
+            parse_manifest(&eng, &ast).is_err(),
+            "a mistyped `vectorized` must not silently select the scalar path"
+        );
     }
 
     #[test]

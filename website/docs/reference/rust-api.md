@@ -1016,6 +1016,39 @@ while let Some(notif) = stream.next().await {
 |--------|---------|-------------|
 | `next()` | `Option<CommitNotification>` | Wait for the next matching notification. `None` if channel closed. |
 
+#### Delivery: best-effort, not a feed
+
+`watch()` is a **notification** stream, not a change feed. It runs over a
+bounded broadcast channel (`UniConfig::commit_channel_capacity`, default 256).
+A consumer that falls behind loses the **oldest** commits — it always still
+receives the newest.
+
+That is deliberate, and correct for the intended use. A consumer that
+invalidates a cache and re-reads is unaffected by lag: the final notification
+always arrives, so the re-read picks up whatever the lost commits did.
+`debounce()` drops notifications for the same reason.
+
+A consumer doing **non-idempotent per-commit work** — an audit mirror, a
+counter, anything that appends once per commit — must check
+`CommitNotification::dropped_before`, which reports how many commits were lost
+immediately before the one you are holding. Filtered skips are never counted
+there, so a `labels()` or `debounce()` filter cannot raise a false alarm.
+
+```rust
+while let Some(n) = stream.next().await {
+    if n.dropped_before > 0 {
+        // These commits cannot be redelivered.
+        return Err(anyhow!("lost {} commits before version {}", n.dropped_before, n.version));
+    }
+    audit_log.append(&n)?;
+}
+```
+
+**If you need a contiguous feed, use CDC instead.** A `CdcOutputProvider`
+guarantees contiguity, checkpoints its position, and halts on a gap rather
+than silently continuing past one. `watch()` will never provide that
+guarantee; `dropped_before` exists so you find out you need it.
+
 ### WatchBuilder
 
 Build a filtered commit stream. Created by `session.watch_with()`.

@@ -147,7 +147,12 @@ impl MultiVersionLinker {
 /// and stable — including the attenuation patterns, so two grants that differ
 /// only in (say) their network allow-list key distinct linkers.
 fn caps_signature(caps: &uni_plugin::CapabilitySet) -> String {
-    serde_json::to_string(caps).unwrap_or_default()
+    // Serializing a `BTreeSet<Capability>` cannot fail. `expect` rather than
+    // `unwrap_or_default` because the default is the empty string, which would
+    // make every capability set hash to the SAME linker cache key — silently
+    // handing one plugin a linker built for another plugin's grants. A panic
+    // on the impossible is the safer failure here.
+    serde_json::to_string(caps).expect("a CapabilitySet always serializes")
 }
 
 #[cfg(test)]

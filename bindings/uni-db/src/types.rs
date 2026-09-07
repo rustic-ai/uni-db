@@ -1383,14 +1383,23 @@ pub struct PyCommitNotification {
     pub session_id: String,
     /// Database version when the transaction started.
     pub causal_version: u64,
+    /// Commits this stream lost, immediately before this one, because the
+    /// consumer fell behind.
+    ///
+    /// `0` normally. A non-zero value means the broadcaster evicted that many
+    /// older commits; they cannot be redelivered. Filtered skips are never
+    /// counted here. A consumer doing idempotent work (invalidate and re-read)
+    /// can ignore this; one doing non-idempotent per-commit work must check
+    /// it, or use the CDC surface, which guarantees a contiguous feed (#233).
+    pub dropped_before: u64,
 }
 
 #[pymethods]
 impl PyCommitNotification {
     fn __repr__(&self) -> String {
         format!(
-            "CommitNotification(version={}, mutations={}, labels={:?})",
-            self.version, self.mutation_count, self.labels_affected
+            "CommitNotification(version={}, mutations={}, labels={:?}, dropped_before={})",
+            self.version, self.mutation_count, self.labels_affected, self.dropped_before
         )
     }
 }
@@ -1407,6 +1416,7 @@ impl From<::uni_db::CommitNotification> for PyCommitNotification {
             tx_id: n.tx_id,
             session_id: n.session_id,
             causal_version: n.causal_version,
+            dropped_before: n.dropped_before,
         }
     }
 }
@@ -4424,6 +4434,8 @@ pub struct PyPromoteReport {
     pub edges_inserted: usize,
     pub edges_skipped_duplicate: usize,
     pub edges_skipped_no_endpoint: usize,
+    pub edges_inserted_unverified: usize,
+    pub vertices_deletes_unverified: usize,
     pub edges_skipped: usize,
     pub per_pattern_inserted: Vec<usize>,
 }
@@ -4433,12 +4445,17 @@ impl PyPromoteReport {
     fn __repr__(&self) -> String {
         format!(
             "PromoteReport(vertices_inserted={}, vertices_skipped_uid_conflict={}, \
-             edges_inserted={}, edges_skipped_duplicate={}, edges_skipped_no_endpoint={})",
+             edges_inserted={}, edges_skipped_duplicate={}, edges_skipped_no_endpoint={}, \
+             vertices_inserted_unverified={}, edges_inserted_unverified={}, \
+             vertices_deletes_unverified={})",
             self.vertices_inserted,
             self.vertices_skipped_uid_conflict,
             self.edges_inserted,
             self.edges_skipped_duplicate,
             self.edges_skipped_no_endpoint,
+            self.vertices_inserted_unverified,
+            self.edges_inserted_unverified,
+            self.vertices_deletes_unverified,
         )
     }
 }
@@ -4460,6 +4477,8 @@ impl PyPromoteReport {
             edges_inserted: r.edges_inserted,
             edges_skipped_duplicate: r.edges_skipped_duplicate,
             edges_skipped_no_endpoint: r.edges_skipped_no_endpoint,
+            edges_inserted_unverified: r.edges_inserted_unverified,
+            vertices_deletes_unverified: r.vertices_deletes_unverified,
             edges_skipped: r.edges_skipped,
             per_pattern_inserted: r.per_pattern_inserted,
         }

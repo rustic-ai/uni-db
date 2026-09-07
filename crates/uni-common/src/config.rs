@@ -441,6 +441,20 @@ pub struct UniConfig {
     /// Auto-flush threshold for L0 buffer (default: 10_000 mutations)
     pub auto_flush_threshold: usize,
 
+    /// Capacity of the commit-notification broadcast channel (default: 256).
+    ///
+    /// `session.watch()` is a best-effort stream over a bounded broadcast
+    /// channel: a consumer that falls behind by more than this many commits
+    /// loses the oldest ones, reported on
+    /// `CommitNotification::dropped_before`. Raising it buys headroom for a
+    /// slow consumer at the cost of retaining that many notifications per
+    /// channel; it does not make the stream a contiguous feed — use the CDC
+    /// surface for that.
+    ///
+    /// #233: this was hardcoded at two sites, so a consumer could neither
+    /// detect the loss nor buy room to avoid it.
+    pub commit_channel_capacity: usize,
+
     /// Auto-flush interval for L0 buffer (default: 5 seconds).
     /// Flush triggers if time elapsed AND mutation count >= auto_flush_min_mutations.
     /// Set to None to disable time-based flush.
@@ -716,6 +730,7 @@ impl Default for UniConfig {
             batch_size: 1024, // Default morsel size
             max_frontier_size: 1_000_000,
             auto_flush_threshold: 10_000,
+            commit_channel_capacity: 256,
             auto_flush_interval: Some(Duration::from_secs(5)),
             auto_flush_min_mutations: 1,
             wal_enabled: true,
