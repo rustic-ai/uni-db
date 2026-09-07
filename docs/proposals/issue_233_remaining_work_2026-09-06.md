@@ -218,3 +218,133 @@ where there is nobody to tell.**
 That distinction, not the tier label, is what did the work throughout: the
 useful question was never "how bad is this" but **"does anything correct it,
 and is there anyone to tell?"**
+
+---
+
+# The workspace audit — 2026-09-06, later
+
+The section above closed P0–P3 and stated that Tier 1 was discharged "in every
+crate". **That was wrong in the same way #233's original scope note was wrong**:
+it generalised from the crates that had been audited to the whole workspace.
+Audited by then: `uni-store`, `uni-query`, the `uni-plugin*` family (six of
+them), `uni-bulk`, `uni-cli`, `uni-crdt`. Never audited: everything else.
+
+Five parallel auditors then covered the remainder. **~22 code-level Tier 1
+sites, plus three design calls.** So #233 does not close.
+
+## Findings by crate
+
+### `uni-fork` — 2 Tier 1
+
+| site | consequence |
+|---|---|
+| `diff.rs:880` | `if let Ok(rs) = primary.query(..)` pre-fetches primary's existing parallel edges for dedup. On failure the set is empty, every fork edge looks new, and promote inserts **duplicate edges on primary** — reported as clean `edges_inserted` with `edges_skipped_duplicate = 0`. |
+| `diff.rs:510` | The upsert `(label, ext_id)` resolve. On failure an *edited* fork vertex fails to match its primary twin and is **inserted as a duplicate instead of updating in place**. |
+| `diff.rs:838` (Tier 3) | `let (resolved, _degraded)` — the flag is computed and discarded. The identical call at `:703` consumes it. |
+
+The remedy is uniform: `batch_resolve_primary_vids` already returns a
+`degraded` flag that `run_promote` surfaces as `vertices_inserted_unverified`
+with a `warn!`. All three sites are the same omission relative to that sibling.
+
+### `uni-query-functions` — 4 solid Tier 1, 4 narrower
+
+| site | consequence |
+|---|---|
+| `datetime.rs:1990`, `:2043` | `datetime(localtime('12:00'))` substitutes **today's wall-clock date**. The same query answers differently tomorrow. `eval_time`, one screen up, errors on the identical condition. |
+| `expr_eval.rs:1716`, `:1730` | `left('hello', -1)`: `as_i64` gives `-1`, `as usize` wraps to `usize::MAX`, `take(MAX)` returns **the whole string**. `left('hello', 2.0)` returns `""` (`as_i64` is `None` for Float). `substring` guards both — with a comment describing this exact bug. |
+| `df_udfs.rs:2349` | Third decode fallback: the row silently becomes NULL rather than erroring. |
+| `df_udfs.rs:5699` | An undecodable `LargeBinary` becomes `Value::Null`, which ranks *smallest*, so `min(p)` returns NULL over a column that has values. |
+
+Narrower: `df_udfs.rs:4621/4650` (truncated bool payload drops a row from
+`WHERE`), `datetime.rs:3663` (DST-boundary offset misresolve),
+`df_udfs.rs:5687` (NaN compares equal, so `min`/`max` is input-order
+dependent). ~170 of 202 raw hits are ordinary correct Rust.
+
+### `uni-algo` — 4 Tier 1
+
+| site | consequence |
+|---|---|
+| `projection.rs:565` | `if let Ok(Some(batch))` — an IO/decode error on one label's vertex table **drops all that label's vertices**, and PageRank/WCC return confident scores for a subgraph the user never asked for. The only `if let Ok` in the file; its sibling `collect_edges` propagates. |
+| `random_walk.rs:47` | A bad `startNodes` entry is dropped; if all are bad the empty vector is treated as "start from all nodes", so `randomWalk(startNodes: ['abc'])` **walks the whole graph**. `astar.rs` and `all_simple_paths.rs` carry comments saying they were changed to propagate exactly this. |
+| `node_similarity.rs:36`, `degree_centrality.rs:31` | `metric:'COSIN'` silently returns **Jaccard**; `direction:'INCOMMING'` returns **outgoing** degrees, with `include_reverse(false)` making genuine incoming degrees 0. |
+| `projection.rs:981` | A `weightColumn` the edge query does not yield makes **every edge weight 1.0**. The Native path was already hardened for this, with an error whose comment reads *"a column of silent 1.0s that is indistinguishable from real weights"*. The Cypher path never got the guard. |
+
+### `uni-common` — 3 Tier 1, 2 design
+
+| site | consequence |
+|---|---|
+| `value.rs:775-784` | `canonical_entity` gives an edge map with no `_src`/`_dst` an `Edge{src: Vid::INVALID, dst: Vid::INVALID}` and `type(r) == ""`. So `startNode(r)` returns a **bogus vid instead of the `null` the same map produced before canonicalization** — at ~18 call sites. Its sibling `edge_endpoints` is correct, and the function's own doc says such a map is "left alone rather than guessed at". |
+| `value.rs:1876`, `:1897` | `TryFrom<&Value> for Vid`: `Int(-1)` wraps to `Vid(u64::MAX)` = `Vid::INVALID`, returned as `Ok`. `coerce_vid` documents rejecting negatives. |
+| `check_constraint.rs:113` **(design)** | A declared `CHECK (age >= 18 AND age < 100)` — 7 tokens against a 3-token parser — returns `Ok(true)` and is **never enforced**; violating rows commit. Documented as deliberate, and rejecting at evaluation time would block legitimate writes. The real gap is that **DDL accepts a constraint it cannot enforce**: fail the declaration, not the write. |
+| `cypher_value_codec.rs:476-500` **(design)** | The fast-decode quartet returns `Option`, conflating "wrong tag" with "tag matched, payload corrupt". Downstream `decode_bool(..).unwrap_or(false)` turns a corrupt blob into a false predicate and the row vanishes. The slow-path sibling `decode_msgpack` returns `Result`. ~14 call sites. |
+
+### Plugin loaders — 9 Tier 1
+
+| site | consequence |
+|---|---|
+| `extism/loader.rs:40` | **No ABI check at all.** `abi_extism` is parsed and read by nothing in the repo, so a guest declaring `"abi-extism":"^9"` loads against a v1 host. `uni-plugin-wasm` does `AbiRange::parse` + `major_for_abi` and returns `AbiUnsupported`. Same family as the `AbiRange` → `STAR` defect fixed this session, with validation not weakened but simply absent. |
+| `extism/exports.rs:40/47`, `wasm/loader.rs:91/98` | `default_volatility() = "immutable"` — a registration omitting `volatility` lets DataFusion constant-fold a **nondeterministic guest function**. Verbatim the Rhai `determinism` defect fixed this session. Both loaders *reject* a bad value and *accept* an absent one. |
+| `extism/loader.rs:47` | `determinism` also parsed and never read; the Extism loader never synthesizes a `PluginManifest`, so host-level determinism / signature / hash policy never sees an Extism plugin. |
+| `wasm-rt/ipc.rs:64` | The FU-2 secret-handle membrane walks Struct / List / LargeList / FixedSizeList / Map. `Union` and `RunEndEncoded` also carry nested `Field`s and the guest controls the IPC schema, so a secret-handle column buried in a Union child crosses unrejected. There is a test for the Struct case and none for Union. |
+| `apoc-core/convert.rs:158` | `apoc.convert.toString([1,2,3])` returns **NULL** where Neo4j returns `"[1, 2, 3]"` — everything but Bool/Int/Float/Utf8 hits the catch-all. The highest-impact APOC finding: an everyday ported query turns real data into NULL. |
+| `apoc-core/create.rs:149`, `text.rs:335` | `apoc.create.uuids(2_000_000)` silently returns 1,000,000 rows; `apoc.text.repeat` silently truncates. The caps are deliberate; the silence is the defect. |
+| `apoc-core/text.rs:345` | `indexOf` returns a UTF-8 **byte** offset where Neo4j returns a character index (`indexOf('cafés','s')` → 5 vs 4), and `text.length` counts scalar values, so the pair is not even self-consistent. |
+
+Two were explicitly **not** flagged despite matching the shape:
+`wasm/loader.rs:899` `let _ = store.set_fuel(..)` and `multi_version.rs:150`
+`to_string(caps).unwrap_or_default()` are unreachable as the code stands —
+but each is one refactor away from failing open silently (a dropped fuel cap;
+a linker cache key collapsing across capability sets).
+
+### Clean, with the mechanism stated
+
+`uni-cypher` (the parser is error-returning end to end; its one dangerous
+decode is unreachable because nothing constructs `CypherLiteral::Bytes`),
+`uni-locy` (its one "missing marginal becomes certain" default is fenced off
+because the sole caller inserts a weight for every RV it interns),
+`uni-sidecar` (`load()` already distinguishes `NotFound` → default from a real
+IO error → typed `Err`; both known defects were caller-side), `uni-btic` (pure
+in-memory codec, no IO).
+
+## What this audit is actually evidence for
+
+**One mechanism explains nearly all 22, and in every crate the evidence was a
+sibling that already does it right.**
+
+| crate | correct sibling | site that didn't get it |
+|---|---|---|
+| `uni-algo` | `collect_edges` propagates | `collect_vertices` swallows |
+| `uni-algo` | `astar` / `all_simple_paths` propagate, with comments | `random_walk` drops |
+| `uni-algo` | Native weight path errors, with the defect named | Cypher weight path defaults to 1.0 |
+| `uni-query-functions` | `eval_time` errors | `eval_datetime` substitutes `Utc::now()` |
+| `uni-query-functions` | `substring` guards, with the bug described | `left` / `right` do not |
+| `uni-common` | `edge_endpoints` returns Options | `canonical_entity` invents endpoints |
+| `uni-common` | `decode_msgpack` returns `Result` | the fast-decode quartet returns `Option` |
+| `uni-fork` | `batch_resolve_primary_vids` returns `degraded` | two callers ignore it, one discards it |
+| loaders | `uni-plugin-wasm` enforces ABI | `uni-plugin-extism` reads the field nowhere |
+
+So this is not carelessness. **The class keeps being fixed one site at a time,
+and the un-fixed sibling is what makes the next instance findable.** That is
+Class 1's founding observation, still producing instances in crates the class
+review never reached — which is exactly why its scope note mattered.
+
+Three of these are the *same* defect as one fixed earlier this session:
+`volatility` defaulting to `Immutable` on a missing field, in Rhai (fixed),
+Extism and Wasm. All three reject a bad value and accept an absent one. That
+one is greppable and belongs in `arch_fail_open.rs` as a fourth rule.
+
+## Recommended handling
+
+1. **File this scope as its own issue.** #233 opened claiming 27 sites; ~45
+   have been fixed and ~22 more are here, in crates its scope note never
+   named. Tracking by that number has now misled twice. Unlike the original
+   speculative note, this audit is complete and reproducible, so it meets the
+   repo's "a bug you can reproduce" bar.
+2. **Fix order**: the three-loader `volatility` default and the Extism ABI gap
+   first (safety, and one rule covers the first); then `uni-fork`'s promote
+   duplicates and `uni-common`'s `canonical_entity`, both of which corrupt data
+   or manufacture a wrong answer from a correct one; then `uni-algo` and
+   `uni-query-functions`, which are mostly one-line `?` changes inside
+   functions that already return `Result`; then the APOC divergences.
+3. **Extend the ratchet** with the `volatility`/`determinism` rule.
+4. `check_constraint` and the codec quartet are **design calls**, not patches.
