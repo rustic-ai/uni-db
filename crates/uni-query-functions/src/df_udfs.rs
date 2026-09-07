@@ -1389,7 +1389,7 @@ fn extract_i64_range_arg(arg: &ColumnarValue, row_idx: usize, name: &str) -> DFR
             ScalarValue::UInt32(Some(v)) => Ok(*v as i64),
             ScalarValue::UInt64(Some(v)) => Ok(*v as i64),
             ScalarValue::LargeBinary(Some(bytes)) => {
-                scalar_binary_to_value(bytes).as_i64().ok_or_else(|| {
+                scalar_binary_to_value(bytes)?.as_i64().ok_or_else(|| {
                     datafusion::error::DataFusionError::Execution(format!(
                         "ArgumentError: InvalidArgumentType - range() {} must be an integer",
                         name
@@ -1461,7 +1461,7 @@ fn extract_i64_range_arg(arg: &ColumnarValue, row_idx: usize, name: &str) -> DFR
                             .downcast_ref::<LargeBinaryArray>()
                             .unwrap()
                             .value(row_idx);
-                        scalar_binary_to_value(bytes).as_i64().ok_or_else(|| {
+                        scalar_binary_to_value(bytes)?.as_i64().ok_or_else(|| {
                             datafusion::error::DataFusionError::Execution(format!(
                                 "ArgumentError: InvalidArgumentType - range() {} must be an integer",
                                 name
@@ -2343,10 +2343,17 @@ fn get_value_from_array(
             if let Ok(val) = uni_common::cypher_value_codec::decode(bytes) {
                 return Ok(val);
             }
-            // UNWIND may produce JSON-encoded binary; try plain JSON decode
-            Ok(serde_json::from_slice::<serde_json::Value>(bytes)
+            // UNWIND may produce JSON-encoded binary; try plain JSON decode.
+            // A blob that is neither codec-tagged nor JSON used to become
+            // `Value::Null`, so an undecodable row read as a legitimately
+            // absent one. This fn returns `DFResult`; say so.
+            serde_json::from_slice::<serde_json::Value>(bytes)
                 .map(Value::from)
-                .unwrap_or(Value::Null))
+                .map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "LargeBinary value decodes as neither a CypherValue nor JSON: {e}"
+                    ))
+                })
         }
         DataType::Int64 => Ok(Value::Int(downcast_arr!(arr, Int64Array).value(row))),
         DataType::Float64 => Ok(Value::Float(downcast_arr!(arr, Float64Array).value(row))),
@@ -3380,7 +3387,7 @@ impl DfAccumulator for BticCountAtAccumulator {
             let point_ms = if let Some(int_arr) = point_arr.as_any().downcast_ref::<Int64Array>() {
                 int_arr.value(i)
             } else if let Some(lb) = point_arr.as_any().downcast_ref::<LargeBinaryArray>() {
-                let val = scalar_binary_to_value(lb.value(i));
+                let val = scalar_binary_to_value(lb.value(i))?;
                 match &val {
                     Value::Int(ms) => *ms,
                     Value::Temporal(uni_common::TemporalValue::DateTime {
@@ -3447,7 +3454,7 @@ fn decode_btic_from_array(arr: &ArrayRef, row: usize) -> DFResult<Option<uni_bti
     }
     // Try LargeBinary (CypherValue encoded)
     if let Some(lb) = arr.as_any().downcast_ref::<LargeBinaryArray>() {
-        let val = scalar_binary_to_value(lb.value(row));
+        let val = scalar_binary_to_value(lb.value(row))?;
         if let Value::Temporal(uni_common::TemporalValue::Btic { lo, hi, meta }) = val {
             return uni_btic::Btic::new(lo, hi, meta)
                 .map(Some)
@@ -3766,9 +3773,14 @@ fn compare_f64(lhs: f64, rhs: f64, op: &BinaryOp) -> Option<bool> {
 /// Decode CypherValue bytes as f64 (works for both TAG_INT and TAG_FLOAT).
 fn cv_bytes_as_f64(bytes: &[u8]) -> Option<f64> {
     use uni_common::cypher_value_codec::{TAG_FLOAT, TAG_INT, decode_float, decode_int, peek_tag};
+    // `decode_int` / `decode_float` now distinguish a wrong tag (`Ok(None)`)
+    // from a corrupt payload (`Err`). Both bail the fast path here; the caller
+    // then falls back to the slow path, which re-decodes through the
+    // `Result`-returning `decode` and surfaces the corruption as an error
+    // instead of guessing at a value.
     match peek_tag(bytes)? {
-        TAG_INT => decode_int(bytes).map(|i| i as f64),
-        TAG_FLOAT => decode_float(bytes),
+        TAG_INT => decode_int(bytes).ok().flatten().map(|i| i as f64),
+        TAG_FLOAT => decode_float(bytes).ok().flatten(),
         _ => None,
     }
 }
@@ -3779,7 +3791,7 @@ fn compare_cv_numeric(bytes: &[u8], rhs: f64, op: &BinaryOp) -> Option<bool> {
     use uni_common::cypher_value_codec::{TAG_INT, TAG_NULL, decode_int, peek_tag};
     // Special case: int-vs-int comparison preserves exact integer semantics
     if peek_tag(bytes) == Some(TAG_INT)
-        && let Some(lhs_int) = decode_int(bytes)
+        && let Ok(Some(lhs_int)) = decode_int(bytes)
         // If rhs is exactly representable as i64, use integer comparison
         && rhs.fract() == 0.0
         && rhs >= i64::MIN as f64
@@ -3804,7 +3816,10 @@ fn compare_cv_vs_i64(bytes: &[u8], rhs: i64, op: &BinaryOp) -> Option<bool> {
     use uni_common::cypher_value_codec::{TAG_INT, TAG_NULL, decode_int, peek_tag};
     match peek_tag(bytes) {
         Some(TAG_NULL) => None,
-        Some(TAG_INT) => decode_int(bytes).map(|lhs| apply_comparison_op(lhs.cmp(&rhs), op)),
+        Some(TAG_INT) => decode_int(bytes)
+            .ok()
+            .flatten()
+            .map(|lhs| apply_comparison_op(lhs.cmp(&rhs), op)),
         _ => compare_f64(cv_bytes_as_f64(bytes)?, rhs as f64, op),
     }
 }
@@ -3888,16 +3903,17 @@ fn try_fast_compare(
                             .value(i)
                     };
                     match peek_tag(bytes) {
-                        Some(TAG_STRING) => {
-                            if let Some(lhs_str) = decode_string(bytes) {
-                                builder.append_value(apply_comparison_op(
-                                    lhs_str.as_str().cmp(rhs_str),
-                                    op,
-                                ));
-                            } else {
-                                builder.append_null();
-                            }
-                        }
+                        Some(TAG_STRING) => match decode_string(bytes) {
+                            Ok(Some(lhs_str)) => builder.append_value(apply_comparison_op(
+                                lhs_str.as_str().cmp(rhs_str),
+                                op,
+                            )),
+                            Ok(None) => builder.append_null(),
+                            // Corrupt payload under a matching tag: abandon the
+                            // whole fast path so the slow path can report it,
+                            // rather than nulling this one row.
+                            Err(_) => return None,
+                        },
                         _ => builder.append_null(),
                     }
                 }
@@ -3926,22 +3942,25 @@ fn try_fast_compare(
 
                     // Int vs Int: exact integer comparison
                     if lhs_tag == Some(TAG_INT) && rhs_tag == Some(TAG_INT) {
-                        if let (Some(l), Some(r)) = (decode_int(lhs_bytes), decode_int(rhs_bytes)) {
-                            builder.append_value(apply_comparison_op(l.cmp(&r), op));
-                        } else {
-                            builder.append_null();
+                        match (decode_int(lhs_bytes), decode_int(rhs_bytes)) {
+                            (Ok(Some(l)), Ok(Some(r))) => {
+                                builder.append_value(apply_comparison_op(l.cmp(&r), op));
+                            }
+                            // See above: corruption abandons the fast path.
+                            (Err(_), _) | (_, Err(_)) => return None,
+                            _ => builder.append_null(),
                         }
                         continue;
                     }
 
                     // String vs String
                     if lhs_tag == Some(TAG_STRING) && rhs_tag == Some(TAG_STRING) {
-                        if let (Some(l), Some(r)) =
-                            (decode_string(lhs_bytes), decode_string(rhs_bytes))
-                        {
-                            builder.append_value(apply_comparison_op(l.cmp(&r), op));
-                        } else {
-                            builder.append_null();
+                        match (decode_string(lhs_bytes), decode_string(rhs_bytes)) {
+                            (Ok(Some(l)), Ok(Some(r))) => {
+                                builder.append_value(apply_comparison_op(l.cmp(&r), op));
+                            }
+                            (Err(_), _) | (_, Err(_)) => return None,
+                            _ => builder.append_null(),
                         }
                         continue;
                     }
@@ -4163,6 +4182,15 @@ pub(crate) fn checked_int_op(lhs: i64, rhs: i64, op: &BinaryOp) -> Option<i64> {
 /// null) from a hard error (integer overflow or division/modulo by zero, which
 /// must abort the query) and from a successful CypherValue-encoded result.
 // Rust guideline compliant
+/// Wrap a corrupt-payload decode failure as a DataFusion execution error.
+///
+/// A payload whose tag matched but whose bytes did not decode is corruption,
+/// not a type mismatch — the two used to be indistinguishable and every caller
+/// resolved the ambiguity by substituting a default.
+fn cv_decode_error(e: &uni_common::UniError) -> datafusion::error::DataFusionError {
+    datafusion::error::DataFusionError::Execution(format!("corrupt CypherValue payload: {e}"))
+}
+
 enum CvArithOutcome {
     /// A successful result, as CypherValue-encoded bytes.
     Value(Vec<u8>),
@@ -4226,12 +4254,14 @@ fn cv_arithmetic_int(bytes: &[u8], rhs: i64, op: &BinaryOp) -> CvArithOutcome {
     use uni_common::cypher_value_codec::{TAG_FLOAT, TAG_INT, decode_float, decode_int, peek_tag};
     match peek_tag(bytes) {
         Some(TAG_INT) => match decode_int(bytes) {
-            Some(lhs) => apply_int_arithmetic(lhs, rhs, op),
-            None => CvArithOutcome::Null,
+            Ok(Some(lhs)) => apply_int_arithmetic(lhs, rhs, op),
+            Ok(None) => CvArithOutcome::Null,
+            Err(e) => CvArithOutcome::Error(cv_decode_error(&e)),
         },
         Some(TAG_FLOAT) => match decode_float(bytes) {
-            Some(lhs) => apply_float_arithmetic(lhs, rhs as f64, op),
-            None => CvArithOutcome::Null,
+            Ok(Some(lhs)) => apply_float_arithmetic(lhs, rhs as f64, op),
+            Ok(None) => CvArithOutcome::Null,
+            Err(e) => CvArithOutcome::Error(cv_decode_error(&e)),
         },
         _ => CvArithOutcome::Null,
     }
@@ -4617,8 +4647,14 @@ impl ScalarUDFImpl for CvToBoolUdf {
             ColumnarValue::Scalar(ScalarValue::LargeBinary(Some(bytes))) => {
                 // Fast path: tag-only decode for boolean
                 use uni_common::cypher_value_codec::{TAG_BOOL, TAG_NULL, decode_bool, peek_tag};
+                // `unwrap_or(false)` here turned a truncated boolean payload
+                // into `false`, which silently failed the enclosing WHERE and
+                // made the row vanish. A matched TAG_BOOL that does not decode
+                // is corruption and must be reported.
                 let b = match peek_tag(bytes) {
-                    Some(TAG_BOOL) => decode_bool(bytes).unwrap_or(false),
+                    Some(TAG_BOOL) => decode_bool(bytes)
+                        .map_err(|e| cv_decode_error(&e))?
+                        .unwrap_or(false),
                     Some(TAG_NULL) => false,
                     _ => false, // Non-boolean in boolean context
                 };
@@ -4646,8 +4682,12 @@ impl ScalarUDFImpl for CvToBoolUdf {
                         builder.append_null();
                     } else {
                         let bytes = lb_arr.value(i);
+                        // See the scalar arm: corruption must not read as
+                        // `false` and drop the row.
                         let b = match peek_tag(bytes) {
-                            Some(TAG_BOOL) => decode_bool(bytes).unwrap_or(false),
+                            Some(TAG_BOOL) => decode_bool(bytes)
+                                .map_err(|e| cv_decode_error(&e))?
+                                .unwrap_or(false),
                             Some(TAG_NULL) => false,
                             _ => false, // Non-boolean in boolean context
                         };
@@ -5681,12 +5721,18 @@ fn cypher_cross_type_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
     if ra != rb {
         return ra.cmp(&rb);
     }
-    // Same type rank: compare within type
+    // Same type rank: compare within type.
+    //
+    // `total_cmp`, not `partial_cmp(..).unwrap_or(Equal)`: the latter made NaN
+    // compare Equal to every number, so `accumulate` kept whichever value it
+    // happened to see first and min/max became input-order dependent. IEEE-754
+    // total ordering is deterministic (NaN sorts above +inf), which is what
+    // min/max needs — an unordered element must not silently tie.
     match (a, b) {
         (Value::Int(l), Value::Int(r)) => l.cmp(r),
-        (Value::Float(l), Value::Float(r)) => l.partial_cmp(r).unwrap_or(Ordering::Equal),
-        (Value::Int(l), Value::Float(r)) => (*l as f64).partial_cmp(r).unwrap_or(Ordering::Equal),
-        (Value::Float(l), Value::Int(r)) => l.partial_cmp(&(*r as f64)).unwrap_or(Ordering::Equal),
+        (Value::Float(l), Value::Float(r)) => l.total_cmp(r),
+        (Value::Int(l), Value::Float(r)) => (*l as f64).total_cmp(r),
+        (Value::Float(l), Value::Int(r)) => l.total_cmp(&(*r as f64)),
         (Value::String(l), Value::String(r)) => l.cmp(r),
         (Value::Bool(l), Value::Bool(r)) => l.cmp(r),
         (Value::List(l), Value::List(r)) => cypher_list_cmp(l, r).unwrap_or(Ordering::Equal),
@@ -5695,8 +5741,19 @@ fn cypher_cross_type_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
 }
 
 /// Decode a LargeBinary scalar into a Value.
-fn scalar_binary_to_value(bytes: &[u8]) -> Value {
-    uni_common::cypher_value_codec::decode(bytes).unwrap_or(Value::Null)
+///
+/// Returns `Err` rather than `Value::Null` on an undecodable payload. The old
+/// `unwrap_or(Value::Null)` was indistinguishable from a genuinely null cell:
+/// `CypherMinMaxAccumulator::accumulate` opens with `if val.is_null() {
+/// return; }`, so a corrupt row was silently dropped from the aggregate — and
+/// if every row failed, the group answered NULL over a column that had values.
+///
+/// # Errors
+///
+/// [`datafusion::error::DataFusionError::Execution`] if the bytes do not
+/// decode as a CypherValue.
+fn scalar_binary_to_value(bytes: &[u8]) -> DFResult<Value> {
+    uni_common::cypher_value_codec::decode(bytes).map_err(|e| cv_decode_error(&e))
 }
 
 use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF, AggregateUDFImpl};
@@ -5827,7 +5884,7 @@ impl DfAccumulator for CypherMinMaxAccumulator {
                     let val = if self.raw_bytes {
                         Value::Bytes(lb.value(i).to_vec())
                     } else {
-                        scalar_binary_to_value(lb.value(i))
+                        scalar_binary_to_value(lb.value(i))?
                     };
                     self.accumulate(val);
                 }
@@ -5917,7 +5974,7 @@ impl DfAccumulator for CypherMinMaxAccumulator {
                 if lb.is_null(i) {
                     continue;
                 }
-                self.accumulate(scalar_binary_to_value(lb.value(i)));
+                self.accumulate(scalar_binary_to_value(lb.value(i))?);
             }
         }
         Ok(())
@@ -6043,7 +6100,7 @@ impl DfAccumulator for CypherSumAccumulator {
                     };
                     match peek_tag(bytes) {
                         Some(TAG_INT) => {
-                            if let Some(v) = decode_int(bytes) {
+                            if let Some(v) = decode_int(bytes).map_err(|e| cv_decode_error(&e))? {
                                 self.sum += v as f64;
                                 // On i64 overflow, drop the exact-int path so the
                                 // result is the f64 sum, not a silent wraparound.
@@ -6055,7 +6112,7 @@ impl DfAccumulator for CypherSumAccumulator {
                             }
                         }
                         Some(TAG_FLOAT) => {
-                            if let Some(v) = decode_float(bytes) {
+                            if let Some(v) = decode_float(bytes).map_err(|e| cv_decode_error(&e))? {
                                 self.sum += v;
                                 self.all_ints = false;
                                 self.has_value = true;
@@ -6354,7 +6411,7 @@ impl DfAccumulator for CypherCollectAccumulator {
                 if lb.is_null(i) {
                     continue;
                 }
-                let val = scalar_binary_to_value(lb.value(i));
+                let val = scalar_binary_to_value(lb.value(i))?;
                 if let Value::List(items) = val {
                     for item in items {
                         if !item.is_null() {
@@ -6928,6 +6985,158 @@ mod tests {
         // and the comparison would not repay itself.
         let ints: ArrayRef = Arc::new(Int64Array::from(vec![7i64, 7, 7]));
         assert_eq!(large_binary_row(&ints, 0), None);
+    }
+
+    /// `cypher_cross_type_cmp` used `partial_cmp(..).unwrap_or(Ordering::Equal)`,
+    /// which made NaN compare Equal to every number. `accumulate` then kept
+    /// whichever value it happened to see first, so `min`/`max` over a column
+    /// containing NaN returned an INPUT-ORDER-DEPENDENT element. `total_cmp`
+    /// gives a deterministic total order instead.
+    #[test]
+    fn min_max_ordering_is_not_input_order_dependent_with_nan() {
+        use std::cmp::Ordering;
+        let nan = Value::Float(f64::NAN);
+        let one = Value::Float(1.0);
+        let ten = Value::Int(10);
+
+        // NaN must not tie with an ordinary number in either direction, and the
+        // two directions must disagree — that is what "ordered" means.
+        for other in [&one, &ten] {
+            let fwd = cypher_cross_type_cmp(&nan, other);
+            let rev = cypher_cross_type_cmp(other, &nan);
+            assert_ne!(
+                fwd,
+                Ordering::Equal,
+                "NaN must not compare Equal to {other:?}"
+            );
+            assert_eq!(fwd.reverse(), rev, "the comparison must be antisymmetric");
+        }
+
+        // Control: ordinary values still order correctly, across Int/Float too.
+        assert_eq!(cypher_cross_type_cmp(&one, &ten), Ordering::Less);
+        assert_eq!(cypher_cross_type_cmp(&ten, &one), Ordering::Greater);
+        assert_eq!(
+            cypher_cross_type_cmp(&Value::Int(3), &Value::Float(3.0)),
+            Ordering::Equal
+        );
+    }
+
+    /// `_cv_to_bool` did `decode_bool(bytes).unwrap_or(false)` AFTER the tag
+    /// had already matched, so a truncated payload silently evaluated to
+    /// `false` — failing the enclosing WHERE and making the row VANISH.
+    /// A matched tag that does not decode is corruption and must be reported.
+    #[test]
+    fn cv_to_bool_reports_a_corrupt_payload_instead_of_answering_false() {
+        use uni_common::cypher_value_codec::encode;
+        let udf = CvToBoolUdf::new();
+
+        let valid = encode(&Value::Bool(true));
+        // Keep the TAG_BOOL byte, drop the payload.
+        let truncated = valid[..1].to_vec();
+
+        let call = |bytes: Vec<u8>| {
+            udf.invoke_with_args(ScalarFunctionArgs {
+                args: vec![ColumnarValue::Scalar(ScalarValue::LargeBinary(Some(bytes)))],
+                arg_fields: vec![Arc::new(arrow::datatypes::Field::new(
+                    "v",
+                    DataType::LargeBinary,
+                    true,
+                ))],
+                number_rows: 1,
+                return_field: Arc::new(arrow::datatypes::Field::new(
+                    "out",
+                    DataType::Boolean,
+                    true,
+                )),
+                config_options: Arc::new(datafusion::config::ConfigOptions::default()),
+            })
+        };
+
+        assert!(
+            call(truncated.clone()).is_err(),
+            "a truncated boolean payload must be an error, not `false` — \
+             answering false silently drops the row from a WHERE"
+        );
+
+        // Control: a well-formed payload still answers true, so the assertion
+        // above is not passing because everything errors.
+        match call(valid).expect("a valid TAG_BOOL payload must still decode") {
+            ColumnarValue::Scalar(ScalarValue::Boolean(Some(b))) => assert!(b),
+            other => panic!("expected Boolean(Some(true)), got {other:?}"),
+        }
+    }
+
+    /// `get_value_from_array`'s third decode fallback ended in
+    /// `.unwrap_or(Value::Null)`, so a LargeBinary blob that is neither
+    /// codec-tagged nor JSON became a NULL indistinguishable from a genuinely
+    /// absent value. The enclosing fn returns `DFResult`.
+    #[test]
+    fn an_undecodable_blob_is_an_error_not_a_null() {
+        // 0xFF is not a codec tag and not valid JSON.
+        let bad: ArrayRef = Arc::new(LargeBinaryArray::from(vec![Some(
+            [0xFFu8, 0xFE, 0xFD].as_ref(),
+        )]));
+        assert!(
+            get_value_from_array(&bad, 0, None).is_err(),
+            "an undecodable LargeBinary blob must error, not read as NULL"
+        );
+
+        // Controls: a codec-encoded value, a JSON blob, and a genuine SQL null
+        // all still behave — so the assertion above is not passing because the
+        // function now rejects everything.
+        let good: ArrayRef = Arc::new(LargeBinaryArray::from(vec![Some(
+            uni_common::cypher_value_codec::encode(&Value::Int(7)).as_slice(),
+        )]));
+        assert_eq!(get_value_from_array(&good, 0, None).unwrap(), Value::Int(7));
+
+        let json: ArrayRef = Arc::new(LargeBinaryArray::from(vec![Some(b"[1,2]".as_ref())]));
+        assert!(
+            get_value_from_array(&json, 0, None).is_ok(),
+            "a JSON-encoded blob must still decode"
+        );
+
+        let null: ArrayRef = Arc::new(LargeBinaryArray::from(vec![None::<&[u8]>]));
+        assert_eq!(get_value_from_array(&null, 0, None).unwrap(), Value::Null);
+    }
+
+    /// `scalar_binary_to_value` did `decode(bytes).unwrap_or(Value::Null)`, and
+    /// `CypherMinMaxAccumulator::accumulate` opens with
+    /// `if val.is_null() { return; }` — so a corrupt row was SILENTLY DROPPED
+    /// from the aggregate, and if every row failed the group answered NULL over
+    /// a column that had values.
+    #[test]
+    fn min_max_reports_a_corrupt_row_instead_of_dropping_it() {
+        use datafusion::logical_expr::Accumulator as _;
+        use uni_common::cypher_value_codec::encode;
+
+        let mut acc = CypherMinMaxAccumulator {
+            current: None,
+            is_max: false,
+            return_type: DataType::LargeBinary,
+            raw_bytes: false,
+        };
+        let corrupt: ArrayRef = Arc::new(LargeBinaryArray::from(vec![
+            Some(encode(&Value::Int(5)).as_slice()),
+            Some([0xFFu8, 0xFE].as_ref()),
+        ]));
+        assert!(
+            acc.update_batch(&[corrupt]).is_err(),
+            "a corrupt row must surface as an error, not be quietly skipped"
+        );
+
+        // Control: a clean batch still aggregates.
+        let mut acc = CypherMinMaxAccumulator {
+            current: None,
+            is_max: false,
+            return_type: DataType::LargeBinary,
+            raw_bytes: false,
+        };
+        let clean: ArrayRef = Arc::new(LargeBinaryArray::from(vec![
+            Some(encode(&Value::Int(5)).as_slice()),
+            Some(encode(&Value::Int(2)).as_slice()),
+        ]));
+        acc.update_batch(&[clean]).expect("a clean batch must work");
+        assert_eq!(acc.current, Some(Value::Int(2)), "min of 5 and 2 is 2");
     }
 
     #[test]

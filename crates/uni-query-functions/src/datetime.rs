@@ -1987,7 +1987,15 @@ fn eval_datetime(args: &[Value]) -> Result<Value> {
         Value::Temporal(TemporalValue::DateTime { .. }) => Ok(args[0].clone()),
         // Cross-type: convert any temporal to datetime (add UTC timezone)
         Value::Temporal(tv) => {
-            let date = tv.to_date().unwrap_or_else(|| Utc::now().date_naive());
+            // A missing date component has no defined substitute. Filling it
+            // from the wall clock made the same query answer differently
+            // tomorrow; `eval_time` errors on the mirror-image case (a value
+            // with no time component) and this now matches it. The `to_time`
+            // default just below is NOT the same shape — a date does imply
+            // midnight, so that one is correct.
+            let date = tv
+                .to_date()
+                .ok_or_else(|| anyhow!("datetime(): temporal value has no date component"))?;
             let time = tv
                 .to_time()
                 .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
@@ -2040,7 +2048,10 @@ fn eval_localdatetime(args: &[Value]) -> Result<Value> {
         Value::Temporal(TemporalValue::LocalDateTime { .. }) => Ok(args[0].clone()),
         // Cross-type: extract date+time, strip timezone
         Value::Temporal(tv) => {
-            let date = tv.to_date().unwrap_or_else(|| Utc::now().date_naive());
+            // See `eval_datetime`: no defined substitute for a missing date.
+            let date = tv
+                .to_date()
+                .ok_or_else(|| anyhow!("localdatetime(): temporal value has no date component"))?;
             let time = tv
                 .to_time()
                 .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
@@ -2525,7 +2536,10 @@ fn temporal_or_string_to_components(
 ) -> Result<(NaiveDate, NaiveTime, Option<TimezoneInfo>)> {
     match val {
         Value::Temporal(tv) => {
-            let date = tv.to_date().unwrap_or_else(|| Utc::now().date_naive());
+            // See `eval_datetime`: no defined substitute for a missing date.
+            let date = tv
+                .to_date()
+                .ok_or_else(|| anyhow!("temporal value has no date component"))?;
             let time = tv
                 .to_time()
                 .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).unwrap());
@@ -3659,7 +3673,14 @@ fn truncate_time(
                 ),
                 _ => None,
             };
-            (Utc::now().date_naive(), t, offset)
+            // Use the value's OWN date when it has one. This arm used the wall
+            // clock unconditionally, so truncating a `DateTime` resolved its
+            // named-timezone offset against today rather than against the
+            // value's date — the wrong side of a DST boundary. A bare `Time`
+            // genuinely has no date, so today remains the fallback there, which
+            // is exactly what the `Value::String` arm below already does.
+            let d = tv.to_date().unwrap_or_else(|| Utc::now().date_naive());
+            (d, t, offset)
         }
         Some(Value::String(s)) => {
             // Try to parse as datetime/time with timezone first
@@ -4829,6 +4850,109 @@ fn parse_temporal_value_typed(val: &Value) -> Result<ParsedTemporal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `datetime()` / `localdatetime()` filled a missing date component from
+    /// `Utc::now()`, so `datetime(localtime('12:00'))` answered with today's
+    /// date — the same query gave a different answer tomorrow. `time()` errors
+    /// on the mirror-image case (a value with no *time* component); these now
+    /// match it. Note the neighbouring `to_time().unwrap_or(midnight)` is NOT
+    /// the same shape and is deliberately left alone: a date does imply
+    /// midnight, so `datetime(date(..))` must still succeed.
+    #[test]
+    fn datetime_of_a_time_only_value_errors_rather_than_borrowing_todays_date() {
+        let local_time = Value::Temporal(TemporalValue::LocalTime {
+            nanos_since_midnight: 12 * 3_600 * 1_000_000_000,
+        });
+        let offset_time = Value::Temporal(TemporalValue::Time {
+            nanos_since_midnight: 12 * 3_600 * 1_000_000_000,
+            offset_seconds: 0,
+        });
+
+        // Sanity: the function names must actually resolve, or every
+        // `is_err()` below would pass for free on an unknown-function error.
+        for func in ["DATETIME", "LOCALDATETIME"] {
+            let ok = eval_datetime_function(
+                func,
+                &[Value::Temporal(TemporalValue::Date {
+                    days_since_epoch: 19_000,
+                })],
+            );
+            assert!(ok.is_ok(), "{func} must be a known function; got {ok:?}");
+        }
+
+        for (name, arg) in [("localtime", &local_time), ("time", &offset_time)] {
+            for func in ["DATETIME", "LOCALDATETIME"] {
+                let got = eval_datetime_function(func, std::slice::from_ref(arg));
+                assert!(
+                    got.is_err(),
+                    "{func}({name}(..)) must error — it used to substitute \
+                     today's wall-clock date, making the query answer \
+                     differently tomorrow. Got {got:?}"
+                );
+            }
+        }
+
+        // A value that DOES carry a date still converts: midnight is the
+        // defined time for a bare date, unlike a fabricated date for a time.
+        let date = Value::Temporal(TemporalValue::Date {
+            days_since_epoch: 19_000,
+        });
+        assert!(
+            eval_datetime_function("DATETIME", &[date]).is_ok(),
+            "datetime(date(..)) must still succeed"
+        );
+    }
+
+    /// `truncate_time` discarded the value's own date and used
+    /// `Utc::now().date_naive()` for every `Temporal`, so a named timezone's
+    /// offset was resolved against today rather than against the value's date
+    /// — the wrong side of a DST boundary. The `Value::String` arm below it
+    /// already parsed the date out correctly.
+    ///
+    /// Asserting a specific offset would make this test depend on the day it
+    /// runs. Instead: two values six months apart in a DST-observing zone must
+    /// resolve to *different* offsets. With the bug both used today's date and
+    /// produced the same one, whatever today happened to be.
+    #[test]
+    fn truncating_resolves_a_named_timezone_against_the_values_own_date() {
+        let at = |y, m, d| {
+            let ndt = NaiveDate::from_ymd_opt(y, m, d)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap();
+            Value::Temporal(TemporalValue::DateTime {
+                nanos_since_epoch: ndt.and_utc().timestamp_nanos_opt().unwrap(),
+                offset_seconds: 0,
+                timezone_name: None,
+            })
+        };
+        let tz: HashMap<String, Value> = [(
+            "timezone".to_string(),
+            Value::String("America/New_York".to_string()),
+        )]
+        .into_iter()
+        .collect();
+
+        let offset_of = |v: &Value| -> i32 {
+            let out =
+                truncate_time("hour", Some(v), Some(&tz), true).expect("truncate should succeed");
+            match out {
+                Value::Temporal(TemporalValue::Time { offset_seconds, .. }) => offset_seconds,
+                Value::Temporal(TemporalValue::DateTime { offset_seconds, .. }) => offset_seconds,
+                other => panic!("expected a time-shaped value, got {other:?}"),
+            }
+        };
+
+        let winter = offset_of(&at(2020, 1, 15)); // EST, -05:00
+        let summer = offset_of(&at(2020, 7, 15)); // EDT, -04:00
+        assert_ne!(
+            winter, summer,
+            "a January and a July value in America/New_York must resolve to \
+             different UTC offsets; getting the same one means the value's own \
+             date was discarded in favour of the wall clock"
+        );
+        assert_eq!(winter - summer, -3_600, "EST is one hour behind EDT");
+    }
 
     /// Helper to build a Value::Map from key-value pairs.
     fn map_val(pairs: Vec<(&str, Value)>) -> Value {
