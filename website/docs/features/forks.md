@@ -193,6 +193,20 @@ println!(
 
 All inserts run inside a single primary transaction that commits at the end — partial-failure semantics are atomic across patterns. Edge endpoints must already exist on primary (or be promoted earlier in the same call by a vertex pattern); otherwise the edge is counted in `edges_skipped_no_endpoint` and skipped.
 
+Three counters report work that completed but could **not be verified against
+primary**, because a lookup against primary failed rather than returning an
+answer. They are not errors — the promote still committed — but a nonzero value
+means the neighbouring counters understate the truth:
+
+| Counter | What could not be confirmed |
+|---|---|
+| `vertices_inserted_unverified` | Whether these vertices already existed on primary. They may be duplicates, and `vertices_skipped_uid_conflict` undercounts. |
+| `edges_inserted_unverified` | Whether these edges already existed on primary. They may be duplicates, and `edges_skipped_duplicate` undercounts. |
+| `vertices_deletes_unverified` | Whether rows marked for delete-promotion are still on primary. The delete was **not** issued and the rows remain. |
+
+Re-running the promote after the transient failure clears is safe: the dedup
+pass runs again and skips whatever did land.
+
 ### Python
 
 The same surface is available via `uni_db` in Python, sync and async.

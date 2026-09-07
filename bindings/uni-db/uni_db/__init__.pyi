@@ -2766,6 +2766,8 @@ class PromoteReport:
     edges_skipped: int
     edges_skipped_duplicate: int
     edges_skipped_no_endpoint: int
+    edges_inserted_unverified: int
+    vertices_deletes_unverified: int
     per_pattern_inserted: list[int]
 
 # Phase 4b — fork-related typed exceptions

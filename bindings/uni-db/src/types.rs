@@ -4434,6 +4434,8 @@ pub struct PyPromoteReport {
     pub edges_inserted: usize,
     pub edges_skipped_duplicate: usize,
     pub edges_skipped_no_endpoint: usize,
+    pub edges_inserted_unverified: usize,
+    pub vertices_deletes_unverified: usize,
     pub edges_skipped: usize,
     pub per_pattern_inserted: Vec<usize>,
 }
@@ -4443,12 +4445,17 @@ impl PyPromoteReport {
     fn __repr__(&self) -> String {
         format!(
             "PromoteReport(vertices_inserted={}, vertices_skipped_uid_conflict={}, \
-             edges_inserted={}, edges_skipped_duplicate={}, edges_skipped_no_endpoint={})",
+             edges_inserted={}, edges_skipped_duplicate={}, edges_skipped_no_endpoint={}, \
+             vertices_inserted_unverified={}, edges_inserted_unverified={}, \
+             vertices_deletes_unverified={})",
             self.vertices_inserted,
             self.vertices_skipped_uid_conflict,
             self.edges_inserted,
             self.edges_skipped_duplicate,
             self.edges_skipped_no_endpoint,
+            self.vertices_inserted_unverified,
+            self.edges_inserted_unverified,
+            self.vertices_deletes_unverified,
         )
     }
 }
@@ -4470,6 +4477,8 @@ impl PyPromoteReport {
             edges_inserted: r.edges_inserted,
             edges_skipped_duplicate: r.edges_skipped_duplicate,
             edges_skipped_no_endpoint: r.edges_skipped_no_endpoint,
+            edges_inserted_unverified: r.edges_inserted_unverified,
+            vertices_deletes_unverified: r.vertices_deletes_unverified,
             edges_skipped: r.edges_skipped,
             per_pattern_inserted: r.per_pattern_inserted,
         }

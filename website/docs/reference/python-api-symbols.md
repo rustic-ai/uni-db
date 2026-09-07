@@ -1576,6 +1576,8 @@ Outcome counts from `Uni.promote_from_fork`.
 | `edges_skipped` | `int` |
 | `edges_skipped_duplicate` | `int` |
 | `edges_skipped_no_endpoint` | `int` |
+| `edges_inserted_unverified` | `int` |
+| `vertices_deletes_unverified` | `int` |
 | `per_pattern_inserted` | `list[int]` |
 
 ---

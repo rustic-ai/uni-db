@@ -12556,6 +12556,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uni-common",
  "uni-query",
  "uni-store",
@@ -12670,6 +12671,7 @@ dependencies = [
  "smol_str",
  "tokio",
  "tracing",
+ "uni-common",
  "uni-plugin",
 ]
 
