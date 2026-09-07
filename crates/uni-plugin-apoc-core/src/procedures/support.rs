@@ -292,3 +292,221 @@ pub(super) fn extract_string(
         )),
     }
 }
+
+/// Reject a synthesis request whose output would exceed a cap.
+///
+/// `text.repeat` and `create.uuids` both bound their output at
+/// [`MAX_SYNTHESIZED_LEN`]. Both used to clamp the request with `min()`, so an
+/// over-cap call returned a *truncated* result indistinguishable from a
+/// complete one — `apoc.create.uuids(2_000_000)` quietly yielded 1,000,000
+/// rows. The cap itself is fine; the silence was the defect. Naming the cap in
+/// an error is the only way a caller can tell a full answer from a clipped one.
+///
+/// `requested` and `max` are in `unit`s (repetitions, rows); `max` is derived
+/// from [`MAX_SYNTHESIZED_LEN`], which the message also names so the operator
+/// can see where the bound comes from.
+///
+/// # Errors
+///
+/// Returns [`FnError::CODE_RESOURCE_LIMIT`] when `requested` exceeds `max`.
+///
+/// # Examples
+///
+/// ```ignore
+/// reject_over_cap("create.uuids", "UUIDs", 5, 10)?; // ok
+/// assert!(reject_over_cap("create.uuids", "UUIDs", 20, 10).is_err());
+/// ```
+pub(super) fn reject_over_cap(
+    label: &str,
+    unit: &str,
+    requested: u64,
+    max: u64,
+) -> Result<(), FnError> {
+    if requested > max {
+        return Err(FnError::new(
+            FnError::CODE_RESOURCE_LIMIT,
+            format!(
+                "{label}: requested {requested} {unit} exceeds the cap of {max} \
+                 (MAX_SYNTHESIZED_LEN = {MAX_SYNTHESIZED_LEN}); \
+                 split the call into smaller batches"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// A numeric prefix scanned out of a string, normalized for `str::parse`.
+struct DecimalPrefix {
+    /// Sign + digits (+ optional fraction / exponent), grouping separators
+    /// removed. Always parseable by `f64::from_str`.
+    cleaned: String,
+    /// `true` when the prefix carried neither a fraction nor an exponent, so
+    /// it can be parsed as an `i64` without going through `f64`.
+    is_integral: bool,
+}
+
+/// Scan the leading numeric prefix of `s`, APOC/`DecimalFormat`-style.
+///
+/// Java's `DecimalFormat.parse` — what Neo4j's APOC uses — accepts grouping
+/// separators and stops at the first character it cannot consume, rather than
+/// demanding that the whole string be numeric. `"1,234"` parses as 1234 and
+/// `"3.7px"` as 3.7. Genuine garbage (no digits at all) still yields `None`.
+///
+/// Accepts: optional `+`/`-`, ASCII digits with `,` grouping separators
+/// between digits, an optional `.`-fraction, and an optional `e`/`E` exponent.
+fn scan_decimal_prefix(s: &str) -> Option<DecimalPrefix> {
+    let chars: Vec<char> = s.trim().chars().collect();
+    let len = chars.len();
+    let mut i = 0usize;
+    let mut out = String::with_capacity(len);
+
+    if let Some(&c) = chars.first()
+        && (c == '+' || c == '-')
+    {
+        if c == '-' {
+            out.push('-');
+        }
+        i = 1;
+    }
+
+    let mut digits = 0usize;
+    while i < len {
+        let c = chars[i];
+        if c.is_ascii_digit() {
+            out.push(c);
+            digits += 1;
+            i += 1;
+        } else if c == ',' && digits > 0 && chars.get(i + 1).is_some_and(char::is_ascii_digit) {
+            // A grouping separator: consumed but not emitted.
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    if digits == 0 {
+        return None;
+    }
+
+    let mut is_integral = true;
+
+    if chars.get(i) == Some(&'.') && chars.get(i + 1).is_some_and(char::is_ascii_digit) {
+        is_integral = false;
+        out.push('.');
+        i += 1;
+        while i < len && chars[i].is_ascii_digit() {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+
+    if matches!(chars.get(i), Some('e' | 'E')) {
+        let mut j = i + 1;
+        let sign = match chars.get(j) {
+            Some(&c @ ('+' | '-')) => {
+                j += 1;
+                Some(c)
+            }
+            _ => None,
+        };
+        if chars.get(j).is_some_and(char::is_ascii_digit) {
+            is_integral = false;
+            out.push('e');
+            if let Some(c) = sign {
+                out.push(c);
+            }
+            i = j;
+            while i < len && chars[i].is_ascii_digit() {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+
+    Some(DecimalPrefix {
+        cleaned: out,
+        is_integral,
+    })
+}
+
+/// Parse the leading numeric prefix of `s` as an `i64`, truncating toward zero.
+///
+/// Matches APOC's `DecimalFormat`-backed behavior: `"3.7"` → 3, `"1,234"` →
+/// 1234, `"12abc"` → 12. Returns `None` for genuine garbage (no digits), for a
+/// non-finite value, and for anything outside the `i64` range — NULL on
+/// garbage is correct APOC behavior and is preserved.
+///
+/// # Examples
+///
+/// ```ignore
+/// assert_eq!(parse_i64_prefix("3.7"), Some(3));
+/// assert_eq!(parse_i64_prefix("-3.7"), Some(-3));
+/// assert_eq!(parse_i64_prefix("1,234"), Some(1234));
+/// assert_eq!(parse_i64_prefix("not a number"), None);
+/// ```
+pub(super) fn parse_i64_prefix(s: &str) -> Option<i64> {
+    let prefix = scan_decimal_prefix(s)?;
+    if prefix.is_integral {
+        return prefix.cleaned.parse::<i64>().ok();
+    }
+    let f = prefix.cleaned.parse::<f64>().ok()?;
+    if !f.is_finite() {
+        return None;
+    }
+    let truncated = f.trunc();
+    // `i64::MAX as f64` rounds up, so compare against the exclusive bound.
+    if truncated < -(2f64.powi(63)) || truncated >= 2f64.powi(63) {
+        return None;
+    }
+    Some(truncated as i64)
+}
+
+/// Parse the leading numeric prefix of `s` as an `f64`.
+///
+/// Matches APOC's `DecimalFormat`-backed behavior: `"1,234.5"` → 1234.5,
+/// `"3.7px"` → 3.7. Returns `None` for genuine garbage (no digits).
+///
+/// # Examples
+///
+/// ```ignore
+/// assert_eq!(parse_f64_prefix("1,234.5"), Some(1234.5));
+/// assert_eq!(parse_f64_prefix("nope"), None);
+/// ```
+pub(super) fn parse_f64_prefix(s: &str) -> Option<f64> {
+    scan_decimal_prefix(s).and_then(|p| p.cleaned.parse::<f64>().ok())
+}
+
+#[cfg(test)]
+mod support_tests {
+    use super::*;
+
+    #[test]
+    fn decimal_prefix_int_rules() {
+        assert_eq!(parse_i64_prefix("42"), Some(42));
+        assert_eq!(parse_i64_prefix("3.7"), Some(3));
+        assert_eq!(parse_i64_prefix("-3.7"), Some(-3));
+        assert_eq!(parse_i64_prefix("1,234"), Some(1234));
+        assert_eq!(parse_i64_prefix("  1,234,567  "), Some(1_234_567));
+        assert_eq!(parse_i64_prefix("12abc"), Some(12));
+        // Garbage stays NULL — the APOC contract.
+        assert_eq!(parse_i64_prefix("not a number"), None);
+        assert_eq!(parse_i64_prefix(""), None);
+        assert_eq!(parse_i64_prefix("-"), None);
+        assert_eq!(parse_i64_prefix(",123"), None);
+    }
+
+    #[test]
+    fn decimal_prefix_float_rules() {
+        assert_eq!(parse_f64_prefix("2.5"), Some(2.5));
+        assert_eq!(parse_f64_prefix("1,234.5"), Some(1234.5));
+        assert_eq!(parse_f64_prefix("3.7px"), Some(3.7));
+        assert_eq!(parse_f64_prefix("1e3"), Some(1000.0));
+        assert_eq!(parse_f64_prefix("nope"), None);
+    }
+
+    #[test]
+    fn over_cap_is_rejected_and_named() {
+        assert!(reject_over_cap("x", "rows", 5, 10).is_ok());
+        let err = reject_over_cap("x", "rows", 20, 10).expect_err("over cap");
+        assert!(err.to_string().contains("10"), "{err}");
+    }
+}

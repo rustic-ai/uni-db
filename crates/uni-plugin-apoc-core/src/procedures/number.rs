@@ -5,6 +5,16 @@
 //! `number.toString`. More formatting (pattern-based) lands as a
 //! follow-up — Rust has no direct equivalent of Java's `DecimalFormat`
 //! patterns, so format procedures use the `format!` syntax.
+//!
+//! **Parsing**, however, does follow `DecimalFormat`. APOC's `parseInt` /
+//! `parseFloat` are backed by `DecimalFormat.parse`, which accepts grouping
+//! separators and stops at the first character it cannot consume rather than
+//! demanding the whole string be numeric: `"1,234"` → 1234 and `"3.7"` → 3
+//! (integer variants truncate toward zero). This module used to call
+//! `str::parse` and returned NULL for both. Genuine garbage — a string with
+//! no digits at all — still yields NULL. `support::parse_i64_prefix` /
+//! `parse_f64_prefix` are the single implementation, shared with
+//! `convert.toInteger` / `convert.toFloat`.
 
 use std::sync::OnceLock;
 
@@ -95,8 +105,16 @@ impl NumberProc {
     /// We keep the descriptive ones as canonical.
     fn docs(&self) -> &'static str {
         match self {
-            Self::ParseInt => "Parse a string as a 64-bit signed integer; NULL on failure.",
-            Self::ParseFloat => "Parse a string as a 64-bit float; NULL on failure.",
+            Self::ParseInt => {
+                "Parse a string as a 64-bit signed integer, Java `DecimalFormat`-style: \
+                 grouping separators are accepted and a leading numeric prefix is taken \
+                 (\"1,234\" -> 1234, \"3.7\" -> 3). NULL when the string holds no digits."
+            }
+            Self::ParseFloat => {
+                "Parse a string as a 64-bit float, Java `DecimalFormat`-style: grouping \
+                 separators are accepted and a leading numeric prefix is taken \
+                 (\"1,234.5\" -> 1234.5). NULL when the string holds no digits."
+            }
             Self::ToString => "Format a number as its default string representation.",
         }
     }
@@ -141,12 +159,12 @@ impl ProcedurePlugin for NumberProc {
         let (schema, array) = match self {
             Self::ParseInt => {
                 let s = support::extract_string(args, 0, "number", false)?;
-                let parsed: Option<i64> = s.trim().parse().ok();
+                let parsed: Option<i64> = support::parse_i64_prefix(&s);
                 nullable_int_result(parsed)
             }
             Self::ParseFloat => {
                 let s = support::extract_string(args, 0, "number", false)?;
-                let parsed: Option<f64> = s.trim().parse().ok();
+                let parsed: Option<f64> = support::parse_f64_prefix(&s);
                 nullable_float_result(parsed)
             }
             Self::ToString => {
