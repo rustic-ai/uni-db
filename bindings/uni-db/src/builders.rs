@@ -405,14 +405,31 @@ impl DatabaseBuilder {
 
     /// Build and return the Database instance.
     fn build(&self, py: Python<'_>) -> PyResult<crate::sync_api::Database> {
-        let rust_write_lease = self.write_lease.as_ref().map(|wl| match &wl.variant {
-            crate::types::WriteLeaseVariant::Local => ::uni_db::api::multi_agent::WriteLease::Local,
-            crate::types::WriteLeaseVariant::DynamoDB { table } => {
-                ::uni_db::api::multi_agent::WriteLease::DynamoDB {
-                    table: table.clone(),
+        // `Custom` is read-back only: the Rust variant wraps a
+        // `Box<dyn WriteLeaseProvider>` that Python cannot supply. It reaches a
+        // `PyWriteLease` only by being read off a database configured in Rust,
+        // so handing one back to a builder is a caller error rather than a
+        // conversion.
+        let rust_write_lease = match self.write_lease.as_ref() {
+            None => None,
+            Some(wl) => Some(match &wl.variant {
+                crate::types::WriteLeaseVariant::Local => {
+                    ::uni_db::api::multi_agent::WriteLease::Local
                 }
-            }
-        });
+                crate::types::WriteLeaseVariant::DynamoDB { table } => {
+                    ::uni_db::api::multi_agent::WriteLease::DynamoDB {
+                        table: table.clone(),
+                    }
+                }
+                crate::types::WriteLeaseVariant::Custom => {
+                    return Err(pyo3::exceptions::PyValueError::new_err(
+                        "WriteLease.CUSTOM cannot be configured from Python: a custom \
+                         lease provider is a Rust trait object. It is only ever read \
+                         back from a database configured in Rust.",
+                    ));
+                }
+            }),
+        };
         let uni = py
             .detach(|| {
                 pyo3_async_runtimes::tokio::get_runtime().block_on(core::build_database_core(

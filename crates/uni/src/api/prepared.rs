@@ -418,6 +418,7 @@ impl PreparedLocy {
         };
 
         let engine = crate::api::impl_locy::LocyEngine {
+            counters: std::sync::Arc::new(uni_store::QueryCounters::new()),
             db: &self.db,
             tx_l0_override: None,
             locy_l0: None,

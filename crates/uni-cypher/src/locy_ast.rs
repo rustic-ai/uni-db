@@ -79,8 +79,25 @@ pub struct RuleDefinition {
     pub where_conditions: Vec<RuleCondition>,
     pub along: Vec<AlongBinding>,
     pub fold: Vec<FoldBinding>,
+    /// Post-FOLD definitional threshold (`REQUIRE`, issue #265).
+    ///
+    /// Unlike [`Self::having`], these conditions are part of the rule's
+    /// *definition*: they are applied to each iteration's folded snapshot,
+    /// which is what a same-stratum self-reference reads, so they constrain
+    /// what the recursion can derive. In a non-recursive rule the two coincide.
+    ///
+    /// `#[serde(default)]` so an older serialized `RuleDefinition` stays
+    /// readable. Note this is hygiene rather than a migration guard: the rule
+    /// catalog persists **source text** and recompiles on open
+    /// (`crates/uni/src/api/locy_rule_catalog.rs`), so no stored AST carries
+    /// the old shape.
+    #[serde(default)]
+    pub require: Vec<Expr>,
     /// Post-FOLD filter conditions (HAVING semantics). These filter on
     /// aggregate results after FOLD computation.
+    ///
+    /// In a recursive rule these filter the *converged* answer only; see
+    /// [`Self::require`] for the form that constrains the recursion.
     pub having: Vec<Expr>,
     pub best_by: Option<BestByClause>,
     pub output: RuleOutput,

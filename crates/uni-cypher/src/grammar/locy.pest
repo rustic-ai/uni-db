@@ -41,6 +41,10 @@ PRIORITY = @{ ^"priority" ~ !ident_char }
 NEW      = @{ ^"new" ~ !ident_char }
 EXPORT   = @{ ^"export" ~ !ident_char }
 PROB     = @{ ^"prob" ~ !ident_char }
+// Contextual, deliberately NOT in `locy_keyword_reserved`: REQUIRE is only
+// meaningful in the post-FOLD position, so `require` stays usable as an
+// ordinary identifier and no existing program breaks (issue #265).
+REQUIRE  = @{ ^"require" ~ !ident_char }
 
 // Phase B (neural-predicate preview): CREATE MODEL surface keywords.
 // MODEL is fully reserved because it would otherwise be a common
@@ -153,6 +157,7 @@ rule_definition = {
     ~ rule_where_clause?
     ~ along_clause?
     ~ fold_clause?
+    ~ fold_require_clause?
     ~ fold_having_clause?
     ~ best_by_clause?
     ~ rule_terminal_clause
@@ -346,9 +351,20 @@ fold_declaration = { locy_identifier ~ eq ~ fold_expression }
 
 fold_expression = { expression }
 
+// Post-FOLD definitional threshold (issue #265).  Unlike fold_having_clause
+// below, REQUIRE is part of the rule's DEFINITION: it is applied to each
+// iteration's folded snapshot, which is what a same-stratum self-reference
+// reads, so it constrains what the recursion can derive.  Written before the
+// post-FOLD WHERE because it applies first — constrain the derivation, then
+// filter what is shown.
+fold_require_clause = { REQUIRE ~ expression ~ ((AND | ",") ~ expression)* }
+
 // Post-FOLD filter (HAVING semantics).  Uses the WHERE keyword positionally:
 // the first WHERE in a rule filters rows pre-aggregation; this second WHERE
 // (after FOLD) filters aggregated groups.
+//
+// In a recursive rule this filters the CONVERGED answer only; see
+// `fold_require_clause` for the form that constrains the recursion itself.
 fold_having_clause = { WHERE ~ expression ~ ((AND | ",") ~ expression)* }
 
 

@@ -8,6 +8,7 @@ pub mod api {
 pub mod config;
 pub mod cypher_value_codec;
 pub mod datetime;
+pub mod locy;
 pub mod muvera;
 pub mod sync;
 pub mod value;

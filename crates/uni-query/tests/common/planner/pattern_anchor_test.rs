@@ -262,3 +262,220 @@ async fn a_named_quantified_path_is_left_alone() {
          lists it binds are ordered by the walk"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #268: an equality predicate anchors a pattern, the same way a binding does.
+// ---------------------------------------------------------------------------
+
+/// Forum/Post where only `Post.uid` carries a scalar index.
+///
+/// The asymmetry is the point: it lets a test put an equality on both ends and
+/// check that the *indexed* one wins, which a uniformly indexed schema could
+/// not distinguish from written order.
+async fn planner_with_index() -> QueryPlanner {
+    use uni_common::core::schema::{
+        DataType, IndexDefinition, IndexMetadata, ScalarIndexConfig, ScalarIndexType,
+    };
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let sm = uni_common::core::schema::SchemaManager::load(&path.join("schema.json"))
+        .await
+        .unwrap();
+
+    for label in ["Forum", "Post"] {
+        sm.add_label(label).unwrap();
+        sm.add_property(label, "id", DataType::Int64, true).unwrap();
+        sm.add_property(label, "uid", DataType::String, true)
+            .unwrap();
+    }
+    sm.add_edge_type("CONTAINER_OF", vec!["Forum".into()], vec!["Post".into()])
+        .unwrap();
+    sm.add_index(IndexDefinition::Scalar(ScalarIndexConfig {
+        name: "idx_post_uid".into(),
+        label: "Post".into(),
+        properties: vec!["uid".into()],
+        index_type: ScalarIndexType::BTree,
+        where_clause: None,
+        // `IndexStatus` defaults to `Online`, which is what the rank requires.
+        metadata: IndexMetadata::default(),
+    }))
+    .unwrap();
+
+    QueryPlanner::new(sm.schema())
+}
+
+/// The variable bound by the plan's leading `Scan` — the node the walk starts at.
+///
+/// Read off the `Debug` rendering because `LogicalPlan::children` is private,
+/// the same constraint `has_cross_join` works under. `has_cross_join` is the
+/// wrong instrument for #268: a single-path MATCH cross-joins nothing either
+/// way, and the defect is which end the walk begins at.
+///
+/// The match is anchored at a variant boundary rather than a bare substring:
+/// `FusedIndexScan {` ends in `Scan {`, and a substring test would report the
+/// wrong operator — the hazard #177 documents for the plan-shape gate.
+fn scan_anchor(plan: &LogicalPlan) -> Option<String> {
+    const KEY: &str = "variable: \"";
+    let rendered = format!("{plan:?}");
+    let mut from = 0;
+    while let Some(hit) = rendered[from..].find("Scan {") {
+        let at = from + hit;
+        if at == 0 || !rendered[..at].ends_with(|c: char| c.is_alphanumeric()) {
+            let tail = &rendered[at..];
+            let start = tail.find(KEY)? + KEY.len();
+            let rest = &tail[start..];
+            return Some(rest[..rest.find('"')?].to_string());
+        }
+        from = at + "Scan {".len();
+    }
+    None
+}
+
+/// An equality on the last node starts the walk there.
+///
+/// #268 reduced to its smallest shape. Neither end is bound by an earlier
+/// clause, so before the fix the walk began at the written-first `f` and
+/// expanded every `CONTAINER_OF` edge, reapplying `p.uid` as a target filter
+/// above the traversal where no index-aware rewrite can see it.
+#[tokio::test]
+async fn an_equality_on_the_last_node_anchors_the_walk_there() {
+    let p = planner_with_index().await;
+
+    let plan = plan_of(
+        &p,
+        "MATCH (f:Forum)-[:CONTAINER_OF]->(p:Post) WHERE p.uid = 'x' RETURN f.id AS c",
+    );
+    assert_eq!(
+        scan_anchor(&plan).as_deref(),
+        Some("p"),
+        "an equality pins `p` to one value, so the walk must start there rather \
+         than at the written-first `f`"
+    );
+}
+
+/// The inline map spelling anchors identically.
+///
+/// `(p:Post {uid: 'x'})` measured exactly as slow as the `WHERE` form, so it
+/// has to reach the same rank — otherwise the fix covers only the spelling that
+/// happened to be reported.
+#[tokio::test]
+async fn an_inline_equality_on_the_last_node_anchors_the_walk_there() {
+    let p = planner_with_index().await;
+
+    let plan = plan_of(
+        &p,
+        "MATCH (f:Forum)-[:CONTAINER_OF]->(p:Post {uid: 'x'}) RETURN f.id AS c",
+    );
+    assert_eq!(
+        scan_anchor(&plan).as_deref(),
+        Some("p"),
+        "an inline property map is a conjunction of equalities and must anchor \
+         like the WHERE form"
+    );
+}
+
+/// The negative twin: an equality on the *first* node must not reverse.
+///
+/// Without this, a rewrite that always reversed would pass every positive case
+/// above while being wrong in general.
+#[tokio::test]
+async fn an_equality_on_the_first_node_leaves_the_walk_alone() {
+    let p = planner_with_index().await;
+
+    let plan = plan_of(
+        &p,
+        "MATCH (f:Forum)-[:CONTAINER_OF]->(p:Post) WHERE f.uid = 'x' RETURN p.id AS c",
+    );
+    assert_eq!(
+        scan_anchor(&plan).as_deref(),
+        Some("f"),
+        "the written-first node already carries the equality; reversing would \
+         only move the anchor to an unconstrained end"
+    );
+}
+
+/// A binding from an earlier clause still outranks an equality.
+///
+/// The regression this ordering exists to prevent. `post` is bound by the
+/// preceding `WITH`; `f` merely carries an equality. Ranking the two as one
+/// boolean "anchorable" would make the written-first `f` look bound, decline
+/// the reversal, and quietly undo #219 for every pattern whose leading node has
+/// a predicate.
+#[tokio::test]
+async fn a_binding_outranks_an_equality_on_the_written_first_node() {
+    let p = planner_with_index().await;
+
+    let plan = plan_of(
+        &p,
+        "MATCH (x:Post) WITH DISTINCT x AS post \
+         MATCH (f:Forum)-[:CONTAINER_OF]->(post) WHERE f.uid = 'x' RETURN f.id AS c",
+    );
+    assert!(
+        !has_cross_join(&plan),
+        "a node bound by an earlier clause must still win the anchor against a \
+         node that only carries an equality (#219 must survive #268)"
+    );
+}
+
+/// With an equality at both ends, the indexed one wins.
+///
+/// `Post.uid` is indexed and `Forum.uid` is not, so the tie breaks toward the
+/// end where a seek is actually available.
+#[tokio::test]
+async fn an_indexed_equality_outranks_an_unindexed_one() {
+    let p = planner_with_index().await;
+
+    let plan = plan_of(
+        &p,
+        "MATCH (f:Forum)-[:CONTAINER_OF]->(p:Post) \
+         WHERE f.uid = 'a' AND p.uid = 'b' RETURN f.id AS c",
+    );
+    assert_eq!(
+        scan_anchor(&plan).as_deref(),
+        Some("p"),
+        "both ends are pinned, so the anchor should be the end whose property \
+         has an index behind it"
+    );
+}
+
+/// Equal rank at both ends preserves the written order.
+///
+/// Neither `id` is indexed, so there is nothing to choose between them and the
+/// rewrite must decline rather than flip on a coin.
+#[tokio::test]
+async fn equal_rank_at_both_ends_preserves_the_written_order() {
+    let p = planner_with_index().await;
+
+    let plan = plan_of(
+        &p,
+        "MATCH (f:Forum)-[:CONTAINER_OF]->(p:Post) \
+         WHERE f.id = 1 AND p.id = 2 RETURN f.id AS c",
+    );
+    assert_eq!(
+        scan_anchor(&plan).as_deref(),
+        Some("f"),
+        "with nothing to separate the two ends the pattern must plan as written"
+    );
+}
+
+/// A predicate under `OR` pins nothing and must not anchor.
+///
+/// `f.uid = 'a' OR p.uid = 'b'` constrains neither end on its own; treating
+/// either disjunct as an anchor would be a wrong answer waiting on a plan
+/// change, not merely a slow one.
+#[tokio::test]
+async fn a_disjunction_does_not_anchor() {
+    let p = planner_with_index().await;
+
+    let plan = plan_of(
+        &p,
+        "MATCH (f:Forum)-[:CONTAINER_OF]->(p:Post) \
+         WHERE f.uid = 'a' OR p.uid = 'b' RETURN f.id AS c",
+    );
+    assert_eq!(
+        scan_anchor(&plan).as_deref(),
+        Some("f"),
+        "neither branch of an OR pins its variable, so the pattern plans as written"
+    );
+}

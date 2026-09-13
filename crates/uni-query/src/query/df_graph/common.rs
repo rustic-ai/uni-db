@@ -1564,6 +1564,17 @@ pub async fn execute_subplan_with_outer_vars(
         graph_ctx.cancellation_token_for_host(),
     );
 
+    // The execution counters inherit for the same reason, and were missing for
+    // the same reason: the fresh `GraphExecutionContext` defaults them to
+    // `None`, so every scan below this boundary counted into nothing. Unlike a
+    // lost deadline this is silent — the query still answers, the counter just
+    // reads low, or zero when *all* the work is under a sub-plan. That is the
+    // Locy case: a rule body is executed through here, so
+    // `LocyResult::metrics().rows_scanned` reported 0 no matter what the rules
+    // scanned. Cypher subqueries and correlated `Apply` were under-counting the
+    // same way.
+    planner = planner.with_counters(graph_ctx.counters().cloned());
+
     // Propagate registries from parent context so procedures remain available
     // inside correlated subqueries (Apply operator).
     if let Some(registry) = graph_ctx.algo_registry() {

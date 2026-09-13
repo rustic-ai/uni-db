@@ -64,10 +64,10 @@ async def test_add_properties_basic_types(async_empty_db):
 
     # Check data types
     props_by_name = {p.name: p for p in info.properties}
-    assert props_by_name["name"].data_type in ("string", "String")
-    assert props_by_name["age"].data_type in ("int", "Int64")
-    assert props_by_name["score"].data_type in ("float", "Float64")
-    assert props_by_name["active"].data_type in ("bool", "Bool", "Boolean")
+    assert props_by_name["name"].data_type == "string"
+    assert props_by_name["age"].data_type == "int64"
+    assert props_by_name["score"].data_type == "float64"
+    assert props_by_name["active"].data_type == "bool"
 
 
 @pytest.mark.asyncio
@@ -387,14 +387,14 @@ async def test_get_label_info(async_empty_db):
     assert len(info.properties) == 3
     props_by_name = {p.name: p for p in info.properties}
 
-    assert props_by_name["title"].data_type in ("string", "String")
+    assert props_by_name["title"].data_type == "string"
     assert props_by_name["title"].nullable is False
     assert props_by_name["title"].is_indexed is True
 
-    assert props_by_name["year"].data_type in ("int", "Int64")
+    assert props_by_name["year"].data_type == "int64"
     assert props_by_name["year"].nullable is False
 
-    assert props_by_name["rating"].data_type in ("float", "Float64")
+    assert props_by_name["rating"].data_type == "float64"
     assert props_by_name["rating"].nullable is True
 
 

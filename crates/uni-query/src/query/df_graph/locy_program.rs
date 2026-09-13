@@ -1617,6 +1617,7 @@ fn convert_to_fixpoint_plans(
                 priority: rule.priority,
                 has_fold: !rule.fold_bindings.is_empty(),
                 fold_bindings,
+                require: rule.require.clone(),
                 having: rule.having.clone(),
                 has_best_by: !rule.best_by_criteria.is_empty(),
                 best_by_criteria,

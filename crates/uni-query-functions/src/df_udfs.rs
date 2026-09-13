@@ -1221,8 +1221,27 @@ cypher_scalar_udf! {
 
         let path = &val_args[0];
         let nodes = match path {
+            // The `Value::Path` arm, without which a real path answered Null.
+            // Only the legacy map encoding was handled, so `nodes(p)` worked
+            // wherever a path arrived as a map and silently emptied wherever it
+            // arrived as a path. `expr_eval::eval_nodes` has always had both.
+            Value::Path(p) => Value::List(p.nodes.iter().cloned().map(Value::Node).collect()),
             Value::Map(map) => map.get("nodes").cloned().unwrap_or(Value::Null),
-            _ => Value::Null,
+            // Null in, null out — the Cypher convention for a function applied
+            // to a missing value, and the one case where a null answer is a
+            // real answer rather than an absent one.
+            Value::Null => Value::Null,
+            // Anything else is a type error. This used to answer `Null`, which
+            // is indistinguishable from "a path with no nodes" and from "the
+            // encoding was not recognised" — the reading that let a missing
+            // `Value::Path` arm go unnoticed here for as long as it did.
+            // `expr_eval::eval_nodes` has always errored.
+            other => {
+                return Err(datafusion::error::DataFusionError::Execution(format!(
+                    "TypeError: InvalidArgumentValue - nodes() expects a Path, got {}",
+                    other.type_name()
+                )));
+            }
         };
 
         Ok(nodes)
@@ -1250,8 +1269,20 @@ cypher_scalar_udf! {
 
         let path = &val_args[0];
         let rels = match path {
+            // See `nodes`: the same arm was missing here, so `relationships(p)`
+            // answered Null for a path that arrived as a path rather than as
+            // the legacy map.
+            Value::Path(p) => Value::List(p.edges.iter().cloned().map(Value::Edge).collect()),
             Value::Map(map) => map.get("relationships").cloned().unwrap_or(Value::Null),
-            _ => Value::Null,
+            // See `nodes`: null in, null out; anything else is a type error
+            // rather than an empty-looking answer.
+            Value::Null => Value::Null,
+            other => {
+                return Err(datafusion::error::DataFusionError::Execution(format!(
+                    "TypeError: InvalidArgumentValue - relationships() expects a Path, got {}",
+                    other.type_name()
+                )));
+            }
         };
 
         Ok(rels)
@@ -4786,6 +4817,16 @@ fn cypher_size_scalar(scalar: &ScalarValue) -> DFResult<ScalarValue> {
                         Err(datafusion::error::DataFusionError::Execution(
                             "TypeError: InvalidArgumentValue - length() is not supported for Relationship values".to_string(),
                         ))
+                    }
+                    // A path's length is its relationship count, as
+                    // `expr_eval::eval_length` has always had it. Without this
+                    // arm a path fell to the catch-all below, which renders it
+                    // as the JSON object `{nodes, relationships}` and returns
+                    // that object's *key count* — so every path, of any length,
+                    // measured 2. Plausible enough to survive: a one-hop path
+                    // is 2 nodes, and 2 is what came back.
+                    uni_common::Value::Path(path) => {
+                        Ok(ScalarValue::Int64(Some(path.edges.len() as i64)))
                     }
                     _ => {
                         let json_val: serde_json::Value = uni_val.into();

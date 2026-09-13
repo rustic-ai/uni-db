@@ -1264,6 +1264,8 @@ Strata are evaluated in topological order:
 1. **Non-recursive strata:** Single pass — evaluate all clause bodies once, collect output.
 2. **Recursive strata:** Semi-naive fixpoint iteration until convergence.
 3. **Post-fixpoint operators:** After convergence, apply PRIORITY filtering, FOLD, the post-FOLD `WHERE`, and BEST BY selection, in that order. PRIORITY and FOLD are *additionally* recomputed once per iteration for a rule whose folded value a same-stratum reference reads — that snapshot is what the reference sees. The post-FOLD `WHERE` and BEST BY stay post-fixpoint only: they filter the folded value, and a non-monotone filter applied per iteration would let a fact appear, vanish and reappear.
+
+   The consequence, which is easy to miss (issue #265): in a rule that references *itself*, the post-FOLD `WHERE` does **not** constrain the recursion. The self-reference reads the rule's unfiltered folded value, so a group the threshold excludes is absent from the answer *while still having derived rows into it*. That is the intended reading when the filter selects what is displayed — a child HAVING removes must still have been visible to its parent during the fixpoint, which is what §15.2's PROB case needs (issue #162) — and it is the only reading available, since "filter the answer" and "the threshold is part of the definition" are spelled identically. The compiler therefore emits a `HavingInRecursivePath` warning rather than rejecting. A rule whose *definition* depends on an aggregate crossing a threshold (ownership or voting control, quorum, a cost ceiling) is written with **`REQUIRE`** instead: it is applied to every iteration's folded snapshot — the view a self-reference reads — so it constrains what the recursion derives, and again at the end so an excluded group stays out of the answer. `REQUIRE` is admitted in a recursive stratum only when the comparison is one-way (a lower bound over a non-decreasing fold, or an upper bound over a non-increasing one); otherwise `NonMonotonicFilterInRecursion`, because a fact that could be withdrawn reads to the change detector as progress and would run the loop to `max_iterations`. Pinned by `crates/uni-locy-tck/tck/features/correlation/{HavingInRecursivePath,RequireInRecursion}.feature`.
 4. **Store results:** Converged facts are placed in `DerivedStore` for downstream strata.
 
 ## 15.3 Semi-Naive Fixpoint
@@ -2218,7 +2220,7 @@ struct ExplainRule { rule_name: QualifiedName, where_expr: Option<Expr>, return_
 
 ## Appendix D: TCK Coverage Map
 
-**70 feature files, 519 scenarios** covering all Locy features.
+**72 feature files, 528 scenarios** covering all Locy features.
 
 ### Core Evaluation
 

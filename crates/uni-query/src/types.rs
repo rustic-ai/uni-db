@@ -414,22 +414,10 @@ impl QueryResult {
 
     /// Attach execution counters harvested from the executor.
     ///
-    /// Takes the tuple shape `Executor::take_counters` returns.
+    /// Takes the shape `Executor::take_counters` returns.
     #[doc(hidden)]
     pub fn set_counters(&mut self, counters: uni_store::CounterSnapshot) {
-        self.metrics.l0_reads = counters.l0_rows as usize;
-        self.metrics.storage_reads = counters.storage_rows as usize;
-        self.metrics.rows_scanned = counters.rows_scanned as usize;
-        self.metrics.branch_scans = counters.branch_scans;
-        self.metrics.snapshot_reads = counters.snapshot_reads;
-        self.metrics.index_scans = counters.index_scans;
-        self.metrics.index_comparisons = counters.index_comparisons;
-        self.metrics.lance_iops = counters.lance_iops;
-        self.metrics.scans_reported = counters.scans_reported;
-        self.metrics.subquery_executions = counters.subquery_executions;
-        self.metrics.vector_index_scans = counters.vector_index_scans;
-        self.metrics.fts_index_scans = counters.fts_index_scans;
-        self.metrics.searches_reported = counters.searches_reported;
+        self.metrics.apply_counters(&counters);
     }
 }
 
@@ -439,6 +427,33 @@ impl IntoIterator for QueryResult {
 
     fn into_iter(self) -> Self::IntoIter {
         self.rows.into_iter()
+    }
+}
+
+impl QueryMetrics {
+    /// Stamp a `CounterSnapshot` onto these metrics.
+    ///
+    /// One mapping, used by every result type that reports counters. It used to
+    /// live inside `QueryResult::set_counters`, which meant a result type that
+    /// was not a `QueryResult` — a Locy rule evaluation, say — had no way to
+    /// report them short of copying the list. None was copied, so
+    /// `LocyResult::metrics().rows_scanned` read 0 however much the rules
+    /// scanned, which is the trap the field docs on [`Self::cache_hits`]
+    /// describe: an assertion against it compiled and silently never fired.
+    pub fn apply_counters(&mut self, c: &uni_store::CounterSnapshot) {
+        self.l0_reads = c.l0_rows as usize;
+        self.storage_reads = c.storage_rows as usize;
+        self.rows_scanned = c.rows_scanned as usize;
+        self.branch_scans = c.branch_scans;
+        self.snapshot_reads = c.snapshot_reads;
+        self.index_scans = c.index_scans;
+        self.index_comparisons = c.index_comparisons;
+        self.lance_iops = c.lance_iops;
+        self.scans_reported = c.scans_reported;
+        self.subquery_executions = c.subquery_executions;
+        self.vector_index_scans = c.vector_index_scans;
+        self.fts_index_scans = c.fts_index_scans;
+        self.searches_reported = c.searches_reported;
     }
 }
 

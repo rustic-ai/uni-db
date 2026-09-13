@@ -24,7 +24,7 @@ After strata converge, commands (`QUERY`, `DERIVE`, `ABDUCE`, `ASSUME`) execute 
 | Context | Execution | Vector | Auto-Embed | FTS |
 |---------|-----------|--------|------------|-----|
 | Rule `MATCH ... WHERE/YIELD` | DataFusion | ✓ | ✓ | ✓ |
-| Rule `ALONG / FOLD / post-FOLD WHERE` | DataFusion | ✓ | ✓ | ✓ |
+| Rule `ALONG / FOLD / REQUIRE / post-FOLD WHERE` | DataFusion | ✓ | ✓ | ✓ |
 | `DERIVE ... WHERE` | In-memory | ✓ | ✗ | ✗ |
 | `ABDUCE ... WHERE` | In-memory | ✓ | ✗ | ✗ |
 | `ASSUME ... WHERE` | In-memory | ✓ | ✗ | ✗ |
@@ -78,6 +78,13 @@ binds depends on whether the rule aggregates:
   per-KEY aggregate is not defined per path. This is decided per clause, so a
   sibling clause of the same rule that folds an inherited value still reads the
   folded view.
+- **The rule carries `REQUIRE`** — the folded value the reference sees is
+  filtered by it, every iteration. That is what makes `REQUIRE` constrain the
+  recursion: a group below the threshold is not visible to the self-reference,
+  so nothing downstream of it is derived. A post-FOLD `WHERE` does *not* do
+  this — it is applied once, after convergence, so the reference still reads
+  the unfiltered value. See
+  [ALONG, FOLD, BEST BY](advanced/along-fold-bestby.md#require-when-the-threshold-is-part-of-the-definition).
 - **A reference to a lower stratum** always reads that rule's published, folded
   facts. It always has.
 

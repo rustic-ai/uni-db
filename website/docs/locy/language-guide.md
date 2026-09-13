@@ -8,6 +8,7 @@ MATCH ...
 [WHERE ...]              // pre-aggregation filter
 [ALONG ...]
 [FOLD ...]
+[REQUIRE ...]            // definitional threshold (constrains recursion)
 [WHERE ...]              // post-FOLD filter (HAVING semantics)
 [BEST BY ...]
 YIELD ...

@@ -565,11 +565,61 @@ pub async fn build_database_core(
 // Helpers
 // ============================================================================
 
+/// Every `CrdtType`, for the `crdt:` spelling.
+///
+/// Not compiler-checked — `CrdtType` could grow a variant without this noticing
+/// — so `data_type_specs_round_trip` walks the same list and would fail on a
+/// spec this cannot parse back.
+const CRDT_TYPES: &[uni_common::CrdtType] = &[
+    uni_common::CrdtType::GCounter,
+    uni_common::CrdtType::GSet,
+    uni_common::CrdtType::ORSet,
+    uni_common::CrdtType::LWWRegister,
+    uni_common::CrdtType::LWWMap,
+    uni_common::CrdtType::Rga,
+    uni_common::CrdtType::VectorClock,
+    uni_common::CrdtType::VCRegister,
+];
+
 /// Parse a data type string into a DataType enum.
+///
+/// The inverse of [`uni_common::DataType::type_spec`]; the two are pinned
+/// together by `data_type_specs_round_trip`.
 pub fn parse_data_type(data_type: &str) -> Result<DataType, String> {
     // Checked before `vector:` — `sparse_vector:N` does not start with `vector:`,
     // but ordering it first keeps the learned-sparse case unambiguous.
-    if let Some(dims_str) = data_type.strip_prefix("sparse_vector:") {
+    // `binary_vector:` and `sparse_vector:` are both checked before `vector:`:
+    // neither starts with it, but keeping the three together makes the ordering
+    // obvious to the next reader.
+    if let Some(dims_str) = data_type.strip_prefix("binary_vector:") {
+        let dims = dims_str.parse::<usize>().map_err(|_| {
+            "Invalid dimensions for binary_vector type, e.g., 'binary_vector:64'".to_string()
+        })?;
+        Ok(DataType::BinaryVector { dimensions: dims })
+    } else if let Some(kind) = data_type.strip_prefix("point:") {
+        match kind {
+            "geographic" => Ok(DataType::Point(
+                uni_common::core::schema::PointType::Geographic,
+            )),
+            "cartesian2d" => Ok(DataType::Point(
+                uni_common::core::schema::PointType::Cartesian2D,
+            )),
+            "cartesian3d" => Ok(DataType::Point(
+                uni_common::core::schema::PointType::Cartesian3D,
+            )),
+            other => Err(format!(
+                "Unknown point type '{other}', expected geographic, cartesian2d or cartesian3d"
+            )),
+        }
+    } else if let Some(name) = data_type.strip_prefix("crdt:") {
+        // Matched against `CrdtType::type_name`, case-insensitively, so
+        // `crdt:GCounter` and `crdt:gcounter` both work.
+        CRDT_TYPES
+            .iter()
+            .find(|ct| ct.type_name().eq_ignore_ascii_case(name))
+            .map(|ct| DataType::Crdt(ct.clone()))
+            .ok_or_else(|| format!("Unknown CRDT type '{name}'"))
+    } else if let Some(dims_str) = data_type.strip_prefix("sparse_vector:") {
         let dims = dims_str.parse::<usize>().map_err(|_| {
             "Invalid dimensions for sparse_vector type, e.g., 'sparse_vector:30522'".to_string()
         })?;
@@ -612,10 +662,10 @@ pub fn parse_data_type(data_type: &str) -> Result<DataType, String> {
     } else {
         match data_type.to_lowercase().as_str() {
             "string" => Ok(DataType::String),
-            "int64" | "int" => Ok(DataType::Int64),
             "int32" => Ok(DataType::Int32),
-            "float64" | "float" => Ok(DataType::Float64),
+            "int64" | "int" => Ok(DataType::Int64),
             "float32" => Ok(DataType::Float32),
+            "float64" | "float" => Ok(DataType::Float64),
             "bool" => Ok(DataType::Bool),
             "datetime" | "timestamp" => Ok(DataType::DateTime),
             "date" => Ok(DataType::Date),
@@ -857,6 +907,70 @@ pub fn create_index_definition_from_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `DataType::type_spec()` must parse back to the same type.
+    ///
+    /// This is the assertion that keeps the two dialects from drifting.
+    /// `type_spec` is what `PropertyMetadata.data_type` reports, and that field
+    /// is also an *input* type — `.property(name, spec)` — so a spec a caller
+    /// reads off a schema has to be feedable straight back. It was not: the
+    /// field used to carry `format!("{:?}")`, so `"BinaryVector { dimensions:
+    /// 64 }"` came out and nothing accepted it.
+    ///
+    /// `Timestamp` is the one documented exception, and is asserted as such
+    /// rather than skipped: the parser has always read `"timestamp"` as
+    /// `DateTime`, and re-pointing it would silently change the column type of
+    /// existing callers.
+    #[test]
+    fn data_type_specs_round_trip() {
+        use uni_common::core::schema::PointType;
+
+        let mut cases = vec![
+            DataType::String,
+            DataType::Int32,
+            DataType::Int64,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Bool,
+            DataType::Date,
+            DataType::Time,
+            DataType::DateTime,
+            DataType::Duration,
+            DataType::CypherValue,
+            DataType::Bytes,
+            DataType::Btic,
+            DataType::Point(PointType::Geographic),
+            DataType::Point(PointType::Cartesian2D),
+            DataType::Point(PointType::Cartesian3D),
+            DataType::Vector { dimensions: 128 },
+            DataType::SparseVector { dimensions: 30522 },
+            DataType::BinaryVector { dimensions: 64 },
+            DataType::List(Box::new(DataType::String)),
+            DataType::List(Box::new(DataType::Vector { dimensions: 8 })),
+            DataType::Map(Box::new(DataType::String), Box::new(DataType::Int64)),
+            DataType::Map(
+                Box::new(DataType::String),
+                Box::new(DataType::List(Box::new(DataType::Float64))),
+            ),
+        ];
+        cases.extend(CRDT_TYPES.iter().map(|ct| DataType::Crdt(ct.clone())));
+
+        for dt in cases {
+            let spec = dt.type_spec();
+            let back = parse_data_type(&spec).unwrap_or_else(|e| {
+                panic!("type_spec() produced {spec:?} for {dt:?}, which does not parse: {e}")
+            });
+            assert_eq!(
+                back, dt,
+                "{dt:?} rendered as {spec:?}, which parsed back as {back:?}"
+            );
+        }
+
+        // The documented asymmetry, pinned so a future change to either side is
+        // a deliberate one.
+        assert_eq!(DataType::Timestamp.type_spec(), "timestamp");
+        assert_eq!(parse_data_type("timestamp"), Ok(DataType::DateTime));
+    }
 
     #[test]
     fn parse_data_type_scalars_and_vector() {

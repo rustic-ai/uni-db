@@ -45,6 +45,12 @@ pub struct LocyRulePlan {
     /// when the user writes e.g. `YIELD ... n AS support`).
     pub fold_bindings: Vec<(String, String, Expr)>,
     /// Post-FOLD filter expressions (HAVING semantics).
+    /// Post-FOLD definitional threshold (`REQUIRE`, issue #265).
+    ///
+    /// Applied to every iteration's folded snapshot rather than once at the
+    /// end, so it constrains what a recursive rule can derive. Aliases are
+    /// substituted exactly as for [`Self::having`].
+    pub require: Vec<Expr>,
     pub having: Vec<Expr>,
     /// BEST BY criteria for post-fixpoint selection (expr, ascending).
     pub best_by_criteria: Vec<(Expr, bool)>,

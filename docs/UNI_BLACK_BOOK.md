@@ -3737,6 +3737,7 @@ CREATE RULE ruleName [PRIORITY n] AS
     WHERE conditions                     -- pre-aggregation filter
     [ALONG name = expr]
     [FOLD name = aggregate]
+    [REQUIRE aggregate_condition]        -- definitional threshold (per iteration)
     [WHERE aggregate_condition]          -- post-FOLD filter (HAVING)
     [BEST BY expr [ASC|DESC], ...]
     [YIELD [KEY] expr [AS alias] [PROB], ...
@@ -3830,6 +3831,33 @@ CREATE RULE frequent_payer AS
 ```
 
 The post-FOLD `WHERE` runs after all FOLD aggregates are computed and before BEST BY. It can reference FOLD output columns and KEY columns. Multiple conditions are combined with `AND`.
+
+In a **recursive** rule it filters the converged answer only. `apply_having_filter` is called once from `apply_post_fixpoint_chain_inner`, never from the per-iteration `FoldViewState::recompute_folded`, so a self-reference reads the rule's *unfiltered* folded value: a group the threshold excludes is absent from the output while still having derived rows into it. That is the intended reading for the PROB case of issue #162 — a child HAVING removes must still have been visible to its parent during the fixpoint — and it is deliberate. `HavingInRecursivePath` warns when the shape appears, because the other intent is spelled identically.
+
+### REQUIRE (definitional threshold)
+
+`REQUIRE` is the other reading of the same predicate (issue #265). It is part of the rule's *definition*, so it constrains what the recursion derives rather than what the answer displays:
+
+```locy
+CREATE RULE blocked AS
+    MATCH (o:Entity)-[s:OWNS]->(e:Entity)
+    WHERE o IS blocked
+    FOLD agg = MSUM(s.pct)
+    REQUIRE agg >= 50.0
+    YIELD KEY e, agg
+```
+
+**Applied at two points, both load-bearing.** `FoldViewState::recompute_folded` filters the per-iteration snapshot, which is what a same-stratum self-reference reads — that is what stops an excluded group deriving anything downstream. `apply_post_fixpoint_chain_inner` filters again, before HAVING — that is what keeps the excluded group itself out of the answer, which the snapshot pass cannot do because the final rows are assembled from contribution facts rather than from the snapshot. Both reuse `apply_having_filter`; the alias substitution from the planner is applied to `require` exactly as to `having`.
+
+**Admitted in a recursive stratum only when one-way.** `check_require_direction` (`uni-locy/src/compiler/typecheck.rs`) pairs each comparison against the fold's direction and raises `NonMonotonicFilterInRecursion` otherwise: a lower bound over a non-decreasing fold, or an upper bound over a non-increasing one. Equality is never admissible, nor is a predicate naming a fold output on both sides, nor an aggregate that declares no direction. A predicate mentioning no fold output at all is constant across iterations and is admitted.
+
+This is a compile error rather than a warning because the runtime cannot recover. The change test (`prev_rows`) compares whole *contribution* rows, not the folded view, so a group leaving the snapshot is invisible to the producing rule's own convergence check and reaches consumers as a row set that flips back and forth — which `rows_now != prev_rows` reads as progress. A non-monotone `REQUIRE` would run to `max_iterations` and return partial results.
+
+**Direction is a `LocyAggregate` method, not `Semilattice` state.** `Semilattice::monotone_join` says *whether* an aggregate is monotone, never which way, and `MIN`/`MAX` share one `BOUNDED_MIN_MAX` constant. `LocyAggregate::direction()` defaults to `FoldDirection::Unknown`, so an aggregate that has not declared one declines `REQUIRE` and existing plugin implementors are unaffected. The enum lives in `uni-common` because `uni-locy` does not depend on `uni-plugin`, and is re-exported from `uni_plugin::traits::locy`. The registry-backed oracle mirrors `is_monotonic_aggregate` as `e.aggregate.direction()`; the registry-free fallback covers the same six `M*` names.
+
+Outside recursion the direction is not policed: there is one pass, nothing can flip, and `REQUIRE` means what the post-FOLD `WHERE` means. That keeps a rule refactor-safe — it holds the meaning its author wrote if a self-reference is added later.
+
+**Gotcha for anyone adding a field here.** `FixpointRulePlan` is cloned field by field inside `FixpointExec::execute` (it carries a `LogicalPlan`), so a new field silently arrives empty at runtime however correctly it was populated upstream. `require` was threaded through the AST, compiler and planner and was still empty at the fixpoint until that clone was updated.
 
 ### Probabilistic Aggregation (MNOR / MPROD)
 

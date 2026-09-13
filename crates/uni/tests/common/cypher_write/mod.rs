@@ -14,6 +14,7 @@ pub mod df_mutation_test;
 pub mod foreach_test;
 pub mod inlined_unwind_pushdown_test;
 pub mod merge_failclosed_test;
+pub mod merge_keyed_endpoint_semantics;
 pub mod mutation_stress_test;
 pub mod partial_lance_delete_test;
 pub mod partial_lance_edges_test;

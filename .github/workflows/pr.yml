@@ -420,7 +420,14 @@ jobs:
     if: github.repository == 'rustic-ai/uni-db'
     name: Perf Gate (instruction counts)
     runs-on: ubuntu-xlarge
-    timeout-minutes: 45
+    # 75, against ~27 minutes nominal (see the build and measure steps). The
+    # previous 45 was sized for the mean and a slow runner walked through it: a
+    # run whose measurement had taken 29 minutes on the commit before took over
+    # 53 on a one-line docs change, hit the limit, and then took ten more
+    # minutes to die, because valgrind's children do not stop promptly. The
+    # per-step budgets below are what actually attribute an overrun; this one is
+    # only the outer bound.
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
 
@@ -439,11 +446,20 @@ jobs:
       - name: Install iai-callgrind-runner
         run: cargo install iai-callgrind-runner --version 0.16.1 --locked
 
-      # save-if: false — this job never populates the shared cache. The "ci"
-      # saver (ci.yml's tck-full) never builds --benches, so the bench binary is
-      # a cold compile here (~15 min). That is why a job doing ~12 minutes of
-      # measurement carries a 45-minute budget. Do not "fix" the slowness by
-      # saving: it would evict entries the stable jobs depend on.
+      # save-if: false — this job never populates the shared cache. Do not
+      # "fix" the slowness by saving under this key: it would evict entries the
+      # stable jobs depend on.
+      #
+      # Note what this restore does *not* buy. The "ci" saver (ci.yml's
+      # tck-full) builds the test profile; this job builds `[profile.bench]`,
+      # which inherits release and keeps symbols. They share no artifacts, so
+      # the dependency graph is compiled from cold here every run — no job
+      # anywhere on main produces that profile, so there is nothing to restore
+      # even in principle. Confirmed rather than assumed: run the build step's
+      # command against a target directory already holding both dev and release
+      # artifacts and it still starts at `proc-macro2`. Warming it means giving some main-branch job that
+      # already builds benches (nightly's) its own key to save under; doing it
+      # in tck-full would triple an 8-minute job and make it ci.yml's long pole.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
@@ -454,7 +470,25 @@ jobs:
       # (run 32810181500) the worst drift of a median with NO code change is
       # 0.997% at 3 runs and 0.599% at 5; 7 runs only reaches 0.581% for another
       # 4.6 minutes. 5 is where the curve flattens.
+      # Split from the measurement so an overrun says which half overran. Both
+      # used to live in one step, where a timeout and a real regression were the
+      # same red X — the ambiguity the "Upload samples" step below already
+      # exists to resolve after the fact.
+      #
+      # `RUSTC_WRAPPER=""` matches the pilot script, so this build and the
+      # measurement runs share one cache key rather than compiling twice.
+      #
+      # The `[profile.bench]` guard stays in the script rather than being copied
+      # here: a missing profile wastes this build and then fails closed at the
+      # first measurement, which is the right outcome and not worth duplicating
+      # a check to shave.
+      - name: Build the bench binary
+        timeout-minutes: 40
+        run: RUSTC_WRAPPER="" cargo bench -p uni-db --bench hot_paths_iai --no-run
+
+      # ~12 minutes of actual measurement, now that the compile is out of it.
       - name: Measure
+        timeout-minutes: 30
         env:
           RUNS: "5"
         run: bash scripts/perf/iai_pilot.sh "$RUNS"

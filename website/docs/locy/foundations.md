@@ -30,7 +30,7 @@ A rule typically has:
 
 - `MATCH` pattern
 - Optional conditions (`WHERE`, `IS`, `IS NOT`)
-- Optional path or aggregate clauses (`ALONG`, `FOLD`, post-FOLD `WHERE`, `BEST BY`)
+- Optional path or aggregate clauses (`ALONG`, `FOLD`, `REQUIRE`, post-FOLD `WHERE`, `BEST BY`)
 - Output (`YIELD` or `DERIVE`)
 
 ## Safety and Predictability

@@ -569,8 +569,11 @@ pub fn make_progress_callback(
 
 /// Map a Rust `WriteLease` to its Python representation.
 ///
-/// `WriteLease` is `#[non_exhaustive]`; the catch-all (covering `Custom` and any
-/// future variant) reports `Local`, matching the pre-existing behavior.
+/// `WriteLease` is `#[non_exhaustive]`, so a catch-all is unavoidable — but it
+/// no longer swallows `Custom`, which used to report as `Local`: "no external
+/// coordination" for a lease that is externally coordinated. A future Rust
+/// variant still lands on `Custom` rather than `Local`, which is the safer of
+/// the two wrong answers, since it at least says "not the local lock".
 pub fn write_lease_to_py(
     wl: &::uni_db::api::multi_agent::WriteLease,
 ) -> crate::types::PyWriteLease {
@@ -580,8 +583,11 @@ pub fn write_lease_to_py(
                 table: table.clone(),
             },
         },
-        _ => crate::types::PyWriteLease {
+        ::uni_db::api::multi_agent::WriteLease::Local => crate::types::PyWriteLease {
             variant: crate::types::WriteLeaseVariant::Local,
+        },
+        _ => crate::types::PyWriteLease {
+            variant: crate::types::WriteLeaseVariant::Custom,
         },
     }
 }
@@ -955,32 +961,20 @@ fn locy_incomplete_to_py(
 /// compiler had already emitted were invisible from Python. Issue #159 was
 /// filed against a program that warns at compile time.
 ///
-/// The match is deliberately exhaustive rather than using a `_` arm, so a new
-/// `WarningCode` variant fails the build here instead of silently reaching
-/// Python under a wrong or generic name.
+/// The code string comes from [`uni_locy::types::WarningCode::as_str`] rather
+/// than a match here.
+/// That match is exhaustive with no `_` arm, so a new variant fails to compile
+/// instead of silently reaching Python under a wrong or generic name — but it
+/// has to live in `uni-locy` to be useful, because this crate is excluded from
+/// every workspace build lane and so is compiled only when a wheel is built.
 fn compile_warnings_to_py(
     py: Python,
     warnings: &[uni_locy::types::CompilerWarning],
 ) -> PyResult<Py<PyAny>> {
-    use uni_locy::types::WarningCode;
-
     let list = PyList::empty(py);
     for w in warnings {
         let wd = PyDict::new(py);
-        let code_str = match w.code {
-            WarningCode::MsumNonNegativity => "msum_non_negativity",
-            WarningCode::ProbabilityDomainViolation => "probability_domain_violation",
-            WarningCode::FoldInRecursivePath => "fold_in_recursive_path",
-            WarningCode::EceBinningBias => "ece_binning_bias",
-            WarningCode::UncalibratedLLMLogprobs => "uncalibrated_llm_logprobs",
-            WarningCode::UncalibratedNeuralPredicate => "uncalibrated_neural_predicate",
-            WarningCode::SharedNeuralInputArgument => "shared_neural_input_argument",
-            WarningCode::SharedNeuralFeatureValue => "shared_neural_feature_value",
-            WarningCode::PositiveComplementCorrelation => "positive_complement_correlation",
-            WarningCode::CrossPredicateCorrelation => "cross_predicate_correlation",
-            WarningCode::SharedRetrievalContext => "shared_retrieval_context",
-        };
-        wd.set_item("code", code_str)?;
+        wd.set_item("code", w.code.as_str())?;
         wd.set_item("message", &w.message)?;
         wd.set_item("rule_name", &w.rule_name)?;
         list.append(wd)?;
@@ -1027,22 +1021,9 @@ pub fn locy_result_to_py(py: Python, result: uni_db::locy::LocyResult) -> PyResu
     let warn_list = PyList::empty(py);
     for w in result.warnings {
         let wd = PyDict::new(py);
-        let code_str = match w.code {
-            uni_locy::RuntimeWarningCode::SharedProbabilisticDependency => {
-                "shared_probabilistic_dependency"
-            }
-            uni_locy::RuntimeWarningCode::BddLimitExceeded => "bdd_limit_exceeded",
-            uni_locy::RuntimeWarningCode::CrossGroupCorrelationNotExact => {
-                "cross_group_correlation_not_exact"
-            }
-            uni_locy::RuntimeWarningCode::FuzzyNotProbabilistic => "fuzzy_not_probabilistic",
-            uni_locy::RuntimeWarningCode::TopKPruningCrossedDependency => {
-                "top_k_pruning_crossed_dependency"
-            }
-            uni_locy::RuntimeWarningCode::EntityHydrationIncomplete => {
-                "entity_hydration_incomplete"
-            }
-        };
+        // See `RuntimeWarningCode::as_str`: the mapping lives on the enum in
+        // `uni-locy` so a new variant fails a build the workspace lanes run.
+        let code_str = w.code.as_str();
         wd.set_item("code", code_str)?;
         wd.set_item("message", &w.message)?;
         wd.set_item("rule_name", &w.rule_name)?;
@@ -1161,22 +1142,9 @@ pub fn locy_result_to_py_class(
     let warn_list = pyo3::types::PyList::empty(py);
     for w in result.warnings {
         let wd = pyo3::types::PyDict::new(py);
-        let code_str = match w.code {
-            uni_locy::RuntimeWarningCode::SharedProbabilisticDependency => {
-                "shared_probabilistic_dependency"
-            }
-            uni_locy::RuntimeWarningCode::BddLimitExceeded => "bdd_limit_exceeded",
-            uni_locy::RuntimeWarningCode::CrossGroupCorrelationNotExact => {
-                "cross_group_correlation_not_exact"
-            }
-            uni_locy::RuntimeWarningCode::FuzzyNotProbabilistic => "fuzzy_not_probabilistic",
-            uni_locy::RuntimeWarningCode::TopKPruningCrossedDependency => {
-                "top_k_pruning_crossed_dependency"
-            }
-            uni_locy::RuntimeWarningCode::EntityHydrationIncomplete => {
-                "entity_hydration_incomplete"
-            }
-        };
+        // See `RuntimeWarningCode::as_str`: the mapping lives on the enum in
+        // `uni-locy` so a new variant fails a build the workspace lanes run.
+        let code_str = w.code.as_str();
         wd.set_item("code", code_str)?;
         wd.set_item("message", &w.message)?;
         wd.set_item("rule_name", &w.rule_name)?;
@@ -1928,6 +1896,49 @@ pub fn py_timedelta_to_duration(obj: &Bound<'_, PyAny>) -> PyResult<std::time::D
 #[cfg(test)]
 mod value_to_py_coverage {
     use super::*;
+
+    /// A `WriteLease::Custom` must not report to Python as `Local`.
+    ///
+    /// The catch-all used to map it there, so a lease that *is* externally
+    /// coordinated described itself as "no external coordination" — the one
+    /// answer a caller inspecting the lease is trying to avoid. This needs no
+    /// interpreter (see the note below): `write_lease_to_py` returns a plain
+    /// struct, and only reading it from Python would require one.
+    #[test]
+    fn a_custom_write_lease_does_not_report_as_local() {
+        use ::uni_db::api::multi_agent::{LeaseGuard, WriteLease, WriteLeaseProvider};
+
+        struct Dummy;
+        #[async_trait::async_trait]
+        impl WriteLeaseProvider for Dummy {
+            async fn acquire(&self) -> uni_common::Result<LeaseGuard> {
+                unreachable!("the mapping never runs the provider")
+            }
+            async fn heartbeat(&self, _g: &LeaseGuard) -> uni_common::Result<()> {
+                unreachable!()
+            }
+            async fn release(&self, _g: LeaseGuard) -> uni_common::Result<()> {
+                unreachable!()
+            }
+        }
+
+        let custom = write_lease_to_py(&WriteLease::Custom(Box::new(Dummy)));
+        assert!(
+            matches!(custom.variant, crate::types::WriteLeaseVariant::Custom),
+            "a custom lease mapped to {:?}",
+            custom.variant
+        );
+
+        // The two that were already right stay right.
+        assert!(matches!(
+            write_lease_to_py(&WriteLease::Local).variant,
+            crate::types::WriteLeaseVariant::Local
+        ));
+        assert!(matches!(
+            write_lease_to_py(&WriteLease::DynamoDB { table: "t".into() }).variant,
+            crate::types::WriteLeaseVariant::DynamoDB { .. }
+        ));
+    }
 
     /// A Rust-side exhaustiveness test is not possible here: the crate builds
     /// with pyo3's `extension-module`, so libpython is not linked and

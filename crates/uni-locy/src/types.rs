@@ -125,6 +125,12 @@ pub struct CompiledClause {
     pub where_conditions: Vec<RuleCondition>,
     pub along: Vec<AlongBinding>,
     pub fold: Vec<FoldBinding>,
+    /// Post-FOLD definitional threshold (`REQUIRE`, issue #265).
+    ///
+    /// Applied to each iteration's folded snapshot — the view a same-stratum
+    /// self-reference reads — so it constrains what the recursion derives,
+    /// unlike [`Self::having`], which filters the converged answer.
+    pub require: Vec<Expr>,
     /// Post-FOLD filter conditions (HAVING semantics).
     pub having: Vec<Expr>,
     pub best_by: Option<BestByClause>,
@@ -302,6 +308,64 @@ pub enum WarningCode {
     /// the pre-embedded query vectors (queries are constants per
     /// `apply_model_invocations` call).
     SharedRetrievalContext,
+    /// Issue #265: a rule that self-references *and* carries a post-FOLD
+    /// `WHERE` (HAVING). The filter is applied once to the converged answer,
+    /// not per iteration, so the self-reference reads the rule's *unfiltered*
+    /// folded value and can derive facts from groups the threshold excluded.
+    ///
+    /// That is deliberate — a non-monotone filter applied per iteration would
+    /// let a fact appear, vanish and reappear, defeating the whole-row change
+    /// test, and the post-fixpoint reading is the intended one for the PROB
+    /// case of issue #162. It is also the *only* available reading, and the two
+    /// are indistinguishable from the syntax: "filter the answer" and "the
+    /// threshold is part of the definition" are written identically. So this
+    /// warns rather than rejecting.
+    ///
+    /// The author who wanted the threshold to constrain the recursion wants
+    /// `REQUIRE`, which is applied per iteration; the message says so.
+    ///
+    /// Still fires when a rule carries both: a `REQUIRE` alongside a post-FOLD
+    /// `WHERE` does not make the `WHERE` any less post-fixpoint.
+    HavingInRecursivePath,
+}
+
+impl WarningCode {
+    /// The stable snake_case identifier for this code, as it crosses a language
+    /// or wire boundary — the `code` field of the Python bindings' warning
+    /// dicts, and anything else that has to name a warning without holding the
+    /// Rust type.
+    ///
+    /// It lives here, beside the variants, rather than in the consumer that
+    /// needs it. `bindings/uni-db` is excluded from every workspace build lane
+    /// for linker reasons, so an exhaustive match over this enum living *there*
+    /// is compiled only by the one CI job that builds a wheel: adding a variant
+    /// then breaks a build the author is not running, three commits later and
+    /// somewhere else. `HavingInRecursivePath` did exactly that. Keeping the
+    /// match in this crate means a new variant fails `cargo check` in the crate
+    /// the author is already editing.
+    ///
+    /// The strings are API: Python callers match on them, so a variant may be
+    /// renamed in Rust without renaming its code here, and renaming a code is a
+    /// breaking change.
+    pub fn as_str(&self) -> &'static str {
+        // Exhaustive with no catch-all, deliberately: a `_` arm here would
+        // restore the silent version of the same failure, reporting a new
+        // warning under an old name instead of refusing to compile.
+        match self {
+            WarningCode::MsumNonNegativity => "msum_non_negativity",
+            WarningCode::ProbabilityDomainViolation => "probability_domain_violation",
+            WarningCode::FoldInRecursivePath => "fold_in_recursive_path",
+            WarningCode::EceBinningBias => "ece_binning_bias",
+            WarningCode::UncalibratedLLMLogprobs => "uncalibrated_llm_logprobs",
+            WarningCode::UncalibratedNeuralPredicate => "uncalibrated_neural_predicate",
+            WarningCode::SharedNeuralInputArgument => "shared_neural_input_argument",
+            WarningCode::SharedNeuralFeatureValue => "shared_neural_feature_value",
+            WarningCode::PositiveComplementCorrelation => "positive_complement_correlation",
+            WarningCode::CrossPredicateCorrelation => "cross_predicate_correlation",
+            WarningCode::SharedRetrievalContext => "shared_retrieval_context",
+            WarningCode::HavingInRecursivePath => "having_in_recursive_path",
+        }
+    }
 }
 
 /// Probability semiring used to evaluate MNOR/MPROD aggregates, PROB
@@ -369,6 +433,31 @@ pub enum RuntimeWarningCode {
     TopKPruningCrossedDependency,
 }
 
+impl RuntimeWarningCode {
+    /// The stable snake_case identifier for this code, as it crosses a language
+    /// or wire boundary.
+    ///
+    /// Here for the same reason as [`WarningCode::as_str`]: the binding that
+    /// needs it lives in a crate no workspace build lane compiles, so an
+    /// exhaustive match over this enum is only checked there when a wheel is
+    /// built. It was additionally written out twice in that file, so a new
+    /// variant meant two identical edits in a build the author is not running.
+    ///
+    /// The strings are API: Python callers match on them.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RuntimeWarningCode::SharedProbabilisticDependency => "shared_probabilistic_dependency",
+            RuntimeWarningCode::BddLimitExceeded => "bdd_limit_exceeded",
+            RuntimeWarningCode::CrossGroupCorrelationNotExact => {
+                "cross_group_correlation_not_exact"
+            }
+            RuntimeWarningCode::FuzzyNotProbabilistic => "fuzzy_not_probabilistic",
+            RuntimeWarningCode::EntityHydrationIncomplete => "entity_hydration_incomplete",
+            RuntimeWarningCode::TopKPruningCrossedDependency => "top_k_pruning_crossed_dependency",
+        }
+    }
+}
+
 /// A non-fatal runtime diagnostic collected during evaluation.
 #[derive(Debug, Clone)]
 pub struct RuntimeWarning {
@@ -382,4 +471,52 @@ pub struct RuntimeWarning {
     pub variable_count: Option<usize>,
     /// Human-readable KEY group description (BddLimitExceeded only).
     pub key_group: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every variant, for the one property `as_str`'s exhaustive match cannot
+    /// itself enforce: that no two codes share a string.
+    ///
+    /// This list is *not* compiler-checked — a new variant added without adding
+    /// it here leaves the test passing on a smaller set. That is deliberate
+    /// rather than overlooked: the thing worth protecting is the mapping, which
+    /// the exhaustive match already fails to compile without, and a
+    /// hand-maintained `ALL` cannot be made authoritative without a derive. It
+    /// sits beside the enum so the omission is visible while editing it.
+    const ALL: &[WarningCode] = &[
+        WarningCode::MsumNonNegativity,
+        WarningCode::ProbabilityDomainViolation,
+        WarningCode::FoldInRecursivePath,
+        WarningCode::EceBinningBias,
+        WarningCode::UncalibratedLLMLogprobs,
+        WarningCode::UncalibratedNeuralPredicate,
+        WarningCode::SharedNeuralInputArgument,
+        WarningCode::SharedNeuralFeatureValue,
+        WarningCode::PositiveComplementCorrelation,
+        WarningCode::CrossPredicateCorrelation,
+        WarningCode::SharedRetrievalContext,
+        WarningCode::HavingInRecursivePath,
+    ];
+
+    #[test]
+    fn warning_codes_have_distinct_strings() {
+        let mut seen: Vec<&'static str> = Vec::new();
+        for code in ALL {
+            let s = code.as_str();
+            assert!(
+                !s.is_empty(),
+                "{code:?} has an empty code string; Python callers match on it"
+            );
+            assert!(
+                !seen.contains(&s),
+                "two WarningCode variants both render as {s:?} — a copy-pasted \
+                 string would make them indistinguishable from Python, which is \
+                 the one failure the exhaustive match in `as_str` cannot catch"
+            );
+            seen.push(s);
+        }
+    }
 }

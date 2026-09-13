@@ -547,6 +547,13 @@ struct FoldViewState {
     has_priority: bool,
     /// Tolerance for the probability-domain check, threaded to `FoldExec`.
     probability_epsilon: f64,
+    /// Post-FOLD definitional threshold (`REQUIRE`, issue #265).
+    ///
+    /// Applied to the snapshot below on every iteration, which is what makes
+    /// it constrain the recursion: the snapshot is exactly what a same-stratum
+    /// self-reference reads. Empty for a rule that carries no `REQUIRE`, in
+    /// which case the stage is skipped entirely.
+    require: Vec<Expr>,
     /// KEY-grouped snapshot of `facts`, in the rule's contribution schema.
     folded: Vec<RecordBatch>,
     /// Whole-row set from the previous merge, for change detection.
@@ -616,11 +623,13 @@ impl FixpointState {
         bindings: Vec<FoldBinding>,
         has_priority: bool,
         probability_epsilon: f64,
+        require: Vec<Expr>,
     ) {
         self.fold_view = Some(FoldViewState {
             bindings,
             has_priority,
             probability_epsilon,
+            require,
             folded: Vec::new(),
             prev_rows: HashSet::new(),
         });
@@ -955,8 +964,28 @@ impl FixpointState {
         }
 
         let folded = RecordBatch::try_new(Arc::clone(&self.schema), columns).map_err(arrow_err)?;
+        // #265: REQUIRE is part of the rule's definition, so it applies to
+        // every snapshot rather than once at the end. This is the whole
+        // mechanism: the snapshot is what a same-stratum self-reference reads,
+        // so a group excluded here cannot derive anything downstream of it.
+        //
+        // Safe to narrow the snapshot only because the compiler has already
+        // proved the threshold one-way for a recursive rule
+        // (`check_require_direction`); a predicate that could turn back off
+        // would let a fact be withdrawn, which the change test below reads as
+        // progress rather than oscillation.
+        let require = self
+            .fold_view
+            .as_ref()
+            .map(|fv| fv.require.clone())
+            .unwrap_or_default();
+        let folded = if require.is_empty() {
+            vec![folded]
+        } else {
+            apply_having_filter(vec![folded], &require, &self.schema, task_ctx)?
+        };
         if let Some(fv) = self.fold_view.as_mut() {
-            fv.folded = vec![folded];
+            fv.folded = folded;
         }
         Ok(())
     }
@@ -1612,6 +1641,10 @@ pub struct FixpointRulePlan {
     /// FOLD bindings for post-fixpoint aggregation.
     pub fold_bindings: Vec<FoldBinding>,
     /// Post-FOLD filter expressions (HAVING semantics).
+    /// Post-FOLD definitional threshold (`REQUIRE`, issue #265) — applied to
+    /// every per-iteration snapshot, unlike `having`, which runs once after
+    /// convergence.
+    pub require: Vec<Expr>,
     pub having: Vec<Expr>,
     /// Whether this rule has BEST BY semantics.
     pub has_best_by: bool,
@@ -1751,6 +1784,7 @@ async fn run_fixpoint_loop(
                     rule.fold_bindings.clone(),
                     rule.has_priority,
                     probability_epsilon,
+                    rule.require.clone(),
                 );
             }
             state
@@ -5247,6 +5281,28 @@ async fn apply_post_fixpoint_chain_inner(
         current
     };
 
+    // Apply REQUIRE (post-FOLD definitional threshold, issue #265).
+    //
+    // Runs here as well as on every per-iteration snapshot, and both are
+    // needed for different reasons. The snapshot pass is what stops an
+    // excluded group deriving anything downstream of it; this pass is what
+    // keeps the group itself out of the answer. Without it a row that fails
+    // the threshold still reaches the output, because the final answer is
+    // built from the rule's contribution facts rather than from the snapshot.
+    //
+    // Before HAVING, mirroring the source order: REQUIRE says what the rule
+    // derives, HAVING then filters what is shown of it.
+    let current: Arc<dyn ExecutionPlan> = if !rule.require.is_empty() {
+        let batches = collect_all_partitions(&current, Arc::clone(task_ctx)).await?;
+        let filtered = apply_having_filter(batches, &rule.require, &current.schema(), task_ctx)?;
+        if filtered.is_empty() {
+            return Ok(filtered);
+        }
+        MemorySourceConfig::try_new_exec(&[filtered], Arc::clone(&current.schema()), None)?
+    } else {
+        current
+    };
+
     // Apply HAVING (post-FOLD WHERE filter)
     let current: Arc<dyn ExecutionPlan> = if !rule.having.is_empty() {
         let batches = collect_all_partitions(&current, Arc::clone(task_ctx)).await?;
@@ -5710,6 +5766,7 @@ impl ExecutionPlan for FixpointExec {
                     priority: r.priority,
                     has_fold: r.has_fold,
                     fold_bindings: r.fold_bindings.clone(),
+                    require: r.require.clone(),
                     having: r.having.clone(),
                     has_best_by: r.has_best_by,
                     best_by_criteria: r.best_by_criteria.clone(),

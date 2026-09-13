@@ -8,6 +8,7 @@ MATCH ...
 [WHERE ...]                         // pre-aggregation filter
 [ALONG x = expr]
 [FOLD agg = aggregate(expr)]
+[REQUIRE agg_condition]             // definitional threshold (constrains recursion)
 [WHERE agg_condition]               // post-FOLD filter (HAVING)
 [BEST BY expr ASC|DESC]
 YIELD KEY a, value AS alias, prob_expr AS PROB
@@ -16,6 +17,8 @@ DERIVE (src)-[:TYPE {prop: expr}]->(dst)
 ```
 
 The second `WHERE` (after `FOLD`) filters on aggregated values — equivalent to SQL's `HAVING`. It can reference FOLD output columns and KEY columns.
+
+`REQUIRE` takes the same kind of condition but belongs to the rule's *definition*: in a recursive rule it is applied to every iteration, so it constrains what the rule derives, where the post-FOLD `WHERE` only filters the converged answer. It must be one-way — a lower bound over a non-decreasing fold (`MSUM`, `MMAX`, `MCOUNT`, `MNOR`) or an upper bound over a non-increasing one (`MMIN`, `MPROD`) — or the compiler rejects it.
 
 ### FOLD Aggregators
 

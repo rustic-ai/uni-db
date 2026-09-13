@@ -687,6 +687,18 @@ impl Session {
         self.metrics_inner
             .locy_evaluations
             .fetch_add(1, Ordering::Relaxed);
+        // Locy evaluations count into the session rollup like Cypher queries
+        // do. They were absent from it, so a session that only ran rules
+        // reported `total_rows_scanned` of 0 — the same permanently-zero
+        // reading the Cypher arm above was fixed for.
+        if let Ok(ref lr) = result {
+            self.metrics_inner
+                .total_rows_scanned
+                .fetch_add(lr.metrics().rows_scanned as u64, Ordering::Relaxed);
+            self.metrics_inner
+                .total_rows_returned
+                .fetch_add(lr.metrics().rows_returned as u64, Ordering::Relaxed);
+        }
         result
     }
 

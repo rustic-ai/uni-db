@@ -21,7 +21,7 @@ use arrow_array::{Array, Float64Array, Int64Array};
 use arrow_schema::DataType;
 use datafusion::scalar::ScalarValue;
 use uni_plugin::traits::locy::{
-    FoldContext, FoldSemiring, LocyAggState, LocyAggregate, Semilattice,
+    FoldContext, FoldDirection, FoldSemiring, LocyAggState, LocyAggregate, Semilattice,
 };
 use uni_plugin::{FnError, PluginError, PluginRegistrar, QName};
 
@@ -144,6 +144,11 @@ fn downcast_state<S: LocyAggState + 'static>(other: &dyn LocyAggState) -> Result
 pub struct MinAgg;
 
 impl LocyAggregate for MinAgg {
+    /// `MIN`/`MMIN`: the running minimum only falls.
+    fn direction(&self) -> FoldDirection {
+        FoldDirection::NonIncreasing
+    }
+
     fn semilattice(&self) -> Semilattice {
         Semilattice::BOUNDED_MIN_MAX
     }
@@ -169,6 +174,11 @@ impl LocyAggregate for MinAgg {
 pub struct MaxAgg;
 
 impl LocyAggregate for MaxAgg {
+    /// `MAX`/`MMAX`: the running maximum only rises.
+    fn direction(&self) -> FoldDirection {
+        FoldDirection::NonDecreasing
+    }
+
     fn semilattice(&self) -> Semilattice {
         Semilattice::BOUNDED_MIN_MAX
     }
@@ -360,6 +370,13 @@ impl LocyAggregate for SumAgg {
 pub struct MSumAgg;
 
 impl LocyAggregate for MSumAgg {
+    /// `MSUM`: only over NON-NEGATIVE inputs, which is the
+    /// same precondition `MsumNonNegativity` already warns about. A negative
+    /// term would let the sum fall and a lower-bound `REQUIRE` oscillate.
+    fn direction(&self) -> FoldDirection {
+        FoldDirection::NonDecreasing
+    }
+
     fn semilattice(&self) -> Semilattice {
         Semilattice {
             idempotent: false,
@@ -439,6 +456,11 @@ impl LocyAggState for SumState {
 pub struct CountAgg;
 
 impl LocyAggregate for CountAgg {
+    /// `COUNT`/`MCOUNT`: the derived set only grows.
+    fn direction(&self) -> FoldDirection {
+        FoldDirection::NonDecreasing
+    }
+
     fn semilattice(&self) -> Semilattice {
         Semilattice::COUNT
     }
@@ -496,6 +518,11 @@ impl LocyAggState for CountState {
 pub struct CountAllAgg;
 
 impl LocyAggregate for CountAllAgg {
+    /// `COUNTALL`: the derived set only grows.
+    fn direction(&self) -> FoldDirection {
+        FoldDirection::NonDecreasing
+    }
+
     fn semilattice(&self) -> Semilattice {
         Semilattice::COUNT
     }
@@ -687,6 +714,11 @@ impl LocyAggState for CollectState {
 pub struct MnorAgg;
 
 impl LocyAggregate for MnorAgg {
+    /// `MNOR`: noisy-OR over [0,1] only rises.
+    fn direction(&self) -> FoldDirection {
+        FoldDirection::NonDecreasing
+    }
+
     fn semilattice(&self) -> Semilattice {
         Semilattice {
             idempotent: true,
@@ -807,6 +839,11 @@ impl LocyAggState for MnorState {
 pub struct MprodAgg;
 
 impl LocyAggregate for MprodAgg {
+    /// `MPROD`: a product of values in [0,1] only falls.
+    fn direction(&self) -> FoldDirection {
+        FoldDirection::NonIncreasing
+    }
+
     fn semilattice(&self) -> Semilattice {
         Semilattice {
             idempotent: true,

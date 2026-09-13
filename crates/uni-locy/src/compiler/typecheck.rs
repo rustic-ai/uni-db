@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use uni_cypher::ast::Expr;
+use uni_cypher::ast::{BinaryOp, Expr};
 use uni_cypher::locy_ast::{
     AlongBinding, FoldBinding, LocyExpr, LocyYieldItem, RuleCondition, RuleDefinition, RuleOutput,
     resolve_yield_column_names,
 };
+
+use uni_common::locy::FoldDirection;
 
 use super::errors::LocyCompileError;
 use super::stratify::StratificationResult;
@@ -40,6 +42,34 @@ pub fn default_monotonicity_oracle(name: &str) -> Option<bool> {
     match name.to_uppercase().as_str() {
         "MMAX" | "MMIN" | "MCOUNT" | "MNOR" | "MPROD" | "MSUM" => Some(true),
         _ => None,
+    }
+}
+
+/// Resolves an aggregate name to the direction its value moves in (#265).
+///
+/// The sibling of [`MonotonicityOracle`], kept separate rather than folded into
+/// it so that adding direction does not change that type and every one of its
+/// call sites. Answers [`FoldDirection::Unknown`] for anything it does not
+/// recognise, which rejects `REQUIRE`.
+pub type DirectionOracle<'a> = &'a (dyn Fn(&str) -> FoldDirection + 'a);
+
+/// Default direction oracle for callers without a `PluginRegistry`.
+///
+/// Covers exactly the names [`default_monotonicity_oracle`] accepts, since a
+/// `REQUIRE` is only ever checked on a fold that already passed the
+/// monotonicity gate. Mirrors the table in
+/// `skills/uni-db/references/locy.md`, which is the user-facing statement of
+/// the same facts.
+///
+/// `MSUM` is non-decreasing **only over non-negative inputs** — the
+/// precondition the `MsumNonNegativity` warning already covers. It is reported
+/// as non-decreasing here and the `REQUIRE` check surfaces the caveat, rather
+/// than refusing the overwhelmingly common non-negative case.
+pub fn default_direction_oracle(name: &str) -> FoldDirection {
+    match name.to_uppercase().as_str() {
+        "MMAX" | "MCOUNT" | "MNOR" | "MSUM" => FoldDirection::NonDecreasing,
+        "MMIN" | "MPROD" => FoldDirection::NonIncreasing,
+        _ => FoldDirection::Unknown,
     }
 }
 
@@ -179,6 +209,12 @@ pub fn check(
                 // F1: clause has FOLD + recursive IS-ref (same SCC) + no ALONG
                 // → almost certainly a semantic mistake (Stress Corpus B3).
                 check_fold_in_recursive_path(rule_name, def, scc_rules, &mut warnings);
+                // #265: the same shape *plus* a post-FOLD WHERE, which does not
+                // constrain the recursion it looks like it constrains.
+                check_having_in_recursive_path(rule_name, def, scc_rules, &mut warnings);
+                // #265: REQUIRE constrains the recursion, so its threshold
+                // must be provably one-way or the fixpoint cannot terminate.
+                check_require_direction(rule_name, def, &default_direction_oracle)?;
             }
 
             // NB: deliberately outside the `is_recursive` block above — a
@@ -205,6 +241,12 @@ pub fn check(
                     rule: rule_name.clone(),
                 });
             }
+            // REQUIRE names a FOLD output, so it needs one to name (#265).
+            if !def.require.is_empty() && def.fold.is_empty() {
+                return Err(LocyCompileError::RequireWithoutFold {
+                    rule: rule_name.clone(),
+                });
+            }
 
             // Phase B Slice 3 + A4 follow-up: extract model invocations
             // from YIELD items, ALONG bindings, and FOLD aggregate
@@ -222,6 +264,7 @@ pub fn check(
                 where_conditions: def.where_conditions.clone(),
                 along: extracted.along,
                 fold: extracted.fold,
+                require: def.require.clone(),
                 having: def.having.clone(),
                 best_by: def.best_by.clone(),
                 output: extracted.output,
@@ -757,6 +800,186 @@ fn check_fold_in_recursive_path(
     }
 }
 
+/// Warn when a post-FOLD `WHERE` sits on a self-referencing rule (#265).
+///
+/// The filter runs once, over the converged answer. A self-reference therefore
+/// reads the rule's *unfiltered* folded value, and the rule can derive facts
+/// from groups the threshold excluded — while those groups are correctly absent
+/// from the output, which is what makes it hard to spot. The OFAC 50 %
+/// ownership rule is the canonical shape: an owner under the threshold is
+/// filtered out of the answer yet still qualifies everything downstream of it.
+///
+/// Deliberately a warning. The post-fixpoint reading is correct for the PROB
+/// case of #162 — a child that HAVING removes from the answer must still have
+/// been visible to its parent while the fixpoint ran — and "filter the answer"
+/// and "the threshold is part of the definition" are written identically, so
+/// nothing in the syntax says which was meant. Rejecting would refuse the
+/// intended use along with the mistaken one.
+///
+/// Fires alongside [`WarningCode::FoldInRecursivePath`] rather than replacing
+/// it: that one is about how a recursive rollup composes, this one about a
+/// filter that does not constrain what it appears to.
+fn check_having_in_recursive_path(
+    rule_name: &str,
+    def: &RuleDefinition,
+    scc_rules: &std::collections::HashSet<String>,
+    warnings: &mut Vec<CompilerWarning>,
+) {
+    if def.having.is_empty() || def.fold.is_empty() {
+        return;
+    }
+    let has_recursive_is_ref = def.where_conditions.iter().any(|cond| {
+        if let RuleCondition::IsReference(is_ref) = cond {
+            scc_rules.contains(&is_ref.rule_name.to_string())
+        } else {
+            false
+        }
+    });
+    if !has_recursive_is_ref {
+        return;
+    }
+    warnings.push(CompilerWarning {
+        code: WarningCode::HavingInRecursivePath,
+        message: format!(
+            "rule '{}' filters its FOLD result inside a recursive stratum. The \
+             post-FOLD WHERE is applied ONCE to the converged answer, not per \
+             iteration, so it does not constrain the recursion: the \
+             self-reference reads this rule's UNFILTERED folded value, and \
+             rows the threshold excludes can still derive further rows. They \
+             are absent from the output while having contributed to it, which \
+             is why the result looks plausible. This is the intended reading \
+             when the filter is meant to select what you see (issue #162). If \
+             the threshold is meant to be part of the rule's DEFINITION — an \
+             ownership or voting-control cutoff, a quorum, a cost ceiling — \
+             write REQUIRE instead of the post-FOLD WHERE: it is applied to \
+             every iteration, so it constrains what the recursion derives. \
+             (issue #265)",
+            rule_name
+        ),
+        rule_name: rule_name.to_string(),
+    });
+}
+
+/// Reject a `REQUIRE` whose threshold could turn back off (#265).
+///
+/// `REQUIRE` is applied to each iteration's folded snapshot, so it constrains
+/// what the recursion derives. That is sound only while the predicate can move
+/// in one direction: a **lower** bound over a non-decreasing fold, or an
+/// **upper** bound over a non-increasing one. The constrained operator is then
+/// still monotone and its least fixpoint exists.
+///
+/// The reverse pairings must be rejected here rather than warned about,
+/// because the runtime cannot recover from them. The fixpoint's change test
+/// compares whole *contribution* rows, not the folded view, so a group leaving
+/// the snapshot is invisible to the producing rule and reaches consumers as a
+/// row set that flips back and forth — which reads as progress, not as
+/// oscillation. Such a program would spin to `max_iterations` and return
+/// partial results.
+///
+/// Conservative by construction: anything whose monotonicity this cannot
+/// *prove* is refused, including an aggregate that declines to declare a
+/// direction. A predicate mentioning no FOLD output at all is constant across
+/// iterations and is admitted.
+fn check_require_direction(
+    rule_name: &str,
+    def: &RuleDefinition,
+    direction_of: DirectionOracle<'_>,
+) -> Result<(), LocyCompileError> {
+    if def.require.is_empty() {
+        return Ok(());
+    }
+    let reject = |detail: String| {
+        Err(LocyCompileError::NonMonotonicFilterInRecursion {
+            rule: rule_name.to_string(),
+            detail,
+        })
+    };
+
+    for predicate in &def.require {
+        let Expr::BinaryOp { left, op, right } = predicate else {
+            return reject(format!(
+                "`{predicate:?}` is not a comparison against a fold output"
+            ));
+        };
+        // Which side names a FOLD output decides which way the bound points:
+        // `agg >= 50` is a lower bound, `50 <= agg` is the same bound written
+        // backwards.
+        let left_fold = fold_output_named(def, left);
+        let right_fold = fold_output_named(def, right);
+        let (fold, lower_bound) = match (left_fold, right_fold) {
+            (Some(_), Some(_)) => {
+                return reject(
+                    "both sides name a fold output, so neither bound is fixed".to_string(),
+                );
+            }
+            // No fold output mentioned: constant across iterations, so it can
+            // never flip. Admitted.
+            (None, None) => continue,
+            (Some(fold), None) => match op {
+                BinaryOp::Gt | BinaryOp::GtEq => (fold, true),
+                BinaryOp::Lt | BinaryOp::LtEq => (fold, false),
+                _ => {
+                    return reject(format!(
+                        "`{}` is compared with an operator that is not an \
+                         inequality; equality and inequality can both turn back off",
+                        fold.name
+                    ));
+                }
+            },
+            (None, Some(fold)) => match op {
+                BinaryOp::Lt | BinaryOp::LtEq => (fold, true),
+                BinaryOp::Gt | BinaryOp::GtEq => (fold, false),
+                _ => {
+                    return reject(format!(
+                        "`{}` is compared with an operator that is not an \
+                         inequality; equality and inequality can both turn back off",
+                        fold.name
+                    ));
+                }
+            },
+        };
+
+        let Expr::FunctionCall { name, .. } = &fold.aggregate else {
+            return reject(format!("`{}` is not bound by an aggregate call", fold.name));
+        };
+        let direction = direction_of(name);
+        if !direction.admits_bound(lower_bound) {
+            let bound = if lower_bound { "lower" } else { "upper" };
+            return reject(match direction {
+                FoldDirection::Unknown => format!(
+                    "`{}` declares no direction, so a {bound} bound on it \
+                     cannot be shown to be one-way",
+                    name.to_uppercase()
+                ),
+                FoldDirection::NonDecreasing => format!(
+                    "`{}` is non-decreasing, so an upper bound on `{}` can turn \
+                     from true back to false",
+                    name.to_uppercase(),
+                    fold.name
+                ),
+                FoldDirection::NonIncreasing => format!(
+                    "`{}` is non-increasing, so a lower bound on `{}` can turn \
+                     from true back to false",
+                    name.to_uppercase(),
+                    fold.name
+                ),
+                _ => format!("`{}` cannot carry a {bound} bound", name.to_uppercase()),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The FOLD binding an expression names, if the expression is exactly that
+/// output column.
+fn fold_output_named<'a>(def: &'a RuleDefinition, expr: &Expr) -> Option<&'a FoldBinding> {
+    let Expr::Variable(name) = expr else {
+        return None;
+    };
+    def.fold.iter().find(|f| &f.name == name)
+}
+
+// âââ Model invocation validation â
 // ─── Model invocation validation ─────────────────────────────────────────────
 
 /// Walk a clause body's expressions and validate any `model_name(args...)`

@@ -973,7 +973,12 @@ fn property_infos_for(
         for (prop_name, prop_meta) in props {
             properties.push(crate::api::schema::PropertyInfo {
                 name: prop_name.clone(),
-                data_type: format!("{:?}", prop_meta.r#type),
+                // `type_spec`, not `format!("{:?}")`. This field is a type
+                // *name* that callers feed back in — the Python binding's
+                // `property(name, data_type)` accepts the same dialect — and a
+                // Debug rendering produced `"BinaryVector { dimensions: 64 }"`,
+                // which nothing accepts.
+                data_type: prop_meta.r#type.type_spec(),
                 nullable: prop_meta.nullable,
                 is_indexed: schema
                     .indexes

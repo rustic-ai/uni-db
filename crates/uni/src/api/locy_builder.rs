@@ -99,6 +99,7 @@ impl<'a> InnerLocyBuilder<'a> {
     /// Evaluate the program and return the full [`LocyResult`].
     pub async fn run(self) -> Result<LocyResult> {
         let engine = crate::api::impl_locy::LocyEngine {
+            counters: std::sync::Arc::new(uni_store::QueryCounters::new()),
             db: self.db,
             tx_l0_override: None,
             locy_l0: None,
@@ -345,6 +346,7 @@ impl<'a> TxLocyBuilder<'a> {
     /// Evaluate the program and return the full [`LocyResult`].
     pub async fn run(self) -> Result<LocyResult> {
         let engine = crate::api::impl_locy::LocyEngine {
+            counters: std::sync::Arc::new(uni_store::QueryCounters::new()),
             db: &self.tx.db,
             tx_l0_override: Some(self.tx.tx_l0.clone()),
             locy_l0: Some(self.tx.tx_l0.clone()),
@@ -361,6 +363,7 @@ impl<'a> TxLocyBuilder<'a> {
     /// profile. Transaction-level analog of [`LocyBuilder::profile`].
     pub async fn profile(self) -> Result<(LocyResult, crate::api::locy_result::LocyProfileOutput)> {
         let engine = crate::api::impl_locy::LocyEngine {
+            counters: std::sync::Arc::new(uni_store::QueryCounters::new()),
             db: &self.tx.db,
             tx_l0_override: Some(self.tx.tx_l0.clone()),
             locy_l0: Some(self.tx.tx_l0.clone()),

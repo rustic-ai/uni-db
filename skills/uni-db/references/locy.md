@@ -48,6 +48,7 @@ CREATE RULE name [PRIORITY n] AS
     [WHERE conditions]              -- pre-aggregation filter (+ IS / IS NOT refs)
     [ALONG accumulations]
     [FOLD aggregations]
+    [REQUIRE conditions]            -- definitional threshold (constrains recursion)
     [WHERE conditions]              -- post-FOLD filter (HAVING semantics)
     [BEST BY selections]
     (YIELD items | DERIVE patterns)
@@ -58,6 +59,11 @@ second `WHERE` (after `FOLD`) is the post-aggregation filter: it runs once the
 FOLD aggregates are computed and may reference FOLD output columns and KEY
 columns (SQL `HAVING` semantics). There is **no `HAVING` keyword** — it is
 spelled `WHERE`, positioned after `FOLD`.
+
+`REQUIRE` takes the same kind of condition but is part of the rule's
+*definition*: in a recursive rule it is applied to every iteration, so it
+constrains what the rule can derive, where the post-FOLD `WHERE` only filters
+the converged answer. See §7.
 
 ### Rule Names
 
@@ -337,6 +343,76 @@ CREATE RULE heavy_spender AS
 
 **`total_iterations` note:** non-recursive programs report `total_iterations >= 1`
 (one evaluation pass); recursive programs report the fixpoint iteration count.
+
+#### In a recursive rule, the post-FOLD WHERE does NOT constrain the recursion
+
+This is the one place the SQL `HAVING` analogy breaks, and it fails quietly.
+
+In a rule that references **itself**, the post-FOLD `WHERE` is applied **once, to
+the converged answer** — not per iteration. The self-reference therefore reads
+the rule's *unfiltered* folded value, so rows the threshold excludes can still
+derive further rows. Those rows are correctly absent from the output *while
+having contributed to it*, which is exactly why the result looks plausible.
+
+```locy
+// WRONG if you meant "an owner only counts once it reaches 50%".
+CREATE RULE blocked AS
+    MATCH (o:Entity)-[s:OWNS]->(e:Entity)
+    WHERE o IS blocked            // self-reference: stratum is recursive
+    FOLD agg = MSUM(s.pct)
+    WHERE agg >= 50.0             // filters the ANSWER, not the recursion
+    YIELD KEY e, agg
+```
+
+An entity at 11% is filtered out of the result, yet still satisfies
+`o IS blocked` for the next hop, so everything it owns is derived anyway.
+Splitting the aggregate into its own rule and filtering at the consumer does not
+help either — the filter still sits outside the recursion.
+
+The compiler emits a `HavingInRecursivePath` warning for this shape. Read
+`result.warnings()`.
+
+**When post-FOLD `WHERE` is right:** when the filter is meant to select *what
+you see*. A child that the threshold removes from the answer must still have
+been visible to its parent while the fixpoint ran — that is the intended
+reading for probabilistic rules (issue #162).
+
+#### `REQUIRE` — when the threshold is part of the definition
+
+Use `REQUIRE` when the threshold *defines* the rule: an ownership or
+voting-control cutoff, a quorum, a cumulative-risk ceiling, reachability under a
+cost budget. It is applied to every iteration's folded snapshot, which is what a
+self-reference reads, so it constrains what the recursion can derive.
+
+```locy
+CREATE RULE blocked AS
+    MATCH (o:Entity)-[s:OWNS]->(e:Entity)
+    WHERE o IS blocked
+    FOLD agg = MSUM(s.pct)
+    REQUIRE agg >= 50.0           // constrains the RECURSION
+    YIELD KEY e, agg
+```
+
+On the graph above this answers `{N6}` — the owner at 11% is excluded, so
+nothing downstream of it is derived. The same rule with `WHERE` answers
+`{N6, N1}`.
+
+Both may appear on one rule; `REQUIRE` is written first, and reads as
+"constrain the derivation, then filter what is shown".
+
+**`REQUIRE` must be one-way.** It is rejected at compile time
+(`NonMonotonicFilterInRecursion`) unless the comparison can only ever turn from
+false to true as the fixpoint grows: a **lower** bound (`>=`, `>`) over a
+non-decreasing fold (`MSUM` over non-negative values, `MMAX`, `MCOUNT`,
+`MNOR`), or an **upper** bound (`<=`, `<`) over a non-increasing one (`MMIN`,
+`MPROD`). Equality is never admissible. The reverse pairings would let a fact be
+derived and then withdrawn, which the fixpoint reads as progress rather than
+oscillation, so it would run to the iteration limit instead of converging.
+
+In a **non-recursive** rule the direction is not policed and `REQUIRE` means
+exactly what the post-FOLD `WHERE` means — one pass, nothing to flip. Writing
+`REQUIRE` for a threshold you consider definitional is therefore safe from the
+start: the rule keeps that meaning if a self-reference is added later.
 
 ### FOLD + BEST BY Restriction
 

@@ -43,6 +43,11 @@ fn carry_budget(
     if let Some(token) = parent.cancellation_token_for_host() {
         ctx = ctx.with_cancellation_token(token);
     }
+    // Counters travel with the budget. `GraphExecutionContext::with_parts`
+    // defaults them to `None`, so a context rebuilt here silently stopped
+    // counting — which made `tx.locy(...)` under-report against
+    // `session.locy(...)`, since only the transaction path rebuilds one.
+    ctx = ctx.with_counters(parent.counters().cloned());
     ctx
 }
 
@@ -428,6 +433,7 @@ pub(crate) async fn evaluate_with_db_and_config_capturing(
         .map(|writer| writer.create_transaction_l0());
     let engine = LocyEngine {
         db,
+        counters: std::sync::Arc::new(uni_store::QueryCounters::new()),
         tx_l0_override: locy_l0.clone(),
         locy_l0,
         collect_derive: true,
@@ -467,6 +473,15 @@ pub struct LocyEngine<'a> {
     /// When true, DERIVE commands collect ASTs + data instead of executing.
     /// Session-level evaluation sets this to true; transaction-level sets false.
     pub(crate) collect_derive: bool,
+    /// Execution counters for this evaluation, shared by every `Executor` it
+    /// builds.
+    ///
+    /// Owned here rather than per-executor because the ASSUME/ABDUCE path
+    /// re-enters through `re_evaluate_strata` with a second executor: if each
+    /// kept its own set, only one could be harvested and the other's scans would
+    /// vanish. A vanished count is indistinguishable from work that never
+    /// happened, which is the whole failure being fixed.
+    pub(crate) counters: Arc<uni_store::QueryCounters>,
     /// The transaction's pinned read snapshot (Components C1 + C2), when
     /// evaluating inside a read-write transaction under SSI. Installed on
     /// the executor so Locy clause bodies read the frozen L0 generations and
@@ -714,6 +729,7 @@ impl<'a> LocyEngine<'a> {
         // 2. Create executor + physical planner
         let mut df_executor = uni_query::Executor::new(self.db.storage.clone());
         df_executor.set_config(self.db.config.clone());
+        df_executor.set_counters(self.counters.clone());
         if let Some(ref w) = self.db.writer {
             df_executor.set_writer(w.clone());
         }
@@ -1025,6 +1041,7 @@ impl<'a> LocyEngine<'a> {
             approximate_groups,
             derived_fact_set,
             incomplete,
+            self.counters.snapshot(),
         ))
     }
 
@@ -1068,6 +1085,7 @@ impl<'a> LocyEngine<'a> {
 
         let mut df_executor = uni_query::Executor::new(self.db.storage.clone());
         df_executor.set_config(self.db.config.clone());
+        df_executor.set_counters(self.counters.clone());
         if let Some(ref w) = self.db.writer {
             df_executor.set_writer(w.clone());
         }
@@ -1585,6 +1603,16 @@ impl LocyExecutionContext for NativeExecutionAdapter<'_> {
         let locy_l0 = self.locy_l0.lock().unwrap().clone();
         let engine = LocyEngine {
             db: self.db,
+            // Shared, not fresh: this re-entry's scans belong to the same
+            // evaluation, and a second set would be harvested by nobody. The
+            // adapter's graph context is where the evaluation's counters
+            // already live, so they are taken from there rather than duplicated
+            // onto the adapter.
+            counters: self
+                .graph_ctx
+                .counters()
+                .cloned()
+                .unwrap_or_else(|| std::sync::Arc::new(uni_store::QueryCounters::new())),
             tx_l0_override: locy_l0.clone(),
             locy_l0,
             collect_derive: false,
@@ -2001,6 +2029,7 @@ fn build_locy_result(
     approximate_groups: HashMap<String, Vec<String>>,
     derived_fact_set: Option<DerivedFactSet>,
     incomplete: Option<uni_common::LocyIncomplete>,
+    counters: uni_store::CounterSnapshot,
 ) -> LocyResult {
     let total_facts: usize = derived.values().map(|v| v.len()).sum();
     // Reflect how far evaluation actually got: the full count for a complete
@@ -2021,12 +2050,17 @@ fn build_locy_result(
         derived_fact_set,
         incomplete,
     };
-    let metrics = QueryMetrics {
+    // The counters are one `Arc` of atomics shared by the whole evaluation, so
+    // this total already spans every fixpoint iteration — there is nothing to
+    // sum here. They were ticking all along; only the harvest was missing, so
+    // `metrics().rows_scanned` read 0 however much the rules scanned.
+    let mut metrics = QueryMetrics {
         total_time: evaluation_time,
         exec_time: evaluation_time,
         rows_returned: total_facts,
         ..Default::default()
     };
+    metrics.apply_counters(&counters);
     LocyResult::new(inner, metrics)
 }
 

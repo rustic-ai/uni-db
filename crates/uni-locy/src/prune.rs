@@ -210,6 +210,7 @@ mod tests {
                 where_conditions,
                 along: vec![],
                 fold: vec![],
+                require: vec![],
                 having: vec![],
                 best_by: None,
                 output: RuleOutput::Yield(YieldClause { items: vec![] }),

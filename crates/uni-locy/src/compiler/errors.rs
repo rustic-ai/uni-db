@@ -20,6 +20,21 @@ pub enum LocyCompileError {
     #[error("post-FOLD WHERE in rule '{rule}' requires a FOLD clause")]
     HavingWithoutFold { rule: String },
 
+    #[error(
+        "REQUIRE in recursive rule '{rule}' is not monotone: {detail}. \
+         A REQUIRE constrains the recursion itself, so it must only ever be \
+         able to turn from false to true as the fixpoint grows — a lower bound \
+         (>=, >) over a non-decreasing fold, or an upper bound (<=, <) over a \
+         non-increasing one. Otherwise a fact could be derived and then \
+         withdrawn, which the fixpoint reads as progress and would run to the \
+         iteration limit. Use the post-FOLD WHERE instead to filter the \
+         converged answer (issue #265)"
+    )]
+    NonMonotonicFilterInRecursion { rule: String, detail: String },
+
+    #[error("REQUIRE in rule '{rule}' requires a FOLD clause")]
+    RequireWithoutFold { rule: String },
+
     #[error("wardedness violation: variable '{variable}' in rule '{rule}' not bound by MATCH")]
     WardednessViolation { rule: String, variable: String },
 

@@ -704,6 +704,13 @@ class PropertyInfo:
     """Information about a property."""
 
     name: str
+    #: Canonical type spec, in the same dialect ``property(name, data_type)``
+    #: accepts: ``"string"``, ``"int64"``, ``"vector:128"``,
+    #: ``"sparse_vector:30522"``, ``"binary_vector:64"``, ``"list:string"``,
+    #: ``"map:string:float64"``, ``"crdt:GCounter"``, ``"point:geographic"``.
+    #: Round-trips — what you read here can be fed straight back.
+    #: (Before 3.5 this was a Rust ``Debug`` rendering, e.g.
+    #: ``"BinaryVector { dimensions: 64 }"``, which nothing accepted.)
     data_type: str
     nullable: bool
     is_indexed: bool
@@ -1097,7 +1104,13 @@ class CancellationToken:
     def is_cancelled(self) -> bool: ...
 
 class WriteLease:
-    """Write lease configuration for multi-agent coordination."""
+    """Write lease configuration for multi-agent coordination.
+
+    ``repr()`` is one of ``WriteLease.LOCAL``, ``WriteLease.DYNAMODB(...)`` or
+    ``WriteLease.CUSTOM``. ``CUSTOM`` has no constructor and is read-back only:
+    it denotes a lease provider configured in Rust, which is a trait object
+    Python cannot supply. Passing one back to a builder raises ``ValueError``.
+    """
 
     @staticmethod
     def LOCAL() -> WriteLease: ...

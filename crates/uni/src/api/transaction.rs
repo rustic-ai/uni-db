@@ -978,6 +978,7 @@ impl Transaction {
         // Create a LocyEngine directly from UniInner (which sees tx L0).
         // Transaction path: auto-apply DERIVE mutations to the private L0.
         let engine = impl_locy::LocyEngine {
+            counters: std::sync::Arc::new(uni_store::QueryCounters::new()),
             db: &self.db,
             tx_l0_override: Some(self.tx_l0.clone()),
             locy_l0: Some(self.tx_l0.clone()),

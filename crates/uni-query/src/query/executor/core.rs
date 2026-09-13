@@ -560,6 +560,23 @@ impl Executor {
         &self.counters
     }
 
+    /// Share an existing counter set with this executor instead of its own.
+    ///
+    /// An `Executor` allocates a fresh `Arc<QueryCounters>`, which is right when
+    /// it *is* the execution. It is wrong when one logical query builds several
+    /// executors: each would count into its own set and only one could be
+    /// harvested. A Locy evaluation is that case — the ASSUME/ABDUCE path
+    /// re-enters with a second executor — so the evaluation owns the counters
+    /// and hands the same `Arc` to every executor it builds.
+    ///
+    /// Prefer this to harvesting each executor and folding with
+    /// `QueryCounters::merge_from`: sharing cannot forget a participant, and a
+    /// forgotten one is invisible, since a missing count looks exactly like work
+    /// that did not happen.
+    pub fn set_counters(&mut self, counters: Arc<uni_store::QueryCounters>) {
+        self.counters = counters;
+    }
+
     /// Snapshot the counters into the shape `QueryMetrics` wants.
     ///
     /// Returns `(l0_reads, storage_reads, rows_scanned, branch_scans, snapshot_reads)`.

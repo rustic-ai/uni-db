@@ -58,3 +58,5 @@ pub mod locy_issue_162_fold_scaling;
 // Repros for the two Debug-fallback nondeterminism defects (#236 + sibling).
 pub mod locy_debug_fallback_nondeterminism;
 pub mod locy_issue_216_in_three_valued_logic;
+pub mod locy_issue_267_node_key_scaling;
+pub mod locy_metrics_counters;

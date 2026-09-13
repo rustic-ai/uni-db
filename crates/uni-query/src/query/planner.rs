@@ -150,7 +150,7 @@ fn find_var_in_scope<'a>(vars: &'a [VariableInfo], name: &str) -> Option<&'a Var
 }
 
 /// Check if a variable is in scope.
-fn is_var_in_scope(vars: &[VariableInfo], name: &str) -> bool {
+pub(crate) fn is_var_in_scope(vars: &[VariableInfo], name: &str) -> bool {
     find_var_in_scope(vars, name).is_some()
 }
 
@@ -454,7 +454,7 @@ fn infer_unwind_output_type(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Vari
 }
 
 /// Collect all variable names referenced in an expression
-fn collect_expr_variables(expr: &Expr) -> Vec<String> {
+pub(crate) fn collect_expr_variables(expr: &Expr) -> Vec<String> {
     let mut vars = Vec::new();
     collect_expr_variables_inner(expr, &mut vars);
     vars
@@ -4526,6 +4526,15 @@ impl QueryPlanner {
             None => match_clause.pattern.paths.iter().collect(),
         };
 
+        // An equality in this clause's WHERE can anchor a pattern the same way
+        // an in-scope variable does (#268). Extracted once here rather than per
+        // path, because `plan_path` recurses.
+        let where_anchored = match_clause
+            .where_clause
+            .as_ref()
+            .map(Self::equality_anchored_properties)
+            .unwrap_or_default();
+
         for path in paths {
             if let Some(mode) = &path.shortest_path_mode {
                 plan =
@@ -4537,6 +4546,7 @@ impl QueryPlanner {
                     vars_in_scope,
                     match_clause.optional,
                     vars_before_pattern,
+                    &where_anchored,
                 )?;
             }
         }
@@ -4780,11 +4790,44 @@ impl QueryPlanner {
         pattern: &Pattern,
         initial_vars: &[VariableInfo],
     ) -> Result<LogicalPlan> {
-        let mut vars_in_scope: Vec<VariableInfo> = initial_vars.to_vec();
+        let mut vars_in_scope = Vec::new();
+        self.plan_pattern_scoped(pattern, initial_vars, &mut vars_in_scope, &HashMap::new())
+    }
+
+    /// [`Self::plan_pattern`], reporting the variables the pattern brought into
+    /// scope and accepting the anchoring hints a WHERE clause provides.
+    ///
+    /// `plan_pattern` discarded both. The scope is what
+    /// [`Self::plan_where_clause`] needs in order to validate and push a
+    /// predicate, so a caller without it had no choice but to hand-build a
+    /// `Filter` above the pattern — which is how a Locy rule-body WHERE came to
+    /// miss `Scan.filter`, and with it index selection, entirely (#226).
+    ///
+    /// `where_anchored` reaches `reversed_for_bound_anchor` through
+    /// [`Self::plan_path`], so a caller that knows its predicate can also get
+    /// the pattern anchored on it rather than on whichever node it wrote first.
+    /// Callers with no WHERE pass an empty map; a node's own inline equality
+    /// still ranks, since the anchor reads that off the pattern.
+    pub(crate) fn plan_pattern_scoped(
+        &self,
+        pattern: &Pattern,
+        initial_vars: &[VariableInfo],
+        vars_in_scope: &mut Vec<VariableInfo>,
+        where_anchored: &HashMap<String, String>,
+    ) -> Result<LogicalPlan> {
+        vars_in_scope.clear();
+        vars_in_scope.extend_from_slice(initial_vars);
         let vars_before_pattern = vars_in_scope.len();
         let mut plan = LogicalPlan::Empty;
         for path in &pattern.paths {
-            plan = self.plan_path(path, plan, &mut vars_in_scope, false, vars_before_pattern)?;
+            plan = self.plan_path(
+                path,
+                plan,
+                vars_in_scope,
+                false,
+                vars_before_pattern,
+                where_anchored,
+            )?;
         }
         Ok(plan)
     }
@@ -4810,9 +4853,91 @@ impl QueryPlanner {
     /// problem that reversal does not solve, and paths carrying a path variable,
     /// a quantified segment, or a shortestPath mode are left alone rather than
     /// reversed with their accompanying machinery.
-    fn reversed_for_bound_anchor(
+    ///
+    /// # An equality predicate anchors too
+    ///
+    /// A node needs no in-scope binding to be worth starting from: an equality
+    /// against a literal or parameter pins it just as well (#268). Before that
+    /// was recognised, `MATCH (o:Entity)-[:OWNS]->(e:Entity) WHERE e.uid = $u`
+    /// planned as a full walk of every `OWNS` edge, because the pattern is
+    /// planned before `plan_where_clause` and the predicate could only land as
+    /// a `Traverse` target filter — which no index-aware rewrite inspects.
+    /// Measured over 60k vertices / 120k edges, every arm returning the same
+    /// 389 rows:
+    ///
+    /// | spelling | time | rows scanned | index used |
+    /// |---|---|---|---|
+    /// | `(e)<-[:OWNS]-(o) WHERE e.uid` | 12.0 ms | 389 | BTREE |
+    /// | `(o)-[:OWNS]->(e) WHERE e.uid` | 521.6 ms | 122,868 | none |
+    /// | `(o)-[:OWNS]->(e {uid: $u})` | 528.3 ms | 122,867 | none |
+    ///
+    /// The index was not merely under-used on the slow arms, it was never
+    /// consulted. Note also that the unindexed pair of the same experiment
+    /// examined only 2x the rows but took 27x the time: the cost is not the
+    /// scan, it is expanding the whole relation and hydrating a property per
+    /// edge before filtering. That is why an equality ranks even with no index
+    /// behind it, and why none of this needs a cost model.
+    /// Variables that an equality in `predicate` pins to one value.
+    ///
+    /// Maps each such variable to the property compared, so
+    /// [`Self::reversed_for_bound_anchor`] can rank a candidate anchor without
+    /// re-walking the predicate per path (#268). A conjunct qualifies when it
+    /// equates `<var>.<prop>` against an expression naming no variable at all —
+    /// a literal or a parameter — so the value is known before the pattern is
+    /// walked. Both operand orders are accepted.
+    ///
+    /// Only `AND`-separated conjuncts count: a branch of an `OR` constrains
+    /// nothing on its own, and equality only, so a wide `>` cannot drag the
+    /// anchor onto a worse end.
+    pub(crate) fn equality_anchored_properties(predicate: &Expr) -> HashMap<String, String> {
+        let mut anchored = HashMap::new();
+        for conjunct in Self::split_and_conjuncts(predicate) {
+            let Expr::BinaryOp {
+                left,
+                op: BinaryOp::Eq,
+                right,
+            } = &conjunct
+            else {
+                continue;
+            };
+            for (side, other) in [(left, right), (right, left)] {
+                if let Expr::Property(base, property) = side.as_ref()
+                    && let Expr::Variable(variable) = base.as_ref()
+                    && collect_expr_variables(other).is_empty()
+                {
+                    anchored.insert(variable.clone(), property.clone());
+                }
+            }
+        }
+        anchored
+    }
+
+    /// The property an equality written on the node itself pins, if any.
+    ///
+    /// The inline spellings of the same constraint the MATCH-level `WHERE`
+    /// expresses. Both were measured to miss the index exactly as the `WHERE`
+    /// form does, so all three have to feed the anchor rank or the fix would
+    /// only cover the spelling that happened to be reported.
+    fn inline_anchored_property(node: &NodePattern, variable: &str) -> Option<String> {
+        // `(e:Entity {uid: $u})` — an inline map is a conjunction of equalities.
+        if let Some(Expr::Map(entries)) = node.properties.as_ref()
+            && let Some((property, _)) = entries
+                .iter()
+                .find(|(_, value)| collect_expr_variables(value).is_empty())
+        {
+            return Some(property.clone());
+        }
+        // `(e:Entity WHERE e.uid = $u)` — the element's own WHERE.
+        node.where_clause
+            .as_ref()
+            .and_then(|inner| Self::equality_anchored_properties(inner).remove(variable))
+    }
+
+    pub(crate) fn reversed_for_bound_anchor(
+        &self,
         path: &PathPattern,
         vars_in_scope: &[VariableInfo],
+        where_anchored: &HashMap<String, String>,
     ) -> Option<PathPattern> {
         // A path variable binds nodes and edges in traversal order, so a
         // reversed plan would bind `p` backwards. Out of scope here.
@@ -4831,17 +4956,57 @@ impl QueryPlanner {
             return None;
         }
 
-        let bound_node = |element: &PatternElement| match element {
-            PatternElement::Node(n) => n
-                .variable
-                .as_deref()
-                .is_some_and(|v| !v.is_empty() && is_var_in_scope(vars_in_scope, v)),
-            _ => false,
+        // Ranked rather than boolean, because "already in scope" has to outrank
+        // "carries an equality": a pattern whose first node has a predicate and
+        // whose last node is bound by an earlier clause must still reverse, and
+        // a merely-widened boolean would silently stop doing so, regressing
+        // #219. Over `{0, 1}` this is exactly the boolean guard it replaces.
+        //
+        //   3  variable already in scope                        (#219, #224)
+        //   2  equality on a property with an online scalar index
+        //   1  equality with no index behind it
+        //   0  nothing to anchor on
+        //
+        // Rank 1 earns its place on measurement, not symmetry: with no index at
+        // all, anchoring on the filtered node still measured 27x, because the
+        // alternative expands the whole edge relation and hydrates a property
+        // per edge before filtering any of it. Rank 2 exists only to break a tie
+        // when both ends carry an equality.
+        let anchor_rank = |element: &PatternElement| -> u8 {
+            let PatternElement::Node(node) = element else {
+                return 0;
+            };
+            let Some(variable) = node.variable.as_deref().filter(|v| !v.is_empty()) else {
+                return 0;
+            };
+            if is_var_in_scope(vars_in_scope, variable) {
+                return 3;
+            }
+            let Some(property) = where_anchored
+                .get(variable)
+                .cloned()
+                .or_else(|| Self::inline_anchored_property(node, variable))
+            else {
+                return 0;
+            };
+            // A multi-label or unlabelled node has no single table to look an
+            // index up in; it still ranks as an unindexed equality.
+            match node.labels.names() {
+                [label]
+                    if self
+                        .schema
+                        .scalar_index_for_property(label, &property)
+                        .is_some() =>
+                {
+                    2
+                }
+                _ => 1,
+            }
         };
 
         // Only the both-ends case is decidable here: reversal helps exactly when
-        // the far end is bound and the near end is not.
-        if bound_node(path.elements.first()?) || !bound_node(path.elements.last()?) {
+        // the far end is the better anchor.
+        if anchor_rank(path.elements.last()?) <= anchor_rank(path.elements.first()?) {
             return None;
         }
 
@@ -5069,6 +5234,7 @@ impl QueryPlanner {
         vars_in_scope: &mut Vec<VariableInfo>,
         optional: bool,
         vars_before_pattern: usize,
+        where_anchored: &HashMap<String, String>,
     ) -> Result<LogicalPlan> {
         // A bound node in the middle becomes two walks out of it, neither of
         // which begins with an unbound scan; see `split_at_bound_anchor`.
@@ -5082,6 +5248,7 @@ impl QueryPlanner {
                 vars_in_scope,
                 optional,
                 vars_before_pattern,
+                where_anchored,
             )?;
             return self.plan_path(
                 &toward_end,
@@ -5089,13 +5256,14 @@ impl QueryPlanner {
                 vars_in_scope,
                 optional,
                 vars_before_pattern,
+                where_anchored,
             );
         }
 
         // Start the walk at the bound end when the pattern was written from the
         // unbound one; see `reversed_for_bound_anchor`.
         let reversed_storage;
-        let path = match Self::reversed_for_bound_anchor(path, vars_in_scope) {
+        let path = match self.reversed_for_bound_anchor(path, vars_in_scope, where_anchored) {
             Some(reversed) => {
                 reversed_storage = reversed;
                 &reversed_storage
@@ -6849,7 +7017,7 @@ impl QueryPlanner {
     ///
     /// When `optional_vars` is non-empty, the Filter will preserve rows where
     /// any of those variables are NULL (for OPTIONAL MATCH semantics).
-    fn plan_where_clause(
+    pub(crate) fn plan_where_clause(
         &self,
         predicate: &Expr,
         plan: LogicalPlan,

@@ -2088,7 +2088,17 @@ pub struct PyWriteLease {
 #[derive(Debug, Clone)]
 pub(crate) enum WriteLeaseVariant {
     Local,
-    DynamoDB { table: String },
+    DynamoDB {
+        table: String,
+    },
+    /// A `WriteLease::Custom` provider configured on the Rust side.
+    ///
+    /// Read-back only: the Rust variant wraps a `Box<dyn WriteLeaseProvider>`
+    /// that Python cannot supply, so there is deliberately no `CUSTOM()`
+    /// constructor — one that only ever raised would be worse than its absence.
+    /// Before this existed, such a lease reported as `Local`, i.e. "no external
+    /// coordination" for a lease that has it.
+    Custom,
 }
 
 #[pymethods]
@@ -2114,6 +2124,7 @@ impl PyWriteLease {
     fn __repr__(&self) -> String {
         match &self.variant {
             WriteLeaseVariant::Local => "WriteLease.LOCAL".to_string(),
+            WriteLeaseVariant::Custom => "WriteLease.CUSTOM".to_string(),
             WriteLeaseVariant::DynamoDB { table } => {
                 format!("WriteLease.DYNAMODB(table={:?})", table)
             }
@@ -2716,19 +2727,10 @@ impl PyCrdtType {
         }
     }
 
+    /// Delegates to [`uni_common::CrdtType::repr_name`], for the same reason as
+    /// [`PyDataType::__repr__`].
     fn __repr__(&self) -> String {
-        let name = match &self.inner {
-            uni_common::CrdtType::GCounter => "G_COUNTER",
-            uni_common::CrdtType::GSet => "G_SET",
-            uni_common::CrdtType::ORSet => "OR_SET",
-            uni_common::CrdtType::LWWRegister => "LWW_REGISTER",
-            uni_common::CrdtType::LWWMap => "LWW_MAP",
-            uni_common::CrdtType::Rga => "RGA",
-            uni_common::CrdtType::VectorClock => "VECTOR_CLOCK",
-            uni_common::CrdtType::VCRegister => "VC_REGISTER",
-            _ => "UNKNOWN",
-        };
-        format!("CrdtType.{}", name)
+        format!("CrdtType.{}", self.inner.repr_name())
     }
 
     fn __eq__(&self, other: &Self) -> bool {
@@ -2895,45 +2897,12 @@ impl PyDataType {
         }
     }
 
+    /// Delegates to [`uni_common::DataType::repr_name`]. `DataType` is
+    /// `#[non_exhaustive]`, so a match here would be forced to carry a
+    /// catch-all and could not be compiler-checked — which is how
+    /// `BinaryVector` came to render as `DataType.UNKNOWN`.
     fn __repr__(&self) -> String {
-        let name = match &self.inner {
-            uni_common::DataType::String => "STRING".to_string(),
-            uni_common::DataType::Int32 => "INT32".to_string(),
-            uni_common::DataType::Int64 => "INT64".to_string(),
-            uni_common::DataType::Float32 => "FLOAT32".to_string(),
-            uni_common::DataType::Float64 => "FLOAT64".to_string(),
-            uni_common::DataType::Bool => "BOOL".to_string(),
-            uni_common::DataType::Timestamp => "TIMESTAMP".to_string(),
-            uni_common::DataType::Date => "DATE".to_string(),
-            uni_common::DataType::Time => "TIME".to_string(),
-            uni_common::DataType::DateTime => "DATETIME".to_string(),
-            uni_common::DataType::Duration => "DURATION".to_string(),
-            uni_common::DataType::CypherValue => "JSON".to_string(),
-            uni_common::DataType::Vector { dimensions } => format!("vector({})", dimensions),
-            uni_common::DataType::SparseVector { dimensions } => {
-                format!("sparse_vector({})", dimensions)
-            }
-            uni_common::DataType::List(inner) => {
-                let py_inner = PyDataType {
-                    inner: *inner.clone(),
-                };
-                format!("list({})", py_inner.__repr__())
-            }
-            uni_common::DataType::Map(k, v) => {
-                let py_k = PyDataType { inner: *k.clone() };
-                let py_v = PyDataType { inner: *v.clone() };
-                format!("map({}, {})", py_k.__repr__(), py_v.__repr__())
-            }
-            uni_common::DataType::Crdt(ct) => {
-                let py_ct = PyCrdtType { inner: ct.clone() };
-                format!("crdt({})", py_ct.__repr__())
-            }
-            uni_common::DataType::Btic => "BTIC".to_string(),
-            uni_common::DataType::Bytes => "BYTES".to_string(),
-            uni_common::DataType::Point(_) => "POINT".to_string(),
-            _ => "UNKNOWN".to_string(),
-        };
-        format!("DataType.{}", name)
+        format!("DataType.{}", self.inner.repr_name())
     }
 
     fn __eq__(&self, other: &Self) -> bool {
@@ -3030,26 +2999,14 @@ impl PyValue {
     }
 
     /// The type discriminator name.
+    ///
+    /// Delegates to [`uni_db::Value::type_name`]. The match belongs in
+    /// `uni-common`: `Value` is `#[non_exhaustive]`, so a copy here is forced to
+    /// carry a catch-all and cannot be compiler-checked — which is how
+    /// `SparseVector` came to report as `"unknown"`.
     #[getter]
-    fn type_name(&self) -> &str {
-        match &self.inner {
-            ::uni_db::Value::Null => "null",
-            ::uni_db::Value::Bool(_) => "bool",
-            ::uni_db::Value::Int(_) => "int",
-            ::uni_db::Value::Float(_) => "float",
-            ::uni_db::Value::String(_) => "string",
-            ::uni_db::Value::Bytes(_) => "bytes",
-            ::uni_db::Value::List(_) => "list",
-            ::uni_db::Value::Map(_) => "map",
-            ::uni_db::Value::Node(_) => "node",
-            ::uni_db::Value::Edge(_) => "edge",
-            ::uni_db::Value::Path(_) => "path",
-            ::uni_db::Value::Vector(_) => "vector",
-            ::uni_db::Value::BinaryVector(_) => "binary_vector",
-            ::uni_db::Value::Temporal(uni_common::value::TemporalValue::Btic { .. }) => "btic",
-            ::uni_db::Value::Temporal(_) => "temporal",
-            _ => "unknown",
-        }
+    fn type_name(&self) -> &'static str {
+        self.inner.type_name()
     }
 
     fn is_null(&self) -> bool {
@@ -3441,7 +3398,11 @@ impl PySchema {
             .iter()
             .map(|(pname, pmeta)| PropertyInfo {
                 name: pname.clone(),
-                data_type: format!("{:?}", pmeta.r#type),
+                // `type_spec`, not `format!("{:?}")`: the Debug rendering put
+                // `"BinaryVector { dimensions: 64 }"` on a public field that is
+                // also an *input* type, so what a caller read off a schema
+                // could not be fed back into `.property(name, spec)`.
+                data_type: pmeta.r#type.type_spec(),
                 nullable: pmeta.nullable,
                 is_indexed: false,
                 description: pmeta.description.clone(),

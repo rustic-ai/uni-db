@@ -1055,6 +1055,24 @@ async fn result_contains_fold_in_recursive_path(world: &mut LocyWorld) {
     );
 }
 
+#[then(regex = r#"^the result should contain a HavingInRecursivePath warning$"#)]
+async fn result_contains_having_in_recursive_path(world: &mut LocyWorld) {
+    assert_compile_warning_present(
+        world,
+        uni_locy::types::WarningCode::HavingInRecursivePath,
+        "HavingInRecursivePath",
+    );
+}
+
+#[then(regex = r#"^the result should not contain a HavingInRecursivePath warning$"#)]
+async fn result_lacks_having_in_recursive_path(world: &mut LocyWorld) {
+    assert_compile_warning_absent(
+        world,
+        uni_locy::types::WarningCode::HavingInRecursivePath,
+        "HavingInRecursivePath",
+    );
+}
+
 #[then(regex = r#"^the result should contain a PositiveComplementCorrelation warning$"#)]
 async fn result_contains_positive_complement_correlation(world: &mut LocyWorld) {
     assert_compile_warning_present(

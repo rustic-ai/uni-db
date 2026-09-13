@@ -100,6 +100,28 @@ pub trait LocyAggregate: Send + Sync + std::fmt::Debug {
         None
     }
 
+    /// Which way this aggregate's value moves as the fixpoint grows.
+    ///
+    /// Answers the question [`Semilattice::monotone_join`] cannot: that flag
+    /// says *whether* the aggregate is monotone, never *which direction*. The
+    /// two cannot be merged, because `MIN` and `MAX` are both monotone and share
+    /// a single [`Semilattice::BOUNDED_MIN_MAX`] constant.
+    ///
+    /// Used by the Locy compiler to decide whether a `REQUIRE` threshold can
+    /// participate in recursion (issue #265): a lower bound over a
+    /// non-decreasing fold, or an upper bound over a non-increasing one, can
+    /// only flip false to true as the fixpoint grows, so the constrained
+    /// operator stays monotone and its least fixpoint exists. The reverse
+    /// pairings oscillate and are rejected.
+    ///
+    /// Defaults to [`FoldDirection::Unknown`], which rejects `REQUIRE`. An
+    /// aggregate that wants to support it must say so explicitly — declining by
+    /// omission is the safe answer, and it keeps this addition backward
+    /// compatible for existing implementors.
+    fn direction(&self) -> FoldDirection {
+        FoldDirection::Unknown
+    }
+
     /// Row-level update step on a primitive `f64` accumulator.
     ///
     /// Returns the new accumulator value after folding `val` into `accum`.
@@ -216,6 +238,15 @@ pub trait LocyAggState: Send + 'static {
         false
     }
 }
+
+/// Which way an aggregate's value moves as the fixpoint grows.
+///
+/// Re-exported from `uni-common` because the Locy compiler must agree on it
+/// and `uni-locy` does not depend on this crate. Deliberately not a field on
+/// [`Semilattice`]: that struct is not `#[non_exhaustive]`, so a new field
+/// would break every plugin constructing one, and `MIN` and `MAX` are
+/// indistinguishable within it — both return [`Semilattice::BOUNDED_MIN_MAX`].
+pub use uni_common::locy::FoldDirection;
 
 /// Lattice properties of an aggregate.
 ///

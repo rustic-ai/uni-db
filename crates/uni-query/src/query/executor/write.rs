@@ -197,6 +197,21 @@ fn unsupported_copy_format(format: &str) -> anyhow::Error {
     anyhow!("COPY TO only supports 'parquet' and 'csv' formats, got '{format}'")
 }
 
+/// The shape `merge_relationship_keyed_fastpath_shape` recognises.
+struct MergeRelKeyedShape<'p> {
+    /// The endpoint resolved from the input row.
+    bound_var: String,
+    /// The endpoint to find-or-create. Guaranteed a variable, one label and a
+    /// non-empty static map literal.
+    keyed: &'p NodePattern,
+    /// `keyed`'s label, schema-cased.
+    keyed_label: String,
+    /// Direction to walk FROM the bound endpoint TOWARDS the keyed one.
+    probe_dir: uni_store::storage::direction::Direction,
+    type_id: u32,
+    rel_var: Option<String>,
+}
+
 impl Executor {
     /// Extracts labels from a node value.
     ///
@@ -1641,6 +1656,188 @@ impl Executor {
     /// filters only the general path applies). Any deviation returns `None` and
     /// the caller keeps the general path. The caller still verifies per row that
     /// both endpoints are actually bound to vids.
+    /// Bind a matched relationship variable to the edge that is already there.
+    ///
+    /// Both relationship fast paths used to hand a *matched* named edge back to
+    /// the general path, on the grounds that an `Edge` carries properties and
+    /// those could not be enumerated. That was wrong about the API, not about
+    /// the requirement: the batch reader takes an explicit name list, but
+    /// `PropertyManager::get_all_edge_props_with_ctx` enumerates a single
+    /// edge's properties, accumulating L0 over storage. The adjacency probe
+    /// already yields the eid, so everything an `Edge` needs is in hand.
+    ///
+    /// `probe_from` is the endpoint the probe walked out of and `neighbour` is
+    /// what it found, so the direction decides which way round the edge goes.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the fast paths' threaded state"
+    )]
+    async fn bind_matched_edge(
+        &self,
+        row: &mut HashMap<String, Value>,
+        rel_var: &str,
+        eid: uni_common::core::id::Eid,
+        type_id: u32,
+        probe_from: Vid,
+        neighbour: Vid,
+        dir: uni_store::storage::direction::Direction,
+        prop_manager: &PropertyManager,
+        ctx: Option<&QueryContext>,
+    ) -> Result<()> {
+        let edge_type = self
+            .storage
+            .schema_manager()
+            .schema()
+            .edge_type_name_by_id_unified(type_id)
+            .unwrap_or_default();
+        let (src, dst) = match dir {
+            uni_store::storage::direction::Direction::Outgoing => (probe_from, neighbour),
+            _ => (neighbour, probe_from),
+        };
+        let properties = prop_manager
+            .get_all_edge_props_with_ctx(eid, ctx)
+            .await?
+            .unwrap_or_default();
+        row.insert(
+            rel_var.to_string(),
+            Value::Edge(uni_common::Edge {
+                eid,
+                edge_type,
+                src,
+                dst,
+                properties,
+            }),
+        );
+        Ok(())
+    }
+
+    /// A relationship MERGE with one bound endpoint and one found-or-created by
+    /// key: `MATCH (a …) MERGE (a)-[:R]->(b:L {k: v})`.
+    ///
+    /// Neither existing detector covers it — `merge_single_node_fastpath` wants
+    /// a lone node, and `merge_relationship_fastpath_shape` rejects an endpoint
+    /// carrying properties — so it fell to the per-row plan, at ~7x the
+    /// MATCH+CREATE floor for a batched ingest.
+    ///
+    /// The keyed endpoint must carry a variable. Without one,
+    /// `execute_create_pattern` hands back no vid, and the created node could
+    /// not be folded into the batch's key map — which is a correctness
+    /// requirement, not an optimisation: a later row merging the same key from
+    /// the same source has to match what this row created.
+    fn merge_relationship_keyed_fastpath_shape<'p>(
+        &self,
+        pattern: &'p Pattern,
+    ) -> Option<MergeRelKeyedShape<'p>> {
+        if pattern.paths.len() != 1 {
+            return None;
+        }
+        let path = &pattern.paths[0];
+        // A path variable needs every element bound to build `Value::Path`, and
+        // the match outcome here binds no edge. Leave it to the general path.
+        if path.variable.is_some() || path.shortest_path_mode.is_some() {
+            return None;
+        }
+        let [
+            PatternElement::Node(left),
+            PatternElement::Relationship(r),
+            PatternElement::Node(right),
+        ] = path.elements.as_slice()
+        else {
+            return None;
+        };
+        if r.range.is_some()
+            || r.properties.is_some()
+            || r.where_clause.is_some()
+            || r.types.names().len() != 1
+        {
+            return None;
+        }
+
+        // "Plain" = resolved from the input row. A label on it is a filter only
+        // the general path applies, so it disqualifies — stricter than
+        // `merge_relationship_fastpath_shape`, which can afford it because both
+        // its endpoints are already bound.
+        let is_plain = |n: &NodePattern| {
+            n.variable.as_ref().is_some_and(|v| !v.is_empty())
+                && n.properties.is_none()
+                && n.where_clause.is_none()
+                && n.labels.names().is_empty()
+        };
+        // "Keyed" = one label plus a non-empty static map literal.
+        let keyed_ok = |n: &NodePattern| {
+            n.variable.as_ref().is_some_and(|v| !v.is_empty())
+                && n.where_clause.is_none()
+                && n.labels.names().len() == 1
+                && matches!(&n.properties, Some(Expr::Map(e)) if !e.is_empty())
+        };
+
+        // Exactly one of each; both-plain is the other detector's job.
+        let (plain, keyed, plain_is_left) = match (
+            is_plain(left),
+            keyed_ok(right),
+            is_plain(right),
+            keyed_ok(left),
+        ) {
+            (true, true, _, _) => (left, right, true),
+            (_, _, true, true) => (right, left, false),
+            _ => return None,
+        };
+
+        let type_name = &r.types.names()[0];
+        let type_id = if self.config.strict_schema {
+            self.storage
+                .schema_manager()
+                .schema()
+                .edge_type_id_by_name_case_insensitive(type_name)?
+        } else {
+            self.storage
+                .schema_manager()
+                .get_or_assign_edge_type_id(type_name)
+        };
+        // The direction to walk FROM the bound endpoint TOWARDS the keyed one,
+        // so both spellings of the same link probe correctly.
+        let ast_dir = match r.direction {
+            uni_cypher::ast::Direction::Outgoing => {
+                uni_store::storage::direction::Direction::Outgoing
+            }
+            uni_cypher::ast::Direction::Incoming => {
+                uni_store::storage::direction::Direction::Incoming
+            }
+            uni_cypher::ast::Direction::Both => return None,
+        };
+        let probe_dir = if plain_is_left {
+            ast_dir
+        } else {
+            match ast_dir {
+                uni_store::storage::direction::Direction::Outgoing => {
+                    uni_store::storage::direction::Direction::Incoming
+                }
+                uni_store::storage::direction::Direction::Incoming => {
+                    uni_store::storage::direction::Direction::Outgoing
+                }
+                other => other,
+            }
+        };
+
+        // Canonical, or the scan reads a different table than the create writes.
+        let keyed_names = keyed.labels.names();
+        let keyed_label = self
+            .storage
+            .schema_manager()
+            .schema()
+            .canonical_label_name(&keyed_names[0])
+            .unwrap_or_else(|| keyed_names[0].clone());
+
+        Some(MergeRelKeyedShape {
+            bound_var: plain.variable.clone().unwrap_or_default(),
+            keyed,
+            keyed_label,
+            probe_dir,
+            type_id,
+            rel_var: r.variable.clone().filter(|v| !v.is_empty()),
+        })
+    }
+
     fn merge_relationship_fastpath_shape(
         &self,
         pattern: &Pattern,
@@ -1649,8 +1846,18 @@ impl Executor {
         String,
         u32,
         uni_store::storage::direction::Direction,
+        Option<String>,
     )> {
         if pattern.paths.len() != 1 {
+            return None;
+        }
+        // A path variable needs every element bound to build `Value::Path`, and
+        // this path's *match* outcome binds no edge: the relationship it serves
+        // is anonymous, so nothing lands in the row, and `bind_path_variables`
+        // requires only `!nodes.is_empty()` — `p` came back holding its nodes
+        // and no relationship. The general path materialises the match rows and
+        // binds them.
+        if pattern.paths[0].variable.is_some() {
             return None;
         }
         let [
@@ -1672,15 +1879,23 @@ impl Executor {
         {
             return None;
         }
-        // Relationship: single concrete type, anonymous, fixed-length, unfiltered.
-        if r.variable.is_some()
-            || r.range.is_some()
+        // Relationship: single concrete type, fixed-length, unfiltered.
+        //
+        // A *named* relationship is allowed through the shape gate but is not
+        // servable in every outcome — see the caller. It used to be rejected
+        // here, which cost 7x on the commonest ingest shape there is: naming the
+        // edge in `MERGE (a)-[e:R]->(b)` dropped the whole statement onto the
+        // per-row plan. Measured over 20 000 vertices with a 400-row batch, the
+        // two spellings were 0.79s named against 0.11s anonymous, the anonymous
+        // one sitting exactly on the MATCH+CREATE floor.
+        if r.range.is_some()
             || r.properties.is_some()
             || r.where_clause.is_some()
             || r.types.names().len() != 1
         {
             return None;
         }
+        let rel_var = r.variable.clone().filter(|v| !v.is_empty());
         let type_name = &r.types.names()[0];
         let type_id = if self.config.strict_schema {
             self.storage
@@ -1703,7 +1918,7 @@ impl Executor {
             // general path handles it.
             uni_cypher::ast::Direction::Both => return None,
         };
-        Some((src_var.clone(), dst_var.clone(), type_id, dir))
+        Some((src_var.clone(), dst_var.clone(), type_id, dir, rel_var))
     }
 
     /// Whether a MERGE key can take the batched persisted-scan fast path.
@@ -1923,11 +2138,25 @@ impl Executor {
         for chunk in key_list.chunks(Self::MERGE_SCAN_CHUNK) {
             let filter = Self::merge_batch_filter(key_names, chunk)
                 .ok_or_else(|| anyhow!("MERGE fast path could not build a batched key filter"))?;
+            // A `MERGE (n:L {k: v})` over an unindexed key resolves its keys by
+            // scanning the label's table, and reported nothing at all — neither
+            // the rows nor that a scan had happened.
+            //
+            // The rows are added from the returned batch rather than left to
+            // the request: `ScanRequest::count_storage_rows` exists to record a
+            // request's rows and has no callers anywhere in the workspace, so
+            // attaching counters to a request records none of them. The scans
+            // that do populate the figure go through `columnar_scan`, which
+            // adds `lance_rows + l0_rows` directly — so both count what storage
+            // handed back, and a pushed-down predicate lowers the figure either
+            // way. Passing the counters is still worth doing: it is what drives
+            // this scan's `index_scans` and `lance_iops`.
             let scanned = self
                 .storage
-                .scan_vertex_table(label, &columns, Some(&filter))
+                .scan_vertex_table_counted(label, &columns, Some(&filter), Some(&self.counters))
                 .await?;
             let Some(batch) = scanned else { continue };
+            self.counters.add_rows_scanned(batch.num_rows());
             let Some(vid_col) = batch
                 .column_by_name("_vid")
                 .and_then(|c| c.as_any().downcast_ref::<arrow_array::UInt64Array>())
@@ -1952,9 +2181,16 @@ impl Executor {
             let filter = FilterExpr::one_of("_vid", chunk.iter().map(|v| Scalar::UInt(v.as_u64())));
             let scanned = self
                 .storage
-                .scan_vertex_table(label, &verify_columns, Some(&filter))
+                .scan_vertex_table_counted(
+                    label,
+                    &verify_columns,
+                    Some(&filter),
+                    Some(&self.counters),
+                )
                 .await?;
+            // See the key scan above: the request records no rows itself.
             let Some(batch) = scanned else { continue };
+            self.counters.add_rows_scanned(batch.num_rows());
             let (Some(vid_col), Some(del_col), Some(ver_col)) = (
                 batch
                     .column_by_name("_vid")
@@ -2404,6 +2640,17 @@ impl Executor {
         // The shape is the same for every row, so it is detected once.
         let fastpath = self.merge_single_node_fastpath(pattern);
 
+        // The same batched key resolution serves a relationship MERGE whose far
+        // endpoint is found-or-created. Detected here rather than beside the
+        // other relationship fast path because the key batch below has to be
+        // built for it, and that runs first. `on_match` is checked at the point
+        // of use, as the other relationship path does.
+        let rel_keyed = if fastpath.is_none() {
+            self.merge_relationship_keyed_fastpath_shape(pattern)
+        } else {
+            None
+        };
+
         // Build the per-batch L0 snapshot once (issue #69 Phase C): the per-row
         // fast path then resolves L0/intra-batch matches with an O(1) lookup
         // instead of re-walking L0 for every row. `key_names` is the sorted
@@ -2423,7 +2670,14 @@ impl Executor {
         // `None` disables it for CRDT-bearing labels (the prefetch-hit read
         // skips CRDT normalization).
         let mut merge_prefetch: Option<Prefetch> = None;
-        if let Some((node, label)) = &fastpath {
+        // Either shape resolves its keys the same way: the machinery is keyed on
+        // `(label, key_names)`, not on the pattern it came from.
+        let key_source: Option<(&NodePattern, &String)> = match (&fastpath, &rel_keyed) {
+            (Some((node, label)), _) => Some((node, label)),
+            (None, Some(shape)) => Some((shape.keyed, &shape.keyed_label)),
+            _ => None,
+        };
+        if let Some((node, label)) = key_source {
             let mut key_names: Vec<String> = match &node.properties {
                 Some(Expr::Map(entries)) => entries.iter().map(|(k, _)| k.clone()).collect(),
                 _ => Vec::new(),
@@ -2493,9 +2747,9 @@ impl Executor {
         // RC3: relationship-MERGE existence fast-path. The single-node fast path
         // above does not cover `(a)-[:R]->(b)`; the general path rebuilds and runs
         // a per-row traversal `LogicalPlan` just to check whether the edge exists
-        // (~19x the bulk CREATE of the same edges). For the bound-endpoints,
-        // anonymous-edge shape (and no ON MATCH SET, whose match-row semantics the
-        // general path materialises) we resolve existence with one MVCC-correct
+        // (~19x the bulk CREATE of the same edges). For the bound-endpoints shape
+        // (and no ON MATCH SET, whose match-row semantics the general path
+        // materialises) we resolve existence with one MVCC-correct
         // adjacency probe — `GraphExecutionContext::get_neighbors` merges CSR + all
         // L0 buffers including the transaction's own writes, so intra-batch edges
         // are seen — and reuse the general create / ON CREATE handling unchanged.
@@ -2508,7 +2762,8 @@ impl Executor {
         } else {
             None
         };
-        let rel_graph_ctx = rel_fast.as_ref().map(|_| {
+        let rel_keyed_active = rel_keyed.is_some() && on_match_empty;
+        let rel_graph_ctx = (rel_fast.is_some() || rel_keyed_active).then(|| {
             let l0_context = match ctx {
                 Some(c) => crate::query::df_graph::L0Context::from_query_context(c),
                 None => crate::query::df_graph::L0Context::empty(),
@@ -2534,6 +2789,11 @@ impl Executor {
                     gctx = gctx.with_cancellation_token(token);
                 }
             }
+            // And the counters, for the same reason and with the same
+            // omission: `with_l0_context` defaults them to `None`, so this
+            // path's adjacency probes counted into nothing however it was
+            // reached. A lost deadline is loud; a lost counter just reads low.
+            gctx = gctx.with_counters(Some(self.counters.clone()));
             gctx
         });
 
@@ -2570,59 +2830,234 @@ impl Executor {
                 continue;
             }
 
-            // RC3 relationship fast path: bound endpoints → resolve edge
-            // existence with one adjacency probe and reuse the general
-            // create / ON CREATE handling, skipping the per-row traversal plan.
-            if let (Some((src_var, dst_var, type_id, dir)), Some(graph_ctx)) =
-                (rel_fast.as_ref(), rel_graph_ctx.as_ref())
+            // Keyed-endpoint relationship fast path: one endpoint bound, the
+            // other found-or-created by key.
+            //
+            // The decision is made before anything is written, so falling
+            // through leaves the row exactly as it was found.
+            if let (true, Some(shape), Some(graph_ctx)) =
+                (rel_keyed_active, rel_keyed.as_ref(), rel_graph_ctx.as_ref())
+                && let Some(Some((key_props, key_tuple))) = row_fast.get(idx)
+                && let Some(bound_vid) = row
+                    .get(&shape.bound_var)
+                    .and_then(|v| Self::vid_from_value(v).ok())
             {
-                let src_vid = row.get(src_var).and_then(|v| Self::vid_from_value(v).ok());
-                let dst_vid = row.get(dst_var).and_then(|v| Self::vid_from_value(v).ok());
-                if let (Some(src_vid), Some(dst_vid)) = (src_vid, dst_vid) {
-                    let exists = graph_ctx
-                        .get_neighbors(src_vid, *type_id, *dir)
+                // Live candidates for this key, re-verified: the persisted map
+                // is a snapshot, and an earlier row of this batch may have
+                // deleted a candidate or rewritten its key.
+                let candidates: Vec<Vid> = fast_persisted
+                    .get(key_tuple)
+                    .into_iter()
+                    .flatten()
+                    .chain(fast_existing.get(key_tuple).into_iter().flatten())
+                    .copied()
+                    .filter(|vid| {
+                        !uni_store::runtime::l0_visibility::is_vertex_deleted(*vid, ctx)
+                            && !Self::vid_overrides_break_key(*vid, key_props, ctx)
+                    })
+                    .collect();
+
+                // A whole-pattern match needs a candidate that is also a
+                // neighbour. A candidate that is NOT a neighbour must not be
+                // reused — the pattern misses and a new node is created, which
+                // is what `merge_keyed_endpoint_semantics` pins.
+                let matched = if candidates.is_empty() {
+                    None
+                } else {
+                    let by_vid: std::collections::HashSet<Vid> =
+                        candidates.iter().copied().collect();
+                    // The eid travels with the hit: a named relationship is
+                    // bound from it below.
+                    let hits: Vec<(Vid, uni_common::core::id::Eid)> = graph_ctx
+                        .get_neighbors(bound_vid, shape.type_id, shape.probe_dir)
                         .into_iter()
-                        .any(|(n, _eid)| n == dst_vid);
-                    let writer: &uni_store::Writer = writer_lock.as_ref();
-                    if !exists {
-                        // Edge absent: create only the edge (endpoints are bound),
-                        // then apply ON CREATE SET — identical to the general
-                        // create branch below.
-                        let seed_props = self
-                            .on_create_seed_props(on_create, &row, prop_manager, params, ctx)
+                        .filter(|(n, _)| by_vid.contains(n))
+                        .collect();
+                    // Two or more matches means the general path's one-row-per-
+                    // match semantics, which this branch does not reproduce.
+                    match hits.len() {
+                        0 => Some(None),
+                        1 => Some(Some(hits[0])),
+                        // The general path emits one row per match; this branch
+                        // does not reproduce that, so hand the row back.
+                        // The general path emits one row per match; this branch
+                        // does not reproduce that, so hand the row back
+                        // untouched. `None` here means "not served".
+                        _ => None,
+                    }
+                };
+
+                // `None` = not served, fall through with the row exactly as it
+                // was found; `Some(None)` = create; `Some(Some(vid))` = match.
+                if let Some(outcome) = matched {
+                    match outcome {
+                        Some((vid, eid)) => {
+                            let empty = Prefetch::default();
+                            let props = read_vertex_props_with_prefetch(
+                                vid,
+                                merge_prefetch.as_ref().unwrap_or(&empty),
+                                prop_manager,
+                                ctx,
+                            )
                             .await?;
-                        self.execute_create_pattern(
-                            &path_pattern,
-                            &mut row,
-                            writer,
-                            prop_manager,
-                            params,
-                            ctx,
-                            tx_l0_override,
-                            Some(&seed_props),
-                        )
-                        .await?;
-                        if let Some(set) = on_create {
-                            self.execute_set_items_locked(
-                                &set.items,
+                            row.insert(
+                                shape.keyed.variable.clone().unwrap_or_default(),
+                                Self::build_node_map(vid, &shape.keyed_label, props),
+                            );
+                            if let Some(rel_var) = shape.rel_var.as_deref() {
+                                self.bind_matched_edge(
+                                    &mut row,
+                                    rel_var,
+                                    eid,
+                                    shape.type_id,
+                                    bound_vid,
+                                    vid,
+                                    shape.probe_dir,
+                                    prop_manager,
+                                    ctx,
+                                )
+                                .await?;
+                            }
+                            Self::bind_path_variables(&path_pattern, &mut row, &temp_vars);
+                            results.push(row);
+                            continue;
+                        }
+                        None => {
+                            let writer: &uni_store::Writer = writer_lock.as_ref();
+                            let seed_props = self
+                                .on_create_seed_props(on_create, &row, prop_manager, params, ctx)
+                                .await?;
+                            self.execute_create_pattern(
+                                &path_pattern,
                                 &mut row,
                                 writer,
                                 prop_manager,
                                 params,
                                 ctx,
                                 tx_l0_override,
-                                &Prefetch::default(),
+                                Some(&seed_props),
+                            )
+                            .await?;
+                            if let Some(set) = on_create {
+                                self.execute_set_items_locked(
+                                    &set.items,
+                                    &mut row,
+                                    writer,
+                                    prop_manager,
+                                    params,
+                                    ctx,
+                                    tx_l0_override,
+                                    &Prefetch::default(),
+                                )
+                                .await?;
+                            }
+                            // Fold the new vid forward. Required, not an
+                            // optimisation: a later row merging the same key from
+                            // the same source must match this node, and it only
+                            // counts as a match if it is among the candidates.
+                            if let Some(new_vid) = row
+                                .get(shape.keyed.variable.as_deref().unwrap_or(""))
+                                .and_then(|v| Self::vid_from_value(v).ok())
+                            {
+                                fast_existing
+                                    .entry(key_tuple.clone())
+                                    .or_default()
+                                    .push(new_vid);
+                            }
+                            Self::bind_path_variables(&path_pattern, &mut row, &temp_vars);
+                            results.push(row);
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // RC3 relationship fast path: bound endpoints → resolve edge
+            // existence with one adjacency probe and reuse the general
+            // create / ON CREATE handling, skipping the per-row traversal plan.
+            if let (Some((src_var, dst_var, type_id, dir, rel_var)), Some(graph_ctx)) =
+                (rel_fast.as_ref(), rel_graph_ctx.as_ref())
+            {
+                let src_vid = row.get(src_var).and_then(|v| Self::vid_from_value(v).ok());
+                let dst_vid = row.get(dst_var).and_then(|v| Self::vid_from_value(v).ok());
+                if let (Some(src_vid), Some(dst_vid)) = (src_vid, dst_vid) {
+                    // Every edge of this type between the two endpoints, not
+                    // just the first: the eid lets a named relationship be
+                    // bound, and the *count* decides whether this branch may
+                    // serve the row at all.
+                    let matching: Vec<uni_common::core::id::Eid> = graph_ctx
+                        .get_neighbors(src_vid, *type_id, *dir)
+                        .into_iter()
+                        .filter(|(n, _)| *n == dst_vid)
+                        .map(|(_, eid)| eid)
+                        .collect();
+                    let exists = !matching.is_empty();
+                    // A named relationship matching more than once has to emit
+                    // one row per match, which this branch does not reproduce —
+                    // it emits a single row. Hand those to the general path.
+                    // (An anonymous relationship binds nothing and keeps the
+                    // single-row behaviour it has always had here.)
+                    if rel_var.is_some() && matching.len() > 1 {
+                        // fall through
+                    } else {
+                        let writer: &uni_store::Writer = writer_lock.as_ref();
+                        if !exists {
+                            // Edge absent: create only the edge (endpoints are bound),
+                            // then apply ON CREATE SET — identical to the general
+                            // create branch below.
+                            let seed_props = self
+                                .on_create_seed_props(on_create, &row, prop_manager, params, ctx)
+                                .await?;
+                            self.execute_create_pattern(
+                                &path_pattern,
+                                &mut row,
+                                writer,
+                                prop_manager,
+                                params,
+                                ctx,
+                                tx_l0_override,
+                                Some(&seed_props),
+                            )
+                            .await?;
+                            if let Some(set) = on_create {
+                                self.execute_set_items_locked(
+                                    &set.items,
+                                    &mut row,
+                                    writer,
+                                    prop_manager,
+                                    params,
+                                    ctx,
+                                    tx_l0_override,
+                                    &Prefetch::default(),
+                                )
+                                .await?;
+                            }
+                        }
+                        // Whether matched or just created, the edge now exists.
+                        // A named relationship that was *created* was bound by
+                        // `execute_create_pattern` with the properties it just
+                        // wrote; one that *matched* is bound here, from the eid
+                        // the probe returned. ON MATCH SET is excluded from this
+                        // fast path.
+                        if let (Some(rel_var), Some(&eid)) = (rel_var.as_deref(), matching.first())
+                        {
+                            self.bind_matched_edge(
+                                &mut row,
+                                rel_var,
+                                eid,
+                                *type_id,
+                                src_vid,
+                                dst_vid,
+                                *dir,
+                                prop_manager,
+                                ctx,
                             )
                             .await?;
                         }
+                        Self::bind_path_variables(&path_pattern, &mut row, &temp_vars);
+                        results.push(row);
+                        continue;
                     }
-                    // Whether matched or just created, the edge now exists; bind
-                    // path variables and emit the row (the edge is anonymous, so
-                    // there is no edge binding to reproduce, and ON MATCH SET is
-                    // excluded from this fast path).
-                    Self::bind_path_variables(&path_pattern, &mut row, &temp_vars);
-                    results.push(row);
-                    continue;
                 }
                 // Endpoints not bound to vids → fall through to the general path.
             }
@@ -2632,7 +3067,15 @@ impl Executor {
             // MERGE — including unique-constrained labels, whose keys are
             // indexed — so there is no separate constraint-only fast path.)
             let matches = self
-                .execute_merge_match(pattern, &row, prop_manager, params, ctx)
+                // `path_pattern`, not `pattern`: when the MERGE carries a path
+                // variable, `prepare_pattern_for_path_binding` names the
+                // otherwise-anonymous relationships so they can be bound. The
+                // match ran on the original, which has nothing to bind, while
+                // `bind_path_variables` below reads the prepared one — so a
+                // matched `MERGE p = (a)-[:R]->(b)` produced a `p` holding its
+                // nodes and no relationship. Without a path variable the two
+                // are the same pattern.
+                .execute_merge_match(&path_pattern, &row, prop_manager, params, ctx)
                 .await?;
             let writer: &uni_store::Writer = writer_lock.as_ref();
 
@@ -4283,6 +4726,39 @@ impl Executor {
         }
     }
 
+    /// Whether a reversed MERGE path can still be planned.
+    ///
+    /// The head node of the walk may be unlabeled and unbound — it becomes a
+    /// `label_id = 0` scan. A node in any *later* position may not: the
+    /// traversal-target arm requires a label or a row binding and errors
+    /// otherwise. Reversal moves the original head to a later position, so a
+    /// pattern like `MERGE (a)-[:R]->(b)` with a bare `a` and a bound `b` is
+    /// legal as written and illegal reversed.
+    ///
+    /// That asymmetry predates this and is left alone; the anchor simply
+    /// declines a reversal it would trip. The cost is that a bare unlabeled
+    /// MERGE node keeps the per-row label scan — but such a node cannot be
+    /// anchored on in any case, since there is nothing to look it up by.
+    fn merge_reversal_is_legal(
+        reversed: &uni_cypher::ast::PathPattern,
+        row: &HashMap<String, Value>,
+    ) -> bool {
+        reversed
+            .elements
+            .iter()
+            .skip(1)
+            .filter_map(|e| match e {
+                PatternElement::Node(n) => Some(n),
+                _ => None,
+            })
+            .all(|n| {
+                !matches!(n.labels, uni_cypher::ast::LabelExpr::Empty)
+                    || n.variable
+                        .as_ref()
+                        .is_some_and(|v| !v.is_empty() && row.contains_key(v))
+            })
+    }
+
     pub(crate) async fn execute_merge_match(
         &self,
         pattern: &Pattern,
@@ -4307,8 +4783,38 @@ impl Executor {
             vars_in_scope.push(key.clone());
         }
 
+        // Anchor on what the input row binds, not on what was written first.
+        //
+        // This walk is MERGE's own transcription of `plan_path`'s, so neither
+        // #219's anchoring fix nor `dc232cd2a`'s ranking of it reached here. It
+        // consults boundness only for the leftmost node, which makes
+        // `MERGE (a:L)-[:R]->(b)` with `b` bound scan the whole of `L` — once
+        // per input row, since `execute_merge_match` runs per row. Measured
+        // with a fixed 400-row batch: 5.4s / 9.7s / 16.2s over labels of
+        // 5k / 10k / 20k nodes, against a flat 0.9s for the same pattern
+        // written with the bound node first (`examples/merge_anchor_probe`).
+        //
+        // Reversal is a *read-side* decision only. The create path walks the
+        // original `pattern`, so a reversed copy must not escape this loop;
+        // variable names survive reversal, so ON MATCH / ON CREATE SET see the
+        // bindings they expect either way.
+        let anchor_scope: Vec<crate::query::planner::VariableInfo> = row
+            .keys()
+            .map(|k| {
+                crate::query::planner::VariableInfo::new(
+                    k.clone(),
+                    crate::query::planner::VariableType::Node,
+                )
+            })
+            .collect();
+        let no_where = HashMap::new();
+
         // Reconstruct Match logic from Planner (simplified for MERGE pattern)
-        for path in &pattern.paths {
+        for original_path in &pattern.paths {
+            let reversed = planner
+                .reversed_for_bound_anchor(original_path, &anchor_scope, &no_where)
+                .filter(|rev| Self::merge_reversal_is_legal(rev, row));
+            let path = reversed.as_ref().unwrap_or(original_path);
             let elements = &path.elements;
             let mut i = 0;
             while i < elements.len() {

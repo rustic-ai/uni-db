@@ -528,6 +528,47 @@ pub enum Value {
 // ---------------------------------------------------------------------------
 
 impl Value {
+    /// The stable discriminator name for this value, as `Value.type_name`
+    /// exposes it to Python and as anything else naming a value's kind across a
+    /// boundary should use.
+    ///
+    /// It lives beside the enum rather than in the binding that needs it. This
+    /// enum is `#[non_exhaustive]`, which forces every *downstream* match to
+    /// carry a catch-all — so a mapping written downstream cannot be checked by
+    /// the compiler, and a new variant silently takes the catch-all's answer
+    /// instead of failing to build. The binding's copy had already drifted:
+    /// `SparseVector` fell to its `_ => "unknown"` arm. That was not reachable
+    /// in practice, because `PyValue` is only ever built from Python and never
+    /// produced from a Rust `Value`, so no caller could hold a sparse one — but
+    /// the arm was missing, and only the unreachability made it harmless.
+    /// Inside the defining crate `#[non_exhaustive]` does not apply, so the
+    /// match below is exhaustive and a new variant is a compile error here.
+    ///
+    /// The strings are API: Python callers compare against them.
+    #[must_use]
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::Null => "null",
+            Value::Bool(_) => "bool",
+            Value::Int(_) => "int",
+            Value::Float(_) => "float",
+            Value::String(_) => "string",
+            Value::Bytes(_) => "bytes",
+            Value::List(_) => "list",
+            Value::Map(_) => "map",
+            Value::Node(_) => "node",
+            Value::Edge(_) => "edge",
+            Value::Path(_) => "path",
+            Value::Vector(_) => "vector",
+            Value::SparseVector { .. } => "sparse_vector",
+            Value::BinaryVector(_) => "binary_vector",
+            // BTIC is split out of `Temporal` because the binding has always
+            // named it separately; keep the two arms in this order.
+            Value::Temporal(crate::value::TemporalValue::Btic { .. }) => "btic",
+            Value::Temporal(_) => "temporal",
+        }
+    }
+
     /// A deterministic, order-independent rendering of this value.
     ///
     /// Exists because two call sites built keys with `format!("{v:?}")`. `Debug`
@@ -2454,6 +2495,27 @@ impl From<f32> for Value {
 
 #[cfg(test)]
 mod tests {
+
+    mod type_name {
+        use super::super::Value;
+
+        /// `SparseVector` had no arm while this match lived in the bindings,
+        /// downstream of a `#[non_exhaustive]` enum whose catch-all the
+        /// compiler could not object to, so it rendered as `"unknown"`. Nothing
+        /// could reach it there — `PyValue` is never produced from a Rust
+        /// `Value` — which is the only reason it did no harm.
+        #[test]
+        fn covers_the_variant_a_catch_all_used_to_hide() {
+            let sparse = Value::SparseVector {
+                indices: vec![1, 7],
+                values: vec![0.5, 0.25],
+            };
+            assert_eq!(sparse.type_name(), "sparse_vector");
+            assert_eq!(Value::BinaryVector(vec![0xff]).type_name(), "binary_vector");
+            assert_eq!(Value::Vector(vec![1.0]).type_name(), "vector");
+            assert_eq!(Value::Null.type_name(), "null");
+        }
+    }
 
     mod entity_identity {
         use super::super::{EntityRef, Value};

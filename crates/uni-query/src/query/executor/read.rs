@@ -974,7 +974,21 @@ impl Executor {
             );
 
             let mutation_ctx = Arc::new(crate::query::df_graph::MutationContext {
-                executor: self.clone(),
+                // Shares *this statement's* counters rather than taking the
+                // fresh set `Executor::clone` installs. That freshness is
+                // deliberate and must stay — the write path clones a cached
+                // executor template, and a shared handle would spill one
+                // query's counts into the next one's result — but it also meant
+                // every scan a mutation performed counted into a set nobody
+                // harvests. A batched MERGE whose per-row plans scanned a label
+                // 400 times reported the rows its *outer* MATCH examined and
+                // nothing else, so the counter read the same for a sixteen-
+                // second query as for a sub-second one.
+                executor: {
+                    let mut e = self.clone();
+                    e.set_counters(self.counters.clone());
+                    e
+                },
                 writer,
                 prop_manager: prop_manager_arc,
                 params: params.clone(),
