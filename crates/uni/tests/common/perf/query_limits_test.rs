@@ -2832,3 +2832,210 @@ async fn a_locy_deadline_is_enforced_on_a_pipeline_breaking_plan() {
         "the budget was ignored rather than enforced: {elapsed:?}"
     );
 }
+
+/// A database whose `query_timeout` is far below what a three-way cartesian
+/// over `n` entities takes, for the #289 tests.
+async fn short_default_timeout_db(n: usize, query_timeout: Duration) -> Uni {
+    let config = uni_db::UniConfig {
+        query_timeout,
+        ..Default::default()
+    };
+    let db = Uni::in_memory().config(config).build().await.unwrap();
+    db.schema()
+        .label("Entity")
+        .property("uid", DataType::String)
+        .done()
+        .apply()
+        .await
+        .unwrap();
+    let tx = db.session().tx().await.unwrap();
+    for i in 0..n {
+        tx.execute_with("CREATE (:Entity {uid: $u})")
+            .param("u", format!("e{i}"))
+            .run()
+            .await
+            .unwrap();
+    }
+    tx.commit().await.unwrap();
+    db
+}
+
+const CARTESIAN: &str = "MATCH (a:Entity),(b:Entity),(c:Entity) RETURN count(*) AS n";
+
+/// Issue #289: an explicit Locy timeout above the database's `query_timeout`
+/// was silently discarded.
+///
+/// `executor_config` combined the two with `min`, because `LocyConfig::timeout`
+/// was a plain 300s default that could not be told apart from a value the
+/// caller asked for. So `locy_with(q).timeout(120s)` ran under the database's
+/// 30s and died there, while `query_with(q).timeout(120s)` was honoured.
+///
+/// The database default here is 250ms so the program crosses it quickly. The
+/// first arm is the control: with no Locy timeout the database value must still
+/// bind — that is the behaviour `min` existed to protect, and it is also what
+/// proves the program genuinely outlasts 250ms, so the explicit arms completing
+/// is the timeout being honoured rather than the fixture being trivial.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_explicit_locy_timeout_above_the_database_default_is_honoured() {
+    let db = short_default_timeout_db(250, Duration::from_millis(250)).await;
+    let session = db.session();
+
+    let err = session
+        .locy_with(CARTESIAN)
+        .run()
+        .await
+        .expect_err("with no Locy timeout the 250ms database default must still bind");
+    assert!(
+        matches!(err, uni_db::UniError::Timeout { timeout_ms: 250 }),
+        "expected the database's 250ms timeout, got: {err:?}"
+    );
+
+    let via_builder = session
+        .locy_with(CARTESIAN)
+        .timeout(Duration::from_secs(120))
+        .run()
+        .await;
+    assert!(
+        via_builder.is_ok(),
+        "`.timeout(120s)` was capped at the database default: {:?}",
+        via_builder.err()
+    );
+
+    // The same request through a whole `LocyConfig`, the other documented way
+    // to set it — a fix that honoured only the builder setter would fail here.
+    let via_config = session
+        .locy_with(CARTESIAN)
+        .with_config(uni_db::locy::LocyConfig {
+            timeout: Some(Duration::from_secs(120)),
+            ..Default::default()
+        })
+        .run()
+        .await;
+    assert!(
+        via_config.is_ok(),
+        "`LocyConfig {{ timeout: Some(120s) }}` was capped at the database default: {:?}",
+        via_config.err()
+    );
+}
+
+/// Issue #289: a Locy program refused for cost raised the same `UniError::Query`
+/// as a program that was simply wrong, so only the message text told them
+/// apart. Each refusal must carry the variant the Cypher path raises for the
+/// same condition, with the budget that was actually applied.
+///
+/// The last arm is the control: an ordinary broken program must stay
+/// `UniError::Query`, or this would pass on a mapper that typed everything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn locy_cost_refusals_are_typed_and_distinct_from_broken_programs() {
+    let db = short_default_timeout_db(250, Duration::from_secs(30)).await;
+    let err = db
+        .session()
+        .locy_with(CARTESIAN)
+        .timeout(Duration::from_millis(300))
+        .run()
+        .await
+        .expect_err("a 300ms budget must stop the cartesian");
+    assert!(
+        matches!(err, uni_db::UniError::Timeout { timeout_ms: 300 }),
+        "a Locy timeout must be UniError::Timeout carrying its budget, got: {err:?}"
+    );
+
+    let db = Uni::in_memory().build().await.unwrap();
+    cyclic_graph(&db, 30, 3).await;
+    let session = db.session();
+
+    let err = session
+        .locy_with("MATCH p=(a:Entity)-[:OWNS*]->(b:Entity) RETURN count(p) AS n")
+        .max_memory(2 * 1024 * 1024)
+        .run()
+        .await
+        .expect_err("an unbounded path query must hit the 2 MB pool");
+    assert!(
+        matches!(
+            err,
+            uni_db::UniError::MemoryLimitExceeded { limit_bytes, .. } if limit_bytes == 2 * 1024 * 1024
+        ),
+        "a refused pool reservation must be MemoryLimitExceeded(2 MB), got: {err:?}"
+    );
+
+    // `max_derived_bytes` is a different budget from the pool — one derived
+    // relation's retained facts — raised by the fixpoint rather than an
+    // operator, so it is classified on a separate arm.
+    let err = session
+        .locy_with(
+            "CREATE RULE reachable AS \
+             MATCH (a:Entity)-[:OWNS]->(b:Entity) YIELD KEY a, b \n\
+             CREATE RULE reachable AS \
+             MATCH (a:Entity)-[:OWNS]->(mid:Entity) WHERE mid IS reachable TO b \
+             YIELD KEY a, b",
+        )
+        .with_config(uni_db::locy::LocyConfig {
+            max_derived_bytes: 1024,
+            ..Default::default()
+        })
+        .run()
+        .await
+        .expect_err("30 x 30 reachable pairs cannot fit in 1 KiB of derived facts");
+    assert!(
+        matches!(
+            err,
+            uni_db::UniError::MemoryLimitExceeded {
+                limit_bytes: 1024,
+                ..
+            }
+        ),
+        "a derived relation over max_derived_bytes must be MemoryLimitExceeded(1 KiB), \
+         got: {err:?}"
+    );
+
+    let err = session
+        .locy("MATCH (e:Entity) RETURN nosuchfn(e.uid) AS x LIMIT 1")
+        .await
+        .expect_err("an unknown function is a broken program");
+    assert!(
+        matches!(err, uni_db::UniError::Query { .. }),
+        "a broken program must stay UniError::Query, got: {err:?}"
+    );
+}
+
+/// Issue #289, the Cypher half: `UniError::MemoryLimitExceeded` existed and the
+/// bindings mapped it to `UniMemoryLimitExceededError`, but nothing constructed
+/// it — both the pool refusal and the result-size estimate were
+/// `UniError::Query`. The two Cypher mechanisms are pinned separately because
+/// they are raised at different layers.
+#[tokio::test]
+async fn cypher_memory_refusals_are_typed() -> Result<()> {
+    let db = seeded_db().await?;
+    let err = db
+        .session()
+        .query_with("MATCH (n:Node) RETURN n")
+        .max_memory(100)
+        .fetch_all()
+        .await
+        .expect_err("a 100-byte pool cannot hold a scan batch");
+    assert!(
+        matches!(
+            err,
+            uni_db::UniError::MemoryLimitExceeded {
+                limit_bytes: 100,
+                ..
+            }
+        ),
+        "a refused pool reservation must be MemoryLimitExceeded, got: {err:?}"
+    );
+
+    let db = db_with_memory_limit(64 * 1024).await?;
+    let err = db
+        .session()
+        .query("RETURN reduce(s = '', x IN range(0, 4000) | s + '0123456789abcdefghij') AS big")
+        .await
+        .expect_err("an ~80 KB result must exceed a 64 KiB ceiling");
+    assert!(
+        matches!(
+            err,
+            uni_db::UniError::MemoryLimitExceeded { limit_bytes, .. } if limit_bytes == 64 * 1024
+        ),
+        "the result-size estimate must be MemoryLimitExceeded, got: {err:?}"
+    );
+    Ok(())
+}

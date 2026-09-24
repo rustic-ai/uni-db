@@ -1048,51 +1048,69 @@ impl StorageBackend for LanceDbBackend {
         use lance_index::scalar::FullTextSearchQuery;
         use lance_index::scalar::inverted::query::MatchQuery;
 
-        let dataset = self.directory.open(table).await?;
-
-        // These are `lance_index` types already — lancedb only forwarded them
-        // to the same scanner, so the query object is unchanged.
-        let match_query = MatchQuery::new(query.to_string()).with_column(Some(column.to_string()));
-        let fts_query = FullTextSearchQuery {
-            query: match_query.into(),
-            limit: Some(k as i64),
-            wand_factor: None,
+        let sql = if filter.is_trivially_true() {
+            None
+        } else {
+            Some(filter.to_sql()?)
         };
+        let directory = self.directory.clone();
+        let table = table.to_string();
+        let column = column.to_string();
+        let query = query.to_string();
 
-        let mut scanner = dataset.scan();
-        scanner
-            .full_text_search(fts_query)
-            .map_err(|e| anyhow!("FTS query on '{}': {}", table, e))?;
-        // `k` is applied both inside the FTS query and as a scan limit, as
-        // before — the inner bound caps the BM25 candidate set, the outer one
-        // the returned rows.
-        scanner
-            .limit(Some(k as i64), None)
-            .map_err(|e| anyhow!("FTS limit on '{}': {}", table, e))?;
+        // Run on the process-wide runtime, never the caller's (#290). The
+        // inverted index caches its readers in the shared session, bound to an
+        // I/O loop spawned on whichever runtime first loads it, and posting
+        // lists load lazily through that loop. If a runtime that can die first
+        // loads it — a caller's runtime, or a query engine bridge — every later
+        // query for an uncached term waits on a loop that no longer exists.
+        crate::runtime::io_runtime::run_on_io_runtime(async move {
+            let dataset = directory.open(&table).await?;
 
-        if !filter.is_trivially_true() {
-            let sql = filter.to_sql()?;
-            // Prefilter, for the same reason `vector_search` does: the FTS
-            // query is bounded by `k` *before* the filter runs, so
-            // postfiltering lets excluded rows consume top-k slots. Measured
-            // without this, on 50 high-scoring excluded docs and 50 matching
-            // ones, `k = 10` with a filter returned **zero** rows while the
-            // same query unfiltered returned ten.
-            scanner.prefilter(true);
+            // These are `lance_index` types already — lancedb only forwarded
+            // them to the same scanner, so the query object is unchanged.
+            let match_query = MatchQuery::new(query).with_column(Some(column));
+            let fts_query = FullTextSearchQuery {
+                query: match_query.into(),
+                limit: Some(k as i64),
+                wand_factor: None,
+            };
+
+            let mut scanner = dataset.scan();
             scanner
-                .filter(&sql)
-                .map_err(|e| anyhow!("FTS filter '{}' on '{}': {}", sql, table, e))?;
-        }
+                .full_text_search(fts_query)
+                .map_err(|e| anyhow!("FTS query on '{}': {}", table, e))?;
+            // `k` is applied both inside the FTS query and as a scan limit, as
+            // before — the inner bound caps the BM25 candidate set, the outer
+            // one the returned rows.
+            scanner
+                .limit(Some(k as i64), None)
+                .map_err(|e| anyhow!("FTS limit on '{}': {}", table, e))?;
 
-        attach_search_stats(&mut scanner, counters, SearchKind::FullText);
+            if let Some(sql) = sql {
+                // Prefilter, for the same reason `vector_search` does: the FTS
+                // query is bounded by `k` *before* the filter runs, so
+                // postfiltering lets excluded rows consume top-k slots. Measured
+                // without this, on 50 high-scoring excluded docs and 50 matching
+                // ones, `k = 10` with a filter returned **zero** rows while the
+                // same query unfiltered returned ten.
+                scanner.prefilter(true);
+                scanner
+                    .filter(&sql)
+                    .map_err(|e| anyhow!("FTS filter '{}' on '{}': {}", sql, table, e))?;
+            }
 
-        scanner
-            .try_into_stream()
-            .await
-            .map_err(|e| anyhow!("FTS search execution failed on '{}': {}", table, e))?
-            .try_collect()
-            .await
-            .map_err(|e| anyhow!("Failed to collect FTS results from '{}': {}", table, e))
+            attach_search_stats(&mut scanner, counters, SearchKind::FullText);
+
+            scanner
+                .try_into_stream()
+                .await
+                .map_err(|e| anyhow!("FTS search execution failed on '{}': {}", table, e))?
+                .try_collect()
+                .await
+                .map_err(|e| anyhow!("Failed to collect FTS results from '{}': {}", table, e))
+        })
+        .await?
     }
 
     async fn create_vector_index(

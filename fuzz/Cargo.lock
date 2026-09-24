@@ -6764,7 +6764,7 @@ dependencies = [
 
 [[package]]
 name = "uni-btic"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -6773,7 +6773,7 @@ dependencies = [
 
 [[package]]
 name = "uni-common"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "anyhow",
  "arrow-schema",
@@ -6795,7 +6795,7 @@ dependencies = [
 
 [[package]]
 name = "uni-crdt"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "rmp-serde",
  "rustc-hash",
@@ -6809,7 +6809,7 @@ dependencies = [
 
 [[package]]
 name = "uni-cypher"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "pest",
  "pest_derive",
@@ -6831,7 +6831,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "arc-swap",
  "arrow",
@@ -6862,7 +6862,7 @@ dependencies = [
 
 [[package]]
 name = "uni-sparse-vector"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -6870,7 +6870,7 @@ dependencies = [
 
 [[package]]
 name = "uni-store"
-version = "4.1.0"
+version = "4.1.1"
 dependencies = [
  "anyhow",
  "arc-swap",

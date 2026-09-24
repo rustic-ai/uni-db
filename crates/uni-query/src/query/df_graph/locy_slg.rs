@@ -93,10 +93,10 @@ impl<'a> SLGResolver<'a> {
     > {
         Box::pin(async move {
             let elapsed = self.start.elapsed();
-            if elapsed > self.config.timeout {
+            if elapsed > self.config.effective_timeout() {
                 return Err(LocyError::Timeout {
                     elapsed,
-                    limit: self.config.timeout,
+                    limit: self.config.effective_timeout(),
                 });
             }
             if self.depth > self.config.max_slg_depth {

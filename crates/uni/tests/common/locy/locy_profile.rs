@@ -17,7 +17,7 @@ use uni_db::locy::LocyConfig;
 fn default_config() -> LocyConfig {
     LocyConfig {
         max_iterations: 1000,
-        timeout: Duration::from_secs(60),
+        timeout: Some(Duration::from_secs(60)),
         ..Default::default()
     }
 }

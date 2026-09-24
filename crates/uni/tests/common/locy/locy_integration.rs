@@ -220,7 +220,7 @@ async fn test_runtime_error_max_iterations() -> Result<()> {
 
     let config = uni_db::locy::LocyConfig {
         max_iterations: 1,
-        timeout: std::time::Duration::from_secs(30),
+        timeout: Some(std::time::Duration::from_secs(30)),
         ..Default::default()
     };
 

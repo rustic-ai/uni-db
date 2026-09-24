@@ -5,6 +5,15 @@
 
 use std::fmt;
 
+/// The phrase a [`LocyRuntimeError::MemoryLimitExceeded`] renders with.
+///
+/// The fixpoint raises that error as a `DataFusionError::Execution` string, so
+/// it reaches the API layer as text; this is what the API layer matches to
+/// classify it as a memory refusal rather than a failed program. It is
+/// deliberately distinct from Cypher's "Query exceeded memory limit", which is
+/// a different budget (`max_query_memory`, not `max_derived_bytes`).
+pub const DERIVED_BYTES_LIMIT_MARKER: &str = "exceeded max_derived_bytes";
+
 /// Runtime errors specific to Locy evaluation.
 #[derive(Debug)]
 pub enum LocyRuntimeError {
@@ -44,7 +53,7 @@ impl fmt::Display for LocyRuntimeError {
             Self::MemoryLimitExceeded { rule, bytes, limit } => {
                 write!(
                     f,
-                    "rule '{rule}' exceeded memory limit ({bytes} bytes > {limit} byte limit)"
+                    "rule '{rule}' {DERIVED_BYTES_LIMIT_MARKER} memory limit ({bytes} bytes > {limit} byte limit)"
                 )
             }
         }

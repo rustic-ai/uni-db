@@ -183,12 +183,17 @@ async def async_execute_with_retry(
 
 # Resource limits
 class UniMemoryLimitExceededError(UniError):
-    """Query exceeded its memory limit."""
+    """A query or Locy program was refused for exceeding a memory budget.
+
+    Raised for the per-query pool (`max_memory` / `max_query_memory`), the
+    result-size estimate, and a Locy relation's `max_derived_bytes` -- as
+    distinct from `UniQueryError`, which a program that is simply wrong raises.
+    """
 
     ...
 
 class UniTimeoutError(UniError):
-    """Operation timed out."""
+    """Operation timed out -- a Cypher query or Locy program included."""
 
     ...
 

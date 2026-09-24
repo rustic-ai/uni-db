@@ -394,7 +394,7 @@ pub struct LocyConfig {
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `max_iterations` | count | 1,000 | Maximum fixpoint iterations per recursive stratum |
-| `timeout` | duration | 300s | Overall Locy evaluation timeout |
+| `timeout` | duration | unset (300s) | Overall Locy evaluation timeout. When set, it is the whole budget and replaces `query_timeout` for the program's operators, as `query_with(..).timeout(..)` does for Cypher. When unset, strata get 300s while operators keep the database `query_timeout` |
 | `max_derived_bytes` | bytes | 256 MB | Maximum derived facts memory per relation |
 | `max_explain_depth` | count | 100 | Maximum recursion depth for EXPLAIN trees |
 | `max_slg_depth` | count | 1,000 | Maximum recursion depth for SLG resolution |

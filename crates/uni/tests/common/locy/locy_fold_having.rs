@@ -25,7 +25,7 @@ async fn test_fold_having_basic() -> Result<()> {
 
     let config = uni_db::locy::LocyConfig {
         max_iterations: 100,
-        timeout: std::time::Duration::from_secs(30),
+        timeout: Some(std::time::Duration::from_secs(30)),
         ..Default::default()
     };
 
@@ -72,7 +72,7 @@ async fn test_fold_having_filters_all() -> Result<()> {
 
     let config = uni_db::locy::LocyConfig {
         max_iterations: 100,
-        timeout: std::time::Duration::from_secs(30),
+        timeout: Some(std::time::Duration::from_secs(30)),
         ..Default::default()
     };
 
@@ -119,7 +119,7 @@ async fn test_fold_without_having_unchanged() -> Result<()> {
 
     let config = uni_db::locy::LocyConfig {
         max_iterations: 100,
-        timeout: std::time::Duration::from_secs(30),
+        timeout: Some(std::time::Duration::from_secs(30)),
         ..Default::default()
     };
 
@@ -171,7 +171,7 @@ async fn test_fold_having_multiple_conditions() -> Result<()> {
 
     let config = uni_db::locy::LocyConfig {
         max_iterations: 100,
-        timeout: std::time::Duration::from_secs(30),
+        timeout: Some(std::time::Duration::from_secs(30)),
         ..Default::default()
     };
 
@@ -226,7 +226,7 @@ async fn test_fold_having_with_best_by() -> Result<()> {
 
     let config = uni_db::locy::LocyConfig {
         max_iterations: 100,
-        timeout: std::time::Duration::from_secs(30),
+        timeout: Some(std::time::Duration::from_secs(30)),
         ..Default::default()
     };
 

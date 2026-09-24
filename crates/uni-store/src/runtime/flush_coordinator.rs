@@ -427,15 +427,22 @@ impl FlushCoordinator {
         let current_version = rotated.current_version;
         let name = rotated.name.clone();
         let stream_timeout = self.stream_timeout;
-        let handle = tokio::spawn(async move {
-            // The seq guard guarantees this seq is submitted even if the task's
-            // future is dropped before the normal `submit` below (issue #132).
-            let guard = FlushSeqGuard {
-                coord: coord.clone(),
-                seq,
-                rotated: Some(rotated),
-                ack: Some(ack_tx),
-            };
+        // The seq guard guarantees this seq is submitted even if the task's
+        // future is dropped before the normal `submit` below (issue #132).
+        // It is built *before* the spawn and moved into the task, so it also
+        // fires when the task is dropped before its first poll — which is what
+        // happens when the runtime it was spawned on shuts down first. Built
+        // inside the async body, it would not exist yet, the seq would never be
+        // submitted, and the in-order finalizer would wait for it forever
+        // (#290).
+        let guard = FlushSeqGuard {
+            coord: coord.clone(),
+            seq,
+            rotated: Some(rotated),
+            ack: Some(ack_tx),
+        };
+        let task = async move {
+            let guard = guard;
             // `run_stream_catching` converts a panic into a submitted *failure*
             // (review H2). `timeout` additionally converts a STALLED stream — a
             // lost-wakeup in the sparse/multivec Lance read-modify-write — into
@@ -465,7 +472,22 @@ impl FlushCoordinator {
             };
             let (rotated, ack) = guard.disarm();
             coord.submit(seq, rotated, result, ack);
-        });
+        };
+        // Spawned on the process-wide runtime, not the caller's: the flush must
+        // outlive the commit that triggered it, and a caller's runtime can shut
+        // down first. A stream dropped that way is a *failed* flush whose L0
+        // stays stranded until restart, so every later flush reports it (#290).
+        let handle = match crate::runtime::io_runtime::io_runtime() {
+            Ok(rt) => rt.spawn(task),
+            Err(e) => {
+                tracing::warn!(
+                    seq,
+                    error = %e,
+                    "uni-io runtime unavailable; running the flush stream on the caller's runtime"
+                );
+                tokio::spawn(task)
+            }
+        };
         // Track the handle so `shutdown()` can await all stream tasks'
         // destructors. Opportunistically prune finished handles to keep
         // the vec bounded under high flush rates.

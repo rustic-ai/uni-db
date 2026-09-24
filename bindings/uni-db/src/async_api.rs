@@ -3646,6 +3646,12 @@ impl AsyncSessionLocyBuilder {
                     for (k, v) in rust_params {
                         builder = builder.param(k, v);
                     }
+                    // The config first, then the individual setters on top of it: `with_config`
+                    // replaces the whole `LocyConfig`, so applied last it silently discarded an
+                    // explicit `.timeout(..)` / `.max_iterations(..)` (#289).
+                    if let Some(c) = locy_config {
+                        builder = builder.with_config(c);
+                    }
                     if let Some(t) = timeout_secs {
                         builder = builder.timeout(std::time::Duration::from_secs_f64(t));
                     }
@@ -3654,9 +3660,6 @@ impl AsyncSessionLocyBuilder {
                     }
                     if let Some(mm) = max_memory {
                         builder = builder.max_memory(mm);
-                    }
-                    if let Some(c) = locy_config {
-                        builder = builder.with_config(c);
                     }
                     if let Some(ct) = cancel_token {
                         builder = builder.cancellation_token(ct);
@@ -3711,6 +3714,12 @@ impl AsyncSessionLocyBuilder {
                     for (k, v) in rust_params {
                         builder = builder.param(k, v);
                     }
+                    // The config first, then the individual setters on top of it: `with_config`
+                    // replaces the whole `LocyConfig`, so applied last it silently discarded an
+                    // explicit `.timeout(..)` / `.max_iterations(..)` (#289).
+                    if let Some(c) = locy_config {
+                        builder = builder.with_config(c);
+                    }
                     if let Some(t) = timeout_secs {
                         builder = builder.timeout(std::time::Duration::from_secs_f64(t));
                     }
@@ -3719,9 +3728,6 @@ impl AsyncSessionLocyBuilder {
                     }
                     if let Some(mm) = max_memory {
                         builder = builder.max_memory(mm);
-                    }
-                    if let Some(c) = locy_config {
-                        builder = builder.with_config(c);
                     }
                     if let Some(ct) = cancel_token {
                         builder = builder.cancellation_token(ct);
@@ -4135,6 +4141,12 @@ impl AsyncTxLocyBuilder {
                     for (k, v) in rust_params {
                         builder = builder.param(k, v);
                     }
+                    // The config first, then the individual setters on top of it: `with_config`
+                    // replaces the whole `LocyConfig`, so applied last it silently discarded an
+                    // explicit `.timeout(..)` / `.max_iterations(..)` (#289).
+                    if let Some(c) = locy_config {
+                        builder = builder.with_config(c);
+                    }
                     if let Some(t) = timeout_secs {
                         builder = builder.timeout(std::time::Duration::from_secs_f64(t));
                     }
@@ -4143,9 +4155,6 @@ impl AsyncTxLocyBuilder {
                     }
                     if let Some(mm) = max_memory {
                         builder = builder.max_memory(mm);
-                    }
-                    if let Some(c) = locy_config {
-                        builder = builder.with_config(c);
                     }
                     if let Some(ct) = cancel_token {
                         builder = builder.cancellation_token(ct);
@@ -4184,6 +4193,12 @@ impl AsyncTxLocyBuilder {
                     for (k, v) in rust_params {
                         builder = builder.param(k, v);
                     }
+                    // The config first, then the individual setters on top of it: `with_config`
+                    // replaces the whole `LocyConfig`, so applied last it silently discarded an
+                    // explicit `.timeout(..)` / `.max_iterations(..)` (#289).
+                    if let Some(c) = locy_config {
+                        builder = builder.with_config(c);
+                    }
                     if let Some(t) = timeout_secs {
                         builder = builder.timeout(std::time::Duration::from_secs_f64(t));
                     }
@@ -4192,9 +4207,6 @@ impl AsyncTxLocyBuilder {
                     }
                     if let Some(mm) = max_memory {
                         builder = builder.max_memory(mm);
-                    }
-                    if let Some(c) = locy_config {
-                        builder = builder.with_config(c);
                     }
                     if let Some(ct) = cancel_token {
                         builder = builder.cancellation_token(ct);

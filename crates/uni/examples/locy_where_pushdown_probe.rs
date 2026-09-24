@@ -228,7 +228,7 @@ async fn run_arm(db: &Uni, arm: &Arm) -> Result<Measurement, Box<dyn std::error:
     if let Some(program) = &arm.locy {
         let config = LocyConfig {
             max_iterations: 100,
-            timeout: Duration::from_secs(300),
+            timeout: Some(Duration::from_secs(300)),
             ..Default::default()
         };
         let started = Instant::now();

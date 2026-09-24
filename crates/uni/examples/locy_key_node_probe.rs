@@ -288,7 +288,7 @@ async fn run_arm(
         // as an error here and not as a fast, wrong row count.
         let config = uni_db::locy::LocyConfig {
             max_iterations: 1_000,
-            timeout: budget,
+            timeout: Some(budget),
             ..Default::default()
         };
         let started = Instant::now();

@@ -130,9 +130,13 @@ pub(crate) fn check_deadline(
 /// Block on `fut` from a synchronous context without touching the caller's runtime.
 ///
 /// Physical operators run inside a DataFusion stream `poll_next`, so they cannot
-/// `block_on` the ambient runtime. This spawns a scoped thread with a fresh
-/// current-thread runtime, drives the future there, and translates both runtime
-/// creation failures and thread panics into `DataFusionError::Execution`.
+/// `block_on` the ambient runtime. This drives the future on a scoped thread
+/// through the process-wide runtime and translates both runtime creation
+/// failures and thread panics into `DataFusionError::Execution`.
+///
+/// It must not build a runtime per call: storage state first created during
+/// the call (Lance's index readers and their I/O loop) is cached beyond it, and
+/// is bound to the runtime that created it (#290).
 ///
 /// `what` names the operation for the error messages (`"{what} failed: {e}"` and
 /// `"{what} thread panicked"`).
@@ -146,27 +150,19 @@ where
     T: Send,
     F: std::future::Future<Output = anyhow::Result<T>> + Send,
 {
-    std::thread::scope(|s| {
-        s.spawn(|| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "Runtime creation failed: {e}"
-                    ))
-                })?;
-            rt.block_on(fut).map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!("{what} failed: {e}"))
-            })
-        })
-        .join()
-        .unwrap_or_else(|_| {
-            Err(datafusion::error::DataFusionError::Execution(format!(
-                "{what} thread panicked"
-            )))
-        })
-    })
+    use uni_store::runtime::io_runtime::{BridgeError, block_on_io_runtime};
+
+    match block_on_io_runtime(fut) {
+        Ok(r) => r.map_err(|e| {
+            datafusion::error::DataFusionError::Execution(format!("{what} failed: {e}"))
+        }),
+        Err(BridgeError::Runtime(e)) => Err(datafusion::error::DataFusionError::Execution(
+            format!("Runtime creation failed: {e}"),
+        )),
+        Err(BridgeError::Panicked) => Err(datafusion::error::DataFusionError::Execution(format!(
+            "{what} thread panicked"
+        ))),
+    }
 }
 
 /// Tracks how much *distinct* memory a set of `RecordBatch`es holds.

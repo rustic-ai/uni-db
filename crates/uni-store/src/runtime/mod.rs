@@ -10,6 +10,9 @@ pub mod embed_caps;
 pub mod flush_coordinator;
 pub mod id_allocator;
 pub mod id_reservoir;
+/// Process-wide runtime for work whose runtime-bound state must outlive the
+/// caller's runtime (issue #290).
+pub mod io_runtime;
 pub mod l0;
 pub mod l0_manager;
 pub mod l0_visibility;

@@ -407,15 +407,14 @@ impl PhysicalExpr for SimilarToExecExpr {
 
         let precomputed = std::thread::scope(|s| {
             s.spawn(|| {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|e| {
-                        datafusion::error::DataFusionError::Execution(format!(
-                            "Failed to create runtime for similar_to: {}",
-                            e
-                        ))
-                    })?;
+                // The process-wide runtime, not one built per call: state this
+                // work first creates (Lance index readers and their I/O loop)
+                // is cached beyond the call and bound to its runtime (#290).
+                let rt = uni_store::runtime::io_runtime::io_runtime().map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Failed to get runtime for similar_to: {e}"
+                    ))
+                })?;
 
                 let mut embed_vectors = vec![None; num_sources];
                 let mut fts_results = vec![None; num_sources];

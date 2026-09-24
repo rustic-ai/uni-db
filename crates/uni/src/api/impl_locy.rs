@@ -535,16 +535,24 @@ impl LocyEngine<'_> {
     /// that crossed none of those boundaries ran to completion and reported
     /// nothing (issue #283).
     ///
-    /// The two are combined with `min` rather than letting the Locy value win
-    /// outright. `LocyConfig::timeout` defaults to 300s against a 30s database
-    /// default, so overriding unconditionally would *loosen* the deadline for
-    /// anyone who never set a Locy timeout.
+    /// An explicit Locy timeout *replaces* the database value, as
+    /// `query_with(..).timeout(..)` does for Cypher. It used to be combined
+    /// with `min`, because `LocyConfig::timeout` was a plain 300s default that
+    /// could not be told apart from a value the caller asked for, and
+    /// overriding with it unconditionally would have loosened the deadline for
+    /// anyone who never set one. `min` bought that safety by silently
+    /// discarding every explicit timeout above the database's 30s (#289). With
+    /// the field an `Option`, an unset timeout keeps the `min` against
+    /// [`LocyConfig::DEFAULT_TIMEOUT`] and a set one is honoured as given.
     fn executor_config(&self, locy: &LocyConfig) -> uni_common::UniConfig {
         let mut config = self.db.config.clone();
         if let Some(bytes) = self.max_memory {
             config.max_query_memory = bytes;
         }
-        config.query_timeout = config.query_timeout.min(locy.timeout);
+        config.query_timeout = match locy.timeout {
+            Some(explicit) => explicit,
+            None => config.query_timeout.min(LocyConfig::DEFAULT_TIMEOUT),
+        };
         config
     }
 }
@@ -746,7 +754,7 @@ impl<'a> LocyEngine<'a> {
             .build_program_plan_with_full_neural(
                 &compiled,
                 config.max_iterations,
-                config.timeout,
+                config.effective_timeout(),
                 config.max_derived_bytes,
                 config.deterministic_best_by,
                 config.strict_probability_domain,
@@ -779,7 +787,9 @@ impl<'a> LocyEngine<'a> {
 
         // 2. Create executor + physical planner
         let mut df_executor = uni_query::Executor::new(self.db.storage.clone());
-        df_executor.set_config(self.executor_config(config));
+        let executor_config = self.executor_config(config);
+        let limits = LocyLimits::new(&executor_config, config);
+        df_executor.set_config(executor_config);
         df_executor.set_counters(self.counters.clone());
         if let Some(ref w) = self.db.writer {
             df_executor.set_writer(w.clone());
@@ -813,10 +823,12 @@ impl<'a> LocyEngine<'a> {
         let (session_ctx, planner, _prop_mgr) = df_executor
             .create_datafusion_planner(&self.db.properties, &config.params)
             .await
-            .map_err(map_native_df_error)?;
+            .map_err(|e| map_native_df_error(e, limits))?;
 
         // 3. Physical plan
-        let exec_plan = planner.plan(&logical).map_err(map_native_df_error)?;
+        let exec_plan = planner
+            .plan(&logical)
+            .map_err(|e| map_native_df_error(e, limits))?;
 
         // 4. Create tracker for EXPLAIN commands or shared-proof detection
         let has_explain = compiled
@@ -890,7 +902,7 @@ impl<'a> LocyEngine<'a> {
         // 5. Execute strata
         let _stats_batches = uni_query::Executor::collect_batches(&session_ctx, exec_plan)
             .await
-            .map_err(map_native_df_error)?;
+            .map_err(|e| map_native_df_error(e, limits))?;
 
         // 5b. Hand the captured execution profile back to the profile() caller.
         if let (Some(capture), Some(slot)) = (profile_capture, profile_slot.as_ref())
@@ -995,7 +1007,7 @@ impl<'a> LocyEngine<'a> {
                     &mut collected_derives,
                 )
                 .await
-                .map_err(map_runtime_error)?;
+                .map_err(|e| map_runtime_error(e, limits))?;
                 command_results.push(result);
             }
         }
@@ -1112,7 +1124,7 @@ impl<'a> LocyEngine<'a> {
             .build_program_plan_with_semiring(
                 compiled,
                 config.max_iterations,
-                config.timeout,
+                config.effective_timeout(),
                 config.max_derived_bytes,
                 config.deterministic_best_by,
                 config.strict_probability_domain,
@@ -1134,7 +1146,9 @@ impl<'a> LocyEngine<'a> {
             })?;
 
         let mut df_executor = uni_query::Executor::new(self.db.storage.clone());
-        df_executor.set_config(self.executor_config(config));
+        let executor_config = self.executor_config(config);
+        let limits = LocyLimits::new(&executor_config, config);
+        df_executor.set_config(executor_config);
         df_executor.set_counters(self.counters.clone());
         if let Some(ref w) = self.db.writer {
             df_executor.set_writer(w.clone());
@@ -1150,8 +1164,10 @@ impl<'a> LocyEngine<'a> {
         let (session_ctx, planner, _) = df_executor
             .create_datafusion_planner(&self.db.properties, &config.params)
             .await
-            .map_err(map_native_df_error)?;
-        let exec_plan = planner.plan(&logical).map_err(map_native_df_error)?;
+            .map_err(|e| map_native_df_error(e, limits))?;
+        let exec_plan = planner
+            .plan(&logical)
+            .map_err(|e| map_native_df_error(e, limits))?;
 
         let derived_store_slot = if let Some(program_exec) =
             exec_plan.downcast_ref::<uni_query::query::df_graph::LocyProgramExec>()
@@ -1163,7 +1179,7 @@ impl<'a> LocyEngine<'a> {
 
         let _ = uni_query::Executor::collect_batches(&session_ctx, exec_plan)
             .await
-            .map_err(map_native_df_error)?;
+            .map_err(|e| map_native_df_error(e, limits))?;
         Ok(derived_store_slot
             .write()
             .unwrap()
@@ -2156,21 +2172,71 @@ fn map_compile_error(e: LocyCompileError) -> UniError {
     }
 }
 
-fn map_runtime_error(e: LocyError) -> UniError {
+/// The budgets a Locy evaluation's executor runs under.
+///
+/// Carried to the error mappers so a refusal reports the limit it hit: the
+/// operator that trips a deadline or a pool reservation cannot know it.
+#[derive(Debug, Clone, Copy)]
+struct LocyLimits {
+    /// The deadline every operator checks (`UniConfig::query_timeout` as
+    /// resolved by [`LocyEngine::executor_config`]).
+    timeout: std::time::Duration,
+    /// The executor's memory pool (`max_query_memory`).
+    max_query_memory: usize,
+    /// A single derived relation's budget (`LocyConfig::max_derived_bytes`).
+    max_derived_bytes: usize,
+}
+
+impl LocyLimits {
+    fn new(executor_config: &uni_common::UniConfig, locy: &LocyConfig) -> Self {
+        Self {
+            timeout: executor_config.query_timeout,
+            max_query_memory: executor_config.max_query_memory,
+            max_derived_bytes: locy.max_derived_bytes,
+        }
+    }
+}
+
+fn map_runtime_error(e: LocyError, limits: LocyLimits) -> UniError {
     match e {
         LocyError::SavepointFailed { ref message } => UniError::Transaction {
             message: format!("LocyRuntimeError: {message}"),
         },
-        other => UniError::Query {
-            message: format!("LocyRuntimeError: {other}"),
-            query: None,
+        // SLG resolution's own budget check. The same condition the operator
+        // deadline reports as `Timeout`, so it must not surface as a failed
+        // program merely because a different layer noticed it (#289).
+        LocyError::Timeout { limit, .. } => UniError::Timeout {
+            timeout_ms: u64::try_from(limit.as_millis()).unwrap_or(u64::MAX),
         },
+        other => map_native_df_error(other, limits),
     }
 }
 
-fn map_native_df_error(e: impl std::fmt::Display) -> UniError {
+/// Map an error from the Locy executor to a `UniError`.
+///
+/// A program refused for cost — deadline, cancellation, the operator memory
+/// pool, a derived relation's `max_derived_bytes` — gets the typed variant the
+/// Cypher path raises for the same condition. Everything else is a failed
+/// program and stays `UniError::Query`. This used to wrap every error as
+/// `Query`, so a caller could tell "too expensive" from "wrong" only by
+/// matching the message (#289).
+fn map_native_df_error(e: impl std::fmt::Display, limits: LocyLimits) -> UniError {
+    let msg = e.to_string();
+    if msg.contains(uni_query::query::df_graph::locy_errors::DERIVED_BYTES_LIMIT_MARKER) {
+        return UniError::MemoryLimitExceeded {
+            limit_bytes: limits.max_derived_bytes,
+            message: msg,
+        };
+    }
+    if let Some(refusal) = crate::api::impl_query::classify_limit_refusal(
+        &msg,
+        limits.timeout,
+        limits.max_query_memory,
+    ) {
+        return refusal;
+    }
     UniError::Query {
-        message: format!("LocyRuntimeError: {e}"),
+        message: format!("LocyRuntimeError: {msg}"),
         query: None,
     }
 }

@@ -76,7 +76,7 @@ async fn measure(depth: usize) -> Result<(usize, usize, usize)> {
         .locy_with(PROGRAM)
         .with_config(LocyConfig {
             max_iterations: 1000,
-            timeout: Duration::from_secs(120),
+            timeout: Some(Duration::from_secs(120)),
             ..Default::default()
         })
         .profile()

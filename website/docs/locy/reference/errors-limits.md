@@ -6,12 +6,22 @@
 - Compile errors: invalid dependencies, type/schema mismatches, stratification violations.
 - Runtime errors: timeout, iteration limit, memory constraints, mutation constraints, cancellation.
 
+A program refused for cost gets a dedicated error, never the generic query error a broken program raises, so a caller can tell "too expensive" from "wrong" without reading the message:
+
+| Refusal | Rust | Python |
+|---|---|---|
+| Timeout (the evaluation's `timeout`, or the database `query_timeout` when unset) | `UniError::Timeout { timeout_ms }` | `UniTimeoutError` |
+| Memory pool (`max_memory`) or a relation over `max_derived_bytes` | `UniError::MemoryLimitExceeded { limit_bytes, message }` | `UniMemoryLimitExceededError` |
+| Stopped at a stratum / iteration boundary | `UniError::LocyIncomplete` | `UniLocyIncompleteError` |
+
+Cypher raises the same variants for the same conditions.
+
 Cancelling the token attached to an evaluation aborts it with `UniError::Cancelled` (`UniCancelledError` in Python). Enforcement races the whole evaluation, so a long-running fixpoint is interruptible rather than only checked at statement boundaries.
 
 ## Operational Limits (via `LocyConfig`)
 
 - `max_iterations`: recursion cap per recursive stratum.
-- `timeout`: overall evaluation budget.
+- `timeout`: overall evaluation budget. When set, it also replaces the database `query_timeout` for the program's operators, whether above or below it.
 - `max_derived_bytes`: derived fact memory bound.
 - `max_explain_depth`: derivation tree depth bound.
 - `max_slg_depth`: goal-directed recursion bound.

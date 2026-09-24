@@ -111,21 +111,15 @@ fn into_execution_error(
     e: impl std::fmt::Display,
     cypher: &str,
     timeout: std::time::Duration,
+    max_mem: usize,
 ) -> UniError {
     let msg = normalize_error_message(&e.to_string(), cypher);
     if let Some(detail) = uni_common::GraphComputeIncomplete::from_tagged_message(&msg) {
         UniError::GraphComputeIncomplete {
             detail: Box::new(detail),
         }
-    } else if msg.contains("Query cancelled") {
-        UniError::Cancelled
-    } else if msg.contains("Query timed out") {
-        query_timed_out_error(timeout)
-    } else if msg.contains("Query exceeded memory limit") {
-        UniError::Query {
-            message: msg,
-            query: Some(cypher.to_string()),
-        }
+    } else if let Some(refusal) = classify_limit_refusal(&msg, timeout, max_mem) {
+        refusal
     } else if msg.contains("TypeError:") {
         UniError::Type {
             expected: msg,
@@ -155,22 +149,21 @@ fn into_stream_error(
     e: impl std::fmt::Display,
     cypher: &str,
     timeout: std::time::Duration,
+    max_mem: usize,
 ) -> UniError {
     let msg = normalize_error_message(&e.to_string(), cypher);
     if let Some(detail) = uni_common::GraphComputeIncomplete::from_tagged_message(&msg) {
         UniError::GraphComputeIncomplete {
             detail: Box::new(detail),
         }
-    } else if msg.contains("Query cancelled") {
+    } else if let Some(refusal) = classify_limit_refusal(&msg, timeout, max_mem) {
         // Reachable only since #207: before the deadline and token were plumbed
         // into `GraphExecutionContext`, no operator-level check could fire, so a
         // streamed abort always came from the outer `timeout_at`/`cancelled`
         // race below and arrived already typed. An operator raising it now must
         // land on the same variants, or the cursor reports a cooperative abort
         // as a generic `Query` error.
-        UniError::Cancelled
-    } else if msg.contains("Query timed out") {
-        query_timed_out_error(timeout)
+        refusal
     } else if msg.contains("TypeError:") {
         UniError::Type {
             expected: msg,
@@ -361,13 +354,47 @@ fn value_bytes(v: &ApiValue) -> usize {
     }
 }
 
-/// The error both paths raise when `max_query_memory` is exceeded.
-fn memory_limit_error(estimated_bytes: usize, max_mem: usize, cypher: &str) -> UniError {
-    UniError::Query {
-        message: format!(
-            "Query exceeded memory limit ({estimated_bytes} bytes > {max_mem} byte limit)"
-        ),
-        query: Some(cypher.to_string()),
+/// The error both paths raise when the result-size estimate exceeds
+/// `max_query_memory`.
+///
+/// Typed, for the reason [`query_timed_out_error`] is: a query refused for
+/// cost and a query that was simply wrong must not share a class (#289).
+fn memory_limit_error(estimated_bytes: usize, max_mem: usize) -> UniError {
+    UniError::MemoryLimitExceeded {
+        limit_bytes: max_mem,
+        message: format!("result estimated at {estimated_bytes} bytes"),
+    }
+}
+
+/// Classify an error that crossed the executor as a cost refusal, if it is one.
+///
+/// The operators signal an elapsed deadline, a cancelled token and a refused
+/// memory-pool reservation as text — `anyhow!("Query timed out")`,
+/// `anyhow!("Query cancelled")`, DataFusion's `ResourcesExhausted` — and the
+/// layers between flatten them further, so text is all that arrives here. The
+/// budgets are reattached because the operator that tripped cannot know them.
+///
+/// Every executor error mapper calls this — Cypher's materializing and
+/// streaming paths and the Locy engine — so a refusal is one `UniError`
+/// variant whichever surface raised it. The Locy engine had no such step and
+/// reported all three as `UniError::Query`, the class of a broken program
+/// (#289).
+pub(crate) fn classify_limit_refusal(
+    msg: &str,
+    timeout: std::time::Duration,
+    max_mem: usize,
+) -> Option<UniError> {
+    if msg.contains("Query cancelled") {
+        Some(UniError::Cancelled)
+    } else if msg.contains("Query timed out") {
+        Some(query_timed_out_error(timeout))
+    } else if msg.contains("Resources exhausted") || msg.contains("Query exceeded memory limit") {
+        Some(UniError::MemoryLimitExceeded {
+            limit_bytes: max_mem,
+            message: msg.to_string(),
+        })
+    } else {
+        None
     }
 }
 
@@ -469,17 +496,13 @@ impl CancelScope {
 /// Reject a result set whose estimated in-memory size exceeds `max_mem` bytes.
 ///
 /// A `max_mem` of `0` disables the limit.
-fn enforce_memory_limit(
-    results: &[HashMap<String, ApiValue>],
-    max_mem: usize,
-    cypher: &str,
-) -> Result<()> {
+fn enforce_memory_limit(results: &[HashMap<String, ApiValue>], max_mem: usize) -> Result<()> {
     if max_mem == 0 {
         return Ok(());
     }
     let estimated_bytes = estimate_result_bytes(results);
     if estimated_bytes > max_mem {
-        return Err(memory_limit_error(estimated_bytes, max_mem, cypher));
+        return Err(memory_limit_error(estimated_bytes, max_mem));
     }
     Ok(())
 }
@@ -674,10 +697,15 @@ impl crate::api::UniInner {
 
         let projection_order = extract_projection_order(&logical_plan);
 
-        let (results, profile_output) = executor
-            .profile(logical_plan, &params)
-            .await
-            .map_err(|e| into_execution_error(e, cypher, self.config.query_timeout))?;
+        let (results, profile_output) =
+            executor.profile(logical_plan, &params).await.map_err(|e| {
+                into_execution_error(
+                    e,
+                    cypher,
+                    self.config.query_timeout,
+                    max_memory.unwrap_or(self.config.max_query_memory),
+                )
+            })?;
 
         let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
@@ -766,7 +794,6 @@ impl crate::api::UniInner {
         let projection_order = extract_projection_order(&logical_plan);
         let projection_order_for_rows = projection_order.clone();
         let cypher_for_error = cypher.to_string();
-        let cypher_for_limits = cypher.to_string();
         let batch_size = config.batch_size;
         let max_mem = config.max_query_memory;
 
@@ -823,7 +850,7 @@ impl crate::api::UniInner {
         let row_stream = stream
             .map(move |batch_res| {
                 let results = batch_res
-                    .map_err(|e| into_stream_error(e, &cypher_for_error, query_timeout))?;
+                    .map_err(|e| into_stream_error(e, &cypher_for_error, query_timeout, max_mem))?;
                 // Applied to the executor's own output, not to the re-chunked
                 // pieces below, so a slow consumer paging an already-computed
                 // result is not charged against the query's execution budget.
@@ -834,11 +861,7 @@ impl crate::api::UniInner {
                 if max_mem > 0 {
                     streamed_bytes = streamed_bytes.saturating_add(estimate_result_bytes(&results));
                     if streamed_bytes > max_mem {
-                        return Err(memory_limit_error(
-                            streamed_bytes,
-                            max_mem,
-                            &cypher_for_limits,
-                        ));
+                        return Err(memory_limit_error(streamed_bytes, max_mem));
                     }
                 }
                 if results.is_empty() {
@@ -1106,7 +1129,14 @@ impl crate::api::UniInner {
                 executor.execute(logical_plan, &self.properties, &params),
             ) => res
                 .map_err(|_| query_timed_out_error(timeout_duration))?
-                .map_err(|e| into_execution_error(e, cypher, self.config.query_timeout))?,
+                .map_err(|e| {
+                into_execution_error(
+                    e,
+                    cypher,
+                    self.config.query_timeout,
+                    max_memory.unwrap_or(self.config.max_query_memory),
+                )
+            })?,
         };
         let exec_time = exec_start.elapsed();
 
@@ -1122,11 +1152,7 @@ impl crate::api::UniInner {
         // Adding it to the cursor without adding it here would have handed the
         // transaction surface a fresh asymmetry — streaming stricter than
         // materializing — which is the shape of defect this work removes.
-        enforce_memory_limit(
-            &results,
-            max_memory.unwrap_or(self.config.max_query_memory),
-            cypher,
-        )?;
+        enforce_memory_limit(&results, max_memory.unwrap_or(self.config.max_query_memory))?;
 
         let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
@@ -1199,10 +1225,15 @@ impl crate::api::UniInner {
 
         let projection_order = extract_projection_order(&logical_plan);
 
-        let (results, profile_output) = executor
-            .profile(logical_plan, &params)
-            .await
-            .map_err(|e| into_execution_error(e, cypher, self.config.query_timeout))?;
+        let (results, profile_output) =
+            executor.profile(logical_plan, &params).await.map_err(|e| {
+                into_execution_error(
+                    e,
+                    cypher,
+                    self.config.query_timeout,
+                    max_memory.unwrap_or(self.config.max_query_memory),
+                )
+            })?;
 
         let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
@@ -1364,7 +1395,7 @@ impl crate::api::UniInner {
                 executor.execute(logical_plan, &self.properties, &params),
             ) => res
                 .map_err(|_| query_timed_out_error(timeout_duration))?
-                .map_err(|e| into_execution_error(e, cypher, config.query_timeout))?,
+                .map_err(|e| into_execution_error(e, cypher, config.query_timeout, config.max_query_memory))?,
         };
         let exec_time = exec_start.elapsed();
 
@@ -1428,7 +1459,7 @@ impl crate::api::UniInner {
                 executor.execute(logical_plan, &self.properties, &params),
             ) => res
                 .map_err(|_| query_timed_out_error(timeout_duration))?
-                .map_err(|e| into_execution_error(e, cypher, config.query_timeout))?,
+                .map_err(|e| into_execution_error(e, cypher, config.query_timeout, config.max_query_memory))?,
         };
         let exec_time = exec_start.elapsed();
 
@@ -1438,7 +1469,7 @@ impl crate::api::UniInner {
             return Err(query_timed_out_error(timeout_duration));
         }
 
-        enforce_memory_limit(&results, config.max_query_memory, cypher)?;
+        enforce_memory_limit(&results, config.max_query_memory)?;
 
         let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
@@ -1529,7 +1560,7 @@ impl crate::api::UniInner {
                 executor.execute(plan, &self.properties, &params),
             ) => res
                 .map_err(|_| query_timed_out_error(timeout_duration))?
-                .map_err(|e| into_execution_error(e, cypher, config.query_timeout))?,
+                .map_err(|e| into_execution_error(e, cypher, config.query_timeout, config.max_query_memory))?,
         };
         let exec_time = exec_start.elapsed();
 
@@ -1537,7 +1568,7 @@ impl crate::api::UniInner {
             return Err(query_timed_out_error(timeout_duration));
         }
 
-        enforce_memory_limit(&results, config.max_query_memory, cypher)?;
+        enforce_memory_limit(&results, config.max_query_memory)?;
 
         let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);

@@ -865,7 +865,7 @@ pub fn extract_locy_config(
         locy_config.max_iterations = v.extract::<usize>(py)?;
     }
     if let Some(v) = config.get("timeout") {
-        locy_config.timeout = std::time::Duration::from_secs_f64(v.extract::<f64>(py)?);
+        locy_config.timeout = Some(std::time::Duration::from_secs_f64(v.extract::<f64>(py)?));
     }
     if let Some(v) = config.get("allow_partial") {
         locy_config.allow_partial = v.extract::<bool>(py)?;

@@ -78,9 +78,14 @@ pub enum UniError {
     #[error("Snapshot '{snapshot_id}' not found")]
     SnapshotNotFound { snapshot_id: String },
 
-    /// Query memory limit exceeded
-    #[error("Query exceeded memory limit of {limit_bytes} bytes")]
-    MemoryLimitExceeded { limit_bytes: usize },
+    /// A query or Locy evaluation was refused for exceeding a memory budget.
+    ///
+    /// Covers the per-query operator pool (`max_query_memory`), the
+    /// result-size estimate, and a Locy relation's `max_derived_bytes`.
+    /// `message` keeps the refusing layer's own text — which operator or rule
+    /// asked, and for how much — since the budget alone does not locate it.
+    #[error("Query exceeded memory limit of {limit_bytes} bytes: {message}")]
+    MemoryLimitExceeded { limit_bytes: usize, message: String },
 
     #[error("Database is locked by another process")]
     DatabaseLocked,

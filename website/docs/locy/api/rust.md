@@ -49,7 +49,7 @@ Builder methods:
 |--------|-------------|
 | `.param(name, value)` | Add a named parameter |
 | `.params(map)` | Add multiple parameters |
-| `.timeout(duration)` | Set evaluation timeout (`std::time::Duration`) |
+| `.timeout(duration)` | Set evaluation timeout (`std::time::Duration`). Replaces the database `query_timeout` for this evaluation, above or below it |
 | `.max_iterations(n)` | Set recursion iteration cap |
 | `.with_config(cfg)` | Set full `LocyConfig` options (taken by value) |
 | `.cancellation_token(token)` | Attach a cancellation token; cancelling it aborts the evaluation with `UniError::Cancelled` |
@@ -61,7 +61,7 @@ Builder methods:
 Common fields:
 
 - `max_iterations`
-- `timeout`
+- `timeout` (`Option<Duration>`; `None` = 300s between strata, database `query_timeout` inside operators)
 - `max_explain_depth`
 - `max_slg_depth`
 - `max_abduce_candidates`

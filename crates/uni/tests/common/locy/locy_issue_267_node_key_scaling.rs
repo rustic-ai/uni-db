@@ -145,7 +145,7 @@ async fn measure(db: &Uni, program: &str) -> Result<(Duration, usize)> {
         max_iterations: 100,
         // Over-budget evaluation is a hard error rather than a silent partial,
         // so a timeout surfaces here instead of arriving as a fast, wrong count.
-        timeout: Duration::from_secs(120),
+        timeout: Some(Duration::from_secs(120)),
         ..Default::default()
     };
     let started = Instant::now();

@@ -70,7 +70,7 @@ async fn run_with(
         .locy_with(program)
         .with_config(LocyConfig {
             max_iterations: 1000,
-            timeout: Duration::from_secs(60),
+            timeout: Some(Duration::from_secs(60)),
             ..Default::default()
         })
         .run()
@@ -242,7 +242,7 @@ CREATE RULE build AS \
         .locy_with(PROGRAM_ALONG_BASE)
         .with_config(LocyConfig {
             max_iterations: 1000,
-            timeout: Duration::from_secs(60),
+            timeout: Some(Duration::from_secs(60)),
             ..Default::default()
         })
         .run()

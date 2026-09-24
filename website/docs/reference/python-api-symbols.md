@@ -4,7 +4,7 @@
 
 # Python API — Symbol Reference
 
-Complete symbol surface of the `uni_db` Python bindings, **generated from `bindings/uni-db/uni_db/__init__.pyi`** at version 4.1.0.
+Complete symbol surface of the `uni_db` Python bindings, **generated from `bindings/uni-db/uni_db/__init__.pyi`** at version 4.1.1.
 
 This page is exhaustive and always in sync with the type stubs — it is regenerated in CI. For narrative documentation, worked examples and the recommended patterns, start at the [Python API guide](python-api.md).
 
@@ -2489,7 +2489,7 @@ Locy program runtime error.
 
 ## `UniMemoryLimitExceededError` — extends `UniError`
 
-Query exceeded its memory limit.
+A query or Locy program was refused for exceeding a memory budget.
 
 ---
 
@@ -2561,7 +2561,7 @@ Storage layer error.
 
 ## `UniTimeoutError` — extends `UniError`
 
-Operation timed out.
+Operation timed out -- a Cypher query or Locy program included.
 
 ---
 

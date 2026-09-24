@@ -3038,15 +3038,14 @@ impl PhysicalExpr for ExistsExecExpr {
 
         let result = std::thread::scope(|s| {
             s.spawn(|| {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|e| {
-                        datafusion::error::DataFusionError::Execution(format!(
-                            "Failed to create runtime for EXISTS: {}",
-                            e
-                        ))
-                    })?;
+                // The process-wide runtime, not one built per call: state this
+                // work first creates (Lance index readers and their I/O loop)
+                // is cached beyond the call and bound to its runtime (#290).
+                let rt = uni_store::runtime::io_runtime::io_runtime().map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Failed to get runtime for EXISTS: {e}"
+                    ))
+                })?;
 
                 // Merge stored outer entity vars with batch-extracted vars
                 // so the inner planner's compiler can detect correlated refs.
@@ -3545,14 +3544,14 @@ impl PhysicalExpr for PatternComprehensionSubqueryExpr {
 
         let result = std::thread::scope(|s| {
             s.spawn(|| {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|e| {
-                        datafusion::error::DataFusionError::Execution(format!(
-                            "failed to create runtime for pattern comprehension: {e}"
-                        ))
-                    })?;
+                // The process-wide runtime, not one built per call: state this
+                // work first creates (Lance index readers and their I/O loop)
+                // is cached beyond the call and bound to its runtime (#290).
+                let rt = uni_store::runtime::io_runtime::io_runtime().map_err(|e| {
+                    datafusion::error::DataFusionError::Execution(format!(
+                        "Failed to get runtime for pattern comprehension: {e}"
+                    ))
+                })?;
 
                 let mut combined_entity_vars = self.outer_entity_vars.clone();
                 combined_entity_vars.extend(correlated_vars.iter().cloned());

@@ -19,7 +19,7 @@ use uni_db::locy::LocyConfig;
 fn default_config() -> LocyConfig {
     LocyConfig {
         max_iterations: 1000,
-        timeout: Duration::from_secs(60),
+        timeout: Some(Duration::from_secs(60)),
         ..Default::default()
     }
 }
@@ -27,7 +27,7 @@ fn default_config() -> LocyConfig {
 fn tight_config(max_iter: usize) -> LocyConfig {
     LocyConfig {
         max_iterations: max_iter,
-        timeout: Duration::from_secs(60),
+        timeout: Some(Duration::from_secs(60)),
         ..Default::default()
     }
 }
@@ -35,7 +35,7 @@ fn tight_config(max_iter: usize) -> LocyConfig {
 fn timeout_config() -> LocyConfig {
     LocyConfig {
         max_iterations: 1000,
-        timeout: Duration::from_nanos(1),
+        timeout: Some(Duration::from_nanos(1)),
         ..Default::default()
     }
 }

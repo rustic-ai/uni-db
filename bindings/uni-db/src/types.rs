@@ -3202,7 +3202,7 @@ impl PyLocyConfig {
             cfg.max_iterations = v;
         }
         if let Some(v) = timeout_secs {
-            cfg.timeout = std::time::Duration::from_secs_f64(v);
+            cfg.timeout = Some(std::time::Duration::from_secs_f64(v));
         }
         if let Some(v) = allow_partial {
             cfg.allow_partial = v;
@@ -3250,7 +3250,7 @@ impl PyLocyConfig {
     }
     #[getter]
     fn timeout_secs(&self) -> f64 {
-        self.inner.timeout.as_secs_f64()
+        self.inner.effective_timeout().as_secs_f64()
     }
     #[getter]
     fn max_explain_depth(&self) -> usize {
@@ -3350,7 +3350,7 @@ impl PyLocyConfig {
         format!(
             "LocyConfig(max_iterations={}, timeout={:.1}s, strict_prob={}, classifiers={})",
             self.inner.max_iterations,
-            self.inner.timeout.as_secs_f64(),
+            self.inner.effective_timeout().as_secs_f64(),
             self.inner.strict_probability_domain,
             self.inner.classifier_registry.len(),
         )

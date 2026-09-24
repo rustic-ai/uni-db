@@ -44,8 +44,21 @@ impl std::error::Error for ConfigError {}
 pub struct LocyConfig {
     /// Maximum fixpoint iterations per recursive stratum.
     pub max_iterations: usize,
-    /// Overall evaluation timeout.
-    pub timeout: Duration,
+    /// Overall evaluation timeout, when the caller set one.
+    ///
+    /// `Some(t)` is the whole budget: the strata / fixpoint / SLG checks and
+    /// the deadline every operator inside a clause body checks are both `t`,
+    /// exactly as `query_with(..).timeout(t)` replaces `query_timeout` for a
+    /// Cypher statement. `None` evaluates under [`Self::DEFAULT_TIMEOUT`]
+    /// between strata while operators keep the database's `query_timeout`,
+    /// so an unconfigured program is never looser than a Cypher query.
+    ///
+    /// An `Option` rather than a `Duration` defaulting to 300s because the
+    /// engine must tell "asked for 300s" from "asked for nothing": with a
+    /// plain value the only safe combination was `min(query_timeout, t)`,
+    /// which silently discarded any explicit timeout above the database
+    /// default (issue #289).
+    pub timeout: Option<Duration>,
     /// When `false` (default), an evaluation that exceeds `timeout` or
     /// `max_iterations` returns [`UniError::LocyIncomplete`] rather than
     /// silently yielding partial facts. Set to `true` for anytime / best-effort
@@ -157,6 +170,15 @@ pub struct LocyConfig {
 }
 
 impl LocyConfig {
+    /// The strata / fixpoint budget used when [`Self::timeout`] is `None`.
+    pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+
+    /// The overall evaluation budget: the explicit [`Self::timeout`], else
+    /// [`Self::DEFAULT_TIMEOUT`].
+    pub fn effective_timeout(&self) -> Duration {
+        self.timeout.unwrap_or(Self::DEFAULT_TIMEOUT)
+    }
+
     /// Resolve scattered probability-related fields into a single
     /// [`ResolvedSemiringConfig`] for threading through the planner and
     /// executors. Performs the `exact_probability` → `BddExact`
@@ -209,7 +231,7 @@ impl Default for LocyConfig {
     fn default() -> Self {
         Self {
             max_iterations: 1000,
-            timeout: Duration::from_secs(300),
+            timeout: None,
             allow_partial: false,
             max_explain_depth: 100,
             max_slg_depth: 1000,

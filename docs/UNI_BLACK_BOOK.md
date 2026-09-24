@@ -3078,7 +3078,7 @@ Adding raw scores mixes incompatible scales (cosine similarity [0, 1] vs unbound
 Key optimizations:
 - **FTS pre-computed per-batch**: Calls `storage.fts_search()` once per RecordBatch, builds `HashMap<Vid, f32>` for O(1) per-row lookups
 - **Auto-embed per-batch**: Embeds query string once per batch, then cosine per-row
-- **Async-in-sync**: Uses `std::thread::scope` + `tokio::runtime::Builder::new_current_thread()` for async storage calls within sync `PhysicalExpr::evaluate()`
+- **Async-in-sync**: Drives async storage calls from the sync `PhysicalExpr::evaluate()` on a scoped thread through the process-wide `uni-io` runtime — never a runtime built per call (see [Runtime Affinity](#runtime-affinity-the-uni-io-runtime))
 
 ### Execution Paths
 
@@ -4635,6 +4635,48 @@ lose updates in this mode.
 - **`session.query()`** (outside a transaction) reads latest-visible data
   and does not participate in OCC; use a transaction when the read feeds a
   write.
+
+### Runtime Affinity: the `uni-io` Runtime
+
+Some storage state is bound to the tokio runtime that first creates it and
+then outlives the call that created it. Lance's `ScanScheduler::new` spawns its
+I/O loop onto the *current* runtime; the inverted (full-text) index caches its
+readers — and with them that loop — in the database's shared
+`lance::session::Session`; and posting lists load lazily, one term at a time.
+If the runtime that first loaded the index is dropped, every later query for a
+term not yet cached submits I/O to a loop that no longer exists and waits
+forever with every thread idle (#290). Terms already cached keep working, which
+is why the failure first appears as "the second *different* query hangs". The
+poisoning is per database, not per call path: after a nested path loads the
+index, the ordinary `uni.fts.query` path hangs too.
+
+Of the Lance index kinds uni builds, only the inverted index caches readers
+this way. BTree, bitmap, label-list and every IVF vector index cache portable
+state and rebuild their readers from a fresh store on each cache hit. Fork FTS
+opens branch datasets with `Dataset::open`, i.e. a fresh `Session` per call, so
+nothing carries across calls there.
+
+The rule: **work whose runtime-bound state can outlive its caller runs on the
+process-wide runtime** in `uni_store::runtime::io_runtime`, which is built
+once and never shut down.
+
+| Site | How it uses `uni-io` |
+|---|---|
+| `LanceDbBackend::full_text_search` | `run_on_io_runtime` — a task on `uni-io`, aborted if the caller drops the future |
+| `SimilarToExecExpr` (FTS / auto-embed), `ExistsExecExpr` (EXISTS / COUNT / COLLECT), pattern-comprehension subqueries, `block_on_scoped` | scoped thread + `io_runtime().block_on` (`block_on_io_runtime`) |
+| `FlushCoordinator::submit_for_stream` | the flush stream task is spawned on `uni-io`, so a commit's runtime shutting down cannot drop an in-flight flush |
+| `UniBuilder::build_sync` | drives `build()` on `uni-io`, so the background tasks spawned at open keep running after it returns |
+
+A runtime built per call, or any caller runtime, is the wrong place for such
+work. The sync-bridge sites used to build a `current_thread` runtime per call
+and drop it; `build_sync` did the same and silently cancelled auto-flush,
+compaction, index rebuilds and the fork sweeper on return; and a flush stream
+spawned on a runtime that shut down before polling it lost its sequence number,
+wedging the in-order finalizer so every later flush hung. `FlushSeqGuard` is now
+built before the spawn so even an unpolled stream task submits its seq.
+
+Background tasks spawned by `build()` still run on the caller's runtime. A
+caller that drops that runtime while keeping the `Uni` loses them.
 
 ## Three-Scope Model
 

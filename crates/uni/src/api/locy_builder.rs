@@ -65,7 +65,7 @@ impl<'a> InnerLocyBuilder<'a> {
 
     /// Override the evaluation timeout.
     pub fn timeout(mut self, duration: std::time::Duration) -> Self {
-        self.config.timeout = duration;
+        self.config.timeout = Some(duration);
         self
     }
 
@@ -162,7 +162,7 @@ impl<'a> LocyBuilder<'a> {
 
     /// Override the evaluation timeout.
     pub fn timeout(mut self, duration: std::time::Duration) -> Self {
-        self.config.timeout = duration;
+        self.config.timeout = Some(duration);
         self
     }
 
@@ -328,7 +328,7 @@ impl<'a> TxLocyBuilder<'a> {
 
     /// Override the evaluation timeout.
     pub fn timeout(mut self, duration: std::time::Duration) -> Self {
-        self.config.timeout = duration;
+        self.config.timeout = Some(duration);
         self
     }
 

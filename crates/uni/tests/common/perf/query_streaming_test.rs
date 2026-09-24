@@ -143,17 +143,20 @@ async fn the_memory_ceiling_fires_while_the_result_is_still_arriving() -> Result
         match batch {
             Ok(rows) => delivered += rows.len(),
             Err(e) => {
-                failure = Some(e.to_string());
+                failure = Some(e);
                 break;
             }
         }
     }
 
     let failure = failure.expect("a result this size must cross the ceiling");
-    assert!(
-        failure.contains("exceeded memory limit"),
-        "expected the memory ceiling, got: {failure}"
-    );
+    let message = match &failure {
+        uni_db::UniError::MemoryLimitExceeded {
+            limit_bytes: CEILING,
+            message,
+        } => message.clone(),
+        other => panic!("expected the {CEILING}-byte memory ceiling, got: {other:?}"),
+    };
 
     // The half that fails against a collecting executor: it delivers nothing
     // before erroring, because the whole result exists before the first check.
@@ -169,11 +172,11 @@ async fn the_memory_ceiling_fires_while_the_result_is_still_arriving() -> Result
 
     // The second half: the figure reported is what had been built, not the
     // total. A collecting executor reports the whole result set here.
-    let reported: usize = failure
-        .split_once('(')
+    let reported: usize = message
+        .split_once("estimated at ")
         .and_then(|(_, rest)| rest.split_once(" bytes"))
         .and_then(|(digits, _)| digits.parse().ok())
-        .unwrap_or_else(|| panic!("could not read the byte figure from: {failure}"));
+        .unwrap_or_else(|| panic!("could not read the byte figure from: {message}"));
     assert!(
         reported < 4_000_000,
         "reported {reported} bytes, which is the size of the whole result — the \

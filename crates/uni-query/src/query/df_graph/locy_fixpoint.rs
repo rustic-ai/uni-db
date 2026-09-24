@@ -6341,6 +6341,13 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("memory limit"), "Error was: {}", err);
+        // The API layer classifies this refusal by the marker, so it must
+        // survive into the rendered error (#289).
+        assert!(
+            err.contains(crate::query::df_graph::locy_errors::DERIVED_BYTES_LIMIT_MARKER),
+            "Error was: {}",
+            err
+        );
     }
 
     // --- FixpointStream lifecycle test ---

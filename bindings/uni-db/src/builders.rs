@@ -1575,14 +1575,17 @@ impl SessionLocyBuilder {
             let val = convert::py_object_to_value(py, v)?;
             builder = builder.param(k, val);
         }
+        // The config first, then the individual setters on top of it: `with_config`
+        // replaces the whole `LocyConfig`, so applied last it silently discarded an
+        // explicit `.timeout(..)` / `.max_iterations(..)` (#289).
+        if let Some(ref config) = self.locy_config {
+            builder = builder.with_config(config.clone());
+        }
         if let Some(t) = self.timeout_secs {
             builder = builder.timeout(std::time::Duration::from_secs_f64(t));
         }
         if let Some(n) = self.max_iterations {
             builder = builder.max_iterations(n);
-        }
-        if let Some(ref config) = self.locy_config {
-            builder = builder.with_config(config.clone());
         }
         if let Some(ref ct) = self.cancellation_token {
             builder = builder.cancellation_token(ct.inner.clone());
@@ -1624,14 +1627,17 @@ impl SessionLocyBuilder {
             let val = convert::py_object_to_value(py, v)?;
             builder = builder.param(k, val);
         }
+        // The config first, then the individual setters on top of it: `with_config`
+        // replaces the whole `LocyConfig`, so applied last it silently discarded an
+        // explicit `.timeout(..)` / `.max_iterations(..)` (#289).
+        if let Some(ref config) = self.locy_config {
+            builder = builder.with_config(config.clone());
+        }
         if let Some(t) = self.timeout_secs {
             builder = builder.timeout(std::time::Duration::from_secs_f64(t));
         }
         if let Some(n) = self.max_iterations {
             builder = builder.max_iterations(n);
-        }
-        if let Some(ref config) = self.locy_config {
-            builder = builder.with_config(config.clone());
         }
         if let Some(ref ct) = self.cancellation_token {
             builder = builder.cancellation_token(ct.inner.clone());
@@ -2008,14 +2014,17 @@ impl PyTxLocyBuilder {
             let val = convert::py_object_to_value(py, v)?;
             builder = builder.param(k, val);
         }
+        // The config first, then the individual setters on top of it: `with_config`
+        // replaces the whole `LocyConfig`, so applied last it silently discarded an
+        // explicit `.timeout(..)` / `.max_iterations(..)` (#289).
+        if let Some(ref config) = self.locy_config {
+            builder = builder.with_config(config.clone());
+        }
         if let Some(t) = self.timeout_secs {
             builder = builder.timeout(std::time::Duration::from_secs_f64(t));
         }
         if let Some(n) = self.max_iterations {
             builder = builder.max_iterations(n);
-        }
-        if let Some(ref config) = self.locy_config {
-            builder = builder.with_config(config.clone());
         }
         if let Some(ref ct) = self.cancellation_token {
             builder = builder.cancellation_token(ct.inner.clone());
@@ -2048,14 +2057,17 @@ impl PyTxLocyBuilder {
             let val = convert::py_object_to_value(py, v)?;
             builder = builder.param(k, val);
         }
+        // The config first, then the individual setters on top of it: `with_config`
+        // replaces the whole `LocyConfig`, so applied last it silently discarded an
+        // explicit `.timeout(..)` / `.max_iterations(..)` (#289).
+        if let Some(ref config) = self.locy_config {
+            builder = builder.with_config(config.clone());
+        }
         if let Some(t) = self.timeout_secs {
             builder = builder.timeout(std::time::Duration::from_secs_f64(t));
         }
         if let Some(n) = self.max_iterations {
             builder = builder.max_iterations(n);
-        }
-        if let Some(ref config) = self.locy_config {
-            builder = builder.with_config(config.clone());
         }
         if let Some(ref ct) = self.cancellation_token {
             builder = builder.cancellation_token(ct.inner.clone());

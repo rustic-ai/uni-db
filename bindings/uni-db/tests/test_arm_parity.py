@@ -100,11 +100,11 @@ def test_the_async_twins_match(builder, knob):
 
 def test_tx_max_memory_refuses_a_query_that_does_not_fit(db):
     session = db.session()
-    with pytest.raises(Exception) as excinfo:
+    # The type is what separates a ceiling from a crash: a refusal for cost is
+    # `UniMemoryLimitExceededError`, never the `UniQueryError` a broken query
+    # raises (#289). This used to catch `Exception` and match the message.
+    with pytest.raises(uni_db.UniMemoryLimitExceededError):
         session.tx().query_with(CYCLIC).max_memory(TINY).fetch_all()
-    # Naming the resource is what separates a ceiling from a crash.
-    message = str(excinfo.value).lower()
-    assert "resources exhausted" in message or "memory" in message, excinfo.value
 
 
 def test_tx_max_memory_leaves_a_fitting_query_alone(db):
@@ -131,10 +131,8 @@ def test_profile_honours_max_memory(db):
     the tx arm inherits the same plumbing.
     """
     session = db.session()
-    with pytest.raises(Exception) as excinfo:
+    with pytest.raises(uni_db.UniMemoryLimitExceededError):
         session.query_with(CYCLIC).max_memory(TINY).profile()
-    message = str(excinfo.value).lower()
-    assert "resources exhausted" in message or "memory" in message, excinfo.value
 
 
 # --- metrics on both arms ---------------------------------------------------

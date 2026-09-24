@@ -2436,9 +2436,26 @@ impl UniBuilder {
         Ok(db)
     }
 
-    /// Open the database (blocking)
+    /// Open the database, blocking the current thread until it is ready.
+    ///
+    /// Opening spawns the database's background tasks — auto-flush,
+    /// compaction, index rebuilds, the fork sweeper — onto the runtime that
+    /// drives it. This drives it on a process-wide runtime that is never shut
+    /// down, so those tasks keep running after this call returns. A runtime
+    /// built for the call and dropped on return would silently cancel them all
+    /// (#290).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the process-wide runtime cannot be started or if
+    /// opening the database fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within an asynchronous execution context; use
+    /// [`Self::build`] there.
     pub fn build_sync(self) -> Result<Uni> {
-        let rt = tokio::runtime::Runtime::new().map_err(UniError::Io)?;
+        let rt = uni_store::runtime::io_runtime::io_runtime().map_err(UniError::Io)?;
         rt.block_on(self.build())
     }
 
