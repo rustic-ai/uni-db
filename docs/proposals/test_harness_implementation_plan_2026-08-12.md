@@ -932,6 +932,11 @@ revert ledger plus a validation harness.
       `bag mismatch: left_total=28, right_total=0`, on case 0 of the batch, with
       replay coordinates printed. The same reconstruction left the pre-Phase-5
       `flush_smoke` **green**, which is the measured before/after.
+      *Note 2026-10-18:* `flush_pushdown_smoke` no longer catches the
+      regenerated patch — its fixture is Hash-indexed, and since perf audit F1
+      a Hash index carries no range to Lance. The generated witness is now
+      `dqp::flush_lever::flush_pushdown_btree_smoke` (BTree fixture
+      `Fixture::TINY_BTREE_INDEXED`), measured failing under the patch.
 
 Two findings worth carrying forward:
 

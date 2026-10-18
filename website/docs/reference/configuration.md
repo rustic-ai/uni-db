@@ -108,6 +108,9 @@ pub struct UniConfig {
     /// Maximum iterations for recursive CTE evaluation (default: 1000)
     pub max_recursive_cte_iterations: usize,
 
+    /// Neighbors a `~=` vector search returns when no LIMIT sizes it (default: 100)
+    pub vector_knn_default_k: usize,
+
     /// Background index rebuild configuration
     pub index_rebuild: IndexRebuildConfig,
 
@@ -193,6 +196,7 @@ pub struct UniConfig {
 | `max_transaction_memory` | bytes | 1 GB | Maximum memory per transaction |
 | `max_compaction_rows` | rows | 5,000,000 | OOM guard for in-memory compaction |
 | `max_recursive_cte_iterations` | count | 1,000 | Maximum iterations for recursive CTE evaluation |
+| `vector_knn_default_k` | count | 100 | `K` for an `n.prop ~= q` search that no `LIMIT` sizes (a residual filter, a traversal, a non-score `ORDER BY`, or no `LIMIT` at all). A search that returns exactly this many rows adds a warning to the result. Also settable from Python: `config({"vector_knn_default_k": 500})` |
 | `strict_schema` | bool | false | Reject writes with undeclared labels or edge types |
 | `ssi_enabled` | bool | true | Serializable Snapshot Isolation / OCC (false = last-writer-wins) |
 | `partial_lance_writes` | bool | false | Use Lance `MergeInsert` for SET-only flushes |

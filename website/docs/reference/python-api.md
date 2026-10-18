@@ -1329,7 +1329,27 @@ if result:
 | `.plan_cache_hit` | `bool` | Whether the plan was cached |
 | `.l0_reads` | `int` | In-memory reads |
 | `.storage_reads` | `int` | Persistent storage reads |
-| `.cache_hits` | `int` | Cache hits |
+| `.cache_hits` | `int` | Cache hits (always 0; not populated) |
+| `.branch_scans` | `int` | Scans that executed against a fork's Lance branch |
+| `.snapshot_reads` | `int` | Reads that executed against a pinned snapshot |
+| `.index_scans` | `int` | Lance scans whose executed plan searched a scalar index |
+| `.index_comparisons` | `int` | Index comparisons across those scans |
+| `.scans_reported` | `int` | Lance scans that reported stats (denominator for `index_scans`) |
+| `.lance_iops` | `int` | Lance I/O operations issued (physical reads; moves across a compaction) |
+| `.vector_index_scans` | `int` | Vector searches that consulted a vector index |
+| `.fts_index_scans` | `int` | Full-text searches that consulted an inverted index |
+| `.searches_reported` | `int` | Vector/FTS searches that reported stats (denominator for the two above) |
+| `.subquery_executions` | `int` | Sub-plan executions by per-row fallbacks (a correlated pattern comprehension runs once per outer row) |
+| `.physical_plans` | `int` | Physical plans built: one for the query plus one per execution-time sub-plan |
+| `.physical_plan_time_ms` | `float` | Time building those plans; part of `exec_time_ms`, distinct from `plan_time_ms` |
+| `.shortest_path_searches` | `int` | BFS searches started by `shortestPath`/`allShortestPaths`, one per distinct source |
+| `.shortest_path_adjacency_reads` | `int` | Per-vertex adjacency lookups by `shortestPath`/`allShortestPaths`; bounded by the vertices searched, not the paths emitted |
+
+A counter that grows with the data where it should not is the signal these
+exist for: `physical_plans` growing with the row count is a re-plan per row,
+`shortest_path_searches` growing with the number of targets is a search
+per row, and `shortest_path_adjacency_reads` growing with the length or number
+of returned paths is output re-reading the graph.
 
 ### ExecuteResult
 
@@ -1345,7 +1365,7 @@ Returned by `tx.execute()`.
 | `.properties_set` | `int` | Properties set |
 | `.labels_added` | `int` | Labels added |
 | `.labels_removed` | `int` | Labels removed |
-| `.metrics` | `dict` | Execution metrics |
+| `.metrics` | `dict` | Execution metrics, with the same keys as `QueryMetrics` |
 
 ### CommitResult
 
@@ -1456,6 +1476,11 @@ print(f"Total time: {profile.total_time_ms}ms")
 print(f"Peak memory: {profile.peak_memory_bytes} bytes")
 print(profile.plan_text)   # Plan with actual row counts
 print(profile.operators)   # Per-operator statistics
+
+# Planning cost. Logical planning happens before execution and is not part of
+# total_time_ms; physical planning (including execution-time sub-plans) is.
+print(profile.logical_planning_ms, profile.physical_planning_ms)
+print(profile.physical_plans)  # 1 + one per execution-time sub-plan
 ```
 
 ### Locy EXPLAIN
@@ -1468,6 +1493,21 @@ print(f"Strata: {explain.strata_count}")
 print(f"Rules: {explain.rule_names}")
 print(f"Recursive: {explain.has_recursive_strata}")
 print(f"Commands: {explain.command_count}")
+```
+
+### Locy PROFILE
+
+```python
+result, profile = session.locy_with(program).profile()
+
+print(profile)  # readable stratum -> rule -> iteration report
+for stratum in profile.strata:
+    for rule in stratum["rules"]:
+        for it in rule["iterations"]:
+            # Clause bodies are re-planned every fixpoint pass; planning_ms and
+            # plans are that rule's physical planning in that iteration.
+            print(rule["name"], it["iteration"], it["delta_facts"],
+                  it["elapsed_ms"], it["planning_ms"], it["plans"])
 ```
 
 ---

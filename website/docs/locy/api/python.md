@@ -57,10 +57,21 @@ out = (
         "exact_probability": True,
         "max_bdd_variables": 1000,
         "top_k_proofs": 100,
+        # Goal-directed QUERY evaluation: "off" (default), "on" or "shadow"
+        "goal_directed": "on",
     })
     .run()
 )
 ```
+
+`goal_directed` takes `"off"`, `"on"` or `"shadow"` (case-insensitive; any
+other string raises `ValueError`). The same option is the `goal_directed=`
+keyword of `uni_db.LocyConfig(...)`, which reports it back as a lowercase
+string. With `"on"`, a `QUERY` whose `WHERE` pins a node KEY column derives
+only what that goal reaches; its answers are unchanged, but a rule only such
+goals needed is left out of `result.derived` rather than returned partial.
+`"shadow"` answers from the rewrite while keeping `derived` complete. See
+[Goal-directed QUERY](../advanced/modules-priority-query.md#goal-directed-query).
 
 Builder methods:
 

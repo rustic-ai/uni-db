@@ -29,6 +29,17 @@ After strata converge, commands (`QUERY`, `DERIVE`, `ABDUCE`, `ASSUME`) execute 
 | `ABDUCE ... WHERE` | In-memory | ✓ | ✗ | ✗ |
 | `ASSUME ... WHERE` | In-memory | ✓ | ✗ | ✗ |
 
+The row-level evaluator (also used for `QUERY ... WHERE / RETURN / ORDER BY` and
+`EXPLAIN RULE ... WHERE`) answers operators as a Cypher `RETURN` does: `+`
+concatenates strings and lists, appends to a list, concatenates a string with a
+number, boolean or temporal (`'a' + 1` is `'a1'`), and adds a duration to a
+temporal; integer overflow and integer division by zero are errors; `^` is
+always a float; `=` over lists or maps holding `NULL` is `NULL`; durations do
+not order (`duration('P1D') < duration('PT25H')` is `NULL`); `=~` matches a
+regular expression; `STARTS WITH` / `ENDS WITH` / `CONTAINS` over a non-string
+is `NULL`; any operator over `NULL` is `NULL` except Kleene `AND` / `OR`; and
+`AND` / `OR` with a non-boolean operand is a type error.
+
 ## Semi-Naive Evaluation
 
 Within a recursive stratum, Locy only re-evaluates rules using *newly derived* facts (the delta) rather than all known facts each iteration. This provides exponential speedup for transitive closures:

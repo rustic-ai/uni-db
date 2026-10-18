@@ -1316,6 +1316,7 @@ Configuration for Locy program evaluation.
 | `max_bdd_variables() -> int` *(property)* | — |
 | `top_k_proofs() -> int` *(property)* | — |
 | `top_k_proofs_training() -> int | None` *(property)* | — |
+| `goal_directed() -> Literal['off', 'on', 'shadow']` *(property)* | — |
 | `classifier_aliases() -> list[str]` *(property)* | — |
 | `register_classifier(alias: str, callable: Callable[..., Any]) -> None` | — |
 
@@ -1399,6 +1400,9 @@ Statistics from a Locy program evaluation.
 | `queries_executed` | `int` |
 | `mutations_executed` | `int` |
 | `peak_memory_bytes` | `int` |
+| `hypothetical_strata_evaluated` | `int` |
+| `hypothetical_strata_reused` | `int` |
+| `hypothetical_facts_derived` | `int` |
 
 ---
 
@@ -1540,6 +1544,9 @@ Typed output from ``session.profile()``.
 | `peak_memory_bytes` | `int` |
 | `plan_text` | `str` |
 | `operators` | `Any` |
+| `logical_planning_ms` | `float` |
+| `physical_planning_ms` | `float` |
+| `physical_plans` | `int` |
 
 ---
 
@@ -1685,6 +1692,12 @@ Query performance metrics returned with every query result.
 | `vector_index_scans` | `int` |
 | `fts_index_scans` | `int` |
 | `searches_reported` | `int` |
+| `lance_iops` | `int` |
+| `subquery_executions` | `int` |
+| `physical_plans` | `int` |
+| `physical_plan_time_ms` | `float` |
+| `shortest_path_searches` | `int` |
+| `shortest_path_adjacency_reads` | `int` |
 
 ---
 

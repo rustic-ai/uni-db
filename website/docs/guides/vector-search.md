@@ -225,6 +225,45 @@ ORDER BY score DESC
 LIMIT 10
 ```
 
+#### How many neighbours `~=` returns
+
+`~=` is a top-K search, so `K` is part of what it means:
+
+- **`K` is the query's `LIMIT` (plus `SKIP`)** when the search feeds that
+  `LIMIT` directly — through `RETURN`/`WITH` projections, and through an
+  `ORDER BY` whose first key is the node's `_score`, descending (later keys only
+  order ties). `RETURN p.title LIMIT 500` returns 500 rows; `SKIP 10 LIMIT 5`
+  fetches 15 neighbours and skips 10. A `WITH ... LIMIT n` counts too, and each
+  `UNION` branch is sized by its own `LIMIT`.
+- **Otherwise `K` is `vector_knn_default_k`** (default 100, see
+  [Configuration](../reference/configuration.md)). That covers no `LIMIT` at
+  all, an `ORDER BY` on anything but the score, `DISTINCT`, a traversal or join
+  after the search, and — the case to watch — a **residual filter**:
+
+  ```cypher
+  MATCH (p:Paper) WHERE p.embedding ~= $q AND p.year > 2020
+  RETURN p.title LIMIT 5
+  ```
+
+  The filter runs on the `K` nearest neighbours. Sizing `K` from the `LIMIT`
+  would filter 5 neighbours and could return fewer than 5 rows, so the default
+  applies instead: the answer is the first 5 papers after 2020 among the 100
+  nearest.
+- **When a defaulted search returns exactly `K` rows, the result carries a
+  warning** (`result.warnings`) naming `vector_knn_default_k`: rows past the
+  cap may have qualified. Add a `LIMIT` the search feeds directly, or raise the
+  setting.
+
+`~=` must replace the node's own label scan, so it is refused at planning (with
+an error that points to `vector_similarity`) when it cannot: on a variable bound
+by an earlier clause or after a `LIMIT` (`MATCH (n) WITH n LIMIT 5 WHERE
+n.emb ~= $q`), on a relationship pattern's endpoint, with a query vector that
+depends on the row, or under an `OR`.
+
+Under `OPTIONAL MATCH`, `~=` on a node the clause creates still uses the index,
+and the clause yields one NULL row when nothing qualifies (for example, an empty
+label).
+
 `~=` is **vector-only** — it cannot do FTS or hybrid search. For hybrid, use `similar_to()` with multi-source arrays (see [below](#similar_to-expression-function)).
 
 !!! note "`=~` is regex, `~=` is vector similarity"

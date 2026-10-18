@@ -1096,6 +1096,17 @@ Answered from the **derived store** — the same semi-naive fixpoint result that
 
 Every rule has a published relation, empty when it derived nothing, including a rule with a **generator**: the fixpoint runs generators as a row-explosion operator (`LocyGenerateExec`), so a generator rule's FOLD, BEST BY and post-FOLD WHERE apply and other rules can reference it. There is no second, goal-directed evaluator; a missing relation is an error.
 
+### Goal-directed QUERY (magic sets, opt-in)
+
+By default a `QUERY ... WHERE` filters the converged relation: `QUERY reach WHERE a.uid = 'c0_0'` derives the whole transitive closure first (76k facts for a 19-row answer in the A1 measurement). With `LocyConfig::goal_directed = GoalDirected::On` the compiled program is rewritten before planning (`uni_locy::magic`, the magic-sets transformation) so the fixpoint derives only what the goal can reach. Answers are unchanged.
+
+- **What binds.** A top-level WHERE conjunct `c.p = v`, `v = c.p` or `c.p IN [...]` where `c` is a node KEY column of the queried rule and `v` a string, integer or boolean literal, or a `$param` holding one (or a list of them). Floats, OR, comparisons between columns and conjuncts on value (non-KEY) columns do not bind; they stay filters. The whole WHERE is still applied to the answer.
+- **The rewrite.** Each adorned rule `r` (adornment = which KEY columns are bound) gets a copy `__locy_gd{g}_r_{bf}` whose clauses are guarded by `(bound vars) IS __locy_gdm{g}_r_{bf}`, a magic rule seeded by `MATCH (c:L) WHERE <conjuncts> YIELD KEY c`. A call inside a copy is adorned on the KEY positions bound by the head or by MATCH nodes connected to a bound head variable; it then contributes a magic propagation clause (the connected MATCH paths, the guard, the filters over them). Magic rules read only the graph and other magic rules, so the rewritten program stratifies whenever the original does.
+- **Fallback to full evaluation** (never a partial answer): ALONG; FOLD, BEST BY, REQUIRE or post-FOLD WHERE in a *recursive* stratum; PROB columns, MNOR/MPROD, `IS NOT` of a PROB rule; PRIORITY; generators; neural models; DERIVE rules. `IS NOT` targets are always read in full (never adorned). FOLD / BEST BY in a non-recursive stratum are adorned: the guard is on KEY columns, so whole KEY groups are kept or dropped. Only top-level `QUERY` is rewritten: `EXPLAIN RULE`, `DERIVE`, `ABDUCE` and commands inside `ASSUME` use full evaluation.
+- **Effect on `.derived`.** The copies and magic rules never appear in `.derived`. In `On` mode a rule that only rewritten goals needed is not evaluated, so it is *absent* from `.derived` (never present with a partial relation); every other rule is evaluated and published as before. `GoalDirected::Shadow` evaluates every original rule too, so `.derived` is unchanged while QUERY reads the rewritten copies — a verification mode (the Locy TCK runs in it with `UNI_LOCY_TCK_GOAL_DIRECTED=shadow`). `profile()` shows the generated rules.
+- **Default: `Off`.** `.derived` is documented as every rule's full relation; turning the rewrite on by default would empty that contract for every queried rule. Opt in per evaluation.
+- **Not passed sideways:** bindings produced by one IS reference for another (the inner call of non-linear recursion reads its callee in full).
+
 ```
 QUERY reachable WHERE a.name = 'Alice' RETURN b.name AS destination
 QUERY risk_score WHERE account.id = 'ACC-001' RETURN score ORDER BY score DESC LIMIT 5
@@ -1129,11 +1140,15 @@ THEN {
 **Execution:**
 1. **Fork** the L0 buffer (save current state)
 2. **Apply** mutations from the ASSUME block
-3. **Re-evaluate** all strata in the mutated state
+3. **Re-evaluate** the strata the mutations can affect; every other stratum keeps the facts it had before the block
 4. **Execute** body commands
 5. **Rollback** — restore L0 to pre-ASSUME state
 
 The database is never permanently modified. ASSUME blocks can be nested (stacked savepoints).
+
+**Incremental re-evaluation.** A stratum is recomputed when one of its rules matches a label whose membership the mutations change (a created node's labels, an added or removed label, every label when a node is deleted), matches a relationship type that gains or loses a relationship, reads a property the mutations `SET` or `REMOVE`, references (`IS` / `IS NOT`) a recomputed rule, or uses a construct whose inputs cannot be read from the syntax (subqueries, `EXISTS`, generators, neural models, plugin or retrieval functions, `rand()`, `timestamp()`). Every other stratum is reused. Recomputed strata are evaluated from scratch. Answers are the same as evaluating the program on the mutated graph; `LocyStats::hypothetical_strata_evaluated` / `hypothetical_strata_reused` show the split. A hypothetical evaluation cut short by the timeout or iteration limit is an error unless `allow_partial` is set.
+
+A nested ASSUME's rows are not part of the enclosing block's result: an ASSUME body collects the rows of its own `QUERY` and Cypher commands.
 
 Returns `CommandResult::Assume(Vec<FactRow>)`.
 
@@ -1158,7 +1173,7 @@ Asks: "What graph modifications would make this rule hold (or stop holding)?"
 
 **Three-phase pipeline:**
 1. **Generate candidates**: Build derivation tree via EXPLAIN, extract candidate modifications (RemoveEdge, AddEdge, ChangeProperty)
-2. **Validate**: For each candidate, use ASSUME-style fork → mutate → re-evaluate → check if goal holds → rollback
+2. **Validate**: For each candidate, use ASSUME-style fork → mutate → re-evaluate (only the strata the candidate can affect, as for ASSUME) → check if goal holds → rollback
 3. **Return**: Validated modifications sorted by cost, up to `max_abduce_results`
 
 ```
@@ -1459,6 +1474,19 @@ Locy used to keep an in-memory top-down resolver (SLG) for generator rules and E
 | `ABDUCE ... WHERE` | In-memory eval_expr | Limited |
 | `ASSUME ... THEN` body WHERE | In-memory eval_expr | Limited |
 
+Every in-memory context (`QUERY ... WHERE / RETURN / ORDER BY`, `DERIVE`,
+`ABDUCE`, `ASSUME`, `EXPLAIN RULE ... WHERE`) evaluates binary operators
+through the same value-level evaluator the Cypher executors share
+(`uni_query_functions::expr_eval::eval_binary_op`), so an operator answers
+as a Cypher `RETURN` does: `+` over strings, lists and temporal + duration;
+checked integer arithmetic; `=` over lists/maps holding NULL is NULL; durations
+do not order; `=~` is supported. Four operators are adjusted to match what a
+Cypher `RETURN` answers: `AND`/`OR` with a non-boolean, non-NULL operand is a
+type error; `STARTS WITH`/`ENDS WITH`/`CONTAINS` over a non-string is NULL;
+`^` is always a float; and `string + number/boolean/temporal` concatenates the
+operand's `toString`. The matrix test `locy::locy_operator_parity` holds every
+operator × operand-type pairing to Cypher.
+
 ---
 
 # Part V: Using Locy
@@ -1696,6 +1724,7 @@ LocyExplainOutput {
 | `timeout` | `Duration` | `300s` | Overall evaluation timeout |
 | `max_explain_depth` | `usize` | `100` | Maximum recursion depth for EXPLAIN derivation trees |
 | `max_slg_depth` | `usize` | `1000` | Deprecated, no effect; will be removed. Setting or reading it warns (a Rust deprecation warning, a Python `DeprecationWarning`) |
+| `goal_directed` | `GoalDirected` | `Off` | Answer qualifying `QUERY ... WHERE` commands by the magic-sets rewrite (`On`), or rewrite while still evaluating every rule (`Shadow`); see §13.2 |
 | `max_abduce_candidates` | `usize` | `20` | Maximum candidate modifications generated during ABDUCE |
 | `max_abduce_results` | `usize` | `10` | Maximum validated results returned from ABDUCE |
 | `max_derived_bytes` | `usize` | `256 MiB` | Maximum bytes of derived facts per relation |
@@ -2324,7 +2353,7 @@ struct ExplainRule { rule_name: QualifiedName, where_expr: Option<Expr>, return_
 
 ## Appendix D: TCK Coverage Map
 
-**72 feature files, 528 scenarios** covering all Locy features.
+**72 feature files, 530 scenarios** covering all Locy features.
 
 ### Core Evaluation
 

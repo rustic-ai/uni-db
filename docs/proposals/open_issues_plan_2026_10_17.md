@@ -151,6 +151,13 @@ for: blocking I/O inside, locks held across I/O, and survival past drop.
   - `index_rebuild.rs:482` and `writer.rs:6430`: detached spawns.
   - `trigger_async_compaction`: detached and dead.
   - Flush stream tasks: not tracked by shutdown.
+- **W1-followups status: all seven fixed, uncommitted.** Each was confirmed
+  real by a test that fails with the fix reverted (current_thread starvation
+  tests with a slow plugin or persistence backend; task-count tests; a
+  failpoint-held flush stream). Per-site table and remaining open items:
+  `docs/UNI_BLACK_BOOK.md`, "Background-task rules". Not revert-tested: the
+  detached-spawn removals in `index_rebuild.rs` / `writer.rs` (no observable
+  without a drop-time probe) and the deferral-tick move to the blocking pool.
 
 ### W2. Default memory CDC provider retains every commit
 
@@ -176,10 +183,28 @@ registering it by default: opt in with `MemoryCdcPlugin`
 (`uni-plugin-builtin/src/extras.rs`). The captured batches are now readable
 (`delivered()`). **Breaking:** `MemoryCdcOutputProvider` is built with
 `::new()`, and `MemoryCdcStream.delivered` is now `Arc<Mutex<Vec<CdcBatch>>>`.
-RSS over 20k commits: +236.6 MB before, +55.8 MB after. **Open:** the remaining
-~2.9 KB per commit on the default path is unexplained. It may be L0 growth
-(20k unflushed nodes) or another retention; measure it with a flush in the
-loop.
+RSS over 20k commits: +236.6 MB before, +55.8 MB after.
+
+**W2 residual (2026-10-17): no per-commit leak.** Probe:
+`connectors::cdc_runtime_e2e::w2_residual_memory_growth_observation`
+(ignored), which reads live heap from glibc `mallinfo2` because RSS only
+ratchets. Debug build, 20k commits:
+
+| Regime | Measured | Reading |
+|---|---|---|
+| Default config | RSS +230.5 MB, live heap +23.5 MB, 216.8 MB free chunks held by glibc (`malloc_trim` returns 63 MB) | RSS growth is mostly allocator retention, not objects |
+| New node per commit, no flush | 0.95 KB/commit; the final flush frees 23.4 → 7.6 MB | L0, as expected |
+| One vertex rewritten per commit, no flush | ~2.7 KB/commit to ~1.2k, ~250 B to ~5k, then 4 B/commit through 20k (plateau ~4.2 MB) | Bounded per-commit state. The knee matches `CommitRegistry` capacity 4096 (inferred, not counted) |
+| Rewrite, flush every 250 / 1000 / 5000 | 420 / 129 / 33 B/commit at 10k–20k, i.e. ~100–170 KB per flush, never freed | Per-flush retention |
+| Same, flush every 250, Lance session caches capped at 1 MB (temporary edit, reverted) | 402 → 57 B/commit | ~86% of the per-flush growth is Lance's `Session` metadata/index cache |
+| New node per commit, flush every 1000 | 298 B/commit at 10k–20k vs 129 for rewrite | ~170 B per stored row survives flush (per-row state, not attributed) |
+
+**Open.** The Lance session uses `Session::default()`
+(`lance_directory.rs`): an LRU bounded at 1 GiB metadata + 6 GiB index per
+database, with no `UniConfig` knob. ~14 KB per flush (the capped run's
+57 B/commit) and the ~170 B per stored row are unattributed. Under four
+concurrent probes the default-config run failed once with "commit timed out"
+(auto-flush on, heavy load); not investigated.
 
 ### W3. In-memory load via UNWIND + MATCH-by-uid + CREATE is super-linear
 
@@ -272,7 +297,11 @@ Two independent defects:
 - **Suites.** uni-store 764/764, uni-db 3267/3267, Cypher TCK both modes and
   Locy TCK 530/530 all pass.
 - **Open.**
-  - The schemaless (label-less) scan path is not covered.
+  - ~~The schemaless (label-less) scan path is not covered.~~ Done (wave B):
+    `scan::schemaless_l0_prefilter` + `schemaless_l0_prefilter_candidates`;
+    unflushed label-less lookup V → ≤ 1 at 2k/8k, write loop 2099 → ≤ 2. A
+    `WHERE` is still not pushed into a scan of an undeclared label, so there
+    only an inline property map engages it. See the Black Book.
   - The candidate pass still walks the label's L0 members with one hash probe
     each. Rows are no longer built, but the walk is O(V) (inferred, not timed).
 
@@ -382,6 +411,31 @@ once (Lance `"col"` is a string literal), so every translated form gets a
 differential test against the unpushed plan over mixed-type, NULL and
 boundary rows, flushed and in L0.
 
+**P6 status: implemented, uncommitted.** `<`, `<=`, `>`, `>=`, `AND`-ed ranges,
+`STARTS WITH` (as a half-open string range, literal or parameter) and
+`IS [NOT] NULL` on an Online BTree (null tests also Hash) go to Lance through
+`pushdown::indexed_range_filter`, with the conjunct kept above the scan.
+Measured, flushed: `n.x < 10`, `n.x >= 100 AND n.x < 110`,
+`n.s STARTS WITH 'u42'`, `n.t IS NULL` read the answer (59 / 10 / 101 / 25
+rows) at 2k, 8k and 32k instead of the label (2,042 / 8,042 / 32,042), wall
+7-8 ms against 37-40 ms at 32k. A non-selective range is ~1.5x slower than
+unpushed (60 vs 38 ms at 32k) after making the superseded-version re-read one
+`_vid` range for dense sets (it was 3x via chunked `IN` lists). Indexed ranges
+over L0 now prune L0 rows too (range bounds in the W3b pre-filter). Found and
+fixed on the way, each a silent wrong answer or a spurious error on an indexed
+equality: datetime normalization applied to STRING columns, `= -0.0` lost the
+row, NaN / ±inf operands errored, `i64::MIN` errored (respelled in
+`FilterExpr::to_sql`). Also: `-2.5` parsed as `Neg(2.5)` so negative float
+bounds were never pushed (parser now folds it), `STARTS WITH $p` was not
+pushable, and `-null` errored in `SET`. Not pushed by design: NaN / inf / zero
+float bounds, type-mismatched / NULL / out-of-range operands, INT32 / FLOAT32
+ranges, `NOT` / `OR`, the empty prefix, Hash ranges, unindexed columns
+(measured ~2x for a selective unindexed range at 32k, flat at 8k; not adopted).
+Open: the residual orders floats by IEEE total order (`-0.0 < 0.0`,
+`NaN = NaN`), unlike openCypher. Tests: `index/range_prefix_null_pushdown.rs`
+(6 tests + an ignored probe), unit tests in `pushdown.rs`, `eval.rs`,
+`columnar_scan.rs`, `grammar/mod.rs`; every change reverted red.
+
 ### P7. A5: VLP property maps pre-scan the whole edge type
 
 `build_edge_property_filter` (`traverse.rs:3645`) and
@@ -390,6 +444,56 @@ target of the type before an anchored walk. Evaluate the map per edge while
 walking (fetch the edge's properties for visited edges only), or bound the
 pre-scan to the reachable frontier. Count the pre-scan in `rows_scanned` first
 (O1), so the guard can see it.
+
+**P7 status: implemented, uncommitted.**
+- **Choice: bound the read to the reachable region, per input batch.**
+  Evaluating per edge inside the walk would need an async read inside the
+  synchronous enumeration; instead `ReachableMapFilter` (`traverse.rs`) runs a
+  breadth-first pass from each batch's sources before the batch is walked,
+  bounded by the hop limit, expanding only through passing edges, with one
+  batched `get_batch_edge_props` read per layer and one target-property read
+  per batch. Used by simple VLP and by `shortestPath`/`allShortestPaths`; QPP
+  keeps the whole-type form.
+- **Fall-back, by measurement.** One read round ≈ 0.8 ms; the whole-type scan
+  ≈ 5 µs per edge (deep chain, every edge passing: 100 ms at 20k edges, 390 ms
+  at 80k). A fixed 16-round cap made `*1..40` 115.6 ms against 38.4 ms
+  uncapped, so the cap is `max(16, type edges / 160)` rounds, plus "more than
+  half the type" for types of ≥ 4096 edges.
+- **Measured (debug, flushed, anchored `*1..3`, best of 3).**
+
+  | Query | 20k nodes before | after | 80k before | after |
+  |---|---|---|---|---|
+  | `{w: 0}` | 171.9 ms | 9.7 ms | 736.2 ms | 14.2 ms |
+  | `(b:N {x: 2})` | 262.1 ms | 10.0 ms | 1149.2 ms | 13.8 ms |
+  | no map (control) | 8.4 ms | 7.7 ms | 9.8 ms | 10.9 ms |
+
+  `rows_scanned`: 40,001 / 160,001 → 7 / 7 (edge map), 40,002 / 160,002 → 15
+  / 15 (target map).
+- **Silent wrong answers found and fixed on the way.** `{w: 1.0}` against an
+  integer `w` returned no rows (structural equality; now `cypher_eq`), and
+  `{w: $p}` matched every edge (the parameter was not extracted, leaving no
+  conditions; `df_planner.rs` `extract_edge_property_conditions` now resolves
+  it). Both were wrong before P7 as well.
+- **Tests.** `cypher_path::vlp_property_map_oracle`: map vs `WHERE all(r IN rs
+  ...)` / `WHERE b.x = ...` reference over random graphs with parallel edges,
+  self-loops, missing `w`, float/string/null/param values, three directions,
+  four hop ranges, path and `DISTINCT` (reachability) forms, flushed + L0, an
+  uncommitted transaction after a `SET` on flushed edges, a fork, and a deep
+  chain that triggers the fall-back. `perf::profiler_blind_spots`: the O1 VLP
+  guards are rewritten to pin the region read exactly at N=200/800, and a QPP
+  guard keeps O1's whole-type counting under test. Reverting `traverse.rs`
+  turns the oracle (`{w: 1.0}`) and all three guards red (401 rows instead of
+  7); removing just the region read's `count_rows_scanned` turns the exact
+  guard red (1 instead of 7).
+- **Open.**
+  - A non-constant map value (`{w: a.x}`) is dropped and the map ignored —
+    silent wrong answer, pinned by an ignored test; needs a residual
+    `all(r IN rs WHERE ...)` filter from the logical planner.
+  - A list expression over a VLP relationship list fails with "all columns in
+    a record batch must have the same length" once one source's trails exceed a
+    batch (8,198 rows, seed 5 of the oracle); independent of P7 and of the
+    neighbor order (both reverted, still fails). Pinned by an ignored test.
+  - QPP per-hop maps still pre-scan the whole type.
 
 ### P8. A1: goal-directed Locy evaluation
 
@@ -407,8 +511,23 @@ form at N=8k.
   reversal and reverse the path value afterwards.
 - **A4.** ASSUME re-derives every stratum (about 2x the program). Incremental
   re-evaluation from the changed facts. Large; rank stays low.
+  **Status: implemented, uncommitted.** Unaffected strata are reused, affected
+  ones recomputed from scratch (no delta seeding); criterion in
+  `uni_locy::incremental`, mechanism in the Black Book (ASSUME, *Incremental
+  re-evaluation*). ASSUME of a Company node over an n-person KNOWS chain:
+  `rows_scanned` plain/ASSUME 6,006/6,016 (n=2k), 24,006/24,016 (n=8k); 12,015
+  at n=2k with reuse disabled.
 - **R1.** Pending D3.
 - **A10.** `{ext_id: …}` pushdown on labelled nodes: write the probe first.
+- **P9 status (2026-10-18): A7 and A6 implemented, uncommitted; A10 probed.**
+  - A7: `PropertyLookupJoinExec`; anchored disjoint pattern `rows_scanned`
+    401 / 1,601 → 2 / 2 (N = 400 / 1,600); an all-label build stays 800 / 3,200.
+  - A6: named far-end-anchored path 800 / 3,200 → 1 / 1; `p` identical to the
+    unreversed plan (differential over flushed, L0, tx, fork, OPTIONAL).
+  - A10: a labelled `{ext_id: …}` returns **no rows** once the data is
+    flushed (`rows_scanned` = N, `index_scans` 0); the per-label `ext_id`
+    column is never read. Fix is in the storage read path; ignored repro
+    `perf::anchored_lookup_test::a10_ext_id_equality_on_a_labelled_node`.
 - **R4, R6.** Not scaling costs today (R4 flat at 8k facts; R6 a ~1.3 ms
   per-iteration floor). Revisit only if a larger fixture shows growth.
 
@@ -453,7 +572,18 @@ possible and stops hiding the next regression.
   - So the two languages disagree, and Python also contradicts the docs. A
     repro test pins the Rust behavior.
 - **Open.**
-  - The Python bindings lack the new metrics.
+  - ~~The Python bindings lack the new metrics.~~ **Done (2026-10-17):**
+    `QueryMetrics.{physical_plans, physical_plan_time_ms,
+    shortest_path_searches, subquery_executions, lance_iops}` (class and the
+    `ExecuteResult.metrics` dict), `ProfileOutput.{logical_planning_ms,
+    physical_planning_ms, physical_plans}`; Locy iteration `planning_ms` /
+    `plans` were already reachable through the serde-built `strata` tree and
+    are now tested and documented. `tests/test_planning_and_search_metrics.py`
+    (14 tests, sync + async): 11 red with the bindings zeroed, the other 3 are
+    a zero control, the vector-search counters (bound before this) and the
+    async Locy tree (serde path). The parity guard gained a struct-field axis
+    (`QueryMetrics`, `ProfileOutput`, `LocyStats`) plus a dict-vs-class key
+    check; each of 4 synthetic drops is red.
   - Locy program-level logical planning is not timed (`impl_locy.rs` step 1).
   - There is no per-operator rows-scanned field.
   - Property point-reads are not counted.
@@ -535,8 +665,14 @@ possible and stops hiding the next regression.
 - **Suites.** uni-query 865/865, uni-locy + oracle 241/241, `^locy::`
   333/333.
 - **Open.**
-  - No test isolates the `ReadSetRecordingExec` look-through: traversal's
-    adjacency recording masks it.
+  - ~~No test isolates the `ReadSetRecordingExec` look-through~~ (closed
+    2026-10-17): `bugs::vid_lookup_join_reachability::vid_lookup_probe_reads_are_in_the_ssi_read_set`
+    runs `MATCH (a:Source) MATCH (b:Target) WHERE id(b) = a.linked_vid` in a
+    transaction, so `b` is read only by the lookup (no traversal). It asserts
+    both operators ran, that a concurrent SET on the looked-up target
+    conflicts, and that a SET on a skipped target does not. Red on both
+    reverts: `wire_probe` dropping the wrapper (no conflict), and `probe_scan`
+    not looking through (operator not emitted).
   - A pure edge insert from the anchor does not conflict, per the item-level
     `OccReadSet` contract (phantoms out of scope).
   - Lower-stratum anchoring considers KEY positions only.
@@ -568,12 +704,43 @@ per query (`QueryCounters`/`QueryMetrics::shortest_path_searches`); the static i
   - a pushdown row guard and a search-count guard.
   - Three reverts each go red.
 - **Open.**
-  - Output building now dominates: `find_edge` runs twice per hop, and
-    `build_output_batch` takes 0.5–2.2 s at 2k.
-  - Tie-breaking differs from run to run, because
-    `AdjacencyManager::get_neighbors` builds a fresh `HashMap` per call. This
-    was true before the change too; tests accept any shortest path.
+  - ~~Output building now dominates~~ Done (see "P2 leftovers" below).
+  - ~~Tie-breaking differs from run to run~~ Done (see below).
   - The target range filter is still a `FilterExec` over the full scan (P6).
+
+**P2 leftovers status: implemented, uncommitted.**
+- **Edges recorded during the search.** `parent` / `predecessors` carry a
+  `Hop` (eid, type, stored orientation); `find_edge` is gone, and so is the
+  per-hop orientation probe (undirected searches read the two directions
+  separately). New counter `QueryMetrics::shortest_path_adjacency_reads`
+  (Rust and Python). Ladder graph, unbound target: 41,889 → 1,977 adjacency
+  reads at 2k nodes, 202,258 → 7,954 at 8k; `allShortestPaths` 109,454 →
+  1,996 and 757,231 → 7,973. Operator time at 8k: `shortestPath` 1777 →
+  1042 ms, `allShortestPaths` 8381 → 6241 ms; at 2k the operator times were
+  within noise (420 vs 565 ms) on a machine at load average 60–100, so the
+  counts are the evidence, not the timings.
+- **allShortestPaths and parallel edges (openCypher: each distinct edge
+  sequence is a distinct path).** The rows for two parallel edges used to
+  carry the same relationship (`find_edge` returned the first match); they now
+  carry each edge. Which parallel edge `shortestPath` reports is unchanged in
+  rule — the first admitted edge in expansion order — and now always the one
+  the search took.
+- **Deterministic tie-breaking.** `AdjacencyManager::get_neighbors` /
+  `get_neighbors_at_version` sort by `(neighbor vid, eid)` (sorted vector, not
+  a per-call `HashMap`); the transaction-L0 overlay re-sorts. Release
+  micro-benchmark per call: degree 4 1.16 → 1.02 µs, 16 1.61 → 1.01, 64 4.90
+  → 1.06–1.15, 512 20.5 → 1.65–1.71 (Main CSR only); layered (CSR + frozen +
+  active) 1.21 → 1.06–1.10, 5.54 → 1.56–2.03, 19.6 → 5.8–6.0.
+- **Tests.** `shortest_path_many_targets`: the BFS oracle now also checks
+  relationship identity (edge `k`) — `shortestPath`'s relationships must be a
+  shortest admitted edge sequence, `allShortestPaths` rows must equal the
+  oracle's edge sequences; `shortest_path_tie_break_is_deterministic` (30 runs,
+  directed and undirected, flushed / L0 / uncommitted transaction / fork, same
+  path across tiers); `path_output_reads_no_extra_adjacency` (n = 60 / 240);
+  AM unit tests for order, dedup, tombstones, self-loops. Reverts: AM order →
+  30 distinct paths in 30 runs; overlay sort → 29 in the transaction tier;
+  `find_edge` output → 3,599 reads for n = 60 and duplicate `allShortestPaths`
+  rows. Each restored byte-identical (`cmp`).
 
 ### W4. OPTIONAL MATCH WHERE pushed into the mandatory clause (new, from P2; agent running)
 
@@ -711,9 +878,17 @@ oracle, and run both Cypher TCK modes.
   pairs as NULL rows. This is documented in the Black Book and pinned by tests;
   Neo4j drops them.
 - **Open.**
-  - The batched Apply path still uses parameter imports.
-  - The `rewrite_query_correlated` property-to-parameter rewrite is now
-    redundant.
+  - ~~The batched Apply path still uses parameter imports.~~ Done (wave B):
+    the batched path was unreachable and is removed; empty input now yields
+    no rows (DF and fallback). The reachable defect was the in-query procedure
+    call: any non-DF-listed procedure sent the whole query to the fallback
+    executor (`RETURN a` = VID, labels / edge properties NULL); entity
+    arguments failed; the post-YIELD `input_filter` dropped `a.x = 2.0`
+    against 2; predicates crossed a `LIMIT`. All fixed; see the Black Book.
+  - ~~The `rewrite_query_correlated` property-to-parameter rewrite is now
+    redundant.~~ Removed (wave B), with label lifting, after measuring no
+    change in correctness suites, TCK both modes, or `index_scans` /
+    `rows_scanned` at two scales.
 
 ### P10. Constant `IN` lists are O(rows × |list|) (new, from P3)
 
@@ -721,6 +896,17 @@ oracle, and run both Cypher TCK modes.
 for constant lists. This affects user queries with large literal `IN` lists, not
 only hydration. Fix: precompute a set keyed by `_cypher_join_key` (W3a), and
 re-check with `cypher_eq` on a key hit to keep 2^53 and NULL semantics.
+
+**P10 status: implemented, uncommitted.** `InListIndex` in
+`uni-query-functions/src/df_udfs/in_list.rs`, used when the list argument is a
+scalar and the element a column of ≥ 2 rows; see the Black Book. Debug build,
+`UNWIND range(1,n) … WHERE x IN $ids` with n = |ids|, best of 3: 90.6 →
+7.5 ms at 2k, 2556.8 → 23.0 ms at 8k (linear control 8.0 / 14.3 ms). Found on
+the way and fixed: list parameters with no common native item type were
+stringified item by item (`$l = [[]]` arrived as `[Bytes("[]")]`);
+`typed_large_list_to_cv_array` rejected `[]` and date list literals compared
+with a CypherValue; `arrow_to_json_value` now errors instead of answering
+NULL.
 
 ## Sequencing
 
@@ -739,3 +925,565 @@ Each step: a test written first and run red, the fix, revert check, a
 `profile()` counter guard at two scales, the relevant Locy / Cypher TCK lane,
 and `docs/UNI_BLACK_BOOK.md` updated where internals change. Commits only on
 approval.
+
+## Deferred-items wave (started 2026-10-17, after commits 5ebf6f0c6..2650428b2)
+
+**Decisions.**
+- P8 magic sets: **implement**, as a compiler-level program rewrite in
+  `uni-locy`, falling back to full evaluation wherever the rewrite is unsafe.
+- `~=`: k = LIMIT (+SKIP) when the KNN feeds that LIMIT directly; otherwise a
+  `UniConfig` default with a truncation warning. The KNN never goes below a
+  filter that sits above a LIMIT. OPTIONAL KNN gets an `optional` flag.
+- Release notes: stay `UNRELEASED` until release time.
+
+**Wave A (running in parallel, file-disjoint).**
+
+| Agent | Items |
+|---|---|
+| 1 | W1 follow-ups (background-task audit, 7 items) |
+| 2 | P5 (R2 BEST BY delta, R3 non-linear and mutual semi-naive, R5 IS NOT set) |
+| 3 | P6 (range, prefix and null index pushdown) |
+| 4 | P7 (VLP pre-scan), P2 path-output cost, deterministic neighbor order |
+| 5 | P10 (constant IN hash set) and `arrow_to_json_value` decode errors |
+| 6 | Edge EID lookup (P3 edge hydration), Locy plan time, DERIVE overlay |
+| 7 | Python binding metrics, W2 residual RSS, ReadSet look-through test |
+| 8 | P8 magic sets |
+| 9 | `~=` k semantics and OPTIONAL KNN |
+
+**Wave B (planner-heavy, after wave A).**
+- P9: A7 sideways information passing, A6 named-path reversal, A10 probe,
+  A4 incremental ASSUME.
+- Batched Apply path imports, and removing the redundant
+  `rewrite_query_correlated`.
+- W3b schemaless L0 prefilter.
+
+**Agent 7 outcome (bindings, RSS, SSI test): done, uncommitted.**
+- **Python bindings.** New metrics on `QueryMetrics`, `ProfileOutput` and the
+  `ExecuteResult.metrics` dict.
+  - The parity guard now also checks struct fields and the dict keys; before,
+    it compared methods only.
+  - `test_planning_and_search_metrics.py`: 14 tests, 11 of them red on revert.
+  - Full Python suite 1005 passed.
+- **W2 residual RSS: no per-commit leak.**
+  - Of +230 MB RSS, only +23.5 MB is live heap; glibc keeps the rest as free
+    chunks.
+  - Growth while unflushed is L0, and an L0 rewrite levels off.
+  - Each flush leaves ~100–170 KB, mostly Lance's default session cache, which
+    can grow to 1 GiB of metadata plus 6 GiB of index per database. With the
+    caches capped it is 57 B/commit.
+  - Probe: `cdc_runtime_e2e::w2_residual_memory_growth_observation`
+    (`#[ignore]`).
+- **Decision pending.** No `UniConfig` sizing exists for the Lance session
+  cache.
+- **SSI look-through test.**
+  `bugs::vid_lookup_join_reachability::vid_lookup_probe_reads_are_in_the_ssi_read_set`
+  fails on both reverts.
+- **Coordinator TODO.** Run `check_documented_counts.py` at the end; it
+  reported Locy TCK 528 against 530 in `docs/complete_locy.md`.
+
+**Agent 6 outcome (edge lookup, plan time, DERIVE): done, uncommitted.**
+- **Edge hydration by EID.**
+  - `MainEdgeDataset::find_edges_by_eids_counted` reads the main table, and
+    `l0_visibility::lookup_edges` covers L0, recording SSI reads.
+  - `StorageManager::lookup_edges_by_eids` asks L0 first, then the main table,
+    and handles forks and pinned snapshots.
+  - Used by `impl_locy.rs` `lookup_edges`. The Cypher edge-lookup queries are
+    deleted.
+
+  | Measure | Before | After |
+  |---|---|---|
+  | Rows to hydrate 1 EID | the whole graph | 1 |
+  | Time, 4k / 16k nodes | 75 / 286 ms | ~4.5 ms flat |
+
+- **Locy `plan_time`.** It was 0; it is now timed (~0.5 ms out of 8 ms).
+  ASSUME/ABDUCE re-planning is not included.
+- **Silent wrong answer, fixed.** `extract_cypher_conditions` dropped every
+  IS reference from a DERIVE rule body, at top level and inside ASSUME.
+  - `WHERE a IS flag` with one `flag` fact wrote 4 edges instead of 1.
+  - `a IS reach TO b` wrote none of the intended edges.
+  - DERIVE now resolves IS references through the binding-plan evaluator,
+    against the issuing command's store (inside ASSUME, the overlay).
+- **Tests.** In `locy_entity_hydration.rs` and `locy_program_plan_time.rs`.
+  Guards are red on revert; value equality against Cypher holds across tx,
+  pinned, fork and ASSUME.
+- **Open.** Planning Cypher `id(r) = $e` as a lookup needs a new operator.
+
+**Agent 1 outcome (W1 follow-ups): all 7 real, all fixed, uncommitted.**
+- **Async trigger fire.** Runs on `spawn_blocking` and is tracked.
+- **Deferral tick.** Moved to the blocking pool, untested.
+- **Scheduler.** Each run is one tracked task, and the lifecycle writes run on
+  the blocking pool.
+- **CDC.** The driver owns the streams and delivers on the blocking pool; a
+  plugin panic halts only its own stream.
+- **Index rebuild leak.** One manager per `UniInner`; before, there was one
+  per `rebuild()` call, and they overwrote each other's state file.
+- **Detached spawns.** Replaced by a worker requeue and a synchronous
+  `enqueue`. Not revert-tested.
+- **`trigger_async_compaction`.** Deleted.
+- **Flush streams.** Now counted, and Drop waits for them.
+- **`ShutdownHandle`.** Now `Clone`, and prunes finished handles.
+- **Behavior change.** A failed rebuild task with attempts left also retries
+  after a restart.
+- **Open.**
+  - `DeferralQueue::push` does an fsync under a lock on the commit path.
+  - Fork and snapshot `UniInner`s get a `ShutdownHandle` that is never
+    signalled.
+- **Regression seen (investigation agent running).** In 2 of 4 runs of
+  `compaction_lifecycle_test`, a live compaction panicked at
+  `compaction.rs:~808` ("EID … not found in main_edges"). That module was
+  green in the round-3 combined run.
+
+**Compaction EID panic: root-caused and fixed, uncommitted.**
+- **Cause.** `uni-bulk` `flush_edges_buffer` wrote the FWD and BWD deltas
+  before `main_edges`. Unguarded background compaction could read delta EIDs
+  that had no `main_edges` row yet. `Writer::flush_to_l1` already writes
+  `main_edges` first, for exactly this reason.
+- **Proof.** With a 500 ms gap between the writes, the original order failed
+  5/5 and the fixed order 0/5.
+- **Not the cause.** `exists_by_eid` and P6's FilterExpr work.
+- **Measured.** The failure rate under load was 1/18; with the fix,
+  `compaction_lifecycle` passed 48/48.
+- **Regression test.** `bulk_dual_write_resilience.rs` (failpoints, at the new
+  `delta::before-write-run` seam) fails when reverted (0 of 200 edges in
+  `main_edges`).
+- **Follow-up (agent running).** Two candidates from code reading: compaction
+  can make an in-flight bulk load's edges readable before commit, and bulk
+  `abort()` does not roll back L2 adjacency.
+
+**Agent 4 outcome (P7, P2 output, tie-break): done, uncommitted.**
+- **P7.** `ReachableMapFilter` reads only the region reachable within the hop
+  bound, through edges that pass the map. It falls back to the whole-type scan
+  by measured cost.
+  - `{w:0}` at 80k nodes: 736 → 14 ms.
+  - `rows_scanned`: 160,001 → 7.
+- **Silent wrong answers fixed.** `{w: 1.0}` against an integer `w` matched
+  nothing (structural comparison), and `{w: $p}` matched every edge (the
+  parameter was never extracted).
+- **O1 guard reworked.** It now asserts an exact `rows_scanned` equal to the
+  region size.
+- **P2 output.** `Hop` records the edge it took, and `find_edge` is gone.
+  - Adjacency reads at 8k: 202k → 8k.
+  - Parallel edges used to give duplicate identical rows; each distinct edge
+    sequence is now its own row (openCypher).
+  - New counter `shortest_path_adjacency_reads`.
+- **Tie-break.** `get_neighbors` returns rows sorted by (vid, eid), and is
+  faster too (degree 512: 20.5 → 1.7 µs). 30/30 runs give the same path.
+- **New defects, pinned by `#[ignore]` repros, for wave B.**
+  - Silent wrong answer: `{w: a.x}` (a non-literal map value) is dropped, so
+    the map matches everything.
+  - A list expression over a VLP relationship list errors once one source's
+    trails exceed a batch (8,198 rows): "all columns … same length".
+  - QPP per-hop maps still pre-scan the whole type.
+
+**Agent 8 outcome (P8 magic sets): implemented, default Off, uncommitted.**
+- **Design.** `uni-locy/src/magic.rs` `rewrite_goal_directed` is a
+  compile-level rewrite into an ordinary program.
+  - Goal bindings: `c.p = literal/$param` or `IN` on a node KEY column.
+  - Sideways information passing runs through MATCH patterns only. Magic rules
+    read only the graph, so stratification is preserved.
+  - The safety matrix falls back for ALONG, recursive FOLD/BEST BY, PROB,
+    PRIORITY, generators, neural models, DERIVE, EXPLAIN, ABDUCE and ASSUME.
+- **Modes.** `LocyConfig::goal_directed`: Off (default), On, Shadow. `On`
+  drops rules that only a rewritten goal needed from `derived`, which breaks
+  the documented "`derived` = every rule" contract. That is why the default is
+  Off.
+- **Measured** (disjoint chains, TC from one node). Off: 4,750 / 19,000 facts.
+  On: 210 / 210.
+- **Soak.** 500 cases and 9,935 goals, 6,517 of them rewritten: 0 On≠Off,
+  0 divergences from the oracle.
+- **TCK.** Off and Shadow 530/530. On 518/530; all 12 are `derived` counts, as
+  designed.
+- **Open.**
+  - No Python `goal_directed` yet.
+  - Not yet built: SIP through IS-refs, scalar KEY adornment, EXPLAIN.
+  - Relaxing the fallbacks needs proofs.
+  - New bug: `QUERY … RETURN 'a' + 'b'` fails (`locy_eval.rs`
+    `eval_binary_op` routes Add only to `numeric_op`).
+
+**Agent 3 outcome (P6): done, uncommitted.**
+- **Served by the index.** Ranges and `STARTS WITH` on a BTree; `IS [NOT]
+  NULL` on a BTree or Hash. The residual filter is kept above.
+  - At 32k: `n.x < 10` reads 59 rows against 32,042 (8.5 vs 37 ms).
+  - Unflushed rows are pruned for indexed ranges.
+- **Cost.** Non-selective indexed ranges run about 1.5x slower than a scan
+  (~60 vs 38 ms at 32k), from re-checking newer versions. There are no column
+  statistics to pick between the two up front.
+- **Fixed on the way.**
+  - Indexed equality: a datetime-looking string literal was rewritten (silent
+    miss); `-0.0` lost its row; NaN/inf errored; `i64::MIN` errored.
+  - Negative float literals now fold to a literal.
+  - `STARTS WITH $p` now reaches the scan.
+  - `-null` in SET returns NULL; `i64::MIN` negation reports overflow.
+- **Tests.** `index/range_prefix_null_pushdown.rs`: 943 differential cases
+  across flushed, mixed, mutated, transaction and fork data, plus guards. Every
+  revert goes red.
+- **Changed test.** In `transition_probe`, the tripwire `index_scans == 0`
+  became `>= 1`. Its own message anticipated a BTree range route, and the
+  logical-plan invariant still holds.
+- **New for wave B.**
+  - **Spec deviation:** floats compare by IEEE total order (`-0.0 < 0.0`,
+    `NaN = NaN` true); openCypher says `-0.0 = 0.0` and every NaN comparison is
+    false. The fix belongs in `df_expr.rs`.
+  - Property names that are SQL keywords in pushed filters are untested.
+
+**Agent 5 outcome (P10, decode errors): done, uncommitted.**
+- **P10.** `in_list.rs` `InListIndex` hashes a constant list per batch by
+  `_cypher_join_key` and re-checks hits with `entity_aware_eq`. Null, list,
+  map and vector items go to a residual scan.
+  - At 8k: 2,557 → 23 ms.
+  - A 41 × 52 value differential agrees with the per-row scan.
+- **Fixed on the way.**
+  - Silent wrong answer: a heterogeneous list parameter had its items turned
+    into text bytes, so `[] IN $l` was false and dates never matched.
+  - `c.v = []` errored.
+- **Decode errors.** `arrow_to_json_value` returns `DFResult`; every caller
+  propagates the error. Untyped bytes come back as `Value::Bytes`.
+- **New for wave B.**
+  - **Silent wrong answer:** a parameter mixing ints and floats is widened to
+    a float list, so `$l = [2^53+1, 1.5]` makes `2^53 IN $l` true. Vector
+    parameters must not regress.
+  - A list arriving as a column with repeated rows (the IC5 shape) is still
+    scanned per row.
+
+**Agent 9 outcome (`~=` k, OPTIONAL KNN): done, uncommitted.**
+- **Sizing.** k = LIMIT (+SKIP) when the KNN feeds that LIMIT directly
+  (including `ORDER BY n._score DESC`, WITH…LIMIT, and per UNION branch).
+  Otherwise it is `UniConfig::vector_knn_default_k` (default 100), with a
+  warning when the cap is hit. That covers a residual filter, inline maps,
+  ORDER BY on another key, DISTINCT and no LIMIT.
+- **Never below a LIMIT.**
+  - Silent wrong answer, fixed: `MATCH (n) WITH n LIMIT 5 MATCH (n) WHERE
+    n.emb ~= q` returned the top 5 of the whole label.
+  - It is now refused at planning (`reject_unplanned_approx_eq`), as is any
+    `~=` that cannot replace its scan.
+- **OPTIONAL KNN.** `VectorKnn{k: Option, optional}` emits a NULL row when
+  nothing qualifies.
+- **Fixed on the way.** Sub-plan warnings were collected into a store nobody
+  read, so `~=` inside CALL{} never warned.
+- **Tests.** `knn_limit_semantics.rs` (9) and the uni-query
+  `planner/knn_sizing.rs`. All 7 reverts go red. TCK both modes 0 failed.
+  Python config parity OK.
+- **New for wave B (unverified).** The planner may apply `WITH … ORDER BY /
+  SKIP / LIMIT … WHERE` before the ORDER BY/SKIP/LIMIT; check against the
+  openCypher spec and TCK.
+
+**Agent 2 outcome (P5): done, uncommitted.**
+- **Counters.**
+
+  | Item | Counter | Before | After |
+  |---|---|---|---|
+  | R2 | DerivedScan, L = 20 / 80 | 190 / 3,160 | 19 / 79 |
+  | R3 mutual | DerivedScan | 120 / 1,680 | 20 / 80 |
+  | R3 non-linear | HashJoin rows over the run, N = 2k / 8k | 722,800 / 2,891,200 | 114,000 / 456,000 (one per derivation) |
+  | R5 | IS NOT set | built every iteration | built once, no measurable overhead |
+
+- **Form.** Non-linear clauses run in k passes: scan i reads Δ, earlier scans
+  read old facts, later scans read full facts. F_newᵏ \ F_oldᵏ is the disjoint
+  union of these passes, so each tuple joins exactly once, which keeps the
+  ALONG/FOLD per-derivation identities. The derivation is in the Black Book.
+- **Silent wrong answers found by the new oracle families (both fixed).**
+  - BEST BY pruned the body before IS NOT, so the runner-up that negation keeps
+    was already lost. This was also wrong under full feeding.
+  - Int→Float drift: `YIELD e.w + e.w` over a schemaless integer came back as
+    a Float, because `infer_expr_type` types properties as Float64. The new
+    `arithmetic_yield_type` fixes it.
+- **Soak.** 500 cases, 0 divergences. A deliberate Δ×Δ bug gives 14/96
+  diverging. Locy TCK 530/530.
+- **Open.**
+  - Non-linear old and full scans are still O(relation) per pass; that needs an
+    index.
+  - `merge_best_by` sorts all facts per merge, so BEST BY is about 3x plain.
+
+**Bulk-load isolation: confirmed and fixed (staging), uncommitted.**
+- **Measured before the fix.**
+  - Uncommitted bulk vertices and edges were visible to other sessions, even
+    with no compaction: the writer appended into the live tables.
+  - Abort after a compaction left 31 traversable edges, 30 of them dangling
+    with NULL properties, and they persisted after reopen.
+  - **Data loss:** abort restored each table's pre-load version, so it
+    destroyed vertices and edges that other sessions committed during the
+    load.
+  - A CSR warmed during the load kept aborted edges traversable until reopen.
+- **Fix.**
+  - Flushes stage Lance data files (`execute_uncommitted`).
+  - `commit()` publishes one Append per table against the current version,
+    under the table write lock, in the order per-label vertices → vertices →
+    `main_edges` → deltas.
+  - Abort discards the staged files. Indexes are updated after publish.
+  - The crash marker covers only the publish step, and includes the touched L2
+    adjacency tables.
+  - Forks (no staging support) keep the old path.
+- **Tests.** `bulk_isolation_resilience.rs` (failpoints), 4 tests. Forcing the
+  old protocol turns them red.
+- **Open.**
+  - A crash mid-publish still rolls back by version, so the window is the
+    publish step, not the whole load.
+  - One crash-marker file per database.
+  - Bulk abort on a fork fails, as it did before.
+
+**Wave A verification (2026-10-17/18).**
+- **Results.** Workspace 7765/7767, failpoints 179/179, both TCKs green,
+  Python 1007/1008.
+- **Fixed after the run.**
+  - A stale `arch_entity_identity` ratchet entry.
+  - 11 rustdoc links from public docs to private items.
+  - The Python `plan_time` contract (Locy now measures planning).
+  - The generated Python API page.
+  - The doc count (528 → 530).
+- **Teeth patch.** `lance_col_fusion.patch` is regenerated at the BTree range
+  site, in `build_indexed_property_pushdown`. Hash columns no longer push
+  ranges, so the old control and oracle stopped being witnesses.
+  - New control: `range_prefix_null_pushdown::translated_forms_match_the_unpushed_oracle`.
+    All 3 variants fail under the patch; with it applied, 778 of 781 tests
+    pass, the 3 failures being exactly the control.
+  - Under Lance 11 the defect is a silent `[]` on string columns and a cast
+    error on numeric columns.
+- **Wave B (running).** B1 value semantics, B2 non-literal pattern maps, B3
+  Locy operators and Python `goal_directed`, B4 P9 planner items, B5 Apply
+  imports and schemaless L0, B6 keyword identifiers and a BTree DQP fixture,
+  B7 incremental ASSUME.
+
+**Wave B interrupted (2026-10-18).**
+- **What happened.** All seven wave B agents stopped mid-edit when the account
+  hit its weekly limit (it resets 2026-10-21).
+- **Tree state.** The tree compiles, but it mixes the verified wave A work with
+  partial wave B edits.
+  - Lib suites: 2233/2235. The 2 failures are B6's new identifier-quoting
+    unit tests in `backend/eval.rs`.
+  - uni-db: 3331/3349. Of the 18 failures, some are new, unfinished wave B
+    tests (float semantics, Locy operator parity, A6 reversal, QPP maps). Others
+    are wave A tests the partial edits broke: `outer_entity_in_subquery` ×4,
+    `range_prefix_null_pushdown` unflushed, `locy_facts_and_filters` ×4,
+    `entity_comparison` ×2, and the `plan_shape::gate` operator registry ×2.
+- **Not committable** until wave B is finished or backed out. Temporary probe
+  files are present: `bugs/apply_probe_tmp.rs` and
+  `cypher_read/zz_probe_float.rs`.
+- **Disk.** It filled again; `target/debug/examples` and `incremental` were
+  deleted (515 GB).
+
+**B3 outcome (Locy operators, Python goal_directed): done, uncommitted.**
+- **Locy operators.** `locy_eval.rs` now calls the shared Cypher
+  `eval_binary_op`.
+  - The 6,103-expression parity matrix had 1,018 disagreements before and 0
+    after.
+  - Old classes: numeric-only `+`, no `=~`, `[1,null]=[1,null]` true, NaN equal
+    to NaN, debug-build overflow panics.
+- **Python.** `goal_directed` is exposed, and the parity script now checks
+  `LocyConfig`.
+- **Cypher defects the matrix exposed (unfixed, for a follow-up).**
+  - A DataFusion panic on `n.missing AND null`.
+  - About 150 planning or run-time errors on NULL operands.
+  - Literal vs property path differences: temporal arithmetic, `date - date`
+    returns Int vs a duration, row-path `n.s + 1` errors.
+  - `n.s =~ 'ab'` fails to plan.
+  - Batch short-circuit: `true OR n.i`.
+  - The shared `eval_binary_op` disagrees with DataFusion on `2 ^ 3` and
+    `NULL AND 1`.
+- **Under check (B6).** A Python BTree two-sided range returned 0 rows with
+  double-quoted names. This is likely B6's teeth patch having been applied
+  during the run; the current tree has none.
+
+**B2 outcome (non-literal pattern maps): done, uncommitted.**
+- **Fixed silent drops.** VLP edge maps with non-literal values, in MATCH,
+  OPTIONAL, EXISTS, comprehensions and single-hop QPP.
+- **Fixed silent wrong answers.**
+  - `OPTIONAL MATCH (b {x: a.x+10})` lost unmatched `a` rows (a W4 violation).
+  - A QPP inner-source map was checked on the first iteration only; it is now
+    refused.
+- **Fixed loud errors.** A map naming a variable bound later in the same
+  pattern, and a shortestPath target map.
+- **Refused with a clear error.** Non-constant shortestPath edge maps
+  (Neo4j accepts these) and non-constant multi-step QPP inner maps.
+- **Design.** One definition of a walk-constant value; other entries become an
+  `all(e IN step WHERE …)` residual, which nulls rather than drops under
+  OPTIONAL.
+- **Tests.** 43 pairs in `vlp_property_map_oracle.rs` across flushed, L0,
+  mixed and fork data. Reverting the core fix turns 20 of 43 red. TCK both
+  modes unchanged.
+- **Open.**
+  - QPP inner-source *labels* may have the same first-iteration-only defect
+    (not probed).
+  - A non-constant map on an anonymous VLP now enumerates paths instead of
+    using reachability (perf not measured).
+
+**B6 outcome (identifier quoting, BTree fixture, teeth): done, uncommitted.**
+- **Python range failure.** It came from B6's teeth window: the revert patch
+  was applied to the shared tree for about 42 s. On the final tree the test
+  passes and the repro returns 2 rows.
+- **Bare identifiers in pushed filters.**
+  - At the Lance level, 90 of 222 renderings failed.
+  - End to end, 82 of 486 cases failed: Lance parse errors surfaced to the
+    user, and properties named `null`/`true` silently returned `[]`.
+  - Lance's identifier quote is the backtick only (from lance-datafusion 11
+    source, confirmed empirically).
+- **Fix.** `quote_ident` backtick-quotes every identifier; a name containing a
+  backtick is refused and falls to the residual filter. The range-path
+  `is_bare_identifier` gate is removed.
+- **Silent data loss fixed.** `SET n.\`order\``, map-literal keys and
+  map-projection selectors kept the backticks, so writes went to a property
+  literally named with backticks (`walker.rs` → `normalize_identifier`).
+- **Fixture.** A `TypedBTreeIndexed` DQP mode and
+  `flush_pushdown_btree_smoke`. The teeth entry is
+  `lance_col_fusion|translated_forms_match_the_unpushed_oracle|flush_pushdown_btree_smoke`;
+  both fail under the patch.
+- **Open.**
+  - The grammar rejects the doubled-backtick escape.
+  - The DDL walker sites (not audited) still keep backticks.
+  - VLP `edge_lance_filter` is dead code.
+  - `topo_rewrites_unflushed_small_batches` failed once under load
+    (unexplained, message not captured).
+
+**B1 outcome (value semantics): done, uncommitted.**
+- **Floats now follow IEEE.**
+  - Old behavior: `-0.0 = 0.0` was false, NaN equalled itself, `n.f = 0.0`
+    missed `-0.0`, `-0.0` and `0.0` were separate DISTINCT groups, and
+    `CASE … WHEN 0.0` missed `-0.0`.
+  - New `float_cmp.rs` UDFs, plus native forms guarded with `isnan` against
+    literals, which keeps the L0 prefilter working.
+  - Group and DISTINCT keys are folded (`float_equivalence_key`).
+- **Mixed int/float lists** (parameters and literals) are encoded whole as a
+  CypherValue, so `2^53 IN [2^53+1, 1.5]` is no longer true. Vector
+  parameters are guarded across all their readers and writers.
+- **VLP list over more than one batch.** A sliced `LargeListArray`'s
+  `values()` paired with offset-based indices (`quantifier.rs` and
+  `comprehension.rs`); fixed by `compact_large_list`.
+- **WITH … ORDER BY … SKIP/LIMIT … WHERE.** uni filtered before the page,
+  against the openCypher BNF and spec. It now filters after the page
+  (`where_after_page`).
+- **Tests.** `float_ieee_semantics_test` (7), `mixed_numeric_list_param_test`,
+  the un-ignored VLP test, and `with_where_filters_after_order_by_skip_limit`.
+  Reverts go red. TCK both modes unchanged.
+- **Open.**
+  - Int vs float comparisons still widen to f64 (openCypher compares them
+    exactly).
+  - `1` and `1.0` are not treated as equal for DISTINCT/grouping.
+  - `[1, n.f]` is widened by `make_array`.
+  - VLP edge L0 float checks were not audited.
+
+**B4 outcome (P9): A7 and A6 done, uncommitted; A10 is a correctness bug (agent running).**
+- **A7.** New `PropertyLookupJoinExec` publishes `prop IN (build keys)` into a
+  `DynamicPropertyFilter` on an indexed probe scan.
+  - It requires exact bare same-dtype keys; mixed types keep the hash join.
+  - It falls back to one scan above 4,096 keys or at 25% of the label.
+  - rows_scanned 401 / 1,601 → 2 / 2. A large bound side shows no regression.
+- **A6.** A named fixed-length path anchored on the far end now reverses; `p`
+  is rebuilt in written order. rows_scanned 800 / 3,200 → 1 / 1.
+- **A10 (silent wrong answer).** `MATCH (n:N {ext_id:'x'})` finds the node
+  before a flush and nothing after it: the labelled scan reads `ext_id` from
+  `overflow_json`, which the flush strips. Repro:
+  `a10_ext_id_equality_on_a_labelled_node` (ignored).
+- **New planner error.** An inline map on a later node that names an outer
+  variable fails to plan: `MATCH (s) MATCH (a)-[:R]->(b {uid: s.name})` gives
+  "No field named s". An agent is fixing both.
+
+**B7 outcome (A4 incremental ASSUME/ABDUCE): done, uncommitted.**
+- **How it decides.** `uni-locy/src/incremental.rs` decides from syntax which
+  strata a mutation can affect: the labels, relationship types and property
+  keys it writes, against what each rule reads. Opaque constructs always
+  recompute.
+- **Reuse.** Unaffected strata are seeded from the pre-mutation facts
+  (`set_reused_strata`). An epoch plus an L0 fingerprint guards against a
+  base-state change.
+- **Fixed on the way.**
+  - The hypothetical run read live storage, not the pinned snapshot.
+  - It dropped custom functions.
+  - A partial hypothetical run was silently accepted.
+- **Measured.** An ASSUME adds 10 rows over the plain program at both 2k and
+  8k; before, it cost about 2x the program.
+- **Differential.** Against a committed-mutation second database: 48 cases
+  with 0 divergences, and a 500-case soak with 0 divergences once MNOR/MPROD
+  floats are compared at 12 significant digits (fold row order).
+- **Open.**
+  - Affected strata are recomputed from scratch.
+  - Reused strata are still planned.
+  - ABDUCE candidate defects (existing, unfixed): a `RemoveEdge` with empty
+    endpoint properties appears to delete every edge of its type; duplicate
+    `ChangeProperty` candidates with `element_var "a._all_props"`;
+    `evaluate_abduce` reads the top-level store inside ASSUME.
+- **PR-lane flake (agent fixing).** `random_programs_match_the_oracle` misses
+  its `mpb` coverage floor in 4 of 5 runs: a generator problem in a P5
+  family.
+
+**B5 outcome (procedure Apply, correlated rewrite, schemaless L0): done, uncommitted.**
+- **Batched Apply path.** It could never run, so it was deleted as dead code.
+- **In-query procedure calls (`MATCH … CALL p(args) YIELD`) had 5 defects,
+  all fixed.**
+  - Plugin and `uni.system` procedures were routed to the row-based fallback.
+    There, `RETURN a` gave a VID, `labels(a)` gave NULL and `r.w` gave NULL:
+    silent wrong answers.
+  - Entity-reading arguments failed or became NULL; they are now hoisted into
+    a Project.
+  - Empty input ran the body once.
+  - `input_filter` dropped a stored `2` under `= 2.0`.
+  - A predicate was pushed below a LIMIT.
+  - Also: `coalesce` over a subquery failed.
+- **`rewrite_query_correlated` and label lifting removed.** Measured A/B
+  first: counters identical (`index_scans` 200, `rows_scanned` 400), and wall
+  time within noise.
+- **Schemaless L0 prefilter.** Unflushed label-less lookups: 2000 → ≤ 1 rows.
+  The shadow set is not load-bearing there, because output re-reads L0 by
+  vid; it is kept as a defence.
+- **Open.**
+  - UNWIND'd entity with a label in a pattern fails (`No field named
+    "a._labels"`), at top level and in EXISTS.
+  - `coalesce` with `r['w']` gives an ambiguous-field error when two edge
+    types share `w`.
+  - `CALL p(x)` without YIELD inside a query never runs (from reading the
+    code, not reproduced).
+  - `plan_apply` may stringify non-string yields of plugin procedures (not
+    verified).
+  - B5's note that WITH…LIMIT…WHERE filters before the page predates B1's fix
+    (re-check in the combined run).
+
+**A10 outcome: fixed (silent wrong answer and data loss), uncommitted.**
+- **Cause.** A flush moves a string `ext_id` into the per-label column and
+  strips it from `overflow_json`. Every per-label reader (columnar scan, five
+  `PropertyManager` paths) read only the blob.
+- **Wrong for flushed declared labels.** Filters, `n.ext_id`, `properties`,
+  `keys`, `RETURN n`, traversals, OPTIONAL, forks, after reopen, and MERGE
+  (missed the existing vertex).
+- **Data loss.**
+  - Any SET on a flushed labelled vertex rewrote its map without `ext_id`,
+    and the next flush NULLed it in both tables.
+  - A non-string `ext_id` was dropped at flush.
+- **Fix.** `property_builder.rs` `stored_in_ext_id_column` /
+  `restore_ext_id_column`, used by flush, the scan, `PropertyManager` and
+  compaction.
+- **Knock-on.** Fork promote's insert-only twin strips an `ext_id` that
+  primary already holds; a fork-only `ext_id` is now carried over (it was
+  silently lost before).
+- **Pushdown.** `{ext_id:…}` on a labelled node uses the per-label BTree:
+  rows_scanned 400 / 1600 → 1 / 1.
+- **Outer-variable map on a traverse target** ("No field named s"):
+  non-self entries become a residual filter above the traversal; under
+  OPTIONAL it null-extends.
+- **Tests.** `bugs/ext_id_on_labelled_nodes.rs` and
+  `bugs/outer_variable_in_pattern_map.rs`. All 5 reverts go red. TCK both
+  modes unchanged.
+- **Open.**
+  - A user property named `overflow_json` collides with the internal blob
+    (ignored repro); fix by rejecting reserved names on write.
+  - `ext_id` on L0 labelled rows is not prefiltered.
+  - The trigger pre-image may expose `overflow_json` (unverified).
+
+**Final combined verification (2026-10-18), wave A + wave B.**
+
+| Check | Result |
+|---|---|
+| fmt | Passes; mod ordering fixed by `cargo fmt` |
+| clippy `-D warnings` | Clean, including `--features failpoints` |
+| Workspace nextest | 7845/7846; the 1 failure is the stale teeth patch below, since fixed |
+| Failpoints | 179/179 |
+| Locy TCK | 530/530 in both modes |
+| Cypher TCK | 3925/3926 in both modes (0 failed) |
+| rustdoc `-D warnings` | Clean |
+| Python | uni-db 1027 passed; uni-pydantic 273; pyo3 loader 35/35 |
+| Parity, doc and static scripts | Pass |
+| `random_programs_match_the_oracle` | 3/3 |
+
+- **Teeth patch.** `compaction_property_loss.patch` is regenerated against the
+  `restore_ext_id_column` helper, plus the overflow/timestamp restores. With it
+  applied, `vacuum_preserves_schemaless_properties` fails; reverted, the file
+  is byte-identical. All 7 patches apply, and the teeth test passes.
+- **No temporary probes remain.** The only open-defect `#[ignore]` is the
+  `overflow_json` property-name collision.

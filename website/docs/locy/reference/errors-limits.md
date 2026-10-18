@@ -25,6 +25,7 @@ Cancelling the token attached to an evaluation aborts it with `UniError::Cancell
 - `max_derived_bytes`: derived fact memory bound.
 - `max_explain_depth`: derivation tree depth bound.
 - `max_slg_depth`: deprecated, no effect (QUERY reads the fixpoint's facts); setting it warns, and it will be removed.
+- `goal_directed`: `Off` (default) derives every rule in full; `On` answers a `QUERY` whose WHERE pins a node KEY column by deriving only what it reaches, and leaves rules only such goals needed out of `.derived`; `Shadow` does the rewrite but keeps `.derived` complete. From Python, pass the lowercase string `"off"` / `"on"` / `"shadow"`.
 - `max_abduce_candidates` / `max_abduce_results`: abduction search bounds.
 - `deterministic_best_by`: enforce deterministic tie-breaking in `BEST BY` clauses.
 - `strict_probability_domain`: reject probability inputs outside `[0, 1]` instead of clamping.

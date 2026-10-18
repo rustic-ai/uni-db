@@ -294,6 +294,12 @@ WHERE p.year < 2025
 WHERE p.year <= 2025
 ```
 
+Floats compare numerically, as openCypher specifies: `-0.0 = 0.0` is true and
+neither is less than the other; `NaN = x` is false and `NaN <> x` is true for
+every number `x` (including `NaN`), and `<`, `<=`, `>`, `>=` with a `NaN`
+operand are false. `DISTINCT` and grouping treat `-0.0` and `0.0` as one value
+and every `NaN` as one value; `ORDER BY` puts `NaN` after positive infinity.
+
 ### Boolean Logic
 
 <!-- doctest: skip -->
@@ -784,6 +790,18 @@ MATCH (p:Paper)-[:AUTHORED_BY]->(a:Author)
 WITH a, COUNT(p) AS paper_count
 WHERE paper_count > 5
 RETURN a.name, paper_count
+```
+
+### WHERE After ORDER BY / SKIP / LIMIT
+
+A `WHERE` that follows `WITH … ORDER BY … SKIP … LIMIT` filters the rows the
+page kept; it does not run before the page:
+
+```cypher
+UNWIND range(1, 10) AS x
+WITH x ORDER BY x LIMIT 3
+WHERE x > 2
+RETURN collect(x)   // [3]
 ```
 
 ### Subquery-like Behavior

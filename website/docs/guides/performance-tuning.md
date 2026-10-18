@@ -20,30 +20,49 @@ Uni's performance characteristics (indicative numbers from internal benchmarks; 
 
 ### 1. Use Predicate Pushdown
 
-Push filters to storage for massive I/O reduction:
+Let a scalar index narrow the scan instead of filtering every row:
 
 ```cypher
-// Good: Filter pushed to Lance
+// Good: with indexes on year and venue, both conjuncts narrow the scan
 MATCH (p:Paper)
 WHERE p.year > 2020 AND p.venue = 'NeurIPS'
 RETURN p.title
 
 // Bad: Filter applied after full scan
 MATCH (p:Paper)
-WHERE p.title CONTAINS 'Transformer'  // Cannot push CONTAINS
+WHERE p.title CONTAINS 'Transformer'  // No index serves CONTAINS
 RETURN p.title
 ```
 
-**Pushable Predicates:**
-- `=`, `<>`, `<`, `>`, `<=`, `>=`
-- `IN [list]`
-- `IS NULL`, `IS NOT NULL`
-- `AND` combinations of above
+**Predicates a scalar index serves** (on a property with an Online index;
+each conjunct of an `AND` is considered on its own):
 
-**Non-Pushable Predicates:**
-- `CONTAINS`, `STARTS WITH`, `ENDS WITH`
+| Predicate | BTree | Hash |
+|---|---|---|
+| `n.p = v`, `n.p IN [...]` | yes | yes |
+| `n.p < v`, `<=`, `>`, `>=`, and `AND`-ed pairs such as `n.p >= a AND n.p < b` | yes | no |
+| `n.p STARTS WITH 'prefix'` (literal or parameter) | yes, as a range | no |
+| `n.p IS NULL`, `n.p IS NOT NULL` | yes | yes |
+
+The index narrows the scan; the full `WHERE` is still applied to what it
+returns, so results are the same as without the index. An operand that cannot
+be handed to the index exactly is simply evaluated after the scan instead:
+`NULL`, `NaN`, infinite or zero bounds on a `FLOAT` property, a value of
+another type (`n.age < 'ten'`), an integer beyond 2^53 against a `FLOAT`
+property, and the empty prefix. A float bound on an `INT` property is fine
+(`n.age > 30.5` is served as `n.age > 30`).
+
+An index pays off when the predicate is selective. A range that matches most of
+the label (`n.age > 0`, `IS NOT NULL` on a mostly-set property) is somewhat
+slower through the index than a plain scan, since every row it returns is
+re-checked against newer versions.
+
+**Evaluated after the scan:**
+- Predicates on unindexed properties
+- `CONTAINS`, `ENDS WITH`
 - Function calls: `lower(x) = 'value'`
-- `OR` with different properties
+- `NOT (...)` and `OR` with different properties
+- Comparisons between two properties (`n.a < n.b`)
 
 ### 2. Limit Early
 

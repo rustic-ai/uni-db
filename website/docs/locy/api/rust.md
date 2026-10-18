@@ -64,6 +64,7 @@ Common fields:
 - `timeout` (`Option<Duration>`; `None` = 300s between strata, database `query_timeout` inside operators)
 - `max_explain_depth`
 - `max_slg_depth` (deprecated, no effect; using it is a deprecation warning)
+- `goal_directed` (`GoalDirected::Off` default, `On`, `Shadow`): magic-sets evaluation of `QUERY ... WHERE`; see [Modules, PRIORITY, QUERY](../advanced/modules-priority-query.md#goal-directed-query)
 - `max_abduce_candidates`
 - `max_abduce_results`
 - `max_derived_bytes`
