@@ -27,8 +27,27 @@ impl Compactor {
         Self { storage }
     }
 
+    /// Runs a full semantic pass: vertex dedup, CRDT merge, delta folding.
+    ///
+    /// Waits for the directory's compaction lock first, so a pass started here
+    /// (for example by `VACUUM`) never overlaps another instance's pass over
+    /// the same directory. See [`CompactionDirLock`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompactionCancelled`] when the manager's compaction token is
+    /// cancelled, before or during the pass; every safe point leaves the store
+    /// consistent. Also fails when the lock file cannot be opened. Per-label
+    /// and per-direction failures are logged and skipped, as before.
     #[instrument(skip(self), level = "info")]
     pub async fn compact_all(&self) -> Result<SemanticCompactionReport> {
+        let _dir_lock = self.storage.lock_compaction_dir().await?;
+        self.compact_all_locked().await
+    }
+
+    /// [`Self::compact_all`] for a caller that already holds the directory's
+    /// compaction lock.
+    pub(crate) async fn compact_all_locked(&self) -> Result<SemanticCompactionReport> {
         let start = std::time::Instant::now();
         let schema = self.storage.schema_manager().schema();
         let mut report = SemanticCompactionReport::default();
@@ -43,6 +62,7 @@ impl Compactor {
 
         // Compact Vertices
         for label in schema.labels.keys() {
+            self.safe_point("compaction::safe-point::before-label")?;
             info!("Compacting vertices for label {}", label);
             match self.compact_vertices(label).await {
                 Ok(v) if v.ran => {
@@ -50,6 +70,7 @@ impl Compactor {
                     report.crdt_merges += v.crdt_merges;
                 }
                 Ok(_) => {}
+                Err(e) if is_compaction_cancelled(&e) => return Err(e),
                 Err(e) => error!("Failed to compact vertices for {}: {}", label, e),
             }
 
@@ -75,9 +96,11 @@ impl Compactor {
         for (edge_type, meta) in &schema.edge_types {
             // Outgoing: src_labels
             for label in &meta.src_labels {
+                self.safe_point("compaction::safe-point::before-adjacency")?;
                 info!("Compacting adjacency {} -> {} (fwd)", label, edge_type);
                 match self.compact_adjacency(edge_type, label, "fwd").await {
                     Ok(info) => report.adjacency.push(info),
+                    Err(e) if is_compaction_cancelled(&e) => return Err(e),
                     Err(e) => {
                         error!(
                             "Failed to compact adjacency {} -> {}: {}",
@@ -101,9 +124,11 @@ impl Compactor {
 
             // Incoming: dst_labels
             for label in &meta.dst_labels {
+                self.safe_point("compaction::safe-point::before-adjacency")?;
                 info!("Compacting adjacency {} <- {} (bwd)", label, edge_type);
                 match self.compact_adjacency(edge_type, label, "bwd").await {
                     Ok(info) => report.adjacency.push(info),
+                    Err(e) if is_compaction_cancelled(&e) => return Err(e),
                     Err(e) => {
                         error!(
                             "Failed to compact adjacency {} <- {}: {}",
@@ -372,6 +397,9 @@ impl Compactor {
                 Some(&created_at),
                 Some(&updated_at),
             )?;
+            // Safe point: nothing has been written yet, so a cancelled pass
+            // leaves the table exactly as it was.
+            self.safe_point("compaction::safe-point::before-vertex-replace")?;
             dataset
                 .replace(self.storage.backend(), batch, &schema)
                 .await?;
@@ -717,6 +745,9 @@ impl Compactor {
             let batch = RecordBatch::try_new(schema, vec![src_arr, neighbors_arr, edge_ids_arr])?;
 
             // Replace the table with compacted data
+            // Safe point: L2 and the deltas are both untouched, so a cancelled
+            // pass leaves the deltas authoritative over the old L2.
+            self.safe_point("compaction::safe-point::before-adj-replace")?;
             adj_ds.replace(self.storage.backend(), batch).await?;
         }
 
@@ -756,10 +787,23 @@ impl Compactor {
                     deltas.iter().map(|e| e.eid).collect();
 
                 for eid in delta_eids {
+                    // A per-EID scan is slow; do not hold a cancelled pass
+                    // here. The safe point below then stops it.
+                    if self.storage.compaction_cancel_token().is_cancelled() {
+                        break;
+                    }
+                    // An I/O failure is not evidence that the EID is missing:
+                    // report it as what it is instead of tripping the assertion.
                     let main_edge_exists =
                         MainEdgeDataset::exists_by_eid(self.storage.backend(), eid)
                             .await
-                            .unwrap_or(false);
+                            .map_err(|e| {
+                                e.context(format!(
+                                    "could not check main_edges for EID {} before \
+                                     clearing Delta L1",
+                                    eid.as_u64()
+                                ))
+                            })?;
 
                     debug_assert!(
                         main_edge_exists,
@@ -769,6 +813,11 @@ impl Compactor {
                     );
                 }
             }
+
+            // Safe point: the window above. L2 already holds merge(L2, deltas)
+            // and the deltas are still present; re-applying them is a no-op,
+            // so stopping here costs only the redo on the next pass.
+            self.safe_point("compaction::safe-point::before-delta-clear")?;
 
             // Clear ONLY the deltas we actually merged into L2 — those at or
             // below the high-water-mark captured from the rows read at the top
@@ -801,6 +850,95 @@ impl Compactor {
             edge_type: edge_type.to_string(),
             direction: direction.to_string(),
         })
+    }
+}
+
+impl Compactor {
+    /// Stops the pass if the manager's compaction token was cancelled.
+    ///
+    /// Every call site is a point where the store is consistent on disk, so
+    /// returning here is equivalent to a crash at that point, which the
+    /// recovery suite covers. The fail point lets tests cancel at exactly
+    /// this call.
+    fn safe_point(&self, at: &'static str) -> Result<()> {
+        fail::fail_point!(at);
+        if self.storage.compaction_cancel_token().is_cancelled() {
+            info!(at, "compaction cancelled at a safe point");
+            return Err(anyhow::Error::new(CompactionCancelled { at }));
+        }
+        Ok(())
+    }
+}
+
+/// A compaction pass stopped at a safe point because it was cancelled.
+///
+/// Returned when the owning database shuts down mid-pass. The store is
+/// consistent; the remaining work is redone by the next pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompactionCancelled {
+    /// Name of the safe point the pass stopped at.
+    pub at: &'static str,
+}
+
+impl std::fmt::Display for CompactionCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "compaction cancelled at {}", self.at)
+    }
+}
+
+impl std::error::Error for CompactionCancelled {}
+
+/// Whether `e` is, or wraps, a [`CompactionCancelled`].
+#[must_use]
+pub fn is_compaction_cancelled(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<CompactionCancelled>().is_some()
+}
+
+/// Exclusive, cross-instance claim on compacting one database directory.
+///
+/// `CompactionGuard` is per `StorageManager`, so it cannot see a second
+/// instance over the same directory. Dropping a database and reopening the
+/// path at once (or two handles opened on one path) let two semantic passes
+/// overwrite each other's tables: measured as an overlap in every drop-and-
+/// reopen with an in-flight pass, with the live instance then answering a
+/// reverse traversal with no rows. This claim is an OS file lock (`flock` on
+/// Unix) on `compaction.lock` in the storage root, so it excludes other
+/// handles in this process and other processes alike, and the OS releases it
+/// if the holder dies. Remote stores have no such lock and are not covered.
+#[derive(Debug)]
+pub struct CompactionDirLock {
+    _file: std::fs::File,
+}
+
+impl CompactionDirLock {
+    /// Name of the lock file inside the storage root.
+    pub const FILE_NAME: &'static str = "compaction.lock";
+
+    /// Takes the lock on `root` without waiting.
+    ///
+    /// Returns `Ok(None)` when another handle holds it.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the lock file cannot be created or the lock call fails for
+    /// a reason other than contention.
+    pub fn try_acquire(root: &std::path::Path) -> Result<Option<Self>> {
+        let path = root.join(Self::FILE_NAME);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|e| anyhow!("cannot open compaction lock {}: {e}", path.display()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(e)) => Err(anyhow!(
+                "cannot lock compaction lock {}: {e}",
+                path.display()
+            )),
+        }
     }
 }
 

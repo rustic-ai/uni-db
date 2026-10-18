@@ -6296,7 +6296,10 @@ impl Writer {
                     .storage
                     .version_high_water_mark()
                     .unwrap_or_else(|| shared.l0_manager.get_current().read().current_version);
-                let handle = tokio::spawn(async move {
+                // Blocking pool, not the executor: the rebuild is synchronous,
+                // CPU-bound and holds `compact_lock` throughout, so on a worker
+                // it stalled every task scheduled there for its duration.
+                let handle = tokio::task::spawn_blocking(move || {
                     am.compact();
                     am.gc_shadow(gc_version);
                 });

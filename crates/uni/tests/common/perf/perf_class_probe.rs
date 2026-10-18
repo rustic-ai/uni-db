@@ -94,6 +94,8 @@ async fn build(f: &Fixture, dir: &std::path::Path) -> Result<Uni> {
         bulk.commit().await?;
         tx.commit().await?;
         db.flush().await?;
+        // Stop background compaction before the path is reopened.
+        db.shutdown().await?;
     }
     Ok(Uni::open(&path).config(cfg()).build().await?)
 }

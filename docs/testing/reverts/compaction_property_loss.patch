@@ -1,8 +1,7 @@
 diff --git b/crates/uni-store/src/storage/compaction.rs a/crates/uni-store/src/storage/compaction.rs
-index 032307e69..b0bffab3a 100644
 --- b/crates/uni-store/src/storage/compaction.rs
 +++ a/crates/uni-store/src/storage/compaction.rs
-@@ -6,9 +6,7 @@ use crate::storage::manager::StorageManager;
+@@ -6,9 +6,7 @@
  use anyhow::{Result, anyhow};
  use arrow_array::Array;
  use arrow_array::builder::{ListBuilder, UInt64Builder};
@@ -13,7 +12,7 @@ index 032307e69..b0bffab3a 100644
  use metrics;
  use std::collections::{HashMap, HashSet};
  use std::sync::Arc;
-@@ -151,8 +149,6 @@ impl Compactor {
+@@ -213,8 +211,6 @@
          let mut vertex_state: HashMap<Vid, (Properties, bool)> = HashMap::new();
          let mut vertex_versions: HashMap<Vid, u64> = HashMap::new();
          let mut vertex_labels: HashMap<Vid, Vec<String>> = HashMap::new();
@@ -22,7 +21,7 @@ index 032307e69..b0bffab3a 100644
  
          let mut rows_processed = 0;
  
-@@ -182,27 +178,6 @@ impl Compactor {
+@@ -244,27 +240,6 @@
                  .column_by_name("_labels")
                  .and_then(|c| c.as_any().downcast_ref::<arrow_array::ListArray>());
  
@@ -50,7 +49,7 @@ index 032307e69..b0bffab3a 100644
              for i in 0..batch.num_rows() {
                  let vid = Vid::from(vid_col.value(i));
                  let version = ver_col.value(i);
-@@ -259,45 +234,6 @@ impl Compactor {
+@@ -321,45 +296,6 @@
                      }
                  }
  
@@ -96,7 +95,7 @@ index 032307e69..b0bffab3a 100644
                  crdt_merges += Self::merge_row_into_state(
                      row_props,
                      null_props,
-@@ -329,13 +263,11 @@ impl Compactor {
+@@ -389,13 +325,11 @@
          }
  
          if !valid_vertices.is_empty() {
@@ -109,5 +108,5 @@ index 032307e69..b0bffab3a 100644
 -                Some(&created_at),
 -                Some(&updated_at),
              )?;
-             dataset
-                 .replace(self.storage.backend(), batch, &schema)
+             // Safe point: nothing has been written yet, so a cancelled pass
+             // leaves the table exactly as it was.

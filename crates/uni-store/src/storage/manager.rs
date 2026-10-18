@@ -13,7 +13,10 @@ use crate::runtime::WorkingGraph;
 use crate::runtime::context::QueryContext;
 use crate::runtime::l0::L0Buffer;
 use crate::storage::adjacency::AdjacencyDataset;
-use crate::storage::compaction::{Compactor, SemanticCompactionReport};
+use crate::storage::compaction::{
+    CompactionCancelled, CompactionDirLock, Compactor, SemanticCompactionReport,
+    is_compaction_cancelled,
+};
 use crate::storage::delta::{DeltaDataset, ENTRY_SIZE_ESTIMATE, Op};
 use crate::storage::direction::Direction;
 #[cfg(feature = "lance-backend")]
@@ -98,6 +101,9 @@ pub struct StorageManager {
     requires_adjacency_revalidation: bool,
     pub config: UniConfig,
     pub compaction_status: Arc<Mutex<CompactionStatus>>,
+    /// Cancels compaction on this manager at its next safe point. Cancelled
+    /// once, at shutdown; it is never reset. See [`Self::cancel_compaction`].
+    compaction_cancel: tokio_util::sync::CancellationToken,
     /// Counter of in-flight `flush_to_l1` operations. Compaction skips
     /// delta-clear when this is non-zero to avoid wiping rows a flush is
     /// about to append. Counter (not bool) so multiple async flushes can
@@ -646,6 +652,7 @@ impl StorageManager {
             config,
             cardinality: Arc::new(crate::storage::cardinality::CardinalityCache::new()),
             compaction_status: Arc::new(Mutex::new(CompactionStatus::default())),
+            compaction_cancel: tokio_util::sync::CancellationToken::new(),
             flush_in_progress: std::sync::atomic::AtomicUsize::new(0),
             pinned_snapshot: None,
             pinned_version_hwm: None,
@@ -818,6 +825,7 @@ impl StorageManager {
             config: self.config.clone(),
             cardinality: self.cardinality.clone(),
             compaction_status: Arc::new(Mutex::new(CompactionStatus::default())),
+            compaction_cancel: tokio_util::sync::CancellationToken::new(),
             flush_in_progress: std::sync::atomic::AtomicUsize::new(0),
             pinned_snapshot: Some(snapshot),
             pinned_version_hwm: None,
@@ -869,6 +877,7 @@ impl StorageManager {
             config: self.config.clone(),
             cardinality: self.cardinality.clone(),
             compaction_status: Arc::new(Mutex::new(CompactionStatus::default())),
+            compaction_cancel: tokio_util::sync::CancellationToken::new(),
             flush_in_progress: std::sync::atomic::AtomicUsize::new(0),
             pinned_snapshot: None,
             pinned_version_hwm: Some(hwm),
@@ -943,6 +952,7 @@ impl StorageManager {
             config: self.config.clone(),
             cardinality: self.cardinality.clone(),
             compaction_status: Arc::new(Mutex::new(CompactionStatus::default())),
+            compaction_cancel: tokio_util::sync::CancellationToken::new(),
             flush_in_progress: std::sync::atomic::AtomicUsize::new(0),
             pinned_snapshot: None,
             pinned_version_hwm: None,
@@ -1368,6 +1378,80 @@ impl StorageManager {
         Ok(())
     }
 
+    /// Cancels compaction on this manager: a running pass stops at its next
+    /// safe point and no new pass starts.
+    ///
+    /// Irreversible. Called when the owning database shuts down, so a pass
+    /// does not keep rewriting tables after its owner is gone. A stopped pass
+    /// leaves the store consistent; the next open redoes its work.
+    pub fn cancel_compaction(&self) {
+        self.compaction_cancel.cancel();
+    }
+
+    /// The token that [`Self::cancel_compaction`] cancels.
+    #[must_use]
+    pub fn compaction_cancel_token(&self) -> &tokio_util::sync::CancellationToken {
+        &self.compaction_cancel
+    }
+
+    /// Waits for this directory's compaction lock, then takes it.
+    ///
+    /// Returns `Ok(None)` for a remote store, which has no lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompactionCancelled`] if cancelled while waiting, or the
+    /// lock file's I/O error.
+    pub(crate) async fn lock_compaction_dir(&self) -> Result<Option<CompactionDirLock>> {
+        let Some(root) = self.local_fs_root() else {
+            return Ok(None);
+        };
+        loop {
+            if self.compaction_cancel.is_cancelled() {
+                return Err(anyhow::Error::new(CompactionCancelled {
+                    at: "compaction::waiting-for-dir-lock",
+                }));
+            }
+            if let Some(lock) = CompactionDirLock::try_acquire(&root)? {
+                return Ok(Some(lock));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Waits until no other handle is compacting this directory.
+    ///
+    /// A writable open calls this before it writes anything: a pass still
+    /// running from a dropped handle on the same path would otherwise
+    /// overwrite a table this handle appends to and lose the append. Takes
+    /// the lock and releases it at once; a no-op for remote stores.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the lock is still held after `timeout`, or on the lock
+    /// file's I/O error.
+    pub async fn wait_for_foreign_compaction(&self, timeout: Duration) -> Result<()> {
+        let Some(root) = self.local_fs_root() else {
+            return Ok(());
+        };
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if CompactionDirLock::try_acquire(&root)?.is_some() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "another handle is still compacting {} after {:?}; refusing to \
+                     open it for writing while a foreign compaction can overwrite \
+                     this handle's writes",
+                    root.display(),
+                    timeout
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     pub async fn wait_for_compaction(&self) -> Result<()> {
         loop {
             let in_progress = {
@@ -1397,9 +1481,25 @@ impl StorageManager {
             let start = tokio::time::Instant::now() + self.config.compaction.check_interval;
             let mut interval =
                 tokio::time::interval_at(start, self.config.compaction.check_interval);
+            // A pass can outlast many ticks; replaying them as a burst would
+            // only re-check status back to back.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
+                // `biased`, shutdown first: unbiased, a tick that became ready
+                // during a long pass won half the races against a pending
+                // shutdown and started another full pass after it.
                 tokio::select! {
+                    biased;
+                    _ = shutdown_rx.recv() => {
+                        log::info!("Background compaction shutting down");
+                        let _ = self.wait_for_compaction().await;
+                        break;
+                    }
+                    () = self.compaction_cancel.cancelled() => {
+                        log::info!("Background compaction cancelled");
+                        break;
+                    }
                     _ = interval.tick() => {
                         if let Err(e) = self.update_compaction_status().await {
                             log::error!("Failed to update compaction status: {}", e);
@@ -1408,15 +1508,14 @@ impl StorageManager {
 
                         if let Some(task) = self.pick_compaction_task() {
                             log::info!("Triggering background compaction: {:?}", task);
-                            if let Err(e) = Self::execute_compaction(Arc::clone(&self), task).await {
-                                log::error!("Compaction failed: {}", e);
+                            match Self::execute_compaction(Arc::clone(&self), task).await {
+                                Ok(_) => {}
+                                Err(e) if is_compaction_cancelled(&e) => {
+                                    log::info!("{e}");
+                                }
+                                Err(e) => log::error!("Compaction failed: {}", e),
                             }
                         }
-                    }
-                    _ = shutdown_rx.recv() => {
-                        log::info!("Background compaction shutting down");
-                        let _ = self.wait_for_compaction().await;
-                        break;
                     }
                 }
             }
@@ -1539,6 +1638,19 @@ impl StorageManager {
         let start = std::time::Instant::now();
         let _guard = CompactionGuard::new(this.compaction_status.clone())
             .ok_or_else(|| anyhow!("Compaction already in progress"))?;
+        if this.compaction_cancel.is_cancelled() {
+            return Err(anyhow::Error::new(CompactionCancelled {
+                at: "compaction::before-start",
+            }));
+        }
+        // Skip, rather than wait, when another handle on this directory is
+        // compacting: the next tick retries. See `CompactionDirLock`.
+        let _dir_lock = match this.local_fs_root() {
+            Some(root) => Some(CompactionDirLock::try_acquire(&root)?.ok_or_else(|| {
+                anyhow!("Compaction already in progress in another handle on this directory")
+            })?),
+            None => None,
+        };
 
         let schema = this.schema_manager.schema();
         let mut stats = CompactionStats::default();
@@ -1558,8 +1670,14 @@ impl StorageManager {
         // before -- a persistent semantic failure must not block fragment
         // compaction -- but drop every cached CSR, because what changed is
         // exactly what is not known.
-        let semantic = match compactor.compact_all().await {
+        let semantic = match compactor.compact_all_locked().await {
             Ok(report) => report,
+            Err(e) if is_compaction_cancelled(&e) => {
+                // Stopped at a safe point. Some adjacency tables may already
+                // be rewritten, and the report naming them was not returned.
+                this.adjacency_manager().invalidate_all_csr();
+                return Err(e);
+            }
             Err(e) => {
                 log::error!(
                     "Semantic compaction failed (continuing with backend optimize; \
@@ -1598,6 +1716,13 @@ impl StorageManager {
         // drift apart again.
         let backend = this.backend.as_ref();
         for table in Self::all_tables(&schema) {
+            // Each optimize is one atomic Lance commit, so stopping between
+            // tables is safe.
+            if this.compaction_cancel.is_cancelled() {
+                return Err(anyhow::Error::new(CompactionCancelled {
+                    at: "compaction::before-optimize",
+                }));
+            }
             if let Some(report) =
                 Self::try_optimize_table(backend, &table, this.config.compaction.version_retention)
                     .await

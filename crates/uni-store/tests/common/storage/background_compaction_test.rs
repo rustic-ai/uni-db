@@ -404,3 +404,93 @@ async fn test_background_compaction_handles_empty_db() {
     assert_eq!(status.l1_runs, 0);
     assert_eq!(status.l1_estimated_bytes, 0);
 }
+
+/// A bare `StorageManager` over a fresh directory with compaction enabled.
+async fn lock_test_storage(dir: &std::path::Path) -> Arc<StorageManager> {
+    let mut config = UniConfig::default();
+    config.compaction.enabled = true;
+    config.compaction.check_interval = Duration::from_millis(20);
+    let store = Arc::new(LocalFileSystem::new_with_prefix(dir).unwrap());
+    let schema_manager = Arc::new(
+        SchemaManager::load_from_store(store, &ObjectStorePath::from("schema.json"))
+            .await
+            .unwrap(),
+    );
+    Arc::new(
+        StorageManager::new_with_config(dir.to_str().unwrap(), schema_manager, config)
+            .await
+            .unwrap(),
+    )
+}
+
+/// The directory lock excludes a second holder, including one in this
+/// process: two handles on one path are exactly the drop-and-reopen case.
+#[tokio::test]
+async fn compaction_dir_lock_is_exclusive_within_a_process() {
+    use uni_store::storage::compaction::CompactionDirLock;
+    let dir = tempdir().unwrap();
+    let first = CompactionDirLock::try_acquire(dir.path()).unwrap();
+    assert!(first.is_some(), "an unheld lock must be acquirable");
+    assert!(
+        CompactionDirLock::try_acquire(dir.path())
+            .unwrap()
+            .is_none(),
+        "a second handle acquired a held compaction lock"
+    );
+    drop(first);
+    assert!(
+        CompactionDirLock::try_acquire(dir.path())
+            .unwrap()
+            .is_some(),
+        "the lock must be released when its holder drops"
+    );
+}
+
+/// A semantic pass (the `VACUUM` route) must not start while another handle
+/// on the same directory holds the compaction lock, and must run once it is
+/// released.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compact_all_waits_for_a_foreign_compaction() {
+    use uni_store::storage::compaction::{CompactionDirLock, Compactor};
+    let dir = tempdir().unwrap();
+    let storage = lock_test_storage(dir.path()).await;
+
+    let foreign = CompactionDirLock::try_acquire(dir.path()).unwrap().unwrap();
+    let pass = tokio::spawn({
+        let storage = storage.clone();
+        async move { Compactor::new(storage).compact_all().await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !pass.is_finished(),
+        "compact_all ran while another handle held the directory's compaction lock"
+    );
+    drop(foreign);
+    tokio::time::timeout(Duration::from_secs(30), pass)
+        .await
+        .expect("compact_all did not proceed after the lock was released")
+        .unwrap()
+        .unwrap();
+}
+
+/// Cancelling compaction stops the background loop by itself, without the
+/// shutdown broadcast: `Drop for Uni` relies on it to stop a loop promptly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_compaction_stops_the_background_loop() {
+    let dir = tempdir().unwrap();
+    let storage = lock_test_storage(dir.path()).await;
+    // The sender stays alive and silent for the whole test.
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::broadcast::channel(1);
+    let handle = storage.clone().start_background_compaction(shutdown_rx);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !handle.is_finished(),
+        "the loop exited before it was cancelled"
+    );
+
+    storage.cancel_compaction();
+    tokio::time::timeout(Duration::from_secs(5), handle)
+        .await
+        .expect("the compaction loop kept running after cancel_compaction")
+        .unwrap();
+}

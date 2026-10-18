@@ -50,7 +50,7 @@ impl ShutdownHandle {
 
         let _ = self.tx.send(());
 
-        let handles = {
+        let mut handles = {
             let mut tasks = self.task_handles.lock().unwrap();
             std::mem::take(&mut *tasks)
         };
@@ -59,7 +59,7 @@ impl ShutdownHandle {
             tracing::info!("Waiting for {} background tasks", handles.len());
 
             let wait_future = async {
-                for handle in handles {
+                for handle in handles.iter_mut() {
                     // #233 P3: `let _ =` made a PANICKING background task
                     // indistinguishable from one that exited cleanly, so
                     // "Background tasks completed gracefully" was logged either
@@ -80,12 +80,86 @@ impl ShutdownHandle {
                 Ok(_) => tracing::info!("Background tasks completed gracefully"),
                 Err(_) => tracing::warn!("Shutdown timeout reached"),
             }
+
+            // Keep the stragglers: dropping a `JoinHandle` detaches its task,
+            // which would make a still-running task uncountable.
+            handles.retain(|h| !h.is_finished());
+            if !handles.is_empty() {
+                self.task_handles.lock().unwrap().extend(handles);
+            }
         }
 
         Ok(())
     }
 
+    /// Signals shutdown without waiting for any task.
     pub fn shutdown_blocking(&self) {
         let _ = self.tx.send(());
+    }
+
+    /// Number of tracked tasks that have not finished yet.
+    #[must_use]
+    pub fn live_task_count(&self) -> usize {
+        self.task_handles
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|h| !h.is_finished())
+            .count()
+    }
+
+    /// Signals shutdown, then blocks this thread until every tracked task has
+    /// finished or `timeout` elapses.
+    ///
+    /// Waits by observing the tasks, not by driving them, so it makes progress
+    /// only when a runtime is still running them on other threads. Calling it
+    /// on a `current_thread` runtime's own thread therefore waits the full
+    /// `timeout` for nothing; callers must not.
+    ///
+    /// Returns the number of tasks still running when it returned.
+    pub fn shutdown_and_wait_blocking(&self, timeout: Duration) -> usize {
+        self.shutdown_blocking();
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let live = self.live_task_count();
+            if live == 0 || std::time::Instant::now() >= deadline {
+                return live;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A task that overruns the grace period must stay countable: dropping its
+    /// `JoinHandle` would detach it while it keeps running.
+    #[tokio::test]
+    async fn straggler_stays_counted_after_shutdown_timeout() {
+        let handle = ShutdownHandle::new(Duration::from_millis(50));
+        handle.track_task(tokio::spawn(tokio::time::sleep(Duration::from_secs(30))));
+        let mut rx = handle.subscribe();
+        handle.track_task(tokio::spawn(async move {
+            let _ = rx.recv().await;
+        }));
+
+        handle.shutdown_async().await.unwrap();
+        assert_eq!(handle.live_task_count(), 1, "the straggler was forgotten");
+    }
+
+    /// The blocking wait returns as soon as every task has observed shutdown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_wait_joins_tasks_that_observe_shutdown() {
+        let handle = ShutdownHandle::new(Duration::from_secs(30));
+        let mut rx = handle.subscribe();
+        handle.track_task(tokio::spawn(async move {
+            let _ = rx.recv().await;
+        }));
+        let live = tokio::task::block_in_place(|| {
+            handle.shutdown_and_wait_blocking(Duration::from_secs(10))
+        });
+        assert_eq!(live, 0);
     }
 }

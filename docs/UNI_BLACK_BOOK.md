@@ -1122,18 +1122,37 @@ Two teardown paths, deliberately different:
   handle — for a Python `with Uni.temporary() as db:` block, past the end of
   the block until garbage collection.
 - **Bare `Drop`** (no explicit shutdown — `db = Uni.temporary()` from Python)
-  signals, closes the flush coordinator's submit channel, and then waits, up to
-  two seconds, for the outstanding claims to drain. The wait exists because
-  ownership ordering assumes *something still runs the tasks*: at process exit
-  the embedder's runtime is abandoned, the tasks never wake, the `Arc` is never
-  released, and the directory is then removed by nothing at all. Closing the
-  submit channel is required rather than optional — the flush-coordinator
-  finalizer blocks on `submit_rx.recv()` and never observes the shutdown
-  broadcast, so without it every exit paid the full two-second deadline.
+  cancels compaction, closes the flush coordinator's submit channel, signals
+  shutdown, and then waits up to `DROP_TASK_JOIN_TIMEOUT` (5 s) for every
+  tracked task to finish (`ShutdownHandle::shutdown_and_wait_blocking`). The
+  wait observes the tasks (`JoinHandle::is_finished`); it does not drive them.
+  So it depends on where the drop runs:
+  - **no runtime on this thread** (process exit, a Python finalizer): waits.
+    Ownership ordering assumes *something still runs the tasks*; at process
+    exit the embedder's runtime may be abandoned, and without the wait the
+    directory was removed by nothing at all.
+  - **a `multi_thread` runtime**: waits inside `block_in_place`, so other
+    workers keep driving the tasks.
+  - **a `current_thread` runtime**: only signals. The tasks run on this very
+    thread, so blocking it would stall them until the bound. Call
+    `shutdown().await` there.
 
-The wait is skipped when a tokio runtime is already current: those tasks are
-being driven, and on a `current_thread` runtime blocking there would deadlock
-the very tasks being waited on.
+  Closing the submit channel is required rather than optional — the
+  flush-coordinator finalizer blocks on `submit_rx.recv()` and never observes
+  the shutdown broadcast, so without it every drop paid the full bound. Past
+  the bound the drop logs a warning and returns with the stragglers running.
+
+Before W1 (2026-10-17) a bare drop inside a runtime only signalled. A
+compaction pass in flight then kept rewriting the directory after its owner
+was gone: removing the directory panicked the detached task, and reopening the
+path at once ran a second compactor over it (an overlap in 19/19
+drop-and-reopen iterations, with the live handle answering a reverse traversal
+with no rows in 4 of them). `runtime::compaction_lifecycle_test` pins the
+contract.
+
+`shutdown_async` keeps the `JoinHandle` of a task that overruns its grace
+period instead of dropping it (dropping a handle detaches the task), so
+`Uni::background_task_count` stays truthful after a timed-out shutdown.
 
 A leak here is worth more than the kilobytes suggest. The survivors never
 expire, so a suite opening thousands of databases strands many per run; on a
@@ -5426,7 +5445,33 @@ The first matching trigger fires a compaction task. After semantic compaction co
 
 ## Concurrency
 
-- **CompactionGuard** (RAII): Only one compaction task at a time
+- **CompactionGuard** (RAII): Only one compaction task at a time *per
+  `StorageManager`*. It cannot see a second handle on the same directory.
+- **`CompactionDirLock`**: an OS file lock (`flock`) on
+  `<storage root>/compaction.lock`, held for a whole background pass
+  (`execute_compaction`, which skips the tick when the lock is held) and for
+  every `Compactor::compact_all` (`VACUUM`, which waits for it). It excludes
+  other handles in this process and other processes alike, and the OS drops it
+  if the holder dies. A **writable open** waits for it too (up to 30 s, then
+  fails), because a pass left running by a dropped handle overwrites whole
+  tables and would discard the new handle's first appends — the per-backend
+  `lock_table_for_write` that serializes flush against the vertex overwrite
+  within one handle does not reach across handles. Remote object stores have
+  no such lock and are not covered.
+- **Cancellation**: `StorageManager::cancel_compaction` (called by `Drop for
+  Uni` and `shutdown_in_place`) stops a pass at its next safe point and ends
+  the background loop. Safe points: before each label's vertex pass, before
+  the vertex table replace, before each adjacency direction, before the L2
+  adjacency replace, and before the delta clear (after the replace). Each is a
+  point where a crash is already covered by the recovery suite: nothing has
+  been written, or L2 holds merge(L2, deltas) while the deltas remain and the
+  redo is a no-op. A cancelled pass returns `CompactionCancelled` and drops
+  every cached CSR. Tier-3 `optimize_table` checks the token between tables.
+  Pinned by `compaction_resilience::cancelled_compaction_leaves_store_consistent_at_every_safe_point`
+  (failpoints lane).
+- The background loop's `select!` is `biased` with shutdown first and uses
+  `MissedTickBehavior::Skip`; unbiased, a tick made ready by a long pass won
+  half the races against a pending shutdown and started another pass.
 - Frozen L0 segments remain readable during CSR rebuild until atomic swap
 - Snapshot-based reads are completely unaffected by compaction
 - Shadow-CSR GC (`AdjacencyManager::gc_shadow`) runs on the same task, right after CSR compaction, bounded by the versions in-flight `pinned_at_version` views hold — an entry a live reader still resolves is never reclaimed (see [ShadowCsr](#shadowcsr-deleted-edge-overlay))

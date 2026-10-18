@@ -1106,6 +1106,10 @@ impl Uni {
     /// Propagates a failure to stop the background tasks. A flush failure is
     /// logged rather than propagated, matching the previous behaviour.
     pub async fn shutdown_in_place(&self) -> Result<()> {
+        // Stop an in-flight compaction at its next safe point rather than
+        // letting it run to completion against a closing database.
+        self.inner.storage.cancel_compaction();
+
         // Flush pending data.
         if let Some(writer) = &self.inner.writer {
             if let Err(e) = writer.flush_to_l1(None).await {
@@ -1172,6 +1176,15 @@ impl Uni {
     pub fn uri(&self) -> &str {
         &self.inner.uri
     }
+
+    /// Number of tracked background tasks still running.
+    ///
+    /// Zero after [`Self::shutdown_in_place`] returns unless a task overran
+    /// the shutdown grace period.
+    #[must_use]
+    pub fn background_task_count(&self) -> usize {
+        self.inner.shutdown_handle.live_task_count()
+    }
 }
 
 /// Removes a temporary database's scratch directory, retrying briefly.
@@ -1196,52 +1209,62 @@ fn reap_dir(path: &std::path::Path) {
     }
 }
 
-impl Drop for Uni {
-    fn drop(&mut self) {
-        self.inner.shutdown_handle.shutdown_blocking();
-        self.await_scratch_claims();
-        tracing::debug!("Uni dropped, shutdown signal sent");
-    }
-}
+/// How long `Drop for Uni` waits for background tasks to finish.
+///
+/// Compaction stops at its next safe point once cancelled, so the wait is
+/// normally milliseconds; the bound covers one in-flight Lance commit or index
+/// rebuild. Past it the tasks are left running and a warning is logged.
+pub const DROP_TASK_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
-impl Uni {
-    /// Give the background tasks a bounded chance to release their scratch-dir
-    /// claims before this handle goes away.
+/// How long a writable open waits for another handle's compaction on the same
+/// directory to finish before failing.
+const FOREIGN_COMPACTION_WAIT: Duration = Duration::from_secs(30);
+
+impl Drop for Uni {
+    /// Stops background work and waits for it, bounded.
     ///
-    /// Ordering removal by ownership (see `ScratchDir`) is correct only while
-    /// something still runs the tasks that release the claims. At process exit
-    /// it may not: the embedder's runtime is abandoned, the tasks never wake,
-    /// the `Arc` is never released, and the directory is then removed by
-    /// *nothing at all* — strictly worse than the racy removal it replaced.
-    /// Measured at ~15% of exits with a disk-backed `TMPDIR`; a tmpfs `/tmp`
-    /// drains fast enough to hide it, which is why the first Python probe of
-    /// this read 0/200.
+    /// Cancels compaction, signals every tracked task, and then waits up to
+    /// [`DROP_TASK_JOIN_TIMEOUT`] for them to finish, so a pass does not keep
+    /// rewriting a directory its owner has given up (and that the caller may
+    /// delete or reopen next). The wait observes the tasks rather than driving
+    /// them, so it depends on where the drop runs:
     ///
-    /// Only runs off a runtime thread — the embedder-teardown case. Inside a
-    /// runtime the tasks are being driven already, and on a `current_thread`
-    /// runtime blocking here would deadlock the very tasks being waited on.
-    fn await_scratch_claims(&self) {
-        let Some(scratch) = self.inner._temp_dir.as_ref() else {
-            return;
-        };
-        if tokio::runtime::Handle::try_current().is_ok() {
-            return;
-        }
+    /// * no runtime on this thread, or a `multi_thread` runtime: waits (on a
+    ///   runtime worker, inside `block_in_place`);
+    /// * a `current_thread` runtime: does not wait, since the tasks run on
+    ///   this very thread and blocking it would stall them until the bound.
+    ///   Call [`Uni::shutdown`] there instead.
+    fn drop(&mut self) {
+        self.inner.storage.cancel_compaction();
         // The flush-coordinator finalizer blocks on its submit channel and
-        // never sees the shutdown broadcast, so it would hold its claim until
-        // the deadline every single time — turning this bounded wait into an
-        // unconditional one. `shutdown_in_place` closes the channel for the
-        // same reason; this is the synchronous half of that.
+        // never sees the shutdown broadcast; without closing the channel it
+        // would hold the wait to its bound every time. `shutdown_in_place`
+        // closes it for the same reason.
         if let Some(writer) = self.inner.writer.as_ref()
             && let Some(coord) = writer.flush_coordinator()
         {
             coord.close_submit_channel();
         }
-        // One claim is `UniInner`'s own; any excess belongs to a live task.
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while Arc::strong_count(scratch) > 1 && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(5));
+        let handle = &self.inner.shutdown_handle;
+        let live = match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
+            Err(_) => handle.shutdown_and_wait_blocking(DROP_TASK_JOIN_TIMEOUT),
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(|| {
+                handle.shutdown_and_wait_blocking(DROP_TASK_JOIN_TIMEOUT)
+            }),
+            Ok(_) => {
+                handle.shutdown_blocking();
+                0
+            }
+        };
+        if live > 0 {
+            tracing::warn!(
+                live,
+                timeout = ?DROP_TASK_JOIN_TIMEOUT,
+                "Uni dropped with background tasks still running; call \
+                 `Uni::shutdown` to wait for them"
+            );
         }
+        tracing::debug!("Uni dropped, background tasks signalled");
     }
 }
 
@@ -1275,7 +1298,8 @@ fn track_task_with_scratch_claim(
 /// Held as an `Arc` by `UniInner` **and** by every background task that can
 /// write into the directory. That is the whole point: on the bare-drop path
 /// (`db = Uni.temporary()` with no `with` block, from Python) `Drop for Uni`
-/// only calls `shutdown_blocking`, which sends a broadcast and awaits nothing.
+/// used to only send a broadcast and await nothing; it now waits, bounded, but
+/// not on a `current_thread` runtime, so the ordering is still needed.
 /// With the guard owned solely by `UniInner`, teardown removed the directory
 /// *successfully* and the auto-flush task — waking on that very same broadcast
 /// to perform its final flush — then wrote a catalog manifest and recreated the
@@ -1306,8 +1330,8 @@ impl Drop for UniInner {
     /// Reap the scratch directory on the implicit teardown path.
     ///
     /// A caller who never calls [`Uni::shutdown`] — `db = Uni.temporary()` with
-    /// no `with` block, from Python — reached only `Drop for Uni`, whose
-    /// `shutdown_blocking` sends a broadcast and awaits nothing. Cleanup then
+    /// no `with` block, from Python — reached only `Drop for Uni`, which then
+    /// sent a broadcast and awaited nothing. Cleanup then
     /// fell through to `TempDir`'s own `Drop`: one un-retried `remove_dir_all`
     /// whose error is discarded. That call walks and then unlinks, so a
     /// background flush landing mid-walk yields `ENOTEMPTY` and the directory
@@ -1716,6 +1740,17 @@ impl UniBuilder {
         storage.set_requires_adjacency_revalidation(self.read_only);
 
         let storage = Arc::new(storage);
+
+        // A handle dropped on this path a moment ago may still be inside a
+        // compaction pass (a `current_thread` runtime cannot join it on drop).
+        // Its table overwrites would discard this handle's first writes, so a
+        // writable open waits it out. A no-op when nothing holds the lock.
+        if !self.read_only {
+            storage
+                .wait_for_foreign_compaction(FOREIGN_COMPACTION_WAIT)
+                .await
+                .map_err(UniError::Internal)?;
+        }
 
         // Create shutdown handle
         let shutdown_handle = Arc::new(ShutdownHandle::new(Duration::from_secs(30)));
