@@ -704,7 +704,7 @@ mod tests {
         };
         assert_eq!(
             mixed.to_sql().unwrap(),
-            "(i IN (0) OR CAST(NULL AS BOOLEAN))"
+            "(`i` IN (0) OR CAST(NULL AS BOOLEAN))"
         );
 
         // The common, NULL-free case keeps the plain rendering.
@@ -712,7 +712,7 @@ mod tests {
             column: "i".into(),
             values: vec![Scalar::Int(0), Scalar::Int(1)],
         };
-        assert_eq!(plain.to_sql().unwrap(), "i IN (0, 1)");
+        assert_eq!(plain.to_sql().unwrap(), "`i` IN (0, 1)");
     }
 
     /// End-to-end for the shape the proptest shrank to: the native evaluator
@@ -887,7 +887,7 @@ mod tests {
         );
         assert_eq!(
             FilterExpr::version_at_most(u64::MAX).to_sql().unwrap(),
-            "_version <= 18446744073709551615"
+            "`_version` <= 18446744073709551615"
         );
     }
 
@@ -954,7 +954,7 @@ mod tests {
             op: CmpOp::Eq,
             value: Scalar::Str("it's".to_string()),
         };
-        assert_eq!(expr.to_sql().unwrap(), "s = 'it''s'");
+        assert_eq!(expr.to_sql().unwrap(), "`s` = 'it''s'");
         assert!(!eval_rids(&expr, &batch()).unwrap().is_empty());
     }
 
@@ -1087,6 +1087,345 @@ mod tests {
             msg.contains("Cast error") && msg.contains("createdAt"),
             "expected the string literal 'createdAt' to fail its cast to the \
              Int64 column, got: {msg}"
+        );
+    }
+
+    /// `i64::MIN` has no SQL literal: `-9223372036854775808` parses as the
+    /// negation of an overflowing integer, becomes a `Float64`, and fails the
+    /// scan against an `Int64` column (measured through the planner: `n.x =
+    /// $p` with `$p = i64::MIN` failed with `could not convert to literal of
+    /// type 'Int64'`). The renderer respells every operator; this checks the
+    /// respelling selects what the native evaluator selects, alone, under
+    /// `NOT`, and inside `IN` lists, on a column holding `MIN`, `MIN + 1` and
+    /// NULL.
+    #[test]
+    fn i64_min_operand_renders_and_agrees_with_eval() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let uri = tmp.path().join("m.lance").to_string_lossy().to_string();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("rid", arrow_schema::DataType::UInt64, false),
+            Field::new("i", arrow_schema::DataType::Int64, true),
+        ]));
+        let values = [
+            Some(i64::MIN),
+            Some(i64::MIN + 1),
+            Some(-1),
+            Some(0),
+            Some(i64::MAX),
+            None,
+        ];
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(UInt64Array::from_iter_values(0..values.len() as u64)),
+                Arc::new(Int64Array::from_iter(values)),
+            ],
+        )
+        .expect("batch");
+        rt.block_on(async {
+            lance::Dataset::write(
+                RecordBatchIterator::new(vec![Ok(batch.clone())], schema),
+                &uri,
+                None,
+            )
+            .await
+            .expect("write");
+        });
+        let ds = rt.block_on(lance::Dataset::open(&uri)).expect("open");
+
+        let min = Scalar::Int(i64::MIN);
+        let mut exprs = Vec::new();
+        for op in [
+            CmpOp::Eq,
+            CmpOp::NotEq,
+            CmpOp::Lt,
+            CmpOp::LtEq,
+            CmpOp::Gt,
+            CmpOp::GtEq,
+        ] {
+            let leaf = FilterExpr::compare("i", op, min.clone());
+            exprs.push(FilterExpr::negate(leaf.clone()));
+            exprs.push(leaf);
+        }
+        for list in [
+            vec![min.clone()],
+            vec![min.clone(), Scalar::Int(0)],
+            vec![min.clone(), Scalar::Null],
+        ] {
+            let leaf = FilterExpr::one_of("i", list);
+            exprs.push(FilterExpr::negate(leaf.clone()));
+            exprs.push(leaf);
+        }
+        for expr in exprs {
+            let sql = expr.to_sql().expect("renderable");
+            assert!(
+                !sql.contains("9223372036854775808"),
+                "i64::MIN must not appear as a literal: {sql}"
+            );
+            let native = eval_rids(&expr, &batch).expect("evaluable");
+            let lance = rt
+                .block_on(sql_rids(&ds, &sql))
+                .unwrap_or_else(|e| panic!("{expr:?} rendered as `{sql}` failed: {e}"));
+            assert_eq!(native, lance, "{expr:?} rendered as `{sql}`");
+        }
+    }
+
+    /// Column names that are SQL keywords, mixed case, non-ASCII, or carry
+    /// spaces, dashes, dots and quote characters. Every one is a legal Arrow
+    /// field name and a legal backtick-quoted Cypher property name.
+    const AWKWARD: &[&str] = &[
+        "order",
+        "select",
+        "group",
+        "limit",
+        "from",
+        "value",
+        "date",
+        "where",
+        "and",
+        "not",
+        "null",
+        "true",
+        "my prop",
+        "a-b",
+        "Upper",
+        "MixedCase",
+        "ünïcödé",
+        "日本語",
+        "has\"dq",
+        "has'sq",
+        "1lead",
+    ];
+    /// A legal Arrow field name no filter spelling reaches: Lance resolves the
+    /// unescaped identifier as a field path, where a bare backtick is invalid.
+    const UNSPELLABLE: &str = "has`tick";
+    const AWKWARD_VALS: [Option<&str>; 4] = [Some("a"), Some("b"), Some("c"), None];
+    const AWKWARD_ROWS: usize = 40;
+
+    /// One `Utf8` column per [`AWKWARD`] name, each cycling `a, b, c, NULL` at
+    /// its own phase, plus a list column whose name has a space.
+    fn awkward_batch() -> RecordBatch {
+        let mut fields = vec![Field::new("rid", arrow_schema::DataType::UInt64, false)];
+        let mut cols: Vec<Arc<dyn arrow_array::Array>> = vec![Arc::new(
+            UInt64Array::from_iter_values(0..AWKWARD_ROWS as u64),
+        )];
+        for (k, name) in AWKWARD.iter().enumerate() {
+            fields.push(Field::new(*name, arrow_schema::DataType::Utf8, true));
+            cols.push(Arc::new(StringArray::from_iter(
+                (0..AWKWARD_ROWS).map(|r| AWKWARD_VALS[(r + k) % AWKWARD_VALS.len()]),
+            )));
+        }
+        fields.push(Field::new(UNSPELLABLE, arrow_schema::DataType::Utf8, true));
+        cols.push(Arc::new(StringArray::from_iter(
+            (0..AWKWARD_ROWS).map(|r| AWKWARD_VALS[r % AWKWARD_VALS.len()]),
+        )));
+        let mut labels = ListBuilder::new(StringBuilder::new());
+        for r in 0..AWKWARD_ROWS {
+            if r % 3 == 0 {
+                labels.values().append_value("Person");
+            }
+            labels.append(true);
+        }
+        let labels = labels.finish();
+        fields.push(Field::new("my labels", labels.data_type().clone(), true));
+        cols.push(Arc::new(labels));
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).expect("batch")
+    }
+
+    /// Every predicate shape `to_sql` renders, over one column.
+    fn awkward_exprs(col: &str) -> Vec<FilterExpr> {
+        let s = |v: &str| Scalar::Str(v.to_string());
+        vec![
+            FilterExpr::equals(col, s("b")),
+            FilterExpr::one_of(col, [s("a"), s("c")]),
+            FilterExpr::one_of(col, [s("a"), Scalar::Null]),
+            FilterExpr::compare(col, CmpOp::Gt, s("a")),
+            FilterExpr::compare(col, CmpOp::LtEq, s("b")),
+            FilterExpr::all([
+                FilterExpr::compare(col, CmpOp::GtEq, s("b")),
+                FilterExpr::compare(col, CmpOp::Lt, s("c")),
+            ]),
+            FilterExpr::StringMatch {
+                column: col.to_string(),
+                kind: StringMatchKind::StartsWith,
+                pattern: "b".to_string(),
+            },
+            FilterExpr::IsNull(col.to_string()),
+            FilterExpr::IsNotNull(col.to_string()),
+            FilterExpr::negate(FilterExpr::equals(col, s("a"))),
+        ]
+    }
+
+    async fn write_awkward(uri: &str, batch: &RecordBatch) -> lance::Dataset {
+        lance::Dataset::write(
+            RecordBatchIterator::new(vec![Ok(batch.clone())], batch.schema()),
+            uri,
+            None,
+        )
+        .await
+        .expect("write");
+        lance::Dataset::open(uri).await.expect("open")
+    }
+
+    /// The single quoting rule, checked against the real Lance filter parser.
+    ///
+    /// Before identifiers were quoted, `to_sql` emitted them bare, and a bare
+    /// keyword (`order = 'b'`) or a name with a space (`my prop = 'b'`) is a
+    /// parse error from Lance; a bare `Upper` resolved case-insensitively.
+    /// Every rendering here must parse and select exactly the rows the native
+    /// evaluator selects, which reads the column by exact name.
+    ///
+    /// Measured with bare names (the pre-quoting renderer), 90 of the 222
+    /// cases failed: parse or planning errors for `my prop`, `a-b`, `1lead`,
+    /// `has'sq`, `not`, `select` under `NOT`/`AND`, and **silent wrong rows**
+    /// for `null` and `true`, which parse as literals (`null IS NULL` kept all
+    /// 40 rows, the native answer is 10).
+    #[test]
+    fn awkward_column_names_agree_with_lance() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let uri = tmp.path().join("k.lance").to_string_lossy().to_string();
+        let batch = awkward_batch();
+        let ds = rt.block_on(write_awkward(&uri, &batch));
+
+        let mut failures = Vec::new();
+        let mut exprs: Vec<FilterExpr> = AWKWARD.iter().flat_map(|c| awkward_exprs(c)).collect();
+        exprs.push(FilterExpr::array_contains(
+            "my labels",
+            Scalar::Str("Person".into()),
+        ));
+        // Two awkward columns in one conjunction, as a pushed scan filter has.
+        exprs.push(FilterExpr::all([
+            FilterExpr::equals("order", Scalar::Str("a".into())),
+            FilterExpr::IsNotNull("my prop".into()),
+        ]));
+        for expr in &exprs {
+            let sql = expr.to_sql().expect("renderable");
+            let native = eval_rids(expr, &batch).expect("evaluable");
+            match rt.block_on(sql_rids(&ds, &sql)) {
+                Ok(lance) if lance == native => {}
+                Ok(lance) => failures.push(format!(
+                    "WRONG `{sql}`: lance {} rows, native {} rows",
+                    lance.len(),
+                    native.len()
+                )),
+                Err(e) => failures.push(format!("ERROR `{sql}`: {e}")),
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of {} renderings disagree with the native evaluator:\n{}",
+            failures.len(),
+            exprs.len(),
+            failures.join("\n")
+        );
+
+        // The one unspellable name: refused, never emitted, and weakened to
+        // "match all" for the residual filter to finish.
+        for expr in awkward_exprs(UNSPELLABLE) {
+            assert!(
+                matches!(expr.to_sql(), Err(ToSqlError::Unsupported(_))),
+                "{expr:?} must refuse to render"
+            );
+            assert_eq!(expr.sql_pushable(), FilterExpr::Literal(true));
+        }
+        // Inside a conjunction only that conjunct is dropped; the rest pushes.
+        let mixed = FilterExpr::all([
+            FilterExpr::equals(UNSPELLABLE, Scalar::Str("a".into())),
+            FilterExpr::equals("order", Scalar::Str("a".into())),
+        ]);
+        let pushed = mixed.sql_pushable();
+        assert_eq!(pushed, FilterExpr::equals("order", Scalar::Str("a".into())));
+        let sql = pushed.to_sql().expect("renderable");
+        let lance = rt.block_on(sql_rids(&ds, &sql)).expect("scan");
+        let native_mixed = eval_rids(&mixed, &batch).expect("evaluable");
+        assert!(
+            native_mixed.iter().all(|r| lance.contains(r)),
+            "the weakened filter must keep every row the full one keeps"
+        );
+    }
+
+    /// Quoting must not cost the scalar index: Lance has to recognize a
+    /// backtick-quoted column as the indexed one, or every pushed lookup on an
+    /// awkward name silently degrades to a full scan.
+    #[test]
+    fn awkward_column_names_still_reach_a_btree_index() {
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let uri = tmp.path().join("ix.lance").to_string_lossy().to_string();
+        let batch = awkward_batch();
+        let mut ds = rt.block_on(write_awkward(&uri, &batch));
+        let params = lance_index::scalar::ScalarIndexParams::for_builtin(
+            lance_index::scalar::BuiltinIndexType::BTree,
+        );
+        let mut indexed = Vec::new();
+        let mut unindexable = Vec::new();
+        for name in AWKWARD {
+            match rt.block_on(lance::index::DatasetIndexExt::create_index(
+                &mut ds,
+                &[*name],
+                lance_index::IndexType::Scalar,
+                None,
+                &params,
+                true,
+            )) {
+                Ok(_) => indexed.push(*name),
+                Err(e) => unindexable.push(format!("{name}: {e}")),
+            }
+        }
+        let ds = rt.block_on(lance::Dataset::open(&uri)).expect("reopen");
+
+        let mut failures = Vec::new();
+        for name in &indexed {
+            for expr in [
+                FilterExpr::equals(*name, Scalar::Str("b".into())),
+                FilterExpr::compare(*name, CmpOp::Gt, Scalar::Str("a".into())),
+            ] {
+                let sql = expr.to_sql().expect("renderable");
+                let native = eval_rids(&expr, &batch).expect("evaluable");
+                let plan = rt.block_on(async {
+                    let mut sc = ds.scan();
+                    sc.project(&["rid"])?;
+                    sc.filter(&sql)?;
+                    sc.explain_plan(true).await
+                });
+                match plan {
+                    Ok(p) if p.contains("ScalarIndexQuery") || p.contains("MaterializeIndex") => {}
+                    Ok(p) => failures.push(format!("NO INDEX `{sql}`:\n{p}")),
+                    Err(e) => failures.push(format!("ERROR `{sql}`: {e}")),
+                }
+                match rt.block_on(sql_rids(&ds, &sql)) {
+                    Ok(lance) if lance == native => {}
+                    Ok(_) => failures.push(format!("WRONG `{sql}`")),
+                    Err(e) => failures.push(format!("ERROR `{sql}`: {e}")),
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "indexed {} names, unindexable: {unindexable:?}\n{}",
+            indexed.len(),
+            failures.join("\n")
+        );
+        assert!(
+            unindexable.is_empty(),
+            "Lance refused to index: {unindexable:?}"
+        );
+        // Lance cannot index the unspellable name either (`column 'has`tick'
+        // does not exist`), so refusing it in `to_sql` costs no index.
+        let mut ds = ds;
+        assert!(
+            rt.block_on(lance::index::DatasetIndexExt::create_index(
+                &mut ds,
+                &[UNSPELLABLE],
+                lance_index::IndexType::Scalar,
+                None,
+                &params,
+                true,
+            ))
+            .is_err(),
+            "Lance now indexes a backtick name; revisit the refusal in quote_ident"
         );
     }
 }

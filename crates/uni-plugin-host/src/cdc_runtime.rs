@@ -50,10 +50,20 @@
 //!   so the next write retries them.
 //!
 //! The write itself (two `fsync`s) runs on tokio's blocking pool, never on
-//! an executor thread and never under the `streams` lock. A slow disk
-//! therefore delays only the checkpoint, not every other task on the
-//! caller's runtime — on a `current_thread` runtime an inline `fsync`
-//! stalls the whole runtime for as long as the disk takes.
+//! an executor thread. A slow disk therefore delays only the checkpoint,
+//! not every other task on the caller's runtime — on a `current_thread`
+//! runtime an inline `fsync` stalls the whole runtime for as long as the
+//! disk takes.
+//!
+//! ## Plugin calls run off the executor
+//!
+//! `CdcStream::deliver` / `checkpoint` / `shutdown` and
+//! `CdcOutputProvider::start` are synchronous plugin calls whose duration
+//! the host does not control (a Kafka or webhook sink does network I/O in
+//! `deliver`). The driver task therefore owns the streams outright and
+//! hands them to the blocking pool for each commit; nothing on an executor
+//! thread runs plugin code or waits on a lock that plugin code holds.
+//! Stream counts for diagnostics are published as atomics after each step.
 //!
 //! Providers whose [`CdcOutputProvider::resumes_from_checkpoint`] is
 //! `false` (they ignore `from_lsn`, e.g. the built-in in-memory provider)
@@ -76,6 +86,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 use parking_lot::Mutex;
@@ -428,8 +439,14 @@ fn start_stream(
 /// `Uni::build`; the running background task exits when
 /// `ShutdownHandle` signals shutdown.
 pub struct CdcRuntime {
-    /// Active streams keyed by provider name.
-    streams: Arc<Mutex<Vec<ActiveStream>>>,
+    /// Number of streams the driver holds, published after each step.
+    ///
+    /// The streams themselves are owned by the driver task (see the module
+    /// docs), so diagnostics read these counts instead of a shared lock.
+    active_count: AtomicUsize,
+    /// Number of those streams that are halted, published with
+    /// [`Self::active_count`].
+    halted_count: AtomicUsize,
     /// Checkpoint sidecar (`None` when no local data path).
     checkpoint: Option<CdcCheckpointSidecar>,
     /// Background writer for `checkpoint` (`None` exactly when it is).
@@ -442,9 +459,8 @@ pub struct CdcRuntime {
 
 impl std::fmt::Debug for CdcRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let count = self.streams.lock().len();
         f.debug_struct("CdcRuntime")
-            .field("active_streams", &count)
+            .field("active_streams", &self.active_stream_count())
             .field(
                 "checkpoint_path",
                 &self.checkpoint.as_ref().map(|c| c.path().to_path_buf()),
@@ -502,27 +518,39 @@ impl CdcRuntime {
             .map(|sidecar| Arc::new(CheckpointWriter::new(sidecar)));
         let writer_handle = writer.as_ref().map(|w| tokio::spawn(Arc::clone(w).run()));
         let runtime = Arc::new(Self {
-            streams: Arc::new(Mutex::new(active)),
+            active_count: AtomicUsize::new(0),
+            halted_count: AtomicUsize::new(0),
             checkpoint,
             writer,
             registry: Arc::clone(registry),
         });
+        runtime.publish_counts(&active);
 
-        // Spawn the driver task. When the broadcast channel sends an
-        // Err (lagged or closed) we re-loop; on `recv` of an
-        // `Arc<CommitNotification>` we forward.
+        // Spawn the driver task. It owns the streams; every step that calls
+        // into a plugin runs on the blocking pool via `off_executor`.
         let runtime_clone = Arc::clone(&runtime);
         let mut shutdown_rx = shutdown.subscribe();
         let handle = tokio::spawn(async move {
+            let mut streams = active;
             loop {
                 tokio::select! {
                     biased;
                     _ = shutdown_rx.recv() => {
-                        runtime_clone.shutdown_streams();
+                        runtime_clone
+                            .off_executor(streams, |rt, s| rt.shutdown_streams(s))
+                            .await;
                         break;
                     }
                     next = commit_rx.recv() => match next {
-                        Ok(notif) => runtime_clone.deliver_commit(&notif),
+                        Ok(notif) => {
+                            let delivered = runtime_clone
+                                .off_executor(streams, move |rt, s| rt.deliver_commit(s, &notif))
+                                .await;
+                            match delivered {
+                                Some(s) => streams = s,
+                                None => break,
+                            }
+                        }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                             tracing::warn!(
                                 lagged = n,
@@ -530,7 +558,8 @@ impl CdcRuntime {
                                  (the dropped commits cannot be redelivered, so continuing would \
                                  leave a silent gap in every feed)",
                             );
-                            runtime_clone.halt_all_streams();
+                            halt_all_streams(&mut streams);
+                            runtime_clone.publish_counts(&streams);
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
@@ -554,23 +583,65 @@ impl CdcRuntime {
     }
 
     /// Number of currently-active CDC streams (for diagnostics + tests).
+    ///
+    /// As of the driver's last completed step: a commit being delivered is
+    /// reflected once its delivery returns.
     #[must_use]
     pub fn active_stream_count(&self) -> usize {
-        self.streams.lock().len()
+        self.active_count.load(Ordering::Acquire)
     }
 
     /// Number of streams currently halted after a deliver failure or a
-    /// broadcaster lag (for diagnostics + tests).
+    /// broadcaster lag (for diagnostics + tests). Same freshness as
+    /// [`Self::active_stream_count`].
     #[must_use]
     pub fn halted_stream_count(&self) -> usize {
-        self.streams.lock().iter().filter(|s| s.halted).count()
+        self.halted_count.load(Ordering::Acquire)
     }
 
-    /// Halt every active stream — used when the commit broadcaster lagged and
-    /// dropped commits that cannot be redelivered.
-    fn halt_all_streams(&self) {
-        for active in self.streams.lock().iter_mut() {
-            halt(active, "broadcaster lagged");
+    /// Publish `streams`' counts for [`Self::active_stream_count`] and
+    /// [`Self::halted_stream_count`].
+    fn publish_counts(&self, streams: &[ActiveStream]) {
+        let halted = streams.iter().filter(|s| s.halted).count();
+        self.halted_count.store(halted, Ordering::Release);
+        self.active_count.store(streams.len(), Ordering::Release);
+    }
+
+    /// Run `step` over the driver's streams on the blocking pool.
+    ///
+    /// Returns the streams back, or `None` if the blocking task did not
+    /// complete (the runtime is shutting down, or `step` panicked outside a
+    /// plugin call); the streams are then gone and the driver stops.
+    async fn off_executor<F>(
+        self: &Arc<Self>,
+        mut streams: Vec<ActiveStream>,
+        step: F,
+    ) -> Option<Vec<ActiveStream>>
+    where
+        F: FnOnce(&Self, &mut Vec<ActiveStream>) + Send + 'static,
+    {
+        let rt = Arc::clone(self);
+        let joined = tokio::task::spawn_blocking(move || {
+            step(&rt, &mut streams);
+            streams
+        })
+        .await;
+        match joined {
+            Ok(streams) => {
+                self.publish_counts(&streams);
+                Some(streams)
+            }
+            Err(e) => {
+                metrics::counter!("uni_cdc_stream_halted_total")
+                    .increment(self.active_stream_count() as u64);
+                self.publish_counts(&[]);
+                tracing::error!(
+                    error = %e,
+                    "CdcRuntime: a delivery step did not complete; CDC has stopped for every \
+                     stream and will not resume without a restart",
+                );
+                None
+            }
         }
     }
 
@@ -598,9 +669,8 @@ impl CdcRuntime {
     /// via `Uni::add_plugin`) and start a stream for each one. Called
     /// at the start of every `deliver_commit` so dynamic
     /// registrations don't miss any commits past the first.
-    fn discover_new_providers(&self) {
+    fn discover_new_providers(&self, streams: &mut Vec<ActiveStream>) {
         let snapshot = self.registry.cdc_outputs_snapshot();
-        let mut streams = self.streams.lock();
         for (name, provider) in snapshot {
             if streams.iter().any(|s| s.name == name.as_str()) {
                 continue;
@@ -616,8 +686,11 @@ impl CdcRuntime {
     /// Convert a single [`CommitNotification`] into a [`CdcBatch`] and
     /// deliver it to every active stream, then checkpoint each
     /// stream and persist the new LSN to the sidecar.
-    fn deliver_commit(&self, notif: &CommitNotification) {
-        self.discover_new_providers();
+    ///
+    /// Runs on the blocking pool (see [`Self::off_executor`]): every call in
+    /// here into a stream is a synchronous plugin call.
+    fn deliver_commit(&self, streams: &mut Vec<ActiveStream>, notif: &CommitNotification) {
+        self.discover_new_providers(streams);
         // FU-4: the broadcaster pre-materializes the mutation RecordBatch
         // when at least one `CdcOutputProvider` is registered (see
         // `Transaction::commit`). `None` here means either there were
@@ -633,7 +706,6 @@ impl CdcRuntime {
         // which is the same contract `deliver` failure already follows: the
         // checkpoint stays at the last contiguous commit so the gap is visible.
         if notif.mutations_failed {
-            let mut streams = self.streams.lock();
             for active in streams.iter_mut() {
                 if active.halted {
                     continue;
@@ -660,7 +732,6 @@ impl CdcRuntime {
             commit_timestamp: SystemTime::now(),
         };
 
-        let mut streams = self.streams.lock();
         for active in streams.iter_mut() {
             // Never deliver to (or checkpoint) a halted stream — its checkpoint
             // must stay at the last contiguous commit so the gap is visible, not
@@ -668,21 +739,40 @@ impl CdcRuntime {
             if active.halted {
                 continue;
             }
-            if let Err(e) = active.stream.deliver(&batch) {
-                tracing::warn!(
-                    provider = %active.name,
-                    error = %e,
-                    "CdcRuntime: deliver failed; halting stream to avoid a silent feed gap \
-                     (its checkpoint stays at the last delivered commit)",
-                );
-                halt(active, "deliver failed");
-                continue;
+            // A panicking plugin halts its own stream rather than unwinding
+            // through the driver and taking every other stream with it.
+            let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                active.stream.deliver(&batch)
+            }));
+            match delivered {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        provider = %active.name,
+                        error = %e,
+                        "CdcRuntime: deliver failed; halting stream to avoid a silent feed gap \
+                         (its checkpoint stays at the last delivered commit)",
+                    );
+                    halt(active, "deliver failed");
+                    continue;
+                }
+                Err(_) => {
+                    halt(active, "deliver panicked");
+                    continue;
+                }
             }
-            match active.stream.checkpoint() {
+            let checkpointed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                active.stream.checkpoint()
+            }));
+            let Ok(checkpointed) = checkpointed else {
+                halt(active, "checkpoint panicked");
+                continue;
+            };
+            match checkpointed {
                 Ok(lsn) => {
-                    // Queue only — the fsyncing write runs on the writer task's
-                    // blocking-pool thread, never here on the executor and never
-                    // under the `streams` lock held above.
+                    // Queue only — the fsyncing write runs on the writer
+                    // task's own blocking-pool call, serialized with the
+                    // other checkpoint writes.
                     if active.persist
                         && let Some(writer) = &self.writer
                     {
@@ -699,18 +789,31 @@ impl CdcRuntime {
     }
 
     /// Call `shutdown()` on every active stream and drop them.
-    fn shutdown_streams(&self) {
-        let mut streams = self.streams.lock();
+    ///
+    /// Runs on the blocking pool (see [`Self::off_executor`]).
+    fn shutdown_streams(&self, streams: &mut Vec<ActiveStream>) {
         for active in streams.iter_mut() {
-            if let Err(e) = active.stream.shutdown() {
-                tracing::warn!(
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| active.stream.shutdown()));
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(
                     provider = %active.name,
                     error = %e,
                     "CdcRuntime: shutdown failed",
-                );
+                ),
+                Err(_) => tracing::warn!(provider = %active.name, "CdcRuntime: shutdown panicked"),
             }
         }
         streams.clear();
+    }
+}
+
+/// Halt every stream — used when the commit broadcaster lagged and dropped
+/// commits that cannot be redelivered.
+fn halt_all_streams(streams: &mut [ActiveStream]) {
+    for active in streams.iter_mut() {
+        halt(active, "broadcaster lagged");
     }
 }
 
@@ -889,6 +992,114 @@ mod tests {
             "the checkpoint is still persisted, just off the executor"
         );
         shutdown.shutdown_async().await.unwrap();
+    }
+
+    /// Provider whose stream's `deliver` blocks its thread for `delay`, as a
+    /// network sink does.
+    struct SlowDeliverProvider {
+        delay: Duration,
+        started: Arc<AtomicUsize>,
+        finished: Arc<AtomicUsize>,
+    }
+
+    struct SlowDeliverStream {
+        delay: Duration,
+        started: Arc<AtomicUsize>,
+        finished: Arc<AtomicUsize>,
+        last: CdcLsn,
+    }
+
+    impl CdcOutputProvider for SlowDeliverProvider {
+        fn name(&self) -> &str {
+            "slow-sink"
+        }
+        fn start(&self, _ctx: CdcStartContext<'_>) -> Result<Box<dyn CdcStream>, FnError> {
+            Ok(Box::new(SlowDeliverStream {
+                delay: self.delay,
+                started: Arc::clone(&self.started),
+                finished: Arc::clone(&self.finished),
+                last: CdcLsn(0),
+            }))
+        }
+        fn resumes_from_checkpoint(&self) -> bool {
+            false
+        }
+    }
+
+    impl CdcStream for SlowDeliverStream {
+        fn deliver(&mut self, batch: &CdcBatch) -> Result<(), FnError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(self.delay);
+            self.last = batch.lsn_end;
+            self.finished.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn checkpoint(&mut self) -> Result<CdcLsn, FnError> {
+            Ok(self.last)
+        }
+        fn shutdown(&mut self) -> Result<(), FnError> {
+            Ok(())
+        }
+    }
+
+    /// A slow plugin `deliver` must not stall other tasks on the runtime.
+    ///
+    /// Same shape as the slow-checkpoint test above, one step earlier: the
+    /// driver called the plugin's synchronous `deliver` inline (under the
+    /// `streams` lock), so on a `current_thread` runtime a sink that took
+    /// `SLOW` to accept a batch stalled every other task for that long.
+    #[tokio::test]
+    async fn slow_plugin_deliver_does_not_stall_the_runtime() {
+        const SLOW: Duration = Duration::from_secs(2);
+        let started = Arc::new(AtomicUsize::new(0));
+        let finished = Arc::new(AtomicUsize::new(0));
+        let registry = Arc::new(PluginRegistry::new());
+        let caps = CapabilitySet::from_iter_of([Capability::Cdc]);
+        let mut r = PluginRegistrar::new(PluginId::new("test"), &caps, &registry);
+        r.cdc_output(Arc::new(SlowDeliverProvider {
+            delay: SLOW,
+            started: Arc::clone(&started),
+            finished: Arc::clone(&finished),
+        }))
+        .expect("register cdc_output");
+        r.commit_to_registry().expect("commit");
+        let (tx, rx) = broadcast::channel(16);
+        let shutdown = ShutdownHandle::new(Duration::from_secs(10));
+        let runtime = CdcRuntime::spawn(&registry, rx, None, &shutdown);
+
+        tx.send(commit(100)).unwrap();
+        let t0 = Instant::now();
+        let unrelated = tokio::spawn(async {
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+        unrelated.await.unwrap();
+        let elapsed = t0.elapsed();
+
+        assert_eq!(
+            started.load(Ordering::SeqCst),
+            1,
+            "control: the delivery must have started during the window"
+        );
+        assert!(
+            elapsed < SLOW / 2,
+            "an unrelated task took {elapsed:?} with a {SLOW:?} plugin deliver in flight: \
+             the delivery is blocking the runtime"
+        );
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            0,
+            "the unrelated task must finish while the delivery is still in flight"
+        );
+
+        shutdown.shutdown_async().await.unwrap();
+        assert_eq!(finished.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            runtime.active_stream_count(),
+            0,
+            "shutdown drops every stream"
+        );
     }
 
     /// Commits queued behind a slow write coalesce, and the persisted LSN only

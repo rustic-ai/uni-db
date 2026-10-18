@@ -96,6 +96,11 @@ fn ext_id_for(map: &HashMap<Vid, String>, vid: Vid) -> Option<&str> {
 /// row's content UID never matches and the promote dedup silently never fires.
 ///
 /// When `ext_id` is `None` the props are hashed unchanged (a no-op re-injection).
+///
+/// Query results now carry `ext_id` for flushed labelled vertices too (they
+/// dropped it only because the per-label read ignored the `ext_id` column),
+/// so the re-injection is idempotent there; it stays as the guarantee that
+/// the digest is built from the storage-sourced value.
 fn content_uid_with_ext_id(
     label: &str,
     ext_id: Option<&str>,
@@ -728,12 +733,28 @@ where
                 )
                 .await;
 
+                // `ext_id` is unique across the graph, so an insert-only twin of
+                // a vertex whose `ext_id` primary already holds cannot carry it:
+                // the twin is inserted without it, and the original keeps it.
+                // A fork-only `ext_id` is carried over. (Query results used to
+                // drop a flushed labelled vertex's `ext_id`, so every twin went
+                // without it and so did every fork-only vertex — the latter
+                // silently.)
+                let held_on_primary: HashSet<&str> =
+                    primary_ext_ids.values().map(String::as_str).collect();
                 let mut to_insert: Vec<Properties> = Vec::with_capacity(uid_candidates.len());
                 let mut insert_uids: Vec<UniId> = Vec::with_capacity(uid_candidates.len());
-                for (uid, props) in uid_candidates {
+                for (uid, mut props) in uid_candidates {
                     if on_primary.contains_key(&uid) {
                         report.vertices_skipped_uid_conflict += 1;
                     } else {
+                        if props
+                            .get("ext_id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|e| held_on_primary.contains(e))
+                        {
+                            props.remove("ext_id");
+                        }
                         to_insert.push(props);
                         insert_uids.push(uid);
                     }

@@ -18,7 +18,24 @@
 //! The search is not bidirectional. Which of several equal-length paths
 //! `shortestPath` returns is decided by the forward expansion order (the first
 //! vertex, in BFS order, that reaches the target is its parent), and a
-//! bidirectional meet would choose differently. A target filter such as
+//! bidirectional meet would choose differently. The expansion order is
+//! deterministic: edge types in pattern order, then outgoing before incoming
+//! for an undirected pattern, then neighbors as the adjacency returns them,
+//! ordered by `(neighbor vid, eid)`. The same query over the same graph
+//! therefore returns the same path every time, whichever storage tier holds
+//! its edges.
+//!
+//! # Relationships
+//!
+//! The search records, with each vertex's predecessor, the **edge** it was
+//! reached over, its type and its stored orientation (`Hop`). The path's
+//! relationships are read from that record. They used to be looked up again
+//! after the search, by scanning the predecessor's neighbors for the first
+//! admitted edge to the next vertex, twice per hop (once to prefetch, once to
+//! build), plus an adjacency probe per hop to recover the stored orientation.
+//! That was most of the cost of a many-target query, and it was wrong for
+//! `allShortestPaths` over parallel edges: each parallel edge makes a distinct
+//! path, and the rows for them came back carrying the same relationship. A target filter such as
 //! `WHERE b.x < 20` is applied by the planner to the target's scan, before the
 //! cross join, so the operator sees only the qualifying targets.
 //!
@@ -33,10 +50,10 @@
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::bitmap::EidFilter;
 use crate::query::df_graph::common::{
-    EdgeAppendCtx, EntityPropertyCache, append_traversed_edge, arrow_err, column_as_vid_array,
+    EdgeAppendCtx, EntityPropertyCache, append_edge_to_struct_with, arrow_err, column_as_vid_array,
     compute_plan_properties, edge_struct_fields, exec_err, new_node_list_builder,
 };
-use crate::query::df_graph::traverse::build_edge_property_filter;
+use crate::query::df_graph::traverse::{ReachableMapFilter, build_edge_property_filter};
 use arrow::compute::take;
 use arrow_array::builder::{ListBuilder, StructBuilder, UInt64Builder};
 use arrow_array::{Array, ArrayRef, RecordBatch, UInt32Array, UInt64Array};
@@ -328,15 +345,31 @@ impl ExecutionPlan for GraphShortestPathExec {
         let warm_types = self.edge_type_ids.clone();
         let warm_direction = self.direction;
         let warm_conditions = self.edge_property_conditions.clone();
-        let warm_fut: Pin<Box<dyn std::future::Future<Output = DFResult<EidFilter>> + Send>> =
-            Box::pin(async move {
-                warm_ctx
-                    .ensure_adjacency_warmed(&warm_types, warm_direction)
-                    .await
-                    .map_err(exec_err)?;
-                build_edge_property_filter(&warm_ctx, &warm_types, warm_direction, &warm_conditions)
-                    .await
-            });
+        let warm_max_hops = self.max_hops as usize;
+        let warm_fut: Pin<
+            Box<dyn std::future::Future<Output = DFResult<WarmedEdgeFilter>> + Send>,
+        > = Box::pin(async move {
+            warm_ctx
+                .ensure_adjacency_warmed(&warm_types, warm_direction)
+                .await
+                .map_err(exec_err)?;
+            // The map is read over the region each batch's sources can
+            // reach, not over the whole type up front (P7).
+            if let Some(reachable) = ReachableMapFilter::new(
+                &warm_ctx,
+                &warm_types,
+                warm_direction,
+                warm_max_hops,
+                &warm_conditions,
+                None,
+                &[],
+            ) {
+                return Ok(WarmedEdgeFilter::Reachable(Box::new(reachable)));
+            }
+            build_edge_property_filter(&warm_ctx, &warm_types, warm_direction, &warm_conditions)
+                .await
+                .map(WarmedEdgeFilter::Whole)
+        });
 
         Ok(Box::pin(GraphShortestPathStream {
             input: input_stream,
@@ -349,6 +382,7 @@ impl ExecutionPlan for GraphShortestPathExec {
             batch_path_bytes: 0,
             source_bfs: None,
             source_layers: None,
+            adjacency_reads: 0,
             reservation: MemoryConsumer::new(format!("GraphShortestPathExec[{partition}]"))
                 .register(&pool),
             source_column: self.source_column.clone(),
@@ -363,6 +397,7 @@ impl ExecutionPlan for GraphShortestPathExec {
             // Replaced by the warming future's result before any batch is read;
             // `AllAllowed` admits everything, so an absent map costs nothing.
             edge_property_filter: EidFilter::AllAllowed,
+            reachable: None,
             graph_ctx: Arc::clone(&self.graph_ctx),
             schema: Arc::clone(&self.schema),
             state: ShortestPathStreamState::Warming(warm_fut),
@@ -375,12 +410,25 @@ impl ExecutionPlan for GraphShortestPathExec {
     }
 }
 
+/// The edge filter warming produces.
+enum WarmedEdgeFilter {
+    /// Complete for every walk: no map, or the whole-type pre-scan.
+    Whole(EidFilter),
+    /// Grown per batch over the region its sources reach.
+    Reachable(Box<ReachableMapFilter>),
+}
+
 /// State machine for shortest path stream execution.
 enum ShortestPathStreamState {
     /// Warming adjacency CSRs and building the edge filter before first batch.
-    Warming(Pin<Box<dyn std::future::Future<Output = DFResult<EidFilter>> + Send>>),
+    Warming(Pin<Box<dyn std::future::Future<Output = DFResult<WarmedEdgeFilter>> + Send>>),
     /// Processing input batches.
     Reading,
+    /// Growing the map's region to this batch's sources before searching.
+    Covering {
+        fut: Pin<Box<dyn std::future::Future<Output = DFResult<ReachableMapFilter>> + Send>>,
+        batch: RecordBatch,
+    },
     /// Fetching storage-backed properties for this batch's path entities before
     /// the synchronous column builders run. Path element structs carry user
     /// properties in a `properties` blob whose only synchronous accessor reads
@@ -389,7 +437,7 @@ enum ShortestPathStreamState {
     PrefetchingProperties {
         fut: Pin<Box<dyn std::future::Future<Output = DFResult<EntityPropertyCache>> + Send>>,
         input: RecordBatch,
-        paths: Vec<Option<Vec<Vid>>>,
+        paths: Vec<Option<FoundPath>>,
     },
     /// Stream is done.
     Done,
@@ -429,7 +477,13 @@ struct GraphShortestPathStream {
 
     /// Edges permitted by the relationship's inline property map. Precomputed
     /// during warming; `AllAllowed` when the pattern carried no map.
+    /// Superseded by `reachable` when that is set.
     edge_property_filter: EidFilter,
+
+    /// The map read over the region the sources so far reach (P7). Its
+    /// allow-set only grows, so a search retained across batches stays
+    /// valid. Taken out while a batch's sources are being covered.
+    reachable: Option<ReachableMapFilter>,
 
     /// Graph execution context.
     graph_ctx: Arc<GraphExecutionContext>,
@@ -454,6 +508,11 @@ struct GraphShortestPathStream {
     /// The `allShortestPaths` search retained likewise.
     source_layers: Option<SourceLayers>,
 
+    /// Per-vertex adjacency lookups made since the counters were last told,
+    /// reported as `QueryMetrics::shortest_path_adjacency_reads` once per
+    /// batch rather than per lookup, so the hot loop touches no shared atomic.
+    adjacency_reads: u64,
+
     /// Pool reservation for the BFS state and the enumerated paths (#261).
     ///
     /// Sized to what this operator holds for the batch it is working on, and
@@ -472,15 +531,17 @@ const GROW_BLOCK: usize = 64 * 1024;
 
 /// Charged per vertex a [`SourceBfs`] discovers: its `parent` and `depth`
 /// entries and its queue slot.
-const SOURCE_BFS_BYTES_PER_VERTEX: usize =
-    2 * std::mem::size_of::<(Vid, Vid)>() + std::mem::size_of::<Vid>();
+const SOURCE_BFS_BYTES_PER_VERTEX: usize = std::mem::size_of::<(Vid, Step)>()
+    + std::mem::size_of::<(Vid, u32)>()
+    + std::mem::size_of::<Vid>();
 
 /// Charged per vertex a [`SourceLayers`] discovers: its `depth` entry, its
 /// `predecessors` entry with the first predecessor, and its layer slot. A
-/// further predecessor is charged one `Vid`.
+/// further predecessor is charged one [`Step`].
 const SOURCE_LAYERS_BYTES_PER_VERTEX: usize = std::mem::size_of::<(Vid, u32)>()
-    + std::mem::size_of::<(Vid, Vec<Vid>)>()
-    + 2 * std::mem::size_of::<Vid>();
+    + std::mem::size_of::<(Vid, Vec<Step>)>()
+    + std::mem::size_of::<Step>()
+    + std::mem::size_of::<Vid>();
 
 /// A breadth-first search from one source, grown on demand for `shortestPath`.
 ///
@@ -489,9 +550,10 @@ const SOURCE_LAYERS_BYTES_PER_VERTEX: usize = std::mem::size_of::<(Vid, u32)>()
 struct SourceBfs {
     /// Where the search starts.
     source: Vid,
-    /// `parent[v]` is the vertex `v` was first reached from. The source has no
-    /// entry, which is what terminates [`rebuild_path`].
-    parent: FxHashMap<Vid, Vid>,
+    /// `parent[v]` is the vertex `v` was first reached from and the edge it
+    /// was reached over. The source has no entry, which is what terminates
+    /// [`rebuild_path`].
+    parent: FxHashMap<Vid, Step>,
     /// Hops from the source for every vertex discovered, the source included.
     depth: FxHashMap<Vid, u32>,
     /// Discovered vertices not yet expanded, in discovery order.
@@ -530,8 +592,8 @@ struct SourceLayers {
     /// Hops from the source for every vertex discovered, the source included.
     depth: FxHashMap<Vid, u32>,
     /// Every vertex one layer closer to the source with an admitted edge into
-    /// the key, once per such edge.
-    predecessors: FxHashMap<Vid, Vec<Vid>>,
+    /// the key, once per such edge, with that edge.
+    predecessors: FxHashMap<Vid, Vec<Step>>,
     /// The deepest complete layer, not yet expanded.
     current_layer: Vec<Vid>,
     /// Depth of `current_layer`.
@@ -566,24 +628,64 @@ impl SourceLayers {
     }
 }
 
-/// Walk `parent` back from `from` to the root, returning the path root-first.
-fn rebuild_path(parent: &FxHashMap<Vid, Vid>, from: Vid) -> Vec<Vid> {
-    let mut path = vec![from];
-    let mut cur = from;
-    while let Some(&p) = parent.get(&cur) {
-        path.push(p);
-        cur = p;
-    }
-    path.reverse();
-    path
+/// One hop of a path: the edge taken, as the search found it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Hop {
+    /// The edge.
+    eid: Eid,
+    /// The edge type it was found under.
+    type_id: u32,
+    /// Whether the edge is stored `(from -> to)` in walk order: found in the
+    /// outgoing adjacency of the vertex the hop leaves.
+    forward: bool,
 }
 
-/// Charged per path held in `result`: the `Vec<Vid>` header plus its elements.
+/// How a vertex was reached: the vertex one hop closer to the source, and the
+/// edge from it.
+type Step = (Vid, Hop);
+
+/// A path the operator emits: `nodes[i] -[hops[i]]- nodes[i + 1]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FoundPath {
+    nodes: Vec<Vid>,
+    hops: Vec<Hop>,
+}
+
+impl FoundPath {
+    /// The zero-length path at `v`.
+    fn at(v: Vid) -> Self {
+        Self {
+            nodes: vec![v],
+            hops: Vec::new(),
+        }
+    }
+}
+
+/// Walk `parent` back from `from` to the root, returning the path root-first.
+fn rebuild_path(parent: &FxHashMap<Vid, Step>, from: Vid) -> FoundPath {
+    let mut nodes = vec![from];
+    let mut hops = Vec::new();
+    let mut cur = from;
+    while let Some(&(p, hop)) = parent.get(&cur) {
+        nodes.push(p);
+        hops.push(hop);
+        cur = p;
+    }
+    nodes.reverse();
+    hops.reverse();
+    FoundPath { nodes, hops }
+}
+
+/// Charged per path of `len` nodes held in `result`: the two vector headers
+/// plus the nodes and the hops between them.
 ///
-/// The elements dominate for anything but a one-hop path, but the header is not
-/// negligible at the scale that matters — 64 000 four-hop paths are half header.
+/// The elements dominate for anything but a one-hop path, but the headers are
+/// not negligible at the scale that matters — 64 000 four-hop paths are about
+/// a third header.
 fn path_bytes(len: usize) -> usize {
-    std::mem::size_of::<Vec<Vid>>() + len * std::mem::size_of::<Vid>()
+    std::mem::size_of::<FoundPath>()
+        + len * std::mem::size_of::<Vid>()
+        + len.saturating_sub(1) * std::mem::size_of::<Hop>()
 }
 
 /// Move `reservation` to `want` bytes for the caller whose current charge is
@@ -622,6 +724,58 @@ impl GraphShortestPathStream {
             *uncharged = 0;
         }
         Ok(())
+    }
+
+    /// Collect into `out` every admitted edge out of `current`, in expansion
+    /// order, as the step it makes; returns the adjacency lookups made.
+    ///
+    /// An undirected pattern looks the two directions up separately, outgoing
+    /// first, so each edge comes back knowing its stored orientation. A
+    /// self-loop is listed by both and so twice, which neither search minds:
+    /// its far end is `current`, already discovered at a shallower depth.
+    fn admitted_steps(&self, current: Vid, out: &mut Vec<(Vid, Hop)>) -> u64 {
+        out.clear();
+        let mut reads = 0;
+        for &type_id in &self.edge_type_ids {
+            for &dir in self.direction.expand() {
+                reads += 1;
+                let forward = dir == Direction::Outgoing;
+                for (neighbor, eid) in self.graph_ctx.get_neighbors(current, type_id, dir) {
+                    // The property map gates expansion, not the result set: the
+                    // shortest path over permitted edges is not the shortest
+                    // path filtered afterwards.
+                    if self.edge_filter().contains(eid) {
+                        out.push((
+                            neighbor,
+                            Hop {
+                                eid,
+                                type_id,
+                                forward,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        reads
+    }
+
+    /// The allow-set the search gates edges on.
+    fn edge_filter(&self) -> &EidFilter {
+        match &self.reachable {
+            Some(r) => &r.edges()[0],
+            None => &self.edge_property_filter,
+        }
+    }
+
+    /// Report the adjacency lookups made so far to the query's counters.
+    fn flush_adjacency_reads(&mut self) {
+        if self.adjacency_reads > 0 {
+            if let Some(counters) = self.graph_ctx.counters() {
+                counters.add_shortest_path_adjacency_reads(self.adjacency_reads);
+            }
+            self.adjacency_reads = 0;
+        }
     }
 
     /// The single-source search for `source`, reusing the retained one when it
@@ -668,7 +822,8 @@ impl GraphShortestPathStream {
         &mut self,
         bfs: &mut SourceBfs,
         target: Vid,
-    ) -> DFResult<Option<Vec<Vid>>> {
+    ) -> DFResult<Option<FoundPath>> {
+        let mut steps = Vec::new();
         loop {
             if bfs.parent.contains_key(&target) {
                 return Ok(Some(rebuild_path(&bfs.parent, target)));
@@ -680,31 +835,20 @@ impl GraphShortestPathStream {
             if hops_taken >= self.max_hops {
                 continue;
             }
-            for &edge_type in &self.edge_type_ids {
-                let neighbors = self
-                    .graph_ctx
-                    .get_neighbors(current, edge_type, self.direction);
-
-                for (neighbor, eid) in neighbors {
-                    // The property map gates expansion, not the result set: the
-                    // shortest path over permitted edges is not the shortest
-                    // path filtered afterwards.
-                    if !self.edge_property_filter.contains(eid) {
-                        continue;
-                    }
-                    if let std::collections::hash_map::Entry::Vacant(slot) =
-                        bfs.depth.entry(neighbor)
-                    {
-                        slot.insert(hops_taken + 1);
-                        bfs.parent.insert(neighbor, current);
-                        bfs.queue.push_back(neighbor);
-                        Self::charge_search(
-                            &mut self.reservation,
-                            &mut bfs.charged,
-                            &mut bfs.uncharged,
-                            SOURCE_BFS_BYTES_PER_VERTEX,
-                        )?;
-                    }
+            self.adjacency_reads += self.admitted_steps(current, &mut steps);
+            for &(neighbor, hop) in &steps {
+                if let std::collections::hash_map::Entry::Vacant(slot) = bfs.depth.entry(neighbor) {
+                    slot.insert(hops_taken + 1);
+                    // The first admitted edge in expansion order is the one
+                    // the path reports, for the parent it settles on.
+                    bfs.parent.insert(neighbor, (current, hop));
+                    bfs.queue.push_back(neighbor);
+                    Self::charge_search(
+                        &mut self.reservation,
+                        &mut bfs.charged,
+                        &mut bfs.uncharged,
+                        SOURCE_BFS_BYTES_PER_VERTEX,
+                    )?;
                 }
             }
         }
@@ -745,49 +889,44 @@ impl GraphShortestPathStream {
             }
             let next_depth = layers.current_depth + 1;
             let mut next_layer: Vec<Vid> = Vec::new();
+            let mut steps = Vec::new();
             for &current in &layers.current_layer {
-                for &edge_type in &self.edge_type_ids {
-                    let neighbors =
-                        self.graph_ctx
-                            .get_neighbors(current, edge_type, self.direction);
-
-                    for (neighbor, eid) in neighbors {
-                        // Gating the forward pass is sufficient for the backward
-                        // reconstruction too: it walks `predecessors`, which is
-                        // built only from edges admitted here.
-                        if !self.edge_property_filter.contains(eid) {
-                            continue;
+                // Gating the forward pass is sufficient for the backward
+                // reconstruction too: it walks `predecessors`, which is built
+                // only from edges admitted here.
+                self.adjacency_reads += self.admitted_steps(current, &mut steps);
+                for &(neighbor, hop) in &steps {
+                    let bytes = match layers.depth.get(&neighbor) {
+                        // Already discovered: a predecessor only at the same
+                        // depth, i.e. another shortest route into it. A
+                        // parallel edge from the same vertex is one too: it
+                        // is a different path.
+                        Some(&d) if d == next_depth => {
+                            layers
+                                .predecessors
+                                .entry(neighbor)
+                                .or_default()
+                                .push((current, hop));
+                            std::mem::size_of::<Step>()
                         }
-                        let bytes = match layers.depth.get(&neighbor) {
-                            // Already discovered: a predecessor only at the same
-                            // depth, i.e. another shortest route into it.
-                            Some(&d) if d == next_depth => {
-                                layers
-                                    .predecessors
-                                    .entry(neighbor)
-                                    .or_default()
-                                    .push(current);
-                                std::mem::size_of::<Vid>()
-                            }
-                            Some(_) => continue,
-                            None => {
-                                layers.depth.insert(neighbor, next_depth);
-                                layers
-                                    .predecessors
-                                    .entry(neighbor)
-                                    .or_default()
-                                    .push(current);
-                                next_layer.push(neighbor);
-                                SOURCE_LAYERS_BYTES_PER_VERTEX
-                            }
-                        };
-                        Self::charge_search(
-                            &mut self.reservation,
-                            &mut layers.charged,
-                            &mut layers.uncharged,
-                            bytes,
-                        )?;
-                    }
+                        Some(_) => continue,
+                        None => {
+                            layers.depth.insert(neighbor, next_depth);
+                            layers
+                                .predecessors
+                                .entry(neighbor)
+                                .or_default()
+                                .push((current, hop));
+                            next_layer.push(neighbor);
+                            SOURCE_LAYERS_BYTES_PER_VERTEX
+                        }
+                    };
+                    Self::charge_search(
+                        &mut self.reservation,
+                        &mut layers.charged,
+                        &mut layers.uncharged,
+                        bytes,
+                    )?;
                 }
             }
             layers.current_layer = next_layer;
@@ -808,7 +947,7 @@ impl GraphShortestPathStream {
         &mut self,
         layers: &mut SourceLayers,
         target: Vid,
-    ) -> DFResult<Vec<Vec<Vid>>> {
+    ) -> DFResult<Vec<FoundPath>> {
         self.settle_layers(layers, target)?;
         if !layers.depth.contains_key(&target) {
             return Ok(vec![]);
@@ -848,23 +987,26 @@ impl GraphShortestPathStream {
         // charge in `compute_paths`, and resizing it to a per-call figure would
         // silently drop those.
         let mut local = 0usize;
-        let mut result: Vec<Vec<Vid>> = Vec::new();
+        let mut result: Vec<FoundPath> = Vec::new();
         let mut result_bytes = 0usize;
-        let mut stack: Vec<(Vid, Vec<Vid>)> = vec![(target, vec![target])];
+        // Paths are built target-first and reversed once complete.
+        let mut stack: Vec<(Vid, FoundPath)> = vec![(target, FoundPath::at(target))];
         let mut stack_bytes = path_bytes(1);
 
         while let Some((node, path)) = stack.pop() {
-            stack_bytes -= path_bytes(path.len());
+            stack_bytes -= path_bytes(path.nodes.len());
             if node == source {
                 let mut full_path = path;
-                full_path.reverse();
-                result_bytes += path_bytes(full_path.len());
+                full_path.nodes.reverse();
+                full_path.hops.reverse();
+                result_bytes += path_bytes(full_path.nodes.len());
                 result.push(full_path);
             } else if let Some(preds) = layers.predecessors.get(&node) {
-                for &pred in preds {
+                for &(pred, hop) in preds {
                     let mut new_path = path.clone();
-                    new_path.push(pred);
-                    stack_bytes += path_bytes(new_path.len());
+                    new_path.nodes.push(pred);
+                    new_path.hops.push(hop);
+                    stack_bytes += path_bytes(new_path.nodes.len());
                     stack.push((pred, new_path));
                 }
             }
@@ -888,17 +1030,13 @@ impl GraphShortestPathStream {
     }
 
     /// The entities the batch's paths will materialize into path element
-    /// structs, for [`EntityPropertyCache::prefetch`]. Edges are resolved the
-    /// same way [`Self::build_output_batch`] resolves them.
-    fn path_entities(&self, paths: &[Option<Vec<Vid>>]) -> (Vec<Vid>, Vec<Eid>) {
+    /// structs, for [`EntityPropertyCache::prefetch`].
+    fn path_entities(paths: &[Option<FoundPath>]) -> (Vec<Vid>, Vec<Eid>) {
         let mut vids = Vec::new();
         let mut eids = Vec::new();
         for path in paths.iter().flatten() {
-            vids.extend_from_slice(path);
-            for window in path.windows(2) {
-                let eid = self.find_edge(window[0], window[1]);
-                eids.push(eid);
-            }
+            vids.extend_from_slice(&path.nodes);
+            eids.extend(path.hops.iter().map(|h| h.eid));
         }
         (vids, eids)
     }
@@ -925,7 +1063,17 @@ impl GraphShortestPathStream {
     fn compute_paths(
         &mut self,
         batch: RecordBatch,
-    ) -> DFResult<(RecordBatch, Vec<Option<Vec<Vid>>>)> {
+    ) -> DFResult<(RecordBatch, Vec<Option<FoundPath>>)> {
+        let computed = self.compute_paths_inner(batch);
+        self.flush_adjacency_reads();
+        computed
+    }
+
+    /// [`Self::compute_paths`] without the counter bookkeeping.
+    fn compute_paths_inner(
+        &mut self,
+        batch: RecordBatch,
+    ) -> DFResult<(RecordBatch, Vec<Option<FoundPath>>)> {
         // Give back the previous batch's paths. By the time this is called
         // again they have been through `build_output_batch` and belong to the
         // consumer; holding a reservation against them would double-count them
@@ -978,17 +1126,18 @@ impl GraphShortestPathStream {
         // so `[:T]` and `[:T*1..n]` must not report the source as reaching
         // itself for free.
         let min_hops = self.min_hops;
-        let trivial = |i: usize| -> Option<Vec<Vid>> {
+        let trivial = |i: usize| -> Option<FoundPath> {
             if source_vids.is_null(i) || target_vids.is_null(i) {
                 return None;
             }
             let source = Vid::from(source_vids.value(i));
-            (source == Vid::from(target_vids.value(i)) && min_hops == 0).then(|| vec![source])
+            (source == Vid::from(target_vids.value(i)) && min_hops == 0)
+                .then(|| FoundPath::at(source))
         };
 
         if self.all_shortest {
             // allShortestPaths: each input row can produce multiple output rows
-            let mut per_row: Vec<Vec<Vec<Vid>>> = (0..batch.num_rows())
+            let mut per_row: Vec<Vec<FoundPath>> = (0..batch.num_rows())
                 .map(|i| trivial(i).into_iter().collect())
                 .collect();
             for (source, rows) in &groups {
@@ -1009,7 +1158,7 @@ impl GraphShortestPathStream {
             }
 
             let mut row_indices: Vec<u32> = Vec::new();
-            let mut all_paths: Vec<Option<Vec<Vid>>> = Vec::new();
+            let mut all_paths: Vec<Option<FoundPath>> = Vec::new();
             for (i, paths) in per_row.into_iter().enumerate() {
                 if paths.is_empty() && self.optional {
                     row_indices.push(i as u32);
@@ -1021,7 +1170,7 @@ impl GraphShortestPathStream {
                     // reservation is to stop a batch whose paths do not fit,
                     // and a charge levied once the vector is already resident
                     // records the peak instead of refusing it.
-                    let grew = path_bytes(path.len());
+                    let grew = path_bytes(path.nodes.len());
                     self.reservation.try_grow(grew)?;
                     self.batch_path_bytes += grew;
                     all_paths.push(Some(path));
@@ -1045,9 +1194,9 @@ impl GraphShortestPathStream {
             Ok((expanded_batch, all_paths))
         } else {
             // shortestPath: one path per input row
-            let mut paths: Vec<Option<Vec<Vid>>> = (0..batch.num_rows()).map(trivial).collect();
+            let mut paths: Vec<Option<FoundPath>> = (0..batch.num_rows()).map(trivial).collect();
             for p in paths.iter().flatten() {
-                let grew = path_bytes(p.len());
+                let grew = path_bytes(p.nodes.len());
                 self.reservation.try_grow(grew)?;
                 self.batch_path_bytes += grew;
             }
@@ -1059,7 +1208,7 @@ impl GraphShortestPathStream {
                         .settle_shortest_path(&mut bfs, target)
                         .and_then(|path| {
                             if let Some(p) = &path {
-                                let grew = path_bytes(p.len());
+                                let grew = path_bytes(p.nodes.len());
                                 self.reservation.try_grow(grew)?;
                                 self.batch_path_bytes += grew;
                             }
@@ -1106,7 +1255,7 @@ impl GraphShortestPathStream {
     fn build_output_batch(
         &self,
         input: &RecordBatch,
-        paths: &[Option<Vec<Vid>>],
+        paths: &[Option<FoundPath>],
         prop_cache: Option<&EntityPropertyCache>,
     ) -> DFResult<RecordBatch> {
         let num_rows = paths.len();
@@ -1130,9 +1279,9 @@ impl GraphShortestPathStream {
 
         for path in paths {
             match path {
-                Some(vids) => {
+                Some(FoundPath { nodes, hops }) => {
                     // Add all nodes
-                    for &vid in vids {
+                    for &vid in nodes {
                         super::common::append_node_to_struct_with(
                             nodes_builder.values(),
                             vid,
@@ -1142,13 +1291,24 @@ impl GraphShortestPathStream {
                     }
                     nodes_builder.append(true);
 
-                    // Add edges between consecutive nodes
-                    // BFS returns node VIDs; edges are between consecutive pairs
-                    for window in vids.windows(2) {
-                        let src = window[0];
-                        let dst = window[1];
-                        let eid = self.find_edge(src, dst);
-                        append_traversed_edge(rels_builder.values(), &edge_ctx, eid, src, dst);
+                    // Each hop carries the edge the search took, its type and
+                    // its stored orientation, so nothing is looked up again.
+                    for (window, hop) in nodes.windows(2).zip(hops) {
+                        let (src, dst) = if hop.forward {
+                            (window[0], window[1])
+                        } else {
+                            (window[1], window[0])
+                        };
+                        let type_name = edge_ctx.type_name(hop.eid, Some(hop.type_id));
+                        append_edge_to_struct_with(
+                            rels_builder.values(),
+                            hop.eid,
+                            &type_name,
+                            src.as_u64(),
+                            dst.as_u64(),
+                            &query_ctx,
+                            prop_cache,
+                        );
                     }
                     rels_builder.append(true);
                     path_validity.push(true);
@@ -1183,7 +1343,7 @@ impl GraphShortestPathStream {
         for path in paths {
             match path {
                 Some(p) => {
-                    let values: Vec<u64> = p.iter().map(|v| v.as_u64()).collect();
+                    let values: Vec<u64> = p.nodes.iter().map(|v| v.as_u64()).collect();
                     list_builder.values().append_slice(&values);
                     list_builder.append(true);
                 }
@@ -1197,7 +1357,7 @@ impl GraphShortestPathStream {
         // Build path length column
         let lengths: Vec<Option<u64>> = paths
             .iter()
-            .map(|p| p.as_ref().map(|path| (path.len() - 1) as u64))
+            .map(|p| p.as_ref().map(|path| path.hops.len() as u64))
             .collect();
         columns.push(Arc::new(UInt64Array::from(lengths)));
 
@@ -1210,26 +1370,35 @@ impl GraphShortestPathStream {
 
         RecordBatch::try_new(Arc::clone(&self.schema), columns).map_err(arrow_err)
     }
+}
 
-    /// Find an edge connecting src to dst.
+impl GraphShortestPathStream {
+    /// Search `batch` and start prefetching its paths' properties.
     ///
-    /// Returns the eid only; the type name and stored orientation are resolved
-    /// by `append_traversed_edge`, which can recover both for a flushed edge.
-    fn find_edge(&self, src: Vid, dst: Vid) -> Eid {
-        for &edge_type in &self.edge_type_ids {
-            let neighbors = self.graph_ctx.get_neighbors(src, edge_type, self.direction);
-            for (neighbor, eid) in neighbors {
-                // Must re-apply the filter. The BFS admitted this *pair* via a
-                // permitted edge, but with parallel edges the first neighbour
-                // match can be a different edge that fails the map — the
-                // returned path would then carry a relationship contradicting
-                // the query that produced it.
-                if neighbor == dst && self.edge_property_filter.contains(eid) {
-                    return eid;
-                }
+    /// Returns the error to emit, if any; otherwise leaves the stream in the
+    /// state to continue from (`PrefetchingProperties`, or `Reading` when every
+    /// pair was dropped).
+    fn search_batch(&mut self, batch: RecordBatch) -> Option<DFResult<RecordBatch>> {
+        let (input, paths) = match self.compute_paths(batch) {
+            Ok(pair) => pair,
+            Err(e) => {
+                self.state = ShortestPathStreamState::Reading;
+                return Some(Err(e));
             }
+        };
+        if paths.is_empty() {
+            // Every pair was dropped: nothing to prefetch or emit, so read on.
+            self.state = ShortestPathStreamState::Reading;
+            return None;
         }
-        Eid::from(0u64)
+        let (vids, eids) = Self::path_entities(&paths);
+        let graph_ctx = self.graph_ctx.clone();
+        let fut = Box::pin(async move {
+            let query_ctx = graph_ctx.query_context();
+            EntityPropertyCache::prefetch(&graph_ctx, &query_ctx, &vids, &eids).await
+        });
+        self.state = ShortestPathStreamState::PrefetchingProperties { fut, input, paths };
+        None
     }
 }
 
@@ -1244,10 +1413,12 @@ impl Stream for GraphShortestPathStream {
 
             match state {
                 ShortestPathStreamState::Warming(mut fut) => match fut.as_mut().poll(cx) {
-                    Poll::Ready(Ok(filter)) => {
-                        self.edge_property_filter = filter;
+                    Poll::Ready(Ok(warmed)) => {
+                        match warmed {
+                            WarmedEdgeFilter::Whole(filter) => self.edge_property_filter = filter,
+                            WarmedEdgeFilter::Reachable(r) => self.reachable = Some(*r),
+                        }
                         self.state = ShortestPathStreamState::Reading;
-                        // Continue loop to start reading
                     }
                     Poll::Ready(Err(e)) => {
                         self.state = ShortestPathStreamState::Done;
@@ -1259,39 +1430,38 @@ impl Stream for GraphShortestPathStream {
                     }
                 },
                 ShortestPathStreamState::Reading => {
-                    // Check timeout
                     if let Err(e) = self.graph_ctx.check_timeout() {
                         return Poll::Ready(Some(Err(exec_err(e))));
                     }
 
                     match self.input.poll_next_unpin(cx) {
                         Poll::Ready(Some(Ok(batch))) => {
-                            let (input, paths) = match self.compute_paths(batch) {
-                                Ok(pair) => pair,
-                                Err(e) => {
-                                    self.state = ShortestPathStreamState::Reading;
-                                    return Poll::Ready(Some(Err(e)));
-                                }
-                            };
-                            if paths.is_empty() {
-                                // Every pair was dropped: nothing to prefetch
-                                // or emit, so read on.
-                                self.state = ShortestPathStreamState::Reading;
+                            if let Some(mut reachable) = self.reachable.take() {
+                                // Grow the map's region to this batch's sources
+                                // before any of its rows is searched.
+                                let sources = match batch
+                                    .column_by_name(&self.source_column)
+                                    .map(|c| column_as_vid_array(c.as_ref()))
+                                    .transpose()
+                                {
+                                    Ok(col) => col
+                                        .map(|c| ReachableMapFilter::sources_of(&c))
+                                        .unwrap_or_default(),
+                                    Err(e) => {
+                                        self.state = ShortestPathStreamState::Done;
+                                        return Poll::Ready(Some(Err(e)));
+                                    }
+                                };
+                                let fut = Box::pin(async move {
+                                    reachable.cover(&sources).await?;
+                                    Ok(reachable)
+                                });
+                                self.state = ShortestPathStreamState::Covering { fut, batch };
                                 continue;
                             }
-                            let (vids, eids) = self.path_entities(&paths);
-                            let graph_ctx = self.graph_ctx.clone();
-                            let fut = Box::pin(async move {
-                                let query_ctx = graph_ctx.query_context();
-                                EntityPropertyCache::prefetch(&graph_ctx, &query_ctx, &vids, &eids)
-                                    .await
-                            });
-                            self.state = ShortestPathStreamState::PrefetchingProperties {
-                                fut,
-                                input,
-                                paths,
-                            };
-                            // Continue loop to poll the freshly created future.
+                            if let Some(out) = self.search_batch(batch) {
+                                return Poll::Ready(Some(out));
+                            }
                         }
                         Poll::Ready(Some(Err(e))) => {
                             self.state = ShortestPathStreamState::Done;
@@ -1311,6 +1481,23 @@ impl Stream for GraphShortestPathStream {
                         }
                     }
                 }
+                ShortestPathStreamState::Covering { mut fut, batch } => match fut.as_mut().poll(cx)
+                {
+                    Poll::Ready(Ok(reachable)) => {
+                        self.reachable = Some(reachable);
+                        if let Some(out) = self.search_batch(batch) {
+                            return Poll::Ready(Some(out));
+                        }
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.state = ShortestPathStreamState::Done;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Pending => {
+                        self.state = ShortestPathStreamState::Covering { fut, batch };
+                        return Poll::Pending;
+                    }
+                },
                 ShortestPathStreamState::PrefetchingProperties {
                     mut fut,
                     input,

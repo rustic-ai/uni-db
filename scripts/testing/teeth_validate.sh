@@ -44,8 +44,24 @@ NEXTEST=(cargo nextest run -p uni-db --test integration --no-fail-fast)
 # second copy of it here would add maintenance surface and detect nothing new.
 # The oracle column is the generated/harness-driven run, and is `-` where no
 # generated case can reach the bug (recorded as such, not silently omitted).
+#
+# lance_col_fusion: the original control (`bugs::hash_index_range_quoting::
+# eq_plus_two_sided_range_on_hash_indexed_column`) and oracle
+# (`flush_pushdown_smoke`) both use a **Hash** index, and a Hash index no longer
+# carries a range to Lance: `build_indexed_property_pushdown` pushes only the
+# `=`/`IN` conjunct for it (`createdAt = 3`), while ranges are pushed only for
+# a BTree column, via `indexed_range_filter`. Both stay green under the
+# reconstruction, so neither is a witness any more. The control is the F1
+# differential, whose BTree cases `n.x >= 10 AND n.x <= 10`,
+# `n.x >= 10.5 AND n.x <= 12.5` and `n.x = 5 AND n.x >= 2 AND n.x <= 9` reach
+# the fusion. The generated oracle is `flush_pushdown_btree_smoke`, the DQP
+# flush lever over `Fixture::TINY_BTREE_INDEXED` (a BTree on `Person.age`, added
+# alongside the Hash fixture so a generated same-column conjunction pushes its
+# range again). Measured 2026-10-18: under the patch both fail (control 3 of
+# 943 cases disagree; oracle errors on its first side-A query), and the Hash
+# `flush_pushdown_smoke` stays green.
 ENTRIES=(
-  "lance_col_fusion|eq_plus_two_sided_range_on_hash_indexed_column|flush_pushdown_smoke"
+  "lance_col_fusion|translated_forms_match_the_unpushed_oracle|flush_pushdown_btree_smoke"
   "issue_097|fork_inherits_unflushed_single_node|-"
   "issue_099|fork_rejects_wrong_target_endpoint_label_schemaless|-"
   "issue_103|issue_103_nested_fork_schemaless_edge_reads_inherited|-"

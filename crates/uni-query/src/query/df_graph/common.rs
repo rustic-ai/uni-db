@@ -1449,16 +1449,18 @@ pub fn typed_large_list_to_cv_array(
         return large_list_of_cv_to_cv_array(list);
     }
 
-    // Build the element-to-JSON converter closure. For Struct arrays, we need
-    // to iterate over fields; for scalar arrays, use arrow_element_to_json directly.
-    let elem_to_json: Box<dyn Fn(usize) -> serde_json::Value> = match values.data_type() {
+    // Build the element converter. For Struct arrays, we need to iterate over
+    // fields; for the common scalar arrays, use arrow_element_to_json directly;
+    // every other element type goes through the canonical decoder.
+    type ElemFn = Box<dyn Fn(usize) -> datafusion::error::Result<uni_common::Value>>;
+    let elem_to_value: ElemFn = match values.data_type() {
         DataType::UInt64
         | DataType::Int64
         | DataType::Float64
         | DataType::Utf8
         | DataType::Boolean => {
             let values = values.clone();
-            Box::new(move |idx| arrow_element_to_json(values.as_ref(), idx))
+            Box::new(move |idx| Ok(arrow_element_to_json(values.as_ref(), idx).into()))
         }
         DataType::Struct(_) => {
             let typed = values
@@ -1476,21 +1478,25 @@ pub fn typed_large_list_to_cv_array(
             let nulls = typed.nulls().cloned();
             Box::new(move |idx| {
                 if nulls.as_ref().is_some_and(|n| n.is_null(idx)) {
-                    return serde_json::Value::Null;
+                    return Ok(uni_common::Value::Null);
                 }
                 let mut map = serde_json::Map::new();
                 for (field_idx, field) in fields.iter().enumerate() {
                     let value = arrow_element_to_json(columns[field_idx].as_ref(), idx);
                     map.insert(field.name().clone(), value);
                 }
-                serde_json::Value::Object(map)
+                Ok(serde_json::Value::Object(map).into())
             })
         }
-        other => {
-            return Err(datafusion::error::DataFusionError::Execution(format!(
-                "Unsupported element type for typed_large_list_to_cv_array: {:?}",
-                other
-            )));
+        // Anything else — the `Null` element type of an empty list literal,
+        // temporals, narrower numerics — used to be rejected outright, so
+        // `c.v = []` with `c.v` a CypherValue failed to run.
+        _ => {
+            let values = values.clone();
+            Box::new(move |idx| {
+                uni_store::storage::arrow_convert::arrow_to_value(values.as_ref(), idx, None)
+                    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
+            })
         }
     };
 
@@ -1504,14 +1510,47 @@ pub fn typed_large_list_to_cv_array(
 
         let start = list.offsets()[row_idx] as usize;
         let end = list.offsets()[row_idx + 1] as usize;
-        let json_elements: Vec<serde_json::Value> = (start..end).map(&elem_to_json).collect();
+        let elements = (start..end)
+            .map(&elem_to_value)
+            .collect::<datafusion::error::Result<Vec<_>>>()?;
 
-        let uni_val: uni_common::Value = serde_json::Value::Array(json_elements).into();
+        let uni_val = uni_common::Value::List(elements);
         let bytes = uni_common::cypher_value_codec::encode(&uni_val);
         builder.append_value(&bytes);
     }
 
     Ok(Arc::new(builder.finish()))
+}
+
+/// `list` with its values trimmed to the rows it covers and offsets from 0.
+///
+/// A sliced `LargeListArray` keeps its parent's whole `values()` buffer, and
+/// its offsets index into it — they start at the slice's first element, not
+/// at 0. Code that pairs `values()` element-for-element with indices built
+/// from the offsets (the comprehension and quantifier inner batches) must see
+/// the compacted form: with the full buffer, the loop column was longer than
+/// every other column of the inner batch, and building it failed with "all
+/// columns in a record batch must have the same length" once an operator
+/// split its output into slices (a VLP emitting more than one batch's worth
+/// of rows for one input). Returns the list unchanged when already compact.
+pub fn compact_large_list(
+    list: &datafusion::arrow::array::LargeListArray,
+) -> datafusion::arrow::array::LargeListArray {
+    use datafusion::arrow::array::{Array, LargeListArray};
+    use datafusion::arrow::buffer::OffsetBuffer;
+    let offsets = list.offsets();
+    let first = offsets[0];
+    let last = offsets[offsets.len() - 1];
+    if first == 0 && last as usize == list.values().len() {
+        return list.clone();
+    }
+    let values = list.values().slice(first as usize, (last - first) as usize);
+    let rebased = OffsetBuffer::new(offsets.iter().map(|o| o - first).collect::<Vec<_>>().into());
+    let field = match list.data_type() {
+        datafusion::arrow::datatypes::DataType::LargeList(f) => f.clone(),
+        _ => unreachable!("a LargeListArray has a LargeList type"),
+    };
+    LargeListArray::new(field, rebased, values, list.nulls().cloned())
 }
 
 /// Convert a `LargeBinaryArray` of CypherValue-encoded arrays into a `LargeListArray`.
@@ -1921,6 +1960,14 @@ pub async fn execute_subplan_with_outer_vars(
     // same way.
     planner = planner.with_counters(graph_ctx.counters().cloned());
 
+    // Warnings and the `~=` default `K` cross the boundary for the same
+    // reason: a fresh context would collect a sub-plan's warnings where
+    // nobody harvests them, and size its vector searches by the built-in
+    // default instead of the database's.
+    planner = planner
+        .with_inherited_warnings(graph_ctx)
+        .with_vector_knn_default_k(graph_ctx.vector_knn_default_k());
+
     // Propagate registries from parent context so procedures remain available
     // inside correlated subqueries (Apply operator).
     if let Some(registry) = graph_ctx.algo_registry() {
@@ -1965,13 +2012,18 @@ pub async fn execute_subplan_with_outer_vars(
 /// Extract a single row from a RecordBatch as a HashMap of column name → Value.
 ///
 /// Used to build parameters for correlated subqueries (Apply, EXISTS).
-pub fn extract_row_params(batch: &RecordBatch, row_idx: usize) -> HashMap<String, Value> {
+///
+/// # Errors
+///
+/// Fails when a column cannot be decoded (see `arrow_to_json_value`); a
+/// subquery must not run against a parameter silently replaced by `NULL`.
+pub fn extract_row_params(batch: &RecordBatch, row_idx: usize) -> DFResult<HashMap<String, Value>> {
     let schema = batch.schema();
     (0..batch.num_columns())
         .map(|col_idx| {
             let col_name = schema.field(col_idx).name().clone();
-            let val = arrow_to_json_value(batch.column(col_idx).as_ref(), row_idx);
-            (col_name, val)
+            let val = arrow_to_json_value(batch.column(col_idx).as_ref(), row_idx)?;
+            Ok((col_name, val))
         })
         .collect()
 }
@@ -2624,6 +2676,20 @@ mod tests {
         }
     }
 
+    /// An outer column the decoder cannot read fails the subquery's
+    /// parameter extraction instead of binding the parameter to `NULL`.
+    #[test]
+    fn test_extract_row_params_undecodable_column_is_an_error() {
+        let arr = arrow_array::Decimal128Array::from(vec![Some(1_i128)]);
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "d",
+            arr.data_type().clone(),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).expect("batch");
+        assert!(extract_row_params(&batch, 0).is_err());
+    }
+
     #[test]
     fn test_extract_row_params_loses_uint64_to_int() {
         let schema = Arc::new(Schema::new(vec![Field::new(
@@ -2634,7 +2700,7 @@ mod tests {
         let batch = RecordBatch::try_new(schema, vec![Arc::new(UInt64Array::from(vec![Some(7)]))])
             .expect("batch should be valid");
 
-        let params = extract_row_params(&batch, 0);
+        let params = extract_row_params(&batch, 0).unwrap();
         assert_eq!(params.get("n._vid"), Some(&Value::Int(7)));
     }
 
@@ -2654,7 +2720,7 @@ mod tests {
         )
         .expect("batch should be valid");
 
-        let params = extract_row_params(&batch, 0);
+        let params = extract_row_params(&batch, 0).unwrap();
         assert_eq!(
             params.get("m._all_props"),
             Some(&Value::Map(HashMap::new()))

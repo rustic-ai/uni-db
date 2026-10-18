@@ -187,6 +187,34 @@ pub struct AdjacencyManager {
     compact_lock: parking_lot::Mutex<()>,
 }
 
+/// Puts a neighbor list in the order the read paths promise: ascending by
+/// `(neighbor vid, eid)`, each edge once.
+///
+/// Layers repeat an edge legitimately — the overlay dual-writes an edge the
+/// Main CSR may already hold, a self-loop read in both directions is listed
+/// once per direction, and the shadow CSR resurrects edges a lower layer may
+/// still list. An edge's endpoints never change, so every repeat of an eid
+/// carries the same neighbor, and exact-duplicate removal after the sort is
+/// the whole of the merge the old per-eid map performed.
+fn into_canonical_order(neighbors: &mut Vec<(Vid, Eid)>) {
+    if neighbors.len() > 1 {
+        neighbors.sort_unstable();
+        neighbors.dedup();
+    }
+    #[cfg(debug_assertions)]
+    {
+        let mut eids: Vec<Eid> = neighbors.iter().map(|&(_, eid)| eid).collect();
+        eids.sort_unstable();
+        let before = eids.len();
+        eids.dedup();
+        debug_assert_eq!(
+            before,
+            eids.len(),
+            "one eid reached two different neighbors: {neighbors:?}"
+        );
+    }
+}
+
 impl AdjacencyManager {
     /// Creates a new adjacency manager with the given memory budget.
     pub fn new(max_bytes: usize) -> Self {
@@ -208,15 +236,29 @@ impl AdjacencyManager {
     ///
     /// Reads Main CSR + frozen segments + active overlay, minus tombstones.
     /// Tombstones from any layer remove edges from all lower layers.
+    ///
+    /// The result is ordered by `(neighbor vid, eid)`, with each edge once.
+    /// That order is a contract, not a by-product: a breadth-first search
+    /// picks among equal-length paths by expansion order, so `shortestPath`
+    /// returns the same path every time — and the same path whether an edge is
+    /// flushed or still buffered — only because this order does not depend on
+    /// hash seeds or on which layer holds an edge. It used to come out of a
+    /// fresh `HashMap` per call, and 30 runs of one query returned 2 paths.
     pub fn get_neighbors(&self, vid: Vid, edge_type: u32, direction: Direction) -> Vec<(Vid, Eid)> {
-        let mut result: HashMap<Eid, Vid> = HashMap::new();
+        // Layers are appended in age order and tombstones applied in place, so
+        // the vector goes through exactly the states the old per-eid map did,
+        // minus the hashing; `into_canonical_order` then removes the repeats a
+        // map would have merged.
+        let mut result: Vec<(Vid, Eid)> = Vec::new();
 
         for &dir in direction.expand() {
             // 1. Main CSR
             if let Some(csr) = self.main_csr.get(&(edge_type, dir)) {
-                for entry in csr.get_entries(vid) {
-                    result.insert(entry.eid, entry.neighbor_vid);
-                }
+                result.extend(
+                    csr.get_entries(vid)
+                        .iter()
+                        .map(|entry| (entry.neighbor_vid, entry.eid)),
+                );
             }
 
             // 2. Frozen segments (oldest first) — add inserts, then remove tombstones.
@@ -234,15 +276,13 @@ impl AdjacencyManager {
                     && let Some(adj) = segment.inserts.get(&(edge_type, dir))
                     && let Some(neighbors) = adj.get(&vid)
                 {
-                    for &(neighbor, eid, _version) in neighbors {
-                        result.insert(eid, neighbor);
-                    }
+                    result.extend(neighbors.iter().map(|&(neighbor, eid, _)| (neighbor, eid)));
                 }
                 // Apply tombstones against ALL prior results (Main CSR + older segments).
                 // Skip the retain pass entirely when there are no tombstones — it would
                 // be a no-op but still O(result_size) due to the closure call.
                 if has_tombstones {
-                    result.retain(|eid, _| !segment.tombstones.contains_key(eid));
+                    result.retain(|(_, eid)| !segment.tombstones.contains_key(eid));
                 }
             }
 
@@ -256,16 +296,15 @@ impl AdjacencyManager {
                 && let Some(adj) = active.inserts.get(&(edge_type, dir))
                 && let Some(neighbors) = adj.get(&vid)
             {
-                for &(neighbor, eid, _version) in neighbors {
-                    result.insert(eid, neighbor);
-                }
+                result.extend(neighbors.iter().map(|&(neighbor, eid, _)| (neighbor, eid)));
             }
             if active_has_tombstones {
-                result.retain(|eid, _| !active.tombstones.contains_key(eid));
+                result.retain(|(_, eid)| !active.tombstones.contains_key(eid));
             }
         }
 
-        result.into_iter().map(|(e, n)| (n, e)).collect()
+        into_canonical_order(&mut result);
+        result
     }
 
     /// Returns neighbors visible at a specific snapshot version.
@@ -280,16 +319,18 @@ impl AdjacencyManager {
         direction: Direction,
         version: u64,
     ) -> Vec<(Vid, Eid)> {
-        let mut result: HashMap<Eid, Vid> = HashMap::new();
+        // Same accumulation and ordering contract as `get_neighbors`.
+        let mut result: Vec<(Vid, Eid)> = Vec::new();
 
         for &dir in direction.expand() {
             // 1. Main CSR — filter by created_version
             if let Some(csr) = self.main_csr.get(&(edge_type, dir)) {
-                for entry in csr.get_entries(vid) {
-                    if entry.created_version <= version {
-                        result.insert(entry.eid, entry.neighbor_vid);
-                    }
-                }
+                result.extend(
+                    csr.get_entries(vid)
+                        .iter()
+                        .filter(|entry| entry.created_version <= version)
+                        .map(|entry| (entry.neighbor_vid, entry.eid)),
+                );
             }
 
             // 2. Frozen segments — filter inserts by version, apply tombstones.
@@ -304,14 +345,15 @@ impl AdjacencyManager {
                     && let Some(adj) = segment.inserts.get(&(edge_type, dir))
                     && let Some(neighbors) = adj.get(&vid)
                 {
-                    for &(neighbor, eid, ver) in neighbors {
-                        if ver <= version {
-                            result.insert(eid, neighbor);
-                        }
-                    }
+                    result.extend(
+                        neighbors
+                            .iter()
+                            .filter(|&&(_, _, ver)| ver <= version)
+                            .map(|&(neighbor, eid, _)| (neighbor, eid)),
+                    );
                 }
                 if has_tombstones {
-                    result.retain(|eid, _| {
+                    result.retain(|(_, eid)| {
                         segment
                             .tombstones
                             .get(eid)
@@ -334,12 +376,12 @@ impl AdjacencyManager {
                         .get(&eid)
                         .is_none_or(|ts| ts.version > version);
                     if ver <= version && not_tombstoned {
-                        result.insert(eid, neighbor);
+                        result.push((neighbor, eid));
                     }
                 }
             }
             if active_has_tombstones {
-                result.retain(|eid, _| {
+                result.retain(|(_, eid)| {
                     active
                         .tombstones
                         .get(eid)
@@ -348,15 +390,14 @@ impl AdjacencyManager {
             }
 
             // 4. Shadow CSR — resurrect edges alive at version
-            for (neighbor, eid) in self
-                .shadow
-                .get_entries_at_version(vid, edge_type, dir, version)
-            {
-                result.insert(eid, neighbor);
-            }
+            result.extend(
+                self.shadow
+                    .get_entries_at_version(vid, edge_type, dir, version),
+            );
         }
 
-        result.into_iter().map(|(e, n)| (n, e)).collect()
+        into_canonical_order(&mut result);
+        result
     }
 
     /// Records an edge insertion into the L0-csr overlay (both directions).
@@ -535,6 +576,32 @@ impl AdjacencyManager {
         ids.sort_unstable();
         ids.dedup();
         ids
+    }
+
+    /// Approximate number of edges of `edge_type` the adjacency holds.
+    ///
+    /// The Main CSR's outgoing entries plus the overlay segments' outgoing
+    /// inserts, without subtracting tombstones or merging an edge both layers
+    /// hold, so it may over-count recent churn. Meant for cost decisions — how
+    /// a bounded read compares with reading the whole type — not for answers.
+    #[must_use]
+    pub fn approx_edge_count(&self, edge_type: u32) -> usize {
+        let key = (edge_type, Direction::Outgoing);
+        let main = self.main_csr.get(&key).map_or(0, |csr| csr.num_edges());
+        let frozen: usize = self
+            .frozen_segments
+            .read()
+            .iter()
+            .filter_map(|seg| seg.inserts.get(&key))
+            .map(|adj| adj.values().map(Vec::len).sum::<usize>())
+            .sum();
+        let active = self
+            .active_overlay
+            .read()
+            .inserts
+            .get(&key)
+            .map_or(0, |adj| adj.values().map(Vec::len).sum());
+        main + frozen + active
     }
 
     /// Returns the number of frozen segments awaiting compaction.
@@ -1401,7 +1468,7 @@ mod tests {
         // Insert same Eid into overlay at version 3 (update scenario)
         am.insert_edge(src, dst, eid, etype, 3);
 
-        // get_neighbors should return only 1 edge (HashMap<Eid, Vid> deduplicates)
+        // get_neighbors should return only 1 edge (repeats of an eid are merged)
         let neighbors = am.get_neighbors(src, etype, Direction::Outgoing);
         assert_eq!(
             neighbors.len(),
@@ -1615,5 +1682,140 @@ mod tests {
             n.is_empty(),
             "tombstone in frozen segment must still hide Main CSR edge"
         );
+    }
+
+    /// Builds a manager whose vertex 0 has `degree` outgoing edges of type 1
+    /// spread over Main CSR, a frozen segment and the active overlay, inserted
+    /// in an order that is neither VID nor EID order, plus parallel edges.
+    fn layered_fixture(degree: u64) -> (AdjacencyManager, Vec<(Vid, Eid)>) {
+        let am = AdjacencyManager::new(64 * 1024 * 1024);
+        // A fixed permutation: multiply by a unit modulo a prime > degree.
+        let p = 1_000_003u64;
+        let perm = |i: u64| (i * 7919) % p;
+        let mut expected = Vec::new();
+        let mut csr_entries = Vec::new();
+        let third = degree / 3;
+        for i in 0..degree {
+            let k = perm(i);
+            // Neighbors collide modulo `degree / 2 + 1`, giving parallel edges.
+            let nbr = Vid::new(1 + (k % (degree / 2 + 1)));
+            let eid = Eid::new(10_000 + perm(degree - i));
+            expected.push((nbr, eid));
+            if i < third {
+                csr_entries.push((0u64, nbr, eid, 1u64));
+            } else if i < 2 * third {
+                am.insert_edge(Vid::new(0), nbr, eid, 1, 2);
+            } else {
+                // Placed after the freeze below.
+                continue;
+            }
+        }
+        am.set_main_csr(
+            1,
+            Direction::Outgoing,
+            MainCsr::from_edge_entries(0, csr_entries),
+        );
+        let frozen = {
+            let mut active = am.active_overlay.write();
+            Arc::new(std::mem::take(&mut *active).freeze())
+        };
+        am.frozen_segments.write().push(frozen);
+        for &(nbr, eid) in expected.iter().skip(2 * third as usize) {
+            am.insert_edge(Vid::new(0), nbr, eid, 1, 3);
+        }
+        expected.sort_unstable();
+        (am, expected)
+    }
+
+    /// Neighbor order is part of the contract: shortest-path tie-breaking and
+    /// the edge reported for a parallel pair follow it, so it must not depend
+    /// on per-call hash seeds or on which layer holds an edge.
+    #[test]
+    fn get_neighbors_is_sorted_by_vid_then_eid_on_every_call() {
+        let (am, expected) = layered_fixture(60);
+        for _ in 0..30 {
+            assert_eq!(
+                am.get_neighbors(Vid::new(0), 1, Direction::Outgoing),
+                expected
+            );
+            assert_eq!(
+                am.get_neighbors_at_version(Vid::new(0), 1, Direction::Outgoing, u64::MAX),
+                expected
+            );
+        }
+    }
+
+    /// Sorting must not resurrect a tombstoned edge or duplicate an edge that
+    /// two layers both hold, and a self-loop read in both directions is still
+    /// one neighbor.
+    #[test]
+    fn get_neighbors_sorted_output_keeps_dedup_and_tombstones() {
+        let am = AdjacencyManager::new(1024 * 1024);
+        let csr = MainCsr::from_edge_entries(
+            0,
+            vec![
+                (0, Vid::new(9), Eid::new(5), 1),
+                (0, Vid::new(3), Eid::new(7), 1),
+            ],
+        );
+        am.set_main_csr(1, Direction::Outgoing, csr);
+        // Same edge again in the overlay (dual-write), a new one, a deleted one.
+        am.insert_edge(Vid::new(0), Vid::new(9), Eid::new(5), 1, 2);
+        am.insert_edge(Vid::new(0), Vid::new(3), Eid::new(2), 1, 2);
+        am.add_tombstone(Eid::new(7), Vid::new(0), Vid::new(3), 1, 3);
+        // Self-loop, seen once outgoing and once incoming.
+        am.insert_edge(Vid::new(0), Vid::new(0), Eid::new(11), 1, 2);
+
+        let out = am.get_neighbors(Vid::new(0), 1, Direction::Outgoing);
+        assert_eq!(
+            out,
+            vec![
+                (Vid::new(0), Eid::new(11)),
+                (Vid::new(3), Eid::new(2)),
+                (Vid::new(9), Eid::new(5)),
+            ]
+        );
+        let both = am.get_neighbors(Vid::new(0), 1, Direction::Both);
+        assert_eq!(both, out);
+        let at_v2 = am.get_neighbors_at_version(Vid::new(0), 1, Direction::Outgoing, 2);
+        assert_eq!(
+            at_v2,
+            vec![
+                (Vid::new(0), Eid::new(11)),
+                (Vid::new(3), Eid::new(2)),
+                (Vid::new(3), Eid::new(7)),
+                (Vid::new(9), Eid::new(5)),
+            ]
+        );
+    }
+
+    /// Micro-benchmark for the neighbor read path; run in release with
+    /// `--run-ignored only -E 'test(get_neighbors_cost)'`.
+    #[test]
+    #[ignore = "timing benchmark, run manually in release"]
+    fn get_neighbors_cost() {
+        for degree in [4u64, 16, 64, 512] {
+            let (am, expected) = layered_fixture(degree);
+            // Main-CSR-only variant: the common flushed-and-compacted case.
+            let csr_only = AdjacencyManager::new(64 * 1024 * 1024);
+            csr_only.set_main_csr(
+                1,
+                Direction::Outgoing,
+                MainCsr::from_edge_entries(
+                    0,
+                    expected.iter().map(|&(v, e)| (0u64, v, e, 1u64)).collect(),
+                ),
+            );
+            let iters = 2_000_000 / degree as usize;
+            for (name, m) in [("layered", &am), ("csr_only", &csr_only)] {
+                let start = std::time::Instant::now();
+                let mut sink = 0usize;
+                for _ in 0..iters {
+                    sink += m.get_neighbors(Vid::new(0), 1, Direction::Outgoing).len();
+                }
+                let ns = start.elapsed().as_nanos() as f64 / iters as f64;
+                eprintln!("degree={degree:4} {name:9} {ns:9.1} ns/call (sink {sink})");
+            }
+        }
     }
 }

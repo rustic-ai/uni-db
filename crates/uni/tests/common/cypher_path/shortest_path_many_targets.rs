@@ -78,6 +78,10 @@ struct Edge {
     src: usize,
     dst: usize,
     w: i64,
+    /// Stored as the edge's `k` property: the index of the edge in
+    /// [`Graph::edges`], so a returned relationship names the exact edge, and
+    /// two parallel edges are told apart.
+    k: usize,
 }
 
 /// `n` nodes `:N {id: i, x}`; edges include self loops and parallel edges.
@@ -94,11 +98,12 @@ fn random_graph(seed: u64) -> Graph {
     let x = (0..n).map(|_| rng.below(10) as i64).collect();
     let m = n + rng.below(2 * n as u64) as usize;
     let edges = (0..m)
-        .map(|_| Edge {
+        .map(|k| Edge {
             ty: if rng.below(3) == 0 { Ty::S } else { Ty::R },
             src: rng.below(n as u64) as usize,
             dst: rng.below(n as u64) as usize,
             w: rng.below(2) as i64,
+            k,
         })
         .collect();
     Graph { n, x, edges }
@@ -272,6 +277,62 @@ fn is_valid_path(
             .all(|w| neighbours(g, rel, dir, w[0]).contains(&w[1]))
 }
 
+/// Whether edge `e` is admitted by `rel` and leads from `u` to `v` under `dir`.
+fn edge_steps(rel: &Rel, dir: Dir, e: &Edge, u: usize, v: usize) -> bool {
+    rel.types.contains(&e.ty)
+        && (!rel.w_eq_1 || e.w == 1)
+        && ((matches!(dir, Dir::Out | Dir::Both) && e.src == u && e.dst == v)
+            || (matches!(dir, Dir::In | Dir::Both) && e.dst == u && e.src == v))
+}
+
+/// A shortest match as its node ids and its relationships' `k`s.
+type EdgePath = (Vec<usize>, Vec<usize>);
+
+/// Every shortest match from `s` to `t` as nodes *and* relationships: one
+/// entry per distinct sequence of edges, so two parallel edges on a hop give
+/// two entries that differ in exactly that relationship.
+fn all_shortest_edges(g: &Graph, rel: &Rel, dir: Dir, s: usize, t: usize) -> Vec<EdgePath> {
+    let Some(len) = shortest_len(g, rel, dir, s, t) else {
+        return Vec::new();
+    };
+    if len == 0 {
+        return vec![(vec![s], vec![])];
+    }
+    let dist = distances(g, rel, dir, s);
+    fn walk(
+        g: &Graph,
+        rel: &Rel,
+        dir: Dir,
+        dist: &[Option<usize>],
+        s: usize,
+        nodes: &mut Vec<usize>,
+        edges: &mut Vec<usize>,
+        out: &mut Vec<EdgePath>,
+    ) {
+        let v = *nodes.last().unwrap();
+        if v == s {
+            let (mut n, mut e) = (nodes.clone(), edges.clone());
+            n.reverse();
+            e.reverse();
+            out.push((n, e));
+            return;
+        }
+        let dv = dist[v].unwrap();
+        for u in (0..g.n).filter(|&u| dist[u] == Some(dv - 1)) {
+            for e in g.edges.iter().filter(|e| edge_steps(rel, dir, e, u, v)) {
+                nodes.push(u);
+                edges.push(e.k);
+                walk(g, rel, dir, dist, s, nodes, edges, out);
+                nodes.pop();
+                edges.pop();
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(g, rel, dir, &dist, s, &mut vec![t], &mut vec![], &mut out);
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Loading
 // ---------------------------------------------------------------------------
@@ -283,8 +344,10 @@ async fn schema(db: &Uni) -> Result<()> {
         .property("x", DataType::Int64)
         .edge_type("R", &["N"], &["N"])
         .property("w", DataType::Int64)
+        .property("k", DataType::Int64)
         .edge_type("S", &["N"], &["N"])
         .property("w", DataType::Int64)
+        .property("k", DataType::Int64)
         .apply()
         .await?;
     Ok(())
@@ -311,14 +374,14 @@ async fn create_edges(session: &Session, edges: &[Edge]) -> Result<()> {
         let rows: Vec<String> = edges
             .iter()
             .filter(|e| e.ty == ty)
-            .map(|e| format!("[{}, {}, {}]", e.src, e.dst, e.w))
+            .map(|e| format!("[{}, {}, {}, {}]", e.src, e.dst, e.w, e.k))
             .collect();
         if rows.is_empty() {
             continue;
         }
         tx.execute(&format!(
             "UNWIND [{}] AS e MATCH (a:N {{id: e[0]}}), (b:N {{id: e[1]}}) \
-             CREATE (a)-[:{} {{w: e[2]}}]->(b)",
+             CREATE (a)-[:{} {{w: e[2], k: e[3]}}]->(b)",
             rows.join(", "),
             ty.name()
         ))
@@ -551,6 +614,96 @@ async fn check_all(
     Ok(())
 }
 
+/// Returns the path's relationships as their `k`s, beside the node ids.
+const RET_RELS: &str = "RETURN a.id AS s, b.id AS t, [n IN nodes(p) | n.id] AS ids, \
+                        [r IN relationships(p) | r.k] AS ks";
+
+/// One output row with its relationships: source, target, nodes, edge `k`s.
+type RelRow = (usize, usize, Vec<usize>, Vec<usize>);
+
+async fn rel_rows(session: &Session, q: &str) -> Result<Vec<RelRow>> {
+    let res = session
+        .query(q)
+        .await
+        .map_err(|e| anyhow::anyhow!("{q}: {e}"))?;
+    let mut out: Vec<RelRow> = res
+        .rows()
+        .iter()
+        .map(|r| {
+            (
+                as_int(r.value("s")).expect("source id"),
+                as_int(r.value("t")).expect("target id"),
+                as_ids(r.value("ids")).expect("node ids"),
+                as_ids(r.value("ks")).expect("relationship ks"),
+            )
+        })
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
+/// The relationships of every path, against the oracle.
+///
+/// `shortestPath`: each reported relationship is an admitted edge joining the
+/// two nodes around it, so the path is one of the pair's shortest matches
+/// *as a sequence of edges* — a parallel edge that fails the map, or a
+/// relationship from a different hop, is caught here and not by the node
+/// list. `allShortestPaths`: the rows are exactly the pair's shortest edge
+/// sequences, each once, so parallel edges give distinct rows rather than
+/// repeats of one.
+async fn check_relationships(
+    session: &Session,
+    g: &Graph,
+    ctx: &str,
+    src: Sources,
+    dir: Dir,
+    rel: &Rel,
+    filter: &TargetFilter,
+) -> Result<()> {
+    let pat = arrow(dir, rel.text);
+    let head = match src {
+        Sources::One => String::from("MATCH p = {f}((a:N {id: 0})PAT(b:N))"),
+        Sources::XBelow4 => String::from("MATCH (a:N) WHERE a.x < 4 MATCH p = {f}((a)PAT(b:N))"),
+    }
+    .replace("PAT", &pat);
+    let sources = src.ids(g);
+
+    let q = format!(
+        "{} {} {RET_RELS}",
+        head.replace("{f}", "shortestPath"),
+        filter.0
+    );
+    for (s, t, ids, ks) in rel_rows(session, &q).await? {
+        let shortest = all_shortest_edges(g, rel, dir, s, t);
+        assert!(
+            shortest.contains(&(ids.clone(), ks.clone())),
+            "{ctx}\nquery: {q}\nrow ({s},{t}) nodes {ids:?} relationships {ks:?} is not \
+             a shortest match as a sequence of admitted edges; shortest: {shortest:?}\n\
+             graph: {g:?}"
+        );
+    }
+
+    let q = format!(
+        "{} {} {RET_RELS}",
+        head.replace("{f}", "allShortestPaths"),
+        filter.0
+    );
+    let got = rel_rows(session, &q).await?;
+    let mut want: Vec<RelRow> = Vec::new();
+    for &s in &sources {
+        for t in (0..g.n).filter(|&t| (filter.1)(t, g.x[t])) {
+            want.extend(
+                all_shortest_edges(g, rel, dir, s, t)
+                    .into_iter()
+                    .map(|(ids, ks)| (s, t, ids, ks)),
+            );
+        }
+    }
+    want.sort();
+    assert_eq!(got, want, "{ctx}\nquery: {q}\ngraph: {g:?}");
+    Ok(())
+}
+
 const DIRS: [Dir; 3] = [Dir::Out, Dir::In, Dir::Both];
 
 /// Every shape against the oracle, over random graphs split across L1 and L0.
@@ -576,6 +729,7 @@ async fn many_target_shortest_paths_match_a_bfs_oracle() -> Result<()> {
                 let ctx = format!("seed {seed}, {src:?}, {dir:?}, rel {}", rel.text);
                 check_shortest(&session, &g, &ctx, src, dir, rel, filter).await?;
                 check_all(&session, &g, &ctx, src, dir, rel, filter).await?;
+                check_relationships(&session, &g, &ctx, src, dir, rel, filter).await?;
             }
         }
         db.shutdown().await?;
@@ -725,6 +879,7 @@ async fn many_target_shortest_paths_on_a_fork_match_the_oracle() -> Result<()> {
             let ctx = format!("{who}, rel {}", rel.text);
             check_shortest(sess, graph, &ctx, Sources::One, Dir::Out, rel, filter).await?;
             check_all(sess, graph, &ctx, Sources::XBelow4, Dir::Both, rel, filter).await?;
+            check_relationships(sess, graph, &ctx, Sources::One, Dir::Both, rel, filter).await?;
         }
     }
     db.shutdown().await?;
@@ -903,6 +1058,264 @@ async fn many_targets_share_one_search() -> Result<()> {
                     sources * n
                 );
             }
+        }
+        db.shutdown().await?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tie-breaking and output cost
+// ---------------------------------------------------------------------------
+
+/// A `w x w` lattice `:N {id: r*w + c}` with `:R` edges right and down, every
+/// third one doubled by a parallel edge, so `(0) -> (w*w - 1)` has
+/// `C(2w-2, w-1)` shortest node sequences and more as edge sequences.
+fn lattice(w: usize) -> Graph {
+    let n = w * w;
+    let mut edges = Vec::new();
+    for r in 0..w {
+        for c in 0..w {
+            let v = r * w + c;
+            for (ok, u) in [(c + 1 < w, v + 1), (r + 1 < w, v + w)] {
+                if !ok {
+                    continue;
+                }
+                let copies = if edges.len() % 3 == 0 { 2 } else { 1 };
+                for _ in 0..copies {
+                    let k = edges.len();
+                    edges.push(Edge {
+                        ty: Ty::R,
+                        src: v,
+                        dst: u,
+                        w: 1,
+                        k,
+                    });
+                }
+            }
+        }
+    }
+    Graph {
+        n,
+        x: vec![0; n],
+        edges,
+    }
+}
+
+/// The one path `q` returns, as node ids and relationship `k`s.
+fn the_path(rows: Vec<RelRow>, q: &str) -> Result<EdgePath> {
+    anyhow::ensure!(rows.len() == 1, "{q}: expected one row, got {rows:?}");
+    let (_, _, ids, ks) = rows.into_iter().next().unwrap();
+    Ok((ids, ks))
+}
+
+/// The same `shortestPath` query returns the same path every time, and the
+/// same path whether the graph is flushed, in L0, read inside a transaction
+/// or read through a fork.
+///
+/// Which of several equal-length paths is returned follows the order in which
+/// a vertex's neighbors are expanded. `AdjacencyManager::get_neighbors` used
+/// to collect them into a fresh `std::collections::HashMap` per call — a new
+/// random hash seed each time — so that order, and with it the path, changed
+/// from one execution to the next: 30 runs of one bound-pair query returned 2
+/// different paths. The neighbor list is now ordered by `(neighbor vid, eid)`
+/// in every layer, which is also what makes the answer independent of which
+/// storage tier holds an edge.
+#[tokio::test(flavor = "multi_thread")]
+async fn shortest_path_tie_break_is_deterministic() -> Result<()> {
+    const RUNS: usize = 30;
+    let g = lattice(5);
+    let last = g.n - 1;
+    let q =
+        format!("MATCH p = shortestPath((a:N {{id: 0}})-[:R*]->(b:N {{id: {last}}})) {RET_RELS}");
+    let q_any =
+        format!("MATCH p = shortestPath((a:N {{id: 0}})-[*]-(b:N {{id: {last}}})) {RET_RELS}");
+
+    let mut per_tier: Vec<(&str, EdgePath, EdgePath)> = Vec::new();
+    for tier in ["flushed", "l0", "transaction", "fork"] {
+        let db = Uni::in_memory().build().await?;
+        schema(&db).await?;
+        let session = db.session();
+        create_nodes(&session, &g, 0..g.n).await?;
+        if tier == "flushed" {
+            create_edges(&session, &g.edges).await?;
+            db.flush().await?;
+        } else if tier == "l0" {
+            create_edges(&session, &g.edges).await?;
+        }
+        let fork = if tier == "fork" {
+            db.flush().await?;
+            let fork = session.fork("tie_break").await?;
+            create_edges(&fork, &g.edges).await?;
+            Some(fork)
+        } else {
+            None
+        };
+        let reader = fork.as_ref().unwrap_or(&session);
+
+        let mut seen: Vec<EdgePath> = Vec::new();
+        let mut seen_any: Vec<EdgePath> = Vec::new();
+        for _ in 0..RUNS {
+            let (rows, rows_any) = if tier == "transaction" {
+                // The edges live only in this transaction's L0, which is read
+                // through a separate overlay from the committed adjacency.
+                let tx = session.tx().await?;
+                let rows: Vec<String> = g
+                    .edges
+                    .iter()
+                    .map(|e| format!("[{}, {}, {}, {}]", e.src, e.dst, e.w, e.k))
+                    .collect();
+                tx.execute(&format!(
+                    "UNWIND [{}] AS e MATCH (a:N {{id: e[0]}}), (b:N {{id: e[1]}}) \
+                     CREATE (a)-[:R {{w: e[2], k: e[3]}}]->(b)",
+                    rows.join(", ")
+                ))
+                .await?;
+                let collect = |res: uni_db::QueryResult| -> Vec<RelRow> {
+                    res.rows()
+                        .iter()
+                        .map(|r| {
+                            (
+                                as_int(r.value("s")).unwrap(),
+                                as_int(r.value("t")).unwrap(),
+                                as_ids(r.value("ids")).unwrap(),
+                                as_ids(r.value("ks")).unwrap(),
+                            )
+                        })
+                        .collect()
+                };
+                let a = collect(tx.query(&q).await?);
+                let b = collect(tx.query(&q_any).await?);
+                tx.rollback();
+                (a, b)
+            } else {
+                (rel_rows(reader, &q).await?, rel_rows(reader, &q_any).await?)
+            };
+            for (rows, seen, q) in [(rows, &mut seen, &q), (rows_any, &mut seen_any, &q_any)] {
+                let path = the_path(rows, q)?;
+                let shortest = all_shortest_edges(&g, &RELS[2], Dir::Both, 0, last);
+                let directed = all_shortest_edges(&g, &RELS[0], Dir::Out, 0, last);
+                assert!(
+                    shortest.contains(&path) || directed.contains(&path),
+                    "{tier}: {q} returned {path:?}, not a shortest match"
+                );
+                if !seen.contains(&path) {
+                    seen.push(path);
+                }
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            1,
+            "{tier}: {RUNS} runs of one shortestPath query returned {} different \
+             paths: {seen:?}",
+            seen.len()
+        );
+        assert_eq!(seen_any.len(), 1, "{tier}: undirected, {seen_any:?}");
+        per_tier.push((tier, seen.remove(0), seen_any.remove(0)));
+        db.shutdown().await?;
+    }
+    for w in per_tier.windows(2) {
+        assert_eq!(
+            (&w[0].1, &w[0].2),
+            (&w[1].1, &w[1].2),
+            "{} and {} chose different shortest paths for the same graph",
+            w[0].0,
+            w[1].0
+        );
+    }
+    Ok(())
+}
+
+/// Path output reads no adjacency beyond what the search itself read.
+///
+/// `QueryMetrics::shortest_path_adjacency_reads` counts the per-vertex
+/// neighbor lookups the path operator makes. The search expands each vertex
+/// at most once per edge type, so for a one-type chain of `n` vertices it is
+/// at most `n` however many paths are emitted. Output building used to look
+/// every hop's edge up again (`find_edge`, twice per hop), adding two reads
+/// per hop of every emitted path: `n(n-1)` for the `n - 1` paths from the head
+/// of a chain, quadratic in `n`.
+#[tokio::test(flavor = "multi_thread")]
+async fn path_output_reads_no_extra_adjacency() -> Result<()> {
+    for n in [60usize, 240] {
+        let g = Graph {
+            n,
+            x: vec![0; n],
+            edges: (0..n - 1)
+                .map(|i| Edge {
+                    ty: Ty::R,
+                    src: i,
+                    dst: i + 1,
+                    w: 1,
+                    k: i,
+                })
+                .collect(),
+        };
+        let db = Uni::in_memory().build().await?;
+        schema(&db).await?;
+        let session = db.session();
+        create_nodes(&session, &g, 0..n).await?;
+        create_edges(&session, &g.edges).await?;
+        db.flush().await?;
+        for fname in ["shortestPath", "allShortestPaths"] {
+            let q = format!(
+                "MATCH p = {fname}((a:N {{id: 0}})-[:R*]->(b:N)) \
+                 RETURN sum(size(relationships(p))) AS hops"
+            );
+            let res = session.query(&q).await?;
+            let hops = res.rows()[0].get::<i64>("hops")?;
+            let reads = res.metrics().shortest_path_adjacency_reads;
+            eprintln!("n={n} {fname}: {reads} adjacency reads for {hops} emitted hops");
+            assert_eq!(hops as usize, n * (n - 1) / 2, "n={n}: {q}");
+            assert!(
+                reads <= n as u64,
+                "n={n}: {q}\n{reads} adjacency reads for a chain of {n} vertices; \
+                 output building is looking edges up again ({hops} hops emitted)"
+            );
+        }
+        db.shutdown().await?;
+    }
+    Ok(())
+}
+
+/// Timing probe for path output on the ladder graph; prints, asserts nothing.
+///
+/// Run with `--run-ignored only -E 'test(path_output_timing_probe)'
+/// --no-capture`. Recorded in the P2 entry of
+/// `docs/proposals/open_issues_plan_2026_10_17.md`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "timing probe, run manually"]
+async fn path_output_timing_probe() -> Result<()> {
+    for n in [2000usize, 8000] {
+        let dir = tempfile::tempdir()?;
+        let db = ladder(n, dir.path()).await?;
+        for (fname, arrow) in [
+            ("shortestPath", "-[:R*]->"),
+            ("allShortestPaths", "-[:R*]->"),
+            ("shortestPath", "-[:R*]-"),
+        ] {
+            let q = format!(
+                "MATCH p = {fname}((a:N {{id: 0}}){arrow}(b:N)) WHERE b.x < {n} \
+                 RETURN count(p) AS c, sum(size(relationships(p))) AS hops"
+            );
+            let start = std::time::Instant::now();
+            let (res, prof) = db.session().query_with(&q).profile().await?;
+            let wall = start.elapsed();
+            let op_ms = prof
+                .runtime_stats
+                .iter()
+                .find(|o| o.operator == "GraphShortestPathExec")
+                .map_or(f64::NAN, |o| o.time_ms);
+            let row = &res.rows()[0];
+            eprintln!(
+                "P2 probe n={n} {fname} {arrow}: paths={:?} hops={:?} \
+                 operator {op_ms:.1} ms, wall {:.1} ms, adjacency reads {}",
+                row.value("c"),
+                row.value("hops"),
+                wall.as_secs_f64() * 1000.0,
+                res.metrics().shortest_path_adjacency_reads
+            );
         }
         db.shutdown().await?;
     }

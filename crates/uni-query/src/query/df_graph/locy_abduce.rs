@@ -27,7 +27,7 @@ use super::locy_delta::RowStore;
 use super::locy_ast_builder::value_to_expr;
 use super::locy_eval::eval_condition;
 use super::locy_explain::explain_rule;
-use super::locy_traits::LocyExecutionContext;
+use super::locy_traits::{LocyExecutionContext, StrataBaseline};
 
 /// Evaluate an ABDUCE query using a three-phase pipeline.
 pub async fn evaluate_abduce(
@@ -92,6 +92,13 @@ pub async fn evaluate_abduce(
     candidates.truncate(config.max_abduce_candidates);
 
     // Phase 3: Validate each candidate via ASSUME
+    //
+    // Every candidate is applied to the same state, the current one, so each
+    // re-evaluation reuses that state's facts for the strata its modification
+    // cannot affect (see `locy_assume::re_evaluate_hypothetical`). Taken once,
+    // before the first candidate's mutation; each candidate's fork is
+    // restored before the next, so the state it describes stays current.
+    let baseline = ctx.reuse_baseline();
     let mut validated = Vec::new();
     for candidate in candidates {
         let cost = compute_cost(&candidate);
@@ -103,6 +110,7 @@ pub async fn evaluate_abduce(
             program,
             ctx,
             config,
+            baseline.as_ref(),
             stats,
         )
         .await?;
@@ -329,9 +337,11 @@ async fn validate_modification(
     program: &CompiledProgram,
     ctx: &dyn LocyExecutionContext,
     config: &LocyConfig,
+    baseline: Option<&StrataBaseline>,
     stats: &mut LocyStats,
 ) -> Result<bool, LocyError> {
     let mutation_query = modification_to_cypher(modification);
+    let footprint = uni_locy::incremental::query_footprint(&mutation_query);
 
     // Fork L0 for hypothetical reasoning
     //
@@ -359,8 +369,12 @@ async fn validate_modification(
     ctx.execute_mutation(mutation_query, HashMap::new()).await?;
     stats.mutations_executed += 1;
 
-    // Re-evaluate strata
-    let assume_store: RowStore = ctx.re_evaluate_strata(program, config).await?;
+    // Re-evaluate strata, reusing those the modification cannot affect.
+    let assume_store: RowStore = super::locy_assume::re_evaluate_hypothetical(
+        program, ctx, config, baseline, &footprint, stats,
+    )
+    .await?
+    .rows;
 
     // Check if the conclusion still holds
     let facts = assume_store

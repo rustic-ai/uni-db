@@ -275,19 +275,30 @@ pub fn strip_derivation_discriminator_columns(
     Ok(result)
 }
 
-/// Probabilistic complement for composite (multi-column) join keys.
+/// The negated facts of a probabilistic `IS NOT`, indexed by composite key.
 ///
-/// Builds a composite key from all `join_cols` fact columns in `neg_facts`,
-/// maps each composite key to a probability via noisy-OR combination, then
-/// adds a single `complement_col_name` column with `1 - p` for matched keys
-/// and `1.0` for absent keys.
-pub fn apply_prob_complement_composite(
-    batches: Vec<RecordBatch>,
+/// Each composite key maps to the noisy-OR of the probabilities of the facts
+/// that carry it. Built by `build_prob_index`, probed by
+/// `probe_prob_complement`.
+#[derive(Debug)]
+pub(crate) struct ProbIndex {
+    /// The negated facts' key column types; `None` when there are no facts.
+    types: Option<Vec<arrow_schema::DataType>>,
+    /// Composite key to combined probability.
+    probs: HashMap<Box<[u8]>, f64>,
+}
+
+/// Indexes `neg_facts` for a probabilistic complement over `join_cols`.
+///
+/// # Errors
+///
+/// An unresolvable key or PROB column in the negated facts (never a silently
+/// empty index).
+pub(crate) fn build_prob_index(
     neg_facts: &[RecordBatch],
     join_cols: &[NegationKey],
     prob_col: &str,
-    complement_col_name: &str,
-) -> datafusion::error::Result<Vec<RecordBatch>> {
+) -> datafusion::error::Result<ProbIndex> {
     use arrow_array::{Array as _, Float64Array};
 
     let types = match neg_facts.first() {
@@ -296,7 +307,7 @@ pub fn apply_prob_complement_composite(
     };
 
     // Build composite-key → probability lookup from negative facts.
-    let mut prob_map: HashMap<Box<[u8]>, f64> = HashMap::new();
+    let mut probs: HashMap<Box<[u8]>, f64> = HashMap::new();
     if let Some(types) = &types {
         for batch in neg_facts {
             let keys = negation_key_rows(batch, join_cols, KeySide::NegatedFacts, types)?;
@@ -308,12 +319,12 @@ pub fn apply_prob_complement_composite(
                 ))
             })?;
             let prob_arr = batch.column(prob_idx);
-            let probs = prob_arr.as_any().downcast_ref::<Float64Array>();
+            let prob_values = prob_arr.as_any().downcast_ref::<Float64Array>();
             for (row, key) in keys.into_iter().enumerate() {
                 let Some(key) = key else {
                     continue;
                 };
-                let p = probs
+                let p = prob_values
                     .and_then(|arr| {
                         if arr.is_null(row) {
                             None
@@ -323,7 +334,7 @@ pub fn apply_prob_complement_composite(
                     })
                     .unwrap_or(0.0);
                 // Noisy-OR combination for duplicate composite keys.
-                prob_map
+                probs
                     .entry(key)
                     .and_modify(|existing| {
                         *existing = 1.0 - (1.0 - *existing) * (1.0 - p);
@@ -332,16 +343,31 @@ pub fn apply_prob_complement_composite(
             }
         }
     }
+    Ok(ProbIndex { types, probs })
+}
 
-    // Add complement column to each batch.
+/// Adds `complement_col_name` to each batch: `1 - p` for a body key the
+/// index holds, `1.0` otherwise.
+///
+/// # Errors
+///
+/// An unresolvable or uncastable body key column.
+pub(crate) fn probe_prob_complement(
+    batches: Vec<RecordBatch>,
+    index: &ProbIndex,
+    join_cols: &[NegationKey],
+    complement_col_name: &str,
+) -> datafusion::error::Result<Vec<RecordBatch>> {
+    use arrow_array::Float64Array;
+
     let mut result = Vec::new();
     for batch in batches {
-        let complements: Vec<f64> = match &types {
+        let complements: Vec<f64> = match &index.types {
             Some(types) => negation_key_rows(&batch, join_cols, KeySide::Body, types)?
                 .into_iter()
                 .map(|key| {
                     let p = key
-                        .and_then(|key| prob_map.get(&key).copied())
+                        .and_then(|key| index.probs.get(&key).copied())
                         .unwrap_or(0.0);
                     1.0 - p
                 })
@@ -372,22 +398,53 @@ pub fn apply_prob_complement_composite(
     Ok(result)
 }
 
-/// Boolean anti-join for composite (multi-column) join keys.
+/// Probabilistic complement for composite (multi-column) join keys.
 ///
-/// Builds the set of composite keys of `neg_facts` from the `join_cols` fact
-/// columns, then filters `batches` to keep only rows whose composite body key
-/// is NOT in the set. Node components compare by vid, every other component
-/// by value.
-pub fn apply_anti_join_composite(
+/// Builds a composite key from all `join_cols` fact columns in `neg_facts`,
+/// maps each composite key to a probability via noisy-OR combination, then
+/// adds a single `complement_col_name` column with `1 - p` for matched keys
+/// and `1.0` for absent keys.
+///
+/// # Errors
+///
+/// As `build_prob_index` and `probe_prob_complement`.
+pub fn apply_prob_complement_composite(
     batches: Vec<RecordBatch>,
     neg_facts: &[RecordBatch],
     join_cols: &[NegationKey],
+    prob_col: &str,
+    complement_col_name: &str,
 ) -> datafusion::error::Result<Vec<RecordBatch>> {
-    use arrow::compute::filter_record_batch;
-    use arrow_array::BooleanArray;
+    let index = build_prob_index(neg_facts, join_cols, prob_col)?;
+    probe_prob_complement(batches, &index, join_cols, complement_col_name)
+}
 
+/// The composite keys of a boolean `IS NOT`'s negated facts.
+///
+/// Built by `build_banned_index`, probed by `probe_anti_join`.
+#[derive(Debug)]
+pub(crate) struct BannedIndex {
+    /// The negated facts' key column types; `None` when there are no facts.
+    types: Option<Vec<arrow_schema::DataType>>,
+    /// Every composite key some negated fact carries.
+    banned: HashSet<Box<[u8]>>,
+}
+
+/// Collects the composite keys of `neg_facts` over `join_cols`.
+///
+/// # Errors
+///
+/// An unresolvable key column in the negated facts (never a silently empty
+/// set).
+pub(crate) fn build_banned_index(
+    neg_facts: &[RecordBatch],
+    join_cols: &[NegationKey],
+) -> datafusion::error::Result<BannedIndex> {
     let Some(first) = neg_facts.first() else {
-        return Ok(batches);
+        return Ok(BannedIndex {
+            types: None,
+            banned: HashSet::new(),
+        });
     };
     let types = negation_key_types(first, join_cols)?;
 
@@ -400,23 +457,44 @@ pub fn apply_anti_join_composite(
                 .flatten(),
         );
     }
+    Ok(BannedIndex {
+        types: Some(types),
+        banned,
+    })
+}
 
-    // Returning every row is correct here *only* because the loop above can no
+/// Keeps the rows of `batches` whose composite body key `index` does not hold.
+///
+/// # Errors
+///
+/// An unresolvable or uncastable body key column.
+pub(crate) fn probe_anti_join(
+    batches: Vec<RecordBatch>,
+    index: &BannedIndex,
+    join_cols: &[NegationKey],
+) -> datafusion::error::Result<Vec<RecordBatch>> {
+    use arrow::compute::filter_record_batch;
+    use arrow_array::BooleanArray;
+
+    let Some(types) = &index.types else {
+        return Ok(batches);
+    };
+    // Returning every row is correct here *only* because the build can no
     // longer skip a batch: it errors rather than `continue`-ing on an
     // unresolvable column. Previously a schema mismatch emptied `banned`, and
     // this fast path then laundered "we gave up" into "nothing was excluded".
-    // Keep that coupling in mind before reintroducing any skip above.
-    if banned.is_empty() {
+    // Keep that coupling in mind before reintroducing any skip in the build.
+    if index.banned.is_empty() {
         return Ok(batches);
     }
 
     // Filter body batches: keep rows where composite left key NOT IN banned.
     let mut result = Vec::new();
     for batch in batches {
-        let keep: Vec<bool> = negation_key_rows(&batch, join_cols, KeySide::Body, &types)?
+        let keep: Vec<bool> = negation_key_rows(&batch, join_cols, KeySide::Body, types)?
             .into_iter()
             // A null key is never banned.
-            .map(|key| key.is_none_or(|key| !banned.contains(&key)))
+            .map(|key| key.is_none_or(|key| !index.banned.contains(&key)))
             .collect();
         let keep_arr = BooleanArray::from(keep);
         let filtered = filter_record_batch(&batch, &keep_arr).map_err(arrow_err)?;
@@ -425,6 +503,88 @@ pub fn apply_anti_join_composite(
         }
     }
     Ok(result)
+}
+
+/// Boolean anti-join for composite (multi-column) join keys.
+///
+/// Builds the set of composite keys of `neg_facts` from the `join_cols` fact
+/// columns, then filters `batches` to keep only rows whose composite body key
+/// is NOT in the set. Node components compare by vid, every other component
+/// by value.
+///
+/// # Errors
+///
+/// As `build_banned_index` and `probe_anti_join`.
+pub fn apply_anti_join_composite(
+    batches: Vec<RecordBatch>,
+    neg_facts: &[RecordBatch],
+    join_cols: &[NegationKey],
+) -> datafusion::error::Result<Vec<RecordBatch>> {
+    let index = build_banned_index(neg_facts, join_cols)?;
+    probe_anti_join(batches, &index, join_cols)
+}
+
+/// One built negation index: the anti-join's banned keys or the complement's
+/// probabilities.
+#[derive(Debug)]
+enum NegationIndex {
+    Banned(BannedIndex),
+    Prob(ProbIndex),
+}
+
+/// What a [`NegationIndex`] was built from: the negated scan, the fact-side
+/// key columns, and the PROB column for a complement.
+type NegationIndexKey = (usize, Vec<String>, Option<String>);
+
+/// Negation indexes reused across the iterations of one fixpoint (R5).
+///
+/// A negated reference always targets a lower stratum (cyclic negation is a
+/// compile error), so its facts are fixed while a stratum iterates, and
+/// rebuilding the banned set or probability map per clause per iteration
+/// cost O(|negated facts|) every iteration regardless of the delta. Each
+/// entry keeps the batches it was built from, and is reused only while the
+/// scan still holds those very batches (compared by column `Arc` identity —
+/// the retained clones keep the addresses from being reused), so a rewritten
+/// handle is rebuilt rather than served stale.
+#[derive(Debug, Default)]
+pub(crate) struct NegationIndexCache {
+    entries: HashMap<NegationIndexKey, (Vec<RecordBatch>, NegationIndex)>,
+}
+
+/// Whether `a` and `b` are the same batches, by column `Arc` identity.
+fn same_batches(a: &[RecordBatch], b: &[RecordBatch]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.num_rows() == y.num_rows()
+                && x.num_columns() == y.num_columns()
+                && x.columns()
+                    .iter()
+                    .zip(y.columns())
+                    .all(|(c, d)| Arc::ptr_eq(c, d))
+        })
+}
+
+impl NegationIndexCache {
+    /// The index for `key` over `neg_facts`, building it when absent or
+    /// built from other batches. Returns whether it was built.
+    fn get_or_build(
+        &mut self,
+        key: NegationIndexKey,
+        neg_facts: &[RecordBatch],
+        build: impl FnOnce() -> datafusion::error::Result<NegationIndex>,
+    ) -> datafusion::error::Result<(&NegationIndex, bool)> {
+        let fresh = match self.entries.get(&key) {
+            Some((source, _)) => !same_batches(source, neg_facts),
+            None => true,
+        };
+        if fresh {
+            let index = build()?;
+            self.entries
+                .insert(key.clone(), (neg_facts.to_vec(), index));
+        }
+        let (_, index) = self.entries.get(&key).expect("inserted above");
+        Ok((index, fresh))
+    }
 }
 
 /// Multiply `__prob_complement_*` columns into the rule's PROB column and clean up.
@@ -601,6 +761,7 @@ pub(crate) fn apply_negated_is_refs(
     bindings: &[super::locy_fixpoint::IsRefBinding],
     registry: &super::locy_fixpoint::DerivedScanRegistry,
     prob_column: Option<&str>,
+    mut cache: Option<&mut NegationIndexCache>,
     mut ops: Option<&mut Vec<crate::query::executor::core::OperatorStats>>,
 ) -> datafusion::error::Result<Vec<RecordBatch>> {
     for binding in bindings {
@@ -621,26 +782,67 @@ pub(crate) fn apply_negated_is_refs(
             // back to the boolean anti-join.
             _ => None,
         };
-        let name = if let Some(prob_col) = complement_into {
-            let complement_col = format!("__prob_complement_{}", binding.rule_name);
-            batches = apply_prob_complement_composite(
-                batches,
-                &neg_facts,
-                &binding.anti_join_cols,
-                prob_col,
-                &complement_col,
-            )?;
-            "LocyIsNotComplement"
-        } else {
-            batches = apply_anti_join_composite(batches, &neg_facts, &binding.anti_join_cols)?;
-            "LocyIsNotAntiJoin"
+        let key: NegationIndexKey = (
+            binding.derived_scan_index,
+            binding
+                .anti_join_cols
+                .iter()
+                .map(|k| k.fact_column.clone())
+                .collect(),
+            complement_into.cloned(),
+        );
+        let build = || -> datafusion::error::Result<NegationIndex> {
+            Ok(match complement_into {
+                Some(prob_col) => NegationIndex::Prob(build_prob_index(
+                    &neg_facts,
+                    &binding.anti_join_cols,
+                    prob_col,
+                )?),
+                None => {
+                    NegationIndex::Banned(build_banned_index(&neg_facts, &binding.anti_join_cols)?)
+                }
+            })
+        };
+        let owned;
+        let (index, built) = match cache.as_deref_mut() {
+            Some(cache) => cache.get_or_build(key, &neg_facts, build)?,
+            None => {
+                owned = build()?;
+                (&owned, true)
+            }
+        };
+        if built && let Some(ops) = ops.as_deref_mut() {
+            // The build reads every negated fact; reported apart from the
+            // probe so a profile shows whether it ran once or per iteration.
+            ops.push(super::locy_profile::synthetic_operator(
+                "LocyIsNotBuild",
+                neg_facts.iter().map(RecordBatch::num_rows).sum(),
+                started.elapsed(),
+            ));
+        }
+        let probe_started = std::time::Instant::now();
+        let name = match index {
+            NegationIndex::Prob(index) => {
+                let complement_col = format!("__prob_complement_{}", binding.rule_name);
+                batches = probe_prob_complement(
+                    batches,
+                    index,
+                    &binding.anti_join_cols,
+                    &complement_col,
+                )?;
+                "LocyIsNotComplement"
+            }
+            NegationIndex::Banned(index) => {
+                batches = probe_anti_join(batches, index, &binding.anti_join_cols)?;
+                "LocyIsNotAntiJoin"
+            }
         };
         if let Some(ops) = ops.as_deref_mut() {
             let rows = batches.iter().map(RecordBatch::num_rows).sum();
             ops.push(super::locy_profile::synthetic_operator(
                 name,
                 rows,
-                started.elapsed(),
+                probe_started.elapsed(),
             ));
         }
     }

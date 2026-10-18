@@ -155,14 +155,18 @@ impl std::error::Error for ToSqlError {}
 /// place quoting, escaping, and parenthesisation happen; anything that builds a
 /// predicate by formatting a string is bypassing that guarantee.
 ///
-/// # Column names are emitted bare, and must stay that way
+/// # Column names are backtick-quoted, never double-quoted
 ///
 /// Lance's filter dialect parses a double-quoted name as a **string literal**,
-/// not a quoted identifier: `"rid" > 2` matches every row (it is `'rid' > 2`,
-/// a constant), and `"no_such_col" > 2` does not even error. So [`Self::to_sql`]
-/// cannot defensively quote a column, and adding quotes to "harden" it would
-/// silently turn every predicate into a constant. Checking that a column name is
-/// a safe bare identifier is therefore the **producer's** job.
+/// not a quoted identifier: `"rid" > 2` is `'rid' > 2`, a constant, and on
+/// lance 7 it matched every row. Its identifier quote is the backtick, and
+/// [`Self::to_sql`] backtick-quotes every column name, so a producer may hand over any name a column can carry — SQL
+/// keywords (`order`, `select`, `null`, `true`), spaces, dashes, quotes,
+/// mixed case, non-ASCII. Emitted bare, those were parse errors or, for `null`
+/// and `true`, literals that made the predicate a silent constant. The one
+/// name it cannot spell, one containing a backtick, is refused with
+/// [`ToSqlError::Unsupported`], which [`Self::sql_pushable`] turns into "leave
+/// it to the residual filter".
 #[derive(Debug, Clone, PartialEq)]
 pub enum FilterExpr {
     /// A constant. `Literal(true)` matches every row, `Literal(false)` none.
@@ -477,12 +481,33 @@ impl FilterExpr {
                 Ok(rendered?.join(" OR "))
             }
             FilterExpr::Not(inner) => Ok(format!("NOT {}", paren(inner.to_sql()?))),
+            FilterExpr::Compare {
+                column,
+                op,
+                value: Scalar::Int(i64::MIN),
+            } => respell_i64_min_compare(column, *op).to_sql(),
             FilterExpr::Compare { column, op, value } => Ok(format!(
                 "{} {} {}",
-                column,
+                quote_ident(column)?,
                 op.as_sql(),
                 scalar_to_sql(value)
             )),
+            FilterExpr::In { column, values } if values.contains(&Scalar::Int(i64::MIN)) => {
+                // `i64::MIN` has no literal (see `respell_i64_min_compare`), so
+                // it leaves the list as `col = MIN`, respelled, and the rest of
+                // the list keeps its own rendering. `col IN (a, MIN)` and
+                // `col IN (a) OR col = MIN` agree in three-valued logic.
+                let rest: Vec<Scalar> = values
+                    .iter()
+                    .filter(|v| **v != Scalar::Int(i64::MIN))
+                    .cloned()
+                    .collect();
+                let min = FilterExpr::compare(column.clone(), CmpOp::Eq, Scalar::Int(i64::MIN));
+                if rest.is_empty() {
+                    return min.to_sql();
+                }
+                FilterExpr::Or(vec![FilterExpr::one_of(column.clone(), rest), min]).to_sql()
+            }
             FilterExpr::In { column, values } => {
                 if values.is_empty() {
                     // `col IN ()` is a parse error in the target dialect, and
@@ -523,10 +548,18 @@ impl FilterExpr {
                     // unknown. Emitting `=` leaves no `InList` for the rewrite
                     // to pair. See issue #212.
                     if let [only] = non_nulls.as_slice() {
-                        return Ok(format!("{} = {}", column, scalar_to_sql(only)));
+                        return Ok(format!(
+                            "{} = {}",
+                            quote_ident(column)?,
+                            scalar_to_sql(only)
+                        ));
                     }
                     let items: Vec<_> = non_nulls.iter().map(|v| scalar_to_sql(v)).collect();
-                    return Ok(format!("{} IN ({})", column, items.join(", ")));
+                    return Ok(format!(
+                        "{} IN ({})",
+                        quote_ident(column)?,
+                        items.join(", ")
+                    ));
                 }
                 if non_nulls.is_empty() {
                     // Every candidate is NULL: the predicate is unknown for
@@ -536,14 +569,14 @@ impl FilterExpr {
                 let items: Vec<_> = non_nulls.iter().map(|v| scalar_to_sql(v)).collect();
                 Ok(format!(
                     "({} IN ({}) OR {})",
-                    column,
+                    quote_ident(column)?,
                     items.join(", "),
                     SQL_UNKNOWN
                 ))
             }
             FilterExpr::ArrayContains { column, value } => Ok(format!(
                 "array_contains({}, {})",
-                column,
+                quote_ident(column)?,
                 scalar_to_sql(value)
             )),
             FilterExpr::StringMatch {
@@ -562,16 +595,44 @@ impl FilterExpr {
                     )));
                 }
                 let escaped = pattern.replace('\'', "''");
+                let column = quote_ident(column)?;
                 Ok(match kind {
                     StringMatchKind::Contains => format!("{column} LIKE '%{escaped}%'"),
                     StringMatchKind::StartsWith => format!("{column} LIKE '{escaped}%'"),
                     StringMatchKind::EndsWith => format!("{column} LIKE '%{escaped}'"),
                 })
             }
-            FilterExpr::IsNull(column) => Ok(format!("{column} IS NULL")),
-            FilterExpr::IsNotNull(column) => Ok(format!("{column} IS NOT NULL")),
+            FilterExpr::IsNull(column) => Ok(format!("{} IS NULL", quote_ident(column)?)),
+            FilterExpr::IsNotNull(column) => Ok(format!("{} IS NOT NULL", quote_ident(column)?)),
             FilterExpr::Raw(s) => Ok(s.clone()),
         }
+    }
+}
+
+/// `column op i64::MIN`, spelled without the literal `-9223372036854775808`.
+///
+/// The SQL dialect parses that literal as the negation of `9223372036854775808`,
+/// which overflows `i64` and becomes a `Float64`; comparing it with an `Int64`
+/// column then fails the whole scan (`could not convert to literal of type
+/// 'Int64'`). Each operator is rewritten to an equivalent in three-valued logic
+/// that names only `i64::MIN + 1` — NULL on a NULL column, the same truth
+/// value everywhere else:
+///
+/// * `= MIN`, `<= MIN` → `< MIN + 1`;
+/// * `<> MIN`, `> MIN` → `>= MIN + 1`;
+/// * `>= MIN` → `IS NOT NULL OR unknown` (true, or NULL on a NULL column);
+/// * `< MIN` → `IS NULL AND unknown` (false, or NULL on a NULL column).
+fn respell_i64_min_compare(column: &str, op: CmpOp) -> FilterExpr {
+    let next = Scalar::Int(i64::MIN + 1);
+    let unknown = || FilterExpr::In {
+        column: column.to_string(),
+        values: vec![Scalar::Null],
+    };
+    match op {
+        CmpOp::Eq | CmpOp::LtEq => FilterExpr::compare(column, CmpOp::Lt, next),
+        CmpOp::NotEq | CmpOp::Gt => FilterExpr::compare(column, CmpOp::GtEq, next),
+        CmpOp::GtEq => FilterExpr::Or(vec![FilterExpr::IsNotNull(column.to_string()), unknown()]),
+        CmpOp::Lt => FilterExpr::And(vec![FilterExpr::IsNull(column.to_string()), unknown()]),
     }
 }
 
@@ -582,6 +643,38 @@ fn paren(s: String) -> String {
     } else {
         format!("({s})")
     }
+}
+
+/// Render a column name as a backtick-quoted identifier.
+///
+/// Backticks are the only identifier quote the Lance filter dialect has: its
+/// tokenizer treats `` ` `` as the delimited-identifier start, and its planner
+/// reads a backtick-quoted name as an exact column reference. A double quote is
+/// a **string literal** there, never an identifier.
+///
+/// Quoting is unconditional rather than "only when needed". A bare name is not
+/// just a parse hazard (`order`, `my prop`, `has'sq`): `null` and `true` parse
+/// as *literals* and silently turn the predicate into a constant, and a bare
+/// name that misses the schema falls back to a case-insensitive match. Deciding
+/// which names are safe bare would mean tracking the parser's keyword list;
+/// quoting every name is exact for all of them.
+///
+/// # Errors
+///
+/// [`ToSqlError::Unsupported`] for a name containing a backtick. The SQL
+/// tokenizer accepts the doubled-backtick escape, but Lance then resolves the
+/// unescaped name as a *field path*, where a bare backtick is a syntax error
+/// (`Column has`tick does not exist`). No spelling reaches such a column, so the
+/// conjunct is refused and [`FilterExpr::sql_pushable`] leaves it to the
+/// residual filter.
+fn quote_ident(name: &str) -> Result<String, ToSqlError> {
+    if name.contains('`') {
+        return Err(ToSqlError::Unsupported(format!(
+            "column name {name:?} contains a backtick, which the storage filter \
+             dialect cannot reference"
+        )));
+    }
+    Ok(format!("`{name}`"))
 }
 
 /// Render a literal. The single place string escaping happens.

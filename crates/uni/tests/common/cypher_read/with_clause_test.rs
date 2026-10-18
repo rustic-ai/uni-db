@@ -2069,3 +2069,67 @@ async fn test_with_collect() -> Result<()> {
 
     Ok(())
 }
+
+// ─── WHERE after ORDER BY / SKIP / LIMIT ────────────────────────────────────
+
+/// `WITH … ORDER BY … SKIP … LIMIT … WHERE p` filters the page, not the input.
+///
+/// The openCypher grammar puts WHERE after the page
+/// (`WITH <body> [<order by and page>] [<where>]`) and the spec says that on
+/// WITH "WHERE simply filters the results". Each expectation is the page
+/// computed by hand, then filtered. Before the fix the filter ran first:
+/// `… LIMIT 3 WHERE x > 2` gave `[3, 4, 5]` and `… SKIP 8 WHERE x > 2` gave
+/// `[]`.
+#[tokio::test]
+async fn with_where_filters_after_order_by_skip_limit() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    let session = db.session();
+    let ints = |v: &[i64]| Value::List(v.iter().map(|i| Value::Int(*i)).collect());
+    for (q, want) in [
+        (
+            "UNWIND range(1, 10) AS x WITH x ORDER BY x LIMIT 3 WHERE x > 2 RETURN collect(x) AS c",
+            ints(&[3]),
+        ),
+        (
+            "UNWIND range(1, 10) AS x WITH x ORDER BY x SKIP 8 WHERE x > 2 RETURN collect(x) AS c",
+            ints(&[9, 10]),
+        ),
+        (
+            "UNWIND range(1, 10) AS x WITH x ORDER BY x DESC SKIP 1 LIMIT 3 WHERE x < 9 \
+             RETURN collect(x) AS c",
+            ints(&[8, 7]),
+        ),
+        (
+            "UNWIND [1, 1, 2, 2, 3] AS x WITH DISTINCT x ORDER BY x LIMIT 2 WHERE x > 1 \
+             RETURN collect(x) AS c",
+            ints(&[2]),
+        ),
+        // A projected alias.
+        (
+            "UNWIND range(1, 10) AS x WITH x, x * 2 AS y ORDER BY x LIMIT 3 WHERE y > 4 \
+             RETURN collect(x) AS c",
+            ints(&[3]),
+        ),
+        // A variable the projection drops (WithWhere7 lets WHERE see it).
+        (
+            "UNWIND range(1, 10) AS x WITH x, x * 10 AS z WITH z ORDER BY z LIMIT 3 WHERE x > 1 \
+             RETURN collect(z) AS c",
+            ints(&[20, 30]),
+        ),
+        // Grouped: the page is over groups.
+        (
+            "UNWIND range(1, 10) AS x WITH x % 3 AS k, count(*) AS n ORDER BY k LIMIT 2 \
+             WHERE n > 3 RETURN collect(k) AS c",
+            ints(&[1]),
+        ),
+        // No page: unchanged.
+        (
+            "UNWIND range(1, 10) AS x WITH x ORDER BY x WHERE x > 7 RETURN collect(x) AS c",
+            ints(&[8, 9, 10]),
+        ),
+    ] {
+        let r = session.query(q).await?;
+        assert_eq!(r.rows()[0].value("c").unwrap(), &want, "{q}");
+    }
+    Ok(())
+}

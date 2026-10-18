@@ -52,6 +52,70 @@ impl TableWriteGuard {
     }
 }
 
+/// Rows written to a table's storage but not yet part of any version of it.
+///
+/// Returned by [`StorageBackend::stage_append`]. A reader of the table cannot
+/// see these rows until [`StorageBackend::publish_staged`] commits them, and
+/// [`StorageBackend::discard_staged`] drops them without them ever having been
+/// visible. This is what lets the bulk loader keep an in-progress load out of
+/// every reader, every compaction pass and every in-memory cache: there is
+/// nothing to read, so there is nothing to undo.
+///
+/// A backend that cannot stage returns a value whose rows are *already*
+/// visible (see [`Self::is_pending`]); callers that need isolation check
+/// [`StorageBackend::stages_invisibly`] before relying on it.
+#[must_use = "staged rows stay invisible until `publish_staged` commits them"]
+pub struct StagedAppend {
+    rows: usize,
+    // Backend-private description of the written files; `None` when the
+    // backend wrote the rows visibly instead of staging them.
+    payload: Option<Box<dyn std::any::Any + Send + Sync>>,
+}
+
+impl StagedAppend {
+    /// Rows that a backend wrote visibly because it cannot stage.
+    pub fn visible(rows: usize) -> Self {
+        Self {
+            rows,
+            payload: None,
+        }
+    }
+
+    /// Rows staged invisibly, described by a backend-private `payload`.
+    pub fn pending(rows: usize, payload: Box<dyn std::any::Any + Send + Sync>) -> Self {
+        Self {
+            rows,
+            payload: Some(payload),
+        }
+    }
+
+    /// Number of rows in this append.
+    #[must_use]
+    pub fn rows(&self) -> usize {
+        self.rows
+    }
+
+    /// Whether the rows still await [`StorageBackend::publish_staged`].
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.payload.is_some()
+    }
+
+    /// The backend-private payload, `None` for a visible append.
+    pub fn into_payload(self) -> Option<Box<dyn std::any::Any + Send + Sync>> {
+        self.payload
+    }
+}
+
+impl std::fmt::Debug for StagedAppend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StagedAppend")
+            .field("rows", &self.rows)
+            .field("pending", &self.is_pending())
+            .finish()
+    }
+}
+
 /// Core storage backend trait.
 ///
 /// All persistent storage operations go through this trait. Backends must be
@@ -218,6 +282,68 @@ pub trait StorageBackend: Send + Sync + 'static {
     ) -> Result<()> {
         let _ = (table_name, add, relax_nullable);
         anyhow::bail!("schema evolution is not supported by this backend")
+    }
+
+    /// Whether [`Self::stage_append`] keeps rows invisible until published.
+    ///
+    /// `false` (the default) means `stage_append` writes visibly, so a caller
+    /// that must not expose rows early has to fall back to a protocol that can
+    /// undo a visible write.
+    fn stages_invisibly(&self) -> bool {
+        false
+    }
+
+    /// Write `batches` into `table_name`'s storage without publishing them.
+    ///
+    /// The table must already exist. Readers, compaction and every other
+    /// writer go on seeing the table exactly as before until
+    /// [`Self::publish_staged`] commits the result. The default writes the
+    /// rows visibly and says so through [`StagedAppend::is_pending`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table does not exist or the write fails.
+    async fn stage_append(
+        &self,
+        table_name: &str,
+        batches: Vec<RecordBatch>,
+    ) -> Result<StagedAppend> {
+        let rows = batches.iter().map(RecordBatch::num_rows).sum();
+        self.write(table_name, batches, WriteMode::Append).await?;
+        Ok(StagedAppend::visible(rows))
+    }
+
+    /// Make every append in `staged` visible in `table_name`, as one commit.
+    ///
+    /// Publishing appends onto the table's *current* version, so writes that
+    /// other writers committed after the rows were staged are kept.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the commit fails, in which case none of `staged`
+    /// is visible, or if `staged` holds rows another backend staged.
+    async fn publish_staged(&self, table_name: &str, staged: Vec<StagedAppend>) -> Result<()> {
+        if staged.iter().any(StagedAppend::is_pending) {
+            anyhow::bail!(
+                "publish_staged('{table_name}'): this backend never stages rows, so it \
+                 cannot publish rows staged by another backend"
+            );
+        }
+        Ok(())
+    }
+
+    /// Drop the rows in `staged` without ever making them visible.
+    ///
+    /// Best effort: storage that cannot be reclaimed now is unreferenced, so
+    /// no reader can reach it and the backend's own garbage collection may
+    /// remove it later.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reclaiming the storage failed.
+    async fn discard_staged(&self, table_name: &str, staged: Vec<StagedAppend>) -> Result<()> {
+        let _ = (table_name, staged);
+        Ok(())
     }
 
     /// Acquire the per-table write lock, returning a guard held until dropped.

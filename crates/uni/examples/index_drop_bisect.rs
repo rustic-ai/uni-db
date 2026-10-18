@@ -59,8 +59,8 @@ async fn main() -> anyhow::Result<()> {
     let path = std::env::var("UNI_DB")?;
     let step: u32 = std::env::var("STEP")?.parse()?;
     // Background compaction is the only live path to `Compactor::compact_all`:
-    // `compact_label` runs Lance's `compact_files` only, and
-    // `trigger_async_compaction` has no callers. Drive the scheduler directly.
+    // `compact_label` runs Lance's `compact_files` only (the uncalled
+    // `trigger_async_compaction` was removed). Drive the scheduler directly.
     let mut cfg = uni_db::UniConfig::default();
     cfg.compaction.check_interval = std::time::Duration::from_millis(300);
     cfg.compaction.max_l1_runs = 1;

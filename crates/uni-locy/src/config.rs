@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use uni_common::Value;
 
+use crate::magic::GoalDirected;
 use crate::neural::{ModelInvocationCache, NeuralClassifier, NeuralProvenanceStore};
 use crate::semiring::ResolvedSemiringConfig;
 use crate::types::SemiringKind;
@@ -174,6 +175,16 @@ pub struct LocyConfig {
     /// Keys are parameter names **without** the leading `$` (e.g., `"agent_id"`
     /// binds `$agent_id`).
     pub params: HashMap<String, Value>,
+    /// Whether `QUERY` commands are answered goal-directed (magic sets).
+    ///
+    /// Defaults to [`GoalDirected::Off`]. With [`GoalDirected::On`], a
+    /// `QUERY` whose WHERE binds a node KEY column of its rule to a literal or
+    /// parameter derives only the facts that goal can reach, and rules only
+    /// such goals needed are not evaluated, so they are absent from
+    /// `LocyResult::derived`. Answers are unchanged; constructs the rewrite
+    /// cannot prove answer-preserving fall back to full evaluation. See
+    /// [`crate::magic`].
+    pub goal_directed: GoalDirected,
 }
 
 impl LocyConfig {
@@ -266,6 +277,7 @@ impl Default for LocyConfig {
             classifier_cache_max: 100_000,
             classifier_provenance_store: None,
             params: HashMap::new(),
+            goal_directed: GoalDirected::Off,
         }
     }
 }

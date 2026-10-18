@@ -309,6 +309,16 @@ pub struct LocyStats {
     pub mutations_executed: usize,
     /// Peak memory used by derived relations (in bytes).
     pub peak_memory_bytes: usize,
+    /// Strata derived by hypothetical re-evaluations (`ASSUME` bodies and
+    /// `ABDUCE` candidate checks), summed over every re-evaluation.
+    pub hypothetical_strata_evaluated: usize,
+    /// Strata a hypothetical re-evaluation copied from the state before its
+    /// mutation instead of deriving, because the mutation could not affect
+    /// them (see [`crate::incremental`]). Summed over every re-evaluation.
+    pub hypothetical_strata_reused: usize,
+    /// Facts the derived (not reused) strata of hypothetical re-evaluations
+    /// produced, summed over every re-evaluation.
+    pub hypothetical_facts_derived: usize,
 }
 
 impl LocyResult {

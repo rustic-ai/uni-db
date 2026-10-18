@@ -551,6 +551,42 @@ pub async fn write_batch_with_lance_conflict_retry(
     .await
 }
 
+/// Stage `batch` for `table_name` without making any of it readable.
+///
+/// The staging counterpart of [`write_batch_with_lance_conflict_retry`]: the
+/// stored schema is widened the same way (issue #249), and a table that does
+/// not exist yet is created *empty* from the batch's schema so the staged
+/// files carry the field ids every later append will use. An empty table is
+/// the only thing a reader can observe before [`StorageBackend::publish_staged`].
+///
+/// [`StorageBackend::publish_staged`]: crate::backend::StorageBackend::publish_staged
+///
+/// # Errors
+///
+/// Returns an error if widening, creating, or staging fails.
+pub async fn stage_batch(
+    backend: &dyn crate::backend::StorageBackend,
+    table_name: &str,
+    batch: arrow_array::RecordBatch,
+) -> anyhow::Result<crate::backend::traits::StagedAppend> {
+    crate::storage::schema_evolution::ensure_table_accepts(
+        backend,
+        table_name,
+        batch.schema_ref(),
+        crate::storage::schema_evolution::BatchCoverage::Full,
+    )
+    .await?;
+    if !backend.table_exists(table_name).await? {
+        // A concurrent writer may create it first; that is the state wanted.
+        if let Err(e) = backend.create_empty_table(table_name, batch.schema()).await
+            && !backend.table_exists(table_name).await?
+        {
+            return Err(e);
+        }
+    }
+    backend.stage_append(table_name, vec![batch]).await
+}
+
 /// Helper to manage compaction_in_progress flag
 struct CompactionGuard {
     status: Arc<Mutex<CompactionStatus>>,
@@ -1617,18 +1653,6 @@ impl StorageManager {
                 None
             }
         }
-    }
-
-    /// Trigger L1 compaction asynchronously without blocking the caller.
-    /// Safe to call frequently — CompactionGuard prevents concurrent runs.
-    pub fn trigger_async_compaction(self: &Arc<Self>) {
-        let this = Arc::clone(self);
-        tokio::spawn(async move {
-            if let Err(e) = Self::execute_compaction(this, CompactionTask::ByRunCount).await {
-                // "Compaction already in progress" is expected when called frequently
-                log::debug!("Post-flush compaction skipped: {}", e);
-            }
-        });
     }
 
     pub(crate) async fn execute_compaction(
@@ -2798,6 +2822,80 @@ impl StorageManager {
             counters,
         )
         .await
+    }
+
+    /// Resolves edges by EID: stored endpoints and type, as `ctx` sees them.
+    ///
+    /// The L0 chain answers first (transaction, current, pending flush), via
+    /// [`crate::runtime::l0_visibility::lookup_edges`]: a tombstone in any
+    /// layer makes the edge absent, and a resident edge is taken from the
+    /// newest layer holding it. Whatever L0 does not mention is read from the
+    /// main edges table by `_eid`
+    /// ([`MainEdgeDataset::find_edges_by_eids_counted`]) through this
+    /// manager's backend — a fork's branch when this storage is forked — and
+    /// bounded by [`Self::version_high_water_mark`] when it is pinned.
+    ///
+    /// An EID that resolves nowhere is absent from the result. Properties are
+    /// not read; see `PropertyManager::get_batch_edge_props`. Each L0-resident
+    /// edge counts as one L0 row scanned and each main-table row as a storage
+    /// row, on `ctx`'s counters. Under a read-write transaction every
+    /// requested EID joins the SSI read set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the main edges table cannot be read.
+    pub async fn lookup_edges_by_eids(
+        &self,
+        eids: &[Eid],
+        ctx: Option<&QueryContext>,
+    ) -> Result<HashMap<Eid, crate::storage::main_edge::EdgeRecord>> {
+        let l0 = ctx
+            .map(|c| crate::runtime::l0_visibility::lookup_edges(eids, c))
+            .unwrap_or_default();
+        let counters = ctx.and_then(|c| c.counters.as_ref());
+        if let Some(c) = counters {
+            c.add_l0_rows(l0.found.len());
+            c.add_rows_scanned(l0.found.len());
+        }
+
+        let schema = self.schema_manager.schema();
+        let mut resolved = HashMap::with_capacity(eids.len());
+        let mut unresolved = Vec::new();
+        for &eid in eids {
+            if l0.deleted.contains(&eid) {
+                continue;
+            }
+            // A buffer that recorded no type name still carries the type id;
+            // only an id the schema cannot name falls through to storage.
+            let from_l0 = l0.found.get(&eid).and_then(|edge| {
+                edge.type_name
+                    .clone()
+                    .or_else(|| schema.edge_type_name_by_id_unified(edge.type_id))
+                    .map(|edge_type| crate::storage::main_edge::EdgeRecord {
+                        src_vid: edge.src_vid,
+                        dst_vid: edge.dst_vid,
+                        edge_type,
+                    })
+            });
+            match from_l0 {
+                Some(record) => {
+                    resolved.insert(eid, record);
+                }
+                None => unresolved.push(eid),
+            }
+        }
+        if !unresolved.is_empty() {
+            resolved.extend(
+                MainEdgeDataset::find_edges_by_eids_counted(
+                    self.backend(),
+                    &unresolved,
+                    self.version_high_water_mark(),
+                    counters,
+                )
+                .await?,
+            );
+        }
+        Ok(resolved)
     }
 
     /// Whether one pass over the edge type beats chunked endpoint lookups.

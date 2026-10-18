@@ -855,6 +855,32 @@ fn command_result_to_py(py: Python, cmd: uni_locy::CommandResult) -> PyResult<Py
     }
 }
 
+/// Parse the Python spelling of [`uni_locy::GoalDirected`].
+///
+/// Accepts `"off"`, `"on"` or `"shadow"`, case-insensitively. Anything else is
+/// a `ValueError` (a non-string a `TypeError`) rather than a fallback to the
+/// default, so a misspelt mode cannot silently run the full evaluation.
+pub(crate) fn parse_goal_directed(v: &Bound<'_, PyAny>) -> PyResult<::uni_locy::GoalDirected> {
+    let raw: String = v.extract()?;
+    match raw.to_ascii_lowercase().as_str() {
+        "off" => Ok(::uni_locy::GoalDirected::Off),
+        "on" => Ok(::uni_locy::GoalDirected::On),
+        "shadow" => Ok(::uni_locy::GoalDirected::Shadow),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid goal_directed '{raw}'; expected one of 'off', 'on', 'shadow'"
+        ))),
+    }
+}
+
+/// The Python spelling of a [`uni_locy::GoalDirected`] mode.
+pub(crate) fn goal_directed_name(mode: ::uni_locy::GoalDirected) -> &'static str {
+    match mode {
+        ::uni_locy::GoalDirected::Off => "off",
+        ::uni_locy::GoalDirected::On => "on",
+        ::uni_locy::GoalDirected::Shadow => "shadow",
+    }
+}
+
 /// Extract a LocyConfig from a Python config dict.
 pub fn extract_locy_config(
     py: Python,
@@ -909,6 +935,9 @@ pub fn extract_locy_config(
     }
     if let Some(v) = config.get("top_k_proofs_training") {
         locy_config.top_k_proofs_training = Some(v.extract::<usize>(py)?);
+    }
+    if let Some(v) = config.get("goal_directed") {
+        locy_config.goal_directed = parse_goal_directed(v.bind(py))?;
     }
     if let Some(v) = config.get("params") {
         let params_map = v.extract::<HashMap<String, Py<PyAny>>>(py)?;
@@ -1011,6 +1040,9 @@ pub fn locy_result_to_py(py: Python, result: uni_db::locy::LocyResult) -> PyResu
         queries_executed: result.stats.queries_executed,
         mutations_executed: result.stats.mutations_executed,
         peak_memory_bytes: result.stats.peak_memory_bytes,
+        hypothetical_strata_evaluated: result.stats.hypothetical_strata_evaluated,
+        hypothetical_strata_reused: result.stats.hypothetical_strata_reused,
+        hypothetical_facts_derived: result.stats.hypothetical_facts_derived,
     };
     dict.set_item("stats", stats.into_py_any(py)?)?;
 
@@ -1088,6 +1120,18 @@ pub fn query_metrics_to_py(py: Python, m: &::uni_db::QueryMetrics) -> PyResult<P
     dict.set_item("searches_reported", m.searches_reported)?;
     dict.set_item("storage_reads", m.storage_reads)?;
     dict.set_item("cache_hits", m.cache_hits)?;
+    dict.set_item("lance_iops", m.lance_iops)?;
+    dict.set_item("subquery_executions", m.subquery_executions)?;
+    dict.set_item("physical_plans", m.physical_plans)?;
+    dict.set_item(
+        "physical_plan_time_ms",
+        m.physical_plan_time.as_secs_f64() * 1000.0,
+    )?;
+    dict.set_item("shortest_path_searches", m.shortest_path_searches)?;
+    dict.set_item(
+        "shortest_path_adjacency_reads",
+        m.shortest_path_adjacency_reads,
+    )?;
     Ok(dict.into())
 }
 
@@ -1137,6 +1181,9 @@ pub fn locy_result_to_py_class(
         queries_executed: result.stats.queries_executed,
         mutations_executed: result.stats.mutations_executed,
         peak_memory_bytes: result.stats.peak_memory_bytes,
+        hypothetical_strata_evaluated: result.stats.hypothetical_strata_evaluated,
+        hypothetical_strata_reused: result.stats.hypothetical_strata_reused,
+        hypothetical_facts_derived: result.stats.hypothetical_facts_derived,
     };
 
     let cmd_list = pyo3::types::PyList::empty(py);
@@ -1271,6 +1318,9 @@ pub fn profile_output_to_py(
     profile_dict.set_item("total_time_ms", profile.total_time_ms)?;
     profile_dict.set_item("peak_memory_bytes", profile.peak_memory_bytes)?;
     profile_dict.set_item("plan_text", &profile.explain.plan_text)?;
+    profile_dict.set_item("logical_planning_ms", profile.logical_planning_ms)?;
+    profile_dict.set_item("physical_planning_ms", profile.physical_planning_ms)?;
+    profile_dict.set_item("physical_plans", profile.physical_plans)?;
 
     let ops = PyList::empty(py);
     for op in &profile.runtime_stats {
@@ -1321,6 +1371,12 @@ pub fn query_metrics_to_py_class(
         vector_index_scans: m.vector_index_scans,
         fts_index_scans: m.fts_index_scans,
         searches_reported: m.searches_reported,
+        lance_iops: m.lance_iops,
+        subquery_executions: m.subquery_executions,
+        physical_plans: m.physical_plans,
+        physical_plan_time_ms: m.physical_plan_time.as_secs_f64() * 1000.0,
+        shortest_path_searches: m.shortest_path_searches,
+        shortest_path_adjacency_reads: m.shortest_path_adjacency_reads,
     };
     Py::new(py, metrics)
 }
@@ -1442,6 +1498,9 @@ pub fn profile_output_to_py_class(
         peak_memory_bytes: profile.peak_memory_bytes,
         plan_text: profile.explain.plan_text,
         operators: ops.into(),
+        logical_planning_ms: profile.logical_planning_ms,
+        physical_planning_ms: profile.physical_planning_ms,
+        physical_plans: profile.physical_plans,
     })
 }
 
@@ -1608,6 +1667,7 @@ pub const UNI_CONFIG_KEYS: &[&str] = &[
     "fork_default_ttl",
     "fork_sweeper_interval",
     "disable_fork_sweeper",
+    "vector_knn_default_k",
 ];
 
 /// Build a fresh [`uni_common::UniConfig`] from a Python dict.
@@ -1682,6 +1742,9 @@ pub fn apply_uni_config(
     }
     if let Some(v) = config.get("strict_schema") {
         uni_config.strict_schema = v.extract::<bool>(py)?;
+    }
+    if let Some(v) = config.get("vector_knn_default_k") {
+        uni_config.vector_knn_default_k = v.extract::<usize>(py)?;
     }
     // Phase 4b — fork lifecycle config
     if let Some(v) = config.get("max_forks") {
@@ -1923,6 +1986,7 @@ pub fn uni_config_to_py(py: Python, config: &uni_common::UniConfig) -> PyResult<
         config.fork_sweeper_interval.as_secs_f64(),
     )?;
     dict.set_item("disable_fork_sweeper", config.disable_fork_sweeper)?;
+    dict.set_item("vector_knn_default_k", config.vector_knn_default_k)?;
     Ok(dict.into())
 }
 

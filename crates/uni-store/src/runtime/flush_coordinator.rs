@@ -304,6 +304,21 @@ impl FlushCoordinator {
         drop(self.submit_tx.lock().take());
     }
 
+    /// Number of spawned stream-phase tasks that have not finished.
+    ///
+    /// Stream tasks run on the process-wide I/O runtime and are awaited by
+    /// [`Self::shutdown`], not by the host's shutdown handle, so a teardown
+    /// path that cannot await (`Drop`) polls this to wait for them: a stream
+    /// still running after its database is gone keeps writing Lance data
+    /// into a directory its owner may already be deleting or reopening.
+    pub fn live_stream_count(&self) -> usize {
+        self.stream_handles
+            .lock()
+            .iter()
+            .filter(|h| !h.is_finished())
+            .count()
+    }
+
     /// Hand off the finalizer task's JoinHandle for tracking by
     /// `ShutdownHandle`. Returns `None` if already taken.
     pub fn take_finalizer_handle(&self) -> Option<tokio::task::JoinHandle<()>> {

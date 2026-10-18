@@ -21,6 +21,7 @@ use crate::api::UniInner;
 use crate::api::impl_locy::{self, LocyRuleRegistry};
 use crate::api::session::Session;
 use crate::api::triggers::{MutationEvents, TriggerRouter, tx_id_to_u64};
+use crate::shutdown::ShutdownHandle;
 use uni_common::{Result, UniError};
 use uni_locy::DerivedFactSet;
 use uni_plugin::traits::trigger::TriggerContext;
@@ -1118,7 +1119,8 @@ impl Transaction {
             &self.db.plugin_registry,
             Some(Arc::clone(&self.db.defer_queue)),
             Arc::clone(&self.db.ec_queue),
-        )?;
+        )?
+        .with_task_tracker(ShutdownHandle::clone(&self.db.shutdown_handle));
 
         // M11 FU-4: CDC subscribers also need per-row mutation events,
         // so the extraction must run if *either* triggers or CDC

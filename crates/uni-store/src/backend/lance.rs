@@ -267,6 +267,29 @@ impl LanceDbBackend {
     }
 }
 
+/// The fragments a staged append wrote, carried inside a
+/// [`crate::backend::traits::StagedAppend`].
+struct StagedFragments(Vec<lance::table::format::Fragment>);
+
+/// Collects the fragments of `staged`, rejecting rows another backend staged.
+fn staged_fragments(
+    table_name: &str,
+    staged: Vec<crate::backend::traits::StagedAppend>,
+) -> Result<Vec<lance::table::format::Fragment>> {
+    let mut fragments = Vec::new();
+    for append in staged {
+        let Some(payload) = append.into_payload() else {
+            // Written visibly (an empty batch); nothing to publish or discard.
+            continue;
+        };
+        let StagedFragments(mut f) = *payload.downcast::<StagedFragments>().map_err(|_| {
+            anyhow!("rows staged for '{table_name}' were not staged by the Lance backend")
+        })?;
+        fragments.append(&mut f);
+    }
+    Ok(fragments)
+}
+
 #[async_trait]
 impl StorageBackend for LanceDbBackend {
     // ========================
@@ -710,6 +733,125 @@ impl StorageBackend for LanceDbBackend {
         // appends. `replace_table_atomic`'s table-exists path takes no internal lock, so a
         // holder calling it does not deadlock.
         crate::backend::traits::TableWriteGuard::held(self.write_lock_for(name).lock_owned().await)
+    }
+
+    fn stages_invisibly(&self) -> bool {
+        true
+    }
+
+    async fn stage_append(
+        &self,
+        table_name: &str,
+        batches: Vec<RecordBatch>,
+    ) -> Result<crate::backend::traits::StagedAppend> {
+        use lance::dataset::transaction::Operation;
+
+        let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
+        if rows == 0 {
+            return Ok(crate::backend::traits::StagedAppend::visible(0));
+        }
+        // Lance's two-step write: the data files are written now, under the
+        // dataset's `data/` directory, and referenced by no manifest until
+        // `publish_staged` commits them. No per-table lock is needed — nothing
+        // is committed — and field ids come from the dataset's schema as of
+        // this open, which a later widening (`add_columns`) only extends.
+        let dataset = Arc::new(self.directory.open(table_name).await?);
+        let params = self
+            .directory
+            .write_params(lance::dataset::WriteMode::Append);
+        let transaction = lance::dataset::InsertBuilder::new(dataset)
+            .with_params(&params)
+            .execute_uncommitted(batches)
+            .await
+            .map_err(|e| anyhow!("Failed to stage rows for '{table_name}': {e}"))?;
+        match transaction.operation {
+            Operation::Append { fragments } => Ok(crate::backend::traits::StagedAppend::pending(
+                rows,
+                Box::new(StagedFragments(fragments)),
+            )),
+            other => Err(anyhow!(
+                "staging rows for '{table_name}' produced a {other} operation, expected Append"
+            )),
+        }
+    }
+
+    async fn publish_staged(
+        &self,
+        table_name: &str,
+        staged: Vec<crate::backend::traits::StagedAppend>,
+    ) -> Result<()> {
+        use lance::dataset::transaction::{Operation, TransactionBuilder};
+
+        let fragments = staged_fragments(table_name, staged)?;
+        if fragments.is_empty() {
+            return Ok(());
+        }
+        // Same per-table mutex `write` takes, so the publish serializes with
+        // flush appends and with compaction's scan → overwrite.
+        let lock = self.write_lock_for(table_name);
+        let _guard = lock.lock().await;
+        // The transaction is built against the version opened *here*, under
+        // the lock, rather than the one the rows were staged against. An
+        // Append's fragments do not depend on the table's other contents, so
+        // re-basing them is exact: whatever was committed since staging — a
+        // flush, a compaction rewrite, a delete — stays, and nothing can
+        // conflict because the lock holds every in-process writer off.
+        let dataset = Arc::new(self.directory.open(table_name).await?);
+        let transaction =
+            TransactionBuilder::new(dataset.version().version, Operation::Append { fragments })
+                .build();
+        let mut commit = lance::dataset::CommitBuilder::new(dataset);
+        if let Some(store_params) = self
+            .directory
+            .write_params(lance::dataset::WriteMode::Append)
+            .store_params
+        {
+            commit = commit.with_store_params(store_params);
+        }
+        commit
+            .execute(transaction)
+            .await
+            .map_err(|e| anyhow!("Failed to publish staged rows to '{table_name}': {e}"))?;
+        Ok(())
+    }
+
+    async fn discard_staged(
+        &self,
+        table_name: &str,
+        staged: Vec<crate::backend::traits::StagedAppend>,
+    ) -> Result<()> {
+        let fragments = staged_fragments(table_name, staged)?;
+        if fragments.is_empty() {
+            return Ok(());
+        }
+        // Unreferenced files are already unreachable; deleting them now only
+        // returns the space early instead of after Lance's unverified-file
+        // grace period (7 days), which an aborted large load would otherwise
+        // hold for that long.
+        let dataset = self.directory.open(table_name).await?;
+        let data_dir = dataset.data_dir();
+        let mut first_error = None;
+        for fragment in &fragments {
+            for file in &fragment.files {
+                let removed = match dataset.object_store(file.base_id).await {
+                    Ok(store) => {
+                        store
+                            .delete(&data_dir.clone().join(file.path.as_str()))
+                            .await
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = removed {
+                    first_error.get_or_insert_with(|| {
+                        anyhow!(
+                            "Failed to delete staged file '{}' of '{table_name}': {e}",
+                            file.path
+                        )
+                    });
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     // ========================
@@ -1554,6 +1696,51 @@ mod tests {
             ],
         )
         .unwrap()
+    }
+
+    /// Staged rows are invisible until published, survive a write committed in
+    /// between (publish re-bases onto the current version), and leave no rows
+    /// and no files behind when discarded.
+    #[tokio::test]
+    async fn staged_append_is_invisible_until_published() {
+        use std::path::Path;
+
+        fn data_files(root: &Path) -> usize {
+            std::fs::read_dir(root.join("t.lance").join("data"))
+                .map(|d| d.count())
+                .unwrap_or(0)
+        }
+
+        let (dir, backend) = create_test_backend().await;
+        backend
+            .create_table("t", vec![test_batch(vec![1], vec![1])])
+            .await
+            .unwrap();
+
+        let staged = backend
+            .stage_append("t", vec![test_batch(vec![2, 3], vec![2, 3])])
+            .await
+            .unwrap();
+        assert!(staged.is_pending());
+        assert_eq!(backend.count_rows("t", None).await.unwrap(), 1);
+
+        // A write committed after staging must survive the publish.
+        backend
+            .write("t", vec![test_batch(vec![4], vec![4])], WriteMode::Append)
+            .await
+            .unwrap();
+        backend.publish_staged("t", vec![staged]).await.unwrap();
+        assert_eq!(backend.count_rows("t", None).await.unwrap(), 4);
+
+        let files_before = data_files(dir.path());
+        let discarded = backend
+            .stage_append("t", vec![test_batch(vec![5], vec![5])])
+            .await
+            .unwrap();
+        assert_eq!(data_files(dir.path()), files_before + 1);
+        backend.discard_staged("t", vec![discarded]).await.unwrap();
+        assert_eq!(data_files(dir.path()), files_before);
+        assert_eq!(backend.count_rows("t", None).await.unwrap(), 4);
     }
 
     /// **Phase 4B probe — does any per-query I/O count move across a compaction?**

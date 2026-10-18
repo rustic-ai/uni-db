@@ -136,6 +136,7 @@ pub mod delete_sees_tx_local_edges;
 pub mod duplicate_property_projection;
 pub mod element_id_of_bound_variables;
 pub mod ext_id_lookup_sees_everything;
+pub mod ext_id_on_labelled_nodes;
 pub mod fts_rank_survives_flush;
 pub mod fts_sees_current_text;
 pub mod inline_element_where;
@@ -155,6 +156,7 @@ pub mod optional_match_clause_close;
 pub mod optional_match_row_identity;
 pub mod optional_traverse_chunked;
 pub mod optional_where_bound_var_pushdown;
+pub mod outer_variable_in_pattern_map;
 // An outer node / relationship variable supports every entity operation inside a subquery.
 pub mod outer_entity_in_subquery;
 pub mod pattern_fast_path_constraints;

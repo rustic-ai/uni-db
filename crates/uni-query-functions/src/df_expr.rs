@@ -910,9 +910,25 @@ fn translate_list_literal(items: &[Expr], context: Option<&TranslationContext>) 
     // Check distinct non-null types count
     let types_count = has_numeric as u8 + has_string as u8 + has_bool as u8 + has_map as u8;
 
+    // Integer and float literals together keep their own types, as a mixed
+    // list does: a `Float64` list would turn `[1, 1.5]` into `[1.0, 1.5]` and
+    // round integers above 2^53.
+    let has_int_and_float = items
+        .iter()
+        .any(|i| matches!(i, Expr::Literal(CypherLiteral::Integer(_))))
+        && items
+            .iter()
+            .any(|i| matches!(i, Expr::Literal(CypherLiteral::Float(_))));
+
     // Mixed types, nested lists, graph entities, or temporal function calls:
     // encode as LargeBinary CypherValue to avoid Arrow type unification failures.
-    if has_list || has_map || types_count > 1 || has_graph_entity || has_temporal {
+    if has_list
+        || has_map
+        || types_count > 1
+        || has_graph_entity
+        || has_temporal
+        || has_int_and_float
+    {
         // Try to convert all items to JSON values for CypherValue encoding
         if let Some(json_array) = try_items_to_json(items) {
             let uni_val: uni_common::Value = serde_json::Value::Array(json_array).into();
@@ -929,34 +945,16 @@ fn translate_list_literal(items: &[Expr], context: Option<&TranslationContext>) 
 
     // Use make_array to create a List type in DataFusion.
     // This supports dynamic values and performs type coercion for mixed numeric types.
-    let mut df_args = Vec::with_capacity(items.len());
-    let mut has_float = false;
-    let mut has_int = false;
-    let mut has_other = false;
-
-    for item in items {
-        match item {
-            Expr::Literal(CypherLiteral::Float(_)) => has_float = true,
-            Expr::Literal(CypherLiteral::Integer(_)) => has_int = true,
-            _ => has_other = true,
-        }
-        df_args.push(cypher_expr_to_df(item, context)?);
-    }
+    let df_args = items
+        .iter()
+        .map(|item| cypher_expr_to_df(item, context))
+        .collect::<Result<Vec<_>>>()?;
 
     if df_args.is_empty() {
         // Empty list with null type
         let empty_arr =
             ScalarValue::new_list_nullable(&[], &datafusion::arrow::datatypes::DataType::Null);
         Ok(lit(ScalarValue::List(empty_arr)))
-    } else if has_float && has_int && !has_other {
-        // Promote all to Float64 for numeric consistency in Arrow
-        let promoted_args = df_args
-            .into_iter()
-            .map(|e| cast_expr(e, datafusion::arrow::datatypes::DataType::Float64))
-            .collect();
-        Ok(datafusion::functions_nested::expr_fn::make_array(
-            promoted_args,
-        ))
     } else {
         // When the list contains Null-typed literals mixed with typed values,
         // cast the nulls to the dominant non-null type so that make_array's
@@ -1179,6 +1177,32 @@ fn value_to_scalar(value: &Value) -> Result<ScalarValue> {
 
             // Determine common type (simple inference), ignoring nulls
             let data_type = infer_common_scalar_type(&scalars);
+
+            // A list with no common native element type — mixed kinds, nested
+            // lists, maps, temporals — is encoded whole as one CypherValue, the
+            // form a mixed list *literal* takes. Coercing each item to
+            // `LargeBinary` instead stringified it through `Display`: the
+            // parameter `[[]]` reached the query as `[Bytes("[]")]`, so
+            // `[] IN $l` was false while `[] IN [[]]` was true, and a date list
+            // matched no date. Lists made only of binary items keep the
+            // per-item form below, which carries raw bytes verbatim.
+            //
+            // Integers mixed with floats take the same form. Widening them to
+            // a `Float64` list changed the values: `[1, 1.5]` came back as
+            // `[1.0, 1.5]`, and `2^53 + 1` rounded to `2^53`, so
+            // `9007199254740992 IN $l` with `$l = [2^53 + 1, 1.5]` was true.
+            let mixed_int_float = data_type == datafusion::arrow::datatypes::DataType::Float64
+                && scalars.iter().any(|s| matches!(s, ScalarValue::Int64(_)));
+            if mixed_int_float
+                || (data_type == datafusion::arrow::datatypes::DataType::LargeBinary
+                    && scalars
+                        .iter()
+                        .any(|s| !matches!(s, ScalarValue::Null | ScalarValue::LargeBinary(_))))
+            {
+                return Ok(ScalarValue::LargeBinary(Some(
+                    uni_common::cypher_value_codec::encode(value),
+                )));
+            }
 
             // Convert scalars to the target type if needed
             let typed_scalars: Vec<ScalarValue> = scalars
@@ -1633,6 +1657,159 @@ pub fn comparison_udf_name(op: datafusion::logical_expr::Operator) -> Option<&'s
         Operator::GtEq => Some("_cypher_gt_eq"),
         _ => None,
     }
+}
+
+/// Whether `dt` is a floating-point type.
+fn is_float_type(dt: &datafusion::arrow::datatypes::DataType) -> bool {
+    use datafusion::arrow::datatypes::DataType;
+    matches!(
+        dt,
+        DataType::Float16 | DataType::Float32 | DataType::Float64
+    )
+}
+
+/// Whether `dt` is an integer or floating-point type.
+fn is_int_or_float_type(dt: &datafusion::arrow::datatypes::DataType) -> bool {
+    dt.is_integer() || is_float_type(dt)
+}
+
+/// The float comparison `left op right` lowers to, when it is a comparison
+/// between two numbers at least one of which is a float.
+pub fn float_comparison_op(
+    op: datafusion::logical_expr::Operator,
+    left_type: &datafusion::arrow::datatypes::DataType,
+    right_type: &datafusion::arrow::datatypes::DataType,
+) -> Option<crate::df_udfs::FloatCmp> {
+    let cmp = crate::df_udfs::FloatCmp::from_operator(op)?;
+    ((is_float_type(left_type) || is_float_type(right_type))
+        && is_int_or_float_type(left_type)
+        && is_int_or_float_type(right_type))
+    .then_some(cmp)
+}
+
+/// Lower a numeric comparison with at least one float operand to the float
+/// comparison UDF, or `None` when it does not apply.
+///
+/// Arrow's comparison kernels order floats by IEEE total order, so the native
+/// `BinaryExpr` answered `-0.0 < 0.0` true, `-0.0 = 0.0` false, `NaN = NaN`
+/// true, and put a sign-bit NaN below every number. openCypher compares floats
+/// numerically and every comparison involving NaN is false except `<>`
+/// (CIP2016-06-14). Both operands are cast to `Float64` — an integer is
+/// widened exactly as `cypher_eq` widens it — and compared by
+/// `_cypher_float_*`, whose `FloatCmp::apply` is Rust's IEEE operators.
+///
+/// Shared by both expression translators: this one, and the physical
+/// compiler's `compile_binary_op`.
+pub fn float_comparison(
+    left: DfExpr,
+    left_type: &datafusion::arrow::datatypes::DataType,
+    op: datafusion::logical_expr::Operator,
+    right: DfExpr,
+    right_type: &datafusion::arrow::datatypes::DataType,
+) -> Option<DfExpr> {
+    use datafusion::arrow::datatypes::DataType;
+    let cmp = float_comparison_op(op, left_type, right_type)?;
+    if let Some(native) = native_float_comparison(&left, left_type, op, &right, right_type) {
+        return Some(native);
+    }
+    let widen = |e: DfExpr, dt: &DataType| {
+        if *dt == DataType::Float64 {
+            e
+        } else {
+            cast_expr(e, DataType::Float64)
+        }
+    };
+    Some(dummy_udf_expr(
+        cmp.udf_name(),
+        vec![widen(left, left_type), widen(right, right_type)],
+    ))
+}
+
+/// A non-null numeric literal's value as `f64`, looking through a cast.
+fn numeric_literal_f64(e: &DfExpr) -> Option<f64> {
+    let sv = match e {
+        DfExpr::Literal(sv, _) => sv,
+        DfExpr::Cast(c) => match c.expr.as_ref() {
+            DfExpr::Literal(sv, _) => sv,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    if sv.is_null() || !(sv.data_type().is_integer() || is_float_type(&sv.data_type())) {
+        return None;
+    }
+    match sv
+        .cast_to(&datafusion::arrow::datatypes::DataType::Float64)
+        .ok()?
+    {
+        ScalarValue::Float64(Some(f)) => Some(f),
+        _ => None,
+    }
+}
+
+/// A native `BinaryExpr` that answers `left op right` exactly as the float
+/// UDF would, when one operand is a numeric literal; `None` otherwise.
+///
+/// The native form is worth keeping where it is exact: the L0 half of a scan
+/// recovers column-versus-literal `BinaryExpr`s from the runtime filter to
+/// skip rows a pushed range rules out, and a UDF call is opaque to it. Total
+/// order and IEEE order disagree only on zeros and NaNs, so:
+///
+/// * a NaN literal has no native form;
+/// * a `-0.0` literal is replaced by `0.0`, its equal;
+/// * against an integer operand nothing else can differ (a widened integer is
+///   never NaN or `-0.0`), so the plain comparison is exact;
+/// * against a float *column* and a non-zero literal only a NaN row can
+///   differ, so the comparison is guarded: `AND NOT isnan(col)` for the five
+///   operators that are false on NaN, `OR isnan(col)` for `<>`, which is true
+///   on it. A null row stays null under either guard;
+/// * a zero literal against a float operand, or a float operand that is not
+///   a plain column (it would be evaluated twice), keeps the UDF.
+fn native_float_comparison(
+    left: &DfExpr,
+    left_type: &datafusion::arrow::datatypes::DataType,
+    op: datafusion::logical_expr::Operator,
+    right: &DfExpr,
+    right_type: &datafusion::arrow::datatypes::DataType,
+) -> Option<DfExpr> {
+    use datafusion::arrow::datatypes::DataType;
+    use datafusion::logical_expr::Operator;
+    let (operand, operand_type, literal, literal_on_right) =
+        match (numeric_literal_f64(left), numeric_literal_f64(right)) {
+            (None, Some(f)) => (left, left_type, f, true),
+            (Some(f), None) => (right, right_type, f, false),
+            _ => return None,
+        };
+    if literal.is_nan() {
+        return None;
+    }
+    // `-0.0 == 0.0`: the positive zero is the one total order agrees on.
+    let literal = if literal == 0.0 { 0.0 } else { literal };
+    let lit_expr = lit(ScalarValue::Float64(Some(literal)));
+    let operand_f64 = if *operand_type == DataType::Float64 {
+        operand.clone()
+    } else {
+        cast_expr(operand.clone(), DataType::Float64)
+    };
+    let compare = |x: DfExpr| {
+        if literal_on_right {
+            binary_expr(x, op, lit_expr.clone())
+        } else {
+            binary_expr(lit_expr.clone(), op, x)
+        }
+    };
+    if operand_type.is_integer() {
+        return Some(compare(operand_f64));
+    }
+    if literal == 0.0 || !matches!(operand, DfExpr::Column(_)) {
+        return None;
+    }
+    let is_nan = datafusion::functions::math::expr_fn::isnan(operand_f64.clone());
+    Some(if op == Operator::NotEq {
+        compare(operand_f64).or(is_nan)
+    } else {
+        compare(operand_f64).and(DfExpr::Not(Box::new(is_nan)))
+    })
 }
 
 /// Map an arithmetic operator to its `_cypher_*` UDF name.
@@ -2559,7 +2736,16 @@ fn dummy_udf_return_type(name: &str) -> datafusion::arrow::datatypes::DataType {
         | "_make_cypher_list"
         | "_map_project"
         | "_cypher_list_to_cv"
-        | "_cypher_tail" => DataType::LargeBinary,
+        | "_cypher_tail"
+        | "_cypher_value_key" => DataType::LargeBinary,
+        // Float comparisons are created after their operands were typed, so
+        // their result type is known.
+        "_cypher_float_eq"
+        | "_cypher_float_not_eq"
+        | "_cypher_float_lt"
+        | "_cypher_float_lt_eq"
+        | "_cypher_float_gt"
+        | "_cypher_float_gt_eq" => DataType::Boolean,
         // Everything else: return Null to preserve existing coercion behavior.
         // The second resolve_udfs pass will replace DummyUdf with the real UDF
         // which has the correct return type.
@@ -2612,6 +2798,11 @@ impl datafusion::logical_expr::ScalarUDFImpl for DummyUdf {
             "_cypher_add" | "_cypher_sub" | "_cypher_mul" | "_cypher_div" | "_cypher_mod" => {
                 Ok(crate::df_udfs::cypher_arith_return_type(arg_types))
             }
+            // Type-preserving: Float32 -> Float32, Float64 -> Float64.
+            crate::df_udfs::CYPHER_FLOAT_KEY_UDF => Ok(arg_types
+                .first()
+                .cloned()
+                .unwrap_or(datafusion::arrow::datatypes::DataType::Float64)),
             // Other UDFs keep the UDF-name-based return type so that
             // apply_type_coercion can correctly route nested expressions before
             // resolve_udfs runs.
@@ -3503,6 +3694,19 @@ fn coerce_binary_expr(
             return Ok(lit(ScalarValue::Boolean(None)));
         }
 
+        // A comparison with a float operand: openCypher semantics, not the
+        // IEEE total order of Arrow's kernels (`-0.0 = 0.0`, NaN compares
+        // false). See `float_comparison`.
+        if let Some(result) = float_comparison(
+            left.clone(),
+            &left_type,
+            binary.op,
+            right.clone(),
+            &right_type,
+        ) {
+            return Ok(result);
+        }
+
         // NaN-aware comparisons
         if is_comparison && (contains_division(&left) || contains_division(&right)) {
             let udf_name = comparison_udf_name(binary.op)
@@ -3872,11 +4076,32 @@ fn coerce_aggregate_function(
     agg: &datafusion::logical_expr::expr::AggregateFunction,
     schema: &datafusion::common::DFSchema,
 ) -> Result<DfExpr> {
+    use datafusion::logical_expr::ExprSchemable;
     let coerced_args: Vec<DfExpr> = agg
         .params
         .args
         .iter()
-        .map(|a| apply_type_coercion(a, schema))
+        .map(|a| {
+            let a = apply_type_coercion(a, schema)?;
+            // A DISTINCT aggregate removes duplicates under equivalence, which
+            // a bit-exact float comparison gets wrong for `-0.0` / `0.0` and
+            // for NaNs of either sign; key the argument on its class.
+            Ok(if !agg.params.distinct {
+                a
+            } else if a.get_type(schema).is_ok_and(|t| {
+                matches!(
+                    t,
+                    datafusion::arrow::datatypes::DataType::Float32
+                        | datafusion::arrow::datatypes::DataType::Float64
+                )
+            }) {
+                dummy_udf_expr(crate::df_udfs::CYPHER_FLOAT_KEY_UDF, vec![a])
+            } else if is_decodable_cypher_value(&a, schema) {
+                dummy_udf_expr(crate::df_udfs::CYPHER_VALUE_KEY_UDF, vec![a])
+            } else {
+                a
+            })
+        })
         .collect::<Result<Vec<_>>>()?;
     let coerced_order_by: Vec<datafusion::logical_expr::SortExpr> = agg
         .params

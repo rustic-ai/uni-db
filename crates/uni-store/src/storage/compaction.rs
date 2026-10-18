@@ -7,7 +7,7 @@ use anyhow::{Result, anyhow};
 use arrow_array::Array;
 use arrow_array::builder::{ListBuilder, UInt64Builder};
 use arrow_array::{
-    LargeBinaryArray, ListArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt64Array,
+    LargeBinaryArray, ListArray, RecordBatch, TimestampNanosecondArray, UInt64Array,
 };
 use metrics;
 use std::collections::{HashMap, HashSet};
@@ -250,9 +250,6 @@ impl Compactor {
             // their physical columns and put them back into the property map, so
             // `build_record_batch_with_timestamps` re-derives `ext_id`, `_uid`
             // and `overflow_json` from the same inputs the flush path used.
-            let ext_id_col = batch
-                .column_by_name("ext_id")
-                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
             let overflow_col = batch
                 .column_by_name("overflow_json")
                 .and_then(|c| c.as_any().downcast_ref::<LargeBinaryArray>());
@@ -322,14 +319,7 @@ impl Compactor {
                 }
 
                 // Restore the reserved columns the loop above cannot reach.
-                if let Some(col) = ext_id_col
-                    && !col.is_null(i)
-                {
-                    row_props.insert(
-                        "ext_id".to_string(),
-                        Value::String(col.value(i).to_string()),
-                    );
-                }
+                crate::storage::property_builder::restore_ext_id_column(&batch, i, &mut row_props);
                 if let Some(col) = overflow_col
                     && !col.is_null(i)
                     && let Value::Map(overflow) =

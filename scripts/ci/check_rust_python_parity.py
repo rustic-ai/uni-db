@@ -68,6 +68,33 @@ RESULT_PARITY = {
     "LocyResult": "LocyResult",
 }
 
+# Fourth axis: public *fields* of data structs that Python receives as a
+# pyclass. The method axis above cannot see these -- `QueryMetrics` has no
+# methods, so five counters added on the Rust side (`physical_plans`,
+# `physical_plan_time`, `shortest_path_searches`, `subquery_executions`,
+# `lance_iops`) were simply absent from Python and nothing noticed.
+#
+# Rust type -> (source file, Python pyclass name).
+FIELD_PARITY = {
+    "QueryMetrics": (ROOT / "crates/uni-query/src/types.rs", "QueryMetrics"),
+    "ProfileOutput": (
+        ROOT / "crates/uni-query/src/query/executor/core.rs",
+        "ProfileOutput",
+    ),
+    "LocyStats": (ROOT / "crates/uni-locy/src/result.rs", "LocyStats"),
+}
+# A `Duration` field is bound as a float with its unit in the name; either
+# suffix counts as the field being bound.
+DURATION_SUFFIXES = ("_ms", "_secs")
+
+# Fifth axis: `LocyConfig` fields. Python has two independent ways to build
+# one, each with its own converter, so each is checked on its own: the dict
+# form (`with_config({...})`, read key by key in `extract_locy_config`) and the
+# `LocyConfig(...)` pyclass (its `#[new]` keyword arguments). A field bound in
+# one and forgotten in the other is exactly the drift this exists to catch.
+LOCY_CONFIG_RS = ROOT / "crates/uni-locy/src/config.rs"
+TYPES_RS = ROOT / "bindings/uni-db/src/types.rs"
+
 # ---------------------------------------------------------------------------
 # Allowlists: a Rust item deliberately not reachable from Python.
 #
@@ -145,6 +172,29 @@ BUILDER_NOT_BOUND = {
     # --- LocyResult ----------------------------------------------------------
     "LocyResult.into_inner": "Rust unwrap; Python receives the converted fields",
     "LocyResult.into_parts": "Rust unwrap; Python receives the converted fields",
+}
+
+
+# `LocyConfig` fields absent from the `with_config({...})` dict form.
+LOCY_DICT_NOT_BOUND = {
+    "semiring": "not bound yet; needs a string mapping for SemiringKind",
+    "neural_predicates_preview": "opt-out kill switch for CREATE MODEL; Rust-embedder concern",
+    "classifier_cache": "shared Rust-side cache handle; no Python representation",
+    "classifier_cache_max": "not bound yet",
+    "classifier_provenance_store": "always set by the binding itself, not by the caller",
+}
+
+# `LocyConfig` fields absent from the `LocyConfig(...)` constructor.
+LOCY_OBJECT_NOT_BOUND = {
+    **LOCY_DICT_NOT_BOUND,
+    "params": "bound on the builder (`.params(...)`) and in the dict form",
+    "classifier_registry": "bound as the `register_classifier` method",
+}
+
+# Keyed "RustType.field".
+FIELD_NOT_BOUND = {
+    "ProfileOutput.explain": "bound as `plan_text`; the cost/index detail is session.explain()",
+    "ProfileOutput.runtime_stats": "bound as `operators`, a list of dicts",
 }
 
 
@@ -294,6 +344,66 @@ def python_type_members(py_name: str) -> set[str]:
     return {m for m in members if not m.startswith("__")}
 
 
+def rust_struct_fields(path: Path, name: str) -> list[tuple[str, str]]:
+    """`(field, type)` pairs of `pub struct name`, in declaration order.
+
+    Bounded at the first column-zero `}`, which is the struct's own closing
+    brace: these structs hold no nested braces at column zero.
+    """
+    src = path.read_text()
+    m = re.search(r"^pub struct " + re.escape(name) + r"\s*\{(.*?)\n\}", src,
+                  re.S | re.M)
+    if not m:
+        fail([f"could not locate `pub struct {name}` in {path}"])
+    return re.findall(r"^    pub ([a-z_0-9]+):\s*([^,\n]+)", m.group(1), re.M)
+
+
+def field_is_bound(field: str, ty: str, members: set[str]) -> bool:
+    if field in members:
+        return True
+    # `Option<Duration>` too: `LocyConfig.timeout` is one, bound as `timeout_secs`.
+    if re.search(r"\bDuration\b", ty):
+        return any(field + suffix in members for suffix in DURATION_SUFFIXES)
+    return False
+
+
+def dict_converter_keys(fn_name: str) -> list[str]:
+    """Keys a `convert.rs` function writes into its result dict."""
+    src = CONVERT_RS.read_text()
+    m = re.search(r"^pub fn " + re.escape(fn_name) + r"\b(.*?)\n\}", src,
+                  re.S | re.M)
+    if not m:
+        fail([f"could not locate `fn {fn_name}` in {CONVERT_RS}"])
+    return re.findall(r'set_item\(\s*"([a-z_0-9]+)"', m.group(1))
+
+
+def python_locy_dict_keys() -> list[str]:
+    """Keys `extract_locy_config` reads from the `with_config({...})` dict."""
+    src = CONVERT_RS.read_text()
+    m = re.search(r"^pub fn extract_locy_config\b(.*?)\n\}", src, re.S | re.M)
+    if not m:
+        fail([f"could not locate `fn extract_locy_config` in {CONVERT_RS}"])
+    return re.findall(r'config\.get\(\s*"([a-z_0-9]+)"', m.group(1))
+
+
+def python_locy_object_kwargs() -> list[str]:
+    """Keyword arguments of the `LocyConfig(...)` pyclass constructor.
+
+    Read from the `#[pyo3(signature = (...))]` on the `#[new]` of the
+    `PyLocyConfig` pymethods, which is what Python actually accepts -- a Rust
+    parameter missing from the signature is not reachable by keyword.
+    """
+    src = TYPES_RS.read_text()
+    m = re.search(
+        r"^impl PyLocyConfig\s*\{.*?#\[new\]\s*#\[pyo3\(signature\s*=\s*\((.*?)\)\)\]",
+        src,
+        re.S | re.M,
+    )
+    if not m:
+        fail([f"could not locate the `PyLocyConfig` #[new] signature in {TYPES_RS}"])
+    return re.findall(r"([a-z_0-9]+)\s*=", m.group(1))
+
+
 def check(kind: str, rust_items: list[str], bound: set[str],
           allowlist: dict[str, str]) -> list[str]:
     problems: list[str] = []
@@ -395,6 +505,76 @@ def main() -> int:
         bound_members |= {f"{rust_ty}.{m}" for m in methods if m in members}
     problems += check("builder", rust_members, bound_members, BUILDER_NOT_BOUND)
 
+    # Fourth axis: data-struct fields, qualified "Type.field".
+    rust_fields: list[str] = []
+    bound_fields: set[str] = set()
+    for rust_ty, (path, py_ty) in FIELD_PARITY.items():
+        pairs = rust_struct_fields(path, rust_ty)
+        members = python_type_members(py_ty)
+        if len(pairs) < 3 or not members:
+            fail([
+                f"parity check parsed {len(pairs)} field(s) on Rust `{rust_ty}` "
+                f"and {len(members)} member(s) on Python `{py_ty}`; it would "
+                "pass vacuously. Fix the parser.",
+            ])
+        rust_fields += [f"{rust_ty}.{f}" for f, _ in pairs]
+        bound_fields |= {
+            f"{rust_ty}.{f}" for f, ty in pairs if field_is_bound(f, ty, members)
+        }
+    problems += check("field", rust_fields, bound_fields, FIELD_NOT_BOUND)
+
+    # `ExecuteResult.metrics` is a dict built by a second converter, not the
+    # `QueryMetrics` pyclass, so it can drift from the class on its own.
+    dict_keys = dict_converter_keys("query_metrics_to_py")
+    class_fields = python_type_members("QueryMetrics")
+    if len(dict_keys) < 3:
+        fail(["parity check parsed implausibly few keys from "
+              "`query_metrics_to_py`; fix the parser."])
+    if set(dict_keys) != class_fields or len(dict_keys) != len(set(dict_keys)):
+        problems.append(
+            "metrics dict: `query_metrics_to_py` (ExecuteResult.metrics) and the\n"
+            "  `QueryMetrics` pyclass disagree:\n"
+            + "".join(f"    - only in the dict: {k}\n"
+                      for k in sorted(set(dict_keys) - class_fields))
+            + "".join(f"    - only in the class: {k}\n"
+                      for k in sorted(class_fields - set(dict_keys)))
+            + "".join(f"    - repeated in the dict: {k}\n"
+                      for k in sorted({k for k in dict_keys
+                                       if dict_keys.count(k) > 1}))
+        )
+
+    # Fifth axis: `LocyConfig` fields, per Python construction form.
+    locy_pairs = rust_struct_fields(LOCY_CONFIG_RS, "LocyConfig")
+    locy_fields = [f for f, _ in locy_pairs]
+    locy_forms = {
+        "locy config dict": (python_locy_dict_keys(), LOCY_DICT_NOT_BOUND),
+        "locy config object": (python_locy_object_kwargs(), LOCY_OBJECT_NOT_BOUND),
+    }
+    locy_bound_counts: dict[str, int] = {}
+    for kind, (accepted, allowlist) in locy_forms.items():
+        if len(locy_fields) < 15 or len(accepted) < 10:
+            fail([
+                f"parity check parsed {len(locy_fields)} LocyConfig field(s) and "
+                f"{len(accepted)} {kind} key(s); it would pass vacuously. "
+                "Fix the parser.",
+            ])
+        accepted_set = set(accepted)
+        bound = {
+            f for f, ty in locy_pairs if field_is_bound(f, ty, accepted_set)
+        }
+        locy_bound_counts[kind] = len(bound)
+        unknown = [
+            k for k in accepted
+            if k not in locy_fields
+            and not any(k == f + sfx for f in locy_fields for sfx in DURATION_SUFFIXES)
+        ]
+        if unknown:
+            problems.append(
+                f"{kind}: accepts key(s) that are not LocyConfig fields:\n"
+                + "".join(f"    - {k}\n" for k in unknown)
+            )
+        problems += check(kind, locy_fields, bound, allowlist)
+
     if problems:
         fail(["Rust <-> Python parity drift:", ""] + problems)
 
@@ -405,7 +585,15 @@ def main() -> int:
         f"exception ({len(ERROR_NO_DEDICATED_EXCEPTION)} allowlisted); "
         f"{len(bound_members)}/{len(rust_members)} methods on "
         f"{len(BUILDER_PARITY) + len(RESULT_PARITY)} builder/result types bound "
-        f"({len(BUILDER_NOT_BOUND)} allowlisted)."
+        f"({len(BUILDER_NOT_BOUND)} allowlisted); "
+        f"{len(bound_fields)}/{len(rust_fields)} fields on "
+        f"{len(FIELD_PARITY)} data structs bound "
+        f"({len(FIELD_NOT_BOUND)} allowlisted); "
+        f"LocyConfig fields reachable: "
+        f"{locy_bound_counts['locy config dict']}/{len(locy_fields)} via dict "
+        f"({len(LOCY_DICT_NOT_BOUND)} allowlisted), "
+        f"{locy_bound_counts['locy config object']}/{len(locy_fields)} via "
+        f"LocyConfig(...) ({len(LOCY_OBJECT_NOT_BOUND)} allowlisted)."
     )
     return 0
 

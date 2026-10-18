@@ -151,9 +151,11 @@ async fn locy_facts_and_filters_query_where_errors_are_reported() -> Result<()> 
             .locy(&program)
             .await
             .expect_err(&format!("`{filter}` cannot be evaluated"));
+        // Lower-cased: the shared Cypher evaluator Locy now delegates to
+        // spells it "Division by zero".
         let text = err.to_string();
         assert!(
-            text.contains("division by zero")
+            text.to_lowercase().contains("division by zero")
                 || text.contains("must be a boolean")
                 || text.contains("NOT requires boolean"),
             "{filter}: {text}"
@@ -212,7 +214,10 @@ async fn locy_facts_and_filters_query_order_by_unreturned_expression() -> Result
         .locy(&format!("{base}ORDER BY a.id / 0"))
         .await
         .expect_err("ORDER BY a.id / 0");
-    assert!(err.to_string().contains("division by zero"), "{err}");
+    assert!(
+        err.to_string().to_lowercase().contains("division by zero"),
+        "{err}"
+    );
     Ok(())
 }
 
@@ -282,7 +287,8 @@ async fn locy_facts_and_filters_command_where_errors_are_reported() -> Result<()
                 .expect_err(&format!("`{text}` cannot be evaluated"));
             let msg = err.to_string();
             assert!(
-                msg.contains("division by zero") || msg.contains("must be a boolean"),
+                msg.to_lowercase().contains("division by zero")
+                    || msg.contains("must be a boolean"),
                 "{text}: {msg}"
             );
         }

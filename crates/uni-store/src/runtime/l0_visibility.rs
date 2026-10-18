@@ -563,6 +563,74 @@ pub fn edge_exists_in_l0(eid: Eid, ctx: Option<&QueryContext>) -> bool {
     visit_l0_buffers(Some(ctx), |buf| buf.edge_endpoints.contains_key(&eid))
 }
 
+/// An edge as the L0 chain holds it: stored endpoints and type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct L0Edge {
+    /// Stored start vertex.
+    pub src_vid: Vid,
+    /// Stored end vertex.
+    pub dst_vid: Vid,
+    /// Schema edge-type id (unified id space, schemaless types included).
+    pub type_id: u32,
+    /// Type name, when the buffer recorded one.
+    pub type_name: Option<String>,
+}
+
+/// What the L0 chain says about a set of edges; see [`lookup_edges`].
+#[derive(Debug, Default)]
+pub struct L0EdgeLookup {
+    /// Edges resident in some layer and tombstoned in none, from the newest
+    /// layer holding each.
+    pub found: HashMap<Eid, L0Edge>,
+    /// Edges tombstoned in some layer. They do not exist, whatever flushed
+    /// storage still holds for them.
+    pub deleted: HashSet<Eid>,
+}
+
+/// Resolves each of `eids` against the L0 chain in one pass per layer.
+///
+/// The batch form of [`get_edge_endpoints`] plus [`is_edge_deleted`]. A
+/// tombstone in any layer wins, as it does for the traversal's L0 overlay and
+/// for `PropertyManager`: EIDs are never reused, so a tombstone cannot be
+/// older than a live entry it would wrongly hide. An EID in neither map is
+/// not in L0 and must be resolved against flushed storage.
+///
+/// Every requested EID joins the transaction's SSI read set, found or not,
+/// under one lock — the item-level contract of `record_edge_read`, which
+/// records the queried id rather than only the ids that turned out to exist.
+pub fn lookup_edges(eids: &[Eid], ctx: &QueryContext) -> L0EdgeLookup {
+    if let Some(tx_l0_arc) = &ctx.transaction_l0
+        && let Some(read_set) = &tx_l0_arc.read().occ_read_set
+    {
+        read_set.lock().edges.extend(eids.iter().copied());
+    }
+
+    let mut lookup = L0EdgeLookup::default();
+    visit_l0_buffers(Some(ctx), |buf| {
+        for &eid in eids {
+            if buf.tombstones.contains_key(&eid) {
+                lookup.found.remove(&eid);
+                lookup.deleted.insert(eid);
+            } else if !lookup.deleted.contains(&eid)
+                && !lookup.found.contains_key(&eid)
+                && let Some(&(src_vid, dst_vid, type_id)) = buf.edge_endpoints.get(&eid)
+            {
+                lookup.found.insert(
+                    eid,
+                    L0Edge {
+                        src_vid,
+                        dst_vid,
+                        type_id,
+                        type_name: buf.edge_types.get(&eid).cloned(),
+                    },
+                );
+            }
+        }
+        false
+    });
+    lookup
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -698,6 +766,93 @@ mod tests {
             assert!(
                 guard.edges.contains(&Eid::from(e)),
                 "edge {e} read was not recorded in the SSI read-set"
+            );
+        }
+    }
+
+    /// `lookup_edges` resolves a batch across all three tiers: endpoints and
+    /// type from the newest layer holding each edge, a tombstone in any layer
+    /// deleting it, and every requested EID — found or not — in the read set.
+    #[test]
+    fn l0_edge_lookup_records_every_requested_eid() {
+        use crate::runtime::l0::OccReadSet;
+
+        let mut pending = L0Buffer::new(0, None);
+        pending
+            .insert_edge(
+                Vid::from(1),
+                Vid::from(2),
+                7,
+                Eid::from(1),
+                HashMap::new(),
+                Some("R".into()),
+            )
+            .unwrap();
+        pending
+            .insert_edge(
+                Vid::from(2),
+                Vid::from(3),
+                7,
+                Eid::from(2),
+                HashMap::new(),
+                Some("R".into()),
+            )
+            .unwrap();
+        let mut main_l0 = L0Buffer::new(0, None);
+        main_l0
+            .insert_edge(
+                Vid::from(3),
+                Vid::from(3),
+                9,
+                Eid::from(3),
+                HashMap::new(),
+                None,
+            )
+            .unwrap();
+        main_l0
+            .delete_edge(Eid::from(2), Vid::from(2), Vid::from(3), 7)
+            .unwrap();
+        let mut tx_l0 = L0Buffer::new(0, None);
+        tx_l0
+            .insert_edge(
+                Vid::from(4),
+                Vid::from(1),
+                7,
+                Eid::from(4),
+                HashMap::new(),
+                Some("R".into()),
+            )
+            .unwrap();
+        let read_set = Arc::new(parking_lot::Mutex::new(OccReadSet::default()));
+        tx_l0.occ_read_set = Some(read_set.clone());
+        let ctx = QueryContext::new_with_pending(
+            Arc::new(RwLock::new(main_l0)),
+            Some(Arc::new(RwLock::new(tx_l0))),
+            vec![Arc::new(RwLock::new(pending))],
+        );
+
+        let eids: Vec<Eid> = (1..=5).map(Eid::from).collect();
+        let lookup = lookup_edges(&eids, &ctx);
+        let edge = |src: u64, dst: u64, type_id, name: Option<&str>| L0Edge {
+            src_vid: Vid::from(src),
+            dst_vid: Vid::from(dst),
+            type_id,
+            type_name: name.map(str::to_string),
+        };
+        assert_eq!(
+            lookup.found,
+            HashMap::from([
+                (Eid::from(1), edge(1, 2, 7, Some("R"))),
+                (Eid::from(3), edge(3, 3, 9, None)),
+                (Eid::from(4), edge(4, 1, 7, Some("R"))),
+            ])
+        );
+        assert_eq!(lookup.deleted, HashSet::from([Eid::from(2)]));
+        let guard = read_set.lock();
+        for e in 1..=5u64 {
+            assert!(
+                guard.edges.contains(&Eid::from(e)),
+                "edge {e} was looked up but not recorded in the SSI read set"
             );
         }
     }

@@ -16,4 +16,5 @@ pub mod vlp_anonymous_path_multiplicity;
 pub mod vlp_debug_simple;
 pub mod vlp_fixes_test;
 pub mod vlp_pattern_predicate_investigation;
+pub mod vlp_property_map_oracle;
 pub mod vlp_test;

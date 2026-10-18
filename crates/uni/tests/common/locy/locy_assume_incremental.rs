@@ -1,0 +1,322 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2024-2026 Dragonscale Team
+
+//! A4: `ASSUME` and `ABDUCE` re-derive only the strata their mutation can
+//! affect, and reuse the rest.
+//!
+//! Before, every hypothetical re-evaluation re-derived every stratum, so an
+//! `ASSUME` that added one isolated node cost a second run of the whole
+//! program (`rows_scanned` 1.97x the plain program at two scales). The
+//! criterion is in `uni_locy::incremental`.
+//!
+//! Each answer is checked against the same program run fresh on the mutated
+//! graph (the mutation applied in a transaction that is then rolled back), and
+//! the work against counters: strata evaluated / reused, and `rows_scanned`
+//! at two scales, so a regression to full re-evaluation fails.
+
+// Rust guideline compliant
+
+use std::collections::BTreeSet;
+
+use anyhow::Result;
+use uni_common::Value;
+use uni_db::Uni;
+
+type FactRow = std::collections::HashMap<String, Value>;
+use uni_db::locy::{CommandResult, LocyConfig};
+
+/// `KNOWS` is the large relation; `Company` is small and unrelated to it.
+async fn seeded(n_people: usize) -> Result<Uni> {
+    let db = Uni::in_memory().build().await?;
+    let tx = db.session().tx().await?;
+    tx.execute(&format!(
+        "UNWIND range(0, {}) AS i CREATE (:Person {{idx: i}})",
+        n_people - 1
+    ))
+    .await?;
+    tx.execute(&format!(
+        "MATCH (a:Person), (b:Person) WHERE b.idx = a.idx + 1 AND a.idx < {} \
+         CREATE (a)-[:KNOWS]->(b)",
+        n_people - 1
+    ))
+    .await?;
+    tx.execute(
+        "CREATE (:Company {name: 'acme', size: 20}), (:Company {name: 'tiny', size: 2}), \
+                (:Company {name: 'mid', size: 12})",
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(db)
+}
+
+/// Three strata: `knows` (reads KNOWS, large), `big` (reads Company), and
+/// `big_named` (references `big`).
+const PROGRAM: &str = "\
+CREATE RULE knows AS MATCH (a:Person)-[:KNOWS]->(b:Person) YIELD KEY a, KEY b\n\
+CREATE RULE big AS MATCH (c:Company) WHERE c.size > 10 YIELD KEY c\n\
+CREATE RULE big_named AS MATCH (c:Company) WHERE c IS big YIELD KEY c, c.name AS name\n";
+
+fn strings(rows: &[FactRow], col: &str) -> BTreeSet<String> {
+    rows.iter().map(|r| format!("{:?}", r.get(col))).collect()
+}
+
+fn assume_rows(result: &uni_db::locy::LocyResult, idx: usize) -> Vec<FactRow> {
+    match &result.command_results[idx] {
+        CommandResult::Assume(rows) => rows.clone(),
+        other => panic!("expected an ASSUME result, got {other:?}"),
+    }
+}
+
+/// The program's QUERY answer on the graph with `mutation` applied, in a
+/// transaction that is rolled back.
+async fn fresh_answer(
+    db: &Uni,
+    mutation: &str,
+    query: &str,
+    col: &str,
+) -> Result<BTreeSet<String>> {
+    let tx = db.session().tx().await?;
+    tx.execute(mutation).await?;
+    let result = tx.locy(&format!("{PROGRAM}{query}")).await?;
+    tx.rollback();
+    let rows = match &result.command_results[0] {
+        CommandResult::Query(rows) => rows.clone(),
+        other => panic!("expected a QUERY result, got {other:?}"),
+    };
+    Ok(strings(&rows, col))
+}
+
+#[tokio::test]
+async fn unaffected_strata_are_reused_and_the_answer_matches_a_fresh_run() -> Result<()> {
+    let db = seeded(50).await?;
+    let mutation = "CREATE (:Company {name: 'new', size: 50})";
+    let query = "QUERY big_named RETURN name";
+    let result = db
+        .session()
+        .locy(&format!(
+            "{PROGRAM}ASSUME {{ {mutation} }} THEN {{ {query} }}"
+        ))
+        .await?;
+    let got = strings(&assume_rows(&result, 0), "name");
+    assert_eq!(got, fresh_answer(&db, mutation, query, "name").await?);
+    assert!(got.contains("Some(String(\"new\"))"), "{got:?}");
+    let stats = result.stats();
+    // `knows` is reused; `big` reads Company and `big_named` references it.
+    assert_eq!(stats.hypothetical_strata_reused, 1, "{stats:?}");
+    assert_eq!(stats.hypothetical_strata_evaluated, 2, "{stats:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_affected_lower_stratum_is_recomputed() -> Result<()> {
+    let db = seeded(20).await?;
+    // A new KNOWS edge from the last person back to the first.
+    let mutation = "MATCH (a:Person {idx: 19}), (b:Person {idx: 0}) CREATE (a)-[:KNOWS]->(b)";
+    let query = "QUERY knows RETURN a.idx AS src";
+    let result = db
+        .session()
+        .locy(&format!(
+            "{PROGRAM}ASSUME {{ {mutation} }} THEN {{ {query} }}"
+        ))
+        .await?;
+    let got = strings(&assume_rows(&result, 0), "src");
+    assert_eq!(got, fresh_answer(&db, mutation, query, "src").await?);
+    assert!(got.contains("Some(Int(19))"), "{got:?}");
+    let stats = result.stats();
+    // `knows` is recomputed; the two Company strata are reused.
+    assert_eq!(stats.hypothetical_strata_evaluated, 1, "{stats:?}");
+    assert_eq!(stats.hypothetical_strata_reused, 2, "{stats:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_property_change_recomputes_only_rules_reading_it() -> Result<()> {
+    let db = seeded(20).await?;
+    let mutation = "MATCH (c:Company {name: 'tiny'}) SET c.size = 99";
+    let query = "QUERY big_named RETURN name";
+    let result = db
+        .session()
+        .locy(&format!(
+            "{PROGRAM}ASSUME {{ {mutation} }} THEN {{ {query} }}"
+        ))
+        .await?;
+    let got = strings(&assume_rows(&result, 0), "name");
+    assert_eq!(got, fresh_answer(&db, mutation, query, "name").await?);
+    assert!(got.contains("Some(String(\"tiny\"))"), "{got:?}");
+    // `big` reads `size`; `big_named` references `big`; `knows` reads neither.
+    assert_eq!(result.stats().hypothetical_strata_reused, 1);
+
+    // A property no rule reads changes nothing: every stratum is reused, and
+    // the hydrated entity still shows the hypothetical value.
+    let result = db
+        .session()
+        .locy(&format!(
+            "{PROGRAM}ASSUME {{ MATCH (c:Company {{name: 'acme'}}) SET c.motto = 'hi' }} \
+             THEN {{ QUERY big RETURN c.motto AS motto }}"
+        ))
+        .await?;
+    let got = strings(&assume_rows(&result, 0), "motto");
+    assert!(got.contains("Some(String(\"hi\"))"), "{got:?}");
+    assert_eq!(result.stats().hypothetical_strata_reused, 3);
+    assert_eq!(result.stats().hypothetical_strata_evaluated, 0);
+    Ok(())
+}
+
+/// A DERIVE before the ASSUME changes the state the program's facts were
+/// derived in, so they must not be reused.
+#[tokio::test]
+async fn a_write_before_the_assume_disables_reuse() -> Result<()> {
+    let db = seeded(5).await?;
+    let result = db
+        .session()
+        .locy(
+            "CREATE RULE knows AS MATCH (a:Person)-[:KNOWS]->(b:Person) YIELD KEY a, KEY b\n\
+             CREATE RULE back AS MATCH (a:Person)-[:KNOWS]->(b:Person) DERIVE (b)-[:KNOWS]->(a)\n\
+             DERIVE back\n\
+             ASSUME { CREATE (:Company {name: 'x', size: 1}) } THEN { QUERY knows RETURN a.idx AS src }",
+        )
+        .await?;
+    let rows = assume_rows(&result, 1);
+    // 4 forward edges plus the 4 derived reverse ones.
+    assert_eq!(rows.len(), 8, "{rows:?}");
+    assert_eq!(result.stats().hypothetical_strata_reused, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn nested_assume_reuses_the_outer_hypothetical_state() -> Result<()> {
+    let db = seeded(10).await?;
+    let result = db
+        .session()
+        .locy(&format!(
+            "{PROGRAM}ASSUME {{ CREATE (:Company {{name: 'outer', size: 30}}) }} THEN {{ \
+               ASSUME {{ MATCH (a:Person {{idx: 9}}), (b:Person {{idx: 0}}) CREATE (a)-[:KNOWS]->(b) }} \
+               THEN {{ QUERY big_named RETURN name }} \
+               QUERY big_named RETURN name }}"
+        ))
+        .await?;
+    // An outer body collects its QUERY and Cypher rows, not a nested
+    // ASSUME's; the outer QUERY reads the outer hypothetical state.
+    let got = strings(&assume_rows(&result, 0), "name");
+    assert!(got.contains("Some(String(\"outer\"))"), "{got:?}");
+    let stats = result.stats();
+    // Outer: knows reused, big + big_named derived. Inner (KNOWS edge): knows
+    // derived, big + big_named reused from the outer state.
+    assert_eq!(stats.hypothetical_strata_reused, 3, "{stats:?}");
+    assert_eq!(stats.hypothetical_strata_evaluated, 3, "{stats:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn abduce_candidates_reuse_unaffected_strata() -> Result<()> {
+    let db = seeded(10).await?;
+    let result = db
+        .session()
+        .locy(&format!("{PROGRAM}ABDUCE NOT knows WHERE a.idx = 3"))
+        .await?;
+    let abduction = match &result.command_results[0] {
+        CommandResult::Abduce(a) => a.clone(),
+        other => panic!("expected ABDUCE, got {other:?}"),
+    };
+    assert!(
+        abduction.modifications.iter().any(|m| m.validated),
+        "{abduction:?}"
+    );
+    let stats = result.stats();
+    let candidates = abduction.modifications.len();
+    // Every candidate re-evaluates the three strata, deriving or reusing each.
+    assert_eq!(
+        stats.hypothetical_strata_reused + stats.hypothetical_strata_evaluated,
+        3 * candidates,
+        "{stats:?}"
+    );
+    // A `SET a.idx` candidate changes no rule input (the ABDUCE WHERE reads
+    // `idx` from the re-hydrated facts), so all three strata are reused; the
+    // KNOWS removal recomputes `knows` and reuses the Company strata.
+    let removals = abduction
+        .modifications
+        .iter()
+        .filter(|m| format!("{:?}", m.modification).starts_with("RemoveEdge"))
+        .count();
+    assert!(removals >= 1, "{abduction:?}");
+    assert_eq!(stats.hypothetical_strata_evaluated, removals, "{stats:?}");
+    Ok(())
+}
+
+/// The hypothetical state's facts must be complete: a re-evaluation cut short
+/// by the iteration limit is an error, not a short answer.
+#[tokio::test]
+async fn an_incomplete_hypothetical_evaluation_is_an_error() -> Result<()> {
+    let db = seeded(3).await?;
+    let program = "\
+        CREATE RULE reach AS MATCH (a:Person)-[:KNOWS]->(b:Person) YIELD KEY a, KEY b\n\
+        CREATE RULE reach AS MATCH (a:Person)-[:KNOWS]->(m:Person) WHERE m IS reach TO b YIELD KEY a, KEY b\n\
+        ASSUME { MATCH (a:Person {idx: 2}) \
+                 CREATE (a)-[:KNOWS]->(:Person {idx: 3})-[:KNOWS]->(:Person {idx: 4})-[:KNOWS]->(:Person {idx: 5})-[:KNOWS]->(:Person {idx: 6})-[:KNOWS]->(:Person {idx: 7}) } \
+        THEN { QUERY reach RETURN a.idx AS src }";
+    let config = LocyConfig {
+        max_iterations: 4,
+        ..Default::default()
+    };
+    // The base chain of 3 converges within the limit; the hypothetical chain
+    // of 8 does not.
+    let err = db
+        .session()
+        .locy_with(program)
+        .with_config(config)
+        .run()
+        .await
+        .expect_err("a hypothetical run that hit the iteration limit must fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.to_lowercase().contains("incomplete") || msg.to_lowercase().contains("iteration"),
+        "{msg}"
+    );
+    Ok(())
+}
+
+/// Counter guard at two scales: an ASSUME that cannot affect the large
+/// stratum must not rescan it. Measured as the scans the ASSUME adds over the
+/// plain program, which must not grow with the large relation.
+#[tokio::test]
+async fn assume_cost_does_not_scale_with_unaffected_strata() -> Result<()> {
+    let mut extra = Vec::new();
+    for n in [2_000usize, 8_000] {
+        let db = seeded(n).await?;
+        // The first evaluation on a fresh database also pays one-off warm-up
+        // scans; measure both arms after it.
+        db.session().locy(PROGRAM).await?;
+        let plain = db
+            .session()
+            .locy(&format!("{PROGRAM}QUERY big_named RETURN name"))
+            .await?;
+        let hypothetical = db
+            .session()
+            .locy(&format!(
+                "{PROGRAM}ASSUME {{ CREATE (:Company {{name: 'new', size: 50}}) }} \
+                 THEN {{ QUERY big_named RETURN name }}"
+            ))
+            .await?;
+        let p = plain.metrics().rows_scanned;
+        let h = hypothetical.metrics().rows_scanned;
+        eprintln!(
+            "[A4] n={n}: rows_scanned plain={p} assume={h}; strata evaluated={} reused={} facts={}",
+            hypothetical.stats().hypothetical_strata_evaluated,
+            hypothetical.stats().hypothetical_strata_reused,
+            hypothetical.stats().hypothetical_facts_derived,
+        );
+        assert!(
+            p as usize >= n,
+            "the plain run scans the KNOWS relation: {p}"
+        );
+        assert_eq!(hypothetical.stats().hypothetical_strata_reused, 1);
+        extra.push(h.saturating_sub(p));
+    }
+    // Full re-evaluation adds about `p` (thousands, growing 4x); reuse adds a
+    // few Company rows at both scales.
+    assert!(
+        extra.iter().all(|e| *e < 100),
+        "an ASSUME on Company rescanned the KNOWS stratum: extra rows_scanned {extra:?}"
+    );
+    Ok(())
+}

@@ -5,7 +5,9 @@ pub mod config;
 pub mod dependency_dnf;
 pub mod entity_columns;
 pub mod errors;
+pub mod incremental;
 pub mod is_binding;
+pub mod magic;
 pub mod names;
 pub mod neural;
 pub mod prune;
@@ -39,6 +41,8 @@ pub use compiler::{MonotonicityOracle, default_monotonicity_oracle};
 pub use config::{ClassifierRegistry, ConfigError, LocyConfig};
 pub use dependency_dnf::{BaseRv, BaseRvSet, DependencyDnf};
 pub use errors::LocyError;
+#[doc(inline)]
+pub use magic::{GoalDirected, GoalDirectedReport, rewrite_goal_directed};
 pub use neural::{
     CalibratedClassifier, CandleLinearClassifier, ClassifierError, ClassifierResult, ClassifyInput,
     FeatureValue, MockClassifier, ModelInvocationCache, NeuralClassifier, NeuralProvenanceRecord,

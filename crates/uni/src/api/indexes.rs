@@ -35,22 +35,14 @@ impl Indexes<'_> {
     /// When `background` is false, blocks until complete and returns `None`.
     pub async fn rebuild(&self, label: &str, background: bool) -> Result<Option<String>> {
         if background {
-            let manager = uni_store::storage::IndexRebuildManager::new(
-                self.inner.storage.clone(),
-                self.inner.schema.clone(),
-                self.inner.config.index_rebuild.clone(),
-            )
-            .await
-            .map_err(UniError::Internal)?;
-
-            let task_ids = manager
+            // Queued on the database's one manager, whose worker picks it up.
+            let task_ids = self
+                .inner
+                .index_rebuild_manager()
+                .await?
                 .schedule(vec![label.to_string()])
                 .await
                 .map_err(UniError::Internal)?;
-
-            let manager = std::sync::Arc::new(manager);
-            let handle = manager.start_background_worker(self.inner.shutdown_handle.subscribe());
-            self.inner.shutdown_handle.track_task(handle);
 
             Ok(task_ids.into_iter().next())
         } else {
@@ -69,6 +61,11 @@ impl Indexes<'_> {
 
     /// Get status of all rebuild tasks.
     pub async fn rebuild_status(&self) -> Result<Vec<uni_store::storage::IndexRebuildTask>> {
+        // The live manager's view, when there is one; otherwise the persisted
+        // state, read without starting a worker just to answer a query.
+        if let Some(manager) = self.inner.index_rebuild.get() {
+            return Ok(manager.status());
+        }
         let manager = uni_store::storage::IndexRebuildManager::new(
             self.inner.storage.clone(),
             self.inner.schema.clone(),
@@ -82,22 +79,11 @@ impl Indexes<'_> {
 
     /// Retry failed rebuild tasks. Returns retried task IDs.
     pub async fn retry_failed(&self) -> Result<Vec<String>> {
-        let manager = uni_store::storage::IndexRebuildManager::new(
-            self.inner.storage.clone(),
-            self.inner.schema.clone(),
-            self.inner.config.index_rebuild.clone(),
-        )
-        .await
-        .map_err(UniError::Internal)?;
-
-        let retried = manager.retry_failed().await.map_err(UniError::Internal)?;
-
-        if !retried.is_empty() {
-            let manager = std::sync::Arc::new(manager);
-            let handle = manager.start_background_worker(self.inner.shutdown_handle.subscribe());
-            self.inner.shutdown_handle.track_task(handle);
-        }
-
-        Ok(retried)
+        self.inner
+            .index_rebuild_manager()
+            .await?
+            .retry_failed()
+            .await
+            .map_err(UniError::Internal)
     }
 }

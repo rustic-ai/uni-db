@@ -433,7 +433,13 @@ async fn when_evaluating_locy_program(world: &mut LocyWorld, step: &cucumber::gh
         .await
         .expect("Failed to initialize database");
 
-    let result = world.db().session().locy(program).await;
+    let result = world
+        .db()
+        .session()
+        .locy_with(program)
+        .with_config(base_config())
+        .run()
+        .await;
     apply_derived_and_store(world, program, result).await;
 }
 
@@ -451,8 +457,35 @@ async fn when_evaluating_locy_program_without_apply(
         .await
         .expect("Failed to initialize database");
 
-    let result = world.db().session().locy(program).await;
+    let result = world
+        .db()
+        .session()
+        .locy_with(program)
+        .with_config(base_config())
+        .run()
+        .await;
     store_without_apply(world, program, result).await;
+}
+
+/// The configuration every scenario evaluates under.
+///
+/// `UNI_LOCY_TCK_GOAL_DIRECTED=shadow` (or `on`) runs the corpus with the
+/// goal-directed rewrite (`uni_locy::magic`). Shadow keeps every rule's full
+/// relation in `derived`, so all assertions apply unchanged while each
+/// rewritten `QUERY` is answered by the rewritten program; `on` also drops
+/// rules only rewritten goals needed, so scenarios asserting such a rule's
+/// `derived` relation are expected to fail in that mode.
+fn base_config() -> LocyConfig {
+    let goal_directed = match std::env::var("UNI_LOCY_TCK_GOAL_DIRECTED").as_deref() {
+        Ok("shadow") => uni_locy::GoalDirected::Shadow,
+        Ok("on") => uni_locy::GoalDirected::On,
+        Ok("off") | Err(_) => uni_locy::GoalDirected::Off,
+        Ok(other) => panic!("UNI_LOCY_TCK_GOAL_DIRECTED={other}: expected off, on or shadow"),
+    };
+    LocyConfig {
+        goal_directed,
+        ..LocyConfig::default()
+    }
 }
 
 /// Initialize the DB, build a `LocyConfig` via `mutate`, run the program in
@@ -472,7 +505,7 @@ async fn run_with_config(
         .await
         .expect("Failed to initialize database");
 
-    let mut config = LocyConfig::default();
+    let mut config = base_config();
     mutate(&mut config);
     let result = world
         .db()

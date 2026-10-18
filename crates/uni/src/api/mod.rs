@@ -270,6 +270,16 @@ pub struct UniInner {
     /// and parameter binding still run per execution, so cached reuse is
     /// parameter-value independent.
     pub(crate) plan_cache: Arc<std::sync::Mutex<crate::api::session::PlanCache>>,
+    /// The one background index-rebuild manager of this view, with its
+    /// worker task.
+    ///
+    /// Set at build when automatic rebuilds are enabled, otherwise created on
+    /// the first background rebuild. One per view matters twice over: every
+    /// manager's worker loops until shutdown, so a manager per call leaked a
+    /// worker per call, and every manager rewrites the same
+    /// `index_rebuild_state.json` from its own task map, so two of them
+    /// overwrite each other's tasks.
+    pub(crate) index_rebuild: tokio::sync::OnceCell<Arc<uni_store::storage::IndexRebuildManager>>,
 }
 
 /// Capacity of the transaction-write-path plan cache (entries).
@@ -407,6 +417,39 @@ fn build_executor_template(
 }
 
 impl UniInner {
+    /// This view's background index-rebuild manager, created with its worker
+    /// on first use.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a new manager cannot load the persisted rebuild state.
+    pub(crate) async fn index_rebuild_manager(
+        &self,
+    ) -> Result<Arc<uni_store::storage::IndexRebuildManager>> {
+        self.index_rebuild
+            .get_or_try_init(|| async {
+                let manager = Arc::new(
+                    uni_store::storage::IndexRebuildManager::new(
+                        self.storage.clone(),
+                        self.schema.clone(),
+                        self.config.index_rebuild.clone(),
+                    )
+                    .await
+                    .map_err(UniError::Internal)?,
+                );
+                let handle =
+                    Arc::clone(&manager).start_background_worker(self.shutdown_handle.subscribe());
+                track_task_with_scratch_claim(
+                    &self.shutdown_handle,
+                    self._temp_dir.as_ref(),
+                    handle,
+                );
+                Ok(manager)
+            })
+            .await
+            .cloned()
+    }
+
     /// Build a [`uni_bulk::BulkBackend`] handle bundle from this inner's
     /// fields for the bulk-write driver (`bulk_writer`/`appender`).
     pub(crate) fn bulk_backend(self: &Arc<Self>) -> uni_bulk::BulkBackend {
@@ -489,6 +532,8 @@ impl UniInner {
             plan_cache: Arc::new(std::sync::Mutex::new(crate::api::session::PlanCache::new(
                 TX_PLAN_CACHE_CAPACITY,
             ))),
+            // A different storage view rebuilds into different datasets.
+            index_rebuild: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -1179,11 +1224,22 @@ impl Uni {
 
     /// Number of tracked background tasks still running.
     ///
-    /// Zero after [`Self::shutdown_in_place`] returns unless a task overran
-    /// the shutdown grace period.
+    /// Counts the tasks tracked by the shutdown handle and the async-flush
+    /// stream tasks. Zero after [`Self::shutdown_in_place`] returns unless a
+    /// task overran the shutdown grace period.
     #[must_use]
     pub fn background_task_count(&self) -> usize {
-        self.inner.shutdown_handle.live_task_count()
+        self.inner.shutdown_handle.live_task_count() + self.live_flush_stream_count()
+    }
+
+    /// Async-flush stream tasks still running (zero without a writer or with
+    /// async flush off).
+    fn live_flush_stream_count(&self) -> usize {
+        self.inner
+            .writer
+            .as_ref()
+            .and_then(|w| w.flush_coordinator())
+            .map_or(0, |coord| coord.live_stream_count())
     }
 }
 
@@ -1223,8 +1279,9 @@ const FOREIGN_COMPACTION_WAIT: Duration = Duration::from_secs(30);
 impl Drop for Uni {
     /// Stops background work and waits for it, bounded.
     ///
-    /// Cancels compaction, signals every tracked task, and then waits up to
-    /// [`DROP_TASK_JOIN_TIMEOUT`] for them to finish, so a pass does not keep
+    /// Cancels compaction, waits for in-flight async-flush streams, signals
+    /// every tracked task, and waits for those too — all within
+    /// [`DROP_TASK_JOIN_TIMEOUT`] — so a pass or a stream does not keep
     /// rewriting a directory its owner has given up (and that the caller may
     /// delete or reopen next). The wait observes the tasks rather than driving
     /// them, so it depends on where the drop runs:
@@ -1236,22 +1293,33 @@ impl Drop for Uni {
     ///   Call [`Uni::shutdown`] there instead.
     fn drop(&mut self) {
         self.inner.storage.cancel_compaction();
-        // The flush-coordinator finalizer blocks on its submit channel and
-        // never sees the shutdown broadcast; without closing the channel it
-        // would hold the wait to its bound every time. `shutdown_in_place`
-        // closes it for the same reason.
-        if let Some(writer) = self.inner.writer.as_ref()
-            && let Some(coord) = writer.flush_coordinator()
-        {
-            coord.close_submit_channel();
-        }
+        let coord = self
+            .inner
+            .writer
+            .as_ref()
+            .and_then(|w| w.flush_coordinator());
         let handle = &self.inner.shutdown_handle;
+        // Waits, in order and under one deadline: for the async-flush stream
+        // tasks (awaited by the coordinator, not tracked by the shutdown
+        // handle; one left running keeps writing Lance data into the directory
+        // after `drop` returns), then — once their submissions are queued — for
+        // the tracked tasks, the flush finalizer among them.
+        let wait_all = || {
+            let deadline = Instant::now() + DROP_TASK_JOIN_TIMEOUT;
+            let mut streams = self.live_flush_stream_count();
+            while streams > 0 && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(2));
+                streams = self.live_flush_stream_count();
+            }
+            close_flush_submit_channel(coord);
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            handle.shutdown_and_wait_blocking(remaining) + streams
+        };
         let live = match tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()) {
-            Err(_) => handle.shutdown_and_wait_blocking(DROP_TASK_JOIN_TIMEOUT),
-            Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(|| {
-                handle.shutdown_and_wait_blocking(DROP_TASK_JOIN_TIMEOUT)
-            }),
+            Err(_) => wait_all(),
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(wait_all),
             Ok(_) => {
+                close_flush_submit_channel(coord);
                 handle.shutdown_blocking();
                 0
             }
@@ -1265,6 +1333,20 @@ impl Drop for Uni {
             );
         }
         tracing::debug!("Uni dropped, background tasks signalled");
+    }
+}
+
+/// Closes the async-flush coordinator's submit channel, if there is one.
+///
+/// The finalizer blocks on that channel and never sees the shutdown broadcast;
+/// without closing it, a wait for the tracked tasks would run to its bound
+/// every time. Buffered submissions are still finalized before it exits.
+/// `shutdown_in_place` closes it for the same reason.
+fn close_flush_submit_channel(
+    coord: Option<&Arc<uni_store::runtime::flush_coordinator::FlushCoordinator>>,
+) {
+    if let Some(coord) = coord {
+        coord.close_submit_channel();
     }
 }
 
@@ -2027,6 +2109,7 @@ impl UniBuilder {
         }
 
         // Wire up IndexRebuildManager for post-flush automatic rebuild scheduling
+        let mut auto_rebuild_manager = None;
         if !self.read_only && self.config.index_rebuild.auto_rebuild_enabled {
             let rebuild_manager = Arc::new(
                 uni_store::storage::IndexRebuildManager::new(
@@ -2044,8 +2127,9 @@ impl UniBuilder {
             track_task_with_scratch_claim(&shutdown_handle, scratch_dir.as_ref(), handle);
 
             writer
-                .set_index_rebuild_manager(rebuild_manager)
+                .set_index_rebuild_manager(Arc::clone(&rebuild_manager))
                 .map_err(UniError::Internal)?;
+            auto_rebuild_manager = Some(rebuild_manager);
         }
 
         // Start background flush checker for time-based auto-flush
@@ -2283,11 +2367,23 @@ impl UniBuilder {
             let mut shutdown_rx = shutdown_handle.subscribe();
             let handle = tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(std::time::Duration::from_millis(50));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                 loop {
                     tokio::select! {
                         _ = ticker.tick() => {
-                            ec.flush_due(std::time::Instant::now());
-                            queue.tick();
+                            // A tick fires deferred triggers (synchronous plugin
+                            // calls) and rewrites the fsynced deferral sidecar,
+                            // so it runs on the blocking pool: inline, a slow
+                            // plugin or disk stalled the executor thread, which
+                            // on a `current_thread` runtime is every task.
+                            let (ec, queue) = (Arc::clone(&ec), Arc::clone(&queue));
+                            let tick = tokio::task::spawn_blocking(move || {
+                                ec.flush_due(std::time::Instant::now());
+                                queue.tick();
+                            });
+                            if let Err(e) = tick.await {
+                                tracing::error!(error = %e, "deferral tick did not complete");
+                            }
                         }
                         _ = shutdown_rx.recv() => { break; }
                     }
@@ -2425,6 +2521,7 @@ impl UniBuilder {
                 plan_cache: Arc::new(std::sync::Mutex::new(crate::api::session::PlanCache::new(
                     TX_PLAN_CACHE_CAPACITY,
                 ))),
+                index_rebuild: tokio::sync::OnceCell::new_with(auto_rebuild_manager),
             }),
         };
 

@@ -11,6 +11,44 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uni_common::{Properties, Schema, Value};
 
+/// Per-label vertex column that holds a vertex's string `ext_id`.
+///
+/// `ext_id` is a reserved property name, so it is never a declared column:
+/// readers that assemble a vertex's undeclared properties from
+/// `overflow_json` must also read this column, because the flush moves a
+/// string `ext_id` here and out of the blob. See
+/// [`stored_in_ext_id_column`] and [`restore_ext_id_column`].
+pub const EXT_ID_COLUMN: &str = "ext_id";
+
+/// Whether a vertex property is stored in the per-label `ext_id` column.
+///
+/// Only a string fits the `Utf8` column. Any other `ext_id` value stays in
+/// `overflow_json`; excluding it from both dropped it at flush.
+pub fn stored_in_ext_id_column(key: &str, value: &Value) -> bool {
+    key == EXT_ID_COLUMN && matches!(value, Value::String(_))
+}
+
+/// Puts a row's `ext_id` column value back into its property map.
+///
+/// The inverse of the flush's [`stored_in_ext_id_column`] split, for every
+/// reader of a per-label vertex table. A no-op when `batch` has no `ext_id`
+/// column (an edge table, or a projection that did not request it) or the
+/// row's value is null. The column wins over a blob entry for the same key:
+/// the flush never writes both for one row.
+pub fn restore_ext_id_column(batch: &arrow_array::RecordBatch, row: usize, props: &mut Properties) {
+    use arrow_array::Array;
+    if let Some(col) = batch
+        .column_by_name(EXT_ID_COLUMN)
+        .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>())
+        && !col.is_null(row)
+    {
+        props.insert(
+            EXT_ID_COLUMN.to_string(),
+            Value::String(col.value(row).to_string()),
+        );
+    }
+}
+
 /// Merge decoded `overflow_json` properties into a row's already-extracted
 /// declared properties, letting the **declared column win** a key collision.
 ///
@@ -94,16 +132,18 @@ impl<'a> PropertyColumnBuilder<'a> {
 /// * `label_or_type` - Label (for vertices) or edge type name used to look up schema properties
 /// * `schema` - The database schema
 /// * `get_row_props` - Closure that returns the full property map for a given row index
-/// * `skip_keys` - Additional property keys to exclude (e.g., `"ext_id"` for vertices)
-pub fn build_overflow_json_column<'a, F>(
+/// * `stored_elsewhere` - Entries kept out of the blob because a dedicated
+///   column holds them (vertices pass [`stored_in_ext_id_column`])
+pub fn build_overflow_json_column<'a, F, S>(
     len: usize,
     label_or_type: &str,
     schema: &Schema,
     get_row_props: F,
-    skip_keys: &[&str],
+    stored_elsewhere: S,
 ) -> Result<ArrayRef>
 where
     F: Fn(usize) -> &'a Properties,
+    S: Fn(&str, &Value) -> bool,
 {
     let schema_props = schema.properties.get(label_or_type);
     let mut builder = LargeBinaryBuilder::new();
@@ -113,7 +153,7 @@ where
         let mut overflow_props = HashMap::new();
 
         for (key, value) in props.iter() {
-            if skip_keys.contains(&key.as_str()) {
+            if stored_elsewhere(key, value) {
                 continue;
             }
             if !schema_props.is_some_and(|sp| sp.contains_key(key)) {

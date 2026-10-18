@@ -15,8 +15,10 @@
 //!    lock is taken. `Synchronous` reject aborts the transaction.
 //! 2. WAL flush + L1 merge run.
 //! 3. `AfterMutation` then `AfterCommit` — fired after publish. `Async`
-//!    fire-mode triggers are spawned onto the tokio runtime so the
-//!    writer's hot path stays untouched.
+//!    fire-mode triggers run on the tokio blocking pool (never on an
+//!    executor thread) as tasks tracked by the database's shutdown
+//!    handle, so the writer's hot path stays untouched and shutdown
+//!    waits for them.
 //!
 //! Behavior contract:
 //! - `predicate_source` is compiled at router build (per-commit) via
@@ -58,6 +60,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant as StdInstant};
 
+use crate::shutdown::ShutdownHandle;
 use arrow_array::{BooleanArray, Int64Array, LargeBinaryArray, RecordBatch, UInt8Array};
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use datafusion::physical_plan::PhysicalExpr;
@@ -424,6 +427,10 @@ pub struct TriggerRouter {
     /// router rebuilds). `EventualConsistency` after-phase fires buffer
     /// here instead of spawning per-commit like `Async`.
     ec_queue: Arc<EcQueue>,
+    /// Tracks the per-commit `Async` fire tasks so shutdown waits for them
+    /// and `Uni::background_task_count` counts them. `None` in test setups
+    /// that build a router without a database.
+    task_tracker: Option<ShutdownHandle>,
 }
 
 impl TriggerRouter {
@@ -530,7 +537,18 @@ impl TriggerRouter {
             by_phase,
             defer_queue,
             ec_queue,
+            task_tracker: None,
         })
+    }
+
+    /// Tracks every `Async` fire task through `tracker`.
+    ///
+    /// Without a tracker an `Async` fire is detached: it keeps running after
+    /// the database is dropped and shutdown cannot wait for it.
+    #[must_use]
+    pub fn with_task_tracker(mut self, tracker: ShutdownHandle) -> Self {
+        self.task_tracker = Some(tracker);
+        self
     }
 
     /// True if no triggers are registered at any phase.
@@ -736,8 +754,12 @@ impl TriggerRouter {
                         );
                     }
                     // `FireMode::Async` and any future variant land on the
-                    // spawn path: one `spawn_blocking`-style task per matching
-                    // commit, fired after the transaction lands.
+                    // spawn path: one blocking-pool task per matching commit,
+                    // fired after the transaction lands. `fire` is a
+                    // synchronous plugin call of unbounded duration, so it must
+                    // not run on an executor thread: on a `current_thread`
+                    // runtime that stalled every other task for the length of
+                    // the fire.
                     _ => {
                         let plugin = Arc::clone(&entry.plugin);
                         let name = entry.name.clone();
@@ -746,7 +768,7 @@ impl TriggerRouter {
                         let tx_id = ctx.tx_id;
                         let queue = self.defer_queue.clone();
                         let host = host.clone();
-                        runtime.spawn(async move {
+                        let handle = runtime.spawn_blocking(move || {
                             let mb_inner = mb;
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -769,6 +791,9 @@ impl TriggerRouter {
                                 );
                             });
                         });
+                        if let Some(tracker) = &self.task_tracker {
+                            tracker.track_task(handle);
+                        }
                     }
                 }
             }
@@ -2457,6 +2482,7 @@ mod tests {
             by_phase,
             defer_queue: None,
             ec_queue: EcQueue::new(None, Duration::from_secs(1), 10_000),
+            task_tracker: None,
         };
         assert!(router.is_empty());
     }

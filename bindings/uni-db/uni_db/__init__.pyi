@@ -13,7 +13,7 @@ import builtins  # qualify annotations where methods shadow builtins (e.g. Value
 from collections.abc import Awaitable, Callable, Iterator
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from typing_extensions import deprecated
 
@@ -547,6 +547,25 @@ class QueryMetrics:
     vector_index_scans: int
     fts_index_scans: int
     searches_reported: int
+    lance_iops: int
+    """Lance I/O operations issued by the query's scans (physical reads;
+    moves across a compaction and is sensitive to caching)."""
+    subquery_executions: int
+    """Sub-plan executions performed by per-row expression fallbacks."""
+    physical_plans: int
+    """Physical plans built: one for the query plus one per execution-time
+    sub-plan (a correlated subquery body per outer row, a Locy clause body per
+    fixpoint iteration)."""
+    physical_plan_time_ms: float
+    """Wall time spent building those physical plans, in milliseconds. Part of
+    ``exec_time_ms``; distinct from ``plan_time_ms`` (logical planning)."""
+    shortest_path_searches: int
+    """Breadth-first searches started by ``shortestPath`` /
+    ``allShortestPaths``: one per distinct source searched from."""
+    shortest_path_adjacency_reads: int
+    """Per-vertex adjacency lookups made by ``shortestPath`` /
+    ``allShortestPaths``: bounded by the vertices searched, not by the paths
+    emitted."""
 
 class QueryWarning:
     """A query warning emitted during execution (e.g., missing index)."""
@@ -672,6 +691,15 @@ class ProfileOutput:
     peak_memory_bytes: int
     plan_text: str
     operators: Any
+    logical_planning_ms: float
+    """Logical planning time (Cypher AST to logical plan), in milliseconds.
+    Measured before execution, so not part of ``total_time_ms``."""
+    physical_planning_ms: float
+    """Physical planning time in milliseconds, summed over every plan built,
+    including execution-time sub-plans. Part of ``total_time_ms``."""
+    physical_plans: int
+    """Physical plans built: one for the query plus one per execution-time
+    sub-plan."""
 
 class LocyExplainOutput:
     """Typed output from ``session.locy_with(program).explain()``."""
@@ -700,7 +728,9 @@ class LocyProfileOutput:
     """Compile-time plan text (identical to ``locy_with(...).explain()``)."""
     strata: list[dict[str, Any]]
     """Per-stratum / per-rule / per-iteration profile as nested dicts and lists
-    (snake_case keys; operators carry ``operator``, ``actual_rows``, ``time_ms``)."""
+    (snake_case keys; operators carry ``operator``, ``actual_rows``, ``time_ms``).
+    Each iteration dict also carries ``planning_ms`` (physical planning time for
+    that rule in that iteration) and ``plans`` (physical plans built)."""
     def __str__(self) -> str: ...
     def __repr__(self) -> str: ...
 
@@ -894,6 +924,12 @@ class LocyStats:
     queries_executed: int
     mutations_executed: int
     peak_memory_bytes: int
+    hypothetical_strata_evaluated: int
+    """Strata derived by ``ASSUME`` / ``ABDUCE`` re-evaluations, summed."""
+    hypothetical_strata_reused: int
+    """Strata those re-evaluations reused because their mutation could not affect them."""
+    hypothetical_facts_derived: int
+    """Facts the derived (not reused) hypothetical strata produced."""
 
 class LocyResult:
     """Result of a Locy program evaluation."""
@@ -908,9 +944,10 @@ class LocyResult:
     metrics: QueryMetrics
     """Timing and scan counters, the same type a Cypher ``QueryResult`` carries.
 
-    ``parse_time_ms`` and ``plan_time_ms`` are always ``0.0`` here and
-    ``plan_cache_hit`` is always ``False``: Locy does not go through the Cypher
-    parse/plan/cache path those measure. Every other field is real.
+    ``parse_time_ms`` is always ``0.0`` here and ``plan_cache_hit`` is always
+    ``False``: Locy does not go through the Cypher parse/cache path those
+    measure. ``plan_time_ms`` times the program's logical planning and
+    ``exec_time_ms`` is the remainder. Every other field is real.
     """
 
     def has_warning(self, code: str) -> bool: ...
@@ -1743,6 +1780,9 @@ class LocyConfig:
         max_bdd_variables: int | None = None,
         top_k_proofs: int | None = None,
         top_k_proofs_training: int | None = None,
+        # "off" | "on" | "shadow", matched case-insensitively; anything else
+        # raises ValueError.
+        goal_directed: str | None = None,
     ) -> None: ...
     @property
     def max_iterations(self) -> int: ...
@@ -1773,6 +1813,8 @@ class LocyConfig:
     def top_k_proofs(self) -> int: ...
     @property
     def top_k_proofs_training(self) -> int | None: ...
+    @property
+    def goal_directed(self) -> Literal["off", "on", "shadow"]: ...
     @property
     def classifier_aliases(self) -> list[str]: ...
     # Parameter is named `callable` at runtime (src/classifier.rs). It shadows

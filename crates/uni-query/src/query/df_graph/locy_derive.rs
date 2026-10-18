@@ -19,6 +19,7 @@ use uni_locy::result::DerivedEdge;
 use uni_locy::{CompiledProgram, FactRow, LocyError, LocyStats};
 
 use super::locy_ast_builder::build_derive_create;
+use super::locy_delta::RowStore;
 use super::locy_eval::{eval_condition, eval_expr};
 use super::locy_traits::LocyExecutionContext;
 use crate::query::executor::result_normalizer::ResultNormalizer;
@@ -33,16 +34,18 @@ pub struct CollectedDeriveOutput {
 
 /// Execute a top-level DERIVE command (auto-apply mode).
 ///
-/// Looks up facts from the native store via `ctx.lookup_derived()`, applies optional
-/// WHERE filtering, and for each matching fact executes the DERIVE mutation via
+/// Looks up the rule's facts via `ctx.lookup_derived_enriched()` against
+/// `derived_store` (the issuing command's store), applies optional WHERE
+/// filtering, and for each matching fact executes the DERIVE mutation via
 /// `ctx.execute_mutation()`.
 pub async fn derive_command(
     dc: &DeriveCommand,
     program: &CompiledProgram,
     ctx: &dyn LocyExecutionContext,
+    derived_store: &RowStore,
     stats: &mut LocyStats,
 ) -> Result<usize, LocyError> {
-    let collected = collect_derive_facts_inner(dc, program, ctx).await?;
+    let collected = collect_derive_facts_inner(dc, program, ctx, derived_store).await?;
     for query in collected.queries {
         ctx.execute_mutation(query, HashMap::new()).await?;
         stats.mutations_executed += 1;
@@ -58,8 +61,9 @@ pub async fn collect_derive_facts(
     dc: &DeriveCommand,
     program: &CompiledProgram,
     ctx: &dyn LocyExecutionContext,
+    derived_store: &RowStore,
 ) -> Result<CollectedDeriveOutput, LocyError> {
-    collect_derive_facts_inner(dc, program, ctx).await
+    collect_derive_facts_inner(dc, program, ctx, derived_store).await
 }
 
 /// Shared implementation for both execute and collect modes.
@@ -67,6 +71,7 @@ async fn collect_derive_facts_inner(
     dc: &DeriveCommand,
     program: &CompiledProgram,
     ctx: &dyn LocyExecutionContext,
+    derived_store: &RowStore,
 ) -> Result<CollectedDeriveOutput, LocyError> {
     let rule_name = dc.rule_name.to_string();
     let rule = program
@@ -76,7 +81,9 @@ async fn collect_derive_facts_inner(
             message: format!("rule '{}' not found for DERIVE command", rule_name),
         })?;
 
-    let facts = ctx.lookup_derived_enriched(&rule_name).await?;
+    let facts = ctx
+        .lookup_derived_enriched(&rule_name, derived_store)
+        .await?;
 
     // Apply optional WHERE filter
     let filtered: Vec<_> = if let Some(where_expr) = &dc.where_expr {

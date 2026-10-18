@@ -17,7 +17,11 @@
 //!
 //! 1. Before the load commits any table it records that table's pre-load Lance
 //!    version in a marker (`catalog/bulk_flush_intent.json`, phase `Active`),
-//!    persisted durably *before* the table write.
+//!    persisted durably *before* the table write. On a backend that stages
+//!    writes, nothing is committed until `commit()` publishes the staged rows,
+//!    so the marker is written only then and also records the touched edge
+//!    types' L2 adjacency tables, which a compaction pass may rewrite from the
+//!    deltas published so far.
 //! 2. [`crate::BulkWriter::commit`] writes the marker as `Committed` (carrying the new
 //!    snapshot id) *after* the manifest is durably saved but *before* the latest
 //!    pointer is flipped, then deletes the marker once everything is finalized.

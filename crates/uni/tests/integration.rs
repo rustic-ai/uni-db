@@ -63,6 +63,10 @@ mod session_tx;
 mod arch_entity_identity;
 #[path = "common/arch_fail_open.rs"]
 mod arch_fail_open;
+#[path = "common/bulk_dual_write_resilience.rs"]
+mod bulk_dual_write_resilience;
+#[path = "common/bulk_isolation_resilience.rs"]
+mod bulk_isolation_resilience;
 #[path = "common/compaction_resilience.rs"]
 mod compaction_resilience;
 #[path = "common/crash_harness.rs"]

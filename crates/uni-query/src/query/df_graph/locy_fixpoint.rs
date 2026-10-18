@@ -102,6 +102,13 @@ pub struct DerivedScanEntry {
     pub is_self_ref: bool,
     /// Which view of the rule's relation this scan reads.
     pub view: DerivedScanView,
+    /// One reference of a non-linear clause (two or more references into its
+    /// own stratum), never shared with another scan (P5, R3). Between clause
+    /// evaluations it holds what a shared self-reference scan would; while
+    /// its clause runs, each semi-naive pass feeds it the delta, the old
+    /// facts or the full facts (see `run_fixpoint_loop`). Negation and
+    /// provenance never resolve to it.
+    pub exclusive: bool,
     /// Shared data handle — write batches here to inject into subplans.
     pub data: Arc<RwLock<Vec<RecordBatch>>>,
     /// Schema of the derived relation.
@@ -562,6 +569,12 @@ pub struct FixpointState {
     /// Issue #162: per-iteration folded view, present exactly when some scan
     /// in this stratum reads this rule's [`DerivedScanView::Folded`] view.
     fold_view: Option<FoldViewState>,
+    /// How many leading batches of `facts` are exactly the facts the latest
+    /// merge did not add (`facts \ delta`), when the merge kept them apart;
+    /// `None` when the delta is interleaved with them (a FOLD contribution
+    /// merge), and [`Self::old_facts`] filters instead. A non-linear clause's
+    /// semi-naive passes read it (P5).
+    old_len: Option<usize>,
 }
 
 /// State backing the per-iteration folded view (issue #162).
@@ -631,6 +644,10 @@ struct FoldViewState {
     /// [`update_derived_scan_handles`] for why that is equivalent to reading
     /// the whole snapshot.
     folded_delta: Vec<RecordBatch>,
+    /// The rows of [`Self::folded`] that the previous snapshot already held:
+    /// `folded \ folded_delta`, what a non-linear clause's semi-naive passes
+    /// read as the old snapshot (P5).
+    folded_old: Vec<RecordBatch>,
     /// Exact (unrounded) whole-row set of [`Self::folded`], for
     /// [`Self::folded_delta`].
     folded_rows: HashSet<Vec<ScalarKey>>,
@@ -697,6 +714,7 @@ impl FixpointState {
             strict_probability_domain,
             semiring_kind,
             fold_view: None,
+            old_len: Some(0),
         }
     }
 
@@ -718,6 +736,7 @@ impl FixpointState {
             folded: Vec::new(),
             prev_rows: HashSet::new(),
             folded_delta: Vec::new(),
+            folded_old: Vec::new(),
             folded_rows: HashSet::new(),
             collect_ops: false,
             last_ops: Vec::new(),
@@ -756,6 +775,11 @@ impl FixpointState {
         self.fold_view.as_ref().map_or(&[], |fv| &fv.folded_delta)
     }
 
+    /// The rows of [`Self::folded_facts`] the previous snapshot already held.
+    pub fn folded_old(&self) -> &[RecordBatch] {
+        self.fold_view.as_ref().map_or(&[], |fv| &fv.folded_old)
+    }
+
     /// Replaces the folded snapshot, recording which of its rows the previous
     /// one did not hold.
     ///
@@ -768,31 +792,22 @@ impl FixpointState {
         };
         let mut rows_now: HashSet<Vec<ScalarKey>> = HashSet::new();
         let mut delta: Vec<RecordBatch> = Vec::new();
+        let mut old: Vec<RecordBatch> = Vec::new();
         for batch in &folded {
             let all: Vec<usize> = (0..batch.num_columns()).collect();
-            let mut changed: Vec<u32> = Vec::new();
+            let mut changed: Vec<bool> = Vec::with_capacity(batch.num_rows());
             for row in 0..batch.num_rows() {
                 let key = extract_scalar_key(batch, &all, row);
-                if !fv.folded_rows.contains(&key) {
-                    changed.push(row as u32);
-                }
+                changed.push(!fv.folded_rows.contains(&key));
                 rows_now.insert(key);
             }
-            if changed.len() == batch.num_rows() {
-                delta.push(batch.clone());
-            } else if !changed.is_empty() {
-                let idx = arrow_array::UInt32Array::from(changed);
-                let columns = batch
-                    .columns()
-                    .iter()
-                    .map(|c| arrow::compute::take(c.as_ref(), &idx, None))
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(arrow_err)?;
-                delta.push(RecordBatch::try_new(batch.schema(), columns).map_err(arrow_err)?);
-            }
+            let (new_rows, old_rows) = split_rows(batch, &changed)?;
+            delta.extend(new_rows);
+            old.extend(old_rows);
         }
         fv.folded_rows = rows_now;
         fv.folded_delta = delta;
+        fv.folded_old = old;
         fv.folded = folded;
         Ok(())
     }
@@ -843,6 +858,7 @@ impl FixpointState {
             .collect();
         if all.is_empty() {
             self.delta.clear();
+            self.old_len = Some(self.facts.len());
             return Ok(false);
         }
         let combined = if all.len() == 1 {
@@ -944,6 +960,8 @@ impl FixpointState {
             ));
         }
         self.facts = vec![retained];
+        // The delta rows sit among the retained ones.
+        self.old_len = None;
         if let Some(fv) = self.fold_view.as_mut() {
             fv.prev_rows = rows_now;
         }
@@ -1286,6 +1304,7 @@ impl FixpointState {
     ) -> DFResult<bool> {
         if candidates.is_empty() || candidates.iter().all(|b| b.num_rows() == 0) {
             self.delta.clear();
+            self.old_len = Some(self.facts.len());
             // No candidates is an empty delta too: the accumulators did not
             // move, so they are stable from here. Without the snapshot, an
             // iteration whose clauses all derive nothing left `is_stable`
@@ -1313,6 +1332,7 @@ impl FixpointState {
 
         if delta.is_empty() || delta.iter().all(|b| b.num_rows() == 0) {
             self.delta.clear();
+            self.old_len = Some(self.facts.len());
             // Update monotonic aggs even with empty delta (for stability check)
             if let Some(ref mut agg) = self.monotonic_agg {
                 agg.snapshot();
@@ -1346,6 +1366,7 @@ impl FixpointState {
 
         // Append delta to facts
         self.facts_bytes += delta_bytes;
+        self.old_len = Some(self.facts.len());
         self.facts.extend(delta.iter().cloned());
         self.delta = delta;
 
@@ -1453,6 +1474,39 @@ impl FixpointState {
         &self.delta
     }
 
+    /// The facts the latest merge did not add: `facts \ delta` (P5).
+    ///
+    /// A non-linear clause's semi-naive pass reads these at the positions
+    /// before its delta position. Every merge keeps whole rows unique, so
+    /// removing the delta's rows by exact whole-row identity is the set
+    /// difference.
+    ///
+    /// # Errors
+    ///
+    /// An Arrow failure filtering the facts.
+    pub fn old_facts(&self) -> DFResult<Vec<RecordBatch>> {
+        if let Some(n) = self.old_len {
+            return Ok(self.facts[..n.min(self.facts.len())].to_vec());
+        }
+        let delta_rows: HashSet<Vec<ScalarKey>> = self
+            .delta
+            .iter()
+            .flat_map(|b| {
+                let all: Vec<usize> = (0..b.num_columns()).collect();
+                (0..b.num_rows()).map(move |row| extract_scalar_key(b, &all, row))
+            })
+            .collect();
+        let mut old = Vec::new();
+        for batch in &self.facts {
+            let all: Vec<usize> = (0..batch.num_columns()).collect();
+            let in_delta: Vec<bool> = (0..batch.num_rows())
+                .map(|row| delta_rows.contains(&extract_scalar_key(batch, &all, row)))
+                .collect();
+            old.extend(split_rows(batch, &in_delta)?.1);
+        }
+        Ok(old)
+    }
+
     /// Consume self and return facts.
     pub fn into_facts(self) -> Vec<RecordBatch> {
         self.facts
@@ -1468,6 +1522,15 @@ impl FixpointState {
     /// This replaces `merge_delta` for rules with BEST BY, enabling convergence
     /// on cyclic graphs where dominated ALONG values would otherwise produce an
     /// unbounded stream of "new" full-row facts.
+    ///
+    /// The delta is the rows that are new for their KEY or strictly better
+    /// (R2), not the whole pruned set: a self-reference fed an unchanged row
+    /// would only re-derive candidates it derived when that row entered. On a
+    /// tie the held row stays, so the delta never churns between equals.
+    ///
+    /// # Errors
+    ///
+    /// An Arrow failure sorting or taking rows, or a row-dedup rebuild error.
     pub fn merge_best_by(
         &mut self,
         candidates: Vec<RecordBatch>,
@@ -1475,6 +1538,7 @@ impl FixpointState {
     ) -> DFResult<bool> {
         if candidates.is_empty() || candidates.iter().all(|b| b.num_rows() == 0) {
             self.delta.clear();
+            self.old_len = Some(self.facts.len());
             return Ok(false);
         }
 
@@ -1483,12 +1547,14 @@ impl FixpointState {
             self.reconcile_schema(&first.schema())?;
         }
 
-        // Round floats for stable dedup.
-        // Snapshot existing best-per-KEY facts for change detection.
+        // Snapshot existing best-per-KEY facts for change detection, through
+        // the rounded key view like every other convergence test.
         let old_best: HashMap<Vec<ScalarKey>, Vec<ScalarKey>> =
             self.build_key_criteria_map(sort_criteria);
 
-        // Concat existing facts + new candidates.
+        // Concat existing facts + new candidates. Rows before `existing_rows`
+        // are the facts.
+        let existing_rows: usize = self.facts.iter().map(RecordBatch::num_rows).sum();
         let mut all_batches = self.facts.clone();
         all_batches.extend(candidates);
         let all_batches: Vec<_> = all_batches
@@ -1497,6 +1563,7 @@ impl FixpointState {
             .collect();
         if all_batches.is_empty() {
             self.delta.clear();
+            self.old_len = Some(self.facts.len());
             return Ok(false);
         }
 
@@ -1505,11 +1572,13 @@ impl FixpointState {
 
         if combined.num_rows() == 0 {
             self.delta.clear();
+            self.old_len = Some(self.facts.len());
             return Ok(false);
         }
 
-        // Sort by KEY ASC then criteria, so the best row per KEY group comes
-        // first.
+        // Sort by KEY ASC, then criteria, then origin (existing facts first),
+        // so the best row per KEY group comes first and, on an exact tie, the
+        // fact already held wins: a re-derivation never displaces it.
         let mut sort_columns = Vec::new();
         for &ki in &self.key_column_indices {
             if ki >= combined.num_columns() {
@@ -1535,78 +1604,108 @@ impl FixpointState {
                 }),
             });
         }
+        let origin: arrow_array::ArrayRef = Arc::new(arrow_array::BooleanArray::from(
+            (0..combined.num_rows())
+                .map(|row| row >= existing_rows)
+                .collect::<Vec<bool>>(),
+        ));
+        sort_columns.push(arrow::compute::SortColumn {
+            values: origin,
+            options: Some(arrow::compute::SortOptions {
+                descending: false,
+                nulls_first: false,
+            }),
+        });
 
         let sorted_indices =
             arrow::compute::lexsort_to_indices(&sort_columns, None).map_err(arrow_err)?;
-        let sorted_columns: Vec<_> = combined
-            .columns()
-            .iter()
-            .map(|col| arrow::compute::take(col.as_ref(), &sorted_indices, None))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
-        let sorted = RecordBatch::try_new(Arc::clone(&self.schema), sorted_columns)
-            .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+        let combined_keys = float_key_view(std::slice::from_ref(&combined))
+            .pop()
+            .expect("one batch in, one out");
 
-        // Dedup: keep first (best) row per KEY group.
-        let mut keep_indices: Vec<u32> = Vec::new();
-        let mut prev_key: Option<Vec<ScalarKey>> = None;
-        for row_idx in 0..sorted.num_rows() {
-            let key = extract_scalar_key(&sorted, &self.key_column_indices, row_idx);
-            let is_new_group = match &prev_key {
-                None => true,
-                Some(prev) => *prev != key,
-            };
-            if is_new_group {
-                keep_indices.push(row_idx as u32);
-                prev_key = Some(key);
+        // Per KEY group, the winner: the first row in sort order — unless it
+        // is a candidate whose rounded criteria equal the fact already held
+        // (a re-derivation, or a value that moved by less than the rounding),
+        // in which case the held fact stays. The winners that are not held
+        // facts are the delta: a KEY seen for the first time, or a strictly
+        // better value (R2). Anything else derives nothing a self-reference
+        // has not already derived from it.
+        let criteria_of = |row: usize| -> Vec<ScalarKey> {
+            sort_criteria
+                .iter()
+                .flat_map(|c| extract_scalar_key(&combined_keys, &[c.col_index], row))
+                .collect()
+        };
+        let mut kept_old: Vec<u32> = Vec::new();
+        let mut kept_new: Vec<u32> = Vec::new();
+        let mut group_start = 0usize;
+        let n = sorted_indices.len();
+        while group_start < n {
+            let first = sorted_indices.value(group_start) as usize;
+            let key = extract_scalar_key(&combined_keys, &self.key_column_indices, first);
+            let mut group_end = group_start + 1;
+            while group_end < n
+                && extract_scalar_key(
+                    &combined_keys,
+                    &self.key_column_indices,
+                    sorted_indices.value(group_end) as usize,
+                ) == key
+            {
+                group_end += 1;
             }
+            if first < existing_rows {
+                kept_old.push(first as u32);
+            } else {
+                let held = (group_start..group_end)
+                    .map(|i| sorted_indices.value(i) as usize)
+                    .find(|&row| row < existing_rows);
+                match held {
+                    Some(held)
+                        if old_best
+                            .get(&key)
+                            .is_some_and(|best| *best == criteria_of(first)) =>
+                    {
+                        kept_old.push(held as u32);
+                    }
+                    _ => kept_new.push(first as u32),
+                }
+            }
+            group_start = group_end;
         }
 
-        let keep_array = arrow_array::UInt32Array::from(keep_indices);
-        let output_columns: Vec<_> = sorted
-            .columns()
-            .iter()
-            .map(|col| arrow::compute::take(col.as_ref(), &keep_array, None))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
-        let pruned = RecordBatch::try_new(Arc::clone(&self.schema), output_columns)
-            .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
-
-        // Detect whether the best-per-KEY set actually changed.
-        // Compared through the rounded key view, like every other convergence
-        // test; the rows kept are exact.
-        let new_best: HashMap<Vec<ScalarKey>, Vec<ScalarKey>> = {
-            let mut map = HashMap::new();
-            let pruned_keys = float_key_view(std::slice::from_ref(&pruned))
-                .pop()
-                .expect("one batch in, one out");
-            for row_idx in 0..pruned.num_rows() {
-                let key = extract_scalar_key(&pruned_keys, &self.key_column_indices, row_idx);
-                let criteria: Vec<ScalarKey> = sort_criteria
-                    .iter()
-                    .flat_map(|c| extract_scalar_key(&pruned_keys, &[c.col_index], row_idx))
-                    .collect();
-                map.insert(key, criteria);
-            }
-            map
+        let take_rows = |rows: Vec<u32>| -> DFResult<RecordBatch> {
+            let idx = arrow_array::UInt32Array::from(rows);
+            let columns = combined
+                .columns()
+                .iter()
+                .map(|c| arrow::compute::take(c.as_ref(), &idx, None))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(arrow_err)?;
+            RecordBatch::try_new(Arc::clone(&self.schema), columns).map_err(arrow_err)
         };
-        let changed = old_best != new_best;
+        let changed = !kept_new.is_empty();
+        let unchanged = take_rows(kept_old)?;
+        let improved = take_rows(kept_new)?;
 
         tracing::debug!(
             rule = %self.rule_name,
             old_keys = old_best.len(),
-            new_keys = new_best.len(),
-            changed = changed,
+            kept = unchanged.num_rows(),
+            improved = improved.num_rows(),
             "BEST BY merge"
         );
 
-        // Replace facts with the pruned set.
-        self.facts_bytes = batch_byte_size(&pruned);
-        self.facts = vec![pruned];
+        // Replace facts with the pruned set: the held winners, then the delta,
+        // so `old_facts` is the leading batch.
+        self.facts_bytes = batch_byte_size(&unchanged) + batch_byte_size(&improved);
+        self.facts = Vec::new();
+        if unchanged.num_rows() > 0 {
+            self.facts.push(unchanged);
+        }
+        self.old_len = Some(self.facts.len());
         if changed {
-            // Delta is conceptually the new/improved facts, but since we
-            // replaced the entire set, just mark delta non-empty.
-            self.delta = self.facts.clone();
+            self.facts.push(improved.clone());
+            self.delta = vec![improved];
         } else {
             self.delta.clear();
         }
@@ -1638,6 +1737,30 @@ impl FixpointState {
         }
         map
     }
+}
+
+/// Splits `batch` by `mask`: the rows it marks, then the rest, each as zero
+/// or one batch (the whole batch, uncopied, when one side takes every row).
+///
+/// # Errors
+///
+/// An Arrow failure filtering the batch.
+fn split_rows(
+    batch: &RecordBatch,
+    mask: &[bool],
+) -> DFResult<(Option<RecordBatch>, Option<RecordBatch>)> {
+    let marked = mask.iter().filter(|m| **m).count();
+    if marked == batch.num_rows() {
+        return Ok(((marked > 0).then(|| batch.clone()), None));
+    }
+    if marked == 0 {
+        return Ok((None, Some(batch.clone())));
+    }
+    let keep = arrow_array::BooleanArray::from(mask.to_vec());
+    let rest = arrow::compute::not(&keep).map_err(arrow_err)?;
+    let marked_rows = arrow::compute::filter_record_batch(batch, &keep).map_err(arrow_err)?;
+    let rest_rows = arrow::compute::filter_record_batch(batch, &rest).map_err(arrow_err)?;
+    Ok((Some(marked_rows), Some(rest_rows)))
 }
 
 /// Estimate byte size of a RecordBatch.
@@ -1898,6 +2021,11 @@ pub struct FixpointClausePlan {
     /// items by the compiler. Each entry is evaluated per row after the
     /// clause body produces batches and before IS-ref handling.
     pub model_invocations: Vec<ModelInvocation>,
+    /// Registry indices of the body's scans into its own stratum, one per
+    /// distinct handle, in first-use order (P5). Empty for a clause that
+    /// reads only the graph and lower strata; two or more only for a
+    /// non-linear clause, whose handles are all exclusive.
+    pub stratum_scans: Vec<usize>,
 }
 
 /// Physical plan for a single rule in a fixpoint stratum.
@@ -2073,6 +2201,10 @@ async fn run_fixpoint_loop(
         })
         .collect();
 
+    // R5: negated references read lower strata, fixed for the whole loop, so
+    // their banned sets / probability maps are built once and reused.
+    let mut negation_cache = super::locy_complement::NegationIndexCache::default();
+
     // Main iteration loop
     let mut converged = false;
     let mut total_iters = 0usize;
@@ -2113,53 +2245,81 @@ async fn run_fixpoint_loop(
                     clause_candidates.push(Vec::new());
                     continue;
                 }
-                // Phase B A4 follow-up: the planner inserts
-                // `LogicalPlan::LocyModelInvoke` between the body and
-                // `LocyProject` when this clause has neural-model
-                // invocations, so `execute_subplan` runs the invocation
-                // inline as part of the body plan tree.
-                let mut batches = execute_locy_clause_body(
-                    &clause.body_logical,
-                    &params,
-                    &graph_ctx,
-                    &session_ctx,
-                    &storage,
-                    &schema_info,
-                    profile_collector.is_some(),
-                    &mut iter_ops,
-                )
-                .await?;
-                // Apply negated IS-ref semantics: probabilistic complement or anti-join.
-                batches = super::locy_complement::apply_negated_is_refs(
-                    batches,
-                    &clause.is_ref_bindings,
-                    &registry,
-                    rule.prob_column_name.as_deref(),
-                    profile_collector.as_ref().map(|_| &mut iter_ops),
-                )?;
-                // Multiply complement columns into the PROB column (if any) and clean up
-                let complement_cols: Vec<String> = if !batches.is_empty() {
-                    batches[0]
-                        .schema()
-                        .fields()
-                        .iter()
-                        .filter(|f| f.name().starts_with("__prob_complement_"))
-                        .map(|f| f.name().clone())
-                        .collect()
-                } else {
-                    vec![]
+                let clause_ctx = ClauseEvalCtx {
+                    params: &params,
+                    graph_ctx: &graph_ctx,
+                    session_ctx: &session_ctx,
+                    storage: &storage,
+                    schema_info: &schema_info,
+                    registry: &registry,
+                    collect_ops: profile_collector.is_some(),
                 };
-                if !complement_cols.is_empty() {
-                    batches = multiply_prob_factors(
-                        batches,
+                // P5: which view each of the clause's stratum scans reads.
+                //
+                // * None: the clause reads only fixed inputs (the graph, lower
+                //   strata) and runs as is.
+                // * One — a linear clause, self- or cross-reference alike: the
+                //   referenced rule's delta. Every fact enters exactly one
+                //   delta, and each rule merges once per iteration while this
+                //   clause runs once per iteration in a fixed order, so the
+                //   clause meets each delta exactly once (R3 mutual: a
+                //   cross-reference used to read the whole relation).
+                // * k >= 2 — a non-linear clause: k passes, pass i feeding
+                //   scan i the delta, scans j < i the old facts and scans
+                //   j > i the full facts (R3 non-linear). F_new^k \ F_old^k
+                //   is exactly the disjoint union over i of
+                //   F_old^{<i} x Δ_i x F_new^{>i}: a tuple of facts is joined
+                //   in the pass of its first member from the latest delta, and
+                //   in no other — so each derivation (and so each per-path or
+                //   FOLD contribution row) is produced once, at the evaluation
+                //   when its last member arrived, exactly as reading every
+                //   position in full would first produce it.
+                //
+                // A non-linear pass whose delta scan is empty derives nothing
+                // (every stratum reference is an inner join) and is skipped.
+                let scans = &clause.stratum_scans;
+                let mut batches: Vec<RecordBatch> = Vec::new();
+                if scans.is_empty() {
+                    batches = evaluate_clause_once(
+                        clause,
                         rule.prob_column_name.as_deref(),
-                        &complement_cols,
-                    )?;
+                        &clause_ctx,
+                        &mut negation_cache,
+                        &mut iter_ops,
+                    )
+                    .await?;
+                } else {
+                    for pass in 0..scans.len() {
+                        let feeds: Vec<ScanFeed> = (0..scans.len())
+                            .map(|j| match j.cmp(&pass) {
+                                std::cmp::Ordering::Less => ScanFeed::Old,
+                                std::cmp::Ordering::Equal => ScanFeed::Delta,
+                                std::cmp::Ordering::Greater => ScanFeed::Full,
+                            })
+                            .collect();
+                        // A linear clause runs even on an empty delta, as it
+                        // always has (it costs one empty anchored lookup); a
+                        // non-linear pass on one would still read its old and
+                        // full scans, so it is skipped.
+                        let skip_empty = scans.len() > 1;
+                        if feed_stratum_scans(
+                            &registry, &states, &rules, scans, &feeds, skip_empty,
+                        )? {
+                            batches.extend(
+                                evaluate_clause_once(
+                                    clause,
+                                    rule.prob_column_name.as_deref(),
+                                    &clause_ctx,
+                                    &mut negation_cache,
+                                    &mut iter_ops,
+                                )
+                                .await?,
+                            );
+                        }
+                    }
+                    // Back to the resting views negation and provenance read.
+                    update_derived_scan_handles(&registry, &states, rule_idx, &rules);
                 }
-
-                // The anti-join has run; drop its hidden subject-`_vid` columns
-                // before anything downstream can absorb them into fact identity.
-                batches = super::locy_complement::strip_isnot_vid_columns(batches)?;
 
                 clause_candidates.push(batches.clone());
                 all_candidates.extend(batches);
@@ -2366,6 +2526,75 @@ async fn run_fixpoint_loop(
     }
 
     Ok(all_output)
+}
+
+/// What [`evaluate_clause_once`] needs from the fixpoint loop.
+struct ClauseEvalCtx<'a> {
+    params: &'a HashMap<String, Value>,
+    graph_ctx: &'a Arc<GraphExecutionContext>,
+    session_ctx: &'a Arc<RwLock<datafusion::prelude::SessionContext>>,
+    storage: &'a Arc<StorageManager>,
+    schema_info: &'a Arc<UniSchema>,
+    registry: &'a Arc<DerivedScanRegistry>,
+    collect_ops: bool,
+}
+
+/// Runs one clause body against the scans as currently fed, then applies its
+/// negations and folds the complement factors into the PROB column.
+///
+/// # Errors
+///
+/// The body's execution error, or a negation / complement failure.
+async fn evaluate_clause_once(
+    clause: &FixpointClausePlan,
+    prob_column: Option<&str>,
+    ctx: &ClauseEvalCtx<'_>,
+    negation_cache: &mut super::locy_complement::NegationIndexCache,
+    iter_ops: &mut Vec<OperatorStats>,
+) -> DFResult<Vec<RecordBatch>> {
+    // Phase B A4 follow-up: the planner inserts `LogicalPlan::LocyModelInvoke`
+    // between the body and `LocyProject` when this clause has neural-model
+    // invocations, so `execute_subplan` runs the invocation inline as part of
+    // the body plan tree.
+    let mut batches = execute_locy_clause_body(
+        &clause.body_logical,
+        ctx.params,
+        ctx.graph_ctx,
+        ctx.session_ctx,
+        ctx.storage,
+        ctx.schema_info,
+        ctx.collect_ops,
+        iter_ops,
+    )
+    .await?;
+    // Apply negated IS-ref semantics: probabilistic complement or anti-join.
+    batches = super::locy_complement::apply_negated_is_refs(
+        batches,
+        &clause.is_ref_bindings,
+        ctx.registry,
+        prob_column,
+        Some(negation_cache),
+        ctx.collect_ops.then_some(&mut *iter_ops),
+    )?;
+    // Multiply complement columns into the PROB column (if any) and clean up
+    let complement_cols: Vec<String> = if !batches.is_empty() {
+        batches[0]
+            .schema()
+            .fields()
+            .iter()
+            .filter(|f| f.name().starts_with("__prob_complement_"))
+            .map(|f| f.name().clone())
+            .collect()
+    } else {
+        vec![]
+    };
+    if !complement_cols.is_empty() {
+        batches = multiply_prob_factors(batches, prob_column, &complement_cols)?;
+    }
+
+    // The anti-join has run; drop its hidden subject-`_vid` columns before
+    // anything downstream can absorb them into fact identity.
+    super::locy_complement::strip_isnot_vid_columns(batches)
 }
 
 // ---------------------------------------------------------------------------
@@ -5066,10 +5295,13 @@ fn extract_feature_value(col: &dyn arrow_array::Array, row_idx: usize) -> uni_lo
     uni_locy::FeatureValue::Null
 }
 
-/// Update derived scan handles before evaluating a rule's clause bodies.
+/// Writes every scan's resting view before a rule's clauses are evaluated.
 ///
-/// For self-references: inject delta (semi-naive optimization).
-/// For cross-references: inject full facts.
+/// A linear self-reference rests on the delta, everything else on the full
+/// relation. This is what a scan holds whenever no clause is running, and so
+/// what negation, provenance and the post-fixpoint chain read through the
+/// registry. While a clause runs, [`feed_stratum_scans`] overrides the scans
+/// that clause reads with their semi-naive feed and restores them after.
 fn update_derived_scan_handles(
     registry: &DerivedScanRegistry,
     states: &[FixpointState],
@@ -5141,6 +5373,78 @@ fn update_derived_scan_handles(
         let mut guard = entry.data.write();
         *guard = data;
     }
+}
+
+/// What a semi-naive pass feeds one stratum scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanFeed {
+    /// The facts the latest merge added.
+    Delta,
+    /// The facts before the latest merge: full minus delta.
+    Old,
+    /// Every fact.
+    Full,
+}
+
+/// One view of the relation a stratum scan reads, from its rule's state.
+fn stratum_scan_view(
+    state: &FixpointState,
+    view: DerivedScanView,
+    feed: ScanFeed,
+) -> DFResult<Vec<RecordBatch>> {
+    Ok(match (view, feed) {
+        (DerivedScanView::Folded, ScanFeed::Delta) => state.folded_delta().to_vec(),
+        (DerivedScanView::Folded, ScanFeed::Old) => state.folded_old().to_vec(),
+        (DerivedScanView::Folded, ScanFeed::Full) => state.folded_facts().to_vec(),
+        (DerivedScanView::Contributions, ScanFeed::Delta) => state.all_delta().to_vec(),
+        (DerivedScanView::Contributions, ScanFeed::Old) => state.old_facts()?,
+        (DerivedScanView::Contributions, ScanFeed::Full) => state.all_facts().to_vec(),
+    })
+}
+
+/// Feeds a clause's stratum scans for one semi-naive pass (P5, R3).
+///
+/// `feeds[i]` is what scan `scans[i]` reads. With `skip_empty_delta`,
+/// returns `false`, writing nothing, when the scan fed [`ScanFeed::Delta`]
+/// would read no rows: every stratum reference is an inner join, so the pass
+/// derives nothing.
+fn feed_stratum_scans(
+    registry: &DerivedScanRegistry,
+    states: &[FixpointState],
+    rules: &[FixpointRulePlan],
+    scans: &[usize],
+    feeds: &[ScanFeed],
+    skip_empty_delta: bool,
+) -> DFResult<bool> {
+    let mut writes: Vec<(&DerivedScanEntry, Vec<RecordBatch>)> = Vec::with_capacity(scans.len());
+    for (&scan, &feed) in scans.iter().zip(feeds) {
+        let Some(entry) = registry.get(scan) else {
+            return Err(datafusion::error::DataFusionError::Internal(format!(
+                "clause reads stratum scan {scan}, which the registry does not hold"
+            )));
+        };
+        let Some(source) = rules.iter().position(|r| r.name == entry.rule_name) else {
+            return Err(datafusion::error::DataFusionError::Internal(format!(
+                "stratum scan {scan} reads rule '{}', which is not in this stratum",
+                entry.rule_name
+            )));
+        };
+        let data = stratum_scan_view(&states[source], entry.view, feed)?;
+        let rows: usize = data.iter().map(RecordBatch::num_rows).sum();
+        if skip_empty_delta && feed == ScanFeed::Delta && rows == 0 {
+            return Ok(false);
+        }
+        writes.push((entry, data));
+    }
+    for (entry, data) in writes {
+        let data = if data.iter().all(|b| b.num_rows() == 0) {
+            vec![RecordBatch::new_empty(Arc::clone(&entry.schema))]
+        } else {
+            data
+        };
+        *entry.data.write() = data;
+    }
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -6227,6 +6531,7 @@ impl ExecutionPlan for FixpointExec {
                             priority: c.priority,
                             along_bindings: c.along_bindings.clone(),
                             model_invocations: c.model_invocations.clone(),
+                            stratum_scans: c.stratum_scans.clone(),
                         })
                         .collect(),
                     yield_schema: Arc::clone(&r.yield_schema),
@@ -6665,6 +6970,7 @@ mod tests {
             rule_name: "reachable".into(),
             is_self_ref: true,
             view: DerivedScanView::Contributions,
+            exclusive: false,
             data: Arc::clone(&data),
             schema: Arc::clone(&schema),
         });
@@ -6687,6 +6993,7 @@ mod tests {
             rule_name: "r1".into(),
             is_self_ref: true,
             view: DerivedScanView::Contributions,
+            exclusive: false,
             data: Arc::new(RwLock::new(Vec::new())),
             schema: Arc::clone(&schema),
         });
@@ -6695,6 +7002,7 @@ mod tests {
             rule_name: "r2".into(),
             is_self_ref: false,
             view: DerivedScanView::Contributions,
+            exclusive: false,
             data: Arc::new(RwLock::new(Vec::new())),
             schema: Arc::clone(&schema),
         });
@@ -6703,6 +7011,7 @@ mod tests {
             rule_name: "r1".into(),
             is_self_ref: false,
             view: DerivedScanView::Contributions,
+            exclusive: false,
             data: Arc::new(RwLock::new(Vec::new())),
             schema: Arc::clone(&schema),
         });

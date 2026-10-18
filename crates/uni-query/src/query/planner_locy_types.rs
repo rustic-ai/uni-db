@@ -89,6 +89,10 @@ pub struct LocyClausePlan {
     /// by the compiler. Carried through planning to the fixpoint
     /// executor where they're evaluated post-body-projection.
     pub model_invocations: Vec<uni_locy::ModelInvocation>,
+    /// Scan indices of the body's derived scans into its own stratum, in
+    /// first-use order, one per distinct handle (P5). A clause with two or
+    /// more holds only exclusive handles, which the fixpoint feeds per pass.
+    pub stratum_scans: Vec<usize>,
 }
 
 /// An IS-reference from a clause body to another derived relation.

@@ -218,17 +218,44 @@ fn flush_soak() {
 /// makes the two sides disagree — which is the definition of the bug the
 /// deleted `"col"` range fusion was.
 ///
-/// Validated against `docs/testing/reverts/lance_col_fusion.patch`: with the
-/// fusion reconstructed this run **fails** with a bag diff, and without it the
-/// run passes. Before this test existed, the same reconstruction left
-/// `flush_smoke` green — the oracle was blind to it, because no generated case
-/// could produce three conditions on one column and the fixture had no index
-/// for them to reach.
+/// Validated on 2026-08-13 against the then-current
+/// `docs/testing/reverts/lance_col_fusion.patch`: with the fusion
+/// reconstructed this run **failed** with a bag diff. Before this test existed,
+/// the same reconstruction left `flush_smoke` green — no generated case could
+/// produce three conditions on one column and the fixture had no index for
+/// them to reach.
+///
+/// **No longer a witness for that patch.** A Hash index now carries only the
+/// `=`/`IN` conjunct to Lance; ranges are pushed only for a BTree column (perf
+/// audit F1, `indexed_range_filter`), so this fixture's ranges on `age` never
+/// reach the renderer, and the regenerated patch — which reinstates the fusion
+/// where two-sided ranges are pushed today — leaves this run green. Its teeth
+/// control is `index::range_prefix_null_pushdown::
+/// translated_forms_match_the_unpushed_oracle`, and its generated oracle is
+/// [`flush_pushdown_btree_smoke`] (see `teeth_validate.sh`).
 #[test]
 fn flush_pushdown_smoke() {
     drive_stateful(
         super::driver::smoke_cases(),
         Fixture::TINY_INDEXED,
+        CaseKind::Pushdown,
+        FlushLever::prepared,
+    );
+}
+
+/// PR lane: [`flush_pushdown_smoke`] against a **BTree-indexed** fixture.
+///
+/// A BTree index carries the generated conjunction's two-sided range to Lance
+/// as well as its `=`/`IN`, so this is the generated run that reaches range
+/// pushdown and the filter renderer. It is the generated oracle for
+/// `docs/testing/reverts/lance_col_fusion.patch`: with the fusion
+/// reconstructed, the range renders as `"age" >= L AND "age" <= U`, which Lance
+/// reads as a string literal compared with a number, and the query fails.
+#[test]
+fn flush_pushdown_btree_smoke() {
+    drive_stateful(
+        super::driver::smoke_cases(),
+        Fixture::TINY_BTREE_INDEXED,
         CaseKind::Pushdown,
         FlushLever::prepared,
     );

@@ -451,6 +451,8 @@ pub struct RandomShape {
     pub prob: bool,
     /// The binding families to add.
     pub binding: BindingShape,
+    /// The recursion families to add.
+    pub recursion: RecursionShape,
 }
 
 /// The reader of family 1 (`o IS seed, (o, e, x) IS wt`): issue #300's P1.
@@ -477,6 +479,8 @@ pub const PREV_RULE: &str = "pth";
 ///   (`COUNT(*)`, `MAX`, `MMIN`), and `flow` over an edge joined with `reach`
 ///   (`COUNT(*)`, `MSUM`, `MCOUNT`);
 /// * the binding families of a [`BindingShape`].
+/// * the recursion families of a [`RecursionShape`]: non-linear and mutually
+///   recursive strata with `BEST BY`, `FOLD`, `ALONG` and `IS NOT`.
 ///
 /// # Examples
 /// ```
@@ -497,6 +501,11 @@ pub fn random_program_strategy() -> impl Strategy<Value = Generated> {
                 any::<[bool; 3]>(),
                 proptest::option::of(any::<bool>()),
                 (any::<[bool; 7]>(), any::<u64>()),
+                (
+                    any::<[bool; 6]>(),
+                    proptest::option::of(any::<bool>()),
+                    any::<u64>(),
+                ),
             )
         })
         .prop_map(
@@ -510,6 +519,18 @@ pub fn random_program_strategy() -> impl Strategy<Value = Generated> {
                 [along, rollup, prob],
                 best,
                 (families, entropy),
+                (
+                    [
+                        nonlinear,
+                        mutual,
+                        mutual_best,
+                        mutual_fold,
+                        mutual_along,
+                        rec_negation,
+                    ],
+                    nonlinear_best,
+                    rec_entropy,
+                ),
             )| {
                 build_random_program(&RandomShape {
                     nodes,
@@ -523,6 +544,16 @@ pub fn random_program_strategy() -> impl Strategy<Value = Generated> {
                     best,
                     prob,
                     binding: BindingShape { families, entropy },
+                    recursion: RecursionShape {
+                        nonlinear,
+                        nonlinear_best,
+                        mutual,
+                        mutual_best,
+                        mutual_fold,
+                        mutual_along,
+                        negation: rec_negation,
+                        entropy: rec_entropy,
+                    },
                 })
             },
         )
@@ -1178,6 +1209,7 @@ pub fn build_random_program(shape: &RandomShape) -> Generated {
         strata.push(after_folds);
     }
 
+    recursion_families(shape, &first, &mut stmts, &mut strata);
     let mut families = Families::new(shape, first, second);
     families.build(&mut stmts, &mut strata);
 
@@ -2273,6 +2305,677 @@ fn derive_features(
     out
 }
 
+// ---------------------------------------------------------------------------
+// Recursion families (P5: non-linear and mutual recursion)
+// ---------------------------------------------------------------------------
+
+/// Which recursion families a random program adds, aimed at how a recursive
+/// stratum feeds its references: clauses with two references into their own
+/// stratum (non-linear), and strata of two rules that read each other
+/// (mutual), each combined with `BEST BY`, `FOLD`, `ALONG` and `IS NOT`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecursionShape {
+    /// `nlr`: non-linear transitive closure, `a IS nlr TO m, m IS nlr TO b`.
+    pub nonlinear: bool,
+    /// `nlb`: non-linear path weight under `BEST BY`. `Some(true)` keeps the
+    /// least over every edge (cycles included), `Some(false)` the greatest
+    /// over the acyclic edges.
+    pub nonlinear_best: Option<bool>,
+    /// `mua` / `mub`: odd and even walks, mutually recursive, each with a
+    /// non-linear clause (`mub` reads `mua` twice, `mua` reads both).
+    pub mutual: bool,
+    /// `mba` / `mbb`: the least odd and even walk weights, mutually recursive
+    /// under `BEST BY`, `mbb` with a non-linear clause.
+    pub mutual_best: bool,
+    /// `mfa` / `mfb`: mutually recursive `MSUM`s over the acyclic edges, each
+    /// reading the other's folded value; `mfa` has a non-linear clause.
+    pub mutual_fold: bool,
+    /// `mpa` / `mpb`: a per-path `ALONG` rule and a plain rule reading each
+    /// other over the acyclic edges.
+    pub mutual_along: bool,
+    /// Adds `m IS NOT xcl` (nodes with `id >= cut`) to recursive clauses.
+    pub negation: bool,
+    /// Seeds the cut of `xcl`.
+    pub entropy: u64,
+}
+
+impl RecursionShape {
+    /// No recursion family.
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            nonlinear: false,
+            nonlinear_best: None,
+            mutual: false,
+            mutual_best: false,
+            mutual_fold: false,
+            mutual_along: false,
+            negation: false,
+            entropy: 0,
+        }
+    }
+}
+
+/// `name = sum of vars` (factor 1, no constant).
+fn sum_of(name: &str, vars: &[&str]) -> Computed {
+    Computed {
+        name: name.to_string(),
+        vars: vars.iter().map(|v| (*v).to_string()).collect(),
+        factor: 1,
+        constant: 0,
+    }
+}
+
+/// An `IsRef` whose subjects reach past the KEYs (a tuple subject).
+fn tuple_ref(rule: &str, subjects: &[&str]) -> IsRef {
+    isref(rule, subjects, None)
+}
+
+/// Builds the rules of the recursion families `shape.recursion` enables.
+///
+/// `first` holds the first relationship type's edges as
+/// `[src, dst, edge index, weight]`. Every family gets its own stratum (a
+/// mutual pair shares one), after an optional `xcl` stratum the negations
+/// read.
+fn recursion_families(
+    shape: &RandomShape,
+    first: &[Tuple],
+    stmts: &mut Vec<SurfaceStmt>,
+    strata: &mut Vec<Vec<OracleRule>>,
+) {
+    let rec = shape.recursion;
+    let n = shape.nodes as i64;
+    let dag: Vec<Tuple> = first.iter().filter(|e| e[0] < e[1]).cloned().collect();
+    let all_nodes: Vec<Tuple> = (0..n).map(|id| vec![id]).collect();
+    let edge_cols = |a: &str, b: &str| var_cols(&[(a, 0), (b, 1), ("w", 3)]);
+    let node_kind = |v: &str| var_kinds(&[(v, ColKind::Node)]);
+
+    // `xcl(x)`: nodes with `id >= cut`, cut in 1..=n so node 0 is never
+    // excluded.
+    let any_family = rec.nonlinear
+        || rec.nonlinear_best.is_some()
+        || rec.mutual
+        || rec.mutual_best
+        || rec.mutual_fold
+        || rec.mutual_along;
+    let negation = rec.negation && any_family;
+    if negation {
+        let cut = 1 + (rec.entropy % n.max(1) as u64) as i64;
+        stmts.push(clause(
+            "xcl",
+            "({x}:Node)",
+            vec![filter(&format!("{{x}}.id >= {cut}"))],
+            "",
+            vec![key_var("x")],
+        ));
+        strata.push(vec![plain_rule(
+            "xcl",
+            &[("x", ColKind::Node)],
+            1,
+            vec![OracleClause {
+                yield_vars: vec!["x".to_string()],
+                ..node_clause("x", cut..n)
+            }],
+        )]);
+    }
+    // `var IS NOT xcl`, in surface and IR form, when negation is on.
+    let neg_surface = |var: &str| -> Vec<Conjunct> {
+        if negation {
+            vec![is_not_ref(&[var], "xcl", None, false)]
+        } else {
+            Vec::new()
+        }
+    };
+    let neg_ir = |var: &str| -> Vec<IsRef> {
+        if negation {
+            vec![isref("xcl", &[var], None)]
+        } else {
+            Vec::new()
+        }
+    };
+    let ab = || vec!["a".to_string(), "b".to_string()];
+    let abd = |d: &str| vec!["a".to_string(), "b".to_string(), d.to_string()];
+
+    if rec.nonlinear {
+        stmts.push(clause(
+            "nlr",
+            "({a}:Node)-[:EDGE]->({b}:Node)",
+            Vec::new(),
+            "",
+            vec![key_var("a"), key_var("b")],
+        ));
+        let mut conj = vec![
+            is_ref(&["a"], "nlr", Some("m")),
+            is_ref(&["m"], "nlr", Some("b")),
+        ];
+        conj.extend(neg_surface("m"));
+        stmts.push(clause(
+            "nlr",
+            "({a}:Node)",
+            conj,
+            "",
+            vec![key_var("a"), key_var("b")],
+        ));
+        strata.push(vec![plain_rule(
+            "nlr",
+            &[("a", ColKind::Node), ("b", ColKind::Node)],
+            2,
+            vec![
+                OracleClause {
+                    base: first.to_vec(),
+                    var_cols: var_cols(&[("a", 0), ("b", 1)]),
+                    yield_vars: ab(),
+                    ..OracleClause::default()
+                },
+                OracleClause {
+                    base: all_nodes.clone(),
+                    var_cols: var_cols(&[("a", 0)]),
+                    var_kinds: node_kind("a"),
+                    pos_refs: vec![
+                        isref("nlr", &["a"], Some("m")),
+                        isref("nlr", &["m"], Some("b")),
+                    ],
+                    neg_refs: neg_ir("m"),
+                    yield_vars: ab(),
+                    ..OracleClause::default()
+                },
+            ],
+        )]);
+    }
+
+    if let Some(ascending) = rec.nonlinear_best {
+        let (order, base) = if ascending {
+            ("ASC", first.to_vec())
+        } else {
+            ("DESC", dag.clone())
+        };
+        let tail = format!("BEST BY {{nlb:d}} {order}");
+        let base_filter = if ascending {
+            Vec::new()
+        } else {
+            vec![filter("{a}.id < {b}.id")]
+        };
+        stmts.push(clause(
+            "nlb",
+            "({a}:Node)-[{e}:EDGE]->({b}:Node)",
+            base_filter,
+            &tail,
+            vec![key_var("a"), key_var("b"), item(false, "{e}.w", "d")],
+        ));
+        let mut conj = vec![
+            is_ref(&["a", "m", "p"], "nlb", None),
+            is_ref(&["m", "b", "q"], "nlb", None),
+        ];
+        conj.extend(neg_surface("m"));
+        stmts.push(clause(
+            "nlb",
+            "({a}:Node)",
+            conj,
+            &tail,
+            vec![key_var("a"), key_var("b"), item(false, "{p} + {q}", "d")],
+        ));
+        strata.push(vec![OracleRule {
+            best: Some(OracleBest {
+                key_count: 2,
+                criterion: 2,
+                ascending,
+            }),
+            ..plain_rule(
+                "nlb",
+                &[
+                    ("a", ColKind::Node),
+                    ("b", ColKind::Node),
+                    ("d", ColKind::Int),
+                ],
+                2,
+                vec![
+                    OracleClause {
+                        base,
+                        var_cols: edge_cols("a", "b"),
+                        computed: vec![sum_of("d", &["w"])],
+                        yield_vars: abd("d"),
+                        ..OracleClause::default()
+                    },
+                    OracleClause {
+                        base: all_nodes.clone(),
+                        var_cols: var_cols(&[("a", 0)]),
+                        var_kinds: node_kind("a"),
+                        pos_refs: vec![
+                            tuple_ref("nlb", &["a", "m", "p"]),
+                            tuple_ref("nlb", &["m", "b", "q"]),
+                        ],
+                        neg_refs: neg_ir("m"),
+                        computed: vec![sum_of("d", &["p", "q"])],
+                        yield_vars: abd("d"),
+                        ..OracleClause::default()
+                    },
+                ],
+            )
+        }]);
+    }
+
+    if rec.mutual {
+        // Text order per rule matches the IR's clause order.
+        stmts.push(clause(
+            "mua",
+            "({a}:Node)-[:EDGE]->({b}:Node)",
+            Vec::new(),
+            "",
+            vec![key_var("a"), key_var("b")],
+        ));
+        let mut conj = vec![is_ref(&["m"], "mua", Some("b"))];
+        conj.extend(neg_surface("m"));
+        stmts.push(clause(
+            "mub",
+            "({a}:Node)-[:EDGE]->({m}:Node)",
+            conj,
+            "",
+            vec![key_var("a"), key_var("b")],
+        ));
+        let mut conj = vec![is_ref(&["m"], "mub", Some("b"))];
+        conj.extend(neg_surface("m"));
+        stmts.push(clause(
+            "mua",
+            "({a}:Node)-[:EDGE]->({m}:Node)",
+            conj,
+            "",
+            vec![key_var("a"), key_var("b")],
+        ));
+        let mut conj = vec![
+            is_ref(&["a"], "mua", Some("m")),
+            is_ref(&["m"], "mua", Some("b")),
+        ];
+        conj.extend(neg_surface("m"));
+        stmts.push(clause(
+            "mub",
+            "({a}:Node)",
+            conj,
+            "",
+            vec![key_var("a"), key_var("b")],
+        ));
+        stmts.push(clause(
+            "mua",
+            "({a}:Node)",
+            vec![
+                is_ref(&["a"], "mua", Some("m")),
+                is_ref(&["m"], "mub", Some("b")),
+            ],
+            "",
+            vec![key_var("a"), key_var("b")],
+        ));
+        let edge_hop = |other: &str| OracleClause {
+            base: first.to_vec(),
+            var_cols: edge_cols("a", "m"),
+            pos_refs: vec![isref(other, &["m"], Some("b"))],
+            neg_refs: neg_ir("m"),
+            yield_vars: ab(),
+            ..OracleClause::default()
+        };
+        let compose = |left: &str, right: &str, negated: bool| OracleClause {
+            base: all_nodes.clone(),
+            var_cols: var_cols(&[("a", 0)]),
+            var_kinds: node_kind("a"),
+            pos_refs: vec![
+                isref(left, &["a"], Some("m")),
+                isref(right, &["m"], Some("b")),
+            ],
+            neg_refs: if negated { neg_ir("m") } else { Vec::new() },
+            yield_vars: ab(),
+            ..OracleClause::default()
+        };
+        let cols = [("a", ColKind::Node), ("b", ColKind::Node)];
+        strata.push(vec![
+            plain_rule(
+                "mua",
+                &cols,
+                2,
+                vec![
+                    OracleClause {
+                        base: first.to_vec(),
+                        var_cols: var_cols(&[("a", 0), ("b", 1)]),
+                        yield_vars: ab(),
+                        ..OracleClause::default()
+                    },
+                    edge_hop("mub"),
+                    compose("mua", "mub", false),
+                ],
+            ),
+            plain_rule(
+                "mub",
+                &cols,
+                2,
+                vec![edge_hop("mua"), compose("mua", "mua", true)],
+            ),
+        ]);
+    }
+
+    if rec.mutual_best {
+        // `ALONG` carries the path weight here; `nlb` and `mpb` compute theirs
+        // in YIELD, so both forms are covered.
+        let tail = |rule: &str, value: &str| {
+            format!("ALONG {{{rule}:d}} = {value} BEST BY {{{rule}:d}} ASC")
+        };
+        let yields = |rule: &str| vec![key_var("a"), key_var("b"), own_col(rule, "d")];
+        stmts.push(clause(
+            "mba",
+            "({a}:Node)-[{e}:EDGE]->({b}:Node)",
+            Vec::new(),
+            &tail("mba", "{e}.w"),
+            yields("mba"),
+        ));
+        let mut conj = vec![is_ref(&["m", "b", "p"], "mba", None)];
+        conj.extend(neg_surface("m"));
+        stmts.push(clause(
+            "mbb",
+            "({a}:Node)-[{e}:EDGE]->({m}:Node)",
+            conj,
+            &tail("mbb", "{p} + {e}.w"),
+            yields("mbb"),
+        ));
+        stmts.push(clause(
+            "mba",
+            "({a}:Node)-[{e}:EDGE]->({m}:Node)",
+            vec![is_ref(&["m", "b", "p"], "mbb", None)],
+            &tail("mba", "{p} + {e}.w"),
+            yields("mba"),
+        ));
+        stmts.push(clause(
+            "mbb",
+            "({a}:Node)",
+            vec![
+                is_ref(&["a", "m", "p"], "mba", None),
+                is_ref(&["m", "b", "q"], "mba", None),
+            ],
+            &tail("mbb", "{p} + {q}"),
+            yields("mbb"),
+        ));
+        let hop = |other: &str, negated: bool| OracleClause {
+            base: first.to_vec(),
+            var_cols: edge_cols("a", "m"),
+            pos_refs: vec![tuple_ref(other, &["m", "b", "p"])],
+            neg_refs: if negated { neg_ir("m") } else { Vec::new() },
+            computed: vec![sum_of("d", &["p", "w"])],
+            yield_vars: abd("d"),
+            ..OracleClause::default()
+        };
+        let cols = [
+            ("a", ColKind::Node),
+            ("b", ColKind::Node),
+            ("d", ColKind::Int),
+        ];
+        let best = Some(OracleBest {
+            key_count: 2,
+            criterion: 2,
+            ascending: true,
+        });
+        strata.push(vec![
+            OracleRule {
+                best,
+                ..plain_rule(
+                    "mba",
+                    &cols,
+                    2,
+                    vec![
+                        OracleClause {
+                            base: first.to_vec(),
+                            var_cols: edge_cols("a", "b"),
+                            computed: vec![sum_of("d", &["w"])],
+                            yield_vars: abd("d"),
+                            ..OracleClause::default()
+                        },
+                        hop("mbb", false),
+                    ],
+                )
+            },
+            OracleRule {
+                best,
+                ..plain_rule(
+                    "mbb",
+                    &cols,
+                    2,
+                    vec![
+                        hop("mba", true),
+                        OracleClause {
+                            base: all_nodes.clone(),
+                            var_cols: var_cols(&[("a", 0)]),
+                            var_kinds: node_kind("a"),
+                            pos_refs: vec![
+                                tuple_ref("mba", &["a", "m", "p"]),
+                                tuple_ref("mba", &["m", "b", "q"]),
+                            ],
+                            computed: vec![sum_of("d", &["p", "q"])],
+                            yield_vars: abd("d"),
+                            ..OracleClause::default()
+                        },
+                    ],
+                )
+            },
+        ]);
+    }
+
+    if rec.mutual_fold {
+        stmts.push(clause(
+            "mfa",
+            "({a}:Node)",
+            Vec::new(),
+            "",
+            vec![key_var("a"), item(false, "1", "s")],
+        ));
+        let mut conj = vec![filter("{a}.id < {c}.id"), is_ref(&["c"], "mfa", None)];
+        conj.extend(neg_surface("c"));
+        stmts.push(clause(
+            "mfb",
+            "({a}:Node)-[{e}:EDGE]->({c}:Node)",
+            conj,
+            "FOLD {mfb:s} = MSUM({mfa:s} + {e}.w)",
+            vec![key_var("a"), own_col("mfb", "s")],
+        ));
+        stmts.push(clause(
+            "mfa",
+            "({a}:Node)-[{e}:EDGE]->({c}:Node)",
+            vec![filter("{a}.id < {c}.id"), is_ref(&["c"], "mfb", None)],
+            "FOLD {mfa:s} = MSUM({mfb:s} + {e}.w)",
+            vec![key_var("a"), own_col("mfa", "s")],
+        ));
+        stmts.push(clause(
+            "mfa",
+            "({c}:Node)<-[{e}:EDGE]-({a}:Node)-[{f}:EDGE]->({d}:Node)",
+            vec![
+                filter("{a}.id < {c}.id"),
+                filter("{a}.id < {d}.id"),
+                is_ref(&["c", "t"], "mfb", None),
+                is_ref(&["d", "u"], "mfa", None),
+            ],
+            "FOLD {mfa:s} = MSUM({t} + {u} + {e}.w)",
+            vec![key_var("a"), own_col("mfa", "s")],
+        ));
+        // Two distinct acyclic edges out of one node: `[a, c, w_e, d]`.
+        // Relationship uniqueness within one MATCH keeps `e` and `f` apart.
+        let fork: Vec<Tuple> = dag
+            .iter()
+            .flat_map(|e| {
+                dag.iter()
+                    .filter(move |f| f[0] == e[0] && f[2] != e[2])
+                    .map(move |f| vec![e[0], e[1], e[3], f[1]])
+            })
+            .collect();
+        let read_other = |other: &str, negated: bool| OracleClause {
+            base: dag.clone(),
+            var_cols: var_cols(&[("a", 0), ("c", 1), ("w", 3)]),
+            pos_refs: vec![IsRef {
+                values: vec!["cs".to_string()],
+                ..isref(other, &["c"], None)
+            }],
+            neg_refs: if negated { neg_ir("c") } else { Vec::new() },
+            computed: vec![sum_of("x", &["cs", "w"])],
+            yield_vars: vec!["a".to_string(), "x".to_string()],
+            ..OracleClause::default()
+        };
+        let fold = Some(OracleFold {
+            key_count: 1,
+            aggs: vec![FoldAgg {
+                agg: Agg::Sum,
+                input: Some(1),
+            }],
+        });
+        let cols = [("a", ColKind::Node), ("s", ColKind::Int)];
+        strata.push(vec![
+            OracleRule {
+                fold: fold.clone(),
+                ..plain_rule(
+                    "mfa",
+                    &cols,
+                    1,
+                    vec![
+                        OracleClause {
+                            base: all_nodes.clone(),
+                            var_cols: var_cols(&[("a", 0)]),
+                            computed: vec![Computed {
+                                constant: 1,
+                                ..sum_of("s", &[])
+                            }],
+                            yield_vars: vec!["a".to_string(), "s".to_string()],
+                            ..OracleClause::default()
+                        },
+                        read_other("mfb", false),
+                        OracleClause {
+                            base: fork,
+                            var_cols: var_cols(&[("a", 0), ("c", 1), ("w", 2), ("d", 3)]),
+                            pos_refs: vec![
+                                tuple_ref("mfb", &["c", "t"]),
+                                tuple_ref("mfa", &["d", "u"]),
+                            ],
+                            computed: vec![sum_of("x", &["t", "u", "w"])],
+                            yield_vars: vec!["a".to_string(), "x".to_string()],
+                            ..OracleClause::default()
+                        },
+                    ],
+                )
+            },
+            OracleRule {
+                fold,
+                ..plain_rule("mfb", &cols, 1, vec![read_other("mfa", true)])
+            },
+        ]);
+    }
+
+    if rec.mutual_along {
+        stmts.push(clause(
+            "mpa",
+            "({a}:Node)-[{e}:EDGE]->({b}:Node)",
+            vec![filter("{a}.id < {b}.id")],
+            "ALONG {mpa:q} = {e}.w",
+            vec![key_var("a"), key_var("b"), own_col("mpa", "q")],
+        ));
+        stmts.push(clause(
+            "mpa",
+            "({a}:Node)-[{e}:EDGE]->({m}:Node)",
+            vec![filter("{a}.id < {m}.id"), is_ref(&["m"], "mpa", Some("b"))],
+            "ALONG {mpa:q} = prev.{mpa:q} + {e}.w",
+            vec![key_var("a"), key_var("b"), own_col("mpa", "q")],
+        ));
+        let mut conj = vec![
+            filter("{a}.id < {m}.id"),
+            is_ref(&["m", "b", "p"], "mpa", None),
+        ];
+        conj.extend(neg_surface("m"));
+        stmts.push(clause(
+            "mpb",
+            "({a}:Node)-[{e}:EDGE]->({m}:Node)",
+            conj,
+            "",
+            vec![key_var("a"), key_var("b"), item(false, "{p} + {e}.w", "q")],
+        ));
+        // `mpb` re-weighting an `mpa` path by an edge parallel to it. The hop
+        // above needs two chained acyclic edges and the `mpa` clause reading
+        // `mpb` a third, which the sparse random graphs rarely hold (`mpb` was
+        // non-empty in ~7% of cases); this clause needs one, so `mpb` is
+        // non-empty whenever `mpa` is and the mutual cycle `mpa -> mpb -> mpa`
+        // turns on any two chained edges.
+        stmts.push(clause(
+            "mpb",
+            "({a}:Node)-[{e}:EDGE]->({b}:Node)",
+            vec![
+                filter("{a}.id < {b}.id"),
+                is_ref(&["a", "b", "p"], "mpa", None),
+            ],
+            "",
+            vec![key_var("a"), key_var("b"), item(false, "{p} + {e}.w", "q")],
+        ));
+        stmts.push(clause(
+            "mpa",
+            "({a}:Node)-[{e}:EDGE]->({m}:Node)",
+            vec![
+                filter("{a}.id < {m}.id"),
+                is_ref(&["m", "b", "p"], "mpb", None),
+            ],
+            "ALONG {mpa:q} = {p} + {e}.w",
+            vec![key_var("a"), key_var("b"), own_col("mpa", "q")],
+        ));
+        let cols = [
+            ("a", ColKind::Node),
+            ("b", ColKind::Node),
+            ("q", ColKind::Int),
+        ];
+        let hop = |other: &str, negated: bool| OracleClause {
+            base: dag.clone(),
+            var_cols: edge_cols("a", "m"),
+            pos_refs: vec![tuple_ref(other, &["m", "b", "p"])],
+            neg_refs: if negated { neg_ir("m") } else { Vec::new() },
+            computed: vec![sum_of("q", &["p", "w"])],
+            yield_vars: abd("q"),
+            ..OracleClause::default()
+        };
+        strata.push(vec![
+            OracleRule {
+                per_path: true,
+                ..plain_rule(
+                    "mpa",
+                    &cols,
+                    2,
+                    vec![
+                        OracleClause {
+                            base: dag.clone(),
+                            var_cols: edge_cols("a", "b"),
+                            computed: vec![sum_of("q", &["w"])],
+                            yield_vars: abd("q"),
+                            ..OracleClause::default()
+                        },
+                        OracleClause {
+                            base: dag.clone(),
+                            var_cols: edge_cols("a", "m"),
+                            pos_refs: vec![IsRef {
+                                values: vec!["p".to_string()],
+                                ..isref("mpa", &["m"], Some("b"))
+                            }],
+                            computed: vec![sum_of("q", &["p", "w"])],
+                            yield_vars: abd("q"),
+                            ..OracleClause::default()
+                        },
+                        hop("mpb", false),
+                    ],
+                )
+            },
+            plain_rule(
+                "mpb",
+                &cols,
+                2,
+                vec![
+                    hop("mpa", true),
+                    OracleClause {
+                        base: dag.clone(),
+                        var_cols: edge_cols("a", "b"),
+                        pos_refs: vec![tuple_ref("mpa", &["a", "b", "p"])],
+                        computed: vec![sum_of("q", &["p", "w"])],
+                        yield_vars: abd("q"),
+                        ..OracleClause::default()
+                    },
+                ],
+            ),
+        ]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2509,6 +3212,7 @@ mod tests {
                     best,
                     prob,
                     binding: BindingShape::none(),
+                    recursion: RecursionShape::none(),
                 },
             )
     }
@@ -2682,6 +3386,7 @@ mod tests {
                     families: [true; 7],
                     entropy,
                 },
+                recursion: RecursionShape::none(),
             };
             let g = build_random_program(&shape);
             match check_program(&g.oracle_rules) {

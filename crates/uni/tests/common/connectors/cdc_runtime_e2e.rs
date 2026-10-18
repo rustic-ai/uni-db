@@ -324,3 +324,264 @@ async fn memory_cdc_opt_in_delivers_batches() -> Result<()> {
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// W2 residual: is the per-commit memory growth on the default path L0 or a
+// leak? An observation probe, not a guard.
+// ---------------------------------------------------------------------------
+
+/// glibc's `struct mallinfo2` (glibc >= 2.33), field order as in `malloc.h`.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[repr(C)]
+#[derive(Default)]
+struct MallInfo2 {
+    arena: usize,
+    ordblks: usize,
+    smblks: usize,
+    hblks: usize,
+    hblkhd: usize,
+    usmblks: usize,
+    fsmblks: usize,
+    uordblks: usize,
+    fordblks: usize,
+    keepcost: usize,
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+unsafe extern "C" {
+    fn mallinfo2() -> MallInfo2;
+    fn malloc_trim(pad: usize) -> i32;
+}
+
+/// Bytes the allocator holds from the OS but has not handed out (free
+/// chunks in every arena): the part of RSS that is no live object.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn allocator_free_bytes() -> usize {
+    // SAFETY: as in `live_heap_bytes`.
+    unsafe { mallinfo2() }.fordblks
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn allocator_free_bytes() -> usize {
+    0
+}
+
+/// Returns free arena memory to the OS (`malloc_trim(0)`).
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_allocator() {
+    // SAFETY: `malloc_trim` only releases free memory; it has no
+    // preconditions and touches no live allocation.
+    unsafe {
+        malloc_trim(0);
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim_allocator() {}
+
+/// Live heap bytes: in-use `brk`/arena chunks plus `mmap`ed chunks.
+///
+/// RSS is a poor leak signal under glibc: freed memory is not returned to the
+/// OS, so RSS only ratchets. `mallinfo2` sums every arena and counts what is
+/// still allocated, so it falls when L0 is flushed and freed.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn live_heap_bytes() -> usize {
+    // SAFETY: `mallinfo2` takes no arguments, has no preconditions, and
+    // returns a plain `repr(C)` struct by value (glibc >= 2.33, which every
+    // supported Linux dev/CI image has).
+    let mi = unsafe { mallinfo2() };
+    mi.uordblks + mi.hblkhd
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn live_heap_bytes() -> usize {
+    0
+}
+
+/// Resident set size in bytes, from `/proc/self/status` (0 if unavailable).
+fn rss_bytes() -> usize {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("VmRSS:"))
+                .and_then(|v| v.trim().trim_end_matches("kB").trim().parse::<usize>().ok())
+        })
+        .map_or(0, |kb| kb * 1024)
+}
+
+/// One commit-loop regime for [`w2_residual_memory_growth_observation`].
+struct W2Regime {
+    /// Printed with every sample.
+    label: String,
+    /// Auto-flush settings; `no_auto` disables both triggers.
+    config: uni_db::UniConfig,
+    /// Use the in-memory object store instead of a temp directory.
+    in_memory: bool,
+    /// Explicit `flush()` period in commits; 0 never flushes explicitly.
+    flush_every: usize,
+    /// Rewrite one pre-created vertex per commit instead of creating one, so
+    /// the stored data stays one row: growth that survives a flush is then
+    /// per-commit or per-flush retention, not per-row state.
+    update: bool,
+}
+
+/// Runs `regime` up to the last checkpoint, printing live heap and RSS deltas
+/// (and the heap slope since the previous checkpoint) at each one.
+async fn w2_commit_loop(regime: W2Regime, checkpoints: &[usize]) -> Result<()> {
+    let W2Regime {
+        label,
+        config,
+        in_memory,
+        flush_every,
+        update,
+    } = regime;
+    let dir = tempfile::tempdir()?;
+    let builder = if in_memory {
+        Uni::in_memory()
+    } else {
+        Uni::open(dir.path().to_string_lossy().to_string())
+    };
+    let db = builder.config(config).build().await?;
+    db.schema()
+        .label("W")
+        .property("x", DataType::Int64)
+        .apply()
+        .await?;
+    if update {
+        let tx = db.session().tx().await?;
+        tx.execute("CREATE (:W {x: 0})").await?;
+        tx.commit().await?;
+    }
+    db.flush().await?;
+    let heap0 = live_heap_bytes();
+    let rss0 = rss_bytes();
+    eprintln!("[w2] {label}: start heap={heap0} rss={rss0}");
+    let session = db.session();
+    let mut prev = (0usize, heap0);
+    let total = *checkpoints.last().unwrap_or(&0);
+    for i in 1..=total {
+        let tx = session.tx().await?;
+        let stmt = if update {
+            format!("MATCH (w:W) SET w.x = {i}")
+        } else {
+            format!("CREATE (:W {{x: {i}}})")
+        };
+        tx.execute(&stmt).await?;
+        tx.commit().await?;
+        if flush_every > 0 && i % flush_every == 0 {
+            db.flush().await?;
+        }
+        if checkpoints.contains(&i) {
+            let heap = live_heap_bytes();
+            let rss = rss_bytes();
+            let slope = (heap as f64 - prev.1 as f64) / (i - prev.0) as f64;
+            eprintln!(
+                "[w2] {label}: commits={i:>6} heap_delta={:>8.1} MB rss_delta={:>8.1} MB \
+                 heap B/commit since last={slope:>8.1}",
+                (heap as f64 - heap0 as f64) / 1e6,
+                (rss as f64 - rss0 as f64) / 1e6,
+            );
+            prev = (i, heap);
+        }
+    }
+    db.flush().await?;
+    let heap = live_heap_bytes();
+    let rss = rss_bytes();
+    eprintln!(
+        "[w2] {label}: after final flush heap_delta={:.1} MB rss_delta={:.1} MB \
+         allocator_free={:.1} MB",
+        (heap as f64 - heap0 as f64) / 1e6,
+        (rss as f64 - rss0 as f64) / 1e6,
+        allocator_free_bytes() as f64 / 1e6,
+    );
+    trim_allocator();
+    eprintln!(
+        "[w2] {label}: after malloc_trim rss_delta={:.1} MB",
+        (rss_bytes() as f64 - rss0 as f64) / 1e6
+    );
+    drop(session);
+    drop(db);
+    Ok(())
+}
+
+/// W2 residual — sizes the memory growth of small commits on the default
+/// (no-CDC) path, so L0 growth (freed by a flush) can be told apart from
+/// retention (survives one).
+///
+/// Measured 2026-10-17 (debug build, 20k commits, live heap from
+/// `mallinfo2`, not RSS):
+/// - RSS is not the signal. Default config: RSS +230.5 MB, live heap
+///   +23.5 MB, 216.8 MB of free chunks held by glibc.
+/// - L0: 0.95 KB/commit with no flush, freed by the flush.
+/// - Per commit: one rewritten vertex, never flushed, grows ~2.7 KB/commit
+///   to ~1.2k commits, ~250 B/commit to ~5k, then 4 B/commit through 20k: a
+///   plateau of ~4.2 MB, so bounded, not a leak. The ~5k knee matches the OCC
+///   `CommitRegistry` capacity (4096); that attribution is inferred, not
+///   counted.
+/// - Per flush: ~100-170 KB that no flush frees (rewrite mode, flush every
+///   250/1000/5000 commits: 420/129/33 B/commit). Capping the Lance session
+///   caches at 1 MB cut it from 402 to 57 B/commit, so ~86% is Lance's
+///   metadata/index cache, an LRU bounded at 1 GiB + 6 GiB per database.
+///
+/// Run: `cargo nextest run -p uni-db --test integration --run-ignored all
+/// -E 'test(w2_residual_memory_growth_observation)' --no-capture` (debug
+/// builds outlast nextest's 180 s ceiling at 20k commits; run the test binary
+/// directly with `--ignored --nocapture --exact` for those). Environment:
+/// `W2_COMMITS` (default 40000), `W2_ONLY` (one regime name, or `custom` with
+/// `W2_FLUSH`, `W2_UPDATE=1`, `W2_MEM=1`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "observation; run with --run-ignored all --no-capture"]
+async fn w2_residual_memory_growth_observation() -> Result<()> {
+    let n: usize = std::env::var("W2_COMMITS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40_000);
+    let checkpoints: Vec<usize> = [n / 16, n / 8, n / 4, n / 2, n].into();
+    let no_auto = || uni_db::UniConfig {
+        auto_flush_interval: None,
+        auto_flush_threshold: usize::MAX / 2,
+        ..Default::default()
+    };
+    let env = |k: &str| std::env::var(k).ok().and_then(|v| v.parse::<usize>().ok());
+    let regime = |label: &str, config, in_memory, flush_every, update| W2Regime {
+        label: label.to_string(),
+        config,
+        in_memory,
+        flush_every,
+        update,
+    };
+    let regimes = [
+        regime(
+            "default_disk",
+            uni_db::UniConfig::default(),
+            false,
+            0,
+            false,
+        ),
+        regime("noflush_disk", no_auto(), false, 0, false),
+        regime("flush1k_disk", no_auto(), false, 1000, false),
+        regime("update_flush1k_disk", no_auto(), false, 1000, true),
+        regime("flush1k_mem", no_auto(), true, 1000, false),
+        // Free-form, so a new data point needs no rebuild.
+        regime(
+            "custom",
+            no_auto(),
+            env("W2_MEM") == Some(1),
+            env("W2_FLUSH").unwrap_or(0),
+            env("W2_UPDATE") == Some(1),
+        ),
+    ];
+    let only = std::env::var("W2_ONLY").unwrap_or_default();
+    for r in regimes {
+        let selected = if r.label == "custom" {
+            only == "custom"
+        } else {
+            only.is_empty() || only == r.label
+        };
+        if selected {
+            w2_commit_loop(r, &checkpoints).await?;
+        }
+    }
+    Ok(())
+}

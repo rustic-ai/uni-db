@@ -119,6 +119,33 @@ impl RebuildTriggerChecker {
     }
 }
 
+/// Re-queue failed tasks whose retry delay has elapsed.
+///
+/// A task is retried when it has attempts left (`retry_count < max_retries`)
+/// and `retry_delay` has passed since it failed. The rebuild worker calls this
+/// on its own tick rather than arming a timer task per failure: such a task was
+/// detached, so it held the manager (and through it the `StorageManager`) for
+/// up to `retry_delay` after the database was gone.
+fn requeue_due_retries(
+    config: &IndexRebuildConfig,
+    tasks: &mut HashMap<String, IndexRebuildTask>,
+    now: chrono::DateTime<Utc>,
+) {
+    let Ok(delay) = chrono::Duration::from_std(config.retry_delay) else {
+        return;
+    };
+    for task in tasks.values_mut() {
+        let due = task
+            .completed_at
+            .and_then(|failed_at| failed_at.checked_add_signed(delay))
+            .is_some_and(|retry_at| retry_at <= now);
+        if task.status == IndexRebuildStatus::Failed && task.retry_count < config.max_retries && due
+        {
+            task.status = IndexRebuildStatus::Pending;
+        }
+    }
+}
+
 /// Manages background index rebuilding with status tracking and retry logic.
 ///
 /// The manager maintains a queue of index rebuild tasks and processes them
@@ -211,7 +238,29 @@ impl IndexRebuildManager {
     /// Schedule labels for background index rebuild.
     ///
     /// Returns the task IDs for the scheduled rebuilds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the task state cannot be persisted; the tasks
+    /// stay queued in memory either way.
     pub async fn schedule(&self, labels: Vec<String>) -> Result<Vec<String>> {
+        let task_ids = self.enqueue(labels);
+
+        // Persist state
+        self.save_state().await?;
+
+        Ok(task_ids)
+    }
+
+    /// Queue labels for rebuild in memory, without persisting.
+    ///
+    /// For synchronous callers (the post-flush trigger check). The worker
+    /// persists the task state when it claims the task, at its next tick; a
+    /// crash before then loses only the queue entry, and the affected indexes
+    /// were already marked `Stale`, which the next trigger pass re-queues.
+    /// Returns the task IDs, reusing an existing pending or in-progress task
+    /// for a label that already has one.
+    pub fn enqueue(&self, labels: Vec<String>) -> Vec<String> {
         let mut task_ids = Vec::with_capacity(labels.len());
         let now = Utc::now();
 
@@ -254,10 +303,7 @@ impl IndexRebuildManager {
             }
         }
 
-        // Persist state
-        self.save_state().await?;
-
-        Ok(task_ids)
+        task_ids
     }
 
     /// Get status of all tasks.
@@ -383,12 +429,14 @@ impl IndexRebuildManager {
 
     /// Claim and process the next pending index rebuild task, if any.
     ///
-    /// Marks the task as in-progress, executes the rebuild, updates task
+    /// First re-queues failed tasks whose retry delay has elapsed, then marks
+    /// one pending task as in-progress, executes the rebuild, updates task
     /// status and index metadata, and persists state.
     async fn process_next_pending_task(self: &Arc<Self>) {
         // Find and claim a pending task
         let task_to_process = {
             let mut tasks = self.tasks.write();
+            requeue_due_retries(&self.config, &mut tasks, Utc::now());
             let pending = tasks
                 .values_mut()
                 .find(|t| t.status == IndexRebuildStatus::Pending);
@@ -449,8 +497,9 @@ impl IndexRebuildManager {
         self.update_index_metadata_for_label(label, IndexStatus::Online, Some(now), row_count);
     }
 
-    /// Handle a failed index rebuild: mark task failed and schedule retry if within limits.
-    fn handle_rebuild_failure(self: &Arc<Self>, task_id: &str, label: &str, err: anyhow::Error) {
+    /// Handle a failed index rebuild: mark task failed; the worker retries it
+    /// after `retry_delay` while attempts remain.
+    fn handle_rebuild_failure(&self, task_id: &str, label: &str, err: anyhow::Error) {
         let (retry_count, exhausted) = {
             let mut tasks = self.tasks.write();
             if let Some(task) = tasks.get_mut(task_id) {
@@ -476,18 +525,6 @@ impl IndexRebuildManager {
                 "Will retry index rebuild for '{}' after delay (attempt {}/{})",
                 label, retry_count, self.config.max_retries
             );
-            let manager = self.clone();
-            let task_id_owned = task_id.to_string();
-            let delay = self.config.retry_delay;
-            tokio::spawn(async move {
-                tokio::time::sleep(delay).await;
-                let mut tasks = manager.tasks.write();
-                if let Some(task) = tasks.get_mut(&task_id_owned)
-                    && task.status == IndexRebuildStatus::Failed
-                {
-                    task.status = IndexRebuildStatus::Pending;
-                }
-            });
         }
     }
 
@@ -584,6 +621,49 @@ impl IndexRebuildManager {
 mod tests {
     use super::*;
     use uni_common::core::schema::IndexMetadata;
+
+    /// A failed task with attempts left becomes pending once `retry_delay`
+    /// has passed, and not before; an exhausted one stays failed.
+    #[test]
+    fn failed_task_is_requeued_by_the_worker_after_the_retry_delay() {
+        let config = IndexRebuildConfig {
+            max_retries: 3,
+            retry_delay: std::time::Duration::from_secs(60),
+            ..Default::default()
+        };
+        let failed_at = Utc::now();
+        let task = |id: &str, retry_count| IndexRebuildTask {
+            id: id.to_string(),
+            label: "L".to_string(),
+            status: IndexRebuildStatus::Failed,
+            created_at: failed_at,
+            started_at: Some(failed_at),
+            completed_at: Some(failed_at),
+            error: Some("boom".to_string()),
+            retry_count,
+        };
+        let mut tasks: HashMap<String, IndexRebuildTask> = [
+            ("retryable".to_string(), task("retryable", 1)),
+            ("exhausted".to_string(), task("exhausted", 3)),
+        ]
+        .into_iter()
+        .collect();
+
+        requeue_due_retries(
+            &config,
+            &mut tasks,
+            failed_at + chrono::Duration::seconds(59),
+        );
+        assert_eq!(tasks["retryable"].status, IndexRebuildStatus::Failed);
+
+        requeue_due_retries(
+            &config,
+            &mut tasks,
+            failed_at + chrono::Duration::seconds(60),
+        );
+        assert_eq!(tasks["retryable"].status, IndexRebuildStatus::Pending);
+        assert_eq!(tasks["exhausted"].status, IndexRebuildStatus::Failed);
+    }
 
     #[test]
     fn test_index_rebuild_status_serialize() {

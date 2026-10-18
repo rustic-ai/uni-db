@@ -1939,9 +1939,10 @@ impl Executor {
                 .all(|(k, v)| Self::is_safe_key_ident(k) && Scalar::from_value(v).is_some())
     }
 
-    /// True when a MERGE key name is a safe bare identifier for a Lance
-    /// filter (issue #8). Keys come from a static map literal, but validate
-    /// anyway.
+    /// True when a MERGE key name is a plain identifier (issue #8). Keys come
+    /// from a static map literal, but validate anyway. `to_sql` now
+    /// backtick-quotes every column, so this gate is conservative rather than
+    /// required: an awkward key name takes the per-row path instead.
     fn is_safe_key_ident(k: &str) -> bool {
         !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     }
@@ -1953,9 +1954,10 @@ impl Executor {
     /// OR of per-tuple conjunctions. Both are wrapped with the same
     /// `_deleted = false` clause the per-row filter used.
     ///
-    /// `is_safe_key_ident` still gates the column names, and must: `to_sql`
-    /// emits identifiers **bare** and can never quote them, because Lance reads
-    /// a double-quoted name as a string literal rather than an identifier.
+    /// `is_safe_key_ident` still gates the column names. `to_sql` quotes every
+    /// identifier with backticks (Lance reads a double-quoted name as a string
+    /// literal, never an identifier), so the gate only keeps awkward key names
+    /// on the per-row path.
     ///
     /// Values of mixed types against one column used to be grouped into
     /// separate same-type `IN` lists. That is gone — it never worked. Lance

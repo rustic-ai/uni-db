@@ -96,7 +96,7 @@ pub use index_manager::{IndexManager, IndexRebuildStatus, IndexRebuildTask};
 pub use index_rebuild::IndexRebuildManager;
 #[cfg(feature = "lance-backend")]
 pub use inverted_index::InvertedIndex;
-pub use main_edge::{EndpointSide, MainEdgeDataset};
+pub use main_edge::{EdgeRecord, EndpointSide, MainEdgeDataset};
 pub use main_vertex::MainVertexDataset;
 pub use manager::StorageManager;
 pub use resilient_store::ResilientObjectStore;

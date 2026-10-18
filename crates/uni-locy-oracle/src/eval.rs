@@ -1006,6 +1006,7 @@ mod tests {
             best: None,
             prob: false,
             binding: crate::generator::BindingShape::none(),
+            recursion: crate::generator::RecursionShape::none(),
         };
         configure(&mut shape);
         evaluate_bags(&crate::generator::build_random_program(&shape).oracle_rules)

@@ -31,11 +31,6 @@ use std::path::{Path, PathBuf};
 /// accessor, and is excluded by the walk below rather than budgeted here.
 fn budget() -> BTreeMap<&'static str, usize> {
     BTreeMap::from([
-        // `"_vid"` here is a *result-column alias* this code emits itself —
-        // `RETURN id(n) AS _vid, n` — read back off a Locy `FactRow`. The value
-        // is a scalar from `id(n)`, and the row is not an entity map at all.
-        // Routing would tie an internal alias to the entity-encoding contract.
-        ("crates/uni/src/api/impl_locy.rs", 3),
         // `_eid`-presence guards on the SET / REMOVE / DELETE arms, plus the
         // node-vs-edge map discriminator. These decide *whether to mutate*, and
         // the accessor is deliberately wider: it also answers "edge" for a map

@@ -202,6 +202,9 @@ impl PhysicalExpr for ListComprehensionExecExpr {
                     list_array.data_type()
                 ))
             })?;
+        // Offsets of a sliced list index into its parent's buffer; the inner
+        // batch pairs values with offset-derived indices, so compact first.
+        let large_list = &crate::query::df_graph::common::compact_large_list(large_list);
 
         let values = large_list.values();
         let offsets = large_list.offsets();

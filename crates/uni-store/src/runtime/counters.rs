@@ -65,6 +65,7 @@ pub struct QueryCounters {
     physical_plans: AtomicU64,
     planning_nanos: AtomicU64,
     shortest_path_searches: AtomicU64,
+    shortest_path_adjacency_reads: AtomicU64,
 }
 
 /// Which kind of index a search consulted.
@@ -303,6 +304,24 @@ impl QueryCounters {
         self.shortest_path_searches.load(Ordering::Relaxed)
     }
 
+    /// Records `n` per-vertex adjacency lookups made by a shortest-path
+    /// operator.
+    ///
+    /// One per vertex expanded, per edge type and per direction. Output
+    /// building reads none: the search records the edge of every hop, so a
+    /// count that grows with the number or length of *emitted* paths rather
+    /// than with the vertices searched is output re-reading the adjacency.
+    /// Only the shortest-path operator reports this; other traversals do not.
+    pub fn add_shortest_path_adjacency_reads(&self, n: u64) {
+        self.shortest_path_adjacency_reads
+            .fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Adjacency lookups made by shortest-path operators.
+    pub fn shortest_path_adjacency_reads(&self) -> u64 {
+        self.shortest_path_adjacency_reads.load(Ordering::Relaxed)
+    }
+
     /// Folds another counter set into this one.
     ///
     /// Used where a query fans out into sub-executions that each carry their own
@@ -337,6 +356,7 @@ impl QueryCounters {
             .fetch_add(other.planning_nanos(), Ordering::Relaxed);
         self.shortest_path_searches
             .fetch_add(other.shortest_path_searches(), Ordering::Relaxed);
+        self.add_shortest_path_adjacency_reads(other.shortest_path_adjacency_reads());
     }
 
     /// Resets every counter to zero, for reuse across executions.
@@ -357,6 +377,8 @@ impl QueryCounters {
         self.physical_plans.store(0, Ordering::Relaxed);
         self.planning_nanos.store(0, Ordering::Relaxed);
         self.shortest_path_searches.store(0, Ordering::Relaxed);
+        self.shortest_path_adjacency_reads
+            .store(0, Ordering::Relaxed);
     }
 
     /// A by-value copy of every counter, for handing across a crate boundary.
@@ -385,6 +407,7 @@ impl QueryCounters {
             physical_plans: self.physical_plans(),
             planning_nanos: self.planning_nanos(),
             shortest_path_searches: self.shortest_path_searches(),
+            shortest_path_adjacency_reads: self.shortest_path_adjacency_reads(),
         }
     }
 }
@@ -425,6 +448,8 @@ pub struct CounterSnapshot {
     pub planning_nanos: u64,
     /// Searches started by shortest-path operators.
     pub shortest_path_searches: u64,
+    /// Adjacency lookups made by shortest-path operators.
+    pub shortest_path_adjacency_reads: u64,
 }
 
 #[cfg(test)]
@@ -518,6 +543,7 @@ mod tests {
         b.add_subquery_execution();
         b.add_physical_plan(std::time::Duration::from_nanos(7));
         b.add_shortest_path_search();
+        b.add_shortest_path_adjacency_reads(5);
         a.merge_from(&b);
 
         let m = a.snapshot();
@@ -540,6 +566,7 @@ mod tests {
                 physical_plans: 1,
                 planning_nanos: 7,
                 shortest_path_searches: 1,
+                shortest_path_adjacency_reads: 5,
             },
             "a counter is missing from merge_from"
         );

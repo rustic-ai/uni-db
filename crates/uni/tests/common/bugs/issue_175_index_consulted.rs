@@ -582,8 +582,8 @@ async fn a_scalar_index_survives_a_later_write() {
 /// `index_scans=0` against indexes present on disk (#247).
 ///
 /// Semantic compaction is reached only from the background scheduler:
-/// `compact_label` runs Lance's `compact_files` alone, and
-/// `trigger_async_compaction` has no callers. So this drives the scheduler with
+/// `compact_label` runs Lance's `compact_files` alone (the uncalled
+/// `trigger_async_compaction` was removed). So this drives the scheduler with
 /// a short interval and a flush to give `pick_compaction_task` something to
 /// pick, which is what the earlier compaction test missed — it called
 /// `compact()` and never reached `replace`.

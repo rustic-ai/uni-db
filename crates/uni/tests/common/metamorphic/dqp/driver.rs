@@ -171,7 +171,7 @@ pub enum CaseKind {
     /// `count(*)` and `sum` over integer properties only.
     IntAggregate,
     /// Plain projections whose base `WHERE` is always a same-column conjunction
-    /// over the Hash-indexed property — the shape that reaches Lance's
+    /// over the indexed property — the shape that reaches Lance's
     /// filter-pushdown path.
     ///
     /// Admissibility is identical to [`Self::Plain`]: the predicate is an
@@ -179,7 +179,9 @@ pub enum CaseKind {
     /// execution paths. It is a separate kind only so a run can *target* the
     /// pushdown path instead of reaching it in a minority of draws.
     ///
-    /// Pair it with `Fixture::TINY_INDEXED`. Against an unindexed fixture the
+    /// Pair it with an indexed fixture: `Fixture::TINY_INDEXED` (Hash; only the
+    /// `=`/`IN` conjunct is pushed) or `Fixture::TINY_BTREE_INDEXED` (BTree; the
+    /// two-sided range is pushed too). Against an unindexed fixture the
     /// predicate is merely a slow filter, the run cannot exhibit the defect,
     /// and it would pass while proving nothing.
     Pushdown,

@@ -165,6 +165,14 @@ pub struct QueryMetrics {
     /// source share one search, however many targets it answers. A count that
     /// grows with the number of targets is a search per row (A8).
     pub shortest_path_searches: u64,
+    /// Per-vertex adjacency lookups made by `shortestPath` /
+    /// `allShortestPaths`: one per vertex expanded, per edge type and per
+    /// direction.
+    ///
+    /// Bounded by the vertices the searches expand, not by the paths emitted:
+    /// the search records each hop's edge, so building the output reads no
+    /// adjacency. Reported by the shortest-path operator only.
+    pub shortest_path_adjacency_reads: u64,
 }
 
 /// Single result row from a query.
@@ -476,6 +484,7 @@ impl QueryMetrics {
         self.physical_plans = c.physical_plans;
         self.physical_plan_time = Duration::from_nanos(c.planning_nanos);
         self.shortest_path_searches = c.shortest_path_searches;
+        self.shortest_path_adjacency_reads = c.shortest_path_adjacency_reads;
     }
 }
 

@@ -31,6 +31,10 @@ use uni_locy_oracle::ir::{Generated, Tuple, WireKind};
 
 // Submodules live in `tests/differential/` but join this one test binary
 // (the crate cap is 3 integration-test binaries; see `docs/test_layout.md`).
+#[path = "differential/assume.rs"]
+mod assume;
+#[path = "differential/goal.rs"]
+mod goal;
 #[path = "differential/random.rs"]
 mod random;
 #[path = "differential/relations.rs"]

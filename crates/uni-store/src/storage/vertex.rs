@@ -174,7 +174,7 @@ impl VertexDataset {
             &self.label,
             schema,
             |i| &vertices[i].2,
-            &["ext_id"],
+            crate::storage::property_builder::stored_in_ext_id_column,
         )
     }
 

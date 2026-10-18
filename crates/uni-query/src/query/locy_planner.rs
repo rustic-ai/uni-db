@@ -555,6 +555,18 @@ fn infer_yield_type_rec(
                     }
                 }
                 let _ = is_key;
+                if let Some(dt) = arithmetic_yield_type(
+                    &item.expr,
+                    first_clause,
+                    node_vars,
+                    along_types,
+                    rule_catalog,
+                    schema,
+                    var_labels,
+                    visited,
+                ) {
+                    return dt;
+                }
                 return infer_expr_type(&item.expr, node_vars);
             }
         }
@@ -569,6 +581,145 @@ fn infer_yield_type_rec(
         return dt;
     }
     DataType::LargeUtf8
+}
+
+/// The type of an arithmetic YIELD expression, typed as ALONG types its
+/// accumulations (`along_column_types`): integral when every operand is, a
+/// float when one is, and a Cypher value (`LargeBinary`) when an operand's type
+/// is only known at run time — a property no schema declares, or a value
+/// column that is itself a Cypher value. `None` for anything else, which
+/// falls back to [`infer_expr_type`].
+///
+/// `infer_expr_type` typed every property `Float64` and every referenced
+/// value variable as a string, so `e.w + e.w` and `p + e.w` over integers
+/// came back `2.0` / `3.0` while `e.w AS d` stayed `2` — one column holding
+/// both, depending on which clause derived the row.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors `infer_yield_type_rec`'s context"
+)]
+fn arithmetic_yield_type(
+    expr: &Expr,
+    clause: &CompiledClause,
+    node_vars: &HashSet<String>,
+    along_types: &HashMap<String, DataType>,
+    rule_catalog: &HashMap<String, CompiledRule>,
+    schema: &Schema,
+    var_labels: &HashMap<String, String>,
+    visited: &mut HashSet<String>,
+) -> Option<DataType> {
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum Kind {
+        Int,
+        Float,
+        Dynamic,
+    }
+    #[expect(clippy::too_many_arguments, reason = "recursive helper, same context")]
+    fn kind(
+        expr: &Expr,
+        clause: &CompiledClause,
+        node_vars: &HashSet<String>,
+        along_types: &HashMap<String, DataType>,
+        rule_catalog: &HashMap<String, CompiledRule>,
+        schema: &Schema,
+        var_labels: &HashMap<String, String>,
+        visited: &mut HashSet<String>,
+    ) -> Option<Kind> {
+        let of_type = |dt: DataType| match dt {
+            DataType::Int64 | DataType::Int32 | DataType::UInt64 => Some(Kind::Int),
+            DataType::Float64 | DataType::Float32 => Some(Kind::Float),
+            DataType::LargeBinary => Some(Kind::Dynamic),
+            _ => None,
+        };
+        match expr {
+            Expr::Literal(CypherLiteral::Integer(_)) => Some(Kind::Int),
+            Expr::Literal(CypherLiteral::Float(_)) => Some(Kind::Float),
+            Expr::Property(object, prop) => {
+                let Expr::Variable(var) = object.as_ref() else {
+                    return None;
+                };
+                let declared = property_arrow_type(schema, var_labels, var, prop)
+                    .or_else(|| uniform_declared_type(schema, prop));
+                match declared {
+                    Some(dt) => of_type(dt),
+                    None if !property_declared_anywhere(schema, prop) => Some(Kind::Dynamic),
+                    None => None,
+                }
+            }
+            Expr::Variable(v) if node_vars.contains(v) => None,
+            Expr::Variable(v) => match along_types.get(v.as_str()) {
+                Some(dt) => of_type(dt.clone()),
+                None => infer_is_ref_value_col_type(v, clause, rule_catalog, schema, visited)
+                    .and_then(of_type),
+            },
+            Expr::UnaryOp {
+                op: uni_cypher::ast::UnaryOp::Neg,
+                expr: inner,
+            } => kind(
+                inner,
+                clause,
+                node_vars,
+                along_types,
+                rule_catalog,
+                schema,
+                var_labels,
+                visited,
+            ),
+            Expr::BinaryOp { left, op, right } => {
+                use uni_cypher::ast::BinaryOp::{Add, Div, Mod, Mul, Pow, Sub};
+                if !matches!(op, Add | Sub | Mul | Div | Mod | Pow) {
+                    return None;
+                }
+                let l = kind(
+                    left,
+                    clause,
+                    node_vars,
+                    along_types,
+                    rule_catalog,
+                    schema,
+                    var_labels,
+                    visited,
+                )?;
+                let r = kind(
+                    right,
+                    clause,
+                    node_vars,
+                    along_types,
+                    rule_catalog,
+                    schema,
+                    var_labels,
+                    visited,
+                )?;
+                let k = l.max(r);
+                Some(if matches!(op, Pow) && k != Kind::Dynamic {
+                    Kind::Float
+                } else {
+                    k
+                })
+            }
+            _ => None,
+        }
+    }
+    // Only an expression: a bare property or variable is typed by the
+    // caller's own rules.
+    if !matches!(expr, Expr::BinaryOp { .. } | Expr::UnaryOp { .. }) {
+        return None;
+    }
+    let k = kind(
+        expr,
+        clause,
+        node_vars,
+        along_types,
+        rule_catalog,
+        schema,
+        var_labels,
+        visited,
+    )?;
+    Some(match k {
+        Kind::Int => DataType::Int64,
+        Kind::Float => DataType::Float64,
+        Kind::Dynamic => DataType::LargeBinary,
+    })
 }
 
 /// The type of the referenced column `var` reads through one of `clause`'s
@@ -737,6 +888,9 @@ struct DerivedScanHandle {
     is_self_ref: bool,
     /// Which view of the target rule's relation this scan reads (issue #162).
     view: DerivedScanView,
+    /// One reference of a non-linear clause, never shared (see
+    /// `DerivedScanEntry::exclusive`).
+    exclusive: bool,
     data: Arc<RwLock<Vec<RecordBatch>>>,
     schema: SchemaRef,
 }
@@ -1974,6 +2128,18 @@ impl<'a> LocyPlanBuilder<'a> {
         // The derived scan a positive reference joins, under its prefix — or,
         // for a lower-stratum anchor's seed, under `seed_prefix`, so the seed's
         // columns never collide with the reference's own join.
+        // P5 (R3): a clause joining two or more references into its own
+        // stratum gets one handle per reference, so the fixpoint can feed each
+        // position its own view (delta at one, old or full facts at the
+        // others) rather than the whole relation everywhere.
+        let exclusive_scans = binding
+            .refs
+            .iter()
+            .filter(|r| !r.negated && stratum_rule_names.contains(r.rule.as_str()))
+            .count()
+            >= 2;
+        let mut exclusive_handles: HashMap<usize, DerivedScanHandle> = HashMap::new();
+        let mut stratum_scans: Vec<usize> = Vec::new();
         let mut derived_scan = |r: usize, seed_prefix: Option<&str>| -> Result<LogicalPlan> {
             let ref_binding = &binding.refs[r];
             let target_rule_name = ref_binding.rule.as_str();
@@ -2010,14 +2176,36 @@ impl<'a> LocyPlanBuilder<'a> {
             } else {
                 DerivedScanView::Contributions
             };
-            let handle = self.get_or_create_derived_scan_handle_with_deriv(
+            let mut handle = self.get_or_create_derived_scan_handle_with_deriv(
                 target_rule_name,
                 target_rule,
                 is_self_ref,
                 rule_catalog,
                 &target_deriv,
                 view,
+                false,
             );
+            if is_self_ref && exclusive_scans {
+                // The shared handle above stays the one negation and
+                // provenance resolve the reference to.
+                handle = exclusive_handles
+                    .entry(r)
+                    .or_insert_with(|| {
+                        self.get_or_create_derived_scan_handle_with_deriv(
+                            target_rule_name,
+                            target_rule,
+                            is_self_ref,
+                            rule_catalog,
+                            &target_deriv,
+                            view,
+                            true,
+                        )
+                    })
+                    .clone();
+            }
+            if is_self_ref && !stratum_scans.contains(&handle.scan_index) {
+                stratum_scans.push(handle.scan_index);
+            }
             let scan_schema =
                 alias_derived_schema(&handle.schema, seed_prefix.unwrap_or(&ref_binding.prefix));
             if seed_prefix.is_none()
@@ -2289,6 +2477,7 @@ impl<'a> LocyPlanBuilder<'a> {
                         rule_catalog,
                         &target_deriv,
                         DerivedScanView::Contributions,
+                        false,
                     );
                 }
             }
@@ -2679,7 +2868,20 @@ impl<'a> LocyPlanBuilder<'a> {
         let yield_names: HashSet<&str> = yield_cols.iter().map(|yc| yc.name.as_str()).collect();
         let mut best_by_criteria: Option<Vec<(Expr, bool)>> = None;
         let mut best_by_hidden = false;
-        if let Some(best_by) = clause.best_by.as_ref().filter(|_| clause.fold.is_empty()) {
+        // Not for a clause with an `IS NOT` either: the fixpoint anti-joins
+        // (or multiplies in the complement) *after* the body, so ranking here
+        // kept the best row per KEY before negation removed it, and the
+        // runner-up that survives negation was already gone — a silent wrong
+        // answer, under full and semi-naive feeding alike (found by the P5
+        // oracle families). The rule-level BEST BY (`merge_best_by` in a
+        // recursive stratum, the post-fixpoint chain otherwise) ranks after
+        // negation; the body ranking is only an early prune.
+        let negates = binding.refs.iter().any(|r| r.negated);
+        if let Some(best_by) = clause
+            .best_by
+            .as_ref()
+            .filter(|_| clause.fold.is_empty() && !negates)
+        {
             let mut criteria = Vec::with_capacity(best_by.items.len());
             for (i, item) in best_by.items.iter().enumerate() {
                 let reads_yield_only = collect_expr_variables(&item.expr)
@@ -2844,6 +3046,7 @@ impl<'a> LocyPlanBuilder<'a> {
             along_bindings,
             priority: clause.priority,
             model_invocations: clause.model_invocations.clone(),
+            stratum_scans,
         })
     }
 
@@ -2871,6 +3074,7 @@ impl<'a> LocyPlanBuilder<'a> {
             rule_catalog,
             &[],
             DerivedScanView::Contributions,
+            false,
         )
     }
 
@@ -2883,6 +3087,14 @@ impl<'a> LocyPlanBuilder<'a> {
     /// already-stripped facts and must stay narrow. `DerivedScanExec` re-stamps
     /// its declared schema onto every batch, so a mismatch here is a hard Arrow
     /// error, not a silent fallback.
+    ///
+    /// An `exclusive` handle is always minted fresh and never reused: it is
+    /// one reference of a non-linear clause, which the fixpoint feeds apart
+    /// from every other scan of the same rule (P5, R3).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the handle key plus the schema inputs"
+    )]
     fn get_or_create_derived_scan_handle_with_deriv(
         &self,
         rule_name: &str,
@@ -2891,15 +3103,20 @@ impl<'a> LocyPlanBuilder<'a> {
         rule_catalog: &HashMap<String, CompiledRule>,
         deriv_columns: &[(String, DataType)],
         view: DerivedScanView,
+        exclusive: bool,
     ) -> DerivedScanHandle {
         let mut handles = self.derived_scan_handles.borrow_mut();
 
         // Reuse existing handle with same (rule_name, is_self_ref, view). The
         // view is part of the key because both views of one rule can be live
         // at once — see `DerivedScanView`.
-        if let Some(handle) = handles
-            .iter()
-            .find(|h| h.rule_name == rule_name && h.is_self_ref == is_self_ref && h.view == view)
+        if !exclusive
+            && let Some(handle) = handles.iter().find(|h| {
+                !h.exclusive
+                    && h.rule_name == rule_name
+                    && h.is_self_ref == is_self_ref
+                    && h.view == view
+            })
         {
             return handle.clone();
         }
@@ -2922,6 +3139,7 @@ impl<'a> LocyPlanBuilder<'a> {
             scan_index,
             is_self_ref,
             view,
+            exclusive,
             data,
             schema,
         };
@@ -2939,6 +3157,7 @@ impl<'a> LocyPlanBuilder<'a> {
                 rule_name: handle.rule_name.clone(),
                 is_self_ref: handle.is_self_ref,
                 view: handle.view,
+                exclusive: handle.exclusive,
                 data: handle.data.clone(),
                 schema: handle.schema.clone(),
             });

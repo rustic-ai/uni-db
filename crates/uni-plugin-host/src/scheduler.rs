@@ -349,6 +349,7 @@ impl SchedulerHost {
             driver_breaker,
             driver_job_host,
             shutdown_rx,
+            shutdown.clone(),
             tick_interval,
         ));
         shutdown.track_task(handle);
@@ -411,7 +412,9 @@ pub fn spawn_with_memory_persistence(
 /// The driving loop. Calls
 /// [`Scheduler::tick_at`](uni_plugin::scheduler::Scheduler::tick_at) on
 /// every interval and dispatches each due job to its provider on a
-/// blocking worker thread.
+/// blocking worker thread. Each run is a task tracked by `tracker`, so
+/// shutdown waits for in-flight runs.
+#[allow(clippy::too_many_arguments)]
 async fn driver_loop(
     scheduler: Arc<Scheduler>,
     persistence: Arc<dyn SchedulerPersistence>,
@@ -419,6 +422,7 @@ async fn driver_loop(
     circuit_breaker: Arc<CircuitBreaker>,
     job_host: Option<Arc<SchedulerJobHost>>,
     mut shutdown_rx: broadcast::Receiver<()>,
+    tracker: ShutdownHandle,
     tick_interval: Duration,
 ) {
     let mut ticker = tokio::time::interval(tick_interval);
@@ -434,6 +438,7 @@ async fn driver_loop(
                     &registry,
                     &circuit_breaker,
                     job_host.as_ref(),
+                    &tracker,
                 );
             }
             _ = shutdown_rx.recv() => {
@@ -445,15 +450,21 @@ async fn driver_loop(
 }
 
 /// Perform one tick: collect due jobs, look up their providers, and
-/// spawn each on `spawn_blocking`. Persisted lifecycle transitions
-/// happen on the same spawned task so the persistence backend sees a
-/// consistent `record_started` → `record_finished` pair per run.
+/// start one tracked run task per job.
+///
+/// Everything that can block runs on the blocking pool, never on the
+/// executor: the provider's `execute` and the persistence backend's
+/// lifecycle writes (the durable backend fsyncs a sidecar and issues a
+/// Cypher write through `block_in_place` for each one). Each run task
+/// performs `record_started` → `execute` → `record_finished` in order,
+/// so the backend sees a consistent pair per run.
 fn dispatch_one_tick(
     scheduler: &Arc<Scheduler>,
     persistence: &Arc<dyn SchedulerPersistence>,
     registry: &Arc<PluginRegistry>,
     circuit_breaker: &Arc<CircuitBreaker>,
     job_host: Option<&Arc<SchedulerJobHost>>,
+    tracker: &ShutdownHandle,
 ) {
     let due = scheduler.tick();
     if due.is_empty() {
@@ -494,7 +505,12 @@ fn dispatch_one_tick(
             let now = std::time::SystemTime::now();
             scheduler.mark_finished(&id, false);
             circuit_breaker.record_failure(&plugin_id, &id);
-            let _ = persistence.record_finished(&id, now, false);
+            let persistence = Arc::clone(persistence);
+            tracker.track_task(tokio::task::spawn_blocking(move || {
+                if let Err(e) = persistence.record_finished(&id, now, false) {
+                    tracing::warn!(job = %id, error = %e, "scheduler: record_finished failed");
+                }
+            }));
             continue;
         };
         let scheduler_clone = Arc::clone(scheduler);
@@ -502,14 +518,6 @@ fn dispatch_one_tick(
         let breaker_clone = Arc::clone(circuit_breaker);
         let plugin_id_clone = plugin_id.clone();
         let job_host_clone = job_host.cloned();
-        let started_at = std::time::SystemTime::now();
-        if let Err(e) = persistence_clone.record_started(&id, started_at) {
-            tracing::warn!(
-                job = %id,
-                error = %e,
-                "scheduler: record_started failed; continuing"
-            );
-        }
         // §1.2 / Phase 6: use the cancel token attached to the
         // scheduler's job record (rather than a fresh one) so that
         // `Scheduler::cancel(id)` and any other holder of the token can
@@ -517,67 +525,124 @@ fn dispatch_one_tick(
         // token if the record vanished between `tick()` and here
         // (extremely unlikely; defensive).
         let cancel = scheduler.cancel_token_for(&id).unwrap_or_default();
-        let cancel_for_select = cancel.clone();
-        let id_for_log = id.clone();
-        let blocking = tokio::task::spawn_blocking(move || {
-            let mut ctx = JobContext::new(cancel, None);
-            // SAFETY-irrelevant: the host Arc is held by
-            // `job_host_clone` for the entire scope of this closure;
-            // the borrow stays valid for the synchronous
-            // `provider.execute(ctx)` call. Rust's borrow checker
-            // verifies this — `provider.execute` consumes `ctx`
-            // before the closure ends.
-            if let Some(host) = job_host_clone.as_deref() {
-                ctx = ctx.with_host(host as &dyn JobHost);
-            }
-            provider.execute(ctx)
-        });
-        // §1.2 / Phase 6: wrap the blocking dispatch in `tokio::select!`
-        // racing the per-job `cancelled().await`. If cancellation
-        // arrives mid-run, the scheduler observes it immediately and
-        // marks the job finished without waiting for the body to poll
-        // `is_cancelled()`. The body keeps running on the blocking
-        // worker (we can't preempt synchronous Rust), but its result is
-        // dropped — the lifecycle records use the "cancelled" outcome
-        // path so the breaker / persistence stay consistent.
-        tokio::spawn(async move {
-            let success = tokio::select! {
-                joined = blocking => {
-                    match joined {
-                        Ok(outcome) => outcome.is_ok(),
-                        Err(join_err) => {
-                            tracing::warn!(
-                                job = %id_for_log,
-                                error = %join_err,
-                                "scheduler: blocking dispatch join failed"
-                            );
-                            false
-                        }
-                    }
-                }
-                () = cancel_for_select.cancelled() => {
-                    tracing::info!(
-                        job = %id_for_log,
-                        "scheduler: cancellation observed before job completion"
+        tracker.track_task(tokio::spawn(run_job(
+            id,
+            provider,
+            cancel,
+            job_host_clone,
+            scheduler_clone,
+            persistence_clone,
+            breaker_clone,
+            plugin_id_clone,
+        )));
+    }
+}
+
+/// One scheduled run: `record_started`, `execute`, `record_finished`.
+///
+/// The three blocking steps each run on the blocking pool. The run is
+/// raced against the job's cancel token: on cancellation the lifecycle is
+/// recorded at once (the scheduler does not wait for the body to poll
+/// `is_cancelled()`), and the task then waits for the body to return, so
+/// a still-running body stays counted and joinable by shutdown instead of
+/// detaching.
+#[allow(clippy::too_many_arguments)]
+async fn run_job(
+    id: QName,
+    provider: Arc<dyn BackgroundJobProvider>,
+    cancel: uni_plugin::traits::background::CancellationToken,
+    job_host: Option<Arc<SchedulerJobHost>>,
+    scheduler: Arc<Scheduler>,
+    persistence: Arc<dyn SchedulerPersistence>,
+    breaker: Arc<CircuitBreaker>,
+    plugin_id: PluginId,
+) {
+    let started_at = std::time::SystemTime::now();
+    let started = {
+        let persistence = Arc::clone(&persistence);
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || persistence.record_started(&id, started_at)).await
+    };
+    match started {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(
+            job = %id,
+            error = %e,
+            "scheduler: record_started failed; continuing"
+        ),
+        Err(e) => tracing::warn!(
+            job = %id,
+            error = %e,
+            "scheduler: record_started did not complete; continuing"
+        ),
+    }
+
+    let cancel_for_select = cancel.clone();
+    let mut blocking = tokio::task::spawn_blocking(move || {
+        let mut ctx = JobContext::new(cancel, None);
+        // The host Arc is held by `job_host` for the entire scope of
+        // this closure, so the borrow stays valid for the synchronous
+        // `provider.execute(ctx)` call, which consumes `ctx` before the
+        // closure ends.
+        if let Some(host) = job_host.as_deref() {
+            ctx = ctx.with_host(host as &dyn JobHost);
+        }
+        provider.execute(ctx)
+    });
+    // §1.2 / Phase 6: if cancellation arrives mid-run, the scheduler
+    // observes it immediately and marks the job finished without waiting
+    // for the body to poll `is_cancelled()`. The body keeps running on the
+    // blocking worker (synchronous Rust cannot be preempted), but its
+    // result is dropped — the lifecycle records use the "cancelled"
+    // outcome so the breaker / persistence stay consistent.
+    let (success, body_running) = tokio::select! {
+        joined = &mut blocking => {
+            let success = match joined {
+                Ok(outcome) => outcome.is_ok(),
+                Err(join_err) => {
+                    tracing::warn!(
+                        job = %id,
+                        error = %join_err,
+                        "scheduler: blocking dispatch join failed"
                     );
                     false
                 }
             };
-            let finished_at = std::time::SystemTime::now();
-            scheduler_clone.mark_finished(&id, success);
-            if success {
-                breaker_clone.record_success(&plugin_id_clone, &id);
-            } else {
-                breaker_clone.record_failure(&plugin_id_clone, &id);
-            }
-            if let Err(e) = persistence_clone.record_finished(&id, finished_at, success) {
-                tracing::warn!(
-                    job = %id,
-                    error = %e,
-                    "scheduler: record_finished failed"
-                );
-            }
-        });
+            (success, false)
+        }
+        () = cancel_for_select.cancelled() => {
+            tracing::info!(
+                job = %id,
+                "scheduler: cancellation observed before job completion"
+            );
+            (false, true)
+        }
+    };
+    let finished_at = std::time::SystemTime::now();
+    scheduler.mark_finished(&id, success);
+    if success {
+        breaker.record_success(&plugin_id, &id);
+    } else {
+        breaker.record_failure(&plugin_id, &id);
+    }
+    let finished = {
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || persistence.record_finished(&id, finished_at, success))
+            .await
+    };
+    match finished {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(job = %id, error = %e, "scheduler: record_finished failed"),
+        Err(e) => tracing::warn!(
+            job = %id,
+            error = %e,
+            "scheduler: record_finished did not complete"
+        ),
+    }
+    if body_running {
+        // The outcome is already recorded; this only keeps the task alive
+        // (and counted) until the cancelled body actually returns.
+        let _ = blocking.await;
     }
 }
 
@@ -602,6 +667,7 @@ fn find_provider(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
     use uni_plugin::Capability;
     use uni_plugin::CapabilitySet;
     use uni_plugin::PluginRegistrar;
@@ -787,5 +853,170 @@ mod tests {
         );
 
         let _ = shutdown.shutdown_async().await;
+    }
+
+    /// A job whose `execute` blocks its thread for `delay`.
+    #[derive(Debug)]
+    struct SlowJob {
+        definition: JobDefinition,
+        delay: Duration,
+        started: Arc<AtomicU64>,
+        finished: Arc<AtomicU64>,
+    }
+
+    impl BackgroundJobProvider for SlowJob {
+        fn definition(&self) -> &JobDefinition {
+            &self.definition
+        }
+
+        fn execute(&self, _ctx: JobContext<'_>) -> Result<JobOutcome, FnError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(self.delay);
+            self.finished.fetch_add(1, Ordering::SeqCst);
+            Ok(JobOutcome::Done)
+        }
+    }
+
+    /// Persistence whose `record_started` blocks for `delay`, as the durable
+    /// backend's fsynced sidecar write plus Cypher mirror can.
+    #[derive(Debug)]
+    struct SlowPersistence {
+        delay: Duration,
+        started: Arc<AtomicU64>,
+    }
+
+    impl SchedulerPersistence for SlowPersistence {
+        fn record_started(
+            &self,
+            _id: &QName,
+            _started_at: std::time::SystemTime,
+        ) -> Result<(), uni_plugin::scheduler::SchedulerPersistenceError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(self.delay);
+            Ok(())
+        }
+        fn record_finished(
+            &self,
+            _id: &QName,
+            _finished_at: std::time::SystemTime,
+            _success: bool,
+        ) -> Result<(), uni_plugin::scheduler::SchedulerPersistenceError> {
+            Ok(())
+        }
+        fn cancel(
+            &self,
+            _id: &QName,
+        ) -> Result<(), uni_plugin::scheduler::SchedulerPersistenceError> {
+            Ok(())
+        }
+        fn load_all(
+            &self,
+        ) -> Result<
+            Vec<uni_plugin::scheduler::SchedulerJobRecord>,
+            uni_plugin::scheduler::SchedulerPersistenceError,
+        > {
+            Ok(Vec::new())
+        }
+    }
+
+    fn slow_job(name: &str, delay: Duration) -> (Arc<SlowJob>, Arc<AtomicU64>, Arc<AtomicU64>) {
+        let started = Arc::new(AtomicU64::new(0));
+        let finished = Arc::new(AtomicU64::new(0));
+        let job = Arc::new(SlowJob {
+            definition: JobDefinition {
+                id: QName::new("test", name),
+                schedule: Schedule::Periodic(Duration::from_secs(3600)),
+                concurrency: ConcurrencyLimit::Exclusive,
+                timeout: Duration::from_secs(30),
+                retry: RetryPolicy::Never,
+                docs: name.to_owned(),
+            },
+            delay,
+            started: Arc::clone(&started),
+            finished: Arc::clone(&finished),
+        });
+        (job, started, finished)
+    }
+
+    /// A slow lifecycle write must not stall other tasks on the runtime.
+    ///
+    /// `record_started` ran inline on the driver task, so on a
+    /// `current_thread` runtime the durable backend's per-run sidecar fsync
+    /// and Cypher mirror stalled every other task. An unrelated timer loop
+    /// that spans the job's first due tick must finish promptly.
+    #[tokio::test]
+    async fn slow_lifecycle_write_does_not_stall_the_runtime() {
+        const SLOW: Duration = Duration::from_secs(2);
+        let (job, _, _) = slow_job("persisted", Duration::ZERO);
+        let registry = make_registry_with_job(job);
+        let started = Arc::new(AtomicU64::new(0));
+        let shutdown = ShutdownHandle::new(Duration::from_secs(10));
+        let host = SchedulerHost::spawn(
+            registry,
+            Arc::new(SlowPersistence {
+                delay: SLOW,
+                started: Arc::clone(&started),
+            }),
+            &shutdown,
+            Duration::from_millis(10),
+        );
+        host.scheduler().add_scheduled_job(
+            QName::new("test", "persisted"),
+            Schedule::Once(std::time::SystemTime::now() + Duration::from_millis(50)),
+        );
+
+        let t0 = Instant::now();
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let elapsed = t0.elapsed();
+
+        assert!(
+            started.load(Ordering::SeqCst) >= 1,
+            "control: a run must have started (and its record_started begun) in the window"
+        );
+        assert!(
+            elapsed < SLOW / 2,
+            "a timer loop took {elapsed:?} with a {SLOW:?} lifecycle write in flight: \
+             the write is blocking the runtime"
+        );
+        shutdown.shutdown_async().await.unwrap();
+    }
+
+    /// A run is a tracked task: counted while the job executes, and shutdown
+    /// waits for it rather than returning with the job still running.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scheduled_run_is_tracked_and_joined_by_shutdown() {
+        let (job, started, finished) = slow_job("slow", Duration::from_secs(1));
+        let registry = make_registry_with_job(job);
+        let shutdown = ShutdownHandle::new(Duration::from_secs(30));
+        let host = SchedulerHost::spawn(
+            registry,
+            Arc::new(MemoryPersistence),
+            &shutdown,
+            Duration::from_millis(10),
+        );
+        host.scheduler().add_scheduled_job(
+            QName::new("test", "slow"),
+            Schedule::Once(std::time::SystemTime::now() + Duration::from_millis(20)),
+        );
+        let t0 = Instant::now();
+        while started.load(Ordering::SeqCst) == 0 {
+            assert!(t0.elapsed() < Duration::from_secs(10), "the job never ran");
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            shutdown.live_task_count() >= 2,
+            "the in-flight run is not tracked (live: {})",
+            shutdown.live_task_count()
+        );
+
+        shutdown.shutdown_async().await.unwrap();
+        assert_eq!(
+            finished.load(Ordering::SeqCst),
+            1,
+            "shutdown returned while a scheduled run was still executing"
+        );
+        assert_eq!(shutdown.live_task_count(), 0);
     }
 }

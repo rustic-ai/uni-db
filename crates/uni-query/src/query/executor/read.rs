@@ -661,6 +661,7 @@ impl Executor {
         // the sense that `take_graph_ctx` preserves it either way — but it must
         // be here at all, or every operator-level count is dropped.
         planner = planner.with_counters(Some(self.counters.clone()));
+        planner = planner.with_vector_knn_default_k(self.config.vector_knn_default_k);
         // The deadline and token live on the `QueryContext` built above; without
         // this hop they never reach a physical operator and every
         // `graph_ctx.check_timeout()` below is a no-op. See #207.
@@ -1687,6 +1688,25 @@ impl Executor {
                 !self.is_df_eligible_procedure(procedure_name)
             }
 
+            // A procedure called with an input row (`MATCH … CALL p(…) YIELD …`).
+            // The fallback executor reads the rows around it without entity
+            // semantics — `RETURN a` gave the VID, `labels(a)` and an edge's
+            // properties NULL — and ran the call once over an empty input, so
+            // any procedure the DataFusion operator can dispatch runs there.
+            // Only the procedures the fallback alone implements stay here.
+            LogicalPlan::Apply {
+                input, subquery, ..
+            } => {
+                self.is_ddl_or_admin(input)
+                    || match subquery.as_ref() {
+                        LogicalPlan::ProcedureCall { procedure_name, .. } => {
+                            !self.is_df_eligible_procedure(procedure_name)
+                                && !self.is_df_dispatchable_procedure(procedure_name)
+                        }
+                        other => self.is_ddl_or_admin(other),
+                    }
+            }
+
             // Recurse through children using plan_children
             _ => Self::plan_children(plan)
                 .iter()
@@ -1757,6 +1777,21 @@ impl Executor {
             .as_ref()
             .and_then(|reg| reg.resolve_user_algorithm(name))
             .is_some_and(|entry| entry.provider.signature().df_composable)
+    }
+
+    /// Whether the DataFusion procedure operator can dispatch `name`.
+    ///
+    /// `GraphProcedureCallExec` resolves a procedure through the same three
+    /// registries the fallback consults after its built-in admin and DDL
+    /// procedures: plugin procedures, algorithm providers, and the TCK mock
+    /// registry. A name none of them holds is one of those built-ins, or
+    /// unknown.
+    fn is_df_dispatchable_procedure(&self, name: &str) -> bool {
+        self.procedure_registry.as_ref().is_some_and(|reg| {
+            reg.resolve_user_procedure(name).is_some()
+                || reg.resolve_user_algorithm(name).is_some()
+                || reg.get(name).is_some()
+        })
     }
 
     /// Check if a plan contains write/mutation operations anywhere in the tree.
@@ -2498,8 +2533,14 @@ impl Executor {
                             }
                         }
                         UnaryOp::Neg => {
-                            if let Some(i) = val.as_i64() {
-                                Ok(Value::Int(-i))
+                            // `-null` is null, like every other arithmetic
+                            // operator on a null operand.
+                            if val.is_null() {
+                                Ok(Value::Null)
+                            } else if let Some(i) = val.as_i64() {
+                                i.checked_neg().map(Value::Int).ok_or_else(|| {
+                                    anyhow!("ArithmeticError: integer overflow negating {i}")
+                                })
                             } else if let Some(f) = val.as_f64() {
                                 Ok(Value::Float(-f))
                             } else {
@@ -5415,13 +5456,10 @@ impl Executor {
             filtered_rows = filtered;
         }
 
-        // Handle empty input: execute subquery once with empty context
-        // This is critical for standalone CALL statements at the beginning of a query
+        // No input rows, no output rows: the subquery runs once per input row.
+        // A standalone CALL is planned as the procedure itself, not an Apply.
         if filtered_rows.is_empty() {
-            let sub_rows = self
-                .execute_subplan(subquery.clone(), prop_manager, params, ctx)
-                .await?;
-            return Ok(sub_rows);
+            return Ok(Vec::new());
         }
 
         let mut results = Vec::new();

@@ -86,6 +86,20 @@ pub enum EndpointSide {
     Either,
 }
 
+/// An edge's identity minus its properties: stored endpoints and type name.
+///
+/// `src_vid`/`dst_vid` are the stored (start -> end) orientation, whatever
+/// direction a query traversed the edge in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeRecord {
+    /// Stored start vertex.
+    pub src_vid: Vid,
+    /// Stored end vertex.
+    pub dst_vid: Vid,
+    /// Relationship type name.
+    pub edge_type: String,
+}
+
 /// Main edge dataset for the unified `edges` table.
 ///
 /// This table contains all edges regardless of type, providing:
@@ -824,6 +838,94 @@ impl MainEdgeDataset {
         }
     }
 
+    /// The stored endpoints and type of each listed edge, by `_eid`.
+    ///
+    /// The edge-side counterpart of a vertex scan with a VID list pushed down:
+    /// it reads only the listed EIDs, through the `_eid` index in chunks of
+    /// `MAX_EIDS_PER_CHUNK`, or in one pass when `Self::prefers_full_scan`
+    /// says the request covers enough of the table. Resolving EIDs any other
+    /// way means walking the graph — `MATCH ()-[e]->() WHERE id(e) IN [...]`
+    /// visits every relationship and tests each against the whole list.
+    ///
+    /// Properties are not read: `props_json` is not authoritative on its own
+    /// (delta runs and L0 overlay it), so callers take them from
+    /// `PropertyManager::get_batch_edge_props`, which merges every tier.
+    ///
+    /// Version selection is `Self::rank_edges_from_batch`'s, per EID: the
+    /// highest `_version` wins with tombstones in the contest, ties to the
+    /// tombstone, and an EID whose winner is a tombstone is absent from the
+    /// result, as is one with no row. `version` bounds the candidates to a
+    /// pinned snapshot's `_version <= hwm` before the contest, as
+    /// [`Self::find_props_by_eids`] does. Only this table is consulted; the L0
+    /// chain is the caller's (see `StorageManager::lookup_edges_by_eids`).
+    ///
+    /// Every row the scan returns counts toward `storage_rows` and
+    /// `rows_scanned`, tombstones and superseded versions included.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table cannot be read.
+    pub async fn find_edges_by_eids_counted(
+        backend: &dyn StorageBackend,
+        eids: &[Eid],
+        version: Option<u64>,
+        counters: Option<&Arc<QueryCounters>>,
+    ) -> Result<HashMap<Eid, EdgeRecord>> {
+        if eids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let table_name = table_names::main_edge_table_name();
+        if !backend.table_exists(table_name).await? {
+            return Ok(HashMap::new());
+        }
+
+        let columns = vec!["_eid", "src_vid", "dst_vid", "type", "_version", "_deleted"];
+        let mut winners: HashMap<Eid, VersionedEdge> = HashMap::new();
+        if Self::prefers_full_scan(backend, table_name, eids).await? {
+            let wanted: std::collections::HashSet<u64> = eids.iter().map(Eid::as_u64).collect();
+            let request = ScanRequest::all(table_name)
+                .with_filter(super::with_version_bound(
+                    FilterExpr::Literal(true),
+                    version,
+                ))
+                .with_columns(columns.into_iter().map(String::from).collect())
+                .with_counters(counters.cloned());
+            let mut stream = backend.scan_stream(request).await?;
+            while let Some(batch) = futures::TryStreamExt::try_next(&mut stream).await? {
+                count_scanned_rows(counters, &batch);
+                Self::rank_edges_from_batch(&batch, Some(&wanted), &mut winners)?;
+            }
+        } else {
+            for chunk in eids.chunks(MAX_EIDS_PER_CHUNK) {
+                let filter = super::with_version_bound(
+                    FilterExpr::one_of("_eid", chunk.iter().map(|e| Scalar::UInt(e.as_u64()))),
+                    version,
+                );
+                let batches =
+                    Self::execute_query(backend, filter, Some(columns.clone()), counters).await?;
+                for batch in &batches {
+                    count_scanned_rows(counters, batch);
+                    Self::rank_edges_from_batch(batch, None, &mut winners)?;
+                }
+            }
+        }
+
+        Ok(winners
+            .into_iter()
+            .filter(|(_, w)| !w.deleted)
+            .map(|(eid, w)| {
+                (
+                    eid,
+                    EdgeRecord {
+                        src_vid: w.src_vid,
+                        dst_vid: w.dst_vid,
+                        edge_type: w.edge_type,
+                    },
+                )
+            })
+            .collect())
+    }
+
     /// Find edge data (eid, src_vid, dst_vid, edge_type, props) by multiple type names in the main edges table.
     ///
     /// Returns all non-deleted edges with any of the given type names.
@@ -890,7 +992,7 @@ impl MainEdgeDataset {
                     Self::execute_query(backend, base_filter.clone(), None, counters).await?;
                 for batch in &batches {
                     count_scanned_rows(counters, batch);
-                    Self::rank_edges_from_batch(batch, &mut winners)?;
+                    Self::rank_edges_from_batch(batch, None, &mut winners)?;
                 }
             }
             Some((_, [])) => {}
@@ -911,7 +1013,7 @@ impl MainEdgeDataset {
                     let batches = Self::execute_query(backend, filter, None, counters).await?;
                     for batch in &batches {
                         count_scanned_rows(counters, batch);
-                        Self::rank_edges_from_batch(batch, &mut winners)?;
+                        Self::rank_edges_from_batch(batch, None, &mut winners)?;
                     }
                 }
             }
@@ -950,6 +1052,7 @@ impl MainEdgeDataset {
     /// drop is correct here and is not over-filtering.
     fn rank_edges_from_batch(
         batch: &RecordBatch,
+        wanted: Option<&std::collections::HashSet<u64>>,
         winners: &mut HashMap<Eid, VersionedEdge>,
     ) -> Result<()> {
         let Some(eid_arr) = batch
@@ -985,6 +1088,9 @@ impl MainEdgeDataset {
 
         for i in 0..batch.num_rows() {
             if eid_arr.is_null(i) || src_arr.is_null(i) || dst_arr.is_null(i) {
+                continue;
+            }
+            if wanted.is_some_and(|w| !w.contains(&eid_arr.value(i))) {
                 continue;
             }
 
@@ -1344,5 +1450,67 @@ mod tests {
             None,
             "deleted (highest-version) winner must not resurrect edge props"
         );
+    }
+
+    /// The EID lookup reads only the listed edges, keeps the highest-version
+    /// row per EID (tombstones in the contest, ties to the tombstone), and
+    /// honours a pinned snapshot's version bound before the contest.
+    #[tokio::test]
+    async fn test_eid_lookup_ranks_versions_and_bounds_snapshot() {
+        let (_dir, be) = scan_backend().await;
+        let backend: &dyn StorageBackend = &be;
+        for batch in [
+            edge_row(1, 10, 11, "R", false, 1),
+            edge_row(2, 10, 12, "R", false, 1),
+            edge_row(2, 10, 12, "R", true, 3),
+            edge_row(3, 12, 10, "U", false, 1),
+            edge_row(4, 11, 11, "R", false, 2),
+            edge_row(4, 11, 11, "R", true, 2),
+            edge_row(5, 13, 14, "R", false, 5),
+        ] {
+            MainEdgeDataset::write_batch(backend, batch).await.unwrap();
+        }
+        let eids: Vec<Eid> = [1, 2, 3, 4, 5, 99].map(Eid::new).to_vec();
+        let counters = Arc::new(QueryCounters::default());
+
+        let head =
+            MainEdgeDataset::find_edges_by_eids_counted(backend, &eids, None, Some(&counters))
+                .await
+                .unwrap();
+        let record = |src, dst, ty: &str| EdgeRecord {
+            src_vid: Vid::new(src),
+            dst_vid: Vid::new(dst),
+            edge_type: ty.to_string(),
+        };
+        assert_eq!(
+            head,
+            HashMap::from([
+                (Eid::new(1), record(10, 11, "R")),
+                (Eid::new(3), record(12, 10, "U")),
+                (Eid::new(5), record(13, 14, "R")),
+            ]),
+            "tombstoned (2), tied-tombstone (4) and unknown (99) EIDs must be absent"
+        );
+        // Every row read for the listed EIDs, tombstones included, and no other.
+        assert_eq!(counters.snapshot().rows_scanned, 7);
+
+        // Pinned at version 2: edge 2's tombstone (v3) and edge 5 (v5) are in
+        // the future, so 2 is live again and 5 does not exist yet.
+        let pinned = MainEdgeDataset::find_edges_by_eids_counted(backend, &eids, Some(2), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            pinned,
+            HashMap::from([
+                (Eid::new(1), record(10, 11, "R")),
+                (Eid::new(2), record(10, 12, "R")),
+                (Eid::new(3), record(12, 10, "U")),
+            ])
+        );
+
+        let none = MainEdgeDataset::find_edges_by_eids_counted(backend, &[], None, None)
+            .await
+            .unwrap();
+        assert!(none.is_empty());
     }
 }

@@ -9,7 +9,8 @@
 //! `LocyExecutionContext` extends it with write operations (mutations, L0 fork/restore,
 //! and strata re-evaluation) needed by ASSUME, DERIVE, and ABDUCE.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::Arc;
 
 use arrow_array::RecordBatch;
 use async_trait::async_trait;
@@ -18,6 +19,33 @@ use uni_cypher::ast::{Expr, Pattern, Query};
 use uni_locy::{CompiledProgram, FactRow, LocyConfig, LocyError};
 
 use super::locy_delta::RowStore;
+use super::locy_program::{DerivedStore, ReusedStrata};
+
+/// The facts of one evaluated state, offered for reuse by a hypothetical
+/// re-evaluation of the same program (incremental `ASSUME` / `ABDUCE`, A4).
+///
+/// An adapter hands one out through
+/// [`LocyExecutionContext::reuse_baseline`] only while the state it was
+/// derived from is the current state, so the holder may reuse any stratum a
+/// mutation applied *after* obtaining it cannot affect.
+#[derive(Clone)]
+pub struct StrataBaseline {
+    /// Every evaluated rule's facts in that state, by rule name.
+    pub facts: Arc<DerivedStore>,
+    /// The same facts as rows, entities hydrated in that state, when held.
+    pub rows: Option<Arc<RowStore>>,
+}
+
+/// The result of re-evaluating a program's strata.
+pub struct ReEvaluation {
+    /// Every rule's facts as rows, entities hydrated in the evaluated state.
+    pub rows: RowStore,
+    /// The raw facts, for a nested re-evaluation to reuse; `None` when the
+    /// adapter does not keep them.
+    pub facts: Option<Arc<DerivedStore>>,
+    /// Positions of the strata whose facts were copied rather than derived.
+    pub reused: BTreeSet<usize>,
+}
 
 /// Read-only access to derived facts and graph data.
 ///
@@ -81,14 +109,24 @@ pub trait DerivedFactSource: Send + Sync {
 /// Extends `DerivedFactSource` with write operations.
 #[async_trait]
 pub trait LocyExecutionContext: DerivedFactSource {
-    /// Look up facts enriched with full node objects (for VID-based stores).
+    /// The facts DERIVE writes from for `rule_name`, entities hydrated.
     ///
-    /// Default implementation delegates to `lookup_derived()` (no enrichment needed
-    /// for the orchestrator path which already returns full `Value::Node` objects).
-    /// Override in native adapters to replace UInt64 VID values with full nodes so
-    /// that commands like DERIVE can access node properties.
-    async fn lookup_derived_enriched(&self, rule_name: &str) -> Result<Vec<FactRow>, LocyError> {
-        self.lookup_derived(rule_name)
+    /// `derived_store` is the store the issuing command reads — the program's
+    /// at top level, an ASSUME body's re-evaluated one inside ASSUME — so IS
+    /// references resolve against the facts of the state the command runs in.
+    ///
+    /// Default implementation returns that store's rows for the rule, falling
+    /// back to `lookup_derived()`. Native adapters override it to re-run a
+    /// DERIVE rule's body, which the fixpoint does not evaluate.
+    async fn lookup_derived_enriched(
+        &self,
+        rule_name: &str,
+        derived_store: &RowStore,
+    ) -> Result<Vec<FactRow>, LocyError> {
+        match derived_store.get(rule_name) {
+            Some(relation) => Ok(relation.rows.clone()),
+            None => self.lookup_derived(rule_name),
+        }
     }
 
     /// Execute a pre-compiled Cypher read query (e.g. from a `CompiledCommand::Cypher`).
@@ -124,4 +162,43 @@ pub trait LocyExecutionContext: DerivedFactSource {
         program: &CompiledProgram,
         config: &LocyConfig,
     ) -> Result<RowStore, LocyError>;
+
+    /// Re-evaluate the strata, copying the facts of `reused` strata instead of
+    /// deriving them.
+    ///
+    /// The caller vouches for the reuse (see [`ReusedStrata`]). The default
+    /// implementation ignores it and re-derives everything, reporting no
+    /// stratum as reused.
+    async fn re_evaluate_strata_reusing(
+        &self,
+        program: &CompiledProgram,
+        config: &LocyConfig,
+        reused: Option<ReusedStrata>,
+    ) -> Result<ReEvaluation, LocyError> {
+        let _ = reused;
+        Ok(ReEvaluation {
+            rows: self.re_evaluate_strata(program, config).await?,
+            facts: None,
+            reused: BTreeSet::new(),
+        })
+    }
+
+    /// The facts of the current state, when the adapter holds them.
+    ///
+    /// Call it **before** applying a hypothetical mutation: the baseline is
+    /// returned only while the state it was derived from is still current, so
+    /// a later mutation is exactly what separates it from the hypothetical
+    /// state. `None` when no such facts are held, which only costs reuse.
+    fn reuse_baseline(&self) -> Option<StrataBaseline> {
+        None
+    }
+
+    /// Record `baseline` as the facts of the current state, for nested
+    /// hypothetical commands. Paired with [`Self::pop_reuse_baseline`].
+    fn push_reuse_baseline(&self, baseline: StrataBaseline) {
+        let _ = baseline;
+    }
+
+    /// Drop the baseline the last [`Self::push_reuse_baseline`] recorded.
+    fn pop_reuse_baseline(&self) {}
 }

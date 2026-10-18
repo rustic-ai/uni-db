@@ -20,9 +20,10 @@
 //!
 //! 1. equi-pairs are non-empty,
 //! 2. some pair is an `id(x)` / `_vid` anchor,
-//! 3. the **probe subtree is a bare `GraphScanExec`** — any `FilterExec`,
-//!    `ProjectionExec` (added when a bare variable is projected) or SSI
-//!    `ReadSetRecordingExec` defeats it,
+//! 3. the **probe subtree is a bare `GraphScanExec`** — any `FilterExec` or
+//!    `ProjectionExec` (added when a bare variable is projected) defeats it.
+//!    An SSI `ReadSetRecordingExec` directly over the scan no longer does: it
+//!    is looked through and kept (`vid_lookup_probe_reads_are_in_the_ssi_read_set`),
 //! 4. every equi key compiles to a bare `Column`,
 //! 5. the **anchor build column is Arrow `UInt64`**,
 //! 6. not (`Left` join with the probe on the left).
@@ -491,5 +492,111 @@ async fn left_outer_null_padding_is_correct_on_the_operator() {
         "every Source must survive; only the one with no matching Target is \
          NULL-padded, and each match must keep its OWN target (B2 paired the \
          unmatched row with a matched row's payload)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SSI: the probe rows the lookup returns are in the transaction's read set.
+// ---------------------------------------------------------------------------
+
+/// Seeds 64 `:Target`s and one `:Source` whose `linked_vid` names `t1`.
+///
+/// Returns the database. 64 targets keep one looked-up vid far below the
+/// full-pass switch (`vertex_scan_beats_lookup`: distinct vids x 4 >= label
+/// rows), so the probe runs as a lookup and reads `t1` alone.
+async fn lookup_fixture() -> Uni {
+    let db = Uni::in_memory().build().await.unwrap();
+    db.schema()
+        .label("Source")
+        .property_nullable("linked_vid", DataType::Int64)
+        .done()
+        .label("Target")
+        .property("name", DataType::String)
+        .done()
+        .label("Marker")
+        .done()
+        .apply()
+        .await
+        .unwrap();
+    let s = db.session();
+    let tx = s.tx().await.unwrap();
+    for i in 0..64 {
+        tx.execute(&format!("CREATE (:Target {{name: 't{i}'}})"))
+            .await
+            .unwrap();
+    }
+    tx.commit().await.unwrap();
+    let t1 = s
+        .query("MATCH (b:Target {name: 't1'}) RETURN id(b) AS v")
+        .await
+        .unwrap()
+        .rows()[0]
+        .get::<i64>("v")
+        .unwrap();
+    let tx = s.tx().await.unwrap();
+    tx.query_with("CREATE (:Source {linked_vid: $v})")
+        .param("v", Value::Int(t1))
+        .fetch_all()
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    db
+}
+
+/// Runs the lookup query inside a read-write transaction, lets a second
+/// transaction run `write` and commit, then commits the first one.
+///
+/// Returns whether the first commit failed with `SerializationConflict`. The
+/// read is profiled, so the physical operators are asserted on the very run
+/// whose read set is committed.
+async fn lookup_read_conflicts_with(write: &str) -> bool {
+    use uni_query::plan_shape::assert_uses;
+
+    let db = lookup_fixture().await;
+    let s = db.session();
+    let tx = s.tx().await.unwrap();
+    // `b` is reached only through the lookup: no traversal records it, and the
+    // build side scans `:Source`, a different vertex.
+    let q = "MATCH (a:Source) MATCH (b:Target) WHERE id(b) = a.linked_vid \
+             RETURN b.name AS n";
+    let ops = crate::plan_shape::tx_plan_ops(&tx, q).await;
+    assert_uses(&ops, "VidLookupJoinExec", q);
+    assert_uses(&ops, "ReadSetRecordingExec", q);
+    {
+        let other = db.session();
+        let tx_b = other.tx().await.unwrap();
+        tx_b.execute(write).await.unwrap();
+        tx_b.commit().await.unwrap();
+    }
+    tx.execute("CREATE (:Marker)").await.unwrap();
+    match tx.commit().await {
+        Ok(_) => false,
+        Err(uni_db::UniError::SerializationConflict { .. }) => true,
+        Err(e) => panic!("unexpected commit error: {e:?}"),
+    }
+}
+
+/// **The vid lookup records the vertex it looked up.**
+///
+/// `VidLookupJoinExec` looks *through* the SSI `ReadSetRecordingExec` over its
+/// probe scan and keeps the wrapper as the probe child (`wire_probe`). If the
+/// wrapper were discarded, the looked-up `t1` would be read but never
+/// recorded, and a concurrent write to it would commit silently: a lost
+/// conflict. Nothing else here records `t1` — the build side reads `:Source`,
+/// and there is no traversal whose adjacency recording would mask the probe
+/// (which is what hid this from the Locy P4 conflict tests).
+///
+/// The control (a write to a target the lookup skipped) shows the conflict is
+/// the item-level read of `t1`, not a label-wide one, and that the probe ran
+/// as a lookup rather than as a full pass that reads every target.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vid_lookup_probe_reads_are_in_the_ssi_read_set() {
+    assert!(
+        lookup_read_conflicts_with("MATCH (b:Target {name: 't1'}) SET b.name = 't1x'").await,
+        "a concurrent write to the looked-up vertex must conflict with the read"
+    );
+    assert!(
+        !lookup_read_conflicts_with("MATCH (b:Target {name: 't2'}) SET b.name = 't2x'").await,
+        "a write to a vertex the lookup skipped must not conflict"
     );
 }

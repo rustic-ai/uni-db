@@ -38,6 +38,8 @@ use uni_common::core::schema::SchemaManager;
 use uni_common::core::snapshot::{EdgeSnapshot, LabelSnapshot, SnapshotManifest};
 use uni_common::{Properties, UniError};
 use uni_plugin_host::shutdown::ShutdownHandle;
+use uni_store::backend::table_names;
+use uni_store::backend::traits::StagedAppend;
 use uni_store::runtime::writer::Writer;
 use uni_store::storage::delta::{L1Entry, Op};
 use uni_store::storage::main_edge::MainEdgeDataset;
@@ -48,9 +50,10 @@ use uuid::Uuid;
 
 use crate::flush_intent;
 
-/// Test-only fault-injection: when set, `flush_vertices_buffer` returns an error
+/// Test-only fault-injection: when set, the bulk writer returns an error
 /// *after* committing the per-label table but *before* the main table, exactly
-/// reproducing the crash-in-the-middle scenario H9 guards against. Always
+/// reproducing the crash-in-the-middle scenario H9 guards against. On a backend
+/// that stages, the commit in question is the publish step of `commit()`. Always
 /// compiled (so integration tests across the crate boundary can arm it) but only
 /// ever set by tests.
 #[doc(hidden)]
@@ -240,6 +243,7 @@ impl BulkWriterBuilder {
             return Err(anyhow!("BulkWriter requires a writable database instance"));
         }
 
+        let staging = self.backend.storage.backend().stages_invisibly();
         Ok(BulkWriter {
             backend: self.backend,
             config: self.config,
@@ -251,6 +255,9 @@ impl BulkWriterBuilder {
             touched_labels: HashSet::new(),
             touched_edge_types: HashSet::new(),
             initial_table_versions: HashMap::new(),
+            staging,
+            staged: HashMap::new(),
+            written_vids: HashMap::new(),
             seen_unique_keys: HashMap::new(),
             buffer_size_bytes: 0,
             committed: false,
@@ -350,11 +357,25 @@ impl EdgeData {
 /// Bulk writer for high-throughput data ingestion.
 ///
 /// Buffers vertices and edges, deferring index updates until commit.
-/// Supports constraint validation, automatic checkpointing when buffer limits
-/// are exceeded, and proper rollback via LanceDB version tracking.
+/// Supports constraint validation and automatic checkpointing when buffer
+/// limits are exceeded.
 ///
-/// Use `abort()` to discard uncommitted changes and roll back storage to its
-/// pre-bulk-load state.
+/// # Isolation
+///
+/// On a backend that stages writes (Lance — see
+/// `StorageBackend::stages_invisibly`) every flush before `commit()` writes
+/// data files that no table version references yet. Until `commit()` publishes
+/// them, no reader, no compaction pass and no in-memory cache can observe the
+/// load, so `abort()` (or dropping the writer) only has to discard files nobody
+/// can reach. Earlier, flushes appended straight into the live tables and abort
+/// restored each table's pre-load version, which exposed uncommitted rows to
+/// every reader, let compaction fold uncommitted edges into L2 adjacency where
+/// abort could not reach them, and discarded rows other writers had committed
+/// to the same tables in the meantime.
+///
+/// A backend that cannot stage (a fork's branched backend) keeps that earlier
+/// protocol: writes are visible as they happen and `abort()` rolls each touched
+/// table back to its pre-load version.
 pub struct BulkWriter {
     backend: BulkBackend,
     config: BulkConfig,
@@ -367,9 +388,18 @@ pub struct BulkWriter {
     // Track what was written (for index rebuild)
     touched_labels: HashSet<String>,
     touched_edge_types: HashSet<String>,
-    // Track LanceDB table versions before bulk load started (for abort rollback)
-    // Key: table name, Value: version before first write (None = table created during bulk load)
+    // Table versions to restore if the load is interrupted: table name ->
+    // version before this load first made rows in it visible (None = table did
+    // not exist). Recorded at the first write on a backend that cannot stage;
+    // at publish time, inside `commit`, on one that can.
     initial_table_versions: HashMap<String, Option<u64>>,
+    // Whether the backend keeps staged rows invisible until published.
+    staging: bool,
+    // Rows staged per table, awaiting `publish` (staging backends only).
+    staged: HashMap<String, Vec<StagedAppend>>,
+    // VIDs written per label, registered in `VidLabelsIndex` once the rows are
+    // visible — registering them earlier would outlive an abort.
+    written_vids: HashMap<String, Vec<Vid>>,
     // UNIQUE-constraint keys accepted over the WHOLE load (not just the current
     // buffer, which `flush_vertices_buffer` drains): without this, a duplicate
     // spanning two flushes slipped through. Keyed by constraint identity
@@ -904,10 +934,11 @@ impl BulkWriter {
         Ok(())
     }
 
-    /// Flush vertex buffer to LanceDB storage.
+    /// Flush the vertex buffer for `label` to storage.
     ///
-    /// Records the initial table version before first write for rollback support.
-    /// Writes to both per-label table and main vertices table.
+    /// Writes the per-label table and the main vertices table. On a staging
+    /// backend the rows stay invisible until [`Self::commit`] publishes them;
+    /// otherwise each table's pre-load version is recorded first, for abort.
     async fn flush_vertices_buffer(&mut self, label: &str) -> Result<()> {
         let write_version = self.write_version();
         if let Some(vertices) = self.pending_vertices.remove(label) {
@@ -915,16 +946,17 @@ impl BulkWriter {
                 return Ok(());
             }
 
-            // Record initial versions for abort rollback (only once per table)
-            let table_name = uni_store::backend::table_names::vertex_table_name(label);
-            self.record_initial_version(&table_name).await?;
-            self.record_initial_version(uni_store::backend::table_names::main_vertex_table_name())
-                .await?;
-
-            // Durably record the intent to mutate these tables BEFORE writing
-            // any of them, so a crash between the per-label and main commits is
-            // reconciled (rolled back) on reopen (H9).
-            self.persist_active_intent().await?;
+            let table_name = table_names::vertex_table_name(label);
+            let main_table = table_names::main_vertex_table_name();
+            if !self.staging {
+                // Record initial versions for abort rollback (only once per
+                // table), and durably record the intent to mutate these tables
+                // BEFORE writing any of them, so a crash between the per-label
+                // and main commits is reconciled (rolled back) on reopen (H9).
+                self.record_initial_version(&table_name).await?;
+                self.record_initial_version(main_table).await?;
+                self.persist_active_intent().await?;
+            }
 
             let ds = self
                 .backend
@@ -964,42 +996,15 @@ impl BulkWriter {
                 )
                 .map_err(UniError::Internal)?;
 
-            // Write to per-label table via backend
-            let backend = self.backend.storage.backend();
-            ds.write_batch(backend, batch, &schema)
-                .await
-                .map_err(UniError::Internal)?;
+            self.write_rows(&table_name, batch).await?;
 
-            // Register the labels this batch just wrote (#269).
-            //
-            // `VidLabelsIndex` is populated at startup from the main vertex
-            // table and thereafter only by `flush_to_l1`. Bulk rows go straight
-            // to Lance and reach neither, so on the inserting handle every one
-            // of them missed the index — and `get_batch_vertex_props` answers a
-            // miss by scanning *every declared label* (#264). Correct, and a
-            // fan-out proportional to the schema.
-            //
-            // A reopen hid it, because the startup rebuild reads the table these
-            // rows are already in. Registering here is what makes the inserting
-            // handle agree with a reopened one.
-            //
-            // Note this cannot be delegated to #264's proposed L0 consultation:
-            // these rows were never in L0, so L0 cannot answer for them.
-            for (vid, labels, _) in &vertices_with_labels {
-                self.backend
-                    .storage
-                    .update_vid_labels_index(*vid, labels.clone());
-            }
-
-            // Create default scalar indexes (_vid, _uid) which are critical for basic function
-            ds.ensure_default_indexes(backend)
-                .await
-                .map_err(UniError::Internal)?;
-
-            // Test-only: simulate a crash between the per-label commit (done) and
-            // the main-table commit (below). The intent marker is already durable,
-            // so reopen recovery must roll the per-label table back.
-            if FAIL_AFTER_PERLABEL_WRITE.load(std::sync::atomic::Ordering::SeqCst) {
+            // Test-only: simulate a crash between the per-label commit (done)
+            // and the main-table commit (below). The intent marker is already
+            // durable, so reopen recovery must roll the per-label table back.
+            // A staging backend has committed nothing yet; its equivalent point
+            // is inside `publish`.
+            if !self.staging && FAIL_AFTER_PERLABEL_WRITE.load(std::sync::atomic::Ordering::SeqCst)
+            {
                 return Err(anyhow!("injected failure after per-label vertex commit"));
             }
 
@@ -1010,22 +1015,39 @@ impl BulkWriter {
                     .map(|(vid, lbls, props)| (vid, lbls, props, false, 1u64))
                     .collect();
 
-            if !main_vertices.is_empty() {
-                let main_batch = MainVertexDataset::build_record_batch(
-                    &main_vertices,
-                    Some(&created_at),
-                    Some(&updated_at),
-                )
+            let main_batch = MainVertexDataset::build_record_batch(
+                &main_vertices,
+                Some(&created_at),
+                Some(&updated_at),
+            )
+            .map_err(UniError::Internal)?;
+            self.write_rows(main_table, main_batch).await?;
+
+            self.written_vids
+                .entry(label.to_string())
+                .or_default()
+                .extend(main_vertices.iter().map(|(vid, ..)| *vid));
+        }
+        Ok(())
+    }
+
+    /// Write `batch` to `table`: staged on a staging backend, visible otherwise.
+    async fn write_rows(&mut self, table: &str, batch: arrow_array::RecordBatch) -> Result<()> {
+        let backend = self.backend.storage.backend();
+        if self.staging {
+            let staged = uni_store::storage::manager::stage_batch(backend, table, batch)
+                .await
                 .map_err(UniError::Internal)?;
-
-                MainVertexDataset::write_batch(backend, main_batch)
-                    .await
-                    .map_err(UniError::Internal)?;
-
-                MainVertexDataset::ensure_default_indexes(backend)
-                    .await
-                    .map_err(UniError::Internal)?;
-            }
+            self.staged
+                .entry(table.to_string())
+                .or_default()
+                .push(staged);
+        } else {
+            uni_store::storage::manager::write_batch_with_lance_conflict_retry(
+                backend, table, batch,
+            )
+            .await
+            .map_err(UniError::Internal)?;
         }
         Ok(())
     }
@@ -1134,74 +1156,42 @@ impl BulkWriter {
         Ok(())
     }
 
-    /// Flush edge buffer to delta datasets.
+    /// Flush the edge buffer for `edge_type` to storage.
     ///
-    /// Records initial table versions before first write for rollback support.
-    /// Writes to both per-type delta tables and main edges table.
+    /// Writes the main edges table and both delta tables. On a staging backend
+    /// the rows stay invisible until [`Self::commit`] publishes them; otherwise
+    /// each table's pre-load version is recorded first, for abort.
     async fn flush_edges_buffer(&mut self, edge_type: &str) -> Result<()> {
         if let Some(entries) = self.pending_edges.remove(edge_type) {
             if entries.is_empty() {
                 return Ok(());
             }
 
-            // Record initial versions for abort rollback (FWD, BWD, and main).
-            let fwd_table_name =
-                uni_store::backend::table_names::delta_table_name(edge_type, "fwd");
-            self.record_initial_version(&fwd_table_name).await?;
-            let bwd_table_name =
-                uni_store::backend::table_names::delta_table_name(edge_type, "bwd");
-            self.record_initial_version(&bwd_table_name).await?;
-            self.record_initial_version(uni_store::backend::table_names::main_edge_table_name())
-                .await?;
+            let fwd_table_name = table_names::delta_table_name(edge_type, "fwd");
+            let bwd_table_name = table_names::delta_table_name(edge_type, "bwd");
+            let main_table = table_names::main_edge_table_name();
+            if !self.staging {
+                // Record initial versions for abort rollback, then the intent,
+                // before writing any of the three edge datasets — see the
+                // vertex path (H9).
+                self.record_initial_version(&fwd_table_name).await?;
+                self.record_initial_version(&bwd_table_name).await?;
+                self.record_initial_version(main_table).await?;
+                self.persist_active_intent().await?;
+            }
 
             let schema = self.backend.schema.schema();
-            let backend = self.backend.storage.backend();
+            let storage = Arc::clone(&self.backend.storage);
+            let backend = storage.backend();
 
-            // Record the intent before writing any of the three edge datasets
-            // (fwd delta, bwd delta, main edges) — see the vertex path (H9).
-            self.persist_active_intent().await?;
-
-            // Write to FWD delta (sorted by src_vid)
-            let mut fwd_entries = entries.clone();
-            fwd_entries.sort_by_key(|e| e.src_vid);
-            let fwd_ds = self
-                .backend
-                .storage
-                .delta_dataset(edge_type, "fwd")
-                .map_err(UniError::Internal)?;
-            let fwd_batch = fwd_ds
-                .build_record_batch(&fwd_entries, &schema)
-                .map_err(UniError::Internal)?;
-            fwd_ds
-                .write_run(backend, fwd_batch)
-                .await
-                .map_err(UniError::Internal)?;
-            fwd_ds
-                .ensure_eid_index(backend)
-                .await
-                .map_err(UniError::Internal)?;
-
-            // Write to BWD delta (sorted by dst_vid)
-            let mut bwd_entries = entries.clone();
-            bwd_entries.sort_by_key(|e| e.dst_vid);
-            let bwd_ds = self
-                .backend
-                .storage
-                .delta_dataset(edge_type, "bwd")
-                .map_err(UniError::Internal)?;
-            let bwd_batch = bwd_ds
-                .build_record_batch(&bwd_entries, &schema)
-                .map_err(UniError::Internal)?;
-            bwd_ds
-                .write_run(backend, bwd_batch)
-                .await
-                .map_err(UniError::Internal)?;
-            bwd_ds
-                .ensure_eid_index(backend)
-                .await
-                .map_err(UniError::Internal)?;
-
-            // Dual-write to main edges table
+            // Main edges FIRST, deltas second — the same order as
+            // `Writer::flush_to_l1`. Background compaction folds whatever a
+            // delta table holds into L2 adjacency and relies on every delta EID
+            // already having its `main_edges` row (the properties it does not
+            // carry). On a backend that cannot stage, these writes are visible
+            // as they land, so the order is what keeps a pass from seeing an
+            // EID `main_edges` does not yet hold; `publish` keeps the same
+            // order for a staging backend.
             let mut edge_created_at: HashMap<Eid, i64> = HashMap::new();
             let mut edge_updated_at: HashMap<Eid, i64> = HashMap::new();
             let main_edges: Vec<(Eid, Vid, Vid, String, Properties, bool, u64)> = entries
@@ -1226,19 +1216,189 @@ impl BulkWriter {
                 })
                 .collect();
 
-            if !main_edges.is_empty() {
-                let main_batch = MainEdgeDataset::build_record_batch(
-                    &main_edges,
-                    Some(&edge_created_at),
-                    Some(&edge_updated_at),
-                )
-                .map_err(UniError::Internal)?;
+            let main_batch = MainEdgeDataset::build_record_batch(
+                &main_edges,
+                Some(&edge_created_at),
+                Some(&edge_updated_at),
+            )
+            .map_err(UniError::Internal)?;
+            self.write_rows(main_table, main_batch).await?;
 
-                MainEdgeDataset::write_batch(self.backend.storage.backend(), main_batch)
-                    .await
+            // FWD delta (sorted by src_vid), then BWD delta (sorted by dst_vid).
+            for (direction, table_name) in [("fwd", &fwd_table_name), ("bwd", &bwd_table_name)] {
+                let mut sorted = entries.clone();
+                if direction == "fwd" {
+                    sorted.sort_by_key(|e| e.src_vid);
+                } else {
+                    sorted.sort_by_key(|e| e.dst_vid);
+                }
+                let ds = self
+                    .backend
+                    .storage
+                    .delta_dataset(edge_type, direction)
                     .map_err(UniError::Internal)?;
+                let batch = ds
+                    .build_record_batch(&sorted, &schema)
+                    .map_err(UniError::Internal)?;
+                if self.staging {
+                    let run = ds
+                        .stage_run(backend, batch)
+                        .await
+                        .map_err(UniError::Internal)?;
+                    self.staged.entry(table_name.clone()).or_default().push(run);
+                } else {
+                    ds.write_run(backend, batch)
+                        .await
+                        .map_err(UniError::Internal)?;
+                }
+            }
+        }
+        Ok(())
+    }
 
-                MainEdgeDataset::ensure_default_indexes(self.backend.storage.backend())
+    /// Make every staged row visible, in an order compaction and recovery can
+    /// rely on.
+    ///
+    /// Vertex tables first (edges must not reach a reader before their
+    /// endpoints), then `main_edges`, then the delta tables: compaction folds a
+    /// delta into L2 adjacency only on the strength of its `main_edges` row.
+    /// Before the first table is touched, every table this step may change —
+    /// including the L2 adjacency tables of the touched edge types, which a
+    /// compaction pass may rewrite from the published deltas while this step is
+    /// still running — is recorded in the durable intent marker, so a crash part
+    /// way through is rolled back on reopen. A no-op on a backend that cannot
+    /// stage: its rows became visible as they were written.
+    async fn publish(&mut self) -> Result<()> {
+        if self.staged.is_empty() {
+            return Ok(());
+        }
+
+        let mut labels: Vec<String> = self.touched_labels.iter().cloned().collect();
+        labels.sort();
+        let mut edge_types: Vec<String> = self.touched_edge_types.iter().cloned().collect();
+        edge_types.sort();
+
+        // (table, (edge type, direction) when it is a delta table)
+        let mut order: Vec<(String, Option<(String, &'static str)>)> = labels
+            .iter()
+            .map(|l| (table_names::vertex_table_name(l), None))
+            .collect();
+        order.push((table_names::main_vertex_table_name().to_string(), None));
+        order.push((table_names::main_edge_table_name().to_string(), None));
+        for et in &edge_types {
+            for dir in ["fwd", "bwd"] {
+                order.push((
+                    table_names::delta_table_name(et, dir),
+                    Some((et.clone(), dir)),
+                ));
+            }
+        }
+        order.retain(|(table, _)| self.staged.contains_key(table));
+        // The staged per-label tables lead `order`.
+        let per_label_tables = labels
+            .iter()
+            .filter(|l| self.staged.contains_key(&table_names::vertex_table_name(l)))
+            .count();
+
+        for (table, _) in &order {
+            self.record_initial_version(table).await?;
+        }
+        for et in &edge_types {
+            for dir in ["fwd", "bwd"] {
+                self.record_initial_version(&table_names::adjacency_table_name(et, dir))
+                    .await?;
+            }
+        }
+        self.persist_active_intent().await?;
+
+        let backend = self.backend.storage.backend();
+        for (i, (table, delta)) in order.into_iter().enumerate() {
+            // Test-only: crash after the per-label vertex commit(s), before the
+            // main vertices table — the H9 scenario, now at publish time.
+            if i == per_label_tables
+                && per_label_tables > 0
+                && FAIL_AFTER_PERLABEL_WRITE.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(anyhow!("injected failure after per-label vertex commit"));
+            }
+            let runs = self.staged.remove(&table).unwrap_or_default();
+            match delta {
+                Some((edge_type, direction)) => {
+                    self.backend
+                        .storage
+                        .delta_dataset(&edge_type, direction)
+                        .map_err(UniError::Internal)?
+                        .publish_runs(backend, runs)
+                        .await
+                        .map_err(UniError::Internal)?;
+                }
+                None => backend
+                    .publish_staged(&table, runs)
+                    .await
+                    .map_err(UniError::Internal)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Bring the published tables' fixed indexes and in-memory label index up
+    /// to date with the rows this load made visible.
+    async fn index_published_rows(&mut self) -> Result<()> {
+        let backend = self.backend.storage.backend();
+
+        let mut labels: Vec<String> = self.written_vids.keys().cloned().collect();
+        labels.sort();
+        for label in &labels {
+            // Create default scalar indexes (_vid, _uid), which are critical
+            // for basic function.
+            self.backend
+                .storage
+                .vertex_dataset(label)
+                .map_err(UniError::Internal)?
+                .ensure_default_indexes(backend)
+                .await
+                .map_err(UniError::Internal)?;
+        }
+        if !labels.is_empty() {
+            MainVertexDataset::ensure_default_indexes(backend)
+                .await
+                .map_err(UniError::Internal)?;
+        }
+
+        // Register the labels of the rows just made visible (#269).
+        //
+        // `VidLabelsIndex` is populated at startup from the main vertex table
+        // and thereafter only by `flush_to_l1`. Bulk rows go straight to Lance
+        // and reach neither, so on the inserting handle every one of them
+        // missed the index — and `get_batch_vertex_props` answers a miss by
+        // scanning *every declared label* (#264). Correct, and a fan-out
+        // proportional to the schema. A reopen hid it, because the startup
+        // rebuild reads the table these rows are already in. Registering here
+        // is what makes the inserting handle agree with a reopened one; doing
+        // it only now, after the rows are visible, keeps an aborted load from
+        // leaving entries behind.
+        for (label, vids) in self.written_vids.drain() {
+            for vid in vids {
+                self.backend
+                    .storage
+                    .update_vid_labels_index(vid, vec![label.clone()]);
+            }
+        }
+
+        let mut edge_types: Vec<String> = self.touched_edge_types.iter().cloned().collect();
+        edge_types.sort();
+        if !edge_types.is_empty() {
+            MainEdgeDataset::ensure_default_indexes(backend)
+                .await
+                .map_err(UniError::Internal)?;
+        }
+        for edge_type in &edge_types {
+            for dir in ["fwd", "bwd"] {
+                self.backend
+                    .storage
+                    .delta_dataset(edge_type, dir)
+                    .map_err(UniError::Internal)?
+                    .ensure_eid_index(backend)
                     .await
                     .map_err(UniError::Internal)?;
             }
@@ -1266,6 +1426,10 @@ impl BulkWriter {
         for edge_type in edge_types {
             self.flush_edges_buffer(&edge_type).await?;
         }
+
+        // 2b. Make the load visible, then index what became visible.
+        self.publish().await?;
+        self.index_published_rows().await?;
 
         let index_start = Instant::now();
 
@@ -1565,15 +1729,17 @@ impl BulkWriter {
         Ok(self.stats.clone())
     }
 
-    /// Abort bulk loading and roll back all changes.
+    /// Abort bulk loading and discard everything it wrote.
     ///
-    /// Rolls back LanceDB tables to their pre-bulk-load versions using LanceDB's
-    /// version API. Tables created during the bulk load are dropped. Buffered
-    /// data that hasn't been flushed is discarded.
+    /// On a staging backend nothing this load wrote was ever visible, so abort
+    /// discards the staged files and touches no table. On a backend that cannot
+    /// stage, each touched table is rolled back to its pre-load version (tables
+    /// created by the load are dropped). Buffered data that hasn't been flushed
+    /// is discarded either way.
     ///
     /// # Errors
     ///
-    /// Returns an error if rollback fails. The error message includes details
+    /// Returns an error if a rollback fails. The error message includes details
     /// about which tables failed to roll back.
     pub async fn abort(mut self) -> Result<()> {
         if self.committed {
@@ -1583,10 +1749,34 @@ impl BulkWriter {
         // 1. Clear pending buffers (not yet flushed to storage)
         self.pending_vertices.clear();
         self.pending_edges.clear();
+        self.written_vids.clear();
         self.buffer_size_bytes = 0;
 
-        // 2. Roll back each modified table to its initial version
         let backend = self.backend.storage.backend();
+
+        // 2. Staged rows: never visible, so there is nothing to roll back.
+        // Reclaiming their files is best effort — an unreferenced file is
+        // unreachable, and the load is discarded whether or not the space comes
+        // back now — so a failure is reported, not returned.
+        let mut discarded = 0usize;
+        for (table_name, runs) in self.staged.drain() {
+            discarded += runs.iter().map(StagedAppend::rows).sum::<usize>();
+            if let Err(e) = backend.discard_staged(&table_name, runs).await {
+                tracing::warn!(
+                    table = %table_name,
+                    error = %e,
+                    "bulk abort: could not delete staged files; they are unreferenced and \
+                     will be reclaimed by version cleanup",
+                );
+            }
+        }
+        if self.initial_table_versions.is_empty() {
+            tracing::info!(discarded, "bulk load aborted; discarded its staged rows");
+            return Ok(());
+        }
+
+        // 3. Visible writes (a backend that cannot stage): roll each modified
+        // table back to its initial version.
         let mut rollback_errors = Vec::new();
         let mut rolled_back_count = 0;
         let mut dropped_count = 0;
@@ -1620,10 +1810,10 @@ impl BulkWriter {
             }
         }
 
-        // 3. Clear backend cache to ensure next read picks up rolled-back state
+        // 4. Clear backend cache to ensure next read picks up rolled-back state
         self.backend.storage.backend().clear_cache();
 
-        // 4. Drop the crash-recovery marker — this abort already did the
+        // 5. Drop the crash-recovery marker — this abort already did the
         // rollback, so reopen must not try to roll back again.
         let store = self.backend.storage.store();
         if let Err(e) = flush_intent::clear(&store).await {
@@ -1648,7 +1838,8 @@ impl BulkWriter {
 
     /// Persist the crash-recovery intent marker (phase `Active`) with the
     /// current set of touched tables and their pre-load versions. Called before
-    /// each multi-table flush writes anything.
+    /// anything this load writes becomes visible: before each multi-table
+    /// flush on a backend that cannot stage, before `publish` on one that can.
     async fn persist_active_intent(&self) -> Result<()> {
         let store = self.backend.storage.store();
         flush_intent::write_active(&store, &self.initial_table_versions)

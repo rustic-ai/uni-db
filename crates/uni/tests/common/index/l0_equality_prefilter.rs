@@ -10,7 +10,7 @@
 //! column, sorting for the MVCC dedup) and only then filtered, so a loop of
 //! single-row writes cost O(N·V) until the next flush. The scan now recovers
 //! the pushed equality and skips L0 rows that cannot match before building
-//! them (`columnar_scan::l0_equality_candidates`).
+//! them (`columnar_scan::l0_prefilter_candidates`).
 //!
 //! The trap that fix walks past: an L0 row that **no longer** matches must
 //! still reach the MVCC merge when the flushed side returned that vid, or the
@@ -207,6 +207,8 @@ fn probes() -> Vec<(&'static str, Value)> {
         ("a.uid = $p", s("n1")),
         ("a.uid = $p", s("l2")),
         ("a.uid = $p", s("l1")),
+        ("a.uid = $p", s("u10")),
+        ("a.uid = $p", s("u11")),
         ("a.uid = $p", Value::Null),
         (
             "a.uid IN $p",
@@ -229,7 +231,8 @@ fn probes() -> Vec<(&'static str, Value)> {
 /// existing one (`u3` → `u4`), delete (`u5`), delete and recreate (`u6`),
 /// remove the label (`u7`), gain the label by relabel (`g1`, which has no L0
 /// property row), an L0-only vertex rewritten twice (`l1` → `l2`), an L0-only
-/// vertex with no `uid`, and an integer key moved away and onto (`ix`).
+/// vertex with no `uid`, an integer key moved away and onto (`ix`), and a key
+/// removed (`u10`) or set to NULL (`u11`).
 async fn mutate(db: &Uni) {
     let s = db.session();
     for q in [
@@ -246,6 +249,8 @@ async fn mutate(db: &Uni) {
         "CREATE (:E {ix: 2001, grp: 1})",
         "MATCH (a:E {ix: 10}) SET a.ix = 1010",
         "MATCH (a:E {ix: 12}) SET a.ix = 11",
+        "MATCH (a:E {uid: 'u10'}) REMOVE a.uid",
+        "MATCH (a:E {uid: 'u11'}) SET a.uid = null",
     ] {
         let tx = s.tx().await.unwrap();
         tx.execute(q)
@@ -415,4 +420,267 @@ async fn all_l0_shadowing_cases_match_an_unpushed_reference() {
         );
     }
     assert_probes_agree(&s, "after flush").await;
+}
+
+// ---------------------------------------------------------------------------
+// Schemaless (main-table) scans: `MATCH (a {uid: $s})` with no label, and a
+// label the schema does not declare. Measured 2026-10-18: the label-less
+// lookup reported `rows_scanned = V` over `V` unflushed vertices — the L0 side
+// built every L0 vertex before the filter above the scan ran. The scan now
+// reads an equality out of its Cypher filter and skips L0 rows that cannot
+// match (`columnar_scan::schemaless_l0_prefilter_candidates`), keeping every
+// vid the flushed side returned so newer L0 versions still shadow it.
+// ---------------------------------------------------------------------------
+
+/// `(rows_scanned, row count)` of one main-table lookup by `uid`: label-less,
+/// or under the label `E`, which the schema does not declare.
+async fn lookup_unlabelled(db: &Uni, uid: &str, labelled: bool) -> (u64, usize) {
+    let q = if labelled {
+        "MATCH (a:E {uid: $s}) RETURN a.ix AS ix"
+    } else {
+        "MATCH (a {uid: $s}) RETURN a.ix AS ix"
+    };
+    let r = db
+        .session()
+        .query_with(q)
+        .param("s", Value::String(uid.into()))
+        .fetch_all()
+        .await
+        .unwrap();
+    (r.metrics().rows_scanned as u64, r.rows().len())
+}
+
+/// A label-less equality lookup over unflushed vertices reads O(1) rows, at
+/// two scales, for a key at either end and for a missing key.
+#[tokio::test]
+async fn unflushed_unlabelled_lookup_reads_only_matching_rows() {
+    for v in [2000_i64, 8000] {
+        let db = Uni::temporary().config(cfg()).build().await.unwrap();
+        insert(&db, 0, v).await;
+        for (uid, want) in [
+            ("u0".to_string(), 1),
+            (format!("u{}", v - 1), 1),
+            ("absent".to_string(), 0),
+        ] {
+            for labelled in [false, true] {
+                let (scanned, rows) = lookup_unlabelled(&db, &uid, labelled).await;
+                assert_eq!(rows, want, "V={v} uid={uid} labelled={labelled}");
+                assert!(
+                    scanned <= 1,
+                    "V={v} uid={uid} labelled={labelled}: scanned {scanned} rows of {v} \
+                     unflushed — the main-table scan built every L0 vertex before \
+                     filtering (W3b)"
+                );
+            }
+        }
+    }
+}
+
+/// A loop of label-less single-row read-modify-writes costs the same per
+/// statement however many unflushed vertices precede it.
+#[tokio::test]
+async fn unlabelled_loop_of_single_row_writes_has_flat_per_statement_cost() {
+    for v in [2000_i64, 8000] {
+        let db = Uni::temporary().config(cfg()).build().await.unwrap();
+        insert(&db, 0, v).await;
+        let mut worst = 0_u64;
+        for i in 0..100_i64 {
+            let tx = db.session().tx().await.unwrap();
+            let r = tx
+                .query_with(
+                    "MATCH (a {uid: $s}) \
+                     CREATE (a)-[:T]->(:E {uid: $n, ix: $i, grp: 0}) \
+                     RETURN a.ix AS ix",
+                )
+                .param("s", Value::String(format!("u{}", (i * 37) % v)))
+                .param("n", Value::String(format!("w{i}")))
+                .param("i", Value::Int(v + i))
+                .fetch_all()
+                .await
+                .unwrap();
+            assert_eq!(r.rows().len(), 1, "V={v} step {i}");
+            worst = worst.max(r.metrics().rows_scanned as u64);
+            tx.commit().await.unwrap();
+        }
+        assert!(
+            worst <= 2,
+            "V={v}: a label-less single-row write scanned {worst} rows; per-statement \
+             cost grows with the unflushed population (W3b)"
+        );
+    }
+}
+
+/// Pushed and unpushed forms of `pred` over a main-table scan: label-less, or
+/// under the undeclared label `E`.
+fn schemaless_forms(pred: &str, labelled: bool) -> (String, String) {
+    let pat = if labelled { "(a:E)" } else { "(a)" };
+    let ret = "RETURN a.uid AS uid, a.ix AS ix, labels(a) AS l";
+    (
+        format!("MATCH {pat} WHERE {pred} {ret}"),
+        format!("MATCH {pat} WITH a WHERE {pred} {ret}"),
+    )
+}
+
+/// Compare pushed and reference forms of every probe, both scan shapes, on
+/// `session`.
+async fn assert_schemaless_probes_agree(session: &uni_db::Session, ctx: &str) {
+    for labelled in [false, true] {
+        for (pred, p) in probes() {
+            let (pushed, reference) = schemaless_forms(pred, labelled);
+            let got = rows(session, &pushed, &p).await;
+            let want = rows(session, &reference, &p).await;
+            assert_eq!(
+                got, want,
+                "{ctx} (labelled {labelled}): `{pred}` with $p = {p:?}"
+            );
+        }
+    }
+}
+
+/// The schemaless base: `u0..u100` and `:G {uid: 'g1'}`, no schema declared.
+async fn schemaless_base(db: &Uni) {
+    insert(db, 0, 100).await;
+    let tx = db.session().tx().await.unwrap();
+    tx.execute("CREATE (:G {uid: 'g1', ix: 900})")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// L0 versions shadow their flushed versions under a schemaless scan's L0
+/// prefilter: update away, update onto, delete, recreate, REMOVE label,
+/// relabel, NULL, in a transaction, after rollback, and in a fork.
+#[tokio::test]
+async fn schemaless_shadowing_cases_match_an_unpushed_reference() {
+    let db = Uni::temporary().config(cfg()).build().await.unwrap();
+    schemaless_base(&db).await;
+    db.flush().await.unwrap();
+
+    // The reference keeps its predicate above the projection: the scan it
+    // reads from carries no filter, so no L0 prefilter applies to it, where
+    // the pushed form's scan carries the predicate. Only the label-less form
+    // is checked: the planner does not push a WHERE into a scan of an
+    // undeclared label (`ScanMainByLabels`), so that form exercises the
+    // prefilter only through an inline property map.
+    let s = db.session();
+    {
+        let (pushed, reference) = schemaless_forms("a.uid = $p", false);
+        let plan = |q: String| {
+            let s = &s;
+            async move { s.query_with(&q).explain().await.unwrap().plan_text }
+        };
+        let (pp, rp) = (plan(pushed).await, plan(reference).await);
+        assert!(!pp.contains("filter: None"), "pushed form not pushed: {pp}");
+        assert!(
+            rp.contains("filter: None"),
+            "reference form was pushed: {rp}"
+        );
+    }
+
+    mutate(&db).await;
+    assert_schemaless_probes_agree(&s, "flushed base + L0 mutations").await;
+
+    // Spot-check the cases whose wrong answer is a stale flushed row.
+    for q in [
+        "MATCH (a {uid: 'u1'}) RETURN a.ix",
+        "MATCH (a {uid: 'u5'}) RETURN a.ix",
+        "MATCH (a:E {uid: 'u7'}) RETURN a.ix",
+        "MATCH (a {ix: 10}) RETURN a.ix",
+    ] {
+        assert!(rows(&s, q, &Value::Null).await.is_empty(), "{q}");
+    }
+    assert_eq!(
+        rows(&s, "MATCH (a {uid: 'u4'}) RETURN a.ix", &Value::Null)
+            .await
+            .len(),
+        2
+    );
+    assert_eq!(
+        rows(&s, "MATCH (a {uid: 'u6'}) RETURN a.ix", &Value::Null).await,
+        vec!["[Int(600)]".to_string()]
+    );
+    assert_eq!(
+        rows(&s, "MATCH (a:E {uid: 'g1'}) RETURN a.ix", &Value::Null)
+            .await
+            .len(),
+        1
+    );
+    // `u7` lost its label but not its key: label-less it is still there, with
+    // its L0 label set rather than the flushed one.
+    assert_eq!(
+        rows(&s, "MATCH (a {uid: 'u7'}) RETURN labels(a)", &Value::Null).await,
+        vec!["[List([])]".to_string()]
+    );
+
+    // A transaction's private L0.
+    let tx = s.tx().await.unwrap();
+    for q in [
+        "MATCH (a:E {uid: 'u8'}) SET a.uid = 'x8'",
+        "MATCH (a:E {uid: 'zz1'}) SET a.uid = 'u1'",
+        "CREATE (:E {uid: 'n1', ix: 3000, grp: 0})",
+        "MATCH (a:E {uid: 'u2b'}) DETACH DELETE a",
+    ] {
+        tx.execute(q).await.unwrap();
+    }
+    for labelled in [false, true] {
+        for (pred, p) in probes() {
+            let (pushed, reference) = schemaless_forms(pred, labelled);
+            let run = |q: String, p: Value| {
+                let tx = &tx;
+                async move {
+                    let r = tx
+                        .query_with(&q)
+                        .param("p", p)
+                        .fetch_all()
+                        .await
+                        .unwrap_or_else(|e| panic!("query failed: {q}: {e}"));
+                    let mut out: Vec<String> = r
+                        .rows()
+                        .iter()
+                        .map(|row| format!("{:?}", row.values()))
+                        .collect();
+                    out.sort();
+                    out
+                }
+            };
+            let got = run(pushed, p.clone()).await;
+            let want = run(reference, p.clone()).await;
+            assert_eq!(
+                got, want,
+                "in-transaction (labelled {labelled}): `{pred}` with $p = {p:?}"
+            );
+        }
+    }
+    tx.rollback();
+    assert_schemaless_probes_agree(&s, "after rollback").await;
+    assert!(
+        rows(&s, "MATCH (a {uid: 'x8'}) RETURN a.ix", &Value::Null)
+            .await
+            .is_empty()
+    );
+
+    // A fork.
+    let fork = s.fork("w3b_schemaless_shadow").await.unwrap();
+    let ftx = fork.tx().await.unwrap();
+    for q in [
+        "MATCH (a:E {uid: 'u9'}) SET a.uid = 'x8'",
+        "MATCH (a:E {uid: 'u4'}) SET a.uid = 'l1'",
+        "CREATE (:E {uid: 'n1', ix: 4000, grp: 0})",
+    ] {
+        ftx.execute(q).await.unwrap();
+    }
+    ftx.commit().await.unwrap();
+    assert_schemaless_probes_agree(&fork, "fork L0").await;
+    assert_schemaless_probes_agree(&s, "primary after fork writes").await;
+}
+
+/// The schemaless mutations with nothing flushed, then flushed.
+#[tokio::test]
+async fn all_l0_schemaless_shadowing_cases_match_an_unpushed_reference() {
+    let db = Uni::temporary().config(cfg()).build().await.unwrap();
+    schemaless_base(&db).await;
+    mutate(&db).await;
+    assert_schemaless_probes_agree(&db.session(), "all in L0").await;
+    db.flush().await.unwrap();
+    assert_schemaless_probes_agree(&db.session(), "after flush").await;
 }

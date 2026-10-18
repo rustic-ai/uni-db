@@ -1,3 +1,4 @@
+pub mod anchored_lookup_test;
 pub mod iai_wallclock;
 pub mod l0_load_probe;
 pub mod limit_pushdown_test;

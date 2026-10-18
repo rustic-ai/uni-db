@@ -43,6 +43,7 @@ use crate::query::df_graph::mutation_delete::new_delete_exec;
 use crate::query::df_graph::mutation_remove::new_remove_exec;
 use crate::query::df_graph::mutation_set::new_set_exec;
 use crate::query::df_graph::recursive_cte::RecursiveCTEExec;
+use crate::query::df_graph::scan::schemaless_l0_prefilter;
 use crate::query::df_graph::traverse::QppStepFilterSpec;
 use crate::query::df_graph::traverse::{
     GraphVariableLengthTraverseExec, GraphVariableLengthTraverseMainExec,
@@ -178,7 +179,8 @@ pub struct HybridPhysicalPlanner {
 /// column failed the query instead of returning no rows. Only operands whose
 /// coercion is exact are accepted: an integer for an integer column, an
 /// integer of magnitude at most 2^53 or a float for a float column, a string
-/// for a string column, a boolean for a boolean column. A NULL operand matches
+/// for a string column, a boolean for a boolean column. A float operand must
+/// also be finite and non-zero (see the float arm). A NULL operand matches
 /// nothing under either semantics and is left to the outer filter. Columns of
 /// any other type keep the previous behavior.
 fn index_operand_fits_column(
@@ -193,10 +195,19 @@ fn index_operand_fits_column(
         match (column_type, lit) {
             (_, CypherLiteral::Null) => false,
             (Some(T::Int32 | T::Int64), lit) => matches!(lit, CypherLiteral::Integer(_)),
+            // A zero operand is never pushed: Cypher's `-0.0 = 0.0` holds, but
+            // the storage filter compares by IEEE total order, so `f = 0`
+            // would drop the stored `-0.0` row before the residual sees it.
             (Some(T::Float32 | T::Float64), CypherLiteral::Integer(i)) => {
-                i.unsigned_abs() <= 1_u64 << 53
+                *i != 0 && i.unsigned_abs() <= 1_u64 << 53
             }
-            (Some(T::Float32 | T::Float64), lit) => matches!(lit, CypherLiteral::Float(_)),
+            // A non-finite float has no SQL literal (`NaN` and `inf` parse as
+            // column names), and a zero cannot be spelled with its sign
+            // (`-0.0` renders as `-0`, an integer, i.e. `+0.0`) — nor would
+            // either sign select both zeros under the storage filter's total
+            // order (see the integer arm).
+            (Some(T::Float32 | T::Float64), CypherLiteral::Float(f)) => f.is_finite() && *f != 0.0,
+            (Some(T::Float32 | T::Float64), _) => false,
             (Some(T::String), lit) => matches!(lit, CypherLiteral::String(_)),
             (Some(T::Bool), lit) => matches!(lit, CypherLiteral::Bool(_)),
             _ => true,
@@ -626,6 +637,25 @@ impl HybridPhysicalPlanner {
         if let Some(token) = token {
             ctx = ctx.with_cancellation_token(token);
         }
+        self.graph_ctx = Arc::new(ctx);
+        self
+    }
+
+    /// Set `K` for a `~=` vector search that no `LIMIT` sized
+    /// (`UniConfig::vector_knn_default_k`).
+    #[must_use]
+    pub fn with_vector_knn_default_k(mut self, k: usize) -> Self {
+        let ctx = self.take_graph_ctx().with_vector_knn_default_k(k);
+        self.graph_ctx = Arc::new(ctx);
+        self
+    }
+
+    /// Share an enclosing query's warning collector with this sub-plan.
+    #[must_use]
+    pub(crate) fn with_inherited_warnings(mut self, parent: &GraphExecutionContext) -> Self {
+        let ctx = self
+            .take_graph_ctx()
+            .with_warnings_sink(parent.warnings_sink());
         self.graph_ctx = Arc::new(ctx);
         self
     }
@@ -1420,16 +1450,12 @@ impl HybridPhysicalPlanner {
                         .iter()
                         .enumerate()
                         .map(|(i, f)| {
-                            (
-                                Arc::new(datafusion::physical_expr::expressions::Column::new(
-                                    f.name(),
-                                    i,
-                                ))
-                                    as Arc<dyn datafusion::physical_expr::PhysicalExpr>,
-                                f.name().clone(),
-                            )
+                            let column: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
+                                datafusion::physical_expr::expressions::Column::new(f.name(), i),
+                            );
+                            Ok((float_equivalence_key(column, &schema)?, f.name().clone()))
                         })
-                        .collect();
+                        .collect::<Result<_>>()?;
                 let group_by = PhysicalGroupBy::new_single(group_exprs);
                 Ok(Arc::new(AggregateExec::try_new(
                     AggregateMode::Single,
@@ -1625,12 +1651,14 @@ impl HybridPhysicalPlanner {
                 property,
                 query,
                 k,
+                optional,
             } => self.plan_vector_knn(
                 *label_id,
                 variable,
                 property,
                 query.clone(),
                 *k,
+                *optional,
                 all_properties,
             ),
 
@@ -2092,13 +2120,22 @@ impl HybridPhysicalPlanner {
     /// filter string AND an Arrow-side `PhysicalExpr`, both derived from the
     /// same set of indexed-property conjuncts.
     ///
-    /// - The Lance string drives an O(1) hash-index lookup against on-disk data.
+    /// - The Lance string lets a scalar index serve the lookup against on-disk
+    ///   data: equality / `IN` (issue #57) and, since perf audit F1, ranges,
+    ///   `STARTS WITH` prefixes and null tests.
     /// - The Arrow filter applies to the merged (Lance + L0) batch in-process,
     ///   so L0 rows that haven't been flushed yet are still index-bounded.
     ///
-    /// Returns `None` when no indexed predicate exists or any parameter
-    /// resolution fails — in that case the planner falls back to the regular
-    /// post-scan `FilterExec`. See issue #57.
+    /// The two halves are deliberately not the same predicate. The Arrow
+    /// filter is the original conjunct (parameters resolved), translated with
+    /// Cypher semantics; the Lance half is a type-exact rendering that may
+    /// accept *more* rows — `n.x < 9.5` on an INT column goes to Lance as
+    /// `x < 10`, a prefix as a half-open string range. Both sit below the
+    /// outer `FilterExec`, which re-applies the whole WHERE.
+    ///
+    /// Returns `None` when no indexed predicate exists or any parameter of an
+    /// indexed equality fails to resolve — in that case the planner falls back
+    /// to the regular post-scan `FilterExec`. See issue #57.
     fn build_indexed_property_pushdown(
         &self,
         filter: Option<&Expr>,
@@ -2109,7 +2146,8 @@ impl HybridPhysicalPlanner {
         let filter = filter?;
         let analyzer = crate::query::pushdown::IndexAwareAnalyzer::new(&self.schema);
         let strategy = analyzer.analyze(filter, variable, label_id);
-        if strategy.indexed_equality_columns.is_empty() {
+        if strategy.indexed_equality_columns.is_empty() && strategy.indexed_range_columns.is_empty()
+        {
             return None;
         }
 
@@ -2122,9 +2160,18 @@ impl HybridPhysicalPlanner {
         // simple keeps the merge behaviour obvious.
         let label_name = self.schema.label_name_by_id(label_id)?;
         let label_props = self.schema.properties.get(label_name);
+        let column_type_of = |col: &str| label_props.and_then(|p| p.get(col)).map(|m| &m.r#type);
         let mut indexed_preds: Vec<Expr> = Vec::new();
         for pred in &strategy.lance_predicates {
             if let Some(col) = crate::query::pushdown::predicate_target_column(pred, variable)
+                && matches!(
+                    pred,
+                    Expr::In { .. }
+                        | Expr::BinaryOp {
+                            op: uni_cypher::ast::BinaryOp::Eq,
+                            ..
+                        }
+                )
                 && strategy
                     .indexed_equality_columns
                     .iter()
@@ -2135,23 +2182,65 @@ impl HybridPhysicalPlanner {
                 // when it cannot (`n.x = 41.5` on an INT column failed the
                 // whole query). Such a predicate stays with the outer
                 // `FilterExec`, which applies Cypher's comparison semantics.
-                let column_type = label_props.and_then(|p| p.get(&col)).map(|m| &m.r#type);
-                if !index_operand_fits_column(&resolved, column_type) {
+                if !index_operand_fits_column(&resolved, column_type_of(&col)) {
                     continue;
                 }
                 indexed_preds.push(resolved);
             }
         }
+        let mut lance_expr = crate::query::pushdown::LanceFilterGenerator::generate_expr(
+            &indexed_preds,
+            variable,
+            label_props,
+        );
+
+        // Ranges, prefixes and null tests (F1). Each conjunct goes to Lance in
+        // its type-exact rendering and to the Arrow filter as written; one
+        // that has no exact rendering is skipped and left to the outer
+        // `FilterExec` alone.
+        if !strategy.indexed_range_columns.is_empty() {
+            let mut range_parts = Vec::new();
+            for conj in crate::query::pushdown::conjuncts(filter) {
+                let Some(col) = crate::query::pushdown::predicate_target_column(conj, variable)
+                else {
+                    continue;
+                };
+                if !strategy
+                    .indexed_range_columns
+                    .iter()
+                    .any(|(c, _)| c == &col)
+                {
+                    continue;
+                }
+                let Some(resolved) = crate::query::pushdown::substitute_params(conj, &self.params)
+                else {
+                    continue;
+                };
+                if let Some(part) = crate::query::pushdown::indexed_range_filter(
+                    &resolved,
+                    variable,
+                    column_type_of(&col),
+                ) {
+                    range_parts.push(part);
+                    indexed_preds.push(resolved);
+                }
+            }
+            lance_expr = uni_store::backend::types::FilterExpr::all(
+                std::iter::once(lance_expr).chain(range_parts),
+            );
+        }
         if indexed_preds.is_empty() {
             return None;
         }
 
-        // Render the Lance SQL filter string for storage-side pushdown.
-        let lance_str = crate::query::pushdown::LanceFilterGenerator::generate(
-            &indexed_preds,
-            variable,
-            label_props,
-        )?;
+        // Render the Lance SQL filter string for storage-side pushdown. A
+        // conjunct the dialect cannot spell is dropped (a superset, which the
+        // filters above re-apply); nothing left means nothing to push.
+        let lance_expr = lance_expr.sql_pushable();
+        if lance_expr.is_trivially_true() {
+            return None;
+        }
+        let lance_str = lance_expr.to_sql().ok()?;
 
         // Build the Arrow-side PhysicalExpr from the same predicates. The
         // GraphScanExec applies it to the merged (Lance+L0) batch so the
@@ -2484,15 +2573,28 @@ impl HybridPhysicalPlanner {
     }
 
     /// Plan a vector KNN search.
+    ///
+    /// `k` is `None` when no `LIMIT` sized the search; the configured default
+    /// (`UniConfig::vector_knn_default_k`) applies, and the exec warns when
+    /// it returns exactly that many rows.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per `LogicalPlan::VectorKnn` field plus the property map"
+    )]
     fn plan_vector_knn(
         &self,
         label_id: u16,
         variable: &str,
         property: &str,
         query_expr: Expr,
-        k: usize,
+        k: Option<usize>,
+        optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        let (k, k_defaulted) = match k {
+            Some(k) => (k, false),
+            None => (self.graph_ctx.vector_knn_default_k(), true),
+        };
         let label_name = self
             .schema
             .label_name_by_id(label_id)
@@ -2550,6 +2652,7 @@ impl HybridPhysicalPlanner {
                 target_properties,
             )
         };
+        let knn = knn.with_k_defaulted(k_defaulted).with_optional(optional);
 
         // SSI read-set: a vector-KNN result is a set of *real* graph vertices
         // (the exec emits `{variable}._vid` from the native/plugin index over the
@@ -2753,12 +2856,35 @@ impl HybridPhysicalPlanner {
         // `apply_scan_filter` below) is harmless and keeps residual conjuncts
         // (e.g. non-indexed multi-property AND) correct.
         let scan_schema_for_idx = scan_exec.schema();
-        if let Some((lance_str, runtime_filter)) =
-            self.build_indexed_property_pushdown(filter, variable, label_id, &scan_schema_for_idx)
-        {
-            scan_exec = scan_exec
-                .with_extra_lance_filter(lance_str)
-                .with_extra_runtime_filter(runtime_filter);
+        let indexed =
+            self.build_indexed_property_pushdown(filter, variable, label_id, &scan_schema_for_idx);
+        // `(n:L {ext_id: 'x'})` / `WHERE n.ext_id = 'x'`: `ext_id` is never a
+        // declared property, so the analyzer above cannot see it, but every
+        // per-label table carries it as a BTree-indexed column (A10). Pushed
+        // as Lance SQL only, like the unlabelled scan's: the outer
+        // `FilterExec` re-applies it to every row, unflushed ones included.
+        let ext_id_lance = ext_id_equality(filter, variable, &self.params)
+            .map(|ext_id| {
+                uni_store::backend::types::FilterExpr::equals(
+                    uni_store::storage::property_builder::EXT_ID_COLUMN,
+                    uni_store::backend::types::Scalar::Str(ext_id),
+                )
+                .to_sql()
+                .map_err(|e| anyhow!("ext_id pushdown: {e}"))
+            })
+            .transpose()?;
+        match (indexed, ext_id_lance) {
+            (Some((lance_str, runtime_filter)), ext) => {
+                let lance_str = match ext {
+                    Some(e) => format!("({lance_str}) AND ({e})"),
+                    None => lance_str,
+                };
+                scan_exec = scan_exec
+                    .with_extra_lance_filter(lance_str)
+                    .with_extra_runtime_filter(runtime_filter);
+            }
+            (None, Some(e)) => scan_exec = scan_exec.with_extra_lance_filter(e),
+            (None, None) => {}
         }
         let mut scan_plan: Arc<dyn ExecutionPlan> = Arc::new(scan_exec);
 
@@ -3056,14 +3182,20 @@ impl HybridPhysicalPlanner {
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let (properties, need_full) = Self::resolve_schemaless_properties(variable, all_properties);
-        let scan_plan: Arc<dyn ExecutionPlan> =
-            Arc::new(GraphScanExec::new_schemaless_vertex_scan(
+        let scan_plan: Arc<dyn ExecutionPlan> = Arc::new(
+            GraphScanExec::new_schemaless_vertex_scan(
                 self.graph_ctx.clone(),
                 label_name.to_string(),
                 variable.to_string(),
                 properties.clone(),
                 None,
-            ));
+            )
+            .with_schemaless_l0_prefilter(schemaless_l0_prefilter(
+                filter,
+                variable,
+                &self.params,
+            )),
+        );
         self.finalize_schemaless_scan(
             scan_plan,
             variable,
@@ -3125,14 +3257,20 @@ impl HybridPhysicalPlanner {
         if virtual_labels.is_empty() {
             let (properties, need_full) =
                 Self::resolve_schemaless_properties(variable, all_properties);
-            let scan_plan: Arc<dyn ExecutionPlan> =
-                Arc::new(GraphScanExec::new_multi_label_vertex_scan(
+            let scan_plan: Arc<dyn ExecutionPlan> = Arc::new(
+                GraphScanExec::new_multi_label_vertex_scan(
                     self.graph_ctx.clone(),
                     labels.to_vec(),
                     variable.to_string(),
                     properties.clone(),
                     None,
-                ));
+                )
+                .with_schemaless_l0_prefilter(schemaless_l0_prefilter(
+                    filter,
+                    variable,
+                    &self.params,
+                )),
+            );
             return self.finalize_schemaless_scan(
                 scan_plan,
                 variable,
@@ -3615,7 +3753,12 @@ impl HybridPhysicalPlanner {
             variable.to_string(),
             properties.clone(),
             scan_filter,
-        );
+        )
+        .with_schemaless_l0_prefilter(schemaless_l0_prefilter(
+            filter,
+            variable,
+            &self.params,
+        ));
         if let Some(vids) = extracted_vids
             && vids.len() > 1
         {
@@ -4049,7 +4192,7 @@ impl HybridPhysicalPlanner {
 
                 // VLP: extract simple property equality conditions for L0 checking
                 let edge_property_conditions = edge_filter_expr
-                    .map(Self::extract_edge_property_conditions)
+                    .map(|e| self.extract_edge_property_conditions(e))
                     .unwrap_or_default();
 
                 // The same extraction applied to the *target* node's predicate,
@@ -4059,7 +4202,7 @@ impl HybridPhysicalPlanner {
                 // applies `target_filter` and remains the authoritative check,
                 // which is what lets the narrowing be conservative.
                 let target_property_conditions = target_filter
-                    .map(Self::extract_edge_property_conditions)
+                    .map(|e| self.extract_edge_property_conditions(e))
                     .unwrap_or_default();
 
                 // VLP: collect used edge columns for cross-pattern relationship uniqueness
@@ -4123,12 +4266,12 @@ impl HybridPhysicalPlanner {
                                 edge_conditions: s
                                     .edge_filter_expr
                                     .as_ref()
-                                    .map(Self::extract_edge_property_conditions)
+                                    .map(|e| self.extract_edge_property_conditions(e))
                                     .unwrap_or_default(),
                                 target_conditions: s
                                     .target_property_expr
                                     .as_ref()
-                                    .map(Self::extract_edge_property_conditions)
+                                    .map(|e| self.extract_edge_property_conditions(e))
                                     .unwrap_or_default(),
                             })
                             .collect()
@@ -4495,7 +4638,7 @@ impl HybridPhysicalPlanner {
 
         // VLP: extract edge property conditions for BFS-level filtering
         let edge_property_conditions = edge_filter_expr
-            .map(Self::extract_edge_property_conditions)
+            .map(|e| self.extract_edge_property_conditions(e))
             .unwrap_or_default();
 
         // VLP: collect used edge columns for cross-pattern relationship uniqueness
@@ -4570,7 +4713,7 @@ impl HybridPhysicalPlanner {
         // is exactly what this extractor supports — the same conversion the
         // variable-length path performs before building its `EidFilter`.
         let edge_property_conditions = edge_filter_expr
-            .map(Self::extract_edge_property_conditions)
+            .map(|e| self.extract_edge_property_conditions(e))
             .unwrap_or_default();
 
         Ok(Arc::new(GraphShortestPathExec::new(
@@ -4908,29 +5051,53 @@ impl HybridPhysicalPlanner {
             return Ok(Some(plan));
         }
 
-        let filter = if rechecks.is_empty() {
-            None
-        } else {
-            Some(self.build_recheck_join_filter(
-                &rechecks,
+        // A7: sideways information passing. When one side is a scan joined on
+        // an indexed property, look it up by the other side's key values
+        // instead of scanning it whole (`PropertyLookupJoinExec`). Same
+        // exactness conditions as the vid lookup above; a cross-side residual
+        // is applied above it exactly as above the hash join, and only an
+        // INNER join can carry one (outer joins bailed earlier).
+        let lookup = if matches!(join_type, JoinType::Inner | JoinType::Left) && rechecks.is_empty()
+        {
+            self.try_emit_property_lookup_join(
+                &cls.equi_pairs,
+                join_type,
                 &left_plan,
                 &right_plan,
                 &left_with_filter,
                 &right_with_filter,
-            )?)
+            )?
+        } else {
+            None
         };
 
-        let join: Arc<dyn ExecutionPlan> = Arc::new(HashJoinExec::try_new(
-            left_plan,
-            right_plan,
-            on,
-            filter,
-            &join_type,
-            None,
-            PartitionMode::CollectLeft,
-            NullEquality::NullEqualsNothing,
-            false,
-        )?);
+        let join: Arc<dyn ExecutionPlan> = match lookup {
+            Some(lookup) => lookup,
+            None => {
+                let filter = if rechecks.is_empty() {
+                    None
+                } else {
+                    Some(self.build_recheck_join_filter(
+                        &rechecks,
+                        &left_plan,
+                        &right_plan,
+                        &left_with_filter,
+                        &right_with_filter,
+                    )?)
+                };
+                Arc::new(HashJoinExec::try_new(
+                    left_plan,
+                    right_plan,
+                    on,
+                    filter,
+                    &join_type,
+                    None,
+                    PartitionMode::CollectLeft,
+                    NullEquality::NullEqualsNothing,
+                    false,
+                )?)
+            }
+        };
 
         // Apply mixed-non-equi residual (predicates referencing both sides
         // that aren't equi-joins) as a post-join FilterExec.
@@ -5202,6 +5369,197 @@ impl HybridPhysicalPlanner {
             probe_side,
             compiled,
             join_kind,
+        )?)))
+    }
+
+    /// A7: emit `PropertyLookupJoinExec` for an equi-join whose probe side is
+    /// a scan keyed on an indexed property. Returns `Ok(None)` for any shape it
+    /// does not take; the caller then emits the hash join.
+    ///
+    /// Conditions, each of which keeps the rewrite exact (see the module docs
+    /// of `property_lookup_join`):
+    ///
+    /// - some equi-pair has, on one side, `v.prop` where that side plans to a
+    ///   row-wise chain over a per-label `GraphScanExec` of `v`, and `prop` has
+    ///   an online Hash or BTree scalar index on the scan's label;
+    /// - every equi-pair compiles to a bare column on both sides of one data
+    ///   type (with no re-check, the caller's guard, that is an exact native
+    ///   key), and the anchor's type is a string or `Int64`;
+    /// - the join is INNER, or LEFT with the probe on the right (only build
+    ///   rows can be null-padded).
+    ///
+    /// When both sides qualify, the side whose scan carries no pushed filter
+    /// is probed: a filtered scan is the anchored, smaller side.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if compiling a join key fails.
+    fn try_emit_property_lookup_join(
+        &self,
+        equi_pairs: &[(Expr, Expr)],
+        join_type: JoinType,
+        left_plan: &Arc<dyn ExecutionPlan>,
+        right_plan: &Arc<dyn ExecutionPlan>,
+        left_logical: &LogicalPlan,
+        right_logical: &LogicalPlan,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        use crate::query::df_graph::property_lookup_join::{
+            LookupKeyType, ProbeKey, PropertyLookupJoinExec, probe_scan,
+        };
+        use crate::query::df_graph::vid_lookup_join::{EquiPair, ProbeSide, VidJoinKind};
+        use datafusion::physical_expr::expressions::Column;
+
+        // Nothing to look up unless some side is a plain user property.
+        let is_property_key = |e: &Expr| {
+            matches!(e, Expr::Property(base, prop)
+                if !prop.starts_with('_') && matches!(base.as_ref(), Expr::Variable(_)))
+        };
+        if !equi_pairs
+            .iter()
+            .any(|(l, r)| is_property_key(l) || is_property_key(r))
+        {
+            return Ok(None);
+        }
+
+        // Compile every pair to (left column, right column); any computed key
+        // keeps the hash join. Entity equality is keyed on identity, exactly as
+        // the caller keys the hash join (`identity_join_key`).
+        let left_schema = left_plan.schema();
+        let right_schema = right_plan.schema();
+        let left_ctx = self.translation_context_for_plan(left_logical);
+        let right_ctx = self.translation_context_for_plan(right_logical);
+        let equi_pairs: Vec<(Expr, Expr)> = equi_pairs
+            .iter()
+            .map(|(l, r)| {
+                identity_join_key(l, r, &left_ctx, &right_ctx)
+                    .unwrap_or_else(|| (l.clone(), r.clone()))
+            })
+            .collect();
+        let compiled: Vec<EquiPair> = {
+            let session = self.session_ctx.read();
+            let state = session.state();
+            let left_compiler = self.expr_compiler(&state, Some(&left_ctx));
+            let right_compiler = self.expr_compiler(&state, Some(&right_ctx));
+            let mut compiled = Vec::with_capacity(equi_pairs.len());
+            for (l_expr, r_expr) in &equi_pairs {
+                let l_phys = left_compiler.compile(l_expr, &left_schema)?;
+                let r_phys = right_compiler.compile(r_expr, &right_schema)?;
+                let (Some(l_col), Some(r_col)) = (
+                    l_phys.downcast_ref::<Column>(),
+                    r_phys.downcast_ref::<Column>(),
+                ) else {
+                    return Ok(None);
+                };
+                if left_schema.field(l_col.index()).data_type()
+                    != right_schema.field(r_col.index()).data_type()
+                {
+                    return Ok(None);
+                }
+                compiled.push(EquiPair {
+                    left_col_idx: l_col.index(),
+                    right_col_idx: r_col.index(),
+                });
+            }
+            compiled
+        };
+
+        // Candidate anchors: (pair index, probe side, probe plan, key, filtered).
+        let mut candidates = Vec::new();
+        for (i, (l_expr, r_expr)) in equi_pairs.iter().enumerate() {
+            for (side, expr, plan) in [
+                (ProbeSide::Left, l_expr, left_plan),
+                (ProbeSide::Right, r_expr, right_plan),
+            ] {
+                let Expr::Property(base, prop) = expr else {
+                    continue;
+                };
+                let Expr::Variable(var) = base.as_ref() else {
+                    continue;
+                };
+                if prop.starts_with('_') {
+                    continue;
+                }
+                let join_kind = match (join_type, side) {
+                    (JoinType::Inner, _) => VidJoinKind::Inner,
+                    (JoinType::Left, ProbeSide::Right) => VidJoinKind::Left,
+                    _ => continue,
+                };
+                // A LEFT probe is the optional side, wrapped by `wrap_optional`;
+                // the operator null-pads unmatched build rows itself.
+                let plan = if join_kind == VidJoinKind::Left {
+                    Self::unwrap_optional_scan(plan)
+                } else {
+                    plan.clone()
+                };
+                let key_column = format!("{var}.{prop}");
+                let Some(scan) = probe_scan(&plan, &key_column) else {
+                    continue;
+                };
+                let (label, scan_var, schemaless) = scan.scan_target();
+                if schemaless || scan_var != var {
+                    continue;
+                }
+                let indexed = self
+                    .schema
+                    .scalar_index_for_property(label, prop)
+                    .is_some_and(|cfg| {
+                        matches!(
+                            cfg.index_type,
+                            uni_common::core::schema::ScalarIndexType::Hash
+                                | uni_common::core::schema::ScalarIndexType::BTree
+                        )
+                    });
+                if !indexed {
+                    continue;
+                }
+                let probe_idx = compiled[i].probe_col(side);
+                let probe_schema = plan.schema();
+                let field = probe_schema.field(probe_idx);
+                if field.name() != &key_column {
+                    continue;
+                }
+                let Some(key_type) = LookupKeyType::of(field.data_type()) else {
+                    continue;
+                };
+                // A pushed index filter or a residual `FilterExec` in the
+                // chain marks the anchored side; a read-set wrapper does not.
+                let mut filtered = scan.has_extra_lance_filter();
+                let mut node = plan.clone();
+                while !filtered && node.downcast_ref::<GraphScanExec>().is_none() {
+                    filtered = node.downcast_ref::<FilterExec>().is_some();
+                    let Some(child) = node.children().first().map(|c| Arc::clone(c)) else {
+                        break;
+                    };
+                    node = child;
+                }
+                candidates.push((
+                    i,
+                    side,
+                    plan,
+                    join_kind,
+                    ProbeKey::new(var, prop, key_type),
+                    filtered,
+                ));
+            }
+        }
+        // Unfiltered probe first; among equals the right side, the hash join's
+        // probe side.
+        candidates
+            .sort_by_key(|(_, side, _, _, _, filtered)| (*filtered, *side == ProbeSide::Left));
+        let Some((anchor_idx, probe_side, probe_plan, join_kind, probe_key, _)) =
+            candidates.into_iter().next()
+        else {
+            return Ok(None);
+        };
+
+        let mut pairs = compiled;
+        pairs.swap(0, anchor_idx);
+        let (left, right) = match probe_side {
+            ProbeSide::Left => (probe_plan, right_plan.clone()),
+            ProbeSide::Right => (left_plan.clone(), probe_plan),
+        };
+        Ok(Some(Arc::new(PropertyLookupJoinExec::try_new(
+            left, right, probe_side, pairs, join_kind, probe_key,
         )?)))
     }
 
@@ -5749,7 +6107,7 @@ impl HybridPhysicalPlanner {
                 // Convert logical expression to physical
                 create_physical_expr(&df_expr, &df_schema_ref, state.execution_props())?
             };
-            group_exprs.push((physical_expr, name));
+            group_exprs.push((float_equivalence_key(physical_expr, &schema)?, name));
         }
 
         // For entity variables (Node/Edge) in group_by, also include their
@@ -6725,16 +7083,17 @@ impl HybridPhysicalPlanner {
             let schema = coalesced.schema();
             let group_by_exprs: Vec<_> = (0..schema.fields().len())
                 .map(|i| {
-                    (
+                    let column: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
                         Arc::new(datafusion::physical_plan::expressions::Column::new(
                             schema.field(i).name(),
                             i,
-                        ))
-                            as Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+                        ));
+                    Ok((
+                        float_equivalence_key(column, &schema)?,
                         schema.field(i).name().clone(),
-                    )
+                    ))
                 })
-                .collect();
+                .collect::<Result<_>>()?;
 
             let group_by = PhysicalGroupBy::new_single(group_by_exprs);
 
@@ -7272,26 +7631,58 @@ impl HybridPhysicalPlanner {
     ///
     /// Returns `Vec<(property_name, expected_value)>` for use in L0 edge property
     /// checking during VLP BFS.
-    fn extract_edge_property_conditions(expr: &Expr) -> Vec<(String, uni_common::Value)> {
+    ///
+    /// Only a value [`is_walk_constant_map_value`] accepts — a literal or a
+    /// parameter — becomes a condition; any other conjunct is skipped. For a
+    /// relationship map that is not a pruning hint but the whole filter, so the
+    /// logical planner hands this extractor walk-constant entries only and
+    /// applies the rest as a residual `all(...)` over the step list. A
+    /// `{w: a.x}` that reached here used to be skipped with nothing after it,
+    /// and the walk admitted every edge.
+    ///
+    /// [`is_walk_constant_map_value`]: crate::query::planner::is_walk_constant_map_value
+    fn extract_edge_property_conditions(&self, expr: &Expr) -> Vec<(String, uni_common::Value)> {
+        // A map value is a literal or a query parameter. A parameter used to be
+        // skipped, which emptied the conditions and made `{w: $p}` match every
+        // edge, as if the map were not there.
+        let constant = |e: &Expr| match e {
+            Expr::Literal(lit) => Some(lit.to_value()),
+            Expr::Parameter(name) => Some(
+                self.params
+                    .get(name)
+                    .cloned()
+                    .unwrap_or(uni_common::Value::Null),
+            ),
+            _ => {
+                // The logical planner leaves a walk-constant value to this
+                // extractor and nothing else; one it cannot convert would be
+                // dropped silently.
+                debug_assert!(
+                    !crate::query::planner::is_walk_constant_map_value(e),
+                    "walk-constant map value the extractor cannot convert: {e:?}"
+                );
+                None
+            }
+        };
         match expr {
             Expr::BinaryOp {
                 left,
                 op: uni_cypher::ast::BinaryOp::Eq,
                 right,
             } => {
-                // Pattern: variable.prop = literal
+                // Pattern: variable.prop = constant
                 if let Expr::Property(inner, prop_name) = left.as_ref()
                     && matches!(inner.as_ref(), Expr::Variable(_))
-                    && let Expr::Literal(lit) = right.as_ref()
+                    && let Some(value) = constant(right)
                 {
-                    return vec![(prop_name.clone(), lit.to_value())];
+                    return vec![(prop_name.clone(), value)];
                 }
-                // Reverse: literal = variable.prop
-                if let Expr::Literal(lit) = left.as_ref()
+                // Reverse: constant = variable.prop
+                if let Some(value) = constant(left)
                     && let Expr::Property(inner, prop_name) = right.as_ref()
                     && matches!(inner.as_ref(), Expr::Variable(_))
                 {
-                    return vec![(prop_name.clone(), lit.to_value())];
+                    return vec![(prop_name.clone(), value)];
                 }
                 vec![]
             }
@@ -7300,8 +7691,8 @@ impl HybridPhysicalPlanner {
                 op: uni_cypher::ast::BinaryOp::And,
                 right,
             } => {
-                let mut result = Self::extract_edge_property_conditions(left);
-                result.extend(Self::extract_edge_property_conditions(right));
+                let mut result = self.extract_edge_property_conditions(left);
+                result.extend(self.extract_edge_property_conditions(right));
                 result
             }
             _ => vec![],
@@ -10082,6 +10473,42 @@ fn wrap_with_unary_udf(
         return_field,
         config_options,
     ))
+}
+
+/// Key a float grouping expression on its Cypher equivalence class.
+///
+/// `AggregateExec` hashes and compares a float key bit-exactly (IEEE total
+/// order), so `-0.0` and `0.0` formed two groups and NaNs with different sign
+/// bits two more. openCypher groups by equivalence: equality, under which
+/// `-0.0 = 0.0`, except that every NaN is one value (CIP2016-06-14).
+/// `_cypher_float_key` maps each class to one bit pattern and keeps the type,
+/// so the group's output column is unchanged apart from showing `0.0` for a
+/// group of zeros. A `CypherValue` column has the same defect through its
+/// encoded bytes and is keyed by `_cypher_value_key`. Other expressions are
+/// returned as they are.
+///
+/// # Errors
+///
+/// Returns an error if the expression's type cannot be determined.
+fn float_equivalence_key(
+    expr: Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+    schema: &Schema,
+) -> Result<Arc<dyn datafusion::physical_plan::PhysicalExpr>> {
+    let field = expr.return_field(schema)?;
+    let dt = field.data_type().clone();
+    match dt {
+        DataType::Float32 | DataType::Float64 => {
+            let udf = Arc::new(crate::query::df_udfs::create_cypher_float_key_udf());
+            Ok(wrap_with_unary_udf(expr, udf, dt))
+        }
+        // A CypherValue groups by its bytes; raw `Bytes` columns share the
+        // type and must be left as they are.
+        DataType::LargeBinary if !field.metadata().contains_key("uni_raw_bytes") => {
+            let udf = Arc::new(crate::query::df_udfs::create_cypher_value_key_udf());
+            Ok(wrap_with_unary_udf(expr, udf, dt))
+        }
+        _ => Ok(expr),
+    }
 }
 
 /// One equi-pair lowered to hash-join keys.

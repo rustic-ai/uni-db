@@ -1815,6 +1815,56 @@ fn bind_outer_row_in_place(plan: &mut LogicalPlan, outer: &arrow_schema::Schema)
     }
 }
 
+/// Computes the arguments of an in-query procedure call on its input row.
+///
+/// A procedure called with an input row evaluates its arguments per row with
+/// a constant evaluator that reads only literals, parameters, built-in scalar
+/// functions of those, and a bare variable (a node as its VID). Anything that
+/// reads the row through an entity — `a.x`, `labels(a)`, `a:L`, `EXISTS {…}`,
+/// `startNode(r)` — has no meaning there. Each such argument becomes a column
+/// of a projection over `input`, which every other variable in `scope` passes
+/// through unchanged, and the call reads that column by name instead.
+///
+/// Returns `input` and `arguments` unchanged when no argument needs it, so a
+/// call whose arguments are constants or bare variables keeps its plan shape.
+/// The column names (`__proc_arg_{clause}_{i}`) are never in the query's
+/// scope, so `RETURN *` does not list them.
+fn hoist_procedure_arguments(
+    input: LogicalPlan,
+    arguments: &[Expr],
+    scope: &[VariableInfo],
+    clause_idx: usize,
+) -> (LogicalPlan, Vec<Expr>) {
+    let needs_row = |arg: &Expr| {
+        !matches!(arg, Expr::Variable(_))
+            && !crate::query::df_graph::common::is_simple_evaluable(arg)
+    };
+    if !arguments.iter().any(needs_row) {
+        return (input, arguments.to_vec());
+    }
+    let mut projections: Vec<(Expr, Option<String>)> = scope
+        .iter()
+        .map(|v| (Expr::Variable(v.name.clone()), Some(v.name.clone())))
+        .collect();
+    let rewritten = arguments
+        .iter()
+        .enumerate()
+        .map(|(i, arg)| {
+            if !needs_row(arg) {
+                return arg.clone();
+            }
+            let column = format!("__proc_arg_{clause_idx}_{i}");
+            projections.push((arg.clone(), Some(column.clone())));
+            Expr::Variable(column)
+        })
+        .collect();
+    let projected = LogicalPlan::Project {
+        input: Box::new(input),
+        projections,
+    };
+    (projected, rewritten)
+}
+
 /// Logical query plan produced by [`QueryPlanner`].
 ///
 /// Each variant represents one step in the Cypher execution pipeline.
@@ -2102,7 +2152,14 @@ pub enum LogicalPlan {
         variable: String,
         property: String,
         query: Expr,
-        k: usize,
+        /// `K`, when a `LIMIT` the search feeds directly sized it (`SKIP` +
+        /// `LIMIT`). `None` means `UniConfig::vector_knn_default_k`, resolved
+        /// at execution, which warns when the search returns exactly that
+        /// many rows. See `QueryPlanner::size_knn_from_limit`.
+        k: Option<usize>,
+        /// From `OPTIONAL MATCH`: emit one all-NULL row when no vertex
+        /// qualifies, as an optional `Scan` does.
+        optional: bool,
     },
     InvertedIndexLookup {
         label_id: u16,
@@ -2587,6 +2644,62 @@ fn and_predicates(preds: impl IntoIterator<Item = Expr>) -> Option<Expr> {
     })
 }
 
+/// Whether a pattern-map value can be tested by a graph walk with no input row.
+///
+/// A literal or a query parameter. This is exactly the set of values the
+/// physical planner's `extract_edge_property_conditions` turns into walk-time
+/// conditions; any other value — `a.x`, `a.x + 1`, `toInteger($p)` — must be
+/// applied by an ordinary filter, because the walk would skip it and admit
+/// every edge.
+pub(crate) fn is_walk_constant_map_value(expr: &Expr) -> bool {
+    matches!(expr, Expr::Literal(_) | Expr::Parameter(_))
+}
+
+/// Splits a relationship property map into walk-constant entries and the rest.
+///
+/// The first part is the map holding only the entries
+/// [`is_walk_constant_map_value`] accepts (`None` when there are none); the
+/// second is every other entry, in pattern order. A property map that is not
+/// a literal map is returned whole as the first part.
+fn split_walk_constant_entries(properties: &Option<Expr>) -> (Option<Expr>, Vec<(String, Expr)>) {
+    let Some(Expr::Map(entries)) = properties else {
+        return (properties.clone(), Vec::new());
+    };
+    let (constant, rest): (Vec<_>, Vec<_>) = entries
+        .iter()
+        .cloned()
+        .partition(|(_, value)| is_walk_constant_map_value(value));
+    ((!constant.is_empty()).then_some(Expr::Map(constant)), rest)
+}
+
+/// Whether a relationship pattern's property map has an entry a walk cannot test.
+fn has_non_walk_constant_entry(properties: &Option<Expr>) -> bool {
+    !split_walk_constant_entries(properties).1.is_empty()
+}
+
+/// Splits a node property map into entries naming only `variable` (or no
+/// variable) and entries naming any other variable.
+///
+/// A map that is not a literal map is returned whole as the first part, as
+/// [`split_walk_constant_entries`] does; `plan_unbound_node` rejects one
+/// before a traversal is planned.
+fn split_target_map_entries(
+    variable: &str,
+    properties: &Option<Expr>,
+) -> (Option<Expr>, Option<Expr>) {
+    let Some(Expr::Map(entries)) = properties else {
+        return (properties.clone(), None);
+    };
+    let (own, other): (Vec<_>, Vec<_>) = entries
+        .iter()
+        .cloned()
+        .partition(|(_, value)| collect_expr_variables(value).iter().all(|v| v == variable));
+    (
+        (!own.is_empty()).then_some(Expr::Map(own)),
+        (!other.is_empty()).then_some(Expr::Map(other)),
+    )
+}
+
 /// A `n.prop ~= query` predicate the planner can serve with a top-K index scan.
 struct KnnPredicate {
     variable: String,
@@ -2652,6 +2765,48 @@ fn extract_knn_predicate(expr: &Expr) -> Option<KnnExtraction> {
         return Some(extraction);
     }
     None
+}
+
+/// Refuses a `~=` that `plan_where_clause` could not plan as a vector scan.
+///
+/// `n.prop ~= q` means "`n` is among the top-K neighbors of `q` in `n`'s
+/// label". That is a property of the label's vector index, not of a row, so
+/// it can only be answered by replacing `n`'s own label scan with the index
+/// scan. When that scan is not reachable — `n` is bound by an earlier clause
+/// behind a `LIMIT`, a traversal target, an imported variable, or the query
+/// vector depends on the row — the predicate used to fall through to the
+/// executor, which failed with an opaque compiler error. Fail at planning
+/// instead, naming the per-row alternative.
+///
+/// # Errors
+///
+/// When `predicate` still contains `~=`.
+fn reject_unplanned_approx_eq(predicate: &Expr) -> Result<()> {
+    fn contains_approx_eq(expr: &Expr) -> bool {
+        if matches!(
+            expr,
+            Expr::BinaryOp {
+                op: BinaryOp::ApproxEq,
+                ..
+            }
+        ) {
+            return true;
+        }
+        let mut found = false;
+        expr.for_each_child(&mut |child| found = found || contains_approx_eq(child));
+        found
+    }
+    if contains_approx_eq(predicate) {
+        return Err(anyhow!(
+            "`~=` is a top-K vector index scan over a node pattern's label, and here it cannot \
+             replace that scan (the variable is bound by an earlier clause, a relationship \
+             pattern, a subquery import, or after a LIMIT; or the query vector is not a \
+             constant, or the `~=` is not a top-level AND conjunct). To filter rows by \
+             similarity, compare `vector_similarity(n.prop, q)` with a threshold, or rank them \
+             with `ORDER BY vector_similarity(n.prop, q) DESC LIMIT k`."
+        ));
+    }
+    Ok(())
 }
 
 /// Helper to combine an optional expression with another using AND
@@ -2754,7 +2909,9 @@ pub(crate) enum WhereScope {
 /// gated on whether the rewriter can actually apply it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RewriteTarget {
-    /// `replace_scan_with_knn`: base `Scan(var)`; descends Filter/Project/Limit/CrossJoin.
+    /// `replace_scan_with_knn`: base `Scan(var)`; descends Filter/Project/CrossJoin.
+    /// Never `Limit`: a top-K scan below a `LIMIT` its `WHERE` sits above would
+    /// choose the rows that `LIMIT` keeps.
     Knn,
     /// `push_predicate_to_scan`: base `Scan|ScanAll(var)`; descends Filter/Project/CrossJoin/Traverse.
     Scan,
@@ -3625,7 +3782,7 @@ impl QueryPlanner {
         // SKIP/LIMIT last — applied to the projected, deduplicated rows.
         if let Some((skip, fetch)) = skip_limit {
             plan = LogicalPlan::Limit {
-                input: Box::new(plan),
+                input: Box::new(Self::size_knn_from_limit(plan, skip, fetch)),
                 skip,
                 fetch,
             };
@@ -3770,6 +3927,9 @@ impl QueryPlanner {
                                 yield_names.push(output_name.clone());
                             }
 
+                            // The variables the arguments may read: the input
+                            // row's, before the YIELD names join the scope.
+                            let argument_scope = vars_in_scope.clone();
                             let mut yields = Vec::new();
                             for item in &call_clause.yield_items {
                                 if item.name == "*" {
@@ -3835,23 +3995,34 @@ impl QueryPlanner {
                             } else {
                                 procedure.clone()
                             };
-                            let proc_plan = LogicalPlan::ProcedureCall {
-                                procedure_name,
-                                arguments: arguments.clone(),
-                                yield_items: yields.clone(),
-                            };
-
                             if matches!(plan, LogicalPlan::Empty) {
                                 // Standalone CALL (first clause) — use directly
-                                plan = proc_plan;
+                                plan = LogicalPlan::ProcedureCall {
+                                    procedure_name,
+                                    arguments: arguments.clone(),
+                                    yield_items: yields.clone(),
+                                };
                             } else if yields.is_empty() {
                                 // In-query CALL with no YIELD (void procedure):
                                 // preserve the input rows unchanged
                             } else {
-                                // In-query CALL with YIELD: cross-join input × procedure output
+                                // In-query CALL with YIELD: cross-join input × procedure output.
+                                // The per-row argument evaluator reads only constants
+                                // and bare variables, so every other argument is
+                                // computed on the input row first.
+                                let (input, arguments) = hoist_procedure_arguments(
+                                    plan,
+                                    arguments,
+                                    &argument_scope,
+                                    clause_idx,
+                                );
                                 plan = LogicalPlan::Apply {
-                                    input: Box::new(plan),
-                                    subquery: Box::new(proc_plan),
+                                    input: Box::new(input),
+                                    subquery: Box::new(LogicalPlan::ProcedureCall {
+                                        procedure_name,
+                                        arguments,
+                                        yield_items: yields.clone(),
+                                    }),
                                     input_filter: None,
                                 };
                             }
@@ -4741,6 +4912,18 @@ impl QueryPlanner {
             return Err(anyhow!("Empty pattern"));
         }
 
+        // A map entry naming another variable of this pattern is evaluated in
+        // the clause's WHERE, where every pattern variable is bound; see
+        // `defer_pattern_bound_map_values`.
+        let deferred;
+        let match_clause = match self.defer_pattern_bound_map_values(match_clause, vars_in_scope) {
+            Some(clause) => {
+                deferred = clause;
+                &deferred
+            }
+            None => match_clause,
+        };
+
         // OPTIONAL MATCH: labels and a property map written on a node an
         // earlier clause bound constrain the optional pattern, so a row they
         // reject must be null-extended. Planned in place they became a plain
@@ -4939,6 +5122,118 @@ impl QueryPlanner {
         }
         Some(MatchClause {
             pattern,
+            ..clause.clone()
+        })
+    }
+
+    /// `clause` with every map entry naming a variable of its own pattern moved into its `WHERE`.
+    ///
+    /// A pattern property map is a predicate over the whole match, as its
+    /// `WHERE` spelling is, so its value may name any variable the match
+    /// binds: `(a)-[:R]->(b {x: a.x})`, `(a {x: b.x})-[:R]->(b)`,
+    /// `-[rs:R* {w: b.x}]->(b)`. Planned in place, an entry naming a variable
+    /// the planner had not bound yet failed with "No field named …" — which
+    /// variables are bound first depends on the path's anchoring, not on the
+    /// text. In `WHERE` every pattern variable is bound. A node or single-hop
+    /// entry `k: v` becomes `e.k = v`; a variable-length one becomes
+    /// `all(x IN e WHERE x.k = v)`, since its map constrains every
+    /// relationship. An anonymous element is given a hidden name.
+    ///
+    /// Left in place: entries naming only the element itself or variables
+    /// from earlier clauses (planned where they are), entries inside a
+    /// quantified sub-pattern (per-iteration, refused when not walk-constant),
+    /// and a shortest-path relationship's map, which must gate the search and
+    /// is refused when not walk-constant. `None` when nothing moves.
+    fn defer_pattern_bound_map_values(
+        &self,
+        clause: &MatchClause,
+        bound: &[VariableInfo],
+    ) -> Option<MatchClause> {
+        fn declared(elements: &[PatternElement], out: &mut HashSet<String>) {
+            for element in elements {
+                match element {
+                    PatternElement::Node(n) => out.extend(n.variable.clone()),
+                    PatternElement::Relationship(r) => out.extend(r.variable.clone()),
+                    PatternElement::Parenthesized { pattern, .. } => {
+                        out.extend(pattern.variable.clone());
+                        declared(&pattern.elements, out);
+                    }
+                }
+            }
+        }
+        let mut pattern_vars = HashSet::new();
+        for path in &clause.pattern.paths {
+            pattern_vars.extend(path.variable.clone());
+            declared(&path.elements, &mut pattern_vars);
+        }
+        pattern_vars.retain(|v| !v.is_empty() && !is_var_in_scope(bound, v));
+        if pattern_vars.is_empty() {
+            return None;
+        }
+
+        // Splits `properties` into the entries that stay and the entries that
+        // name a pattern variable other than `own`.
+        let split = |properties: &Option<Expr>, own: Option<&str>| {
+            let Some(Expr::Map(entries)) = properties else {
+                return None;
+            };
+            let (moved, kept): (Vec<_>, Vec<_>) =
+                entries.iter().cloned().partition(|(_, value)| {
+                    collect_expr_variables(value)
+                        .iter()
+                        .any(|v| Some(v.as_str()) != own && pattern_vars.contains(v))
+                });
+            (!moved.is_empty()).then(|| {
+                let kept = (!kept.is_empty()).then_some(Expr::Map(kept));
+                (kept, moved)
+            })
+        };
+
+        let mut predicates = Vec::new();
+        let mut pattern = clause.pattern.clone();
+        for path in &mut pattern.paths {
+            let shortest = path.shortest_path_mode.is_some();
+            for element in &mut path.elements {
+                match element {
+                    PatternElement::Node(n) => {
+                        let own = n.variable.as_deref().filter(|v| !v.is_empty());
+                        let Some((kept, moved)) = split(&n.properties, own) else {
+                            continue;
+                        };
+                        let name = own.map_or_else(|| self.next_anon_var(), str::to_string);
+                        n.variable = Some(name.clone());
+                        n.properties = kept;
+                        predicates.extend(self.properties_to_expr(&name, &Some(Expr::Map(moved))));
+                    }
+                    PatternElement::Relationship(r) => {
+                        if shortest && r.range.is_some() {
+                            continue;
+                        }
+                        let own = r.variable.as_deref().filter(|v| !v.is_empty());
+                        let Some((kept, moved)) = split(&r.properties, own) else {
+                            continue;
+                        };
+                        let name = own.map_or_else(|| self.next_anon_var(), str::to_string);
+                        r.variable = Some(name.clone());
+                        r.properties = kept;
+                        predicates.extend(if r.range.is_some() {
+                            self.every_relationship_satisfies(&name, moved)
+                        } else {
+                            self.properties_to_expr(&name, &Some(Expr::Map(moved)))
+                        });
+                    }
+                    PatternElement::Parenthesized { .. } => {}
+                }
+            }
+        }
+        if predicates.is_empty() {
+            return None;
+        }
+        let where_clause =
+            and_predicates(predicates.into_iter().chain(clause.where_clause.clone()))?;
+        Some(MatchClause {
+            pattern,
+            where_clause: Some(where_clause),
             ..clause.clone()
         })
     }
@@ -5158,6 +5453,19 @@ impl QueryPlanner {
         // projected column, so the `"__anon_edge"` sentinel used by the
         // variable-length path (see `plan_traverse_with_source`) is sufficient
         // when the relationship binds no variable of its own. Issue #166.
+        //
+        // The search tests only walk-constant entries (literals, parameters).
+        // Any other — `{w: a.x}` — was skipped and the search admitted every
+        // edge; a filter after the search cannot stand in for it, by the
+        // argument above, so it is refused.
+        if has_non_walk_constant_entry(&rel.properties) {
+            return Err(anyhow!(
+                "A relationship property map in shortestPath/allShortestPaths supports \
+                 only literal and parameter values; a value computed from a variable or \
+                 an expression is not supported there, because it must gate the search \
+                 rather than filter its result"
+            ));
+        }
         let step_var = rel.variable.clone().filter(|v| !v.is_empty());
         let edge_filter_expr = {
             let edge_var = step_var
@@ -5224,14 +5532,29 @@ impl QueryPlanner {
                 };
 
             if let Some(target_label_id) = target_label_id {
+                // An entry naming another variable — `(b {x: a.x})` — cannot be
+                // evaluated by the target's own scan; it filters the join.
+                let (scan_filter, residual) =
+                    self.split_node_property_filters_for_scan(&target_var, &target_node.properties);
                 let target_scan = LogicalPlan::Scan {
                     label_id: target_label_id,
                     labels: target_node.labels.names().to_vec(),
                     variable: target_var.clone(),
-                    filter: self.properties_to_expr(&target_var, &target_node.properties),
+                    filter: scan_filter,
                     optional,
                 };
                 plan = Self::join_with_plan(plan, target_scan);
+                if let Some(predicate) = residual {
+                    plan = LogicalPlan::Filter {
+                        input: Box::new(plan),
+                        predicate,
+                        optional_variables: if optional {
+                            HashSet::from([target_var.clone()])
+                        } else {
+                            HashSet::new()
+                        },
+                    };
+                }
                 target_label_id
             } else {
                 // A label the schema does not declare: scan it schemalessly,
@@ -5518,9 +5841,11 @@ impl QueryPlanner {
     /// with separate `fwd`/`bwd` datasets.
     ///
     /// Deliberately narrow. A bound node in the *middle* is a join-ordering
-    /// problem that reversal does not solve, and paths carrying a path variable,
-    /// a quantified segment, or a shortestPath mode are left alone rather than
-    /// reversed with their accompanying machinery.
+    /// problem that reversal does not solve, and a shortestPath mode or a
+    /// quantified segment that names its interior is left alone rather than
+    /// reversed with its accompanying machinery. A path variable is reversed
+    /// only over fixed-length hops, where `plan_path` can un-reverse its binding
+    /// (see [`Self::reversed_for_bound_anchor_keeping_path`]).
     ///
     /// # An equality predicate anchors too
     ///
@@ -5608,8 +5933,46 @@ impl QueryPlanner {
         where_anchored: &HashMap<String, String>,
     ) -> Option<PathPattern> {
         // A path variable binds nodes and edges in traversal order, so a
-        // reversed plan would bind `p` backwards. Out of scope here.
-        if path.variable.is_some() || path.shortest_path_mode.is_some() {
+        // reversed plan would bind `p` backwards. Callers that bind a path
+        // variable themselves use `reversed_for_bound_anchor_keeping_path`,
+        // which un-reverses the binding; this entry point (MERGE) does not.
+        if path.variable.is_some() {
+            return None;
+        }
+        self.reversed_for_bound_anchor_keeping_path(path, vars_in_scope, where_anchored)
+    }
+
+    /// [`Self::reversed_for_bound_anchor`], also for a fixed-length path that
+    /// binds a path variable (A6 of the 2026-10-17 perf-class audit).
+    ///
+    /// The reversed pattern keeps the path variable. `plan_path` collects the
+    /// path's node and edge variables in traversal order, so for a reversed
+    /// walk it reverses those lists before building `BindPath` — which makes
+    /// `p` the same value the written order binds: nodes and relationships in
+    /// written order, and each relationship's direction taken from its stored
+    /// endpoints (`BindFixedPathExec` resolves those per edge, independent of
+    /// traversal direction).
+    ///
+    /// Only fixed-length hops qualify. A variable-length segment builds its
+    /// part of the path inside the traversal, in traversal order, and a
+    /// quantified segment binds group lists in traversal order; neither is
+    /// un-reversed here, so such a named path is left as written.
+    pub(crate) fn reversed_for_bound_anchor_keeping_path(
+        &self,
+        path: &PathPattern,
+        vars_in_scope: &[VariableInfo],
+        where_anchored: &HashMap<String, String>,
+    ) -> Option<PathPattern> {
+        if path.shortest_path_mode.is_some() {
+            return None;
+        }
+        if path.variable.is_some()
+            && !path.elements.iter().all(|element| match element {
+                PatternElement::Node(_) => true,
+                PatternElement::Relationship(rel) => rel.range.is_none(),
+                PatternElement::Parenthesized { .. } => false,
+            })
+        {
             return None;
         }
         // Fewer than three elements is a bare node: nothing to reorder.
@@ -5679,7 +6042,7 @@ impl QueryPlanner {
         }
 
         Some(PathPattern {
-            variable: None,
+            variable: path.variable.clone(),
             elements: Self::reversed_elements(&path.elements),
             shortest_path_mode: None,
         })
@@ -5930,13 +6293,20 @@ impl QueryPlanner {
 
         // Start the walk at the bound end when the pattern was written from the
         // unbound one; see `reversed_for_bound_anchor`.
+        //
+        // A named fixed-length path reverses too (A6); its binding is
+        // un-reversed where `BindPath` is built below.
         let reversed_storage;
-        let path = match self.reversed_for_bound_anchor(path, vars_in_scope, where_anchored) {
+        let (path, walk_reversed) = match self.reversed_for_bound_anchor_keeping_path(
+            path,
+            vars_in_scope,
+            where_anchored,
+        ) {
             Some(reversed) => {
                 reversed_storage = reversed;
-                &reversed_storage
+                (&reversed_storage, true)
             }
-            None => path,
+            None => (path, false),
         };
 
         let mut plan = plan;
@@ -6328,13 +6698,43 @@ impl QueryPlanner {
                                 rel.variable.as_ref().is_none_or(|v| v.is_empty())
                                     && node.variable.as_ref().is_none_or(|v| v.is_empty())
                             }));
+                    // An inner target's property map constrains the node every
+                    // hop reaches. The plain variable-length path reads only the
+                    // outer target's map, so `(()-[:R]->({x: 1})){1,3}(b)`
+                    // matched every intermediate node; the per-hop path below
+                    // applies it.
+                    let inner_target_has_map = matches!(
+                        &inner_target_node.properties,
+                        Some(Expr::Map(entries)) if !entries.is_empty()
+                    );
                     let use_simple_vlp = qpp_rels.len() == 1
                         && inner_is_anonymous
+                        && !inner_target_has_map
                         && inner_target_node
                             .labels
                             .first()
                             .and_then(|l| self.schema.get_label_case_insensitive(l))
                             .is_none();
+
+                    // An inner source's property map constrains the first node
+                    // of every iteration, but only the first iteration's (the
+                    // outer source) was ever checked, so `(({x: 1})-[:R]->()){1,3}`
+                    // admitted intermediate nodes that fail it. The walk has
+                    // no per-iteration source check to carry it, so refuse.
+                    if is_quantified
+                        && matches!(
+                            &source_node.properties,
+                            Some(Expr::Map(entries)) if !entries.is_empty()
+                        )
+                    {
+                        return Err(anyhow!(
+                            "A property map on the first node inside a quantified path \
+                             pattern is not supported: it would constrain the start of \
+                             every iteration, and only the first is checked. Put the map \
+                             on the preceding node, or filter the path in WHERE, e.g. \
+                             `WHERE all(n IN nodes(p) WHERE n.k = ...)`"
+                        ));
+                    }
 
                     // Plan source node.
                     // In `(a)((x)-[:R]->(y)){n}(b)`, the QPP source is the preceding
@@ -6474,6 +6874,24 @@ impl QueryPlanner {
                             // relationship's was refused outright, the target
                             // node's was silently ignored because only
                             // `labels.first()` was ever read. Issue #166 family.
+                            //
+                            // The walk tests a map entry per hop, and only a
+                            // walk-constant one; any other was skipped and the
+                            // hop admitted every edge or node. It has no
+                            // equivalent filter after the walk — an entry may
+                            // name a per-iteration variable — so refuse it.
+                            if has_non_walk_constant_entry(&rel.properties)
+                                || has_non_walk_constant_entry(&node.properties)
+                            {
+                                return Err(anyhow!(
+                                    "A property map inside a quantified path pattern \
+                                     supports only literal and parameter values; a \
+                                     value computed from a variable or an expression \
+                                     is not supported there. Filter the matched path \
+                                     in WHERE instead, e.g. \
+                                     `WHERE all(r IN relationships(p) WHERE r.k = ...)`"
+                                ));
+                            }
                             let edge_filter_expr = {
                                 let edge_var = rel
                                     .variable
@@ -6615,7 +7033,7 @@ impl QueryPlanner {
                             min_hops,
                             max_hops,
                             optional,
-                            target_filter: self.node_filter_expr(
+                            target_filter: self.traverse_target_filter(
                                 &target_variable,
                                 &target_node.labels,
                                 &target_node.properties,
@@ -6630,6 +7048,16 @@ impl QueryPlanner {
                             qpp_steps: Some(qpp_step_infos),
                             qpp_inner_source: inner_source_var.clone(),
                         };
+                        plan = self.apply_traverse_target_residual(
+                            plan,
+                            &target_variable,
+                            &target_node.properties,
+                            if optional {
+                                optional_pattern_vars.clone()
+                            } else {
+                                HashSet::new()
+                            },
+                        );
 
                         // Handle bound target: filter rebound results against original variable
                         if let Some(ref btv) = rebound_target_var {
@@ -6726,6 +7154,17 @@ impl QueryPlanner {
             && !path_node_vars.is_empty()
             && !is_var_in_scope(vars_in_scope, path_var)
         {
+            // The lists were collected in traversal order. A reversed walk
+            // (only ever fixed-length here, see
+            // `reversed_for_bound_anchor_keeping_path`) collected them back to
+            // front, so restore the written order `p` must bind in. Edge `i`
+            // still sits between nodes `i` and `i + 1` after reversing all
+            // three lists.
+            if walk_reversed {
+                path_node_vars.reverse();
+                path_edge_vars.reverse();
+                path_edge_types.reverse();
+            }
             plan = LogicalPlan::BindPath {
                 input: Box::new(plan),
                 node_variables: path_node_vars,
@@ -7026,10 +7465,14 @@ impl QueryPlanner {
                 // variable for exactly this reason (see `target_variable` above);
                 // relationships did not, so the map was parsed and then silently
                 // discarded and `-[:E {k: v}]->` matched every E edge. Issue #166.
-                // Variable-length patterns are excluded: they carry the predicate
-                // inline via `edge_filter_expr`, where the name is stripped anyway.
-                (params.rel.properties.is_some() && params.rel.range.is_none())
-                    .then(|| self.next_anon_var())
+                // Variable-length patterns carry walk-constant entries inline via
+                // `edge_filter_expr`, where the name is stripped, and need a name
+                // only for an entry the walk cannot test (`{w: a.x}`), which is
+                // applied to the step variable's list after the walk.
+                (params.rel.properties.is_some()
+                    && (params.rel.range.is_none()
+                        || has_non_walk_constant_entry(&params.rel.properties)))
+                .then(|| self.next_anon_var())
             });
             let path_var = params.path_variable.clone();
 
@@ -7069,7 +7512,7 @@ impl QueryPlanner {
                 min_hops,
                 max_hops,
                 optional: params.optional,
-                target_filter: self.node_filter_expr(
+                target_filter: self.traverse_target_filter(
                     &target_variable,
                     &params.target_node.labels,
                     &params.target_node.properties,
@@ -7082,12 +7525,46 @@ impl QueryPlanner {
                     let filter_var = step_var
                         .clone()
                         .unwrap_or_else(|| "__anon_edge".to_string());
-                    self.properties_to_expr(&filter_var, &params.rel.properties)
+                    // Walk-constant entries only; the rest is the residual below.
+                    let (walk_map, _) = split_walk_constant_entries(&params.rel.properties);
+                    self.properties_to_expr(&filter_var, &walk_map)
                 } else {
                     None
                 },
                 path_mode: crate::query::df_graph::nfa::PathMode::Trail,
             };
+            plan = self.apply_traverse_target_residual(
+                plan,
+                &target_variable,
+                &params.target_node.properties,
+                if params.optional {
+                    params.optional_pattern_vars.clone()
+                } else {
+                    HashSet::new()
+                },
+            );
+
+            // A variable-length map entry the walk cannot test — `{w: a.x}` —
+            // holds for every relationship on the path. The walk skipped it,
+            // admitting every edge, so it is applied here to the step list.
+            if is_variable_length
+                && let Some(list_var) = step_var.as_ref()
+                && let Some(residual) = self.every_relationship_satisfies(
+                    list_var,
+                    split_walk_constant_entries(&params.rel.properties).1,
+                )
+            {
+                let mut filter_optional_vars = HashSet::new();
+                if params.optional {
+                    filter_optional_vars.clone_from(&params.optional_pattern_vars);
+                    filter_optional_vars.insert(list_var.clone());
+                }
+                plan = LogicalPlan::Filter {
+                    input: Box::new(plan),
+                    predicate: residual,
+                    optional_variables: filter_optional_vars,
+                };
+            }
 
             // Only apply bound target filter for Imported variables (from outer scope/subquery).
             // For regular cycle patterns like (a)-[:T]->(b)-[:T]->(a), the bound check
@@ -7241,10 +7718,14 @@ impl QueryPlanner {
             // variable for exactly this reason (see `target_variable` above);
             // relationships did not, so the map was parsed and then silently
             // discarded and `-[:E {k: v}]->` matched every E edge. Issue #166.
-            // Variable-length patterns are excluded: they carry the predicate
-            // inline via `edge_filter_expr`, where the name is stripped anyway.
-            (params.rel.properties.is_some() && params.rel.range.is_none())
-                .then(|| self.next_anon_var())
+            // Variable-length patterns carry walk-constant entries inline via
+            // `edge_filter_expr`, where the name is stripped, and need a name
+            // only for an entry the walk cannot test (`{w: a.x}`), which is
+            // applied to the step variable's list after the walk.
+            (params.rel.properties.is_some()
+                && (params.rel.range.is_none()
+                    || has_non_walk_constant_entry(&params.rel.properties)))
+            .then(|| self.next_anon_var())
         });
         let path_var = params.path_variable.clone();
 
@@ -7335,7 +7816,7 @@ impl QueryPlanner {
             min_hops,
             max_hops,
             optional: params.optional,
-            target_filter: self.node_filter_expr(
+            target_filter: self.traverse_target_filter(
                 &target_variable,
                 &params.target_node.labels,
                 &params.target_node.properties,
@@ -7354,7 +7835,9 @@ impl QueryPlanner {
                 let filter_var = effective_step_var
                     .clone()
                     .unwrap_or_else(|| "__anon_edge".to_string());
-                self.properties_to_expr(&filter_var, &params.rel.properties)
+                // Walk-constant entries only; the rest is the residual below.
+                let (walk_map, _) = split_walk_constant_entries(&params.rel.properties);
+                self.properties_to_expr(&filter_var, &walk_map)
             } else {
                 None
             },
@@ -7370,6 +7853,12 @@ impl QueryPlanner {
         } else {
             HashSet::new()
         };
+        plan = self.apply_traverse_target_residual(
+            plan,
+            &target_variable,
+            &params.target_node.properties,
+            filter_optional_vars.clone(),
+        );
 
         // Apply relationship property predicates (e.g. [r {k: v}]).
         // For VLP, predicates are stored inline in edge_filter_expr (above).
@@ -7383,6 +7872,27 @@ impl QueryPlanner {
                 input: Box::new(plan),
                 predicate: edge_prop_filter,
                 optional_variables: filter_optional_vars.clone(),
+            };
+        }
+
+        // A variable-length map entry the walk cannot test — `{w: a.x}` —
+        // holds for every relationship on the path. The walk skipped it,
+        // admitting every edge, so it is applied here to the step list.
+        if is_variable_length
+            && let Some(list_var) = effective_step_var.as_ref()
+            && let Some(residual) = self.every_relationship_satisfies(
+                list_var,
+                split_walk_constant_entries(&params.rel.properties).1,
+            )
+        {
+            let mut residual_optional_vars = filter_optional_vars.clone();
+            if params.optional {
+                residual_optional_vars.insert(list_var.clone());
+            }
+            plan = LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate: residual,
+                optional_variables: residual_optional_vars,
             };
         }
 
@@ -7643,12 +8153,21 @@ impl QueryPlanner {
 
         let has_existing_scope = !matches!(plan, LogicalPlan::Empty);
 
+        // The residual — a map entry naming an earlier variable, `{x: a.x}` —
+        // constrains this node only. Under OPTIONAL MATCH a row it rejects
+        // null-extends the node rather than dropping the entering row; with no
+        // optional variables the filter dropped it, and `OPTIONAL MATCH
+        // (b {x: a.x + 10})` lost every `a` that had no such `b`.
         let apply_residual_filter = |input: LogicalPlan, residual: Option<Expr>| -> LogicalPlan {
             if let Some(predicate) = residual {
                 LogicalPlan::Filter {
                     input: Box::new(input),
                     predicate,
-                    optional_variables: HashSet::new(),
+                    optional_variables: if optional {
+                        HashSet::from([variable.to_string()])
+                    } else {
+                        HashSet::new()
+                    },
                 }
             } else {
                 input
@@ -7887,12 +8406,21 @@ impl QueryPlanner {
 
         // 1. `n.prop ~= q` is a top-K index scan by definition. A threshold on
         //    `vector_similarity(...)` is not (see `extract_knn_predicate`).
-        if pushdown && let Some(extraction) = extract_knn_predicate(&current_predicate) {
+        //
+        //    Under OPTIONAL MATCH the scan must be the clause's own: a variable
+        //    the clause creates, bound by an `optional` scan. The KNN then
+        //    inherits the flag and emits the NULL row itself; the residual
+        //    stays in the clause's null-preserving filter.
+        if let Some(extraction) = extract_knn_predicate(&current_predicate) {
             let vs = &extraction.predicate;
             // Only consume the vector predicate if the KNN rewriter can actually
-            // reach the Scan; otherwise leave it in `current_predicate` so it
-            // becomes a residual Filter instead of being silently dropped.
-            if Self::rewrite_target_reachable(&plan, &vs.variable, RewriteTarget::Knn) {
+            // reach the Scan. Otherwise it stays in `current_predicate`, and is
+            // refused below: `~=` has no per-row meaning to fall back on.
+            let reachable = Self::rewrite_target_reachable(&plan, &vs.variable, RewriteTarget::Knn)
+                && (pushdown
+                    || (optional_vars.contains(&vs.variable)
+                        && Self::optional_scan_reachable(&plan, &vs.variable)));
+            if reachable {
                 plan =
                     Self::replace_scan_with_knn(plan, &vs.variable, &vs.property, vs.query.clone());
                 if let Some(residual) = extraction.residual {
@@ -7902,6 +8430,7 @@ impl QueryPlanner {
                 }
             }
         }
+        reject_unplanned_approx_eq(&current_predicate)?;
 
         // 2. Label/type disjunction → narrow-scan rewrite.
         //
@@ -8871,12 +9400,42 @@ impl QueryPlanner {
         }
 
         // Apply the WHERE filter (post-projection, with extras still visible).
+        //
+        // `WITH … ORDER BY … SKIP … LIMIT … WHERE p` filters the rows the
+        // projection *produced*, after its SKIP/LIMIT: the grammar places WHERE
+        // after the page (`WITH <body> [<order by and page>] [<where>]`) and the
+        // spec says that on WITH "WHERE simply filters the results". Filtering
+        // first answered `UNWIND range(1, 10) AS x WITH x ORDER BY x LIMIT 3
+        // WHERE x > 2` with `[3, 4, 5]` instead of `[3]`. Without a SKIP or
+        // LIMIT the two orders give the same rows, so the filter stays here,
+        // below the sort, where it shrinks what is sorted.
+        let where_after_page = with_clause.where_clause.is_some()
+            && (with_clause.skip.is_some() || with_clause.limit.is_some());
         if let Some(predicate) = &with_clause.where_clause {
-            plan = LogicalPlan::Filter {
-                input: Box::new(plan),
-                predicate: predicate.clone(),
-                optional_variables: HashSet::new(),
-            };
+            // No scan below a projection can be replaced by a KNN.
+            reject_unplanned_approx_eq(predicate)?;
+            if !where_after_page {
+                plan = LogicalPlan::Filter {
+                    input: Box::new(plan),
+                    predicate: predicate.clone(),
+                    optional_variables: HashSet::new(),
+                };
+            }
+        }
+        // A WHERE after the page that reads a variable the projection dropped
+        // needs that column past DISTINCT, which is defined only over the
+        // projected columns.
+        if where_after_page
+            && with_clause.distinct
+            && let Some(predicate) = &with_clause.where_clause
+            && let Some(name) = collect_expr_variables(predicate)
+                .into_iter()
+                .find(|n| !new_vars.iter().any(|v| &v.name == n))
+        {
+            return Err(anyhow!(
+                "SyntaxError: VariableNotDefined - `{name}` is not projected by WITH DISTINCT, \
+                 so a WHERE after its SKIP/LIMIT cannot read it"
+            ));
         }
 
         // Validate and apply ORDER BY for WITH clause.
@@ -8995,7 +9554,11 @@ impl QueryPlanner {
         let skip_limit = (skip.is_some() || fetch.is_some()).then_some((skip, fetch));
 
         // Strip passthrough columns that were only needed by WHERE / ORDER BY.
-        if needs_cleanup {
+        // A WHERE applied after the page still needs them and strips them
+        // itself — unless DISTINCT, which must see only the projected columns
+        // (that WHERE reads no others, checked above).
+        let cleanup_after_where = where_after_page && !with_clause.distinct;
+        if needs_cleanup && !cleanup_after_where {
             let cleanup_projections: Vec<(Expr, Option<String>)> = new_vars
                 .iter()
                 .map(|v| (Expr::Variable(v.name.clone()), Some(v.name.clone())))
@@ -9015,10 +9578,29 @@ impl QueryPlanner {
         // SKIP/LIMIT last — applied to the projected, deduplicated rows.
         if let Some((skip, fetch)) = skip_limit {
             plan = LogicalPlan::Limit {
-                input: Box::new(plan),
+                input: Box::new(Self::size_knn_from_limit(plan, skip, fetch)),
                 skip,
                 fetch,
             };
+        }
+
+        // …and a WHERE that follows the page filters what it kept.
+        if where_after_page && let Some(predicate) = &with_clause.where_clause {
+            plan = LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate: predicate.clone(),
+                optional_variables: HashSet::new(),
+            };
+            if needs_cleanup && cleanup_after_where {
+                let cleanup_projections: Vec<(Expr, Option<String>)> = new_vars
+                    .iter()
+                    .map(|v| (Expr::Variable(v.name.clone()), Some(v.name.clone())))
+                    .collect();
+                plan = LogicalPlan::Project {
+                    input: Box::new(plan),
+                    projections: cleanup_projections,
+                };
+            }
         }
 
         Ok((plan, new_vars))
@@ -9058,6 +9640,30 @@ impl QueryPlanner {
         }
     }
 
+    /// `all(e IN list_var WHERE e.k = v AND ...)` for a variable-length map's entries.
+    ///
+    /// A map on a variable-length relationship constrains every relationship
+    /// the path walks, so an entry the walk cannot test itself (see
+    /// [`is_walk_constant_map_value`]) becomes this filter over the list the
+    /// step variable binds. `None` when `entries` is empty.
+    fn every_relationship_satisfies(
+        &self,
+        list_var: &str,
+        entries: Vec<(String, Expr)>,
+    ) -> Option<Expr> {
+        if entries.is_empty() {
+            return None;
+        }
+        let element = self.next_anon_var();
+        let predicate = self.properties_to_expr(&element, &Some(Expr::Map(entries)))?;
+        Some(Expr::Quantifier {
+            quantifier: uni_cypher::ast::Quantifier::All,
+            variable: element,
+            list: Box::new(Expr::Variable(list_var.to_string())),
+            predicate: Box::new(predicate),
+        })
+    }
+
     pub fn properties_to_expr(&self, variable: &str, properties: &Option<Expr>) -> Option<Expr> {
         let entries = match properties {
             Some(Expr::Map(entries)) => entries,
@@ -9095,6 +9701,51 @@ impl QueryPlanner {
     ///
     /// This is used for TraverseMainByType where we need to filter target nodes
     /// by both labels and properties. Label checks use hasLabel(variable, 'label').
+    /// A traversal target's walk-time filter: its labels and the map entries
+    /// naming no variable but the target itself.
+    ///
+    /// The traversal operators evaluate `target_filter` against the target
+    /// alone, so an entry naming an earlier clause's variable —
+    /// `MATCH (s) MATCH (a)-[:R]->(b {uid: s.name})` — failed to plan with
+    /// `No field named s`. Those entries are the residual applied above the
+    /// traversal by [`Self::apply_traverse_target_residual`], the split a
+    /// scanned node already gets from `split_node_property_filters_for_scan`.
+    /// Entries naming a variable of the same pattern never reach here:
+    /// `defer_pattern_bound_map_values` moved them into the clause's `WHERE`.
+    fn traverse_target_filter(
+        &self,
+        variable: &str,
+        labels: &uni_cypher::ast::LabelExpr,
+        properties: &Option<Expr>,
+    ) -> Option<Expr> {
+        let (own, _) = split_target_map_entries(variable, properties);
+        self.node_filter_expr(variable, labels, &own)
+    }
+
+    /// `plan` under a `Filter` for the target-map entries naming other variables.
+    ///
+    /// The counterpart of [`Self::traverse_target_filter`]. `optional_variables`
+    /// is the traversal's null-extension set when the pattern is optional (the
+    /// same set its relationship-map filter uses), so under `OPTIONAL MATCH` a
+    /// row the residual rejects is null-extended rather than dropped.
+    fn apply_traverse_target_residual(
+        &self,
+        plan: LogicalPlan,
+        variable: &str,
+        properties: &Option<Expr>,
+        optional_variables: HashSet<String>,
+    ) -> LogicalPlan {
+        let (_, residual) = split_target_map_entries(variable, properties);
+        match self.properties_to_expr(variable, &residual) {
+            Some(predicate) => LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate,
+                optional_variables,
+            },
+            None => plan,
+        }
+    }
+
     pub fn node_filter_expr(
         &self,
         variable: &str,
@@ -9169,6 +9820,16 @@ impl QueryPlanner {
     }
 
     /// Replaces the `Scan` of `variable` with a top-K `VectorKnn` (`~=` only).
+    ///
+    /// `K` is left unset (the configured default); a `LIMIT` planned later
+    /// may size it, see [`Self::size_knn_from_limit`]. An `optional` scan
+    /// becomes an optional `VectorKnn`, which emits one NULL row when nothing
+    /// qualifies.
+    ///
+    /// Descends `Filter`, `Project` and `CrossJoin` only — in lockstep with
+    /// [`Self::rewrite_target_reachable`] for [`RewriteTarget::Knn`]. Never
+    /// `Limit`: a `WHERE` above a `LIMIT` filters the rows the `LIMIT` kept,
+    /// and a top-K scan below it would choose those rows instead.
     fn replace_scan_with_knn(
         plan: LogicalPlan,
         variable: &str,
@@ -9184,21 +9845,30 @@ impl QueryPlanner {
                 optional,
             } => {
                 if scan_var == variable {
-                    // A filter already pushed into the scan is kept above the
-                    // KNN, so it narrows the top-K rather than being lost.
                     let knn = LogicalPlan::VectorKnn {
                         label_id,
                         variable: variable.to_string(),
                         property: property.to_string(),
                         query,
-                        k: 100, // Default K, should push down LIMIT
+                        k: None,
+                        optional,
                     };
 
+                    // A filter already pushed into the scan (an inline
+                    // property map) is kept above the KNN, so it narrows the
+                    // top-K rather than being lost. Under OPTIONAL it must
+                    // null-extend, not drop, exactly as it did inside the
+                    // optional scan.
                     if let Some(f) = filter {
+                        let optional_variables = if optional {
+                            HashSet::from([variable.to_string()])
+                        } else {
+                            HashSet::new()
+                        };
                         LogicalPlan::Filter {
                             input: Box::new(knn),
                             predicate: f,
-                            optional_variables: HashSet::new(),
+                            optional_variables,
                         }
                     } else {
                         knn
@@ -9230,19 +9900,6 @@ impl QueryPlanner {
                 )),
                 projections,
             },
-            LogicalPlan::Limit { input, skip, fetch } => {
-                // If we encounter Limit, we should ideally push K down to VectorKnn
-                // But replace_scan_with_knn is called from plan_where_clause which is inside plan_match.
-                // Limit comes later.
-                // To support Limit pushdown, we need a separate optimizer pass or do it in plan_single.
-                LogicalPlan::Limit {
-                    input: Box::new(Self::replace_scan_with_knn(
-                        *input, variable, property, query,
-                    )),
-                    skip,
-                    fetch,
-                }
-            }
             LogicalPlan::CrossJoin { left, right } => LogicalPlan::CrossJoin {
                 left: Box::new(Self::replace_scan_with_knn(
                     *left,
@@ -9255,6 +9912,138 @@ impl QueryPlanner {
                 )),
             },
             other => other,
+        }
+    }
+
+    /// Sizes a `VectorKnn` that feeds a new `Limit` directly: `K = skip + fetch`.
+    ///
+    /// Called where a `RETURN` or `WITH` adds its `SKIP`/`LIMIT`. "Directly"
+    /// means every node between the two passes the KNN's rows through one for
+    /// one and in score order: a `Project`, or a `Sort` whose leading key is
+    /// the KNN's own `_score`, descending (later keys only order ties). The
+    /// first `skip + fetch` KNN rows are then exactly the rows the `Limit`
+    /// keeps, so a larger `K` could not change the answer and a smaller one
+    /// would lose rows.
+    ///
+    /// Anything else between them — a residual `Filter`, a traversal, a join,
+    /// `DISTINCT`, an aggregate, another `ORDER BY` — leaves `K` unset (the
+    /// configured default). A filter is the important case: the `fetch`
+    /// nearest rows, then filtered, would return fewer rows than the `LIMIT`
+    /// asked for. A `Limit` without `fetch` (`SKIP` alone) sizes nothing.
+    fn size_knn_from_limit(
+        plan: LogicalPlan,
+        skip: Option<usize>,
+        fetch: Option<usize>,
+    ) -> LogicalPlan {
+        let Some(fetch) = fetch else {
+            return plan;
+        };
+        let k = skip.unwrap_or(0).saturating_add(fetch);
+        Self::set_knn_k_through_row_preserving(plan, k, None)
+    }
+
+    /// Rebuilds `plan`, setting `K` on a `VectorKnn` reached only through
+    /// row-preserving, score-ordered nodes (see [`Self::size_knn_from_limit`]).
+    ///
+    /// `sorted_by` is the variable whose `_score` a `Sort` above has ordered
+    /// by; the KNN found must bind that variable.
+    fn set_knn_k_through_row_preserving(
+        plan: LogicalPlan,
+        k: usize,
+        sorted_by: Option<&str>,
+    ) -> LogicalPlan {
+        match plan {
+            LogicalPlan::VectorKnn {
+                label_id,
+                variable,
+                property,
+                query,
+                k: existing,
+                optional,
+            } => {
+                let k = match sorted_by {
+                    Some(v) if v != variable => existing,
+                    // A KNN already sized by an inner `LIMIT` keeps that `K`:
+                    // the inner `LIMIT` sits between the two and is the
+                    // stricter bound.
+                    _ => existing.or(Some(k)),
+                };
+                LogicalPlan::VectorKnn {
+                    label_id,
+                    variable,
+                    property,
+                    query,
+                    k,
+                    optional,
+                }
+            }
+            LogicalPlan::Project { input, projections } => LogicalPlan::Project {
+                input: Box::new(Self::set_knn_k_through_row_preserving(*input, k, sorted_by)),
+                projections,
+            },
+            LogicalPlan::Sort { input, order_by } => {
+                match (Self::knn_score_sort_variable(&order_by, &input), sorted_by) {
+                    (Some(v), None) => LogicalPlan::Sort {
+                        input: Box::new(Self::set_knn_k_through_row_preserving(
+                            *input,
+                            k,
+                            Some(v.as_str()),
+                        )),
+                        order_by,
+                    },
+                    (Some(v), Some(outer)) if v.as_str() == outer => LogicalPlan::Sort {
+                        input: Box::new(Self::set_knn_k_through_row_preserving(
+                            *input, k, sorted_by,
+                        )),
+                        order_by,
+                    },
+                    _ => LogicalPlan::Sort { input, order_by },
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// The variable whose `_score` leads `order_by`, descending, if any.
+    ///
+    /// Recognizes `v._score` as a property access, as its flattened column
+    /// name, and as an alias that a `Project` below the `Sort` (`input`)
+    /// binds to either form.
+    fn knn_score_sort_variable(order_by: &[SortItem], input: &LogicalPlan) -> Option<String> {
+        let first = order_by.first()?;
+        if first.ascending {
+            return None;
+        }
+        let mut expr = &first.expr;
+        let mut below = input;
+        loop {
+            if let Some(v) = Self::score_variable(expr) {
+                return Some(v.to_string());
+            }
+            // An alias: follow it into the projection that defined it.
+            let Expr::Variable(alias) = expr else {
+                return None;
+            };
+            let LogicalPlan::Project { input, projections } = below else {
+                return None;
+            };
+            expr = projections
+                .iter()
+                .find(|(_, a)| a.as_deref() == Some(alias.as_str()))
+                .map(|(e, _)| e)?;
+            below = input;
+        }
+    }
+
+    /// `v` when `expr` reads `v._score`.
+    fn score_variable(expr: &Expr) -> Option<&str> {
+        match expr {
+            Expr::Property(base, prop) if prop == "_score" => match base.as_ref() {
+                Expr::Variable(v) => Some(v.as_str()),
+                _ => None,
+            },
+            Expr::Variable(col) => col.strip_suffix("._score"),
+            _ => None,
         }
     }
 
@@ -9391,10 +10180,6 @@ impl QueryPlanner {
         // Transparent descent — each rewriter's recursive arms, and no more.
         match plan {
             LogicalPlan::Filter { input, .. } | LogicalPlan::Project { input, .. } => {
-                Self::rewrite_target_reachable(input, variable, target)
-            }
-            // Only `replace_scan_with_knn` recurses through `Limit`.
-            LogicalPlan::Limit { input, .. } if matches!(target, RewriteTarget::Knn) => {
                 Self::rewrite_target_reachable(input, variable, target)
             }
             // Scan/label-union/traverse-target rewriters recurse through `Traverse`;
@@ -9935,8 +10720,9 @@ impl QueryPlanner {
     /// arithmetic, CASE, regex, function calls) silently evaluates to
     /// `false`/`Null` there — and `NOT <unsupported>` inverts to `true`. Such
     /// predicates must NOT be pushed into `input_filter`; they stay as a residual
-    /// `Filter` that evaluates them correctly. Keep in lockstep with
-    /// `df_graph/apply.rs`.
+    /// `Filter` that evaluates them correctly. The planner now places the
+    /// accepted conjuncts in a `Filter` below the Apply rather than in
+    /// `input_filter`; the gate still bounds which conjuncts move.
     fn apply_input_filter_supported(expr: &Expr) -> bool {
         use uni_cypher::ast::{BinaryOp, UnaryOp};
         match expr {
@@ -9999,7 +10785,7 @@ impl QueryPlanner {
         (input_preds, remaining)
     }
 
-    /// Push eligible predicates into Apply.input_filter.
+    /// Push eligible predicates below an Apply, as a `Filter` on its input.
     /// This filters input rows BEFORE executing the correlated subquery.
     fn push_predicates_to_apply(plan: LogicalPlan, current_predicate: &mut Expr) -> LogicalPlan {
         match plan {
@@ -10030,28 +10816,26 @@ impl QueryPlanner {
                     Self::combine_predicates(remaining).unwrap()
                 };
 
-                // Combine extracted predicates with existing input_filter
-                let new_input_filter = if input_preds.is_empty() {
-                    input_filter
-                } else {
-                    let extracted = Self::combine_predicates(input_preds).unwrap();
-                    match input_filter {
-                        Some(existing) => Some(Expr::BinaryOp {
-                            left: Box::new(existing),
-                            op: BinaryOp::And,
-                            right: Box::new(extracted),
-                        }),
-                        None => Some(extracted),
-                    }
-                };
-
                 // Recurse into input plan
-                let new_input = Self::push_predicates_to_apply(*input, current_predicate);
+                let mut new_input = Self::push_predicates_to_apply(*input, current_predicate);
+
+                // The extracted predicates filter the input rows below the
+                // operator, where the engine evaluates them with full Cypher
+                // semantics, instead of in `input_filter`, whose row-map
+                // evaluator re-implements comparison by hand (it dropped a
+                // stored `2` under `a.x = 2.0`).
+                if let Some(extracted) = Self::combine_predicates(input_preds) {
+                    new_input = LogicalPlan::Filter {
+                        input: Box::new(new_input),
+                        predicate: extracted,
+                        optional_variables: HashSet::new(),
+                    };
+                }
 
                 LogicalPlan::Apply {
                     input: Box::new(new_input),
                     subquery,
-                    input_filter: new_input_filter,
+                    input_filter,
                 }
             }
             // Recurse into other plan nodes
@@ -10064,28 +10848,28 @@ impl QueryPlanner {
                 predicate,
                 optional_variables,
             },
-            LogicalPlan::Project { input, projections } => LogicalPlan::Project {
-                input: Box::new(Self::push_predicates_to_apply(*input, current_predicate)),
-                projections,
-            },
+            // A projection is crossed only when it rebinds no name: below
+            // `WITH a.x AS a` the predicate's `a` would read the entity.
+            LogicalPlan::Project { input, projections }
+                if projections.iter().all(|(expr, alias)| match (expr, alias) {
+                    (Expr::Variable(v), Some(a)) => v == a,
+                    (Expr::Variable(_), None) => true,
+                    _ => false,
+                }) =>
+            {
+                LogicalPlan::Project {
+                    input: Box::new(Self::push_predicates_to_apply(*input, current_predicate)),
+                    projections,
+                }
+            }
             LogicalPlan::Sort { input, order_by } => LogicalPlan::Sort {
                 input: Box::new(Self::push_predicates_to_apply(*input, current_predicate)),
                 order_by,
             },
-            LogicalPlan::Limit { input, skip, fetch } => LogicalPlan::Limit {
-                input: Box::new(Self::push_predicates_to_apply(*input, current_predicate)),
-                skip,
-                fetch,
-            },
-            LogicalPlan::Aggregate {
-                input,
-                group_by,
-                aggregates,
-            } => LogicalPlan::Aggregate {
-                input: Box::new(Self::push_predicates_to_apply(*input, current_predicate)),
-                group_by,
-                aggregates,
-            },
+            // Not crossed: a `LIMIT`/`SKIP` keeps the first rows *before* the
+            // predicate (`CALL … YIELD … WITH a, c LIMIT 3 MATCH (a)-->(z)
+            // WHERE a.x > c.x` returned a row of a fourth `a` once the filter
+            // ran first), and an aggregation rebinds its output.
             LogicalPlan::CrossJoin { left, right } => LogicalPlan::CrossJoin {
                 left: Box::new(Self::push_predicates_to_apply(*left, current_predicate)),
                 right: Box::new(Self::push_predicates_to_apply(*right, current_predicate)),
@@ -10346,6 +11130,25 @@ impl QueryPlanner {
                             reason: Some(format!(
                                 "{kind_name} index point lookup pushed into Lance scan"
                             )),
+                        });
+                    }
+                    // Range, prefix and null-test candidates (perf audit F1).
+                    for (prop, kind) in strategy.indexed_range_columns {
+                        if usage
+                            .iter()
+                            .any(|u| u.used && u.property == prop && u.label_or_type == label_name)
+                        {
+                            continue;
+                        }
+                        let kind_name = format!("{kind:?}").to_uppercase();
+                        usage.push(IndexUsage {
+                            label_or_type: label_name.to_string(),
+                            property: prop,
+                            reason: Some(format!(
+                                "{kind_name} index range / prefix / null scan pushed into Lance scan"
+                            )),
+                            index_type: kind_name,
+                            used: true,
                         });
                     }
                 }
@@ -13785,31 +14588,32 @@ fn rewrite_node<L: ForkIndexLookup>(plan: LogicalPlan, lookup: &L) -> LogicalPla
             property,
             query,
             k,
+            optional,
         } => {
-            if lookup.fork_index_has_label_id(
+            let knn = LogicalPlan::VectorKnn {
                 label_id,
-                &property,
-                uni_store::fork::ForkLocalIndexKind::Vector,
-            ) && let Some(kind) = into_fusion_kind(uni_store::fork::ForkLocalIndexKind::Vector)
+                variable,
+                property,
+                query,
+                k,
+                optional,
+            };
+            if let LogicalPlan::VectorKnn {
+                label_id, property, ..
+            } = &knn
+                && lookup.fork_index_has_label_id(
+                    *label_id,
+                    property,
+                    uni_store::fork::ForkLocalIndexKind::Vector,
+                )
+                && let Some(kind) = into_fusion_kind(uni_store::fork::ForkLocalIndexKind::Vector)
             {
                 LogicalPlan::FusedIndexScanWrapped {
-                    inner: Box::new(LogicalPlan::VectorKnn {
-                        label_id,
-                        variable,
-                        property,
-                        query,
-                        k,
-                    }),
+                    inner: Box::new(knn),
                     kind,
                 }
             } else {
-                LogicalPlan::VectorKnn {
-                    label_id,
-                    variable,
-                    property,
-                    query,
-                    k,
-                }
+                knn
             }
         }
         LogicalPlan::InvertedIndexLookup {

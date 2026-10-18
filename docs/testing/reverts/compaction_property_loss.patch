@@ -1,12 +1,12 @@
-diff --git b/crates/uni-store/src/storage/compaction.rs a/crates/uni-store/src/storage/compaction.rs
---- b/crates/uni-store/src/storage/compaction.rs
-+++ a/crates/uni-store/src/storage/compaction.rs
+diff --git a/crates/uni-store/src/storage/compaction.rs b/crates/uni-store/src/storage/compaction.rs
+--- a/crates/uni-store/src/storage/compaction.rs
++++ b/crates/uni-store/src/storage/compaction.rs
 @@ -6,9 +6,7 @@
  use anyhow::{Result, anyhow};
  use arrow_array::Array;
  use arrow_array::builder::{ListBuilder, UInt64Builder};
 -use arrow_array::{
--    LargeBinaryArray, ListArray, RecordBatch, StringArray, TimestampNanosecondArray, UInt64Array,
+-    LargeBinaryArray, ListArray, RecordBatch, TimestampNanosecondArray, UInt64Array,
 -};
 +use arrow_array::{ListArray, RecordBatch, UInt64Array};
  use metrics;
@@ -21,7 +21,7 @@ diff --git b/crates/uni-store/src/storage/compaction.rs a/crates/uni-store/src/s
  
          let mut rows_processed = 0;
  
-@@ -244,27 +240,6 @@
+@@ -244,23 +240,6 @@
                  .column_by_name("_labels")
                  .and_then(|c| c.as_any().downcast_ref::<arrow_array::ListArray>());
  
@@ -31,9 +31,6 @@ diff --git b/crates/uni-store/src/storage/compaction.rs a/crates/uni-store/src/s
 -            // their physical columns and put them back into the property map, so
 -            // `build_record_batch_with_timestamps` re-derives `ext_id`, `_uid`
 -            // and `overflow_json` from the same inputs the flush path used.
--            let ext_id_col = batch
--                .column_by_name("ext_id")
--                .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 -            let overflow_col = batch
 -                .column_by_name("overflow_json")
 -                .and_then(|c| c.as_any().downcast_ref::<LargeBinaryArray>());
@@ -45,23 +42,15 @@ diff --git b/crates/uni-store/src/storage/compaction.rs a/crates/uni-store/src/s
 -            let updated_col = batch
 -                .column_by_name("_updated_at")
 -                .and_then(|c| c.as_any().downcast_ref::<TimestampNanosecondArray>());
--
+ 
              for i in 0..batch.num_rows() {
                  let vid = Vid::from(vid_col.value(i));
-                 let version = ver_col.value(i);
-@@ -321,45 +296,6 @@
+@@ -318,38 +297,6 @@
                      }
                  }
  
 -                // Restore the reserved columns the loop above cannot reach.
--                if let Some(col) = ext_id_col
--                    && !col.is_null(i)
--                {
--                    row_props.insert(
--                        "ext_id".to_string(),
--                        Value::String(col.value(i).to_string()),
--                    );
--                }
+-                crate::storage::property_builder::restore_ext_id_column(&batch, i, &mut row_props);
 -                if let Some(col) = overflow_col
 -                    && !col.is_null(i)
 -                    && let Value::Map(overflow) =
@@ -95,7 +84,7 @@ diff --git b/crates/uni-store/src/storage/compaction.rs a/crates/uni-store/src/s
                  crdt_merges += Self::merge_row_into_state(
                      row_props,
                      null_props,
-@@ -389,13 +325,11 @@
+@@ -379,13 +326,11 @@
          }
  
          if !valid_vertices.is_empty() {

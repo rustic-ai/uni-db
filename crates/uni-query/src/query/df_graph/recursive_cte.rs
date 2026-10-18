@@ -227,7 +227,7 @@ impl ExecutionPlan for RecursiveCTEExec {
 ///
 /// Each row becomes a single `Value`. If the row has one column, the column
 /// value is used directly. If multiple columns, they are combined into a `Value::Map`.
-fn batches_to_values(batches: &[RecordBatch]) -> Vec<Value> {
+fn batches_to_values(batches: &[RecordBatch]) -> DFResult<Vec<Value>> {
     let mut values = Vec::new();
     for batch in batches {
         let num_cols = batch.num_columns();
@@ -235,19 +235,19 @@ fn batches_to_values(batches: &[RecordBatch]) -> Vec<Value> {
 
         for row_idx in 0..batch.num_rows() {
             if num_cols == 1 {
-                values.push(arrow_to_json_value(batch.column(0).as_ref(), row_idx));
+                values.push(arrow_to_json_value(batch.column(0).as_ref(), row_idx)?);
             } else {
                 let mut map = Vec::new();
                 for col_idx in 0..num_cols {
                     let col_name = schema.field(col_idx).name().clone();
-                    let val = arrow_to_json_value(batch.column(col_idx).as_ref(), row_idx);
+                    let val = arrow_to_json_value(batch.column(col_idx).as_ref(), row_idx)?;
                     map.push((col_name, val));
                 }
                 values.push(Value::Map(map.into_iter().collect()));
             }
         }
     }
-    values
+    Ok(values)
 }
 
 /// Extract the VID from a CTE result value.
@@ -302,7 +302,7 @@ async fn run_cte_loop(
         mutation_ctx,
     )
     .await?;
-    let mut working_values = batches_to_values(&anchor_batches);
+    let mut working_values = batches_to_values(&anchor_batches)?;
     let mut result_values = working_values.clone();
 
     // Track seen values for cycle detection. Key on `Value` directly rather
@@ -342,7 +342,7 @@ async fn run_cte_loop(
             mutation_ctx,
         )
         .await?;
-        let next_values = batches_to_values(&recursive_batches);
+        let next_values = batches_to_values(&recursive_batches)?;
 
         if next_values.is_empty() {
             break;

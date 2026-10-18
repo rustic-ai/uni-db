@@ -6389,7 +6389,7 @@ impl Writer {
 
     /// Check rebuild thresholds and schedule background index rebuilds for
     /// labels that exceed growth or age limits. Marks affected indexes as
-    /// `Stale` and spawns an async task to schedule the rebuild.
+    /// `Stale` and queues the rebuild on the manager's worker.
     ///
     /// Static rather than a method because the async-flush finalize path
     /// holds the [`SchemaManager`] via `SharedFlushCtx` rather than `&Writer`.
@@ -6430,21 +6430,12 @@ impl Writer {
             }
         }
 
-        tokio::spawn(async move {
-            if let Err(e) = rebuild_mgr.schedule(labels).await {
-                // Recoverable now rather than lost: the indexes above are
-                // `Stale`, and `labels_needing_rebuild` treats that as a trigger,
-                // so the next pass picks them up. Before, `Stale` was a status
-                // nothing acted on and the rebuild waited on an unrelated growth
-                // or time trigger.
-                metrics::counter!("uni_index_rebuild_schedule_failures_total").increment(1);
-                tracing::error!(
-                    error = %e,
-                    "failed to schedule index rebuild; the affected indexes remain \
-                     stale and will be retried by the next trigger pass"
-                );
-            }
-        });
+        // Queue in memory only; the rebuild worker (a tracked task) persists
+        // the task state when it claims the task. Persisting here needed a
+        // detached task, which could write the state file after the database
+        // was dropped.
+        let task_ids = rebuild_mgr.enqueue(labels);
+        tracing::debug!(tasks = ?task_ids, "queued index rebuilds after flush");
     }
 }
 

@@ -50,8 +50,15 @@ use super::expr_eval::{
     to_datafusion_err,
 };
 
+mod float_cmp;
+mod in_list;
 mod join_key;
 mod sort_key;
+pub use float_cmp::{
+    CYPHER_FLOAT_KEY_UDF, CYPHER_VALUE_KEY_UDF, FloatCmp, canonical_cypher_value_key,
+    canonical_float, create_cypher_float_compare_udf, create_cypher_float_key_udf,
+    create_cypher_value_key_udf,
+};
 pub use join_key::encode_cypher_join_key;
 pub use sort_key::encode_cypher_sort_key;
 
@@ -245,6 +252,14 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_cypher_gt_eq_udf());
     ctx.register_udf(create_cypher_lt_udf());
     ctx.register_udf(create_cypher_lt_eq_udf());
+
+    // Float comparisons and equivalence keys with openCypher semantics
+    // (`-0.0 = 0.0`, NaN compares false) instead of Arrow's total order.
+    for op in FloatCmp::ALL {
+        ctx.register_udf(create_cypher_float_compare_udf(op));
+    }
+    ctx.register_udf(create_cypher_float_key_udf());
+    ctx.register_udf(create_cypher_value_key_udf());
 
     // CypherValue to bool UDF (for boolean context: WHERE, CASE WHEN)
     ctx.register_udf(create_cv_to_bool_udf());
@@ -5060,6 +5075,11 @@ cypher_scalar_udf! {
     signature: Signature::any(2, Volatility::Immutable),
     return_type: DataType::Boolean,
     invoke(args) {
+    // A literal or parameter list is the same on every row: index it once and
+    // probe it per row, instead of scanning it per row (see `InListIndex`).
+    if let Some(out) = in_list::invoke_constant_list(&args)? {
+        return Ok(out);
+    }
     invoke_cypher_udf(args, &DataType::Boolean, |vals| {
         if vals.len() != 2 {
             return Err(datafusion::error::DataFusionError::Execution(
@@ -5085,30 +5105,7 @@ cypher_scalar_udf! {
             }
         };
 
-        // If element is null
-        if element.is_null() {
-            return if items.is_empty() {
-                Ok(Value::Bool(false))
-            } else {
-                Ok(Value::Null) // null IN non-empty list → null
-            };
-        }
-
-        // 3-valued comparison: cypher_eq returns Some(true/false) or None (indeterminate)
-        let mut has_null = false;
-        for item in items {
-            match entity_aware_eq(element, item) {
-                Some(true) => return Ok(Value::Bool(true)),
-                None => has_null = true,
-                Some(false) => {}
-            }
-        }
-
-        if has_null {
-            Ok(Value::Null) // not found but comparison was indeterminate → null
-        } else {
-            Ok(Value::Bool(false))
-        }
+        Ok(in_list::scan_membership(element, items))
     })
     }
 }

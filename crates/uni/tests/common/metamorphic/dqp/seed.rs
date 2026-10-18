@@ -88,9 +88,12 @@ const EDGE_BATCH: usize = 10_000;
 ///   `build_edge_adjacency_and_target_props`, has exactly one caller and it
 ///   lives under `TraverseMainByType` — so a fixture that declares its edge
 ///   type cannot reach that bug no matter how wide the generator gets.
-/// * Whether a scalar index exists decides whether a predicate reaches
-///   `LanceFilterGenerator` at all, which is where the deleted `"col"` range
-///   fusion lived.
+/// * Whether a scalar index exists, and its *kind*, decides which conjuncts
+///   reach the Lance filter renderer at all. A Hash index carries only the
+///   `=`/`IN` and null-test conjuncts; a BTree index also carries ranges and
+///   `STARTS WITH` prefixes (perf audit F1, `indexed_range_filter`), which is
+///   where a range-rendering defect such as the deleted `"col"` range fusion
+///   can show.
 ///
 /// A widened *generator* over a fixture that routes around the defect produces
 /// a wider, greener, still-toothless oracle. Widen the fixture too.
@@ -101,11 +104,22 @@ pub enum SchemaMode {
     Typed,
     /// [`Self::Typed`] plus a **Hash** scalar index on `Person.age`.
     ///
-    /// The Hash kind specifically: an `=`/`IN` on a Hash-indexed column is what
-    /// puts it into `PushdownStrategy::hash_index_columns`, which is condition
-    /// (2) of three for reaching the range fusion. See
-    /// `bugs/hash_index_range_quoting.rs:15-23`.
+    /// An `=`/`IN` on a Hash-indexed column is what puts it into
+    /// `PushdownStrategy::indexed_equality_columns`, so this mode exercises the
+    /// point-lookup half of the pushdown. It does **not** reach range pushdown:
+    /// a Hash index carries no range to Lance (perf audit F1), so the ranges of
+    /// a generated same-column conjunction stay in the residual filter. Use
+    /// [`Self::TypedBTreeIndexed`] for those.
     TypedIndexed,
+    /// [`Self::Typed`] plus a **BTree** scalar index on `Person.age`.
+    ///
+    /// A BTree serves the `=`/`IN` conjunct *and* the two-sided range around
+    /// it, so a generated same-column conjunction pushes all three conjuncts —
+    /// the range half through `indexed_range_filter` and the filter renderer.
+    /// Added alongside, not instead of, [`Self::TypedIndexed`]: the two kinds
+    /// push different conjunct sets, and each set is a path a defect can live
+    /// on.
+    TypedBTreeIndexed,
 }
 
 impl SchemaMode {
@@ -114,6 +128,7 @@ impl SchemaMode {
         match self {
             SchemaMode::Typed => "typed",
             SchemaMode::TypedIndexed => "typed-indexed",
+            SchemaMode::TypedBTreeIndexed => "typed-btree-indexed",
         }
     }
 }
@@ -144,6 +159,13 @@ impl Fixture {
         mode: SchemaMode::TypedIndexed,
     };
 
+    /// [`Self::TINY`] with a BTree index on `Person.age`, so the pushdown
+    /// lever's ranges reach Lance too.
+    pub const TINY_BTREE_INDEXED: Self = Self {
+        tier: Tier::Tiny,
+        mode: SchemaMode::TypedBTreeIndexed,
+    };
+
     /// Label used in driver output, e.g. `tiny/typed-indexed`.
     pub fn name(self) -> String {
         format!("{}/{}", self.tier.name(), self.mode.name())
@@ -169,7 +191,8 @@ impl From<Tier> for Fixture {
 /// change as a correctness failure.
 pub const DEFAULT_DATA_SEED: u64 = 0x5EED_D9F_u64.wrapping_mul(0x9E37_79B9);
 
-/// The property the [`SchemaMode::TypedIndexed`] Hash index covers.
+/// The property the [`SchemaMode::TypedIndexed`] Hash index and the
+/// [`SchemaMode::TypedBTreeIndexed`] BTree index cover.
 ///
 /// `age` and not `score`/`city`: it is nullable (so three-valued logic stays
 /// reachable), it is drawn from a small fixed domain [`AGE_DOMAIN`] that the
@@ -362,11 +385,16 @@ async fn apply_schema(db: &Uni, mode: SchemaMode) -> anyhow::Result<()> {
     // has no Lance counterpart and is mapped onto BTree — so what makes
     // pushdown engage is the *declaration*, not a build. That is why this is
     // safe to declare up front and why the self-tests below check behaviour
-    // rather than trusting `apply()` returning `Ok`.
+    // rather than trusting `apply()` returning `Ok`. The BTree mode declares at
+    // the same point; `btree_fixture_pushes_ranges_to_its_index` checks it was
+    // physically built and serves a range.
     let person = match mode {
         SchemaMode::Typed => person,
         SchemaMode::TypedIndexed => {
             person.index(INDEXED_PROPERTY, IndexType::Scalar(ScalarType::Hash))
+        }
+        SchemaMode::TypedBTreeIndexed => {
+            person.index(INDEXED_PROPERTY, IndexType::Scalar(ScalarType::BTree))
         }
     };
 
@@ -689,13 +717,18 @@ mod tests {
         Ok(())
     }
 
-    /// The two fixtures must hold identical data, so a pushdown run and a
+    /// The fixtures must hold identical data, so a pushdown run and a
     /// non-indexed run differ in exactly one variable.
     #[tokio::test]
     async fn schema_mode_does_not_change_the_data() -> anyhow::Result<()> {
         let plain = build_dqp_seed_for(Fixture::TINY).await?;
-        let indexed = build_dqp_seed_for(Fixture::TINY_INDEXED).await?;
+        for indexed_fixture in [Fixture::TINY_INDEXED, Fixture::TINY_BTREE_INDEXED] {
+            schema_mode_matches(&plain, &build_dqp_seed_for(indexed_fixture).await?).await?;
+        }
+        Ok(())
+    }
 
+    async fn schema_mode_matches(plain: &uni_db::Uni, indexed: &uni_db::Uni) -> anyhow::Result<()> {
         for q in [
             "MATCH (p:Person) RETURN count(p) AS c",
             "MATCH (p:Person) WHERE p.age = 30 RETURN count(p) AS c",
@@ -703,8 +736,8 @@ mod tests {
             "MATCH (:Person)-[r:WORKS_AT]->(:Company) RETURN count(r) AS c",
         ] {
             assert_eq!(
-                count(&plain, q).await?,
-                count(&indexed, q).await?,
+                count(plain, q).await?,
+                count(indexed, q).await?,
                 "SchemaMode changed the data, not just the access path: {q}"
             );
         }
@@ -834,13 +867,14 @@ mod tests {
         Ok(())
     }
 
-    /// **The condition the pushdown lever depends on.**
+    /// **The condition the Hash pushdown lever depends on.**
     ///
-    /// Reaching the deleted `"col"` range fusion needs all three of: a Hash
-    /// index on the column, an `=`/`IN` on it, and a two-sided *inclusive*
-    /// range on the same column (`bugs/hash_index_range_quoting.rs:15-23`).
-    /// This asserts the fixture supplies the first and that the resulting query
-    /// is both **correct** and **non-empty**.
+    /// The generated same-column conjunction is an `=`/`IN` plus a two-sided
+    /// *inclusive* range on one column. On this Hash-indexed fixture only the
+    /// `=`/`IN` reaches Lance; the range stays residual (perf audit F1 pushes
+    /// ranges for a BTree only — see `btree_fixture_pushes_ranges_to_its_index`
+    /// for the fixture that reaches range pushdown). This asserts the query is
+    /// both **correct** and **non-empty**.
     ///
     /// Non-emptiness is the load-bearing half. The fusion's symptom is an empty
     /// result, so a case that legitimately matches nothing passes identically
@@ -881,6 +915,71 @@ mod tests {
         assert!(
             in_form > 0,
             "IN + range matched nothing, so the lever would compare empty bags"
+        );
+        Ok(())
+    }
+
+    /// **The condition the BTree pushdown lever depends on.**
+    ///
+    /// A range-rendering defect (the deleted `"col"` fusion turned an inclusive
+    /// two-sided range into a data-independent constant) can only show where a
+    /// range reaches the Lance filter renderer, and since perf audit F1 that is
+    /// a BTree-indexed column only. This asserts the BTree fixture is
+    /// physically built, that a bare two-sided range on it consults the index
+    /// (it does not on the Hash fixture — that difference is what makes the
+    /// two modes distinct), and that the generated eq-plus-range shape is
+    /// correct and non-empty.
+    #[tokio::test]
+    async fn btree_fixture_pushes_ranges_to_its_index() -> anyhow::Result<()> {
+        use uni_db::core::schema::{IndexDefinition, ScalarIndexType};
+
+        let db = build_dqp_seed_for(Fixture::TINY_BTREE_INDEXED).await?;
+        let found = db
+            .indexes()
+            .list(Some("Person"))
+            .into_iter()
+            .find(|i| {
+                matches!(
+                    i,
+                    IndexDefinition::Scalar(c)
+                        if c.index_type == ScalarIndexType::BTree
+                            && c.properties.iter().any(|p| p == INDEXED_PROPERTY)
+                )
+            })
+            .unwrap_or_else(|| panic!("no BTree index on Person.{INDEXED_PROPERTY}"));
+        assert!(
+            found.metadata().last_built_at.is_some(),
+            "the BTree index was registered but never physically built"
+        );
+
+        let range = "MATCH (p:Person) WHERE p.age >= 22 AND p.age <= 40 RETURN p.name";
+        let on_btree = db.session().query(range).await?.metrics().index_scans;
+        assert!(
+            on_btree > 0,
+            "a two-sided range on the BTree-indexed column consulted no index"
+        );
+        let hash = build_dqp_seed_for(Fixture::TINY_INDEXED).await?;
+        let on_hash = hash.session().query(range).await?.metrics().index_scans;
+        assert_eq!(
+            on_hash, 0,
+            "a Hash index now serves a range; the BTree mode no longer adds a path"
+        );
+
+        let eq_only = count(
+            &db,
+            "MATCH (p:Person) WHERE p.age = 30 RETURN count(p) AS c",
+        )
+        .await?;
+        let fused = count(
+            &db,
+            "MATCH (p:Person) WHERE p.age = 30 AND p.age >= 25 AND p.age <= 40 \
+             RETURN count(p) AS c",
+        )
+        .await?;
+        assert!(eq_only > 0, "fixture has no age=30 rows to push down");
+        assert_eq!(
+            fused, eq_only,
+            "eq + containing range must equal eq alone; got {fused} vs {eq_only}"
         );
         Ok(())
     }

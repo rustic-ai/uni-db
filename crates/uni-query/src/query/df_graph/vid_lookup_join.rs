@@ -133,7 +133,7 @@ pub struct EquiPair {
 
 impl EquiPair {
     /// Column index on the build side, given which side is the probe.
-    fn build_col(&self, probe_side: ProbeSide) -> usize {
+    pub(crate) fn build_col(&self, probe_side: ProbeSide) -> usize {
         match probe_side {
             ProbeSide::Left => self.right_col_idx,
             ProbeSide::Right => self.left_col_idx,
@@ -141,7 +141,7 @@ impl EquiPair {
     }
 
     /// Column index on the probe side, given which side is the probe.
-    fn probe_col(&self, probe_side: ProbeSide) -> usize {
+    pub(crate) fn probe_col(&self, probe_side: ProbeSide) -> usize {
         match probe_side {
             ProbeSide::Left => self.left_col_idx,
             ProbeSide::Right => self.right_col_idx,
@@ -697,10 +697,10 @@ async fn run_join(
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
-struct JoinMatch {
-    build_batch_idx: usize,
-    build_row_idx: usize,
-    probe_row_idx: usize,
+pub(crate) struct JoinMatch {
+    pub(crate) build_batch_idx: usize,
+    pub(crate) build_row_idx: usize,
+    pub(crate) probe_row_idx: usize,
 }
 
 fn build_probe_vid_index(
@@ -729,7 +729,12 @@ fn build_probe_vid_index(
 /// Uses `ScalarValue` for type-erased comparison so the operator works for
 /// any column type Arrow can lift into a `ScalarValue` (which covers all
 /// types we currently materialize from Lance).
-fn values_equal(a_col: &ArrayRef, a_row: usize, b_col: &ArrayRef, b_row: usize) -> DFResult<bool> {
+pub(crate) fn values_equal(
+    a_col: &ArrayRef,
+    a_row: usize,
+    b_col: &ArrayRef,
+    b_row: usize,
+) -> DFResult<bool> {
     // Cypher comparison against NULL yields null (unknown), which for a join
     // equi-pair means "not a match" — a null on either side must never join.
     // `ScalarValue`'s `PartialEq` instead treats NULL == NULL as true, so guard
@@ -773,7 +778,11 @@ fn locate_vid_column(schema: &SchemaRef) -> DFResult<usize> {
 /// `{var}._vid` as `Field::new(.., UInt64, false)`, so a LEFT-outer NULL pad
 /// wrote nulls into a non-nullable column and `RecordBatch::try_new` rejected
 /// the whole batch. Every unmatched OPTIONAL row would have failed the query.
-fn concat_schemas(left: &SchemaRef, right: &SchemaRef, widen: Option<ProbeSide>) -> SchemaRef {
+pub(crate) fn concat_schemas(
+    left: &SchemaRef,
+    right: &SchemaRef,
+    widen: Option<ProbeSide>,
+) -> SchemaRef {
     let mut fields: Vec<Field> = Vec::with_capacity(left.fields().len() + right.fields().len());
     let widen_left = widen == Some(ProbeSide::Left);
     let widen_right = widen == Some(ProbeSide::Right);
@@ -856,7 +865,7 @@ impl<'a> AnchorKeys<'a> {
 /// outer) NULL-padded unmatched build rows. Output column order is
 /// `left_schema ++ right_schema` regardless of which side is the probe.
 #[allow(clippy::too_many_arguments)]
-fn emit_joined_batch(
+pub(crate) fn emit_joined_batch(
     build_batches: &[RecordBatch],
     probe_batch: &RecordBatch,
     matches: &[JoinMatch],

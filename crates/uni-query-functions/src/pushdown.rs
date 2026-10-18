@@ -55,13 +55,26 @@ pub struct PushdownStrategy {
     /// Lance was handed nothing index-servable. Every LDBC SF1 index is a BTree,
     /// which is why all fourteen queries reported `index_scans=0` (#247).
     ///
-    /// Equality and `IN` only, for both types. A BTree can also serve ranges,
-    /// but pushing a range inside the scan is a different question from pushing
-    /// a point lookup — see the boundary note in
-    /// `build_indexed_property_pushdown` — and is left alone here.
+    /// Equality and `IN` only, for both types. Ranges, prefixes and null tests
+    /// are recorded separately in [`Self::indexed_range_columns`].
     ///
     /// See issues #57, #247.
     pub indexed_equality_columns: Vec<(String, ScalarIndexType)>,
+
+    /// Property columns with an Online scalar index that can serve a range,
+    /// prefix or null-test conjunct in this scan, paired with the index type.
+    ///
+    /// `<`, `<=`, `>`, `>=` and `STARTS WITH` need an ordered index, so only a
+    /// `BTree` qualifies for them; `IS NULL` / `IS NOT NULL` are served by a
+    /// `BTree` or a `Hash` index. The planner turns each such conjunct into a
+    /// type-exact [`FilterExpr`] through [`indexed_range_filter`] and keeps the
+    /// original predicate above the scan, so a recorded column is a candidate,
+    /// not a promise: an operand that cannot be rendered exactly (a NaN, an
+    /// out-of-range integer, a type mismatch) is left to the residual filter.
+    ///
+    /// Perf audit 2026-10-17, row F1: before this, only `=` and `IN` reached
+    /// Lance, and every range, prefix and null test read the whole label.
+    pub indexed_range_columns: Vec<(String, ScalarIndexType)>,
 
     /// Residual predicates (not pushable to storage).
     pub residual: Vec<Expr>,
@@ -101,6 +114,19 @@ impl<'a> IndexAwareAnalyzer<'a> {
         let lance_analyzer = PredicateAnalyzer::new();
 
         for conj in conjuncts {
+            // Range / prefix / null-test candidates are recorded independently
+            // of where the conjunct is routed below: a BTree `STARTS WITH`
+            // goes to `btree_prefix_scans`, a parameterized one to `residual`,
+            // and both can still be served by the index once resolved.
+            if let Some((col, kind)) = self.indexed_range_column(&conj, variable, label_id)
+                && !strategy
+                    .indexed_range_columns
+                    .iter()
+                    .any(|(c, _)| c == &col)
+            {
+                strategy.indexed_range_columns.push((col, kind));
+            }
+
             // 1. Check for _uid = 'xxx' pattern (most selective)
             if let Some(uid) = self.extract_uid_predicate(&conj, variable) {
                 strategy.uid_lookup = Some(uid);
@@ -194,6 +220,56 @@ impl<'a> IndexAwareAnalyzer<'a> {
             }
         }
         None
+    }
+
+    /// The indexed column a range, prefix or null-test conjunct targets.
+    ///
+    /// Recognizes `variable.prop OP operand` for `<`, `<=`, `>`, `>=` and
+    /// `STARTS WITH` (operand a literal or a parameter) against an Online
+    /// `BTree` index, and `variable.prop IS [NOT] NULL` against an Online
+    /// `BTree` or `Hash` index. The operand is not inspected here; whether it
+    /// can be rendered exactly is decided after parameter substitution, by
+    /// [`indexed_range_filter`].
+    fn indexed_range_column(
+        &self,
+        expr: &Expr,
+        variable: &str,
+        label_id: u16,
+    ) -> Option<(String, ScalarIndexType)> {
+        let (prop_side, ordered) = match expr {
+            Expr::BinaryOp {
+                left,
+                op:
+                    BinaryOp::Lt | BinaryOp::LtEq | BinaryOp::Gt | BinaryOp::GtEq | BinaryOp::StartsWith,
+                right,
+            } if matches!(right.as_ref(), Expr::Literal(_) | Expr::Parameter(_)) => {
+                (left.as_ref(), true)
+            }
+            Expr::IsNull(inner) | Expr::IsNotNull(inner) => (inner.as_ref(), false),
+            _ => return None,
+        };
+        let Expr::Property(var_expr, prop) = prop_side else {
+            return None;
+        };
+        if !matches!(var_expr.as_ref(), Expr::Variable(v) if v == variable) {
+            return None;
+        }
+        let label_name = self.schema.label_name_by_id(label_id)?;
+        self.schema.indexes.iter().find_map(|idx| match idx {
+            IndexDefinition::Scalar(cfg)
+                if cfg.label == *label_name
+                    && cfg.properties.contains(prop)
+                    && cfg.metadata.status == IndexStatus::Online
+                    && match cfg.index_type {
+                        ScalarIndexType::BTree => true,
+                        ScalarIndexType::Hash => !ordered,
+                        _ => false,
+                    } =>
+            {
+                Some((prop.clone(), cfg.index_type.clone()))
+            }
+            _ => None,
+        })
     }
 
     /// Extract UniId from `_uid = 'xxx'` predicate.
@@ -441,13 +517,20 @@ impl PredicateAnalyzer {
                     Expr::Property(box_expr, _) if matches!(box_expr.as_ref(), Expr::Variable(v) if v == variable)
                 );
 
-                // Check right side is a literal or parameter or list of literals
-                // For string operators, strict requirement on String Literal
+                // Check right side is a literal or parameter or list of literals.
+                // A string operator takes a string literal or a parameter. A
+                // parameter reaches the scan's filter so the index can serve it
+                // once resolved (`STARTS WITH $p` as a prefix range, perf audit
+                // F1); `LanceFilterGenerator` never renders a parameter, so an
+                // unresolved one is simply not handed to storage.
                 let right_valid = if matches!(
                     op,
                     BinaryOp::Contains | BinaryOp::StartsWith | BinaryOp::EndsWith
                 ) {
-                    matches!(right.as_ref(), Expr::Literal(CypherLiteral::String(_)))
+                    matches!(
+                        right.as_ref(),
+                        Expr::Literal(CypherLiteral::String(_)) | Expr::Parameter(_)
+                    )
                 } else {
                     matches!(
                         right.as_ref(),
@@ -709,30 +792,40 @@ fn collect_properties(expr: &Expr, variable: &str, props: &mut HashSet<String>) 
     }
 }
 
-/// Increment the last character of a string to create an exclusive upper bound.
+/// The least string greater than every string that starts with `s`.
 ///
-/// For ASCII strings, this increments the last character.
-/// For example: "John" -> "Joho"
+/// Used as the exclusive upper bound of a prefix range: a string starts with
+/// `s` exactly when it lies in `[s, prefix_successor(s))` under byte order,
+/// which for UTF-8 is code-point order. The successor drops trailing
+/// U+10FFFF (the largest scalar value has no successor) and replaces the new
+/// last character with the next scalar value, stepping over the surrogate gap
+/// (U+D7FF is followed by U+E000, not U+D800).
 ///
-/// Returns `None` if the last character is at its maximum value (cannot be incremented).
+/// `None` when no upper bound exists: `s` is empty or consists only of
+/// U+10FFFF, so every string at or above it shares the prefix (or `s` matches
+/// everything).
+///
+/// Examples: `"John"` → `"Joho"`, `"a\u{10FFFF}"` → `"b"`, `"u\u{D7FF}"` →
+/// `"u\u{E000}"`.
 fn increment_last_char(s: &str) -> Option<String> {
-    if s.is_empty() {
-        return None;
-    }
+    let trimmed = s.trim_end_matches(char::MAX);
+    let mut chars = trimmed.chars();
+    let last = chars.next_back()?;
+    let next = match last {
+        '\u{D7FF}' => '\u{E000}',
+        c => char::from_u32(u32::from(c) + 1)?,
+    };
+    let mut out = String::with_capacity(trimmed.len() + 4);
+    out.push_str(chars.as_str());
+    out.push(next);
+    Some(out)
+}
 
-    let mut chars: Vec<char> = s.chars().collect();
-    let last_idx = chars.len() - 1;
-    let last_char = chars[last_idx];
-
-    // Increment the last character
-    // For most ASCII/UTF-8 characters, this works correctly
-    if let Some(next_char) = char::from_u32(last_char as u32 + 1) {
-        chars[last_idx] = next_char;
-        Some(chars.into_iter().collect())
-    } else {
-        // Last character is at maximum, cannot increment
-        None
-    }
+/// The conjuncts of `expr`: its `AND` tree flattened, left to right.
+///
+/// A predicate that is not an `AND` is its own single conjunct.
+pub fn conjuncts(expr: &Expr) -> Vec<&Expr> {
+    flatten_ands(expr)
 }
 
 /// Flatten nested AND expressions into a vector
@@ -827,7 +920,11 @@ impl LanceFilterGenerator {
                 list: right,
             } => {
                 let column = Self::extract_column(left, variable, schema_props)?;
-                Some(FilterExpr::one_of(column, Self::list_to_scalars(right)?))
+                let temporal = Self::may_be_temporal(&column, schema_props);
+                Some(FilterExpr::one_of(
+                    column,
+                    Self::list_to_scalars(right, temporal)?,
+                ))
             }
             Expr::BinaryOp { left, op, right } => {
                 let column = Self::extract_column(left, variable, schema_props)?;
@@ -847,11 +944,14 @@ impl LanceFilterGenerator {
                         kind,
                         pattern: Self::get_string_value(right)?,
                     }),
-                    None => Some(FilterExpr::compare(
-                        column,
-                        Self::op_to_cmp(op)?,
-                        Self::value_to_scalar(right)?,
-                    )),
+                    None => {
+                        let temporal = Self::may_be_temporal(&column, schema_props);
+                        Some(FilterExpr::compare(
+                            column,
+                            Self::op_to_cmp(op)?,
+                            Self::value_to_scalar(right, temporal)?,
+                        ))
+                    }
                 }
             }
             Expr::UnaryOp {
@@ -922,9 +1022,26 @@ impl LanceFilterGenerator {
         }
     }
 
-    fn value_to_scalar(expr: &Expr) -> Option<Scalar> {
+    /// Whether `column` may hold a temporal type, so a string literal compared
+    /// with it is a timestamp spelling rather than a string.
+    ///
+    /// Unknown (no schema, or a column the schema does not declare) counts as
+    /// possibly temporal, which keeps the behavior callers without a schema
+    /// always had.
+    fn may_be_temporal(column: &str, schema_props: Option<&HashMap<String, PropertyMeta>>) -> bool {
+        use uni_common::core::schema::DataType as T;
+        schema_props
+            .and_then(|props| props.get(column))
+            .is_none_or(|meta| {
+                matches!(meta.r#type, T::Timestamp | T::Date | T::Time | T::DateTime)
+            })
+    }
+
+    /// The literal `expr` as a [`Scalar`]; `temporal` enables datetime
+    /// normalization of a string literal.
+    fn value_to_scalar(expr: &Expr, temporal: bool) -> Option<Scalar> {
         match expr {
-            Expr::Literal(CypherLiteral::String(s)) => {
+            Expr::Literal(CypherLiteral::String(s)) if temporal => {
                 // Normalize datetime strings to include seconds for Arrow timestamp parsing.
                 // Our Cypher datetime formatting omits `:00` seconds (e.g. `2021-06-01T00:00Z`)
                 // but Arrow/Lance requires full `HH:MM:SS` for timestamp parsing.
@@ -932,6 +1049,12 @@ impl LanceFilterGenerator {
                     super::df_expr::normalize_datetime_str(s).unwrap_or_else(|| s.clone()),
                 ))
             }
+            // On a column known not to be temporal the literal is a string and
+            // must reach the storage filter unchanged: normalizing it turned
+            // `n.s = '2021-06-01T00:00Z'` on an indexed STRING column into
+            // `s = '2021-06-01T00:00:00Z'`, and the stored row was lost
+            // (measured: `[]` instead of the row).
+            Expr::Literal(CypherLiteral::String(s)) => Some(Scalar::Str(s.clone())),
             Expr::Literal(CypherLiteral::Integer(i)) => Some(Scalar::Int(*i)),
             Expr::Literal(CypherLiteral::Float(f)) => Some(Scalar::Float(*f)),
             Expr::Literal(CypherLiteral::Bool(b)) => Some(Scalar::Bool(*b)),
@@ -949,9 +1072,12 @@ impl LanceFilterGenerator {
     ///
     /// One unrenderable element rejects the whole list — a partial `IN` would
     /// silently narrow the predicate.
-    fn list_to_scalars(expr: &Expr) -> Option<Vec<Scalar>> {
+    fn list_to_scalars(expr: &Expr, temporal: bool) -> Option<Vec<Scalar>> {
         match expr {
-            Expr::List(items) => items.iter().map(Self::value_to_scalar).collect(),
+            Expr::List(items) => items
+                .iter()
+                .map(|item| Self::value_to_scalar(item, temporal))
+                .collect(),
             _ => None,
         }
     }
@@ -1071,6 +1197,190 @@ pub fn predicate_target_column(expr: &Expr, variable: &str) -> Option<String> {
     None
 }
 
+/// Translate one range, prefix or null-test conjunct into an index-servable filter.
+///
+/// `resolved` is a property-first conjunct with parameters already substituted
+/// (`n.p < 10`, `n.p STARTS WITH 'ab'`, `n.p IS NULL`); `column_type` is the
+/// declared type of `p`. The result is handed to the storage scan, where a
+/// scalar index can serve it, while the caller keeps `resolved` itself above
+/// the scan. The contract is therefore one-sided: the returned filter must
+/// accept **every** row `resolved` accepts under Cypher semantics, and may
+/// accept more. `None` means "no exact rendering", and the conjunct stays a
+/// residual filter only.
+///
+/// What is translated, and why each form is exact or a superset:
+///
+/// Only `INT64`, `FLOAT64` and `STRING` columns take a range: a bound on an
+/// `INT32` or `FLOAT32` column would be narrowed to the column type by the
+/// storage layer, and that rounding is not one-sided.
+///
+/// * **Integer column, integer bound** — the same comparison.
+/// * **Integer column, float bound** — rounded to the integer comparison that
+///   selects the same integers: `x < 9.5` ⇔ `x < 10` (`ceil`), `x <= 9.5` ⇔
+///   `x <= 9` (`floor`), `x > 9.5` ⇔ `x > 9`, `x >= 9.5` ⇔ `x >= 10`. Exact
+///   in real arithmetic, and a superset of a comparison done after widening
+///   the integer to `f64`, because rounding to the nearest `f64` is monotone.
+///   A zero bound becomes an inclusive bound at 0 (see
+///   `integer_bound_for_float`). A NaN, infinite or out-of-`i64` bound is not
+///   translated.
+/// * **Float column** — a finite, non-zero float bound, or an integer bound of
+///   magnitude at most 2^53 (exactly representable). See `float_bound` for
+///   why zero, NaN and infinite bounds are not translated.
+/// * **String column, string bound** — the same comparison; both sides order
+///   strings by bytes. No datetime normalization: on a STRING column the
+///   literal is a string, not a timestamp.
+/// * **`STARTS WITH p`** on a string column — `col >= p AND col <
+///   increment_last_char(p)`. The empty prefix is not translated (it selects
+///   every string, so the index has nothing to narrow).
+/// * **`IS NULL` / `IS NOT NULL`** on a string, integer, float or boolean
+///   column — the same test. Restricted to those types because a
+///   `CypherValue` column can hold an encoded NULL in a non-null cell.
+///
+/// Every other operand type pairing (a string bound on an integer column, a
+/// NULL bound, a boolean bound, any other column type) is not translated: in
+/// Cypher such a comparison is NULL, and the storage layer would either reject
+/// the literal or coerce it.
+pub fn indexed_range_filter(
+    resolved: &Expr,
+    variable: &str,
+    column_type: Option<&uni_common::core::schema::DataType>,
+) -> Option<FilterExpr> {
+    use uni_common::core::schema::DataType as T;
+
+    let column_of = |e: &Expr| -> Option<String> {
+        let Expr::Property(base, prop) = e else {
+            return None;
+        };
+        // System columns (`_vid`, `_version`, ...) have their own routes.
+        (matches!(base.as_ref(), Expr::Variable(v) if v == variable) && !prop.starts_with('_'))
+            .then(|| prop.clone())
+    };
+    match resolved {
+        Expr::IsNull(inner) | Expr::IsNotNull(inner) => {
+            let column = column_of(inner)?;
+            if !matches!(
+                column_type?,
+                T::String | T::Int32 | T::Int64 | T::Float32 | T::Float64 | T::Bool
+            ) {
+                return None;
+            }
+            Some(match resolved {
+                Expr::IsNull(_) => FilterExpr::IsNull(column),
+                _ => FilterExpr::IsNotNull(column),
+            })
+        }
+        Expr::BinaryOp {
+            left,
+            op: BinaryOp::StartsWith,
+            right,
+        } => {
+            let column = column_of(left)?;
+            let (Some(T::String), Expr::Literal(CypherLiteral::String(prefix))) =
+                (column_type, right.as_ref())
+            else {
+                return None;
+            };
+            if prefix.is_empty() {
+                return None;
+            }
+            let lower =
+                FilterExpr::compare(column.clone(), CmpOp::GtEq, Scalar::Str(prefix.clone()));
+            Some(match increment_last_char(prefix) {
+                Some(upper) => FilterExpr::all([
+                    lower,
+                    FilterExpr::compare(column, CmpOp::Lt, Scalar::Str(upper)),
+                ]),
+                None => lower,
+            })
+        }
+        Expr::BinaryOp { left, op, right } => {
+            let column = column_of(left)?;
+            let op = match op {
+                BinaryOp::Lt => CmpOp::Lt,
+                BinaryOp::LtEq => CmpOp::LtEq,
+                BinaryOp::Gt => CmpOp::Gt,
+                BinaryOp::GtEq => CmpOp::GtEq,
+                _ => return None,
+            };
+            let Expr::Literal(lit) = right.as_ref() else {
+                return None;
+            };
+            match (column_type?, lit) {
+                (T::Int64, CypherLiteral::Integer(i)) => {
+                    Some(FilterExpr::compare(column, op, Scalar::Int(*i)))
+                }
+                (T::Int64, CypherLiteral::Float(f)) => {
+                    let (op, bound) = integer_bound_for_float(op, *f)?;
+                    Some(FilterExpr::compare(column, op, Scalar::Int(bound)))
+                }
+                (T::Float64, CypherLiteral::Float(f)) => float_bound(column, op, *f),
+                (T::Float64, CypherLiteral::Integer(i)) if i.unsigned_abs() <= 1_u64 << 53 => {
+                    // Exact: |i| <= 2^53 is representable as an f64.
+                    let f = *i as f64;
+                    float_bound(column, op, f)
+                }
+                (T::String, CypherLiteral::String(s)) => {
+                    Some(FilterExpr::compare(column, op, Scalar::Str(s.clone())))
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The integer comparison selecting exactly the integers `x` with `x op f`.
+///
+/// `None` for a NaN or infinite `f`, or when the rounded bound does not fit
+/// in an `i64`.
+fn integer_bound_for_float(op: CmpOp, f: f64) -> Option<(CmpOp, i64)> {
+    if !f.is_finite() {
+        return None;
+    }
+    if f == 0.0 {
+        // Either zero. The residual compares numerically (`0 > -0.0` is
+        // false; it was true under the total order the residual once used).
+        // An inclusive bound at 0 is a superset of the residual's answer
+        // under either reading.
+        let inclusive = match op {
+            CmpOp::Lt | CmpOp::LtEq => CmpOp::LtEq,
+            CmpOp::Gt | CmpOp::GtEq => CmpOp::GtEq,
+            CmpOp::Eq | CmpOp::NotEq => return None,
+        };
+        return Some((inclusive, 0));
+    }
+    let rounded = match op {
+        CmpOp::Lt | CmpOp::GtEq => f.ceil(),
+        CmpOp::LtEq | CmpOp::Gt => f.floor(),
+        CmpOp::Eq | CmpOp::NotEq => return None,
+    };
+    // 2^63 is exactly representable; every f64 in [-2^63, 2^63) is an i64.
+    const TWO_POW_63: f64 = 9_223_372_036_854_775_808.0;
+    if !(-TWO_POW_63..TWO_POW_63).contains(&rounded) {
+        return None;
+    }
+    // Exact: `rounded` is integral and in `i64` range, checked above.
+    let bound = rounded as i64;
+    Some((op, bound))
+}
+
+/// A float-column comparison against a finite, non-zero `f`.
+///
+/// A bound of either zero is not rendered. The residual compares floats
+/// numerically (`-0.0 = 0.0`), but storage orders them by IEEE total order, so
+/// `f >= 0` there would lose a stored `-0.0` row the residual accepts; and the
+/// SQL dialect has no spelling for `-0.0` (it renders as `-0`, the negation of
+/// an integer, which is `+0.0`). Non-zero bounds are exact: total order and
+/// numeric order differ only on zeros and NaNs, and the residual rejects every
+/// NaN. NaN and infinite bounds have no SQL literal at all (`NaN` and `inf`
+/// parse as column names).
+fn float_bound(column: String, op: CmpOp, f: f64) -> Option<FilterExpr> {
+    if !f.is_finite() || f == 0.0 {
+        return None;
+    }
+    Some(FilterExpr::compare(column, op, Scalar::Float(f)))
+}
+
 /// Convert a runtime `Value` to a Cypher AST `Expr` literal.
 ///
 /// Returns `None` for variants we cannot represent inline in a pushed-down
@@ -1168,11 +1478,14 @@ mod security_tests {
 
         #[test]
         fn test_safe_strings_render() {
-            assert_eq!(like_sql("admin").unwrap(), "name LIKE '%admin%'");
-            assert_eq!(like_sql("John Smith").unwrap(), "name LIKE '%John Smith%'");
+            assert_eq!(like_sql("admin").unwrap(), "`name` LIKE '%admin%'");
+            assert_eq!(
+                like_sql("John Smith").unwrap(),
+                "`name` LIKE '%John Smith%'"
+            );
             assert_eq!(
                 like_sql("test@example.com").unwrap(),
-                "name LIKE '%test@example.com%'"
+                "`name` LIKE '%test@example.com%'"
             );
         }
 
@@ -1398,5 +1711,293 @@ mod orientation_tests {
         let commuted = cmp(param("p"), BinaryOp::Eq, prop("n", "uid"));
         assert!(!analyzer.is_pushable(&commuted, "n"));
         assert!(analyzer.is_pushable(&orient_property_comparisons(commuted), "n"));
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    //! Unit tests for the F1 translation: prefix successors and the
+    //! type-exact range / null renderings handed to the index.
+
+    use super::*;
+    use uni_common::core::schema::DataType as T;
+
+    fn prop(name: &str) -> Expr {
+        Expr::Property(Box::new(Expr::Variable("n".into())), name.into())
+    }
+
+    fn bin(op: BinaryOp, lit: CypherLiteral) -> Expr {
+        Expr::BinaryOp {
+            left: Box::new(prop("p")),
+            op,
+            right: Box::new(Expr::Literal(lit)),
+        }
+    }
+
+    fn render(e: &Expr, ty: T) -> Option<String> {
+        indexed_range_filter(e, "n", Some(&ty)).map(|f| f.to_sql().expect("renderable"))
+    }
+
+    /// `[p, succ(p))` holds exactly the strings starting with `p`, compared
+    /// by bytes, over strings straddling U+D7FF/U+E000 and U+10FFFF.
+    #[test]
+    fn prefix_successor_bounds_exactly_the_prefixed_strings() {
+        let alphabet = [
+            'a',
+            'b',
+            '\u{7F}',
+            '\u{80}',
+            '\u{D7FF}',
+            '\u{E000}',
+            '\u{FFFF}',
+            char::MAX,
+        ];
+        let mut strings = vec![String::new()];
+        for len in 1..=3 {
+            let mut frontier = vec![String::new()];
+            for _ in 0..len {
+                frontier = frontier
+                    .iter()
+                    .flat_map(|s| {
+                        alphabet.iter().map(move |c| {
+                            let mut t = s.clone();
+                            t.push(*c);
+                            t
+                        })
+                    })
+                    .collect();
+            }
+            strings.extend(frontier);
+        }
+        for p in strings.iter().filter(|p| !p.is_empty()) {
+            let upper = increment_last_char(p);
+            for s in &strings {
+                let in_range = s.as_bytes() >= p.as_bytes()
+                    && upper.as_ref().is_none_or(|u| s.as_bytes() < u.as_bytes());
+                assert_eq!(
+                    in_range,
+                    s.starts_with(p.as_str()),
+                    "prefix {p:?}, upper {upper:?}, string {s:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn prefix_successor_steps_over_the_surrogate_gap_and_the_maximum() {
+        assert_eq!(increment_last_char("John").as_deref(), Some("Joho"));
+        assert_eq!(
+            increment_last_char("u\u{D7FF}").as_deref(),
+            Some("u\u{E000}")
+        );
+        assert_eq!(increment_last_char("a\u{10FFFF}").as_deref(), Some("b"));
+        assert_eq!(
+            increment_last_char("a\u{10FFFF}\u{10FFFF}").as_deref(),
+            Some("b")
+        );
+        assert_eq!(increment_last_char("\u{10FFFF}"), None);
+        assert_eq!(increment_last_char(""), None);
+    }
+
+    /// Float bounds on an INT column round to the integer comparison that
+    /// selects the same integers; zero widens to an inclusive bound.
+    #[test]
+    fn float_bound_on_int_column_rounds_outward() {
+        use BinaryOp::{Gt, GtEq, Lt, LtEq};
+        let f = CypherLiteral::Float;
+        assert_eq!(
+            render(&bin(Lt, f(9.5)), T::Int64).as_deref(),
+            Some("`p` < 10")
+        );
+        assert_eq!(
+            render(&bin(LtEq, f(9.5)), T::Int64).as_deref(),
+            Some("`p` <= 9")
+        );
+        assert_eq!(
+            render(&bin(Gt, f(9.5)), T::Int64).as_deref(),
+            Some("`p` > 9")
+        );
+        assert_eq!(
+            render(&bin(GtEq, f(9.5)), T::Int64).as_deref(),
+            Some("`p` >= 10")
+        );
+        assert_eq!(
+            render(&bin(Lt, f(-2.5)), T::Int64).as_deref(),
+            Some("`p` < -2")
+        );
+        assert_eq!(
+            render(&bin(Gt, f(-0.0)), T::Int64).as_deref(),
+            Some("`p` >= 0")
+        );
+        assert_eq!(
+            render(&bin(Lt, f(0.0)), T::Int64).as_deref(),
+            Some("`p` <= 0")
+        );
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e19, -1e19] {
+            assert_eq!(render(&bin(Lt, f(bad)), T::Int64), None, "{bad}");
+        }
+        // Every integer in a window agrees with the real-number comparison.
+        for bound in [-2.5, -2.0, -0.5, 0.5, 9.5, 10.0, 10.25] {
+            for op in [Lt, LtEq, Gt, GtEq] {
+                let cmp = match op {
+                    Lt => CmpOp::Lt,
+                    LtEq => CmpOp::LtEq,
+                    Gt => CmpOp::Gt,
+                    _ => CmpOp::GtEq,
+                };
+                let (iop, ib) = integer_bound_for_float(cmp, bound).expect("finite");
+                for x in -20_i64..20 {
+                    let xf = x as f64;
+                    let real = match cmp {
+                        CmpOp::Lt => xf < bound,
+                        CmpOp::LtEq => xf <= bound,
+                        CmpOp::Gt => xf > bound,
+                        _ => xf >= bound,
+                    };
+                    let int = match iop {
+                        CmpOp::Lt => x < ib,
+                        CmpOp::LtEq => x <= ib,
+                        CmpOp::Gt => x > ib,
+                        _ => x >= ib,
+                    };
+                    assert_eq!(int, real, "x={x} {cmp:?} {bound}");
+                }
+            }
+        }
+    }
+
+    /// Operands with no exact rendering stay residual.
+    #[test]
+    fn untranslatable_operands_are_left_residual() {
+        use BinaryOp::Lt;
+        let cases = [
+            (bin(Lt, CypherLiteral::String("a".into())), T::Int64),
+            (bin(Lt, CypherLiteral::Integer(5)), T::String),
+            (bin(Lt, CypherLiteral::Null), T::Int64),
+            (bin(Lt, CypherLiteral::Bool(true)), T::Int64),
+            (bin(Lt, CypherLiteral::Float(0.0)), T::Float64),
+            (bin(Lt, CypherLiteral::Float(-0.0)), T::Float64),
+            (bin(Lt, CypherLiteral::Float(f64::NAN)), T::Float64),
+            (bin(Lt, CypherLiteral::Integer((1 << 53) + 1)), T::Float64),
+            (bin(Lt, CypherLiteral::Integer(5)), T::Int32),
+            (bin(Lt, CypherLiteral::Float(1.5)), T::Float32),
+            (bin(Lt, CypherLiteral::Integer(5)), T::DateTime),
+            (
+                bin(BinaryOp::StartsWith, CypherLiteral::String(String::new())),
+                T::String,
+            ),
+            (
+                bin(BinaryOp::StartsWith, CypherLiteral::Integer(4)),
+                T::String,
+            ),
+            (
+                bin(BinaryOp::StartsWith, CypherLiteral::String("a".into())),
+                T::Int64,
+            ),
+            (Expr::IsNull(Box::new(prop("p"))), T::CypherValue),
+        ];
+        for (e, ty) in cases {
+            assert_eq!(render(&e, ty.clone()), None, "{e:?} on {ty:?}");
+        }
+        // An awkward property name is translated and quoted (`to_sql`
+        // backtick-quotes every identifier). The one name no spelling reaches,
+        // a backtick, is refused at render time, so the planner's
+        // `sql_pushable` leaves it to the residual filter.
+        let odd = Expr::IsNull(Box::new(prop("a b")));
+        assert_eq!(render(&odd, T::Int64).as_deref(), Some("`a b` IS NULL"));
+        let kw = Expr::IsNull(Box::new(prop("order")));
+        assert_eq!(render(&kw, T::Int64).as_deref(), Some("`order` IS NULL"));
+        let tick = indexed_range_filter(&Expr::IsNull(Box::new(prop("a`b"))), "n", Some(&T::Int64))
+            .expect("translated");
+        assert!(tick.to_sql().is_err());
+        assert_eq!(tick.sql_pushable(), FilterExpr::Literal(true));
+    }
+
+    #[test]
+    fn prefix_and_null_tests_render_as_ranges_and_null_checks() {
+        let sw = |p: &str| bin(BinaryOp::StartsWith, CypherLiteral::String(p.into()));
+        assert_eq!(
+            render(&sw("u42"), T::String).as_deref(),
+            Some("(`p` >= 'u42') AND (`p` < 'u43')")
+        );
+        assert_eq!(
+            render(&sw("it's"), T::String).as_deref(),
+            Some("(`p` >= 'it''s') AND (`p` < 'it''t')")
+        );
+        assert_eq!(
+            render(&sw("\u{10FFFF}"), T::String).as_deref(),
+            Some("`p` >= '\u{10FFFF}'")
+        );
+        // A datetime-shaped string on a STRING column is not normalized.
+        assert_eq!(
+            render(
+                &bin(
+                    BinaryOp::Lt,
+                    CypherLiteral::String("2021-06-01T00:00Z".into())
+                ),
+                T::String
+            )
+            .as_deref(),
+            Some("`p` < '2021-06-01T00:00Z'")
+        );
+        assert_eq!(
+            render(&Expr::IsNull(Box::new(prop("p"))), T::Float64).as_deref(),
+            Some("`p` IS NULL")
+        );
+        assert_eq!(
+            render(&Expr::IsNotNull(Box::new(prop("p"))), T::String).as_deref(),
+            Some("`p` IS NOT NULL")
+        );
+    }
+
+    /// The analyzer records range, prefix and null-test columns against the
+    /// right index types: ordered forms need a BTree, null tests take a Hash.
+    #[test]
+    fn analyzer_records_range_columns_by_index_type() {
+        use uni_common::core::schema::{IndexDefinition, ScalarIndexConfig};
+        let mut schema = Schema::default();
+        schema.labels.insert(
+            "L".into(),
+            uni_common::core::schema::LabelMeta {
+                id: 1,
+                created_at: chrono::Utc::now(),
+                state: uni_common::core::schema::SchemaElementState::Active,
+                description: None,
+            },
+        );
+        for (prop_name, kind) in [("b", ScalarIndexType::BTree), ("h", ScalarIndexType::Hash)] {
+            schema
+                .indexes
+                .push(IndexDefinition::Scalar(ScalarIndexConfig {
+                    name: format!("idx_{prop_name}"),
+                    label: "L".into(),
+                    properties: vec![prop_name.into()],
+                    index_type: kind,
+                    where_clause: None,
+                    metadata: Default::default(),
+                }));
+        }
+        let analyzer = IndexAwareAnalyzer::new(&schema);
+        let on = |e: Expr| analyzer.analyze(&e, "n", 1).indexed_range_columns;
+        let with = |name: &str, op: BinaryOp| Expr::BinaryOp {
+            left: Box::new(prop(name)),
+            op,
+            right: Box::new(Expr::Parameter("x".into())),
+        };
+        assert_eq!(
+            on(with("b", BinaryOp::Lt)),
+            vec![("b".into(), ScalarIndexType::BTree)]
+        );
+        assert_eq!(on(with("b", BinaryOp::StartsWith)).len(), 1);
+        assert!(
+            on(with("h", BinaryOp::Lt)).is_empty(),
+            "a Hash index is not ordered"
+        );
+        assert_eq!(
+            on(Expr::IsNull(Box::new(prop("h")))),
+            vec![("h".into(), ScalarIndexType::Hash)]
+        );
+        assert!(on(with("b", BinaryOp::NotEq)).is_empty());
+        assert!(on(with("z", BinaryOp::Lt)).is_empty(), "unindexed");
     }
 }

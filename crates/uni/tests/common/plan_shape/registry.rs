@@ -84,6 +84,15 @@ pub const OPERATORS: &[Operator] = &[
         },
     },
     // ── Measured 2026-08-14 ────────────────────────────────────────────────
+    // ── Added 2026-10-18 (P9 / A7) ────────────────────────────────────────
+    Operator {
+        ty: "PropertyLookupJoinExec",
+        runtime_name: "PropertyLookupJoinExec",
+        status: Status::Proven {
+            by: "a7_anchored_disjoint_pattern_reads_only_the_matching_rows",
+            in_file: "crates/uni/tests/common/perf/anchored_lookup_test.rs",
+        },
+    },
     Operator {
         ty: "VidLookupJoinExec",
         runtime_name: "VidLookupJoinExec",

@@ -177,9 +177,10 @@ pub mod locy {
     pub use uni_cypher::locy_ast::LocyProgram;
     pub use uni_cypher::{ParseError, parse_locy};
     pub use uni_locy::LocyResult as RawLocyResult;
+    pub use uni_locy::magic;
     pub use uni_locy::{
-        CommandResult, CompiledProgram, DerivedEdge, DerivedFactSet, LocyCompileError, LocyConfig,
-        LocyError,
+        CommandResult, CompiledProgram, DerivedEdge, DerivedFactSet, GoalDirected,
+        GoalDirectedReport, LocyCompileError, LocyConfig, LocyError, rewrite_goal_directed,
     };
     pub use uni_query::{
         LocyExecProfile, LocyIterationProfile, LocyRuleProfile, LocyStratumProfile,

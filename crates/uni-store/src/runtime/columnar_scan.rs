@@ -29,6 +29,9 @@ use crate::backend::types::{CmpOp, FilterExpr, Scalar};
 use crate::runtime::l0_visibility::L0Context;
 use crate::storage::arrow_convert;
 use crate::storage::manager::StorageManager;
+use crate::storage::property_builder::{
+    EXT_ID_COLUMN, restore_ext_id_column, stored_in_ext_id_column,
+};
 
 /// Resolve the Arrow data type for a property, handling system columns like `overflow_json`.
 ///
@@ -146,6 +149,44 @@ pub fn build_overflow_property_column(
     Ok(Arc::new(builder.finish()))
 }
 
+/// Build the `ext_id` output column (`LargeBinary` CypherValue) for a labelled scan.
+///
+/// `ext_id` is never a declared property, so it is read like an overflow
+/// property — L0 first, then storage — except that storage keeps a string
+/// `ext_id` in the per-label `ext_id` column rather than in `overflow_json`
+/// (see `property_builder::stored_in_ext_id_column`). Reading the blob alone
+/// returned NULL for every flushed row.
+///
+/// # Errors
+///
+/// Propagates a corrupt overflow payload.
+pub fn build_ext_id_property_column(
+    num_rows: usize,
+    vid_arr: &UInt64Array,
+    stored: Option<&arrow_array::StringArray>,
+    overflow_arr: Option<&arrow_array::LargeBinaryArray>,
+    l0_ctx: &L0Context,
+) -> anyhow::Result<ArrayRef> {
+    let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
+    for i in 0..num_rows {
+        let vid = Vid::from(vid_arr.value(i));
+        if let Some(val_opt) = resolve_l0_property(&vid, EXT_ID_COLUMN, l0_ctx) {
+            append_value_as_cypher_binary(&mut builder, val_opt.as_ref());
+        } else if let Some(col) = stored
+            && !col.is_null(i)
+        {
+            builder.append_value(uni_common::cypher_value_codec::encode(&Value::String(
+                col.value(i).to_string(),
+            )));
+        } else if let Some(bytes) = extract_from_overflow_blob(overflow_arr, i, EXT_ID_COLUMN)? {
+            builder.append_value(&bytes);
+        } else {
+            builder.append_null();
+        }
+    }
+    Ok(Arc::new(builder.finish()))
+}
+
 /// Resolve a property value from the L0 visibility chain.
 ///
 /// Returns `Some(Some(val))` when the property exists with a non-null value,
@@ -234,7 +275,8 @@ pub fn build_all_props_column_for_schema_scan(
             }
         }
 
-        // 2. Overflow_json properties
+        // 2. Overflow_json properties, and the `ext_id` column the flush
+        //    moved a string `ext_id` into
         if let Some(arr) = overflow_arr
             && !arr.is_null(i)
             && let Ok(uni_common::Value::Map(map)) =
@@ -242,6 +284,7 @@ pub fn build_all_props_column_for_schema_scan(
         {
             crate::storage::property_builder::merge_overflow_into(&mut merged_props, map);
         }
+        restore_ext_id_column(batch, i, &mut merged_props);
 
         // 3. L0 buffer overlay (pending → current → transaction)
         for l0 in l0_ctx.iter_l0_buffers() {
@@ -1395,9 +1438,36 @@ pub async fn drop_superseded_pushdown_rows(
     // the vid list, so rewritten-key rows and deletion tombstones are seen.
     // Chunked to bound the `_vid IN (…)` filter-string size.
     const VERIFY_CHUNK: usize = 1000;
+    // A dense candidate set is read back in one `_vid` range instead: the
+    // chunked lookups cost one storage query per 1000 candidates, which made
+    // a non-selective indexed range (perf audit F1: `n.x IS NOT NULL` over
+    // 32,000 rows, 30 chunks) 3x slower than not pushing it at all — measured
+    // 126 ms against 37 ms unpushed, and 39 ms with the check skipped. Two
+    // narrow `u64` columns over the candidates' vid span are cheaper than
+    // that once the candidates fill at least 1/`DENSE_SPAN_RATIO` of the span;
+    // a sparse set keeps the chunked lookups, so a few thousand matches in a
+    // huge table never trigger a whole-table read.
+    const DENSE_SPAN_RATIO: u64 = 16;
+    let (lo, hi) = (
+        candidates.iter().copied().min().unwrap_or(0),
+        candidates.iter().copied().max().unwrap_or(0),
+    );
+    let span = hi - lo + 1;
+    let dense = candidates.len() > VERIFY_CHUNK
+        && (candidates.len() as u64).saturating_mul(DENSE_SPAN_RATIO) >= span;
+    let filters: Vec<FilterExpr> = if dense {
+        vec![FilterExpr::all([
+            FilterExpr::compare("_vid", CmpOp::GtEq, Scalar::UInt(lo)),
+            FilterExpr::compare("_vid", CmpOp::LtEq, Scalar::UInt(hi)),
+        ])]
+    } else {
+        candidates
+            .chunks(VERIFY_CHUNK)
+            .map(|chunk| FilterExpr::one_of("_vid", chunk.iter().map(|v| Scalar::UInt(*v))))
+            .collect()
+    };
     let mut max_ver: HashMap<u64, u64> = HashMap::with_capacity(candidates.len());
-    for chunk in candidates.chunks(VERIFY_CHUNK) {
-        let filter = FilterExpr::one_of("_vid", chunk.iter().map(|v| Scalar::UInt(*v)));
+    for filter in filters {
         let scanned = match label_table {
             Some(label) => {
                 storage
@@ -1778,8 +1848,8 @@ pub enum L0VertexTargets<'a> {
     /// and [`Self::Range`] decide it (the label set alone, with no property-row
     /// requirement), so a row this selects is built byte-for-byte as the
     /// unrestricted scan would have built it. Produced by
-    /// [`l0_equality_candidates`] to skip L0 rows a pushed equality cannot
-    /// match before they are materialized (W3b).
+    /// [`l0_prefilter_candidates`] to skip L0 rows a pushed equality or range
+    /// cannot match before they are materialized (W3b, F1).
     Filtered {
         /// Half-open `_vid` range the scan is walking, if any.
         range: Option<(u64, u64)>,
@@ -1802,20 +1872,46 @@ impl L0VertexTargets<'_> {
     }
 }
 
-/// A pushed equality on one declared property, for pruning L0 rows early.
+/// Pushed constraints on one declared property, for pruning L0 rows early.
 ///
-/// `property IN values` (one value for `=`). It is a **pre-filter**: it may
-/// keep a row the scan's runtime filter later rejects, but must never drop a
-/// row that filter would accept, because the runtime filter — and the residual
-/// `FilterExec` above the scan — stay authoritative for three-valued logic and
-/// type coercion. [`l0_value_may_equal`] is where that one-sided contract is
-/// kept.
+/// `property IN one_of` (one value for `=`) when `one_of` is set, and
+/// `property op value` for every entry of `bounds`. It is a **pre-filter**: it
+/// may keep a row the scan's runtime filter later rejects, but must never drop
+/// a row that filter would accept, because the runtime filter — and the
+/// residual `FilterExec` above the scan — stay authoritative for three-valued
+/// logic and type coercion. [`l0_value_may_equal`] and
+/// [`l0_value_may_satisfy`] are where that one-sided contract is kept.
+///
+/// Equality came first (W3b); range bounds were added with the F1 range
+/// pushdown, so an indexed `n.x < 10` over unflushed rows reads the matching
+/// L0 rows instead of the label's whole L0 set.
 #[derive(Debug, Clone, PartialEq)]
-pub struct L0EqualityPrefilter {
-    /// Declared property the equality constrains.
+pub struct L0PropertyPrefilter {
+    /// Declared property the constraints apply to.
     pub property: String,
-    /// Literals the property is compared against; a row may match any of them.
-    pub values: Vec<Value>,
+    /// Literals the property must equal one of, when the filter pins it.
+    pub one_of: Option<Vec<Value>>,
+    /// `(op, literal)` comparisons the property must all satisfy. `op` is one
+    /// of `<`, `<=`, `>`, `>=`, with the property on the left.
+    pub bounds: Vec<(CmpOp, Value)>,
+}
+
+impl L0PropertyPrefilter {
+    /// Whether a stored L0 value of the property could pass every constraint.
+    pub fn may_match(
+        &self,
+        column_type: &uni_common::core::schema::DataType,
+        stored: Option<&Value>,
+    ) -> bool {
+        self.one_of.as_ref().is_none_or(|values| {
+            values
+                .iter()
+                .any(|lit| l0_value_may_equal(column_type, stored, lit))
+        }) && self
+            .bounds
+            .iter()
+            .all(|(op, lit)| l0_value_may_satisfy(column_type, stored, *op, lit))
+    }
 }
 
 /// Whether a stored L0 value could satisfy `column = literal` after the scan
@@ -1860,10 +1956,67 @@ pub fn l0_value_may_equal(
     }
 }
 
+/// Whether a stored L0 value could satisfy `column op literal` after the scan
+/// converts it to the declared column type, for `op` one of `<`, `<=`, `>`,
+/// `>=`.
+///
+/// The same one-sided contract as [`l0_value_may_equal`]: `false` only when
+/// the conversion is the identity and the comparison is plainly false.
+///
+/// * a missing or NULL value is a NULL cell, and a comparison with NULL is
+///   never true;
+/// * `String` in a `STRING` column against a string literal compares bytes, as
+///   the runtime filter does;
+/// * `Int` in an `INT64` column against an integer literal compares integers;
+/// * `Int` or `Float` in a `FLOAT64` column against a numeric literal compares
+///   as `f64`, except that a NaN on either side, or a zero on both, answers
+///   `true`: the runtime filter orders floats by IEEE total order (NaN above
+///   everything, `-0.0` below `+0.0`), which disagrees with `f64`'s own
+///   comparison exactly there.
+///
+/// Every other pairing answers `true`.
+pub fn l0_value_may_satisfy(
+    column_type: &uni_common::core::schema::DataType,
+    stored: Option<&Value>,
+    op: CmpOp,
+    literal: &Value,
+) -> bool {
+    use std::cmp::Ordering;
+    use uni_common::core::schema::DataType as T;
+    let Some(stored) = stored else {
+        return false;
+    };
+    let ordering = match (column_type, stored, literal) {
+        (_, Value::Null, _) => return false,
+        (T::String, Value::String(a), Value::String(b)) => a.as_bytes().cmp(b.as_bytes()),
+        (T::Int64, Value::Int(a), Value::Int(b)) => a.cmp(b),
+        (T::Float64, Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
+            match (stored.as_f64(), literal.as_f64()) {
+                (Some(a), Some(b)) if !a.is_nan() && !b.is_nan() && !(a == 0.0 && b == 0.0) => {
+                    match a.partial_cmp(&b) {
+                        Some(o) => o,
+                        None => return true,
+                    }
+                }
+                _ => return true,
+            }
+        }
+        _ => return true,
+    };
+    match op {
+        CmpOp::Lt => ordering == Ordering::Less,
+        CmpOp::LtEq => ordering != Ordering::Greater,
+        CmpOp::Gt => ordering == Ordering::Greater,
+        CmpOp::GtEq => ordering != Ordering::Less,
+        CmpOp::Eq | CmpOp::NotEq => true,
+    }
+}
+
 /// The L0 vids of `label` that the scan must still build under `prefilter`.
 ///
-/// A vid is kept when its merged L0 value of the property may equal one of the
-/// literals ([`l0_value_may_equal`]), **or** when `shadowed` holds it. The
+/// A vid is kept when its merged L0 value of the property may pass the
+/// prefilter ([`L0PropertyPrefilter::may_match`]), **or** when `shadowed`
+/// holds it. The
 /// second arm is the shadowing contract: `shadowed` is the set of vids the
 /// storage side of the same scan returned, and an L0 row for one of them must
 /// reach the MVCC merge even when it no longer matches — it is the newer
@@ -1880,22 +2033,17 @@ pub fn l0_value_may_equal(
 /// The pass touches one hash entry per L0 label member and clones nothing,
 /// which is what replaces materializing every row (clone every property, build
 /// every column, sort and dedup) for each lookup.
-pub fn l0_equality_candidates(
+pub fn l0_prefilter_candidates(
     l0_ctx: &L0Context,
     label: &str,
     range: Option<(u64, u64)>,
     column_type: &uni_common::core::schema::DataType,
-    prefilter: &L0EqualityPrefilter,
+    prefilter: &L0PropertyPrefilter,
     label_only: &HashMap<u64, (Properties, u64)>,
     shadowed: impl IntoIterator<Item = u64>,
 ) -> HashSet<u64> {
     let in_range = |vid: u64| range.is_none_or(|(lo, hi)| vid >= lo && vid < hi);
-    let may_equal = |stored: Option<&Value>| {
-        prefilter
-            .values
-            .iter()
-            .any(|lit| l0_value_may_equal(column_type, stored, lit))
-    };
+    let may_equal = |stored: Option<&Value>| prefilter.may_match(column_type, stored);
     let prop = prefilter.property.as_str();
     let mut verdict: HashMap<u64, bool> = HashMap::new();
     for l0 in l0_ctx.iter_l0_buffers() {
@@ -1924,6 +2072,103 @@ pub fn l0_equality_candidates(
         .collect();
     keep.extend(shadowed.into_iter().filter(|v| in_range(*v)));
     keep
+}
+
+/// Whether a stored schemaless L0 value could satisfy `property = literal`.
+///
+/// A schemaless property has no declared column type: the scan hands the
+/// value to the Cypher comparison as it was written. The contract is
+/// [`l0_value_may_equal`]'s, one-sided: `false` only when the comparison is
+/// plainly false.
+///
+/// * a missing or NULL value never equals anything;
+/// * two strings, two integers or two booleans compare by value;
+/// * two floats compare as `f64`, keeping any `NaN`.
+///
+/// Every other pairing — an integer against a float (equal across types in
+/// Cypher, and not transitively above 2^53), a list, a map, a temporal —
+/// answers `true` and leaves the decision to the filter above the scan.
+pub fn l0_value_may_equal_untyped(stored: Option<&Value>, literal: &Value) -> bool {
+    let Some(stored) = stored else {
+        return false;
+    };
+    match (stored, literal) {
+        (Value::Null, _) => false,
+        (Value::String(a), Value::String(b)) => a == b,
+        (Value::Int(a), Value::Int(b)) => a == b,
+        (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::Float(a), Value::Float(b)) if !a.is_nan() && !b.is_nan() => a == b,
+        _ => true,
+    }
+}
+
+/// The L0 vids a schemaless vertex scan of `label` must still build under an
+/// equality prefilter.
+///
+/// The schemaless counterpart of [`l0_prefilter_candidates`], with the same
+/// shadowing contract: a vid is kept when its merged L0 value of the property
+/// may equal one of `prefilter.one_of` ([`l0_value_may_equal_untyped`]), **or**
+/// when `shadowed` — the vids the flushed side of the same scan returned —
+/// holds it, so a newer L0 version that no longer matches still reaches the
+/// MVCC merge and hides the stale flushed row. Range bounds are not used: an
+/// untyped stored value orders by Cypher's rules, which this pass does not
+/// re-implement, so a prefilter without `one_of` keeps every vid.
+///
+/// Membership mirrors the schemaless L0 builder's unrestricted walk: with no
+/// label every vid in a buffer's property map, else the vids carrying every
+/// label of `label` (`"A:B"`) in that buffer; later buffers' values for the
+/// key win; a relabeled vid in `label_only` starts from its flushed
+/// properties.
+///
+/// Returns `None` when the prefilter cannot restrict (no `one_of`), meaning
+/// "build every row".
+pub fn schemaless_l0_prefilter_candidates(
+    l0_ctx: &L0Context,
+    label: &str,
+    range: Option<(u64, u64)>,
+    prefilter: &L0PropertyPrefilter,
+    label_only: &HashMap<u64, (Properties, u64)>,
+    shadowed: impl IntoIterator<Item = u64>,
+) -> Option<HashSet<u64>> {
+    let values = prefilter.one_of.as_ref()?;
+    let in_range = |vid: u64| range.is_none_or(|(lo, hi)| vid >= lo && vid < hi);
+    let may_equal = |stored: Option<&Value>| {
+        values
+            .iter()
+            .any(|lit| l0_value_may_equal_untyped(stored, lit))
+    };
+    let labels: Vec<&str> = label.split(':').filter(|l| !l.is_empty()).collect();
+    let prop = prefilter.property.as_str();
+    let mut verdict: HashMap<u64, bool> = HashMap::new();
+    for l0 in l0_ctx.iter_l0_buffers() {
+        let guard = l0.read();
+        let label_sets: Option<Vec<&HashSet<Vid>>> =
+            labels.iter().map(|l| guard.label_to_vids.get(*l)).collect();
+        let Some(label_sets) = label_sets else {
+            // A label this buffer has never seen: no member here.
+            continue;
+        };
+        for (vid, props) in &guard.vertex_properties {
+            let raw = vid.as_u64();
+            if !in_range(raw) || !label_sets.iter().all(|s| s.contains(vid)) {
+                continue;
+            }
+            if let Some(value) = props.get(prop) {
+                verdict.insert(raw, may_equal(Some(value)));
+            }
+        }
+    }
+    for (vid, (base, _)) in label_only {
+        if in_range(*vid) {
+            verdict.insert(*vid, may_equal(base.get(prop)));
+        }
+    }
+    let mut keep: HashSet<u64> = verdict
+        .into_iter()
+        .filter_map(|(vid, may)| may.then_some(vid))
+        .collect();
+    keep.extend(shadowed.into_iter().filter(|v| in_range(*v)));
+    Some(keep)
 }
 
 /// Build a RecordBatch from L0 buffer data for a given label, matching the
@@ -2125,7 +2370,7 @@ pub fn build_l0_vertex_batch(
                     let (props, _) = &vid_data[vid_u64];
                     let mut overflow: HashMap<String, Value> = HashMap::new();
                     for (k, v) in props {
-                        if k == "ext_id" || k.starts_with('_') {
+                        if stored_in_ext_id_column(k, v) || k.starts_with('_') {
                             continue;
                         }
                         if !schema_prop_names.contains(k.as_str()) {
@@ -2158,6 +2403,18 @@ pub fn build_l0_vertex_batch(
                     .with_field(Arc::new(Field::new("item", DataType::Utf8, true)));
                 for _ in 0..num_rows {
                     builder.append_null();
+                }
+                columns.push(Arc::new(builder.finish()));
+            }
+            EXT_ID_COLUMN => {
+                // The flush-shaped split: a string `ext_id` here, anything
+                // else in `overflow_json` above (`stored_in_ext_id_column`).
+                let mut builder = StringBuilder::new();
+                for vid_u64 in &vids {
+                    match vid_data[vid_u64].0.get(EXT_ID_COLUMN) {
+                        Some(Value::String(s)) => builder.append_value(s),
+                        _ => builder.append_null(),
+                    }
                 }
                 columns.push(Arc::new(builder.finish()));
             }
@@ -2308,7 +2565,11 @@ pub fn map_to_output_schema(
                 .iter()
                 .any(|p| p != "overflow_json" && p != "_all_props" && !p.starts_with('_'));
 
-            if !any_l0_has_vertex_props && !has_schema_cols {
+            let has_ext_id = batch
+                .column_by_name(EXT_ID_COLUMN)
+                .is_some_and(|c| c.null_count() < c.len());
+
+            if !any_l0_has_vertex_props && !has_schema_cols && !has_ext_id {
                 // No L0 mutations, no schema cols to merge: overflow_json IS _all_props
                 match batch.column_by_name("overflow_json") {
                     Some(col) => columns.push(col.clone()),
@@ -2330,6 +2591,17 @@ pub fn map_to_output_schema(
                 )?;
                 columns.push(col);
             }
+        } else if prop == EXT_ID_COLUMN {
+            let stored = batch
+                .column_by_name(EXT_ID_COLUMN)
+                .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
+            columns.push(build_ext_id_property_column(
+                batch.num_rows(),
+                vid_arr,
+                stored,
+                overflow_arr,
+                l0_ctx,
+            )?);
         } else {
             match batch.column_by_name(prop) {
                 Some(col) => columns.push(col.clone()),
@@ -2385,14 +2657,15 @@ pub struct ColumnarVertexScanRequest<'a> {
     /// Rendered SQL from the planner's hash-index pushdown; passed through
     /// verbatim, nothing here parses it.
     pub extra_lance_filter: Option<&'a str>,
-    /// Structured form of the equality the caller filters this scan's rows by,
-    /// used to skip L0 rows that cannot match before they are materialized.
+    /// Structured form of the equality / range the caller filters this scan's
+    /// rows by, used to skip L0 rows that cannot match before they are
+    /// materialized.
     ///
     /// Only a cost lever: the caller still applies its own filter to every
     /// returned row. Without it a point lookup on unflushed rows built the
     /// label's whole L0 set and filtered afterwards — `rows_scanned` equal to
-    /// the L0 population per lookup (W3b). See [`L0EqualityPrefilter`].
-    pub l0_prefilter: Option<&'a L0EqualityPrefilter>,
+    /// the L0 population per lookup (W3b). See [`L0PropertyPrefilter`].
+    pub l0_prefilter: Option<&'a L0PropertyPrefilter>,
 }
 
 /// Read a batch of vertices columnarly: Lance + L0, MVCC-resolved.
@@ -2483,6 +2756,16 @@ pub async fn columnar_scan_vertex_batch(
                 push_column_if_absent(&mut lance_columns, prop);
             }
         }
+    }
+
+    // `ext_id` is undeclared but has its own column: a flush moves a string
+    // `ext_id` there and out of `overflow_json`, so the blob alone cannot
+    // answer `n.ext_id` or a whole-entity map.
+    if projected_properties
+        .iter()
+        .any(|p| p == EXT_ID_COLUMN || p == "_all_props")
+    {
+        push_column_if_absent(&mut lance_columns, EXT_ID_COLUMN);
     }
 
     // Ensure overflow_json is present when any projected property is not in the schema
@@ -2625,6 +2908,8 @@ pub async fn columnar_scan_vertex_batch(
                 }
                 if col == "overflow_json" {
                     fields.push(Field::new("overflow_json", DataType::LargeBinary, true));
+                } else if col == EXT_ID_COLUMN {
+                    fields.push(Field::new(EXT_ID_COLUMN, DataType::Utf8, true));
                 } else if col == "_labels" {
                     // Typed explicitly: falling through to the `label_props`
                     // lookup below would default it to LargeBinary, since
@@ -2677,7 +2962,7 @@ pub async fn columnar_scan_vertex_batch(
     )
     .await?;
     // Narrow a whole-label (or range) L0 read to the rows the pushed equality
-    // can match, plus every vid the storage side returned — those L0 rows
+    // or range can match, plus every vid the storage side returned — those L0 rows
     // must reach the merge to shadow their stale flushed versions. A vid list
     // is already narrow; an undeclared property has no column type to reason
     // about, so both keep the unrestricted read.
@@ -2696,7 +2981,7 @@ pub async fn columnar_scan_vertex_batch(
                         .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
                         .map(|a| a.values().to_vec())
                         .unwrap_or_default();
-                    l0_kept = l0_equality_candidates(
+                    l0_kept = l0_prefilter_candidates(
                         l0_ctx,
                         label,
                         range,
@@ -3201,5 +3486,166 @@ mod tests {
             &Value::Float(f64::NAN)
         ));
         assert!(l0_value_may_equal(&T::CypherValue, Some(&s("a")), &s("b")));
+    }
+
+    /// The untyped (schemaless) variant drops only same-type scalar
+    /// mismatches and missing/NULL values; a cross-type numeric pair, which
+    /// Cypher may call equal, and every non-scalar are kept.
+    #[test]
+    fn l0_value_may_equal_untyped_drops_only_same_type_mismatches() {
+        let s = |v: &str| Value::String(v.into());
+        assert!(!l0_value_may_equal_untyped(None, &s("a")));
+        assert!(!l0_value_may_equal_untyped(Some(&Value::Null), &s("a")));
+        assert!(l0_value_may_equal_untyped(Some(&s("a")), &s("a")));
+        assert!(!l0_value_may_equal_untyped(Some(&s("a")), &s("b")));
+        assert!(!l0_value_may_equal_untyped(
+            Some(&Value::Int(1)),
+            &Value::Int(2)
+        ));
+        assert!(!l0_value_may_equal_untyped(
+            Some(&Value::Bool(true)),
+            &Value::Bool(false)
+        ));
+        assert!(!l0_value_may_equal_untyped(
+            Some(&Value::Float(1.5)),
+            &Value::Float(2.5)
+        ));
+        // Kept: `1 = 1.0` in Cypher; NaN; a string against an integer is left
+        // to the filter; a list.
+        assert!(l0_value_may_equal_untyped(
+            Some(&Value::Int(1)),
+            &Value::Float(1.0)
+        ));
+        assert!(l0_value_may_equal_untyped(
+            Some(&Value::Float(1.0)),
+            &Value::Int(2)
+        ));
+        assert!(l0_value_may_equal_untyped(
+            Some(&Value::Float(f64::NAN)),
+            &Value::Float(f64::NAN)
+        ));
+        assert!(l0_value_may_equal_untyped(Some(&s("1")), &Value::Int(1)));
+        assert!(l0_value_may_equal_untyped(
+            Some(&Value::List(vec![Value::Int(1)])),
+            &Value::List(vec![Value::Int(2)])
+        ));
+    }
+
+    /// The L0 range prefilter never drops a row the runtime filter keeps.
+    ///
+    /// The runtime filter compares with Arrow's kernels, which order floats by
+    /// IEEE total order (NaN above everything, `-0.0` below `+0.0`). Over every
+    /// pairing of stored value and literal from domains that straddle those
+    /// edges, a `false` from [`l0_value_may_satisfy`] must coincide with the
+    /// kernel's `false` (or NULL).
+    #[test]
+    fn l0_range_prefilter_is_a_superset_of_the_arrow_comparison() {
+        use arrow::compute::kernels::cmp;
+        use arrow_array::{Datum, Float64Array, Int64Array, Scalar as ArrowScalar, StringArray};
+        use uni_common::core::schema::DataType as T;
+
+        let floats = [
+            f64::NAN,
+            f64::NEG_INFINITY,
+            -1.5,
+            -0.0,
+            0.0,
+            1.0,
+            2.5,
+            f64::INFINITY,
+        ];
+        let ints = [i64::MIN, -3, -1, 0, 1, 2, 10, i64::MAX];
+        let strs = [
+            "",
+            "a",
+            "a\u{10FFFF}",
+            "b",
+            "u\u{D7FF}",
+            "u\u{E000}",
+            "é",
+            "it's",
+        ];
+        let ops = [CmpOp::Lt, CmpOp::LtEq, CmpOp::Gt, CmpOp::GtEq];
+        let kernel = |op: CmpOp, l: &dyn Datum, r: &dyn Datum| -> bool {
+            let out = match op {
+                CmpOp::Lt => cmp::lt(l, r),
+                CmpOp::LtEq => cmp::lt_eq(l, r),
+                CmpOp::Gt => cmp::gt(l, r),
+                _ => cmp::gt_eq(l, r),
+            }
+            .expect("kernel");
+            out.is_valid(0) && out.value(0)
+        };
+        let mut pruned = 0usize;
+        for op in ops {
+            // FLOAT64 column, stored Int or Float, literal Int or Float.
+            for stored in floats {
+                for lit in floats {
+                    let want = kernel(
+                        op,
+                        &Float64Array::from(vec![stored]),
+                        &ArrowScalar::new(Float64Array::from(vec![lit])),
+                    );
+                    let may = l0_value_may_satisfy(
+                        &T::Float64,
+                        Some(&Value::Float(stored)),
+                        op,
+                        &Value::Float(lit),
+                    );
+                    assert!(may || !want, "{stored} {op:?} {lit}");
+                    pruned += usize::from(!may);
+                }
+            }
+            for stored in ints {
+                for lit in ints {
+                    let want = kernel(
+                        op,
+                        &Int64Array::from(vec![stored]),
+                        &ArrowScalar::new(Int64Array::from(vec![lit])),
+                    );
+                    let may = l0_value_may_satisfy(
+                        &T::Int64,
+                        Some(&Value::Int(stored)),
+                        op,
+                        &Value::Int(lit),
+                    );
+                    assert_eq!(may, want, "{stored} {op:?} {lit}");
+                }
+            }
+            for stored in strs {
+                for lit in strs {
+                    let want = kernel(
+                        op,
+                        &StringArray::from(vec![stored]),
+                        &ArrowScalar::new(StringArray::from(vec![lit])),
+                    );
+                    let may = l0_value_may_satisfy(
+                        &T::String,
+                        Some(&Value::String(stored.into())),
+                        op,
+                        &Value::String(lit.into()),
+                    );
+                    assert_eq!(may, want, "{stored:?} {op:?} {lit:?}");
+                }
+            }
+            // NULL and missing values never satisfy a comparison.
+            for stored in [None, Some(&Value::Null)] {
+                assert!(!l0_value_may_satisfy(&T::Int64, stored, op, &Value::Int(1)));
+            }
+            // Cross-type pairings are left to the runtime filter.
+            assert!(l0_value_may_satisfy(
+                &T::String,
+                Some(&Value::Int(5)),
+                op,
+                &Value::String("a".into())
+            ));
+            assert!(l0_value_may_satisfy(
+                &T::Int64,
+                Some(&Value::Int(5)),
+                op,
+                &Value::Float(1.5)
+            ));
+        }
+        assert!(pruned > 0, "the float domain never pruned anything");
     }
 }

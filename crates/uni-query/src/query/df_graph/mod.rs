@@ -82,6 +82,7 @@ pub mod pattern_comprehension;
 pub mod pattern_exists;
 pub mod pred_dag;
 pub mod procedure_call;
+pub mod property_lookup_join;
 pub mod quantifier;
 pub mod raw_bytes_marker;
 mod read_set_exec;
@@ -145,8 +146,8 @@ pub use locy_fixpoint::{
 };
 pub use locy_fold::FoldExec;
 pub use locy_priority::PriorityExec;
-pub use locy_program::{DerivedStore, LocyProgramExec};
-pub use locy_traits::{DerivedFactSource, LocyExecutionContext};
+pub use locy_program::{DerivedStore, LocyProgramExec, ReusedStrata};
+pub use locy_traits::{DerivedFactSource, LocyExecutionContext, ReEvaluation, StrataBaseline};
 
 /// A query deadline that excuses the time a cursor's consumer spent idle.
 ///
@@ -312,6 +313,10 @@ pub struct GraphExecutionContext {
     /// context, which is what releases the ids — see
     /// `uni_common::cypher_value_codec::handle`.
     handle_scope: Arc<HandleScope>,
+
+    /// `K` for a `~=` vector search no `LIMIT` sized
+    /// (`UniConfig::vector_knn_default_k`).
+    vector_knn_default_k: usize,
 }
 
 impl std::fmt::Debug for GraphExecutionContext {
@@ -371,6 +376,7 @@ impl GraphExecutionContext {
             cancellation_token,
             writer: None,
             handle_scope: Arc::new(HandleScope::new()),
+            vector_knn_default_k: uni_common::config::DEFAULT_VECTOR_KNN_K,
         }
     }
 
@@ -442,6 +448,33 @@ impl GraphExecutionContext {
     /// The per-query counter set, if this context belongs to a counted query.
     pub fn counters(&self) -> Option<&Arc<uni_store::QueryCounters>> {
         self.counters.as_ref()
+    }
+
+    /// Set `K` for a `~=` vector search that no `LIMIT` sized.
+    #[must_use]
+    pub fn with_vector_knn_default_k(mut self, k: usize) -> Self {
+        self.vector_knn_default_k = k;
+        self
+    }
+
+    /// `K` for a `~=` vector search that no `LIMIT` sized.
+    pub fn vector_knn_default_k(&self) -> usize {
+        self.vector_knn_default_k
+    }
+
+    /// Share `sink` as this context's warning collector.
+    ///
+    /// For a sub-plan: its context is built fresh, so without this the
+    /// warnings its operators raise land in a collector nobody harvests.
+    #[must_use]
+    pub(crate) fn with_warnings_sink(mut self, sink: Arc<Mutex<Vec<QueryWarning>>>) -> Self {
+        self.warnings = sink;
+        self
+    }
+
+    /// The warning collector, for a sub-plan to share.
+    pub(crate) fn warnings_sink(&self) -> Arc<Mutex<Vec<QueryWarning>>> {
+        Arc::clone(&self.warnings)
     }
 
     /// Records `n` rows served from an L0 buffer, if counting is active.
@@ -542,8 +575,14 @@ impl GraphExecutionContext {
     }
 
     /// Record a runtime warning.
+    ///
+    /// A warning already recorded is not recorded again: a sub-plan runs
+    /// once per outer row and shares this collector, and the same truncation
+    /// reported a thousand times says nothing the first report did not.
     pub fn push_warning(&self, warning: QueryWarning) {
-        if let Ok(mut w) = self.warnings.lock() {
+        if let Ok(mut w) = self.warnings.lock()
+            && !w.contains(&warning)
+        {
             w.push(warning);
         }
     }
@@ -1175,8 +1214,11 @@ fn overlay_l0_neighbors(
         neighbor_map.remove(eid);
     }
 
-    // Convert back to vec
+    // Back to a vector, in the `(neighbor vid, eid)` order the adjacency
+    // manager returns: the map's iteration order is seeded per call, and a
+    // search over transaction-local edges must expand them deterministically.
     *neighbors = neighbor_map.into_iter().map(|(e, v)| (v, e)).collect();
+    neighbors.sort_unstable();
 }
 
 /// Extension trait to convert storage Direction to SimpleGraph directions.

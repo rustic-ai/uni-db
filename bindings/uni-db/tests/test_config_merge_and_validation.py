@@ -69,6 +69,7 @@ def test_every_accepted_key_is_accepted(tmp_path):
         "fork_default_ttl": timedelta(hours=1),
         "fork_sweeper_interval": timedelta(seconds=30),
         "disable_fork_sweeper": True,
+        "vector_knn_default_k": 500,
     }
     # One at a time, so a failure names the key rather than the whole dict.
     for key, value in accepted.items():
@@ -138,3 +139,42 @@ def test_the_last_write_to_one_setting_wins(tmp_path):
     assert not _rejects_undeclared_label(db), (
         "the later write to strict_schema did not win"
     )
+
+
+# --- vector_knn_default_k -----------------------------------------------------
+
+
+def _knn_db(tmp_path, name, config):
+    db = _builder(tmp_path, name).config(config).build()
+    db.schema().label("Doc").property("id", "int").vector("emb", 2).done().apply()
+    session = db.session()
+    tx = session.tx()
+    for i in range(10):
+        tx.execute(f"CREATE (:Doc {{id: {i}, emb: [1.0, {i / 10}]}})")
+    tx.commit()
+    return db, session
+
+
+def test_vector_knn_default_k_sizes_an_unlimited_search(tmp_path):
+    """The key is honoured, not merely accepted: an `~=` search no LIMIT sizes
+    returns `vector_knn_default_k` rows and warns that it stopped there."""
+    db, session = _knn_db(tmp_path, "k3", {"vector_knn_default_k": 3})
+    assert db.config()["vector_knn_default_k"] == 3
+    result = session.query("MATCH (d:Doc) WHERE d.emb ~= [1.0, 0.0] RETURN d.id")
+    assert sorted(row["d.id"] for row in result) == [0, 1, 2]
+    assert any("vector_knn_default_k" in w.message for w in result.warnings), (
+        result.warnings
+    )
+    # A LIMIT the search feeds directly sizes it instead, with no warning.
+    result = session.query(
+        "MATCH (d:Doc) WHERE d.emb ~= [1.0, 0.0] RETURN d.id LIMIT 5"
+    )
+    assert [row["d.id"] for row in result] == [0, 1, 2, 3, 4]
+    assert not any("vector_knn_default_k" in w.message for w in result.warnings)
+
+
+def test_vector_knn_default_k_larger_than_the_label_does_not_warn(tmp_path):
+    _db, session = _knn_db(tmp_path, "k50", {"vector_knn_default_k": 50})
+    result = session.query("MATCH (d:Doc) WHERE d.emb ~= [1.0, 0.0] RETURN d.id")
+    assert len(result) == 10
+    assert not any("vector_knn_default_k" in w.message for w in result.warnings)

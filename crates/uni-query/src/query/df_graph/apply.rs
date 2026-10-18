@@ -3,20 +3,21 @@
 
 //! Apply (correlated subquery) execution plan for DataFusion.
 //!
-//! Implements `CALL { ... }` subqueries by executing the subquery once per
-//! input row, injecting the input row's columns as parameters, and cross-joining
-//! the results.
+//! Implements `CALL { ... }` subqueries and in-query procedure calls by
+//! executing the subquery once per input row and cross-joining the results.
 //!
 //! # Semantics
 //!
 //! For each row from the input plan:
-//! 1. Optionally filter via `input_filter`
-//! 2. Inject the input row's columns as parameters
-//! 3. Re-plan and execute the subquery with those parameters
+//! 1. Optionally filter via `input_filter` (the planner no longer sets it: it
+//!    pushes input-only predicates into a `Filter` below this operator)
+//! 2. Bind the subquery to the row: a `CALL { }` body's node and relationship
+//!    imports read the row's own columns (`LogicalPlan::OuterRow`); a
+//!    procedure reads its arguments from the row's values
+//! 3. Re-plan and execute the subquery for that row
 //! 4. Cross-join: merge each subquery result row with the input row
 //!
-//! If input produces zero rows (after filtering), execute the subquery once
-//! with the base parameters (standalone CALL support).
+//! An input with no rows yields no rows; the subquery does not run.
 
 use crate::query::df_graph::common::{
     arrow_err, collect_all_partitions, compute_plan_properties, execute_subplan,
@@ -253,13 +254,13 @@ impl ExecutionPlan for GraphApplyExec {
 // ---------------------------------------------------------------------------
 
 /// Convert record batches into row-oriented `HashMap<String, Value>` representation.
-fn batches_to_row_maps(batches: &[RecordBatch]) -> Vec<HashMap<String, Value>> {
+fn batches_to_row_maps(batches: &[RecordBatch]) -> DFResult<Vec<HashMap<String, Value>>> {
     batches
         .iter()
         .flat_map(|batch| {
             (0..batch.num_rows()).map(move |row_idx| extract_row_params(batch, row_idx))
         })
-        .collect()
+        .collect::<DFResult<Vec<_>>>()
 }
 
 /// Evaluate a Cypher filter expression against a row.
@@ -392,50 +393,10 @@ fn evaluate_comparison(
     }
 }
 
-/// Build a typed column from row maps using a builder and value extractor.
-///
-/// For each row, looks up `col_name`, applies `extract` to get an `Option<T>`,
-/// and appends the value or null to the builder.
-/// The value for `col_name` in `row`, deriving `{var}.{prop}` from the entity
-/// bound to `var` when the flat column is absent.
-///
-/// A row carries an entity either as a `Value::Map` — from which the planner's
-/// dotted columns were split out alongside it — or natively, in which case those
-/// dotted columns were never materialised and `{var}._vid` is simply missing.
-/// Reading it flat then yields a null, and a non-nullable `{var}._vid` fails
-/// batch construction outright (#234).
-fn row_column(row: &HashMap<String, Value>, col_name: &str) -> Option<Value> {
-    if let Some(v) = row.get(col_name) {
-        return Some(v.clone());
-    }
-    let (var, prop) = col_name.split_once('.')?;
-    let derived = row.get(var)?.entity_property(prop);
-    (!derived.is_null()).then_some(derived)
-}
-
-fn build_column<B, T>(
-    rows: &[HashMap<String, Value>],
-    col_name: &str,
-    mut builder: B,
-    extract: impl Fn(&Value) -> Option<T>,
-) -> ArrayRef
-where
-    B: arrow_array::builder::ArrayBuilder,
-    B: PrimitiveAppend<T>,
-{
-    for row in rows {
-        match row_column(row, col_name).as_ref().and_then(&extract) {
-            Some(v) => builder.append_typed_value(v),
-            None => builder.append_typed_null(),
-        }
-    }
-    Arc::new(builder.finish_to_array())
-}
-
 /// Trait to abstract over typed append for primitive Arrow builders.
 ///
 /// This avoids repeating the same get-value/convert/append-or-null pattern
-/// for each numeric/boolean type in `rows_to_batch`.
+/// for each numeric/boolean type in `value_to_single_row_array`.
 trait PrimitiveAppend<T> {
     fn append_typed_value(&mut self, val: T);
     fn append_typed_null(&mut self);
@@ -463,102 +424,6 @@ impl_primitive_append!(Int64Builder, i64, arrow_array::Int64Array);
 impl_primitive_append!(Int32Builder, i32, arrow_array::Int32Array);
 impl_primitive_append!(Float64Builder, f64, arrow_array::Float64Array);
 impl_primitive_append!(BooleanBuilder, bool, arrow_array::BooleanArray);
-
-/// Build a RecordBatch from merged row maps using the output schema.
-fn rows_to_batch(rows: &[HashMap<String, Value>], schema: &SchemaRef) -> DFResult<RecordBatch> {
-    if rows.is_empty() {
-        return Ok(RecordBatch::new_empty(schema.clone()));
-    }
-
-    let num_rows = rows.len();
-    let mut columns: Vec<ArrayRef> = Vec::with_capacity(schema.fields().len());
-
-    for field in schema.fields() {
-        let col_name = field.name();
-        let col = match field.data_type() {
-            DataType::UInt64 => build_column(
-                rows,
-                col_name,
-                UInt64Builder::with_capacity(num_rows),
-                |v| v.as_u64().or_else(|| v.as_i64().map(|i| i as u64)),
-            ),
-            DataType::Int64 => build_column(
-                rows,
-                col_name,
-                Int64Builder::with_capacity(num_rows),
-                Value::as_i64,
-            ),
-            DataType::Int32 => {
-                build_column(rows, col_name, Int32Builder::with_capacity(num_rows), |v| {
-                    v.as_i64().map(|i| i as i32)
-                })
-            }
-            DataType::Float64 => build_column(
-                rows,
-                col_name,
-                Float64Builder::with_capacity(num_rows),
-                Value::as_f64,
-            ),
-            DataType::Boolean => build_column(
-                rows,
-                col_name,
-                BooleanBuilder::with_capacity(num_rows),
-                Value::as_bool,
-            ),
-            DataType::LargeBinary => {
-                let mut builder = arrow_array::builder::LargeBinaryBuilder::with_capacity(
-                    num_rows,
-                    num_rows * 64,
-                );
-                for row in rows {
-                    match row_column(row, col_name) {
-                        Some(val) if !val.is_null() => {
-                            let cv_bytes = uni_common::cypher_value_codec::encode(&val);
-                            builder.append_value(&cv_bytes);
-                        }
-                        _ => builder.append_null(),
-                    }
-                }
-                Arc::new(builder.finish()) as ArrayRef
-            }
-            DataType::List(inner_field) if inner_field.data_type() == &DataType::Utf8 => {
-                let mut builder = arrow_array::builder::ListBuilder::new(StringBuilder::new());
-                for row in rows {
-                    match row_column(row, col_name) {
-                        Some(Value::List(items)) => {
-                            for item in &items {
-                                match item {
-                                    Value::String(s) => builder.values().append_value(s),
-                                    Value::Null => builder.values().append_null(),
-                                    other => builder.values().append_value(format!("{other}")),
-                                }
-                            }
-                            builder.append(true);
-                        }
-                        _ => builder.append_null(),
-                    }
-                }
-                Arc::new(builder.finish()) as ArrayRef
-            }
-            DataType::Null => Arc::new(arrow_array::NullArray::new(num_rows)) as ArrayRef,
-            // Default: Utf8 for everything else
-            _ => {
-                let mut builder = StringBuilder::with_capacity(num_rows, num_rows * 32);
-                for row in rows {
-                    match row.get(col_name) {
-                        Some(Value::Null) | None => builder.append_null(),
-                        Some(Value::String(s)) => builder.append_value(s),
-                        Some(other) => builder.append_value(format!("{other}")),
-                    }
-                }
-                Arc::new(builder.finish()) as ArrayRef
-            }
-        };
-        columns.push(col);
-    }
-
-    RecordBatch::try_new(schema.clone(), columns).map_err(arrow_err)
-}
 
 /// Slice a single row, projecting only the input columns whose name survives
 /// the Apply schema merge (i.e., not overridden by a subquery RETURN column).
@@ -624,21 +489,6 @@ fn canonical_params_key(params: &HashMap<String, Value>) -> BTreeMap<String, Val
     params.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
-/// Check if batching is eligible for this apply operation.
-/// Returns true if:
-/// - There are 2+ filtered entries (single row → existing path)
-/// - At least one `._vid` correlation key exists
-fn is_batch_eligible(filtered_entries: &[(&RecordBatch, usize, HashMap<String, Value>)]) -> bool {
-    if filtered_entries.len() < 2 {
-        return false;
-    }
-
-    // Check if at least one correlation key (._vid) exists
-    filtered_entries
-        .iter()
-        .any(|(_, _, row_params)| row_params.keys().any(|k| k.ends_with("._vid")))
-}
-
 /// Run the apply operation: execute input, filter, correlate subquery, merge results.
 ///
 /// Uses Arrow-native row slicing for input columns to preserve complex types
@@ -675,7 +525,7 @@ async fn run_apply(
     let mut filtered_entries: Vec<(&RecordBatch, usize, HashMap<String, Value>)> = Vec::new();
     for batch in &input_batches {
         for row_idx in 0..batch.num_rows() {
-            let row_params = extract_row_params(batch, row_idx);
+            let row_params = extract_row_params(batch, row_idx)?;
             if let Some(filter) = input_filter
                 && !evaluate_filter(filter, &row_params)
             {
@@ -691,158 +541,15 @@ async fn run_apply(
     );
 
     let subquery_has_writes = plan_contains_writes(subquery_plan);
-
-    // 3. Handle empty input: execute subquery once with base params.
-    //
-    // For unit subqueries (no RETURN, schema has no subquery fields) we skip
-    // the call entirely: with zero outer rows there's nothing to drive
-    // per-row side effects, and correlated parameter resolution would fail
-    // (`Unresolved parameter: $n`). The same logic applies to any
-    // write-bearing subquery — running it once with no outer correlation
-    // would either fail to resolve params or write phantom rows.
     let is_unit_subquery = output_schema.fields().len() == kept_input_indices.len();
+
+    // 3. No input rows, no output rows. The body runs once per input row, so
+    // over none it does not run at all, correlated or not: running it once
+    // with no outer row emitted its rows as if the input had one (and a
+    // correlated body failed with `Unresolved parameter`). A standalone
+    // `CALL { … }` is not this case: its input is the one-row `Empty`.
     if filtered_entries.is_empty() {
-        if is_unit_subquery || subquery_has_writes {
-            return Ok(RecordBatch::new_empty(output_schema.clone()));
-        }
-        let sub_batches = execute_subplan(
-            subquery_plan,
-            params,
-            &HashMap::new(), // No outer values for empty input case
-            graph_ctx,
-            session_ctx,
-            storage,
-            schema_info,
-            mutation_ctx,
-        )
-        .await?;
-        let sub_rows = batches_to_row_maps(&sub_batches);
-        return rows_to_batch(&sub_rows, output_schema);
-    }
-
-    // 4. Check if we can batch the subplan execution
-    // IMPORTANT: Only batch when NOT a procedure call AND has input_filter.
-    // - Procedure calls use outer_values (not params), incompatible with batching
-    // - No input_filter indicates CALL subquery (e.g., MATCH (p) CALL { MATCH (p) })
-    //   which requires per-row correlation, not batching
-    // - Target pattern: procedure call → Apply with filter → MATCH traversal
-    let has_filter = input_filter.is_some();
-
-    if is_batch_eligible(&filtered_entries) && !is_proc_call && has_filter && !subquery_has_writes {
-        tracing::debug!("run_apply: batching eligible, attempting batch execution");
-
-        // Collect unique VID values and build batched params
-        let mut vid_values: HashMap<String, Vec<Value>> = HashMap::new();
-        for (_, _, row_params) in &filtered_entries {
-            for (key, value) in row_params {
-                if key.ends_with("._vid") {
-                    vid_values
-                        .entry(key.clone())
-                        .or_default()
-                        .push(value.clone());
-                }
-            }
-        }
-
-        // Build batched params: VID keys become Value::List
-        let mut batched_params = params.clone();
-        for (key, values) in &vid_values {
-            batched_params.insert(key.clone(), Value::List(values.clone()));
-        }
-
-        // Add carry-through parameters from first row (for literals in projections)
-        // These won't affect the WHERE filter but ensure planning succeeds
-        if let Some((_, _, first_row_params)) = filtered_entries.first() {
-            for (key, value) in first_row_params {
-                if !key.ends_with("._vid") {
-                    batched_params
-                        .entry(key.clone())
-                        .or_insert_with(|| value.clone());
-                }
-            }
-        }
-
-        // Execute subquery ONCE with batched VID params
-        let subplan_start = std::time::Instant::now();
-        let sub_batches = execute_subplan(
-            subquery_plan,
-            &batched_params,
-            &HashMap::new(),
-            graph_ctx,
-            session_ctx,
-            storage,
-            schema_info,
-            mutation_ctx,
-        )
-        .await?;
-        let subplan_elapsed = subplan_start.elapsed();
-        tracing::debug!(
-            "run_apply: batch execute_subplan took {:?}",
-            subplan_elapsed
-        );
-
-        // Build hash index: VID → Vec<subquery result rows>
-        let sub_rows = batches_to_row_maps(&sub_batches);
-        let mut sub_index: HashMap<i64, Vec<&HashMap<String, Value>>> = HashMap::new();
-
-        // Find the VID key (should be the same for all rows)
-        let vid_key = vid_values.keys().next().expect("at least one VID key");
-
-        for sub_row in &sub_rows {
-            if let Some(Value::Int(vid)) = sub_row.get(vid_key) {
-                sub_index.entry(*vid).or_default().push(sub_row);
-            }
-        }
-
-        // Hash-join: for each input row, look up by VID, emit input+subquery columns.
-        // `kept_input_indices` filters out input columns whose names are
-        // overridden by subquery RETURN columns.
-        let num_input_cols = kept_input_indices.len();
-        let num_output_cols = output_schema.fields().len();
-        let mut column_arrays: Vec<Vec<ArrayRef>> = vec![Vec::new(); num_output_cols];
-
-        for (batch, row_idx, row_params) in &filtered_entries {
-            // Extract VID from row params
-            let input_vid = if let Some(Value::Int(vid)) = row_params.get(vid_key) {
-                *vid
-            } else {
-                continue; // Skip if VID is not present
-            };
-
-            let input_row_arrays = slice_kept_row(batch, *row_idx, kept_input_indices);
-
-            // Look up matching subquery rows by VID
-            if let Some(matching_sub_rows) = sub_index.get(&input_vid) {
-                for sub_row in matching_sub_rows {
-                    append_cross_join_row(
-                        &mut column_arrays,
-                        &input_row_arrays,
-                        sub_row,
-                        output_schema,
-                        num_input_cols,
-                        kept_input_overrides,
-                        is_unit_subquery,
-                    )?;
-                }
-            } else if is_unit_subquery {
-                // Unit subquery: side effects (writes) have run as part of the
-                // bulk sub-plan execution above; pass the input row through.
-                for (col_idx, arr) in input_row_arrays.iter().enumerate() {
-                    column_arrays[col_idx].push(arr.clone());
-                }
-            }
-            // else: inner join — skip input row (no subquery matches)
-        }
-
-        let result = concat_column_arrays(&column_arrays, output_schema);
-
-        let apply_elapsed = apply_start.elapsed();
-        tracing::debug!(
-            "run_apply: completed (batched) in {:?}, 1 subplan execution",
-            apply_elapsed
-        );
-
-        return result;
+        return Ok(RecordBatch::new_empty(output_schema.clone()));
     }
 
     // The body's node and relationship imports, bound to the input row's
@@ -851,8 +558,7 @@ async fn run_apply(
     let bound_subquery_plan =
         crate::query::planner::bind_outer_row(subquery_plan, &input_exec.schema());
 
-    // 5. Fallback: For each input row, execute subquery and collect output column arrays.
-    //    Used when batching is not eligible (single row, no VID keys, or procedure call).
+    // 4. For each input row, execute subquery and collect output column arrays.
     //    Each output row is: surviving input columns (sliced via
     //    `kept_input_indices`) + subquery columns. Input columns whose name is
     //    overridden by a subquery RETURN are dropped here so the merged
@@ -939,7 +645,7 @@ async fn run_apply(
                 subplan_elapsed
             );
 
-            let rows = batches_to_row_maps(&sub_batches);
+            let rows = batches_to_row_maps(&sub_batches)?;
             // Only memoize read-only subqueries (see above).
             if !subquery_has_writes {
                 subplan_cache.insert(params_key, rows.clone());
@@ -1088,7 +794,7 @@ fn value_to_single_row_array(val: &Value, data_type: &DataType) -> DFResult<Arra
         _ => {
             debug_assert!(
                 false,
-                "value_to_single_row_array: unhandled DataType {:?} — mirror the arm in rows_to_batch",
+                "value_to_single_row_array: unhandled DataType {:?} — add an arm for it",
                 data_type
             );
             let mut b = StringBuilder::with_capacity(1, 64);
@@ -1280,83 +986,6 @@ impl RecordBatchStream for ApplyStream {
 
 #[cfg(test)]
 mod tests {
-
-    mod dotted_column_resolution {
-        use super::super::row_column;
-        use std::collections::HashMap;
-        use uni_common::core::id::Eid;
-        use uni_common::value::{Edge, Node};
-        use uni_common::{Value, Vid};
-
-        /// A dotted column resolves from the entity when it was not materialised.
-        ///
-        /// The planner splits `{var}._vid` out alongside a map-encoded entity,
-        /// so the flat column is there to read. A natively-encoded entity has no
-        /// such column, and reading it flat yields a null that a non-nullable
-        /// `{var}._vid` then rejects at batch construction.
-        #[test]
-        fn a_dotted_column_falls_back_to_the_entity() {
-            let mut row: HashMap<String, Value> = HashMap::new();
-            row.insert(
-                "n".to_string(),
-                Value::Node(Node {
-                    vid: Vid::from(7),
-                    labels: vec!["P".into()],
-                    properties: HashMap::from([("name".to_string(), Value::String("b".into()))]),
-                }),
-            );
-            assert_eq!(row_column(&row, "n._vid"), Some(Value::Int(7)));
-            assert_eq!(row_column(&row, "n.name"), Some(Value::String("b".into())));
-            assert_eq!(row_column(&row, "n.absent"), None);
-        }
-
-        /// The flat column still wins when it exists, so nothing is recomputed.
-        #[test]
-        fn an_existing_flat_column_is_preferred() {
-            let mut row: HashMap<String, Value> = HashMap::new();
-            row.insert("n._vid".to_string(), Value::Int(42));
-            row.insert(
-                "n".to_string(),
-                Value::Node(Node {
-                    vid: Vid::from(7),
-                    labels: vec![],
-                    properties: HashMap::new(),
-                }),
-            );
-            assert_eq!(row_column(&row, "n._vid"), Some(Value::Int(42)));
-        }
-
-        /// An edge answers its own system fields too.
-        #[test]
-        fn an_edge_resolves_its_dotted_columns() {
-            let mut row: HashMap<String, Value> = HashMap::new();
-            row.insert(
-                "r".to_string(),
-                Value::Edge(Edge {
-                    eid: Eid::from(3),
-                    edge_type: "KNOWS".into(),
-                    src: Vid::from(0),
-                    dst: Vid::from(1),
-                    properties: HashMap::new(),
-                }),
-            );
-            assert_eq!(row_column(&row, "r._eid"), Some(Value::Int(3)));
-            assert_eq!(
-                row_column(&row, "r._type"),
-                Some(Value::String("KNOWS".into()))
-            );
-        }
-
-        /// A non-entity base resolves nothing rather than inventing a value.
-        #[test]
-        fn a_non_entity_base_resolves_nothing() {
-            let mut row: HashMap<String, Value> = HashMap::new();
-            row.insert("x".to_string(), Value::Int(1));
-            assert_eq!(row_column(&row, "x._vid"), None);
-            assert_eq!(row_column(&row, "missing._vid"), None);
-        }
-    }
-
     use super::*;
 
     fn params(pairs: &[(&str, Value)]) -> HashMap<String, Value> {

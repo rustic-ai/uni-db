@@ -18,7 +18,7 @@ fn test_lance_filter_generation() {
     };
 
     let filter = LanceFilterGenerator::generate(&[expr], "n", None).unwrap();
-    assert_eq!(filter, "name LIKE '%foo%'");
+    assert_eq!(filter, "`name` LIKE '%foo%'");
 
     // n.title STARTS WITH 'Intro'
     let expr = Expr::BinaryOp {
@@ -31,7 +31,7 @@ fn test_lance_filter_generation() {
     };
 
     let filter = LanceFilterGenerator::generate(&[expr], "n", None).unwrap();
-    assert_eq!(filter, "title LIKE 'Intro%'");
+    assert_eq!(filter, "`title` LIKE 'Intro%'");
 }
 
 #[test]
@@ -78,7 +78,7 @@ fn test_or_to_in_conversion() {
     // Verify SQL generation
     let sql = LanceFilterGenerator::generate(&analysis.pushable, "n", None).unwrap();
     // order might vary? No, vec insertion order.
-    assert!(sql == "status IN ('a', 'b')" || sql == "status IN ('b', 'a')");
+    assert!(sql == "`status` IN ('a', 'b')" || sql == "`status` IN ('b', 'a')");
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn test_is_null_pushdown() {
     assert!(analysis.residual.is_empty());
 
     let sql = LanceFilterGenerator::generate(&analysis.pushable, "n", None).unwrap();
-    assert_eq!(sql, "email IS NULL");
+    assert_eq!(sql, "`email` IS NULL");
 }
 
 #[test]
@@ -111,7 +111,7 @@ fn test_is_not_null_pushdown() {
     assert_eq!(analysis.pushable.len(), 1);
 
     let sql = LanceFilterGenerator::generate(&analysis.pushable, "n", None).unwrap();
-    assert_eq!(sql, "email IS NOT NULL");
+    assert_eq!(sql, "`email` IS NOT NULL");
 }
 
 #[test]
@@ -147,7 +147,7 @@ fn test_predicate_flattening() {
     // Each conjunct is parenthesised unconditionally. Composing predicates by
     // concatenation is only safe while no operand contains a lower-precedence
     // operator, and nothing enforced that when this was built by `join(" AND ")`.
-    assert_eq!(sql, "(a = 1) AND (b = 2)");
+    assert_eq!(sql, "(`a` = 1) AND (`b` = 2)");
 }
 
 // =====================================================================
@@ -585,7 +585,8 @@ fn test_btree_prefix_scan_skips_non_online_index() {
     assert!(strategy.lance_predicates.is_empty());
 }
 
-/// A two-sided inclusive range must emit **bare** column names.
+/// A two-sided inclusive range must emit backtick-quoted column names, never
+/// double-quoted ones (`to_sql` backtick-quotes every identifier).
 ///
 /// This used to be fused into `"col" >= L AND "col" <= R`. Lance parses a
 /// double-quoted name as a *string literal*, not a quoted identifier, so that
@@ -593,7 +594,7 @@ fn test_btree_prefix_scan_skips_non_online_index() {
 /// matched every row — silently defeating the pushdown for every such query.
 /// Only a residual filter above the scan kept the answers correct.
 #[test]
-fn test_two_sided_range_emits_bare_identifiers() {
+fn test_two_sided_range_never_double_quotes_identifiers() {
     fn cmp(prop: &str, op: BinaryOp, v: i64) -> Expr {
         Expr::BinaryOp {
             left: Box::new(Expr::Property(
@@ -613,5 +614,5 @@ fn test_two_sided_range_emits_bare_identifiers() {
         !sql.contains('"'),
         "a double-quoted column is a string literal in Lance: {sql}"
     );
-    assert_eq!(sql, "(createdAt >= 2) AND (createdAt <= 4)");
+    assert_eq!(sql, "(`createdAt` >= 2) AND (`createdAt` <= 4)");
 }

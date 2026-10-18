@@ -8,6 +8,7 @@ use crate::runtime::l0::L0Buffer;
 use crate::runtime::l0_visibility;
 use crate::storage::main_vertex::MainVertexDataset;
 use crate::storage::manager::StorageManager;
+use crate::storage::property_builder::EXT_ID_COLUMN;
 use crate::storage::value_codec::CrdtDecodeMode;
 use anyhow::{Result, anyhow};
 use arrow_array::{Array, BooleanArray, RecordBatch, UInt64Array};
@@ -633,8 +634,10 @@ impl PropertyManager {
             columns.push("_version".to_string());
             columns.push("_deleted".to_string());
             columns.extend(valid_props.iter().map(|s| s.to_string()));
-            // Add overflow_json to fetch non-schema properties
+            // Add overflow_json to fetch non-schema properties, and the
+            // `ext_id` column a flush moves a string `ext_id` into.
             columns.push("overflow_json".to_string());
+            columns.push(EXT_ID_COLUMN.to_string());
             retain_first_occurrences(&mut columns);
 
             use crate::backend::types::ScanRequest;
@@ -1464,6 +1467,7 @@ impl PropertyManager {
         ];
         columns.extend(prop_names.iter().cloned());
         columns.push("overflow_json".to_string());
+        columns.push(EXT_ID_COLUMN.to_string());
         retain_first_occurrences(&mut columns);
 
         // Build IN filter for all VIDs at once.
@@ -1901,11 +1905,25 @@ impl PropertyManager {
         Ok(props)
     }
 
-    /// Extract overflow properties from the overflow_json column.
+    /// Extract a row's undeclared properties: `overflow_json` plus `ext_id`.
     ///
-    /// Returns None if the column doesn't exist or the value is null,
-    /// otherwise parses the JSON blob and returns the properties.
+    /// A flush moves a vertex's string `ext_id` out of the blob into the
+    /// per-label `ext_id` column, so the blob alone is not the undeclared
+    /// set; the column is folded back in when the batch carries it (see
+    /// `property_builder::restore_ext_id_column`). Returns `None` when
+    /// neither holds anything for the row.
     fn extract_overflow_properties(batch: &RecordBatch, row: usize) -> Result<Option<Properties>> {
+        let mut props = Self::extract_overflow_blob(batch, row)?;
+        let mut ext_id = Properties::new();
+        crate::storage::property_builder::restore_ext_id_column(batch, row, &mut ext_id);
+        if !ext_id.is_empty() {
+            props.get_or_insert_with(Properties::new).extend(ext_id);
+        }
+        Ok(props)
+    }
+
+    /// Decode the row's `overflow_json` blob; `None` when absent or null.
+    fn extract_overflow_blob(batch: &RecordBatch, row: usize) -> Result<Option<Properties>> {
         use arrow_array::LargeBinaryArray;
 
         let overflow_col = match batch.column_by_name("overflow_json") {
@@ -1952,13 +1970,11 @@ impl PropertyManager {
     ) -> Result<()> {
         use arrow_array::LargeBinaryArray;
 
-        let overflow_col = match batch.column_by_name("overflow_json") {
-            Some(col) if !col.is_null(row) => col,
-            _ => return Ok(()),
-        };
-
         // Store raw JSONB bytes if explicitly requested
         if properties.contains(&"overflow_json")
+            && let Some(overflow_col) = batch
+                .column_by_name("overflow_json")
+                .filter(|col| !col.is_null(row))
             && let Some(binary_array) = overflow_col.as_any().downcast_ref::<LargeBinaryArray>()
         {
             let jsonb_bytes = binary_array.value(row);
@@ -2076,8 +2092,10 @@ impl PropertyManager {
             // Build column selection
             let mut columns: Vec<String> = vec!["_deleted".to_string(), "_version".to_string()];
             columns.extend(prop_names.iter().cloned());
-            // Add overflow_json column to fetch non-schema properties
+            // Add overflow_json column to fetch non-schema properties, and
+            // the `ext_id` column a flush moves a string `ext_id` into.
             columns.push("overflow_json".to_string());
+            columns.push(EXT_ID_COLUMN.to_string());
 
             // Query using backend scan API
             let base_filter = FilterExpr::equals("_vid", Scalar::UInt(vid.as_u64()));
@@ -2427,6 +2445,9 @@ impl PropertyManager {
                 "_version".to_string(),
                 "overflow_json".to_string(),
             ];
+            if prop == EXT_ID_COLUMN {
+                columns.push(EXT_ID_COLUMN.to_string());
+            }
 
             // Only request the property column if it's defined in schema
             if prop_meta.is_some() {

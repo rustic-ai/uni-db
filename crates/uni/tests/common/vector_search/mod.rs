@@ -2,6 +2,7 @@ pub mod cypher_vector;
 pub mod fts_integration;
 pub mod hybrid_query;
 pub mod inverted_index_test;
+pub mod knn_limit_semantics;
 pub mod similar_to_integration;
 pub mod vector_index_options_test;
 pub mod vector_predicate_exactness;

@@ -39,7 +39,7 @@ crate's reason to exist.
 | `src/ir.rs` | The oracle's own minimal IR (`OracleProgram`/`OracleRule`/`OracleClause`/`IsRef`). |
 | `src/eval.rs` | `evaluate()` — the naive fixpoint reference (join → anti-join → project → dedup to fixpoint). |
 | `src/surface.rs` | Program text as structured data (`SurfaceProgram`), rendered under a `Renaming` and conjunct `Orders`. |
-| `src/generator.rs` | Builders (`build_layered_dag`, `build_complement`, `build_union`, `random_program_strategy` with the #300 binding families) emitting the single-source-of-truth triple: base-graph Cypher, Locy program text (from the surface), and oracle IR. |
+| `src/generator.rs` | Builders (`build_layered_dag`, `build_complement`, `build_union`, `random_program_strategy` with the #300 binding families and the P5 recursion families — non-linear and mutual strata with `BEST BY`, `FOLD`, `ALONG`, `IS NOT`) emitting the single-source-of-truth triple: base-graph Cypher, Locy program text (from the surface), and oracle IR. |
 | `tests/differential.rs` | Engine↔oracle agreement: fixed cases, threshold proptest, completeness guard, complement/union, and the nightly soak. |
 | `tests/differential/random.rs` | Random programs against the oracle (strict decoding by column kind, per-relation attribution, feature floors) and the `#[ignore]`d `teeth_refind_issue_300` teeth harness (passes only against a pre-fix engine). |
 | `tests/differential/relations.rs` | Text-only metamorphic relations: conjunct permutation, alpha renaming, renaming into a collision, interleaved `YIELD`, and `EXPLAIN` agreement. |

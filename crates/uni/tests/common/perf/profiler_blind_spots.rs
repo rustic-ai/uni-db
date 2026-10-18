@@ -7,11 +7,11 @@
 //! Each test runs the same shape at two scales under `profile()` and asserts
 //! on counters, not wall time:
 //!
-//! - **VLP property-map pre-scans.** `-[:R*1..3 {w: 1}]->` and
-//!   `->(b:N {x: 2})` enumerate the whole edge type before the anchored walk
-//!   (`build_edge_property_filter` / `build_accepting_vid_filter`). That scan
-//!   must reach `rows_scanned`, and must grow with the edge type while the
-//!   map-free control stays flat.
+//! - **VLP property maps.** `-[:R*1..3 {w: 0}]->` and `->(b:N {x: 2})` used to
+//!   enumerate the whole edge type before the anchored walk; O1 made that scan
+//!   reach `rows_scanned`. P7 replaced it with a read of the reachable region
+//!   only, and the guard now pins that read exactly. A QPP's per-hop map still
+//!   pre-scans the whole type and is guarded for counting separately.
 //! - **Locy IS NOT anti-join and fact dedup.** Both ran outside any physical
 //!   plan, so the per-iteration operator tree of a rule never showed them.
 //! - **Planning.** Physical planning — once per query, once per correlated row,
@@ -82,59 +82,149 @@ async fn profiled(db: &Uni, q: &str) -> Result<(i64, usize, usize)> {
     Ok((count, m.rows_scanned, m.l0_reads))
 }
 
-/// A VLP inline property map pre-scans the whole edge type; `rows_scanned`
-/// must report it, at both scales, while the map-free control stays flat.
+/// The `:R` edges of [`flushed_graph`]`(n)`, as `(src, dst, w)`.
+fn ladder_edges(n: usize) -> Vec<(usize, usize, i64)> {
+    (0..n)
+        .flat_map(|i| {
+            [((i + 1) % n, i % 10), ((i * 7 + 3) % n, (i * 3) % 10)].map(|(d, w)| (i, d, w as i64))
+        })
+        .collect()
+}
+
+/// What a map-gated walk from vertex 0 over `*1..max_hops` outgoing must read:
+/// the edges leaving every vertex reached through edges that pass `keep`
+/// (each read once), and the distinct vertices those passing edges reach.
+///
+/// This is the P7 contract for the map's cost, computed from the graph alone:
+/// a breadth-first region walk that expands only through passing edges, up to
+/// the hop bound. The whole-type pre-scan it replaced read all `2n` edges.
+fn region_reads(n: usize, max_hops: usize, keep: impl Fn(i64) -> bool) -> (usize, usize) {
+    let edges = ladder_edges(n);
+    let mut depth = vec![usize::MAX; n];
+    depth[0] = 0;
+    let mut frontier = vec![0usize];
+    let mut read = std::collections::HashSet::new();
+    let mut reached = std::collections::HashSet::new();
+    let mut d = 0;
+    while !frontier.is_empty() && d < max_hops {
+        let mut next = Vec::new();
+        for &v in &frontier {
+            for (k, &(src, dst, w)) in edges.iter().enumerate() {
+                if src != v {
+                    continue;
+                }
+                read.insert(k);
+                if keep(w) {
+                    reached.insert(dst);
+                    if depth[dst] > d + 1 {
+                        depth[dst] = d + 1;
+                        next.push(dst);
+                    }
+                }
+            }
+        }
+        frontier = next;
+        d += 1;
+    }
+    (read.len(), reached.len())
+}
+
+/// A VLP inline property map reads properties only for the region the walk
+/// can reach, and `rows_scanned` reports exactly that read, at both scales.
+///
+/// History. O1 made the old whole-type pre-scan visible: `{w: 1}` read all
+/// `2n` edges before an anchored walk, and this guard asserted
+/// `rows_scanned >= 2n`. P7 removed that pre-scan (the map is evaluated per
+/// input batch over the reachable region, `ReachableMapFilter`), so the guard
+/// now pins the new cost *exactly*: the anchor's one row plus one row per
+/// edge (edge map) or reached vertex (target map) whose properties were read,
+/// as computed from the graph by [`region_reads`] (plus, for the target map,
+/// one row per matched endpoint hydrated for the `FilterExec` above). It still has teeth both
+/// ways — reads hidden from `rows_scanned` again make the count fall to the
+/// anchor's 1, and a return of the whole-type scan makes it grow with `n`.
 #[tokio::test(flavor = "multi_thread")]
-async fn vlp_property_map_prescan_counts_toward_rows_scanned() -> Result<()> {
-    const EDGE_MAP: &str = "MATCH (a:N {uid: 'u0'})-[:R*1..3 {w: 1}]->(b) RETURN count(*) AS c";
+async fn vlp_property_map_reads_only_the_reachable_region() -> Result<()> {
+    const EDGE_MAP: &str = "MATCH (a:N {uid: 'u0'})-[:R*1..3 {w: 0}]->(b) RETURN count(*) AS c";
     const TARGET_MAP: &str = "MATCH (a:N {uid: 'u0'})-[:R*1..3]->(b:N {x: 2}) RETURN count(*) AS c";
     const CONTROL: &str = "MATCH (a:N {uid: 'u0'})-[:R*1..3]->(b) RETURN count(*) AS c";
 
-    let mut edge_scanned = Vec::new();
-    let mut target_scanned = Vec::new();
     for n in [200usize, 800] {
         let db = flushed_graph(n).await?;
-        let edges = 2 * n;
-
         let (_, edge_rows, _) = profiled(&db, EDGE_MAP).await?;
-        let (_, target_rows, _) = profiled(&db, TARGET_MAP).await?;
+        let (target_matches, target_rows, _) = profiled(&db, TARGET_MAP).await?;
         let (_, control_rows, _) = profiled(&db, CONTROL).await?;
+        let (edges_read, _) = region_reads(n, 3, |w| w == 0);
+        let (_, vertices_read) = region_reads(n, 3, |_| true);
         eprintln!(
-            "N={n}: rows_scanned edge-map={edge_rows} target-map={target_rows} control={control_rows}"
+            "N={n}: rows_scanned edge-map={edge_rows} (region {edges_read} edges) \
+             target-map={target_rows} (region {vertices_read} vertices) control={control_rows}"
         );
-
-        assert!(
-            edge_rows >= edges,
-            "N={n}: the edge-map pre-scan reads all {edges} :R edges but \
-             rows_scanned = {edge_rows}"
+        assert_eq!(
+            control_rows, 1,
+            "N={n}: the map-free walk reads only its anchor"
         );
         assert!(
-            target_rows >= edges,
-            "N={n}: the target-map pre-scan reads all {edges} :R edges but \
-             rows_scanned = {target_rows}"
+            edges_read > 1 && vertices_read > 1,
+            "fixture must read something"
         );
-        // The anchored walk itself is not a scan; only the anchor lookup is.
-        assert!(
-            control_rows < n / 4,
-            "N={n}: control VLP without a map should not scan the edge type, \
-             rows_scanned = {control_rows}"
+        assert_eq!(
+            edge_rows,
+            1 + edges_read,
+            "N={n}: the edge map must read exactly the {edges_read} edges of the \
+             reachable region (plus the anchor) and report them in rows_scanned"
         );
-        edge_scanned.push(edge_rows);
-        target_scanned.push(target_rows);
-    }
-    // 4x the edges: the pre-scan's count follows the edge type, not the answer.
-    for (what, v) in [("edge map", &edge_scanned), ("target map", &target_scanned)] {
-        assert!(
-            v[1] >= v[0] * 3,
-            "{what}: rows_scanned should grow ~4x with the edge type, got {v:?}"
+        // Each matched path then hydrates its endpoint's properties for the
+        // `FilterExec` above the walk: one more row per match.
+        assert_eq!(
+            target_rows,
+            1 + vertices_read + target_matches as usize,
+            "N={n}: the target map must read exactly the {vertices_read} reached \
+             vertices (plus the anchor and the {target_matches} matched endpoints) \
+             and report them in rows_scanned"
         );
     }
     Ok(())
 }
 
-/// The same pre-scan over edges that are still in L0 counts as L0 rows.
+/// The whole-type pre-scan is still how a quantified path pattern's per-hop
+/// map is evaluated, and it still counts toward `rows_scanned` (O1).
+///
+/// A QPP's hops carry their own types, directions and node maps, which the
+/// region walk does not model, so they keep `build_edge_property_filter`.
+/// This keeps O1's counting of `build_edge_adjacency_map` under a guard now
+/// that a simple pattern no longer goes through it.
+#[tokio::test(flavor = "multi_thread")]
+async fn qpp_property_map_prescan_counts_toward_rows_scanned() -> Result<()> {
+    const QPP: &str = "MATCH (a:N {uid: 'u0'})((x)-[:R {w: 1}]->(y)-[:R]->(z)){1,2}(b) \
+                       RETURN count(*) AS c";
+    let mut scanned = Vec::new();
+    for n in [200usize, 800] {
+        let db = flushed_graph(n).await?;
+        let (_, rows, _) = profiled(&db, QPP).await?;
+        eprintln!("N={n}: QPP map rows_scanned={rows}");
+        assert!(
+            rows >= 2 * n,
+            "N={n}: the QPP map pre-scan reads all {} :R edges but rows_scanned = {rows}",
+            2 * n
+        );
+        scanned.push(rows);
+    }
+    assert!(
+        scanned[1] >= scanned[0] * 3,
+        "pre-scan should follow the edge type: {scanned:?}"
+    );
+    Ok(())
+}
+
+/// The map's reads over L0 edges count too.
+///
+/// O1 asserted that the whole-type pre-scan's 60 L0 edges appeared in
+/// `rows_scanned` and `l0_reads`. With the region read (P7) the map reads
+/// only what `u1` reaches: its one `:R` edge, to `v1`, which has none. That
+/// read is counted in `rows_scanned`; it is a batched point read whose tier
+/// the property layer does not report, so `l0_reads` is not asserted.
 #[tokio::test]
-async fn vlp_property_map_prescan_counts_l0_edges() -> Result<()> {
+async fn vlp_property_map_region_read_counts_l0_edges() -> Result<()> {
     let db = Uni::in_memory().build().await?;
     let tx = db.session().tx().await?;
     tx.execute("CREATE LABEL N (uid STRING, x INT)").await?;
@@ -148,31 +238,25 @@ async fn vlp_property_map_prescan_counts_l0_edges() -> Result<()> {
     .await?;
     tx.commit().await?;
 
-    // The anchor lookup scans the 120 L0 `:N` rows either way, so the
-    // pre-scan is the difference between the map and the map-free control.
-    let (count, scanned, l0) = profiled(
+    // The anchor lookup scans the 120 L0 `:N` rows either way.
+    let (count, scanned, _) = profiled(
         &db,
         "MATCH (a:N {uid: 'u1'})-[:R*1..3 {w: 1}]->(b) RETURN count(*) AS c",
     )
     .await?;
-    let (_, control_scanned, control_l0) = profiled(
+    let (_, control_scanned, _) = profiled(
         &db,
         "MATCH (a:N {uid: 'u1'})-[:R*1..3]->(b) RETURN count(*) AS c",
     )
     .await?;
-    eprintln!(
-        "L0: rows_scanned {scanned} vs control {control_scanned}; l0_reads {l0} vs {control_l0}"
-    );
+    eprintln!("L0: rows_scanned {scanned} vs control {control_scanned}");
     assert_eq!(count, 1, "u1 -[w=1]-> v1 is the only match");
-    assert!(
-        scanned >= control_scanned + 60,
-        "the pre-scan examined all 60 L0 :R edges: rows_scanned {scanned} vs \
-         {control_scanned} without the map"
-    );
-    assert!(
-        l0 >= control_l0 + 60,
-        "the pre-scan's 60 edges came from L0: l0_reads {l0} vs {control_l0} \
-         without the map"
+    assert_eq!(
+        scanned,
+        control_scanned + 1,
+        "the map reads exactly u1's one L0 edge, and rows_scanned must show it \
+         ({scanned} vs {control_scanned} without the map); 60 more is the \
+         whole-type pre-scan back"
     );
     Ok(())
 }
@@ -446,5 +530,91 @@ async fn assume_rows_are_returned_by_rows() -> Result<()> {
         "rows() is the Assume result itself"
     );
     assert_eq!(result.columns(), Some(vec!["uid".to_string()]));
+    Ok(())
+}
+
+/// Timing probe for P7: an anchored map-gated walk at two scales. Prints only.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "timing probe, run manually"]
+async fn vlp_property_map_timing_probe() -> Result<()> {
+    for n in [20_000usize, 80_000] {
+        let db = flushed_graph(n).await?;
+        for q in [
+            "MATCH (a:N {uid: 'u0'})-[:R*1..3 {w: 0}]->(b) RETURN count(*) AS c",
+            "MATCH (a:N {uid: 'u0'})-[:R*1..3]->(b:N {x: 2}) RETURN count(*) AS c",
+            "MATCH (a:N {uid: 'u0'})-[:R*1..3]->(b) RETURN count(*) AS c",
+        ] {
+            let mut best = f64::MAX;
+            let mut rows = 0;
+            for _ in 0..3 {
+                let start = std::time::Instant::now();
+                let (_, r, _) = profiled(&db, q).await?;
+                best = best.min(start.elapsed().as_secs_f64() * 1000.0);
+                rows = r;
+            }
+            eprintln!("P7 probe n={n}: best of 3 {best:.1} ms, rows_scanned {rows}: {q}");
+        }
+    }
+    Ok(())
+}
+
+/// Timing probe for the region read's fall-back: a deep unbounded walk on a
+/// chain where every edge passes the map, so the region grows by one vertex
+/// per property-read round. Prints only.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "timing probe, run manually"]
+async fn vlp_property_map_deep_walk_timing_probe() -> Result<()> {
+    for n in [20_000usize, 80_000] {
+        let db = Uni::in_memory().build().await?;
+        let tx = db.session().tx().await?;
+        for ddl in [
+            "CREATE LABEL N (uid STRING, x INT)",
+            "CREATE EDGE TYPE R (w INT) FROM N TO N",
+            "CREATE INDEX idx_n_uid FOR (n:N) ON (n.uid)",
+        ] {
+            tx.execute(ddl).await?;
+        }
+        tx.commit().await?;
+        let tx = db.session().tx().await?;
+        let mut bulk = tx.bulk_writer().build()?;
+        let props: Vec<HashMap<String, Value>> = (0..n)
+            .map(|i| {
+                HashMap::from([
+                    ("uid".to_string(), Value::String(format!("u{i}"))),
+                    ("x".to_string(), Value::Int(i as i64)),
+                ])
+            })
+            .collect();
+        let vids = bulk.insert_vertices("N", props).await?;
+        let edges = (0..n - 1)
+            .map(|i| {
+                uni_bulk::EdgeData::new(
+                    vids[i],
+                    vids[i + 1],
+                    HashMap::from([("w".to_string(), Value::Int(1))]),
+                )
+            })
+            .collect();
+        bulk.insert_edges("R", edges).await?;
+        bulk.commit().await?;
+        tx.commit().await?;
+        db.flush().await?;
+        for q in [
+            "MATCH (a:N {uid: 'u0'})-[:R*1..12 {w: 1}]->(b) RETURN count(*) AS c",
+            "MATCH (a:N {uid: 'u0'})-[:R*1..40 {w: 1}]->(b) RETURN count(*) AS c",
+            "MATCH (a:N {uid: 'u0'})-[:R* {w: 1}]->(b) RETURN count(*) AS c",
+        ] {
+            let mut best = f64::MAX;
+            let mut rows = 0;
+            for _ in 0..3 {
+                let start = std::time::Instant::now();
+                let (_, r, _) = profiled(&db, q).await?;
+                best = best.min(start.elapsed().as_secs_f64() * 1000.0);
+                rows = r;
+            }
+            eprintln!("P7 deep n={n}: best of 3 {best:.1} ms, rows_scanned {rows}: {q}");
+        }
+        db.shutdown().await?;
+    }
     Ok(())
 }

@@ -372,7 +372,9 @@ fn build_property_expr_chain(pair: Pair<Rule>) -> Expr {
     p_inner
         .filter(|p| p.as_str() != ")")
         .fold(Expr::Variable(var), |expr, p| {
-            Expr::Property(Box::new(expr), p.as_str().to_string())
+            // Unquoted like property access is: `SET n.`order` = …` must
+            // write the property `n.`order`` reads.
+            Expr::Property(Box::new(expr), normalize_identifier(p.as_str()))
         })
 }
 
@@ -926,6 +928,13 @@ fn apply_tail_to_expr(
 fn negate_expression(expr: Expr) -> Expr {
     if let Expr::Literal(CypherLiteral::Integer(int_val)) = &expr {
         return Expr::Literal(CypherLiteral::Integer(int_val.wrapping_neg()));
+    }
+    // A float literal folds the same way: `-2.5` is the literal -2.5, exactly
+    // the value `-(2.5)` evaluates to. Left as `Neg(2.5)` it was not a literal
+    // to any matcher downstream, so `n.f > -2.5` on an indexed property was
+    // never handed to the index while `n.x > -2` was.
+    if let Expr::Literal(CypherLiteral::Float(f)) = &expr {
+        return Expr::Literal(CypherLiteral::Float(-f));
     }
     Expr::UnaryOp {
         op: UnaryOp::Neg,
@@ -1553,7 +1562,7 @@ fn build_map_literal(pair: Pair<Rule>) -> Result<Expr, ParseError> {
                 // so `{ "a\nb": 1 }` keys on a real newline (not a literal
                 // backslash-n) and `{ 'it''s': 1 }` keys on `it's`.
                 Rule::string => build_string_literal(key_pair)?,
-                _ => key_pair.as_str().to_string(), // identifier_or_keyword
+                _ => normalize_identifier(key_pair.as_str()), // identifier_or_keyword
             };
             let val = build_expression(inner.next().unwrap())?;
             Ok((key, val))
@@ -2085,12 +2094,14 @@ fn build_map_projection_items(pair: Pair<Rule>) -> Result<Vec<MapProjectionItem>
                     Ok(MapProjectionItem::AllProperties)
                 } else {
                     // .property_name
-                    Ok(MapProjectionItem::Property(first.as_str().to_string()))
+                    Ok(MapProjectionItem::Property(normalize_identifier(
+                        first.as_str(),
+                    )))
                 }
             } else if full_str.contains(':') {
                 // Computed property: key: expr
                 // Inner contains: [identifier, expression]
-                let key = inner.next().unwrap().as_str().to_string();
+                let key = normalize_identifier(inner.next().unwrap().as_str());
                 let val = build_expression(inner.next().unwrap())?;
                 Ok(MapProjectionItem::LiteralEntry(key, Box::new(val)))
             } else {

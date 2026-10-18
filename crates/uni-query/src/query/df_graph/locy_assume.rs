@@ -5,8 +5,28 @@
 //!
 //! Ported from `uni-locy/src/orchestrator/assume.rs`. Uses `LocyExecutionContext`
 //! for L0 fork/restore, mutations, and strata re-evaluation.
+//!
+//! # Incremental re-evaluation (A4)
+//!
+//! The hypothetical state differs from the state before the block only by the
+//! block's mutations. A stratum those mutations cannot affect
+//! ([`uni_locy::incremental::affected_strata`]) has the same facts in both
+//! states, so `re_evaluate_hypothetical` copies them from the facts of the
+//! state before the mutation (the adapter's [`StrataBaseline`]) and derives
+//! only the affected strata, from scratch. `ABDUCE` validates each candidate
+//! modification the same way.
+//!
+//! Affected strata are recomputed in full rather than seeded from the
+//! change: a delta-seeded fixpoint would need the delta of every base clause
+//! (the matches the mutation added or removed), which no operator computes,
+//! and is unsound for deletions, negation and aggregates anyway.
+
+// Rust guideline compliant
+
+use std::collections::BTreeSet;
 
 use uni_cypher::ast::Query;
+use uni_locy::incremental::{MutationFootprint, affected_strata, mutation_footprint};
 use uni_locy::result::CommandResult;
 use uni_locy::types::{CompiledAssume, CompiledCommand};
 use uni_locy::{CompiledProgram, FactRow, LocyConfig, LocyError, LocyStats};
@@ -14,7 +34,99 @@ use uni_locy::{CompiledProgram, FactRow, LocyConfig, LocyError, LocyStats};
 use super::locy_delta::RowStore;
 
 use super::locy_explain::ProvenanceStore;
-use super::locy_traits::LocyExecutionContext;
+use super::locy_program::ReusedStrata;
+use super::locy_traits::{LocyExecutionContext, ReEvaluation, StrataBaseline};
+
+/// The strata of `program` whose facts `baseline` can supply in the state a
+/// mutation with footprint `footprint` produces from the baseline's state.
+///
+/// A stratum qualifies when the mutation cannot affect it and the baseline
+/// holds every relation it derives (a rule the baseline's evaluation never
+/// ran, e.g. one the goal-directed rewrite pruned, is derived instead).
+fn reuse_plan(
+    program: &CompiledProgram,
+    baseline: &StrataBaseline,
+    footprint: &MutationFootprint,
+) -> Option<ReusedStrata> {
+    let affected = affected_strata(program, footprint);
+    let positions: BTreeSet<usize> = program
+        .strata
+        .iter()
+        .enumerate()
+        .filter(|(pos, stratum)| {
+            !affected[*pos]
+                && stratum
+                    .rules
+                    .iter()
+                    .filter(|r| !r.yield_schema.is_empty())
+                    .all(|r| baseline.facts.get(&r.name).is_some())
+        })
+        .map(|(pos, _)| pos)
+        .collect();
+    // Hydrated rows stay correct when every entity they name reads back
+    // unchanged; otherwise the reused facts are hydrated again.
+    let hydrated = baseline
+        .rows
+        .clone()
+        .filter(|_| footprint.preserves_existing_entities());
+    (!positions.is_empty()).then(|| ReusedStrata {
+        facts: baseline.facts.clone(),
+        positions,
+        hydrated,
+    })
+}
+
+/// Re-evaluates `program` and records what was derived and what reused.
+async fn re_evaluate_counted(
+    program: &CompiledProgram,
+    ctx: &dyn LocyExecutionContext,
+    config: &LocyConfig,
+    reused: Option<ReusedStrata>,
+    stats: &mut LocyStats,
+) -> Result<ReEvaluation, LocyError> {
+    let result = ctx
+        .re_evaluate_strata_reusing(program, config, reused)
+        .await?;
+    stats.hypothetical_strata_reused += result.reused.len();
+    stats.hypothetical_strata_evaluated += program.strata.len() - result.reused.len();
+    if let Some(facts) = &result.facts {
+        stats.hypothetical_facts_derived += program
+            .strata
+            .iter()
+            .enumerate()
+            .filter(|(pos, _)| !result.reused.contains(pos))
+            .flat_map(|(_, s)| &s.rules)
+            .map(|r| facts.fact_count(&r.name))
+            .sum::<usize>();
+    }
+    tracing::debug!(
+        strata = program.strata.len(),
+        reused = result.reused.len(),
+        "locy.hypothetical.re_evaluated"
+    );
+    Ok(result)
+}
+
+/// Re-evaluates `program` in a hypothetical state: the state `baseline` was
+/// derived in, changed by a mutation with footprint `footprint`.
+///
+/// Strata the mutation cannot affect take their facts from `baseline`; the
+/// rest are derived from scratch. With no baseline everything is derived.
+///
+/// # Errors
+///
+/// Whatever the re-evaluation raises.
+pub(crate) async fn re_evaluate_hypothetical(
+    program: &CompiledProgram,
+    ctx: &dyn LocyExecutionContext,
+    config: &LocyConfig,
+    baseline: Option<&StrataBaseline>,
+    footprint: &MutationFootprint,
+    stats: &mut LocyStats,
+) -> Result<ReEvaluation, LocyError> {
+    let reused = baseline.and_then(|b| reuse_plan(program, b, footprint));
+    re_evaluate_counted(program, ctx, config, reused, stats).await
+}
 
 /// A binding error from planning an ASSUME body against its parent's rules.
 fn binding_error(e: uni_locy::LocyCompileError) -> LocyError {
@@ -60,6 +172,11 @@ pub async fn evaluate_assume(
             message: format!("failed to fork L0: {}", e),
         })?;
 
+    // The facts of the state the mutations apply to. Taken before they run:
+    // the adapter offers a baseline only while its state is current.
+    let baseline = ctx.reuse_baseline();
+    let footprint = mutation_footprint(&assume.mutations);
+
     // 2. Execute mutations
     if !assume.mutations.is_empty() {
         let query = Query::Single(uni_cypher::ast::Statement {
@@ -96,8 +213,23 @@ pub async fn evaluate_assume(
         merged
     };
 
-    // 3. Re-evaluate the parent program's strata in the mutated state
-    let mut assume_derived_store: RowStore = ctx.re_evaluate_strata(parent_program, config).await?;
+    // 3. Re-evaluate the parent program's strata in the mutated state,
+    // reusing the strata the mutations cannot affect.
+    let parent = re_evaluate_hypothetical(
+        parent_program,
+        ctx,
+        config,
+        baseline.as_ref(),
+        &footprint,
+        stats,
+    )
+    .await?;
+    let parent_facts = parent.facts;
+    // Kept for nested hypothetical commands only when there is a state to offer.
+    let parent_rows = parent_facts
+        .as_ref()
+        .map(|_| std::sync::Arc::new(parent.rows.clone()));
+    let mut assume_derived_store: RowStore = parent.rows;
     stats.queries_executed += 1; // rough accounting for the re-evaluation
 
     // 4. Also evaluate the body program's strata, if any.
@@ -131,8 +263,17 @@ pub async fn evaluate_assume(
         // The body was compiled without the parent's schemas, so a body clause
         // referencing a parent rule had no binding plan until this catalog.
         uni_locy::attach_binding_plans(&mut body_program).map_err(binding_error)?;
-        let body_store = ctx.re_evaluate_strata(&body_program, config).await?;
-        for (name, rel) in body_store {
+        // The parent's strata were derived in this very state a moment ago;
+        // only the body's own strata are new. Positional, not by name: a body
+        // rule may shadow a parent rule's name.
+        let reused = parent_facts.clone().map(|facts| ReusedStrata {
+            facts,
+            positions: (0..parent_program.strata.len()).collect(),
+            // Hydrated in this very state.
+            hydrated: parent_rows.clone(),
+        });
+        let body = re_evaluate_counted(&body_program, ctx, config, reused, stats).await?;
+        for (name, rel) in body.rows {
             assume_derived_store.insert(name, rel);
         }
     }
@@ -151,6 +292,18 @@ pub async fn evaluate_assume(
     // shared reference, as top-level commands do.
     let assume_derived_store = assume_derived_store;
 
+    // Nested hypothetical commands (ASSUME, ABDUCE) start from this state, so
+    // they reuse the parent strata derived here. The parent's facts, not the
+    // body's: a nested command re-evaluates `command_program`, whose strata
+    // are the parent's, and a body rule may shadow a parent rule's name.
+    let pushed_baseline = parent_facts.is_some();
+    if let Some(facts) = parent_facts {
+        ctx.push_reuse_baseline(StrataBaseline {
+            facts,
+            rows: parent_rows,
+        });
+    }
+
     // 5. Execute body commands and collect results
     let mut result_rows = Vec::new();
     for cmd in &assume.body_commands {
@@ -168,6 +321,10 @@ pub async fn evaluate_assume(
             CommandResult::Cypher(rows) => result_rows.extend(rows),
             _ => {}
         }
+    }
+
+    if pushed_baseline {
+        ctx.pop_reuse_baseline();
     }
 
     // If no commands produced rows, collect all derived facts
@@ -209,7 +366,9 @@ fn dispatch_body_command<'a>(
                 Ok(CommandResult::Query(rows))
             }
             CompiledCommand::DeriveCommand(dc) => {
-                let affected = super::locy_derive::derive_command(dc, program, ctx, stats).await?;
+                let affected =
+                    super::locy_derive::derive_command(dc, program, ctx, derived_store, stats)
+                        .await?;
                 Ok(CommandResult::Derive { affected })
             }
             CompiledCommand::ExplainRule(eq) => {

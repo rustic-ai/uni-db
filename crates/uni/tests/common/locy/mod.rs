@@ -1,4 +1,5 @@
 pub mod btic_cypher_test;
+pub mod locy_assume_incremental;
 pub mod locy_assume_module_context;
 pub mod locy_assume_params;
 pub mod locy_derive_visibility;
@@ -7,6 +8,7 @@ pub mod locy_fold_having;
 pub mod locy_fold_property_key;
 pub mod locy_fold_related_repro;
 pub mod locy_generator_plugin;
+pub mod locy_goal_directed;
 pub mod locy_integration;
 pub mod locy_is_ref_fold_alias;
 pub mod locy_is_ref_value_col_type;
@@ -22,6 +24,7 @@ pub mod locy_predicate_plugin;
 pub mod locy_prefix_to_grouped_recursion;
 pub mod locy_profile;
 pub mod locy_program_persistence;
+pub mod locy_program_plan_time;
 pub mod locy_warded_parenthesized_path;
 pub mod repro_locy_runtime_distinct_debug_dedup;
 // Correctness-scan Wave 2 repros (R12 Locy probabilistic).
@@ -51,6 +54,9 @@ pub mod locy_issue_294_parallel_edge_fold;
 // Issue #301: recursive rule cost tracks the frontier, not the relation
 // (cost guard, correctness cases, and an #[ignore] measurement probe).
 pub mod locy_issue_301_fixpoint_delta;
+// P5 (2026-10-17 perf-class audit): semi-naive feeding of BEST BY (R2),
+// non-linear and mutual recursion (R3), and the IS NOT banned set (R5).
+pub mod locy_recursion_semi_naive;
 // P4 (2026-10-17 perf-class audit): anchoring on the walk's target (A1b), on a
 // lower-stratum reference (A2), and the node a reference binds.
 pub mod locy_anchor_target_cross_stratum;
@@ -75,8 +81,10 @@ pub mod locy_issue_162_fold_scaling;
 // Repros for the two Debug-fallback nondeterminism defects (#236 + sibling).
 pub mod locy_debug_fallback_nondeterminism;
 pub mod locy_issue_216_in_three_valued_logic;
+// Every operator over every operand-type pairing answers as Cypher does.
 pub mod locy_issue_267_node_key_scaling;
 pub mod locy_metrics_counters;
+pub mod locy_operator_parity;
 // Issue #272: `IS <rule> TO <value column>` returns zero rows with no error.
 pub mod locy_issue_272_is_ref_to_value_column;
 // Issue #273: a query parameter is not resolved in the post-FOLD (HAVING) position.

@@ -22,9 +22,10 @@
 //!
 //! # Why it must run under `CaseKind::Pushdown`
 //!
-//! A scalar index is consulted only for an `=`/`IN` on a Hash-indexed column:
-//! `build_indexed_property_pushdown` collects nothing else, so a range predicate
-//! hands Lance no predicate an index could serve. Measured over the generator's
+//! This lever declares a Hash index, and a Hash index is consulted only for
+//! `=`/`IN` and `IS [NOT] NULL`: a range predicate hands Lance no predicate it
+//! can serve. (A BTree also serves ranges and `STARTS WITH` since perf audit
+//! F1; the measurements below predate that and describe the Hash case.) Measured over the generator's
 //! case kinds, the fraction of cases carrying such a predicate is ~7% for
 //! `Plain` and ~22% for the selective variants — both far below the floor.
 //! `CaseKind::Pushdown` routes to `arb_case_pushdown`, which narrows targets to
@@ -99,10 +100,10 @@ impl StatefulLever for IndexLever {
 
     /// Declares a **Hash** index on the column the generator filters.
     ///
-    /// The kind matters as much as the column: only `=`/`IN` against a
-    /// Hash-indexed column populates `hash_index_columns`, so a `BTree` here
-    /// would leave every case unable to reach pushdown and the lever would
-    /// report 0% activation while looking correct.
+    /// The kind matters as much as the column: a Hash index serves the
+    /// `=`/`IN` conjuncts `CaseKind::Pushdown` always emits and no range, so
+    /// activation comes from those conjuncts alone. (A `BTree` would also serve
+    /// the ranges, since perf audit F1, which changes what the lever measures.)
     ///
     /// [`INDEXED_PROPERTY`] is a literal alias of the generator's
     /// `PUSHDOWN_PROPERTY`, so the indexed column and the filtered column cannot

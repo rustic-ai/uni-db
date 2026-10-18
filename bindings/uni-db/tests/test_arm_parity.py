@@ -162,15 +162,18 @@ def test_both_arms_carry_metrics(db):
 
 
 def test_locy_metrics_document_which_fields_are_unmeasured(db):
-    """Locy does not go through the Cypher parse/plan/cache path.
+    """Locy does not go through the Cypher parse/cache path.
 
-    Those fields are therefore always zero here, and a zero that means "not
-    measured" is indistinguishable from one that means "fast" -- so the stub
-    says so, and this pins the claim rather than leaving it as prose.
+    ``parse_time_ms`` and ``plan_cache_hit`` are therefore always zero/False
+    here, and a zero that means "not measured" is indistinguishable from one
+    that means "fast" -- so the stub says so, and this pins the claim rather
+    than leaving it as prose. ``plan_time_ms`` *is* measured: it times the
+    program's logical planning, and ``exec_time_ms`` is the rest.
     """
     metrics = db.session().locy(LOCY_PROGRAM).metrics
     assert metrics.parse_time_ms == 0.0
-    assert metrics.plan_time_ms == 0.0
+    assert metrics.plan_time_ms > 0.0
+    assert metrics.plan_time_ms <= metrics.total_time_ms
     assert metrics.plan_cache_hit is False
     # ... while the fields Locy does populate are real.
     assert metrics.total_time_ms > 0.0

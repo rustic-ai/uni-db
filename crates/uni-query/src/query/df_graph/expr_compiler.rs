@@ -35,8 +35,7 @@ use std::sync::Arc;
 use uni_common::Value;
 use uni_common::core::schema::{DistanceMetric, IndexDefinition, Schema as UniSchema};
 use uni_cypher::ast::{
-    BinaryOp, Clause, CypherLiteral, Expr, MapProjectionItem, MatchClause, Query, ReturnClause,
-    ReturnItem, SortItem, Statement, UnaryOp, UnwindClause, WithClause,
+    BinaryOp, Clause, CypherLiteral, Expr, MapProjectionItem, Query, ReturnItem, UnaryOp,
 };
 use uni_store::storage::manager::StorageManager;
 
@@ -1051,8 +1050,8 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
     ///
     /// Used when the pattern has no node bound in the outer scope. The synthesized
     /// query is the comprehension's own semantics written out longhand, so the
-    /// existing correlated-subquery machinery — `rewrite_query_correlated`,
-    /// `plan_with_scope`, `execute_subplan_with_outer_vars` — evaluates it without
+    /// existing correlated-subquery machinery — `plan_with_typed_scope`,
+    /// `bind_outer_row`, `execute_subplan_with_outer_vars` — evaluates it without
     /// needing to understand pattern comprehensions at all.
     fn compile_pattern_comprehension_as_subquery(
         &self,
@@ -2224,6 +2223,27 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         _distinct: bool,
         input_schema: &Schema,
     ) -> Result<Arc<dyn PhysicalExpr>> {
+        // DataFusion's `coalesce` UDF cannot be invoked: its logical simplifier
+        // rewrites it to a CASE, and planning it physically here, past that
+        // simplifier, failed every such query with an internal error. Lower it
+        // to the same CASE the simplifier would.
+        if name.eq_ignore_ascii_case("coalesce") && !args.is_empty() {
+            let (last, rest) = args.split_last().expect("non-empty");
+            let when_then = rest
+                .iter()
+                .map(|a| (Expr::IsNotNull(Box::new(a.clone())), a.clone()))
+                .collect::<Vec<_>>();
+            if when_then.is_empty() {
+                return self.compile(last, input_schema);
+            }
+            return self.compile_case(
+                &None,
+                &when_then,
+                &Some(Box::new(last.clone())),
+                input_schema,
+            );
+        }
+
         // 1. Recursively compile each argument
         let compiled_args: Vec<Arc<dyn PhysicalExpr>> = args
             .iter()
@@ -2557,6 +2577,35 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 right.clone(),
                 &left_type,
                 &right_type,
+            )? {
+                return Ok(result);
+            }
+        }
+
+        // A comparison with a float operand compares numerically, not by the
+        // IEEE total order of Arrow's kernels; the same lowering as the
+        // logical path's (`df_expr::float_comparison`).
+        if let (Some(l), Some(r)) = (&left_type, &right_type)
+            && let Some(cmp) = crate::query::df_expr::float_comparison_op(df_op, l, r)
+        {
+            let widen =
+                |e: Arc<dyn PhysicalExpr>, dt: &DataType| -> Result<Arc<dyn PhysicalExpr>> {
+                    Ok(if *dt == DataType::Float64 {
+                        e
+                    } else {
+                        datafusion::physical_expr::expressions::cast(
+                            e,
+                            input_schema,
+                            DataType::Float64,
+                        )?
+                    })
+                };
+            if let Some(result) = self.plan_binary_udf(
+                cmp.udf_name(),
+                widen(left.clone(), l)?,
+                widen(right.clone(), r)?,
+                DataType::Float64,
+                DataType::Float64,
             )? {
                 return Ok(result);
             }
@@ -3197,28 +3246,30 @@ fn body_bound_vars(query: &Query) -> HashSet<String> {
 /// CypherValue — an entity bound by `UNWIND`, which has no `{name}._vid` /
 /// `{name}._eid` column. Decided by value: the column's type alone does not
 /// say what it holds.
-fn cypher_value_entity_columns(batch: &arrow_array::RecordBatch) -> HashSet<String> {
+fn cypher_value_entity_columns(
+    batch: &arrow_array::RecordBatch,
+) -> datafusion::error::Result<HashSet<String>> {
     let schema = batch.schema();
-    schema
-        .fields()
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| {
-            let name = f.name();
-            !name.contains('.') && !name.starts_with('_') && *f.data_type() == DataType::LargeBinary
-        })
-        .filter(|(i, _)| {
-            let col = batch.column(*i);
-            (0..col.len()).any(|row| {
-                !col.is_null(row)
-                    && matches!(
-                        arrow_to_json_value(col.as_ref(), row),
-                        Value::Node(_) | Value::Edge(_)
-                    )
-            })
-        })
-        .map(|(_, f)| f.name().clone())
-        .collect()
+    let mut out = HashSet::new();
+    for (i, f) in schema.fields().iter().enumerate() {
+        let name = f.name();
+        if name.contains('.') || name.starts_with('_') || *f.data_type() != DataType::LargeBinary {
+            continue;
+        }
+        let col = batch.column(i);
+        for row in 0..col.len() {
+            if !col.is_null(row)
+                && matches!(
+                    arrow_to_json_value(col.as_ref(), row)?,
+                    Value::Node(_) | Value::Edge(_)
+                )
+            {
+                out.insert(name.clone());
+                break;
+            }
+        }
+    }
+    Ok(out)
 }
 
 struct ExistsExecExpr {
@@ -3372,9 +3423,8 @@ impl PhysicalExpr for ExistsExecExpr {
         // execution with "Column 'names' not found", and a body that reads `n`
         // fails earlier still with `UndefinedVariable` (#199).
         //
-        // They are added to `vars_in_scope` only, never to `entity_vars`. The
-        // correlated rewrite below turns `v.prop` into `Parameter("v.prop")`, which
-        // is meaningful for an entity and wrong for a scalar; the value itself
+        // They are added to `vars_in_scope` only, never to `entity_vars`, which
+        // name the imports bound to the outer row's entity columns; the value itself
         // arrives through `extract_row_params`, which already copies every batch
         // column into `sub_params`, so the projection `plan_single_typed` emits for
         // an in-scope variable resolves without any further plumbing.
@@ -3385,7 +3435,7 @@ impl PhysicalExpr for ExistsExecExpr {
         // A node or relationship held as one CypherValue (bound by `UNWIND`)
         // is an outer entity too: a body pattern naming it refers to it, as
         // at top level. Shadowed, `MATCH (a)` re-bound `a` to every node.
-        let value_entities = cypher_value_entity_columns(batch);
+        let value_entities = cypher_value_entity_columns(batch)?;
         let mut vars_in_scope: Vec<String> = entity_vars.iter().cloned().collect();
         for field in schema.fields() {
             let name = field.name();
@@ -3399,15 +3449,15 @@ impl PhysicalExpr for ExistsExecExpr {
             vars_in_scope.push(name.clone());
         }
 
-        // 7.3: Rewrite correlated property accesses to parameter references.
-        // e.g., `n.prop` where `n` is an outer entity → `$param("n.prop")`
-        let rewritten_query = rewrite_query_correlated(&self.query, &entity_vars);
-        let labelled_outer = outer_nodes_with_labels(&self.query, &entity_vars);
-
-        // 7.4: Plan ONCE — the rewritten query is parameterized, same for all rows.
+        // 7.3: The body is planned as written. Its outer node and relationship
+        // imports are bound to the outer row's own columns (`bind_outer_row`
+        // below), so `a.x`, `a:L` and `(a:L)` read them as at top level. A
+        // rewrite of `a.x` to `$a.x` and of `(a:L)` to a `$a._labels` test
+        // predated that binding and was removed once measured redundant.
+        // 7.4: Plan ONCE; each row's execution binds the imports to that row.
         let planner = QueryPlanner::new(self.uni_schema.clone());
         let typed_scope = crate::query::planner::outer_row_scope(vars_in_scope, &schema);
-        let logical_plan = match planner.plan_with_typed_scope(rewritten_query, typed_scope) {
+        let logical_plan = match planner.plan_with_typed_scope(self.query.clone(), typed_scope) {
             Ok(plan) => plan,
             Err(e) => {
                 return Err(datafusion::error::DataFusionError::Execution(format!(
@@ -3466,7 +3516,7 @@ impl PhysicalExpr for ExistsExecExpr {
                         datafusion::error::DataFusionError::Execution(e.to_string())
                     })?;
 
-                    let row_params = extract_row_params(batch, row_idx);
+                    let row_params = extract_row_params(batch, row_idx)?;
                     let mut sub_params = base_params.clone();
                     sub_params.extend(row_params);
 
@@ -3478,7 +3528,6 @@ impl PhysicalExpr for ExistsExecExpr {
                             sub_params.insert(var.clone(), vid_val);
                         }
                     }
-                    supply_outer_labels(&mut sub_params, &labelled_outer, &graph_ctx);
 
                     let (batches, _plan) = rt.block_on(execute_subplan_with_outer_vars(
                         &logical_plan,
@@ -3839,7 +3888,7 @@ fn collect_single_column(
         }
         let column = batch.column(0);
         for row in 0..batch.num_rows() {
-            out.push(arrow_to_json_value(column, row));
+            out.push(arrow_to_json_value(column, row)?);
         }
     }
     Ok(out)
@@ -3919,7 +3968,7 @@ impl PhysicalExpr for PatternComprehensionSubqueryExpr {
         // outer node or relationship of that name is not shadowed: in openCypher
         // a variable already bound in scope refers to the same entity inside the
         // pattern, so it stays correlated.
-        let value_entities = cypher_value_entity_columns(batch);
+        let value_entities = cypher_value_entity_columns(batch)?;
         for v in &self.pattern_vars {
             if !entity_vars.contains(v) && !value_entities.contains(v) {
                 vars_in_scope.remove(v);
@@ -3927,18 +3976,15 @@ impl PhysicalExpr for PatternComprehensionSubqueryExpr {
         }
         let vars_in_scope: Vec<String> = vars_in_scope.into_iter().collect();
 
-        // Only genuine entity variables drive the property-access rewrite; a
-        // shadowed name must not be rewritten to an outer parameter either.
+        // Only genuine entity variables are correlated imports; a shadowed name
+        // is not.
         let correlated_vars: HashSet<String> = entity_vars.clone();
-        let rewritten_query = rewrite_query_correlated(&self.query, &correlated_vars);
-        let labelled_outer = outer_nodes_with_labels(&self.query, &correlated_vars);
 
-        // Planned once; the rewrite turned correlated references into parameters,
-        // so the plan is the same for every row.
+        // Planned once; each row's execution binds the imports to that row.
         let planner = QueryPlanner::new(self.uni_schema.clone());
         let logical_plan = planner
             .plan_with_typed_scope(
-                rewritten_query,
+                self.query.clone(),
                 crate::query::planner::outer_row_scope(vars_in_scope, &schema),
             )
             .map_err(|e| {
@@ -3999,7 +4045,7 @@ impl PhysicalExpr for PatternComprehensionSubqueryExpr {
                         continue;
                     }
 
-                    let row_params = extract_row_params(batch, row_idx);
+                    let row_params = extract_row_params(batch, row_idx)?;
                     let mut sub_params = base_params.clone();
                     sub_params.extend(row_params);
                     for var in &correlated_vars {
@@ -4008,7 +4054,6 @@ impl PhysicalExpr for PatternComprehensionSubqueryExpr {
                             sub_params.insert(var.clone(), vid_val);
                         }
                     }
-                    supply_outer_labels(&mut sub_params, &labelled_outer, &graph_ctx);
 
                     // Counted here rather than once per `evaluate`: the cost
                     // this path carries is one sub-plan execution per outer
@@ -4040,7 +4085,7 @@ impl PhysicalExpr for PatternComprehensionSubqueryExpr {
                         }
                         let col = b.column(0);
                         for i in 0..b.num_rows() {
-                            let v = arrow_to_json_value(col.as_ref(), i);
+                            let v = arrow_to_json_value(col.as_ref(), i)?;
                             row_values.push(Some(uni_common::cypher_value_codec::encode(&v)));
                         }
                     }
@@ -4211,24 +4256,6 @@ fn rewrite_endpoint_calls(expr: Expr, schema: &Schema) -> Expr {
     expr.map_children(&mut |c| rewrite_endpoint_calls(c, schema))
 }
 
-fn rewrite_query_correlated(query: &Query, outer_vars: &HashSet<String>) -> Query {
-    match query {
-        Query::Single(stmt) => Query::Single(Statement {
-            clauses: stmt
-                .clauses
-                .iter()
-                .map(|c| rewrite_clause_correlated(c, outer_vars))
-                .collect(),
-        }),
-        Query::Union { left, right, all } => Query::Union {
-            left: Box::new(rewrite_query_correlated(left, outer_vars)),
-            right: Box::new(rewrite_query_correlated(right, outer_vars)),
-            all: *all,
-        },
-        other => other.clone(),
-    }
-}
-
 /// Which vectorized operator a pattern is being considered for.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FastPath {
@@ -4362,265 +4389,6 @@ fn fast_path_unsupported(
         }
     }
     None
-}
-
-/// Parameter holding an outer node's labels inside a correlated subquery.
-fn outer_labels_param(var: &str) -> String {
-    format!("{var}._labels")
-}
-
-/// Moves the labels of outer-bound nodes out of a subquery pattern and into
-/// predicates over `$<var>._labels`.
-///
-/// Inside the subquery an outer node exists only as parameters, not as scan
-/// columns, so the label filter the planner emits for `(n:Person)` —
-/// `array_has(n._labels, ...)` — referred to a column that is never there and
-/// failed with `No field named "n._labels"`. The predicate reads the same
-/// labels from a parameter [`ExistsExecExpr`] supplies instead.
-fn lift_outer_node_labels(
-    pattern: &uni_cypher::ast::Pattern,
-    outer_vars: &HashSet<String>,
-) -> (uni_cypher::ast::Pattern, Vec<Expr>) {
-    use uni_cypher::ast::{LabelExpr, PatternElement};
-    let mut pattern = pattern.clone();
-    let mut preds = Vec::new();
-    for path in &mut pattern.paths {
-        for elem in &mut path.elements {
-            let PatternElement::Node(node) = elem else {
-                continue;
-            };
-            let Some(var) = node.variable.as_ref().filter(|v| outer_vars.contains(*v)) else {
-                continue;
-            };
-            let has = |label: &String| Expr::In {
-                expr: Box::new(Expr::Literal(CypherLiteral::String(label.clone()))),
-                list: Box::new(Expr::Parameter(outer_labels_param(var))),
-            };
-            let combine = |op: BinaryOp, names: &[String]| {
-                names.iter().map(has).reduce(|l, r| Expr::BinaryOp {
-                    left: Box::new(l),
-                    op,
-                    right: Box::new(r),
-                })
-            };
-            let pred = match &node.labels {
-                LabelExpr::Empty => None,
-                LabelExpr::Conjunction(names) => combine(BinaryOp::And, names),
-                LabelExpr::Disjunction(names) => combine(BinaryOp::Or, names),
-            };
-            if let Some(pred) = pred {
-                preds.push(pred);
-                node.labels = LabelExpr::Empty;
-            }
-        }
-    }
-    (pattern, preds)
-}
-
-/// Adds `$<var>._labels` for each of `vars` the outer row does not already
-/// carry, resolved from the node's id. See [`lift_outer_node_labels`].
-fn supply_outer_labels(
-    sub_params: &mut HashMap<String, Value>,
-    vars: &HashSet<String>,
-    graph_ctx: &Arc<GraphExecutionContext>,
-) {
-    for var in vars {
-        let key = outer_labels_param(var);
-        if sub_params.contains_key(&key) {
-            continue;
-        }
-        let labels = match sub_params.get(&format!("{var}._vid")) {
-            Some(Value::Int(raw)) => graph_ctx
-                .resolve_vertex_labels(
-                    uni_common::core::id::Vid::from(*raw as u64),
-                    &graph_ctx.query_context(),
-                )
-                .unwrap_or_default()
-                .into_iter()
-                .map(Value::String)
-                .collect(),
-            // A NULL outer node has no labels, so a label test on it is false,
-            // as `(n:Label)` over NULL matches nothing.
-            _ => Vec::new(),
-        };
-        sub_params.insert(key, Value::List(labels));
-    }
-}
-
-/// Outer variables whose labels a correlated subquery tests (see
-/// [`lift_outer_node_labels`]), so their labels must be supplied per row.
-fn outer_nodes_with_labels(query: &Query, outer_vars: &HashSet<String>) -> HashSet<String> {
-    use uni_cypher::ast::{LabelExpr, PatternElement};
-    let mut out = HashSet::new();
-    let mut visit = |stmt: &Statement| {
-        for clause in &stmt.clauses {
-            if let Clause::Match(m) = clause {
-                for path in &m.pattern.paths {
-                    for elem in &path.elements {
-                        if let PatternElement::Node(node) = elem
-                            && let Some(var) = &node.variable
-                            && outer_vars.contains(var)
-                            && !matches!(node.labels, LabelExpr::Empty)
-                        {
-                            out.insert(var.clone());
-                        }
-                    }
-                }
-            }
-        }
-    };
-    fn walk(q: &Query, visit: &mut dyn FnMut(&Statement)) {
-        match q {
-            Query::Single(stmt) => visit(stmt),
-            Query::Union { left, right, .. } => {
-                walk(left, visit);
-                walk(right, visit);
-            }
-            _ => {}
-        }
-    }
-    walk(query, &mut visit);
-    out
-}
-
-/// Rewrite expressions within a clause for correlated property access.
-fn rewrite_clause_correlated(clause: &Clause, outer_vars: &HashSet<String>) -> Clause {
-    match clause {
-        Clause::Match(m) => {
-            let (pattern, label_preds) = lift_outer_node_labels(&m.pattern, outer_vars);
-            let where_clause = m
-                .where_clause
-                .as_ref()
-                .map(|e| rewrite_expr_correlated(e, outer_vars));
-            let where_clause =
-                label_preds
-                    .into_iter()
-                    .chain(where_clause)
-                    .reduce(|l, r| Expr::BinaryOp {
-                        left: Box::new(l),
-                        op: BinaryOp::And,
-                        right: Box::new(r),
-                    });
-            Clause::Match(MatchClause {
-                optional: m.optional,
-                pattern,
-                where_clause,
-                for_update: m.for_update,
-            })
-        }
-        Clause::With(w) => Clause::With(WithClause {
-            distinct: w.distinct,
-            items: w
-                .items
-                .iter()
-                .map(|item| rewrite_return_item(item, outer_vars))
-                .collect(),
-            order_by: w.order_by.as_ref().map(|items| {
-                items
-                    .iter()
-                    .map(|si| SortItem {
-                        expr: rewrite_expr_correlated(&si.expr, outer_vars),
-                        ascending: si.ascending,
-                    })
-                    .collect()
-            }),
-            skip: w
-                .skip
-                .as_ref()
-                .map(|e| rewrite_expr_correlated(e, outer_vars)),
-            limit: w
-                .limit
-                .as_ref()
-                .map(|e| rewrite_expr_correlated(e, outer_vars)),
-            where_clause: w
-                .where_clause
-                .as_ref()
-                .map(|e| rewrite_expr_correlated(e, outer_vars)),
-        }),
-        Clause::Return(r) => Clause::Return(ReturnClause {
-            distinct: r.distinct,
-            items: r
-                .items
-                .iter()
-                .map(|item| rewrite_return_item(item, outer_vars))
-                .collect(),
-            order_by: r.order_by.as_ref().map(|items| {
-                items
-                    .iter()
-                    .map(|si| SortItem {
-                        expr: rewrite_expr_correlated(&si.expr, outer_vars),
-                        ascending: si.ascending,
-                    })
-                    .collect()
-            }),
-            skip: r
-                .skip
-                .as_ref()
-                .map(|e| rewrite_expr_correlated(e, outer_vars)),
-            limit: r
-                .limit
-                .as_ref()
-                .map(|e| rewrite_expr_correlated(e, outer_vars)),
-        }),
-        Clause::Unwind(u) => Clause::Unwind(UnwindClause {
-            expr: rewrite_expr_correlated(&u.expr, outer_vars),
-            variable: u.variable.clone(),
-        }),
-        other => other.clone(),
-    }
-}
-
-fn rewrite_return_item(item: &ReturnItem, outer_vars: &HashSet<String>) -> ReturnItem {
-    match item {
-        ReturnItem::All => ReturnItem::All,
-        ReturnItem::Expr {
-            expr,
-            alias,
-            source_text,
-        } => ReturnItem::Expr {
-            expr: rewrite_expr_correlated(expr, outer_vars),
-            alias: alias.clone(),
-            source_text: source_text.clone(),
-        },
-    }
-}
-
-/// Rewrite a single expression: Property(Variable(v), key) → Parameter("{v}.{key}")
-/// when v is an outer-scope entity variable. Handles nested EXISTS recursively.
-fn rewrite_expr_correlated(expr: &Expr, outer_vars: &HashSet<String>) -> Expr {
-    match expr {
-        // Core rewrite: n.prop → $param("n.prop") when n is an outer entity
-        Expr::Property(base, key) => {
-            if let Expr::Variable(v) = base.as_ref()
-                && outer_vars.contains(v)
-            {
-                return Expr::Parameter(format!("{}.{}", v, key));
-            }
-            Expr::Property(
-                Box::new(rewrite_expr_correlated(base, outer_vars)),
-                key.clone(),
-            )
-        }
-        // Nested EXISTS — recurse into the subquery body
-        Expr::Exists {
-            query,
-            from_pattern_predicate,
-        } => Expr::Exists {
-            query: Box::new(rewrite_query_correlated(query, outer_vars)),
-            from_pattern_predicate: *from_pattern_predicate,
-        },
-        // CountSubquery and CollectSubquery — recurse into subquery body
-        Expr::CountSubquery(query) => {
-            Expr::CountSubquery(Box::new(rewrite_query_correlated(query, outer_vars)))
-        }
-        Expr::CollectSubquery(query) => {
-            Expr::CollectSubquery(Box::new(rewrite_query_correlated(query, outer_vars)))
-        }
-        // All other expressions: recursively transform children
-        other => other
-            .clone()
-            .map_children(&mut |child| rewrite_expr_correlated(&child, outer_vars)),
-    }
 }
 
 /// Look up the `DistanceMetric` for a vector-indexed property on a label.

@@ -159,6 +159,14 @@ pub(crate) fn build_cypher_comparison(
 ) -> DfExpr {
     use TypeCompat::*;
 
+    // Numbers with a float among them compare numerically, not by the total
+    // order Arrow's kernels use (`-0.0 = 0.0`, NaN compares false).
+    if let Some(cmp) =
+        super::df_expr::float_comparison(left.clone(), left_type, op, right.clone(), right_type)
+    {
+        return cmp;
+    }
+
     match type_compat(left_type, right_type) {
         Same | StringCompat | BooleanCompat => binary_expr(left, op, right),
         NumericWidening(common) => {

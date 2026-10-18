@@ -646,6 +646,19 @@ mod tests {
     }
 
     #[test]
+    fn test_unary_minus_folds_float_literals() {
+        use crate::ast::{CypherLiteral, Expr};
+        let lit = |s: &str| parse_expression(s).unwrap_or_else(|e| panic!("{s}: {e}"));
+        assert_eq!(lit("-2.5"), Expr::Literal(CypherLiteral::Float(-2.5)));
+        assert_eq!(lit("--2.5"), Expr::Literal(CypherLiteral::Float(2.5)));
+        assert_eq!(lit("-+1e3"), Expr::Literal(CypherLiteral::Float(-1000.0)));
+        let Expr::Literal(CypherLiteral::Float(z)) = lit("-0.0") else {
+            panic!("-0.0 is not a float literal");
+        };
+        assert!(z == 0.0 && z.is_sign_negative(), "-0.0 must keep its sign");
+    }
+
+    #[test]
     fn test_unary_plus_identity() {
         use crate::ast::{CypherLiteral, Expr};
         // +5 → Integer(5)

@@ -212,7 +212,7 @@ impl DeltaDataset {
             &self.edge_type,
             schema,
             |i| &entries[i].properties,
-            &[],
+            |_, _| false,
         )
     }
 
@@ -367,9 +367,48 @@ impl DeltaDataset {
     /// Race-safe under async-flush — see
     /// `crate::storage::manager::write_batch_with_lance_conflict_retry`.
     pub async fn write_run(&self, backend: &dyn StorageBackend, batch: RecordBatch) -> Result<()> {
+        // Seam for the dual-write ordering check: background compaction folds
+        // whatever it finds in a delta table into L2 and expects each EID to
+        // already have its `main_edges` row, so every writer must have written
+        // `main_edges` by the time it reaches here.
+        fail::fail_point!("delta::before-write-run");
         let table_name = table_names::delta_table_name(&self.edge_type, &self.direction);
         crate::storage::manager::write_batch_with_lance_conflict_retry(backend, &table_name, batch)
             .await
+    }
+
+    /// Stage a run for this delta table without making it readable.
+    ///
+    /// Nothing staged is visible to a reader or to compaction until
+    /// [`Self::publish_runs`]. See [`crate::storage::manager::stage_batch`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table cannot be created or the run staged.
+    pub async fn stage_run(
+        &self,
+        backend: &dyn StorageBackend,
+        batch: RecordBatch,
+    ) -> Result<crate::backend::traits::StagedAppend> {
+        let table_name = table_names::delta_table_name(&self.edge_type, &self.direction);
+        crate::storage::manager::stage_batch(backend, &table_name, batch).await
+    }
+
+    /// Make runs staged by [`Self::stage_run`] readable, as one commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the commit fails; none of `runs` is then visible.
+    pub async fn publish_runs(
+        &self,
+        backend: &dyn StorageBackend,
+        runs: Vec<crate::backend::traits::StagedAppend>,
+    ) -> Result<()> {
+        // The same seam as `write_run`: this is the instant these delta rows
+        // become readable, so `main_edges` must already hold every EID in them.
+        fail::fail_point!("delta::before-write-run");
+        let table_name = table_names::delta_table_name(&self.edge_type, &self.direction);
+        backend.publish_staged(&table_name, runs).await
     }
 
     /// Build a partial-column RecordBatch for Lance `MergeInsert`.
@@ -468,7 +507,7 @@ impl DeltaDataset {
                 &self.edge_type,
                 schema,
                 |i| &entries[i].properties,
-                &[],
+                |_, _| false,
             )?;
             columns.push(overflow_column);
         }

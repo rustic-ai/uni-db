@@ -160,8 +160,8 @@ impl TriggerPlugin for DelayedAsyncTrigger {
         _ctx: TriggerContext<'_>,
         events: &MutationBatch,
     ) -> Result<TriggerOutcome, FnError> {
-        // Synchronous sleep is fine — `fire` is called from a spawned
-        // task so blocking here doesn't stall the writer.
+        // Synchronous sleep is fine — an `Async` fire runs on the blocking
+        // pool, so blocking here stalls neither the writer nor the executor.
         std::thread::sleep(self.delay);
         let n = events.events.num_rows() as u64;
         self.counter.fetch_add(n, Ordering::SeqCst);
@@ -388,6 +388,37 @@ async fn async_fire_mode_does_not_block_commit() -> Result<()> {
         "async trigger never fired (counter = {})",
         counter.load(Ordering::SeqCst)
     );
+}
+
+/// An in-flight `Async` fire is a background task of the database: counted by
+/// `background_task_count` and waited for by `shutdown_in_place`.
+///
+/// It was a detached `tokio::spawn`, so shutdown returned with the plugin
+/// still running against a database that was gone, and nothing counted it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_fire_is_counted_and_awaited_by_shutdown() -> Result<()> {
+    let db = db_with_audit_schema().await?;
+    let (trigger, counter) = DelayedAsyncTrigger::new(Duration::from_secs(1));
+    register_trigger(&db, "test-async-tracked", Arc::new(trigger))?;
+    let baseline = db.background_task_count();
+
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:_AuditMe {x: 1})").await?;
+    tx.commit().await?;
+    assert_eq!(
+        db.background_task_count(),
+        baseline + 1,
+        "the in-flight async trigger fire is not counted"
+    );
+
+    db.shutdown_in_place().await?;
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "shutdown returned while the async trigger was still firing"
+    );
+    assert_eq!(db.background_task_count(), 0);
+    Ok(())
 }
 
 #[tokio::test]

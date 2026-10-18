@@ -687,16 +687,21 @@ async fn logical_plan_does_not_show_index_selection() -> anyhow::Result<()> {
         "the logical plan changed after an explicit index rebuild — see above."
     );
 
-    // The execution-side observable, on the shape this query cannot reach: a
-    // range predicate collects no hash-index column, so no filter is pushed and
-    // no index is consulted. `scans_reported` is asserted alongside so the zero
-    // means "a scan ran and used no index" rather than "nothing was measured".
+    // The execution-side observable. Until perf audit F1 a range predicate
+    // collected no indexed column, so nothing was pushed and this read 0, with
+    // the note that a BTree route would mean revisiting the index lever. The
+    // route now exists: `a.age > 30` on a BTree goes to Lance through
+    // `pushdown::indexed_range_filter`. Revisited: the index lever declares a
+    // **Hash** index, and a Hash index still takes no range (it is not
+    // ordered), so its query shapes and its activation are unchanged. The
+    // logical plan above stayed identical across the index creation, which is
+    // the property this test pins.
     let (w, rows) = probe(&db.session(), Q).await?;
     report("rebuilt", "node-filtered-int", &w, rows);
-    assert_eq!(
-        w.index_scans, 0,
-        "a range predicate consulted an index; if a BTree route was added, the \
-         index lever's query shapes need revisiting"
+    assert!(
+        w.index_scans >= 1,
+        "a range predicate on a BTree-indexed column consulted no index; the F1 \
+         range route (`indexed_range_filter`) is not reaching the scan"
     );
     Ok(())
 }

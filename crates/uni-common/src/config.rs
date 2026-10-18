@@ -424,6 +424,13 @@ impl FileSandboxConfig {
     }
 }
 
+/// Default of [`UniConfig::vector_knn_default_k`].
+///
+/// The `K` an unsized `~=` search used before it was configurable, kept so
+/// existing queries return the same rows. Large enough for interactive
+/// retrieval, small enough that hydrating every hit stays cheap.
+pub const DEFAULT_VECTOR_KNN_K: usize = 100;
+
 #[derive(Clone, Debug)]
 pub struct UniConfig {
     /// Maximum adjacency cache size in bytes (default: 1GB)
@@ -521,6 +528,22 @@ pub struct UniConfig {
 
     /// Maximum iterations for recursive CTE evaluation (default: 1000).
     pub max_recursive_cte_iterations: usize,
+
+    /// Neighbors a `n.prop ~= q` vector search returns when no `LIMIT`
+    /// sizes it (default: 100).
+    ///
+    /// `~=` is a top-K index scan. `K` is the query's `LIMIT` (plus `SKIP`)
+    /// when the scan feeds that `LIMIT` directly: through projections, and
+    /// through an `ORDER BY` whose leading key is the scan's `_score`,
+    /// descending. Everywhere else, including when a residual filter sits
+    /// between the scan and the `LIMIT`, `K` is this value, and a search that
+    /// returns exactly this many rows adds a warning to the result, because
+    /// more rows may have qualified.
+    ///
+    /// Raising it trades search cost for completeness; every hit is hydrated,
+    /// so the cost grows linearly. A value of `0` makes such searches return
+    /// nothing.
+    pub vector_knn_default_k: usize,
 
     /// Object store resilience configuration
     pub object_store: ObjectStoreConfig,
@@ -757,6 +780,7 @@ impl Default for UniConfig {
             max_transaction_memory: 1024 * 1024 * 1024, // 1GB
             max_compaction_rows: 5_000_000,             // 5M rows
             max_recursive_cte_iterations: 1000,
+            vector_knn_default_k: DEFAULT_VECTOR_KNN_K,
             object_store: ObjectStoreConfig::default(),
             index_rebuild: IndexRebuildConfig::default(),
             strict_schema: false,

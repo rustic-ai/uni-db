@@ -336,6 +336,153 @@ const ENDPOINTS: &[(&str, &[&str])] = &[
     ),
 ];
 
+/// A correlated operator over an input with no rows yields no rows: neither a
+/// `CALL { }` body nor a procedure runs, correlated or not.
+const EMPTY_INPUT: &[(&str, &[&str])] = &[
+    (
+        "MATCH (a:N) WHERE a.id > 100 \
+         CALL { WITH a MATCH (a)-[:R]->(b:N) RETURN b.id AS i } RETURN i",
+        &[],
+    ),
+    (
+        "MATCH (a:N) WHERE a.id > 100 CALL { WITH a RETURN a:L AS v } RETURN v",
+        &[],
+    ),
+    (
+        "MATCH (a:N) WHERE a.id > 100 CALL { MATCH (x:N) RETURN x.id AS i } RETURN i",
+        &[],
+    ),
+    (
+        "MATCH (a:N) WHERE a.id > 100 \
+         CALL { MATCH (x:N) RETURN count(x) AS c } RETURN count(*)",
+        &["[Int(0)]"],
+    ),
+    (
+        "MATCH (a:N) WHERE a.id > 100 CALL uni.system.echo('x') YIELD echo RETURN echo",
+        &[],
+    ),
+    (
+        "MATCH (a:N) WHERE a.id > 100 \
+         CALL uni.system.echo(toString(a.x)) YIELD echo RETURN echo",
+        &[],
+    ),
+    // A procedure only the row-based fallback executor implements.
+    (
+        "MATCH (a:N) WHERE a.id > 100 \
+         CALL uni.admin.compactionStatus() YIELD l1_runs RETURN l1_runs",
+        &[],
+    ),
+];
+
+/// A label on an outer node in a body pattern tests that node, in every
+/// subquery form: `n2` is the only `:L` and has an `:R` out-edge; `n4` the only
+/// `:M`, also with one.
+const OUTER_PATTERN_LABEL: &[(&str, &[&str])] = &[
+    (
+        "MATCH (a:N) RETURN a.id, EXISTS { MATCH (a:L)-[:R]->() }",
+        &[
+            "[Int(1), Bool(false)]",
+            "[Int(2), Bool(true)]",
+            "[Int(3), Bool(false)]",
+            "[Int(4), Bool(false)]",
+            "[Int(5), Bool(false)]",
+            "[Int(6), Bool(false)]",
+        ],
+    ),
+    (
+        "MATCH (a:N) RETURN a.id, COUNT { MATCH (a:M)-[:R]->(b) WHERE b.x > a.x }",
+        &[
+            "[Int(1), Int(0)]",
+            "[Int(2), Int(0)]",
+            "[Int(3), Int(0)]",
+            "[Int(4), Int(1)]",
+            "[Int(5), Int(0)]",
+            "[Int(6), Int(0)]",
+        ],
+    ),
+    (
+        "MATCH (a:N) RETURN a.id, size([(a:L)-[:R]->(b) | b.id])",
+        &[
+            "[Int(1), Int(0)]",
+            "[Int(2), Int(1)]",
+            "[Int(3), Int(0)]",
+            "[Int(4), Int(0)]",
+            "[Int(5), Int(0)]",
+            "[Int(6), Int(0)]",
+        ],
+    ),
+    (
+        "MATCH (a:N) CALL { WITH a MATCH (a:L)-[:R]->(b) RETURN count(b) AS d } \
+         RETURN a.id, d",
+        &[
+            "[Int(1), Int(0)]",
+            "[Int(2), Int(1)]",
+            "[Int(3), Int(0)]",
+            "[Int(4), Int(0)]",
+            "[Int(5), Int(0)]",
+            "[Int(6), Int(0)]",
+        ],
+    ),
+];
+
+/// Rows around an in-query procedure call keep their entity semantics.
+///
+/// A plan holding a procedure the DataFusion engine does not list as its own
+/// (every plugin procedure, `uni.system.echo` among them) ran wholly on the
+/// row-based fallback executor: `RETURN a` gave the VID, `labels(a)` and every
+/// relationship property NULL. A post-`YIELD` predicate on the input rows is
+/// filtered before the call; it must not cross an earlier `LIMIT` or a
+/// rebinding aggregation between the call and the predicate.
+const AROUND_PROCEDURE: &[(&str, &[&str])] = &[
+    (
+        "MATCH (a:N)-[r]->(c:N) CALL uni.system.echo('x') YIELD echo RETURN r.w",
+        &[
+            "[Int(1)]", "[Int(2)]", "[Int(3)]", "[Int(4)]", "[Int(5)]", "[Int(6)]", "[Int(7)]",
+        ],
+    ),
+    (
+        "MATCH (a:N) CALL uni.system.echo('x') YIELD echo RETURN a.id, size(labels(a)), a:L",
+        &[
+            "[Int(1), Int(1), Bool(false)]",
+            "[Int(2), Int(2), Bool(true)]",
+            "[Int(3), Int(1), Bool(false)]",
+            "[Int(4), Int(2), Bool(false)]",
+            "[Int(5), Int(1), Bool(false)]",
+            "[Int(6), Int(1), Bool(false)]",
+        ],
+    ),
+    (
+        "MATCH (a:N) CALL uni.system.echo('x') YIELD echo WHERE a.x = 2.0 RETURN a.id",
+        &["[Int(2)]"],
+    ),
+    (
+        "MATCH (a:N), (c:N) WHERE c.id = 1 CALL uni.system.echo('x') YIELD echo \
+         WITH a, c, echo ORDER BY a.id LIMIT 3 \
+         MATCH (a)-[:R]->(z:N) WHERE a.x > c.x RETURN a.id",
+        &["[Int(2)]", "[Int(3)]", "[Int(3)]"],
+    ),
+    (
+        "MATCH (a:N) CALL uni.system.echo('x') YIELD echo \
+         WITH a.x AS a, count(*) AS c WHERE a > 4 RETURN a",
+        &["[Int(5)]", "[Int(6)]"],
+    ),
+];
+
+/// `coalesce` over a subquery expression: the expression compiler planned
+/// DataFusion's `coalesce` UDF directly, past the simplifier that rewrites it
+/// to a CASE, and every such query failed with an internal error.
+const COALESCE_SUBQUERY: &[(&str, &[&str])] = &[(
+    "MATCH (a:N) RETURN a.id, coalesce(toString(EXISTS { (a)-[:R]->(:L) }), 'null')",
+    &[
+        "[Int(1), String(\"true\")]",
+        "[Int(2), String(\"false\")]",
+        "[Int(3), String(\"false\")]",
+        "[Int(4), String(\"false\")]",
+        "[Int(5), String(\"false\")]",
+        "[Int(6), String(\"false\")]",
+    ],
+)];
+
 /// Schemaless, or a declared schema with scalar indexes on `id` and `x`.
 #[derive(Clone, Copy, Debug)]
 enum Mode {
@@ -646,6 +793,47 @@ const CONTEXTS: &[Context] = &[
                 .collect()
         },
     ),
+    // A procedure call with an input row is the `Apply` operator: its
+    // arguments read the outer row, not an imported body.
+    (
+        "CALL procedure(op) YIELD",
+        |p, op| {
+            format!(
+                "{} CALL uni.system.echo(toString({op})) YIELD echo RETURN {}, echo",
+                p.clause, p.key
+            )
+        },
+        |o| {
+            o.value
+                .iter()
+                .map(|(k, v)| {
+                    let text = match v {
+                        Value::Bool(b) => b.to_string(),
+                        other => format!("{other:?}"),
+                    };
+                    row(k, &Value::String(text))
+                })
+                .collect()
+        },
+    ),
+    // The post-`YIELD` predicate on outer variables only is pushed into the
+    // `Apply` operator's input filter where its shape allows.
+    (
+        "CALL procedure YIELD … WHERE op",
+        |p, op| {
+            format!(
+                "{} CALL uni.system.echo('x') YIELD echo WHERE {op} RETURN {}",
+                p.clause, p.key
+            )
+        },
+        |o| {
+            o.value
+                .keys()
+                .filter(|k| o.holds(k))
+                .map(|k| format!("[{k}]"))
+                .collect()
+        },
+    ),
     (
         "OPTIONAL MATCH … WHERE op",
         |p, op| {
@@ -734,6 +922,10 @@ async fn check(mode: Mode, flush: bool) -> Result<()> {
         .chain(ENDPOINTS)
         .chain(SHORTEST)
         .chain(UNWOUND)
+        .chain(EMPTY_INPUT)
+        .chain(COALESCE_SUBQUERY)
+        .chain(AROUND_PROCEDURE)
+        .chain(OUTER_PATTERN_LABEL)
     {
         let want: Vec<String> = rows.iter().map(|r| (*r).to_string()).collect();
         match bag(&db, query).await {

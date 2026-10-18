@@ -99,6 +99,8 @@ pub(crate) enum Check {
     Transformed,
     /// `EXPLAIN RULE` derives other facts than the oracle.
     Explain,
+    /// A goal-directed `QUERY` answers other rows than the filtered oracle.
+    GoalDirected,
 }
 
 /// One disagreement between the engine and the oracle.
@@ -552,6 +554,17 @@ fn floor_failures(cases: &[Case]) -> Vec<String> {
         SCALAR_INT_READER,
         "sks",
         "ng",
+        // P5 recursion families: non-linear and mutual strata.
+        "nlr",
+        "nlb",
+        "mua",
+        "mub",
+        "mba",
+        "mbb",
+        "mfa",
+        "mfb",
+        "mpa",
+        "mpb",
     ] {
         at_least(
             &format!("relation {rel} non-empty"),

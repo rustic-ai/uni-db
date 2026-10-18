@@ -619,7 +619,7 @@ const INT_LITERALS: &[i64] = &[0, 18, 22, 25, 30, 40, 50, 65, 1999, 2010];
 /// `0`, `1999` and `2010` are in the full set **deliberately**, as literals that
 /// match nothing — an always-false predicate is a partition worth having for
 /// TLP. But they are useless as the *equality* half of a pushdown conjunction:
-/// the `=`/`IN` is what puts the column into `hash_index_columns`, and one that
+/// the `=`/`IN` is what puts the column into `indexed_equality_columns`, and one that
 /// selects no row leaves the case unable to exercise the pushdown path at all.
 /// Such a case is not wrong, merely inert, and a run made mostly of them reports
 /// a depressed activation rate rather than a defect.
@@ -661,7 +661,7 @@ fn arb_comparison(targets: Vec<(&'static str, Prop)>) -> impl Strategy<Value = E
 
 /// `var.prop IN [l1, l2, l3]` over an integer target.
 ///
-/// `IN` is the second route into `PushdownStrategy::hash_index_columns`,
+/// `IN` is the second route into `PushdownStrategy::indexed_equality_columns`,
 /// alongside `=`. The list is drawn from [`INT_LITERALS`] and deduplicated —
 /// a repeated literal is legal Cypher but renders a list the parser
 /// canonicalises differently, which would fail the round-trip property for a
@@ -692,13 +692,16 @@ fn arb_in_list(targets: Vec<(&'static str, Prop)>) -> BoxedStrategy<Expr> {
 
 /// An `=`/`IN` **and** a two-sided inclusive range over the *same* column.
 ///
-/// This is the only predicate shape that reaches the deleted Lance range
-/// fusion, and all three parts are load-bearing
-/// (`bugs/hash_index_range_quoting.rs:15-23`): the `=`/`IN` is what puts the
-/// column into `PushdownStrategy::hash_index_columns`, and the two-sided
-/// *inclusive* range is the only form the fusion fired on. Drop any one and the
-/// predicate never reaches `LanceFilterGenerator` — which is why the plain
-/// `WHERE p >= 2 AND p <= 4` form always looked correct and the bug survived.
+/// The shape the deleted Lance range fusion fired on. Which parts reach Lance
+/// depends on the index kind. The `=`/`IN` puts the column into
+/// `PushdownStrategy::indexed_equality_columns` for a Hash *or* BTree index.
+/// The two-sided *inclusive* range is pushed only for a **BTree** column (perf
+/// audit F1, `indexed_range_filter`); on a Hash column it stays in the residual
+/// filter and never reaches the renderer. (When the fusion shipped, the
+/// `=`/`IN` was also what let the range reach `LanceFilterGenerator` on a Hash
+/// column — `bugs/hash_index_range_quoting.rs:15-23` — which is no longer
+/// true.) So the range half has teeth only against
+/// `dqp::seed::Fixture::TINY_BTREE_INDEXED`.
 ///
 /// Bounds are drawn as an **ordered** triple `lo <= mid <= hi` with the equality
 /// at `mid`, so the range contains the equality and the predicate selects real
@@ -865,20 +868,24 @@ pub fn arb_case() -> impl Strategy<Value = Case> {
 
 /// The property the pushdown strategies target.
 ///
-/// Shared with `dqp::seed::INDEXED_PROPERTY`, which declares the Hash index on
-/// exactly this column — a generated pushdown predicate over any *other*
-/// property would never enter `hash_index_columns`, and the lever would run a
-/// full soak against a path that cannot exhibit the defect. `dqp::seed` aliases
-/// this constant rather than repeating the string, so the two cannot drift.
+/// Shared with `dqp::seed::INDEXED_PROPERTY`, which declares the Hash (or, in
+/// the BTree mode, the BTree) index on exactly this column — a generated
+/// pushdown predicate over any *other* property would consult no index, and
+/// the lever would run a full soak against a path that cannot exhibit the
+/// defect. `dqp::seed` aliases this constant rather than repeating the string,
+/// so the two cannot drift.
 pub const PUSHDOWN_PROPERTY: &str = "age";
 
 /// A case whose base `WHERE` is always a same-column conjunction over
-/// [`PUSHDOWN_PROPERTY`] — the shape that reaches the Lance range fusion.
+/// [`PUSHDOWN_PROPERTY`]: an `=`/`IN` plus a two-sided inclusive range.
 ///
 /// Every case is filtered by construction, so unlike [`arb_case`] this needs no
-/// `arb_base_where` (which emits `None` two draws in three). Pair it with
-/// `dqp::seed::Fixture::TINY_INDEXED`; against a fixture with no index the
-/// predicate is merely a slow filter and the run proves nothing.
+/// `arb_base_where` (which emits `None` two draws in three). Pair it with an
+/// indexed fixture. Against `dqp::seed::Fixture::TINY_INDEXED` (Hash) only the
+/// `=`/`IN` conjunct is pushed to Lance; the range reaches range pushdown and
+/// the filter renderer only against `dqp::seed::Fixture::TINY_BTREE_INDEXED`
+/// (ranges push only for a BTree since perf audit F1). Against a fixture with
+/// no index the predicate is merely a slow filter and the run proves nothing.
 pub fn arb_case_pushdown() -> impl Strategy<Value = Case> {
     arb_shape().prop_flat_map(|shape| {
         let targets = shape.nullable_targets();
@@ -1155,7 +1162,7 @@ mod spike {
     #[test]
     fn fixpoint_pushdown_predicates_and_explain() {
         // `IN` over an integer column — the second route into
-        // `hash_index_columns` alongside `=`.
+        // `indexed_equality_columns` alongside `=`.
         assert_render_fixpoint("MATCH (a:Person) WHERE (a.age IN [18, 25, 30]) RETURN a.name");
         assert_render_fixpoint("MATCH (a:Person) WHERE (a.age IN [30]) RETURN a.name");
 

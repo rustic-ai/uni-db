@@ -205,182 +205,153 @@ fn get_property(value: &Value, property: &str) -> Value {
     }
 }
 
-/// Evaluate a unary operator on a value.
+/// Evaluates `NOT` or unary `-` with Cypher's NULL and overflow rules.
 ///
-/// Shared by both `eval_locy_expr` and `eval_expr` to avoid duplicating
-/// NOT/negation logic.
+/// Shared by both `eval_locy_expr` and `eval_expr`. `-i64::MIN` is an
+/// overflow error, as in Cypher; it used to panic in a debug build and wrap
+/// in a release one. A duration negates component-wise, as in Cypher.
 fn eval_unary_op(op: &UnaryOp, v: &Value) -> Result<Value, LocyError> {
-    match op {
-        UnaryOp::Not => match v {
-            Value::Bool(b) => Ok(Value::Bool(!b)),
-            Value::Null => Ok(Value::Null),
-            _ => Err(LocyError::TypeError {
-                message: format!("NOT requires boolean, got {v:?}"),
+    use uni_common::TemporalValue;
+    let overflow = || LocyError::EvaluationError {
+        message: format!("integer overflow negating {v:?}"),
+    };
+    match (op, v) {
+        (_, Value::Null) => Ok(Value::Null),
+        (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+        (UnaryOp::Not, _) => Err(LocyError::TypeError {
+            message: format!("NOT requires boolean, got {v:?}"),
+        }),
+        (UnaryOp::Neg, Value::Int(i)) => i.checked_neg().map(Value::Int).ok_or_else(overflow),
+        (UnaryOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
+        (
+            UnaryOp::Neg,
+            Value::Temporal(TemporalValue::Duration {
+                months,
+                days,
+                nanos,
             }),
+        ) => match (
+            months.checked_neg(),
+            days.checked_neg(),
+            nanos.checked_neg(),
+        ) {
+            (Some(months), Some(days), Some(nanos)) => {
+                Ok(Value::Temporal(TemporalValue::Duration {
+                    months,
+                    days,
+                    nanos,
+                }))
+            }
+            _ => Err(overflow()),
         },
-        UnaryOp::Neg => match v {
-            Value::Int(i) => Ok(Value::Int(-i)),
-            Value::Float(f) => Ok(Value::Float(-f)),
-            Value::Null => Ok(Value::Null),
-            _ => Err(LocyError::TypeError {
-                message: format!("negation requires numeric, got {v:?}"),
-            }),
-        },
-    }
-}
-
-/// Cypher's three-valued `AND` / `OR` / `XOR`: NULL is "unknown", so
-/// `false AND NULL` is false and `true OR NULL` is true — not NULL.
-fn kleene(left: &Value, right: &Value, op: KleeneOp) -> Value {
-    let (l, r) = (left.as_bool(), right.as_bool());
-    match op {
-        KleeneOp::And => match (l, r) {
-            (Some(false), _) | (_, Some(false)) => Value::Bool(false),
-            (Some(true), Some(true)) => Value::Bool(true),
-            _ => Value::Null,
-        },
-        KleeneOp::Or => match (l, r) {
-            (Some(true), _) | (_, Some(true)) => Value::Bool(true),
-            (Some(false), Some(false)) => Value::Bool(false),
-            _ => Value::Null,
-        },
-        KleeneOp::Xor => match (l, r) {
-            (Some(a), Some(b)) => Value::Bool(a ^ b),
-            _ => Value::Null,
-        },
-    }
-}
-
-#[derive(Clone, Copy)]
-enum KleeneOp {
-    And,
-    Or,
-    Xor,
-}
-
-fn eval_locy_binary_op(left: &Value, op: &LocyBinaryOp, right: &Value) -> Result<Value, LocyError> {
-    match op {
-        LocyBinaryOp::And => return Ok(kleene(left, right, KleeneOp::And)),
-        LocyBinaryOp::Or => return Ok(kleene(left, right, KleeneOp::Or)),
-        LocyBinaryOp::Xor => return Ok(kleene(left, right, KleeneOp::Xor)),
-        _ => {}
-    }
-    if left.is_null() || right.is_null() {
-        return Ok(Value::Null);
-    }
-    match op {
-        LocyBinaryOp::Add => numeric_op(left, right, |a, b| a + b, |a, b| a + b),
-        LocyBinaryOp::Sub => numeric_op(left, right, |a, b| a - b, |a, b| a - b),
-        LocyBinaryOp::Mul => numeric_op(left, right, |a, b| a * b, |a, b| a * b),
-        LocyBinaryOp::Div => divide(left, right),
-        LocyBinaryOp::Mod => modulo(left, right),
-        LocyBinaryOp::Pow => {
-            let l = left.as_f64().ok_or_else(|| LocyError::TypeError {
-                message: format!("pow requires numeric, got {left:?}"),
-            })?;
-            let r = right.as_f64().ok_or_else(|| LocyError::TypeError {
-                message: format!("pow requires numeric, got {right:?}"),
-            })?;
-            Ok(Value::Float(l.powf(r)))
-        }
-        LocyBinaryOp::And | LocyBinaryOp::Or | LocyBinaryOp::Xor => {
-            unreachable!("handled above")
-        }
-    }
-}
-
-fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Value, LocyError> {
-    match op {
-        BinaryOp::And => return Ok(kleene(left, right, KleeneOp::And)),
-        BinaryOp::Or => return Ok(kleene(left, right, KleeneOp::Or)),
-        BinaryOp::Xor => return Ok(kleene(left, right, KleeneOp::Xor)),
-        _ => {}
-    }
-    // Any comparison with NULL is NULL ("unknown"), as in Cypher and in a
-    // rule body's WHERE. `NULL = x` used to be false and `NULL <> x` true, so a
-    // `QUERY ... WHERE a.age <> 0` or `NOT (a.age = 30)` kept every row whose
-    // `age` is NULL.
-    if left.is_null() || right.is_null() {
-        return Ok(Value::Null);
-    }
-    match op {
-        BinaryOp::Add => numeric_op(left, right, |a, b| a + b, |a, b| a + b),
-        BinaryOp::Sub => numeric_op(left, right, |a, b| a - b, |a, b| a - b),
-        BinaryOp::Mul => numeric_op(left, right, |a, b| a * b, |a, b| a * b),
-        BinaryOp::Div => divide(left, right),
-        BinaryOp::Mod => modulo(left, right),
-        BinaryOp::Pow => {
-            let l = left.as_f64().ok_or_else(|| LocyError::TypeError {
-                message: format!("pow requires numeric, got {left:?}"),
-            })?;
-            let r = right.as_f64().ok_or_else(|| LocyError::TypeError {
-                message: format!("pow requires numeric, got {right:?}"),
-            })?;
-            Ok(Value::Float(l.powf(r)))
-        }
-        BinaryOp::Eq => Ok(Value::Bool(values_equal(left, right))),
-        BinaryOp::NotEq => Ok(Value::Bool(!values_equal(left, right))),
-        BinaryOp::Lt => Ok(compare(left, right, std::cmp::Ordering::is_lt)),
-        BinaryOp::LtEq => Ok(compare(left, right, std::cmp::Ordering::is_le)),
-        BinaryOp::Gt => Ok(compare(left, right, std::cmp::Ordering::is_gt)),
-        BinaryOp::GtEq => Ok(compare(left, right, std::cmp::Ordering::is_ge)),
-        BinaryOp::Contains => match (left.as_str(), right.as_str()) {
-            (Some(l), Some(r)) => Ok(Value::Bool(l.contains(r))),
-            _ => Ok(Value::Null),
-        },
-        BinaryOp::StartsWith => match (left.as_str(), right.as_str()) {
-            (Some(l), Some(r)) => Ok(Value::Bool(l.starts_with(r))),
-            _ => Ok(Value::Null),
-        },
-        BinaryOp::EndsWith => match (left.as_str(), right.as_str()) {
-            (Some(l), Some(r)) => Ok(Value::Bool(l.ends_with(r))),
-            _ => Ok(Value::Null),
-        },
-        _ => Err(LocyError::EvaluationError {
-            message: format!("unsupported binary op in in-memory evaluation: {op:?}"),
+        (UnaryOp::Neg, _) => Err(LocyError::TypeError {
+            message: format!("negation requires numeric, got {v:?}"),
         }),
     }
 }
 
-/// `/`, as in Cypher: an integer divided by integer zero is an error (it
-/// panics in Rust); a float division follows IEEE 754, so `1 / 0.0` is
-/// Infinity and `0 / 0.0` NaN. Every zero divisor used to be an error.
-fn divide(left: &Value, right: &Value) -> Result<Value, LocyError> {
-    if let (Value::Int(_), Value::Int(0)) = (left, right) {
-        return Err(LocyError::EvaluationError {
-            message: "division by zero".to_string(),
-        });
-    }
-    numeric_op(left, right, i64::wrapping_div, |a, b| a / b)
+fn eval_locy_binary_op(left: &Value, op: &LocyBinaryOp, right: &Value) -> Result<Value, LocyError> {
+    eval_binary_op(
+        left,
+        &crate::query::locy_planner::locy_op_to_cypher_op(op),
+        right,
+    )
 }
 
-/// `%`, as in Cypher: integer modulo zero is an error; a float one is NaN.
-fn modulo(left: &Value, right: &Value) -> Result<Value, LocyError> {
-    if let (Value::Int(_), Value::Int(0)) = (left, right) {
-        return Err(LocyError::EvaluationError {
-            message: "modulo by zero".to_string(),
-        });
-    }
-    numeric_op(left, right, i64::wrapping_rem, |a, b| a % b)
-}
-
-fn numeric_op(
-    left: &Value,
-    right: &Value,
-    int_op: impl Fn(i64, i64) -> i64,
-    float_op: impl Fn(f64, f64) -> f64,
-) -> Result<Value, LocyError> {
-    match (left, right) {
-        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(int_op(*a, *b))),
-        _ => {
-            let a = left.as_f64().ok_or_else(|| LocyError::TypeError {
-                message: format!("numeric op requires number, got {left:?}"),
-            })?;
-            let b = right.as_f64().ok_or_else(|| LocyError::TypeError {
-                message: format!("numeric op requires number, got {right:?}"),
-            })?;
-            Ok(Value::Float(float_op(a, b)))
+/// Evaluates a binary operator over two values, as Cypher does.
+///
+/// Delegates to the value-level evaluator the Cypher executors share
+/// ([`crate::query::expr_eval::eval_binary_op`]), so `+` concatenates lists,
+/// adds a duration to a temporal and rejects integer overflow; `=` over a
+/// list holding NULL is NULL; `=~` matches a regex; and durations do not
+/// order. Locy used to keep its own copy, in which `+` was numeric only
+/// (`'a' + 'b'` failed with "numeric op requires number"), integer
+/// arithmetic wrapped, and `=~` was unsupported.
+///
+/// Four operators answer differently from the shared evaluator, to match
+/// what a Cypher `RETURN` answers (and openCypher specifies):
+///
+/// * `AND` / `OR` with a non-boolean, non-NULL operand is a type error
+///   whatever the other operand; the shared evaluator answers `NULL AND 1`
+///   NULL and `false AND 1` false. `XOR` propagates NULL first, as Cypher's
+///   row path does.
+/// * `STARTS WITH` / `ENDS WITH` / `CONTAINS` with a non-string operand is
+///   NULL, not an error.
+/// * `^` is always a float (`2 ^ 3` is `8.0`); the shared evaluator answers
+///   an integer when both operands are integers and the result is whole.
+/// * `+` of a string and a number, boolean or temporal concatenates the
+///   other operand's `toString`, where the shared evaluator errors.
+fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Value, LocyError> {
+    let shared = |left: &Value, right: &Value| {
+        crate::query::expr_eval::eval_binary_op(left, op, right).map_err(|e| {
+            LocyError::EvaluationError {
+                message: e.to_string(),
+            }
+        })
+    };
+    match op {
+        BinaryOp::And | BinaryOp::Or => {
+            if let Some(operand) = [left, right]
+                .into_iter()
+                .find(|v| !matches!(v, Value::Null | Value::Bool(_)))
+            {
+                return Err(LocyError::TypeError {
+                    message: format!("{op} requires boolean arguments, got {operand:?}"),
+                });
+            }
+            shared(left, right)
         }
+        BinaryOp::StartsWith | BinaryOp::EndsWith | BinaryOp::Contains => match (left, right) {
+            (Value::String(_), Value::String(_)) => shared(left, right),
+            _ => Ok(Value::Null),
+        },
+        BinaryOp::Pow => match (left, right) {
+            (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+            _ => match (left.as_f64(), right.as_f64()) {
+                (Some(l), Some(r)) if left.is_number() && right.is_number() => {
+                    Ok(Value::Float(l.powf(r)))
+                }
+                _ => Err(LocyError::TypeError {
+                    message: format!("pow requires numeric, got {left:?} ^ {right:?}"),
+                }),
+            },
+        },
+        BinaryOp::Add => shared(left, right).or_else(|err| match (left, right) {
+            (Value::String(s), other) if concatenates(other) => {
+                Ok(Value::String(format!("{s}{}", to_cypher_string(other)?)))
+            }
+            (other, Value::String(s)) if concatenates(other) => {
+                Ok(Value::String(format!("{}{s}", to_cypher_string(other)?)))
+            }
+            _ => Err(err),
+        }),
+        _ => shared(left, right),
+    }
+}
+
+/// Whether `+` concatenates `value`'s string form onto a string.
+fn concatenates(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Temporal(_)
+    )
+}
+
+/// `toString(value)`, through the scalar function Cypher calls.
+fn to_cypher_string(value: &Value) -> Result<String, LocyError> {
+    let rendered = crate::query::expr_eval::eval_scalar_function(
+        "toString",
+        std::slice::from_ref(value),
+        None,
+    )
+    .map_err(|e| LocyError::EvaluationError {
+        message: e.to_string(),
+    })?;
+    match rendered {
+        Value::String(s) => Ok(s),
+        other => Err(LocyError::TypeError {
+            message: format!("toString returned {other:?}"),
+        }),
     }
 }
 
@@ -510,8 +481,10 @@ fn eval_function(name: &str, args: &[Value]) -> Result<Value, LocyError> {
     }
 }
 
-/// Resolve `name` to a registered [`LocyPredicate`] and evaluate it over the
-/// single-row `args`, or return `None` when no predicate is registered.
+/// Resolve `name` to a registered
+/// [`LocyPredicate`](uni_plugin::traits::locy::LocyPredicate) and evaluate it
+/// over the single-row `args`, or return `None` when no predicate is
+/// registered.
 ///
 /// Resolution uses the same convention-agnostic `candidate_splits` lookup as
 /// Locy aggregates and scalars, against the session-local plugin registry. This
@@ -629,58 +602,6 @@ pub fn value_cmp(a: &Value, b: &Value) -> std::cmp::Ordering {
         std::cmp::Ordering::Greater
     } else {
         std::cmp::Ordering::Equal
-    }
-}
-
-/// A three-valued ordering comparison (`<`, `<=`, `>`, `>=`), as in Cypher.
-///
-/// Values of types that have no order between them (`1 < 'a'`, a date and a
-/// datetime, two maps) compare as NULL. They used to compare as false, so
-/// `NOT (x < y)` kept every incomparable row. NaN is ordered against nothing
-/// and compares as false, as in Cypher.
-fn compare(left: &Value, right: &Value, holds: fn(std::cmp::Ordering) -> bool) -> Value {
-    match ordering(left, right) {
-        Comparable::Ordered(o) => Value::Bool(holds(o)),
-        Comparable::Unordered => Value::Bool(false),
-        Comparable::Incomparable => Value::Null,
-    }
-}
-
-enum Comparable {
-    Ordered(std::cmp::Ordering),
-    /// Same type, but no order (NaN).
-    Unordered,
-    /// No order between the types, or a NULL inside a list.
-    Incomparable,
-}
-
-fn ordering(a: &Value, b: &Value) -> Comparable {
-    use Comparable::*;
-    let float = |o: Option<std::cmp::Ordering>| o.map_or(Unordered, Ordered);
-    match (a, b) {
-        (Value::Null, _) | (_, Value::Null) => Incomparable,
-        (Value::Int(x), Value::Int(y)) => Ordered(x.cmp(y)),
-        (Value::Float(x), Value::Float(y)) => float(x.partial_cmp(y)),
-        (Value::Int(x), Value::Float(y)) => float((*x as f64).partial_cmp(y)),
-        (Value::Float(x), Value::Int(y)) => float(x.partial_cmp(&(*y as f64))),
-        (Value::String(x), Value::String(y)) => Ordered(x.cmp(y)),
-        (Value::Bool(x), Value::Bool(y)) => Ordered(x.cmp(y)),
-        (Value::Temporal(x), Value::Temporal(y))
-            if std::mem::discriminant(x) == std::mem::discriminant(y) =>
-        {
-            Ordered(temporal_less_than(x, y))
-        }
-        // Lexicographic; a shorter prefix sorts first.
-        (Value::List(x), Value::List(y)) => {
-            for (l, r) in x.iter().zip(y) {
-                match ordering(l, r) {
-                    Ordered(std::cmp::Ordering::Equal) => {}
-                    other => return other,
-                }
-            }
-            Ordered(x.len().cmp(&y.len()))
-        }
-        _ => Incomparable,
     }
 }
 
@@ -1114,5 +1035,62 @@ mod predicate_dispatch_tests {
         // Outside a session scope there is no registry, so dispatch declines and
         // the caller falls back to the scalar path.
         assert!(try_dispatch_locy_predicate("anything.at_all", &[Value::Int(1)]).is_none());
+    }
+}
+
+/// The `LocyExpr` operator path (`ALONG`, `prev.field`) answers as the Cypher
+/// operators do; `locy::locy_operator_parity` covers the `Expr` path end to
+/// end against Cypher.
+#[cfg(test)]
+mod operator_tests {
+    use super::*;
+
+    fn lit(v: CypherLiteral) -> Box<LocyExpr> {
+        Box::new(LocyExpr::Cypher(Expr::Literal(v)))
+    }
+
+    fn binary(left: Box<LocyExpr>, op: LocyBinaryOp, right: Box<LocyExpr>) -> LocyExpr {
+        LocyExpr::BinaryOp { left, op, right }
+    }
+
+    #[test]
+    fn along_add_concatenates_strings_onto_prev() {
+        // ALONG p = prev.p + '>b'
+        let expr = binary(
+            Box::new(LocyExpr::PrevRef("p".to_string())),
+            LocyBinaryOp::Add,
+            lit(CypherLiteral::String(">b".to_string())),
+        );
+        let prev = FactRow::from([("p".to_string(), Value::String("a".to_string()))]);
+        let got = eval_locy_expr(&expr, &FactRow::new(), Some(&prev));
+        assert_eq!(got.ok(), Some(Value::String("a>b".to_string())));
+    }
+
+    #[test]
+    fn along_add_rejects_integer_overflow() {
+        let expr = binary(
+            lit(CypherLiteral::Integer(i64::MAX)),
+            LocyBinaryOp::Add,
+            lit(CypherLiteral::Integer(1)),
+        );
+        assert!(eval_locy_expr(&expr, &FactRow::new(), None).is_err());
+    }
+
+    #[test]
+    fn along_pow_is_a_float() {
+        let expr = binary(
+            lit(CypherLiteral::Integer(2)),
+            LocyBinaryOp::Pow,
+            lit(CypherLiteral::Integer(3)),
+        );
+        assert_eq!(
+            eval_locy_expr(&expr, &FactRow::new(), None).ok(),
+            Some(Value::Float(8.0))
+        );
+    }
+
+    #[test]
+    fn negating_i64_min_is_an_error() {
+        assert!(eval_unary_op(&UnaryOp::Neg, &Value::Int(i64::MIN)).is_err());
     }
 }

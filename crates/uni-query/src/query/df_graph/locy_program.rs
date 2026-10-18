@@ -16,8 +16,8 @@ use crate::query::df_graph::common::{
 use crate::query::df_graph::locy_best_by::SortCriterion;
 use crate::query::df_graph::locy_explain::ProvenanceStore;
 use crate::query::df_graph::locy_fixpoint::{
-    DerivedScanRegistry, DerivedScanView, FixpointClausePlan, FixpointExec, FixpointRulePlan,
-    IsRefBinding,
+    DerivedScanEntry, DerivedScanRegistry, DerivedScanView, FixpointClausePlan, FixpointExec,
+    FixpointRulePlan, IsRefBinding,
 };
 use crate::query::df_graph::locy_fold::{FoldBinding, resolve_locy_aggregate};
 use crate::query::df_graph::locy_profile::{
@@ -59,6 +59,9 @@ use uni_store::storage::manager::StorageManager;
 ///
 /// Each rule's converged facts are stored here after its stratum completes,
 /// making them available for later strata that depend on them.
+///
+/// Cloning is cheap: each relation is a list of reference-counted batches.
+#[derive(Clone)]
 pub struct DerivedStore {
     relations: HashMap<String, Vec<RecordBatch>>,
 }
@@ -120,6 +123,27 @@ impl DerivedStore {
     pub fn rule_names(&self) -> impl Iterator<Item = &str> {
         self.relations.keys().map(|s| s.as_str())
     }
+}
+
+/// Strata whose facts a run takes from an earlier evaluation instead of
+/// deriving them (incremental `ASSUME` / `ABDUCE`, A4).
+///
+/// The caller vouches that each listed stratum's facts in the state being
+/// evaluated equal `facts`' relations of the same names; see
+/// [`uni_locy::incremental`] for the criterion. A listed stratum is not
+/// evaluated: its rules' relations are copied from `facts` into the run's
+/// store, where later strata read them as they would read derived ones.
+#[derive(Clone)]
+pub struct ReusedStrata {
+    /// The earlier evaluation's facts, by rule name.
+    pub facts: Arc<DerivedStore>,
+    /// Positions, in the program's strata, of the strata to reuse.
+    pub positions: std::collections::BTreeSet<usize>,
+    /// The reused rules' facts as hydrated rows, when they are hydrated
+    /// correctly in the evaluated state too (the mutation changed no entity
+    /// that existed before it). Not read by the run itself; the caller that
+    /// hydrates the run's facts uses it instead of hydrating them again.
+    pub hydrated: Option<Arc<super::locy_delta::RowStore>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -198,6 +222,9 @@ pub struct LocyProgramExec {
     /// Shared slot written with the structured execution profile when
     /// `profile_enabled` is set. Read after execution to build `LocyProfileOutput`.
     profile_slot: Arc<StdRwLock<Option<LocyExecProfile>>>,
+    /// Strata to copy from an earlier evaluation rather than derive; set
+    /// before `execute()` by [`Self::set_reused_strata`].
+    reused_strata: StdRwLock<Option<ReusedStrata>>,
 }
 
 /// Encoding for the shared interruption signal threaded through the stratum
@@ -486,6 +513,17 @@ impl LocyProgramExec {
             incomplete_slot: Arc::new(StdRwLock::new(None)),
             profile_enabled: std::sync::atomic::AtomicBool::new(false),
             profile_slot: Arc::new(StdRwLock::new(None)),
+            reused_strata: StdRwLock::new(None),
+        }
+    }
+
+    /// Reuse the facts of some strata from an earlier evaluation.
+    ///
+    /// Must be called before `execute()`. See [`ReusedStrata`] for the
+    /// contract the caller takes on.
+    pub fn set_reused_strata(&self, reused: ReusedStrata) {
+        if let Ok(mut guard) = self.reused_strata.write() {
+            *guard = Some(reused);
         }
     }
 
@@ -668,6 +706,7 @@ impl ExecutionPlan for LocyProgramExec {
             .profile_enabled
             .load(std::sync::atomic::Ordering::Relaxed);
         let profile_slot = Arc::clone(&self.profile_slot);
+        let reused_strata = self.reused_strata.read().ok().and_then(|g| g.clone());
 
         let fut = async move {
             run_program(
@@ -705,6 +744,7 @@ impl ExecutionPlan for LocyProgramExec {
                 classifier_provenance_store,
                 profile_enabled,
                 profile_slot,
+                reused_strata,
             )
             .await
         };
@@ -856,6 +896,7 @@ async fn run_program(
     classifier_provenance_store: Option<Arc<uni_locy::NeuralProvenanceStore>>,
     profile_enabled: bool,
     profile_slot: Arc<StdRwLock<Option<LocyExecProfile>>>,
+    reused_strata: Option<ReusedStrata>,
 ) -> DFResult<Vec<RecordBatch>> {
     let start = Instant::now();
     let mut derived_store = DerivedStore::new();
@@ -902,6 +943,20 @@ async fn run_program(
     let mut completed_strata = 0usize;
     let mut partial_stratum: Option<usize> = None;
     for (stratum_idx, stratum) in strata.iter().enumerate() {
+        // A reused stratum is not evaluated: its rules' facts are those of the
+        // earlier evaluation, and later strata read them from the store.
+        if let Some(reused) = reused_strata
+            .as_ref()
+            .filter(|r| r.positions.contains(&stratum_idx))
+        {
+            for rule in stratum.rules.iter().filter(|r| !r.yield_schema.is_empty()) {
+                let facts = reused.facts.get(&rule.name).cloned().unwrap_or_default();
+                derived_store.insert(rule.name.clone(), facts);
+            }
+            completed_strata += 1;
+            continue;
+        }
+
         // Write cross-stratum facts into registry handles for strata we depend on
         write_cross_stratum_facts(&registry, &derived_store, stratum);
 
@@ -1066,6 +1121,8 @@ async fn run_program(
                         &fp_clause.is_ref_bindings,
                         &registry,
                         fp_rule.prob_column_name.as_deref(),
+                        // Each clause runs once here: nothing to reuse.
+                        None,
                         collector.as_ref().map(|_| &mut iter_ops),
                     )?;
 
@@ -1566,6 +1623,7 @@ fn convert_to_fixpoint_plans(
                         priority: clause.priority,
                         along_bindings: clause.along_bindings.clone(),
                         model_invocations: clause.model_invocations.clone(),
+                        stratum_scans: clause.stratum_scans.clone(),
                     })
                 })
                 .collect::<DFResult<Vec<_>>>()?;
@@ -1684,6 +1742,11 @@ fn convert_is_refs(
             // rows: the folded snapshot has one row per KEY, so anti-joining
             // against it would under-filter and its row hashes would never
             // match the ones `record_provenance` stores.
+            // Exclusive handles (one reference of a non-linear clause) are fed
+            // per semi-naive pass and never stand for the rule; the planner
+            // always mints the shared handle beside them.
+            let entries: Vec<&DerivedScanEntry> =
+                entries.into_iter().filter(|e| !e.exclusive).collect();
             let entry = entries
                 .iter()
                 .find(|e| {

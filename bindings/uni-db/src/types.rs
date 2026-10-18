@@ -67,6 +67,41 @@ pub struct PyQueryMetrics {
     /// Vector and full-text searches for which the stats callback fired — the
     /// denominator for the two counters above.
     pub searches_reported: u64,
+    /// Lance I/O operations issued by the query's scans.
+    ///
+    /// Counts physical reads, so it moves across a compaction (fewer
+    /// fragments, fewer reads) and is sensitive to caching. Do not read it as
+    /// "did this query touch storage".
+    pub lance_iops: u64,
+    /// Sub-plan executions performed by per-row expression fallbacks.
+    ///
+    /// An unanchored pattern comprehension plans once and executes per outer
+    /// row; a count that grows with the row count while the answer does not
+    /// depend on the row is recomputation.
+    pub subquery_executions: u64,
+    /// Physical plans built while answering this query.
+    ///
+    /// One for the query's own plan plus one per sub-plan built at execution
+    /// time (a correlated subquery body per outer row, a Locy clause body per
+    /// fixpoint iteration). A count that grows with the data is a re-plan per
+    /// row or per iteration.
+    pub physical_plans: u64,
+    /// Wall time spent building those physical plans, in milliseconds.
+    ///
+    /// Distinct from `plan_time_ms`, which is the logical planning done before
+    /// execution; this is measured inside execution and so is also part of
+    /// `exec_time_ms`.
+    pub physical_plan_time_ms: f64,
+    /// Breadth-first searches started by `shortestPath` / `allShortestPaths`.
+    ///
+    /// One per distinct source searched from; a count that grows with the
+    /// number of targets is a search per row.
+    pub shortest_path_searches: u64,
+    /// Per-vertex adjacency lookups made by `shortestPath` /
+    /// `allShortestPaths`.
+    ///
+    /// Bounded by the vertices searched, not by the paths emitted.
+    pub shortest_path_adjacency_reads: u64,
 }
 
 #[pymethods]
@@ -650,6 +685,18 @@ pub struct PyProfileOutput {
     pub plan_text: String,
     /// Operator-level statistics (list of dicts).
     pub operators: Py<PyAny>,
+    /// Logical planning time (Cypher AST to logical plan), in milliseconds.
+    ///
+    /// Measured before execution starts, so it is not part of `total_time_ms`.
+    pub logical_planning_ms: f64,
+    /// Physical planning time in milliseconds, summed over every plan built.
+    ///
+    /// Includes sub-plans built during execution (a correlated subquery body
+    /// once per outer row), so it is part of `total_time_ms`.
+    pub physical_planning_ms: f64,
+    /// Physical plans built: one for the query plus one per execution-time
+    /// sub-plan.
+    pub physical_plans: u64,
 }
 
 #[pymethods]
@@ -726,7 +773,8 @@ impl PyLocyProfile {
 
     /// The per-stratum / per-rule / per-iteration profile as nested Python
     /// dicts and lists (snake_case keys; operators carry `operator`,
-    /// `actual_rows`, `time_ms`).
+    /// `actual_rows`, `time_ms`). Each iteration also carries `planning_ms`
+    /// and `plans`, the physical planning done for that rule in that pass.
     #[getter]
     fn strata(&self, py: Python) -> PyResult<Py<PyAny>> {
         let json = serde_json::to_value(&self.inner.profile.strata)
@@ -1028,6 +1076,14 @@ pub struct LocyStats {
     pub mutations_executed: usize,
     /// Peak memory used by derived relations in bytes.
     pub peak_memory_bytes: usize,
+    /// Strata derived by hypothetical re-evaluations (`ASSUME` bodies,
+    /// `ABDUCE` candidate checks), summed over all of them.
+    pub hypothetical_strata_evaluated: usize,
+    /// Strata those re-evaluations reused from the state before their
+    /// mutation, because the mutation could not affect them.
+    pub hypothetical_strata_reused: usize,
+    /// Facts the derived (not reused) hypothetical strata produced.
+    pub hypothetical_facts_derived: usize,
 }
 
 #[pymethods]
@@ -1080,10 +1136,11 @@ pub struct PyLocyResult {
     ///
     /// Not every field is populated on this path. Locy assembles its metrics
     /// from the evaluation's own totals plus the execution counters, so
-    /// `total_time_ms`, `exec_time_ms`, `rows_returned` and the counter-derived
-    /// fields are real, while **`parse_time_ms` and `plan_time_ms` are always
-    /// `0.0` and `plan_cache_hit` is always `False`** -- Locy does not go
-    /// through the Cypher parse/plan/cache path those measure. A zero that
+    /// `total_time_ms`, `plan_time_ms` (the program's logical planning),
+    /// `exec_time_ms` (the remainder), `rows_returned` and the counter-derived
+    /// fields are real, while **`parse_time_ms` is always `0.0` and
+    /// `plan_cache_hit` is always `False`** -- Locy does not go through the
+    /// Cypher parse/cache path those measure. A zero that
     /// means "not measured" is indistinguishable from one that means "fast",
     /// hence this note.
     pub metrics: Py<PyQueryMetrics>,
@@ -3181,7 +3238,7 @@ impl PyLocyConfig {
         max_derived_bytes=None, deterministic_best_by=None,
         strict_probability_domain=None, probability_epsilon=None,
         exact_probability=None, max_bdd_variables=None,
-        top_k_proofs=None, top_k_proofs_training=None
+        top_k_proofs=None, top_k_proofs_training=None, goal_directed=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -3201,6 +3258,7 @@ impl PyLocyConfig {
         max_bdd_variables: Option<usize>,
         top_k_proofs: Option<usize>,
         top_k_proofs_training: Option<usize>,
+        goal_directed: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let mut cfg = ::uni_locy::LocyConfig::default();
         if let Some(v) = max_iterations {
@@ -3250,6 +3308,9 @@ impl PyLocyConfig {
             cfg.top_k_proofs = v;
         }
         cfg.top_k_proofs_training = top_k_proofs_training;
+        if let Some(v) = goal_directed {
+            cfg.goal_directed = crate::convert::parse_goal_directed(v)?;
+        }
         Ok(Self { inner: cfg })
     }
 
@@ -3310,6 +3371,11 @@ impl PyLocyConfig {
     #[getter]
     fn top_k_proofs_training(&self) -> Option<usize> {
         self.inner.top_k_proofs_training
+    }
+    /// Goal-directed `QUERY` evaluation mode: `"off"`, `"on"` or `"shadow"`.
+    #[getter]
+    fn goal_directed(&self) -> &'static str {
+        crate::convert::goal_directed_name(self.inner.goal_directed)
     }
 
     /// Register a Python callable as the neural classifier for `alias`.
