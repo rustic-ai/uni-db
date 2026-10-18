@@ -1056,6 +1056,20 @@ A provider whose `start` ignores `from_lsn` should return `false` from
 `resumes_from_checkpoint()` so the host does not persist a checkpoint nothing
 reads.
 
+No CDC provider is registered by default, so a database without one does no
+per-commit CDC work. For tests and authoring, the built-in in-memory provider
+is available as an opt-in plugin. It keeps every batch it receives until the
+database shuts down, so do not leave it on in a long-running process:
+
+```rust
+use uni_plugin_builtin::extras::{MemoryCdcOutputProvider, MemoryCdcPlugin};
+
+let captured = MemoryCdcOutputProvider::new();
+db.add_plugin(MemoryCdcPlugin::with_provider(captured.clone()))?;
+// ... commit ...
+let batches = captured.delivered();
+```
+
 ### WatchBuilder
 
 Build a filtered commit stream. Created by `session.watch_with()`.

@@ -242,3 +242,85 @@ async fn cdc_runtime_delivers_mutation_rows() -> Result<()> {
     );
     Ok(())
 }
+
+/// W2 — a default database registers no CDC output, so the CDC runtime
+/// starts no stream and no commit is retained by one. The built-in
+/// in-memory provider used to be registered by default and kept a clone
+/// of every delivered batch for the database's lifetime.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn default_database_starts_no_cdc_stream() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    let names: Vec<String> = db
+        .plugin_registry()
+        .cdc_outputs_snapshot()
+        .into_iter()
+        .map(|(k, _)| k.to_string())
+        .collect();
+    assert!(
+        names.is_empty(),
+        "a default database must register no CDC output (the runtime starts a \
+         stream for each); got {names:?}"
+    );
+    Ok(())
+}
+
+/// W2 — the in-memory provider stays available as an explicit opt-in and
+/// still receives one batch per commit once added.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_cdc_opt_in_delivers_batches() -> Result<()> {
+    use uni_plugin_builtin::extras::{MemoryCdcOutputProvider, MemoryCdcPlugin};
+
+    let db = Uni::in_memory().build().await?;
+    let provider = MemoryCdcOutputProvider::new();
+    db.add_plugin(MemoryCdcPlugin::with_provider(provider.clone()))?;
+    assert!(
+        db.plugin_registry()
+            .cdc_outputs_snapshot()
+            .iter()
+            .any(|(k, _)| k.as_str() == "memory"),
+        "opt-in must register the `memory` CDC output"
+    );
+
+    db.schema()
+        .label("_MemCdc")
+        .property("x", DataType::Int64)
+        .apply()
+        .await?;
+    for i in 0..3 {
+        let tx = db.session().tx().await?;
+        tx.execute(&format!("CREATE (:_MemCdc {{x: {i}}})")).await?;
+        tx.commit().await?;
+    }
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if provider
+            .delivered()
+            .iter()
+            .filter(|b| b.mutations.num_rows() > 0)
+            .count()
+            >= 3
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let batches = provider.delivered();
+    let with_rows: Vec<&CdcBatch> = batches
+        .iter()
+        .filter(|b| b.mutations.num_rows() > 0)
+        .collect();
+    assert!(
+        with_rows.len() >= 3,
+        "expected a batch with mutation rows per CREATE commit, got row counts {:?}",
+        batches
+            .iter()
+            .map(|b| b.mutations.num_rows())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        with_rows.windows(2).all(|w| w[0].lsn_end < w[1].lsn_end),
+        "LSNs must advance monotonically"
+    );
+    Ok(())
+}
