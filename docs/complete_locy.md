@@ -578,6 +578,12 @@ KEY marks a column as a **grouping key**:
 **Deduplication is on the whole row, not on KEY alone.** Two derived rows are
 the same fact only when *every* column matches, so a rule may legitimately
 produce several rows per KEY group — which is what ALONG and BEST BY rely on.
+A rule with **ALONG** is the exception: its facts are one row per derivation
+path, so two paths that reach the same KEY with equal values give two rows,
+identical on every visible column (issue #159; merging them halved downstream
+`SUM`s). On a DAG with many equal paths this grows with the number of paths —
+exponential in the depth of a diamond lattice. Add `BEST BY` when you want one
+row per KEY.
 Declaring no KEY columns does not disable deduplication; it only removes the
 grouping, and is usually an anti-pattern in recursive rules (see
 [Section 19](#19-best-practices--anti-patterns)).

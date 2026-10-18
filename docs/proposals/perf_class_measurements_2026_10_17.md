@@ -41,7 +41,7 @@ another axis is stated). "ctl" = control query.
 | A1 Locy `QUERY … WHERE a.uid=` over recursive rule | **CONFIRMED** | facts 19,000 → 76,000; rows_scanned 73,000 → 292,000; wall 790 → 3,797 ms; identical to `QUERY reach` with no WHERE | anchored rule (`WHERE a.uid='c0_0'` in the base clause): facts 19 → 19; rows_scanned 58 → 58; wall 55 → 50 ms | 4.0x / 1.0x | The QUERY WHERE is applied after the full fixpoint; nothing pushes the binding into the rule (no magic sets). |
 | A1b (new) Recursive clause whose IS-ref is on the pattern's **target** (`(a)-[:T]->(m) WHERE m IS reach TO b`) | **CONFIRMED** | per-iteration `GraphScanExec` = 4,000 → 16,000 (2N) in every iteration 1–15, while delta falls 1,800 → 400 | source-side IS-ref (`(o)-[:T]->(b) WHERE o IS d`): `GraphScanExec` 1 per iteration (#301 fix working) | 4.0x / 1.0x | The #301 anchoring covers a derived ref on the traversal source only; a ref on the target re-scans the label every iteration. |
 | A2 Cross-stratum IS-ref in a non-recursive clause | **CONFIRMED** | rows_scanned 2,005 → 8,005; at N=100/400 the `nb` ops are GraphScan = N, GraphTraverse ≈ 0.95N, then a HashJoin against the 1 `sd` fact | single-rule (`e.uid='c0_0'` inline): rows_scanned 3 → 3; Cypher form: 2 → 2 | 4.0x / 1.0x | The lower-stratum fact set is hash-joined *after* a full label scan + traverse; it is not used as the scan anchor. |
-| A3 Hydration of an unreturned rule | **CONFIRMED** | adding an unreturned `allv` (N facts) to a 1-fact program: rows_scanned 3 → 6,003 / 24,003; wall 13 → 271 ms (N=2k) and 13 → 1,958 ms (N=8k); fixpoint time only 7.4 / 18.2 ms; `allv` KEY came back as `Value::Node` | program without `allv`: rows_scanned 3 → 3, wall 13.4 → 12.9 ms | wall 7.2x for 4x N (super-linear) / 1.0x | `enrich_vids_with_nodes` (`crates/uni/src/api/impl_locy.rs:2108`) hydrates every derived rule, returned or not, via `MATCH (entity) WHERE id(entity) IN [<all ids>]` (`impl_locy.rs:1915`). The cause of the super-linear growth is a candidate, unverified: the IN list of N literals is evaluated per scanned row, giving O(N²). |
+| A3 Hydration of an unreturned rule | **CONFIRMED** | adding an unreturned `allv` (N facts) to a 1-fact program: rows_scanned 3 → 6,003 / 24,003; wall 13 → 271 ms (N=2k) and 13 → 1,958 ms (N=8k); fixpoint time only 7.4 / 18.2 ms; `allv` KEY came back as `Value::Node` | program without `allv`: rows_scanned 3 → 3, wall 13.4 → 12.9 ms | wall 7.2x for 4x N (super-linear) / 1.0x | `enrich_vids_with_nodes` (`crates/uni/src/api/impl_locy.rs:2108`) hydrates every derived rule, returned or not, via `MATCH (entity) WHERE id(entity) IN [<all ids>]` (`impl_locy.rs:1915`). Cause of the super-linear growth, verified by per-operator profile: the residual `_cypher_in` FilterExec scans the N-literal list per row (38.6 → 585.8 ms, 15.2x for 4x N), and every rule was hydrated twice (4N+2 rows). Fixed in P3, see the plan. |
 | A4 ASSUME re-evaluation | **CONFIRMED** | ASSUME (adds 1 isolated node) + same QUERY: rows_scanned 144,034 → 576,034; wall 1,467 → 6,660 ms | plain program: rows_scanned 73,000 → 292,000; wall 724 → 3,753 ms | rows_scanned = 1.97x the plain program at both scales | The hypothetical re-derives every stratum from scratch: O(program), not O(change). (The `rows()` of the ASSUME run read 0 because the first command result is not a Query; this is a reading artifact.) |
 | A5 VLP / edge-pattern property map (`-[:R*1..3 {w:1}]->`, `(b:N {x:2})`) | **CONFIRMED (wall + code; counters blind)** | edge map: 26.6 → 65.1 → 246.1 ms (N = 2k/8k/32k); target map: 34.7 → 99.0 → 414.0 ms; rows_scanned 1 at every scale | VLP without the map: 8.0 → 5.8 → 7.6 ms; 1-hop with the same map: 9.1 → 7.3 → 12.4 ms | ~linear in edge count / flat | `build_edge_property_filter` (`crates/uni-query/src/query/df_graph/traverse.rs:3645`) enumerates every edge of the type ("`None` source-vids ⇒ whole-type scan"), and `build_accepting_vid_filter` (`traverse.rs:3561`) does the same for target-property maps, before the anchored walk. Neither pre-scan reaches `rows_scanned`, which is a counter blind spot in its own right. |
 | A6 Named path with an anchor on the far end (`p = (a)-[:R]->(b {uid:…})`) | **CONFIRMED** | `GraphScanExec` 2,000 → 8,000; `GraphTraverseExec` 4,000 → 16,000; wall 33 → 85 ms | same pattern without `p =`: GraphScan 1 → 1, traverse 2 → 2. A named path anchored on the *near* end is also 1 → 1 | 4.0x / 1.0x | Binding a path variable disables anchor reversal, so the scan starts at the unanchored `a`. Only the far-end-anchored form is affected. |
@@ -70,11 +70,14 @@ another axis is stated). "ctl" = control query.
 During the probes a background compaction task hit a debug assertion twice:
 `EID … from Delta L1 not found in main_edges after compaction`
 (`crates/uni-store/src/storage/compaction.rs:764`). Both times it fired right
-after a probe's database and its tempdir were dropped. The cause is a
-candidate and unverified: the check does `exists_by_eid(..).unwrap_or(false)`,
-so an I/O error from a deleted directory would read as "missing". A real
-missing bulk-writer dual-write has not been excluded. Next step: reproduce it
-with the directory kept alive.
+after a probe's database and its tempdir were dropped.
+
+Resolved by a follow-up investigation: there is no data loss. With the
+directory kept alive and compaction forced, all 2,000 bulk-written EIDs are
+present. The assertion fires because background compaction outlives
+`Drop for Uni`, and `exists_by_eid(..).unwrap_or(false)` turns Lance's "Not
+found" on the deleted directory into "missing". The fix is tracked as W1 in
+`open_issues_plan_2026_10_17.md`.
 
 ## Ranking of confirmed items (impact × likely frequency)
 

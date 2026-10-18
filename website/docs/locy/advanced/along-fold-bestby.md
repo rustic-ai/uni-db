@@ -13,6 +13,13 @@ YIELD KEY a, KEY b, dist
 
 Use `prev.<field>` to reference prior recursive step values.
 
+An ALONG rule yields **one fact per derivation path**. Two paths that reach the
+same key with equal values produce two rows that are identical on every column,
+so a downstream `FOLD SUM` counts each path. The cost grows with the number of
+paths, which on a graph with many parallel routes (a lattice of diamonds) is
+exponential in its depth. If you want one row per key, add `BEST BY` to keep a
+single witness path.
+
 ## FOLD (Aggregation)
 
 `FOLD` aggregates rule outputs after derivation.
