@@ -677,8 +677,10 @@ impl crate::api::UniInner {
         params: HashMap<String, ApiValue>,
         max_memory: Option<usize>,
     ) -> Result<(QueryResult, ProfileOutput)> {
+        let plan_start = Instant::now();
         let planner = self.base_planner();
         let logical_plan = self.plan_and_rewrite(&planner, ast, cypher)?;
+        let plan_time = plan_start.elapsed();
 
         let mut executor = uni_query::Executor::new(self.storage.clone());
         // A profile that accepted `.max_memory(..)` and ignored it would be a
@@ -697,7 +699,7 @@ impl crate::api::UniInner {
 
         let projection_order = extract_projection_order(&logical_plan);
 
-        let (results, profile_output) =
+        let (results, mut profile_output) =
             executor.profile(logical_plan, &params).await.map_err(|e| {
                 into_execution_error(
                     e,
@@ -713,7 +715,9 @@ impl crate::api::UniInner {
         // PROFILE used to return `Default::default()` here, i.e. a result whose
         // every metric read zero — the one query form a user runs *specifically*
         // to see metrics.
+        profile_output.logical_planning_ms = plan_time.as_secs_f64() * 1000.0;
         let metrics = QueryMetrics {
+            plan_time,
             rows_returned: rows.len(),
             ..Default::default()
         };
@@ -1200,8 +1204,10 @@ impl crate::api::UniInner {
             });
         }
 
+        let plan_start = Instant::now();
         let planner = self.base_planner().with_params(params.clone());
         let logical_plan = self.plan_and_rewrite(&planner, ast, cypher)?;
+        let plan_time = plan_start.elapsed();
 
         let mut executor = uni_query::Executor::new(self.storage.clone());
         // A profile that accepted `.max_memory(..)` and ignored it would be a
@@ -1225,7 +1231,7 @@ impl crate::api::UniInner {
 
         let projection_order = extract_projection_order(&logical_plan);
 
-        let (results, profile_output) =
+        let (results, mut profile_output) =
             executor.profile(logical_plan, &params).await.map_err(|e| {
                 into_execution_error(
                     e,
@@ -1238,7 +1244,9 @@ impl crate::api::UniInner {
         let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
 
+        profile_output.logical_planning_ms = plan_time.as_secs_f64() * 1000.0;
         let metrics = QueryMetrics {
+            plan_time,
             rows_returned: rows.len(),
             ..Default::default()
         };

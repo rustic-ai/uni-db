@@ -1727,6 +1727,42 @@ pub async fn execute_subplan(
         storage,
         schema_info,
         &std::collections::HashSet::new(),
+        None,
+        mutation_ctx,
+    )
+    .await?;
+    Ok(batches)
+}
+
+/// Like [`execute_subplan`], for a correlated subquery body bound to its
+/// enclosing row ([`crate::query::planner::bind_outer_row`]).
+///
+/// `outer_row` is that row, as a one-row batch; the body's node and
+/// relationship imports are planned from its columns.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Mirrors execute_subplan's context parameters plus the outer row"
+)]
+pub async fn execute_subplan_with_outer_row(
+    plan: &LogicalPlan,
+    params: &HashMap<String, Value>,
+    outer_row: RecordBatch,
+    graph_ctx: &Arc<GraphExecutionContext>,
+    session_ctx: &Arc<RwLock<SessionContext>>,
+    storage: &Arc<StorageManager>,
+    schema_info: &Arc<UniSchema>,
+    mutation_ctx: Option<&Arc<MutationContext>>,
+) -> DFResult<Vec<RecordBatch>> {
+    let (batches, _plan) = execute_subplan_with_outer_vars(
+        plan,
+        params,
+        &HashMap::new(),
+        graph_ctx,
+        session_ctx,
+        storage,
+        schema_info,
+        &std::collections::HashSet::new(),
+        Some(outer_row),
         mutation_ctx,
     )
     .await?;
@@ -1819,6 +1855,7 @@ pub async fn execute_subplan_collecting(
         storage,
         schema_info,
         &std::collections::HashSet::new(),
+        None,
         mutation_ctx,
     )
     .await?;
@@ -1844,6 +1881,7 @@ pub async fn execute_subplan_with_outer_vars(
     storage: &Arc<StorageManager>,
     schema_info: &Arc<UniSchema>,
     outer_entity_vars: &std::collections::HashSet<String>,
+    outer_row: Option<RecordBatch>,
     mutation_ctx: Option<&Arc<MutationContext>>,
 ) -> DFResult<(
     Vec<RecordBatch>,
@@ -1859,6 +1897,9 @@ pub async fn execute_subplan_with_outer_vars(
         outer_values.clone(),
     );
     planner.set_outer_entity_vars(outer_entity_vars.clone());
+    if let Some(row) = outer_row {
+        planner = planner.with_outer_row(row);
+    }
 
     // A sub-plan inherits the outer query's budget: the planner builds its own
     // `GraphExecutionContext` from the L0 context alone, so without this the
@@ -2115,6 +2156,35 @@ fn numeric_promotion(left: &DataType, right: &DataType) -> DataType {
     }
 }
 
+/// Whether [`evaluate_simple_expr`] can evaluate `expr` with no row in scope.
+///
+/// True for literals, parameters, lists and maps of such, unary and binary
+/// operators over them, and built-in scalar functions of them — every constant
+/// a query writes as an operator argument, including a negative literal (which
+/// the parser produces as a unary minus over a literal). False for anything
+/// that reads a row: a variable, a property, a subquery.
+pub(crate) fn is_simple_evaluable(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_) | Expr::Parameter(_) => true,
+        Expr::List(items) => items.iter().all(is_simple_evaluable),
+        Expr::Map(entries) => entries.iter().all(|(_, v)| is_simple_evaluable(v)),
+        Expr::UnaryOp { expr, .. } => is_simple_evaluable(expr),
+        Expr::BinaryOp { left, right, .. } => {
+            is_simple_evaluable(left) && is_simple_evaluable(right)
+        }
+        Expr::FunctionCall {
+            name,
+            args,
+            distinct: false,
+            window_spec: None,
+        } => {
+            uni_query_functions::expr_eval::is_scalar_function(name)
+                && args.iter().all(is_simple_evaluable)
+        }
+        _ => false,
+    }
+}
+
 /// Evaluate a simple expression to get a `uni_common::Value`.
 ///
 /// Supports:
@@ -2123,6 +2193,10 @@ fn numeric_promotion(left: &DataType, right: &DataType) -> DataType {
 /// - Variable references (node/edge variables from MATCH)
 /// - Literal lists
 /// - Literal maps ({key: value, ...})
+/// - Unary (`-x`, `NOT x`) and binary operators over any of these
+/// - Built-in scalar functions of any of these
+///
+/// [`is_simple_evaluable`] says which expressions need no `outer_values`.
 pub(crate) fn evaluate_simple_expr(
     expr: &Expr,
     params: &HashMap<String, Value>,
@@ -2168,10 +2242,55 @@ pub(crate) fn evaluate_simple_expr(
             Ok(Value::Map(map))
         }
 
+        Expr::UnaryOp { op, expr: inner } => {
+            let value = evaluate_simple_expr(inner, params, outer_values)?;
+            eval_simple_unary(op, value)
+        }
+
+        Expr::BinaryOp { left, op, right } => {
+            let l = evaluate_simple_expr(left, params, outer_values)?;
+            let r = evaluate_simple_expr(right, params, outer_values)?;
+            uni_query_functions::expr_eval::eval_binary_op(&l, op, &r)
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
+        }
+
+        Expr::FunctionCall {
+            name,
+            args,
+            distinct: false,
+            window_spec: None,
+        } if uni_query_functions::expr_eval::is_scalar_function(name) => {
+            let values = args
+                .iter()
+                .map(|arg| evaluate_simple_expr(arg, params, outer_values))
+                .collect::<DFResult<Vec<_>>>()?;
+            uni_query_functions::expr_eval::eval_scalar_function(name, &values, None)
+                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
+        }
+
         _ => Err(datafusion::error::DataFusionError::Execution(format!(
             "Unsupported expression type for procedure argument: {:?}",
             expr
         ))),
+    }
+}
+
+/// Applies `-` or `NOT` to an evaluated constant, with Cypher's NULL rules.
+///
+/// `-i64::MIN` is an overflow error rather than a wrapped value.
+fn eval_simple_unary(op: &uni_cypher::ast::UnaryOp, value: Value) -> DFResult<Value> {
+    use uni_cypher::ast::UnaryOp;
+    let err = |msg: String| datafusion::error::DataFusionError::Execution(msg);
+    match (op, value) {
+        (_, Value::Null) => Ok(Value::Null),
+        (UnaryOp::Neg, Value::Int(i)) => i
+            .checked_neg()
+            .map(Value::Int)
+            .ok_or_else(|| err(format!("integer overflow negating {i}"))),
+        (UnaryOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
+        (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+        (UnaryOp::Neg, other) => Err(err(format!("cannot negate {other:?}"))),
+        (UnaryOp::Not, other) => Err(err(format!("NOT requires a boolean, got {other:?}"))),
     }
 }
 

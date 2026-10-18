@@ -26,11 +26,14 @@
 //! * Each filter goes right after the step that makes its last name
 //!   available; filters over MATCH variables only run immediately.
 //! * `IS NOT` references run last, as anti-joins.
-//! * At most one positive reference into the clause's own recursive group,
-//!   testing a MATCH node on a KEY, is the clause's [`Anchor`]: the planner
-//!   reads it before the pattern and walks the pattern from the nodes it
-//!   names, so a fixpoint iteration costs the referenced delta rather than
-//!   the whole relation (issue #301).
+//! * At most one positive reference testing a MATCH node on a KEY is the
+//!   clause's [`Anchor`]: the planner reads it before the pattern and walks
+//!   the pattern from the nodes it names, from whichever end of the path the
+//!   node is on. A reference into the clause's own recursive group is
+//!   preferred, so a fixpoint iteration costs the referenced delta rather
+//!   than the whole relation (issue #301); failing that, a reference to a
+//!   lower stratum anchors, so a clause over a few lower-stratum facts does
+//!   not scan and walk the whole label (P4 / A2).
 //!
 //! The plan also records, per IS-reference position, the [`ColumnKind`] the
 //! referenced column holds — a node, a relationship or a scalar — inferred
@@ -239,6 +242,10 @@ pub enum Exposure {
 ///
 /// Chosen by [`ClauseBindingPlan::compute`]; see [`ClauseBindingPlan::anchor`]
 /// for the rule.
+///
+/// Anchoring changes the plan's shape, never its binding: the anchoring
+/// position stays a [`PositionAction::TestNode`] of a MATCH variable, and every
+/// other position keeps the action the schedule gave it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Anchor {
     /// Index into [`ClauseBindingPlan::refs`] of the anchoring reference.
@@ -246,6 +253,28 @@ pub struct Anchor {
     /// Index into that reference's positions of the KEY position whose MATCH
     /// node the walk starts from.
     pub pos: usize,
+    /// Which kind of reference anchors, which decides how the walk is seeded.
+    pub source: AnchorSource,
+}
+
+/// The kind of reference an [`Anchor`] is, and so how the planner seeds the walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorSource {
+    /// A reference into the clause's own recursive group (issue #301).
+    ///
+    /// Its rows are the fixpoint's delta. The walk is seeded by the
+    /// reference's rows themselves, and the anchoring position's test is the
+    /// join that seeds it, so the reference is read once.
+    Recursive,
+    /// A reference to a rule of a lower stratum, whose facts are complete
+    /// before this clause runs.
+    ///
+    /// The walk is seeded by the *distinct* nodes of the anchoring column,
+    /// and the reference is still joined in full at its own step, every test
+    /// included. The seed is a semi-join: it removes pattern rows the full
+    /// join would reject anyway, and never repeats a walk for two facts that
+    /// share the anchored node.
+    LowerStratum,
 }
 
 /// The order-independent binding decision for one clause.
@@ -274,22 +303,34 @@ pub struct ClauseBindingPlan {
     pub prev_ref: Option<usize>,
     /// The reference the MATCH pattern is walked from, if any.
     ///
-    /// A positive reference into the clause's own recursive group qualifies
-    /// when one of its KEY positions tests a node the MATCH pattern binds as a
-    /// plain node element (not inside a quantified group nor a shortestPath).
-    /// The planner then reads that reference before the pattern and walks the
-    /// pattern from the referenced nodes, so a fixpoint iteration costs the
-    /// referenced delta rather than the whole relation (issue #301). The
-    /// reference's other positions keep their actions; the anchoring position's
-    /// test is the join that seeds the walk.
+    /// A positive reference qualifies when one of its KEY positions tests a
+    /// node the MATCH pattern binds as a plain node element (not inside a
+    /// quantified group, nor in a shortestPath or a path bound to a variable).
+    /// The node may be at either end of its path, or in the middle: the
+    /// pattern planner walks a path from whichever of its nodes is bound,
+    /// reversing it or splitting it there. The planner reads the reference
+    /// before the pattern and walks the pattern from the referenced nodes. The
+    /// reference's other positions keep their actions.
     ///
-    /// Only same-group references are considered. They are what a fixpoint
-    /// re-reads every iteration, and what semi-naive evaluation keeps small;
-    /// a reference to a lower stratum is read once per iteration at its full
-    /// size, and with no cardinality to compare it against a selective pattern
-    /// the planner has no basis for preferring it. Among several candidates the
-    /// one with the smallest `(rule, subject variables)` wins — deterministic,
-    /// and independent of the order of the WHERE conditions.
+    /// * A reference into the clause's own recursive group is preferred
+    ///   ([`AnchorSource::Recursive`]): it is what a fixpoint re-reads every
+    ///   iteration, and semi-naive evaluation keeps it small, so an iteration
+    ///   costs the referenced delta rather than the whole relation (issue
+    ///   #301).
+    /// * Failing one, a reference to a lower stratum anchors
+    ///   ([`AnchorSource::LowerStratum`]), unless another node of the pattern
+    ///   carries an equality — an inline property map or a WHERE conjunct
+    ///   `v.p = <constant>` — which the pattern planner would start the walk
+    ///   from instead (`reversed_for_bound_anchor`'s rank). A seed is a set of
+    ///   vids the anchor node is looked up by, so it composes with an
+    ///   equality on the anchored node itself, but not with a better start
+    ///   elsewhere. Whether the lookup reads the label by vid or in one pass
+    ///   is decided at run time by the fact count against the label's row
+    ///   count (`VidLookupJoinExec`), where both are known.
+    ///
+    /// Among several candidates of one kind, the one with the smallest
+    /// `(rule, subject variables)` wins — deterministic, and independent of
+    /// the order of the WHERE conditions.
     pub anchor: Option<Anchor>,
     /// What the plan found wrong with the clause.
     pub diagnostics: Vec<LocyCompileError>,
@@ -1180,7 +1221,7 @@ impl ClauseBindingPlan {
         scheduler.schedule_negations(&negated);
         scheduler.check_ambiguous_reads();
         let mut plan = scheduler.plan;
-        plan.anchor = choose_anchor(&plan, &clause.match_pattern, &positive, same_scc);
+        plan.anchor = choose_anchor(&plan, clause, &positive, same_scc);
         Some(plan)
     }
 }
@@ -1188,41 +1229,115 @@ impl ClauseBindingPlan {
 /// The anchor of a scheduled plan, per [`ClauseBindingPlan::anchor`].
 fn choose_anchor(
     plan: &ClauseBindingPlan,
-    pattern: &Pattern,
+    clause: &CompiledClause,
     positive: &[usize],
     same_scc: &dyn Fn(&str) -> bool,
 ) -> Option<Anchor> {
-    let walkable = walkable_node_variables(pattern);
-    positive
-        .iter()
-        .copied()
-        .filter(|&r| same_scc(&plan.refs[r].rule))
-        .filter_map(|r| {
-            let pos = plan.refs[r].positions.iter().position(|p| {
-                p.is_key
-                    && p.action == PositionAction::TestNode
-                    && matches!(
-                        plan.scope.get(&p.variable),
-                        Some(VarSource::Match(ColumnKind::Node))
-                    )
-                    && walkable.contains(p.variable.as_str())
-            })?;
-            Some(Anchor { r, pos })
+    let walkable = walkable_node_variables(&clause.match_pattern);
+    let candidates = |source: AnchorSource, eligible: &dyn Fn(&str) -> bool| {
+        positive
+            .iter()
+            .copied()
+            .filter(|&r| same_scc(&plan.refs[r].rule) == (source == AnchorSource::Recursive))
+            .filter_map(|r| {
+                let pos = plan.refs[r].positions.iter().position(|p| {
+                    p.is_key
+                        && p.action == PositionAction::TestNode
+                        && matches!(
+                            plan.scope.get(&p.variable),
+                            Some(VarSource::Match(ColumnKind::Node))
+                        )
+                        && walkable.contains(p.variable.as_str())
+                        && eligible(&p.variable)
+                })?;
+                Some(Anchor { r, pos, source })
+            })
+            .min_by(|a, b| anchor_rank(plan, a).cmp(&anchor_rank(plan, b)))
+    };
+    candidates(AnchorSource::Recursive, &|_| true).or_else(|| {
+        let equalities = equality_anchored_nodes(plan, clause);
+        candidates(AnchorSource::LowerStratum, &|var| {
+            equalities.iter().all(|other| *other == var)
         })
-        .min_by(|a, b| {
-            let rank = |anchor: &Anchor| {
-                let binding = &plan.refs[anchor.r];
-                (
-                    binding.rule.clone(),
-                    binding
-                        .positions
-                        .iter()
-                        .map(|p| p.variable.clone())
-                        .collect::<Vec<_>>(),
-                )
-            };
-            rank(a).cmp(&rank(b))
-        })
+    })
+}
+
+/// The deterministic tie-break between candidate anchors of one kind.
+fn anchor_rank(plan: &ClauseBindingPlan, anchor: &Anchor) -> (String, Vec<String>) {
+    let binding = &plan.refs[anchor.r];
+    (
+        binding.rule.clone(),
+        binding
+            .positions
+            .iter()
+            .map(|p| p.variable.clone())
+            .collect(),
+    )
+}
+
+/// The MATCH node variables an equality could start the walk from.
+///
+/// A node with an inline property map, or one that a WHERE conjunct over MATCH
+/// variables only equates a property of to an expression of no variable
+/// (`v.uid = 'x'`, `$p = v.uid`). These are the nodes the pattern planner
+/// ranks as anchors on its own (`reversed_for_bound_anchor`), with or without
+/// an index behind them, so a lower-stratum seed elsewhere would override a
+/// start the planner already considers better.
+fn equality_anchored_nodes<'c>(
+    plan: &ClauseBindingPlan,
+    clause: &'c CompiledClause,
+) -> HashSet<&'c str> {
+    fn conjuncts<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match expr {
+            Expr::BinaryOp {
+                left,
+                op: uni_cypher::ast::BinaryOp::And,
+                right,
+            } => {
+                conjuncts(left, out);
+                conjuncts(right, out);
+            }
+            other => out.push(other),
+        }
+    }
+    fn equated_node<'e>(expr: &'e Expr) -> Option<&'e str> {
+        let Expr::BinaryOp {
+            left,
+            op: uni_cypher::ast::BinaryOp::Eq,
+            right,
+        } = expr
+        else {
+            return None;
+        };
+        let side = |property: &'e Expr, other: &Expr| match property {
+            Expr::Property(inner, _) if free_variables(other).is_empty() => match inner.as_ref() {
+                Expr::Variable(v) => Some(v.as_str()),
+                _ => None,
+            },
+            _ => None,
+        };
+        side(left, right).or_else(|| side(right, left))
+    }
+
+    let mut out = HashSet::new();
+    for path in &clause.match_pattern.paths {
+        for element in &path.elements {
+            if let PatternElement::Node(n) = element
+                && n.properties.is_some()
+                && let Some(v) = n.variable.as_deref()
+            {
+                out.insert(v);
+            }
+        }
+    }
+    for &index in &plan.immediate_filters {
+        if let Some(RuleCondition::Expression(expr)) = clause.where_conditions.get(index) {
+            let mut parts = Vec::new();
+            conjuncts(expr, &mut parts);
+            out.extend(parts.into_iter().filter_map(equated_node));
+        }
+    }
+    out
 }
 
 /// The node variables a walk may start from: those written as a plain node
@@ -1521,6 +1636,17 @@ mod tests {
     /// The anchor of the plan of `rule`'s first clause with WHERE conditions,
     /// as `(referenced rule, anchored variable)`, in every WHERE order.
     fn anchors(program: &CompiledProgram, rule: &str) -> Vec<Option<(String, String)>> {
+        anchors_with_source(program, rule)
+            .into_iter()
+            .map(|a| a.map(|(r, v, _)| (r, v)))
+            .collect()
+    }
+
+    /// [`anchors`] with each anchor's [`AnchorSource`].
+    fn anchors_with_source(
+        program: &CompiledProgram,
+        rule: &str,
+    ) -> Vec<Option<(String, String, AnchorSource)>> {
         let n = program.rule_catalog[rule].clauses[clause_index(program, rule)]
             .where_conditions
             .len();
@@ -1530,9 +1656,13 @@ mod tests {
                 let plan = plan_in_order(program, rule, &order);
                 plan.anchor.map(|a| {
                     let binding = &plan.refs[a.r];
+                    // Anchoring never changes binding: the anchoring
+                    // position is a test of a MATCH node.
+                    assert_eq!(binding.positions[a.pos].action, PositionAction::TestNode);
                     (
                         binding.rule.clone(),
                         binding.positions[a.pos].variable.clone(),
+                        a.source,
                     )
                 })
             })
@@ -1557,19 +1687,107 @@ mod tests {
     }
 
     #[test]
-    fn issue_301_no_anchor_without_a_walkable_recursive_reference() {
-        // A lower-stratum reference never anchors.
-        let program = compiled(&format!(
-            "{STAKE}{SEED}CREATE RULE r AS MATCH (o:E) WHERE o IS seed AND (o, e, pct) IS stake \
-             YIELD KEY e, pct"
-        ));
-        assert!(anchors(&program, "r").iter().all(Option::is_none));
+    fn issue_301_no_anchor_without_a_walkable_reference() {
         // A node bound under a path variable is not walked from.
         let program = compiled(
             "CREATE RULE r AS MATCH (e:E {uid: 'y'}) YIELD KEY e\n\
              CREATE RULE r AS MATCH p = (o:E)-[:OWNS]->(e:E) WHERE o IS r YIELD KEY e",
         );
         assert!(anchors(&program, "r").iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn p4_lower_stratum_reference_anchors_without_a_recursive_one() {
+        // Both lower-stratum references test `o` on a KEY; the smaller
+        // `(rule, subjects)` wins in every order, and it is a lower-stratum
+        // anchor.
+        let program = compiled(&format!(
+            "{STAKE}{SEED}CREATE RULE r AS MATCH (o:E) WHERE o IS seed AND (o, e, pct) IS stake \
+             YIELD KEY e, pct"
+        ));
+        let all = anchors_with_source(&program, "r");
+        assert!(
+            all.iter().all(|a| a
+                == &Some((
+                    "seed".to_string(),
+                    "o".to_string(),
+                    AnchorSource::LowerStratum
+                ))),
+            "{all:?}"
+        );
+        // A recursive reference still wins over a lower-stratum one.
+        let program = compiled(&format!(
+            "{SEED}CREATE RULE r AS MATCH (e:E {{uid: 'y'}}) YIELD KEY e\n\
+             CREATE RULE r AS MATCH (o:E)-[:OWNS]->(e:E) WHERE e IS seed AND o IS r YIELD KEY e"
+        ));
+        let all = anchors_with_source(&program, "r");
+        assert!(
+            all.iter()
+                .all(|a| a == &Some(("r".to_string(), "o".to_string(), AnchorSource::Recursive))),
+            "{all:?}"
+        );
+    }
+
+    #[test]
+    fn p4_anchor_on_the_walks_target() {
+        // A1b: the reference tests the walk's target `m`; `b` is bound by it.
+        let program = compiled(
+            "CREATE RULE r AS MATCH (a:E)-[:OWNS]->(b:E) YIELD KEY a, KEY b\n\
+             CREATE RULE r AS MATCH (a:E)-[:OWNS]->(m:E) WHERE a.uid <> 'z' AND m IS r TO b \
+             YIELD KEY a, KEY b",
+        );
+        let all = anchors_with_source(&program, "r");
+        assert!(
+            all.iter()
+                .all(|a| a == &Some(("r".to_string(), "m".to_string(), AnchorSource::Recursive))),
+            "{all:?}"
+        );
+        let plan = order_independent(&program, "r");
+        assert_eq!(binders(&plan)["b"], "r.b BindNode");
+    }
+
+    #[test]
+    fn p4_equality_elsewhere_in_the_pattern_keeps_the_planners_start() {
+        // `f` carries an equality the pattern planner starts from; a
+        // lower-stratum seed on `o` would override it.
+        for f in ["(f:E {uid: 'k'})", "(f:E)"] {
+            let filter = if f == "(f:E)" { "f.uid = 'k' AND " } else { "" };
+            let program = compiled(&format!(
+                "{SEED}CREATE RULE r AS MATCH (o:E)-[:OWNS]->{f} WHERE {filter}o IS seed \
+                 YIELD KEY f"
+            ));
+            assert!(
+                anchors(&program, "r").iter().all(Option::is_none),
+                "{f} {filter}"
+            );
+        }
+        // An equality on the anchored node itself composes with the seed, and
+        // a non-equality elsewhere does not count.
+        let program = compiled(&format!(
+            "{SEED}CREATE RULE r AS MATCH (o:E)-[:OWNS]->(f:E) \
+             WHERE o.uid = 'x' AND f.uid <> 'k' AND o IS seed YIELD KEY f"
+        ));
+        let all = anchors_with_source(&program, "r");
+        assert!(
+            all.iter().all(|a| a
+                == &Some((
+                    "seed".to_string(),
+                    "o".to_string(),
+                    AnchorSource::LowerStratum
+                ))),
+            "{all:?}"
+        );
+        // A recursive anchor ignores equalities: the delta is the frontier.
+        let program = compiled(
+            "CREATE RULE r AS MATCH (e:E {uid: 'y'}) YIELD KEY e\n\
+             CREATE RULE r AS MATCH (o:E)-[:OWNS]->(e:E {uid: 'k'}) WHERE o IS r YIELD KEY e",
+        );
+        let all = anchors_with_source(&program, "r");
+        assert!(
+            all.iter()
+                .all(|a| a == &Some(("r".to_string(), "o".to_string(), AnchorSource::Recursive))),
+            "{all:?}"
+        );
     }
 
     #[test]

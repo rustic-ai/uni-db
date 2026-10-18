@@ -20,7 +20,7 @@
 
 use crate::query::df_graph::common::{
     arrow_err, collect_all_partitions, compute_plan_properties, execute_subplan,
-    extract_row_params, operator_reservation,
+    execute_subplan_with_outer_row, extract_row_params, operator_reservation,
 };
 use crate::query::df_graph::{GraphExecutionContext, MutationContext};
 use crate::query::planner::LogicalPlan;
@@ -845,6 +845,12 @@ async fn run_apply(
         return result;
     }
 
+    // The body's node and relationship imports, bound to the input row's
+    // own columns for them (`bind_outer_row`), so an imported `a` supports
+    // inside the body every operation it supports outside it.
+    let bound_subquery_plan =
+        crate::query::planner::bind_outer_row(subquery_plan, &input_exec.schema());
+
     // 5. Fallback: For each input row, execute subquery and collect output column arrays.
     //    Used when batching is not eligible (single row, no VID keys, or procedure call).
     //    Each output row is: surviving input columns (sliced via
@@ -898,17 +904,31 @@ async fn run_apply(
         } else {
             // Cache miss: execute subplan
             let subplan_start = std::time::Instant::now();
-            let sub_batches = execute_subplan(
-                subquery_plan,
-                &sub_params,
-                &sub_outer_values,
-                graph_ctx,
-                session_ctx,
-                storage,
-                schema_info,
-                mutation_ctx,
-            )
-            .await?;
+            let sub_batches = if is_proc_call {
+                execute_subplan(
+                    subquery_plan,
+                    &sub_params,
+                    &sub_outer_values,
+                    graph_ctx,
+                    session_ctx,
+                    storage,
+                    schema_info,
+                    mutation_ctx,
+                )
+                .await?
+            } else {
+                execute_subplan_with_outer_row(
+                    &bound_subquery_plan,
+                    &sub_params,
+                    batch.slice(*row_idx, 1),
+                    graph_ctx,
+                    session_ctx,
+                    storage,
+                    schema_info,
+                    mutation_ctx,
+                )
+                .await?
+            };
             let subplan_elapsed = subplan_start.elapsed();
             total_subplan_time += subplan_elapsed;
             subplan_executions += 1;

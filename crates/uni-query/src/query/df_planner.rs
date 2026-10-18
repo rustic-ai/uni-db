@@ -54,8 +54,9 @@ use crate::query::df_graph::{
     OptionalFilterExec,
 };
 use crate::query::planner::{
-    COL_FWD, LogicalPlan, STRUCT_ONLY_SENTINEL, WITH_PASSTHROUGH_SENTINEL, aggregate_column_name,
-    collect_properties_from_plan, projection_columns, reconcile_passthrough_properties,
+    COL_FWD, ImportKind, LogicalPlan, STRUCT_ONLY_SENTINEL, WITH_PASSTHROUGH_SENTINEL,
+    aggregate_column_name, collect_properties_from_plan, projection_columns,
+    reconcile_passthrough_properties,
 };
 use anyhow::{Result, anyhow};
 use arrow_schema::{DataType, Schema, SchemaRef};
@@ -147,6 +148,11 @@ pub struct HybridPhysicalPlanner {
     /// correlated references.
     outer_entity_vars: HashSet<String>,
 
+    /// The enclosing row a correlated subquery body runs against, as one
+    /// row. A [`LogicalPlan::OuterRow`] import bound to a node or a
+    /// relationship is planned from its columns (see [`Self::with_outer_row`]).
+    outer_row: Option<datafusion::arrow::array::RecordBatch>,
+
     /// Plugin registry used to resolve Locy aggregates (and other plugin
     /// surfaces) at plan time. Defaults to a process-wide registry pre-loaded
     /// with the built-ins from `uni-plugin-builtin`; replace with
@@ -161,6 +167,49 @@ pub struct HybridPhysicalPlanner {
     /// [`Self::plan_internal`]). A variable-length traversal with no bound
     /// variable reads it to choose reachability over per-path enumeration.
     multiplicity_insensitive: AtomicBool,
+}
+
+/// Whether the constant operand of an indexed point lookup can be handed to
+/// Lance against a column of `column_type` without changing its meaning.
+///
+/// `resolved` is a property-first predicate with parameters already
+/// substituted (`n.p = lit` or `n.p IN [lit, …]`). Lance coerces the literal to
+/// the column's Arrow type and errors when it cannot, so `n.x = 41.5` on an INT
+/// column failed the query instead of returning no rows. Only operands whose
+/// coercion is exact are accepted: an integer for an integer column, an
+/// integer of magnitude at most 2^53 or a float for a float column, a string
+/// for a string column, a boolean for a boolean column. A NULL operand matches
+/// nothing under either semantics and is left to the outer filter. Columns of
+/// any other type keep the previous behavior.
+fn index_operand_fits_column(
+    resolved: &Expr,
+    column_type: Option<&uni_common::core::schema::DataType>,
+) -> bool {
+    use uni_common::core::schema::DataType as T;
+    let fits = |operand: &Expr| -> bool {
+        let Expr::Literal(lit) = operand else {
+            return false;
+        };
+        match (column_type, lit) {
+            (_, CypherLiteral::Null) => false,
+            (Some(T::Int32 | T::Int64), lit) => matches!(lit, CypherLiteral::Integer(_)),
+            (Some(T::Float32 | T::Float64), CypherLiteral::Integer(i)) => {
+                i.unsigned_abs() <= 1_u64 << 53
+            }
+            (Some(T::Float32 | T::Float64), lit) => matches!(lit, CypherLiteral::Float(_)),
+            (Some(T::String), lit) => matches!(lit, CypherLiteral::String(_)),
+            (Some(T::Bool), lit) => matches!(lit, CypherLiteral::Bool(_)),
+            _ => true,
+        }
+    };
+    match resolved {
+        Expr::BinaryOp { right, .. } => fits(right),
+        Expr::In { list, .. } => match list.as_ref() {
+            Expr::List(items) => items.iter().all(fits),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// The string `variable.ext_id` is required to equal, if some conjunct of
@@ -353,6 +402,7 @@ impl HybridPhysicalPlanner {
             outer_values: HashMap::new(),
             mutation_ctx: None,
             outer_entity_vars: HashSet::new(),
+            outer_row: None,
             plugin_registry: super::df_graph::locy_fold::default_locy_plugin_registry(),
             multiplicity_insensitive: AtomicBool::new(false),
         }
@@ -511,6 +561,7 @@ impl HybridPhysicalPlanner {
             outer_values,
             mutation_ctx: None,
             outer_entity_vars: HashSet::new(),
+            outer_row: None,
             plugin_registry: super::df_graph::locy_fold::default_locy_plugin_registry(),
             multiplicity_insensitive: AtomicBool::new(false),
         }
@@ -605,6 +656,16 @@ impl HybridPhysicalPlanner {
     /// Set outer entity variable names for nested EXISTS correlated reference detection.
     pub fn set_outer_entity_vars(&mut self, vars: HashSet<String>) {
         self.outer_entity_vars = vars;
+    }
+
+    /// Supplies the enclosing row of a correlated subquery body.
+    ///
+    /// `row` must hold exactly one row. The imports of a plan bound against
+    /// its schema (`bind_outer_row`) are planned from its columns.
+    #[must_use]
+    pub fn with_outer_row(mut self, row: datafusion::arrow::array::RecordBatch) -> Self {
+        self.outer_row = Some(row);
+        self
     }
 
     pub fn with_algo_registry(mut self, registry: Arc<AlgorithmRegistry>) -> Self {
@@ -860,6 +921,7 @@ impl HybridPhysicalPlanner {
             | LogicalPlan::LocyModelInvoke { .. }
             | LogicalPlan::LocyGenerate { .. }
             | LogicalPlan::Empty
+            | LogicalPlan::OuterRow { .. }
             | LogicalPlan::CreateVectorIndex { .. }
             | LogicalPlan::CreateSparseIndex { .. }
             | LogicalPlan::CreateFullTextIndex { .. }
@@ -906,6 +968,7 @@ impl HybridPhysicalPlanner {
     ///
     /// Returns an error if planning fails (unsupported operation, schema mismatch, etc.)
     pub fn plan(&self, logical: &LogicalPlan) -> Result<Arc<dyn ExecutionPlan>> {
+        let started = std::time::Instant::now();
         // A root `MultiplicityInsensitive` marker becomes the planner flag and
         // is stripped before the logical pre-passes below, which would
         // otherwise stop at a node they do not recognise.
@@ -936,7 +999,19 @@ impl HybridPhysicalPlanner {
 
         // Delegate to internal planning with properties context
         let plan = self.plan_internal(&logical_rewritten, &all_properties)?;
-        self.guard_deadlines(plan)
+        let guarded = self.guard_deadlines(plan);
+        self.count_physical_plan(started);
+        guarded
+    }
+
+    /// Records one physical plan, and the time since `started`, in the query's
+    /// counters. Every public planning entry calls this once on success, so the
+    /// count covers the query's plan and each execution-time sub-plan (a
+    /// correlated body per outer row, a Locy clause body per iteration).
+    fn count_physical_plan(&self, started: std::time::Instant) {
+        if let Some(counters) = self.graph_ctx.counters() {
+            counters.add_physical_plan(started.elapsed());
+        }
     }
 
     /// Insert deadline checkpoints beneath pipeline-breaking operators.
@@ -965,6 +1040,7 @@ impl HybridPhysicalPlanner {
         logical: &LogicalPlan,
         extra_properties: HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        let started = std::time::Instant::now();
         // Same pre-pass as `plan()` — see commentary there.
         let logical_rewritten = merge_unwind_in_filters(logical, &self.params);
         let mut all_properties = collect_properties_from_plan(&logical_rewritten);
@@ -976,7 +1052,9 @@ impl HybridPhysicalPlanner {
         // `count(n)` needs to know a row exists, not what is in it (#184 family).
         crate::query::planner::relax_count_only_entities(&logical_rewritten, &mut all_properties);
         let plan = self.plan_internal(&logical_rewritten, &all_properties)?;
-        self.guard_deadlines(plan)
+        let guarded = self.guard_deadlines(plan);
+        self.count_physical_plan(started);
+        guarded
     }
 
     /// Wrap a plan with optional semantics.
@@ -1288,6 +1366,8 @@ impl HybridPhysicalPlanner {
                 min_hops,
                 max_hops,
                 edge_filter_expr,
+                optional,
+                optional_pattern_vars,
             } => self.plan_shortest_path(
                 input,
                 edge_type_ids,
@@ -1300,6 +1380,8 @@ impl HybridPhysicalPlanner {
                 *min_hops,
                 *max_hops,
                 edge_filter_expr.as_ref(),
+                *optional,
+                optional_pattern_vars,
                 all_properties,
             ),
 
@@ -1372,6 +1454,8 @@ impl HybridPhysicalPlanner {
             }
 
             LogicalPlan::Empty => self.plan_empty(),
+
+            LogicalPlan::OuterRow { variables } => self.plan_outer_row(variables, all_properties),
 
             LogicalPlan::BindZeroLengthPath {
                 input,
@@ -1541,14 +1625,12 @@ impl HybridPhysicalPlanner {
                 property,
                 query,
                 k,
-                threshold,
             } => self.plan_vector_knn(
                 *label_id,
                 variable,
                 property,
                 query.clone(),
                 *k,
-                *threshold,
                 all_properties,
             ),
 
@@ -1568,6 +1650,8 @@ impl HybridPhysicalPlanner {
                 min_hops,
                 max_hops,
                 edge_filter_expr,
+                optional,
+                optional_pattern_vars,
             } => self.plan_shortest_path(
                 input,
                 edge_type_ids,
@@ -1580,6 +1664,8 @@ impl HybridPhysicalPlanner {
                 *min_hops,
                 *max_hops,
                 edge_filter_expr.as_ref(),
+                *optional,
+                optional_pattern_vars,
                 all_properties,
             ),
 
@@ -2045,6 +2131,14 @@ impl HybridPhysicalPlanner {
                     .any(|(c, _)| c == &col)
             {
                 let resolved = crate::query::pushdown::substitute_params(pred, &self.params)?;
+                // Lance coerces the literal to the column type, and refuses
+                // when it cannot (`n.x = 41.5` on an INT column failed the
+                // whole query). Such a predicate stays with the outer
+                // `FilterExec`, which applies Cypher's comparison semantics.
+                let column_type = label_props.and_then(|p| p.get(&col)).map(|m| &m.r#type);
+                if !index_operand_fits_column(&resolved, column_type) {
+                    continue;
+                }
                 indexed_preds.push(resolved);
             }
         }
@@ -2390,7 +2484,6 @@ impl HybridPhysicalPlanner {
     }
 
     /// Plan a vector KNN search.
-    #[expect(clippy::too_many_arguments)]
     fn plan_vector_knn(
         &self,
         label_id: u16,
@@ -2398,7 +2491,6 @@ impl HybridPhysicalPlanner {
         property: &str,
         query_expr: Expr,
         k: usize,
-        threshold: Option<f32>,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         let label_name = self
@@ -2440,7 +2532,6 @@ impl HybridPhysicalPlanner {
                 property.to_string(),
                 query_expr,
                 k,
-                threshold,
                 self.params.clone(),
                 target_properties,
                 entry.kind,
@@ -2455,7 +2546,6 @@ impl HybridPhysicalPlanner {
                 property.to_string(),
                 query_expr,
                 k,
-                threshold,
                 self.params.clone(),
                 target_properties,
             )
@@ -4462,9 +4552,15 @@ impl HybridPhysicalPlanner {
         min_hops: u32,
         max_hops: u32,
         edge_filter_expr: Option<&Expr>,
+        optional: bool,
+        optional_pattern_vars: &HashSet<String>,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let input_plan = self.plan_internal(input, all_properties)?;
+        let input_plan = if optional {
+            self.plan_tagging_optional_entry(input, optional_pattern_vars, all_properties)?
+        } else {
+            self.plan_internal(input, all_properties)?
+        };
 
         let adj_direction = convert_direction(direction);
         let source_col = format!("{}._vid", source_variable);
@@ -4490,7 +4586,43 @@ impl HybridPhysicalPlanner {
             min_hops,
             max_hops,
             edge_property_conditions,
+            optional,
         )))
+    }
+
+    /// Plan the input of an OPTIONAL `shortestPath`, tagging the rows that
+    /// enter the clause.
+    ///
+    /// An endpoint the clause scans for itself is cross-joined onto the
+    /// entering rows, so one entering row reaches the operator as one row per
+    /// candidate. The closing `OptionalFilterExec` must decide per *entering*
+    /// row, which only a tag applied before those cross joins identifies:
+    /// grouping by the bound node ids instead merges entering rows that bind
+    /// the same node (`UNWIND [1, 1] AS x MATCH (a) OPTIONAL MATCH …` would keep
+    /// one NULL row of two). Walks the left spine of cross joins past each
+    /// right side that binds one of `clause_vars`, tags what is left, and
+    /// rebuilds the joins as `plan_internal` would. `tag_optional_source`
+    /// declines to tag a subtree that still binds a clause variable, so an
+    /// unexpected shape is left untagged rather than tagged wrongly.
+    fn plan_tagging_optional_entry(
+        &self,
+        plan: &LogicalPlan,
+        clause_vars: &HashSet<String>,
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        if let LogicalPlan::CrossJoin { left, right } = plan
+            && collect_plan_variables(right)
+                .iter()
+                .any(|v| clause_vars.contains(v))
+        {
+            let left_plan = self.plan_tagging_optional_entry(left, clause_vars, all_properties)?;
+            let right_plan = self.plan_internal(right, all_properties)?;
+            return Ok(Arc::new(
+                datafusion::physical_plan::joins::CrossJoinExec::new(left_plan, right_plan),
+            ));
+        }
+        let planned = self.plan_internal(plan, all_properties)?;
+        Ok(tag_optional_source(planned, true, clause_vars))
     }
 
     /// Plan a filter operation.
@@ -4523,12 +4655,25 @@ impl HybridPhysicalPlanner {
         }
 
         let input_plan = self.plan_internal(input, all_properties)?;
+        let input_width = input_plan.schema().fields().len();
+        // An unresolved `startNode(r)` in the predicate reads `r`'s endpoint
+        // from a hydrated column, as it does in a projection
+        // (`plan_project_from_input`); the columns are dropped again below.
+        let input_plan = self.hydrate_endpoints_for(input_plan, &[(predicate.clone(), None)])?;
         let schema = input_plan.schema();
 
         // Use CypherPhysicalExprCompiler for all filters (handles both schema-typed
         // and schemaless LargeBinary/CypherValue columns without coercion failures).
         let mut ctx = self.translation_context_for_plan(input);
         ctx.available_columns = Some(schema.fields().iter().map(|f| f.name().clone()).collect());
+        ctx.node_variable_hints.extend(
+            schema
+                .fields()
+                .iter()
+                .map(|f| f.name())
+                .filter(|name| name.starts_with(ENDPOINT_COLUMN_PREFIX))
+                .cloned(),
+        );
         let ctx = ctx;
         let session = self.session_ctx.read();
         let state = session.state();
@@ -4536,18 +4681,34 @@ impl HybridPhysicalPlanner {
         let physical_predicate = compiler.compile_predicate(predicate, &schema)?;
 
         // For OPTIONAL MATCH: use OptionalFilterExec for proper NULL row preservation.
-        if !optional_variables.is_empty() {
-            return Ok(Arc::new(OptionalFilterExec::new(
+        let filtered: Arc<dyn ExecutionPlan> = if optional_variables.is_empty() {
+            Arc::new(FilterExec::try_new(physical_predicate, input_plan)?)
+        } else {
+            Arc::new(OptionalFilterExec::new(
                 input_plan,
                 physical_predicate,
                 optional_variables.clone(),
-            )));
+            ))
+        };
+        if schema.fields().len() == input_width {
+            return Ok(filtered);
         }
-
-        Ok(Arc::new(FilterExec::try_new(
-            physical_predicate,
-            input_plan,
-        )?))
+        let kept = schema
+            .fields()
+            .iter()
+            .take(input_width)
+            .enumerate()
+            .map(|(idx, field)| {
+                (
+                    Arc::new(datafusion::physical_expr::expressions::Column::new(
+                        field.name(),
+                        idx,
+                    )) as Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+                    field.name().clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        Ok(Arc::new(ProjectionExec::try_new(kept, filtered)?))
     }
 
     /// Issue #53 optimization: try to convert Filter(CrossJoin(L, R), pred) into
@@ -4616,7 +4777,7 @@ impl HybridPhysicalPlanner {
         // by the standalone `merge_unwind_in_filters` pre-pass at
         // `HybridPhysicalPlanner::plan`. That pass walks the LogicalPlan
         // tree BEFORE any physical-plan optimization can bail (e.g.,
-        // `unify_join_key_types` failing on Utf8 ↔ LargeBinary), so the
+        // `unify_join_key_types` refusing a dtype pairing), so the
         // scan-side filters always survive — regardless of whether this
         // function emits HashJoinExec or falls back to FilterExec(CrossJoin).
         //
@@ -4661,17 +4822,18 @@ impl HybridPhysicalPlanner {
             left_plan
         };
 
-        // Compile each (l_expr, r_expr) pair, wrapping both sides in tointeger
-        // for type unification (handles UInt64 _vid vs LargeBinary CV property).
-        // If any pair can't be unified, fall through to FilterExec.
+        // Compile each (l_expr, r_expr) pair into hash keys of one dtype (see
+        // `unify_join_key_types`). If any pair can't be unified, fall through
+        // to FilterExec.
         let left_schema = left_plan.schema();
         let right_schema = right_plan.schema();
         let left_ctx = self.translation_context_for_plan(&left_with_filter);
         let right_ctx = self.translation_context_for_plan(&right_with_filter);
 
-        // Build join keys: compile each side's expression and wrap in tointeger
-        // for type unification (handles UInt64 _vid vs LargeBinary CV property).
+        // Build join keys. A pair keyed through a coarse bucket key also
+        // yields its original equality, re-checked as a join filter below.
         // Drop the session lock between this scope and HashJoinExec construction.
+        let mut rechecks: Vec<Expr> = Vec::new();
         let on: Vec<(
             Arc<dyn datafusion::physical_plan::PhysicalExpr>,
             Arc<dyn datafusion::physical_plan::PhysicalExpr>,
@@ -4705,12 +4867,18 @@ impl HybridPhysicalPlanner {
                 };
                 let l_phys = left_compiler.compile(l_expr, &left_schema)?;
                 let r_phys = right_compiler.compile(r_expr, &right_schema)?;
-                let Some((l_key, r_key)) =
-                    unify_join_key_types(l_phys, r_phys, &left_schema, &right_schema, &state)
+                let Some(key) = unify_join_key_types(l_phys, r_phys, &left_schema, &right_schema)
                 else {
                     return Ok(None);
                 };
-                pairs.push((l_key, r_key));
+                if key.needs_recheck {
+                    rechecks.push(Expr::BinaryOp {
+                        left: Box::new(l_expr.clone()),
+                        op: uni_cypher::ast::BinaryOp::Eq,
+                        right: Box::new(r_expr.clone()),
+                    });
+                }
+                pairs.push((key.left, key.right));
             }
             pairs
         };
@@ -4722,8 +4890,12 @@ impl HybridPhysicalPlanner {
         // with `VidLookupJoinExec`. Supports INNER and LEFT outer; falls
         // through to HashJoinExec for RIGHT outer, non-Scan probes, or
         // computed (non-Column) join keys.
+        // `VidLookupJoinExec` compares non-anchor pairs by exact `ScalarValue`
+        // equality, which is only Cypher equality on a same-dtype exact key —
+        // a pair that needs re-checking needs `HashJoinExec`'s join filter.
         if matches!(join_type, JoinType::Inner | JoinType::Left)
             && cls.residual.is_none()
+            && rechecks.is_empty()
             && let Some(plan) = self.try_emit_vid_lookup_join(
                 &cls.equi_pairs,
                 join_type,
@@ -4736,11 +4908,23 @@ impl HybridPhysicalPlanner {
             return Ok(Some(plan));
         }
 
+        let filter = if rechecks.is_empty() {
+            None
+        } else {
+            Some(self.build_recheck_join_filter(
+                &rechecks,
+                &left_plan,
+                &right_plan,
+                &left_with_filter,
+                &right_with_filter,
+            )?)
+        };
+
         let join: Arc<dyn ExecutionPlan> = Arc::new(HashJoinExec::try_new(
             left_plan,
             right_plan,
             on,
-            None,
+            filter,
             &join_type,
             None,
             PartitionMode::CollectLeft,
@@ -4768,6 +4952,65 @@ impl HybridPhysicalPlanner {
         }
 
         Ok(Some(join))
+    }
+
+    /// Build the join filter that re-checks equi-pairs keyed by a bucket key.
+    ///
+    /// `_cypher_join_key` puts every pair of equal values in one bucket but may
+    /// put unequal ones there too (see `unify_join_key_types`), so each
+    /// candidate pair is re-tested with the original equality, compiled exactly
+    /// as the cross-join fallback compiles it. A join filter rather than a
+    /// post-join `FilterExec` keeps outer joins right: a candidate that fails
+    /// the re-check leaves the outer row unmatched and NULL-padded instead of
+    /// dropping it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the re-check predicate fails to compile.
+    fn build_recheck_join_filter(
+        &self,
+        rechecks: &[Expr],
+        left_plan: &Arc<dyn ExecutionPlan>,
+        right_plan: &Arc<dyn ExecutionPlan>,
+        left_logical: &LogicalPlan,
+        right_logical: &LogicalPlan,
+    ) -> Result<datafusion::physical_plan::joins::utils::JoinFilter> {
+        use datafusion::common::JoinSide;
+        use datafusion::physical_plan::joins::utils::{ColumnIndex, JoinFilter};
+
+        let left_schema = left_plan.schema();
+        let right_schema = right_plan.schema();
+        let fields: Vec<arrow_schema::FieldRef> = left_schema
+            .fields()
+            .iter()
+            .chain(right_schema.fields().iter())
+            .cloned()
+            .collect();
+        let column_indices: Vec<ColumnIndex> = (0..left_schema.fields().len())
+            .map(|index| ColumnIndex {
+                index,
+                side: JoinSide::Left,
+            })
+            .chain((0..right_schema.fields().len()).map(|index| ColumnIndex {
+                index,
+                side: JoinSide::Right,
+            }))
+            .collect();
+        let intermediate = Arc::new(Schema::new(fields));
+
+        let predicate = and_combine(rechecks.to_vec()).ok_or_else(|| {
+            anyhow::anyhow!("build_recheck_join_filter called without a re-check")
+        })?;
+        let crossjoin_for_ctx = LogicalPlan::CrossJoin {
+            left: Box::new(left_logical.clone()),
+            right: Box::new(right_logical.clone()),
+        };
+        let merged_ctx = self.translation_context_for_plan(&crossjoin_for_ctx);
+        let session = self.session_ctx.read();
+        let state = session.state();
+        let compiler = self.expr_compiler(&state, Some(&merged_ctx));
+        let expression = compiler.compile_predicate(&predicate, &intermediate)?;
+        Ok(JoinFilter::new(expression, column_indices, intermediate))
     }
 
     /// Issue #55 PR #5+#6: detect the cross-MATCH dynamic VID-filter pushdown
@@ -6900,6 +7143,87 @@ impl HybridPhysicalPlanner {
         Ok(Arc::new(PlaceholderRowExec::new(schema)))
     }
 
+    /// Plan the imports of a correlated subquery body ([`LogicalPlan::OuterRow`]).
+    ///
+    /// A node or relationship import carries every column the outer row holds
+    /// for it — `{name}`, and `{name}.<anything>` (`_vid`, `_labels`, `_eid`,
+    /// `_type`, properties, `_all_props`) — so the body sees the entity in
+    /// the same columns the enclosing query does. A parameter import is the
+    /// same-named parameter, as a one-row projection over an empty input.
+    fn plan_outer_row(
+        &self,
+        variables: &[crate::query::planner::ImportedVariable],
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        // With the outer row supplied, an import that row carries no value
+        // for is one an earlier projection pruned because nothing reads it —
+        // `CALL { … }` imports every variable in scope. Planning its parameter
+        // anyway failed with `Unresolved parameter`; a body that does read it
+        // still fails, naming the column.
+        let parameters: Vec<(Expr, Option<String>)> = variables
+            .iter()
+            .filter(|v| v.kind == ImportKind::Parameter)
+            .filter(|v| self.outer_row.is_none() || self.params.contains_key(&v.name))
+            .map(|v| (Expr::Parameter(v.name.clone()), Some(v.name.clone())))
+            .collect();
+        let entities: Vec<&str> = variables
+            .iter()
+            .filter(|v| v.kind != ImportKind::Parameter)
+            .map(|v| v.name.as_str())
+            .collect();
+        let parameter_plan = || {
+            self.plan_project_with_aliases(
+                &LogicalPlan::Empty,
+                &parameters,
+                all_properties,
+                &HashMap::new(),
+            )
+        };
+        if entities.is_empty() {
+            return if parameters.is_empty() {
+                self.plan_empty()
+            } else {
+                parameter_plan()
+            };
+        }
+        // `bind_outer_row` sets an entity kind only for a caller that supplies
+        // the row, so its absence is a planner bug, not a user error.
+        let row = self.outer_row.as_ref().ok_or_else(|| {
+            anyhow!(
+                "internal error: subquery imports {entities:?} were bound to the outer row, \
+                 but no outer row was supplied"
+            )
+        })?;
+        let schema = row.schema();
+        let indices: Vec<usize> = schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                let name = f.name();
+                entities.iter().any(|e| {
+                    name == e
+                        || name
+                            .strip_prefix(e)
+                            .is_some_and(|rest| rest.starts_with('.'))
+                })
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let columns = row.project(&indices)?;
+        let entity_plan = datafusion::datasource::memory::MemorySourceConfig::try_new_exec(
+            &[vec![columns.clone()]],
+            columns.schema(),
+            None,
+        )?;
+        if parameters.is_empty() {
+            return Ok(entity_plan);
+        }
+        Ok(Arc::new(
+            datafusion::physical_plan::joins::CrossJoinExec::new(entity_plan, parameter_plan()?),
+        ))
+    }
+
     /// Plan a zero-length path binding.
     /// Converts a single node pattern `p = (a)` into a Path with one node and zero edges.
     fn plan_bind_zero_length_path(
@@ -7925,6 +8249,18 @@ pub(crate) fn collect_variable_kinds(
         | LogicalPlan::MultiplicityInsensitive { input: inner } => {
             collect_variable_kinds(inner, kinds);
         }
+        // An unbound import is a single parameter value, as an aliased
+        // projection of anything but a variable is (see `Project` below).
+        LogicalPlan::OuterRow { variables } => {
+            for v in variables {
+                let kind = match v.kind {
+                    ImportKind::Node => VariableKind::Node,
+                    ImportKind::Edge => VariableKind::Edge,
+                    ImportKind::Parameter => VariableKind::Opaque,
+                };
+                kinds.insert(v.name.clone(), kind);
+            }
+        }
         LogicalPlan::Scan { variable, .. }
         | LogicalPlan::FusedIndexScan { variable, .. }
         | LogicalPlan::ExtIdLookup { variable, .. }
@@ -8284,6 +8620,7 @@ fn collect_mutation_node_hints(plan: &LogicalPlan, hints: &mut Vec<String>) {
         | LogicalPlan::LocyModelInvoke { .. }
         | LogicalPlan::LocyGenerate { .. }
         | LogicalPlan::Empty
+        | LogicalPlan::OuterRow { .. }
         | LogicalPlan::CreateVectorIndex { .. }
         | LogicalPlan::CreateSparseIndex { .. }
         | LogicalPlan::CreateFullTextIndex { .. }
@@ -8415,6 +8752,7 @@ fn collect_mutation_edge_hints(plan: &LogicalPlan, hints: &mut Vec<String>) {
         | LogicalPlan::LocyModelInvoke { .. }
         | LogicalPlan::LocyGenerate { .. }
         | LogicalPlan::Empty
+        | LogicalPlan::OuterRow { .. }
         | LogicalPlan::CreateVectorIndex { .. }
         | LogicalPlan::CreateSparseIndex { .. }
         | LogicalPlan::CreateFullTextIndex { .. }
@@ -8675,6 +9013,16 @@ fn collect_plan_variables_into(plan: &LogicalPlan, out: &mut HashSet<String>) {
         } => {
             out.insert(variable.clone());
             collect_plan_variables_into(input, out);
+        }
+        LogicalPlan::OuterRow { variables } => {
+            for v in variables {
+                match v.kind {
+                    ImportKind::Node => insert_node_var(&v.name, out),
+                    ImportKind::Edge | ImportKind::Parameter => {
+                        out.insert(v.name.clone());
+                    }
+                }
+            }
         }
         // Wrapper nodes — pass their input's variables through.
         LogicalPlan::Filter { input, .. }
@@ -9648,10 +9996,13 @@ fn merge_unwind_in_filters(
     }
 }
 
-/// Returns `true` if `dt` is hashable directly by Arrow's HashJoinExec without
-/// any value transformation. When both join keys share such a dtype, we can
-/// skip the `tointeger` / `_cypher_sort_key` wrap entirely.
-fn is_hashable_native_dtype(dt: &DataType) -> bool {
+/// Returns `true` if Arrow's native equality on `dt` is exactly Cypher equality.
+///
+/// When both join keys share such a dtype the hash join can compare them as
+/// they are. Floats are excluded (Arrow's total order says `NaN = NaN` and
+/// `-0.0 <> 0.0`), and so are binary columns: a `LargeBinary` column holds
+/// `CypherValue` bytes, where `1` and `1.0` encode differently but are equal.
+fn is_exact_native_key_dtype(dt: &DataType) -> bool {
     matches!(
         dt,
         DataType::Boolean
@@ -9663,20 +10014,15 @@ fn is_hashable_native_dtype(dt: &DataType) -> bool {
             | DataType::UInt16
             | DataType::UInt32
             | DataType::UInt64
-            | DataType::Float32
-            | DataType::Float64
             | DataType::Utf8
             | DataType::LargeUtf8
-            | DataType::Binary
-            | DataType::LargeBinary
             | DataType::Date32
             | DataType::Date64
     )
 }
 
-/// Returns `true` if `dt` is one of the types `tointeger` UDF accepts as input
-/// (numeric primitives plus CV-encoded `LargeBinary`).
-fn tointeger_accepts_dtype(dt: &DataType) -> bool {
+/// Returns `true` for the Arrow integer types.
+fn is_integer_dtype(dt: &DataType) -> bool {
     matches!(
         dt,
         DataType::Int8
@@ -9687,10 +10033,37 @@ fn tointeger_accepts_dtype(dt: &DataType) -> bool {
             | DataType::UInt16
             | DataType::UInt32
             | DataType::UInt64
-            | DataType::Float32
-            | DataType::Float64
-            | DataType::LargeBinary
     )
+}
+
+/// The dtype classes a mixed-type equi-join may key through `_cypher_join_key`.
+///
+/// Every pair the key admits is compared, in the residual it re-checks, by
+/// Cypher equality or by Arrow numeric equality — the two semantics the key is
+/// complete for. Mixed pairs outside this set (a temporal column against a
+/// string, say) can be compared by an Arrow coercion the key does not model,
+/// so they keep the cross-join fallback.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JoinKeyDomain {
+    /// `LargeBinary`: a `CypherValue`, any kind at run time.
+    Dynamic,
+    /// Integer or float.
+    Numeric,
+    /// `Utf8` / `LargeUtf8`.
+    String,
+    /// `Boolean`.
+    Bool,
+}
+
+fn join_key_domain(dt: &DataType) -> Option<JoinKeyDomain> {
+    match dt {
+        DataType::LargeBinary => Some(JoinKeyDomain::Dynamic),
+        DataType::Float32 | DataType::Float64 => Some(JoinKeyDomain::Numeric),
+        dt if is_integer_dtype(dt) => Some(JoinKeyDomain::Numeric),
+        DataType::Utf8 | DataType::LargeUtf8 => Some(JoinKeyDomain::String),
+        DataType::Boolean => Some(JoinKeyDomain::Bool),
+        _ => None,
+    }
 }
 
 /// Wrap `expr` with a 1-arg scalar UDF that returns `return_dt`.
@@ -9711,49 +10084,88 @@ fn wrap_with_unary_udf(
     ))
 }
 
+/// One equi-pair lowered to hash-join keys.
+struct JoinKeyPair {
+    left: Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+    right: Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+    /// The keys only bucket candidates: equal values always share a key, but
+    /// unequal ones may too, so the original equality must be re-checked on
+    /// every candidate pair (as a join filter, so outer joins stay correct).
+    needs_recheck: bool,
+}
+
 /// Bilateral type unification for a HashJoin equi-pair.
 ///
-/// Strategy (in order of preference):
-/// 1. Same dtype + natively hashable → return both unchanged (fast path,
-///    e.g. `Utf8 = Utf8`, `Int64 = Int64`).
-/// 2. Both dtypes accepted by `tointeger` (numeric or CV-encoded
-///    `LargeBinary`) → wrap both in `tointeger` to unify on `Int64`. This is
-///    the original issue #53 behavior.
-/// 3. Otherwise (mixed string/CV/other Cypher types) → wrap both in
-///    `_cypher_sort_key`, which produces an order-preserving `LargeBinary`
-///    encoding that hashes equal iff the underlying Cypher values are equal.
+/// 1. Same dtype, and Arrow equality on it is exactly Cypher equality
+///    (integers, strings, booleans, dates) → keys used as they are.
+/// 2. Two integer dtypes → both cast to `Int64`. Exact: a `UInt64` above
+///    `i64::MAX` becomes a null key, and no `Int64` can equal it.
+/// 3. `Utf8` against `LargeUtf8` → both cast to `LargeUtf8`. Exact.
+/// 4. Any other pairing of `CypherValue`, numeric, string and boolean
+///    dtypes that can compare equal → both wrapped in `_cypher_join_key`, a
+///    bucket key under which equal values always collide, with
+///    `needs_recheck` set so the caller re-applies the original equality.
+///    This covers a `CypherValue` against a string (a correlated
+///    `MATCH (n {uid: row.uid})`), against a number, or against another
+///    `CypherValue`, and a float against a float or an integer.
+/// 5. Anything else → `None`, and the caller falls back to FilterExec over a
+///    CrossJoin, which compares with Cypher-aware UDFs. A pairing whose values
+///    can never compare equal (a string against a number) also lands here.
 ///
-/// Returns `None` only when the required UDFs aren't registered or a side's
-/// dtype can't be inferred — the caller falls back to FilterExec+CrossJoin.
+/// A single key that is equal exactly when Cypher equality holds does not
+/// exist for numbers: `cypher_eq` compares an integer with a float through
+/// `f64`, so it is not transitive above 2^53. Bucket-then-recheck is what
+/// makes the join answer identical to the filter answer.
 fn unify_join_key_types(
     left: Arc<dyn datafusion::physical_plan::PhysicalExpr>,
     right: Arc<dyn datafusion::physical_plan::PhysicalExpr>,
     left_schema: &Schema,
     right_schema: &Schema,
-    state: &SessionState,
-) -> Option<(
-    Arc<dyn datafusion::physical_plan::PhysicalExpr>,
-    Arc<dyn datafusion::physical_plan::PhysicalExpr>,
-)> {
+) -> Option<JoinKeyPair> {
+    use datafusion::physical_expr::expressions::CastExpr;
+
     let l_dt = left.data_type(left_schema).ok()?;
     let r_dt = right.data_type(right_schema).ok()?;
+    let exact = |left, right| {
+        Some(JoinKeyPair {
+            left,
+            right,
+            needs_recheck: false,
+        })
+    };
+    let cast = |expr, dt: DataType| -> Arc<dyn datafusion::physical_plan::PhysicalExpr> {
+        Arc::new(CastExpr::new(expr, dt, None))
+    };
 
-    if l_dt == r_dt && is_hashable_native_dtype(&l_dt) {
-        return Some((left, right));
+    if l_dt == r_dt && is_exact_native_key_dtype(&l_dt) {
+        return exact(left, right);
+    }
+    if is_integer_dtype(&l_dt) && is_integer_dtype(&r_dt) {
+        return exact(cast(left, DataType::Int64), cast(right, DataType::Int64));
+    }
+    if matches!(
+        (&l_dt, &r_dt),
+        (DataType::Utf8, DataType::LargeUtf8) | (DataType::LargeUtf8, DataType::Utf8)
+    ) {
+        return exact(
+            cast(left, DataType::LargeUtf8),
+            cast(right, DataType::LargeUtf8),
+        );
     }
 
-    if tointeger_accepts_dtype(&l_dt) && tointeger_accepts_dtype(&r_dt) {
-        let udf = state.scalar_functions().get("tointeger")?.clone();
-        return Some((
-            wrap_with_unary_udf(left, udf.clone(), DataType::Int64),
-            wrap_with_unary_udf(right, udf, DataType::Int64),
-        ));
+    let l_dom = join_key_domain(&l_dt)?;
+    let r_dom = join_key_domain(&r_dt)?;
+    let comparable =
+        l_dom == r_dom || l_dom == JoinKeyDomain::Dynamic || r_dom == JoinKeyDomain::Dynamic;
+    if !comparable {
+        return None;
     }
-
-    // Cross-domain unification (e.g. Utf8 ↔ LargeBinary CV-encoded) is not yet
-    // implemented at the HashJoin layer — fall through to FilterExec, which
-    // handles these via Cypher-aware comparison UDFs.
-    None
+    let udf = Arc::new(crate::query::df_udfs::create_cypher_join_key_udf());
+    Some(JoinKeyPair {
+        left: wrap_with_unary_udf(left, udf.clone(), DataType::LargeBinary),
+        right: wrap_with_unary_udf(right, udf, DataType::LargeBinary),
+        needs_recheck: true,
+    })
 }
 
 #[cfg(test)]

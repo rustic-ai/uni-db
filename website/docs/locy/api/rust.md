@@ -93,6 +93,28 @@ Helpers:
 - `result.derived_facts(rule_name)`
 - `result.iterations`
 
+## Profile Output (`LocyProfileOutput`)
+
+```rust
+let (result, profile) = session.locy_with(program).profile().await?;
+println!("{profile}");
+```
+
+`profile.profile.strata[i].rules[j].iterations[k]` is one rule's evaluation in one
+fixpoint pass: `delta_facts`, `elapsed_ms`, `planning_ms` / `plans` (clause bodies are
+re-planned every pass), and `operators`. Besides the physical-plan operators of the clause
+bodies, `operators` lists the steps that run outside a plan, with `actual_rows` = rows kept:
+
+- `LocyIsNotAntiJoin` (or `LocyIsNotComplement` under PROB) — one per `IS NOT` reference applied
+- `LocyFactDedup`, `LocyBestByMerge` or `LocyFoldMerge` — the fact merge, once per pass
+
+`result.metrics().physical_plans` counts every physical plan the program built.
+
+Note: `result.rows()` returns the rows of the first row-producing command in program order:
+a `QUERY`, an `ASSUME { ... } THEN { ... }` block (`CommandResult::Assume`), or a Cypher
+statement. The Python `rows` follows the same rule. Use `result.command_results()` to reach a
+specific command's result.
+
 ## Explain Output (`LocyExplainOutput`)
 
 ```rust

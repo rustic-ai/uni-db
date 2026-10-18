@@ -303,16 +303,23 @@ pub fn normalize_bm25(score: f32, fts_k: f32) -> f32 {
 
 /// Compute pure vector-vs-vector similarity (no storage access needed).
 ///
-/// Both values must be `Value::List` of numbers or `Value::Vector`.
+/// Both values must be `Value::List` of numbers or `Value::Vector`: the result
+/// is their cosine similarity. Two multi-vectors (lists of token vectors) score
+/// by MaxSim with a cosine per token, `v2` being the query and `v1` the
+/// document — the same score the multi-vector index ranks by.
 ///
-/// Uses f64 arithmetic throughout when both inputs are `Value::List`, preserving
-/// full precision for property-based vectors (e.g. in TCK and unit tests). For
-/// `Value::Vector` (pre-indexed f32 data) it falls back to the f32 path.
+/// The cosine is computed and returned in f64 whatever the input width. f32
+/// inputs (`Value::Vector`) are widened, never the result narrowed: rounding
+/// an exact 0.8 to f32 gives 0.800000011920929, which passes `> 0.8`.
 pub fn eval_similar_to_pure(v1: &Value, v2: &Value) -> Result<Value> {
     // NULL propagates: a NULL operand yields NULL, not an error. `values_to_array`
     // renders `Value::Null` as an Arrow null, matching 3VL semantics.
     if matches!(v1, Value::Null) || matches!(v2, Value::Null) {
         return Ok(Value::Null);
+    }
+    if let (Some(doc), Some(query)) = (as_multivector(v1), as_multivector(v2)) {
+        let score = maxsim(&query?, &doc?, &DistanceMetric::Cosine)?;
+        return Ok(Value::Float(f64::from(score)));
     }
     // Fast path: at least one input is a List — use f64 to avoid f32 precision loss.
     let has_list = matches!(v1, Value::List(_)) || matches!(v2, Value::List(_));
@@ -323,11 +330,26 @@ pub fn eval_similar_to_pure(v1: &Value, v2: &Value) -> Result<Value> {
         let sim = cosine_similarity_inner(&vec1, &vec2)?;
         return Ok(Value::Float(sim));
     }
-    // Fallback: f32 path for Value::Vector (indexed data already in f32).
+    // Fallback: `Value::Vector` operands (stored f32 data), widened to f64.
     let vec1 = value_to_f32_vec(v1)?;
     let vec2 = value_to_f32_vec(v2)?;
-    let sim = cosine_similarity(&vec1, &vec2)?;
-    Ok(Value::Float(sim as f64))
+    let sim = cosine_similarity_inner(&vec1, &vec2)?;
+    Ok(Value::Float(sim))
+}
+
+/// Reads `v` as a multi-vector: a non-empty list whose items are all vectors.
+///
+/// `None` when `v` is not one (a flat vector, a scalar list, an empty list);
+/// `Some(Err)` when an item is a list with a non-numeric element.
+fn as_multivector(v: &Value) -> Option<Result<Vec<Vec<f32>>, SimilarToError>> {
+    let Value::List(items) = v else {
+        return None;
+    };
+    let is_token = |item: &Value| matches!(item, Value::Vector(_) | Value::List(_));
+    if items.is_empty() || !items.iter().all(is_token) {
+        return None;
+    }
+    Some(items.iter().map(value_to_f32_vec).collect())
 }
 
 /// Compute the sparse dot product between two sparse vectors (no storage access).
@@ -690,6 +712,33 @@ mod tests {
             Value::Float(f) => assert!((f - 0.0).abs() < 1e-6),
             _ => panic!("Expected Float"),
         }
+    }
+
+    /// Two stored (f32) vectors with an exact cosine of 0.8 score exactly
+    /// 0.8 — not 0.8 rounded to f32, which exceeds 0.8.
+    #[test]
+    fn test_eval_similar_to_pure_vector_type_keeps_f64() {
+        let v1 = Value::Vector(vec![3.0, 4.0]);
+        let v2 = Value::Vector(vec![0.0, 1.0]);
+        assert_eq!(eval_similar_to_pure(&v1, &v2).unwrap(), Value::Float(0.8));
+    }
+
+    /// Two multi-vectors score by MaxSim, the second operand being the query.
+    #[test]
+    fn test_eval_similar_to_pure_multivector_is_maxsim() {
+        let tok = |x: f32, y: f32| Value::Vector(vec![x, y]);
+        let doc = Value::List(vec![tok(1.0, 0.0), tok(0.0, 1.0)]);
+        let query = Value::List(vec![tok(1.0, 0.0), tok(0.0, 1.0), tok(1.0, 0.0)]);
+        // Every query token finds an exact match: 1 + 1 + 1.
+        assert_eq!(
+            eval_similar_to_pure(&doc, &query).unwrap(),
+            Value::Float(3.0)
+        );
+        // Reversed, the two-token operand is the query: 1 + 1.
+        assert_eq!(
+            eval_similar_to_pure(&query, &doc).unwrap(),
+            Value::Float(2.0)
+        );
     }
 
     #[test]

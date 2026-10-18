@@ -579,6 +579,74 @@ pub fn multiply_prob_factors(
 // Unit tests
 // ---------------------------------------------------------------------------
 
+/// Applies a clause's negated `IS NOT` references to its body rows.
+///
+/// For each negated binding with a non-empty negated relation: a probabilistic
+/// complement column when both sides carry PROB (`prob_column` is the
+/// consuming rule's PROB column), the boolean anti-join otherwise. The
+/// recursive fixpoint and the non-recursive stratum loop both run exactly
+/// this, so it lives in one place.
+///
+/// When `ops` is `Some` (the `profile()` path), each application appends a
+/// synthetic operator — `LocyIsNotAntiJoin` or `LocyIsNotComplement` — with the
+/// rows it emitted and its wall time. Neither step is a physical-plan node, so
+/// without these entries the profile tree could not show them at all.
+///
+/// # Errors
+///
+/// Propagates the anti-join's and the complement's errors (an unresolvable
+/// negation key column fails rather than passing rows through).
+pub(crate) fn apply_negated_is_refs(
+    mut batches: Vec<RecordBatch>,
+    bindings: &[super::locy_fixpoint::IsRefBinding],
+    registry: &super::locy_fixpoint::DerivedScanRegistry,
+    prob_column: Option<&str>,
+    mut ops: Option<&mut Vec<crate::query::executor::core::OperatorStats>>,
+) -> datafusion::error::Result<Vec<RecordBatch>> {
+    for binding in bindings {
+        if !binding.negated || binding.anti_join_cols.is_empty() {
+            continue;
+        }
+        let Some(entry) = registry.get(binding.derived_scan_index) else {
+            continue;
+        };
+        let neg_facts = entry.data.read().clone();
+        if neg_facts.is_empty() {
+            continue;
+        }
+        let started = std::time::Instant::now();
+        let complement_into = match &binding.target_prob_col {
+            Some(prob_col) if binding.target_has_prob && prob_column.is_some() => Some(prob_col),
+            // `target_has_prob` without a PROB column on either side falls
+            // back to the boolean anti-join.
+            _ => None,
+        };
+        let name = if let Some(prob_col) = complement_into {
+            let complement_col = format!("__prob_complement_{}", binding.rule_name);
+            batches = apply_prob_complement_composite(
+                batches,
+                &neg_facts,
+                &binding.anti_join_cols,
+                prob_col,
+                &complement_col,
+            )?;
+            "LocyIsNotComplement"
+        } else {
+            batches = apply_anti_join_composite(batches, &neg_facts, &binding.anti_join_cols)?;
+            "LocyIsNotAntiJoin"
+        };
+        if let Some(ops) = ops.as_deref_mut() {
+            let rows = batches.iter().map(RecordBatch::num_rows).sum();
+            ops.push(super::locy_profile::synthetic_operator(
+                name,
+                rows,
+                started.elapsed(),
+            ));
+        }
+    }
+    Ok(batches)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

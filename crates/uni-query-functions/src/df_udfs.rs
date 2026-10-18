@@ -50,7 +50,9 @@ use super::expr_eval::{
     to_datafusion_err,
 };
 
+mod join_key;
 mod sort_key;
+pub use join_key::encode_cypher_join_key;
 pub use sort_key::encode_cypher_sort_key;
 
 /// Generate a Cypher scalar UDF whose shell is entirely mechanical.
@@ -221,6 +223,7 @@ pub fn register_cypher_udfs(ctx: &SessionContext) -> DFResult<()> {
     ctx.register_udf(create_temporal_property_udf());
     ctx.register_udf(create_tostring_udf());
     ctx.register_udf(create_cypher_sort_key_udf());
+    ctx.register_udf(create_cypher_join_key_udf());
     ctx.register_udf(create_has_null_udf());
     ctx.register_udf(create_cypher_size_udf());
 
@@ -2972,6 +2975,58 @@ cypher_scalar_udf! {
                     .map(|k| k.as_deref())
                     .collect::<Vec<Option<&[u8]>>>(),
             );
+            Ok(ColumnarValue::Array(Arc::new(array)))
+        }
+    }
+    }
+}
+
+// ============================================================================
+// _cypher_join_key(x) -> LargeBinary
+// Hash-join bucket key: equal Cypher values always share a key. Coarse by
+// design, so the join must re-check the original equality (see `join_key`).
+// ============================================================================
+
+cypher_scalar_udf! {
+    /// Build the `_cypher_join_key` UDF, the bucket key of a mixed-type equi-join.
+    ///
+    /// Every pair of values that compare equal maps to the same key; `null`
+    /// maps to a null key, which joins nothing. Distinct values may collide,
+    /// so a planner that keys a hash join on it must keep the original
+    /// equality as a join filter.
+    create_cypher_join_key_udf => CypherJoinKeyUdf,
+    name: "_cypher_join_key",
+    signature: Signature::any(1, Volatility::Immutable),
+    return_type: DataType::LargeBinary,
+    invoke(args) {
+    if args.args.len() != 1 {
+        return Err(datafusion::error::DataFusionError::Execution(
+            "_cypher_join_key(): requires 1 argument".to_string(),
+        ));
+    }
+
+    match &args.args[0] {
+        ColumnarValue::Scalar(s) => {
+            let val = if s.is_null() {
+                Value::Null
+            } else {
+                scalar_to_value(s)?
+            };
+            Ok(ColumnarValue::Scalar(ScalarValue::LargeBinary(
+                encode_cypher_join_key(&val),
+            )))
+        }
+        ColumnarValue::Array(arr) => {
+            let field = args.arg_fields.first().map(|f| f.as_ref());
+            let mut keys: Vec<Option<Vec<u8>>> = Vec::with_capacity(arr.len());
+            for i in 0..arr.len() {
+                keys.push(if arr.is_null(i) {
+                    None
+                } else {
+                    encode_cypher_join_key(&get_value_from_array(arr, i, field)?)
+                });
+            }
+            let array: LargeBinaryArray = keys.iter().map(|k| k.as_deref()).collect();
             Ok(ColumnarValue::Array(Arc::new(array)))
         }
     }

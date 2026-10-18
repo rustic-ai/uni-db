@@ -148,7 +148,11 @@ RETURN DISTINCT b
 When you genuinely need paths:
 
 - **`shortestPath`** stops at the first path it finds — use it whenever one path
-  will do.
+  will do. An unbound target (`shortestPath((a {id: 0})-[:R*]->(b:Person))`)
+  runs one search from each source, shared by all its targets, and a `WHERE`
+  on the target alone (`WHERE b.age > 30`) narrows the targets before the
+  search. When several shortest paths tie, which one is returned is not
+  guaranteed.
 - **A `LIMIT` stops the expansion**, rather than trimming its output, so a small
   limit costs little. Two caveats: the graph search still runs in full, and the
   limit applies one batch (8192 rows) at a time, so any limit up to 8192 costs

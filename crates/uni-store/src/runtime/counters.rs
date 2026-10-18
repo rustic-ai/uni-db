@@ -62,6 +62,9 @@ pub struct QueryCounters {
     fts_index_scans: AtomicU64,
     searches_reported: AtomicU64,
     subquery_executions: AtomicU64,
+    physical_plans: AtomicU64,
+    planning_nanos: AtomicU64,
+    shortest_path_searches: AtomicU64,
 }
 
 /// Which kind of index a search consulted.
@@ -263,6 +266,43 @@ impl QueryCounters {
         self.subquery_executions.load(Ordering::Relaxed)
     }
 
+    /// Records one physical plan built, and the wall time it took.
+    ///
+    /// Raised by every `HybridPhysicalPlanner::plan` call that carries these
+    /// counters: the query's own plan, and each sub-plan built at execution
+    /// time — a correlated subquery's body once per outer row, a Locy clause
+    /// body once per fixpoint iteration. The count is what makes a per-row or
+    /// per-iteration re-plan visible; the time is what it costs.
+    pub fn add_physical_plan(&self, elapsed: std::time::Duration) {
+        self.physical_plans.fetch_add(1, Ordering::Relaxed);
+        let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
+        self.planning_nanos.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    /// Physical plans built, including execution-time sub-plans.
+    pub fn physical_plans(&self) -> u64 {
+        self.physical_plans.load(Ordering::Relaxed)
+    }
+
+    /// Wall time spent building those plans, in nanoseconds.
+    pub fn planning_nanos(&self) -> u64 {
+        self.planning_nanos.load(Ordering::Relaxed)
+    }
+
+    /// Records one breadth-first search started by a shortest-path operator.
+    ///
+    /// One per source the operator searches from, however many targets that
+    /// search then answers. Rows sharing a source share a search, so a count
+    /// that grows with the number of *targets* is a search per row (A8).
+    pub fn add_shortest_path_search(&self) {
+        self.shortest_path_searches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Searches started by shortest-path operators.
+    pub fn shortest_path_searches(&self) -> u64 {
+        self.shortest_path_searches.load(Ordering::Relaxed)
+    }
+
     /// Folds another counter set into this one.
     ///
     /// Used where a query fans out into sub-executions that each carry their own
@@ -291,6 +331,12 @@ impl QueryCounters {
             .fetch_add(other.fts_index_scans(), Ordering::Relaxed);
         self.searches_reported
             .fetch_add(other.searches_reported(), Ordering::Relaxed);
+        self.physical_plans
+            .fetch_add(other.physical_plans(), Ordering::Relaxed);
+        self.planning_nanos
+            .fetch_add(other.planning_nanos(), Ordering::Relaxed);
+        self.shortest_path_searches
+            .fetch_add(other.shortest_path_searches(), Ordering::Relaxed);
     }
 
     /// Resets every counter to zero, for reuse across executions.
@@ -308,6 +354,9 @@ impl QueryCounters {
         self.fts_index_scans.store(0, Ordering::Relaxed);
         self.searches_reported.store(0, Ordering::Relaxed);
         self.subquery_executions.store(0, Ordering::Relaxed);
+        self.physical_plans.store(0, Ordering::Relaxed);
+        self.planning_nanos.store(0, Ordering::Relaxed);
+        self.shortest_path_searches.store(0, Ordering::Relaxed);
     }
 
     /// A by-value copy of every counter, for handing across a crate boundary.
@@ -333,6 +382,9 @@ impl QueryCounters {
             fts_index_scans: self.fts_index_scans(),
             searches_reported: self.searches_reported(),
             subquery_executions: self.subquery_executions(),
+            physical_plans: self.physical_plans(),
+            planning_nanos: self.planning_nanos(),
+            shortest_path_searches: self.shortest_path_searches(),
         }
     }
 }
@@ -367,6 +419,12 @@ pub struct CounterSnapshot {
     pub searches_reported: u64,
     /// Sub-plan executions performed by per-row expression fallbacks (#206).
     pub subquery_executions: u64,
+    /// Physical plans built, including execution-time sub-plans.
+    pub physical_plans: u64,
+    /// Wall time spent building those plans, in nanoseconds.
+    pub planning_nanos: u64,
+    /// Searches started by shortest-path operators.
+    pub shortest_path_searches: u64,
 }
 
 #[cfg(test)]
@@ -458,6 +516,8 @@ mod tests {
         b.add_search(SearchKind::Vector, true);
         b.add_search(SearchKind::FullText, true);
         b.add_subquery_execution();
+        b.add_physical_plan(std::time::Duration::from_nanos(7));
+        b.add_shortest_path_search();
         a.merge_from(&b);
 
         let m = a.snapshot();
@@ -477,6 +537,9 @@ mod tests {
                 fts_index_scans: 1,
                 searches_reported: 2,
                 subquery_executions: 1,
+                physical_plans: 1,
+                planning_nanos: 7,
+                shortest_path_searches: 1,
             },
             "a counter is missing from merge_from"
         );

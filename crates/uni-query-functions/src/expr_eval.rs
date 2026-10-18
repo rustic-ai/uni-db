@@ -2253,7 +2253,13 @@ fn lane_to_u8(lane: f64) -> Result<u8> {
 }
 
 /// Evaluate vector similarity between two vectors (cosine similarity).
+///
+/// A NULL operand (a node without the vector) yields NULL, as in
+/// [`crate::similar_to::eval_similar_to_pure`].
 pub fn eval_vector_similarity(v1: &Value, v2: &Value) -> Result<Value> {
+    if v1.is_null() || v2.is_null() {
+        return Ok(Value::Null);
+    }
     let arr1 = vector_arg_to_f64(v1)?;
     let arr2 = vector_arg_to_f64(v2)?;
 
@@ -2288,7 +2294,13 @@ pub fn eval_vector_similarity(v1: &Value, v2: &Value) -> Result<Value> {
 }
 
 /// Evaluate vector distance between two vectors.
+///
+/// A NULL operand (a node without the vector) yields NULL rather than an
+/// error, matching `vector_similarity`.
 pub fn eval_vector_distance(v1: &Value, v2: &Value, metric: &str) -> Result<Value> {
+    if v1.is_null() || v2.is_null() {
+        return Ok(Value::Null);
+    }
     let arr1 = vector_arg_to_f64(v1)?;
     let arr2 = vector_arg_to_f64(v2)?;
 
@@ -2931,6 +2943,26 @@ mod tests {
     /// Helper to create int values in tests (replaces json!(i))
     fn i(v: i64) -> Value {
         Value::Int(v)
+    }
+
+    /// A NULL operand is NULL for both vector functions, not an error.
+    #[test]
+    fn test_vector_functions_propagate_null() {
+        let v = Value::List(vec![Value::Float(1.0), Value::Float(0.0)]);
+        for metric in ["cosine", "l2", "dot"] {
+            assert_eq!(
+                eval_vector_distance(&Value::Null, &v, metric).unwrap(),
+                Value::Null
+            );
+            assert_eq!(
+                eval_vector_distance(&v, &Value::Null, metric).unwrap(),
+                Value::Null
+            );
+        }
+        assert_eq!(
+            eval_vector_similarity(&Value::Null, &v).unwrap(),
+            Value::Null
+        );
     }
 
     #[test]

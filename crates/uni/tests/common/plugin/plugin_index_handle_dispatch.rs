@@ -13,9 +13,13 @@
 //! Positive test: register a `CountingHandle` that returns a single
 //! hand-picked vid + distance and asserts (a) the handle's `probe` ran
 //! exactly once during query execution, and (b) the row count reflects
-//! the handle's filtering rather than the native L2 path's "everything
-//! above threshold". The native path against query `[1.0, 0.0]` over
-//! `(A=[1,0], B=[0,1])` returns both rows; the handle returns only `B`.
+//! the handle's answer rather than the native path's. The native top-K
+//! against query `[1.0, 0.0]` over `(A=[1,0], B=[0,1])` returns both rows;
+//! the handle returns only `B`.
+//!
+//! The probe is reached through `n.embedding ~= q`, the top-K index scan.
+//! A `vector_similarity(...) > t` threshold is a per-row filter and never
+//! consults an index, native or plugin.
 //!
 //! Negative test (regression guard): do NOT register a handle; the
 //! native `StorageManager::vector_search` path runs and returns both
@@ -152,8 +156,8 @@ async fn seed_db() -> anyhow::Result<(Arc<Uni>, i64, i64)> {
 async fn plugin_handle_dispatched_when_registered() -> anyhow::Result<()> {
     let (db, _vid_a, vid_b) = seed_db().await?;
 
-    // Register a handle that returns only B; the native L2 path against
-    // `[1.0, 0.0]` would return A *and* B above the 0.0 threshold.
+    // Register a handle that returns only B; the native top-K against
+    // `[1.0, 0.0]` would return A *and* B.
     let handle = Arc::new(CountingHandle::new(vec![(vid_b, 0.05)]));
     let probe_counter = Arc::clone(&handle.probe_count);
     db.plugin_registry().register_index_handle(
@@ -166,7 +170,7 @@ async fn plugin_handle_dispatched_when_registered() -> anyhow::Result<()> {
         .session()
         .query(
             "MATCH (n:Item) \
-             WHERE vector_similarity(n.embedding, [1.0, 0.0]) > 0.0 \
+             WHERE n.embedding ~= [1.0, 0.0] \
              RETURN n.name AS name",
         )
         .await?;
@@ -195,22 +199,17 @@ async fn no_plugin_handle_falls_through_to_native_path() -> anyhow::Result<()> {
     let (db, _vid_a, _vid_b) = seed_db().await?;
 
     // Do NOT register a handle for `idx_item_embed`. The native vector
-    // backend should answer the probe and return both rows above the
-    // 0.0 threshold.
+    // backend should answer the probe and return both rows (top-K of 2).
     let res = db
         .session()
         .query(
             "MATCH (n:Item) \
-             WHERE vector_similarity(n.embedding, [1.0, 0.0]) > 0.0 \
+             WHERE n.embedding ~= [1.0, 0.0] \
              RETURN n.name AS name ORDER BY name",
         )
         .await?;
 
-    assert_eq!(
-        res.len(),
-        2,
-        "native path should return both Items above the 0.0 similarity threshold"
-    );
+    assert_eq!(res.len(), 2, "native top-K should return both Items");
 
     Ok(())
 }

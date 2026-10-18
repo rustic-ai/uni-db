@@ -317,12 +317,21 @@ impl LocyResult {
         self.derived.get(rule)
     }
 
-    /// Get rows from the first Query command result.
+    /// Get rows from the first row-producing command result.
+    ///
+    /// Row-producing commands are `QUERY`, `ASSUME … THEN { … }` and Cypher
+    /// statements, taken in program order. The Python binding's `rows` follows
+    /// the same rule. Use [`Self::command_results`] to reach a specific command.
     pub fn rows(&self) -> Option<&Vec<FactRow>> {
-        self.command_results.iter().find_map(|cr| cr.as_query())
+        self.command_results.iter().find_map(|cr| match cr {
+            CommandResult::Query(rows)
+            | CommandResult::Assume(rows)
+            | CommandResult::Cypher(rows) => Some(rows),
+            _ => None,
+        })
     }
 
-    /// Get column names from the first Query command result's first row.
+    /// Get column names from the first row-producing command result's first row.
     ///
     /// Column names are returned in deterministic (sorted) order. The
     /// underlying [`FactRow`] is a `HashMap`, whose iteration order is

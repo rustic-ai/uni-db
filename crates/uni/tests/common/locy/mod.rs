@@ -2,6 +2,7 @@ pub mod btic_cypher_test;
 pub mod locy_assume_module_context;
 pub mod locy_assume_params;
 pub mod locy_derive_visibility;
+pub mod locy_entity_hydration;
 pub mod locy_fold_having;
 pub mod locy_fold_property_key;
 pub mod locy_fold_related_repro;
@@ -50,6 +51,9 @@ pub mod locy_issue_294_parallel_edge_fold;
 // Issue #301: recursive rule cost tracks the frontier, not the relation
 // (cost guard, correctness cases, and an #[ignore] measurement probe).
 pub mod locy_issue_301_fixpoint_delta;
+// P4 (2026-10-17 perf-class audit): anchoring on the walk's target (A1b), on a
+// lower-stratum reference (A2), and the node a reference binds.
+pub mod locy_anchor_target_cross_stratum;
 // Issue #160: QUERY (SLG) and derived (fixpoint) diverge when an IS-ref
 // introduces a variable binding the MATCH pattern does not provide.
 pub mod locy_issue_160_query_derived_parity;

@@ -1033,15 +1033,36 @@ impl<'a> LocyEngine<'a> {
 
         let evaluation_time = start.elapsed();
 
-        // 9. Build derived map, enrich VID columns with full nodes
-        let mut base_derived: HashMap<String, Vec<FactRow>> = native_store
-            .rule_names()
-            .filter_map(|name| {
-                native_store
-                    .get(name)
-                    .map(|batches| (name.to_string(), record_batches_to_locy_rows(batches)))
-            })
-            .collect();
+        // 9. Build the returned derived map, every rule hydrated.
+        //
+        // `LocyResult::derived` is public and holds every rule's facts, returned
+        // by a command or not, so every rule is hydrated (the Python binding
+        // converts the whole map too). The command store above holds exactly
+        // these rows, already hydrated, and no command can change it. What a
+        // command can change is the graph: DERIVE writes, and the entities the
+        // facts name are then read in their post-DERIVE state. So the store is
+        // reused unless the program DERIVEs, in which case hydration runs again
+        // after the commands, as it always did. (ASSUME and ABDUCE write only
+        // to a hypothetical overlay that is discarded before this point.)
+        let commands_may_write = compiled
+            .commands
+            .iter()
+            .any(|c| matches!(c, CompiledCommand::DeriveCommand(_)));
+        let mut base_derived: HashMap<String, Vec<FactRow>> = if commands_may_write {
+            native_store
+                .rule_names()
+                .filter_map(|name| {
+                    native_store
+                        .get(name)
+                        .map(|batches| (name.to_string(), record_batches_to_locy_rows(batches)))
+                })
+                .collect()
+        } else {
+            orch_store
+                .into_iter()
+                .map(|(name, relation)| (name, relation.rows))
+                .collect()
+        };
 
         // Stamp _approximate on facts in rules that had BDD fallback groups.
         let approximate_groups = approximate_slot
@@ -1058,20 +1079,25 @@ impl<'a> LocyEngine<'a> {
             }
         }
 
-        let (enriched_derived, hydration_warnings) = enrich_vids_with_nodes(
-            self.db,
-            &native_store,
-            &compiled.rule_catalog,
-            base_derived,
-            planner.graph_ctx(),
-            planner.session_ctx(),
-        )
-        .await;
-        if !hydration_warnings.is_empty()
-            && let Ok(mut w) = warnings_slot.write()
-        {
-            w.extend(hydration_warnings);
-        }
+        let enriched_derived = if commands_may_write {
+            let (enriched, hydration_warnings) = enrich_vids_with_nodes(
+                self.db,
+                &native_store,
+                &compiled.rule_catalog,
+                base_derived,
+                planner.graph_ctx(),
+                planner.session_ctx(),
+            )
+            .await;
+            if !hydration_warnings.is_empty()
+                && let Ok(mut w) = warnings_slot.write()
+            {
+                w.extend(hydration_warnings);
+            }
+            enriched
+        } else {
+            base_derived
+        };
 
         // 10. Build DerivedFactSet from collected derives (session path only)
         let derived_fact_set = if !collected_derives.is_empty() {
@@ -1282,6 +1308,25 @@ impl<'a> NativeExecutionAdapter<'a> {
             .unwrap_or_else(|| self.db.storage.clone())
     }
 
+    /// The context an entity lookup scans through: the fixpoint's, on the
+    /// storage [`Self::execute_query_ast`] reads (pinned to the transaction's
+    /// snapshot when one is installed), so a lookup and a Cypher read of the
+    /// same entity see the same version.
+    fn lookup_ctx(&self) -> Arc<uni_query::query::df_graph::GraphExecutionContext> {
+        let storage = self.effective_storage();
+        if Arc::ptr_eq(&storage, self.graph_ctx.storage()) {
+            return self.graph_ctx.clone();
+        }
+        Arc::new(carry_budget(
+            uni_query::query::df_graph::GraphExecutionContext::with_l0_context(
+                storage,
+                self.graph_ctx.l0_context().clone(),
+                self.graph_ctx.property_manager().clone(),
+            ),
+            &self.graph_ctx,
+        ))
+    }
+
     /// Execute a Query AST via execute_subplan, reusing the fixpoint contexts.
     async fn execute_query_ast(
         &self,
@@ -1473,7 +1518,7 @@ impl LocyExecutionContext for NativeExecutionAdapter<'_> {
         let rows = record_batches_to_locy_rows(batches);
         let edge_columns = uni_locy::entity_columns::edge_columns(&self.compiled.rule_catalog);
         let id_columns = entity_id_columns(batches, edge_columns.get(rule_name));
-        let mut resolved: HashMap<EntityKind, HashMap<i64, Value>> = HashMap::new();
+        let mut maps: HashMap<EntityKind, HashMap<i64, Value>> = HashMap::new();
         for kind in [EntityKind::Node, EntityKind::Edge] {
             let columns: HashSet<String> = id_columns
                 .iter()
@@ -1490,24 +1535,35 @@ impl LocyExecutionContext for NativeExecutionAdapter<'_> {
             let lookup_error = |message: String| LocyError::EvaluationError {
                 message: format!("hydrating rule '{rule_name}': {message}"),
             };
-            let ast = uni_cypher::parse(&entity_lookup_query(&ids, kind))
-                .map_err(|e| lookup_error(e.to_string()))?;
-            let batches = self.execute_query_ast(ast).await?;
-            let mut map = HashMap::new();
-            for row in record_batches_to_locy_rows(&batches) {
-                if let (Some(Value::Int(id)), Some(entity)) = (row.get("_id"), row.get("entity")) {
-                    map.insert(*id, entity.clone());
+            let map = match kind {
+                EntityKind::Node => lookup_vertices(&ids, &self.lookup_ctx(), &self.session_ctx)
+                    .await
+                    .map_err(lookup_error)?,
+                EntityKind::Edge => {
+                    let ast = uni_cypher::parse(&entity_lookup_query(&ids, kind))
+                        .map_err(|e| lookup_error(e.to_string()))?;
+                    let batches = self.execute_query_ast(ast).await?;
+                    let mut map = HashMap::new();
+                    for row in record_batches_to_locy_rows(&batches) {
+                        if let (Some(Value::Int(id)), Some(entity)) =
+                            (row.get("_id"), row.get("entity"))
+                        {
+                            map.insert(*id, entity.clone());
+                        }
+                    }
+                    map
                 }
-            }
-            if map.len() < ids.len() {
+            };
+            let found = ids.iter().filter(|id| map.contains_key(id)).count();
+            if found < ids.len() {
                 return Err(lookup_error(format!(
-                    "resolved {}/{} entities",
-                    map.len(),
+                    "resolved {found}/{} entities",
                     ids.len()
                 )));
             }
-            resolved.insert(kind, map);
+            maps.insert(kind, map);
         }
+        let resolved = maps.iter().map(|(kind, map)| (*kind, map)).collect();
         Ok(substitute_entities(rows, &id_columns, &resolved))
     }
 
@@ -1702,7 +1758,7 @@ impl LocyExecutionContext for NativeExecutionAdapter<'_> {
             .map(|(k, v)| (k.clone(), v.rows.clone()))
             .collect();
 
-        // Enrichment resolves each vid by running `MATCH (n) WHERE id(n) IN [...]`.
+        // Enrichment resolves each vid by scanning exactly those vertices (`lookup_vertices`).
         // It MUST read through the same hypothetical `locy_l0` overlay the fixpoint
         // just used — otherwise a node created only inside this ASSUME/ABDUCE block
         // (which lives in the forked overlay, not base storage) is not found, the
@@ -1974,6 +2030,18 @@ impl NativeExecutionAdapter<'_> {
         if ids.is_empty() {
             return Ok(HashMap::new());
         }
+        if kind == EntityKind::Node {
+            return lookup_vertices(&ids, &self.lookup_ctx(), &self.session_ctx)
+                .await
+                .map(|map| {
+                    map.into_iter()
+                        .filter_map(|(id, node)| u64::try_from(id).ok().map(|id| (id, node)))
+                        .collect()
+                })
+                .map_err(|message| LocyError::EvaluationError {
+                    message: format!("entity lookup failed: {message}"),
+                });
+        }
         let ast = uni_cypher::parse(&entity_lookup_query(&ids, kind)).map_err(|e| {
             LocyError::EvaluationError {
                 message: format!("entity lookup failed to parse: {e}"),
@@ -2004,7 +2072,7 @@ enum EntityKind {
 fn substitute_entities(
     rows: Vec<FactRow>,
     columns: &HashMap<String, EntityKind>,
-    resolved: &HashMap<EntityKind, HashMap<i64, Value>>,
+    resolved: &HashMap<EntityKind, &HashMap<i64, Value>>,
 ) -> Vec<FactRow> {
     rows.into_iter()
         .map(|row| {
@@ -2029,7 +2097,7 @@ fn substitute_entities(
 
 /// Minimum wall-clock budget granted to a VID hydration lookup.
 ///
-/// Hydration is bounded work — one `id(n) IN [...]` lookup over a known VID
+/// Hydration is bounded work — one lookup per entity kind over a known ID
 /// list — but it runs *after* the fixpoint, so it inherits whatever is left of
 /// the evaluation deadline. A fixpoint that consumed the budget used to leave
 /// hydration racing a few microseconds, and the resulting timeout was swallowed:
@@ -2041,10 +2109,14 @@ const VID_HYDRATION_MIN_BUDGET: Duration = Duration::from_secs(30);
 
 /// Resolve `ids` to entities of `kind` with one Cypher lookup.
 ///
+/// Used for relationships only; nodes go through [`lookup_vertices`]. IDs that
+/// do not resolve are absent from the map, and the caller decides per rule
+/// whether that is a failure.
+///
 /// # Errors
 ///
 /// Returns a description of the failure if the lookup cannot be planned or
-/// run, or resolves fewer entities than it was given.
+/// run.
 async fn lookup_entities(
     db: &crate::api::UniInner,
     ids: &HashSet<i64>,
@@ -2084,12 +2156,99 @@ async fn lookup_entities(
             resolved.insert(*id, entity.clone());
         }
     }
-    if resolved.len() < ids.len() {
-        return Err(format!(
-            "{what} lookup resolved {}/{} entities",
-            resolved.len(),
-            ids.len()
-        ));
+    Ok(resolved)
+}
+
+/// Resolve VIDs to `Value::Node`s by scanning exactly those vertices.
+///
+/// This is the same scan `MATCH (entity) WHERE id(entity) IN [...] RETURN
+/// entity` plans — a label-less vertex scan with the VID list pushed down to
+/// Lance and to L0 — without the two costs that statement adds on top. The
+/// statement had to be parsed with every VID as a literal (130 ms for 8k VIDs),
+/// and its residual `FilterExec` re-evaluated the `IN` per row against the
+/// whole list, O(N²): 38.6 ms → 585.8 ms for 2k → 8k VIDs while the scan
+/// beneath it went 5.7 ms → 19.6 ms. The scan already returns only the listed
+/// VIDs, and a filter can only remove rows, so dropping it changes no answer:
+/// anything not asked for is ignored when the result is substituted.
+///
+/// The node is built the way the Cypher read path builds it: the scan's
+/// `_vid`, `_labels` and `_all_props` columns, decoded by `arrow_to_value`, as
+/// an entity map canonicalised by [`Value::canonical_entity`]. Visibility is
+/// the scan's, so `graph_ctx` decides it: its L0 chain (transaction and
+/// hypothetical overlays included), its storage (pinned snapshot, fork branch)
+/// and its tombstones.
+///
+/// # Errors
+///
+/// Returns a description of the failure if the scan cannot run or its output
+/// cannot be decoded. VIDs that do not resolve are absent from the map.
+async fn lookup_vertices(
+    ids: &HashSet<i64>,
+    graph_ctx: &Arc<uni_query::query::df_graph::GraphExecutionContext>,
+    session_ctx: &Arc<parking_lot::RwLock<datafusion::prelude::SessionContext>>,
+) -> std::result::Result<HashMap<i64, Value>, String> {
+    use datafusion::physical_plan::ExecutionPlan;
+    use uni_query::query::df_graph::{GraphScanExec, ReadSetRecordingExec};
+
+    const VARIABLE: &str = "entity";
+    let vids: Vec<u64> = ids
+        .iter()
+        .filter_map(|&id| u64::try_from(id).ok())
+        .collect();
+    if vids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let scan: Arc<dyn ExecutionPlan> = Arc::new(
+        GraphScanExec::new_schemaless_all_scan(
+            graph_ctx.clone(),
+            VARIABLE,
+            vec!["_all_props".to_string()],
+            None,
+        )
+        .with_vid_list_filter(vids),
+    );
+    // Inside a transaction the planner wraps every scan so the rows it returns
+    // join the SSI read set; this read is no exception.
+    let records_reads = graph_ctx
+        .l0_context()
+        .transaction_l0
+        .as_ref()
+        .is_some_and(|l0| l0.read().occ_read_set.is_some());
+    let plan: Arc<dyn ExecutionPlan> = if records_reads {
+        Arc::new(ReadSetRecordingExec::new(scan, graph_ctx.clone(), VARIABLE))
+    } else {
+        scan
+    };
+    let task_ctx = session_ctx.read().task_ctx();
+    let batches = datafusion::physical_plan::collect(plan, task_ctx)
+        .await
+        .map_err(|e| format!("VID lookup failed to execute: {e}"))?;
+
+    let mut resolved = HashMap::with_capacity(ids.len());
+    for batch in &batches {
+        let column = |field: &str| {
+            batch
+                .column_by_name(&format!("{VARIABLE}.{field}"))
+                .ok_or_else(|| format!("VID lookup: scan output lacks `{VARIABLE}.{field}`"))
+        };
+        let (vid_col, labels_col, props_col) =
+            (column("_vid")?, column("_labels")?, column("_all_props")?);
+        for row in 0..batch.num_rows() {
+            let decode = |col: &arrow_array::ArrayRef| {
+                uni_store::storage::arrow_convert::arrow_to_value(col.as_ref(), row, None)
+                    .map_err(|e| format!("VID lookup failed to decode: {e}"))
+            };
+            let vid = decode(vid_col)?;
+            let Value::Int(id) = vid else {
+                return Err(format!("VID lookup: `_vid` decoded as {vid:?}"));
+            };
+            let entity = HashMap::from([
+                ("_vid".to_string(), vid),
+                ("_labels".to_string(), decode(labels_col)?),
+                ("_all_props".to_string(), decode(props_col)?),
+            ]);
+            resolved.insert(id, Value::Map(entity).canonical_entity());
+        }
     }
     Ok(resolved)
 }
@@ -2128,32 +2287,78 @@ async fn enrich_vids_with_nodes(
             _ => graph_ctx.clone(),
         };
 
-    for (name, rows) in derived {
-        let id_columns = entity_id_columns(
-            native_store.get(&name).map_or(&[][..], Vec::as_slice),
-            edge_columns.get(&name),
-        );
+    // Every rule's ID columns, then the union of every rule's IDs per kind: one
+    // lookup per kind for the whole store rather than one per rule, so a vertex
+    // that several rules derive is read once.
+    let id_columns: HashMap<String, HashMap<String, EntityKind>> = derived
+        .keys()
+        .map(|name| {
+            let columns = entity_id_columns(
+                native_store.get(name).map_or(&[][..], Vec::as_slice),
+                edge_columns.get(name),
+            );
+            (name.clone(), columns)
+        })
+        .collect();
+    let ids_of = |rows: &[FactRow], columns: &HashMap<String, EntityKind>, kind: EntityKind| {
+        let of_kind: HashSet<String> = columns
+            .iter()
+            .filter(|(_, k)| **k == kind)
+            .map(|(c, _)| c.clone())
+            .collect();
+        unique_vids_in(rows, &of_kind)
+    };
+    let mut wanted: HashMap<EntityKind, HashSet<i64>> = HashMap::new();
+    for (name, rows) in &derived {
+        for kind in [EntityKind::Node, EntityKind::Edge] {
+            let ids = ids_of(rows, &id_columns[name], kind);
+            if !ids.is_empty() {
+                wanted.entry(kind).or_default().extend(ids);
+            }
+        }
+    }
+    let mut lookups: HashMap<EntityKind, std::result::Result<HashMap<i64, Value>, String>> =
+        HashMap::new();
+    for (kind, ids) in &wanted {
+        let lookup = match kind {
+            EntityKind::Node => lookup_vertices(ids, &enrich_ctx, session_ctx).await,
+            EntityKind::Edge => lookup_entities(db, ids, *kind, &enrich_ctx, session_ctx).await,
+        };
+        lookups.insert(*kind, lookup);
+    }
 
-        let mut resolved: HashMap<EntityKind, HashMap<i64, Value>> = HashMap::new();
+    for (name, rows) in derived {
+        let columns = &id_columns[&name];
+        let mut resolved: HashMap<EntityKind, &HashMap<i64, Value>> = HashMap::new();
         // Why every failure is recorded: an unhydrated rule is indistinguishable
         // from an empty one to a caller doing `hasattr(r, "properties")`, so a
         // swallowed error here reads downstream as "no rows matched".
         let mut failures: Vec<String> = Vec::new();
         for kind in [EntityKind::Node, EntityKind::Edge] {
-            let columns: HashSet<String> = id_columns
-                .iter()
-                .filter(|(_, k)| **k == kind)
-                .map(|(c, _)| c.clone())
-                .collect();
-            let ids = unique_vids_in(&rows, &columns);
+            let ids = ids_of(&rows, columns, kind);
             if ids.is_empty() {
                 continue;
             }
-            match lookup_entities(db, &ids, kind, &enrich_ctx, session_ctx).await {
-                Ok(map) => {
-                    resolved.insert(kind, map);
+            let what = match kind {
+                EntityKind::Node => "VID",
+                EntityKind::Edge => "EID",
+            };
+            match lookups.get(&kind) {
+                // All or nothing per rule and kind, as when each rule ran its
+                // own lookup: a rule is never returned half hydrated.
+                Some(Ok(map)) => {
+                    let found = ids.iter().filter(|id| map.contains_key(id)).count();
+                    if found == ids.len() {
+                        resolved.insert(kind, map);
+                    } else {
+                        failures.push(format!(
+                            "{what} lookup resolved {found}/{} entities",
+                            ids.len()
+                        ));
+                    }
                 }
-                Err(message) => failures.push(message),
+                Some(Err(message)) => failures.push(message.clone()),
+                None => failures.push(format!("{what} lookup did not run")),
             }
         }
 
@@ -2168,7 +2373,8 @@ async fn enrich_vids_with_nodes(
             });
         }
 
-        enriched.insert(name, substitute_entities(rows, &id_columns, &resolved));
+        let rows = substitute_entities(rows, columns, &resolved);
+        enriched.insert(name, rows);
     }
 
     (enriched, warnings)

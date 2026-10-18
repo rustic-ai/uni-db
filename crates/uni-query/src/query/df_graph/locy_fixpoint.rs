@@ -18,7 +18,9 @@ use crate::query::df_graph::locy_explain::{
 };
 use crate::query::df_graph::locy_fold::{FoldBinding, FoldExec};
 use crate::query::df_graph::locy_priority::PriorityExec;
-use crate::query::df_graph::locy_profile::LocyProfileCollector;
+use crate::query::df_graph::locy_profile::{
+    LocyProfileCollector, PlanningMark, synthetic_operator,
+};
 use crate::query::df_graph::locy_program::interruption;
 use crate::query::executor::core::OperatorStats;
 use crate::query::planner::LogicalPlan;
@@ -2091,6 +2093,7 @@ async fn run_fixpoint_loop(
             // Profiling (profile() path only): time this rule's evaluation in
             // this iteration and accumulate the clause-body operator trees.
             let rule_start = Instant::now();
+            let plan_mark = PlanningMark::take(graph_ctx.counters());
             let mut iter_ops: Vec<OperatorStats> = Vec::new();
             for clause in &rule.clauses {
                 // Issue #301: a clause that reads nothing of this stratum —
@@ -2127,44 +2130,13 @@ async fn run_fixpoint_loop(
                 )
                 .await?;
                 // Apply negated IS-ref semantics: probabilistic complement or anti-join.
-                for binding in &clause.is_ref_bindings {
-                    if binding.negated
-                        && !binding.anti_join_cols.is_empty()
-                        && let Some(entry) = registry.get(binding.derived_scan_index)
-                    {
-                        let neg_facts = entry.data.read().clone();
-                        if !neg_facts.is_empty() {
-                            if binding.target_has_prob && rule.prob_column_name.is_some() {
-                                // Probabilistic complement: add 1-p column instead of filtering.
-                                let complement_col =
-                                    format!("__prob_complement_{}", binding.rule_name);
-                                if let Some(prob_col) = &binding.target_prob_col {
-                                    batches = apply_prob_complement_composite(
-                                        batches,
-                                        &neg_facts,
-                                        &binding.anti_join_cols,
-                                        prob_col,
-                                        &complement_col,
-                                    )?;
-                                } else {
-                                    // target_has_prob but no prob_col: fall back to anti-join.
-                                    batches = apply_anti_join_composite(
-                                        batches,
-                                        &neg_facts,
-                                        &binding.anti_join_cols,
-                                    )?;
-                                }
-                            } else {
-                                // Boolean exclusion: anti-join (existing behavior)
-                                batches = apply_anti_join_composite(
-                                    batches,
-                                    &neg_facts,
-                                    &binding.anti_join_cols,
-                                )?;
-                            }
-                        }
-                    }
-                }
+                batches = super::locy_complement::apply_negated_is_refs(
+                    batches,
+                    &clause.is_ref_bindings,
+                    &registry,
+                    rule.prob_column_name.as_deref(),
+                    profile_collector.as_ref().map(|_| &mut iter_ops),
+                )?;
                 // Multiply complement columns into the PROB column (if any) and clean up
                 let complement_cols: Vec<String> = if !batches.is_empty() {
                     batches[0]
@@ -2196,6 +2168,14 @@ async fn run_fixpoint_loop(
             // Merge candidates into facts.
             // For BEST BY rules, use a specialized merge that keeps only the
             // best row per KEY group, enabling convergence on cyclic graphs.
+            let merge_started = Instant::now();
+            let merge_op = if rule.has_best_by && !rule.best_by_criteria.is_empty() {
+                "LocyBestByMerge"
+            } else if states[rule_idx].has_fold_view() {
+                "LocyFoldMerge"
+            } else {
+                "LocyFactDedup"
+            };
             let changed = if rule.has_best_by && !rule.best_by_criteria.is_empty() {
                 states[rule_idx].merge_best_by(all_candidates, &rule.best_by_criteria)?
             } else if states[rule_idx].has_fold_view() {
@@ -2209,6 +2189,7 @@ async fn run_fixpoint_loop(
                     .merge_delta(all_candidates, Some(Arc::clone(&task_ctx)))
                     .await?
             };
+            let merge_elapsed = merge_started.elapsed();
             if changed {
                 any_changed = true;
                 // Record provenance for newly derived facts when tracker is present.
@@ -2245,12 +2226,16 @@ async fn run_fixpoint_loop(
                     .iter()
                     .map(|b| b.num_rows())
                     .sum();
+                // The merge is the row dedup (or BEST BY / FOLD merge): it runs
+                // outside any physical plan, so it is reported as its own entry.
+                iter_ops.push(synthetic_operator(merge_op, delta_facts, merge_elapsed));
                 collector.record(
                     &rule.name,
                     iteration,
                     delta_facts,
                     rule_start.elapsed().as_secs_f64() * 1000.0,
                     iter_ops,
+                    plan_mark.cost(graph_ctx.counters()),
                 );
             }
         }

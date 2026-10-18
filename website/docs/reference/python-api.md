@@ -931,8 +931,8 @@ with session.tx() as tx:
 | `.warnings` | `list` | Runtime warnings |
 | `.approximate_groups` | `list` | Groups with approximate probabilities |
 | `.derived_fact_set` | `DerivedFactSet` | Opaque fact set for `tx.apply()` |
-| `.rows()` | `list \| None` | Rows from the first QUERY command |
-| `.columns()` | `list[str] \| None` | Column names from the first QUERY |
+| `.rows()` | `list \| None` | Rows from the first QUERY, ASSUME or Cypher command |
+| `.columns()` | `list[str] \| None` | Column names from the first QUERY, ASSUME or Cypher command |
 | `.derived_facts(rule)` | `list \| None` | Facts for a specific rule |
 | `.has_warning(code)` | `bool` | Check for a specific warning code |
 | `.iterations` | `int` | Total fixpoint iterations (property) |

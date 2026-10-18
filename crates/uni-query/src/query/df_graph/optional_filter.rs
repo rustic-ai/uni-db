@@ -88,7 +88,8 @@ pub struct OptionalFilterExec {
     created_columns: Vec<usize>,
 
     /// The created columns that name an entity or a traversal step (`._vid`,
-    /// `._eid`, `__eid_to_*`, `_hop_count`). Each is non-null on a real match
+    /// `._eid`, a shortest path's `._path`, `__eid_to_*`, `_hop_count`). Each
+    /// is non-null on a real match
     /// and NULL on a carrier row, the row a traversal inside the clause emits
     /// for an entering row it could not extend. A row passes only if all of
     /// them are non-null, so a carrier is never mistaken for a match — even
@@ -627,9 +628,15 @@ impl OptionalFilterStream {
 
 /// Whether a column identifies an entity or a traversal step, and so is
 /// non-null on every row that really matched.
+///
+/// `{p}._path` is the vid list `GraphShortestPathExec` emits, the only
+/// producer of that suffix. Inside an OPTIONAL MATCH the operator keeps a pair
+/// with no path as a row whose path is NULL but whose target is a real node, so
+/// the target's `._vid` alone would take that row for a match.
 fn is_evidence_column(name: &str) -> bool {
     name.ends_with("._vid")
         || name.ends_with("._eid")
+        || name.ends_with("._path")
         || name.starts_with("__eid_to_")
         || name == "_hop_count"
 }

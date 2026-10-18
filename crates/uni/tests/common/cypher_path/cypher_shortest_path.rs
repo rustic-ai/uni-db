@@ -394,7 +394,22 @@ async fn test_all_shortest_paths_no_path() -> anyhow::Result<()> {
         .execute(plan, &prop_manager, &HashMap::new())
         .await?;
 
-    // When no path exists, the exec returns a null-path row (consistent with shortestPath)
+    // A mandatory MATCH drops a pair with no path, as openCypher and Neo4j do.
+    // Intended semantics change (user decision, 2026-10-17): this assertion
+    // used to pin one row with a NULL path, the old uni-only contract.
+    assert!(
+        results.is_empty(),
+        "a mandatory MATCH must drop a pair with no path, got {results:?}"
+    );
+
+    // OPTIONAL MATCH keeps the entering row, with the path NULL.
+    let cypher = "MATCH (a:Node {name: 'A'}), (b:Node {name: 'B'}) \
+                  OPTIONAL MATCH p = allShortestPaths((a)-[:LINK*]->(b)) \
+                  RETURN length(p) as len";
+    let plan = planner.plan(uni_cypher::parse(cypher)?)?;
+    let results = executor
+        .execute(plan, &prop_manager, &HashMap::new())
+        .await?;
     assert_eq!(results.len(), 1, "Expected 1 result with null path");
     assert_eq!(results[0].get("len"), Some(&Value::Null));
 

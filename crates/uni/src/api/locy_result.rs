@@ -213,8 +213,13 @@ impl std::fmt::Display for LocyProfileOutput {
                 for it in &r.iterations {
                     writeln!(
                         f,
-                        "      iter {}: +{} facts ({:.3} ms)",
-                        it.iteration, it.delta_facts, it.elapsed_ms,
+                        "      iter {}: +{} facts ({:.3} ms, planning {:.3} ms / {} plan{})",
+                        it.iteration,
+                        it.delta_facts,
+                        it.elapsed_ms,
+                        it.planning_ms,
+                        it.plans,
+                        if it.plans == 1 { "" } else { "s" },
                     )?;
                     for op in &it.operators {
                         writeln!(

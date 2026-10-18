@@ -126,9 +126,11 @@ async fn test_auto_embedding_and_vector_search() -> Result<()> {
     // Constructing a 384-float array in query string is tedious.
     // Use parameter!
 
+    // `~=` is the top-K index search; a `vector_similarity(...) > t`
+    // threshold would keep the document only if its cosine with `$q` passed.
     let search_query_param = r#"
         MATCH (d:Document)
-        WHERE vector_similarity(d.embedding, $q) > 0.0
+        WHERE d.embedding ~= $q
         RETURN d.content
     "#;
 
@@ -141,17 +143,12 @@ async fn test_auto_embedding_and_vector_search() -> Result<()> {
         let planner = QueryPlanner::new(schema_manager.schema());
         let plan = planner.plan(query)?;
 
-        // Plan should contain VectorKnn if optimization worked?
-        // Or Scan+Filter if not.
-        // If we want to verify VectorKnn plan usage, we might need to inspect plan, but integration test checks result.
-        // However, `vector_similarity` with threshold IS optimized to `VectorKnn` logical plan in `planner.rs`.
-
         let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
         let executor = Executor::new_with_writer(storage.clone(), writer.clone());
 
         let results = executor.execute(plan, &prop_manager, &params).await?;
 
-        // We should find our document (threshold 0.0 is low)
+        // The only document is the top-1 neighbour.
         assert_eq!(results.len(), 1);
         let content = results[0].get("d.content").unwrap().as_str().unwrap();
         assert_eq!(content, "This is a test document about graphs and vectors.");

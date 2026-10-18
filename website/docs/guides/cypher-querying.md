@@ -634,7 +634,7 @@ The bulk loader can supply explicit per-row values; otherwise the engine assigns
 | Function | Description | Example |
 |----------|-------------|---------|
 | `similar_to(sources, queries [, options])` | Unified similarity scoring (vector similarity, BM25, or hybrid fusion). Metric-aware: uses the index's configured distance metric (Cosine, L2, or Dot). | `RETURN similar_to(n.embedding, $vec)` |
-| `vector_similarity(v1, v2)` | Cosine similarity between two vectors. Alias for `similar_to` with a single vector source. | `WHERE vector_similarity(a.embed, b.embed) > 0.8` |
+| `vector_similarity(v1, v2)` | Cosine similarity between two vectors (NULL if either is NULL); MaxSim with `v2` as the query for two multi-vectors. Evaluated per row: a `WHERE` threshold returns every matching node and never uses a vector index (use `~=` for top-K). | `WHERE vector_similarity(a.embed, b.embed) > 0.8` |
 | `vector_distance(v1, v2 [, metric])` | Distance between two vectors. | `RETURN vector_distance(a.embed, b.embed, 'cosine')` |
 
 `similar_to` is an expression function — it works in `WHERE`, `RETURN`, `WITH`, `ORDER BY`, and Locy rule bodies. Unlike `CALL uni.search(...)`, it scores one already-bound node (point computation), not a top-K scan.
@@ -1397,17 +1397,22 @@ PROFILE executes the query and returns runtime statistics alongside results.
 
     ```rust
     // Execute with profiling
-    let (results, profile) = db.profile(
-        "MATCH (p:Person) WHERE p.age > 25 RETURN p.name"
-    ).await?;
+    let (result, profile) = db
+        .session()
+        .query_with("MATCH (p:Person) WHERE p.age > 25 RETURN p.name")
+        .profile()
+        .await?;
 
     println!("Total time: {}ms", profile.total_time_ms);
-    println!("Rows scanned: {}", profile.rows_scanned);
-    println!("Peak memory: {} bytes", profile.peak_memory_bytes);
+    println!("Rows scanned: {}", result.metrics().rows_scanned);
+    println!(
+        "Planning: logical {:.3}ms, physical {:.3}ms over {} plan(s)",
+        profile.logical_planning_ms, profile.physical_planning_ms, profile.physical_plans
+    );
 
     // Per-operator statistics
-    for op in &profile.operators {
-        println!("{}: {}ms, {} rows", op.name, op.time_ms, op.rows_produced);
+    for op in &profile.runtime_stats {
+        println!("{}: {:.3}ms, {} rows", op.operator, op.time_ms, op.actual_rows);
     }
     ```
 
@@ -1427,9 +1432,17 @@ PROFILE executes the query and returns runtime statistics alongside results.
 
 The profile includes:
 - **total_time_ms**: Total query execution time
-- **rows_scanned**: Number of rows read from storage
+- **runtime_stats** (Python: `operators`): Per-operator breakdown with timing and row counts
+- **logical_planning_ms** / **physical_planning_ms** / **physical_plans** (Rust): planning cost.
+  `physical_plans` is one for the query plus one per sub-plan built while it runs, so a
+  correlated `CALL { ... }` body planned once per outer row shows up as a count that grows
+  with the rows
 - **peak_memory_bytes**: Maximum memory used during execution
-- **operators**: Per-operator breakdown with timing and row counts
+
+The result's `metrics()` carries the query-level counters, including **rows_scanned**
+(rows examined by scans, before filtering). A variable-length pattern with an inline
+property map, such as `-[:R*1..3 {w: 1}]->` or `->(b:N {x: 2})`, scans every edge of the
+type before walking from the anchor, and that scan is included in `rows_scanned`.
 
 ---
 
@@ -1461,14 +1474,10 @@ The `shortestPath` function finds the shortest path between two nodes.
 MATCH path = shortestPath((a:Author {name: 'Alice'})-[:COAUTHOR*]-(b:Author {name: 'Bob'}))
 RETURN path
 
-// With hop constraints (minimum and maximum hops)
-MATCH path = shortestPath((a:Person)-[:KNOWS*2..6]-(b:Person))
+// With an upper hop bound
+MATCH path = shortestPath((a:Person)-[:KNOWS*1..6]-(b:Person))
 WHERE a.name = 'Alice' AND b.name = 'Bob'
 RETURN path, length(path) AS hops
-
-// Minimum hops only (at least 2 hops)
-MATCH path = shortestPath((a)-[:FOLLOWS*2..]-(b))
-RETURN path
 
 // Maximum hops only (at most 5 hops)
 MATCH path = shortestPath((a)-[:KNOWS*..5]-(b))
@@ -1481,10 +1490,47 @@ RETURN path
 
 **Hop Constraint Semantics:**
 - `*` or `*1..` — No *written* upper bound. The planner supplies a default of **100 hops**
-- `*2..6` — Between 2 and 6 hops
+- `*1..6` — Between 1 and 6 hops
 - `*..5` — At most 5 hops (1 to 5)
-- `*3..` — At least 3 hops, up to the 100-hop default
 - `*0..` — Zero or more hops (allows source == target)
+- A lower bound above 1 (`*2..6`, `*3..`) is rejected with an error: the search
+  returns the first, shortest match, so honouring a higher minimum would need a
+  different search.
+
+**When there is no path.** A mandatory `MATCH` drops a pair that has no path
+between its endpoints, as in openCypher and Neo4j; `OPTIONAL MATCH` keeps the
+row with the path `NULL`. This applies to `shortestPath`, `allShortestPaths`
+and the unnamed form `MATCH shortestPath(...)`. A node is its own target only
+through the zero-length path, so `(a)-[*]->(a)` finds nothing and `*0..` finds
+the path of length 0.
+
+```cypher
+// Only the people Alice can reach
+MATCH (a:Person {name: 'Alice'}), (b:Person)
+MATCH p = shortestPath((a)-[:KNOWS*]->(b))
+RETURN b.name, length(p)
+
+// Everyone, with hops NULL for those she cannot reach
+MATCH (a:Person {name: 'Alice'}), (b:Person)
+OPTIONAL MATCH p = shortestPath((a)-[:KNOWS*]->(b))
+RETURN b.name, length(p)
+
+// With an unbound target, each person gets the people they reach,
+// or one row with NULLs if they reach nobody
+MATCH (a:Person)
+OPTIONAL MATCH p = shortestPath((a)-[:KNOWS*]->(b:Person))
+RETURN a.name, b.name, length(p)
+```
+
+A `WHERE` on the path (`WHERE length(p) > 2`) filters the shortest path that was
+found; it does not search for a longer path that would pass.
+
+!!! warning "Changed in the next release"
+    Up to 4.2.0 a mandatory `MATCH` kept every no-path pair as a row with a
+    `NULL` path, and an `OPTIONAL MATCH` with an unbound target returned a
+    `NULL`-path row for every unreachable target. Queries that relied on that —
+    for example counting rows to count candidate pairs — should use `OPTIONAL
+    MATCH`.
 
 !!! warning "An omitted upper bound means 100, not infinity"
     A pattern with no upper bound is planned with a maximum of 100 hops. If

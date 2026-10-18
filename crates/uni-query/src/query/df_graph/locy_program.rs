@@ -21,7 +21,7 @@ use crate::query::df_graph::locy_fixpoint::{
 };
 use crate::query::df_graph::locy_fold::{FoldBinding, resolve_locy_aggregate};
 use crate::query::df_graph::locy_profile::{
-    LocyExecProfile, LocyProfileCollector, LocyStratumProfile,
+    LocyExecProfile, LocyProfileCollector, LocyStratumProfile, PlanningMark, synthetic_operator,
 };
 use crate::query::executor::core::OperatorStats;
 use crate::query::planner_locy_types::{
@@ -1039,6 +1039,7 @@ async fn run_program(
                 // Profiling: time this rule's single pass and collect its
                 // clause-body operator trees.
                 let rule_start = Instant::now();
+                let plan_mark = PlanningMark::take(graph_ctx.counters());
                 let mut iter_ops: Vec<OperatorStats> = Vec::new();
                 let mut tagged_clause_facts: Vec<(usize, Vec<RecordBatch>)> = Vec::new();
                 for (clause_idx, (clause, fp_clause)) in
@@ -1060,43 +1061,13 @@ async fn run_program(
                     .await?;
 
                     // Apply negated IS-ref semantics per-clause.
-                    for binding in &fp_clause.is_ref_bindings {
-                        if binding.negated
-                            && !binding.anti_join_cols.is_empty()
-                            && let Some(entry) = registry.get(binding.derived_scan_index)
-                        {
-                            let neg_facts = entry.data.read().clone();
-                            if !neg_facts.is_empty() {
-                                if binding.target_has_prob && fp_rule.prob_column_name.is_some() {
-                                    let complement_col =
-                                        format!("__prob_complement_{}", binding.rule_name);
-                                    if let Some(prob_col) = &binding.target_prob_col {
-                                        batches =
-                                            super::locy_fixpoint::apply_prob_complement_composite(
-                                                batches,
-                                                &neg_facts,
-                                                &binding.anti_join_cols,
-                                                prob_col,
-                                                &complement_col,
-                                            )?;
-                                    } else {
-                                        // target_has_prob but no prob_col: fall back to anti-join.
-                                        batches = super::locy_fixpoint::apply_anti_join_composite(
-                                            batches,
-                                            &neg_facts,
-                                            &binding.anti_join_cols,
-                                        )?;
-                                    }
-                                } else {
-                                    batches = super::locy_fixpoint::apply_anti_join_composite(
-                                        batches,
-                                        &neg_facts,
-                                        &binding.anti_join_cols,
-                                    )?;
-                                }
-                            }
-                        }
-                    }
+                    batches = super::locy_complement::apply_negated_is_refs(
+                        batches,
+                        &fp_clause.is_ref_bindings,
+                        &registry,
+                        fp_rule.prob_column_name.as_deref(),
+                        collector.as_ref().map(|_| &mut iter_ops),
+                    )?;
 
                     // Multiply complement columns into PROB per-clause.
                     let complement_cols: Vec<String> = if !batches.is_empty() {
@@ -1213,7 +1184,17 @@ async fn run_program(
                 let facts = if facts_are_per_path(rule) {
                     facts
                 } else {
-                    super::locy_fixpoint::dedup_fact_rows(facts)?
+                    let dedup_started = Instant::now();
+                    let facts = super::locy_fixpoint::dedup_fact_rows(facts)?;
+                    if collector.is_some() {
+                        let rows = facts.iter().map(RecordBatch::num_rows).sum();
+                        iter_ops.push(synthetic_operator(
+                            "LocyFactDedup",
+                            rows,
+                            dedup_started.elapsed(),
+                        ));
+                    }
+                    facts
                 };
 
                 // Profiling: record this rule's single non-recursive pass.
@@ -1225,6 +1206,7 @@ async fn run_program(
                         fact_count,
                         rule_start.elapsed().as_secs_f64() * 1000.0,
                         std::mem::take(&mut iter_ops),
+                        plan_mark.cost(graph_ctx.counters()),
                     );
                     c.set_final_facts(&rule.name, fact_count);
                 }

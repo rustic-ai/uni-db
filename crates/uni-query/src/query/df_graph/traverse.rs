@@ -3227,12 +3227,16 @@ async fn build_edge_adjacency_map(
         uni_common::Properties,
     )> = edges_with_type.into_iter().collect();
 
-    // Step 2: Overlay L0 buffers for all type names
+    // Step 2: Overlay L0 buffers for all type names. Every L0 edge of the type
+    // is examined, so each counts as an L0 row scanned (the persisted rows are
+    // counted by the storage scan above).
+    let mut l0_examined = 0usize;
     for l0 in l0_ctx.iter_l0_buffers() {
         let l0_guard = l0.read();
 
         for type_name in type_names {
             let l0_eids = l0_guard.eids_for_type(type_name);
+            l0_examined += l0_eids.len();
 
             // For each L0 edge, extract its information
             for &eid in &l0_eids {
@@ -3255,6 +3259,9 @@ async fn build_edge_adjacency_map(
             }
         }
     }
+
+    graph_ctx.count_l0_rows(l0_examined);
+    graph_ctx.count_rows_scanned(l0_examined);
 
     // Step 3: Deduplicate by EID (L0 takes precedence)
     let mut seen_eids = HashSet::new();
@@ -3642,6 +3649,12 @@ pub(super) async fn build_accepting_vid_filter(
     Ok(VidFilter::from_vids(passing, max_vid as usize + 1))
 }
 
+/// Build the [`EidFilter`] for a variable-length pattern's inline edge
+/// property map by pre-scanning every edge of the pattern's types.
+///
+/// The pre-scan goes through [`build_edge_adjacency_map`], so it counts toward
+/// the query's `rows_scanned` (storage and L0 rows alike): a profile shows a
+/// whole-type scan here instead of the anchor lookup alone.
 pub(super) async fn build_edge_property_filter(
     graph_ctx: &Arc<GraphExecutionContext>,
     edge_type_ids: &[u32],

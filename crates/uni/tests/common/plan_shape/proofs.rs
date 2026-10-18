@@ -523,23 +523,28 @@ async fn a_with_recursive_runs_the_recursive_cte() -> Result<()> {
 
 // ── Vector search ──────────────────────────────────────────────────────────
 
-/// A `WHERE vector_similarity(...) > t` predicate runs the KNN operator.
+/// A `WHERE n.prop ~= q` predicate runs the KNN operator.
 ///
-/// # The shape that looks right and is not
+/// # The shapes that look right and are not
 ///
 /// `ORDER BY similar_to(d.embedding, ...) DESC LIMIT 1` reads like the KNN
 /// query and **does not reach this operator**: measured, it plans
 /// `GraphScanExec` + `SortExec(TopK)` and answers correctly by scanning
-/// everything and sorting. The rewrite is driven from a *predicate*
-/// (`planner.rs:6895`), matching a `vector_similarity(var.prop, q)` call under
-/// a comparison or `~=` — not from an ordering.
+/// everything and sorting. The rewrite is driven from a `~=` *predicate*
+/// (`extract_knn_predicate` in `planner.rs`), not from an ordering.
+///
+/// `WHERE vector_similarity(d.embedding, q) > t` does not reach it either, by
+/// design: that is a per-row cosine threshold, which a top-K index scan
+/// cannot answer exactly (it truncates at K, an ANN index misses rows, and the
+/// index scores with its own metric). It used to be rewritten to this
+/// operator and returned rows below the threshold.
 ///
 /// That is the exact hazard #177 exists for, and it is live in this repo:
 /// `ssi_read_path_matrix.rs::vector_knn_records_matches` uses the `ORDER BY`
 /// form and passes, because a full scan records the same read set the KNN exec
 /// would have. Its assertion cannot tell the two apart. This test can.
 #[tokio::test]
-async fn a_vector_similarity_predicate_runs_the_vector_knn() -> Result<()> {
+async fn an_approx_eq_predicate_runs_the_vector_knn() -> Result<()> {
     let db = Uni::in_memory().build().await?;
     db.schema()
         .label("Doc")
@@ -566,6 +571,14 @@ async fn a_vector_similarity_predicate_runs_the_vector_knn() -> Result<()> {
     db.flush().await?;
 
     assert_plan_uses(
+        &session,
+        "MATCH (d:Doc) WHERE d.embedding ~= [1.0, 0.0] RETURN d.id AS id",
+        "GraphVectorKnnExec",
+    )
+    .await;
+
+    // The threshold twin stays a per-row filter over a scan.
+    assert_plan_avoids(
         &session,
         "MATCH (d:Doc) WHERE vector_similarity(d.embedding, [1.0, 0.0]) > 0.5 \
          RETURN d.id AS id",

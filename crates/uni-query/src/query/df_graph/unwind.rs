@@ -1014,8 +1014,23 @@ pub(crate) fn arrow_to_json_value(array: &dyn Array, row: usize) -> Value {
         return Value::Map(map).canonical_entity();
     }
 
-    // Fallback
-    Value::Null
+    // Every other type — a fixed-size list (a stored dense vector), a large
+    // list, a temporal or binary column — goes through the storage layer's
+    // canonical decoder. Answering NULL here erased a vector property handed
+    // to an `EXISTS { }` body as an outer value, so `vector_similarity(a.emb,
+    // q)` on an outer `a` was always NULL there.
+    match uni_store::storage::arrow_convert::arrow_to_value(array, row, None) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(
+                name: "query.arrow_decode.unsupported",
+                data_type = %array.data_type(),
+                error = %e,
+                "column of type {{data_type}} decoded as NULL: {{error}}"
+            );
+            Value::Null
+        }
+    }
 }
 
 #[cfg(test)]

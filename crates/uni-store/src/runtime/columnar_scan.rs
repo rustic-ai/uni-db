@@ -1698,14 +1698,12 @@ pub async fn label_only_l0_base_props(
     counters: Option<&Arc<crate::QueryCounters>>,
 ) -> anyhow::Result<HashMap<u64, (Properties, u64)>> {
     let required: Vec<&str> = label.split(':').filter(|l| !l.is_empty()).collect();
-    let mut has_props: HashSet<u64> = HashSet::new();
     let mut tombstoned: HashSet<u64> = HashSet::new();
     // vid -> (newest resolved label set, newest label-mutation version)
     let mut relabeled: HashMap<u64, (Vec<String>, u64)> = HashMap::new();
     for l0 in l0_ctx.iter_l0_buffers() {
         let guard = l0.read();
         tombstoned.extend(guard.vertex_tombstones.iter().map(|v| v.as_u64()));
-        has_props.extend(guard.vertex_properties.keys().map(|v| v.as_u64()));
         for vid in &guard.vertex_label_overwrites {
             let labels = guard.vertex_labels.get(vid).cloned().unwrap_or_default();
             let version = guard.vertex_label_versions.get(vid).copied().unwrap_or(0);
@@ -1713,6 +1711,21 @@ pub async fn label_only_l0_base_props(
             entry.0 = labels;
             entry.1 = entry.1.max(version);
         }
+    }
+    if relabeled.is_empty() {
+        return Ok(HashMap::new());
+    }
+    // Probed per relabeled vid rather than collected from every buffer's
+    // property map: that collection made each scan O(all L0 vertices) even
+    // when the scan was a point lookup and nothing was relabeled (W3b).
+    let mut has_props: HashSet<u64> = HashSet::new();
+    for l0 in l0_ctx.iter_l0_buffers() {
+        let guard = l0.read();
+        has_props.extend(
+            relabeled
+                .keys()
+                .filter(|vid| guard.vertex_properties.contains_key(&Vid::from(**vid))),
+        );
     }
     let vids: Vec<Vid> = relabeled
         .iter()
@@ -1758,6 +1771,21 @@ pub enum L0VertexTargets<'a> {
     Range(u64, u64),
     /// Every vid of the label.
     All,
+    /// The label's vids — within `range` when one is set — that are also in
+    /// `vids`.
+    ///
+    /// Unlike [`Self::Vids`], membership is decided exactly as [`Self::All`]
+    /// and [`Self::Range`] decide it (the label set alone, with no property-row
+    /// requirement), so a row this selects is built byte-for-byte as the
+    /// unrestricted scan would have built it. Produced by
+    /// [`l0_equality_candidates`] to skip L0 rows a pushed equality cannot
+    /// match before they are materialized (W3b).
+    Filtered {
+        /// Half-open `_vid` range the scan is walking, if any.
+        range: Option<(u64, u64)>,
+        /// The vids that may survive the scan's filters.
+        vids: &'a HashSet<u64>,
+    },
 }
 
 impl L0VertexTargets<'_> {
@@ -1767,8 +1795,135 @@ impl L0VertexTargets<'_> {
             Self::Vids(vids) => vids.contains(&vid),
             Self::Range(lo, hi) => vid >= *lo && vid < *hi,
             Self::All => true,
+            Self::Filtered { range, vids } => {
+                range.is_none_or(|(lo, hi)| vid >= lo && vid < hi) && vids.contains(&vid)
+            }
         }
     }
+}
+
+/// A pushed equality on one declared property, for pruning L0 rows early.
+///
+/// `property IN values` (one value for `=`). It is a **pre-filter**: it may
+/// keep a row the scan's runtime filter later rejects, but must never drop a
+/// row that filter would accept, because the runtime filter — and the residual
+/// `FilterExec` above the scan — stay authoritative for three-valued logic and
+/// type coercion. [`l0_value_may_equal`] is where that one-sided contract is
+/// kept.
+#[derive(Debug, Clone, PartialEq)]
+pub struct L0EqualityPrefilter {
+    /// Declared property the equality constrains.
+    pub property: String,
+    /// Literals the property is compared against; a row may match any of them.
+    pub values: Vec<Value>,
+}
+
+/// Whether a stored L0 value could satisfy `column = literal` after the scan
+/// converts it to the declared column type.
+///
+/// Returns `false` only when the conversion is the identity and the two values
+/// are plainly unequal under the comparison the runtime filter performs, so the
+/// answer is never `false` for a row that filter would keep:
+///
+/// * a missing or NULL value becomes a NULL cell, and `NULL = x` is never true;
+/// * `String` in a `STRING` column against a string literal compares bytes;
+/// * `Int` in an `INT64` column against an integer literal compares integers;
+/// * `Int` or `Float` in a `FLOAT64` column against a numeric literal compares
+///   as `f64` (the builder widens with `as_f64`), keeping any `NaN`;
+/// * `Bool` in a `BOOL` column against a boolean literal compares booleans.
+///
+/// Every other pairing — a value of another type that the column builder would
+/// coerce (`Int` into a `STRING` column renders `"5"`, `Float` into an `INT64`
+/// column truncates), a cross-type literal, any other column type — answers
+/// `true` and leaves the decision to the runtime filter.
+pub fn l0_value_may_equal(
+    column_type: &uni_common::core::schema::DataType,
+    stored: Option<&Value>,
+    literal: &Value,
+) -> bool {
+    use uni_common::core::schema::DataType as T;
+    let Some(stored) = stored else {
+        return false;
+    };
+    match (column_type, stored, literal) {
+        (_, Value::Null, _) => false,
+        (T::String, Value::String(a), Value::String(b)) => a == b,
+        (T::Int64, Value::Int(a), Value::Int(b)) => a == b,
+        (T::Float64, Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
+            match (stored.as_f64(), literal.as_f64()) {
+                (Some(a), Some(b)) if !a.is_nan() && !b.is_nan() => a == b,
+                _ => true,
+            }
+        }
+        (T::Bool, Value::Bool(a), Value::Bool(b)) => a == b,
+        _ => true,
+    }
+}
+
+/// The L0 vids of `label` that the scan must still build under `prefilter`.
+///
+/// A vid is kept when its merged L0 value of the property may equal one of the
+/// literals ([`l0_value_may_equal`]), **or** when `shadowed` holds it. The
+/// second arm is the shadowing contract: `shadowed` is the set of vids the
+/// storage side of the same scan returned, and an L0 row for one of them must
+/// reach the MVCC merge even when it no longer matches — it is the newer
+/// version, and dropping it would let the stale flushed row win the dedup and
+/// pass the filter. Every other non-matching L0 row is the newest version of a
+/// vid the storage side did not return, so the runtime filter would reject it
+/// anyway; skipping it changes cost, not results.
+///
+/// "Merged value" mirrors [`build_l0_vertex_batch`]: buffers in visibility
+/// order, a buffer contributing only for vids in its own label set, the later
+/// buffer's value for the key winning; a relabeled vid in `label_only` starts
+/// from its flushed properties, which replace the L0 ones wholesale.
+///
+/// The pass touches one hash entry per L0 label member and clones nothing,
+/// which is what replaces materializing every row (clone every property, build
+/// every column, sort and dedup) for each lookup.
+pub fn l0_equality_candidates(
+    l0_ctx: &L0Context,
+    label: &str,
+    range: Option<(u64, u64)>,
+    column_type: &uni_common::core::schema::DataType,
+    prefilter: &L0EqualityPrefilter,
+    label_only: &HashMap<u64, (Properties, u64)>,
+    shadowed: impl IntoIterator<Item = u64>,
+) -> HashSet<u64> {
+    let in_range = |vid: u64| range.is_none_or(|(lo, hi)| vid >= lo && vid < hi);
+    let may_equal = |stored: Option<&Value>| {
+        prefilter
+            .values
+            .iter()
+            .any(|lit| l0_value_may_equal(column_type, stored, lit))
+    };
+    let prop = prefilter.property.as_str();
+    let mut verdict: HashMap<u64, bool> = HashMap::new();
+    for l0 in l0_ctx.iter_l0_buffers() {
+        let guard = l0.read();
+        let Some(members) = guard.label_to_vids.get(label) else {
+            continue;
+        };
+        for vid in members {
+            let raw = vid.as_u64();
+            if !in_range(raw) {
+                continue;
+            }
+            if let Some(value) = guard.vertex_properties.get(vid).and_then(|p| p.get(prop)) {
+                verdict.insert(raw, may_equal(Some(value)));
+            }
+        }
+    }
+    for (vid, (base, _)) in label_only {
+        if in_range(*vid) {
+            verdict.insert(*vid, may_equal(base.get(prop)));
+        }
+    }
+    let mut keep: HashSet<u64> = verdict
+        .into_iter()
+        .filter_map(|(vid, may)| may.then_some(vid))
+        .collect();
+    keep.extend(shadowed.into_iter().filter(|v| in_range(*v)));
+    keep
 }
 
 /// Build a RecordBatch from L0 buffer data for a given label, matching the
@@ -1840,6 +1995,18 @@ pub fn build_l0_vertex_batch(
                 out
             }
             L0VertexTargets::All => guard.vids_for_label(label),
+            // Probe the (small) kept set against the label set rather than
+            // walking the label: the membership rule is `All`'s / `Range`'s,
+            // so each kept row is built exactly as those arms would build it.
+            L0VertexTargets::Filtered { range, vids } => match guard.label_to_vids.get(label) {
+                Some(members) => vids
+                    .iter()
+                    .filter(|raw| range.is_none_or(|(lo, hi)| **raw >= lo && **raw < hi))
+                    .map(|raw| Vid::from(*raw))
+                    .filter(|vid| members.contains(vid))
+                    .collect(),
+                None => Vec::new(),
+            },
         };
         for vid in candidate_vids {
             let vid_u64 = vid.as_u64();
@@ -2218,6 +2385,14 @@ pub struct ColumnarVertexScanRequest<'a> {
     /// Rendered SQL from the planner's hash-index pushdown; passed through
     /// verbatim, nothing here parses it.
     pub extra_lance_filter: Option<&'a str>,
+    /// Structured form of the equality the caller filters this scan's rows by,
+    /// used to skip L0 rows that cannot match before they are materialized.
+    ///
+    /// Only a cost lever: the caller still applies its own filter to every
+    /// returned row. Without it a point lookup on unflushed rows built the
+    /// label's whole L0 set and filtered afterwards — `rows_scanned` equal to
+    /// the L0 population per lookup (W3b). See [`L0EqualityPrefilter`].
+    pub l0_prefilter: Option<&'a L0EqualityPrefilter>,
 }
 
 /// Read a batch of vertices columnarly: Lance + L0, MVCC-resolved.
@@ -2251,6 +2426,7 @@ pub async fn columnar_scan_vertex_batch(
         vid_list_filter,
         vid_range,
         extra_lance_filter,
+        l0_prefilter,
     } = req;
     let uni_schema = storage.schema_manager().schema();
     let label_props = uni_schema.properties.get(label);
@@ -2500,6 +2676,45 @@ pub async fn columnar_scan_vertex_batch(
         counters,
     )
     .await?;
+    // Narrow a whole-label (or range) L0 read to the rows the pushed equality
+    // can match, plus every vid the storage side returned — those L0 rows
+    // must reach the merge to shadow their stale flushed versions. A vid list
+    // is already narrow; an undeclared property has no column type to reason
+    // about, so both keep the unrestricted read.
+    let l0_kept: HashSet<u64>;
+    let l0_targets = match (l0_prefilter, l0_targets) {
+        (Some(pf), L0VertexTargets::All | L0VertexTargets::Range(..)) => {
+            match label_props.and_then(|lp| lp.get(pf.property.as_str())) {
+                Some(meta) => {
+                    let range = match l0_targets {
+                        L0VertexTargets::Range(lo, hi) => Some((lo, hi)),
+                        _ => None,
+                    };
+                    let shadowed = lance_deduped
+                        .as_ref()
+                        .and_then(|b| b.column_by_name("_vid"))
+                        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+                        .map(|a| a.values().to_vec())
+                        .unwrap_or_default();
+                    l0_kept = l0_equality_candidates(
+                        l0_ctx,
+                        label,
+                        range,
+                        &meta.r#type,
+                        pf,
+                        &label_only,
+                        shadowed,
+                    );
+                    L0VertexTargets::Filtered {
+                        range,
+                        vids: &l0_kept,
+                    }
+                }
+                None => l0_targets,
+            }
+        }
+        (_, t) => t,
+    };
     let l0_batch = build_l0_vertex_batch(
         l0_ctx,
         label,
@@ -2925,5 +3140,66 @@ mod tests {
             .unwrap();
         assert_eq!(name_col.value(0), "Alice");
         assert_eq!(name_col.value(1), "Bob");
+    }
+
+    /// `l0_value_may_equal` answers `false` only where the column builder's
+    /// conversion is the identity and the values plainly differ; every
+    /// coercing pairing is kept for the runtime filter to decide (W3b).
+    #[test]
+    fn l0_value_may_equal_drops_only_identity_converted_mismatches() {
+        use uni_common::core::schema::DataType as T;
+        let s = |v: &str| Value::String(v.into());
+
+        // Missing or NULL is a NULL cell: never equal.
+        assert!(!l0_value_may_equal(&T::String, None, &s("a")));
+        assert!(!l0_value_may_equal(&T::String, Some(&Value::Null), &s("a")));
+
+        // Identity conversions compare.
+        assert!(l0_value_may_equal(&T::String, Some(&s("a")), &s("a")));
+        assert!(!l0_value_may_equal(&T::String, Some(&s("a")), &s("b")));
+        assert!(!l0_value_may_equal(
+            &T::Int64,
+            Some(&Value::Int(1)),
+            &Value::Int(2)
+        ));
+        assert!(l0_value_may_equal(
+            &T::Float64,
+            Some(&Value::Int(1)),
+            &Value::Float(1.0)
+        ));
+        assert!(!l0_value_may_equal(
+            &T::Float64,
+            Some(&Value::Float(1.5)),
+            &Value::Int(1)
+        ));
+        assert!(!l0_value_may_equal(
+            &T::Bool,
+            Some(&Value::Bool(true)),
+            &Value::Bool(false)
+        ));
+
+        // Coercing conversions are kept: `Int` renders into a STRING column as
+        // "5", `Float` truncates into an INT64 column, NaN is left to Arrow.
+        assert!(l0_value_may_equal(
+            &T::String,
+            Some(&Value::Int(5)),
+            &s("5")
+        ));
+        assert!(l0_value_may_equal(
+            &T::Int64,
+            Some(&Value::Float(5.5)),
+            &Value::Int(5)
+        ));
+        assert!(l0_value_may_equal(
+            &T::Int64,
+            Some(&Value::Int(5)),
+            &Value::Float(5.5)
+        ));
+        assert!(l0_value_may_equal(
+            &T::Float64,
+            Some(&Value::Float(f64::NAN)),
+            &Value::Float(f64::NAN)
+        ));
+        assert!(l0_value_may_equal(&T::CypherValue, Some(&s("a")), &s("b")));
     }
 }

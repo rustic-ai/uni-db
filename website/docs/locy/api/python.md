@@ -103,7 +103,7 @@ Helper methods:
 | `.has_warning(code)` | Check if a specific warning code is present |
 | `.warnings_list()` | Get all warnings |
 | `.derived_facts(rule)` | Get derived facts for a specific rule |
-| `.rows()` | Get query result rows (from first `QUERY` command) |
+| `.rows()` | Get result rows from the first `QUERY`, `ASSUME` or Cypher command |
 | `.columns()` | Get query result column names |
 | `.iterations` | Number of fixpoint iterations performed |
 

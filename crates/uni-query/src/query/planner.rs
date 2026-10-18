@@ -2,7 +2,10 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use crate::query::df_expr::VariableKind;
-use crate::query::pushdown::{PredicateAnalyzer, try_label_or_to_union, try_type_or_to_union};
+use crate::query::df_graph::common::is_simple_evaluable;
+use crate::query::pushdown::{
+    PredicateAnalyzer, orient_property_comparisons, try_label_or_to_union, try_type_or_to_union,
+};
 use anyhow::{Result, anyhow};
 use arrow_array::RecordBatch;
 use arrow_schema::{DataType, SchemaRef};
@@ -1716,6 +1719,102 @@ pub enum FusionKind {
     SparseDot,
 }
 
+/// How a variable imported into a subquery body ([`LogicalPlan::OuterRow`])
+/// is materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportKind {
+    /// The parameter of the same name, as one value.
+    Parameter,
+    /// A node: the outer row's `{name}._vid` column and its siblings.
+    Node,
+    /// A relationship: the outer row's `{name}._eid` column and its siblings.
+    Edge,
+}
+
+/// A variable a subquery body imports from the enclosing row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportedVariable {
+    pub name: String,
+    pub kind: ImportKind,
+}
+
+/// Marks each variable the pipeline of `plan` imports as a node or a
+/// relationship when `outer` — the schema of the rows the body runs against —
+/// carries the variable's identity column (`{name}._vid` / `{name}._eid`).
+///
+/// The caller must then execute the plan with the outer row supplied to the
+/// physical planner (`HybridPhysicalPlanner::with_outer_row`).
+///
+/// Only this body's own [`LogicalPlan::OuterRow`] leaves are bound. The
+/// subquery of a nested `CALL { }` imports from *its* input row, not from
+/// `outer`, and is bound by its own operator, so it is left alone.
+pub fn bind_outer_row(plan: &LogicalPlan, outer: &arrow_schema::Schema) -> LogicalPlan {
+    let mut plan = plan.clone();
+    bind_outer_row_in_place(&mut plan, outer);
+    plan
+}
+
+/// How `name` is imported from rows of schema `outer`: as a node or a
+/// relationship when the row carries its identity column, else as a value.
+fn outer_import_kind(name: &str, outer: &arrow_schema::Schema) -> ImportKind {
+    let has = |suffix: &str| {
+        outer
+            .column_with_name(&format!("{name}.{suffix}"))
+            .is_some()
+    };
+    if has("_vid") {
+        ImportKind::Node
+    } else if has("_eid") {
+        ImportKind::Edge
+    } else {
+        ImportKind::Parameter
+    }
+}
+
+/// Types the variables a correlated subquery body imports from rows of
+/// schema `outer`, consistently with [`bind_outer_row`], for
+/// [`QueryPlanner::plan_with_typed_scope`].
+pub fn outer_row_scope(
+    names: impl IntoIterator<Item = String>,
+    outer: &arrow_schema::Schema,
+) -> Vec<VariableInfo> {
+    names
+        .into_iter()
+        .map(|name| {
+            let var_type = match outer_import_kind(&name, outer) {
+                ImportKind::Node => VariableType::Node,
+                ImportKind::Edge => VariableType::Edge,
+                ImportKind::Parameter => VariableType::Imported,
+            };
+            VariableInfo::new(name, var_type)
+        })
+        .collect()
+}
+
+fn bind_outer_row_in_place(plan: &mut LogicalPlan, outer: &arrow_schema::Schema) {
+    match plan {
+        LogicalPlan::OuterRow { variables } => {
+            for v in variables {
+                v.kind = outer_import_kind(&v.name, outer);
+            }
+        }
+        LogicalPlan::Union { left, right, .. } | LogicalPlan::CrossJoin { left, right, .. } => {
+            bind_outer_row_in_place(left, outer);
+            bind_outer_row_in_place(right, outer);
+        }
+        // The input side only: see the function documentation.
+        LogicalPlan::Apply { input, .. } | LogicalPlan::SubqueryCall { input, .. } => {
+            bind_outer_row_in_place(input, outer);
+        }
+        LogicalPlan::QuantifiedPattern { input, .. } => bind_outer_row_in_place(input, outer),
+        other => {
+            if let Some(input) = other.input_mut() {
+                bind_outer_row_in_place(input, outer);
+            }
+        }
+    }
+}
+
 /// Logical query plan produced by [`QueryPlanner`].
 ///
 /// Each variant represents one step in the Cypher execution pipeline.
@@ -1815,6 +1914,18 @@ pub enum LogicalPlan {
     },
     /// Produces exactly one empty row (used to bootstrap pipelines with no source).
     Empty,
+    /// The one row a correlated subquery body starts from: the variables it
+    /// imports from the enclosing row (`CALL { WITH a … }`, `EXISTS { … }`,
+    /// `COUNT { … }`, `COLLECT { … }`).
+    ///
+    /// Each variable is planned as the parameter of the same name until
+    /// [`bind_outer_row`] marks it as a node or relationship. A bound entity
+    /// variable is planned from the outer row's own columns for it
+    /// (`a._vid`, `a._labels`, `a.<prop>`, `a`), so inside the body it is the
+    /// same entity it is outside, and supports the same operations.
+    OuterRow {
+        variables: Vec<ImportedVariable>,
+    },
     /// UNWIND: expand a list expression into one row per element.
     Unwind {
         input: Box<LogicalPlan>,
@@ -1984,13 +2095,14 @@ pub enum LogicalPlan {
         input: Box<LogicalPlan>,
         subquery: Box<LogicalPlan>,
     },
+    /// Top-K nearest neighbours of `query` on `label.property`, from the
+    /// vector index. Produced only for `n.property ~= query`.
     VectorKnn {
         label_id: u16,
         variable: String,
         property: String,
         query: Expr,
         k: usize,
-        threshold: Option<f32>,
     },
     InvertedIndexLookup {
         label_id: u16,
@@ -2020,6 +2132,17 @@ pub enum LogicalPlan {
         /// the shortest path among permitted edges is not the unconstrained
         /// shortest path filtered. `None` when the pattern carries no map.
         edge_filter_expr: Option<Expr>,
+        /// Whether the pattern belongs to an `OPTIONAL MATCH`. A mandatory
+        /// match drops a pair with no path, as openCypher does; an optional
+        /// one keeps it with a NULL path, for the clause's closing operator to
+        /// null-extend or discard per entering row.
+        optional: bool,
+        /// The variables this pattern binds inside its `OPTIONAL MATCH`: the
+        /// path, the relationship and any endpoint the clause scans for itself.
+        /// Empty when `optional` is false. The physical planner tags the rows
+        /// entering the clause below the endpoint scans these name, so the
+        /// clause is closed per entering row rather than per bound node.
+        optional_pattern_vars: HashSet<String>,
     },
     /// allShortestPaths() - Returns all paths with minimum length
     AllShortestPaths {
@@ -2044,6 +2167,17 @@ pub enum LogicalPlan {
         /// the shortest path among permitted edges is not the unconstrained
         /// shortest path filtered. `None` when the pattern carries no map.
         edge_filter_expr: Option<Expr>,
+        /// Whether the pattern belongs to an `OPTIONAL MATCH`. A mandatory
+        /// match drops a pair with no path, as openCypher does; an optional
+        /// one keeps it with a NULL path, for the clause's closing operator to
+        /// null-extend or discard per entering row.
+        optional: bool,
+        /// The variables this pattern binds inside its `OPTIONAL MATCH`: the
+        /// path, the relationship and any endpoint the clause scans for itself.
+        /// Empty when `optional` is false. The physical planner tags the rows
+        /// entering the clause below the endpoint scans these name, so the
+        /// clause is closed per entering row rather than per bound node.
+        optional_pattern_vars: HashSet<String>,
     },
     QuantifiedPattern {
         input: Box<LogicalPlan>,
@@ -2453,74 +2587,71 @@ fn and_predicates(preds: impl IntoIterator<Item = Expr>) -> Option<Expr> {
     })
 }
 
-/// Extracted vector similarity predicate info for optimization
-struct VectorSimilarityPredicate {
+/// A `n.prop ~= query` predicate the planner can serve with a top-K index scan.
+struct KnnPredicate {
     variable: String,
     property: String,
     query: Expr,
-    threshold: Option<f32>,
 }
 
-/// Result of extracting vector_similarity from a predicate
-struct VectorSimilarityExtraction {
-    /// The extracted vector similarity predicate
-    predicate: VectorSimilarityPredicate,
-    /// Remaining predicates that couldn't be optimized (if any)
+/// A [`KnnPredicate`] split out of a `WHERE` conjunction.
+struct KnnExtraction {
+    /// The extracted `~=` predicate.
+    predicate: KnnPredicate,
+    /// The remaining conjuncts, if any.
     residual: Option<Expr>,
 }
 
-/// Try to extract a vector_similarity predicate from an expression.
-/// Matches patterns like:
-/// - vector_similarity(n.embedding, [1,2,3]) > 0.8
-/// - n.embedding ~= $query
+/// Extracts a `n.prop ~= query` conjunct from a predicate.
 ///
-/// Also handles AND predicates.
-fn extract_vector_similarity(expr: &Expr) -> Option<VectorSimilarityExtraction> {
-    match expr {
-        Expr::BinaryOp { left, op, right } => {
-            // Handle AND: check both sides for vector_similarity
-            if matches!(op, BinaryOp::And) {
-                // Try left side first
-                if let Some(vs) = extract_simple_vector_similarity(left) {
-                    return Some(VectorSimilarityExtraction {
-                        predicate: vs,
-                        residual: Some(right.as_ref().clone()),
-                    });
-                }
-                // Try right side
-                if let Some(vs) = extract_simple_vector_similarity(right) {
-                    return Some(VectorSimilarityExtraction {
-                        predicate: vs,
-                        residual: Some(left.as_ref().clone()),
-                    });
-                }
-                // Recursively check within left/right for nested ANDs
-                if let Some(mut extraction) = extract_vector_similarity(left) {
-                    extraction.residual = Some(combine_with_and(
-                        extraction.residual,
-                        right.as_ref().clone(),
-                    ));
-                    return Some(extraction);
-                }
-                if let Some(mut extraction) = extract_vector_similarity(right) {
-                    extraction.residual =
-                        Some(combine_with_and(extraction.residual, left.as_ref().clone()));
-                    return Some(extraction);
-                }
-                return None;
-            }
-
-            // Simple case: direct vector_similarity comparison
-            if let Some(vs) = extract_simple_vector_similarity(expr) {
-                return Some(VectorSimilarityExtraction {
-                    predicate: vs,
-                    residual: None,
-                });
-            }
-            None
-        }
-        _ => None,
+/// Only `~=` qualifies: it is defined as the top-K index scan, so replacing
+/// the scan with `VectorKnn` *is* its meaning. A comparison over
+/// `vector_similarity(...)` never qualifies, even with a vector index on the
+/// property. That predicate keeps exactly the rows whose cosine similarity
+/// passes the threshold, and an index cannot answer it exactly: an ANN index
+/// (IVF, HNSW, quantized) misses rows, every index scores with its own metric
+/// (`(1 + cos) / 2`, `1 / (1 + d)`, the raw dot product) rather than the
+/// cosine, and any top-K bound truncates a threshold answer. It stays a
+/// per-row filter.
+///
+/// The query vector must be a constant the KNN operator can evaluate once
+/// ([`is_simple_evaluable`]); a `~=` against a row-dependent expression stays
+/// in the predicate.
+fn extract_knn_predicate(expr: &Expr) -> Option<KnnExtraction> {
+    let Expr::BinaryOp { left, op, right } = expr else {
+        return None;
+    };
+    if !matches!(op, BinaryOp::And) {
+        return extract_approx_eq(expr).map(|predicate| KnnExtraction {
+            predicate,
+            residual: None,
+        });
     }
+    if let Some(predicate) = extract_approx_eq(left) {
+        return Some(KnnExtraction {
+            predicate,
+            residual: Some(right.as_ref().clone()),
+        });
+    }
+    if let Some(predicate) = extract_approx_eq(right) {
+        return Some(KnnExtraction {
+            predicate,
+            residual: Some(left.as_ref().clone()),
+        });
+    }
+    // Nested conjunctions.
+    if let Some(mut extraction) = extract_knn_predicate(left) {
+        extraction.residual = Some(combine_with_and(
+            extraction.residual,
+            right.as_ref().clone(),
+        ));
+        return Some(extraction);
+    }
+    if let Some(mut extraction) = extract_knn_predicate(right) {
+        extraction.residual = Some(combine_with_and(extraction.residual, left.as_ref().clone()));
+        return Some(extraction);
+    }
+    None
 }
 
 /// Helper to combine an optional expression with another using AND
@@ -2535,80 +2666,24 @@ fn combine_with_and(opt_expr: Option<Expr>, other: Expr) -> Expr {
     }
 }
 
-/// Extract a simple vector_similarity comparison (no AND)
-fn extract_simple_vector_similarity(expr: &Expr) -> Option<VectorSimilarityPredicate> {
-    match expr {
-        Expr::BinaryOp { left, op, right } => {
-            // Pattern: vector_similarity(...) > threshold or vector_similarity(...) >= threshold
-            if matches!(op, BinaryOp::Gt | BinaryOp::GtEq)
-                && let (Some(vs), Some(thresh)) = (
-                    extract_vector_similarity_call(left),
-                    extract_float_literal(right),
-                )
-            {
-                return Some(VectorSimilarityPredicate {
-                    variable: vs.0,
-                    property: vs.1,
-                    query: vs.2,
-                    threshold: Some(thresh),
-                });
-            }
-            // Pattern: threshold < vector_similarity(...) or threshold <= vector_similarity(...)
-            if matches!(op, BinaryOp::Lt | BinaryOp::LtEq)
-                && let (Some(thresh), Some(vs)) = (
-                    extract_float_literal(left),
-                    extract_vector_similarity_call(right),
-                )
-            {
-                return Some(VectorSimilarityPredicate {
-                    variable: vs.0,
-                    property: vs.1,
-                    query: vs.2,
-                    threshold: Some(thresh),
-                });
-            }
-            // Pattern: n.embedding ~= query
-            if matches!(op, BinaryOp::ApproxEq)
-                && let Expr::Property(var_expr, prop) = left.as_ref()
-                && let Expr::Variable(var) = var_expr.as_ref()
-            {
-                return Some(VectorSimilarityPredicate {
-                    variable: var.clone(),
-                    property: prop.clone(),
-                    query: right.as_ref().clone(),
-                    threshold: None,
-                });
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-/// Extract (variable, property, query_expr) from vector_similarity(n.prop, query)
-fn extract_vector_similarity_call(expr: &Expr) -> Option<(String, String, Expr)> {
-    if let Expr::FunctionCall { name, args, .. } = expr
-        && name.eq_ignore_ascii_case("vector_similarity")
-        && args.len() == 2
+/// Matches `var.prop ~= query` with a constant `query` (no AND).
+fn extract_approx_eq(expr: &Expr) -> Option<KnnPredicate> {
+    if let Expr::BinaryOp {
+        left,
+        op: BinaryOp::ApproxEq,
+        right,
+    } = expr
+        && let Expr::Property(var_expr, prop) = left.as_ref()
+        && let Expr::Variable(var) = var_expr.as_ref()
+        && is_simple_evaluable(right)
     {
-        // First arg should be Property(Identifier(var), prop)
-        if let Expr::Property(var_expr, prop) = &args[0]
-            && let Expr::Variable(var) = var_expr.as_ref()
-        {
-            // Second arg is query
-            return Some((var.clone(), prop.clone(), args[1].clone()));
-        }
+        return Some(KnnPredicate {
+            variable: var.clone(),
+            property: prop.clone(),
+            query: right.as_ref().clone(),
+        });
     }
     None
-}
-
-/// Extract a float value from a literal expression
-fn extract_float_literal(expr: &Expr) -> Option<f32> {
-    match expr {
-        Expr::Literal(CypherLiteral::Integer(i)) => Some(*i as f32),
-        Expr::Literal(CypherLiteral::Float(f)) => Some(*f as f32),
-        _ => None,
-    }
 }
 
 /// Translates a parsed Cypher AST into a [`LogicalPlan`].
@@ -2652,6 +2727,22 @@ struct TraverseParams<'a> {
     /// All variables from this OPTIONAL MATCH pattern.
     /// Used to ensure multi-hop patterns correctly NULL all vars when any hop fails.
     optional_pattern_vars: HashSet<String>,
+}
+
+/// The clause a `WHERE` belongs to, which decides where its conjuncts may go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WhereScope {
+    /// `MATCH`, `CALL … YIELD`, a Locy rule body: a row the predicate rejects
+    /// is dropped, so a conjunct may be pushed into any producer it reaches.
+    Mandatory,
+    /// `OPTIONAL MATCH`: a row the predicate rejects is null-extended, never
+    /// dropped, so no conjunct may filter anything below the clause's own
+    /// null-preserving filter — not even a conjunct that names only
+    /// variables an earlier clause bound.
+    Optional {
+        /// The variables the clause binds, which a rejected row has nulled.
+        created: HashSet<String>,
+    },
 }
 
 /// Which `plan_where_clause` rewriter a reachability check is standing in for.
@@ -3002,12 +3093,37 @@ impl QueryPlanner {
     /// that skipped it would fail `startNode(r)` over a MATCH-bound
     /// relationship rather than merely plan it worse.
     pub fn plan_with_scope(&self, query: Query, vars: Vec<String>) -> Result<LogicalPlan> {
+        self.plan_with_typed_scope(
+            query,
+            vars.into_iter()
+                .map(|name| VariableInfo::new(name, VariableType::Imported))
+                .collect(),
+        )
+    }
+
+    /// [`Self::plan_with_scope`] with each in-scope variable's type known.
+    ///
+    /// A correlated subquery body whose imports are bound to the outer row
+    /// (`bind_outer_row`) passes its node and relationship imports as
+    /// [`VariableType::Node`] / [`VariableType::Edge`], so the body plans them
+    /// as a later clause of the enclosing query would: a pattern that names
+    /// one (`MATCH (x)-[r]->(y)`) is constrained to it rather than binding a
+    /// fresh variable of the same name.
+    pub fn plan_with_typed_scope(
+        &self,
+        query: Query,
+        vars: Vec<VariableInfo>,
+    ) -> Result<LogicalPlan> {
         Ok(resolve_traversal_endpoints(
             self.plan_with_scope_unresolved(query, vars)?,
         ))
     }
 
-    fn plan_with_scope_unresolved(&self, query: Query, vars: Vec<String>) -> Result<LogicalPlan> {
+    fn plan_with_scope_unresolved(
+        &self,
+        query: Query,
+        vars: Vec<VariableInfo>,
+    ) -> Result<LogicalPlan> {
         // Apply query rewrites before planning
         let rewritten_query = crate::query::rewrite::rewrite_query(query)?;
         // M5 follow-up #5: function-call rewrite via ReplacementScanProvider.
@@ -3025,10 +3141,10 @@ impl QueryPlanner {
         }
 
         match rewritten_query {
-            Query::Single(stmt) => self.plan_single(stmt, vars),
+            Query::Single(stmt) => self.plan_single_typed(stmt, vars),
             Query::Union { left, right, all } => {
-                let l = self.plan_with_scope(*left, vars.clone())?;
-                let r = self.plan_with_scope(*right, vars)?;
+                let l = self.plan_with_typed_scope(*left, vars.clone())?;
+                let r = self.plan_with_typed_scope(*right, vars)?;
 
                 // Validate that both sides have the same column names
                 let left_cols = Self::extract_projection_columns(&l);
@@ -3048,7 +3164,7 @@ impl QueryPlanner {
             }
             Query::Schema(cmd) => self.plan_schema_command(*cmd),
             Query::Explain(inner) => {
-                let inner_plan = self.plan_with_scope(*inner, vars)?;
+                let inner_plan = self.plan_with_typed_scope(*inner, vars)?;
                 Ok(LogicalPlan::Explain {
                     plan: Box::new(inner_plan),
                 })
@@ -3518,14 +3634,6 @@ impl QueryPlanner {
         Ok(plan)
     }
 
-    fn plan_single(&self, query: Statement, initial_vars: Vec<String>) -> Result<LogicalPlan> {
-        let typed_vars: Vec<VariableInfo> = initial_vars
-            .into_iter()
-            .map(|name| VariableInfo::new(name, VariableType::Imported))
-            .collect();
-        self.plan_single_typed(query, typed_vars)
-    }
-
     /// Rewrite a query then plan it, preserving typed variable scope when possible.
     ///
     /// For `Query::Single` statements, uses `plan_single_typed` to carry typed
@@ -3551,16 +3659,17 @@ impl QueryPlanner {
         let mut plan = LogicalPlan::Empty;
 
         if !initial_vars.is_empty() {
-            // Project bound variables from outer scope as parameters.
-            // These come from the enclosing query's row (passed as sub_params in EXISTS evaluation).
-            // Use Parameter expressions to read from params, not Variable which would read from input row.
-            let projections = initial_vars
-                .iter()
-                .map(|v| (Expr::Parameter(v.name.clone()), Some(v.name.clone())))
-                .collect();
-            plan = LogicalPlan::Project {
-                input: Box::new(plan),
-                projections,
+            // Variables bound by the enclosing row. Each is its same-named
+            // parameter until the operator running the body binds the entity
+            // ones to the outer row's columns (`bind_outer_row`).
+            plan = LogicalPlan::OuterRow {
+                variables: initial_vars
+                    .iter()
+                    .map(|v| ImportedVariable {
+                        name: v.name.clone(),
+                        kind: ImportKind::Parameter,
+                    })
+                    .collect(),
             };
         }
 
@@ -3759,7 +3868,7 @@ impl QueryPlanner {
                                     predicate,
                                     plan,
                                     &vars_in_scope,
-                                    HashSet::new(),
+                                    WhereScope::Mandatory,
                                 )?;
                             }
                         }
@@ -4632,6 +4741,23 @@ impl QueryPlanner {
             return Err(anyhow!("Empty pattern"));
         }
 
+        // OPTIONAL MATCH: labels and a property map written on a node an
+        // earlier clause bound constrain the optional pattern, so a row they
+        // reject must be null-extended. Planned in place they became a plain
+        // filter on the rows entering the clause and dropped them.
+        let hoisted;
+        let match_clause = match match_clause
+            .optional
+            .then(|| self.hoist_bound_node_constraints(match_clause, vars_in_scope))
+            .flatten()
+        {
+            Some(clause) => {
+                hoisted = clause;
+                &hoisted
+            }
+            None => match_clause,
+        };
+
         // Relationship uniqueness spans the whole clause, so a relationship
         // after a variable-length one must see the edges that one walked. It
         // does through the step variable's edge list; an anonymous one has
@@ -4645,6 +4771,24 @@ impl QueryPlanner {
                     ..match_clause.clone()
                 };
                 &named
+            }
+            None => match_clause,
+        };
+
+        // An OPTIONAL MATCH between nodes that are all bound already can still
+        // match an entering row more than once — once per relationship — and
+        // its WHERE has to choose among those matches. Naming the anonymous
+        // relationships gives the clause variables of its own for that WHERE
+        // to null; without any, it has nothing to key the choice on.
+        let bound_named;
+        let match_clause = match match_clause
+            .optional
+            .then(|| self.name_relationships_between_bound_nodes(match_clause, vars_in_scope))
+            .flatten()
+        {
+            Some(clause) => {
+                bound_named = clause;
+                &bound_named
             }
             None => match_clause,
         };
@@ -4680,8 +4824,13 @@ impl QueryPlanner {
 
         for &path in &paths {
             if let Some(mode) = &path.shortest_path_mode {
-                plan =
-                    self.plan_shortest_path(path, plan, vars_in_scope, mode, vars_before_pattern)?;
+                plan = self.plan_shortest_path(
+                    path,
+                    plan,
+                    vars_in_scope,
+                    mode,
+                    match_clause.optional,
+                )?;
             } else {
                 plan = self.plan_path(
                     path,
@@ -4706,7 +4855,14 @@ impl QueryPlanner {
 
         // Handle WHERE clause with vector_similarity and predicate pushdown
         if let Some(predicate) = &match_clause.where_clause {
-            plan = self.plan_where_clause(predicate, plan, vars_in_scope, optional_vars.clone())?;
+            let scope = if match_clause.optional {
+                WhereScope::Optional {
+                    created: optional_vars.clone(),
+                }
+            } else {
+                WhereScope::Mandatory
+            };
+            plan = self.plan_where_clause(predicate, plan, vars_in_scope, scope)?;
         }
 
         // Close the clause. Each traversal inside it decides "this row found no
@@ -4734,6 +4890,120 @@ impl QueryPlanner {
         }
 
         Ok(plan)
+    }
+
+    /// `clause` with a hidden variable on every anonymous relationship, when
+    /// the clause would otherwise bind nothing new; `None` otherwise.
+    ///
+    /// "Nothing new" means every node is named and bound, every named
+    /// relationship is bound, and there is no path variable or quantified
+    /// group. Without an anonymous relationship such a clause matches an
+    /// entering row at most once and needs no name either.
+    fn name_relationships_between_bound_nodes(
+        &self,
+        clause: &MatchClause,
+        bound: &[VariableInfo],
+    ) -> Option<MatchClause> {
+        let is_bound = |v: &Option<String>| {
+            v.as_deref()
+                .is_some_and(|v| !v.is_empty() && is_var_in_scope(bound, v))
+        };
+        let mut anonymous = false;
+        for path in &clause.pattern.paths {
+            if path.variable.as_deref().is_some_and(|v| !v.is_empty()) {
+                return None;
+            }
+            for element in &path.elements {
+                match element {
+                    PatternElement::Node(n) if is_bound(&n.variable) => {}
+                    PatternElement::Relationship(r)
+                        if r.variable.as_deref().is_none_or(str::is_empty) =>
+                    {
+                        anonymous = true;
+                    }
+                    PatternElement::Relationship(r) if is_bound(&r.variable) => {}
+                    _ => return None,
+                }
+            }
+        }
+        if !anonymous {
+            return None;
+        }
+        let mut pattern = clause.pattern.clone();
+        for element in pattern.paths.iter_mut().flat_map(|p| p.elements.iter_mut()) {
+            if let PatternElement::Relationship(r) = element
+                && r.variable.as_deref().is_none_or(str::is_empty)
+            {
+                r.variable = Some(self.next_anon_var());
+            }
+        }
+        Some(MatchClause {
+            pattern,
+            ..clause.clone()
+        })
+    }
+
+    /// `clause` with the labels and property map of every node an earlier
+    /// clause bound moved into its `WHERE`; `None` when no node has any.
+    ///
+    /// For a bound node the two spellings are the same constraint, but only
+    /// the `WHERE` is applied by the null-preserving filter that closes an
+    /// `OPTIONAL MATCH`. A property map given as a parameter is left in place:
+    /// it has no per-key spelling to move.
+    fn hoist_bound_node_constraints(
+        &self,
+        clause: &MatchClause,
+        bound: &[VariableInfo],
+    ) -> Option<MatchClause> {
+        let mut constraints = Vec::new();
+        let mut pattern = clause.pattern.clone();
+        for element in pattern.paths.iter_mut().flat_map(|p| p.elements.iter_mut()) {
+            let PatternElement::Node(node) = element else {
+                continue;
+            };
+            let Some(variable) = node
+                .variable
+                .clone()
+                .filter(|v| !v.is_empty() && is_var_in_scope(bound, v))
+            else {
+                continue;
+            };
+            let label_check = |labels: Vec<String>| Expr::LabelCheck {
+                expr: Box::new(Expr::Variable(variable.clone())),
+                labels,
+            };
+            match std::mem::take(&mut node.labels) {
+                uni_cypher::ast::LabelExpr::Empty => {}
+                uni_cypher::ast::LabelExpr::Conjunction(labels) => {
+                    if !labels.is_empty() {
+                        constraints.push(label_check(labels));
+                    }
+                }
+                uni_cypher::ast::LabelExpr::Disjunction(labels) => {
+                    constraints.extend(labels.into_iter().map(|l| label_check(vec![l])).reduce(
+                        |l, r| Expr::BinaryOp {
+                            left: Box::new(l),
+                            op: BinaryOp::Or,
+                            right: Box::new(r),
+                        },
+                    ));
+                }
+            }
+            if matches!(node.properties, Some(Expr::Map(_))) {
+                constraints.extend(self.properties_to_expr(&variable, &node.properties));
+                node.properties = None;
+            }
+        }
+        if constraints.is_empty() {
+            return None;
+        }
+        Some(MatchClause {
+            pattern,
+            where_clause: and_predicates(
+                constraints.into_iter().chain(clause.where_clause.clone()),
+            ),
+            ..clause.clone()
+        })
     }
 
     /// `pattern` with a hidden step variable on every anonymous
@@ -4790,8 +5060,9 @@ impl QueryPlanner {
     }
 
     /// Whether an OPTIONAL MATCH takes more than one step from the rows
-    /// entering it: more than one path, more than one relationship, or a
-    /// relationship out of a node the clause itself scans for.
+    /// entering it: more than one path, more than one relationship, a
+    /// relationship out of a node the clause itself scans for, or a shortest
+    /// path to a target the clause itself scans for.
     ///
     /// A single relationship out of an already-bound node decides "no match"
     /// per entering row by construction and needs no closing operator.
@@ -4812,24 +5083,38 @@ impl QueryPlanner {
                 PatternElement::Parenthesized { .. } => 2,
             })
             .sum();
-        let starts_unbound = match elements.first() {
+        let unbound = |element: Option<&PatternElement>| match element {
             Some(PatternElement::Node(n)) => n
                 .variable
                 .as_deref()
                 .is_none_or(|v| v.is_empty() || !is_var_in_scope(bound_before_clause, v)),
             _ => true,
         };
-        steps + usize::from(starts_unbound && steps > 0) > 1
+        let starts_unbound = unbound(elements.first());
+        // A shortest path's unbound target is a scan cross-joined in ahead of
+        // the search, so one entering row is already several rows when the
+        // search sees it, and the search decides "no path" per pair, not per
+        // entering row.
+        let shortest_ends_unbound =
+            paths[0].shortest_path_mode.is_some() && unbound(elements.last());
+        steps + usize::from(starts_unbound && steps > 0) + usize::from(shortest_ends_unbound) > 1
     }
 
     /// Plan a shortestPath pattern.
+    ///
+    /// `optional` is whether the pattern belongs to an `OPTIONAL MATCH`. It
+    /// decides what the operator does with a pair that has no path — drop it,
+    /// or keep it with a NULL path for the clause to null-extend — and makes
+    /// the endpoint scans the clause itself plans yield a NULL row when nothing
+    /// qualifies, so an entering row with no candidate target survives to be
+    /// null-extended instead of vanishing in the cross join.
     fn plan_shortest_path(
         &self,
         path: &PathPattern,
         plan: LogicalPlan,
         vars_in_scope: &mut Vec<VariableInfo>,
         mode: &ShortestPathMode,
-        _vars_before_pattern: usize,
+        optional: bool,
     ) -> Result<LogicalPlan> {
         let mut plan = plan;
         let elements = &path.elements;
@@ -4894,17 +5179,20 @@ impl QueryPlanner {
             .variable
             .clone()
             .ok_or_else(|| anyhow!("Target node must have variable in shortestPath"))?;
+        // The unnamed form, `MATCH shortestPath((a)-[*]->(b))`, still matches
+        // per path; a hidden variable carries the path the operator needs.
         let path_var = path
             .variable
             .clone()
-            .ok_or_else(|| anyhow!("shortestPath must be assigned to a variable"))?;
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| self.next_anon_var());
 
         let source_bound = is_var_in_scope(vars_in_scope, &source_var);
         let target_bound = is_var_in_scope(vars_in_scope, &target_var);
 
         // Plan source node if not bound
         if !source_bound {
-            plan = self.plan_unbound_node(source_node, &source_var, plan, false)?;
+            plan = self.plan_unbound_node(source_node, &source_var, plan, optional)?;
         } else if let Some(prop_filter) =
             self.properties_to_expr(&source_var, &source_node.properties)
         {
@@ -4928,23 +5216,30 @@ impl QueryPlanner {
             // `CatalogVertexScanExec` at physical-plan time.
             let target_label_id =
                 if let Some(meta) = self.schema.get_label_case_insensitive(target_label_name) {
-                    meta.id
+                    Some(meta.id)
                 } else if let Some((vid, _)) = self.allocate_virtual_label(target_label_name)? {
-                    vid
+                    Some(vid)
                 } else {
-                    return Err(anyhow!("Label {} not found", target_label_name));
+                    None
                 };
 
-            let target_scan = LogicalPlan::Scan {
-                label_id: target_label_id,
-                labels: target_node.labels.names().to_vec(),
-                variable: target_var.clone(),
-                filter: self.properties_to_expr(&target_var, &target_node.properties),
-                optional: false,
-            };
-
-            plan = Self::join_with_plan(plan, target_scan);
-            target_label_id
+            if let Some(target_label_id) = target_label_id {
+                let target_scan = LogicalPlan::Scan {
+                    label_id: target_label_id,
+                    labels: target_node.labels.names().to_vec(),
+                    variable: target_var.clone(),
+                    filter: self.properties_to_expr(&target_var, &target_node.properties),
+                    optional,
+                };
+                plan = Self::join_with_plan(plan, target_scan);
+                target_label_id
+            } else {
+                // A label the schema does not declare: scan it schemalessly,
+                // as the source is, and walk to that scan's rows — the
+                // already-bound case below.
+                plan = self.plan_unbound_node(target_node, &target_var, plan, optional)?;
+                0
+            }
         } else {
             if let Some(prop_filter) = self.properties_to_expr(&target_var, &target_node.properties)
             {
@@ -4964,14 +5259,18 @@ impl QueryPlanner {
         } else {
             let mut ids = Vec::new();
             for type_name in &rel.types {
-                let id = if let Some(meta) = self.schema.edge_types.get(type_name) {
-                    meta.id
+                // A type the schema does not declare may still have edges,
+                // written schemalessly; the traversal reads them by their
+                // schemaless id, as an untyped pattern does. A type with neither
+                // has no edges, so it contributes nothing to walk — the answer
+                // an ordinary `-[:T]->` gives for it, not an error.
+                if let Some(meta) = self.schema.edge_types.get(type_name) {
+                    ids.push(meta.id);
                 } else if let Some((vid, _)) = self.allocate_virtual_edge_type(type_name)? {
-                    vid
-                } else {
-                    return Err(anyhow!("Edge type {} not found", type_name));
-                };
-                ids.push(id);
+                    ids.push(vid);
+                } else if let Some(id) = self.schema.edge_type_id_unified(type_name) {
+                    ids.push(id);
+                }
             }
             ids
         };
@@ -4991,6 +5290,16 @@ impl QueryPlanner {
             ));
         }
 
+        let optional_pattern_vars: HashSet<String> = if optional {
+            std::iter::once(path_var.clone())
+                .chain(step_var.clone())
+                .chain((!source_bound).then(|| source_var.clone()))
+                .chain((!target_bound).then(|| target_var.clone()))
+                .collect()
+        } else {
+            HashSet::new()
+        };
+
         let sp_plan = match mode {
             ShortestPathMode::Shortest => LogicalPlan::ShortestPath {
                 input: Box::new(plan),
@@ -5004,6 +5313,8 @@ impl QueryPlanner {
                 min_hops,
                 max_hops,
                 edge_filter_expr: edge_filter_expr.clone(),
+                optional,
+                optional_pattern_vars: optional_pattern_vars.clone(),
             },
             ShortestPathMode::AllShortest => LogicalPlan::AllShortestPaths {
                 input: Box::new(plan),
@@ -5017,6 +5328,8 @@ impl QueryPlanner {
                 min_hops,
                 max_hops,
                 edge_filter_expr: edge_filter_expr.clone(),
+                optional,
+                optional_pattern_vars: optional_pattern_vars.clone(),
             },
         };
 
@@ -7499,14 +7812,24 @@ impl QueryPlanner {
 
     /// Plan a WHERE clause with vector_similarity extraction and predicate pushdown.
     ///
-    /// When `optional_vars` is non-empty, the Filter will preserve rows where
-    /// any of those variables are NULL (for OPTIONAL MATCH semantics).
+    /// Under [`WhereScope::Optional`] the only pushdown is a conjunct over one
+    /// created variable into that variable's `optional` scan, which lies
+    /// inside the clause. Everything else lands in one null-preserving
+    /// `Filter` over the clause, keyed by the created variables. A conjunct
+    /// pushed into a producer below the clause — an earlier clause's scan, an
+    /// earlier OPTIONAL's traversal target, a correlated subquery's input
+    /// filter — drops the rows it rejects instead of null-extending them. The
+    /// KNN rewrite stays off: `VectorKnn` has no `optional` flag, so it would
+    /// lose the NULL row. So does the label-disjunction rewrite, whose union of
+    /// optional scans would emit a NULL row per empty branch. When the clause
+    /// creates no variable at all it cannot change a row, and the predicate is
+    /// only validated.
     pub(crate) fn plan_where_clause(
         &self,
         predicate: &Expr,
         plan: LogicalPlan,
         vars_in_scope: &[VariableInfo],
-        optional_vars: HashSet<String>,
+        scope: WhereScope,
     ) -> Result<LogicalPlan> {
         // Validate no aggregation functions in WHERE clause
         validate_no_aggregation_in_where(predicate)?;
@@ -7531,6 +7854,17 @@ impl QueryPlanner {
             ));
         }
 
+        // OPTIONAL MATCH: the predicate decides which of the clause's matches
+        // survive, and nothing else. A clause that creates nothing has every
+        // node and relationship bound (anonymous relationships between bound
+        // nodes are named first), so it matches an entering row at most once
+        // and returns it unchanged either way.
+        let (pushdown, optional_vars) = match scope {
+            WhereScope::Mandatory => (true, HashSet::new()),
+            WhereScope::Optional { created } if created.is_empty() => return Ok(plan),
+            WhereScope::Optional { created } => (false, created),
+        };
+
         let mut plan = plan;
 
         // Transform VALID_AT macro to function call
@@ -7540,23 +7874,27 @@ impl QueryPlanner {
         // PredicateAnalyzer can push it down.
         let transformed_predicate = Self::rewrite_id_to_vid(transformed_predicate, vars_in_scope);
 
-        let mut current_predicate =
+        let rewritten =
             self.rewrite_predicates_using_indexes(&transformed_predicate, &plan, vars_in_scope)?;
 
-        // 1. Try to extract vector_similarity predicate for optimization
-        if let Some(extraction) = extract_vector_similarity(&current_predicate) {
+        // Orient `const OP n.prop` as `n.prop OP' const`. Every matcher below —
+        // scan / traverse pushdown, indexed point lookup, UID / ext_id / `_vid`
+        // routes, Lance filter rendering — recognizes the property on the
+        // left only, so a commuted `$p = n.uid` used to scan the whole label
+        // (A9). This runs after the generated-column rewrite so a commuted
+        // comparison against a generated column is oriented too.
+        let mut current_predicate = orient_property_comparisons(rewritten);
+
+        // 1. `n.prop ~= q` is a top-K index scan by definition. A threshold on
+        //    `vector_similarity(...)` is not (see `extract_knn_predicate`).
+        if pushdown && let Some(extraction) = extract_knn_predicate(&current_predicate) {
             let vs = &extraction.predicate;
             // Only consume the vector predicate if the KNN rewriter can actually
             // reach the Scan; otherwise leave it in `current_predicate` so it
             // becomes a residual Filter instead of being silently dropped.
             if Self::rewrite_target_reachable(&plan, &vs.variable, RewriteTarget::Knn) {
-                plan = Self::replace_scan_with_knn(
-                    plan,
-                    &vs.variable,
-                    &vs.property,
-                    vs.query.clone(),
-                    vs.threshold,
-                );
+                plan =
+                    Self::replace_scan_with_knn(plan, &vs.variable, &vs.property, vs.query.clone());
                 if let Some(residual) = extraction.residual {
                     current_predicate = residual;
                 } else {
@@ -7577,12 +7915,10 @@ impl QueryPlanner {
         // `ScanAll` / `Traverse` accordingly.
         let conjuncts = Self::split_and_conjuncts(&current_predicate);
         let mut keep: Vec<Expr> = Vec::with_capacity(conjuncts.len());
+        let rewritable_vars: &[VariableInfo] = if pushdown { vars_in_scope } else { &[] };
         for conj in conjuncts {
             let mut consumed = false;
-            for var in vars_in_scope {
-                if optional_vars.contains(&var.name) {
-                    continue;
-                }
+            for var in rewritable_vars {
                 // Node label disjunction → Union of label-scoped Scans.
                 // Gate on reachability by the label-union rewriter (not the
                 // laxer `is_scan_all_for`), so a `ScanAll` sitting under a
@@ -7623,22 +7959,33 @@ impl QueryPlanner {
         }
         current_predicate = Self::combine_predicates(keep).unwrap_or(Expr::TRUE);
 
-        // 3. Push eligible predicates to Scan OR Traverse filters
-        // Note: Do NOT push predicates on optional variables (from OPTIONAL MATCH) to
-        // Traverse's target_filter, because target_filter filtering doesn't preserve NULL
-        // rows. Let them stay in the Filter operator which handles NULL preservation.
-        for var in vars_in_scope {
-            // Skip pushdown for optional variables - they need NULL preservation in Filter
-            if optional_vars.contains(&var.name) {
-                continue;
-            }
-
+        // 3. Push eligible predicates to Scan OR Traverse filters.
+        //
+        // Under OPTIONAL MATCH only a variable the clause itself creates
+        // qualifies, and only into a scan marked `optional`: that scan is the
+        // clause's own and emits a NULL row when nothing passes, exactly as
+        // the inline `(b:N {uid: 'u42'})` form already does. A conjunct naming
+        // an earlier variable is never single-variable on a created one, so
+        // it stays in the clause's filter. Traverse targets stay closed:
+        // `target_filter` drops a row instead of null-extending it.
+        let scan_vars: Vec<&VariableInfo> = vars_in_scope
+            .iter()
+            .filter(|v| pushdown || optional_vars.contains(&v.name))
+            .collect();
+        for var in scan_vars {
             // Check if var is produced by a Scan the pushdown rewriter can reach.
             // Gate on `rewrite_target_reachable` (not the laxer
             // `find_scan_label_id`), so a scan under Sort/Limit/Aggregate/Apply —
             // which `push_predicate_to_scan` can't rebuild — keeps its predicate
             // in `current_predicate` as a residual Filter instead of dropping it.
-            if Self::rewrite_target_reachable(&plan, &var.name, RewriteTarget::Scan) {
+            // A scan under a shortest-path operator is reachable too (A8).
+            let scan_reachable = if pushdown {
+                Self::rewrite_target_reachable(&plan, &var.name, RewriteTarget::Scan)
+                    || Self::scan_reachable_through_shortest_path(&plan, &var.name)
+            } else {
+                Self::optional_scan_reachable(&plan, &var.name)
+            };
+            if scan_reachable {
                 let (pushable, residual) =
                     Self::extract_variable_predicates(&current_predicate, &var.name);
 
@@ -7651,11 +7998,9 @@ impl QueryPlanner {
                 } else {
                     current_predicate = Expr::TRUE;
                 }
-            } else if Self::rewrite_target_reachable(
-                &plan,
-                &var.name,
-                RewriteTarget::TraverseTarget,
-            ) {
+            } else if pushdown
+                && Self::rewrite_target_reachable(&plan, &var.name, RewriteTarget::TraverseTarget)
+            {
                 // Push to Traverse (same reachability discipline).
                 let (pushable, residual) =
                     Self::extract_variable_predicates(&current_predicate, &var.name);
@@ -7674,7 +8019,9 @@ impl QueryPlanner {
 
         // 4. Push predicates to Apply.input_filter
         // This filters input rows BEFORE executing correlated subqueries.
-        plan = Self::push_predicates_to_apply(plan, &mut current_predicate);
+        if pushdown {
+            plan = Self::push_predicates_to_apply(plan, &mut current_predicate);
+        }
 
         // 5. Add Filter node for any remaining predicates
         if !current_predicate.is_true_literal() {
@@ -8821,13 +9168,12 @@ impl QueryPlanner {
         }
     }
 
-    /// Replace a Scan node matching the variable with a VectorKnn node
+    /// Replaces the `Scan` of `variable` with a top-K `VectorKnn` (`~=` only).
     fn replace_scan_with_knn(
         plan: LogicalPlan,
         variable: &str,
         property: &str,
         query: Expr,
-        threshold: Option<f32>,
     ) -> LogicalPlan {
         match plan {
             LogicalPlan::Scan {
@@ -8838,20 +9184,14 @@ impl QueryPlanner {
                 optional,
             } => {
                 if scan_var == variable {
-                    // Inject any existing scan filter into VectorKnn?
-                    // VectorKnn doesn't support pre-filtering natively in logical plan yet (except threshold).
-                    // Typically filter is applied post-Knn or during Knn if supported.
-                    // For now, we assume filter is residual or handled by `extract_vector_similarity` which separates residual.
-                    // If `filter` is present on Scan, it must be preserved.
-                    // We can wrap VectorKnn in Filter if Scan had filter.
-
+                    // A filter already pushed into the scan is kept above the
+                    // KNN, so it narrows the top-K rather than being lost.
                     let knn = LogicalPlan::VectorKnn {
                         label_id,
                         variable: variable.to_string(),
                         property: property.to_string(),
                         query,
                         k: 100, // Default K, should push down LIMIT
-                        threshold,
                     };
 
                     if let Some(f) = filter {
@@ -8879,14 +9219,14 @@ impl QueryPlanner {
                 optional_variables,
             } => LogicalPlan::Filter {
                 input: Box::new(Self::replace_scan_with_knn(
-                    *input, variable, property, query, threshold,
+                    *input, variable, property, query,
                 )),
                 predicate,
                 optional_variables,
             },
             LogicalPlan::Project { input, projections } => LogicalPlan::Project {
                 input: Box::new(Self::replace_scan_with_knn(
-                    *input, variable, property, query, threshold,
+                    *input, variable, property, query,
                 )),
                 projections,
             },
@@ -8897,7 +9237,7 @@ impl QueryPlanner {
                 // To support Limit pushdown, we need a separate optimizer pass or do it in plan_single.
                 LogicalPlan::Limit {
                     input: Box::new(Self::replace_scan_with_knn(
-                        *input, variable, property, query, threshold,
+                        *input, variable, property, query,
                     )),
                     skip,
                     fetch,
@@ -8909,10 +9249,9 @@ impl QueryPlanner {
                     variable,
                     property,
                     query.clone(),
-                    threshold,
                 )),
                 right: Box::new(Self::replace_scan_with_knn(
-                    *right, variable, property, query, threshold,
+                    *right, variable, property, query,
                 )),
             },
             other => other,
@@ -8986,6 +9325,7 @@ impl QueryPlanner {
             | LogicalPlan::LocyModelInvoke { .. }
             | LogicalPlan::LocyGenerate { .. }
             | LogicalPlan::Empty
+            | LogicalPlan::OuterRow { .. }
             | LogicalPlan::CreateVectorIndex { .. }
             | LogicalPlan::CreateSparseIndex { .. }
             | LogicalPlan::CreateFullTextIndex { .. }
@@ -9075,6 +9415,68 @@ impl QueryPlanner {
         }
     }
 
+    /// Whether `variable` is produced by a scan marked `optional` that
+    /// `push_predicate_to_scan` can reach.
+    ///
+    /// An optional scan emits one NULL row when nothing passes its filter, so
+    /// a predicate pushed into it null-extends rather than drops. Descends the
+    /// same nodes as [`Self::rewrite_target_reachable`] for
+    /// [`RewriteTarget::Scan`].
+    fn optional_scan_reachable(plan: &LogicalPlan, variable: &str) -> bool {
+        match plan {
+            LogicalPlan::Scan {
+                variable: var,
+                optional,
+                ..
+            }
+            | LogicalPlan::ScanAll {
+                variable: var,
+                optional,
+                ..
+            } if var == variable => *optional,
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::Traverse { input, .. } => Self::optional_scan_reachable(input, variable),
+            LogicalPlan::CrossJoin { left, right } => {
+                Self::optional_scan_reachable(left, variable)
+                    || Self::optional_scan_reachable(right, variable)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `variable`'s scan sits under a `shortestPath` /
+    /// `allShortestPaths` operator, on a route `push_predicate_to_scan` rebuilds.
+    ///
+    /// Pushing a predicate over one endpoint past the operator is sound: it
+    /// emits only copies of its input rows' values (one per path for
+    /// `allShortestPaths`, and none for a pair with no path under a mandatory
+    /// MATCH), so the predicate selects the same rows
+    /// before the search as after it. Before, it selects them for free —
+    /// `shortestPath((a {id: 0})-[*]->(b:N)) WHERE b.x < 20` searched to every
+    /// `N` node and then kept 20 (A8). Kept apart from
+    /// `rewrite_target_reachable` so that `plan_where_clause` can withhold it
+    /// from OPTIONAL MATCH.
+    fn scan_reachable_through_shortest_path(plan: &LogicalPlan, variable: &str) -> bool {
+        match plan {
+            LogicalPlan::ShortestPath { input, .. }
+            | LogicalPlan::AllShortestPaths { input, .. } => {
+                Self::rewrite_target_reachable(input, variable, RewriteTarget::Scan)
+                    || Self::scan_reachable_through_shortest_path(input, variable)
+            }
+            LogicalPlan::Filter { input, .. }
+            | LogicalPlan::Project { input, .. }
+            | LogicalPlan::Traverse { input, .. } => {
+                Self::scan_reachable_through_shortest_path(input, variable)
+            }
+            LogicalPlan::CrossJoin { left, right } => {
+                Self::scan_reachable_through_shortest_path(left, variable)
+                    || Self::scan_reachable_through_shortest_path(right, variable)
+            }
+            _ => false,
+        }
+    }
+
     /// Push a predicate into a Scan's filter for the specified variable
     fn push_predicate_to_scan(plan: LogicalPlan, variable: &str, predicate: Expr) -> LogicalPlan {
         match plan {
@@ -9135,8 +9537,12 @@ impl QueryPlanner {
                 projections,
             },
             LogicalPlan::CrossJoin { left, right } => {
-                // Check which side has the variable
-                if Self::find_scan_label_id(&left, variable).is_some() {
+                // Check which side has the variable. `find_scan_label_id` does
+                // not descend a shortest-path operator, so it alone would send
+                // a predicate for a scan under one to the wrong side.
+                if Self::find_scan_label_id(&left, variable).is_some()
+                    || Self::scan_reachable_through_shortest_path(&left, variable)
+                {
                     LogicalPlan::CrossJoin {
                         left: Box::new(Self::push_predicate_to_scan(*left, variable, predicate)),
                         right,
@@ -9148,7 +9554,9 @@ impl QueryPlanner {
                     }
                 }
             }
-            other @ LogicalPlan::Traverse { .. } => {
+            other @ (LogicalPlan::Traverse { .. }
+            | LogicalPlan::ShortestPath { .. }
+            | LogicalPlan::AllShortestPaths { .. }) => {
                 other.map_input(|child| Self::push_predicate_to_scan(child, variable, predicate))
             }
             other => other,
@@ -9299,6 +9707,9 @@ impl QueryPlanner {
                 Self::collect_plan_variables_impl(input, vars);
             }
             LogicalPlan::Filter { input, .. } => Self::collect_plan_variables_impl(input, vars),
+            LogicalPlan::OuterRow { variables } => {
+                vars.extend(variables.iter().map(|v| v.name.clone()));
+            }
             LogicalPlan::Project { input, projections } => {
                 for (expr, alias) in projections {
                     if let Some(a) = alias {
@@ -9742,6 +10153,7 @@ pub fn projection_columns(plan: &LogicalPlan) -> Option<Vec<String>> {
         | LogicalPlan::ScanAll { .. }
         | LogicalPlan::ScanMainByLabels { .. }
         | LogicalPlan::Empty
+        | LogicalPlan::OuterRow { .. }
         | LogicalPlan::Unwind { .. }
         | LogicalPlan::Traverse { .. }
         | LogicalPlan::TraverseMainByType { .. }
@@ -11523,6 +11935,7 @@ fn collect_properties_recursive(
         LogicalPlan::LocyProgram { .. }
         | LogicalPlan::LocyDerivedScan { .. }
         | LogicalPlan::Empty
+        | LogicalPlan::OuterRow { .. }
         | LogicalPlan::CreateVectorIndex { .. }
         | LogicalPlan::CreateSparseIndex { .. }
         | LogicalPlan::CreateFullTextIndex { .. }
@@ -12271,6 +12684,20 @@ fn analyze_function_property_requirements(
                 mark_wildcard(var, properties);
             }
         }
+    }
+
+    // A `startNode(r)` / `endNode(r)` that reaches property collection was not
+    // rewritten to a traversal's endpoint variable (`resolve_traversal_endpoints`):
+    // `r` is an outer relationship inside a subquery body, or a projection
+    // dropped its endpoints. The call then reads them from `r`'s struct
+    // (`_src` / `_dst`), so `r` needs one — but not its property bag.
+    if matches!(name.to_uppercase().as_str(), "STARTNODE" | "ENDNODE")
+        && let Some(Expr::Variable(var)) = args.first()
+    {
+        properties
+            .entry(var.clone())
+            .or_default()
+            .insert(STRUCT_ONLY_SENTINEL.to_string());
     }
 
     // The spec's entity arguments are authoritatively handled above (a specific
@@ -13358,7 +13785,6 @@ fn rewrite_node<L: ForkIndexLookup>(plan: LogicalPlan, lookup: &L) -> LogicalPla
             property,
             query,
             k,
-            threshold,
         } => {
             if lookup.fork_index_has_label_id(
                 label_id,
@@ -13373,7 +13799,6 @@ fn rewrite_node<L: ForkIndexLookup>(plan: LogicalPlan, lookup: &L) -> LogicalPla
                         property,
                         query,
                         k,
-                        threshold,
                     }),
                     kind,
                 }
@@ -13384,7 +13809,6 @@ fn rewrite_node<L: ForkIndexLookup>(plan: LogicalPlan, lookup: &L) -> LogicalPla
                     property,
                     query,
                     k,
-                    threshold,
                 }
             }
         }

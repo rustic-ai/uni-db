@@ -1612,6 +1612,7 @@ impl Executor {
             | LogicalPlan::LocyProgram { .. }
             | LogicalPlan::LocyDerivedScan { .. }
             | LogicalPlan::Empty
+            | LogicalPlan::OuterRow { .. }
             | LogicalPlan::CreateVectorIndex { .. }
             | LogicalPlan::CreateSparseIndex { .. }
             | LogicalPlan::CreateFullTextIndex { .. }
@@ -3520,6 +3521,20 @@ impl Executor {
                     unreachable!("mutations are handled by DataFusion engine")
                 }
                 LogicalPlan::Empty => Ok(vec![HashMap::new()]),
+                // This executor runs no correlated operator, so nothing binds an
+                // import to an outer row: each is its same-named parameter.
+                LogicalPlan::OuterRow { variables } => {
+                    let projections = variables
+                        .iter()
+                        .map(|v| (Expr::Parameter(v.name.clone()), Some(v.name.clone())))
+                        .collect();
+                    let project = LogicalPlan::Project {
+                        input: Box::new(LogicalPlan::Empty),
+                        projections,
+                    };
+                    self.execute_subplan(project, prop_manager, params, ctx)
+                        .await
+                }
                 LogicalPlan::BindZeroLengthPath { .. } => {
                     unreachable!("BindZeroLengthPath is handled by DataFusion engine")
                 }

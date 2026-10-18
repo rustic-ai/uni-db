@@ -1048,6 +1048,22 @@ pub struct ProfileOutput {
     pub total_time_ms: u64,
     /// Peak memory used during execution in bytes.
     pub peak_memory_bytes: usize,
+    /// Logical planning time in milliseconds (Cypher AST to logical plan).
+    ///
+    /// Measured by the API layer before execution starts, so it is not part of
+    /// [`Self::total_time_ms`].
+    #[serde(default)]
+    pub logical_planning_ms: f64,
+    /// Physical planning time in milliseconds, summed over every plan built.
+    ///
+    /// Includes the sub-plans built during execution (a correlated subquery's
+    /// body once per outer row), so it is part of [`Self::total_time_ms`].
+    #[serde(default)]
+    pub physical_planning_ms: f64,
+    /// Physical plans built: one for the query plus one per execution-time
+    /// sub-plan.
+    #[serde(default)]
+    pub physical_plans: u64,
 }
 
 /// Runtime statistics for a single logical plan operator.
@@ -1136,6 +1152,8 @@ impl Executor {
         let explain_output = planner.explain_logical_plan(&plan)?;
 
         let start = Instant::now();
+        let plans_before = self.counters.physical_plans();
+        let planning_before = self.counters.planning_nanos();
 
         let prop_manager = self.create_prop_manager();
 
@@ -1173,6 +1191,14 @@ impl Executor {
                 runtime_stats: stats,
                 total_time_ms: total_time.as_millis() as u64,
                 peak_memory_bytes: 0,
+                // Filled in by the API layer, which owns logical planning.
+                logical_planning_ms: 0.0,
+                physical_planning_ms: self
+                    .counters
+                    .planning_nanos()
+                    .saturating_sub(planning_before) as f64
+                    / 1_000_000.0,
+                physical_plans: self.counters.physical_plans().saturating_sub(plans_before),
             },
         ))
     }

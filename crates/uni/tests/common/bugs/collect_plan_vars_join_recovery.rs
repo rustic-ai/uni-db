@@ -122,8 +122,9 @@ async fn bindpath_cross_match_equi_join_is_hash_join() {
     assert_hash_not_cross(&join_ops(&profile), "BindPath");
 }
 
-/// `MATCH (a:Doc),(b:Doc) WHERE vector_similarity(a.embedding,[..]) > t AND a.q = b.q`
-/// — `a` is rewritten to a `VectorKnn` node in-place under the CrossJoin.
+/// `MATCH (a:Doc),(b:Doc) WHERE a.embedding ~= [..] AND a.q = b.q` — `a` is
+/// rewritten to a `VectorKnn` node in-place under the CrossJoin. (Only `~=`
+/// reaches `VectorKnn`; a `vector_similarity` threshold is a per-row filter.)
 #[tokio::test]
 async fn vectorknn_cross_match_equi_join_is_hash_join() {
     let db = Uni::in_memory().build().await.unwrap();
@@ -145,8 +146,8 @@ async fn vectorknn_cross_match_equi_join_is_hash_join() {
         .unwrap();
     let s = db.session();
     let tx = s.tx().await.unwrap();
-    // All embeddings == query vector → cosine 1.0 > 0.5, so every `a` passes
-    // the KNN threshold and the join cardinality is fully determined by `q`.
+    // 20 docs, under the KNN's top-100: every `a` is returned, so the join
+    // cardinality is fully determined by `q`.
     for i in 0..20i64 {
         tx.query_with("CREATE (:Doc {q:$q, embedding:[1.0, 0.0, 0.0]})")
             .param("q", Value::Int(i % 4))
@@ -157,7 +158,7 @@ async fn vectorknn_cross_match_equi_join_is_hash_join() {
     tx.commit().await.unwrap();
 
     let q = "MATCH (a:Doc),(b:Doc) \
-             WHERE vector_similarity(a.embedding, [1.0, 0.0, 0.0]) > 0.5 AND a.q = b.q \
+             WHERE a.embedding ~= [1.0, 0.0, 0.0] AND a.q = b.q \
              RETURN count(*) AS n";
     let ex = s.query_with(q).explain().await.unwrap();
     assert!(ex.plan_text.contains("VectorKnn"), "plan: {}", ex.plan_text);
@@ -167,7 +168,7 @@ async fn vectorknn_cross_match_equi_join_is_hash_join() {
 
     let aq = col_i64(
         &s,
-        "MATCH (a:Doc) WHERE vector_similarity(a.embedding, [1.0, 0.0, 0.0]) > 0.5 RETURN a.q AS q",
+        "MATCH (a:Doc) WHERE a.embedding ~= [1.0, 0.0, 0.0] RETURN a.q AS q",
         "q",
     )
     .await;

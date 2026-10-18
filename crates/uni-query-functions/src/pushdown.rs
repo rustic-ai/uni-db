@@ -965,6 +965,92 @@ impl LanceFilterGenerator {
     }
 }
 
+/// Rewrites `constant OP var.prop` comparisons to `var.prop OP' constant`.
+///
+/// Every pushdown and index matcher downstream of the WHERE planner —
+/// [`PredicateAnalyzer::is_pushable`], [`IndexAwareAnalyzer`]'s indexed-equality,
+/// UID, prefix and FTS routes, and [`LanceFilterGenerator`] — recognizes a
+/// property comparison only with the property on the left. A commuted
+/// `$p = n.uid` or `'u42' = n.uid` therefore became a residual filter over a
+/// full scan while `n.uid = $p` read one row from the index (perf audit
+/// 2026-10-17, A9). Orienting the predicate once, before any matcher runs, fixes
+/// every matcher at the same time.
+///
+/// The operator is mirrored, not negated: `=` and `<>` are symmetric, `<`
+/// becomes `>`, `<=` becomes `>=` and so on. `a < b` and `b > a` are the same
+/// Cypher comparison, including the NULL result for a NULL or incomparable
+/// operand, so the rewrite is semantics-preserving wherever it fires.
+///
+/// Only the boolean skeleton (`AND`, `OR`, `XOR`, `NOT`) is descended; a
+/// comparison nested inside any other expression is left untouched. A side
+/// counts as constant only when it is built from literals and parameters
+/// (see `is_row_independent`); the other side must be a property of a
+/// variable. Non-commutative operators — `IN`, `STARTS WITH`, `ENDS WITH`,
+/// `CONTAINS`, `=~` — are never flipped.
+pub fn orient_property_comparisons(expr: Expr) -> Expr {
+    match expr {
+        Expr::BinaryOp {
+            left,
+            op: op @ (BinaryOp::And | BinaryOp::Or | BinaryOp::Xor),
+            right,
+        } => Expr::BinaryOp {
+            left: Box::new(orient_property_comparisons(*left)),
+            op,
+            right: Box::new(orient_property_comparisons(*right)),
+        },
+        Expr::UnaryOp {
+            op: UnaryOp::Not,
+            expr: inner,
+        } => Expr::UnaryOp {
+            op: UnaryOp::Not,
+            expr: Box::new(orient_property_comparisons(*inner)),
+        },
+        Expr::BinaryOp { left, op, right } => match mirrored_comparison(op) {
+            Some(mirrored)
+                if is_row_independent(&left)
+                    && matches!(right.as_ref(), Expr::Property(base, _)
+                        if matches!(base.as_ref(), Expr::Variable(_))) =>
+            {
+                Expr::BinaryOp {
+                    left: right,
+                    op: mirrored,
+                    right: left,
+                }
+            }
+            _ => Expr::BinaryOp { left, op, right },
+        },
+        other => other,
+    }
+}
+
+/// The operator `op'` with `a op b` ≡ `b op' a`, for comparisons only.
+fn mirrored_comparison(op: BinaryOp) -> Option<BinaryOp> {
+    match op {
+        BinaryOp::Eq => Some(BinaryOp::Eq),
+        BinaryOp::NotEq => Some(BinaryOp::NotEq),
+        BinaryOp::Lt => Some(BinaryOp::Gt),
+        BinaryOp::LtEq => Some(BinaryOp::GtEq),
+        BinaryOp::Gt => Some(BinaryOp::Lt),
+        BinaryOp::GtEq => Some(BinaryOp::LtEq),
+        _ => None,
+    }
+}
+
+/// Whether `expr` is built only from literals and parameters.
+///
+/// Deliberately structural and conservative: any variable, property access,
+/// function call or subquery makes it row-dependent, so an expression this
+/// function cannot classify is never treated as a constant.
+fn is_row_independent(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_) | Expr::Parameter(_) => true,
+        Expr::List(items) => items.iter().all(is_row_independent),
+        Expr::Map(entries) => entries.iter().all(|(_, v)| is_row_independent(v)),
+        Expr::UnaryOp { expr, .. } => is_row_independent(expr),
+        _ => false,
+    }
+}
+
 /// If `expr` is a property predicate (`Property(var, p) <op> _` or
 /// `Property(var, p) IN _`) on `variable`, return the property name.
 /// Used by the planner to match analyzer-detected hash-index columns back
@@ -1191,5 +1277,126 @@ mod security_tests {
                 "Parameterized predicates should not be pushed to storage"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod orientation_tests {
+    use super::*;
+
+    fn prop(var: &str, p: &str) -> Expr {
+        Expr::Property(Box::new(Expr::Variable(var.to_string())), p.to_string())
+    }
+
+    fn cmp(left: Expr, op: BinaryOp, right: Expr) -> Expr {
+        Expr::BinaryOp {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        }
+    }
+
+    fn param(name: &str) -> Expr {
+        Expr::Parameter(name.to_string())
+    }
+
+    /// Each comparison flips to its mirror, never its negation.
+    #[test]
+    fn every_comparison_is_mirrored() {
+        for (op, mirrored) in [
+            (BinaryOp::Eq, BinaryOp::Eq),
+            (BinaryOp::NotEq, BinaryOp::NotEq),
+            (BinaryOp::Lt, BinaryOp::Gt),
+            (BinaryOp::LtEq, BinaryOp::GtEq),
+            (BinaryOp::Gt, BinaryOp::Lt),
+            (BinaryOp::GtEq, BinaryOp::LtEq),
+        ] {
+            let got = orient_property_comparisons(cmp(param("p"), op, prop("n", "uid")));
+            assert_eq!(got, cmp(prop("n", "uid"), mirrored, param("p")), "{op:?}");
+        }
+    }
+
+    /// Non-commutative operators keep their orientation.
+    #[test]
+    fn non_commutative_operators_are_left_alone() {
+        for op in [
+            BinaryOp::StartsWith,
+            BinaryOp::EndsWith,
+            BinaryOp::Contains,
+            BinaryOp::Regex,
+            BinaryOp::Sub,
+        ] {
+            let e = cmp(
+                Expr::Literal(CypherLiteral::String("u".into())),
+                op,
+                prop("n", "uid"),
+            );
+            assert_eq!(orient_property_comparisons(e.clone()), e, "{op:?}");
+        }
+        let in_expr = Expr::In {
+            expr: Box::new(Expr::Literal(CypherLiteral::String("u".into()))),
+            list: Box::new(prop("n", "tags")),
+        };
+        assert_eq!(orient_property_comparisons(in_expr.clone()), in_expr);
+    }
+
+    /// A row-dependent left side is never treated as a constant.
+    #[test]
+    fn row_dependent_left_side_is_not_flipped() {
+        for left in [
+            prop("m", "uid"),
+            Expr::Variable("x".into()),
+            Expr::FunctionCall {
+                name: "toUpper".into(),
+                args: vec![param("p")],
+                distinct: false,
+                window_spec: None,
+            },
+            Expr::List(vec![param("p"), Expr::Variable("x".into())]),
+        ] {
+            let e = cmp(left, BinaryOp::Eq, prop("n", "uid"));
+            assert_eq!(orient_property_comparisons(e.clone()), e);
+        }
+    }
+
+    /// The boolean skeleton is descended so every conjunct and disjunct is
+    /// oriented; an already-canonical comparison is unchanged.
+    #[test]
+    fn boolean_skeleton_is_descended() {
+        let lit = |s: &str| Expr::Literal(CypherLiteral::String(s.into()));
+        let e = cmp(
+            Expr::UnaryOp {
+                op: UnaryOp::Not,
+                expr: Box::new(cmp(lit("a"), BinaryOp::Lt, prop("n", "x"))),
+            },
+            BinaryOp::And,
+            cmp(
+                cmp(lit("b"), BinaryOp::Eq, prop("n", "y")),
+                BinaryOp::Or,
+                cmp(prop("n", "z"), BinaryOp::Eq, lit("c")),
+            ),
+        );
+        let want = cmp(
+            Expr::UnaryOp {
+                op: UnaryOp::Not,
+                expr: Box::new(cmp(prop("n", "x"), BinaryOp::Gt, lit("a"))),
+            },
+            BinaryOp::And,
+            cmp(
+                cmp(prop("n", "y"), BinaryOp::Eq, lit("b")),
+                BinaryOp::Or,
+                cmp(prop("n", "z"), BinaryOp::Eq, lit("c")),
+            ),
+        );
+        assert_eq!(orient_property_comparisons(e), want);
+    }
+
+    /// The oriented form is what the analyzers accept; the commuted one is not.
+    #[test]
+    fn oriented_form_is_pushable() {
+        let analyzer = PredicateAnalyzer::new();
+        let commuted = cmp(param("p"), BinaryOp::Eq, prop("n", "uid"));
+        assert!(!analyzer.is_pushable(&commuted, "n"));
+        assert!(analyzer.is_pushable(&orient_property_comparisons(commuted), "n"));
     }
 }

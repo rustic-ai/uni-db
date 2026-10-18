@@ -211,6 +211,11 @@ Direct storage-layer vector search, bypassing Cypher:
 
 Vector similarity filter via Cypher (`WHERE vector_similarity(...) > 0.8`):
 
+These figures predate a correctness fix: the predicate was then rewritten into a
+top-100 index scan that ignored the threshold's meaning and capped the answer at
+100 rows. It is now an exact per-row filter over the label scan, so expect
+linear growth; `~=` / `uni.vector.query` is the index-served form.
+
 | Dataset | Latency | Notes |
 |---------|---------|-------|
 | 1K n | 6.12 ms | Includes Cypher parse + plan |

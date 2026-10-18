@@ -96,6 +96,17 @@ pub struct MainEdgeDataset {
     _base_uri: String,
 }
 
+/// Adds a scanned main-edge batch to the query's row counters, if counting.
+///
+/// Counted here because this is where the batch is in hand: attaching counters
+/// to the `ScanRequest` reports index work only (see `ScanRequest::with_counters`).
+fn count_scanned_rows(counters: Option<&Arc<QueryCounters>>, batch: &RecordBatch) {
+    if let Some(c) = counters {
+        c.add_storage_rows(batch.num_rows());
+        c.add_rows_scanned(batch.num_rows());
+    }
+}
+
 impl MainEdgeDataset {
     /// Create a new MainEdgeDataset.
     pub fn new(base_uri: &str) -> Self {
@@ -831,6 +842,12 @@ impl MainEdgeDataset {
 
     /// [`Self::find_edges_by_type_names`], carrying a query's counters into the
     /// backend.
+    ///
+    /// Every row the scan returns — live rows and tombstones alike, before the
+    /// per-eid ranking — counts toward `storage_rows` and `rows_scanned`. A
+    /// variable-length pattern with an inline property map scans a whole edge
+    /// type through here before its anchored walk, and was invisible to
+    /// `rows_scanned` until this counted it.
     pub async fn find_edges_by_type_names_counted(
         backend: &dyn StorageBackend,
         type_names: &[&str],
@@ -872,6 +889,7 @@ impl MainEdgeDataset {
                 let batches =
                     Self::execute_query(backend, base_filter.clone(), None, counters).await?;
                 for batch in &batches {
+                    count_scanned_rows(counters, batch);
                     Self::rank_edges_from_batch(batch, &mut winners)?;
                 }
             }
@@ -892,6 +910,7 @@ impl MainEdgeDataset {
                     let filter = FilterExpr::all([base_filter.clone(), endpoint_clause]);
                     let batches = Self::execute_query(backend, filter, None, counters).await?;
                     for batch in &batches {
+                        count_scanned_rows(counters, batch);
                         Self::rank_edges_from_batch(batch, &mut winners)?;
                     }
                 }

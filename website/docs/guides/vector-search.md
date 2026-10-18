@@ -480,6 +480,14 @@ Adding two separate `similar_to` calls produces raw score addition without norma
 
 Use `~=` to **find** candidates; use `similar_to()` to **score** or **fuse** on bound nodes.
 
+A threshold such as `WHERE vector_similarity(d.embedding, $q) > 0.8` is a
+per-row filter: it returns **every** node whose cosine similarity to `$q`
+exceeds 0.8, and only those, whether or not a vector index exists — the index
+is not consulted, and there is no top-K cap. That makes it exact but a full
+label scan. To use the index, ask for the nearest neighbours with `~=` or
+`uni.vector.query` and filter their scores. `vector_similarity` returns NULL
+when either vector is NULL, so nodes without the property never match.
+
 ### Procedures vs `similar_to`
 
 | | `CALL uni.search(...)` | `similar_to()` |

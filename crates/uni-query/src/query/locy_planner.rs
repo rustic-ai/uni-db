@@ -26,7 +26,7 @@ use uni_cypher::locy_ast::{
     LocyBinaryOp, LocyExpr, RuleCondition, RuleOutput, resolve_yield_column_names,
 };
 use uni_locy::binding_plan::{
-    BindingStep, ClauseBindingPlan, ColumnKind, Exposure, PositionAction, VarSource,
+    AnchorSource, BindingStep, ClauseBindingPlan, ColumnKind, Exposure, PositionAction, VarSource,
 };
 use uni_locy::types::{
     CompiledClause, CompiledCommand, CompiledProgram, CompiledRule, Stratum, YieldColumn,
@@ -713,7 +713,7 @@ fn infer_expr_type(expr: &Expr, node_vars: &HashSet<String>) -> DataType {
 use super::df_graph::common::build_edge_list_field;
 use super::df_graph::locy_fixpoint::{DerivedScanEntry, DerivedScanRegistry, DerivedScanView};
 use super::planner::{
-    LogicalPlan, QueryPlanner, VariableInfo, collect_expr_variables, is_var_in_scope,
+    LogicalPlan, QueryPlanner, VariableInfo, WhereScope, collect_expr_variables, is_var_in_scope,
 };
 use super::planner_locy_types::{
     FOLD_DISCRIMINATOR_COL_PREFIX, ISNOT_VID_COL_PREFIX, LocyClausePlan, LocyCommand, LocyIsRef,
@@ -1971,8 +1971,10 @@ impl<'a> LocyPlanBuilder<'a> {
             .enumerate()
             .map(|(occurrence, (r, _))| (r, occurrence))
             .collect();
-        // The derived scan a positive reference joins, under its prefix.
-        let mut derived_scan = |r: usize| -> Result<LogicalPlan> {
+        // The derived scan a positive reference joins, under its prefix — or,
+        // for a lower-stratum anchor's seed, under `seed_prefix`, so the seed's
+        // columns never collide with the reference's own join.
+        let mut derived_scan = |r: usize, seed_prefix: Option<&str>| -> Result<LogicalPlan> {
             let ref_binding = &binding.refs[r];
             let target_rule_name = ref_binding.rule.as_str();
             let target_rule = rule_catalog
@@ -2016,8 +2018,11 @@ impl<'a> LocyPlanBuilder<'a> {
                 &target_deriv,
                 view,
             );
-            let scan_schema = alias_derived_schema(&handle.schema, &ref_binding.prefix);
-            if let Some(&occurrence) = positive_occurrence.get(&r) {
+            let scan_schema =
+                alias_derived_schema(&handle.schema, seed_prefix.unwrap_or(&ref_binding.prefix));
+            if seed_prefix.is_none()
+                && let Some(&occurrence) = positive_occurrence.get(&r)
+            {
                 ref_scan_columns.insert(
                     occurrence,
                     scan_schema
@@ -2035,21 +2040,47 @@ impl<'a> LocyPlanBuilder<'a> {
         };
 
         // Issue #301: an anchored clause reads its anchoring reference first
-        // and walks the pattern from the nodes it names, so a recursive clause
-        // costs the referenced delta rather than the whole relation. The
-        // anchoring position's test is the join that seeds the walk; the
-        // reference's other positions are applied at its step below.
+        // and walks the pattern from the nodes it names — from whichever end
+        // of the path the node is on — so a recursive clause costs the
+        // referenced delta rather than the whole relation.
+        //
+        // A recursive anchor seeds the walk with the reference's own rows: the
+        // anchoring position's test is the seed join, and the reference's
+        // other positions are applied at its step below. A lower-stratum
+        // anchor (P4 / A2) seeds it with the distinct anchored vids only, and
+        // the reference is joined in full at its step, every test included:
+        // the seed is a semi-join, so a lower stratum's facts never repeat a
+        // walk for two rows sharing the anchored node, and the binding is the
+        // unanchored plan's exactly.
         let mut pattern_vars: Vec<VariableInfo> = Vec::new();
         let mut plan = match binding.anchor {
             Some(anchor) => {
                 let position = &binding.refs[anchor.r].positions[anchor.pos];
-                let source = derived_scan(anchor.r)?;
+                let (source, vid_column) = match anchor.source {
+                    AnchorSource::Recursive => {
+                        (derived_scan(anchor.r, None)?, position.physical.clone())
+                    }
+                    AnchorSource::LowerStratum => {
+                        let seed_prefix = "__anchor_";
+                        let seed = format!("{seed_prefix}{}", position.column);
+                        let source = LogicalPlan::Distinct {
+                            input: Box::new(LogicalPlan::Project {
+                                input: Box::new(derived_scan(anchor.r, Some(seed_prefix))?),
+                                projections: vec![(
+                                    Expr::Variable(seed.clone()),
+                                    Some(seed.clone()),
+                                )],
+                            }),
+                        };
+                        (source, seed)
+                    }
+                };
                 self.planner
                     .plan_pattern_from_anchor(
                         &clause.match_pattern,
                         &position.variable,
                         source,
-                        &position.physical,
+                        &vid_column,
                         &mut pattern_vars,
                         &where_anchored,
                     )
@@ -2084,7 +2115,7 @@ impl<'a> LocyPlanBuilder<'a> {
             let predicate = combine_with_and(&pushable);
             plan = self
                 .planner
-                .plan_where_clause(&predicate, plan, &pattern_vars, HashSet::new())
+                .plan_where_clause(&predicate, plan, &pattern_vars, WhereScope::Mandatory)
                 .context("planning rule-body WHERE")?;
         }
         if !unpushable.is_empty() {
@@ -2109,12 +2140,16 @@ impl<'a> LocyPlanBuilder<'a> {
             match *step {
                 BindingStep::Ref(r) => {
                     let ref_binding = &binding.refs[r];
-                    // The anchoring reference was joined below the pattern.
-                    let anchor_pos = binding.anchor.filter(|a| a.r == r).map(|a| a.pos);
+                    // A recursive anchoring reference was joined below the
+                    // pattern; a lower-stratum one only seeded it.
+                    let anchor_pos = binding
+                        .anchor
+                        .filter(|a| a.r == r && a.source == AnchorSource::Recursive)
+                        .map(|a| a.pos);
                     if anchor_pos.is_none() {
                         plan = LogicalPlan::CrossJoin {
                             left: Box::new(plan),
-                            right: Box::new(derived_scan(r)?),
+                            right: Box::new(derived_scan(r, None)?),
                         };
                     }
 
@@ -2151,6 +2186,14 @@ impl<'a> LocyPlanBuilder<'a> {
                     // is never scanned twice — a second `ScanAll` cross-joins
                     // the node with itself and inflates any aggregate over the
                     // joined value columns.
+                    //
+                    // The join key is `Property(var, "_vid")`, not the
+                    // flattened `var._vid` column name: that shape is what the
+                    // physical planner recognises as a vid lookup
+                    // (`VidLookupJoinExec`), so the scan reads the bound nodes
+                    // by vid. Written flat, it was a hash join over a full
+                    // `ScanAll` on every fixpoint iteration (P4, the #301
+                    // leftover).
                     for position in ref_binding
                         .positions
                         .iter()
@@ -2167,7 +2210,10 @@ impl<'a> LocyPlanBuilder<'a> {
                         plan = LogicalPlan::Filter {
                             input: Box::new(plan),
                             predicate: equals(
-                                Expr::Variable(format!("{}._vid", position.variable)),
+                                Expr::Property(
+                                    Box::new(Expr::Variable(position.variable.clone())),
+                                    "_vid".to_string(),
+                                ),
                                 &position.physical,
                             ),
                             optional_variables: HashSet::new(),
@@ -3070,6 +3116,22 @@ fn check_sources(pattern: &HashSet<String>, body: &LogicalPlan) -> Result<()> {
                 }
                 names
             }
+            // A lower-stratum anchor's seed: the distinct anchored vids of
+            // the reference, under the seed column's own name.
+            LogicalPlan::Project { input, projections } => {
+                let names = produced(pattern, input)?;
+                for (expr, _) in projections {
+                    require("anchor seed", expr, &names)?;
+                }
+                Produced {
+                    entities: HashSet::new(),
+                    columns: projections
+                        .iter()
+                        .filter_map(|(_, alias)| alias.clone())
+                        .collect(),
+                }
+            }
+            LogicalPlan::Distinct { input } => produced(pattern, input)?,
             // A pattern walked from its anchoring reference (issue #301): the
             // pattern planner's own nodes, over the join that seeds the walk
             // with the referenced nodes. They produce the pattern's variables

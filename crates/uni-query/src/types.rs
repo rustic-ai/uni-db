@@ -146,6 +146,25 @@ pub struct QueryMetrics {
     /// [`Self::scans_reported`] because they count different things: that one
     /// counts `ScanRequest` scans, this one counts searches.
     pub searches_reported: u64,
+    /// Physical plans built while answering this query.
+    ///
+    /// One for the query's own plan, plus one for every sub-plan built at
+    /// execution time: a correlated subquery's body is planned once per outer
+    /// row, and a Locy clause body once per fixpoint iteration. A count that
+    /// grows with the data is a re-plan per row or per iteration.
+    pub physical_plans: u64,
+    /// Wall time spent building those physical plans.
+    ///
+    /// Distinct from [`Self::plan_time`], which is the logical planning the API
+    /// layer does before execution. This one is measured inside execution, so
+    /// it is also contained in [`Self::exec_time`].
+    pub physical_plan_time: Duration,
+    /// Breadth-first searches started by `shortestPath` / `allShortestPaths`.
+    ///
+    /// One per distinct source an operator searched from: rows that share a
+    /// source share one search, however many targets it answers. A count that
+    /// grows with the number of targets is a search per row (A8).
+    pub shortest_path_searches: u64,
 }
 
 /// Single result row from a query.
@@ -454,6 +473,9 @@ impl QueryMetrics {
         self.vector_index_scans = c.vector_index_scans;
         self.fts_index_scans = c.fts_index_scans;
         self.searches_reported = c.searches_reported;
+        self.physical_plans = c.physical_plans;
+        self.physical_plan_time = Duration::from_nanos(c.planning_nanos);
+        self.shortest_path_searches = c.shortest_path_searches;
     }
 }
 

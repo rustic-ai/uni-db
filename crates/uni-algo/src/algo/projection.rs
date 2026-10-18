@@ -872,6 +872,7 @@ impl ProjectionBuilder {
                     vid_list_filter: Some(&raw_vids),
                     vid_range: None,
                     extra_lance_filter: None,
+                    l0_prefilter: None,
                 },
                 None,
             )

@@ -154,6 +154,9 @@ pub mod optional_entity_is_null;
 pub mod optional_match_clause_close;
 pub mod optional_match_row_identity;
 pub mod optional_traverse_chunked;
+pub mod optional_where_bound_var_pushdown;
+// An outer node / relationship variable supports every entity operation inside a subquery.
+pub mod outer_entity_in_subquery;
 pub mod pattern_fast_path_constraints;
 pub mod reachability_trail_any_predecessor;
 pub mod reduce_accumulator_types;
@@ -178,6 +181,7 @@ pub mod numeric_functions_take_numbers;
 pub mod duration_order;
 // min/max over a declared DateTime / Time: the earliest or latest instant, offset kept.
 pub mod min_max_keep_temporal_values;
+pub mod mixed_type_hash_join;
 pub mod unique_key_reuse;
 pub mod user_maps_are_not_entities;
 pub mod vid_lookup_join_payoff;

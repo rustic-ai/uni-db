@@ -88,7 +88,76 @@ pub struct LocyIterationProfile {
     /// Per-operator metrics for the rule's clause-body DataFusion plan in this
     /// iteration, produced by the same plan walk Cypher's profile uses
     /// (`collect_plan_metrics`).
+    ///
+    /// Work done outside a physical plan is reported here too, as synthetic
+    /// entries built by [`synthetic_operator`]: `LocyIsNotAntiJoin` (one per
+    /// negated `IS NOT` reference applied to a clause's rows) and the fact
+    /// merge — `LocyFactDedup`, `LocyBestByMerge` or `LocyFoldMerge`. Their
+    /// `actual_rows` is the rows that survived the step.
     pub operators: Vec<OperatorStats>,
+    /// Physical planning time for this rule in this iteration, in
+    /// milliseconds: every clause body is re-planned on every pass, and any
+    /// sub-plan built while it executes is included.
+    #[serde(default)]
+    pub planning_ms: f64,
+    /// Physical plans built for this rule in this iteration.
+    #[serde(default)]
+    pub plans: u64,
+}
+
+/// Planning work attributed to one rule evaluation.
+///
+/// Read as the difference of the query's planning counters across the
+/// evaluation, so it includes nested sub-plans built while the clause bodies
+/// executed.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PlanningCost {
+    /// Physical planning time, in milliseconds.
+    pub planning_ms: f64,
+    /// Physical plans built.
+    pub plans: u64,
+}
+
+/// A reading of the planning counters, taken before a rule evaluation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlanningMark {
+    plans: u64,
+    nanos: u64,
+}
+
+impl PlanningMark {
+    /// Reads the planning counters; `None` (no counters) reads as zero.
+    pub fn take(counters: Option<&std::sync::Arc<uni_store::QueryCounters>>) -> Self {
+        counters.map_or_else(Self::default, |c| Self {
+            plans: c.physical_plans(),
+            nanos: c.planning_nanos(),
+        })
+    }
+
+    /// Planning done between this mark and now.
+    pub fn cost(self, counters: Option<&std::sync::Arc<uni_store::QueryCounters>>) -> PlanningCost {
+        let now = Self::take(counters);
+        PlanningCost {
+            planning_ms: now.nanos.saturating_sub(self.nanos) as f64 / 1_000_000.0,
+            plans: now.plans.saturating_sub(self.plans),
+        }
+    }
+}
+
+/// Builds an [`OperatorStats`] for Locy work that runs outside any physical
+/// plan, so the profile tree can show it.
+///
+/// `rows` is what the step emitted and `elapsed` how long it took. Memory and
+/// index fields stay unset: the step reports neither.
+pub fn synthetic_operator(name: &str, rows: usize, elapsed: std::time::Duration) -> OperatorStats {
+    OperatorStats {
+        operator: name.to_string(),
+        actual_rows: rows,
+        time_ms: elapsed.as_secs_f64() * 1000.0,
+        memory_bytes: 0,
+        index_hits: None,
+        index_misses: None,
+    }
 }
 
 /// Thread-safe accumulator that the fixpoint and non-recursive stratum
@@ -119,6 +188,7 @@ impl LocyProfileCollector {
         delta_facts: usize,
         elapsed_ms: f64,
         operators: Vec<OperatorStats>,
+        planning: PlanningCost,
     ) {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if !g.by_rule.contains_key(rule) {
@@ -132,6 +202,8 @@ impl LocyProfileCollector {
                 delta_facts,
                 elapsed_ms,
                 operators,
+                planning_ms: planning.planning_ms,
+                plans: planning.plans,
             });
     }
 

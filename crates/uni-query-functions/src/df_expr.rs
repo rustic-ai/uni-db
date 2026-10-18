@@ -2356,6 +2356,16 @@ fn translate_graph_function(
                         .as_ref()
                         .is_none_or(|cols| cols.contains(var))
                 };
+                // An endpoint column `EndpointHydrateExec` materialised comes
+                // first: the UDF answers with the first node whose vid matches,
+                // and an in-scope node variable carries only the properties its
+                // own clause loaded, so `WITH r AS rel, a AS q RETURN
+                // startNode(rel).x` read NULL from `q`.
+                for var in &ctx.node_variable_hints {
+                    if var.starts_with("_endpoint.") && exists(var) && seen.insert(var.clone()) {
+                        udf_args.push(DfExpr::Column(Column::from_name(var.clone())));
+                    }
+                }
                 // Add node variables from MATCH (registered in variable_kinds)
                 for (var, kind) in &ctx.variable_kinds {
                     if matches!(kind, VariableKind::Node) && exists(var) && seen.insert(var.clone())

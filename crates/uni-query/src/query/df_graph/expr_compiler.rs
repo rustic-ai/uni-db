@@ -3193,6 +3193,34 @@ fn body_bound_vars(query: &Query) -> HashSet<String> {
     out
 }
 
+/// Bare-named outer columns holding a node or relationship as one
+/// CypherValue — an entity bound by `UNWIND`, which has no `{name}._vid` /
+/// `{name}._eid` column. Decided by value: the column's type alone does not
+/// say what it holds.
+fn cypher_value_entity_columns(batch: &arrow_array::RecordBatch) -> HashSet<String> {
+    let schema = batch.schema();
+    schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| {
+            let name = f.name();
+            !name.contains('.') && !name.starts_with('_') && *f.data_type() == DataType::LargeBinary
+        })
+        .filter(|(i, _)| {
+            let col = batch.column(*i);
+            (0..col.len()).any(|row| {
+                !col.is_null(row)
+                    && matches!(
+                        arrow_to_json_value(col.as_ref(), row),
+                        Value::Node(_) | Value::Edge(_)
+                    )
+            })
+        })
+        .map(|(_, f)| f.name().clone())
+        .collect()
+}
+
 struct ExistsExecExpr {
     query: Query,
     /// Which of the three subquery forms this is.
@@ -3317,7 +3345,12 @@ impl PhysicalExpr for ExistsExecExpr {
         let mut entity_vars: HashSet<String> = HashSet::new();
         for field in schema.fields() {
             let name = field.name();
-            if let Some(base) = name.strip_suffix("._vid") {
+            // A node's identity column, or a relationship's: an outer
+            // relationship is as much an entity as an outer node (W5 #4).
+            if let Some(base) = name
+                .strip_suffix("._vid")
+                .or_else(|| name.strip_suffix("._eid"))
+            {
                 entity_vars.insert(base.to_string());
             }
             if matches!(field.data_type(), DataType::Struct(_)) {
@@ -3349,13 +3382,17 @@ impl PhysicalExpr for ExistsExecExpr {
         // Dotted and underscore-prefixed columns stay excluded for the reason the
         // comment above gives: they collide with traverse output columns.
         let bound_in_body = body_bound_vars(&self.query);
+        // A node or relationship held as one CypherValue (bound by `UNWIND`)
+        // is an outer entity too: a body pattern naming it refers to it, as
+        // at top level. Shadowed, `MATCH (a)` re-bound `a` to every node.
+        let value_entities = cypher_value_entity_columns(batch);
         let mut vars_in_scope: Vec<String> = entity_vars.iter().cloned().collect();
         for field in schema.fields() {
             let name = field.name();
             if name.contains('.')
                 || name.starts_with('_')
                 || entity_vars.contains(name)
-                || bound_in_body.contains(name)
+                || (bound_in_body.contains(name) && !value_entities.contains(name))
             {
                 continue;
             }
@@ -3369,7 +3406,8 @@ impl PhysicalExpr for ExistsExecExpr {
 
         // 7.4: Plan ONCE — the rewritten query is parameterized, same for all rows.
         let planner = QueryPlanner::new(self.uni_schema.clone());
-        let logical_plan = match planner.plan_with_scope(rewritten_query, vars_in_scope) {
+        let typed_scope = crate::query::planner::outer_row_scope(vars_in_scope, &schema);
+        let logical_plan = match planner.plan_with_typed_scope(rewritten_query, typed_scope) {
             Ok(plan) => plan,
             Err(e) => {
                 return Err(datafusion::error::DataFusionError::Execution(format!(
@@ -3378,6 +3416,11 @@ impl PhysicalExpr for ExistsExecExpr {
                 )));
             }
         };
+        // The body's node and relationship imports are the outer row's own
+        // columns for them, so every entity operation the enclosing query
+        // can apply to `a` — labels, `type(r)`, `properties()`, a path or
+        // `shortestPath` from it — works inside the body too.
+        let logical_plan = crate::query::planner::bind_outer_row(&logical_plan, &schema);
         // `EXISTS` only asks whether a row exists, so a variable-length
         // relationship inside it may be searched for reachability rather than
         // enumerated path by path. `COUNT {}` and `COLLECT {}` see every row.
@@ -3446,6 +3489,7 @@ impl PhysicalExpr for ExistsExecExpr {
                         &storage,
                         &uni_schema,
                         &combined_entity_vars,
+                        Some(batch.slice(row_idx, 1)),
                         None, // EXISTS compile-time rejects mutations (expr_compiler:693)
                     ))?;
 
@@ -3839,7 +3883,12 @@ impl PhysicalExpr for PatternComprehensionSubqueryExpr {
         let mut entity_vars: HashSet<String> = HashSet::new();
         for field in schema.fields() {
             let name = field.name();
-            if let Some(base) = name.strip_suffix("._vid") {
+            // A node's identity column, or a relationship's: an outer
+            // relationship is as much an entity as an outer node (W5 #4).
+            if let Some(base) = name
+                .strip_suffix("._vid")
+                .or_else(|| name.strip_suffix("._eid"))
+            {
                 entity_vars.insert(base.to_string());
             }
             if matches!(field.data_type(), DataType::Struct(_)) {
@@ -3870,8 +3919,9 @@ impl PhysicalExpr for PatternComprehensionSubqueryExpr {
         // outer node or relationship of that name is not shadowed: in openCypher
         // a variable already bound in scope refers to the same entity inside the
         // pattern, so it stays correlated.
+        let value_entities = cypher_value_entity_columns(batch);
         for v in &self.pattern_vars {
-            if !entity_vars.contains(v) {
+            if !entity_vars.contains(v) && !value_entities.contains(v) {
                 vars_in_scope.remove(v);
             }
         }
@@ -3887,12 +3937,17 @@ impl PhysicalExpr for PatternComprehensionSubqueryExpr {
         // so the plan is the same for every row.
         let planner = QueryPlanner::new(self.uni_schema.clone());
         let logical_plan = planner
-            .plan_with_scope(rewritten_query, vars_in_scope)
+            .plan_with_typed_scope(
+                rewritten_query,
+                crate::query::planner::outer_row_scope(vars_in_scope, &schema),
+            )
             .map_err(|e| {
                 datafusion::error::DataFusionError::Execution(format!(
                     "pattern comprehension subquery planning failed: {e}"
                 ))
             })?;
+        // See `ExistsExecExpr::evaluate`.
+        let logical_plan = crate::query::planner::bind_outer_row(&logical_plan, &schema);
 
         let graph_ctx = self.graph_ctx.clone();
         let session_ctx = self.session_ctx.clone();
@@ -3972,6 +4027,7 @@ impl PhysicalExpr for PatternComprehensionSubqueryExpr {
                         &storage,
                         &uni_schema,
                         &combined_entity_vars,
+                        Some(batch.slice(row_idx, 1)),
                         None,
                     ))?;
 

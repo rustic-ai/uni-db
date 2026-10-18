@@ -196,7 +196,7 @@ impl VidLookupJoinExec {
     /// - `pairs[0]`'s probe side is the `_vid` column (UInt64).
     /// - `pairs[0]`'s build side is a UInt64 column.
     /// - The `probe_side`'s child is a `GraphScanExec`, or a
-    ///   `ReadSetRecordingExec` directly over one (see [`probe_scan`]).
+    ///   `ReadSetRecordingExec` directly over one (see `probe_scan`).
     /// - `pairs` is non-empty.
     pub fn try_new(
         left: Arc<dyn ExecutionPlan>,

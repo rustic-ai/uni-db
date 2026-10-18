@@ -163,6 +163,26 @@ The query layer translates OpenCypher text into a streaming execution plan:
 3. **Physical Planner**: Maps logical plan to DataFusion physical operators — `GraphScanExec`, `GraphTraverseExec`, `GraphVectorKnnExec`, `MutationExec`, etc.
 4. **Executor**: Streams Arrow `RecordBatch` results through the DataFusion pipeline.
 
+#### Join planning: equi-joins over a cross product
+
+A correlated pattern (`UNWIND $rows AS r MATCH (a:E {uid: r.a})`, two MATCH patterns sharing a predicate, WITH-then-MATCH) reaches the physical planner as `Filter(CrossJoin(L, R), pred)`. `HybridPhysicalPlanner::try_plan_cross_join_as_hash_join` (`uni-query/src/query/df_planner.rs`) splits `pred` into equi-pairs (`l = r`, each side over one subtree's variables), single-side conjuncts (pushed below the join), and a residual. Each equi-pair becomes a pair of hash keys through `unify_join_key_types`; if any pair cannot be keyed, the whole rewrite falls back to `FilterExec` over `CrossJoinExec` (N × V rows).
+
+Key lowering, by the dtypes of the two compiled sides:
+
+| Pairing | Keys | Re-check |
+|---|---|---|
+| Same dtype, Arrow equality is Cypher equality (integers, `Utf8`, `LargeUtf8`, `Boolean`, `Date32/64`) | as they are | no |
+| Two integer dtypes | both `CAST … AS Int64` (a `UInt64` above `i64::MAX` becomes a null key; no `Int64` equals it) | no |
+| `Utf8` against `LargeUtf8` | both `CAST … AS LargeUtf8` | no |
+| `CypherValue` (`LargeBinary`) against a string, number, boolean or `CypherValue`; float against float or integer | both `_cypher_join_key(x)` | yes |
+| Anything else (temporal or struct columns of different dtypes, a string against a number) | refused, cross-join fallback | — |
+
+`_cypher_join_key` (`uni-query-functions/src/df_udfs/join_key.rs`) is a **bucket key**, not an identity: whenever two values compare equal their keys are equal, but unequal values may share a key. Numbers are why. `cypher_eq` compares an integer with a float through `f64`, so it is not transitive above 2^53 (`2^53+1 = 2^53.0` and `2^53 = 2^53.0`, but `2^53+1 <> 2^53`), and no key can be equal exactly when such a relation holds. The key encodes integral numbers below 2^53 exactly (so `1` and `1.0` share a bucket), larger ones through `f64`, every NaN in one bucket, strings and bytes length-prefixed, entities by identity (both the `Node` and the `_vid`-map encodings), lists and maps recursively (map keys sorted), temporals by UTC instant, and anything else by kind only. `null` gets a null key and joins nothing.
+
+Every pair keyed that way also contributes its original equality, compiled exactly as the cross-join fallback would compile it, to a `JoinFilter` on the `HashJoinExec`. The answer is therefore identical to the fallback's by construction; the filter (not a post-join `FilterExec`) keeps OPTIONAL MATCH right, since a candidate rejected by the re-check leaves the outer row NULL-padded. `VidLookupJoinExec` compares non-anchor pairs with `ScalarValue` equality, so it is only chosen when no pair needs a re-check.
+
+History: until 2026-10 the mixed case was handled by wrapping both sides in `toInteger`, and everything else was refused. `toInteger` truncates (`1 = 1.5` matched), parses strings (`1 = '1'` matched) and raises a type error on a boolean or list key; `LargeBinary = LargeBinary` compared raw bytes (`1 = 1.0` missed); and the `Utf8 = CypherValue` refusal made the in-memory load above quadratic (502,000 cross-join rows at N = 1k). `crates/uni/tests/common/bugs/mixed_type_hash_join.rs` runs every pairing against the fallback's answer, flushed and unflushed.
+
 ### Graph Runtime (`uni-common` + `uni-algo` + `uni`)
 
 The runtime manages in-memory graph state and write coordination:
@@ -1974,6 +1994,75 @@ graph TB
     LANCE -->|No| RES[Residual Filter<br/>Post-scan evaluation]
 ```
 
+**Orientation comes first.** Every matcher above recognizes a property
+comparison only with the property on the left. `plan_where_clause`
+(`uni-query/src/query/planner.rs`) therefore rewrites `const OP n.prop` to
+`n.prop OP' const` once, before any of them runs, via
+`pushdown::orient_property_comparisons`: `=` and `<>` stay, `<` ↔ `>`,
+`<=` ↔ `>=`. A constant is a literal, a parameter, or a list / map / unary
+expression built only from those. Only the boolean skeleton (`AND`, `OR`,
+`XOR`, `NOT`) is descended. `IN`, `STARTS WITH`, `ENDS WITH`, `CONTAINS` and
+`=~` are not commutative and are never flipped. Every WHERE path goes through
+this function: MATCH, element (`(n WHERE …)`) predicates folded into it,
+`CALL {}` subqueries, and Locy rule bodies (#226). Before this, `$p = n.uid`
+scanned the whole label while `n.uid = $p` read one row from the index (perf
+audit 2026-10-17, A9). Regression suite:
+`crates/uni/tests/common/index/commuted_comparison_pushdown.rs`.
+
+**Indexed point lookups only push type-exact operands.**
+`build_indexed_property_pushdown` (`df_planner.rs`) hands the resolved literal
+to Lance, which coerces it to the column type and fails the query when it
+cannot. `index_operand_fits_column` keeps a predicate out of the Lance filter
+unless the coercion is exact: an integer for an INT column, a float or an
+integer of magnitude at most 2^53 for a FLOAT column, a string for a STRING
+column, a boolean for a BOOL column, and never NULL. Anything else is left to
+the outer `FilterExec`, which applies Cypher semantics. Before this,
+`n.x = 41.5` on an indexed INT column failed with Lance's
+`could not convert to literal of type 'Int64'` instead of returning no rows.
+
+**An `OPTIONAL MATCH`'s `WHERE` reaches only the clause's own optional
+scans.** `plan_where_clause` takes a `WhereScope`. Under
+`WhereScope::Mandatory` (MATCH, `CALL … YIELD`, Locy rule bodies) all four
+rewrites run: the vector KNN rewrite (`n.prop ~= q` only — see "A
+`vector_similarity` threshold is never index-served" below), the label/type
+disjunction rewrite,
+scan/traverse-target pushdown, and the correlated-subquery
+`Apply.input_filter`. Under `WhereScope::Optional { created }` one pushdown is
+left. A conjunct over a single variable the clause creates may go into that
+variable's scan, but only a scan marked `optional`
+(`optional_scan_reachable`). Such a scan is the clause's own and emits one
+NULL row when nothing passes. This is what the inline
+`OPTIONAL MATCH (b:N {uid: $u})` form always did, and it keeps the index
+lookup: without it, `MATCH (a:A) OPTIONAL MATCH (b:N) WHERE b.uid = 'u42'` read
+all 4003 rows instead of 3. Everything else goes into one `Filter` carrying
+`created`, which lowers to `OptionalFilterExec`, so a row it rejects is
+null-extended instead of dropped. Every other pushdown target is a producer the
+null-extension sits above or beside. That covers an earlier clause's scan
+(`MATCH (a) WHERE a.x < 4 OPTIONAL MATCH (a)-->(b) WHERE a.x < 3` lost the
+`x = 3` row), an earlier OPTIONAL's traversal target (a rejected `b.x < 3`
+nulled `b` itself), a subquery's input filter, and a traversal's
+`target_filter`, which drops rows rather than null-extending them. The KNN
+rewrite stays off because `VectorKnn` has no `optional` flag: a vector
+predicate nothing satisfied lost the NULL row. The label-disjunction rewrite
+stays off because it would build a union of optional scans, each able to emit
+its own NULL row.
+`plan_match_clause` makes the same rule hold for the pattern's own syntax
+before planning. In an OPTIONAL clause, labels and a property map on a node an
+earlier clause bound (`OPTIONAL MATCH (a:L {x: 1})-->(b)`) are moved into the
+`WHERE`. Planned in place they were a plain `Filter` on the rows entering the
+clause. And when every node in the clause is bound, its anonymous
+relationships get hidden names. Such a clause still matches an entering row
+once per relationship, and without created variables its `Filter` would have
+nothing to null. A clause that creates no variable even then (every node and
+relationship bound) matches an entering row at most once and returns it
+unchanged, so its `WHERE` is validated and then dropped. Regression suite:
+`crates/uni/tests/common/bugs/optional_where_bound_var_pushdown.rs`. It
+compares each query against `MATCH … ⊎ NOT EXISTS {…}` padded with NULL, and
+runs schemaless and with scalar and vector indexes, flushed and unflushed. Its
+counter guard (`…_counters_1000` / `…_counters_4000`) holds `rows_scanned` to at
+most 64 and requires an index scan, for the created-only scan, the traversal
+form and a mixed `b.uid = 'u42' AND a.x < 3`.
+
 ## Choosing the Right Index
 
 ```mermaid
@@ -2773,9 +2862,139 @@ return a path of any length. Both are now enforced:
   sighting of the target and relaxing the visited-set semantics that make the
   walk terminate — a different search, not a bound on this one.
 
-A pair with no path is **not** dropped: `shortestPath` emits the row with a NULL
-path (pinned by `cypher_shortest_path::test_all_shortest_paths_no_path`). Filter
-on `length(p) IS NOT NULL` when the distinction matters.
+### shortestPath: a pair with no path
+
+Matches openCypher / Neo4j (a breaking change from 4.2.0, where every no-path
+pair was kept as a row with a NULL path, in mandatory and OPTIONAL MATCH alike):
+
+- **Mandatory `MATCH`** drops the pair. `GraphShortestPathExec` gets
+  `optional: false` (carried on `LogicalPlan::ShortestPath` /
+  `AllShortestPaths`) and `compute_paths` emits only rows with a path; a NULL
+  endpoint, and a source equal to its target outside `*0..`, are no-path pairs.
+  The unnamed form `MATCH shortestPath(...)` is planned with a hidden path
+  variable and behaves the same (it used to fail to plan).
+- **`OPTIONAL MATCH`** null-extends an entering row only when the pattern as a
+  whole matched nothing for it. The operator (`optional: true`) keeps a no-path
+  pair as a NULL-path row; for a bound pair that row is the answer. With a
+  target the clause scans for itself, one entering row is one row per
+  candidate, so the clause is always closed by an `OptionalFilterExec`
+  (`optional_clause_has_several_steps` counts the unbound target as a step),
+  which treats a shortest path's `{p}._path` as an evidence column — a carrier
+  row has a real target but a NULL path. The endpoint scans the clause plans
+  are `optional`, so an entering row with no candidate target (an empty label,
+  a property map nothing satisfies) survives as one NULL row instead of
+  vanishing in the cross join, and `plan_tagging_optional_entry` tags the
+  entering rows (`OptionalSourceRowIdExec`) below those cross joins so the
+  close is per entering row, not per bound node.
+- A `WHERE` on the path filters what the search found — it does not steer the
+  search toward a path that satisfies it. Mandatory: `WHERE length(p) > 2`
+  drops a pair whose shortest path is shorter. OPTIONAL: that pair is
+  null-extended (bound target) or, if no target passes, the entering row gets
+  one NULL row. Neo4j evaluates some path predicates during the search and can
+  return a longer path that passes; uni does not.
+
+Pinned by `cypher_path::shortest_path_no_path` (hand-computed, both storage
+states, schema and schemaless) and the BFS oracle in
+`cypher_path::shortest_path_many_targets`, whose oracle drops no-path pairs for
+mandatory MATCH and null-extends per entering row for OPTIONAL MATCH.
+
+### shortestPath with many targets (A8)
+
+An unbound target — `shortestPath((a {id: 0})-[:R*]->(b:N))` — is planned as
+the source cross-joined with every `N` node, one row per pair. Two things keep
+that from costing one search per row:
+
+- **Target predicates reach the target scan.** `plan_where_clause` pushes a
+  single-variable conjunct (`WHERE b.x < 20`) past `ShortestPath` /
+  `AllShortestPaths` into the endpoint's `Scan`
+  (`scan_reachable_through_shortest_path`), so the cross join carries only the
+  qualifying targets. Sound because the operator emits only copies of its input
+  rows' values (`allShortestPaths` one per path; none for a no-path pair under a
+  mandatory MATCH). Withheld
+  inside OPTIONAL MATCH, where a conjunct on a variable bound by an earlier
+  mandatory clause would drop that clause's rows instead of null-extending them.
+- **One search per source.** `GraphShortestPathStream::compute_paths` groups a
+  batch's rows by source and answers each group from one `SourceBfs`
+  (`SourceLayers` for `allShortestPaths`), grown only until the group's targets
+  are settled and retained across batches while the source is unchanged. A
+  target the search has already passed costs a map lookup. Every search begun
+  ticks the per-query `QueryCounters::shortest_path_searches`, reported as
+  `QueryMetrics::shortest_path_searches` (the guard in
+  `cypher_path::shortest_path_many_targets` asserts it equals the number of
+  sources).
+
+Measured on the perf-class probe graph: `WHERE b.x < 20` 6.1 s → 13.5 ms (2k
+nodes) and 83 s → 15.8 ms (8k); the fully unbound target 5.5 s → 0.40 s (2k).
+
+The search is **single-direction**, not bidirectional (an older module comment
+claimed otherwise). Which of several equal-length paths `shortestPath` returns
+is not deterministic: `AdjacencyManager::get_neighbors` collects a vertex's
+neighbours into a fresh `std::collections::HashMap` per call, so BFS expansion
+order — which picks each vertex's parent — varies between calls. The same
+bound-pair query repeated 30 times returned two different paths.
+
+### shortestPath without a schema
+
+A relationship type the schema does not declare is resolved to its
+schemaless id (`Schema::edge_type_id_unified`), the id an untyped traversal
+already walks; a type with no id at all has no edges and contributes nothing
+to the search — the answer `-[:T]->` gives, not an error. An unbound target
+whose label the schema does not declare is planned with `plan_unbound_node`
+(a schemaless label scan) and then treated as bound. Both used to fail
+planning (`Edge type R not found`, `Label N not found`), so no schemaless
+query could use `shortestPath` (`bugs::outer_entity_in_subquery`, `SHORTEST`).
+
+## Correlated subqueries: imports are the outer row's columns
+
+The body of `EXISTS { }`, `COUNT { }`, `COLLECT { }`, an unanchored pattern
+comprehension and `CALL { WITH … }` is planned once and executed per outer
+row. Its imports start the plan as one `LogicalPlan::OuterRow` leaf.
+
+- **Unbound, each import is its same-named parameter**, a single value. That
+  is all an outer node used to be inside a body: in `EXISTS` its vid, in
+  `CALL` a map. Every operation compiled against the columns a node has
+  elsewhere failed or answered wrongly: `a:L` (`No field named "a._labels"`),
+  `labels(a)`, `a['x']`, `properties(a)` / `keys(a)` (silently NULL),
+  `shortestPath((a)-[:R*]->(c))` (`Source column 'a._vid' not found`),
+  `elementId`, a nested `EXISTS` over the import (in schemaless `CALL`,
+  `WITH * WHERE NOT EXISTS {…}` dropped every row), and every operation on an
+  outer *relationship* (`._eid` was not recognised as an identity column, so
+  `r` was undefined). A body pattern naming an outer relationship
+  (`MATCH (x)-[r]->(y)`) bound a fresh `r`, because the body's scope typed it
+  `Imported` rather than `Edge`.
+- **`bind_outer_row(plan, outer_schema)`** marks an import a node when the
+  outer rows carry `{name}._vid` and a relationship when they carry
+  `{name}._eid`; `outer_row_scope` types the body's scope the same way for
+  `QueryPlanner::plan_with_typed_scope`. The physical planner, given the row
+  (`HybridPhysicalPlanner::with_outer_row`), plans a bound import as the outer
+  row's own `{name}` and `{name}.*` columns — the body sees the entity exactly
+  as the enclosing query does. `ExistsExecExpr`, the comprehension subquery
+  and `GraphApplyExec`'s per-row path bind; the batched `Apply` path, empty
+  input and the fallback executor keep parameters.
+- An entity held as one CypherValue (`UNWIND` of a collected list) has no
+  identity column; `cypher_value_entity_columns` recognises it by value so a
+  body pattern naming it refers to it instead of shadowing it (it re-bound `a`
+  to every node: `EXISTS` always true, `COUNT` the whole edge count).
+- With the outer row supplied, an import the row has no value for (an outer
+  variable a projection pruned, since `CALL` imports everything in scope) is
+  left out instead of failing with `Unresolved parameter`.
+- The property rewrite (`a.x` → `$a.x`) and label lifting in
+  `rewrite_query_correlated` predate the leaf and are still applied; they
+  agree with the columns.
+
+`startNode(r)` / `endNode(r)` on an imported `r` cannot be rewritten to a
+traversal endpoint, so it takes the unresolved path, which had two defects
+of its own, at top level too: the `Filter` path did not hydrate endpoints
+(`WITH r AS rel WHERE startNode(rel).x < 3` failed), and the UDF took the
+first in-scope node with a matching vid, which carries only the columns its
+own clause loaded (`WITH r AS rel, a AS q RETURN startNode(rel).x` read NULL).
+`plan_filter` now hydrates like a projection, hydrated `_endpoint.*` columns
+are offered to the UDF first, and an unresolved call marks its relationship
+struct-only so the outer row carries `_src` / `_dst`.
+
+Coverage: `bugs::outer_entity_in_subquery` crosses 34 entity operations with
+15 contexts, schemaless and declared, flushed and unflushed, against the same
+operation evaluated per row at top level.
 
 ## Variable-length path execution
 
@@ -3113,6 +3332,33 @@ Uni provides two syntaxes for similarity search. They serve **different purposes
 The `~=` operator is **vector-only** and cannot do FTS or hybrid search. For hybrid search, use `similar_to()` with multi-source arrays.
 
 > **Common confusion:** `=~` is regex match (`n.name =~ '(?i)john'`), `~=` is vector similarity. They are unrelated operators.
+
+**A `vector_similarity` threshold is never index-served.**
+`WHERE vector_similarity(d.emb, q) > t` keeps exactly the rows whose cosine
+similarity passes `t`; it plans as a per-row `Filter` over the label scan, with
+or without a vector index. Only `n.prop ~= q` becomes `VectorKnn`
+(`extract_knn_predicate` in `planner.rs`), and `VectorKnn` carries no
+threshold. The planner used to rewrite the threshold form into a top-100
+`VectorKnn` as well, which was wrong three ways at once: the exec compared `t`
+with the *index's* score (`(1 + cos) / 2` for cosine, `1 / (1 + d)` for L2, the
+raw dot product for dot) rather than the cosine, so `> 0.5` on a cosine index
+kept every row with `cos >= 0`; it kept `score >= t` for a strict `>`; and it
+dropped every match past the 100th. An index cannot answer a range predicate
+exactly in any case — IVF and HNSW miss rows, and a top-K bound truncates — so
+the rewrite was removed rather than repaired. Two scalar-path defects the
+oracle found alongside: `vector_similarity` on two stored vectors rounded an
+exact cosine to f32 (0.8 became 0.800000011920929 and passed `> 0.8`), and
+`vector_distance` errored on a NULL operand instead of returning NULL. On a
+multi-vector (`List<Vector>`) operand pair `vector_similarity(doc, query)` is
+MaxSim with a cosine per query token, computed per row.
+
+**Outer vector columns reach a subquery body.** `EXISTS { }` / `COUNT { }`
+bodies read outer values through `extract_row_params`, which decoded columns
+with `arrow_to_json_value`. That function had no arm for `FixedSizeList` (a
+stored dense vector) and returned NULL for it, so `vector_similarity(a.emb, q)`
+on an outer `a` was always NULL inside the body and `EXISTS` always false. Any
+type it does not decode itself now goes to the storage layer's
+`arrow_to_value`.
 
 ### Scoring Modes
 
@@ -3892,10 +4138,48 @@ RETURN n.name, n.age
 ```cypher
 // Show query plan without executing
 EXPLAIN MATCH (n:Person)-[:KNOWS]->(m:Person) RETURN n, m
-
-// Execute and show timing per operator
-EXPLAIN MATCH (n:Person)-[:KNOWS]->(m:Person) RETURN n, m
 ```
+
+Profiling is a builder terminal, not a Cypher keyword (the grammar has no
+`PROFILE`): `session.query_with(cypher).profile()` executes and returns
+`(QueryResult, ProfileOutput)`.
+
+### What the profiler counts
+
+`profile()` returns `ProfileOutput`: per-operator `OperatorStats` (rows, time,
+index hits) walked from the executed DataFusion plan, plus planning cost. The
+query-level counters (`QueryMetrics`: `rows_scanned`, `l0_reads`,
+`storage_reads`, `index_scans`, …) come from the per-query `QueryCounters`
+threaded through the planner's `GraphExecutionContext`, the `QueryContext` and
+each `ScanRequest`.
+
+- **Rows are counted where the batch is in hand**, never at request time:
+  `columnar_scan::merge_lance_and_l0` for label scans, and
+  `MainEdgeDataset::find_edges_by_type_names_counted` for main-edge-table
+  scans (every returned row, tombstones included, before per-eid ranking).
+  The L0 overlay of `build_edge_adjacency_map` counts each L0 edge of the type
+  it examines. This is what makes a variable-length pattern's inline property
+  map visible: `-[:R*1..3 {w: 1}]->` and `->(b:N {x: 2})` pre-scan the whole
+  edge type (`build_edge_property_filter`, `build_accepting_vid_filter`)
+  before the anchored walk, and that scan now reads as `rows_scanned` ≈ the
+  edge count instead of 1 (O1, measured 1 → 401 / 1,601 at 400 / 1,600 edges).
+  The anchored walk itself reads the adjacency CSR and is not a scan.
+- **Planning.** Every successful `HybridPhysicalPlanner::plan` /
+  `plan_with_properties` call adds one to `QueryCounters::physical_plans` and
+  its wall time to `planning_nanos`. Only two places build a physical planner
+  (the executor's top-level plan and `execute_subplan_with_outer_vars`), and
+  neither calls `plan` re-entrantly, so the count is exact: one for the query,
+  plus one per execution-time sub-plan — a correlated `CALL { … }` body per
+  outer row, a MERGE read plan per row, a Locy clause body per fixpoint
+  iteration. Surfaced as `QueryMetrics::{physical_plans, physical_plan_time}`
+  (also on `LocyResult::metrics()`) and `ProfileOutput::{physical_plans,
+  physical_planning_ms}`. Logical planning (AST → `LogicalPlan`) is measured by
+  the API layer: `ProfileOutput::logical_planning_ms` and
+  `QueryMetrics::plan_time` on the profile path.
+- **Not counted as rows:** property point-reads (`PropertyManager`), including
+  the accepting-filter's fetch of candidate vertices' properties; adjacency
+  CSR walks. `OperatorStats` has no per-operator rows-scanned field; a
+  pre-scan's cost shows in its operator's `time_ms`.
 
 ---
 
@@ -4602,11 +4886,20 @@ A **non-linear** rule (≥2 positive same-stratum `IS`-refs in one clause) gets 
 
 Delta feeding alone does not make an iteration cost the delta. Issue #301 measured every iteration of a one-node-per-iteration chain walking all 40,008 edges and rescanning every vertex, because:
 
-- **The pattern was walked from a scan, not from the delta.** A clause planned its MATCH on its own and joined each `IS` reference to the result. The binding plan now names an **anchor** (`ClauseBindingPlan::anchor`, `uni-locy/src/binding_plan.rs`): a positive reference into the clause's own recursive group whose KEY position tests a plain MATCH node. The Locy planner reads that reference first and plans the pattern from it (`QueryPlanner::plan_pattern_from_anchor`): the anchor node's own scan is joined on `_vid`, which lowers to `VidLookupJoinExec` (a `_vid IN (...)` lookup) and enforces the node's labels and properties, and every path is then walked from the looked-up nodes. Lower-stratum references never anchor — without cardinality there is no basis to prefer one over a selective pattern.
+- **The pattern was walked from a scan, not from the delta.** A clause planned its MATCH on its own and joined each `IS` reference to the result. The binding plan now names an **anchor** (`ClauseBindingPlan::anchor`, `uni-locy/src/binding_plan.rs`): a positive reference into the clause's own recursive group whose KEY position tests a plain MATCH node. The Locy planner reads that reference first and plans the pattern from it (`QueryPlanner::plan_pattern_from_anchor`): the anchor node's own scan is joined on `_vid`, which lowers to `VidLookupJoinExec` (a `_vid IN (...)` lookup) and enforces the node's labels and properties, and every path is then walked from the looked-up nodes. The anchored node may sit at either end of its path, or in the middle: the pattern planner reverses or splits the path at whichever node is bound (`reversed_for_bound_anchor`, `split_at_bound_anchor`), so `(a)-[:T]->(m) WHERE m IS r TO b` walks `m <- a` from the delta.
+- **Anchoring beyond the recursive group (P4, 2026-10-17).** `Anchor::source` records which kind of reference anchors. A reference into the clause's own recursive group (`AnchorSource::Recursive`) is preferred and seeds the walk with its own rows, the anchoring test being the seed join. Failing one, a lower-stratum reference whose KEY position tests a plain MATCH node anchors (`AnchorSource::LowerStratum`): the walk is seeded with the *distinct* anchored vids (`Distinct(Project(LocyDerivedScan))` under its own `__anchor_` prefix), and the reference is still joined in full at its step with every test, so the seed is a pure semi-join and the binding is the unanchored plan's exactly. It is skipped when another node of the pattern carries an equality (inline map, or a WHERE conjunct `v.p = <constant>`), which the pattern planner would start from instead. There is no plan-time cardinality threshold: the seed never walks from more nodes than the unanchored plan (the distinct anchors are a subset of the label), and its extra cost is reading the facts twice plus a distinct, O(|facts|), which the unanchored plan's hash join already pays. The fact-count-versus-label-count decision is taken at run time, where both are known, by `VidLookupJoinExec`'s existing switch (`vertex_scan_beats_lookup`: distinct vids × 4 ≥ label rows reads the label in one pass instead of chunked `_vid IN` lookups). Measured on the chain+noise fixture at 2,000 / 8,000 noise edges: a one-fact lower stratum went from `GraphScanExec` 1,011 / 4,011 and `GraphTraverseExec` 2,008 / 8,008 rows to 1 / 1 at both sizes; when every vertex is a fact the plan reads the label once and walks every edge, as before (49.7 vs 51.1 ms, 166 vs 174 ms, single runs).
+- **A node a reference binds is looked up by vid.** A `BindNode` position materialises its node with a `ScanAll` joined on the node's vid; the join key is now `Property(var, "_vid")` rather than the flattened `var._vid` column, which is the shape the physical planner lowers to `VidLookupJoinExec`. It was a hash join over a full `ScanAll` on every iteration (1,012 / 4,012 rows per iteration; two of them per iteration in non-linear TC, 2,030 / 8,030), and is now one lookup per bound node (2 rows per iteration for a one-node frontier; 23 per iteration for the non-linear TC probe at both sizes).
 - **`VidLookupJoinExec` could not fire inside Locy.** Every Locy evaluation runs with an SSI read set, so its scans are wrapped in `ReadSetRecordingExec`, which used to mask the scan. The rewrite now looks through that wrapper and keeps it as the probe child (`vid_lookup_join::probe_scan` / `wire_probe`), so the looked-up rows are still recorded.
 - **Non-recursive clauses re-ran every iteration.** A clause that references no rule of its stratum reads only fixed inputs, so `run_fixpoint_loop` evaluates it in iteration 0 only; every merge keeps (or only replaces) existing facts. Two latent defects that re-running had masked were fixed with it: `reconcile_schema` reset the row-dedup state when two clauses differed only in nullability (a re-derivation was then admitted as a new fact), and `merge_delta` did not re-snapshot the monotonic-fold accumulators when an iteration produced no candidates at all (the stratum then ran to its iteration limit).
 
 `DerivedScanExec` records the rows it serves, and the folded snapshot's `PriorityExec`/`FoldExec` metrics are appended to each iteration's profile row, so `profile()` shows how much of a derived relation every iteration read and what the per-iteration fold cost.
+
+Work that runs outside any physical plan is reported in the same per-iteration operator list as synthetic `OperatorStats` entries (`locy_profile::synthetic_operator`), with `actual_rows` = rows that survived the step and `time_ms` = its wall time:
+
+- `LocyIsNotAntiJoin` / `LocyIsNotComplement` — one per negated `IS NOT` reference applied to a clause's rows (`locy_complement::apply_negated_is_refs`, shared by the recursive and non-recursive loops). The anti-join rebuilds its banned-key set from the whole negated relation on every call (R5), which shows up as this entry's `time_ms` growing with the negated relation, not with the delta.
+- `LocyFactDedup` (row dedup: `merge_delta` in a recursive stratum, `dedup_fact_rows` in a non-recursive one), `LocyBestByMerge`, `LocyFoldMerge` — one per rule per iteration.
+
+Each `LocyIterationProfile` also carries `planning_ms` and `plans`: the difference of the query's planning counters across that rule's evaluation, so it includes every clause body re-planned that pass and any sub-plan built while it ran (R6). The program-level logical plan and its top-level physical plan are built in `impl_locy.rs` before the program runs; the physical one is in `LocyResult::metrics().physical_plans`, the logical one is not measured yet.
 
 ## Locy Commands
 
@@ -5189,6 +5482,62 @@ each has to count L0 or it goes wrong in a way no range read can repair:
 The L0 answers are upper bounds or early resume points, never exclusions: a
 tombstoned or double-counted vertex only makes the walk look one range further,
 and the range read drops it.
+
+### A pushed equality narrows the L0 read, but never drops a shadowing row
+
+An indexed equality (`MATCH (a:E {uid: $s})`, `WHERE a.uid IN [...]`) reaches
+the labelled vertex scan twice: as a Lance SQL string that turns the flushed
+side into an index lookup, and as an Arrow `PhysicalExpr` applied to the merged
+batch (#57). Until W3b the L0 side used neither — `build_l0_vertex_batch` built
+every L0 row of the label (cloning every property, building every column, then
+a sort for the MVCC dedup) and the runtime filter discarded all but one. With
+`V` unflushed vertices a point lookup reported `rows_scanned = V`, and a loop of
+single-row writes cost O(N·V) until the next flush.
+
+`columnar_scan_vertex_batch` now takes an `L0EqualityPrefilter` (property plus
+literals) in `ColumnarVertexScanRequest::l0_prefilter`. `GraphScanExec` reads it
+back from the runtime filter (`l0_equality_prefilter` in `df_graph/scan.rs`):
+`col = lit`, `col IN (lits)`, either side of an `AND`, an `OR` over one column.
+Anything else yields `None` and the old unrestricted read. For a whole-label or
+range read, `l0_equality_candidates` makes one pass over the L0 label sets,
+mirroring the builder's merge (visibility order, a buffer contributing only for
+vids in its own label set, relabel-only vids judged on their flushed
+properties), and the build runs on `L0VertexTargets::Filtered` — the same
+membership rule as `All`/`Range`, intersected with the kept set, so a kept row
+is built exactly as before.
+
+Two rules keep this from changing an answer:
+
+- **The pre-filter is one-sided.** `l0_value_may_equal` answers `false` only
+  when the column builder's conversion is the identity (a `String` in a
+  `STRING` column, `Int` in `INT64`, `Int`/`Float` in `FLOAT64` compared as
+  `f64` with `NaN` kept, `Bool` in `BOOL`) and the values are plainly unequal,
+  or the value is missing/NULL. Every coercing pairing (`Int` rendered into a
+  `STRING` column, `Float` truncated into `INT64`) is kept. The runtime filter
+  and the residual `FilterExec` above the scan stay authoritative for
+  three-valued logic and coercion. The literal side may carry a cast, which is
+  evaluated as DataFusion would; a cast on the column side is not accepted.
+- **Every vid the flushed side returned is kept.** An L0 row that no longer
+  matches is the *newer* version of its vertex. If the flushed side returned
+  that vid (its stale row still matches the index), the L0 row must reach the
+  merge or the stale row wins the dedup and passes the filter. Any other
+  non-matching L0 row is the newest version of a vid the flushed side did not
+  return, so the runtime filter would reject it anyway; skipping it changes
+  cost only. Tombstones, label overwrites and transaction / fork buffers are
+  untouched: they are applied after the merge, as before.
+
+The candidate pass is still one hash probe per L0 label member — it removes the
+materialization, not the walk. An L0 value index (`(label, prop) → vids`
+maintained on write) was considered and not built: L0 property maps are `pub`
+and mutated directly from `writer.rs` as well as through `L0Buffer` methods and
+merge/replay, and a missed site would silently drop rows. `label_only_l0_base_props`
+also stopped collecting every buffer's property-map keys per scan; it probes
+only the relabeled vids.
+
+Guards: `crates/uni/tests/common/index/l0_equality_prefilter.rs` (counter
+guards at two scales, a write loop, and a shadowing differential against an
+unpushed `WITH a WHERE …` reference across L1/L0, a transaction's private L0,
+rollback and a fork).
 
 ## Write Throttling
 
@@ -7839,6 +8188,32 @@ causes ABDUCE edits are in them. Provenance is keyed by rule and row
 (`provenance_fact_hash`): keyed by row alone, a tuple two rules derive was
 recorded for the first, and EXPLAIN of the second lost it
 (`locy_single_engine`, `locy_generator_plugin`).
+
+**Hydration covers every rule, once, by a VID scan.** `LocyResult::derived` is
+public and holds every rule's facts, returned by a command or not (the Python
+binding converts the whole map), so every rule is hydrated — an unreturned rule
+is still part of the result. `enrich_vids_with_nodes` collects the IDs of every
+rule into one set per kind and resolves each set once; a rule still gets its
+entities all or nothing, with an `EntityHydrationIncomplete` warning when any of
+its IDs did not resolve. The command store and the returned map hold the same
+rows, so the map reuses the store's hydration unless the program has a `DERIVE`
+command, whose writes change the entities the facts name (ASSUME and ABDUCE
+write only to a discarded overlay). Nodes are resolved by `lookup_vertices`: the
+label-less vertex scan (`GraphScanExec::new_schemaless_all_scan`) with the VID
+list pushed down, decoded into the same entity map the Cypher read path builds
+and canonicalised by `Value::canonical_entity`. It replaced a
+`MATCH (entity) WHERE id(entity) IN [<N literals>]` statement whose residual
+`FilterExec` evaluated the `IN` per row against the whole list — O(N²): 38.6 →
+585.8 ms for 2k → 8k VIDs while the scan beneath it went 5.7 → 19.6 ms — and
+whose parse alone took 130 ms at 8k. That statement plus the second pass made
+one unreturned 8k-fact rule cost 1.92 s against an 18 ms fixpoint; it now
+costs 175 ms (debug build, `locy_entity_hydration_probe`). Relationships still
+go through `MATCH ()-[entity]->() WHERE id(entity) IN [...]`, which has no EID
+pushdown and so traverses every edge per lookup; it runs once per kind per
+store, not once per rule. Guards: `locy_entity_hydration` (a `rows_scanned`
+bound on the unreturned rule, a ratio against a Cypher read of the same nodes,
+and value equality against Cypher across session, transaction, fork, QUERY,
+EXPLAIN, ASSUME, ABDUCE and DERIVE).
 
 **The compiler hands on resolved rule names.** Inside a `MODULE`, IS
 references and the rule a command names are rewritten to the catalog key

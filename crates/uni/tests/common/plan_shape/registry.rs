@@ -284,7 +284,7 @@ pub const OPERATORS: &[Operator] = &[
         ty: "GraphVectorKnnExec",
         runtime_name: "GraphVectorKnnExec",
         status: Status::Proven {
-            by: "a_vector_similarity_predicate_runs_the_vector_knn",
+            by: "an_approx_eq_predicate_runs_the_vector_knn",
             in_file: "crates/uni/tests/common/plan_shape/proofs.rs",
         },
     },

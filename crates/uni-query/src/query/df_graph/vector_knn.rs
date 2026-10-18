@@ -41,8 +41,7 @@ use crate::query::df_graph::scan::{property_field, resolve_property_type};
 
 /// Vector-retrieval source for a [`GraphVectorKnnExec`].
 ///
-/// The exec is kind-agnostic above the retrieval step: threshold filter,
-/// score normalization, label / vid emission, and property hydration all
+/// The exec is kind-agnostic above the retrieval step: score normalization, label / vid emission, and property hydration all
 /// run identically on the `Vec<(Vid, f32)>` produced here. Only the
 /// retrieval call differs:
 ///
@@ -105,9 +104,6 @@ pub struct GraphVectorKnnExec {
     /// Number of results to return.
     k: usize,
 
-    /// Optional similarity threshold.
-    threshold: Option<f32>,
-
     /// Query parameters for expression evaluation.
     params: HashMap<String, Value>,
 
@@ -136,7 +132,6 @@ impl fmt::Debug for GraphVectorKnnExec {
             .field("variable", &self.variable)
             .field("property", &self.property)
             .field("k", &self.k)
-            .field("threshold", &self.threshold)
             .finish()
     }
 }
@@ -153,7 +148,6 @@ impl GraphVectorKnnExec {
     /// * `property` - Property containing vectors
     /// * `query_expr` - Expression evaluating to query vector
     /// * `k` - Number of results
-    /// * `threshold` - Optional similarity threshold
     /// * `params` - Query parameters
     #[expect(clippy::too_many_arguments)]
     pub fn new(
@@ -164,7 +158,6 @@ impl GraphVectorKnnExec {
         property: impl Into<String>,
         query_expr: Expr,
         k: usize,
-        threshold: Option<f32>,
         params: HashMap<String, Value>,
         target_properties: Vec<String>,
     ) -> Self {
@@ -187,7 +180,6 @@ impl GraphVectorKnnExec {
             property,
             query_expr,
             k,
-            threshold,
             params,
             target_properties,
             schema,
@@ -201,7 +193,7 @@ impl GraphVectorKnnExec {
     /// retrieval through a plugin-registered [`IndexHandle`] instead of
     /// the native storage path.
     ///
-    /// All other behavior (threshold, scoring, property hydration) is
+    /// All other behavior (scoring, property hydration) is
     /// identical to [`Self::new`].
     #[expect(clippy::too_many_arguments)]
     pub fn with_plugin_source(
@@ -212,7 +204,6 @@ impl GraphVectorKnnExec {
         property: impl Into<String>,
         query_expr: Expr,
         k: usize,
-        threshold: Option<f32>,
         params: HashMap<String, Value>,
         target_properties: Vec<String>,
         kind: IndexKind,
@@ -226,7 +217,6 @@ impl GraphVectorKnnExec {
             property,
             query_expr,
             k,
-            threshold,
             params,
             target_properties,
         );
@@ -395,7 +385,6 @@ impl ExecutionPlan for GraphVectorKnnExec {
             query_vector,
             multivec_query,
             self.k,
-            self.threshold,
             self.target_properties.clone(),
             self.schema.clone(),
             self.source.clone(),
@@ -442,9 +431,6 @@ struct VectorKnnStream {
     /// Number of results.
     k: usize,
 
-    /// Similarity threshold.
-    threshold: Option<f32>,
-
     /// Target vertex properties to materialize.
     target_properties: Vec<String>,
 
@@ -471,7 +457,6 @@ impl VectorKnnStream {
         query_vector: Vec<f32>,
         multivec_query: Option<Vec<Vec<f32>>>,
         k: usize,
-        threshold: Option<f32>,
         target_properties: Vec<String>,
         schema: SchemaRef,
         source: VectorSource,
@@ -485,7 +470,6 @@ impl VectorKnnStream {
             query_vector,
             multivec_query,
             k,
-            threshold,
             target_properties,
             schema,
             source,
@@ -514,7 +498,6 @@ impl Stream for VectorKnnStream {
                     let query_vector = self.query_vector.clone();
                     let multivec_query = self.multivec_query.clone();
                     let k = self.k;
-                    let threshold = self.threshold;
                     let target_properties = self.target_properties.clone();
                     let schema = self.schema.clone();
                     let source = self.source.clone();
@@ -531,7 +514,6 @@ impl Stream for VectorKnnStream {
                             &query_vector,
                             multivec_query.as_deref(),
                             k,
-                            threshold,
                             &target_properties,
                             &schema,
                             &source,
@@ -582,7 +564,6 @@ async fn execute_vector_search(
     query_vector: &[f32],
     multivec_query: Option<&[Vec<f32>]>,
     k: usize,
-    threshold: Option<f32>,
     target_properties: &[String],
     schema: &SchemaRef,
     source: &VectorSource,
@@ -616,28 +597,19 @@ async fn execute_vector_search(
         .map(|cfg| cfg.metric.clone())
         .unwrap_or(default_metric);
 
-    // Filter by threshold and build result
-    let mut vids = Vec::new();
-    let mut scores = Vec::new();
-
-    for (vid, value) in results {
-        // Multi-vector (ColBERT) results are already exact MaxSim similarities
-        // (higher is better); dense distances are converted to a similarity here.
-        let similarity = if multivec_query.is_some() {
-            value
-        } else {
-            calculate_score(value, &metric)
-        };
-
-        if let Some(thresh) = threshold
-            && similarity < thresh
-        {
-            continue;
-        }
-
-        vids.push(vid);
-        scores.push(similarity);
-    }
+    // Multi-vector (ColBERT) results are already exact MaxSim similarities
+    // (higher is better); dense distances are converted to a similarity here.
+    let (vids, scores): (Vec<Vid>, Vec<f32>) = results
+        .into_iter()
+        .map(|(vid, value)| {
+            let similarity = if multivec_query.is_some() {
+                value
+            } else {
+                calculate_score(value, &metric)
+            };
+            (vid, similarity)
+        })
+        .unzip();
 
     if vids.is_empty() {
         return Ok(Some(RecordBatch::new_empty(schema.clone())));
@@ -975,5 +947,56 @@ mod tests {
             }
             _ => panic!("Expected list, got {:?}", result),
         }
+    }
+
+    fn neg(e: Expr) -> Expr {
+        Expr::UnaryOp {
+            op: uni_cypher::ast::UnaryOp::Neg,
+            expr: Box::new(e),
+        }
+    }
+
+    fn float(f: f64) -> Expr {
+        Expr::Literal(CypherLiteral::Float(f))
+    }
+
+    /// `[-1.0, 0.0]` parses as a unary minus over a literal; the KNN query
+    /// vector must evaluate it, and arithmetic over constants too.
+    #[test]
+    fn test_evaluate_negative_and_arithmetic_constants() {
+        let expr = Expr::List(vec![
+            neg(float(1.0)),
+            Expr::BinaryOp {
+                left: Box::new(float(0.0)),
+                op: uni_cypher::ast::BinaryOp::Sub,
+                right: Box::new(float(0.5)),
+            },
+            neg(Expr::Literal(CypherLiteral::Integer(2))),
+        ]);
+        assert!(crate::query::df_graph::common::is_simple_evaluable(&expr));
+        let result = evaluate_simple_expr(&expr, &HashMap::new(), &HashMap::new()).unwrap();
+        assert_eq!(
+            result,
+            Value::List(vec![Value::Float(-1.0), Value::Float(-0.5), Value::Int(-2)])
+        );
+    }
+
+    /// Negating `i64::MIN` overflows: an error, never a wrapped value.
+    #[test]
+    fn test_evaluate_negation_overflow_errors() {
+        let mut params = HashMap::new();
+        params.insert("m".to_string(), Value::Int(i64::MIN));
+        let expr = neg(Expr::Parameter("m".to_string()));
+        assert!(evaluate_simple_expr(&expr, &params, &HashMap::new()).is_err());
+    }
+
+    /// A row-dependent expression is not a constant query vector.
+    #[test]
+    fn test_property_is_not_simple_evaluable() {
+        let prop = Expr::Property(Box::new(Expr::Variable("a".to_string())), "emb".to_string());
+        assert!(!crate::query::df_graph::common::is_simple_evaluable(&prop));
+        assert!(!crate::query::df_graph::common::is_simple_evaluable(
+            &Expr::List(vec![neg(prop)])
+        ));
     }
 }

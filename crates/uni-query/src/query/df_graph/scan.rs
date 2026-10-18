@@ -53,9 +53,9 @@ use uni_common::core::id::Vid;
 use uni_common::core::schema::Schema as UniSchema;
 use uni_store::backend::types::{CmpOp, FilterExpr, Scalar};
 use uni_store::runtime::columnar_scan::{
-    build_overflow_property_column, drop_superseded_pushdown_rows, extract_from_overflow_blob,
-    filter_deleted_rows, filter_l0_label_overwrites, filter_l0_tombstones, merge_lance_and_l0,
-    mvcc_dedup_to_option, resolve_l0_property,
+    L0EqualityPrefilter, build_overflow_property_column, drop_superseded_pushdown_rows,
+    extract_from_overflow_blob, filter_deleted_rows, filter_l0_label_overwrites,
+    filter_l0_tombstones, merge_lance_and_l0, mvcc_dedup_to_option, resolve_l0_property,
 };
 pub(crate) use uni_store::runtime::columnar_scan::{
     build_property_column_static, property_field, resolve_property_type,
@@ -1553,9 +1553,10 @@ pub(crate) async fn prefetch_vids_columnar(
 pub(crate) async fn columnar_scan_vertex_batch_static(
     graph_ctx: &GraphExecutionContext,
     label: &str,
-    // Retained so the three call sites are untouched. Column naming is the
-    // caller's `output_schema`, which `map_to_output_schema` maps positionally.
-    _variable: &str,
+    // Column naming is the caller's `output_schema`, which
+    // `map_to_output_schema` maps positionally; the variable only names the
+    // runtime filter's columns, for recovering its equality (W3b).
+    variable: &str,
     projected_properties: &[String],
     output_schema: &SchemaRef,
     filter: &Option<Arc<dyn PhysicalExpr>>,
@@ -1580,6 +1581,10 @@ pub(crate) async fn columnar_scan_vertex_batch_static(
     // multi-VID list comes from the IN-list path (`UNWIND ... WHERE id(x) =
     // e.field`, issue #55 PR #4).
     let target_vid = filter.as_ref().and_then(extract_vid_from_physical_filter);
+    // The runtime filter below stays authoritative; this structured copy only
+    // lets the storage layer skip L0 rows that cannot match (W3b).
+    let l0_prefilter =
+        extra_runtime_filter.and_then(|f| l0_equality_prefilter(f, format!("{variable}.")));
 
     let mut index_hits = 0usize;
     let mapped = uni_store::runtime::columnar_scan::columnar_scan_vertex_batch(
@@ -1595,6 +1600,7 @@ pub(crate) async fn columnar_scan_vertex_batch_static(
             vid_list_filter,
             vid_range,
             extra_lance_filter,
+            l0_prefilter: l0_prefilter.as_ref(),
         },
         Some(&mut index_hits),
     )
@@ -1608,6 +1614,113 @@ pub(crate) async fn columnar_scan_vertex_batch_static(
     // filtered the on-disk side via `extra_lance_filter`; this catches any
     // L0 rows that slipped through the merge.
     apply_runtime_filter(mapped, extra_runtime_filter)
+}
+
+/// Recover `column = literal` / `column IN (literals)` from the indexed-property
+/// runtime filter, as an [`L0EqualityPrefilter`] the storage layer can apply
+/// to L0 rows before materializing them (W3b).
+///
+/// The planner builds the runtime filter and the Lance string from the same
+/// indexed conjuncts but hands the scan no structured form, so this reads one
+/// back from the physical expression. Anything not recognized returns `None`,
+/// which keeps the unrestricted L0 read — the failure mode of a miss is the old
+/// cost, never a wrong row. What *is* recognized must describe a superset of
+/// the rows the filter accepts:
+///
+/// * `AND` — either side's equality alone is a superset of the conjunction;
+/// * `OR` — both sides must constrain the same column, and the values union;
+/// * the column side must be a bare `Column` named `{prefix}{prop}`: a cast on
+///   it can make unequal stored values compare equal (`CAST(5.5 AS BIGINT)`);
+/// * the literal side may be cast, which is evaluated here exactly as
+///   DataFusion would, and a NULL or non-scalar literal gives up.
+fn l0_equality_prefilter(
+    filter: &Arc<dyn PhysicalExpr>,
+    prefix: String,
+) -> Option<L0EqualityPrefilter> {
+    use datafusion::logical_expr::Operator;
+    use datafusion::physical_expr::expressions::{BinaryExpr, InListExpr};
+
+    let property_of = |e: &Arc<dyn PhysicalExpr>| -> Option<String> {
+        let col = e.downcast_ref::<datafusion::physical_expr::expressions::Column>()?;
+        let prop = col.name().strip_prefix(prefix.as_str())?;
+        (!prop.is_empty() && !prop.starts_with('_')).then(|| prop.to_string())
+    };
+
+    if let Some(bin) = filter.downcast_ref::<BinaryExpr>() {
+        match bin.op() {
+            Operator::Eq => {
+                let (prop, lit) = match (property_of(bin.left()), property_of(bin.right())) {
+                    (Some(p), None) => (p, bin.right()),
+                    (None, Some(p)) => (p, bin.left()),
+                    _ => return None,
+                };
+                return Some(L0EqualityPrefilter {
+                    property: prop,
+                    values: vec![physical_literal_value(lit)?],
+                });
+            }
+            Operator::And => {
+                return l0_equality_prefilter(bin.left(), prefix.clone())
+                    .or_else(|| l0_equality_prefilter(bin.right(), prefix));
+            }
+            Operator::Or => {
+                let mut l = l0_equality_prefilter(bin.left(), prefix.clone())?;
+                let r = l0_equality_prefilter(bin.right(), prefix)?;
+                if l.property != r.property {
+                    return None;
+                }
+                l.values.extend(r.values);
+                return Some(l);
+            }
+            _ => return None,
+        }
+    }
+    if let Some(in_list) = filter.downcast_ref::<InListExpr>() {
+        if in_list.negated() {
+            return None;
+        }
+        let property = property_of(in_list.expr())?;
+        let values = in_list
+            .list()
+            .iter()
+            .map(physical_literal_value)
+            .collect::<Option<Vec<_>>>()?;
+        return Some(L0EqualityPrefilter { property, values });
+    }
+    None
+}
+
+/// The value a literal operand (possibly cast) evaluates to, as a [`Value`].
+///
+/// `None` for anything but a non-null boolean, integer, float or string.
+fn physical_literal_value(e: &Arc<dyn PhysicalExpr>) -> Option<Value> {
+    use datafusion::common::ScalarValue;
+    use datafusion::physical_expr::expressions::{CastExpr, Literal};
+
+    let scalar = if let Some(lit) = e.downcast_ref::<Literal>() {
+        lit.value().clone()
+    } else {
+        let cast = e.downcast_ref::<CastExpr>()?;
+        let lit = cast.expr().downcast_ref::<Literal>()?;
+        lit.value().cast_to(cast.cast_type()).ok()?
+    };
+    match scalar {
+        ScalarValue::Utf8(Some(s))
+        | ScalarValue::LargeUtf8(Some(s))
+        | ScalarValue::Utf8View(Some(s)) => Some(Value::String(s)),
+        ScalarValue::Int8(Some(v)) => Some(Value::Int(v.into())),
+        ScalarValue::Int16(Some(v)) => Some(Value::Int(v.into())),
+        ScalarValue::Int32(Some(v)) => Some(Value::Int(v.into())),
+        ScalarValue::Int64(Some(v)) => Some(Value::Int(v)),
+        ScalarValue::UInt8(Some(v)) => Some(Value::Int(v.into())),
+        ScalarValue::UInt16(Some(v)) => Some(Value::Int(v.into())),
+        ScalarValue::UInt32(Some(v)) => Some(Value::Int(v.into())),
+        ScalarValue::UInt64(Some(v)) => i64::try_from(v).ok().map(Value::Int),
+        ScalarValue::Float32(Some(v)) => Some(Value::Float(v.into())),
+        ScalarValue::Float64(Some(v)) => Some(Value::Float(v)),
+        ScalarValue::Boolean(Some(b)) => Some(Value::Bool(b)),
+        _ => None,
+    }
 }
 
 /// Apply the indexed-property runtime filter, if present, to a `RecordBatch`.
