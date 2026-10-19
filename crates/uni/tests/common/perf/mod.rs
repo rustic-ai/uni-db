@@ -12,3 +12,5 @@ pub mod test_100k_lookup;
 pub mod test_bulk_insert_performance;
 pub mod test_count_performance;
 pub mod update_microbench_stress;
+// `x IN fs` with `fs` a column repeated in runs (the IC5 shape).
+pub mod in_list_column_runs;

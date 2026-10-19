@@ -684,3 +684,257 @@ async fn all_l0_schemaless_shadowing_cases_match_an_unpushed_reference() {
     db.flush().await.unwrap();
     assert_schemaless_probes_agree(&db.session(), "after flush").await;
 }
+
+// ── `ext_id` on a labelled scan ───────────────────────────────────────────
+//
+// Measured 2026-10-18: `MATCH (a:E {ext_id: $s})` over `V` unflushed vertices
+// reported `rows_scanned = V` (2000 / 8000) while the flushed lookup read 1.
+// `ext_id` is never a declared property, so the equality reached the scan
+// only as Lance SQL (A10) with no runtime filter, and the scan had nothing to
+// recover an L0 prefilter from. The planner now hands the scan the equality
+// directly, and the L0 pass reasons about `ext_id` as the string column every
+// per-label table carries.
+
+/// Commit `:E {uid, ext_id: 'x{i}', ix: i, grp: 0}` for `i` in `from..to`.
+async fn insert_ext(db: &Uni, from: i64, to: i64) {
+    let tx = db.session().tx().await.unwrap();
+    tx.query_with(
+        "UNWIND range($from, $to - 1) AS i \
+         CREATE (:E {uid: 'u' + toString(i), ext_id: 'x' + toString(i), ix: i, grp: 0})",
+    )
+    .param("from", Value::Int(from))
+    .param("to", Value::Int(to))
+    .fetch_all()
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+/// An `ext_id` lookup over unflushed labelled vertices reads O(1) rows, in
+/// both spellings, at two scales, for present and absent keys.
+#[tokio::test]
+async fn unflushed_ext_id_lookup_reads_only_matching_rows() {
+    for v in [2000_i64, 8000] {
+        let db = Uni::temporary().config(cfg()).build().await.unwrap();
+        schema(&db).await;
+        insert_ext(&db, 0, v).await;
+        for q in [
+            "MATCH (a:E {ext_id: $s}) RETURN a.ix AS ix",
+            "MATCH (a:E) WHERE a.ext_id = $s RETURN a.ix AS ix",
+        ] {
+            for (key, want) in [
+                ("x0".to_string(), 1),
+                (format!("x{}", v - 1), 1),
+                ("absent".to_string(), 0),
+            ] {
+                let r = db
+                    .session()
+                    .query_with(q)
+                    .param("s", Value::String(key.clone()))
+                    .fetch_all()
+                    .await
+                    .unwrap();
+                let scanned = r.metrics().rows_scanned;
+                assert_eq!(r.rows().len(), want, "V={v} `{q}` {key}");
+                assert!(
+                    scanned <= 1,
+                    "V={v} `{q}` {key}: scanned {scanned} rows of {v} unflushed — the L0 \
+                     side of an ext_id lookup built the whole label"
+                );
+            }
+        }
+    }
+}
+
+/// Every way an L0 version's `ext_id` can diverge from its flushed one gives
+/// the same rows through the pushed lookup as through a form no pushdown
+/// reaches, flushed and unflushed, in a transaction and in a fork.
+#[tokio::test]
+async fn ext_id_shadowing_cases_match_an_unpushed_reference() {
+    async fn agree(session: &uni_db::Session, ctx: &str) {
+        for key in [
+            "x1", "x2", "x3", "x4", "x5", "y1", "y2", "n1", "5", "absent",
+        ] {
+            let p = Value::String(key.into());
+            let got = rows(session, "MATCH (a:E {ext_id: $p}) RETURN a.ix", &p).await;
+            let alt = rows(session, "MATCH (a:E) WHERE a.ext_id = $p RETURN a.ix", &p).await;
+            let want = rows(
+                session,
+                "MATCH (a:E) WHERE [a.ext_id] = [$p] RETURN a.ix",
+                &p,
+            )
+            .await;
+            assert_eq!(got, want, "{ctx}: inline ext_id = {key}");
+            assert_eq!(alt, want, "{ctx}: WHERE ext_id = {key}");
+        }
+    }
+    let mutations = [
+        // Away from a flushed key, onto a new one, and onto another
+        // vertex's freed key.
+        "MATCH (a:E {uid: 'u1'}) SET a.ext_id = 'y1'",
+        "MATCH (a:E {uid: 'u2'}) SET a.ext_id = 'x1'",
+        // Removed, deleted, recreated under a flushed key.
+        "MATCH (a:E {uid: 'u3'}) REMOVE a.ext_id",
+        "MATCH (a:E {uid: 'u4'}) DETACH DELETE a",
+        "CREATE (:E {uid: 'u4b', ext_id: 'x4', ix: 104, grp: 0})",
+        // A non-string ext_id, which stays out of the string column.
+        "MATCH (a:E {uid: 'u5'}) SET a.ext_id = 5",
+        // Label removed and restored.
+        "MATCH (a:E {uid: 'u6'}) REMOVE a:E",
+        "MATCH (a {uid: 'u6'}) SET a:E",
+        "CREATE (:E {uid: 'n', ext_id: 'n1', ix: 200, grp: 0})",
+    ];
+
+    for flush_base in [true, false] {
+        let db = Uni::temporary().config(cfg()).build().await.unwrap();
+        schema(&db).await;
+        insert_ext(&db, 0, 10).await;
+        if flush_base {
+            db.flush().await.unwrap();
+        }
+        let s = db.session();
+        agree(&s, &format!("base (flushed {flush_base})")).await;
+        for m in mutations {
+            let tx = s.tx().await.unwrap();
+            tx.execute(m).await.unwrap();
+            tx.commit().await.unwrap();
+        }
+        agree(&s, &format!("mutated (flushed base {flush_base})")).await;
+
+        // In a transaction, over its private L0.
+        let tx = s.tx().await.unwrap();
+        tx.execute("MATCH (a:E {uid: 'u7'}) SET a.ext_id = 'y2'")
+            .await
+            .unwrap();
+        for key in ["x7", "y2"] {
+            let p = Value::String(key.into());
+            let run = |q: &'static str, p: Value| {
+                let tx = &tx;
+                async move {
+                    let mut out: Vec<String> = tx
+                        .query_with(q)
+                        .param("p", p)
+                        .fetch_all()
+                        .await
+                        .unwrap()
+                        .rows()
+                        .iter()
+                        .map(|row| format!("{:?}", row.values()))
+                        .collect();
+                    out.sort();
+                    out
+                }
+            };
+            let got = run("MATCH (a:E {ext_id: $p}) RETURN a.ix", p.clone()).await;
+            let want = run("MATCH (a:E) WHERE [a.ext_id] = [$p] RETURN a.ix", p.clone()).await;
+            assert_eq!(got, want, "in-transaction: ext_id = {key}");
+        }
+        tx.rollback();
+        agree(&s, "after rollback").await;
+
+        // A fork.
+        let fork = s
+            .fork(&format!("ext_id_shadow_{flush_base}"))
+            .await
+            .unwrap();
+        let ftx = fork.tx().await.unwrap();
+        ftx.execute("MATCH (a:E {uid: 'u8'}) SET a.ext_id = 'y2'")
+            .await
+            .unwrap();
+        ftx.commit().await.unwrap();
+        agree(&fork, "fork L0").await;
+        agree(&s, "primary after fork writes").await;
+
+        db.flush().await.unwrap();
+        agree(&s, &format!("all flushed (flushed base {flush_base})")).await;
+    }
+}
+
+/// A `WHERE` equality on a label the schema does not declare reads O(1)
+/// unflushed rows, like the inline map.
+///
+/// Measured 2026-10-18: `MATCH (a:E) WHERE a.uid = $s` read `V` rows (2000 /
+/// 8000) where `MATCH (a:E {uid: $s})` read 1. The planner pushed a WHERE
+/// conjunct into a declared-label `Scan` or a label-less `ScanAll` but never
+/// into the undeclared label's `ScanMainByLabels`, so the conjunct stayed in
+/// a filter above the scan and the scan saw no equality to narrow its L0
+/// read with. The cross-product and OPTIONAL rows pin the two places the
+/// pushdown also had to learn the new scan: choosing the side of a cross
+/// product (it would have sent the predicate to the side that does not bind
+/// the variable, losing it) and null-extending under OPTIONAL MATCH.
+#[tokio::test]
+async fn unflushed_where_on_undeclared_label_reads_only_matching_rows() {
+    for v in [2000_i64, 8000] {
+        let db = Uni::temporary().config(cfg()).build().await.unwrap();
+        insert(&db, 0, v).await;
+        let tx = db.session().tx().await.unwrap();
+        tx.execute("CREATE (:G {uid: 'g1', ix: -1})").await.unwrap();
+        tx.commit().await.unwrap();
+        let last = format!("u{}", v - 1);
+        for (q, key, want, max_scanned) in [
+            ("MATCH (a:E) WHERE a.uid = $s RETURN a.ix", "u0", 1, 1),
+            (
+                "MATCH (a:E) WHERE $s = a.uid RETURN a.ix",
+                last.as_str(),
+                1,
+                1,
+            ),
+            (
+                "MATCH (a:E) WHERE a.uid IN [$s, 'none'] RETURN a.ix",
+                "u7",
+                1,
+                1,
+            ),
+            (
+                "MATCH (a:E) WHERE a.uid = $s AND a.ix >= 0 RETURN a.ix",
+                "u7",
+                1,
+                1,
+            ),
+            ("MATCH (a:E) WHERE a.uid = $s RETURN a.ix", "absent", 0, 1),
+            (
+                "MATCH (g:G), (a:E) WHERE a.uid = $s AND g.uid = 'g1' RETURN a.ix, g.ix",
+                "u3",
+                1,
+                2,
+            ),
+            (
+                "MATCH (a:E), (g:G) WHERE a.uid = $s AND g.uid = 'g1' RETURN a.ix, g.ix",
+                "u3",
+                1,
+                2,
+            ),
+            (
+                "OPTIONAL MATCH (a:E) WHERE a.uid = $s RETURN a.ix",
+                "absent",
+                1,
+                1,
+            ),
+        ] {
+            let r = db
+                .session()
+                .query_with(q)
+                .param("s", Value::String(key.into()))
+                .fetch_all()
+                .await
+                .unwrap();
+            let scanned = r.metrics().rows_scanned as u64;
+            assert_eq!(r.rows().len(), want, "V={v} `{q}` {key}");
+            assert!(
+                scanned <= max_scanned,
+                "V={v} `{q}` {key}: scanned {scanned} rows of {v} unflushed — the WHERE \
+                 equality did not reach the undeclared label's scan"
+            );
+        }
+        let r = db
+            .session()
+            .query("OPTIONAL MATCH (a:E) WHERE a.uid = 'absent' RETURN a.ix AS ix")
+            .await
+            .unwrap();
+        assert_eq!(
+            r.rows()[0].values(),
+            &[Value::Null],
+            "V={v}: OPTIONAL null row"
+        );
+    }
+}

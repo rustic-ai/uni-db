@@ -91,6 +91,8 @@ pub(crate) fn into_query_error(e: impl std::fmt::Display, cypher: &str) -> UniEr
             column: None,
             context: Some(cypher.to_string()),
         }
+    } else if let Some(reserved) = UniError::reserved_property_from_message(&msg) {
+        reserved
     } else {
         UniError::Query {
             message: msg,
@@ -127,6 +129,8 @@ fn into_execution_error(
         }
     } else if msg.starts_with("ConstraintVerificationFailed:") {
         UniError::Constraint { message: msg }
+    } else if let Some(reserved) = UniError::reserved_property_from_message(&msg) {
+        reserved
     } else {
         UniError::Query {
             message: msg,
@@ -171,6 +175,8 @@ fn into_stream_error(
         }
     } else if msg.starts_with("ConstraintVerificationFailed:") {
         UniError::Constraint { message: msg }
+    } else if let Some(reserved) = UniError::reserved_property_from_message(&msg) {
+        reserved
     } else {
         UniError::Query {
             message: msg,

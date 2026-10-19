@@ -14,11 +14,17 @@
 //!
 //! Demonstration: fire N concurrent `register()` calls of DISTINCT single-rule
 //! programs at the same db-level registry. With no lost update the final rule
-//! count is N; the read-snapshot-rebuild-clobber loses some, so the count
-//! comes out < N.
+//! count is N; the read-snapshot-rebuild-clobber lost some, so the count came
+//! out < N.
 //!
-//! Timing-dependent: `#[ignore]`d so CI stays green. Run explicitly with
-//! `--run-ignored=all` to observe.
+//! FIXED: `register_rules_on_registry` (impl_locy.rs) and
+//! `RuleRegistry::remove` now hold the write lock across read → rebuild →
+//! assign, so this test runs in the default tier and asserts the exact count
+//! every round. It is a race detector, not a deterministic guard: with the fix
+//! reverted, whether a round loses a rule depends on two tasks interleaving
+//! inside the window between the snapshot and the assignment (which spans the
+//! Locy compile of the new program). Sixteen tasks on four workers over thirty
+//! rounds make that likely but not certain, so a pass is evidence, not proof.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,8 +35,6 @@ use uni_db::{DataType, Uni};
 async fn concurrent_register_loses_rules() -> anyhow::Result<()> {
     const CONCURRENCY: usize = 16;
     const ROUNDS: usize = 30;
-
-    let reproduced_at: Option<(usize, usize)> = None;
 
     for round in 0..ROUNDS {
         let db = Arc::new(Uni::in_memory().build().await?);
@@ -65,7 +69,5 @@ async fn concurrent_register_loses_rules() -> anyhow::Result<()> {
             "lost update at round {round}: final rule count {count} < {CONCURRENCY}"
         );
     }
-    let _ = reproduced_at;
-
     Ok(())
 }

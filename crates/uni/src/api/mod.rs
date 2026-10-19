@@ -459,6 +459,24 @@ impl UniInner {
             schema: self.schema.clone(),
             shutdown: self.shutdown_handle.clone(),
             config: self.config.clone(),
+            // The view's one manager, so a deferred rebuild after a bulk load
+            // does not start a worker of its own. Weak: the backend must not
+            // keep the database alive.
+            rebuild_manager: Some({
+                let inner = Arc::downgrade(self);
+                Arc::new(move || {
+                    let inner = inner.clone();
+                    Box::pin(async move {
+                        let inner = inner
+                            .upgrade()
+                            .ok_or_else(|| anyhow::anyhow!("the database was dropped"))?;
+                        inner
+                            .index_rebuild_manager()
+                            .await
+                            .map_err(anyhow::Error::from)
+                    })
+                })
+            }),
         }
     }
 
@@ -504,7 +522,10 @@ impl UniInner {
             defer_queue: self.defer_queue.clone(),
             ec_queue: self.ec_queue.clone(),
             scheduler_host: Arc::clone(&self.scheduler_host),
-            shutdown_handle: Arc::new(ShutdownHandle::new(Duration::from_secs(30))),
+            // Derived from the parent's, so the parent's shutdown (and `Drop for
+            // Uni`) signals, counts, and waits for the tasks this view starts:
+            // they write the same directory. Released when this inner drops.
+            shutdown_handle: Arc::new(self.shutdown_handle.derive()),
             locy_rule_registry,
             // Fork/snapshot inners must not persist rule mutations: keep them
             // ephemeral so a fork's registrations never touch the primary
@@ -1409,7 +1430,8 @@ impl Drop for ScratchDir {
 }
 
 impl Drop for UniInner {
-    /// Reap the scratch directory on the implicit teardown path.
+    /// Signal this view's own background tasks, and reap the scratch directory
+    /// on the implicit teardown path.
     ///
     /// A caller who never calls [`Uni::shutdown`] — `db = Uni.temporary()` with
     /// no `with` block, from Python — reached only `Drop for Uni`, which then
@@ -1423,6 +1445,11 @@ impl Drop for UniInner {
     /// when the *last* `Arc` dies, not when one handle goes out of scope while
     /// a `Session` still holds a reference to the data underneath it.
     fn drop(&mut self) {
+        // Stop the tasks this view started; nothing can reach them any more. A
+        // fork's last session going away is the common case. Tasks of views
+        // derived from this one (a nested fork) are left alone, and the tasks
+        // stay tracked by the root handle, whose shutdown still waits for them.
+        self.shutdown_handle.release();
         // Releasing the `Arc` is the whole teardown: `ScratchDir::drop` removes
         // the directory once no background task still holds a claim.
         drop(self._temp_dir.take());
@@ -2157,7 +2184,7 @@ impl UniBuilder {
                 loop {
                     tokio::select! {
                         _ = ticker.tick() => {
-                            if let Err(e) = writer_clone.check_flush().await {
+                            if let Err(e) = writer_clone.check_flush_in_background().await {
                                 tracing::warn!("Background flush check failed: {}", e);
                             }
                         }

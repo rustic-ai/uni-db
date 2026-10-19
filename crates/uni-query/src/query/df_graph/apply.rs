@@ -540,7 +540,10 @@ async fn run_apply(
         filtered_entries.len()
     );
 
-    let subquery_has_writes = plan_contains_writes(subquery_plan);
+    // A procedure call is never served from the cache: whether it writes, or
+    // answers differently on each call (`uni.create.uuid()`), is the
+    // procedure's business, and a cache hit ran it once for two equal rows.
+    let subquery_has_writes = plan_contains_writes(subquery_plan) || is_proc_call;
     let is_unit_subquery = output_schema.fields().len() == kept_input_indices.len();
 
     // 3. No input rows, no output rows. The body runs once per input row, so
@@ -667,7 +670,16 @@ async fn run_apply(
             continue;
         }
 
-        for sub_row in &sub_rows {
+        // A unit subquery or void procedure call keeps each input row once,
+        // however many rows its body made: it names no columns, so it has
+        // nothing to multiply the row by. The last row carries the body's
+        // final view of any entity it updated.
+        let sub_rows: &[HashMap<String, Value>] = if is_unit_subquery {
+            &sub_rows[sub_rows.len() - 1..]
+        } else {
+            &sub_rows
+        };
+        for sub_row in sub_rows {
             append_cross_join_row(
                 &mut column_arrays,
                 &input_row_arrays,

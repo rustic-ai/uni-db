@@ -1420,6 +1420,29 @@ pub fn cmp_i64_f64(i: i64, f: f64) -> std::cmp::Ordering {
     }
 }
 
+/// The `i64` equal to `f`, or `None` when no `i64` is.
+///
+/// `f` must be integral and in `[-2^63, 2^63)`. The tempting bound
+/// `f <= i64::MAX as f64` is wrong: `i64::MAX` widens to `2^63`, so `2^63`
+/// passes and `as i64` saturates it to `i64::MAX`, making the float `2^63`
+/// and the integer `i64::MAX` one key. NaN and the infinities have no `i64`.
+///
+/// # Examples
+/// ```
+/// use uni_common::f64_to_exact_i64;
+/// assert_eq!(f64_to_exact_i64(1.0), Some(1));
+/// assert_eq!(f64_to_exact_i64(-9_223_372_036_854_775_808.0), Some(i64::MIN));
+/// assert_eq!(f64_to_exact_i64(9_223_372_036_854_775_808.0), None);
+/// assert_eq!(f64_to_exact_i64(1.5), None);
+/// ```
+#[must_use]
+pub fn f64_to_exact_i64(f: f64) -> Option<i64> {
+    const TWO_63: f64 = 9_223_372_036_854_775_808.0;
+    // `fract` of an infinity or NaN is NaN, so neither passes.
+    // Every integral float in `[-2^63, 2^63)` converts to `i64` exactly.
+    (f.fract() == 0.0 && (-TWO_63..TWO_63).contains(&f)).then_some(f as i64)
+}
+
 /// Normalized float equality used by [`Value`]'s `PartialEq`/`Hash`.
 ///
 /// Treats `0.0 == -0.0` and `NaN == NaN`, so that `Value` upholds the std

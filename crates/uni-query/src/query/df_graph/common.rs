@@ -27,6 +27,7 @@ use super::GraphExecutionContext;
 use super::procedure_call::map_yield_to_canonical;
 use super::unwind::arrow_to_json_value;
 use crate::query::df_graph::MutationContext;
+use crate::query::executor::procedure::ProcedureRegistry;
 
 /// Replace any interned-value handle in `batches` with its self-contained
 /// encoding.
@@ -1985,6 +1986,12 @@ pub async fn execute_subplan_with_outer_vars(
     if let Some(runtime) = graph_ctx.xervo_runtime() {
         planner = planner.with_xervo_runtime(runtime.clone());
     }
+    // The transaction's writer, for the same reason: an in-query `CALL` of a
+    // `WRITE` procedure runs as a sub-plan of `Apply`, and without the writer
+    // its host refused the write that the standalone call performs.
+    if let Some(writer) = graph_ctx.writer() {
+        planner = planner.with_writer(Arc::clone(writer));
+    }
 
     // Propagate the outer MutationContext so writes inside CALL { ... }
     // subqueries (SET, CREATE, MERGE, DELETE) and RecursiveCTE bodies can
@@ -2038,7 +2045,9 @@ fn infer_procedure_call_schema(
     procedure_name: &str,
     yield_items: &[(String, Option<String>)],
     _schema_info: &UniSchema,
+    procedures: Option<&ProcedureRegistry>,
 ) -> SchemaRef {
+    let node_yield = super::procedure_call::is_node_yield_procedure_static(procedure_name);
     let infer_type = |name: &str| -> DataType {
         match procedure_name {
             "uni.schema.labels" => match name {
@@ -2073,7 +2082,16 @@ fn infer_procedure_call_schema(
         .iter()
         .map(|(name, alias)| {
             let col_name = alias.as_ref().unwrap_or(name);
-            Field::new(col_name, infer_type(name), true)
+            // The procedure's own declaration first, as the standalone call
+            // types its columns (`GraphProcedureCallExec::build_schema`):
+            // without it every plugin yield here was Utf8, and the row's
+            // `Int` came back as the string `"1"`, so `result + 1` was `"11"`.
+            procedures
+                .filter(|_| !node_yield)
+                .and_then(|r| {
+                    super::procedure_call::declared_yield_field(r, procedure_name, name, col_name)
+                })
+                .unwrap_or_else(|| Field::new(col_name, infer_type(name), true))
         })
         .collect();
 
@@ -2086,7 +2104,14 @@ fn infer_procedure_call_schema(
 /// don't exist as physical columns at planning time, so we can't dry-run plan
 /// the subquery to get its schema. Instead we walk the logical plan and use
 /// `UniSchema` property metadata to infer types.
-pub fn infer_logical_plan_schema(plan: &LogicalPlan, schema_info: &UniSchema) -> SchemaRef {
+///
+/// `procedures` types the yields of a `ProcedureCall` from the procedures'
+/// declarations; without it they fall back to a built-in table and `Utf8`.
+pub fn infer_logical_plan_schema(
+    plan: &LogicalPlan,
+    schema_info: &UniSchema,
+    procedures: Option<&ProcedureRegistry>,
+) -> SchemaRef {
     // Walk to outermost Project
     if let LogicalPlan::Project { projections, .. } = plan {
         let fields: Vec<Field> = projections
@@ -2105,13 +2130,15 @@ pub fn infer_logical_plan_schema(plan: &LogicalPlan, schema_info: &UniSchema) ->
         LogicalPlan::Sort { input, .. }
         | LogicalPlan::Limit { input, .. }
         | LogicalPlan::Filter { input, .. }
-        | LogicalPlan::Distinct { input } => infer_logical_plan_schema(input, schema_info),
+        | LogicalPlan::Distinct { input } => {
+            infer_logical_plan_schema(input, schema_info, procedures)
+        }
 
         LogicalPlan::ProcedureCall {
             procedure_name,
             yield_items,
             ..
-        } => infer_procedure_call_schema(procedure_name, yield_items, schema_info),
+        } => infer_procedure_call_schema(procedure_name, yield_items, schema_info, procedures),
 
         _ => {
             // Fallback: empty schema

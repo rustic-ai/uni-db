@@ -22,60 +22,54 @@ use uni_cypher::ast::BinaryOp;
 
 /// Evaluate a binary operation on two already-evaluated values.
 ///
-/// This function handles all binary operators (Eq, NotEq, And, Or, Gt, Lt, etc.)
-/// and returns the result of the operation.
+/// This is the value-level definition of every Cypher binary operator; the
+/// per-row DataFusion UDFs, the interpreted executor and Locy all call it, so
+/// it answers what openCypher specifies:
+///
+/// * NULL propagates through every operator except `AND`/`OR`/`XOR`, which
+///   use Kleene logic.
+/// * `AND`/`OR` are decided by a dominating operand whatever the other one
+///   is (`false AND x` is false, `true OR x` true, in either order), so the
+///   answer does not depend on evaluation order or batch composition.
+///   Otherwise a non-boolean, non-NULL operand is a type error, NULL
+///   included: `NULL AND 1` is an error.
+/// * `XOR` has no dominating operand: a non-boolean, non-NULL operand is a
+///   type error, even beside NULL.
+/// * `^` is always a float (`2 ^ 3` is `8.0`).
+/// * `+` of a string and a number, boolean or temporal concatenates the
+///   other operand's `toString`.
+/// * `STARTS WITH` / `ENDS WITH` / `CONTAINS` with a non-string operand is
+///   NULL.
 pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Value> {
-    // Null propagation for most operators (except AND/OR which have three-valued logic)
-    if !matches!(op, BinaryOp::And | BinaryOp::Or) && (left.is_null() || right.is_null()) {
+    // Null propagation for every operator but the three-valued logical ones.
+    if !matches!(op, BinaryOp::And | BinaryOp::Or | BinaryOp::Xor)
+        && (left.is_null() || right.is_null())
+    {
         return Ok(Value::Null);
     }
 
     match op {
         BinaryOp::Eq => Ok(cypher_eq(left, right).map_or(Value::Null, Value::Bool)),
         BinaryOp::NotEq => Ok(cypher_eq(left, right).map_or(Value::Null, |b| Value::Bool(!b))),
-        BinaryOp::And => {
-            // Three-valued logic: false dominates, null propagates with true
-            match (left.as_bool(), right.as_bool()) {
-                (Some(false), _) | (_, Some(false)) => Ok(Value::Bool(false)),
-                (Some(true), Some(true)) => Ok(Value::Bool(true)),
-                _ if left.is_null() || right.is_null() => Ok(Value::Null),
-                _ => Err(anyhow!(
-                    "InvalidArgumentType: Expected bool for AND operands"
-                )),
-            }
-        }
-        BinaryOp::Or => {
-            // Three-valued logic: true dominates, null propagates with false
-            match (left.as_bool(), right.as_bool()) {
-                (Some(true), _) | (_, Some(true)) => Ok(Value::Bool(true)),
-                (Some(false), Some(false)) => Ok(Value::Bool(false)),
-                _ if left.is_null() || right.is_null() => Ok(Value::Null),
-                _ => Err(anyhow!(
-                    "InvalidArgumentType: Expected bool for OR operands"
-                )),
-            }
-        }
+        BinaryOp::And => eval_logical(left, right, "AND", false),
+        BinaryOp::Or => eval_logical(left, right, "OR", true),
         BinaryOp::Xor => {
-            // Three-valued logic: any null operand returns null
-            match (left.as_bool(), right.as_bool()) {
-                (Some(l), Some(r)) => Ok(Value::Bool(l ^ r)),
-                _ if left.is_null() || right.is_null() => Ok(Value::Null),
-                _ => Err(anyhow!(
-                    "InvalidArgumentType: Expected bool for XOR operands"
-                )),
-            }
+            let (l, r) = (
+                logical_operand(left, "XOR")?,
+                logical_operand(right, "XOR")?,
+            );
+            Ok(match (l, r) {
+                (Some(l), Some(r)) => Value::Bool(l ^ r),
+                _ => Value::Null,
+            })
         }
         BinaryOp::Gt => eval_comparison(left, right, |ordering| ordering.is_gt()),
         BinaryOp::Lt => eval_comparison(left, right, |ordering| ordering.is_lt()),
         BinaryOp::GtEq => eval_comparison(left, right, |ordering| ordering.is_ge()),
         BinaryOp::LtEq => eval_comparison(left, right, |ordering| ordering.is_le()),
-        BinaryOp::Contains => eval_string_predicate(left, right, "CONTAINS", |l, r| l.contains(r)),
-        BinaryOp::StartsWith => {
-            eval_string_predicate(left, right, "STARTS WITH", |l, r| l.starts_with(r))
-        }
-        BinaryOp::EndsWith => {
-            eval_string_predicate(left, right, "ENDS WITH", |l, r| l.ends_with(r))
-        }
+        BinaryOp::Contains => Ok(eval_string_predicate(left, right, |l, r| l.contains(r))),
+        BinaryOp::StartsWith => Ok(eval_string_predicate(left, right, |l, r| l.starts_with(r))),
+        BinaryOp::EndsWith => Ok(eval_string_predicate(left, right, |l, r| l.ends_with(r))),
         BinaryOp::Add => eval_add(left, right),
         BinaryOp::Sub => eval_sub(left, right),
         BinaryOp::Mul => eval_mul(left, right),
@@ -91,7 +85,19 @@ pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Valu
                 eval_numeric_op(left, right, |a, b| a % b)
             }
         }
-        BinaryOp::Pow => eval_numeric_op(left, right, |a, b| a.powf(b)),
+        BinaryOp::Pow => match (left, right) {
+            (Value::Int(_) | Value::Float(_), Value::Int(_) | Value::Float(_)) => {
+                // Both arms are numbers, so `as_f64` cannot fail.
+                let (l, r) = (
+                    left.as_f64().unwrap_or(f64::NAN),
+                    right.as_f64().unwrap_or(f64::NAN),
+                );
+                Ok(Value::Float(l.powf(r)))
+            }
+            _ => Err(anyhow!(
+                "pow requires numeric operands, got {left:?} ^ {right:?}"
+            )),
+        },
         BinaryOp::Regex => {
             let l = left
                 .as_str()
@@ -103,6 +109,37 @@ pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Valu
             Ok(Value::Bool(matched))
         }
         BinaryOp::ApproxEq => eval_vector_similarity(left, right),
+    }
+}
+
+/// A logical operand as a Kleene truth value: `Some(bool)` or `None` for
+/// NULL; any other value is a type error.
+fn logical_operand(value: &Value, op_name: &str) -> Result<Option<bool>> {
+    match value {
+        Value::Bool(b) => Ok(Some(*b)),
+        Value::Null => Ok(None),
+        other => Err(anyhow!(
+            "InvalidArgumentType: {op_name} requires boolean arguments, got {other:?}"
+        )),
+    }
+}
+
+/// `AND` (`dominant` false) or `OR` (`dominant` true) under Kleene logic.
+///
+/// An operand equal to `dominant` decides the answer whatever the other
+/// operand is, in either position; otherwise both must be boolean or NULL.
+fn eval_logical(left: &Value, right: &Value, op_name: &str, dominant: bool) -> Result<Value> {
+    if matches!(left, Value::Bool(b) if *b == dominant)
+        || matches!(right, Value::Bool(b) if *b == dominant)
+    {
+        return Ok(Value::Bool(dominant));
+    }
+    match (
+        logical_operand(left, op_name)?,
+        logical_operand(right, op_name)?,
+    ) {
+        (Some(_), Some(_)) => Ok(Value::Bool(!dominant)),
+        _ => Ok(Value::Null),
     }
 }
 
@@ -137,6 +174,26 @@ fn with_cached_regex<T>(pattern: &str, f: impl FnOnce(&regex::Regex) -> T) -> Re
     })
 }
 
+/// Compare two numbers by their exact mathematical value.
+///
+/// Returns `None` when either operand is not an `Int` or a `Float`, and
+/// `Some(None)` when they are numbers that do not compare (a NaN is
+/// involved). An integer against a float is compared exactly through
+/// [`uni_common::cmp_i64_f64`]: widening the integer to `f64` rounds above
+/// 2^53, under which `9007199254740993 = 9007199254740992.0` held, while
+/// openCypher compares numbers by value.
+pub fn cypher_numeric_cmp(left: &Value, right: &Value) -> Option<Option<Ordering>> {
+    Some(match (left, right) {
+        (Value::Int(l), Value::Int(r)) => Some(l.cmp(r)),
+        (Value::Float(l), Value::Float(r)) => l.partial_cmp(r),
+        (Value::Int(i), Value::Float(f)) => (!f.is_nan()).then(|| uni_common::cmp_i64_f64(*i, *f)),
+        (Value::Float(f), Value::Int(i)) => {
+            (!f.is_nan()).then(|| uni_common::cmp_i64_f64(*i, *f).reverse())
+        }
+        _ => return None,
+    })
+}
+
 /// Deep equality comparison with Cypher-compliant numeric coercion and 3-valued logic.
 /// Returns Some(bool) for True/False, and None for Null/Unknown.
 pub fn cypher_eq(left: &Value, right: &Value) -> Option<bool> {
@@ -144,17 +201,9 @@ pub fn cypher_eq(left: &Value, right: &Value) -> Option<bool> {
         return None;
     }
 
-    // Exact integer equality — avoid f64 precision loss for large i64 values
-    if let (Some(l), Some(r)) = (left.as_i64(), right.as_i64()) {
-        return Some(l == r);
-    }
-
-    // Mixed numeric equality (1 = 1.0)
-    if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
-        if l.is_nan() || r.is_nan() {
-            return Some(false);
-        }
-        return Some(l == r);
+    // Numbers compare by exact value: `1 = 1.0`, `2^53 + 1 <> 2^53`.
+    if let Some(ord) = cypher_numeric_cmp(left, right) {
+        return Some(ord == Some(Ordering::Equal));
     }
 
     // Graph entities compare by identity, never structurally.
@@ -283,19 +332,12 @@ pub fn eval_in_op(left: &Value, right: &Value) -> Result<Value> {
     }
 }
 
-fn eval_string_predicate(
-    left: &Value,
-    right: &Value,
-    op_name: &str,
-    check: fn(&str, &str) -> bool,
-) -> Result<Value> {
-    let l = left
-        .as_str()
-        .ok_or_else(|| anyhow!("Left side of {} must be a string", op_name))?;
-    let r = right
-        .as_str()
-        .ok_or_else(|| anyhow!("Right side of {} must be a string", op_name))?;
-    Ok(Value::Bool(check(l, r)))
+fn eval_string_predicate(left: &Value, right: &Value, check: fn(&str, &str) -> bool) -> Value {
+    match (left, right) {
+        (Value::String(l), Value::String(r)) => Value::Bool(check(l, r)),
+        // openCypher: a non-string operand is NULL, not an error.
+        _ => Value::Null,
+    }
 }
 
 fn eval_numeric_op<F>(left: &Value, right: &Value, op: F) -> Result<Value>
@@ -458,10 +500,12 @@ fn eval_add(left: &Value, right: &Value) -> Result<Value> {
         return add_temporal_duration_to_value(right, &dur);
     }
 
-    // Temporal + Duration (supports typed temporals and map-wrapped temporals)
+    // Temporal + Duration (supports typed temporals and map-wrapped temporals).
+    // A number is not a duration: `datetime(..) + 1` is a type error, as in
+    // openCypher, not an offset in microseconds.
     if let Some(tv) = temporal_from_value(left)
         && !matches!(tv, TemporalValue::Duration { .. })
-        && (is_duration_value(right) || right.is_number())
+        && is_duration_value(right)
     {
         let dur = parse_duration_from_value(right)?;
         return add_temporal_duration_typed(&tv, &dur);
@@ -469,7 +513,7 @@ fn eval_add(left: &Value, right: &Value) -> Result<Value> {
     // Duration + Temporal
     if let Some(tv) = temporal_from_value(right)
         && !matches!(tv, TemporalValue::Duration { .. })
-        && (is_duration_value(left) || left.is_number())
+        && is_duration_value(left)
     {
         let dur = parse_duration_from_value(left)?;
         return add_temporal_duration_typed(&tv, &dur);
@@ -522,21 +566,16 @@ fn eval_add(left: &Value, right: &Value) -> Result<Value> {
         }
     }
 
-    // temporal string + integer microseconds
-    if let Value::String(_) = left
-        && right.is_number()
-        && classify_value_temporal(left).is_some_and(|t| t != TemporalType::Duration)
-    {
-        let dur = parse_duration_from_value(right)?;
-        return add_temporal_duration_to_value(left, &dur);
-    }
-    // integer microseconds + temporal string
-    if let Value::String(_) = right
-        && left.is_number()
-        && classify_value_temporal(right).is_some_and(|t| t != TemporalType::Duration)
-    {
-        let dur = parse_duration_from_value(left)?;
-        return add_temporal_duration_to_value(right, &dur);
+    // String + number, boolean or temporal: concatenate the other operand's
+    // `toString`, in either order (`'ab' + 1` is `'ab1'`).
+    match (left, right) {
+        (Value::String(s), other) if concatenates_to_string(other) => {
+            return Ok(Value::String(format!("{s}{}", cypher_to_string(other)?)));
+        }
+        (other, Value::String(s)) if concatenates_to_string(other) => {
+            return Ok(Value::String(format!("{}{s}", cypher_to_string(other)?)));
+        }
+        _ => {}
     }
 
     Err(anyhow!(
@@ -546,12 +585,20 @@ fn eval_add(left: &Value, right: &Value) -> Result<Value> {
     ))
 }
 
-/// Classify a Value's temporal type (works for both Temporal and String).
-fn classify_value_temporal(val: &Value) -> Option<TemporalType> {
-    match val {
-        Value::Temporal(tv) => Some(tv.temporal_type()),
-        Value::String(s) => classify_temporal(s),
-        _ => None,
+/// Whether `+` concatenates `value` onto a string: a number, boolean or
+/// temporal. A list appends instead; any other value is a type error.
+fn concatenates_to_string(value: &Value) -> bool {
+    matches!(
+        value,
+        Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Temporal(_)
+    )
+}
+
+/// `toString(value)`, as the scalar function answers it.
+fn cypher_to_string(value: &Value) -> Result<String> {
+    match eval_scalar_function("toString", std::slice::from_ref(value), None)? {
+        Value::String(s) => Ok(s),
+        other => Err(anyhow!("toString returned {other:?}")),
     }
 }
 
@@ -575,7 +622,7 @@ fn eval_sub(left: &Value, right: &Value) -> Result<Value> {
             let dur = CypherDuration::new(-months, -days, -nanos);
             return add_temporal_duration_typed(tv, &dur);
         }
-        if is_duration_value(right) || right.is_number() {
+        if is_duration_value(right) {
             let dur = parse_duration_from_value(right)?.negate();
             return add_temporal_duration_typed(tv, &dur);
         }
@@ -632,15 +679,6 @@ fn eval_sub(left: &Value, right: &Value) -> Result<Value> {
             }
             _ => {}
         }
-    }
-
-    // temporal string - integer microseconds
-    if let Value::String(_) = left
-        && right.is_number()
-        && classify_value_temporal(left).is_some_and(|t| t != TemporalType::Duration)
-    {
-        let dur = parse_duration_from_value(right)?.negate();
-        return add_temporal_duration_to_value(left, &dur);
     }
 
     // Integer - integer uses checked subtraction (rejects overflow, stays exact above 2^53).
@@ -803,14 +841,9 @@ fn cypher_partial_cmp(left: &Value, right: &Value) -> Option<Ordering> {
         return None;
     }
 
-    // Exact integer ordering — avoid f64 precision loss for large i64 values
-    if let (Some(l), Some(r)) = (left.as_i64(), right.as_i64()) {
-        return Some(l.cmp(&r));
-    }
-
-    // Number vs Number
-    if let (Some(l), Some(r)) = (left.as_f64(), right.as_f64()) {
-        return l.partial_cmp(&r);
+    // Number vs Number, by exact value.
+    if let Some(ord) = cypher_numeric_cmp(left, right) {
+        return ord;
     }
 
     // String vs String (includes temporal string comparison for ISO-format strings)

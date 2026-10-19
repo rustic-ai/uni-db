@@ -95,7 +95,7 @@ locy_keyword_reserved = {
 locy_identifier = @{
     !keyword_reserved ~ !locy_keyword_reserved
     ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
-    | "`" ~ (!"`" ~ ANY)* ~ "`"
+    | escaped_name
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -962,3 +962,214 @@ async fn perf_class_probe_timing() -> Result<()> {
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// BEST BY merge cost (Wave C): a wide layered graph, so the fact set is large
+// while each iteration's delta is one layer.
+// ---------------------------------------------------------------------------
+
+/// `depth` layers of `width` `:E` nodes. Every node has three `:T` edges into
+/// the next layer (weights 1..10) and one expensive skip edge two layers on
+/// (weight 25), so a node is first reached through a skip and then improved.
+/// Layer 0 is the seed set.
+fn layered_fixture(width: usize, depth: usize) -> Fixture {
+    let mut vertices = Vec::new();
+    for layer in 0..depth {
+        for j in 0..width {
+            vertices.push((
+                "E",
+                HashMap::from([
+                    ("uid".to_string(), s(&format!("l{layer}_{j}"))),
+                    ("seed".to_string(), Value::Bool(layer == 0)),
+                ]),
+            ));
+        }
+    }
+    let w = |x: f64| HashMap::from([("w".to_string(), Value::Float(x))]);
+    let mut edges = Vec::new();
+    for layer in 0..depth.saturating_sub(1) {
+        for j in 0..width {
+            let from = layer * width + j;
+            for k in 0..3 {
+                let to = (layer + 1) * width + (j * 7 + k * 13 + 1) % width;
+                let weight = 1 + (layer * 31 + j * 17 + k * 5) % 10;
+                edges.push(("T", from, to, w(weight as f64)));
+            }
+            if layer + 2 < depth {
+                edges.push((
+                    "T",
+                    from,
+                    (layer + 2) * width + (j * 3 + 5) % width,
+                    w(25.0),
+                ));
+            }
+        }
+    }
+    Fixture {
+        ddl: locy_ddl(),
+        vertices,
+        edges,
+    }
+}
+
+/// Total time and rows of every operator named `op` across all iterations.
+fn op_totals(profile: &uni_db::locy::LocyProfileOutput, op: &str) -> (f64, usize) {
+    profile
+        .profile
+        .strata
+        .iter()
+        .flat_map(|s| s.rules.iter())
+        .flat_map(|r| r.iterations.iter())
+        .flat_map(|it| it.operators.iter())
+        .filter(|o| o.operator == op)
+        .fold((0.0, 0), |(t, n), o| (t + o.time_ms, n + o.actual_rows))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "perf-class measurement probe; run with --run-ignored all --no-capture"]
+async fn perf_class_probe_best_by_merge() -> Result<()> {
+    let config = LocyConfig {
+        max_iterations: 500,
+        timeout: Some(Duration::from_secs(600)),
+        ..Default::default()
+    };
+    for width in scales(&[500, 2000]) {
+        let depth = 40;
+        let dir = tempfile::tempdir()?;
+        let db = build(&layered_fixture(width, depth), dir.path()).await?;
+        for (tag, op, program) in [
+            (
+                "BEST BY shortest",
+                "LocyBestByMerge",
+                "CREATE RULE d AS MATCH (a:E)-[r:T]->(b:E) WHERE a.seed = true ALONG c = r.w BEST BY c ASC YIELD KEY b, c \n\
+                 CREATE RULE d AS MATCH (o:E)-[r:T]->(b:E) WHERE o IS d ALONG c = prev.c + r.w BEST BY c ASC YIELD KEY b, c \n\
+                 QUERY d WHERE b.uid = 'l39_0' RETURN c",
+            ),
+            (
+                "ctl plain reach",
+                "LocyFactDedup",
+                "CREATE RULE d AS MATCH (a:E)-[r:T]->(b:E) WHERE a.seed = true YIELD KEY b \n\
+                 CREATE RULE d AS MATCH (o:E)-[r:T]->(b:E) WHERE o IS d YIELD KEY b \n\
+                 QUERY d WHERE b.uid = 'l39_0' RETURN b.uid AS uid",
+            ),
+        ] {
+            for round in 0..3 {
+                let t = Instant::now();
+                let (result, profile) = db
+                    .session()
+                    .locy_with(program)
+                    .with_config(config.clone())
+                    .profile()
+                    .await?;
+                let wall = t.elapsed().as_secs_f64() * 1000.0;
+                let (merge_ms, merge_rows) = op_totals(&profile, op);
+                let facts = result.derived.get("d").map_or(0, Vec::len);
+                eprintln!(
+                    "BB|{tag}|width={width}|round={round}|facts={facts}|iterations={}|wall_ms={wall:.1}|{op}_ms={merge_ms:.1}|{op}_rows={merge_rows}",
+                    result.stats.total_iterations,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A `:T` chain `c0 -> ... -> c{len-1}` plus `noise x noise` edges from
+/// `x*` to `y*` nodes, which no chain pair composes with: the non-linear
+/// clause's old and full scans carry them every pass while no derivation
+/// reads them.
+fn chain_plus_bipartite_fixture(len: usize, noise: usize) -> Fixture {
+    let mut vertices = Vec::new();
+    let v = |uid: String| {
+        (
+            "E",
+            HashMap::from([
+                ("uid".to_string(), Value::String(uid)),
+                ("seed".to_string(), Value::Bool(false)),
+            ]),
+        )
+    };
+    for i in 0..len {
+        vertices.push(v(format!("c{i}")));
+    }
+    for i in 0..noise {
+        vertices.push(v(format!("x{i}")));
+    }
+    for i in 0..noise {
+        vertices.push(v(format!("y{i}")));
+    }
+    let w = || HashMap::from([("w".to_string(), Value::Float(1.0))]);
+    let mut edges = Vec::new();
+    for i in 1..len {
+        edges.push(("T", i - 1, i, w()));
+    }
+    for i in 0..noise {
+        for j in 0..noise {
+            edges.push(("T", len + i, len + noise + j, w()));
+        }
+    }
+    Fixture {
+        ddl: locy_ddl(),
+        vertices,
+        edges,
+    }
+}
+
+/// Non-linear recursion: per-iteration cost against the size of the old/full
+/// relation the semi-naive passes read, at a fixed chain (fixed derivations).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "perf-class measurement probe; run with --run-ignored all --no-capture"]
+async fn perf_class_probe_nonlinear_full_scan() -> Result<()> {
+    let config = LocyConfig {
+        max_iterations: 500,
+        timeout: Some(Duration::from_secs(600)),
+        ..Default::default()
+    };
+    let program = "CREATE RULE tc AS MATCH (a:E)-[:T]->(b:E) YIELD KEY a, KEY b \n\
+                   CREATE RULE tc AS MATCH (a:E) WHERE a IS tc TO m, m IS tc TO b YIELD KEY a, KEY b \n\
+                   QUERY tc WHERE a.uid = 'c0' RETURN b.uid AS uid";
+    for noise in [0usize, 100, 300] {
+        let len = 128;
+        let dir = tempfile::tempdir()?;
+        let db = build(&chain_plus_bipartite_fixture(len, noise), dir.path()).await?;
+        for round in 0..3 {
+            let (result, profile) = db
+                .session()
+                .locy_with(program)
+                .with_config(config.clone())
+                .profile()
+                .await?;
+            let its: Vec<_> = profile
+                .profile
+                .strata
+                .iter()
+                .flat_map(|s| s.rules.iter())
+                .filter(|r| r.name == "tc")
+                .flat_map(|r| r.iterations.iter())
+                .filter(|it| it.iteration >= 1)
+                .collect();
+            let rec_ms: f64 = its.iter().map(|it| it.elapsed_ms).sum();
+            let join: (f64, usize) = its
+                .iter()
+                .flat_map(|it| it.operators.iter())
+                .filter(|o| o.operator.starts_with("HashJoinExec"))
+                .fold((0.0, 0), |(t, n), o| (t + o.time_ms, n + o.actual_rows));
+            let scan: (f64, usize) = its
+                .iter()
+                .flat_map(|it| it.operators.iter())
+                .filter(|o| o.operator.starts_with("DerivedScanExec"))
+                .fold((0.0, 0), |(t, n), o| (t + o.time_ms, n + o.actual_rows));
+            eprintln!(
+                "NL|len={len}|noise_facts={}|round={round}|facts={}|iterations={}|recursive_iters_ms={rec_ms:.1}|hashjoin_ms={:.1}|hashjoin_rows={}|derivedscan_rows={}|total_ms={:.1}",
+                noise * noise,
+                result.derived.get("tc").map_or(0, Vec::len),
+                result.stats.total_iterations,
+                join.0,
+                join.1,
+                scan.1,
+                profile.total_time_ms,
+            );
+        }
+    }
+    Ok(())
+}

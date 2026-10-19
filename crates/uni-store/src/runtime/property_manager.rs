@@ -1958,31 +1958,23 @@ impl PropertyManager {
 
     /// Merge overflow properties from the overflow_json column into an existing props map.
     ///
-    /// Handles two concerns:
-    /// 1. If `overflow_json` is explicitly requested in `properties`, stores the raw JSONB
-    ///    bytes as a JSON array of u8 values.
-    /// 2. Extracts individual overflow properties and merges those that are in `properties`.
+    /// Extracts the row's individual overflow properties and merges those named
+    /// in `properties` (all of them under the `_all_props` wildcard).
+    ///
+    /// The blob itself is never stored in the map, even when a caller lists
+    /// `overflow_json` among `properties`: the map is the entity's user-facing
+    /// property set, and the blob is storage. Storing it here (as a list of
+    /// byte values) leaked it into `keys(r)`, `properties(r)` and the returned
+    /// relationship of every flushed edge whose type declares no properties,
+    /// because the planner requests `overflow_json` alongside `_all_props` for
+    /// such a type, and a SET on that edge then staged the blob back as a
+    /// property.
     fn merge_overflow_into_props(
         batch: &RecordBatch,
         row: usize,
         properties: &[&str],
         props: &mut Properties,
     ) -> Result<()> {
-        use arrow_array::LargeBinaryArray;
-
-        // Store raw JSONB bytes if explicitly requested
-        if properties.contains(&"overflow_json")
-            && let Some(overflow_col) = batch
-                .column_by_name("overflow_json")
-                .filter(|col| !col.is_null(row))
-            && let Some(binary_array) = overflow_col.as_any().downcast_ref::<LargeBinaryArray>()
-        {
-            let jsonb_bytes = binary_array.value(row);
-            let bytes_list: Vec<Value> =
-                jsonb_bytes.iter().map(|&b| Value::Int(b as i64)).collect();
-            props.insert("overflow_json".to_string(), Value::List(bytes_list));
-        }
-
         // Extract and merge individual overflow properties. `_all_props` is a
         // wildcard sentinel: merge every overflow property, not just named ones.
         let wants_all = properties.contains(&"_all_props");

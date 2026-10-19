@@ -316,7 +316,35 @@ pub enum UniError {
     },
 }
 
+/// Tag carried in the reason of a reserved-property-name rejection, so the
+/// typed error survives the string boundary between the executor and the API
+/// layer (see [`UniError::reserved_property_from_message`]).
+pub const RESERVED_PROPERTY_TAG: &str = "ReservedPropertyName";
+
 impl UniError {
+    /// The rejection of a write whose property is named after a storage column.
+    #[must_use]
+    pub fn reserved_property_name(name: &str) -> Self {
+        Self::InvalidIdentifier {
+            name: name.to_string(),
+            reason: format!(
+                "{RESERVED_PROPERTY_TAG}: the property name is reserved by the storage layer; \
+                 please choose a different name"
+            ),
+        }
+    }
+
+    /// Recovers a [`Self::reserved_property_name`] rejection from its display
+    /// text, wherever it sits in `msg` (upstream layers may prefix it).
+    #[must_use]
+    pub fn reserved_property_from_message(msg: &str) -> Option<Self> {
+        const PREFIX: &str = "Invalid identifier '";
+        let tail = &msg[msg.find(PREFIX)? + PREFIX.len()..];
+        let (name, rest) = tail.split_once("': ")?;
+        rest.starts_with(RESERVED_PROPERTY_TAG)
+            .then(|| Self::reserved_property_name(name))
+    }
+
     /// Returns `true` when retrying the failed operation from scratch may succeed.
     ///
     /// Distinguishes transient contention failures — optimistic-concurrency

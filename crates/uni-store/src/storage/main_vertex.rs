@@ -454,7 +454,98 @@ impl MainVertexDataset {
         if best_deleted {
             return Ok(None);
         }
-        Ok(best_vid)
+        let Some(vid) = best_vid else {
+            return Ok(None);
+        };
+        let holders =
+            Self::current_ext_id_holders(backend, &[(ext_id.to_string(), vid)], version, counters)
+                .await?;
+        Ok(holders.into_values().next())
+    }
+
+    /// Keep each `(ext_id, vid)` whose vid still holds that `ext_id`.
+    ///
+    /// The `ext_id` lookups pick the highest-version row *carrying* the
+    /// `ext_id`, but a vertex that later took another `ext_id`, removed it, or
+    /// was rewritten without it has newer rows that do not carry it, so the
+    /// lookup alone kept reporting the freed `ext_id` as taken: reassigning it
+    /// was refused permanently, flushed or not. This reads each candidate's
+    /// newest row overall (tombstones included) and keeps the pair only when
+    /// that row is live and still carries the `ext_id`.
+    ///
+    /// Under the uniqueness invariant the highest-version row carrying an
+    /// `ext_id` belongs to its latest assignee, so checking that one vid is
+    /// enough: anyone who took the `ext_id` after it was freed wrote a newer
+    /// row carrying it.
+    async fn current_ext_id_holders(
+        backend: &dyn StorageBackend,
+        candidates: &[(String, Vid)],
+        version: Option<u64>,
+        counters: Option<&Arc<QueryCounters>>,
+    ) -> Result<HashMap<String, Vid>> {
+        let table_name = table_names::main_vertex_table_name();
+        // Newest row per vid: (version, deleted, ext_id).
+        let mut latest: HashMap<Vid, (u64, bool, Option<String>)> = HashMap::new();
+        for chunk in candidates.chunks(MAX_EXT_IDS_PER_CHUNK) {
+            let filter = with_version_bound(
+                FilterExpr::one_of("_vid", chunk.iter().map(|(_, v)| Scalar::UInt(v.as_u64()))),
+                version,
+            );
+            let results = backend
+                .scan(
+                    ScanRequest::all(table_name)
+                        .with_filter(filter)
+                        .with_columns(vec![
+                            "_vid".to_string(),
+                            "ext_id".to_string(),
+                            "_version".to_string(),
+                            "_deleted".to_string(),
+                        ])
+                        .with_counters(counters.cloned()),
+                )
+                .await?;
+            for batch in results {
+                let vid_col = batch
+                    .column_by_name("_vid")
+                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+                let ext_col = batch
+                    .column_by_name("ext_id")
+                    .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
+                let ver_col = batch
+                    .column_by_name("_version")
+                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+                let deleted_col = batch
+                    .column_by_name("_deleted")
+                    .and_then(|c| c.as_any().downcast_ref::<arrow_array::BooleanArray>());
+                let (Some(vid_arr), Some(ver_arr)) = (vid_col, ver_col) else {
+                    continue;
+                };
+                for i in 0..batch.num_rows() {
+                    let vid = Vid::from(vid_arr.value(i));
+                    let v = if ver_arr.is_null(i) {
+                        0
+                    } else {
+                        ver_arr.value(i)
+                    };
+                    // `>=`: the later row wins a tie, as in the lookups.
+                    if latest.get(&vid).is_none_or(|(best, ..)| v >= *best) {
+                        let ext = ext_col
+                            .filter(|c| !c.is_null(i))
+                            .map(|c| c.value(i).to_string());
+                        latest.insert(vid, (v, deleted_col.is_some_and(|d| d.value(i)), ext));
+                    }
+                }
+            }
+        }
+        Ok(candidates
+            .iter()
+            .filter(|(ext_id, vid)| {
+                latest
+                    .get(vid)
+                    .is_some_and(|(_, deleted, ext)| !deleted && ext.as_deref() == Some(ext_id))
+            })
+            .cloned()
+            .collect())
     }
 
     /// The batched counterpart of [`Self::find_by_ext_id`].
@@ -560,11 +651,15 @@ impl MainVertexDataset {
             }
         }
 
-        for (ext_id, (_, deleted, vid)) in best {
-            if !deleted {
-                found.insert(ext_id, vid);
-            }
+        let candidates: Vec<(String, Vid)> = best
+            .into_iter()
+            .filter(|(_, (_, deleted, _))| !deleted)
+            .map(|(ext_id, (_, _, vid))| (ext_id, vid))
+            .collect();
+        if candidates.is_empty() {
+            return Ok(found);
         }
+        found = Self::current_ext_id_holders(backend, &candidates, version, counters).await?;
         Ok(found)
     }
 

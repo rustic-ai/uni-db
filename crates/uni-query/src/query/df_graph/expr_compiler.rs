@@ -5,6 +5,7 @@ use crate::query::df_expr::{TranslationContext, VariableKind, cypher_expr_to_df}
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::df_graph::common::{execute_subplan_with_outer_vars, extract_row_params};
 use crate::query::df_graph::comprehension::ListComprehensionExecExpr;
+use crate::query::df_graph::exists_decorrelate::{self, BatchGrouping, BodyShape, SourceCache};
 use crate::query::df_graph::pattern_comprehension::{
     PatternComprehensionExecExpr, analyze_pattern, build_inner_schema, collect_inner_properties,
 };
@@ -1567,6 +1568,29 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             .map_err(|e| anyhow!("DataFusion planning failed: {}", e))
     }
 
+    /// Whether `var` is one column holding a whole node or edge value — an
+    /// `UNWIND` element, say — rather than a scanned entity, whose identity
+    /// and labels live in flat `{var}._vid` / `{var}._labels` columns.
+    fn is_whole_entity_column(var: &str, schema: &Schema) -> bool {
+        schema.index_of(var).is_ok()
+            && ["_labels", "_type", "_vid", "_eid"]
+                .iter()
+                .all(|c| schema.index_of(&format!("{var}.{c}")).is_err())
+    }
+
+    /// `_cypher_has_labels(var, 'L1', …)`: a label check that reads the labels
+    /// off the value in `var` (see [`Self::is_whole_entity_column`]).
+    fn has_labels_call(var: &str, labels: impl Iterator<Item = String>) -> Expr {
+        Expr::FunctionCall {
+            name: "_cypher_has_labels".to_string(),
+            args: std::iter::once(Expr::Variable(var.to_string()))
+                .chain(labels.map(|l| Expr::Literal(CypherLiteral::String(l))))
+                .collect(),
+            distinct: false,
+            window_spec: None,
+        }
+    }
+
     /// Recursively resolve `Property(Variable(v), p)` → `Variable("v.p")` when
     /// the flat column `"v.p"` exists in `schema`.  This ensures that property
     /// access on graph-scan variables is compiled as a direct column reference
@@ -1628,6 +1652,18 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                     .map(|(k, v)| (k.clone(), Self::resolve_flat_column_properties(v, schema)))
                     .collect(),
             ),
+            // The planner's own spelling of a pattern label, `(a:L)` on a bound
+            // `a`; it reads `{var}._labels` just as `LabelCheck` does.
+            Expr::FunctionCall { name, args, .. }
+                if name.eq_ignore_ascii_case("hasLabel")
+                    && let [
+                        Expr::Variable(var),
+                        Expr::Literal(CypherLiteral::String(label)),
+                    ] = args.as_slice()
+                    && Self::is_whole_entity_column(var, schema) =>
+            {
+                Self::has_labels_call(var, std::iter::once(label.clone()))
+            }
             Expr::FunctionCall {
                 name,
                 args,
@@ -1708,12 +1744,21 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                     })
                     .collect(),
             },
+            // `LabelCheck` compiles against the flat `{var}._labels` /
+            // `{var}._type` columns of a scanned entity. A variable that is
+            // one whole-entity column — an `UNWIND` element, say — has neither,
+            // so the check reads the labels off the value.
             Expr::LabelCheck {
                 expr: inner,
                 labels,
-            } => Expr::LabelCheck {
-                expr: go(inner),
-                labels: labels.clone(),
+            } => match inner.as_ref() {
+                Expr::Variable(var) if Self::is_whole_entity_column(var, schema) => {
+                    Self::has_labels_call(var, labels.iter().cloned())
+                }
+                _ => Expr::LabelCheck {
+                    expr: go(inner),
+                    labels: labels.clone(),
+                },
             },
 
             // ---- scope-introducing: deliberately not rewritten ----
@@ -2534,22 +2579,61 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         let has_cv =
             is_cypher_value_type(left_type.as_ref()) || is_cypher_value_type(right_type.as_ref());
 
-        // A dynamically typed operand of AND/OR is read as a boolean, as under
-        // NOT; DataFusion's logical operators take only booleans, so
-        // `n.b AND true` over a schemaless property failed to plan.
-        if matches!(df_op, Operator::And | Operator::Or) && has_cv {
-            let left = if is_cypher_value_type(left_type.as_ref()) {
-                self.wrap_with_cv_to_bool(left)?
-            } else {
-                left
+        // AND/OR over a dynamically typed operand evaluate per row with
+        // openCypher's rules. DataFusion's own operators take only booleans
+        // (`n.b AND true` over a schemaless property failed to plan), and
+        // reading the property through `_cv_to_bool` was not enough: their
+        // batch short-circuit skips the right operand when the left one
+        // decides every row, so `true OR n.i` answered true or a type error
+        // depending on which rows shared a batch.
+        if matches!(df_op, Operator::And | Operator::Or) {
+            if has_cv {
+                let name = if df_op == Operator::And {
+                    "_cypher_and"
+                } else {
+                    "_cypher_or"
+                };
+                return self
+                    .plan_binary_udf(
+                        name,
+                        left,
+                        right,
+                        left_type.unwrap_or(DataType::LargeBinary),
+                        right_type.unwrap_or(DataType::LargeBinary),
+                    )?
+                    .ok_or_else(|| anyhow!("{name} UDF not found"));
+            }
+            // An untyped NULL operand is a NULL boolean. DataFusion rejects a
+            // NULL left operand at planning and panics on a NULL right one
+            // ("boolean_op failed to downcast right array").
+            let as_bool = |e: Arc<dyn PhysicalExpr>, t: &Option<DataType>| {
+                if matches!(t, Some(DataType::Null)) {
+                    datafusion::physical_expr::expressions::cast(e, input_schema, DataType::Boolean)
+                } else {
+                    Ok(e)
+                }
             };
-            let right = if is_cypher_value_type(right_type.as_ref()) {
-                self.wrap_with_cv_to_bool(right)?
-            } else {
-                right
-            };
+            let left = as_bool(left, &left_type)?;
+            let right = as_bool(right, &right_type)?;
             return binary(left, df_op, right, input_schema)
                 .map_err(|e| anyhow!("Failed to create binary expression: {}", e));
+        }
+
+        // `=~` over anything but two strings (a CypherValue, a NULL literal)
+        // evaluates per row: DataFusion's regex operator has no common type
+        // for `LargeBinary ~ Utf8`, so `n.s =~ 'ab'` failed to plan.
+        let is_string =
+            |t: &Option<DataType>| matches!(t, Some(DataType::Utf8 | DataType::LargeUtf8));
+        if df_op == Operator::RegexMatch && !(is_string(&left_type) && is_string(&right_type)) {
+            return self
+                .plan_binary_udf(
+                    "_cypher_regex",
+                    left,
+                    right,
+                    left_type.unwrap_or(DataType::LargeBinary),
+                    right_type.unwrap_or(DataType::LargeBinary),
+                )?
+                .ok_or_else(|| anyhow!("_cypher_regex UDF not found"));
         }
 
         if has_cv {
@@ -2588,24 +2672,23 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         if let (Some(l), Some(r)) = (&left_type, &right_type)
             && let Some(cmp) = crate::query::df_expr::float_comparison_op(df_op, l, r)
         {
+            // An integer operand is cast to `Int64`, not widened to `Float64`:
+            // the UDF compares it with the float exactly.
             let widen =
                 |e: Arc<dyn PhysicalExpr>, dt: &DataType| -> Result<Arc<dyn PhysicalExpr>> {
-                    Ok(if *dt == DataType::Float64 {
+                    let target = crate::query::df_expr::float_comparison_operand_type(dt);
+                    Ok(if *dt == target {
                         e
                     } else {
-                        datafusion::physical_expr::expressions::cast(
-                            e,
-                            input_schema,
-                            DataType::Float64,
-                        )?
+                        datafusion::physical_expr::expressions::cast(e, input_schema, target)?
                     })
                 };
             if let Some(result) = self.plan_binary_udf(
                 cmp.udf_name(),
                 widen(left.clone(), l)?,
                 widen(right.clone(), r)?,
-                DataType::Float64,
-                DataType::Float64,
+                crate::query::df_expr::float_comparison_operand_type(l),
+                crate::query::df_expr::float_comparison_operand_type(r),
             )? {
                 return Ok(result);
             }
@@ -3284,6 +3367,11 @@ struct ExistsExecExpr {
     /// Entity variable names from outer scopes, threaded into nested subplans
     /// so the inner expression compiler can detect correlated references.
     outer_entity_vars: HashSet<String>,
+    /// What the body admits for per-source evaluation, or `None` when every
+    /// row must be evaluated on its own.
+    body_shape: Option<BodyShape>,
+    /// Per-source answers, kept across the batches this expression evaluates.
+    source_cache: parking_lot::Mutex<SourceCache>,
 }
 
 impl std::fmt::Debug for ExistsExecExpr {
@@ -3308,6 +3396,7 @@ impl ExistsExecExpr {
         outer_entity_vars: HashSet<String>,
     ) -> Self {
         Self {
+            body_shape: BodyShape::analyze(&query),
             query,
             mode,
             graph_ctx,
@@ -3316,72 +3405,19 @@ impl ExistsExecExpr {
             uni_schema,
             params,
             outer_entity_vars,
+            source_cache: parking_lot::Mutex::default(),
         }
     }
 }
 
-impl std::fmt::Display for ExistsExecExpr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "EXISTS(<subquery>)")
-    }
-}
-
-impl PartialEq<dyn PhysicalExpr> for ExistsExecExpr {
-    fn eq(&self, _other: &dyn PhysicalExpr) -> bool {
-        false
-    }
-}
-
-impl PartialEq for ExistsExecExpr {
-    fn eq(&self, _other: &Self) -> bool {
-        false
-    }
-}
-
-impl Eq for ExistsExecExpr {}
-
-impl std::hash::Hash for ExistsExecExpr {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        "ExistsExecExpr".hash(state);
-    }
-}
-
-impl DisplayAs for ExistsExecExpr {
-    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}", self)
-    }
-}
-
-impl PhysicalExpr for ExistsExecExpr {
-    fn data_type(
-        &self,
-        _input_schema: &Schema,
-    ) -> datafusion::error::Result<arrow_schema::DataType> {
-        Ok(match self.mode {
-            SubqueryResult::Exists => DataType::Boolean,
-            SubqueryResult::Count => DataType::Int64,
-            // The same item type the pattern-comprehension fallback produces,
-            // so a list from `COLLECT { … }` decodes exactly like one from
-            // `[(a)-[:R]->(x) | x]`.
-            SubqueryResult::Collect => DataType::LargeList(comprehension_item_field()),
-        })
-    }
-
-    fn nullable(&self, _input_schema: &Schema) -> datafusion::error::Result<bool> {
-        Ok(true)
-    }
-
-    fn evaluate(
+impl ExistsExecExpr {
+    /// Plans the body against the columns of `batch`, the outer rows it will
+    /// be bound to, and returns the plan with the outer entity variables it
+    /// imports.
+    fn plan_body(
         &self,
         batch: &arrow_array::RecordBatch,
-    ) -> datafusion::error::Result<datafusion::physical_plan::ColumnarValue> {
-        let num_rows = batch.num_rows();
-        let mode = self.mode;
-        // Row count and, in `Collect` mode, the body's single column. Gathered
-        // rather than appended to a typed builder because the builder's type
-        // depends on the mode.
-        let mut per_row: Vec<(usize, Vec<Value>)> = Vec::with_capacity(num_rows);
-
+    ) -> datafusion::error::Result<(crate::query::planner::LogicalPlan, HashSet<String>)> {
         // 7.2: Extract entity variable names from batch schema.
         // Entity columns follow the pattern "varname._vid" (flattened) or are struct columns.
         // We pass ONLY entity base names (e.g., "p", "n", "m") as vars_in_scope so the
@@ -3482,6 +3518,84 @@ impl PhysicalExpr for ExistsExecExpr {
             logical_plan
         };
 
+        Ok((logical_plan, entity_vars))
+    }
+}
+
+impl std::fmt::Display for ExistsExecExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EXISTS(<subquery>)")
+    }
+}
+
+impl PartialEq<dyn PhysicalExpr> for ExistsExecExpr {
+    fn eq(&self, _other: &dyn PhysicalExpr) -> bool {
+        false
+    }
+}
+
+impl PartialEq for ExistsExecExpr {
+    fn eq(&self, _other: &Self) -> bool {
+        false
+    }
+}
+
+impl Eq for ExistsExecExpr {}
+
+impl std::hash::Hash for ExistsExecExpr {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        "ExistsExecExpr".hash(state);
+    }
+}
+
+impl DisplayAs for ExistsExecExpr {
+    fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self)
+    }
+}
+
+impl PhysicalExpr for ExistsExecExpr {
+    fn data_type(
+        &self,
+        _input_schema: &Schema,
+    ) -> datafusion::error::Result<arrow_schema::DataType> {
+        Ok(match self.mode {
+            SubqueryResult::Exists => DataType::Boolean,
+            SubqueryResult::Count => DataType::Int64,
+            // The same item type the pattern-comprehension fallback produces,
+            // so a list from `COLLECT { … }` decodes exactly like one from
+            // `[(a)-[:R]->(x) | x]`.
+            SubqueryResult::Collect => DataType::LargeList(comprehension_item_field()),
+        })
+    }
+
+    fn nullable(&self, _input_schema: &Schema) -> datafusion::error::Result<bool> {
+        Ok(true)
+    }
+
+    fn evaluate(
+        &self,
+        batch: &arrow_array::RecordBatch,
+    ) -> datafusion::error::Result<datafusion::physical_plan::ColumnarValue> {
+        let num_rows = batch.num_rows();
+        let mode = self.mode;
+        // Row count and, in `Collect` mode, the body's single column. Gathered
+        // rather than appended to a typed builder because the builder's type
+        // depends on the mode.
+        let mut per_row: Vec<(usize, Vec<Value>)> = Vec::with_capacity(num_rows);
+
+        let (logical_plan, entity_vars) = self.plan_body(batch)?;
+
+        // Per-source evaluation: when the body leaves one outer node bare, rows
+        // that share every other import are answered by one execution with that
+        // node free (see `exists_decorrelate`). `COLLECT` reports values, not a
+        // count per match, so it keeps the per-row path.
+        let grouping = match &self.body_shape {
+            Some(shape) if mode != SubqueryResult::Collect => BatchGrouping::build(shape, batch)?,
+            _ => None,
+        };
+        let mut free_plan: Option<(crate::query::planner::LogicalPlan, HashSet<String>)> = None;
+
         // Execute all rows on a dedicated thread with a single tokio runtime.
         // The runtime must be created and dropped on this thread (not in an async context).
         let graph_ctx = self.graph_ctx.clone();
@@ -3506,6 +3620,45 @@ impl PhysicalExpr for ExistsExecExpr {
                 let mut combined_entity_vars = self.outer_entity_vars.clone();
                 combined_entity_vars.extend(entity_vars.iter().cloned());
 
+                // One execution of `plan` bound to row `row_idx` of `source`.
+                let run = |plan: &crate::query::planner::LogicalPlan,
+                           plan_entity_vars: &HashSet<String>,
+                           outer_entity_vars: &HashSet<String>,
+                           source: &arrow_array::RecordBatch,
+                           row_idx: usize|
+                 -> datafusion::error::Result<Vec<arrow_array::RecordBatch>> {
+                    let row_params = extract_row_params(source, row_idx)?;
+                    let mut sub_params = base_params.clone();
+                    sub_params.extend(row_params);
+
+                    // Add entity variable → VID value mappings so that
+                    // Parameter("n") resolves to the VID for traversal sources.
+                    for var in plan_entity_vars {
+                        let vid_key = format!("{}._vid", var);
+                        if let Some(vid_val) = sub_params.get(&vid_key).cloned() {
+                            sub_params.insert(var.clone(), vid_val);
+                        }
+                    }
+
+                    let (batches, _plan) = rt.block_on(execute_subplan_with_outer_vars(
+                        plan,
+                        &sub_params,
+                        &HashMap::new(), // No outer values for EXISTS subquery
+                        &graph_ctx,
+                        &session_ctx,
+                        &storage,
+                        &uni_schema,
+                        outer_entity_vars,
+                        Some(source.slice(row_idx, 1)),
+                        None, // EXISTS compile-time rejects mutations (expr_compiler:693)
+                    ))?;
+                    Ok(batches)
+                };
+
+                // Set once a free execution's output turns out to lack the free
+                // variable's identity; every later row then runs bound.
+                let mut grouping_usable = true;
+
                 for row_idx in 0..num_rows {
                     // One full sub-plan execution happens below, inside a single
                     // `poll_next` on a scoped thread, so nothing between here and
@@ -3516,31 +3669,68 @@ impl PhysicalExpr for ExistsExecExpr {
                         datafusion::error::DataFusionError::Execution(e.to_string())
                     })?;
 
-                    let row_params = extract_row_params(batch, row_idx)?;
-                    let mut sub_params = base_params.clone();
-                    sub_params.extend(row_params);
-
-                    // Add entity variable → VID value mappings so that
-                    // Parameter("n") resolves to the VID for traversal sources.
-                    for var in &entity_vars {
-                        let vid_key = format!("{}._vid", var);
-                        if let Some(vid_val) = sub_params.get(&vid_key).cloned() {
-                            sub_params.insert(var.clone(), vid_val);
+                    if let Some(g) = grouping.as_ref().filter(|_| grouping_usable)
+                        && let Some((key, target)) = g.row(row_idx)
+                    {
+                        let free_var = g.free_var.as_str();
+                        let (cached, seen) = {
+                            let cache = self.source_cache.lock();
+                            (cache.get(free_var, key), cache.seen(free_var, key))
+                        };
+                        let answer = match cached {
+                            Some(answer) => Some(answer),
+                            // A source seen twice pays for one free execution;
+                            // one seen once is cheaper bound.
+                            None if seen || g.batch_count(key) >= 2 => {
+                                if free_plan.is_none() {
+                                    free_plan = Some(self.plan_body(&g.projected)?);
+                                }
+                                let (plan, plan_entity_vars) =
+                                    free_plan.as_ref().expect("planned above");
+                                let mut free_outer = self.outer_entity_vars.clone();
+                                free_outer.extend(plan_entity_vars.iter().cloned());
+                                free_outer.remove(free_var);
+                                let batches = run(
+                                    plan,
+                                    plan_entity_vars,
+                                    &free_outer,
+                                    &g.projected,
+                                    row_idx,
+                                )?;
+                                match exists_decorrelate::matches_by_identity(&batches, free_var)? {
+                                    Some(by_id) => {
+                                        let by_id = Arc::new(by_id);
+                                        self.source_cache.lock().insert(
+                                            free_var,
+                                            key,
+                                            by_id.clone(),
+                                        );
+                                        Some(by_id)
+                                    }
+                                    None => {
+                                        grouping_usable = false;
+                                        None
+                                    }
+                                }
+                            }
+                            None => {
+                                self.source_cache.lock().mark_seen(free_var, key);
+                                None
+                            }
+                        };
+                        if let Some(answer) = answer {
+                            per_row.push((answer.get(&target).copied().unwrap_or(0), Vec::new()));
+                            continue;
                         }
                     }
 
-                    let (batches, _plan) = rt.block_on(execute_subplan_with_outer_vars(
+                    let batches = run(
                         &logical_plan,
-                        &sub_params,
-                        &HashMap::new(), // No outer values for EXISTS subquery
-                        &graph_ctx,
-                        &session_ctx,
-                        &storage,
-                        &uni_schema,
+                        &entity_vars,
                         &combined_entity_vars,
-                        Some(batch.slice(row_idx, 1)),
-                        None, // EXISTS compile-time rejects mutations (expr_compiler:693)
-                    ))?;
+                        batch,
+                        row_idx,
+                    )?;
 
                     let matched: usize = batches.iter().map(|b| b.num_rows()).sum();
                     let values = if mode == SubqueryResult::Collect {
@@ -3715,7 +3905,7 @@ impl Hash for PatternComprehensionSubqueryExpr {
 /// That asymmetry is the point. Over-reporting costs a per-row evaluation that
 /// was already being paid; under-reporting would let a correlated comprehension
 /// be answered once and broadcast, which is a wrong answer with no error.
-fn free_variables(expr: &Expr) -> Option<HashSet<String>> {
+pub(crate) fn free_variables(expr: &Expr) -> Option<HashSet<String>> {
     fn union(into: &mut HashSet<String>, expr: &Expr) -> Option<()> {
         into.extend(free_variables(expr)?);
         Some(())

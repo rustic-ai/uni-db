@@ -283,6 +283,14 @@ async fn assume_cost_does_not_scale_with_unaffected_strata() -> Result<()> {
     let mut extra = Vec::new();
     for n in [2_000usize, 8_000] {
         let db = seeded(n).await?;
+        // Settle the storage tiers before measuring. Seeding crosses the
+        // auto-flush threshold at n=8000 (and the interval trigger at either
+        // scale under load), and while that background flush is in flight a
+        // scan reads the rows from both the pending L0 and the Lance version
+        // already written: `rows_scanned` doubles for whichever arm lands in
+        // the window, which made the extra-scan figure depend on timing. The
+        // barrier drains it, so both arms read the same, quiescent tiers.
+        db.flush().await?;
         // The first evaluation on a fresh database also pays one-off warm-up
         // scans; measure both arms after it.
         db.session().locy(PROGRAM).await?;
@@ -300,7 +308,12 @@ async fn assume_cost_does_not_scale_with_unaffected_strata() -> Result<()> {
         let p = plain.metrics().rows_scanned;
         let h = hypothetical.metrics().rows_scanned;
         eprintln!(
-            "[A4] n={n}: rows_scanned plain={p} assume={h}; strata evaluated={} reused={} facts={}",
+            "[A4] n={n}: rows_scanned plain={p} assume={h} (l0/storage plain={}/{} assume={}/{}); \
+             strata evaluated={} reused={} facts={}",
+            plain.metrics().l0_reads,
+            plain.metrics().storage_reads,
+            hypothetical.metrics().l0_reads,
+            hypothetical.metrics().storage_reads,
             hypothetical.stats().hypothetical_strata_evaluated,
             hypothetical.stats().hypothetical_strata_reused,
             hypothetical.stats().hypothetical_facts_derived,

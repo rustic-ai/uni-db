@@ -85,9 +85,10 @@ async fn numeric_functions_take_numbers() -> Result<()> {
         ),
         ("RETURN ceil(null)", vec![Value::Null]),
         ("RETURN 2 ^ 3", vec![Value::Float(8.0)]),
+        // percentileDisc answers the input itself, the integer 4.
         (
             "MATCH (p:P) RETURN percentileDisc(p.n, 1.0)",
-            vec![Value::Float(4.0)],
+            vec![Value::Int(4)],
         ),
         (
             "UNWIND [1, 3] AS x RETURN stDev(x)",

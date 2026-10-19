@@ -11,8 +11,8 @@ use crate::query::df_graph::common::{
     extract_scalar_key, operator_reservation,
 };
 use arrow::compute::take;
-use arrow_array::{RecordBatch, UInt32Array};
-use arrow_schema::SchemaRef;
+use arrow_array::{ArrayRef, LargeBinaryArray, RecordBatch, UInt32Array};
+use arrow_schema::{DataType, Field, SchemaRef};
 use datafusion::common::Result as DFResult;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
@@ -23,10 +23,60 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+/// `column` in a form whose Arrow order is Cypher's `ORDER BY` order.
+///
+/// A CypherValue column (`LargeBinary`) holds tagged encodings, and Arrow
+/// orders it by those bytes: by type tag first, so every integer ranked below
+/// every float (`BEST BY v` over `5` and `1.5` chose `5`), and then by the
+/// payload's byte order, which is not the numbers' order. It becomes the
+/// column of its values' Cypher sort keys ([`encode_cypher_sort_key`]),
+/// which order bytewise as `ORDER BY` does, with numbers by exact value. A
+/// NULL stays NULL, so the criterion's own NULL placement still applies.
+/// Any other column, including raw `Bytes`, is returned as it is.
+///
+/// # Errors
+///
+/// When a value does not decode as a CypherValue.
+///
+/// [`encode_cypher_sort_key`]: uni_query_functions::df_udfs::encode_cypher_sort_key
+pub(crate) fn order_column(column: &ArrayRef, field: &Field) -> DFResult<ArrayRef> {
+    use arrow::array::AsArray;
+    let raw_bytes = field
+        .metadata()
+        .get("uni_raw_bytes")
+        .is_some_and(|v| v == "true");
+    if column.data_type() != &DataType::LargeBinary || raw_bytes {
+        return Ok(Arc::clone(column));
+    }
+    let keys = column
+        .as_binary::<i64>()
+        .iter()
+        .map(|bytes| {
+            bytes
+                .map(|b| {
+                    uni_common::cypher_value_codec::decode(b)
+                        .map(|v| uni_query_functions::df_udfs::encode_cypher_sort_key(&v))
+                        .map_err(|e| {
+                            datafusion::error::DataFusionError::Execution(format!(
+                                "BEST BY: undecodable value in column '{}': {e}",
+                                field.name()
+                            ))
+                        })
+                })
+                .transpose()
+        })
+        .collect::<DFResult<LargeBinaryArray>>()?;
+    Ok(Arc::new(keys))
+}
+
 /// Sort criterion for BEST BY ordering.
 #[derive(Debug, Clone)]
 pub struct SortCriterion {
+    /// The criterion column's position in the schema it was resolved against.
     pub col_index: usize,
+    /// The criterion column's name. The fixpoint's BEST BY merge resolves it
+    /// by name in its facts' schema, and refuses one it does not hold.
+    pub column: String,
     pub ascending: bool,
     pub nulls_first: bool,
 }
@@ -167,10 +217,13 @@ impl ExecutionPlan for BestByExec {
                 });
             }
 
-            // 2. Criteria columns
+            // 2. Criteria columns, in Cypher's order
             for criterion in &sort_criteria {
                 sort_columns.push(arrow::compute::SortColumn {
-                    values: Arc::clone(batch.column(criterion.col_index)),
+                    values: order_column(
+                        batch.column(criterion.col_index),
+                        input_schema.field(criterion.col_index),
+                    )?,
                     options: Some(arrow::compute::SortOptions {
                         descending: !criterion.ascending,
                         nulls_first: criterion.nulls_first,
@@ -354,7 +407,8 @@ mod tests {
             input,
             vec![0], // key: name
             vec![SortCriterion {
-                col_index: 1, // sort by score
+                col_index: 1,
+                column: String::new(), // sort by score
                 ascending: true,
                 nulls_first: false,
             }],
@@ -379,6 +433,7 @@ mod tests {
             vec![0],
             vec![SortCriterion {
                 col_index: 1,
+                column: String::new(),
                 ascending: false,
                 nulls_first: false,
             }],
@@ -407,6 +462,7 @@ mod tests {
             vec![0],
             vec![SortCriterion {
                 col_index: 1,
+                column: String::new(),
                 ascending: true,
                 nulls_first: false,
             }],
@@ -445,11 +501,13 @@ mod tests {
             vec![
                 SortCriterion {
                     col_index: 1,
+                    column: String::new(),
                     ascending: true,
                     nulls_first: false,
                 },
                 SortCriterion {
                     col_index: 2,
+                    column: String::new(),
                     ascending: true,
                     nulls_first: false,
                 },
@@ -487,6 +545,7 @@ mod tests {
             vec![0],
             vec![SortCriterion {
                 col_index: 1,
+                column: String::new(),
                 ascending: true,
                 nulls_first: false,
             }],

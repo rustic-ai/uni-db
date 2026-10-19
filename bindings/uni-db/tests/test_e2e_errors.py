@@ -309,3 +309,28 @@ def test_bulk_writer_insert_edges_after_abort(social_db):
     # Try to insert edges after abort - RuntimeError (Python-side check)
     with pytest.raises(RuntimeError):
         writer.insert_edges("KNOWS", [(vids[0], vids[1], {})])
+
+
+@pytest.mark.parametrize("name", ["overflow_json", "_vid", "_deleted", "_created_at"])
+def test_storage_column_property_name_refused(social_db, name):
+    """A property named after a storage column is refused on every write path."""
+    session = social_db.session()
+    statements = [
+        f"CREATE (:Person {{name: 'X', age: 1, `{name}`: 7}})",
+        f"CREATE (:Loose {{`{name}`: 7}})",
+        f"MERGE (p:Person {{name: 'Y', age: 2}}) SET p.`{name}` = 7",
+    ]
+    for stmt in statements:
+        tx = session.tx()
+        with pytest.raises(uni_db.UniInvalidIdentifierError):
+            tx.execute(stmt)
+        tx.rollback()
+
+    tx = session.tx()
+    writer = tx.bulk_writer().build()
+    with pytest.raises(uni_db.UniInvalidIdentifierError):
+        writer.insert_vertices("Person", [{"name": "Z", "age": 3, name: 7}])
+    writer.abort()
+    tx.rollback()
+
+    assert len(session.query("MATCH (n) RETURN n")) == 0

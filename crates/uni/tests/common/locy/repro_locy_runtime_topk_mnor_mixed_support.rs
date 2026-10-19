@@ -37,8 +37,14 @@
 //! What the passing test below DOES exercise is the `topk_dnf_disjunction` DNF
 //! branch itself (the function that houses the defect): a shared-base group
 //! collapses to `0.7` — provably distinct from the `0.88` independence value —
-//! proving the proof/DNF machinery runs end-to-end. The mixed-group 1.0
-//! collapse is captured as an ignored test documenting the latent defect.
+//! proving the proof/DNF machinery runs end-to-end.
+//!
+//! # Fixed
+//!
+//! `topk_dnf_disjunction` keeps unsupported rows out of the DNF and folds them
+//! in as independent noisy-OR factors. A mixed group, which the public surface
+//! cannot produce, is built directly in the unit test
+//! `locy_fold::tests::topk_mixed_support_group_folds_unsupported_rows_independently`.
 
 use anyhow::Result;
 use uni_db::locy::LocyConfig;
@@ -146,35 +152,7 @@ async fn topk_mnor_shared_base_dnf_branch_engages() -> Result<()> {
     Ok(())
 }
 
-/// The specific [24] defect — an unsupported row's empty DNF clause collapsing a
-/// MIXED group to `1.0`. Ignored because the mixed precondition is not reachable
-/// through the public FOLD surface: `collect_is_ref_inputs_for_body_row`
-/// resolves support by the IS-ref subject's KEY column, which is group-invariant,
-/// so every row in a KEY group is uniformly supported or unsupported (verified
-/// with three shapes → 0.88 / 0.7 / 0.88, never a mixed 1.0). The empty-clause
-/// weight defect at `locy_fold.rs:720` is real by inspection but latent e2e.
-#[tokio::test]
-#[ignore = "e2e repro for uni-query [24]: empty-clause DNF weight=1.0 for a mixed group; the mixed precondition is unreachable via the public FOLD surface (support resolution is group-invariant), so the defect is latent"]
-async fn topk_mnor_mixed_support_collapses_to_one() -> Result<()> {
-    let db = Uni::in_memory().build().await?;
-    seed(&db).await?;
-
-    let result = db
-        .session()
-        .locy_with(RISK_SHARED)
-        .with_config(topk_config())
-        .run()
-        .await?;
-
-    // Documents the defect's SHAPE: were a genuinely mixed group constructible,
-    // the unsupported row's empty clause would force the group to 1.0.
-    let p = prob_of(&result, "i1").expect("risk(i1) should exist");
-    println!(
-        "[24] TopKProofs MNOR risk(i1) prob -> {p} (defect would yield 1.0 for a mixed group)"
-    );
-    assert_eq!(
-        p, 1.0,
-        "the empty-clause DNF defect collapses a mixed supported/unsupported group to 1.0"
-    );
-    Ok(())
-}
+// The ignored `topk_mnor_mixed_support_collapses_to_one` that stood here
+// asserted the DEFECT's value (`1.0`) on a group that is not mixed, so it could
+// pass neither before nor after the fix. The mixed-group behavior is covered by
+// the unit test named in the module docs.

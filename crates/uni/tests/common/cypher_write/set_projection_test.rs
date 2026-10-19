@@ -2824,17 +2824,14 @@ async fn l3d_vlp_target_set_no_matches() -> Result<()> {
 }
 
 /// L3e — VLP edge SET via UNWIND on the bound path: `MATCH
-/// (a)-[r*1..2]->(b) UNWIND r AS e SET e.flag = true`. The Arrow
-/// schema-mismatch (`List<Struct>` vs `LargeBinary`) at the mutation
-/// boundary is fixed by Round 10's recursive normalization in
-/// `normalize_mutation_schema` — the query now runs without error.
-/// However, the SET still silently no-ops: the UNWIND-bound `e`
-/// arrives at the SET executor as a Map but its edge identity (`_eid`
-/// / `_src` / `_dst` / `_type` ordering, or Edge decoding path) doesn't
-/// route through `execute_set_items_locked`'s edge branch correctly.
-/// That is a separate UNWIND-on-edge-list workstream and is marked
-/// `#[ignore]` until investigated. (Direct VLP target SET — covered by
-/// l3/l3b/l3c/l3d — works.)
+/// (a)-[r*1..2]->(b) UNWIND r AS e SET e.flag = true`. Two defects stood in
+/// the way: an Arrow schema mismatch (`List<Struct>` vs `LargeBinary`) at the
+/// mutation boundary, fixed by the recursive normalization in
+/// `normalize_mutation_schema`, and then a SET that ran without error but
+/// silently wrote nothing to the UNWIND-bound edges. Both are fixed: the test
+/// asserts that both path edges carry the flag after the SET commits. The edges are created without `flag`, so a no-op leaves
+/// `count(e.flag)` at 0 and fails the assertion. (Direct VLP target SET is
+/// covered by l3/l3b/l3c/l3d.)
 #[tokio::test]
 async fn l3e_vlp_path_edges_set() -> Result<()> {
     let db = Uni::in_memory().build().await?;

@@ -346,6 +346,11 @@ impl MainEdgeDataset {
         eid: Eid,
         counters: Option<&Arc<QueryCounters>>,
     ) -> Result<bool> {
+        // I/O-error injection for callers that must tell "absent" from "could
+        // not check" (compaction's pre-clear invariant check).
+        fail::fail_point!("main_edge::exists-by-eid", |_| Err(anyhow!(
+            "injected main_edges read failure"
+        )));
         let filter = FilterExpr::equals("_eid", Scalar::UInt(eid.as_u64()));
         let batches = Self::execute_query(backend, filter, Some(vec!["_eid"]), counters).await?;
         Ok(!batches.is_empty() && batches.iter().any(|b| b.num_rows() > 0))

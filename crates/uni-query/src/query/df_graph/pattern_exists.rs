@@ -374,18 +374,20 @@ impl PhysicalExpr for PatternExistsExecExpr {
                             continue;
                         }
 
-                        let matches = if let Some(props) = props_map.get(target_vid) {
-                            resolved_preds
-                                .iter()
-                                .all(|(name, expected)| match props.get(name) {
-                                    Some(actual) => actual == expected,
-                                    None => matches!(expected, Value::Null),
+                        // `{k: v}` is `k = v` under Cypher equality: `1`
+                        // matches `1.0`, NaN matches nothing, and a null on
+                        // either side (a missing property included) is not a
+                        // match. Structural `Value` equality got all three
+                        // wrong.
+                        let matches = resolved_preds.iter().all(|(name, expected)| {
+                            props_map
+                                .get(target_vid)
+                                .and_then(|props| props.get(name))
+                                .is_some_and(|actual| {
+                                    crate::query::expr_eval::cypher_eq(actual, expected)
+                                        == Some(true)
                                 })
-                        } else {
-                            resolved_preds
-                                .iter()
-                                .all(|(_, expected)| matches!(expected, Value::Null))
-                        };
+                        });
 
                         if matches {
                             if is_last_step {

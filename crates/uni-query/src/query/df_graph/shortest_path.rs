@@ -61,6 +61,7 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use datafusion::common::Result as DFResult;
 use datafusion::execution::memory_pool::{MemoryConsumer, MemoryReservation};
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
+use datafusion::physical_expr::PhysicalExpr;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use futures::{Stream, StreamExt};
@@ -72,6 +73,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use uni_common::Value as UniValue;
 use uni_common::core::id::{Eid, Vid};
+use uni_store::storage::arrow_convert;
 use uni_store::storage::direction::Direction;
 
 /// Shortest path execution plan.
@@ -134,6 +136,12 @@ pub struct GraphShortestPathExec {
     /// precompute an `EidFilter` during warming. Empty when there is no map.
     edge_property_conditions: Vec<(String, UniValue)>,
 
+    /// Map entries whose value depends on the row — `{w: a.x}` — as the
+    /// property name and the value compiled against the input schema. Each
+    /// distinct set of values gets its own allow-set, which also holds
+    /// `edge_property_conditions`. Empty when every entry is a constant.
+    row_conditions: Vec<(String, Arc<dyn PhysicalExpr>)>,
+
     /// Whether the pattern belongs to an `OPTIONAL MATCH`: keep a pair with
     /// no path as a NULL-path row (true) or drop it (false).
     optional: bool,
@@ -164,6 +172,7 @@ impl fmt::Debug for GraphShortestPathExec {
             .field("min_hops", &self.min_hops)
             .field("max_hops", &self.max_hops)
             .field("edge_property_conditions", &self.edge_property_conditions)
+            .field("row_conditions", &self.row_conditions)
             .field("optional", &self.optional)
             .finish()
     }
@@ -181,6 +190,9 @@ impl GraphShortestPathExec {
     /// * `direction` - Traversal direction
     /// * `path_variable` - Variable name for the path
     /// * `graph_ctx` - Graph execution context
+    /// * `edge_property_conditions` - The relationship map's constant entries
+    /// * `row_conditions` - The map's entries computed per row, compiled
+    ///   against `input`'s schema
     /// * `optional` - Keep a pair with no path as a NULL-path row (OPTIONAL
     ///   MATCH) instead of dropping it (mandatory MATCH)
     #[expect(
@@ -200,6 +212,7 @@ impl GraphShortestPathExec {
         min_hops: u32,
         max_hops: u32,
         edge_property_conditions: Vec<(String, UniValue)>,
+        row_conditions: Vec<(String, Arc<dyn PhysicalExpr>)>,
         optional: bool,
     ) -> Self {
         let source_column = source_column.into();
@@ -221,6 +234,7 @@ impl GraphShortestPathExec {
             min_hops,
             max_hops,
             edge_property_conditions,
+            row_conditions,
             optional,
             graph_ctx,
             schema,
@@ -322,6 +336,7 @@ impl ExecutionPlan for GraphShortestPathExec {
             self.min_hops,
             self.max_hops,
             self.edge_property_conditions.clone(),
+            self.row_conditions.clone(),
             self.optional,
         )))
     }
@@ -346,6 +361,7 @@ impl ExecutionPlan for GraphShortestPathExec {
         let warm_direction = self.direction;
         let warm_conditions = self.edge_property_conditions.clone();
         let warm_max_hops = self.max_hops as usize;
+        let per_row = !self.row_conditions.is_empty();
         let warm_fut: Pin<
             Box<dyn std::future::Future<Output = DFResult<WarmedEdgeFilter>> + Send>,
         > = Box::pin(async move {
@@ -353,6 +369,11 @@ impl ExecutionPlan for GraphShortestPathExec {
                 .ensure_adjacency_warmed(&warm_types, warm_direction)
                 .await
                 .map_err(exec_err)?;
+            // A map with per-row values builds one allow-set per distinct
+            // value set, batch by batch; the constant entries join each.
+            if per_row {
+                return Ok(WarmedEdgeFilter::Whole(EidFilter::AllAllowed));
+            }
             // The map is read over the region each batch's sources can
             // reach, not over the whole type up front (P7).
             if let Some(reachable) = ReachableMapFilter::new(
@@ -398,6 +419,12 @@ impl ExecutionPlan for GraphShortestPathExec {
             // `AllAllowed` admits everything, so an absent map costs nothing.
             edge_property_filter: EidFilter::AllAllowed,
             reachable: None,
+            edge_property_conditions: self.edge_property_conditions.clone(),
+            row_conditions: self.row_conditions.clone(),
+            keyed_filters: FxHashMap::default(),
+            keyed_filter_bytes: 0,
+            batch_keys: Vec::new(),
+            row_keys: Vec::new(),
             graph_ctx: Arc::clone(&self.graph_ctx),
             schema: Arc::clone(&self.schema),
             state: ShortestPathStreamState::Warming(warm_fut),
@@ -418,6 +445,29 @@ enum WarmedEdgeFilter {
     Reachable(Box<ReachableMapFilter>),
 }
 
+/// The allow-set of one distinct set of per-row map values.
+enum KeyedFilter {
+    /// Grown per batch over the region its rows' sources reach.
+    Reachable(Box<ReachableMapFilter>),
+    /// Complete for every walk: a `NULL` value, which admits no edge, or the
+    /// whole-type form when no edge type resolves to a name.
+    Whole(EidFilter),
+}
+
+impl KeyedFilter {
+    /// Approximate bytes held, for the reservation.
+    fn approx_bytes(&self) -> usize {
+        match self {
+            KeyedFilter::Reachable(r) => r.approx_bytes(),
+            KeyedFilter::Whole(f) => f.approx_bytes(),
+        }
+    }
+}
+
+/// Future that covers a batch's sources in every allow-set the batch needs.
+type CoverKeysFuture =
+    Pin<Box<dyn std::future::Future<Output = DFResult<Vec<(Vec<UniValue>, KeyedFilter)>>> + Send>>;
+
 /// State machine for shortest path stream execution.
 enum ShortestPathStreamState {
     /// Warming adjacency CSRs and building the edge filter before first batch.
@@ -427,6 +477,12 @@ enum ShortestPathStreamState {
     /// Growing the map's region to this batch's sources before searching.
     Covering {
         fut: Pin<Box<dyn std::future::Future<Output = DFResult<ReachableMapFilter>> + Send>>,
+        batch: RecordBatch,
+    },
+    /// Building or growing, for a map with per-row values, the allow-set of
+    /// each distinct value set in this batch over its rows' sources.
+    CoveringKeys {
+        fut: CoverKeysFuture,
         batch: RecordBatch,
     },
     /// Fetching storage-backed properties for this batch's path entities before
@@ -484,6 +540,27 @@ struct GraphShortestPathStream {
     /// allow-set only grows, so a search retained across batches stays
     /// valid. Taken out while a batch's sources are being covered.
     reachable: Option<ReachableMapFilter>,
+
+    /// The map's constant entries, joined to every per-row allow-set.
+    edge_property_conditions: Vec<(String, UniValue)>,
+
+    /// The map's entries computed per row; see the exec's field.
+    row_conditions: Vec<(String, Arc<dyn PhysicalExpr>)>,
+
+    /// One allow-set per distinct set of per-row values seen so far, so rows
+    /// of later batches with the same values reuse it. A group's set is moved
+    /// into `reachable` / `edge_property_filter` while the group is searched.
+    keyed_filters: FxHashMap<Vec<UniValue>, KeyedFilter>,
+
+    /// Bytes of `reservation` charged to `keyed_filters`.
+    keyed_filter_bytes: usize,
+
+    /// The distinct per-row value sets of the batch in flight.
+    batch_keys: Vec<Vec<UniValue>>,
+
+    /// For each row of the batch in flight, its value set's index into
+    /// `batch_keys`. Empty when the map has no per-row entry.
+    row_keys: Vec<usize>,
 
     /// Graph execution context.
     graph_ctx: Arc<GraphExecutionContext>,
@@ -550,6 +627,8 @@ const SOURCE_LAYERS_BYTES_PER_VERTEX: usize = std::mem::size_of::<(Vid, u32)>()
 struct SourceBfs {
     /// Where the search starts.
     source: Vid,
+    /// The per-row map values the search is gated by; empty without any.
+    key: Vec<UniValue>,
     /// `parent[v]` is the vertex `v` was first reached from and the edge it
     /// was reached over. The source has no entry, which is what terminates
     /// [`rebuild_path`].
@@ -567,7 +646,7 @@ struct SourceBfs {
 impl SourceBfs {
     /// A search from `source`, counted on `graph_ctx`'s per-query counters
     /// (`QueryMetrics::shortest_path_searches`).
-    fn new(source: Vid, graph_ctx: &GraphExecutionContext) -> Self {
+    fn new(source: Vid, key: Vec<UniValue>, graph_ctx: &GraphExecutionContext) -> Self {
         if let Some(counters) = graph_ctx.counters() {
             counters.add_shortest_path_search();
         }
@@ -575,6 +654,7 @@ impl SourceBfs {
         depth.insert(source, 0);
         Self {
             source,
+            key,
             parent: FxHashMap::default(),
             depth,
             queue: VecDeque::from([source]),
@@ -589,6 +669,8 @@ impl SourceBfs {
 struct SourceLayers {
     /// Where the search starts.
     source: Vid,
+    /// The per-row map values the search is gated by; empty without any.
+    key: Vec<UniValue>,
     /// Hops from the source for every vertex discovered, the source included.
     depth: FxHashMap<Vid, u32>,
     /// Every vertex one layer closer to the source with an admitted edge into
@@ -609,7 +691,7 @@ struct SourceLayers {
 impl SourceLayers {
     /// A search from `source`, counted on `graph_ctx`'s per-query counters
     /// (`QueryMetrics::shortest_path_searches`).
-    fn new(source: Vid, graph_ctx: &GraphExecutionContext) -> Self {
+    fn new(source: Vid, key: Vec<UniValue>, graph_ctx: &GraphExecutionContext) -> Self {
         if let Some(counters) = graph_ctx.counters() {
             counters.add_shortest_path_search();
         }
@@ -617,6 +699,7 @@ impl SourceLayers {
         depth.insert(source, 0);
         Self {
             source,
+            key,
             depth,
             predecessors: FxHashMap::default(),
             current_layer: vec![source],
@@ -778,19 +861,20 @@ impl GraphShortestPathStream {
         }
     }
 
-    /// The single-source search for `source`, reusing the retained one when it
-    /// already starts there.
+    /// The single-source search for `source` under the per-row map values
+    /// `key`, reusing the retained one when it already starts there with the
+    /// same values.
     ///
     /// A different source's search is released first: one is retained at a time,
     /// so the reservation holds at most one search's state beyond the batch.
-    fn take_source_bfs(&mut self, source: Vid) -> SourceBfs {
+    fn take_source_bfs(&mut self, source: Vid, key: &[UniValue]) -> SourceBfs {
         match self.source_bfs.take() {
-            Some(bfs) if bfs.source == source => bfs,
+            Some(bfs) if bfs.source == source && bfs.key == key => bfs,
             other => {
                 if let Some(old) = other {
                     self.reservation.shrink(old.charged);
                 }
-                SourceBfs::new(source, &self.graph_ctx)
+                SourceBfs::new(source, key.to_vec(), &self.graph_ctx)
             }
         }
     }
@@ -856,16 +940,188 @@ impl GraphShortestPathStream {
 
     /// The layered search for `source`, reusing the retained one when it
     /// already starts there. See [`Self::take_source_bfs`].
-    fn take_source_layers(&mut self, source: Vid) -> SourceLayers {
+    fn take_source_layers(&mut self, source: Vid, key: &[UniValue]) -> SourceLayers {
         match self.source_layers.take() {
-            Some(layers) if layers.source == source => layers,
+            Some(layers) if layers.source == source && layers.key == key => layers,
             other => {
                 if let Some(old) = other {
                     self.reservation.shrink(old.charged);
                 }
-                SourceLayers::new(source, &self.graph_ctx)
+                SourceLayers::new(source, key.to_vec(), &self.graph_ctx)
             }
         }
+    }
+
+    /// Evaluate the per-row map values of `batch` into `batch_keys` and
+    /// `row_keys`. A no-op when the map has no per-row entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an evaluation or decoding error.
+    fn evaluate_row_keys(&mut self, batch: &RecordBatch) -> DFResult<()> {
+        self.batch_keys.clear();
+        self.row_keys.clear();
+        if self.row_conditions.is_empty() {
+            return Ok(());
+        }
+        let n = batch.num_rows();
+        let columns: Vec<ArrayRef> = self
+            .row_conditions
+            .iter()
+            .map(|(_, expr)| expr.evaluate(batch).and_then(|v| v.into_array(n)))
+            .collect::<DFResult<_>>()?;
+        let mut index: FxHashMap<Vec<UniValue>, usize> = FxHashMap::default();
+        for row in 0..n {
+            let key = columns
+                .iter()
+                .map(|c| arrow_convert::arrow_to_value(c.as_ref(), row, None))
+                .collect::<anyhow::Result<Vec<UniValue>>>()
+                .map_err(exec_err)?;
+            let k = match index.get(&key) {
+                Some(&k) => k,
+                None => {
+                    index.insert(key.clone(), self.batch_keys.len());
+                    self.batch_keys.push(key);
+                    self.batch_keys.len() - 1
+                }
+            };
+            self.row_keys.push(k);
+        }
+        Ok(())
+    }
+
+    /// The future that builds or grows the allow-set of every value set in
+    /// the batch in flight, each over the sources of its own rows.
+    ///
+    /// The sets it returns go back into `keyed_filters`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the source column cannot be read.
+    fn cover_keys(&mut self, batch: &RecordBatch) -> DFResult<CoverKeysFuture> {
+        let sources = batch
+            .column_by_name(&self.source_column)
+            .map(|c| column_as_vid_array(c.as_ref()))
+            .transpose()?;
+        let mut per_key: Vec<Vec<Vid>> = vec![Vec::new(); self.batch_keys.len()];
+        if let Some(sources) = sources {
+            let mut seen: rustc_hash::FxHashSet<(usize, u64)> = Default::default();
+            for (row, &k) in self.row_keys.iter().enumerate() {
+                if sources.is_valid(row) && seen.insert((k, sources.value(row))) {
+                    per_key[k].push(Vid::from(sources.value(row)));
+                }
+            }
+        }
+        let work: Vec<(Vec<UniValue>, Option<KeyedFilter>, Vec<Vid>)> = self
+            .batch_keys
+            .iter()
+            .zip(per_key)
+            .map(|(key, srcs)| (key.clone(), self.keyed_filters.remove(key), srcs))
+            .collect();
+        let graph_ctx = Arc::clone(&self.graph_ctx);
+        let edge_type_ids = self.edge_type_ids.clone();
+        let direction = self.direction;
+        let max_hops = self.max_hops as usize;
+        let constant = self.edge_property_conditions.clone();
+        let names: Vec<String> = self.row_conditions.iter().map(|(n, _)| n.clone()).collect();
+        Ok(Box::pin(async move {
+            let mut out = Vec::with_capacity(work.len());
+            for (key, existing, srcs) in work {
+                let filter = match existing {
+                    Some(f) => f,
+                    // Cypher equality with `NULL` is never true: the map
+                    // admits no edge, and no read is needed to know it.
+                    None if key.iter().any(UniValue::is_null) => {
+                        KeyedFilter::Whole(EidFilter::Sparse(Default::default()))
+                    }
+                    None => {
+                        let mut conditions = constant.clone();
+                        conditions.extend(names.iter().cloned().zip(key.iter().cloned()));
+                        match ReachableMapFilter::new(
+                            &graph_ctx,
+                            &edge_type_ids,
+                            direction,
+                            max_hops,
+                            &conditions,
+                            None,
+                            &[],
+                        ) {
+                            Some(r) => KeyedFilter::Reachable(Box::new(r)),
+                            None => KeyedFilter::Whole(
+                                build_edge_property_filter(
+                                    &graph_ctx,
+                                    &edge_type_ids,
+                                    direction,
+                                    &conditions,
+                                )
+                                .await?,
+                            ),
+                        }
+                    }
+                };
+                let filter = match filter {
+                    KeyedFilter::Reachable(mut r) => {
+                        r.cover(&srcs).await?;
+                        KeyedFilter::Reachable(r)
+                    }
+                    whole => whole,
+                };
+                out.push((key, filter));
+            }
+            Ok(out)
+        }))
+    }
+
+    /// Put covered allow-sets back and charge what they hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns the pool's refusal when the allow-sets do not fit.
+    fn store_keyed_filters(&mut self, covered: Vec<(Vec<UniValue>, KeyedFilter)>) -> DFResult<()> {
+        self.keyed_filters.extend(covered);
+        let want: usize = self
+            .keyed_filters
+            .iter()
+            .map(|(k, f)| f.approx_bytes() + k.len() * std::mem::size_of::<UniValue>())
+            .sum();
+        charge(&mut self.reservation, &mut self.keyed_filter_bytes, want)
+    }
+
+    /// Make the allow-set of the batch's value set `k` the one the search
+    /// gates on. A no-op when the map has no per-row entry.
+    fn activate_key(&mut self, k: usize) -> DFResult<()> {
+        if self.row_conditions.is_empty() {
+            return Ok(());
+        }
+        match self.keyed_filters.remove(&self.batch_keys[k]) {
+            Some(KeyedFilter::Reachable(r)) => self.reachable = Some(*r),
+            Some(KeyedFilter::Whole(f)) => {
+                self.reachable = None;
+                self.edge_property_filter = f;
+            }
+            None => {
+                return Err(datafusion::error::DataFusionError::Internal(
+                    "shortest path: no allow-set for a value set of this batch".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Return the allow-set [`Self::activate_key`] took for value set `k`.
+    fn deactivate_key(&mut self, k: usize) {
+        if self.row_conditions.is_empty() {
+            return;
+        }
+        let filter = match self.reachable.take() {
+            Some(r) => KeyedFilter::Reachable(Box::new(r)),
+            None => KeyedFilter::Whole(std::mem::replace(
+                &mut self.edge_property_filter,
+                EidFilter::AllAllowed,
+            )),
+        };
+        self.keyed_filters
+            .insert(self.batch_keys[k].clone(), filter);
     }
 
     /// Expand the layered search until `target` has a complete layer, or no
@@ -1101,11 +1357,12 @@ impl GraphShortestPathStream {
         let target_vid_cow = column_as_vid_array(target_col.as_ref())?;
         let target_vids: &UInt64Array = &target_vid_cow;
 
-        // Rows that need a search, grouped by source in order of first
-        // appearance. A NULL endpoint, a zero-length match and a zero hop bound
-        // are answered without one.
-        let mut group_of: FxHashMap<Vid, usize> = FxHashMap::default();
-        let mut groups: Vec<(Vid, Vec<usize>)> = Vec::new();
+        // Rows that need a search, grouped by source — and by the value set of
+        // a map with per-row values, which decides the edges the search may
+        // take — in order of first appearance. A NULL endpoint, a zero-length
+        // match and a zero hop bound are answered without one.
+        let mut group_of: FxHashMap<(Vid, usize), usize> = FxHashMap::default();
+        let mut groups: Vec<(Vid, usize, Vec<usize>)> = Vec::new();
         for i in 0..batch.num_rows() {
             if source_vids.is_null(i) || target_vids.is_null(i) {
                 continue;
@@ -1114,11 +1371,12 @@ impl GraphShortestPathStream {
             if source == Vid::from(target_vids.value(i)) || self.max_hops == 0 {
                 continue;
             }
-            let g = *group_of.entry(source).or_insert_with(|| {
-                groups.push((source, Vec::new()));
+            let key = self.row_keys.get(i).copied().unwrap_or(0);
+            let g = *group_of.entry((source, key)).or_insert_with(|| {
+                groups.push((source, key, Vec::new()));
                 groups.len() - 1
             });
-            groups[g].1.push(i);
+            groups[g].2.push(i);
         }
 
         // The answer for a row that needs no search. A zero-length path is only
@@ -1140,8 +1398,12 @@ impl GraphShortestPathStream {
             let mut per_row: Vec<Vec<FoundPath>> = (0..batch.num_rows())
                 .map(|i| trivial(i).into_iter().collect())
                 .collect();
-            for (source, rows) in &groups {
-                let mut layers = self.take_source_layers(*source);
+            for (source, k, rows) in &groups {
+                self.activate_key(*k)?;
+                let mut layers = {
+                    let key = self.batch_keys.get(*k).cloned().unwrap_or_default();
+                    self.take_source_layers(*source, &key)
+                };
                 for &i in rows {
                     let target = Vid::from(target_vids.value(i));
                     match self.all_shortest_paths_to(&mut layers, target) {
@@ -1150,11 +1412,13 @@ impl GraphShortestPathStream {
                             // A refused search may be half a layer in; it is
                             // not reusable, so give its state back with it.
                             self.reservation.shrink(layers.charged);
+                            self.deactivate_key(*k);
                             return Err(e);
                         }
                     }
                 }
                 self.source_layers = Some(layers);
+                self.deactivate_key(*k);
             }
 
             let mut row_indices: Vec<u32> = Vec::new();
@@ -1200,8 +1464,12 @@ impl GraphShortestPathStream {
                 self.reservation.try_grow(grew)?;
                 self.batch_path_bytes += grew;
             }
-            for (source, rows) in &groups {
-                let mut bfs = self.take_source_bfs(*source);
+            for (source, k, rows) in &groups {
+                self.activate_key(*k)?;
+                let mut bfs = {
+                    let key = self.batch_keys.get(*k).cloned().unwrap_or_default();
+                    self.take_source_bfs(*source, &key)
+                };
                 for &i in rows {
                     let target = Vid::from(target_vids.value(i));
                     let found = self
@@ -1222,11 +1490,13 @@ impl GraphShortestPathStream {
                             // what the search charged before it propagates, or
                             // the budget stays spent for the rest of the query.
                             self.reservation.shrink(bfs.charged);
+                            self.deactivate_key(*k);
                             return Err(e);
                         }
                     }
                 }
                 self.source_bfs = Some(bfs);
+                self.deactivate_key(*k);
             }
 
             if self.optional || paths.iter().all(Option::is_some) {
@@ -1436,6 +1706,24 @@ impl Stream for GraphShortestPathStream {
 
                     match self.input.poll_next_unpin(cx) {
                         Poll::Ready(Some(Ok(batch))) => {
+                            if !self.row_conditions.is_empty() {
+                                // Evaluate the per-row values, then cover each
+                                // value set's sources before any row is searched.
+                                let fut = self
+                                    .evaluate_row_keys(&batch)
+                                    .and_then(|()| self.cover_keys(&batch));
+                                match fut {
+                                    Ok(fut) => {
+                                        self.state =
+                                            ShortestPathStreamState::CoveringKeys { fut, batch };
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        self.state = ShortestPathStreamState::Done;
+                                        return Poll::Ready(Some(Err(e)));
+                                    }
+                                }
+                            }
                             if let Some(mut reachable) = self.reachable.take() {
                                 // Grow the map's region to this batch's sources
                                 // before any of its rows is searched.
@@ -1470,7 +1758,9 @@ impl Stream for GraphShortestPathStream {
                         Poll::Ready(None) => {
                             // No row is left to reuse a retained search.
                             let held = self.source_bfs.take().map_or(0, |b| b.charged)
-                                + self.source_layers.take().map_or(0, |l| l.charged);
+                                + self.source_layers.take().map_or(0, |l| l.charged)
+                                + std::mem::take(&mut self.keyed_filter_bytes);
+                            self.keyed_filters.clear();
                             self.reservation.shrink(held);
                             self.state = ShortestPathStreamState::Done;
                             return Poll::Ready(None);
@@ -1498,6 +1788,27 @@ impl Stream for GraphShortestPathStream {
                         return Poll::Pending;
                     }
                 },
+                ShortestPathStreamState::CoveringKeys { mut fut, batch } => {
+                    match fut.as_mut().poll(cx) {
+                        Poll::Ready(Ok(covered)) => {
+                            if let Err(e) = self.store_keyed_filters(covered) {
+                                self.state = ShortestPathStreamState::Done;
+                                return Poll::Ready(Some(Err(e)));
+                            }
+                            if let Some(out) = self.search_batch(batch) {
+                                return Poll::Ready(Some(out));
+                            }
+                        }
+                        Poll::Ready(Err(e)) => {
+                            self.state = ShortestPathStreamState::Done;
+                            return Poll::Ready(Some(Err(e)));
+                        }
+                        Poll::Pending => {
+                            self.state = ShortestPathStreamState::CoveringKeys { fut, batch };
+                            return Poll::Pending;
+                        }
+                    }
+                }
                 ShortestPathStreamState::PrefetchingProperties {
                     mut fut,
                     input,

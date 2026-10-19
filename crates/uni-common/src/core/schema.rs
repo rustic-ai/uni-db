@@ -2194,6 +2194,19 @@ pub fn validate_identifier(name: &str) -> Result<()> {
 /// Without this, declaring a property named e.g. `ext_id` produces an Arrow
 /// schema with two `ext_id` fields at flush time, which Lance rejects with
 /// "Duplicate field name" — silently losing all in-session writes on shutdown.
+///
+/// A declared property is a top-level storage column, and two characters
+/// cannot appear in one:
+///
+/// * `.`: Lance refuses the field at table creation (it reads the name as a
+///   struct path). The declaration used to succeed and accept writes, and then
+///   every flush of the label failed.
+/// * a backtick: Lance writes the field but cannot project it (see
+///   `uni-store`'s `lance_backtick_column_probe`), so after the first flush
+///   every read of the label failed with `No field named`.
+///
+/// An undeclared (schemaless) property of either name is unaffected: it lives
+/// in the overflow column, not a field of its own.
 pub fn validate_property_name(name: &str) -> Result<()> {
     if name.starts_with('_') {
         return Err(anyhow!(
@@ -2201,7 +2214,62 @@ pub fn validate_property_name(name: &str) -> Result<()> {
             name
         ));
     }
+    if let Some(c) = name.chars().find(|c| matches!(c, '.' | '`')) {
+        return Err(anyhow!(
+            "Property name '{}' cannot be declared: a declared property is a storage \
+             column, and a column name cannot contain '{}' (leave it undeclared to store it \
+             schemalessly)",
+            name,
+            c
+        ));
+    }
     validate_reserved_property_name(name)
+}
+
+/// Storage column names that a write may not use as a property name.
+///
+/// [`validate_property_name`] guards the declared-property path; this guards
+/// the property maps a write carries (CREATE, SET, MERGE, bulk insert), where
+/// a name is never declared. Each entry is a column of the per-label vertex,
+/// per-type edge or main tables that the read path gives its own meaning, so
+/// a property of that name was accepted and then misread: `overflow_json`
+/// read NULL on a declared label while `properties()` held the value, and
+/// the `_`-prefixed columns were dropped on a declared label, hidden from
+/// `keys()` on a schemaless one, or shadowed by the system value (`n._vid`
+/// returned the vertex id).
+///
+/// The other storage column names (`ext_id`, `eid`, `src_vid`, `dst_vid`,
+/// `op`, `type`, `labels`, `props_json`) are deliberately absent: a write of
+/// any of them round-trips through every storage state, so rejecting them
+/// would break working data.
+pub const WRITE_RESERVED_PROPERTY_NAMES: &[&str] = &[
+    "overflow_json",
+    "_vid",
+    "_uid",
+    "_eid",
+    "_deleted",
+    "_version",
+    "_labels",
+    "_created_at",
+    "_updated_at",
+];
+
+/// Reject a write whose property map uses a [`WRITE_RESERVED_PROPERTY_NAMES`]
+/// key.
+///
+/// # Errors
+///
+/// Returns [`crate::UniError::InvalidIdentifier`] naming the first reserved key.
+pub fn check_written_property_names<'a>(
+    keys: impl IntoIterator<Item = &'a String>,
+) -> std::result::Result<(), crate::UniError> {
+    match keys
+        .into_iter()
+        .find(|k| WRITE_RESERVED_PROPERTY_NAMES.contains(&k.as_str()))
+    {
+        Some(name) => Err(crate::UniError::reserved_property_name(name)),
+        None => Ok(()),
+    }
 }
 
 /// Reject names that collide with storage-layer Arrow column names.

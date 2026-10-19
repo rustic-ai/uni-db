@@ -133,8 +133,13 @@ ident_char = _{ ASCII_ALPHANUMERIC | "_" }
 
 identifier = @{
     !keyword_reserved ~ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
-    | "`" ~ (!("`") ~ ANY)* ~ "`"
+    | escaped_name
 }
+
+// openCypher EscapedSymbolicName: a backtick-quoted name in which a doubled
+// backtick stands for one literal backtick (`a``b` is the name a`b). The walker
+// unescapes it in `normalize_identifier`.
+escaped_name = @{ "`" ~ ("``" | !"`" ~ ANY)* ~ "`" }
 
 // Reserved keywords - these CANNOT be used as identifiers
 keyword_reserved = {
@@ -170,7 +175,7 @@ keyword = { keyword_reserved | keyword_nonreserved }
 // Allow keywords as identifiers in certain contexts
 identifier_or_keyword = @{
     (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
-    | "`" ~ (!"`" ~ ANY)* ~ "`"
+    | escaped_name
 }
 
 // Function names - allow function keywords and common Neo4j function names
@@ -192,7 +197,7 @@ function_name = @{
 // Alias identifiers after AS can be keywords
 alias_identifier = @{
     (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
-    | "`" ~ (!"`" ~ ANY)* ~ "`"
+    | escaped_name
 }
 
 integer = @{
@@ -238,7 +243,7 @@ double_quote_char = {
     | "\\" ~ ANY                    // Catch-all for regex escapes like \., \$, \d, etc.
 }
 
-parameter = @{ "$" ~ (ASCII_ALPHANUMERIC | "_")+ }
+parameter = @{ "$" ~ (escaped_name | (ASCII_ALPHANUMERIC | "_")+) }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // OPERATORS

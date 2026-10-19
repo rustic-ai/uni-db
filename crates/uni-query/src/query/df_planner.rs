@@ -1396,6 +1396,7 @@ impl HybridPhysicalPlanner {
                 min_hops,
                 max_hops,
                 edge_filter_expr,
+                edge_row_conditions,
                 optional,
                 optional_pattern_vars,
             } => self.plan_shortest_path(
@@ -1410,6 +1411,7 @@ impl HybridPhysicalPlanner {
                 *min_hops,
                 *max_hops,
                 edge_filter_expr.as_ref(),
+                edge_row_conditions,
                 *optional,
                 optional_pattern_vars,
                 all_properties,
@@ -1442,29 +1444,8 @@ impl HybridPhysicalPlanner {
 
             LogicalPlan::Distinct { input } => {
                 let input_plan = self.plan_internal(input, all_properties)?;
-                let schema = input_plan.schema();
                 // Group by all columns with no aggregates = deduplication
-                let group_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
-                    schema
-                        .fields()
-                        .iter()
-                        .enumerate()
-                        .map(|(i, f)| {
-                            let column: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
-                                datafusion::physical_expr::expressions::Column::new(f.name(), i),
-                            );
-                            Ok((float_equivalence_key(column, &schema)?, f.name().clone()))
-                        })
-                        .collect::<Result<_>>()?;
-                let group_by = PhysicalGroupBy::new_single(group_exprs);
-                Ok(Arc::new(AggregateExec::try_new(
-                    AggregateMode::Single,
-                    group_by,
-                    vec![],
-                    vec![],
-                    input_plan.clone(),
-                    input_plan.schema(),
-                )?))
+                plan_equivalence_distinct(input_plan)
             }
 
             LogicalPlan::Sort { input, order_by } => {
@@ -1678,6 +1659,7 @@ impl HybridPhysicalPlanner {
                 min_hops,
                 max_hops,
                 edge_filter_expr,
+                edge_row_conditions,
                 optional,
                 optional_pattern_vars,
             } => self.plan_shortest_path(
@@ -1692,6 +1674,7 @@ impl HybridPhysicalPlanner {
                 *min_hops,
                 *max_hops,
                 edge_filter_expr.as_ref(),
+                edge_row_conditions,
                 *optional,
                 optional_pattern_vars,
                 all_properties,
@@ -2503,7 +2486,11 @@ impl HybridPhysicalPlanner {
         // 2. Infer subquery output schema from logical plan + UniSchema metadata.
         // Use the ORIGINAL (still-wrapped) subquery so a unit subquery resolves
         // to an empty schema, which `GraphApplyExec` reads as the unit signal.
-        let sub_schema = infer_logical_plan_schema(subquery, &self.schema);
+        let sub_schema = infer_logical_plan_schema(
+            subquery,
+            &self.schema,
+            self.graph_ctx.procedure_registry().map(Arc::as_ref),
+        );
 
         // 3. Merge schemas: subquery fields override input fields with the
         //    same name. The subquery's RETURN list is authoritative for the
@@ -2863,7 +2850,22 @@ impl HybridPhysicalPlanner {
         // per-label table carries it as a BTree-indexed column (A10). Pushed
         // as Lance SQL only, like the unlabelled scan's: the outer
         // `FilterExec` re-applies it to every row, unflushed ones included.
-        let ext_id_lance = ext_id_equality(filter, variable, &self.params)
+        //
+        // The same equality narrows the scan's L0 read: without a runtime
+        // filter there is nothing for the scan to recover an L0 prefilter
+        // from, so it is handed one, and an unflushed lookup builds the
+        // matching L0 rows instead of the label's whole L0 set.
+        let ext_id_value = ext_id_equality(filter, variable, &self.params);
+        if let Some(ext_id) = &ext_id_value {
+            scan_exec = scan_exec.with_planner_l0_prefilter(Some(
+                uni_store::runtime::columnar_scan::L0PropertyPrefilter {
+                    property: uni_store::storage::property_builder::EXT_ID_COLUMN.to_string(),
+                    one_of: Some(vec![uni_common::Value::String(ext_id.clone())]),
+                    bounds: Vec::new(),
+                },
+            ));
+        }
+        let ext_id_lance = ext_id_value
             .map(|ext_id| {
                 uni_store::backend::types::FilterExpr::equals(
                     uni_store::storage::property_builder::EXT_ID_COLUMN,
@@ -3190,7 +3192,7 @@ impl HybridPhysicalPlanner {
                 properties.clone(),
                 None,
             )
-            .with_schemaless_l0_prefilter(schemaless_l0_prefilter(
+            .with_planner_l0_prefilter(schemaless_l0_prefilter(
                 filter,
                 variable,
                 &self.params,
@@ -3265,7 +3267,7 @@ impl HybridPhysicalPlanner {
                     properties.clone(),
                     None,
                 )
-                .with_schemaless_l0_prefilter(schemaless_l0_prefilter(
+                .with_planner_l0_prefilter(schemaless_l0_prefilter(
                     filter,
                     variable,
                     &self.params,
@@ -3754,11 +3756,7 @@ impl HybridPhysicalPlanner {
             properties.clone(),
             scan_filter,
         )
-        .with_schemaless_l0_prefilter(schemaless_l0_prefilter(
-            filter,
-            variable,
-            &self.params,
-        ));
+        .with_planner_l0_prefilter(schemaless_l0_prefilter(filter, variable, &self.params));
         if let Some(vids) = extracted_vids
             && vids.len() > 1
         {
@@ -3860,18 +3858,27 @@ impl HybridPhysicalPlanner {
                     .get(edge_var)
                     .is_some_and(|props| props.contains("*"));
                 if has_wildcard {
-                    // Expand to all schema-defined properties across all matching edge types
-                    let mut schema_props: Vec<String> = edge_type_ids
+                    // Expand to all schema-defined properties across all matching
+                    // edge types, each name once: two types that both declare `w`
+                    // would otherwise make two `r.w` columns, and a reference
+                    // DataFusion resolves by name (`r['w']`) is then ambiguous.
+                    let mut schema_props: Vec<String> = Vec::new();
+                    for name in edge_type_ids
                         .iter()
                         .filter_map(|eid| self.schema.edge_type_name_by_id(*eid))
-                        .flat_map(|name| {
-                            self.schema
-                                .properties
-                                .get(name)
-                                .map(|p| p.keys().cloned().collect::<Vec<_>>())
-                                .unwrap_or_default()
-                        })
-                        .collect();
+                    {
+                        for prop in self
+                            .schema
+                            .properties
+                            .get(name)
+                            .into_iter()
+                            .flat_map(|p| p.keys())
+                        {
+                            if !schema_props.contains(prop) {
+                                schema_props.push(prop.clone());
+                            }
+                        }
+                    }
 
                     // Also include explicitly referenced properties (non-wildcard, non-internal)
                     // that may be overflow properties not in the schema. System-managed
@@ -4180,16 +4187,6 @@ impl HybridPhysicalPlanner {
                     vlp_target_properties.clear();
                 }
 
-                // VLP: compile edge predicates to Lance SQL for bitmap preselection
-                let edge_lance_filter: Option<String> = edge_filter_expr.and_then(|expr| {
-                    let edge_var_name = step_variable.unwrap_or("__anon_edge");
-                    crate::query::pushdown::LanceFilterGenerator::generate(
-                        std::slice::from_ref(expr),
-                        edge_var_name,
-                        None,
-                    )
-                });
-
                 // VLP: extract simple property equality conditions for L0 checking
                 let edge_property_conditions = edge_filter_expr
                     .map(|e| self.extract_edge_property_conditions(e))
@@ -4294,7 +4291,16 @@ impl HybridPhysicalPlanner {
                                 .map(|l| VertexConstraint::Label(l.clone())),
                         })
                         .collect();
-                    crate::query::df_graph::nfa::PathNfa::from_qpp(nfa_steps, min_iter, max_iter)
+                    let nfa = crate::query::df_graph::nfa::PathNfa::from_qpp(
+                        nfa_steps, min_iter, max_iter,
+                    );
+                    match steps.first().and_then(|s| s.source_label.clone()) {
+                        Some(label) => nfa.with_iteration_source_constraint(
+                            hops_per_iter,
+                            VertexConstraint::Label(label),
+                        ),
+                        None => nfa,
+                    }
                 });
 
                 Arc::new(GraphVariableLengthTraverseExec::new(
@@ -4312,7 +4318,6 @@ impl HybridPhysicalPlanner {
                     self.graph_ctx.clone(),
                     optional,
                     bound_target_column,
-                    edge_lance_filter,
                     edge_property_conditions,
                     target_property_conditions,
                     used_edge_columns,
@@ -4626,16 +4631,6 @@ impl HybridPhysicalPlanner {
             target_properties.clear();
         }
 
-        // VLP: compile edge predicates to Lance SQL for bitmap preselection
-        let edge_lance_filter: Option<String> = edge_filter_expr.and_then(|expr| {
-            let edge_var_name = step_variable.unwrap_or("__anon_edge");
-            crate::query::pushdown::LanceFilterGenerator::generate(
-                std::slice::from_ref(expr),
-                edge_var_name,
-                None,
-            )
-        });
-
         // VLP: extract edge property conditions for BFS-level filtering
         let edge_property_conditions = edge_filter_expr
             .map(|e| self.extract_edge_property_conditions(e))
@@ -4670,7 +4665,6 @@ impl HybridPhysicalPlanner {
             self.graph_ctx.clone(),
             optional,
             bound_target_column,
-            edge_lance_filter,
             edge_property_conditions,
             used_edge_columns,
             path_mode.clone(),
@@ -4695,6 +4689,7 @@ impl HybridPhysicalPlanner {
         min_hops: u32,
         max_hops: u32,
         edge_filter_expr: Option<&Expr>,
+        edge_row_conditions: &[(String, Expr)],
         optional: bool,
         optional_pattern_vars: &HashSet<String>,
         all_properties: &HashMap<String, HashSet<String>>,
@@ -4716,6 +4711,24 @@ impl HybridPhysicalPlanner {
             .map(|e| self.extract_edge_property_conditions(e))
             .unwrap_or_default();
 
+        // Map values computed per row, compiled against the rows entering the
+        // search; the operator evaluates them per batch.
+        let row_conditions = if edge_row_conditions.is_empty() {
+            Vec::new()
+        } else {
+            let schema = input_plan.schema();
+            let mut ctx = self.translation_context_for_plan(input);
+            ctx.available_columns =
+                Some(schema.fields().iter().map(|f| f.name().clone()).collect());
+            let session = self.session_ctx.read();
+            let state = session.state();
+            let compiler = self.expr_compiler(&state, Some(&ctx));
+            edge_row_conditions
+                .iter()
+                .map(|(name, value)| Ok((name.clone(), compiler.compile(value, &schema)?)))
+                .collect::<Result<Vec<_>>>()?
+        };
+
         Ok(Arc::new(GraphShortestPathExec::new(
             input_plan,
             source_col,
@@ -4729,6 +4742,7 @@ impl HybridPhysicalPlanner {
             min_hops,
             max_hops,
             edge_property_conditions,
+            row_conditions,
             optional,
         )))
     }
@@ -6059,6 +6073,9 @@ impl HybridPhysicalPlanner {
         use crate::query::df_graph::expr_compiler::CypherPhysicalExprCompiler;
         let mut group_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
             Vec::new();
+        // `(group position, aggregate)` for each key emitted through
+        // `_cypher_first_seen` rather than as its canonical key.
+        let mut first_seen_keys: Vec<(usize, Arc<AggregateFunctionExpr>)> = Vec::new();
         for expr in group_by {
             let name = expr.to_string_repr();
 
@@ -6107,7 +6124,15 @@ impl HybridPhysicalPlanner {
                 // Convert logical expression to physical
                 create_physical_expr(&df_expr, &df_schema_ref, state.execution_props())?
             };
-            group_exprs.push((float_equivalence_key(physical_expr, &schema)?, name));
+            let (key, first_seen) = equivalence_group_key(
+                physical_expr,
+                &format!("__cypher_first_seen_{}", group_exprs.len()),
+                &schema,
+            )?;
+            if let Some(first_seen) = first_seen {
+                first_seen_keys.push((group_exprs.len(), first_seen));
+            }
+            group_exprs.push((key, name));
         }
 
         // For entity variables (Node/Edge) in group_by, also include their
@@ -6142,11 +6167,20 @@ impl HybridPhysicalPlanner {
 
         // Translate aggregates and their associated filter expressions
         // (e.g. collect() uses a filter to exclude null values per Cypher spec)
-        let (aggr_exprs, filter_exprs): (Vec<_>, Vec<_>) = self
+        let (mut aggr_exprs, mut filter_exprs): (Vec<_>, Vec<_>) = self
             .translate_aggregates(&rewritten_aggregates, &schema, &state, &ctx)?
             .into_iter()
             .unzip();
         let num_aggregates = aggr_exprs.len();
+        // First-seen values of CypherValue keys go after the user's
+        // aggregates; the projection below puts each in its key's place.
+        let num_first_seen = first_seen_keys.len();
+        let mut first_seen_slot: HashMap<usize, usize> = HashMap::new();
+        for (j, (group_pos, agg)) in first_seen_keys.into_iter().enumerate() {
+            first_seen_slot.insert(group_pos, num_aggregates + j);
+            aggr_exprs.push(agg);
+            filter_exprs.push(None);
+        }
 
         let agg_exec = Arc::new(AggregateExec::try_new(
             AggregateMode::Single,
@@ -6163,14 +6197,25 @@ impl HybridPhysicalPlanner {
         let agg_schema = agg_exec.schema();
         // Use actual expanded group-by count (includes entity property columns)
         // rather than logical group_by.len() which doesn't account for expansion.
-        let num_group_by = agg_schema.fields().len() - num_aggregates;
+        let num_group_by = agg_schema.fields().len() - num_aggregates - num_first_seen;
         let mut proj_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
             Vec::new();
 
-        for (i, field) in agg_schema.fields().iter().enumerate() {
-            let mut col_expr: Arc<dyn datafusion::physical_expr::PhysicalExpr> = Arc::new(
-                datafusion::physical_expr::expressions::Column::new(field.name(), i),
-            );
+        for (i, field) in agg_schema
+            .fields()
+            .iter()
+            .enumerate()
+            .take(num_group_by + num_aggregates)
+        {
+            // A CypherValue key reads its group's first-seen value.
+            let src = first_seen_slot
+                .get(&i)
+                .map_or(i, |&slot| num_group_by + slot);
+            let mut col_expr: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
+                Arc::new(datafusion::physical_expr::expressions::Column::new(
+                    agg_schema.field(src).name(),
+                    src,
+                ));
             if i >= num_group_by && is_sum_aggregate(&aggregates[i - num_group_by]) {
                 col_expr = sum_of_nothing_is_zero(col_expr, field.data_type())?;
             }
@@ -6363,10 +6408,11 @@ impl HybridPhysicalPlanner {
                     }
                     let expr_arg = cypher_expr_to_df(&args[0], Some(ctx))?;
                     let pct_arg = cypher_expr_to_df(&args[1], Some(ctx))?;
-                    let coerced = Self::coerce_numeric_for_stat(expr_arg, schema);
+                    // The input goes in uncast: the aggregate reads exact
+                    // numbers and rejects anything else itself.
                     let udaf =
                         Arc::new(crate::query::df_udfs::create_cypher_percentile_disc_udaf());
-                    udaf.call(vec![coerced, pct_arg])
+                    udaf.call(vec![expr_arg, pct_arg])
                 }
                 "percentilecont" => {
                     if args.len() != 2 {
@@ -6374,10 +6420,11 @@ impl HybridPhysicalPlanner {
                     }
                     let expr_arg = cypher_expr_to_df(&args[0], Some(ctx))?;
                     let pct_arg = cypher_expr_to_df(&args[1], Some(ctx))?;
-                    let coerced = Self::coerce_numeric_for_stat(expr_arg, schema);
+                    // The input goes in uncast: the aggregate reads exact
+                    // numbers and rejects anything else itself.
                     let udaf =
                         Arc::new(crate::query::df_udfs::create_cypher_percentile_cont_udaf());
-                    udaf.call(vec![coerced, pct_arg])
+                    udaf.call(vec![expr_arg, pct_arg])
                 }
                 "collect" => {
                     // Use custom Cypher collect UDAF that filters nulls and returns
@@ -6936,9 +6983,9 @@ impl HybridPhysicalPlanner {
     /// agree on what a mixed pair becomes rather than one working and the
     /// other reporting a planner bug.
     ///
-    /// Only entity columns are touched. A genuine conflict between, say, an
-    /// `Int64` and a `Utf8` is left for the caller's schema check to reject —
-    /// coercing that pair would invent a conversion the user did not ask for.
+    /// Entity columns, and an integer column against a float column, are
+    /// touched. A conflict between, say, an `Int64` and a `Utf8` is left for
+    /// the caller's schema check to reject.
     fn coerce_union_entity_columns(
         left: Arc<dyn ExecutionPlan>,
         right: Arc<dyn ExecutionPlan>,
@@ -6947,12 +6994,19 @@ impl HybridPhysicalPlanner {
         if ls.fields().len() != rs.fields().len() {
             return Ok((left, right));
         }
+        let entity_or_cv = |t: &DataType| {
+            uni_query_functions::cypher_type_coerce::is_entity_struct(t)
+                || matches!(t, DataType::LargeBinary)
+        };
+        // An integer against a float: both are numbers, but no Arrow type
+        // holds both exactly (`Float64` rounds integers above 2^53 and turns
+        // `1` into `1.0`), so the pair becomes CypherValue too.
+        let int_vs_float = |l: &DataType, r: &DataType| {
+            let float = |t: &DataType| matches!(t, DataType::Float32 | DataType::Float64);
+            (l.is_integer() && float(r)) || (float(l) && r.is_integer())
+        };
         let coercible = |l: &DataType, r: &DataType| {
-            l != r
-                && [l, r].iter().all(|t| {
-                    uni_query_functions::cypher_type_coerce::is_entity_struct(t)
-                        || matches!(t, DataType::LargeBinary)
-                })
+            l != r && ((entity_or_cv(l) && entity_or_cv(r)) || int_vs_float(l, r))
         };
         let positions: Vec<usize> = (0..ls.fields().len())
             .filter(|&i| coercible(ls.field(i).data_type(), rs.field(i).data_type()))
@@ -7071,40 +7125,13 @@ impl HybridPhysicalPlanner {
 
         // UNION (without ALL) requires deduplication
         if !all {
-            use datafusion::physical_plan::aggregates::{
-                AggregateExec, AggregateMode, PhysicalGroupBy,
-            };
             use datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec;
 
             // First, coalesce all partitions into one to ensure global deduplication
             let coalesced = Arc::new(CoalescePartitionsExec::new(union_plan));
 
-            // Create group by all columns to deduplicate
-            let schema = coalesced.schema();
-            let group_by_exprs: Vec<_> = (0..schema.fields().len())
-                .map(|i| {
-                    let column: Arc<dyn datafusion::physical_expr::PhysicalExpr> =
-                        Arc::new(datafusion::physical_plan::expressions::Column::new(
-                            schema.field(i).name(),
-                            i,
-                        ));
-                    Ok((
-                        float_equivalence_key(column, &schema)?,
-                        schema.field(i).name().clone(),
-                    ))
-                })
-                .collect::<Result<_>>()?;
-
-            let group_by = PhysicalGroupBy::new_single(group_by_exprs);
-
-            Ok(Arc::new(AggregateExec::try_new(
-                AggregateMode::Single,
-                group_by,
-                vec![], // No aggregate functions, just grouping for distinct
-                vec![], // No filters
-                coalesced,
-                schema,
-            )?))
+            // Group by all columns to deduplicate
+            plan_equivalence_distinct(coalesced)
         } else {
             // UNION ALL - just return the union
             Ok(union_plan)
@@ -8235,7 +8262,7 @@ impl HybridPhysicalPlanner {
     }
 
     /// Coerce an aggregate argument to `Float64` for numeric statistical
-    /// aggregates (stDev, variance, percentiles). A numeric column is cast
+    /// aggregates (stDev, variance). A numeric column is cast
     /// directly; anything else (a schemaless property's `LargeBinary`
     /// CypherValue, a string or duration column) reads through
     /// `_cypher_number`, so a value that is not a number is an error, as in
@@ -8285,10 +8312,20 @@ fn coerce_physical_expr(
     // FOLD `SUM` over them summed to 0.
     match (actual_dt, target_dt) {
         (DataType::LargeBinary, DataType::Float64) => wrap_cypher_number(expr, schema),
-        // Read the number, then truncate.
+        // Read the integer exactly (a float truncates). Reading a Float64
+        // first rounded every integer above 2^53.
         (DataType::LargeBinary, DataType::Int64) => {
-            let float_expr = wrap_cypher_number(expr, schema);
-            Arc::new(CastExpr::new(float_expr, DataType::Int64, None))
+            let udf = Arc::new(super::df_udfs::cypher_integer_udf());
+            let config = Arc::new(datafusion::common::config::ConfigOptions::default());
+            Arc::new(
+                datafusion::physical_expr::ScalarFunctionExpr::try_new(
+                    udf,
+                    vec![expr],
+                    schema,
+                    config,
+                )
+                .expect("CypherIntegerUdf accepts Any(1) signature"),
+            )
         }
         (actual, DataType::Float64) if !actual.is_numeric() && actual != &DataType::Null => {
             wrap_cypher_number(expr, schema)
@@ -8409,6 +8446,7 @@ fn resolve_best_by_criteria(
                 })?;
             Ok(super::df_graph::locy_best_by::SortCriterion {
                 col_index,
+                column: schema.field(col_index).name().clone(),
                 ascending: *ascending,
                 nulls_first: false, // NULLS LAST is Locy default
             })
@@ -10511,6 +10549,116 @@ fn float_equivalence_key(
     }
 }
 
+/// A group key and, when the key is not the value, the aggregate that emits
+/// the group's value ([`equivalence_group_key`]).
+type EquivalenceGroupKey = (
+    Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+    Option<Arc<AggregateFunctionExpr>>,
+);
+
+/// The group key for `expr` under Cypher equivalence, and the aggregate that
+/// emits the group's value when the key is not that value.
+///
+/// A float key is its canonical float ([`float_equivalence_key`]), which is
+/// the value up to the sign of a zero. A `CypherValue` key is its canonical
+/// encoding, in which `1.0` is `1`: grouping on it makes `1` and `1.0` one
+/// group, as openCypher equality requires, but emitting it would replace the
+/// value the query produced. Such a key is returned with a
+/// `_cypher_first_seen` aggregate over `expr`, named `name`, which emits the
+/// first value of the group, as Neo4j does.
+///
+/// # Errors
+///
+/// Returns an error if the expression's type cannot be determined or the
+/// aggregate cannot be built.
+fn equivalence_group_key(
+    expr: Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+    name: &str,
+    schema: &Schema,
+) -> Result<EquivalenceGroupKey> {
+    let field = expr.return_field(schema)?;
+    let key = float_equivalence_key(Arc::clone(&expr), schema)?;
+    if field.data_type() != &DataType::LargeBinary || field.metadata().contains_key("uni_raw_bytes")
+    {
+        return Ok((key, None));
+    }
+    let first_seen = datafusion::physical_expr::aggregate::AggregateExprBuilder::new(
+        Arc::new(crate::query::df_udfs::create_cypher_first_seen_udaf()),
+        vec![expr],
+    )
+    .schema(Arc::new(schema.clone()))
+    .alias(name)
+    .build()?;
+    Ok((key, Some(Arc::new(first_seen))))
+}
+
+/// Deduplicate the rows of `input` under Cypher equivalence: one row per
+/// group of equivalent rows, every column kept in place under its name.
+///
+/// Float columns group on their canonical float and are emitted as it.
+/// CypherValue columns group on their canonical encoding and are emitted as
+/// the group's first-seen value ([`equivalence_group_key`]), so
+/// `UNWIND [1.0, 1] AS x RETURN DISTINCT x` is one row, `1.0`.
+///
+/// # Errors
+///
+/// Returns an error if a key or the aggregate cannot be planned.
+fn plan_equivalence_distinct(input: Arc<dyn ExecutionPlan>) -> Result<Arc<dyn ExecutionPlan>> {
+    let schema = input.schema();
+    let mut groups: Vec<(Arc<dyn datafusion::physical_plan::PhysicalExpr>, String)> = Vec::new();
+    let mut aggs: Vec<Arc<AggregateFunctionExpr>> = Vec::new();
+    // Per input column: `Ok(group index)` or `Err(aggregate index)`.
+    let mut slots: Vec<std::result::Result<usize, usize>> = Vec::new();
+    for (i, f) in schema.fields().iter().enumerate() {
+        let column: Arc<dyn datafusion::physical_plan::PhysicalExpr> = Arc::new(
+            datafusion::physical_expr::expressions::Column::new(f.name(), i),
+        );
+        let (key, first_seen) = equivalence_group_key(column, f.name(), &schema)?;
+        match first_seen {
+            Some(agg) => {
+                // The key is internal; the aggregate carries the column name.
+                groups.push((key, format!("__cypher_group_key_{i}")));
+                slots.push(Err(aggs.len()));
+                aggs.push(agg);
+            }
+            None => {
+                slots.push(Ok(groups.len()));
+                groups.push((key, f.name().clone()));
+            }
+        }
+    }
+    let num_groups = groups.len();
+    let has_first_seen = !aggs.is_empty();
+    let filters = vec![None; aggs.len()];
+    let agg: Arc<dyn ExecutionPlan> = Arc::new(AggregateExec::try_new(
+        AggregateMode::Single,
+        PhysicalGroupBy::new_single(groups),
+        aggs,
+        filters,
+        input,
+        Arc::clone(&schema),
+    )?);
+    if !has_first_seen {
+        return Ok(agg);
+    }
+    let out = agg.schema();
+    let exprs = slots
+        .iter()
+        .zip(schema.fields().iter())
+        .map(|(slot, f)| {
+            let idx = match *slot {
+                Ok(g) => g,
+                Err(a) => num_groups + a,
+            };
+            let col: Arc<dyn datafusion::physical_plan::PhysicalExpr> = Arc::new(
+                datafusion::physical_expr::expressions::Column::new(out.field(idx).name(), idx),
+            );
+            (col, f.name().clone())
+        })
+        .collect::<Vec<_>>();
+    Ok(Arc::new(ProjectionExec::try_new(exprs, agg)?))
+}
+
 /// One equi-pair lowered to hash-join keys.
 struct JoinKeyPair {
     left: Arc<dyn datafusion::physical_plan::PhysicalExpr>,
@@ -10539,10 +10687,10 @@ struct JoinKeyPair {
 ///    CrossJoin, which compares with Cypher-aware UDFs. A pairing whose values
 ///    can never compare equal (a string against a number) also lands here.
 ///
-/// A single key that is equal exactly when Cypher equality holds does not
-/// exist for numbers: `cypher_eq` compares an integer with a float through
-/// `f64`, so it is not transitive above 2^53. Bucket-then-recheck is what
-/// makes the join answer identical to the filter answer.
+/// The numeric bucket key is coarse above 2^53 (an integer is keyed through
+/// the float it rounds to), while `cypher_eq` compares an integer with a
+/// float exactly. Bucket-then-recheck is what makes the join answer identical
+/// to the filter answer.
 fn unify_join_key_types(
     left: Arc<dyn datafusion::physical_plan::PhysicalExpr>,
     right: Arc<dyn datafusion::physical_plan::PhysicalExpr>,

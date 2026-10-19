@@ -3,9 +3,18 @@
 //
 // Runnable repros for the 2026-07-05 correctness scan (uni-query).
 // Each test exercises the real public API (parse -> QueryPlanner::plan ->
-// Executor::execute) with real inputs. Tests that currently observe BUGGY
-// behavior assert the actual (wrong) value with a "// BUG:" comment, or are
-// marked #[ignore] with the correct-behavior assertion so CI stays green.
+// Executor::execute) with real inputs. Every finding here is fixed and no test
+// is ignored: each one asserts the CORRECT behavior and runs in the default
+// tier. A "BUG:" comment beside an assertion describes the defective output the
+// assertion now rules out; it does not mean the test pins that output.
+//
+// Two groups guard less than their names suggest:
+// * [17] and [32] need a plugin virtual label / edge type the default registry
+//   does not provide, so they run the native-schema control only.
+// * The Locy findings [25], [24], [13] and [10] surface at evaluation time,
+//   which is reachable only through the uni-db session; here they only check
+//   that the triggering program plans. Their behavioral guards live in uni-db
+//   and uni-query (see the section comment above them).
 
 #![allow(clippy::all)]
 #![allow(dead_code)]
@@ -1018,13 +1027,15 @@ async fn repro_19_traverse_target_pred_dropped() {
                 "[19] traverse-target WHERE b.p=1 below SKIP -> rows={}, p vals={ps:?}",
                 rows.len()
             );
-            let has_p2 = ps.iter().any(|v| v == &Value::Int(2));
             // BUG: filter dropped -> rows with b.p=2 also present.
-            if has_p2 {
-                println!("[19] REPRODUCED: b.p=2 rows leaked (filter dropped)");
-            }
+            assert!(
+                ps.iter().all(|v| v == &Value::Int(1)),
+                "repro for [19]: WHERE b.p = 1 below SKIP must hold, got p={ps:?}"
+            );
+            // One b with p=1, crossed with the two Z nodes.
+            assert_eq!(rows.len(), 2, "repro for [19]: rows={rows:?}");
         }
-        Err(e) => println!("[19] errored: {e}"),
+        Err(e) => panic!("[19] query must run: {e}"),
     }
 }
 
@@ -1357,7 +1368,7 @@ async fn repro_find19_copy_from_drops_timestamp() {
                 "repro for [19]: Timestamp column dropped by COPY FROM"
             );
         }
-        other => println!("[19] COPY/MATCH not observable in harness: {other:?}"),
+        other => panic!("[19] COPY FROM must import the row: copy={copy_res:?} match={other:?}"),
     }
 }
 
@@ -1489,7 +1500,7 @@ async fn repro_find16_vid_lookup_null_eq_null() {
                 "repro for [16]: NULL join key must not match"
             );
         }
-        Err(e) => println!("[16] not runnable in harness: {e}"),
+        Err(e) => panic!("[16] query must run: {e}"),
     }
 }
 
@@ -1528,7 +1539,7 @@ async fn repro_find35_vector_similarity_under_traverse() {
                 "repro for [35]: similarity filter must be honored under Traverse"
             );
         }
-        Err(e) => println!("[35] not runnable in harness: {e}"),
+        Err(e) => panic!("[35] query must run: {e}"),
     }
 }
 
@@ -1602,8 +1613,21 @@ async fn repro_find32_virtual_edge_both_is_outgoing() {
 // planner: parse_locy -> uni_locy::compile -> LocyPlanBuilder::build_program_plan.
 // The planner-layer bug ([34]) is observable here directly; the runtime-layer
 // bugs ([10]/[13]/[24]/[25]) are only observable through the uni-db session, so
-// their repros exercise the compile+plan-build path (which reaches the relevant
-// planner code) and are marked #[ignore] noting where the buggy OUTPUT surfaces.
+// these tests only check that the triggering program compiles and plans — they
+// would pass with any of those defects back. All four are fixed, and the
+// behavioral guards are elsewhere:
+// * [25] `distinct_multicolumn_duplicates_should_collapse_to_one`
+//   (uni/tests/common/locy/repro_locy_runtime_distinct_debug_dedup.rs).
+// * [24] `topk_mixed_support_group_folds_unsupported_rows_independently`
+//   (unit test in df_graph/locy_fold.rs).
+// * [13] `exact_wmc_resolves_key_and_hash_columns_by_name` (unit test in
+//   df_graph/locy_fixpoint.rs) and
+//   `wmc_shared_lineage_exact_path_with_renamed_fold_output`
+//   (uni/tests/common/locy/repro_locy_runtime_wmc_shared_lineage.rs).
+// * [10] `abduce_multihop_target_var_should_be_correct`
+//   (uni/tests/common/locy/repro_locy_runtime_abduce_target_var.rs) covers
+//   positive ABDUCE (`extract_addition_candidates`); no test drives a multi-hop
+//   ABDUCE NOT through `extract_edge_candidates`.
 // ---------------------------------------------------------------------------
 
 fn build_locy_plan(
@@ -1725,9 +1749,7 @@ async fn repro_find24_mnor_mixed_support_one() {
                 uni_query::query::planner::LogicalPlan::LocyProgram { .. }
             ));
         }
-        Err(e) => {
-            println!("[24] MNOR program not planned in harness (aggregate registration): {e}")
-        }
+        Err(e) => panic!("[24] MNOR program must plan: {e}"),
     }
 }
 
@@ -1735,13 +1757,16 @@ async fn repro_find24_mnor_mixed_support_one() {
 // FINDING [13] locy_fixpoint.rs:2537 — apply_exact_wmc overwrites the PROB column
 // and groups shared-lineage keys by raw yield-schema positions against
 // post-fixpoint batches whose schema differs. Manifests during exact-WMC PROB
-// evaluation (uni-db session); here we pin the OUTPUT PROB trigger.
+// evaluation (uni-db session); here we pin the PROB trigger.
 // ===========================================================================
 #[tokio::test]
 // note: repro for [13]: apply_exact_wmc mis-groups PROB by positional index vs post-fixpoint schema (observed via uni-db session)
 async fn repro_find13_exact_wmc_prob_positions() {
     let h = Harness::new_schemaless().await;
-    let program = "CREATE RULE base AS MATCH (a:N)-[e:R]->(b:N) YIELD KEY a.name AS a, b.name AS b OUTPUT PROB e.w";
+    // The old `... YIELD ... OUTPUT PROB e.w` form never parsed, and the `Err`
+    // arm only printed, so this test passed without planning anything.
+    let program = "CREATE RULE base AS MATCH (a:N)-[e:R]->(b:N) \
+                   YIELD KEY a.name AS a, KEY b.name AS b, e.w AS w PROB";
     match build_locy_plan(h.schema_manager.schema(), program) {
         Ok(plan) => {
             println!(
@@ -1756,7 +1781,7 @@ async fn repro_find13_exact_wmc_prob_positions() {
                 uni_query::query::planner::LogicalPlan::LocyProgram { .. }
             ));
         }
-        Err(e) => println!("[13] OUTPUT PROB program not planned in harness: {e}"),
+        Err(e) => panic!("[13] OUTPUT PROB program must plan: {e}"),
     }
 }
 
@@ -1790,7 +1815,7 @@ async fn repro_find10_abduce_multihop_target_var() {
                 uni_query::query::planner::LogicalPlan::LocyProgram { .. }
             ));
         }
-        Err(e) => println!("[10] ABDUCE program not planned in harness: {e}"),
+        Err(e) => panic!("[10] ABDUCE program must plan: {e}"),
     }
 }
 

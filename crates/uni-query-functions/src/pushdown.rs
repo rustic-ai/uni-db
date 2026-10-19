@@ -487,8 +487,11 @@ impl PredicateAnalyzer {
                     left.as_ref(),
                     Expr::Property(box_expr, _) if matches!(box_expr.as_ref(), Expr::Variable(v) if v == variable)
                 );
-                // Check right side is list or parameter
-                let right_valid = matches!(right.as_ref(), Expr::List(_) | Expr::Parameter(_));
+                // Check right side is a constant list or a parameter. A list
+                // holding another variable's property (`n.i IN [m.f]`) cannot
+                // be evaluated by `n`'s scan.
+                let right_valid =
+                    matches!(right.as_ref(), Expr::Parameter(_)) || is_constant_list(right);
                 left_is_property && right_valid
             }
             Expr::BinaryOp { left, op, right } => {
@@ -532,10 +535,8 @@ impl PredicateAnalyzer {
                         Expr::Literal(CypherLiteral::String(_)) | Expr::Parameter(_)
                     )
                 } else {
-                    matches!(
-                        right.as_ref(),
-                        Expr::Literal(_) | Expr::Parameter(_) | Expr::List(_)
-                    )
+                    matches!(right.as_ref(), Expr::Literal(_) | Expr::Parameter(_))
+                        || is_constant_list(right)
                 };
 
                 left_is_property && right_valid
@@ -1439,6 +1440,17 @@ pub fn substitute_params(expr: &Expr, params: &HashMap<String, Value>) -> Option
         // Leaves with no parameter references — passthrough.
         _ => expr.clone(),
     })
+}
+
+/// Whether `expr` is a list whose items are all literals, parameters or
+/// such lists: a value the scan can evaluate without any other binding.
+fn is_constant_list(expr: &Expr) -> bool {
+    match expr {
+        Expr::List(items) => items.iter().all(|item| {
+            matches!(item, Expr::Literal(_) | Expr::Parameter(_)) || is_constant_list(item)
+        }),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

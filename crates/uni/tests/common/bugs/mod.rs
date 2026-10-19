@@ -193,3 +193,18 @@ pub mod vlp_limit_stops_enumeration;
 pub mod vlp_pinned_endpoint_prunes;
 pub mod vlp_relationship_uniqueness;
 pub mod with_rebinds_entity_names;
+// A label check on a node that arrives as one value (`UNWIND`, a list).
+pub mod unwound_entity_label_check;
+// Two relationship types sharing a property: one `r.w` column, not two.
+pub mod edge_wildcard_shared_property;
+// A procedure called per row: void calls run, yields keep their types.
+pub mod in_query_procedure_call;
+// A WRITE procedure's writes belong to the calling transaction.
+pub mod write_procedure_in_transaction;
+// An algorithm's list and map yields are lists and maps to every consumer.
+pub mod algorithm_list_yield_values;
+// A relationship bound earlier and matched again, with its type undeclared.
+pub mod rebound_relationship_schemaless;
+// A quoted identifier (incl. the doubled-backtick escape) denotes one name
+// across DDL, writes, reads, indexes, constraints and parameters.
+pub mod escaped_identifier_round_trip;

@@ -388,6 +388,46 @@ pub(crate) struct Case {
     pub report: CaseReport,
 }
 
+/// One case in this many is drawn with an ambiguous rule column, the rest
+/// without: 10 of the 96 PR cases, inside the 3%..20% band of
+/// [`floor_failures`].
+///
+/// The band is two-sided, and no independent per-case rate keeps a binomial
+/// count inside it at 96 cases: the generator's own rate (7.5%) fell below 3%
+/// in about one run in 45, and the best rate (10.5%) still leaves one in 250.
+/// A quota makes the count exact, so a missed floor means the generator can no
+/// longer produce the shape — the regression the floor exists to catch.
+const AMBIGUOUS_EVERY: u32 = 10;
+
+/// Draws before [`draw_case`] gives up on the quota and takes the last
+/// program. At the generator's 7.5% rate the chance of 2,000 misses in a row
+/// is below 1e-60, so reaching it means the shape is gone; the floor then
+/// reports it.
+const QUOTA_DRAWS: usize = 2_000;
+
+/// Draws a program that has (`ambiguous`) or lacks an expected
+/// `AmbiguousRuleColumn` error, redrawing up to [`QUOTA_DRAWS`] times.
+fn draw_case(
+    strategy: &impl Strategy<Value = Generated>,
+    runner: &mut TestRunner,
+    ambiguous: bool,
+) -> Generated {
+    let mut draw = || {
+        strategy
+            .new_tree(runner)
+            .expect("the strategy draws a program")
+            .current()
+    };
+    let mut g = draw();
+    for _ in 1..QUOTA_DRAWS {
+        if g.features.contains(&Feature::AmbiguousExpected) == ambiguous {
+            break;
+        }
+        g = draw();
+    }
+    g
+}
+
 /// Draws and runs `cases` programs from `seed`, every one, with no early
 /// stop and no shrinking.
 pub(crate) fn run_cases(cases: u32, seed: u64) -> Vec<Case> {
@@ -405,11 +445,8 @@ pub(crate) fn run_cases(cases: u32, seed: u64) -> Vec<Case> {
     );
     let strategy = random_program_strategy();
     (0..cases)
-        .map(|_| {
-            let g = strategy
-                .new_tree(&mut runner)
-                .expect("the strategy draws a program")
-                .current();
+        .map(|i| {
+            let g = draw_case(&strategy, &mut runner, i % AMBIGUOUS_EVERY == 0);
             let report = rt
                 .block_on(run_case(&g, splitmix(&mut state)))
                 .unwrap_or_else(|e| panic!("infrastructure failure: {e}\n{}", g.program_text));

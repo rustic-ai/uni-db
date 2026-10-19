@@ -31,8 +31,9 @@ fn map(entries: &[(&str, Value)]) -> Value {
     )
 }
 
-/// Elements and list items: numerics around the points where Cypher equality
-/// stops being transitive (2^53) or reflexive (NaN), strings, booleans, nested
+/// Elements and list items: numerics around the points where widening an
+/// integer to a float stops being exact (2^53) and where equality stops being
+/// reflexive (NaN), strings, booleans, nested
 /// lists and maps with and without nulls, and temporals.
 fn values() -> Vec<Value> {
     vec![
@@ -199,8 +200,13 @@ async fn constant_in_list_known_answers() {
         ("{k: 1} IN [{k: null}]", Value::Null),
         ("0.0/0.0 IN [0.0/0.0]", Value::Bool(false)),
         ("9007199254740993 IN [9007199254740992]", Value::Bool(false)),
+        // Numbers compare exactly: `2^53 + 1` is not the float `2^53`.
         (
             "9007199254740993 IN [9007199254740992.0]",
+            Value::Bool(false),
+        ),
+        (
+            "9007199254740992 IN [9007199254740992.0]",
             Value::Bool(true),
         ),
         (

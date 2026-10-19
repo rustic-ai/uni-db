@@ -222,7 +222,7 @@ pub struct FoldExec {
     /// not yet recorded in the `ProvenanceStore` (which is keyed by
     /// post-YIELD hashes anyway). `None` for non-TopK semirings and
     /// for legacy callers.
-    body_support_map: Option<Arc<HashMap<Vec<u8>, Vec<ProofTerm>>>>,
+    body_support_map: Option<Arc<BodySupportMap>>,
     schema: SchemaRef,
     properties: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
@@ -301,7 +301,7 @@ impl FoldExec {
         semiring_kind: SemiringKind,
         provenance_tracker: Option<Arc<super::locy_explain::ProvenanceStore>>,
         top_k_proofs_k: usize,
-        body_support_map: Option<Arc<HashMap<Vec<u8>, Vec<ProofTerm>>>>,
+        body_support_map: Option<Arc<BodySupportMap>>,
     ) -> Self {
         let input_schema = input.schema();
         let schema = Self::build_output_schema(&input_schema, &key_indices, &fold_bindings);
@@ -598,6 +598,79 @@ struct FoldGroups<'a> {
     num_groups: usize,
 }
 
+/// Body-row → IS-ref support for TopKProofs MNOR (Phase D D-C0), keyed by
+/// the row's content over named columns.
+///
+/// Built over the pre-fold facts and read by [`FoldExec`] over its input
+/// batch. Both sides hash the same columns, resolved by name in each batch:
+/// the map was keyed by a positional hash over every column, so a batch whose
+/// columns were reordered or renamed between the two missed every row and
+/// silently folded under independence. A column the reading batch lacks is
+/// an error rather than a hash over a subset, which would merge rows.
+#[derive(Debug, Clone, Default)]
+pub struct BodySupportMap {
+    columns: Vec<String>,
+    rows: HashMap<Vec<u8>, Vec<ProofTerm>>,
+}
+
+impl BodySupportMap {
+    /// An empty map hashing rows over `columns`.
+    pub fn new(columns: Vec<String>) -> Self {
+        Self {
+            columns,
+            rows: HashMap::new(),
+        }
+    }
+
+    /// Where the map's columns sit in `schema`, in the map's order.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `schema` lacks one of the columns.
+    pub fn resolve(&self, schema: &SchemaRef) -> DFResult<Vec<usize>> {
+        self.columns
+            .iter()
+            .map(|name| {
+                schema.index_of(name).map_err(|_| {
+                    datafusion::error::DataFusionError::Internal(format!(
+                        "TopKProofs support map column '{name}' missing from the FOLD \
+                         input (columns: {:?})",
+                        schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
+                    ))
+                })
+            })
+            .collect()
+    }
+
+    /// Records `support` for row `row` of `batch`, whose map columns sit at
+    /// `columns` (from [`Self::resolve`]).
+    pub fn insert(
+        &mut self,
+        batch: &RecordBatch,
+        columns: &[usize],
+        row: usize,
+        support: Vec<ProofTerm>,
+    ) {
+        self.rows.insert(
+            super::locy_fixpoint::fact_hash_key(batch, columns, row),
+            support,
+        );
+    }
+
+    /// The support recorded for row `row` of `batch`, whose map columns sit
+    /// at `columns` (from [`Self::resolve`]).
+    pub fn get(&self, batch: &RecordBatch, columns: &[usize], row: usize) -> Option<&[ProofTerm]> {
+        self.rows
+            .get(&super::locy_fixpoint::fact_hash_key(batch, columns, row))
+            .map(Vec::as_slice)
+    }
+
+    /// Whether no row has support.
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+}
+
 /// Phase D D-C0: per-call context for TopKProofs-aware aggregation.
 /// Carries the K config and a pre-computed body-row → IS-ref support
 /// map so MNOR / MPROD can build per-row `Proof`s and aggregate via
@@ -609,7 +682,7 @@ struct FoldGroups<'a> {
 struct TopKFoldCtx<'a> {
     k: usize,
     batch: &'a RecordBatch,
-    body_support_map: Option<&'a HashMap<Vec<u8>, Vec<ProofTerm>>>,
+    body_support_map: Option<&'a BodySupportMap>,
 }
 
 /// Compute one fold-output column by dispatching through the resolved
@@ -732,7 +805,10 @@ fn topk_dnf_disjunction(
     use uni_locy::{BaseRv, BaseRvSet, Proof};
 
     let batch = ctx.batch;
-    let all_indices: Vec<usize> = (0..batch.num_columns()).collect();
+    let support_columns = ctx
+        .body_support_map
+        .map(|m| m.resolve(&batch.schema()))
+        .transpose()?;
     let mut interner: HashMap<Vec<u8>, BaseRv> = HashMap::new();
     let mut next_rv: u32 = 0;
     let mut base_weights: HashMap<BaseRv, f64> = HashMap::new();
@@ -759,9 +835,12 @@ fn topk_dnf_disjunction(
 
         // Resolve row's IS-ref support via the precomputed body-row map;
         // intern base facts into BaseRvs.
-        let fact_hash = super::locy_fixpoint::fact_hash_key(batch, &all_indices, i);
         let mut base_rvs = BaseRvSet::empty();
-        if let Some(support) = ctx.body_support_map.and_then(|m| m.get(&fact_hash)) {
+        let support = ctx
+            .body_support_map
+            .zip(support_columns.as_deref())
+            .and_then(|(m, columns)| m.get(batch, columns, i));
+        if let Some(support) = support {
             for term in support {
                 let rv = *interner
                     .entry(term.base_fact_id.clone())
@@ -2570,5 +2649,159 @@ mod tests {
         // ordered_keys preserves first-seen order: "a" then "b".
         assert_eq!(col.value(0), 4.0);
         assert_eq!(col.value(1), 0.0);
+    }
+
+    /// A `TopKProofs` noisy-OR group that mixes rows with IS-ref support and a
+    /// row without any.
+    ///
+    /// An unsupported row has an empty `base_rvs` clause, and
+    /// `DependencyDnf::weight` treats an empty clause as trivially true. Fed
+    /// into the DNF with the supported rows, it drove the whole group to `1.0`.
+    /// The unsupported row is instead an independent noisy-OR factor:
+    /// `1 - (1 - dnf) * (1 - w)`.
+    ///
+    /// The public FOLD surface cannot build this group today (support resolves
+    /// through a KEY column, so a group is uniformly supported or not), which
+    /// is why the precondition is constructed here directly.
+    #[test]
+    fn topk_mixed_support_group_folds_unsupported_rows_independently() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Utf8, true),
+            Field::new("w", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("a"), Some("a"), Some("a")])),
+                Arc::new(Float64Array::from(vec![0.5, 0.6, 0.4])),
+            ],
+        )
+        .unwrap();
+        let shared_base = ProofTerm {
+            source_rule: "hub".to_string(),
+            base_fact_id: b"hub-fact-x".to_vec(),
+        };
+        // Rows 0 and 1 share one base fact; row 2 has no support at all.
+        let mut support = BodySupportMap::new(vec!["k".to_string(), "w".to_string()]);
+        let columns = support.resolve(&batch.schema()).unwrap();
+        for row in [0usize, 1] {
+            support.insert(&batch, &columns, row, vec![shared_base.clone()]);
+        }
+        let ctx = TopKFoldCtx {
+            k: 0,
+            batch: &batch,
+            body_support_map: Some(&support),
+        };
+
+        let p = topk_dnf_disjunction(batch.column(1).as_ref(), &[0, 1, 2], false, &ctx)
+            .unwrap()
+            .expect("a non-empty group folds to a probability");
+
+        // The shared base carries the larger of its rows' weights (0.6), so the
+        // DNF over the two supported proofs is 0.6; the unsupported 0.4 row
+        // joins by independent noisy-OR.
+        let expected = 1.0 - (1.0 - 0.6) * (1.0 - 0.4);
+        assert!(
+            (p - expected).abs() < 1e-12,
+            "mixed group should fold to {expected}, got {p} (1.0 means the empty \
+             clause of the unsupported row entered the DNF)"
+        );
+    }
+
+    /// The rows of the mixed-support group above with two rows sharing a
+    /// base fact, the support map built over columns `(k, w)`.
+    fn shared_support_map() -> BodySupportMap {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Utf8, true),
+            Field::new("w", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("a"), Some("a")])),
+                Arc::new(Float64Array::from(vec![0.5, 0.6])),
+            ],
+        )
+        .unwrap();
+        let shared_base = ProofTerm {
+            source_rule: "hub".to_string(),
+            base_fact_id: b"hub-fact-x".to_vec(),
+        };
+        let mut support = BodySupportMap::new(vec!["k".to_string(), "w".to_string()]);
+        let columns = support.resolve(&batch.schema()).unwrap();
+        for row in 0..2 {
+            support.insert(&batch, &columns, row, vec![shared_base.clone()]);
+        }
+        support
+    }
+
+    /// A FOLD input batch with columns `names` over the rows `("a", 0.5)`
+    /// and `("a", 0.6)`, in that column order.
+    fn fold_input(names: [&str; 2], k_first: bool) -> RecordBatch {
+        let k: arrow_array::ArrayRef = Arc::new(StringArray::from(vec![Some("a"), Some("a")]));
+        let w: arrow_array::ArrayRef = Arc::new(Float64Array::from(vec![0.5, 0.6]));
+        let (fields, cols) = if k_first {
+            (
+                vec![
+                    Field::new(names[0], DataType::Utf8, true),
+                    Field::new(names[1], DataType::Float64, true),
+                ],
+                vec![k, w],
+            )
+        } else {
+            (
+                vec![
+                    Field::new(names[1], DataType::Float64, true),
+                    Field::new(names[0], DataType::Utf8, true),
+                ],
+                vec![w, k],
+            )
+        };
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap()
+    }
+
+    /// The support map resolves its columns by name, so a FOLD input with
+    /// its columns in another order still finds each row's support.
+    ///
+    /// Keyed by a positional hash over every column, the reordered batch
+    /// missed both rows and folded them as independent: 1 - 0.5 * 0.4 = 0.8
+    /// instead of the shared-proof 0.6.
+    #[test]
+    fn topk_support_map_resolves_columns_by_name_under_reorder() {
+        let support = shared_support_map();
+        let batch = fold_input(["k", "w"], false);
+        let w_col = batch.schema().index_of("w").unwrap();
+        let ctx = TopKFoldCtx {
+            k: 0,
+            batch: &batch,
+            body_support_map: Some(&support),
+        };
+        let p = topk_dnf_disjunction(batch.column(w_col).as_ref(), &[0, 1], false, &ctx)
+            .unwrap()
+            .expect("a non-empty group folds to a probability");
+        assert!(
+            (p - 0.6).abs() < 1e-12,
+            "the two rows share one base fact, so the group is 0.6; got {p} \
+             (0.8 means the reordered rows missed their support)"
+        );
+    }
+
+    /// A FOLD input that lacks a column the support map was built over is an
+    /// error, not a silent fold under independence.
+    #[test]
+    fn topk_support_map_fails_closed_on_a_renamed_column() {
+        let support = shared_support_map();
+        let batch = fold_input(["k_alias", "w"], true);
+        let ctx = TopKFoldCtx {
+            k: 0,
+            batch: &batch,
+            body_support_map: Some(&support),
+        };
+        let err = topk_dnf_disjunction(batch.column(1).as_ref(), &[0, 1], false, &ctx)
+            .expect_err("a support column missing from the FOLD input must fail");
+        assert!(
+            err.to_string().contains("'k'"),
+            "the error names the missing column: {err}"
+        );
     }
 }

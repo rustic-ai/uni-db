@@ -38,7 +38,7 @@
 use std::sync::Arc;
 
 use arrow_array::{ArrayRef, RecordBatch};
-use arrow_schema::{Field, Schema};
+use arrow_schema::{DataType, Field, Schema};
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::logical_expr::ColumnarValue;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
@@ -57,7 +57,7 @@ use uni_plugin::{FnError, PluginError, PluginRegistrar, QName, SideEffects};
 use crate::procedures_plugin::host_args::arg;
 use crate::query::df_graph::common::exec_err;
 use crate::query::df_graph::procedure_call::{
-    build_typed_column, is_complex_value_type, json_to_value, value_type_to_arrow,
+    algo_yield_field, build_typed_column, json_to_value, value_type_to_arrow,
 };
 use crate::query::executor::procedure_host::QueryProcedureHost;
 
@@ -492,11 +492,16 @@ fn build_algo_record_batch(
                 .unwrap_or(usize::MAX)
         };
 
+        // A list, map or path yield is a `LargeBinary` CypherValue column and
+        // takes the value itself; `json_to_value` would flatten it to text.
+        let structured = matches!(field.data_type(), DataType::LargeBinary);
         let uni_values: Vec<Value> = rows
             .iter()
             .map(|row| {
                 if algo_idx == usize::MAX || algo_idx >= row.values.len() {
                     Value::Null
+                } else if structured {
+                    Value::from(row.values[algo_idx].clone())
                 } else {
                     json_to_value(&row.values[algo_idx])
                 }
@@ -534,15 +539,7 @@ fn build_plugin_signature(
     let yields: Vec<Field> = algo_sig
         .yields
         .iter()
-        .map(|(name, vt)| {
-            let mut field = Field::new((*name).to_owned(), value_type_to_arrow(vt), true);
-            if is_complex_value_type(vt) {
-                let mut metadata = std::collections::HashMap::new();
-                metadata.insert("cv_encoded".to_owned(), "true".to_owned());
-                field = field.with_metadata(metadata);
-            }
-            field
-        })
+        .map(|(name, vt)| algo_yield_field(name, vt))
         .collect();
 
     let plugin_sig = ProcedureSignature {

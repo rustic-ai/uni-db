@@ -11,12 +11,28 @@ fn peek_is(inner: &mut std::iter::Peekable<Pairs<Rule>>, rule: Rule) -> bool {
     inner.peek().is_some_and(|p| p.as_rule() == rule)
 }
 
-/// Strip backticks from identifier_or_keyword tokens.
+/// The name an identifier token denotes.
+///
+/// A bare token is its own name. A backtick-quoted token (`escaped_name` in
+/// `cypher.pest`) loses its enclosing backticks, and each doubled backtick
+/// inside stands for one literal backtick: `` `a``b` `` is the name ``a`b``.
+/// Must be applied exactly once per token: the result of unescaping can itself
+/// look quoted (`` ```x``` `` is the name `` `x` ``).
 pub(crate) fn normalize_identifier(s: &str) -> String {
-    s.strip_prefix('`')
-        .and_then(|s| s.strip_suffix('`'))
-        .unwrap_or(s)
-        .to_string()
+    match s.strip_prefix('`').and_then(|s| s.strip_suffix('`')) {
+        Some(body) => body.replace("``", "`"),
+        None => s.to_string(),
+    }
+}
+
+/// The name an identifier pair denotes; see [`normalize_identifier`].
+fn ident(pair: &Pair<Rule>) -> String {
+    normalize_identifier(pair.as_str())
+}
+
+/// The name a `$parameter` token denotes: `$p`, `$1` or `` $`p q` ``.
+fn parameter_name(pair: &Pair<Rule>) -> String {
+    normalize_identifier(&pair.as_str()[1..])
 }
 
 /// Extract the expression from a `where_clause` pair (skips the WHERE keyword).
@@ -291,7 +307,7 @@ fn build_with_recursive_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
     let mut inner = pair.into_inner();
     inner.next(); // WITH
     inner.next(); // RECURSIVE
-    let name = inner.next().unwrap().as_str().to_string();
+    let name = ident(&inner.next().unwrap());
     inner.next(); // AS
     // Note: parentheses are not separate tokens
     let union_query = inner.next().unwrap();
@@ -314,7 +330,7 @@ fn build_unwind_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
     inner.next(); // UNWIND
     let expr = build_expression(inner.next().unwrap())?;
     inner.next(); // AS
-    let variable = inner.next().unwrap().as_str().to_string();
+    let variable = ident(&inner.next().unwrap());
     Ok(Clause::Unwind(UnwindClause { expr, variable }))
 }
 
@@ -327,7 +343,7 @@ fn build_unwind_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
 fn build_foreach_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
     let mut inner = pair.into_inner();
     inner.next(); // FOREACH
-    let variable = inner.next().unwrap().as_str().to_string();
+    let variable = ident(&inner.next().unwrap());
     inner.next(); // IN
     let expr = build_expression(inner.next().unwrap())?;
     let body = inner
@@ -365,9 +381,9 @@ fn build_property_expr_chain(pair: Pair<Rule>) -> Expr {
     let mut p_inner = pair.into_inner();
     let first_token = p_inner.next().unwrap();
     let var = if first_token.as_str() == "(" {
-        p_inner.next().unwrap().as_str().to_string()
+        ident(&p_inner.next().unwrap())
     } else {
-        first_token.as_str().to_string()
+        ident(&first_token)
     };
     p_inner
         .filter(|p| p.as_str() != ")")
@@ -389,7 +405,7 @@ fn build_set_item(pair: Pair<Rule>) -> Result<SetItem, ParseError> {
                 Rule::plus_eq => {
                     let expr = build_expression(inner.next().unwrap())?;
                     Ok(SetItem::VariablePlus {
-                        variable: first.as_str().to_string(),
+                        variable: ident(&first),
                         value: expr,
                     })
                 }
@@ -421,14 +437,14 @@ fn build_set_item(pair: Pair<Rule>) -> Result<SetItem, ParseError> {
                         .map(|l| normalize_identifier(l.as_str()))
                         .collect();
                     Ok(SetItem::Labels {
-                        variable: first.as_str().to_string(),
+                        variable: ident(&first),
                         labels,
                     })
                 }
                 Rule::eq => {
                     let expr = build_expression(inner.next().unwrap())?;
                     Ok(SetItem::Variable {
-                        variable: first.as_str().to_string(),
+                        variable: ident(&first),
                         value: expr,
                     })
                 }
@@ -460,7 +476,7 @@ fn build_remove_item(pair: Pair<Rule>) -> Result<RemoveItem, ParseError> {
     match first.as_rule() {
         Rule::property_expr => Ok(RemoveItem::Property(build_property_expr_chain(first))),
         Rule::identifier => {
-            let id = first.as_str().to_string();
+            let id = ident(&first);
             let labels_pair = inner.next().unwrap();
             // `node_labels` now wraps `node_label_disjunction |
             // node_label_conjunction`; drill one level deeper to reach
@@ -546,8 +562,14 @@ fn build_call_clause(pair: Pair<Rule>) -> Result<Clause, ParseError> {
             }))
         }
         Rule::qualified_name => {
-            // Procedure variant: CALL qualified_name (...)
-            let procedure = target.as_str().to_string();
+            // Procedure variant: CALL qualified_name (...). Each dotted part
+            // is its own identifier, so `db`.`labels` names db.labels.
+            let procedure = target
+                .clone()
+                .into_inner()
+                .map(|p| ident(&p))
+                .collect::<Vec<_>>()
+                .join(".");
             let mut args = vec![];
             let mut yield_items = vec![];
             let mut where_clause = None;
@@ -626,8 +648,8 @@ pub fn build_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
         Rule::postfix_expression => build_postfix_expression(pair),
         Rule::primary_expression => build_primary_expression(pair),
         Rule::literal => build_literal(pair),
-        Rule::identifier => Ok(Expr::Variable(pair.as_str().to_string())),
-        Rule::parameter => Ok(Expr::Parameter(pair.as_str()[1..].to_string())),
+        Rule::identifier => Ok(Expr::Variable(ident(&pair))),
+        Rule::parameter => Ok(Expr::Parameter(parameter_name(&pair))),
         _ => unreachable!("Unexpected expression rule: {:?}", pair.as_rule()),
     }
 }
@@ -1088,10 +1110,10 @@ fn build_primary_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
         Rule::literal => build_literal(first),
         Rule::function_name => {
             // function_name is atomic, just get the string directly
-            Ok(Expr::Variable(first.as_str().to_string()))
+            Ok(Expr::Variable(ident(&first)))
         }
-        Rule::identifier => Ok(Expr::Variable(first.as_str().to_string())),
-        Rule::parameter => Ok(Expr::Parameter(first.as_str()[1..].to_string())),
+        Rule::identifier => Ok(Expr::Variable(ident(&first))),
+        Rule::parameter => Ok(Expr::Parameter(parameter_name(&first))),
         Rule::case_expression => build_case_expression(first),
         Rule::list_expression => build_list_expression(first),
         Rule::map_literal => build_map_literal(first),
@@ -1371,7 +1393,7 @@ fn build_list_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
         }
         Rule::list_comprehension_body => {
             let mut l_inner = first.into_inner();
-            let var = l_inner.next().unwrap().as_str().to_string();
+            let var = ident(&l_inner.next().unwrap());
             l_inner.next(); // IN
             let source = l_inner.next().unwrap();
 
@@ -1517,7 +1539,7 @@ fn build_quantifier_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
         _ => unreachable!(),
     };
 
-    let variable = inner.next().unwrap().as_str().to_string();
+    let variable = ident(&inner.next().unwrap());
     inner.next(); // IN
     let list = build_expression(inner.next().unwrap())?;
     inner.next(); // WHERE
@@ -1533,11 +1555,11 @@ fn build_quantifier_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
 fn build_reduce_expression(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     let mut inner = pair.into_inner();
     inner.next(); // REDUCE
-    let accumulator = inner.next().unwrap().as_str().to_string();
+    let accumulator = ident(&inner.next().unwrap());
     inner.next(); // =
     let init = build_expression(inner.next().unwrap())?;
     // , skipped
-    let variable = inner.next().unwrap().as_str().to_string();
+    let variable = ident(&inner.next().unwrap());
     inner.next(); // IN
     let list = build_expression(inner.next().unwrap())?;
     inner.next(); // pipe
@@ -1834,7 +1856,7 @@ fn build_node_pattern(pair: Pair<Rule>) -> Result<NodePattern, ParseError> {
 
     for p in pair.into_inner() {
         match p.as_rule() {
-            Rule::identifier => variable = Some(p.as_str().to_string()),
+            Rule::identifier => variable = Some(ident(&p)),
             Rule::node_labels => {
                 // `node_labels` wraps either node_label_disjunction or
                 // node_label_conjunction (see grammar/cypher.pest).
@@ -1893,7 +1915,7 @@ fn build_relationship_pattern(pair: Pair<Rule>) -> Result<RelationshipPattern, P
             Rule::relationship_detail => {
                 for detail in p.into_inner() {
                     match detail.as_rule() {
-                        Rule::identifier => variable = Some(detail.as_str().to_string()),
+                        Rule::identifier => variable = Some(ident(&detail)),
                         Rule::relationship_types => {
                             // Relationship types are always disjunction
                             // semantically — `[r:A|B]` matches edges of
@@ -2021,7 +2043,7 @@ pub(crate) fn build_properties(pair: Pair<Rule>) -> Result<Expr, ParseError> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::map_literal => build_map_literal(inner),
-        Rule::parameter => Ok(Expr::Parameter(inner.as_str()[1..].to_string())),
+        Rule::parameter => Ok(Expr::Parameter(parameter_name(&inner))),
         _ => unreachable!(),
     }
 }
@@ -2107,7 +2129,7 @@ fn build_map_projection_items(pair: Pair<Rule>) -> Result<Vec<MapProjectionItem>
             } else {
                 // Variable selector: just an identifier
                 let first = inner.next().unwrap();
-                Ok(MapProjectionItem::Variable(first.as_str().to_string()))
+                Ok(MapProjectionItem::Variable(ident(&first)))
             }
         })
         .collect()
@@ -2160,12 +2182,16 @@ fn parse_label_binding(inner: &mut std::iter::Peekable<Pairs<Rule>>) -> String {
     }
 }
 
-/// Extract property name from the last segment of a dotted expression.
+/// Extract the property name from the last segment of a `property_expr`.
 ///
-/// e.g., "d.embedding" -> "embedding"
+/// e.g., "d.embedding" -> "embedding". Reads the last identifier token rather
+/// than splitting the text on `.`, which a quoted name may contain
+/// (`` d.`a.b` `` is the property `a.b`).
 fn extract_property_name(pair: Pair<Rule>) -> String {
-    let s = pair.as_str().trim();
-    s.split('.').next_back().unwrap_or(s).trim().to_string()
+    let fallback = pair.as_str().trim().to_string();
+    pair.into_inner()
+        .rfind(|p| matches!(p.as_rule(), Rule::identifier | Rule::identifier_or_keyword))
+        .map_or(fallback, |p| ident(&p))
 }
 
 /// Parse OPTIONS clause if present, returning empty map otherwise.
@@ -2187,7 +2213,7 @@ fn build_create_vector_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseErr
     inner.next(); // VECTOR
     inner.next(); // INDEX
 
-    let name = inner.next().unwrap().as_str().to_string();
+    let name = ident(&inner.next().unwrap());
     let if_not_exists = consume_if_present(&mut inner, Rule::if_not_exists);
     inner.next(); // FOR
 
@@ -2212,7 +2238,7 @@ fn build_create_fulltext_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseE
     inner.next(); // FULLTEXT
     inner.next(); // INDEX
 
-    let name = inner.next().unwrap().as_str().to_string();
+    let name = ident(&inner.next().unwrap());
     let if_not_exists = consume_if_present(&mut inner, Rule::if_not_exists);
     inner.next(); // FOR
 
@@ -2246,12 +2272,12 @@ fn build_create_scalar_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseErr
     inner.next(); // INDEX
 
     let if_not_exists = consume_if_present(&mut inner, Rule::if_not_exists);
-    let name = inner.next().unwrap().as_str().to_string();
+    let name = ident(&inner.next().unwrap());
 
     // FOR clause: expect identifier ":" label
     // Parentheses are not separate tokens
     inner.next(); // FOR
-    let _variable = inner.next().unwrap().as_str().to_string(); // variable name (e.g., "p")
+    let _variable = ident(&inner.next().unwrap()); // variable name (e.g., "p")
     let label = normalize_identifier(inner.next().unwrap().as_str()); // label name (e.g., "Person")
     inner.next(); // ON
 
@@ -2293,14 +2319,14 @@ fn build_create_json_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError
     inner.next(); // FULLTEXT
     inner.next(); // INDEX
 
-    let name = inner.next().unwrap().as_str().to_string();
+    let name = ident(&inner.next().unwrap());
     let if_not_exists = consume_if_present(&mut inner, Rule::if_not_exists);
     inner.next(); // FOR
 
     let _variable = inner.next().unwrap(); // e.g., "a"
     let label = normalize_identifier(inner.next().unwrap().as_str());
     inner.next(); // ON
-    let column = inner.next().unwrap().as_str().to_string();
+    let column = ident(&inner.next().unwrap());
 
     let options = parse_options(&mut inner)?;
 
@@ -2319,7 +2345,7 @@ fn build_drop_index(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> {
     inner.next(); // INDEX
 
     let if_exists = consume_if_present(&mut inner, Rule::if_exists);
-    let name = inner.next().unwrap().as_str().to_string();
+    let name = ident(&inner.next().unwrap());
 
     Ok(SchemaCommand::DropIndex(DropIndex { name, if_exists }))
 }
@@ -2351,7 +2377,7 @@ fn build_create_constraint(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError
     let pattern = inner.next().unwrap();
     let on_relationship = matches!(pattern.as_rule(), Rule::constraint_rel_pattern);
     let mut pat_inner = pattern.into_inner();
-    let var = pat_inner.next().unwrap().as_str().to_string();
+    let var = ident(&pat_inner.next().unwrap());
     let label = normalize_identifier(pat_inner.next().unwrap().as_str());
     inner.next(); // ASSERT
 
@@ -2419,7 +2445,7 @@ fn build_constraint_assertion(
             // Composite form `(a, b) IS [NODE|RELATIONSHIP] [UNIQUE|KEY]`. The
             // parentheses are silent literals, so `first` IS the identifier_list;
             // its inner pairs are the bare property names.
-            let properties = first.into_inner().map(|p| p.as_str().to_string()).collect();
+            let properties = first.into_inner().map(|p| ident(&p)).collect();
             inner.next(); // IS
 
             let mut next = inner.next().unwrap();
@@ -2452,7 +2478,7 @@ fn extract_property_names_from_expr(
             pair.as_rule(),
             Rule::identifier | Rule::identifier_or_keyword
         ) {
-            parts.push(pair.as_str().to_string());
+            parts.push(ident(&pair));
         } else {
             for child in pair.into_inner() {
                 collect_identifiers(child, parts);
@@ -2522,7 +2548,7 @@ fn build_drop_constraint(pair: Pair<Rule>) -> Result<SchemaCommand, ParseError> 
     inner.next(); // CONSTRAINT
 
     let if_exists = consume_if_present(&mut inner, Rule::if_exists);
-    let name = inner.next().unwrap().as_str().to_string();
+    let name = ident(&inner.next().unwrap());
 
     Ok(SchemaCommand::DropConstraint(DropConstraint {
         name,
@@ -2633,7 +2659,7 @@ fn build_alter_action(pair: Pair<Rule>) -> Result<AlterAction, ParseError> {
             let second = inner.next().unwrap();
             match second.as_rule() {
                 Rule::PROPERTY => {
-                    let name = inner.next().unwrap().as_str().to_string();
+                    let name = ident(&inner.next().unwrap());
                     // Check if followed by DESCRIPTION_KW (drop property description)
                     if inner.peek().map(|p| p.as_rule()) == Some(Rule::DESCRIPTION_KW) {
                         inner.next(); // consume DESCRIPTION_KW
@@ -2651,16 +2677,16 @@ fn build_alter_action(pair: Pair<Rule>) -> Result<AlterAction, ParseError> {
         }
         Rule::RENAME => {
             inner.next(); // PROPERTY
-            let old_name = inner.next().unwrap().as_str().to_string();
+            let old_name = ident(&inner.next().unwrap());
             inner.next(); // TO
-            let new_name = inner.next().unwrap().as_str().to_string();
+            let new_name = ident(&inner.next().unwrap());
             Ok(AlterAction::RenameProperty { old_name, new_name })
         }
         Rule::SET => {
             let second = inner.next().unwrap();
             match second.as_rule() {
                 Rule::PROPERTY => {
-                    let name = inner.next().unwrap().as_str().to_string();
+                    let name = ident(&inner.next().unwrap());
                     inner.next(); // DESCRIPTION_KW
                     let string_pair = inner.next().unwrap();
                     let desc = build_string_literal(string_pair)?;
@@ -2848,7 +2874,7 @@ fn build_property_definitions(pair: Pair<Rule>) -> Result<Vec<PropertyDefinition
 
 fn build_property_definition(pair: Pair<Rule>) -> Result<PropertyDefinition, ParseError> {
     let mut inner = pair.into_inner();
-    let name = inner.next().unwrap().as_str().to_string();
+    let name = ident(&inner.next().unwrap());
     let data_type = inner.next().unwrap().as_str().to_string();
 
     let mut nullable = true;

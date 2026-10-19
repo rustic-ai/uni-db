@@ -136,6 +136,67 @@ pub trait ForkBranching: Send + Sync + 'static {
         schema: Arc<ArrowSchema>,
     ) -> Result<()>;
 
+    /// Whether [`Self::stage_on_branch`] and its siblings are implemented.
+    ///
+    /// `false` (the default) leaves a fork's bulk load on the protocol that
+    /// writes visibly.
+    fn stages_on_branch(&self) -> bool {
+        false
+    }
+
+    /// Write `batches` as data files for `branch` without committing them.
+    ///
+    /// The branch counterpart of `StorageBackend::stage_append`: no reader of
+    /// the branch sees the rows until [`Self::publish_on_branch`] commits the
+    /// returned payload. The payload is implementation-private.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the branch does not exist, the write fails, or the
+    /// implementation cannot stage ([`Self::stages_on_branch`] is `false`).
+    async fn stage_on_branch(
+        &self,
+        table: &str,
+        branch: &str,
+        batches: Vec<RecordBatch>,
+    ) -> Result<Box<dyn std::any::Any + Send + Sync>> {
+        let _ = batches;
+        anyhow::bail!("stage_on_branch('{table}', '{branch}'): this backend cannot stage")
+    }
+
+    /// Commit payloads from [`Self::stage_on_branch`] on `branch`, as one
+    /// commit onto the branch's current version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the commit fails, in which case none of the rows
+    /// are visible, or if a payload was not staged by this implementation.
+    async fn publish_on_branch(
+        &self,
+        table: &str,
+        branch: &str,
+        staged: Vec<Box<dyn std::any::Any + Send + Sync>>,
+    ) -> Result<()> {
+        let _ = staged;
+        anyhow::bail!("publish_on_branch('{table}', '{branch}'): this backend cannot stage")
+    }
+
+    /// Delete the files of payloads from [`Self::stage_on_branch`], never
+    /// committing them. Best effort, as for `StorageBackend::discard_staged`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reclaiming the storage failed.
+    async fn discard_on_branch(
+        &self,
+        table: &str,
+        branch: &str,
+        staged: Vec<Box<dyn std::any::Any + Send + Sync>>,
+    ) -> Result<()> {
+        let _ = (table, branch, staged);
+        Ok(())
+    }
+
     /// Widen `branch`'s stored schema: add all-null nullable columns, and/or
     /// relax `NOT NULL` on existing ones.
     ///

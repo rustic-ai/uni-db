@@ -18,3 +18,9 @@ pub mod vlp_fixes_test;
 pub mod vlp_pattern_predicate_investigation;
 pub mod vlp_property_map_oracle;
 pub mod vlp_test;
+// The first node inside a quantified pattern constrains every iteration.
+pub mod qpp_inner_source_constraints;
+// shortestPath / allShortestPaths with a map value computed per row.
+pub mod shortest_path_row_dependent_map;
+// Quantified per-hop maps read over the reachable region.
+pub mod qpp_region_map_oracle;

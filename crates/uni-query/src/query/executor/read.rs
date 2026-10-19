@@ -3784,8 +3784,10 @@ impl Executor {
                     } else {
                         "inf:-".to_string()
                     }
-                } else if f.fract() == 0.0 && *f >= i64::MIN as f64 && *f <= i64::MAX as f64 {
-                    format!("n:{}", *f as i64)
+                } else if let Some(i) = uni_common::f64_to_exact_i64(*f) {
+                    // Exact: the bound `f <= i64::MAX as f64` admitted `2^63`,
+                    // which the cast saturated into `i64::MAX`'s key.
+                    format!("n:{i}")
                 } else {
                     format!("f:{f}")
                 }
@@ -4380,6 +4382,14 @@ impl Executor {
                     self.evaluate_expr(&args[0], row, prop_manager, params, ctx)
                         .await?
                 };
+                if accs[i].wants_percentile()
+                    && let Some(p) = args.get(1)
+                {
+                    let p = self
+                        .evaluate_expr(p, row, prop_manager, params, ctx)
+                        .await?;
+                    accs[i].set_percentile(&p)?;
+                }
                 accs[i].update(&val, is_wildcard)?;
             }
         }

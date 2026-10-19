@@ -412,6 +412,15 @@ fn props_subset(props: &Properties, keys: &HashSet<String>) -> Properties {
     out
 }
 
+/// Reject a write whose property map is keyed by a storage column name
+/// (`uni_common::core::schema::WRITE_RESERVED_PROPERTY_NAMES`). Every vertex
+/// and edge insert path runs this, so CREATE, SET, MERGE and the batch
+/// inserts share one rule. The error stays a typed `UniError` inside the
+/// `anyhow` chain.
+fn check_property_names(props: &Properties) -> Result<()> {
+    uni_common::core::schema::check_written_property_names(props.keys()).map_err(anyhow::Error::new)
+}
+
 /// Output of [`Writer::flush_stream_l1`]: the built (but not yet
 /// published) snapshot manifest and its id. Finalize is responsible
 /// for `save_snapshot` + `set_latest_snapshot` + `cached_manifest`
@@ -2037,6 +2046,7 @@ impl Writer {
         labels: &[String],
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
     ) -> Result<()> {
+        check_property_names(properties)?;
         let schema = self.schema_manager.schema();
 
         // Validate constraints only for known labels
@@ -2068,6 +2078,7 @@ impl Writer {
         labels: &[String],
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
     ) -> Result<()> {
+        check_property_names(touched)?;
         let schema = self.schema_manager.schema();
         for label in labels {
             if schema.get_label_case_insensitive(label).is_none() {
@@ -2197,6 +2208,9 @@ impl Writer {
         if vids.len() != properties_batch.len() {
             return Err(anyhow!("VID/properties length mismatch"));
         }
+        for properties in properties_batch {
+            check_property_names(properties)?;
+        }
 
         let schema = self.schema_manager.schema();
 
@@ -2229,43 +2243,50 @@ impl Writer {
         }
 
         // 2. Build constraint key index from L0 buffers (ONCE for entire batch)
+        //
+        // From the transaction's own buffer, `current`, and the pending-flush
+        // buffers (rows rotated off `current` but not yet in Lance; skipping
+        // them left the Bug #9A window open). Only each vid's newest version
+        // counts: a pending buffer still holding a vid's old `ext_id` or key
+        // after a newer buffer changed or deleted it must not refuse a write
+        // that reuses the freed value. Pass one finds the buffer that decides
+        // each vid; pass two collects keys from those versions alone. A
+        // partial row (`partial_lance_writes`) decides nothing, since it omits
+        // the keys it did not touch, so it is collected and the walk goes on
+        // to older versions -- a superset, which can refuse but never admit.
+        // One buffer lock is held at a time, as before.
         let mut existing_keys: HashMap<String, HashSet<String>> = HashMap::new();
         let mut existing_extids: HashSet<String> = HashSet::new();
-
-        // Scan current L0 buffer
-        {
-            let l0 = self.l0_manager.get_current();
-            let l0_guard = l0.read();
-            Self::collect_constraint_keys_from_properties(
-                l0_guard.vertex_properties.values(),
-                label,
-                &schema.constraints,
-                &mut existing_keys,
-                &mut existing_extids,
-            );
+        let l0_buffers = self.l0_buffers_newest_first(tx_l0);
+        // vid -> index of the buffer whose version of it is newest; `None`
+        // for a tombstone.
+        let mut decided_by: HashMap<Vid, Option<usize>> = HashMap::new();
+        let mut partial_rows: HashSet<(Vid, usize)> = HashSet::new();
+        for (i, l0) in l0_buffers.iter().enumerate() {
+            let guard = l0.read();
+            for vid in &guard.vertex_tombstones {
+                decided_by.entry(*vid).or_insert(None);
+            }
+            for vid in guard.vertex_properties.keys() {
+                if guard.vertex_partial_keys.contains_key(vid) {
+                    if !decided_by.contains_key(vid) {
+                        partial_rows.insert((*vid, i));
+                    }
+                } else {
+                    decided_by.entry(*vid).or_insert(Some(i));
+                }
+            }
         }
-
-        // Scan pending-flush buffers (rows rotated off `current` but not yet in
-        // Lance). The single-vertex paths (check_unique_constraint_multi,
-        // check_extid_globally_unique) consult these; skipping them here left the
-        // Bug #9A window open — a duplicate key/ext_id whose only prior copy sits
-        // on pending_flush would pass batch validation.
-        for pending_l0 in self.l0_manager.get_pending_flush() {
-            let pending_guard = pending_l0.read();
+        for (i, l0) in l0_buffers.iter().enumerate() {
+            let guard = l0.read();
             Self::collect_constraint_keys_from_properties(
-                pending_guard.vertex_properties.values(),
-                label,
-                &schema.constraints,
-                &mut existing_keys,
-                &mut existing_extids,
-            );
-        }
-
-        // Scan transaction L0 if present
-        if let Some(tx_l0) = tx_l0 {
-            let tx_l0_guard = tx_l0.read();
-            Self::collect_constraint_keys_from_properties(
-                tx_l0_guard.vertex_properties.values(),
+                guard
+                    .vertex_properties
+                    .iter()
+                    .filter(|(vid, _)| {
+                        decided_by.get(*vid) == Some(&Some(i)) || partial_rows.contains(&(**vid, i))
+                    })
+                    .map(|(_, props)| props),
                 label,
                 &schema.constraints,
                 &mut existing_keys,
@@ -2292,6 +2313,7 @@ impl Writer {
             MainVertexDataset::find_by_ext_ids_counted(self.storage.backend(), &wanted, None, None)
                 .await?
         };
+        let l0_newest_first = self.l0_buffers_newest_first(tx_l0);
 
         for (idx, (_vid, properties)) in vids.iter().zip(properties_batch.iter()).enumerate() {
             // Check ext_id uniqueness
@@ -2322,7 +2344,9 @@ impl Writer {
                 // error. `find_by_ext_id` already answers `Ok(None)` when the
                 // table is absent (see `main_vertex.rs`), so every `Err` here
                 // is a genuine failure with no benign case to absorb.
-                if let Some(found_vid) = flushed_extids.get(ext_id) {
+                if let Some(found_vid) = flushed_extids.get(ext_id)
+                    && Self::l0_ext_id_verdict(&l0_newest_first, *found_vid, ext_id) != Some(false)
+                {
                     return Err(anyhow!(
                         "Constraint violation at index {}: ext_id '{}' already exists (vertex {:?})",
                         idx,
@@ -2526,21 +2550,19 @@ impl Writer {
         current_vid: Vid,
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
     ) -> Result<()> {
-        // Check L0 buffers: current, transaction, and pending flush
-        let l0_buffers_to_check: Vec<Arc<RwLock<L0Buffer>>> = {
-            let mut buffers = vec![self.l0_manager.get_current()];
-            if let Some(tx_l0) = tx_l0 {
-                buffers.push(tx_l0.clone());
-            }
-            buffers.extend(self.l0_manager.get_pending_flush());
-            buffers
-        };
+        // Check L0 buffers: transaction, current, and pending flush, newest
+        // first, which is the order `l0_ext_id_verdict` reads them in.
+        let l0_buffers_to_check = self.l0_buffers_newest_first(tx_l0);
 
         for l0 in &l0_buffers_to_check {
             // O(1) per buffer via the maintained `extid_index` (the previous
             // full `vertex_properties` scan made constrained ingest O(n²)).
-            if let Some(&vid) = l0.read().extid_index.get(ext_id)
+            // A buffer's index is current only for that buffer: a newer one
+            // may have moved the vid off this `ext_id` or deleted it.
+            let hit = l0.read().extid_index.get(ext_id).copied();
+            if let Some(vid) = hit
                 && vid != current_vid
+                && Self::l0_ext_id_verdict(&l0_buffers_to_check, vid, ext_id) != Some(false)
             {
                 return Err(anyhow!(
                     "Constraint violation: ext_id '{}' already exists (vertex {:?})",
@@ -2554,9 +2576,11 @@ impl Writer {
         // Pass None for global uniqueness check (not snapshot-isolated)
         let backend = self.storage.backend();
         // #233 Tier 1: see the batch path above — a failed probe must not
-        // read as "no duplicate".
+        // read as "no duplicate". A flushed holder whose newer L0 version
+        // gave the `ext_id` up, or deleted the vertex, no longer holds it.
         if let Some(found_vid) = MainVertexDataset::find_by_ext_id(backend, ext_id, None).await?
             && found_vid != current_vid
+            && Self::l0_ext_id_verdict(&l0_buffers_to_check, found_vid, ext_id) != Some(false)
         {
             return Err(anyhow!(
                 "Constraint violation: ext_id '{}' already exists (vertex {:?})",
@@ -2566,6 +2590,49 @@ impl Writer {
         }
 
         Ok(())
+    }
+
+    /// The L0 buffers a write can see, newest first: the transaction's own,
+    /// then `current`, then the pending-flush buffers from newest to oldest.
+    fn l0_buffers_newest_first(
+        &self,
+        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+    ) -> Vec<Arc<RwLock<L0Buffer>>> {
+        let mut buffers: Vec<Arc<RwLock<L0Buffer>>> = tx_l0.cloned().into_iter().collect();
+        buffers.push(self.l0_manager.get_current());
+        // `get_pending_flush` lists the buffers oldest first.
+        buffers.extend(self.l0_manager.get_pending_flush().into_iter().rev());
+        buffers
+    }
+
+    /// Whether `vid` holds `ext_id` according to the newest L0 buffer that
+    /// says anything about it; `None` when no buffer does, so a flushed
+    /// answer stands.
+    ///
+    /// A tombstone answers `false`. A complete property map answers whether
+    /// its `ext_id` is that string. A partial map (`partial_lance_writes`)
+    /// that leaves `ext_id` untouched says nothing about it, so the walk goes
+    /// on to older buffers.
+    fn l0_ext_id_verdict(
+        buffers_newest_first: &[Arc<RwLock<L0Buffer>>],
+        vid: Vid,
+        ext_id: &str,
+    ) -> Option<bool> {
+        for l0 in buffers_newest_first {
+            let guard = l0.read();
+            if guard.vertex_tombstones.contains(&vid) {
+                return Some(false);
+            }
+            let Some(props) = guard.vertex_properties.get(&vid) else {
+                continue;
+            };
+            match props.get("ext_id") {
+                Some(v) => return Some(v.as_str() == Some(ext_id)),
+                None if guard.vertex_partial_keys.contains_key(&vid) => continue,
+                None => return Some(false),
+            }
+        }
+        None
     }
 
     /// Helper to get vertex labels from L0 buffer.
@@ -4080,6 +4147,7 @@ impl Writer {
         }
 
         let start = std::time::Instant::now();
+        check_property_names(&props)?;
         self.check_write_pressure().await?;
         self.check_transaction_memory(tx_l0)?;
         let mut props = props;
@@ -4142,6 +4210,7 @@ impl Writer {
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
     ) -> Result<()> {
         let start = std::time::Instant::now();
+        check_property_names(&properties)?;
         self.check_write_pressure().await?;
         self.check_transaction_memory(tx_l0)?;
         self.freeze_for_non_tx_write_if_pinned(tx_l0).await; // C1 (G4)
@@ -4249,6 +4318,42 @@ impl Writer {
         if self.should_flush() {
             self.flush_to_l1(None).await?;
         }
+        Ok(())
+    }
+
+    /// [`Self::check_flush`] for the time-based background flush task.
+    ///
+    /// With async flush on, a due flush rotates L0 under `flush_lock` and
+    /// writes Lance outside it, through the [`FlushCoordinator`], exactly as
+    /// the commit path's own trigger does. `flush_to_l1` instead holds
+    /// `flush_lock` across the whole Lance write, and a commit waits for that
+    /// lock for at most `commit_timeout`: one background flush slower than
+    /// that (a loaded machine, a slow disk, a debug build) failed a user
+    /// commit with `CommitTimeout` although no other commit was running.
+    ///
+    /// Does not wait for the flush to land. When the pipeline is full the
+    /// flush is skipped; the next tick retries it. Without async flush this
+    /// is [`Self::check_flush`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the rotate or the inline flush fails.
+    pub async fn check_flush_in_background(self: &Arc<Self>) -> Result<()> {
+        let Some(coord) = self
+            .flush_coordinator
+            .as_ref()
+            .filter(|_| self.config.async_flush_enabled)
+        else {
+            return self.check_flush().await;
+        };
+        if !self.should_flush() {
+            return Ok(());
+        }
+        if coord.pending_flush_count() >= self.config.max_pending_flushes {
+            metrics::counter!("uni_flush_trigger_skipped_total").increment(1);
+            return Ok(());
+        }
+        let _ticket = self.flush_to_l1_async(None).await?;
         Ok(())
     }
 

@@ -530,3 +530,120 @@ async fn recursion_semi_naive_yield_arithmetic_keeps_integers() -> Result<()> {
     }
     Ok(())
 }
+
+/// BEST BY over a cyclic graph whose cheapest paths are found late: the
+/// incremental merge keeps exactly the shortest distance per node.
+///
+/// `merge_best_by` keeps the held best row of every KEY in an index and
+/// displaces it from its fact batch when a candidate is strictly better,
+/// instead of re-sorting all facts per merge. The graph mixes cheap long
+/// paths, expensive short-cuts (each node is first reached expensively and
+/// then improved, often several times, so rows are displaced from many
+/// batches) and back edges (cycles, so dominated re-derivations arrive every
+/// iteration). Distances are checked against Dijkstra.
+#[tokio::test(flavor = "multi_thread")]
+async fn recursion_semi_naive_best_by_matches_dijkstra_with_improvements() -> Result<()> {
+    let n = 60usize;
+    let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    let mut edges: Vec<Value> = Vec::new();
+    let mut add = |a: usize, b: usize, w: f64, edges: &mut Vec<Value>| {
+        adj[a].push((b, w));
+        edges.push(edge(&format!("c{a}"), &format!("c{b}"), w));
+    };
+    for i in 0..n {
+        // Cheap step forward, an expensive jump, and a back edge.
+        if i + 1 < n {
+            add(i, i + 1, 1.0 + (i % 3) as f64, &mut edges);
+        }
+        if i + 5 < n {
+            add(i, i + 5, 4.0 + (i * 7 % 11) as f64, &mut edges);
+        }
+        if i >= 3 {
+            add(i, i - 3, 0.5 + (i % 4) as f64, &mut edges);
+        }
+    }
+    // Dijkstra from c0 (the seed's out-edges start every path).
+    let mut dist = vec![f64::INFINITY; n];
+    let mut done = vec![false; n];
+    dist[0] = 0.0;
+    for _ in 0..n {
+        let Some(u) = (0..n)
+            .filter(|&v| !done[v] && dist[v].is_finite())
+            .min_by(|&a, &b| dist[a].total_cmp(&dist[b]))
+        else {
+            break;
+        };
+        done[u] = true;
+        for &(v, w) in &adj[u] {
+            if dist[u] + w < dist[v] {
+                dist[v] = dist[u] + w;
+            }
+        }
+    }
+
+    let db = Uni::in_memory().build().await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE LABEL E (uid STRING, seed BOOL)").await?;
+    tx.execute("CREATE EDGE TYPE T (w FLOAT) FROM E TO E")
+        .await?;
+    tx.commit().await?;
+    let tx = db.session().tx().await?;
+    tx.execute_with("UNWIND $rows AS r CREATE (:E {uid: r.uid, seed: r.seed})")
+        .param(
+            "rows",
+            Value::List((0..n).map(|i| vertex(&format!("c{i}"), i == 0)).collect()),
+        )
+        .run()
+        .await?;
+    tx.execute_with(
+        "UNWIND $rows AS r MATCH (a:E {uid: r.a}), (b:E {uid: r.b}) \
+         CREATE (a)-[:T {w: r.w}]->(b)",
+    )
+    .param("rows", Value::List(edges))
+    .run()
+    .await?;
+    tx.commit().await?;
+
+    let program = "\
+CREATE RULE d AS MATCH (a:E)-[r:T]->(b:E) WHERE a.seed = true ALONG c = r.w BEST BY c ASC YIELD KEY b, c \n\
+CREATE RULE d AS MATCH (o:E)-[r:T]->(b:E) WHERE o IS d ALONG c = prev.c + r.w BEST BY c ASC YIELD KEY b, c \n\
+QUERY d RETURN b.uid AS uid, c";
+    let (result, rules) = profile(&db, program).await?;
+    // c0 is reached again only through a back edge (c3 -> c0).
+    let mut expected: Vec<(String, f64)> = (0..n)
+        .filter(|&i| i != 0 || dist[3].is_finite())
+        .map(|i| {
+            let d = if i == 0 {
+                // A path back to the seed: shortest cycle through c0.
+                (3..n)
+                    .filter(|&u| adj[u].iter().any(|&(v, _)| v == 0))
+                    .map(|u| dist[u] + adj[u].iter().find(|&&(v, _)| v == 0).unwrap().1)
+                    .fold(f64::INFINITY, f64::min)
+            } else {
+                dist[i]
+            };
+            (format!("c{i}"), d)
+        })
+        .collect();
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    let got = uid_numbers(&result, "c");
+    assert_eq!(
+        got.len(),
+        expected.len(),
+        "one fact per reached node: {got:?}"
+    );
+    for ((gu, gc), (eu, ec)) in got.iter().zip(&expected) {
+        assert_eq!(gu, eu);
+        assert!(
+            (gc - ec).abs() < 1e-9,
+            "{gu}: BEST BY kept {gc}, the shortest distance is {ec}"
+        );
+    }
+    // Improvements happened: more delta rows than facts.
+    let deltas: usize = rules["d"].iter().map(|it| it.delta).sum();
+    assert!(
+        deltas > n,
+        "the fixture should improve held rows ({deltas} delta rows for {n} facts)"
+    );
+    Ok(())
+}

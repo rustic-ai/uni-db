@@ -15,7 +15,7 @@
 //! is the verbatim query text by design.
 
 /// The AST's `Debug` form with every `source_text: Some("…")` value removed.
-fn debug_without_source_text(dbg: &str) -> String {
+pub(crate) fn debug_without_source_text(dbg: &str) -> String {
     const OPEN: &str = "source_text: Some(\"";
     let mut out = String::new();
     let mut rest = dbg;

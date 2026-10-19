@@ -1,4 +1,5 @@
 pub mod btic_cypher_test;
+pub mod locy_abduce_identity;
 pub mod locy_assume_incremental;
 pub mod locy_assume_module_context;
 pub mod locy_assume_params;
@@ -109,3 +110,5 @@ pub mod locy_fold_reads_numbers;
 pub mod locy_fold_any_column_type;
 pub mod locy_value_types;
 pub mod locy_yield_list_values;
+// Locy compares an integer with a float by exact value, as Cypher does.
+pub mod locy_numeric_exact;

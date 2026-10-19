@@ -66,6 +66,16 @@ macro_rules! define_id_filter {
                 }
             }
 
+            /// Approximate heap bytes the filter holds, for memory accounting.
+            pub fn approx_bytes(&self) -> usize {
+                match self {
+                    Self::AllAllowed => 0,
+                    Self::DenseBitVec(bv) => bv.len() / 8,
+                    // A hash set slot is the key plus control bytes.
+                    Self::Sparse(set) => set.capacity() * (std::mem::size_of::<u64>() + 1),
+                }
+            }
+
             /// Build a filter from a list of raw u64 IDs.
             ///
             /// Uses a density heuristic to choose between DenseBitVec (>12.5% density)

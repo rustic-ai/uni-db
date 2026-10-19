@@ -475,7 +475,7 @@ async fn ext_id_on_labelled_nodes_survives_promote() -> Result<()> {
 }
 
 /// Write `key: 7` on a vertex and on an edge, then compare the reads of it
-/// before and after a flush; returns the mismatches (writes refused are skipped).
+/// before and after a flush; returns the mismatches, a refused write among them.
 async fn reserved_name_round_trip(key: &str) -> Result<Vec<String>> {
     let mut failures = Vec::new();
     for (write, read) in [
@@ -495,8 +495,9 @@ async fn reserved_name_round_trip(key: &str) -> Result<Vec<String>> {
         let session = db.session();
         seed(&session).await?;
         let tx = session.tx().await?;
-        if tx.execute(&write).await.is_err() {
+        if let Err(e) = tx.execute(&write).await {
             tx.rollback();
+            failures.push(format!("`{write}` refused: {e}"));
             continue;
         }
         tx.commit().await?;
@@ -515,30 +516,204 @@ async fn reserved_name_round_trip(key: &str) -> Result<Vec<String>> {
 ///
 /// `ext_id` was the one reserved name a flush split out of `overflow_json`.
 /// Probed 2026-10-18: `op`, `eid`, `src_vid` and `dst_vid` round-trip on both
-/// a vertex and an edge, so none shares the split.
+/// a vertex and an edge, so none shares the split. So do the main-table
+/// column names `type`, `labels` and `props_json`, which is why none of these
+/// is in `WRITE_RESERVED_PROPERTY_NAMES`: this test pins that the write-time
+/// refusal stays off names that work.
 #[tokio::test]
 async fn ext_id_on_labelled_nodes_other_reserved_names_round_trip() -> Result<()> {
     let mut failures = Vec::new();
-    for key in ["op", "eid", "src_vid", "dst_vid"] {
+    for key in [
+        "op",
+        "eid",
+        "src_vid",
+        "dst_vid",
+        "type",
+        "labels",
+        "props_json",
+    ] {
         failures.extend(reserved_name_round_trip(key).await?);
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
     Ok(())
 }
 
-/// A user property named `overflow_json` is accepted at write and then
-/// confused with the storage blob of the same name.
+/// Every vertex and edge with its keys; what a refused write must not change.
+async fn trace(session: &Session) -> Result<Vec<String>> {
+    let mut out = bag(session, "MATCH (n) RETURN labels(n), n.id, keys(n)").await?;
+    out.extend(bag(session, "MATCH ()-[r]->() RETURN type(r), keys(r)").await?);
+    Ok(out)
+}
+
+/// A property named after a storage column is refused at write, on every
+/// write path, with a typed error, and leaves nothing behind.
 ///
-/// Probed 2026-10-18 (`{overflow_json: 7}`): `n.overflow_json` and
-/// `r.overflow_json` read NULL in both states; `properties(n)` holds 7 in
-/// both; `properties(r)` holds 7 unflushed and, flushed, the raw encoded
-/// `overflow_json` blob as a list of byte values. `declare_property` rejects
-/// the name, but CREATE / SET do not. A different defect from the `ext_id`
-/// split (a name collision, not a column the read path ignored), left open.
+/// Probed 2026-10-18 (`{overflow_json: 7}`): the write was accepted and then
+/// confused with the storage blob of the same name -- `n.overflow_json` and
+/// `r.overflow_json` read NULL in both states; `properties(n)` held 7;
+/// `properties(r)` held 7 unflushed and, flushed, the raw encoded blob as a
+/// list of byte values. The `_`-prefixed storage columns (`_vid`, `_uid`,
+/// `_deleted`, ...) were accepted too, then dropped on a declared label,
+/// hidden from `keys()` on a schemaless one, or shadowed by the system value
+/// (`n._vid` read the vertex id). `declare_property` already refused all of
+/// them; the write paths now refuse them the same way.
 #[tokio::test]
-#[ignore = "open: a user property named `overflow_json` collides with the storage blob"]
-async fn ext_id_on_labelled_nodes_overflow_json_name_round_trip() -> Result<()> {
-    let failures = reserved_name_round_trip("overflow_json").await?;
+async fn ext_id_on_labelled_nodes_reserved_storage_names_are_refused_at_write() -> Result<()> {
+    use uni_db::{EdgeData, UniError};
+
+    fn refused(what: &str, key: &str, r: Result<(), UniError>, failures: &mut Vec<String>) {
+        match r {
+            Err(UniError::InvalidIdentifier { name, .. }) if name == key => {}
+            other => failures.push(format!("{what} `{key}`: {other:?}")),
+        }
+    }
+
+    let mut failures = Vec::new();
+    for &key in uni_db::core::schema::WRITE_RESERVED_PROPERTY_NAMES {
+        let db = Uni::in_memory().config(config()).build().await?;
+        let session = db.session();
+        seed(&session).await?;
+        let before = trace(&session).await?;
+        for stmt in [
+            format!("CREATE (:N {{id: 50, `{key}`: 7}})"),
+            format!("CREATE (:M {{id: 50, `{key}`: 7}})"),
+            format!("CREATE ({{id: 50, `{key}`: 7}})"),
+            format!("MERGE (n:N {{id: 50, `{key}`: 7}})"),
+            format!("MERGE (n:N {{id: 50}}) ON CREATE SET n.`{key}` = 7"),
+            format!("MATCH (n:N {{id: 1}}) SET n.`{key}` = 7"),
+            format!("MATCH (n:M {{id: 1}}) SET n.`{key}` = 7"),
+            format!("MATCH (n:N {{id: 1}}) SET n += {{`{key}`: 7}}"),
+            format!("MATCH (n:N {{id: 1}}) SET n = {{id: 1, `{key}`: 7}}"),
+            format!("MATCH (a:N {{id: 1}}), (b:N {{id: 3}}) CREATE (a)-[:R {{`{key}`: 7}}]->(b)"),
+            format!("MATCH (a:M {{id: 1}}), (b:M {{id: 3}}) CREATE (a)-[:Q {{`{key}`: 7}}]->(b)"),
+            format!("MATCH (:N {{id: 1}})-[r:R]->() SET r.`{key}` = 7"),
+        ] {
+            let tx = session.tx().await?;
+            let r = tx.execute(&stmt).await.map(|_| ());
+            tx.rollback();
+            refused(&stmt, key, r, &mut failures);
+        }
+
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), Value::Int(60));
+        row.insert(key.to_string(), Value::Int(7));
+        let tx = session.tx().await?;
+        let r = tx
+            .bulk_insert_vertices("N", vec![row.clone()])
+            .await
+            .map(|_| ());
+        tx.rollback();
+        refused("Transaction::bulk_insert_vertices", key, r, &mut failures);
+
+        let vids: Vec<_> = {
+            let r = session
+                .query("MATCH (n:N) WHERE n.id IN [1, 3] RETURN id(n) AS v ORDER BY n.id")
+                .await?;
+            r.rows()
+                .iter()
+                .map(|row| match row.values()[0] {
+                    Value::Int(v) => uni_db::Vid::from(v as u64),
+                    ref o => panic!("{o:?}"),
+                })
+                .collect()
+        };
+        let mut edge_props = HashMap::new();
+        edge_props.insert(key.to_string(), Value::Int(7));
+        let tx = session.tx().await?;
+        let r = tx
+            .bulk_insert_edges("R", vec![(vids[0], vids[1], edge_props.clone())])
+            .await;
+        tx.rollback();
+        refused("Transaction::bulk_insert_edges", key, r, &mut failures);
+
+        let tx = session.tx().await?;
+        let mut bulk = tx.bulk_writer().build()?;
+        let r = bulk
+            .insert_vertices("N", vec![row.clone()])
+            .await
+            .map(|_| ())
+            .map_err(|e| e.downcast::<UniError>().unwrap_or_else(UniError::Internal));
+        refused("BulkWriter::insert_vertices", key, r, &mut failures);
+        let r = bulk
+            .insert_edges(
+                "R",
+                vec![EdgeData::new(vids[0], vids[1], edge_props.clone())],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.downcast::<UniError>().unwrap_or_else(UniError::Internal));
+        refused("BulkWriter::insert_edges", key, r, &mut failures);
+        bulk.abort().await?;
+        tx.rollback();
+
+        let tx = session.tx().await?;
+        let mut appender = tx.appender("N").build()?;
+        appender.append(row.clone()).await?;
+        let r = appender.finish().await.map(|_| ());
+        tx.rollback();
+        refused("StreamingAppender::finish", key, r, &mut failures);
+
+        // Nothing a refused write touched is visible, before or after a flush.
+        assert_eq!(
+            trace(&session).await?,
+            before,
+            "`{key}`: a refused write left a trace"
+        );
+        db.flush().await?;
+        assert_eq!(
+            trace(&session).await?,
+            before,
+            "`{key}`: a refused write left a trace after flush"
+        );
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+/// A flushed edge whose type declares no properties reports its undeclared
+/// properties and nothing else.
+///
+/// The planner asks for `overflow_json` beside `_all_props` for such a type,
+/// and the property reader answered that request by storing the blob itself,
+/// as a list of byte values, in the edge's property map. So after a flush,
+/// `keys(r)`, `properties(r)` and the returned relationship all carried an
+/// `overflow_json` entry, and a SET on the edge staged it back as a property.
+#[tokio::test]
+async fn ext_id_on_labelled_nodes_flushed_edge_does_not_expose_overflow_blob() -> Result<()> {
+    let db = Uni::in_memory().config(config()).build().await?;
+    let session = db.session();
+    seed(&session).await?;
+    run(
+        &session,
+        "MATCH (a:N {id: 1}), (b:N {id: 3}) CREATE (a)-[:R {u: 2}]->(b)",
+    )
+    .await?;
+    let reads = [
+        "MATCH (:N {id: 1})-[r:R]->(:N {id: 3}) RETURN keys(r), properties(r), r",
+        "MATCH ()-[r:R]->() WHERE r.u = 2 RETURN keys(r), properties(r), r",
+        "MATCH (:N {id: 1})-[r]->(:N {id: 3}) RETURN keys(r), properties(r)",
+    ];
+    let mut want = Vec::new();
+    for q in reads {
+        want.push(bag(&session, q).await?);
+    }
+    assert_eq!(
+        want[0],
+        vec!["[[String(\"u\")], {u:Int(2)}, [R{u:Int(2)}]]"]
+    );
+    db.flush().await?;
+    for (q, w) in reads.iter().zip(&want) {
+        assert_eq!(&bag(&session, q).await?, w, "flushed: `{q}`");
+    }
+    run(
+        &session,
+        "MATCH (:N {id: 1})-[r:R]->(:N {id: 3}) SET r.z = 9",
+    )
+    .await?;
+    db.flush().await?;
+    assert_eq!(
+        bag(&session, reads[0]).await?,
+        vec!["[[String(\"u\"),String(\"z\")], {u:Int(2),z:Int(9)}, [R{u:Int(2),z:Int(9)}]]"]
+    );
     Ok(())
 }

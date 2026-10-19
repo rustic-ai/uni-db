@@ -498,7 +498,12 @@ pub fn random_program_strategy() -> impl Strategy<Value = Generated> {
                 any::<bool>(),
                 any::<bool>(),
                 any::<[bool; 3]>(),
-                any::<[bool; 3]>(),
+                // `along` is weighted up: `cost` is non-empty only when the
+                // graph also has an ascending first-type edge, and at even
+                // odds it was non-empty in 36% of cases, which missed its 20%
+                // coverage floor in about one 96-case run in 3,000. At 0.65
+                // it is 48%, and a miss is below one in a million.
+                (proptest::bool::weighted(0.65), any::<bool>(), any::<bool>()),
                 proptest::option::of(any::<bool>()),
                 (any::<[bool; 7]>(), any::<u64>()),
                 (
@@ -516,7 +521,7 @@ pub fn random_program_strategy() -> impl Strategy<Value = Generated> {
                 union,
                 negation,
                 folds,
-                [along, rollup, prob],
+                (along, rollup, prob),
                 best,
                 (families, entropy),
                 (
@@ -1465,8 +1470,11 @@ impl Families {
             self.prev_beside_value();
         }
         if self.on[5] {
-            let int = self.d.chance(70);
-            let string = !int || self.d.chance(40);
+            // Both kinds in most family cases. Each has a 15% coverage
+            // floor; at 70/40 odds the string kind reached 29% of cases and
+            // missed it in about one 96-case run in 1,100.
+            let int = self.d.chance(75);
+            let string = !int || self.d.chance(70);
             if int {
                 self.scalar_keys(ColKind::Int);
             }

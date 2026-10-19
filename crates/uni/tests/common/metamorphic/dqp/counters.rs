@@ -8,11 +8,21 @@
 //! and always read zero (`docs/perf/dqp-feasibility-2026-08-12.md` §4). Nothing
 //! caught it because nothing asserted on them. These tests are the assertion.
 
-use uni_db::{DataType, Uni};
+use uni_db::{DataType, Uni, UniConfig};
 
 /// A small flushed fixture: `n` `Person` rows in L1, nothing dirty.
 async fn flushed_db(n: usize) -> anyhow::Result<Uni> {
-    let db = Uni::temporary().build().await?;
+    // No timer flush: a later test write must stay in L0, and a background
+    // flush in flight makes a scan count the rows of both the pending L0 and
+    // the Lance version already written, so exact counters would depend on
+    // timing.
+    let db = Uni::temporary()
+        .config(UniConfig {
+            auto_flush_interval: None,
+            ..Default::default()
+        })
+        .build()
+        .await?;
     db.schema()
         .label("Person")
         .property("name", DataType::String)

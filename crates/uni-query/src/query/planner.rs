@@ -739,8 +739,10 @@ fn validate_function_call(name: &str, args: &[Expr], vars_in_scope: &[VariableIn
     Ok(())
 }
 
-/// Check if an expression is a non-boolean literal.
-fn is_non_boolean_literal(expr: &Expr) -> bool {
+/// Whether `expr` is a number, string, list or map literal, which openCypher
+/// rejects at compile time as an operand of `AND`/`OR`/`XOR`/`NOT` (TCK
+/// Boolean1-4).
+pub(crate) fn is_non_boolean_literal(expr: &Expr) -> bool {
     matches!(
         expr,
         Expr::Literal(CypherLiteral::Integer(_))
@@ -1376,7 +1378,28 @@ fn build_merge_scope(pattern: &Pattern, vars_in_scope: &[VariableInfo]) -> Vec<V
     scope
 }
 
+/// Refuse `SET x.k = …` when `k` names a storage column.
+///
+/// The writer refuses such a property on every insert path, but a SET on a
+/// `_`-prefixed system column (`n._deleted`) fails earlier, while the scan
+/// under it projects that column with its storage type, so the typed refusal
+/// is raised here, at plan time, for a literal target.
+fn reject_reserved_set_target(item: &SetItem) -> Result<()> {
+    if let SetItem::Property {
+        expr: Expr::Property(_, name),
+        ..
+    } = item
+        && uni_common::core::schema::WRITE_RESERVED_PROPERTY_NAMES.contains(&name.as_str())
+    {
+        return Err(anyhow::Error::new(
+            uni_common::UniError::reserved_property_name(name),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_merge_set_item(item: &SetItem, vars_in_scope: &[VariableInfo]) -> Result<()> {
+    reject_reserved_set_target(item)?;
     match item {
         SetItem::Property { expr, value } => {
             validate_expression_variables(expr, vars_in_scope)?;
@@ -1663,6 +1686,12 @@ fn validate_expression(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Result<()
 /// Used by `LogicalPlan::Traverse` when `qpp_steps` is `Some`.
 #[derive(Debug, Clone)]
 pub struct QppStepInfo {
+    /// Label the node starting each iteration must carry — the inner source's
+    /// label in `((x:L)-[:R]->(y)){n}`. Set on the first step only; the walk
+    /// checks it whenever it leaves an iteration boundary, so it holds for the
+    /// outer source and for every node where one iteration ends and the next
+    /// begins, but not for the node the last iteration ends on.
+    pub source_label: Option<String>,
     /// Edge type IDs that this step can traverse.
     pub edge_type_ids: Vec<u32>,
     /// Traversal direction for this step.
@@ -2188,7 +2217,13 @@ pub enum LogicalPlan {
         /// `-[:E {tag: 'keep'}]->`. Evaluated *during* expansion, not after:
         /// the shortest path among permitted edges is not the unconstrained
         /// shortest path filtered. `None` when the pattern carries no map.
+        /// Holds the map's walk-constant entries only.
         edge_filter_expr: Option<Expr>,
+        /// The map's entries whose value is computed per row, `{w: a.x}`, as
+        /// the property name and the value. They gate the search too: rows
+        /// are searched per distinct set of these values. Empty when every
+        /// entry is a literal or a parameter.
+        edge_row_conditions: Vec<(String, Expr)>,
         /// Whether the pattern belongs to an `OPTIONAL MATCH`. A mandatory
         /// match drops a pair with no path, as openCypher does; an optional
         /// one keeps it with a NULL path, for the clause's closing operator to
@@ -2223,7 +2258,13 @@ pub enum LogicalPlan {
         /// `-[:E {tag: 'keep'}]->`. Evaluated *during* expansion, not after:
         /// the shortest path among permitted edges is not the unconstrained
         /// shortest path filtered. `None` when the pattern carries no map.
+        /// Holds the map's walk-constant entries only.
         edge_filter_expr: Option<Expr>,
+        /// The map's entries whose value is computed per row, `{w: a.x}`, as
+        /// the property name and the value. They gate the search too: rows
+        /// are searched per distinct set of these values. Empty when every
+        /// entry is a literal or a parameter.
+        edge_row_conditions: Vec<(String, Expr)>,
         /// Whether the pattern belongs to an `OPTIONAL MATCH`. A mandatory
         /// match drops a pair with no path, as openCypher does; an optional
         /// one keeps it with a NULL path, for the clause's closing operator to
@@ -2670,6 +2711,41 @@ fn split_walk_constant_entries(properties: &Option<Expr>) -> (Option<Expr>, Vec<
         .cloned()
         .partition(|(_, value)| is_walk_constant_map_value(value));
     ((!constant.is_empty()).then_some(Expr::Map(constant)), rest)
+}
+
+/// The filter that ties a re-matched relationship to its earlier binding.
+///
+/// A relationship named by an earlier clause is walked under the name
+/// `__rebound_{name}`; the predicate keeps a row when that edge is the bound
+/// one (`edge`), or when that edge list is the bound list (`edge_list`, a
+/// variable-length pattern over `WITH [r1, r2] AS rs`). `None` when neither
+/// is set.
+fn rebound_relationship_check(edge: Option<&str>, edge_list: Option<&str>) -> Option<Expr> {
+    let eid = |var: &str| Expr::Property(Box::new(Expr::Variable(var.to_string())), "_eid".into());
+    if let Some(bv) = edge {
+        return Some(Expr::BinaryOp {
+            left: Box::new(eid(&format!("__rebound_{bv}"))),
+            op: BinaryOp::Eq,
+            right: Box::new(eid(bv)),
+        });
+    }
+    let bv = edge_list?;
+    let eids = |list: String, item: &str| Expr::ListComprehension {
+        variable: item.to_string(),
+        list: Box::new(Expr::Variable(list)),
+        where_clause: None,
+        map_expr: Box::new(Expr::FunctionCall {
+            name: "toInteger".to_string(),
+            args: vec![eid(item)],
+            distinct: false,
+            window_spec: None,
+        }),
+    };
+    Some(Expr::BinaryOp {
+        left: Box::new(eids(format!("__rebound_{bv}"), "__rebound_edge")),
+        op: BinaryOp::Eq,
+        right: Box::new(eids(bv.to_string(), "__bound_edge")),
+    })
 }
 
 /// Whether a relationship pattern's property map has an entry a walk cannot test.
@@ -3143,26 +3219,29 @@ impl QueryPlanner {
     /// name. Used by the procedure-call replacement-scan gate to decide
     /// whether to consult before substituting.
     fn procedure_resolves(&self, user_name: &str) -> bool {
-        let Some(registry) = self.plugin_registry.as_ref() else {
-            return false;
-        };
+        self.resolve_plugin_procedure(user_name).is_some()
+    }
+
+    /// The plugin registry's entry for a user-typed procedure name, under the
+    /// namespace rules of [`Self::procedure_resolves`]; `None` when no plugin
+    /// claims it (a legacy registered procedure, or an unknown name).
+    fn resolve_plugin_procedure(
+        &self,
+        user_name: &str,
+    ) -> Option<Arc<uni_plugin::registry::ProcedureEntry>> {
+        let registry = self.plugin_registry.as_ref()?;
         // Try every namespace/local split (first-dot → last-dot) so dotted
         // plugin ids resolve alongside the first-dot M9/builtin convention.
         // Mirrors `ProcedureRegistry::resolve_user_procedure`.
-        if uni_plugin::QName::candidate_splits(user_name).any(|q| registry.procedure(&q).is_some())
+        if let Some(entry) =
+            uni_plugin::QName::candidate_splits(user_name).find_map(|q| registry.procedure(&q))
         {
-            return true;
+            return Some(entry);
         }
         let stripped = user_name.strip_prefix("uni.").unwrap_or(user_name);
-        for plugin_id in ["uni", "builtin", "apoc-core", "custom"] {
-            if registry
-                .procedure(&uni_plugin::QName::new(plugin_id, stripped))
-                .is_some()
-            {
-                return true;
-            }
-        }
-        false
+        ["uni", "builtin", "apoc-core", "custom"]
+            .into_iter()
+            .find_map(|plugin_id| registry.procedure(&uni_plugin::QName::new(plugin_id, stripped)))
     }
 
     /// Construct a [`uni_plugin::QName`] from a user-typed identifier for
@@ -4003,8 +4082,46 @@ impl QueryPlanner {
                                     yield_items: yields.clone(),
                                 };
                             } else if yields.is_empty() {
-                                // In-query CALL with no YIELD (void procedure):
-                                // preserve the input rows unchanged
+                                // In-query CALL with no YIELD. Only a procedure
+                                // without results may be called this way
+                                // (openCypher; Neo4j rejects it too): naming
+                                // none of its results would leave the row
+                                // count to the procedure. A void procedure
+                                // still runs once per input row — its effect
+                                // is the point — and keeps each row once.
+                                if has_yield_star {
+                                    return Err(anyhow!(
+                                        "SyntaxError: UnexpectedSyntax - YIELD * is only allowed in standalone procedure calls"
+                                    ));
+                                }
+                                if let Some(entry) = self.resolve_plugin_procedure(&procedure_name)
+                                    && !entry.signature.yields.is_empty()
+                                {
+                                    return Err(anyhow!(
+                                        "SyntaxError: InvalidProcedureCall - procedure `{}` \
+                                         returns results, so a call to it inside a query \
+                                         must name them with YIELD (for example \
+                                         `CALL {}(...) YIELD {}`)",
+                                        procedure,
+                                        procedure,
+                                        entry.signature.yields[0].name()
+                                    ));
+                                }
+                                let (input, arguments) = hoist_procedure_arguments(
+                                    plan,
+                                    arguments,
+                                    &argument_scope,
+                                    clause_idx,
+                                );
+                                plan = LogicalPlan::Apply {
+                                    input: Box::new(input),
+                                    subquery: Box::new(LogicalPlan::ProcedureCall {
+                                        procedure_name,
+                                        arguments,
+                                        yield_items: Vec::new(),
+                                    }),
+                                    input_filter: None,
+                                };
                             } else {
                                 // In-query CALL with YIELD: cross-join input × procedure output.
                                 // The per-row argument evaluator reads only constants
@@ -4261,6 +4378,7 @@ impl QueryPlanner {
                 Clause::Set(set_clause) => {
                     // Validate SET value expressions
                     for item in &set_clause.items {
+                        reject_reserved_set_target(item)?;
                         match item {
                             SetItem::Property { value, .. }
                             | SetItem::Variable { value, .. }
@@ -4818,6 +4936,7 @@ impl QueryPlanner {
         Ok(match clause {
             Clause::Set(c) => {
                 for item in &c.items {
+                    reject_reserved_set_target(item)?;
                     match item {
                         SetItem::Property { value, .. }
                         | SetItem::Variable { value, .. }
@@ -5454,24 +5573,18 @@ impl QueryPlanner {
         // variable-length path (see `plan_traverse_with_source`) is sufficient
         // when the relationship binds no variable of its own. Issue #166.
         //
-        // The search tests only walk-constant entries (literals, parameters).
-        // Any other — `{w: a.x}` — was skipped and the search admitted every
-        // edge; a filter after the search cannot stand in for it, by the
-        // argument above, so it is refused.
-        if has_non_walk_constant_entry(&rel.properties) {
-            return Err(anyhow!(
-                "A relationship property map in shortestPath/allShortestPaths supports \
-                 only literal and parameter values; a value computed from a variable or \
-                 an expression is not supported there, because it must gate the search \
-                 rather than filter its result"
-            ));
-        }
+        // Walk-constant entries (literals, parameters) become one allow-set
+        // for the whole operator. Any other — `{w: a.x}` — must gate the
+        // search as well, since a filter after it cannot stand in for it by
+        // the argument above: the operator evaluates it per row and searches
+        // each distinct value set with its own allow-set.
+        let (walk_map, row_entries) = split_walk_constant_entries(&rel.properties);
         let step_var = rel.variable.clone().filter(|v| !v.is_empty());
         let edge_filter_expr = {
             let edge_var = step_var
                 .clone()
                 .unwrap_or_else(|| "__anon_edge".to_string());
-            self.properties_to_expr(&edge_var, &rel.properties)
+            self.properties_to_expr(&edge_var, &walk_map)
         };
 
         let target_node = match &elements[2] {
@@ -5613,6 +5726,27 @@ impl QueryPlanner {
             ));
         }
 
+        // A per-row value is evaluated against the row entering the search,
+        // so it may name the endpoints and anything bound before the clause,
+        // but not what the search itself binds.
+        for (key, value) in &row_entries {
+            for var in collect_expr_variables(value) {
+                let bound = var == source_var
+                    || var == target_var
+                    || (is_var_in_scope(vars_in_scope, &var)
+                        && Some(&var) != step_var.as_ref()
+                        && var != path_var);
+                if !bound {
+                    return Err(anyhow!(
+                        "The value of `{key}` in a shortestPath/allShortestPaths relationship \
+                         map names `{var}`, which is not bound before the search; it may name \
+                         the path's endpoints or variables from earlier clauses"
+                    ));
+                }
+            }
+        }
+        let edge_row_conditions = row_entries;
+
         let optional_pattern_vars: HashSet<String> = if optional {
             std::iter::once(path_var.clone())
                 .chain(step_var.clone())
@@ -5636,6 +5770,7 @@ impl QueryPlanner {
                 min_hops,
                 max_hops,
                 edge_filter_expr: edge_filter_expr.clone(),
+                edge_row_conditions: edge_row_conditions.clone(),
                 optional,
                 optional_pattern_vars: optional_pattern_vars.clone(),
             },
@@ -5651,6 +5786,7 @@ impl QueryPlanner {
                 min_hops,
                 max_hops,
                 edge_filter_expr: edge_filter_expr.clone(),
+                edge_row_conditions,
                 optional,
                 optional_pattern_vars: optional_pattern_vars.clone(),
             },
@@ -6707,14 +6843,19 @@ impl QueryPlanner {
                         &inner_target_node.properties,
                         Some(Expr::Map(entries)) if !entries.is_empty()
                     );
+                    // An inner source label constrains the start of every
+                    // iteration; the plain variable-length path has no
+                    // per-iteration check, so it would drop the label. An
+                    // inner target label likewise holds at every iteration's
+                    // end, and the plain path checks only the target it is
+                    // given — which is the inner node itself only when there
+                    // is no quantifier and no outer node after the group.
                     let use_simple_vlp = qpp_rels.len() == 1
                         && inner_is_anonymous
                         && !inner_target_has_map
-                        && inner_target_node
-                            .labels
-                            .first()
-                            .and_then(|l| self.schema.get_label_case_insensitive(l))
-                            .is_none();
+                        && !(is_quantified && !source_node.labels.is_empty())
+                        && (inner_target_node.labels.is_empty()
+                            || (!is_quantified && outer_target_node.is_none()));
 
                     // An inner source's property map constrains the first node
                     // of every iteration, but only the first iteration's (the
@@ -6736,22 +6877,67 @@ impl QueryPlanner {
                         ));
                     }
 
+                    // Under a quantifier the inner source's label holds at the
+                    // start of every iteration, so the walk checks it as it
+                    // leaves each iteration boundary (`QppStepInfo::source_label`).
+                    // Only the first iteration's start was checked, and only
+                    // when no outer node preceded the pattern. One label, as
+                    // for the other inner nodes.
+                    let iteration_source_label = if is_quantified {
+                        if source_node.labels.len() > 1 {
+                            return Err(anyhow!(
+                                "Quantified path patterns support at most one label on an \
+                                 inner node, but a node is labelled `{}`. Filter the extra \
+                                 labels with a WHERE clause instead.",
+                                source_node.labels.names().join(
+                                    if source_node.labels.is_disjunction() {
+                                        "|"
+                                    } else {
+                                        ":"
+                                    }
+                                )
+                            ));
+                        }
+                        source_node.labels.first().cloned()
+                    } else {
+                        None
+                    };
+
                     // Plan source node.
                     // In `(a)((x)-[:R]->(y)){n}(b)`, the QPP source is the preceding
                     // outer node `a`, NOT the inner `x`. If there's a preceding outer
                     // node variable, use it; otherwise fall back to the inner source.
-                    let source_variable = if let Some(ref outer_src) = last_outer_node_var {
-                        // The preceding outer node is already bound and in scope
-                        // Apply any property filters from the inner source node
-                        if let Some(prop_filter) =
-                            self.properties_to_expr(outer_src, &source_node.properties)
-                        {
-                            plan = LogicalPlan::Filter {
+                    //
+                    // When the source is already bound, the inner source's
+                    // constraints filter it. Without a quantifier that is its
+                    // labels and property map (a map under one is refused
+                    // above, a label checked per iteration). In a mandatory
+                    // clause the filter runs before the walk; under OPTIONAL
+                    // it must null the clause's variables, not drop the row,
+                    // so it runs after the walk (`deferred_source_filter`).
+                    let mut deferred_source_filter = None;
+                    let mut filter_bound_source = |plan: LogicalPlan, var: &str| {
+                        let labels = if is_quantified {
+                            uni_cypher::ast::LabelExpr::Empty
+                        } else {
+                            source_node.labels.clone()
+                        };
+                        match self.node_filter_expr(var, &labels, &source_node.properties) {
+                            Some(predicate) if optional => {
+                                deferred_source_filter = Some(predicate);
+                                plan
+                            }
+                            Some(predicate) => LogicalPlan::Filter {
                                 input: Box::new(plan),
-                                predicate: prop_filter,
+                                predicate,
                                 optional_variables: HashSet::new(),
-                            };
+                            },
+                            None => plan,
                         }
+                    };
+                    let source_variable = if let Some(ref outer_src) = last_outer_node_var {
+                        // The preceding outer node is already bound and in scope.
+                        plan = filter_bound_source(plan, outer_src);
                         outer_src.clone()
                     } else {
                         let sv = source_node
@@ -6761,16 +6947,7 @@ impl QueryPlanner {
                             .unwrap_or_else(|| self.next_anon_var());
 
                         if is_var_in_scope(vars_in_scope, &sv) {
-                            // Source is already bound, apply property filter if needed
-                            if let Some(prop_filter) =
-                                self.properties_to_expr(&sv, &source_node.properties)
-                            {
-                                plan = LogicalPlan::Filter {
-                                    input: Box::new(plan),
-                                    predicate: prop_filter,
-                                    optional_variables: HashSet::new(),
-                                };
-                            }
+                            plan = filter_bound_source(plan, &sv);
                         } else {
                             // Source is unbound, scan it
                             plan = self.plan_unbound_node(source_node, &sv, plan, optional)?;
@@ -6866,9 +7043,11 @@ impl QueryPlanner {
                                     })
                                 ));
                             }
-                            let target_label = node.labels.first().and_then(|l| {
-                                self.schema.get_label_case_insensitive(l).map(|_| l.clone())
-                            });
+                            // Every label is a constraint, declared or not: a
+                            // label the schema does not know is carried by no
+                            // node, or by schemaless ones, and was dropped here
+                            // — so `(y:Undeclared)` matched every node.
+                            let target_label = node.labels.first().cloned();
 
                             // Both maps are filters and both were dropped: the
                             // relationship's was refused outright, the target
@@ -6909,6 +7088,11 @@ impl QueryPlanner {
                             };
 
                             qpp_step_infos.push(QppStepInfo {
+                                source_label: if qpp_step_infos.is_empty() {
+                                    iteration_source_label.clone()
+                                } else {
+                                    None
+                                },
                                 edge_type_ids: step_edge_type_ids,
                                 direction: rel.direction.clone(),
                                 target_label,
@@ -7112,6 +7296,13 @@ impl QueryPlanner {
                         }
                     }
                     had_traverses = true;
+                    if let Some(predicate) = deferred_source_filter {
+                        plan = LogicalPlan::Filter {
+                            input: Box::new(plan),
+                            predicate,
+                            optional_variables: optional_pattern_vars.clone(),
+                        };
+                    }
 
                     // Skip the outer target node if we consumed it
                     if outer_target_node.is_some() {
@@ -7476,18 +7667,25 @@ impl QueryPlanner {
             });
             let path_var = params.path_variable.clone();
 
+            // A relationship bound by an earlier clause is walked under a
+            // temporary name and tied to its binding by a filter below, as
+            // on the schema'd path. Walking it under its own name kept only
+            // one of the two columns: the earlier binding was replaced, or
+            // the walked edge was dropped, and either way the pattern matched
+            // every edge of the type instead of the bound one.
+            let rebound_edge = bound_edge_var.as_ref().or(bound_edge_list_var.as_ref());
+            let walk_step_var = match rebound_edge {
+                Some(bv) => Some(format!("__rebound_{bv}")),
+                None => step_var.clone(),
+            };
+
             // Compute scope_match_variables for relationship uniqueness scoping.
             let mut scope_match_variables: HashSet<String> = vars_in_scope[vars_before_pattern..]
                 .iter()
                 .map(|v| v.name.clone())
                 .collect();
-            if let Some(ref sv) = step_var {
-                // Only add the step variable to scope if it's NOT rebound from a previous clause.
-                // Rebound edges (bound_edge_var is set) should not participate in uniqueness
-                // filtering because the second MATCH intentionally reuses the same edge.
-                if bound_edge_var.is_none() {
-                    scope_match_variables.insert(sv.clone());
-                }
+            if let Some(ref sv) = walk_step_var {
+                scope_match_variables.insert(sv.clone());
             }
             scope_match_variables.insert(target_variable.clone());
             // Include bound edge variables from this path for cross-segment Trail mode
@@ -7508,7 +7706,7 @@ impl QueryPlanner {
                 direction: params.rel.direction.clone(),
                 source_variable: source_variable.to_string(),
                 target_variable: target_variable.clone(),
-                step_variable: step_var.clone(),
+                step_variable: walk_step_var.clone(),
                 min_hops,
                 max_hops,
                 optional: params.optional,
@@ -7522,7 +7720,7 @@ impl QueryPlanner {
                 optional_pattern_vars: params.optional_pattern_vars.clone(),
                 scope_match_variables,
                 edge_filter_expr: if is_variable_length {
-                    let filter_var = step_var
+                    let filter_var = walk_step_var
                         .clone()
                         .unwrap_or_else(|| "__anon_edge".to_string());
                     // Walk-constant entries only; the rest is the residual below.
@@ -7548,7 +7746,7 @@ impl QueryPlanner {
             // holds for every relationship on the path. The walk skipped it,
             // admitting every edge, so it is applied here to the step list.
             if is_variable_length
-                && let Some(list_var) = step_var.as_ref()
+                && let Some(list_var) = walk_step_var.as_ref()
                 && let Some(residual) = self.every_relationship_satisfies(
                     list_var,
                     split_walk_constant_entries(&params.rel.properties).1,
@@ -7581,7 +7779,7 @@ impl QueryPlanner {
             // For VLP, predicates are stored inline in edge_filter_expr (above).
             // For fixed-length, wrap as a Filter node for post-traverse evaluation.
             if !is_variable_length
-                && let Some(edge_var_name) = step_var.as_ref()
+                && let Some(edge_var_name) = walk_step_var.as_ref()
                 && let Some(edge_prop_filter) =
                     self.properties_to_expr(edge_var_name, &params.rel.properties)
             {
@@ -7597,8 +7795,30 @@ impl QueryPlanner {
                 };
             }
 
-            // Add the bound variables to scope
-            if let Some(sv) = &step_var {
+            if let Some(predicate) = rebound_relationship_check(
+                bound_edge_var.as_deref(),
+                bound_edge_list_var.as_deref(),
+            ) {
+                // Under OPTIONAL the walked name is nulled with the clause's
+                // own variables, so a row whose bound edge is not matched
+                // keeps one null-extended row, not one per walked edge.
+                let mut optional_variables = HashSet::new();
+                if params.optional {
+                    optional_variables.clone_from(&params.optional_pattern_vars);
+                    optional_variables.extend(walk_step_var.clone());
+                }
+                plan = LogicalPlan::Filter {
+                    input: Box::new(plan),
+                    predicate,
+                    optional_variables,
+                };
+            }
+
+            // Add the bound variables to scope; a rebound relationship keeps
+            // its earlier binding.
+            if let Some(sv) = &step_var
+                && rebound_edge.is_none()
+            {
                 add_var_to_scope(vars_in_scope, sv, edge_binding_type(is_variable_length))?;
             }
             if let Some(pv) = &path_var
@@ -7906,67 +8126,15 @@ impl QueryPlanner {
             plan = Self::wrap_with_bound_target_filter(plan, &target_variable);
         }
 
-        // If we have a bound edge variable, add a filter to match it
-        if let Some(ref bv) = bound_edge_var {
-            let temp_var = format!("__rebound_{}", bv);
-            let bound_check = Expr::BinaryOp {
-                left: Box::new(Expr::Property(
-                    Box::new(Expr::Variable(temp_var)),
-                    "_eid".to_string(),
-                )),
-                op: BinaryOp::Eq,
-                right: Box::new(Expr::Property(
-                    Box::new(Expr::Variable(bv.clone())),
-                    "_eid".to_string(),
-                )),
-            };
+        // A relationship (or relationship list) bound by an earlier clause:
+        // the walk binds `__rebound_{name}`, and this keeps the rows where it
+        // is the bound one.
+        if let Some(predicate) =
+            rebound_relationship_check(bound_edge_var.as_deref(), bound_edge_list_var.as_deref())
+        {
             plan = LogicalPlan::Filter {
                 input: Box::new(plan),
-                predicate: bound_check,
-                optional_variables: filter_optional_vars.clone(),
-            };
-        }
-
-        // If we have a bound relationship list variable for a VLP pattern,
-        // add a filter to match the traversed relationship list exactly.
-        if let Some(ref bv) = bound_edge_list_var {
-            let temp_var = format!("__rebound_{}", bv);
-            let temp_eids = Expr::ListComprehension {
-                variable: "__rebound_edge".to_string(),
-                list: Box::new(Expr::Variable(temp_var)),
-                where_clause: None,
-                map_expr: Box::new(Expr::FunctionCall {
-                    name: "toInteger".to_string(),
-                    args: vec![Expr::Property(
-                        Box::new(Expr::Variable("__rebound_edge".to_string())),
-                        "_eid".to_string(),
-                    )],
-                    distinct: false,
-                    window_spec: None,
-                }),
-            };
-            let bound_eids = Expr::ListComprehension {
-                variable: "__bound_edge".to_string(),
-                list: Box::new(Expr::Variable(bv.clone())),
-                where_clause: None,
-                map_expr: Box::new(Expr::FunctionCall {
-                    name: "toInteger".to_string(),
-                    args: vec![Expr::Property(
-                        Box::new(Expr::Variable("__bound_edge".to_string())),
-                        "_eid".to_string(),
-                    )],
-                    distinct: false,
-                    window_spec: None,
-                }),
-            };
-            let bound_list_check = Expr::BinaryOp {
-                left: Box::new(temp_eids),
-                op: BinaryOp::Eq,
-                right: Box::new(bound_eids),
-            };
-            plan = LogicalPlan::Filter {
-                input: Box::new(plan),
-                predicate: bound_list_check,
+                predicate,
                 optional_variables: filter_optional_vars.clone(),
             };
         }
@@ -10168,6 +10336,15 @@ impl QueryPlanner {
                     return true;
                 }
             }
+            // A scan of a label the schema does not declare. Its `filter` is
+            // applied in full above the scan (`finalize_schemaless_scan`) and
+            // narrows its L0 read (W3b), so a WHERE pushed here is the inline
+            // `(n:M {p: v})` form.
+            LogicalPlan::ScanMainByLabels { variable: var, .. } if var == variable => {
+                if matches!(target, RewriteTarget::Scan) {
+                    return true;
+                }
+            }
             LogicalPlan::Traverse {
                 target_variable, ..
             } if target_variable == variable => {
@@ -10215,6 +10392,11 @@ impl QueryPlanner {
                 ..
             }
             | LogicalPlan::ScanAll {
+                variable: var,
+                optional,
+                ..
+            }
+            | LogicalPlan::ScanMainByLabels {
                 variable: var,
                 optional,
                 ..
@@ -10308,6 +10490,27 @@ impl QueryPlanner {
                     optional,
                 }
             }
+            LogicalPlan::ScanMainByLabels {
+                labels,
+                variable: var,
+                filter,
+                optional,
+            } if var == variable => {
+                let new_filter = match filter {
+                    Some(existing) => Some(Expr::BinaryOp {
+                        left: Box::new(existing),
+                        op: BinaryOp::And,
+                        right: Box::new(predicate),
+                    }),
+                    None => Some(predicate),
+                };
+                LogicalPlan::ScanMainByLabels {
+                    labels,
+                    variable: var,
+                    filter: new_filter,
+                    optional,
+                }
+            }
             LogicalPlan::Filter {
                 input,
                 predicate: p,
@@ -10324,8 +10527,13 @@ impl QueryPlanner {
             LogicalPlan::CrossJoin { left, right } => {
                 // Check which side has the variable. `find_scan_label_id` does
                 // not descend a shortest-path operator, so it alone would send
-                // a predicate for a scan under one to the wrong side.
+                // a predicate for a scan under one to the wrong side; nor does
+                // it see a `ScanMainByLabels`, whose predicate it would send to
+                // the other side, where nothing binds the variable and the
+                // predicate would be lost.
                 if Self::find_scan_label_id(&left, variable).is_some()
+                    || Self::rewrite_target_reachable(&left, variable, RewriteTarget::Scan)
+                    || Self::optional_scan_reachable(&left, variable)
                     || Self::scan_reachable_through_shortest_path(&left, variable)
                 {
                     LogicalPlan::CrossJoin {
@@ -12632,11 +12840,21 @@ fn collect_properties_recursive(
         LogicalPlan::InvertedIndexLookup { terms, .. } => {
             collect_properties_from_expr_into(terms, properties, kinds);
         }
-        LogicalPlan::ShortestPath { input, .. } => {
-            collect_properties_recursive(input, properties, kinds);
+        LogicalPlan::ShortestPath {
+            input,
+            edge_row_conditions,
+            ..
         }
-        LogicalPlan::AllShortestPaths { input, .. } => {
+        | LogicalPlan::AllShortestPaths {
+            input,
+            edge_row_conditions,
+            ..
+        } => {
             collect_properties_recursive(input, properties, kinds);
+            // A per-row map value reads the row's properties, `a.x`.
+            for (_, value) in edge_row_conditions {
+                collect_properties_from_expr_into(value, properties, kinds);
+            }
         }
         LogicalPlan::Distinct { input } => {
             collect_properties_recursive(input, properties, kinds);

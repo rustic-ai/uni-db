@@ -752,7 +752,13 @@ fn build_rule_condition(pair: Pair<LocyRule>) -> Result<RuleCondition, ParseErro
             let mut outputs = Vec::new();
             for child in inner.into_inner() {
                 match child.as_rule() {
-                    LocyRule::generator_name => name = child.as_str().to_string(),
+                    LocyRule::generator_name => {
+                        name = child
+                            .into_inner()
+                            .map(|p| normalize_locy_identifier(p.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(".");
+                    }
                     LocyRule::generator_arg_list => {
                         for arg in child.into_inner() {
                             args.push(reparse_as_cypher_expression(arg.as_str())?);
@@ -760,7 +766,7 @@ fn build_rule_condition(pair: Pair<LocyRule>) -> Result<RuleCondition, ParseErro
                     }
                     LocyRule::generator_outputs => {
                         for out in child.into_inner() {
-                            outputs.push(out.as_str().to_string());
+                            outputs.push(normalize_locy_identifier(out.as_str()));
                         }
                     }
                     _ => {}
@@ -951,12 +957,10 @@ fn find_prev_reference(pair: &Pair<LocyRule>) -> Option<String> {
     if pair.as_rule() == LocyRule::prev_reference {
         // `prev_reference = { PREV ~ "." ~ identifier }` -- the field is the
         // last child; fall back to the whole span if the shape ever changes.
-        return Some(
-            pair.clone()
-                .into_inner()
-                .next_back()
-                .map_or_else(|| pair.as_str().to_string(), |f| f.as_str().to_string()),
-        );
+        return Some(pair.clone().into_inner().next_back().map_or_else(
+            || pair.as_str().to_string(),
+            |f| normalize_locy_identifier(f.as_str()),
+        ));
     }
     pair.clone()
         .into_inner()
@@ -1136,7 +1140,7 @@ fn build_locy_primary_expression(pair: Pair<LocyRule>) -> Result<LocyExpr, Parse
                 .into_inner()
                 .find(|p| p.as_rule() == LocyRule::identifier_or_keyword)
                 .unwrap();
-            Ok(LocyExpr::PrevRef(field.as_str().to_string()))
+            Ok(LocyExpr::PrevRef(normalize_locy_identifier(field.as_str())))
         }
         LocyRule::primary_expression => {
             // Standard Cypher primary — re-parse

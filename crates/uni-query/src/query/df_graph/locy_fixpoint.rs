@@ -11,12 +11,12 @@ use crate::query::df_graph::common::{
     ScalarKey, arrow_err, collect_all_partitions, compute_plan_properties,
     execute_locy_clause_body, extract_scalar_key, operator_reservation,
 };
-use crate::query::df_graph::locy_best_by::{BestByExec, SortCriterion};
+use crate::query::df_graph::locy_best_by::{BestByExec, SortCriterion, order_column};
 use crate::query::df_graph::locy_errors::LocyRuntimeError;
 use crate::query::df_graph::locy_explain::{
     ProofTerm, ProvenanceAnnotation, ProvenanceStore, compute_proof_probability,
 };
-use crate::query::df_graph::locy_fold::{FoldBinding, FoldExec};
+use crate::query::df_graph::locy_fold::{BodySupportMap, FoldBinding, FoldExec};
 use crate::query::df_graph::locy_priority::PriorityExec;
 use crate::query::df_graph::locy_profile::{
     LocyProfileCollector, PlanningMark, synthetic_operator,
@@ -404,32 +404,6 @@ impl RowDedupState {
         }
     }
 
-    /// Populate the seen set from existing fact batches.
-    ///
-    /// Used after BEST BY in-loop pruning replaces the fact set, so that delta
-    /// computation in subsequent iterations correctly recognizes surviving facts.
-    ///
-    /// # Errors
-    ///
-    /// Fails when a fact batch does not match the converter's schema. Skipping
-    /// it would leave those facts out of the seen set, so their re-derivations
-    /// would be admitted as new facts.
-    fn ingest_existing(&mut self, facts: &[RecordBatch]) -> DFResult<()> {
-        self.seen.clear();
-        for batch in &float_key_view(facts) {
-            if batch.num_rows() == 0 {
-                continue;
-            }
-            let arrays: Vec<_> = batch.columns().to_vec();
-            let rows = self.converter.convert_columns(&arrays).map_err(arrow_err)?;
-            for row_idx in 0..batch.num_rows() {
-                let row_bytes: Box<[u8]> = rows.row(row_idx).data().into();
-                self.seen.insert(row_bytes);
-            }
-        }
-        Ok(())
-    }
-
     /// Filter `candidates` to only rows not yet seen, updating the persistent set.
     ///
     /// Both cross-iteration dedup (rows already accepted in prior iterations) and
@@ -575,6 +549,9 @@ pub struct FixpointState {
     /// merge), and [`Self::old_facts`] filters instead. A non-linear clause's
     /// semi-naive passes read it (P5).
     old_len: Option<usize>,
+    /// BEST BY rules only: the held row of every KEY, so a merge finds the
+    /// row a candidate competes with without re-sorting the facts.
+    best_index: HashMap<Vec<ScalarKey>, BestSlot>,
 }
 
 /// State backing the per-iteration folded view (issue #162).
@@ -715,6 +692,7 @@ impl FixpointState {
             semiring_kind,
             fold_view: None,
             old_len: Some(0),
+            best_index: HashMap::new(),
         }
     }
 
@@ -1514,10 +1492,9 @@ impl FixpointState {
 
     /// Merge candidates using BEST BY semantics.
     ///
-    /// Combines existing facts with new candidates, keeping only the best row
-    /// per KEY group according to `sort_criteria`. Returns `true` if the
-    /// best-per-KEY fact set actually changed (a genuinely better value was
-    /// found or a new KEY appeared).
+    /// Keeps only the best row per KEY group according to `sort_criteria`.
+    /// Returns `true` if the best-per-KEY fact set actually changed (a
+    /// genuinely better value was found or a new KEY appeared).
     ///
     /// This replaces `merge_delta` for rules with BEST BY, enabling convergence
     /// on cyclic graphs where dominated ALONG values would otherwise produce an
@@ -1526,217 +1503,359 @@ impl FixpointState {
     /// The delta is the rows that are new for their KEY or strictly better
     /// (R2), not the whole pruned set: a self-reference fed an unchanged row
     /// would only re-derive candidates it derived when that row entered. On a
-    /// tie the held row stays, so the delta never churns between equals.
+    /// tie the held row stays, so the delta never churns between equals; a
+    /// candidate whose rounded criteria equal the held row's (a re-derivation,
+    /// or a value that moved by less than the rounding) does not displace it
+    /// either.
+    ///
+    /// # Cost
+    ///
+    /// O(candidates) plus the batches the merge rewrites, not O(facts): the
+    /// held best row of every KEY is found through the `best_index` map
+    /// rather than by re-sorting the facts with the candidates. A displaced
+    /// row is filtered out of the one batch holding it, and the tail batches
+    /// are merged binary-counter style (each row is re-copied O(log facts)
+    /// times over the whole fixpoint), so the facts stay a short list of
+    /// batches. Re-sorting everything on every merge made a BEST BY rule
+    /// about 3x a plain one, and quadratic in the iteration count.
     ///
     /// # Errors
     ///
-    /// An Arrow failure sorting or taking rows, or a row-dedup rebuild error.
+    /// An Arrow failure comparing, concatenating, filtering or taking rows,
+    /// or an internal error when the held facts carry two rows for one KEY,
+    /// which no BEST BY merge produces.
     pub fn merge_best_by(
         &mut self,
         candidates: Vec<RecordBatch>,
         sort_criteria: &[SortCriterion],
     ) -> DFResult<bool> {
-        if candidates.is_empty() || candidates.iter().all(|b| b.num_rows() == 0) {
-            self.delta.clear();
-            self.old_len = Some(self.facts.len());
-            return Ok(false);
-        }
-
-        // Reconcile schema from the first non-empty candidate batch.
-        if let Some(first) = candidates.iter().find(|b| b.num_rows() > 0) {
-            self.reconcile_schema(&first.schema())?;
-        }
-
-        // Snapshot existing best-per-KEY facts for change detection, through
-        // the rounded key view like every other convergence test.
-        let old_best: HashMap<Vec<ScalarKey>, Vec<ScalarKey>> =
-            self.build_key_criteria_map(sort_criteria);
-
-        // Concat existing facts + new candidates. Rows before `existing_rows`
-        // are the facts.
-        let existing_rows: usize = self.facts.iter().map(RecordBatch::num_rows).sum();
-        let mut all_batches = self.facts.clone();
-        all_batches.extend(candidates);
-        let all_batches: Vec<_> = all_batches
+        let candidates: Vec<RecordBatch> = candidates
             .into_iter()
             .filter(|b| b.num_rows() > 0)
             .collect();
-        if all_batches.is_empty() {
+        let Some(first) = candidates.first() else {
             self.delta.clear();
             self.old_len = Some(self.facts.len());
             return Ok(false);
-        }
+        };
 
-        let combined = arrow::compute::concat_batches(&self.schema, &all_batches)
-            .map_err(|e| datafusion::error::DataFusionError::ArrowError(Box::new(e), None))?;
+        // Reconcile schema from the first non-empty candidate batch.
+        self.reconcile_schema(&first.schema())?;
+        // A BEST BY rule never takes the whole-row dedup path, and the row
+        // set it would describe is rewritten by every displacement below.
+        // `None` sends a stray `merge_delta` to the legacy dedup, which reads
+        // the facts themselves.
+        self.row_dedup = None;
+        let criteria = resolve_best_by_columns(&self.rule_name, &self.schema, sort_criteria)?;
+        self.ensure_best_index(&criteria)?;
 
-        if combined.num_rows() == 0 {
-            self.delta.clear();
-            self.old_len = Some(self.facts.len());
-            return Ok(false);
-        }
-
-        // Sort by KEY ASC, then criteria, then origin (existing facts first),
-        // so the best row per KEY group comes first and, on an exact tie, the
-        // fact already held wins: a re-derivation never displaces it.
-        let mut sort_columns = Vec::new();
-        for &ki in &self.key_column_indices {
-            if ki >= combined.num_columns() {
-                continue;
-            }
-            sort_columns.push(arrow::compute::SortColumn {
-                values: Arc::clone(combined.column(ki)),
-                options: Some(arrow::compute::SortOptions {
-                    descending: false,
-                    nulls_first: false,
-                }),
-            });
-        }
-        for criterion in sort_criteria {
-            if criterion.col_index >= combined.num_columns() {
-                continue;
-            }
-            sort_columns.push(arrow::compute::SortColumn {
-                values: Arc::clone(combined.column(criterion.col_index)),
-                options: Some(arrow::compute::SortOptions {
-                    descending: !criterion.ascending,
-                    nulls_first: criterion.nulls_first,
-                }),
-            });
-        }
-        let origin: arrow_array::ArrayRef = Arc::new(arrow_array::BooleanArray::from(
-            (0..combined.num_rows())
-                .map(|row| row >= existing_rows)
-                .collect::<Vec<bool>>(),
-        ));
-        sort_columns.push(arrow::compute::SortColumn {
-            values: origin,
-            options: Some(arrow::compute::SortOptions {
-                descending: false,
-                nulls_first: false,
-            }),
-        });
-
-        let sorted_indices =
-            arrow::compute::lexsort_to_indices(&sort_columns, None).map_err(arrow_err)?;
-        let combined_keys = float_key_view(std::slice::from_ref(&combined))
+        let cand = arrow::compute::concat_batches(&self.schema, &candidates).map_err(arrow_err)?;
+        let cand_keys = float_key_view(std::slice::from_ref(&cand))
             .pop()
             .expect("one batch in, one out");
-
-        // Per KEY group, the winner: the first row in sort order — unless it
-        // is a candidate whose rounded criteria equal the fact already held
-        // (a re-derivation, or a value that moved by less than the rounding),
-        // in which case the held fact stays. The winners that are not held
-        // facts are the delta: a KEY seen for the first time, or a strictly
-        // better value (R2). Anything else derives nothing a self-reference
-        // has not already derived from it.
-        let criteria_of = |row: usize| -> Vec<ScalarKey> {
-            sort_criteria
+        let rounded_criteria = |batch: &RecordBatch, row: usize| -> Vec<ScalarKey> {
+            criteria
                 .iter()
-                .flat_map(|c| extract_scalar_key(&combined_keys, &[c.col_index], row))
+                .flat_map(|&(ci, _)| extract_scalar_key(batch, &[ci], row))
                 .collect()
         };
-        let mut kept_old: Vec<u32> = Vec::new();
-        let mut kept_new: Vec<u32> = Vec::new();
-        let mut group_start = 0usize;
-        let n = sorted_indices.len();
-        while group_start < n {
-            let first = sorted_indices.value(group_start) as usize;
-            let key = extract_scalar_key(&combined_keys, &self.key_column_indices, first);
-            let mut group_end = group_start + 1;
-            while group_end < n
-                && extract_scalar_key(
-                    &combined_keys,
-                    &self.key_column_indices,
-                    sorted_indices.value(group_end) as usize,
-                ) == key
-            {
-                group_end += 1;
-            }
-            if first < existing_rows {
-                kept_old.push(first as u32);
-            } else {
-                let held = (group_start..group_end)
-                    .map(|i| sorted_indices.value(i) as usize)
-                    .find(|&row| row < existing_rows);
-                match held {
-                    Some(held)
-                        if old_best
-                            .get(&key)
-                            .is_some_and(|best| *best == criteria_of(first)) =>
-                    {
-                        kept_old.push(held as u32);
+
+        // The best candidate per KEY; the earliest on an exact tie.
+        let cand_cmp = criteria_comparators(&cand, &cand, &criteria)?;
+        let mut best: HashMap<Vec<ScalarKey>, usize> = HashMap::new();
+        for row in 0..cand.num_rows() {
+            let key = extract_scalar_key(&cand_keys, &self.key_column_indices, row);
+            match best.entry(key) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert(row);
+                }
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    if lex_compare(&cand_cmp, row, *o.get()).is_lt() {
+                        o.insert(row);
                     }
-                    _ => kept_new.push(first as u32),
                 }
             }
-            group_start = group_end;
         }
+        let mut winners: Vec<(usize, Vec<ScalarKey>)> =
+            best.into_iter().map(|(key, row)| (row, key)).collect();
+        winners.sort_unstable_by_key(|(row, _)| *row);
 
-        let take_rows = |rows: Vec<u32>| -> DFResult<RecordBatch> {
-            let idx = arrow_array::UInt32Array::from(rows);
-            let columns = combined
-                .columns()
-                .iter()
-                .map(|c| arrow::compute::take(c.as_ref(), &idx, None))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(arrow_err)?;
-            RecordBatch::try_new(Arc::clone(&self.schema), columns).map_err(arrow_err)
-        };
-        let changed = !kept_new.is_empty();
-        let unchanged = take_rows(kept_old)?;
-        let improved = take_rows(kept_new)?;
+        // The held rows of the KEYs the candidates touch, gathered into one
+        // batch of criteria columns so one comparator per criterion serves.
+        let held_locs: Vec<(usize, usize)> = winners
+            .iter()
+            .filter_map(|(_, key)| self.best_index.get(key).map(|s| (s.batch, s.row)))
+            .collect();
+        let held_cols: Vec<arrow_array::ArrayRef> = criteria
+            .iter()
+            .map(|&(ci, _)| {
+                let arrays: Vec<&dyn arrow_array::Array> =
+                    self.facts.iter().map(|b| b.column(ci).as_ref()).collect();
+                if held_locs.is_empty() {
+                    Ok(arrow_array::new_empty_array(cand.column(ci).data_type()))
+                } else {
+                    arrow::compute::interleave(&arrays, &held_locs).map_err(arrow_err)
+                }
+            })
+            .collect::<DFResult<_>>()?;
+        let held_cmp: Vec<arrow::array::DynComparator> = criteria
+            .iter()
+            .zip(&held_cols)
+            .map(|(&(ci, opts), held_col)| {
+                let field = self.schema.field(ci);
+                arrow::array::make_comparator(
+                    order_column(cand.column(ci), field)?.as_ref(),
+                    order_column(held_col, field)?.as_ref(),
+                    opts,
+                )
+                .map_err(arrow_err)
+            })
+            .collect::<DFResult<_>>()?;
+
+        let mut improved_rows: Vec<u32> = Vec::new();
+        let mut displaced: HashMap<usize, Vec<usize>> = HashMap::new();
+        // `held_locs` lists the held rows in `winners` order, so the n-th
+        // winner with a held row compares against held row n.
+        let mut held_pos = 0usize;
+        for (row, key) in &winners {
+            let row = *row;
+            let Some(slot) = self.best_index.get(key) else {
+                // A KEY seen for the first time.
+                improved_rows.push(row as u32);
+                continue;
+            };
+            let pos = held_pos;
+            held_pos += 1;
+            let strictly_better = lex_compare(&held_cmp, row, pos).is_lt();
+            let moved = slot.criteria != rounded_criteria(&cand_keys, row);
+            if strictly_better && moved {
+                improved_rows.push(row as u32);
+                displaced.entry(slot.batch).or_default().push(slot.row);
+            }
+        }
 
         tracing::debug!(
             rule = %self.rule_name,
-            old_keys = old_best.len(),
-            kept = unchanged.num_rows(),
-            improved = improved.num_rows(),
+            held_keys = self.best_index.len(),
+            candidate_keys = winners.len(),
+            improved = improved_rows.len(),
+            displaced = displaced.values().map(Vec::len).sum::<usize>(),
             "BEST BY merge"
         );
 
-        // Replace facts with the pruned set: the held winners, then the delta,
-        // so `old_facts` is the leading batch.
-        self.facts_bytes = batch_byte_size(&unchanged) + batch_byte_size(&improved);
-        self.facts = Vec::new();
-        if unchanged.num_rows() > 0 {
-            self.facts.push(unchanged);
-        }
-        self.old_len = Some(self.facts.len());
-        if changed {
-            self.facts.push(improved.clone());
-            self.delta = vec![improved];
-        } else {
+        if improved_rows.is_empty() {
             self.delta.clear();
+            self.old_len = Some(self.facts.len());
+            return Ok(false);
         }
 
-        // Rebuild row dedup from pruned facts for consistency.
-        self.row_dedup = RowDedupState::try_new(&self.schema);
-        if let Some(ref mut rd) = self.row_dedup {
-            rd.ingest_existing(&self.facts)?;
+        // Drop the displaced rows from the batches that hold them.
+        let mut rewritten: Vec<usize> = displaced.keys().copied().collect();
+        rewritten.sort_unstable();
+        for &b in &rewritten {
+            let rows = &displaced[&b];
+            let mut keep = vec![true; self.facts[b].num_rows()];
+            for &r in rows {
+                keep[r] = false;
+            }
+            self.facts[b] = arrow::compute::filter_record_batch(
+                &self.facts[b],
+                &arrow_array::BooleanArray::from(keep),
+            )
+            .map_err(arrow_err)?;
+            self.index_best_batch(b, &criteria);
         }
+        self.compact_best_tail(&criteria)?;
 
-        Ok(changed)
+        // The held winners, then the delta, so `old_facts` is the leading
+        // batches.
+        let improved = take_rows(&cand, &self.schema, improved_rows)?;
+        self.old_len = Some(self.facts.len());
+        self.facts.push(improved.clone());
+        self.index_best_batch(self.facts.len() - 1, &criteria);
+        self.delta = vec![improved];
+        self.facts_bytes = self.facts.iter().map(batch_byte_size).sum();
+        Ok(true)
     }
 
-    /// Build a map from KEY column values to sort criteria values.
-    fn build_key_criteria_map(
-        &self,
-        sort_criteria: &[SortCriterion],
-    ) -> HashMap<Vec<ScalarKey>, Vec<ScalarKey>> {
-        let mut map = HashMap::new();
-        for batch in &float_key_view(&self.facts) {
-            for row_idx in 0..batch.num_rows() {
-                let key = extract_scalar_key(batch, &self.key_column_indices, row_idx);
-                let criteria: Vec<ScalarKey> = sort_criteria
-                    .iter()
-                    .flat_map(|c| extract_scalar_key(batch, &[c.col_index], row_idx))
-                    .collect();
-                map.insert(key, criteria);
+    /// Makes [`Self::best_index`] describe the facts, rebuilding it when it
+    /// does not hold one entry per fact row.
+    ///
+    /// Only [`Self::merge_best_by`] writes a BEST BY rule's facts, and it
+    /// keeps the index in step, so the rebuild runs for the first merge of a
+    /// state at most.
+    fn ensure_best_index(&mut self, criteria: &[BestByColumn]) -> DFResult<()> {
+        let rows: usize = self.facts.iter().map(RecordBatch::num_rows).sum();
+        if self.best_index.len() == rows {
+            return Ok(());
+        }
+        self.best_index.clear();
+        for b in 0..self.facts.len() {
+            self.index_best_batch(b, criteria);
+        }
+        if self.best_index.len() != rows {
+            return Err(datafusion::error::DataFusionError::Internal(format!(
+                "rule '{}': BEST BY facts hold {rows} rows for {} KEYs; a BEST BY \
+                 merge keeps one row per KEY",
+                self.rule_name,
+                self.best_index.len()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Points [`Self::best_index`] at every row of fact batch `b`.
+    fn index_best_batch(&mut self, b: usize, criteria: &[BestByColumn]) {
+        let batch = &self.facts[b];
+        let keys = float_key_view(std::slice::from_ref(batch))
+            .pop()
+            .expect("one batch in, one out");
+        for row in 0..keys.num_rows() {
+            let key = extract_scalar_key(&keys, &self.key_column_indices, row);
+            let criteria = criteria
+                .iter()
+                .flat_map(|&(ci, _)| extract_scalar_key(&keys, &[ci], row))
+                .collect();
+            self.best_index.insert(
+                key,
+                BestSlot {
+                    batch: b,
+                    row,
+                    criteria,
+                },
+            );
+        }
+    }
+
+    /// Drops the fact batches a displacement emptied, then merges the
+    /// trailing batches binary-counter style while the last holds at least
+    /// half as many rows as the one before it, so the batch count stays
+    /// logarithmic in the fact count and each row is re-copied O(log facts)
+    /// times over the whole fixpoint.
+    ///
+    /// Only batches whose index changes are re-indexed.
+    ///
+    /// # Errors
+    ///
+    /// An Arrow failure concatenating batches.
+    fn compact_best_tail(&mut self, criteria: &[BestByColumn]) -> DFResult<()> {
+        if let Some(first_empty) = self.facts.iter().position(|b| b.num_rows() == 0) {
+            self.facts.retain(|b| b.num_rows() > 0);
+            for b in first_empty..self.facts.len() {
+                self.index_best_batch(b, criteria);
             }
         }
-        map
+        while let [.., prev, last] = self.facts.as_slice() {
+            if last.num_rows() * 2 < prev.num_rows() {
+                break;
+            }
+            let merged =
+                arrow::compute::concat_batches(&self.schema, [prev, last]).map_err(arrow_err)?;
+            self.facts.truncate(self.facts.len() - 2);
+            self.facts.push(merged);
+            self.index_best_batch(self.facts.len() - 1, criteria);
+        }
+        Ok(())
     }
+}
+
+/// Where a BEST BY rule's held row for one KEY sits in its facts, and that
+/// row's criteria through the rounded key view.
+#[derive(Debug, Clone)]
+struct BestSlot {
+    batch: usize,
+    row: usize,
+    criteria: Vec<ScalarKey>,
+}
+
+/// One comparator per BEST BY criterion between rows of `left` and `right`.
+/// A BEST BY criterion resolved against a rule's facts: the column's
+/// position and its sort options.
+type BestByColumn = (usize, arrow::compute::SortOptions);
+
+/// Resolves each BEST BY criterion by its column name in `schema`.
+///
+/// The criteria used to be applied by position, and a position past the
+/// schema's end was silently dropped, so a criterion that did not line up
+/// with the facts either ranked by the wrong column or by nothing at all.
+///
+/// # Errors
+///
+/// When `schema` holds no column of a criterion's name.
+fn resolve_best_by_columns(
+    rule_name: &str,
+    schema: &arrow_schema::Schema,
+    sort_criteria: &[SortCriterion],
+) -> DFResult<Vec<BestByColumn>> {
+    sort_criteria
+        .iter()
+        .map(|c| {
+            let ci = schema.index_of(&c.column).map_err(|_| {
+                datafusion::error::DataFusionError::Plan(format!(
+                    "rule '{rule_name}': BEST BY column '{}' is not among its facts' columns {:?}",
+                    c.column,
+                    schema.fields().iter().map(|f| f.name()).collect::<Vec<_>>()
+                ))
+            })?;
+            Ok((
+                ci,
+                arrow::compute::SortOptions {
+                    descending: !c.ascending,
+                    nulls_first: c.nulls_first,
+                },
+            ))
+        })
+        .collect()
+}
+
+fn criteria_comparators(
+    left: &RecordBatch,
+    right: &RecordBatch,
+    criteria: &[(usize, arrow::compute::SortOptions)],
+) -> DFResult<Vec<arrow::array::DynComparator>> {
+    criteria
+        .iter()
+        .map(|&(ci, opts)| {
+            // Cypher's order, not a CypherValue column's byte order.
+            let field = left.schema_ref().field(ci).clone();
+            arrow::array::make_comparator(
+                order_column(left.column(ci), &field)?.as_ref(),
+                order_column(right.column(ci), &field)?.as_ref(),
+                opts,
+            )
+            .map_err(arrow_err)
+        })
+        .collect()
+}
+
+/// Lexicographic comparison of a left row and a right row under BEST BY
+/// criterion comparators: `Less` when the left row ranks first.
+fn lex_compare(
+    comparators: &[arrow::array::DynComparator],
+    left: usize,
+    right: usize,
+) -> std::cmp::Ordering {
+    comparators
+        .iter()
+        .map(|cmp| cmp(left, right))
+        .find(|o| o.is_ne())
+        .unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// The rows `rows` of `batch`, under `schema`.
+///
+/// # Errors
+///
+/// An Arrow failure taking the rows or building the batch.
+fn take_rows(batch: &RecordBatch, schema: &SchemaRef, rows: Vec<u32>) -> DFResult<RecordBatch> {
+    let idx = arrow_array::UInt32Array::from(rows);
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|c| arrow::compute::take(c.as_ref(), &idx, None))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(arrow_err)?;
+    RecordBatch::try_new(Arc::clone(schema), columns).map_err(arrow_err)
 }
 
 /// Splits `batch` by `mask`: the rows it marks, then the rest, each as zero
@@ -2371,7 +2490,7 @@ async fn run_fixpoint_loop(
                             provenance_store: classifier_provenance_store.as_ref(),
                         },
                     )
-                    .await;
+                    .await?;
                 }
             }
 
@@ -2475,7 +2594,7 @@ async fn run_fixpoint_loop(
         let shared_info = if semiring_kind == SemiringKind::MaxMinProb {
             None
         } else if let Some(ref tracker) = derivation_tracker {
-            detect_shared_lineage(rule, &facts, tracker, &warnings_slot, semiring_kind)
+            detect_shared_lineage(rule, &facts, tracker, &warnings_slot, semiring_kind)?
         } else {
             None
         };
@@ -2639,13 +2758,12 @@ async fn record_provenance(
     iteration: usize,
     top_k_proofs: usize,
     classifiers: ClassifierRefs<'_>,
-) {
+) -> DFResult<()> {
     let tracker = prov.tracker;
     let registry = prov.registry;
     let warnings_slot = prov.warnings_slot;
     let classifier_registry = classifiers.registry;
     let classifier_cache = classifiers.cache;
-    let all_indices: Vec<usize> = (0..rule.yield_schema.fields().len()).collect();
 
     // Pre-compute base fact probabilities for top-k mode.
     let base_probs = if top_k_proofs > 0 {
@@ -2655,13 +2773,15 @@ async fn record_provenance(
     };
 
     let mut topk_acc = TopKProofAccumulator::new();
+    let attribution = clause_attribution(rule, clause_candidates)?;
 
     for delta_batch in state.all_delta() {
+        let (hash_indices, _) = yield_positions_in(rule, &delta_batch.schema())?;
         for row_idx in 0..delta_batch.num_rows() {
-            let row_hash = provenance_fact_hash(&rule.name, delta_batch, &all_indices, row_idx);
+            let row_hash = provenance_fact_hash(&rule.name, delta_batch, &hash_indices, row_idx);
             let fact_row = batch_row_to_value_map(delta_batch, row_idx);
             let clause_index =
-                find_clause_for_row(delta_batch, row_idx, &all_indices, clause_candidates);
+                find_clause_for_row(rule, &attribution, delta_batch, &hash_indices, row_idx)?;
 
             let support = collect_is_ref_inputs(rule, clause_index, delta_batch, row_idx, registry);
 
@@ -2709,6 +2829,7 @@ async fn record_provenance(
     }
 
     topk_acc.emit_warning_if_any(rule, top_k_proofs, warnings_slot);
+    Ok(())
 }
 
 /// Phase C C0 Stage 2: collects per-row `Proof` tags during the
@@ -3239,15 +3360,95 @@ pub(crate) fn provenance_fact_hash(
     key
 }
 
+/// The name yield column `pos` of `rule` carries in a pre-fold fact batch.
+///
+/// A FOLD output is carried under its fold variable until the fold runs, and
+/// a YIELD may rename it (`FOLD risk = MNOR(e.p) YIELD risk AS risk_out`), so
+/// the pre-fold name is the binding's input column name, not the yield name.
+fn pre_fold_column_name(rule: &FixpointRulePlan, pos: usize) -> Option<&str> {
+    rule.fold_bindings
+        .iter()
+        .find(|fb| fb.input_col_index == pos)
+        .and_then(|fb| fb.input_col_name.as_deref())
+        .or_else(|| {
+            rule.yield_schema
+                .fields()
+                .get(pos)
+                .map(|f| f.name().as_str())
+        })
+}
+
+/// Where `rule`'s yield columns sit in the fact batch `schema`, resolved by
+/// name.
+///
+/// Returns every yield column in yield order, then the KEY columns. A fact's
+/// provenance hash covers its yield columns in yield order, so recording and
+/// lookup agree whatever column order a batch carries; positional indices
+/// into a batch that orders its columns differently grouped by the wrong KEY
+/// and hashed a row the store had recorded under another key. A column is
+/// looked up under its pre-fold name ([`pre_fold_column_name`]), then its
+/// yield name.
+///
+/// # Errors
+///
+/// Fails when a yield column is missing from `schema`. Hashing or grouping on
+/// a subset would silently merge or split facts.
+fn yield_positions_in(
+    rule: &FixpointRulePlan,
+    schema: &SchemaRef,
+) -> DFResult<(Vec<usize>, Vec<usize>)> {
+    let yield_fields = rule.yield_schema.fields();
+    let all = yield_fields
+        .iter()
+        .enumerate()
+        .map(|(pos, field)| {
+            pre_fold_column_name(rule, pos)
+                .and_then(|name| schema.index_of(name).ok())
+                .or_else(|| schema.index_of(field.name()).ok())
+                .ok_or_else(|| {
+                    datafusion::error::DataFusionError::Internal(format!(
+                        "rule '{}': yield column '{}' missing from the fact batch \
+                         (columns: {:?})",
+                        rule.name,
+                        field.name(),
+                        schema
+                            .fields()
+                            .iter()
+                            .map(|f| f.name().as_str())
+                            .collect::<Vec<_>>()
+                    ))
+                })
+        })
+        .collect::<DFResult<Vec<usize>>>()?;
+    let key = rule
+        .key_column_indices
+        .iter()
+        .map(|&i| {
+            all.get(i).copied().ok_or_else(|| {
+                datafusion::error::DataFusionError::Internal(format!(
+                    "rule '{}': KEY column index {i} out of range for {} yield columns",
+                    rule.name,
+                    yield_fields.len()
+                ))
+            })
+        })
+        .collect::<DFResult<Vec<usize>>>()?;
+    Ok((all, key))
+}
+
 /// Emits at most one `SharedProbabilisticDependency` warning per rule.
 /// Returns `Some(SharedLineageInfo)` if any group has shared proofs.
+///
+/// # Errors
+///
+/// Fails when a fact batch lacks one of the rule's yield columns.
 fn detect_shared_lineage(
     rule: &FixpointRulePlan,
     pre_fold_facts: &[RecordBatch],
     tracker: &Arc<ProvenanceStore>,
     warnings_slot: &Arc<StdRwLock<Vec<RuntimeWarning>>>,
     semiring_kind: SemiringKind,
-) -> Option<SharedLineageInfo> {
+) -> DFResult<Option<SharedLineageInfo>> {
     use uni_locy::{RuntimeWarning, RuntimeWarningCode};
 
     // Only check rules with probability-domain fold bindings. M3:
@@ -3259,17 +3460,15 @@ fn detect_shared_lineage(
         .iter()
         .any(|fb| fb.aggregate.is_probability_aggregate());
     if !has_prob_fold {
-        return None;
+        return Ok(None);
     }
 
     // Group facts by KEY columns.
-    let key_indices = &rule.key_column_indices;
-    let all_indices: Vec<usize> = (0..rule.yield_schema.fields().len()).collect();
-
     let mut groups: HashMap<Vec<ScalarKey>, Vec<Vec<u8>>> = HashMap::new();
     for batch in pre_fold_facts {
+        let (all_indices, key_indices) = yield_positions_in(rule, &batch.schema())?;
         for row_idx in 0..batch.num_rows() {
-            let key = extract_scalar_key(batch, key_indices, row_idx);
+            let key = extract_scalar_key(batch, &key_indices, row_idx);
             let fact_hash = provenance_fact_hash(&rule.name, batch, &all_indices, row_idx);
             groups.entry(key).or_default().push(fact_hash);
         }
@@ -3438,9 +3637,9 @@ fn detect_shared_lineage(
                 });
             }
         }
-        Some(SharedLineageInfo { shared_groups })
+        Ok(Some(SharedLineageInfo { shared_groups }))
     } else {
-        None
+        Ok(None)
     }
 }
 
@@ -3464,10 +3663,9 @@ pub(crate) async fn record_and_detect_lineage_nonrecursive(
     top_k_proofs: usize,
     classifiers: ClassifierRefs<'_>,
     semiring_kind: SemiringKind,
-) -> Option<SharedLineageInfo> {
+) -> DFResult<Option<SharedLineageInfo>> {
     let classifier_registry = classifiers.registry;
     let classifier_cache = classifiers.cache;
-    let all_indices: Vec<usize> = (0..rule.yield_schema.fields().len()).collect();
 
     // Pre-compute base fact probabilities for top-k mode.
     let base_probs = if top_k_proofs > 0 {
@@ -3481,8 +3679,9 @@ pub(crate) async fn record_and_detect_lineage_nonrecursive(
     // Record provenance for each clause's facts.
     for (clause_index, batches) in tagged_clause_facts {
         for batch in batches {
+            let (hash_indices, _) = yield_positions_in(rule, &batch.schema())?;
             for row_idx in 0..batch.num_rows() {
-                let row_hash = provenance_fact_hash(&rule.name, batch, &all_indices, row_idx);
+                let row_hash = provenance_fact_hash(&rule.name, batch, &hash_indices, row_idx);
                 let fact_row = batch_row_to_value_map(batch, row_idx);
 
                 let support = collect_is_ref_inputs(rule, *clause_index, batch, row_idx, registry);
@@ -3579,12 +3778,13 @@ pub(crate) fn apply_exact_wmc(
         SemiringOp::Conjunction
     };
     let prob_col_idx = prob_fold.input_col_index;
-    // Fail loud rather than panic if the PROB column index is out of range
-    // (the planner keeps it within the yield schema; a miss signals a bug).
-    let prob_col_name = rule
-        .yield_schema
-        .fields()
-        .get(prob_col_idx)
+    // The PROB column's name in the pre-fold facts — and so in the rows the
+    // provenance store recorded — which is the fold variable, not the YIELD
+    // alias. Under a rename the alias matched no column, so the exact
+    // probability was silently never written. Fail loud rather than panic if
+    // the PROB column index is out of range (the planner keeps it within the
+    // yield schema; a miss signals a bug).
+    let prob_col_name = pre_fold_column_name(rule, prob_col_idx)
         .ok_or_else(|| {
             datafusion::error::DataFusionError::Internal(format!(
                 "PROB aggregate '{}' column index {} out of range ({} yield columns)",
@@ -3593,11 +3793,7 @@ pub(crate) fn apply_exact_wmc(
                 rule.yield_schema.fields().len(),
             ))
         })?
-        .name()
-        .clone();
-
-    let key_indices = &rule.key_column_indices;
-    let all_indices: Vec<usize> = (0..rule.yield_schema.fields().len()).collect();
+        .to_string();
 
     // Build a set of shared group keys for quick lookup.
     let shared_keys: HashSet<Vec<ScalarKey>> = shared_info.shared_groups.keys().cloned().collect();
@@ -3616,8 +3812,10 @@ pub(crate) fn apply_exact_wmc(
     let mut non_shared_rows: Vec<(usize, usize)> = Vec::new(); // (batch_idx, row_idx)
 
     for (batch_idx, batch) in pre_fold_facts.iter().enumerate() {
+        // By name, as `detect_shared_lineage` grouped and hashed them.
+        let (all_indices, key_indices) = yield_positions_in(rule, &batch.schema())?;
         for row_idx in 0..batch.num_rows() {
-            let key = extract_scalar_key(batch, key_indices, row_idx);
+            let key = extract_scalar_key(batch, &key_indices, row_idx);
             if shared_keys.contains(&key) {
                 let fact_hash = provenance_fact_hash(&rule.name, batch, &all_indices, row_idx);
                 let bases = compute_lineage(&fact_hash, tracker, &mut HashSet::new());
@@ -3738,11 +3936,17 @@ pub(crate) fn apply_exact_wmc(
         // write would overwrite the wrong column. `columns` mirrors `batch`'s
         // order (built from `batch.columns()`), and the result reuses
         // `batch.schema()`, so the batch-local index is the correct target.
-        let batch_prob_idx = batch.schema().index_of(&prob_col_name).ok();
-        if override_map.iter().any(|o| o.is_some())
-            && let Some(bpi) = batch_prob_idx
-            && bpi < columns.len()
-        {
+        // A column that does not resolve is an error, not a skipped write.
+        let (batch_indices, _) = yield_positions_in(rule, &batch.schema())?;
+        let bpi = *batch_indices.get(prob_col_idx).ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal(format!(
+                "PROB aggregate '{}' column index {} out of range ({} yield columns)",
+                prob_fold.name,
+                prob_col_idx,
+                batch_indices.len(),
+            ))
+        })?;
+        if override_map.iter().any(|o| o.is_some()) {
             // Rebuild the PROB column with overrides.
             let existing_prob = columns[bpi]
                 .as_any()
@@ -3807,30 +4011,64 @@ fn compute_lineage(
     }
 }
 
-/// Determine which clause produced a given row by checking each clause's candidates.
+/// The clause that produced each of this iteration's candidate rows, keyed by
+/// the row's yield columns resolved by name; the first clause wins.
 ///
-/// Returns the index of the first clause whose candidates contain a matching row.
-/// Falls back to 0 if no match is found.
-fn find_clause_for_row(
-    delta_batch: &RecordBatch,
-    row_idx: usize,
-    all_indices: &[usize],
+/// Built once per [`record_provenance`] call, so attributing a delta row is a
+/// lookup rather than a scan of every candidate.
+///
+/// # Errors
+///
+/// Fails when a candidate batch lacks one of the rule's yield columns (see
+/// [`yield_positions_in`]).
+fn clause_attribution(
+    rule: &FixpointRulePlan,
     clause_candidates: &[Vec<RecordBatch>],
-) -> usize {
-    let target_key = extract_scalar_key(delta_batch, all_indices, row_idx);
+) -> DFResult<HashMap<Vec<ScalarKey>, usize>> {
+    let mut attribution: HashMap<Vec<ScalarKey>, usize> = HashMap::new();
     for (clause_idx, batches) in clause_candidates.iter().enumerate() {
-        for batch in batches {
-            if batch.num_columns() != all_indices.len() {
-                continue;
-            }
-            for r in 0..batch.num_rows() {
-                if extract_scalar_key(batch, all_indices, r) == target_key {
-                    return clause_idx;
-                }
+        for batch in batches.iter().filter(|b| b.num_rows() > 0) {
+            let (indices, _) = yield_positions_in(rule, &batch.schema())?;
+            for row in 0..batch.num_rows() {
+                attribution
+                    .entry(extract_scalar_key(batch, &indices, row))
+                    .or_insert(clause_idx);
             }
         }
     }
-    0
+    Ok(attribution)
+}
+
+/// The clause that produced row `row_idx` of `delta_batch`, whose yield
+/// columns sit at `hash_indices` (resolved by name).
+///
+/// Columns were compared by position, and a candidate batch whose column
+/// count differed from the yield schema's was skipped; a row no clause
+/// matched was attributed to clause 0. A delta row is always one of the
+/// iteration's candidate rows (every merge takes its delta rows from the
+/// candidates, exactly), so a miss means the columns did not line up, and
+/// it fails rather than recording another clause's support and ALONG values.
+///
+/// # Errors
+///
+/// Fails when no clause's candidates hold the row.
+fn find_clause_for_row(
+    rule: &FixpointRulePlan,
+    attribution: &HashMap<Vec<ScalarKey>, usize>,
+    delta_batch: &RecordBatch,
+    hash_indices: &[usize],
+    row_idx: usize,
+) -> DFResult<usize> {
+    attribution
+        .get(&extract_scalar_key(delta_batch, hash_indices, row_idx))
+        .copied()
+        .ok_or_else(|| {
+            datafusion::error::DataFusionError::Internal(format!(
+                "rule '{}': a derived fact matches none of the iteration's clause \
+                 candidates; its clause cannot be attributed",
+                rule.name
+            ))
+        })
 }
 
 /// Convert a single row from a `RecordBatch` at `row_idx` into a `HashMap<String, Value>`.
@@ -5901,20 +6139,20 @@ async fn apply_post_fixpoint_chain_inner(
         SemiringKind::TopKProofs { k } if k > 0 => Some(k as usize),
         _ => None,
     };
-    let body_support_map: Option<Arc<HashMap<Vec<u8>, Vec<ProofTerm>>>> = if topk_k.is_some()
+    let body_support_map: Option<Arc<BodySupportMap>> = if topk_k.is_some()
         && !rule.has_priority
         && let Some(registry) = registry.as_ref()
     {
-        let mut map: HashMap<Vec<u8>, Vec<ProofTerm>> = HashMap::new();
+        let mut map =
+            BodySupportMap::new(schema.fields().iter().map(|f| f.name().clone()).collect());
         for batch in &facts {
-            let all_indices: Vec<usize> = (0..batch.num_columns()).collect();
+            let columns = map.resolve(&batch.schema())?;
             for row_idx in 0..batch.num_rows() {
                 let support = collect_is_ref_inputs_for_body_row(rule, batch, row_idx, registry);
                 if support.is_empty() {
                     continue;
                 }
-                let hash = fact_hash_key(batch, &all_indices, row_idx);
-                map.insert(hash, support);
+                map.insert(batch, &columns, row_idx, support);
             }
         }
         if map.is_empty() {
@@ -6768,6 +7006,68 @@ mod tests {
         ]))
     }
 
+    fn criterion(col_index: usize, column: &str) -> SortCriterion {
+        SortCriterion {
+            col_index,
+            column: column.to_string(),
+            ascending: true,
+            nulls_first: false,
+        }
+    }
+
+    /// The BEST BY merge ranks by the criterion's column name, not its
+    /// position, and refuses a criterion its facts do not hold. It applied
+    /// the position, and dropped a position past the schema's end, so the
+    /// rule kept whichever row arrived first.
+    #[test]
+    fn best_by_merge_resolves_criteria_by_name_and_fails_closed() {
+        let mut state = FixpointState::new(
+            "test".into(),
+            test_schema(),
+            vec![0],
+            1_000_000,
+            None,
+            false,
+        );
+        // The position names the KEY column; the name names `value`.
+        let by_name = [criterion(0, "value")];
+        state
+            .merge_best_by(vec![make_batch(&["a", "a"], &[5, 2])], &by_name)
+            .unwrap();
+        state
+            .merge_best_by(vec![make_batch(&["a"], &[1])], &by_name)
+            .unwrap();
+        let held: Vec<i64> = state
+            .facts
+            .iter()
+            .flat_map(|b| {
+                b.column(1)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .values()
+                    .to_vec()
+            })
+            .collect();
+        assert_eq!(held, vec![1]);
+
+        let mut state = FixpointState::new(
+            "test".into(),
+            test_schema(),
+            vec![0],
+            1_000_000,
+            None,
+            false,
+        );
+        let err = state
+            .merge_best_by(vec![make_batch(&["a"], &[1])], &[criterion(7, "missing")])
+            .expect_err("a criterion the facts do not hold");
+        assert!(
+            err.to_string().contains("BEST BY column 'missing'"),
+            "{err}"
+        );
+    }
+
     fn make_batch(names: &[&str], values: &[i64]) -> RecordBatch {
         RecordBatch::try_new(
             test_schema(),
@@ -7329,5 +7629,256 @@ mod tests {
         assert!(result.is_ok());
         let val = agg.get_accumulator(&acc_key("a")).unwrap();
         assert!((val - 0.5).abs() < 1e-10, "expected 0.5, got {}", val);
+    }
+
+    // --- Exact WMC over batches whose column order differs from the yield ---
+
+    /// A rule `r` with yield `(a KEY, p)` and `FOLD p = MNOR(p)`.
+    fn mnor_rule_plan() -> FixpointRulePlan {
+        FixpointRulePlan {
+            name: "r".into(),
+            clauses: Vec::new(),
+            yield_schema: Arc::new(Schema::new(vec![
+                Field::new("a", DataType::Utf8, true),
+                Field::new("p", DataType::Float64, true),
+            ])),
+            key_column_indices: vec![0],
+            priority: None,
+            has_fold: true,
+            fold_bindings: vec![FoldBinding {
+                output_name: "p".into(),
+                name: smol_str::SmolStr::new_static("MNOR"),
+                aggregate: Arc::new(uni_plugin_builtin::locy_aggregates::MnorAgg),
+                input_col_index: 1,
+                input_col_name: Some("p".into()),
+                distinct: false,
+            }],
+            require: Vec::new(),
+            having: Vec::new(),
+            has_best_by: false,
+            best_by_criteria: Vec::new(),
+            has_priority: false,
+            deterministic: true,
+            prob_column_name: Some("p".into()),
+            non_linear: false,
+            yield_projection: Vec::new(),
+        }
+    }
+
+    fn annotation(
+        rule: &str,
+        support: Vec<ProofTerm>,
+        fact_row: HashMap<String, Value>,
+    ) -> ProvenanceAnnotation {
+        ProvenanceAnnotation {
+            rule_name: rule.into(),
+            clause_index: 0,
+            support,
+            along_values: HashMap::new(),
+            iteration: 0,
+            fact_row,
+            proof_probability: None,
+            neural_calls: Vec::new(),
+        }
+    }
+
+    /// `detect_shared_lineage` and `apply_exact_wmc` group, hash and rewrite a
+    /// pre-fold batch by column NAME.
+    ///
+    /// The batch carries `(p, a)` while the yield schema is `(a, p)`. Read by
+    /// position, the KEY was the `p` column and the fact hash covered the
+    /// columns in the wrong order, so the two `x` proofs, which share one base
+    /// fact, were neither grouped together nor found in the provenance store:
+    /// no shared group was detected and the independence result stood.
+    #[test]
+    fn exact_wmc_resolves_key_and_hash_columns_by_name() {
+        let rule = mnor_rule_plan();
+        // Canonical layout: the provenance store keys a fact by its yield
+        // columns in yield order, whatever order a batch carries them in.
+        let canonical = RecordBatch::try_new(
+            Arc::clone(&rule.yield_schema),
+            vec![
+                Arc::new(StringArray::from(vec!["x", "x", "y"])),
+                Arc::new(Float64Array::from(vec![0.5, 0.4, 0.3])),
+            ],
+        )
+        .unwrap();
+        let permuted = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("p", DataType::Float64, true),
+                Field::new("a", DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(Float64Array::from(vec![0.5, 0.4, 0.3])),
+                Arc::new(StringArray::from(vec!["x", "x", "y"])),
+            ],
+        )
+        .unwrap();
+
+        let tracker = Arc::new(ProvenanceStore::new());
+        let base_hash = b"base-fact-b".to_vec();
+        tracker.record(
+            base_hash.clone(),
+            annotation(
+                "base",
+                Vec::new(),
+                HashMap::from([("p".to_string(), Value::Float(0.6))]),
+            ),
+        );
+        let shared = ProofTerm {
+            source_rule: "base".into(),
+            base_fact_id: base_hash,
+        };
+        for row in 0..2 {
+            tracker.record(
+                provenance_fact_hash("r", &canonical, &[0, 1], row),
+                annotation("r", vec![shared.clone()], HashMap::new()),
+            );
+        }
+
+        let warnings = Arc::new(StdRwLock::new(Vec::new()));
+        let info = detect_shared_lineage(
+            &rule,
+            std::slice::from_ref(&permuted),
+            &tracker,
+            &warnings,
+            SemiringKind::AddMultProb,
+        )
+        .unwrap()
+        .expect("the two `x` proofs share base fact b");
+        let x_key = vec![ScalarKey::Utf8("x".into())];
+        assert_eq!(
+            info.shared_groups.keys().collect::<Vec<_>>(),
+            vec![&x_key],
+            "only the `x` group shares lineage"
+        );
+
+        let approximate = Arc::new(StdRwLock::new(HashMap::new()));
+        let out = apply_exact_wmc(
+            vec![permuted],
+            &rule,
+            &info,
+            &tracker,
+            64,
+            &warnings,
+            &approximate,
+        )
+        .unwrap();
+        let mut rows: Vec<(String, f64)> = Vec::new();
+        for batch in &out {
+            let a_idx = batch.schema().index_of("a").unwrap();
+            let p_idx = batch.schema().index_of("p").unwrap();
+            let a = batch
+                .column(a_idx)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let p = batch
+                .column(p_idx)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            for i in 0..batch.num_rows() {
+                rows.push((a.value(i).to_string(), p.value(i)));
+            }
+        }
+        rows.sort_by(|l, r| l.0.cmp(&r.0));
+        // Both `x` proofs depend only on b, so the exact disjunction is P(b).
+        assert_eq!(rows, vec![("x".to_string(), 0.6), ("y".to_string(), 0.3)]);
+    }
+
+    /// A pre-fold batch missing a yield column fails instead of hashing or
+    /// grouping on whichever columns happen to sit at those positions.
+    #[test]
+    fn exact_wmc_fails_closed_on_missing_yield_column() {
+        let rule = mnor_rule_plan();
+        let narrow = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("a", DataType::Utf8, true)])),
+            vec![Arc::new(StringArray::from(vec!["x"]))],
+        )
+        .unwrap();
+        let tracker = Arc::new(ProvenanceStore::new());
+        let warnings = Arc::new(StdRwLock::new(Vec::new()));
+        let err = detect_shared_lineage(
+            &rule,
+            std::slice::from_ref(&narrow),
+            &tracker,
+            &warnings,
+            SemiringKind::AddMultProb,
+        )
+        .err()
+        .expect("a missing yield column is an error");
+        assert!(err.to_string().contains("'p'"), "{err}");
+    }
+
+    /// A batch of rule `r`'s rows `(a, p)` with the columns in `names` order.
+    fn r_batch(names: [&str; 2], a_first: bool, rows: &[(&str, f64)]) -> RecordBatch {
+        let a: arrow_array::ArrayRef = Arc::new(StringArray::from(
+            rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+        ));
+        let p: arrow_array::ArrayRef = Arc::new(Float64Array::from(
+            rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+        ));
+        let (fields, cols) = if a_first {
+            (
+                vec![
+                    Field::new(names[0], DataType::Utf8, true),
+                    Field::new(names[1], DataType::Float64, true),
+                ],
+                vec![a, p],
+            )
+        } else {
+            (
+                vec![
+                    Field::new(names[1], DataType::Float64, true),
+                    Field::new(names[0], DataType::Utf8, true),
+                ],
+                vec![p, a],
+            )
+        };
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), cols).unwrap()
+    }
+
+    /// `find_clause_for_row` matches a fact against each clause's candidates
+    /// by column NAME.
+    ///
+    /// Clause 1's candidates carry `(p, a)`. Compared by position they never
+    /// matched, and the fact was attributed to clause 0 — whose support and
+    /// ALONG values provenance then recorded.
+    #[test]
+    fn find_clause_for_row_matches_candidates_by_name() {
+        let rule = mnor_rule_plan();
+        let delta = r_batch(["a", "p"], true, &[("x", 0.5)]);
+        let clause_candidates = vec![
+            vec![r_batch(["a", "p"], true, &[("y", 0.3)])],
+            vec![r_batch(["a", "p"], false, &[("x", 0.5)])],
+        ];
+        let attribution = clause_attribution(&rule, &clause_candidates).unwrap();
+        let (hash_indices, _) = yield_positions_in(&rule, &delta.schema()).unwrap();
+        assert_eq!(
+            find_clause_for_row(&rule, &attribution, &delta, &hash_indices, 0).unwrap(),
+            1,
+            "the fact is clause 1's candidate"
+        );
+    }
+
+    /// A clause candidate batch missing a yield column is an error rather than
+    /// a skipped batch, and a fact no clause produced is not given clause 0.
+    #[test]
+    fn find_clause_for_row_fails_closed() {
+        let rule = mnor_rule_plan();
+        let renamed = vec![vec![r_batch(["a", "p_alias"], true, &[("x", 0.5)])]];
+        let err = clause_attribution(&rule, &renamed)
+            .expect_err("a candidate batch lacking yield column 'p' is an error");
+        assert!(err.to_string().contains("'p'"), "{err}");
+
+        let delta = r_batch(["a", "p"], true, &[("x", 0.5)]);
+        let other = vec![vec![r_batch(["a", "p"], true, &[("y", 0.3)])]];
+        let attribution = clause_attribution(&rule, &other).unwrap();
+        let (hash_indices, _) = yield_positions_in(&rule, &delta.schema()).unwrap();
+        assert!(
+            find_clause_for_row(&rule, &attribution, &delta, &hash_indices, 0).is_err(),
+            "a fact absent from every clause's candidates has no clause"
+        );
     }
 }

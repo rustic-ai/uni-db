@@ -271,6 +271,59 @@ async fn direction_skew_leaves_both_directions_agreeing() -> Result<()> {
     Ok(())
 }
 
+/// A failure to read `main_edges` during the pre-clear invariant check is an
+/// error of the pass, not evidence that an EID is missing.
+///
+/// The check used `exists_by_eid(..).unwrap_or(false)`, so any read failure
+/// tripped the `debug_assert!` with "EID … not found in main_edges", a panic
+/// that blamed the data for an I/O fault, and in release builds the failure
+/// went unreported. The read is failed here by injection; the pass must return
+/// the error with its context, and the deltas must survive for the next pass.
+///
+/// The check exists only with debug assertions, so the test does too.
+#[cfg(debug_assertions)]
+#[tokio::test]
+async fn main_edges_read_failure_in_the_invariant_check_is_an_error() -> Result<()> {
+    const SEAM: &str = "main_edge::exists-by-eid";
+    let g = graph().await?;
+    let a = person(&g).await?;
+    let b = person(&g).await?;
+    knows(&g, a, b).await?;
+    g.writer.flush_to_l1(None).await?;
+
+    fail::cfg(SEAM, "return").unwrap();
+    let storage = g.storage.clone();
+    let joined = tokio::spawn(async move {
+        Compactor::new(storage)
+            .compact_adjacency("KNOWS", "Person", "fwd")
+            .await
+    })
+    .await;
+    fail::remove(SEAM);
+    let res = joined.unwrap_or_else(|e| {
+        panic!("the pass panicked on a main_edges read failure instead of returning it: {e}")
+    });
+    let err = match res {
+        Ok(_) => panic!("the pass succeeded although main_edges could not be read"),
+        Err(e) => e,
+    };
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("could not check main_edges") && rendered.contains("injected"),
+        "the error lost its context: {rendered}"
+    );
+
+    // Nothing was cleared, and the next pass converges.
+    Compactor::new(g.storage.clone())
+        .compact_adjacency("KNOWS", "Person", "fwd")
+        .await?;
+    assert_eq!(
+        neighbors_after_reopen(&g, a, Direction::Outgoing).await?,
+        vec![b]
+    );
+    Ok(())
+}
+
 /// Probe, not a repro. `adjacency_table_name` ignores its `label` argument, so
 /// an edge type with N `src_labels` calls `compact_adjacency` N times against
 /// the *same* L2 and delta tables. Passes 2..N early-return on empty deltas, so

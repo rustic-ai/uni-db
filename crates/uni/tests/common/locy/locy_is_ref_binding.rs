@@ -287,14 +287,18 @@ async fn is_ref_binding_too_many_subjects_is_refused() -> Result<()> {
 /// ABDUCE builds its derivation tree with the in-memory evaluator, which bound
 /// `TO t` by the stored relation's column order and put the weight `w` in `t`.
 /// No clause reproduced the `via` facts, the tree ended at them, and ABDUCE
-/// reported no valid edit at all, though removing either `E` edge out of `a`
-/// removes one of them.
+/// reported no valid edit at all, though removing the `E` edge from `a` to `b`
+/// removes `via(a, b)`.
+///
+/// The goal names one fact. `x.name = 'a'` alone matches `via(a, b)` and
+/// `via(a, c)`, which no single edge removal ends; this test used to accept
+/// that goal only because a removal deleted every `E` edge.
 #[tokio::test]
 async fn is_ref_binding_abduce_follows_the_binding() -> Result<()> {
     let db = graph(FAN).await?;
     let program = "CREATE RULE link AS MATCH (x:N)-[e:E]->(y:N) YIELD KEY x, e.w AS w, KEY y\n\
          CREATE RULE via AS MATCH (x:N) WHERE x IS link TO t YIELD KEY x, KEY t\n\
-         ABDUCE NOT via WHERE x.name = 'a'";
+         ABDUCE NOT via WHERE x.name = 'a' AND t.name = 'b'";
     let result = db
         .session()
         .locy_with(program)

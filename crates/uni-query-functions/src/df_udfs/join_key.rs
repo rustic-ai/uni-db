@@ -11,13 +11,11 @@
 //! The key is a *necessary* condition for equality, not a sufficient one:
 //! whenever two values compare equal, their keys are equal. Two unequal values
 //! may share a key, so the join that uses it must re-check the original
-//! equality on every candidate pair. That split is deliberate. Cypher equality
-//! is not an equivalence relation over numbers — `cypher_eq` compares an
-//! integer with a float through `f64`, so `2^53 + 1 = 2^53 (float)` and
-//! `2^53 = 2^53 (float)` both hold while `2^53 + 1 = 2^53` does not — and no
-//! key can be exactly equal-iff-equal for a relation that is not transitive.
-//! A key that merges such values and a re-check that separates them answers
-//! exactly what a filter over the cross product answers.
+//! equality on every candidate pair. Above 2^53 an integer is keyed through
+//! the float it rounds to, so `2^53 + 1` and `2^53 (float)` share a bucket
+//! although `cypher_eq` compares them exactly and finds them unequal; the
+//! re-check separates them, and the join answers exactly what a filter over
+//! the cross product answers.
 //!
 //! The only key that is `None` is the one for `null`, which equals nothing.
 
@@ -332,8 +330,9 @@ mod tests {
         assert_eq!(key(Value::Null), None);
     }
 
-    /// Integers above 2^53 that round to the same float share a bucket, since
-    /// both equal that float; the re-check is what keeps them apart.
+    /// Integers above 2^53 that round to the same float share a bucket with
+    /// it although none of them is equal to another; the re-check is what
+    /// keeps them apart.
     #[test]
     fn integers_that_round_to_one_float_share_a_bucket() {
         let big = 1_i64 << 53;
@@ -341,8 +340,13 @@ mod tests {
             cypher_eq(&Value::Int(big + 1), &Value::Int(big)),
             Some(false)
         );
+        // Exact: `2^53 + 1` is not the float `2^53`.
         assert_eq!(
             cypher_eq(&Value::Int(big + 1), &Value::Float(big as f64)),
+            Some(false)
+        );
+        assert_eq!(
+            cypher_eq(&Value::Int(big), &Value::Float(big as f64)),
             Some(true)
         );
         assert_eq!(

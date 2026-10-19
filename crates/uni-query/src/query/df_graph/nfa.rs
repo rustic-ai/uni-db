@@ -168,6 +168,14 @@ pub struct NfaTransition {
     /// Held as an index rather than the filter itself because the NFA is built
     /// during planning and the filters only exist after warming.
     pub edge_filter_slot: usize,
+    /// Constraint the vertex the transition *leaves* must satisfy.
+    ///
+    /// A destination constraint (`PathNfa::state_constraint`) cannot express
+    /// a quantified pattern's inner source label: the node one iteration ends
+    /// on starts the next only if the path goes on, and a state that accepts
+    /// may also continue. Checking on departure makes the constraint apply to
+    /// a path exactly when it starts another iteration.
+    pub source_constraint: Option<VertexConstraint>,
 }
 
 /// Non-deterministic finite automaton for variable-length path matching.
@@ -242,6 +250,7 @@ impl PathNfa {
                 direction,
                 // A simple VLP is one step repeated, so every hop shares slot 0.
                 edge_filter_slot: 0,
+                source_constraint: None,
             });
         }
 
@@ -307,6 +316,41 @@ impl PathNfa {
         &self.accepting_states
     }
 
+    /// `(min_hops, max_hops)` when this is the plain chain
+    /// [`Self::from_vlp`] builds: one relationship step repeated, with no
+    /// label or property constraint on any vertex, and every hop count from
+    /// `min_hops` to `max_hops` accepting. A quantified pattern that reduces
+    /// to the same chain qualifies too. `None` for anything else.
+    pub fn simple_chain_range(&self) -> Option<(usize, usize)> {
+        let same_step = |t: &NfaTransition| {
+            self.transitions
+                .first()
+                .is_some_and(|f| t.edge_type_ids == f.edge_type_ids && t.direction == f.direction)
+        };
+        let plain = self.start_state == 0
+            && self.transitions.len() + 1 == self.num_states as usize
+            && self.transitions.iter().enumerate().all(|(i, t)| {
+                t.from as usize == i
+                    && t.to as usize == i + 1
+                    && t.source_constraint.is_none()
+                    && t.edge_filter_slot == 0
+                    && same_step(t)
+            })
+            && self.state_constraints.iter().all(Option::is_none)
+            && self.state_vertex_filter_slot.iter().all(Option::is_none);
+        if !plain {
+            return None;
+        }
+        let max = self.transitions.len();
+        let min = self.accepting_states.iter().copied().min()? as usize;
+        (self.accepting_states.len() == max - min + 1
+            && self
+                .accepting_states
+                .iter()
+                .all(|&s| s as usize >= min && s as usize <= max))
+        .then_some((min, max))
+    }
+
     /// Get the state constraint for a given NFA state.
     pub fn state_constraint(&self, state: NfaStateId) -> Option<&VertexConstraint> {
         self.state_constraints
@@ -364,6 +408,7 @@ impl PathNfa {
                 edge_type_ids: step.edge_type_ids.clone(),
                 direction: step.direction,
                 edge_filter_slot: slot,
+                source_constraint: None,
             });
 
             // Apply the step's target constraint to the destination state
@@ -402,6 +447,24 @@ impl PathNfa {
             state_constraints,
             state_vertex_filter_slot,
         }
+    }
+
+    /// Require `constraint` of the vertex at the start of every iteration of a
+    /// quantified pattern with `hops_per_iter` hops — the pattern's inner
+    /// source label. It is checked on each transition that begins an
+    /// iteration ([`NfaTransition::source_constraint`]), the first included.
+    #[must_use]
+    pub fn with_iteration_source_constraint(
+        mut self,
+        hops_per_iter: usize,
+        constraint: VertexConstraint,
+    ) -> Self {
+        for t in &mut self.transitions {
+            if hops_per_iter > 0 && usize::from(t.from) % hops_per_iter == 0 {
+                t.source_constraint = Some(constraint.clone());
+            }
+        }
+        self
     }
 
     /// Which per-hop vertex-property filter a vertex reaching `state` must

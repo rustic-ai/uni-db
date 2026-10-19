@@ -1183,7 +1183,7 @@ async fn run_program(
                         },
                         semiring_kind,
                     )
-                    .await
+                    .await?
                 } else {
                     None
                 };
@@ -1968,6 +1968,7 @@ fn convert_best_by_criteria(
                 })?;
             Ok(SortCriterion {
                 col_index,
+                column: yield_schema[col_index].name.clone(),
                 ascending: *ascending,
                 nulls_first: false,
             })

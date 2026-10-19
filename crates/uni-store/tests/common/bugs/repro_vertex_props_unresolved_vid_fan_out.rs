@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-//! `PropertyManager::get_batch_vertex_props` scans *every declared label* as
-//! soon as a single vid in the batch fails to resolve.
+//! `PropertyManager::get_batch_vertex_props` used to scan *every declared
+//! label* as soon as a single vid in the batch failed to resolve. FIXED; the
+//! tests below guard the fix.
 //!
-//! The label set to scan is chosen at `property_manager.rs:540-555`: each vid is
-//! looked up in the `VidLabelsIndex`, and the first one that misses `break`s out
-//! and falls back to `schema.labels.keys()` — "Fallback to full scan". The
-//! escalation is all-or-nothing and batch-wide: one unresolved vid among a
-//! hundred resolved ones costs the whole batch a fan-out across every label.
+//! The label set to scan is chosen in `get_batch_vertex_props` (the block that
+//! builds `labels_to_scan`): each vid was looked up in the `VidLabelsIndex`,
+//! and the first one that missed `break`s out and fell back to
+//! `schema.labels.keys()` — "Fallback to full scan". The escalation was
+//! all-or-nothing and batch-wide: one unresolved vid among a hundred resolved
+//! ones cost the whole batch a fan-out across every label.
 //!
 //! # What makes a vid unresolved
 //!
-//! `update_vid_labels_index` has exactly one production caller
-//! (`writer.rs:5344`), inside `flush_to_l1`, and the startup rebuild reads the
+//! `update_vid_labels_index` has exactly one production caller in `writer.rs`,
+//! inside `flush_to_l1`, and the startup rebuild reads the
 //! *main vertex table*. So the index describes flushed vertices only, and a
 //! vertex that has been written but not yet flushed is absent from it — which
 //! makes the ordinary insert-then-read sequence the trigger, not an edge case.
@@ -167,7 +169,9 @@ async fn a_resolved_batch_scans_only_the_labels_it_needs() -> Result<()> {
     Ok(())
 }
 
-/// The defect: one unresolved vid escalates the read to every declared label.
+/// One unflushed vid costs what a resolved one does, because L0 supplies its
+/// label. With the L0 consultation removed it falls back to every declared
+/// label (8 scans against the control's 1) and the equality fails.
 #[tokio::test]
 async fn one_unflushed_vid_fans_the_batch_out_across_every_label() -> Result<()> {
     let f = fixture().await?;
@@ -209,9 +213,11 @@ async fn one_unflushed_vid_fans_the_batch_out_across_every_label() -> Result<()>
     Ok(())
 }
 
-/// The sharpest form: the escalation is batch-wide. A single unresolved vid
-/// makes every *resolved* vid in the same call pay the fan-out, because the
-/// resolution loop `break`s rather than collecting what it knows.
+/// The sharpest form: the escalation was batch-wide. A single unresolved vid
+/// made every *resolved* vid in the same call pay the fan-out, because the
+/// resolution loop `break`s rather than collecting what it knows. With the L0
+/// consultation reverted, the mixed batch scans all 8 labels against the
+/// resolved batch's 2.
 #[tokio::test]
 async fn a_single_unresolved_vid_escalates_an_otherwise_resolved_batch() -> Result<()> {
     let f = fixture().await?;

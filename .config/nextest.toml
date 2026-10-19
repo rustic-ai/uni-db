@@ -63,6 +63,14 @@ slow-timeout = { period = "60s", terminate-after = 6 }
 filter = 'test(/metamorphic::dqp::topo::topo_rewrites/) or test(flush_wide_smoke)'
 slow-timeout = { period = "60s", terminate-after = 6 }
 
+# `locy_operator_parity_matches_cypher` asks about 10,300 expressions of both
+# Locy and Cypher, each in its own statement: about 90 s alone in a debug
+# build, and 180 s beside the rest of the suite, where the default
+# three-minute ceiling killed it. 6 minutes leaves room without cutting cases.
+[[profile.default.overrides]]
+filter = 'test(locy_operator_parity_matches_cypher)'
+slow-timeout = { period = "60s", terminate-after = 6 }
+
 # CI profile: keep running after failures so one broken test surfaces the
 # full failure set in a single pipeline run. Select with `--profile ci`.
 [profile.ci]
@@ -72,6 +80,14 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 # Mirrored from the default profile; see the rationale there.
 [[profile.ci.overrides]]
 filter = 'test(/metamorphic::dqp::topo::topo_rewrites/) or test(flush_wide_smoke)'
+slow-timeout = { period = "60s", terminate-after = 6 }
+
+# `locy_operator_parity_matches_cypher` asks about 10,300 expressions of both
+# Locy and Cypher, each in its own statement: about 90 s alone in a debug
+# build, and 180 s beside the rest of the suite, where the default
+# three-minute ceiling killed it. 6 minutes leaves room without cutting cases.
+[[profile.ci.overrides]]
+filter = 'test(locy_operator_parity_matches_cypher)'
 slow-timeout = { period = "60s", terminate-after = 6 }
 
 # Mirrored explicitly rather than relying on override inheritance from

@@ -2045,7 +2045,19 @@ pub fn l0_prefilter_candidates(
     let in_range = |vid: u64| range.is_none_or(|(lo, hi)| vid >= lo && vid < hi);
     let may_equal = |stored: Option<&Value>| prefilter.may_match(column_type, stored);
     let prop = prefilter.property.as_str();
-    let mut verdict: HashMap<u64, bool> = HashMap::new();
+    // Buffers come oldest first, so the last verdict per vid is its merged
+    // one. Recording it as membership -- insert on a possible match, remove
+    // otherwise -- keeps that semantics while allocating only for the vids
+    // that may match: the pass is still one probe per L0 label member, but
+    // no longer one map insert per member as well.
+    let mut keep: HashSet<u64> = HashSet::new();
+    let mut record = |raw: u64, may: bool| {
+        if may {
+            keep.insert(raw);
+        } else {
+            keep.remove(&raw);
+        }
+    };
     for l0 in l0_ctx.iter_l0_buffers() {
         let guard = l0.read();
         let Some(members) = guard.label_to_vids.get(label) else {
@@ -2057,19 +2069,15 @@ pub fn l0_prefilter_candidates(
                 continue;
             }
             if let Some(value) = guard.vertex_properties.get(vid).and_then(|p| p.get(prop)) {
-                verdict.insert(raw, may_equal(Some(value)));
+                record(raw, may_equal(Some(value)));
             }
         }
     }
     for (vid, (base, _)) in label_only {
         if in_range(*vid) {
-            verdict.insert(*vid, may_equal(base.get(prop)));
+            record(*vid, may_equal(base.get(prop)));
         }
     }
-    let mut keep: HashSet<u64> = verdict
-        .into_iter()
-        .filter_map(|(vid, may)| may.then_some(vid))
-        .collect();
     keep.extend(shadowed.into_iter().filter(|v| in_range(*v)));
     keep
 }
@@ -2139,7 +2147,15 @@ pub fn schemaless_l0_prefilter_candidates(
     };
     let labels: Vec<&str> = label.split(':').filter(|l| !l.is_empty()).collect();
     let prop = prefilter.property.as_str();
-    let mut verdict: HashMap<u64, bool> = HashMap::new();
+    // Membership as the merged verdict, as in `l0_prefilter_candidates`.
+    let mut keep: HashSet<u64> = HashSet::new();
+    let mut record = |raw: u64, may: bool| {
+        if may {
+            keep.insert(raw);
+        } else {
+            keep.remove(&raw);
+        }
+    };
     for l0 in l0_ctx.iter_l0_buffers() {
         let guard = l0.read();
         let label_sets: Option<Vec<&HashSet<Vid>>> =
@@ -2148,25 +2164,37 @@ pub fn schemaless_l0_prefilter_candidates(
             // A label this buffer has never seen: no member here.
             continue;
         };
-        for (vid, props) in &guard.vertex_properties {
+        // Walk the smallest label set rather than every vertex in the
+        // buffer: with no label, every vertex is a member.
+        let mut visit = |vid: &Vid, props: &Properties| {
             let raw = vid.as_u64();
             if !in_range(raw) || !label_sets.iter().all(|s| s.contains(vid)) {
-                continue;
+                return;
             }
             if let Some(value) = props.get(prop) {
-                verdict.insert(raw, may_equal(Some(value)));
+                record(raw, may_equal(Some(value)));
+            }
+        };
+        match label_sets.iter().min_by_key(|s| s.len()) {
+            Some(smallest) => {
+                for vid in *smallest {
+                    if let Some(props) = guard.vertex_properties.get(vid) {
+                        visit(vid, props);
+                    }
+                }
+            }
+            None => {
+                for (vid, props) in &guard.vertex_properties {
+                    visit(vid, props);
+                }
             }
         }
     }
     for (vid, (base, _)) in label_only {
         if in_range(*vid) {
-            verdict.insert(*vid, may_equal(base.get(prop)));
+            record(*vid, may_equal(base.get(prop)));
         }
     }
-    let mut keep: HashSet<u64> = verdict
-        .into_iter()
-        .filter_map(|(vid, may)| may.then_some(vid))
-        .collect();
     keep.extend(shadowed.into_iter().filter(|v| in_range(*v)));
     Some(keep)
 }
@@ -2965,12 +2993,20 @@ pub async fn columnar_scan_vertex_batch(
     // or range can match, plus every vid the storage side returned — those L0 rows
     // must reach the merge to shadow their stale flushed versions. A vid list
     // is already narrow; an undeclared property has no column type to reason
-    // about, so both keep the unrestricted read.
+    // about, so both keep the unrestricted read. `ext_id` is the exception:
+    // undeclared, but every per-label table carries it as a string column,
+    // and `l0_value_may_equal` answers `true` for any non-string L0 value, so
+    // reasoning about it as a `STRING` column keeps every row that could match.
+    let ext_id_type = uni_common::core::schema::DataType::String;
     let l0_kept: HashSet<u64>;
     let l0_targets = match (l0_prefilter, l0_targets) {
         (Some(pf), L0VertexTargets::All | L0VertexTargets::Range(..)) => {
-            match label_props.and_then(|lp| lp.get(pf.property.as_str())) {
-                Some(meta) => {
+            let column_type = label_props
+                .and_then(|lp| lp.get(pf.property.as_str()))
+                .map(|meta| &meta.r#type)
+                .or_else(|| (pf.property == EXT_ID_COLUMN).then_some(&ext_id_type));
+            match column_type {
+                Some(column_type) => {
                     let range = match l0_targets {
                         L0VertexTargets::Range(lo, hi) => Some((lo, hi)),
                         _ => None,
@@ -2985,7 +3021,7 @@ pub async fn columnar_scan_vertex_batch(
                         l0_ctx,
                         label,
                         range,
-                        &meta.r#type,
+                        column_type,
                         pf,
                         &label_only,
                         shadowed,

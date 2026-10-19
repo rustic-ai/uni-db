@@ -79,7 +79,24 @@ pub struct BulkBackend {
     pub shutdown: Arc<ShutdownHandle>,
     /// Database configuration (e.g. index-rebuild tuning).
     pub config: UniConfig,
+    /// The database's background index-rebuild manager, its worker started
+    /// on first use.
+    ///
+    /// A deferred (`async_indexes`) rebuild is queued here. `None` falls back
+    /// to a manager of the load's own, whose worker is tracked by
+    /// [`Self::shutdown`]; that worker loops until shutdown, so a database
+    /// should always supply this to keep one worker however many loads run.
+    pub rebuild_manager: Option<RebuildManagerSource>,
 }
+
+/// Yields a database's shared [`IndexRebuildManager`], creating it (and
+/// starting its worker) on first use.
+pub type RebuildManagerSource = Arc<
+    dyn Fn() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<Arc<IndexRebuildManager>>> + Send>,
+        > + Send
+        + Sync,
+>;
 
 /// Trait for types that can be converted to property maps for bulk insertion.
 ///
@@ -373,7 +390,8 @@ impl EdgeData {
 /// abort could not reach them, and discarded rows other writers had committed
 /// to the same tables in the meantime.
 ///
-/// A backend that cannot stage (a fork's branched backend) keeps that earlier
+/// A fork stages on its own branch of each table, so a fork's load is just as
+/// invisible until `commit()`. A backend that cannot stage keeps the earlier
 /// protocol: writes are visible as they happen and `abort()` rolls each touched
 /// table back to its pre-load version.
 pub struct BulkWriter {
@@ -526,6 +544,13 @@ impl BulkWriter {
         // is still an error.
         if vertices.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // A property named after a storage column is refused whether or not
+        // constraint validation is on: it is a storage collision, not a
+        // constraint (see `WRITE_RESERVED_PROPERTY_NAMES`).
+        for props in &vertices {
+            uni_common::core::schema::check_written_property_names(props.keys())?;
         }
 
         // Validate constraints before buffering (if enabled)
@@ -1085,6 +1110,11 @@ impl BulkWriter {
             return Ok(Vec::new());
         }
 
+        // Unconditional, as for vertices.
+        for edge in &edges {
+            uni_common::core::schema::check_written_property_names(edge.properties.keys())?;
+        }
+
         // Allocate EIDs in one IdAllocator mutex acquisition.
         let eids = {
             let writer = self.backend.writer.as_ref().unwrap();
@@ -1300,16 +1330,24 @@ impl BulkWriter {
             .filter(|l| self.staged.contains_key(&table_names::vertex_table_name(l)))
             .count();
 
-        for (table, _) in &order {
-            self.record_initial_version(table).await?;
-        }
-        for et in &edge_types {
-            for dir in ["fwd", "bwd"] {
-                self.record_initial_version(&table_names::adjacency_table_name(et, dir))
-                    .await?;
+        // The crash marker is the database's, and recovery applies it to the
+        // primary tables at reopen. A fork's load must not write one: the
+        // versions it would record are the primary tables' (the fork backend
+        // reports those), so recovering an interrupted fork load rolled
+        // primary back -- discarding primary commits made meanwhile -- and
+        // dropped primary tables the fork load had seen absent.
+        if self.writes_crash_marker() {
+            for (table, _) in &order {
+                self.record_initial_version(table).await?;
             }
+            for et in &edge_types {
+                for dir in ["fwd", "bwd"] {
+                    self.record_initial_version(&table_names::adjacency_table_name(et, dir))
+                        .await?;
+                }
+            }
+            self.persist_active_intent().await?;
         }
-        self.persist_active_intent().await?;
 
         let backend = self.backend.storage.backend();
         for (i, (table, delta)) in order.into_iter().enumerate() {
@@ -1477,25 +1515,32 @@ impl BulkWriter {
                     }
                 }
 
-                let rebuild_manager = IndexRebuildManager::new(
-                    self.backend.storage.clone(),
-                    self.backend.schema.clone(),
-                    self.backend.config.index_rebuild.clone(),
-                )
-                .await
-                .map_err(UniError::Internal)?;
+                let manager = match &self.backend.rebuild_manager {
+                    Some(source) => source().await.map_err(UniError::Internal)?,
+                    None => {
+                        let manager = Arc::new(
+                            IndexRebuildManager::new(
+                                self.backend.storage.clone(),
+                                self.backend.schema.clone(),
+                                self.backend.config.index_rebuild.clone(),
+                            )
+                            .await
+                            .map_err(UniError::Internal)?,
+                        );
+                        let handle = Arc::clone(&manager)
+                            .start_background_worker(self.backend.shutdown.subscribe());
+                        self.backend.shutdown.track_task(handle);
+                        manager
+                    }
+                };
 
-                let task_ids = rebuild_manager
+                let task_ids = manager
                     .schedule(labels_to_rebuild)
                     .await
                     .map_err(UniError::Internal)?;
 
                 self.stats.index_task_ids = task_ids;
                 self.stats.indexes_pending = true;
-
-                let manager = Arc::new(rebuild_manager);
-                let handle = manager.start_background_worker(self.backend.shutdown.subscribe());
-                self.backend.shutdown.track_task(handle);
             } else {
                 // Sync mode: rebuild indexes blocking
                 for label in &labels_to_rebuild {
@@ -1659,7 +1704,7 @@ impl BulkWriter {
             .save_snapshot(&manifest)
             .await
             .map_err(UniError::Internal)?;
-        if !self.initial_table_versions.is_empty() {
+        if !self.initial_table_versions.is_empty() && self.writes_crash_marker() {
             let store = self.backend.storage.store();
             flush_intent::write_committed(
                 &store,
@@ -1717,7 +1762,7 @@ impl BulkWriter {
         // before this point leaves the `Committed` marker, which reopen
         // reconciliation rolls forward; a crash before the `Committed` write
         // leaves the `Active` marker, which it rolls back.)
-        if !self.initial_table_versions.is_empty() {
+        if !self.initial_table_versions.is_empty() && self.writes_crash_marker() {
             let store = self.backend.storage.store();
             flush_intent::clear(&store)
                 .await
@@ -1815,8 +1860,12 @@ impl BulkWriter {
 
         // 5. Drop the crash-recovery marker — this abort already did the
         // rollback, so reopen must not try to roll back again.
+        // Never on a fork, which writes none and must not clear the
+        // database's.
         let store = self.backend.storage.store();
-        if let Err(e) = flush_intent::clear(&store).await {
+        if self.writes_crash_marker()
+            && let Err(e) = flush_intent::clear(&store).await
+        {
             rollback_errors.push(format!("intent marker: {e}"));
         }
 
@@ -1840,7 +1889,20 @@ impl BulkWriter {
     /// current set of touched tables and their pre-load versions. Called before
     /// anything this load writes becomes visible: before each multi-table
     /// flush on a backend that cannot stage, before `publish` on one that can.
+    /// Whether this load keeps the database's crash-recovery marker.
+    ///
+    /// Not on a fork: see `publish`. A fork's load that is interrupted is
+    /// therefore not reconciled at reopen. On a staging fork (every Lance
+    /// fork) nothing is visible before publish, so only a crash *during*
+    /// publish can leave part of it published, on the fork's branches alone.
+    fn writes_crash_marker(&self) -> bool {
+        self.backend.storage.fork_scope().is_none()
+    }
+
     async fn persist_active_intent(&self) -> Result<()> {
+        if !self.writes_crash_marker() {
+            return Ok(());
+        }
         let store = self.backend.storage.store();
         flush_intent::write_active(&store, &self.initial_table_versions)
             .await

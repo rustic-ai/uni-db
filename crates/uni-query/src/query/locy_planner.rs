@@ -280,7 +280,7 @@ fn fold_argument_type(
                 .or_else(|| {
                     var_labels
                         .contains_key(var)
-                        .then(|| undeclared_property_arrow_type(schema, prop))
+                        .then(undeclared_property_arrow_type)
                 })
                 .or_else(|| uniform_declared_type(schema, prop))
                 // Declared nowhere (a schemaless graph): the value arrives as
@@ -307,19 +307,6 @@ fn fold_function_name(aggregate: &Expr) -> Option<String> {
     }
 }
 
-/// The Arrow type the *scan* will emit for a property of a label that is not
-/// declared in the schema.
-///
-/// This must mirror `df_graph::scan::build_schemaless_vertex_schema` exactly:
-/// it merges property metadata across **all** labels and only falls back to
-/// `LargeBinary` when no label declares that property name. Guessing
-/// differently makes the projection's declared type disagree with the column it
-/// actually receives, and the resulting coercion silently nulls the value —
-/// which is the whole bug this function exists to avoid.
-///
-/// The merge matters in the realistic partial-schema case: with `Sensor.name`
-/// declared and label `Tag` undeclared, `t.name` still arrives as `Utf8`, not
-/// as cv-encoded bytes.
 /// Whether any label or edge type in `schema` declares `prop`.
 fn property_declared_anywhere(schema: &Schema, prop: &str) -> bool {
     schema
@@ -328,13 +315,18 @@ fn property_declared_anywhere(schema: &Schema, prop: &str) -> bool {
         .any(|label_props| label_props.contains_key(prop))
 }
 
-fn undeclared_property_arrow_type(schema: &Schema, prop: &str) -> DataType {
-    schema
-        .properties
-        .values()
-        .find_map(|label_props| label_props.get(prop))
-        .map(|meta| meta.r#type.to_arrow())
-        .unwrap_or(DataType::LargeBinary)
+/// The Arrow type the scan emits for a property its label does not declare.
+///
+/// This must mirror `df_graph::scan` exactly: a schema'd scan reads an
+/// undeclared property from the overflow map, and a schemaless one types a
+/// property only from the scanned labels' own declarations, so both emit
+/// `LargeBinary` (the stored Cypher value). Guessing differently makes the
+/// projection's declared type disagree with the column it receives, and the
+/// coercion nulls or garbles the value. Both used to take the type of the
+/// first label that declared the property anywhere in the schema, which read
+/// an integer stored on another label as a float, and a string as NULL.
+fn undeclared_property_arrow_type() -> DataType {
+    DataType::LargeBinary
 }
 
 /// The variables a clause's generator conditions bind.
@@ -536,7 +528,7 @@ fn infer_yield_type_rec(
                     // definition and the complement / noisy-OR arithmetic reads it
                     // as a real Float64, so there the coercion is exactly right.
                     if var_labels.contains_key(var) && !item.is_prob {
-                        return undeclared_property_arrow_type(schema, prop);
+                        return undeclared_property_arrow_type();
                     }
                     // An unlabelled node or a relationship: the schema's type,
                     // when every declaration of the property agrees. The
@@ -899,6 +891,45 @@ struct DerivedScanHandle {
 // LocyPlanBuilder
 // ---------------------------------------------------------------------------
 
+/// The plan of a stratum whose facts are reused rather than derived.
+///
+/// Carries what `LocyProgramExec` reads of a reused stratum — its rules'
+/// names and which of them yield columns — and no clause bodies. The YIELD
+/// columns' types are not inferred (that needs the clauses) and are never
+/// read: the reused facts bring their own schema.
+fn reused_stratum_stub(stratum: &Stratum) -> LocyStratum {
+    LocyStratum {
+        id: stratum.id,
+        rules: stratum
+            .rules
+            .iter()
+            .map(|rule| LocyRulePlan {
+                name: rule.name.clone(),
+                clauses: Vec::new(),
+                yield_schema: rule
+                    .yield_schema
+                    .iter()
+                    .map(|yc| LocyYieldColumn {
+                        name: yc.name.clone(),
+                        is_key: yc.is_key,
+                        is_prob: yc.is_prob,
+                        data_type: DataType::Null,
+                    })
+                    .collect(),
+                priority: rule.priority,
+                fold_bindings: Vec::new(),
+                require: Vec::new(),
+                having: Vec::new(),
+                best_by_criteria: Vec::new(),
+                yield_projection: Vec::new(),
+                deriv_columns: Vec::new(),
+            })
+            .collect(),
+        is_recursive: stratum.is_recursive,
+        depends_on: stratum.depends_on.clone(),
+    }
+}
+
 /// Builds a `LogicalPlan::LocyProgram` from a [`CompiledProgram`].
 ///
 /// The builder translates each stratum, rule, and clause into corresponding
@@ -914,6 +945,11 @@ pub struct LocyPlanBuilder<'a> {
     /// with user-registered aggregates should override via
     /// [`Self::with_plugin_registry`].
     plugin_registry: std::sync::Arc<uni_plugin::PluginRegistry>,
+    /// Positions of strata whose facts the run copies from an earlier
+    /// evaluation (incremental `ASSUME` / `ABDUCE`). They are never
+    /// evaluated, so their clause bodies are not planned; see
+    /// [`Self::with_reused_strata`].
+    reused_strata: std::collections::BTreeSet<usize>,
 }
 
 /// Neural-classifier-related plumbing threaded through `build_stratum` →
@@ -1454,7 +1490,24 @@ impl<'a> LocyPlanBuilder<'a> {
             planner,
             derived_scan_handles: RefCell::new(Vec::new()),
             plugin_registry: crate::query::df_graph::locy_fold::default_locy_plugin_registry(),
+            reused_strata: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Skip planning the strata at `positions`, whose facts the run reuses.
+    ///
+    /// A reused stratum is not evaluated: `LocyProgramExec` copies its rules'
+    /// facts by name and reads nothing else of the stratum (see
+    /// [`crate::query::df_graph::ReusedStrata`]). Planning its clause bodies
+    /// was the dominant cost of a hypothetical re-evaluation that reuses
+    /// most of the program, so such a stratum is emitted with its rules'
+    /// names and YIELD columns only. The plan must then be run with exactly
+    /// these positions reused; evaluating it otherwise derives nothing for
+    /// them.
+    #[must_use]
+    pub fn with_reused_strata(mut self, positions: std::collections::BTreeSet<usize>) -> Self {
+        self.reused_strata = positions;
+        self
     }
 
     /// Replace the plugin registry used for aggregate monotonicity resolution.
@@ -1597,7 +1650,11 @@ impl<'a> LocyPlanBuilder<'a> {
             cache: classifier_cache.as_ref().map(Arc::clone),
             provenance_store: classifier_provenance_store.as_ref().map(Arc::clone),
         };
-        for stratum in &compiled.strata {
+        for (pos, stratum) in compiled.strata.iter().enumerate() {
+            if self.reused_strata.contains(&pos) {
+                strata.push(reused_stratum_stub(stratum));
+                continue;
+            }
             let rule_names: HashSet<String> =
                 stratum.rules.iter().map(|r| r.name.clone()).collect();
             let locy_stratum =

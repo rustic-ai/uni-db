@@ -189,9 +189,8 @@ fn int_key(i: i64) -> Vec<u8> {
 ///
 /// Returns `None` — use the per-row path — unless the list is a scalar (a
 /// literal or a parameter) and the element a column of at least
-/// [`MIN_INDEXED_ROWS`] rows. A list that arrives as a column is left to the
-/// per-row path even when its rows repeat, since indexing a list costs about
-/// as much as one scan of it.
+/// [`MIN_INDEXED_ROWS`] rows. A list that arrives as a column is handled per
+/// run of identical rows by [`invoke_column_list`].
 pub(super) fn invoke_constant_list(args: &ScalarFunctionArgs) -> DFResult<Option<ColumnarValue>> {
     let [ColumnarValue::Array(elements), ColumnarValue::Scalar(list)] = args.args.as_slice() else {
         return Ok(None);
@@ -223,6 +222,95 @@ pub(super) fn invoke_constant_list(args: &ScalarFunctionArgs) -> DFResult<Option
             Value::Bool(b) => out.append_value(b),
             _ => out.append_null(),
         }
+    }
+    Ok(Some(ColumnarValue::Array(Arc::new(out.finish()))))
+}
+
+/// `_cypher_in` over a list argument that arrives as a column.
+///
+/// A list bound by `WITH` or `collect()` reaches the membership test once per
+/// row, and rows that come from one `UNWIND` of it carry the same list in a
+/// run (the LDBC IC5 shape, `WITH collect(f) AS fs UNWIND … WHERE x IN fs`).
+/// Scanning it per row made the test `rows × len`; this splits the column
+/// into runs of identical rows, decodes each run's list once, and answers a
+/// run of two or more rows from an [`InListIndex`] built for it, a single row
+/// by the scan. The answers are the scan's, row by row.
+///
+/// Rows are identical when their bytes are (a CypherValue `LargeBinary`), or
+/// when their Arrow values are, for any other list encoding — exact equality,
+/// never Cypher equality, so a run never merges two lists the scan could
+/// answer differently.
+///
+/// Returns `None` — use the per-row path — unless the list is a column of at
+/// least [`MIN_INDEXED_ROWS`] rows.
+pub(super) fn invoke_column_list(args: &ScalarFunctionArgs) -> DFResult<Option<ColumnarValue>> {
+    let [element_arg, ColumnarValue::Array(lists)] = args.args.as_slice() else {
+        return Ok(None);
+    };
+    let rows = lists.len();
+    if rows < MIN_INDEXED_ROWS {
+        return Ok(None);
+    }
+    let element_field = args.arg_fields.first().map(|f| f.as_ref());
+    let list_field = args.arg_fields.get(1).map(|f| f.as_ref());
+    let constant_element = match element_arg {
+        ColumnarValue::Scalar(s) => Some(scalar_to_value(s)?),
+        ColumnarValue::Array(_) => None,
+    };
+    let element_at = |row: usize| -> DFResult<Value> {
+        match (element_arg, &constant_element) {
+            (_, Some(v)) => Ok(v.clone()),
+            (ColumnarValue::Array(arr), None) => get_value_from_array(arr, row, element_field),
+            (ColumnarValue::Scalar(s), None) => scalar_to_value(s),
+        }
+    };
+    let same_row = |a: usize, b: usize| -> bool {
+        if lists.is_null(a) || lists.is_null(b) {
+            return false;
+        }
+        match (large_binary_row(lists, a), large_binary_row(lists, b)) {
+            (Some(x), Some(y)) => x == y,
+            _ => lists.slice(a, 1).to_data() == lists.slice(b, 1).to_data(),
+        }
+    };
+    let mut out = arrow_array::builder::BooleanBuilder::with_capacity(rows);
+    let mut start = 0;
+    while start < rows {
+        let mut end = start + 1;
+        while end < rows && same_row(start, end) {
+            end += 1;
+        }
+        let list = if lists.is_null(start) {
+            Value::Null
+        } else {
+            get_value_from_array(lists, start, list_field)?
+        };
+        let items = match &list {
+            Value::Null => {
+                out.append_nulls(end - start);
+                start = end;
+                continue;
+            }
+            Value::List(items) => items.as_slice(),
+            other => {
+                return Err(datafusion::error::DataFusionError::Execution(format!(
+                    "_cypher_in(): second argument must be a list, got {other:?}"
+                )));
+            }
+        };
+        let index = (end - start >= MIN_INDEXED_ROWS).then(|| InListIndex::new(items));
+        for row in start..end {
+            let element = element_at(row)?;
+            let answer = match &index {
+                Some(index) => index.contains(&element),
+                None => scan_membership(&element, items),
+            };
+            match answer {
+                Value::Bool(b) => out.append_value(b),
+                _ => out.append_null(),
+            }
+        }
+        start = end;
     }
     Ok(Some(ColumnarValue::Array(Arc::new(out.finish()))))
 }
@@ -414,8 +502,34 @@ mod tests {
         )
     }
 
-    /// The same, with `list` repeated per row as a column — a collected or
-    /// `WITH`-bound list — which takes the per-row scan.
+    /// The reference: [`scan_membership`] per element, with no index.
+    fn scan(elements: &[Value], list: &[Value]) -> Vec<Option<bool>> {
+        elements
+            .iter()
+            .map(|e| match scan_membership(e, list) {
+                Value::Bool(b) => Some(b),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `elements[i] IN lists[i]`, the lists as a column — a collected or
+    /// `WITH`-bound list — with `None` for a `NULL` list.
+    fn column(elements: &[Value], lists: &[Option<Vec<Value>>]) -> Vec<Option<bool>> {
+        let encoded: Vec<Option<Vec<u8>>> = lists
+            .iter()
+            .map(|l| {
+                l.as_ref()
+                    .map(|l| uni_common::cypher_value_codec::encode(&Value::List(l.clone())))
+            })
+            .collect();
+        invoke(
+            element_array(elements),
+            ColumnarValue::Array(Arc::new(LargeBinaryArray::from_iter(encoded))),
+        )
+    }
+
+    /// The same, with `list` repeated per row as a column: one run.
     fn per_row(elements: &[Value], list: &[Value]) -> Vec<Option<bool>> {
         let bytes = uni_common::cypher_value_codec::encode(&Value::List(list.to_vec()));
         let column: ArrayRef = Arc::new(LargeBinaryArray::from_iter_values(std::iter::repeat_n(
@@ -425,19 +539,25 @@ mod tests {
         invoke(element_array(elements), ColumnarValue::Array(column))
     }
 
-    /// The constant-list path answers exactly what the per-row scan answers,
-    /// for every element against every list in the matrix.
+    /// The constant-list path and the column path answer exactly what the
+    /// scan answers, for every element against every list in the matrix.
     #[test]
     fn constant_list_matches_per_row_scan() {
         let elements = values();
         let (mut trues, mut nulls, mut falses) = (0, 0, 0);
         for list in lists() {
             let got = constant(&elements, &list);
-            let want = per_row(&elements, &list);
-            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+            let got_column = per_row(&elements, &list);
+            let want = scan(&elements, &list);
+            for (i, ((g, c), w)) in got.iter().zip(&got_column).zip(&want).enumerate() {
                 assert_eq!(
                     g, w,
-                    "{:?} IN {list:?}: constant list said {g:?}, per-row scan {w:?}",
+                    "{:?} IN {list:?}: constant list said {g:?}, scan {w:?}",
+                    elements[i]
+                );
+                assert_eq!(
+                    c, w,
+                    "{:?} IN {list:?}: list column said {c:?}, scan {w:?}",
                     elements[i]
                 );
                 match w {
@@ -474,8 +594,13 @@ mod tests {
             Some(false)
         );
         assert_eq!(one(Value::Int(BIG + 1), vec![Value::Int(BIG)]), Some(false));
+        // Exact: `2^53 + 1` is not the float `2^53`, which `2^53` is.
         assert_eq!(
             one(Value::Int(BIG + 1), vec![Value::Float(BIG as f64)]),
+            Some(false)
+        );
+        assert_eq!(
+            one(Value::Int(BIG), vec![Value::Float(BIG as f64)]),
             Some(true)
         );
         assert_eq!(
@@ -528,11 +653,96 @@ mod tests {
         );
         assert!(large < 512 * 4, "{large} comparisons for 512 rows");
 
-        // Control: the per-row path really is the linear scan this guards.
+        // Control: a list that differs on every row is a run of one per row,
+        // answered by the linear scan this guards against.
         let elements: Vec<Value> = (0..64).map(|i| Value::Int(1_000_000 + i)).collect();
-        let list: Vec<Value> = (0..256).map(Value::Int).collect();
+        let distinct: Vec<Option<Vec<Value>>> = (0..64)
+            .map(|r| Some((0..256).map(|i| Value::Int(r * 1000 + i)).collect()))
+            .collect();
         take_comparisons();
-        per_row(&elements, &list);
+        column(&elements, &distinct);
         assert_eq!(take_comparisons(), 64 * 256);
+    }
+
+    /// A list column whose rows repeat in runs: lists change between runs,
+    /// some hold `NULL`, some rows are a `NULL` list, a run may be one row.
+    /// Every row answers what the scan of its own list answers.
+    #[test]
+    fn list_column_runs_match_the_scan() {
+        let pool = lists();
+        let elements = values();
+        let mut row_elements = Vec::new();
+        let mut row_lists: Vec<Option<Vec<Value>>> = Vec::new();
+        // Runs of 1, 2, 3, ... rows, cycling through the lists, with a NULL
+        // list every fifth run, and the same list twice in a row once.
+        for run in 0..60usize {
+            let list = if run % 5 == 4 {
+                None
+            } else {
+                Some(pool[(run / 2) % pool.len()].clone())
+            };
+            for r in 0..(run % 4 + 1) {
+                // Every other row probes an item of its own list.
+                let element = match &list {
+                    Some(l) if r % 2 == 0 && !l.is_empty() => l[(run + r) % l.len()].clone(),
+                    _ => elements[(run * 7 + r * 3) % elements.len()].clone(),
+                };
+                row_elements.push(element);
+                row_lists.push(list.clone());
+            }
+        }
+        let got = column(&row_elements, &row_lists);
+        let (mut trues, mut nulls, mut falses) = (0, 0, 0);
+        for (i, g) in got.iter().enumerate() {
+            let want = match &row_lists[i] {
+                None => None,
+                Some(list) => scan(&row_elements[i..=i], list)[0],
+            };
+            assert_eq!(
+                *g, want,
+                "{:?} IN {:?}: list column said {g:?}, scan {want:?}",
+                row_elements[i], row_lists[i]
+            );
+            match want {
+                Some(true) => trues += 1,
+                Some(false) => falses += 1,
+                None => nulls += 1,
+            }
+        }
+        assert!(
+            trues > 5 && nulls > 5 && falses > 5,
+            "{trues}/{nulls}/{falses}"
+        );
+    }
+
+    /// Comparisons made for `groups` runs of `rows` misses against a list
+    /// column whose runs hold `len` items each.
+    fn column_runs_cost(groups: i64, rows: i64, len: i64) -> u64 {
+        let mut elements = Vec::new();
+        let mut lists = Vec::new();
+        for g in 0..groups {
+            let list: Vec<Value> = (0..len).map(|i| Value::Int(g * 100_000 + i)).collect();
+            for r in 0..rows {
+                elements.push(Value::Int(1_000_000_000 + g * 1000 + r));
+                lists.push(Some(list.clone()));
+            }
+        }
+        take_comparisons();
+        let got = column(&elements, &lists);
+        assert!(got.iter().all(|r| *r == Some(false)));
+        take_comparisons()
+    }
+
+    /// A list column repeated in runs is probed per row, not scanned: the
+    /// comparisons do not grow with the list (IC5).
+    #[test]
+    fn list_column_runs_cost_does_not_grow_with_list() {
+        let small = column_runs_cost(8, 64, 256);
+        let large = column_runs_cost(8, 64, 4096);
+        assert!(
+            large <= small,
+            "4096-item runs made {large} comparisons, 256-item runs {small}"
+        );
+        assert!(large < 8 * 64 * 4, "{large} comparisons for 512 rows");
     }
 }

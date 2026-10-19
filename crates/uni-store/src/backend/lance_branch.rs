@@ -630,6 +630,136 @@ where
     Ok(())
 }
 
+/// Write `batches` as data files of `branch` without committing them.
+///
+/// Lance's two-step write against a branch-checked-out dataset, the branch
+/// counterpart of the Lance backend's `stage_append`: the files land where an
+/// append on the branch would put them, and no manifest references them until
+/// [`publish_on_branch`] commits the returned fragments.
+///
+/// # Errors
+///
+/// - The dataset or branch does not exist.
+/// - The write fails, or produces something other than an append.
+pub async fn stage_on_branch(
+    uri: &str,
+    branch: &str,
+    batches: Vec<arrow_array::RecordBatch>,
+) -> Result<Vec<lance::table::format::Fragment>> {
+    use lance::dataset::transaction::Operation;
+
+    let on_branch = open_branch(uri, branch)
+        .await
+        .with_context(|| format!("open branch {branch} on {uri} to stage rows"))?;
+    let params = lance::dataset::WriteParams {
+        mode: lance::dataset::WriteMode::Append,
+        ..Default::default()
+    };
+    let transaction = lance::dataset::InsertBuilder::new(Arc::new(on_branch))
+        .with_params(&params)
+        .execute_uncommitted(batches)
+        .await
+        .with_context(|| format!("stage rows on branch {branch} of {uri}"))?;
+    match transaction.operation {
+        Operation::Append { fragments } => Ok(fragments),
+        other => anyhow::bail!(
+            "staging rows on branch {branch} of {uri} produced a {other} operation, \
+             expected Append"
+        ),
+    }
+}
+
+/// Commit `fragments` staged by [`stage_on_branch`] onto `branch`'s current
+/// version, as one append.
+///
+/// Re-basing an append onto whatever the branch committed since staging is
+/// exact, for the reason the Lance backend's `publish_staged` gives.
+///
+/// # Errors
+///
+/// Returns an error if the dataset or branch does not exist or the commit
+/// fails, in which case none of the rows are visible.
+pub async fn publish_on_branch(
+    uri: &str,
+    branch: &str,
+    fragments: Vec<lance::table::format::Fragment>,
+) -> Result<()> {
+    use lance::dataset::transaction::{Operation, TransactionBuilder};
+
+    if fragments.is_empty() {
+        return Ok(());
+    }
+    let on_branch = open_branch(uri, branch)
+        .await
+        .with_context(|| format!("open branch {branch} on {uri} to publish staged rows"))?;
+    let transaction =
+        TransactionBuilder::new(on_branch.version().version, Operation::Append { fragments })
+            .build();
+    lance::dataset::CommitBuilder::new(Arc::new(on_branch))
+        .execute(transaction)
+        .await
+        .with_context(|| format!("publish staged rows to branch {branch} of {uri}"))?;
+    Ok(())
+}
+
+/// Delete the files of `fragments` staged by [`stage_on_branch`].
+///
+/// # Errors
+///
+/// Returns the first deletion error; the remaining files are still tried.
+pub async fn discard_on_branch(
+    uri: &str,
+    branch: &str,
+    fragments: Vec<lance::table::format::Fragment>,
+) -> Result<()> {
+    if fragments.is_empty() {
+        return Ok(());
+    }
+    let on_branch = open_branch(uri, branch).await?;
+    let data_dir = on_branch.data_dir();
+    let mut first_error = None;
+    for fragment in &fragments {
+        for file in &fragment.files {
+            let removed = match on_branch.object_store(file.base_id).await {
+                Ok(store) => {
+                    store
+                        .delete(&data_dir.clone().join(file.path.as_str()))
+                        .await
+                }
+                Err(e) => Err(e),
+            };
+            if let Err(e) = removed {
+                first_error.get_or_insert_with(|| {
+                    anyhow::anyhow!(
+                        "delete staged file '{}' of branch {branch} on {uri}: {e}",
+                        file.path
+                    )
+                });
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+/// The fragments one [`ForkBranching::stage_on_branch`] call wrote.
+struct BranchStagedFragments(Vec<lance::table::format::Fragment>);
+
+/// Collect the fragments of `staged`, rejecting payloads staged elsewhere.
+fn branch_staged_fragments(
+    table: &str,
+    staged: Vec<Box<dyn std::any::Any + Send + Sync>>,
+) -> Result<Vec<lance::table::format::Fragment>> {
+    let mut fragments = Vec::new();
+    for payload in staged {
+        let BranchStagedFragments(mut f) =
+            *payload.downcast::<BranchStagedFragments>().map_err(|_| {
+                anyhow::anyhow!("rows staged for '{table}' were not staged on a branch")
+            })?;
+        fragments.append(&mut f);
+    }
+    Ok(fragments)
+}
+
 /// Widen a branch's stored schema so it accepts a batch it currently rejects.
 ///
 /// The branch half of [`crate::backend::StorageBackend::evolve_table_schema`].
@@ -1010,6 +1140,43 @@ impl ForkBranching for LanceBranching {
             Self::reader(batches, schema),
         )
         .await
+    }
+
+    fn stages_on_branch(&self) -> bool {
+        true
+    }
+
+    async fn stage_on_branch(
+        &self,
+        table: &str,
+        branch: &str,
+        batches: Vec<arrow_array::RecordBatch>,
+    ) -> Result<Box<dyn std::any::Any + Send + Sync>> {
+        if batches.iter().all(|b| b.num_rows() == 0) {
+            return Ok(Box::new(BranchStagedFragments(Vec::new())));
+        }
+        let fragments = stage_on_branch(&self.dataset_uri(table), branch, batches).await?;
+        Ok(Box::new(BranchStagedFragments(fragments)))
+    }
+
+    async fn publish_on_branch(
+        &self,
+        table: &str,
+        branch: &str,
+        staged: Vec<Box<dyn std::any::Any + Send + Sync>>,
+    ) -> Result<()> {
+        let fragments = branch_staged_fragments(table, staged)?;
+        publish_on_branch(&self.dataset_uri(table), branch, fragments).await
+    }
+
+    async fn discard_on_branch(
+        &self,
+        table: &str,
+        branch: &str,
+        staged: Vec<Box<dyn std::any::Any + Send + Sync>>,
+    ) -> Result<()> {
+        let fragments = branch_staged_fragments(table, staged)?;
+        discard_on_branch(&self.dataset_uri(table), branch, fragments).await
     }
 
     async fn evolve_branch_schema(

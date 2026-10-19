@@ -21,6 +21,7 @@ use uni_locy::{CompiledProgram, FactRow, LocyConfig, LocyError};
 use super::locy_delta::RowStore;
 
 use super::locy_eval::{eval_condition, eval_expr, value_cmp};
+use uni_query_functions::df_udfs::canonical_cypher_value;
 
 /// Entry point for goal-directed QUERY evaluation.
 ///
@@ -161,11 +162,15 @@ pub(super) fn apply_return_clause(
         // `FactRow` is a `HashMap`, whose `Debug` order is instance-dependent,
         // so byte-identical rows could render to different strings and survive
         // DISTINCT. `Value` has a canonical `Hash`/`Eq`, so this dedups by
-        // content deterministically.
+        // content deterministically. Each value is keyed on its equivalence
+        // class, so `1` and `1.0` are one value, as in Cypher; the row kept
+        // is the first one seen.
         let mut seen = std::collections::HashSet::new();
         entries.retain(|(row, _)| {
-            let key: std::collections::BTreeMap<String, uni_common::Value> =
-                row.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let key: std::collections::BTreeMap<String, uni_common::Value> = row
+                .iter()
+                .map(|(k, v)| (k.clone(), canonical_cypher_value(v.clone())))
+                .collect();
             seen.insert(key)
         });
     }
@@ -367,10 +372,13 @@ fn aggregate(expr: &Expr, group: &[FactRow]) -> Result<Value, LocyError> {
             message: format!("{name}() in a QUERY RETURN takes one argument"),
         });
     };
+    // Under DISTINCT, the first value of each class of equal values (`1` and
+    // `1.0` are one value, as in Cypher).
     let mut values = Vec::with_capacity(group.len());
+    let mut seen = std::collections::HashSet::new();
     for row in group {
         let v = eval_expr(arg, row)?;
-        if !v.is_null() && !(*distinct && values.contains(&v)) {
+        if !v.is_null() && (!*distinct || seen.insert(canonical_cypher_value(v.clone()))) {
             values.push(v);
         }
     }

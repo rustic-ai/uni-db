@@ -1,5 +1,6 @@
 pub mod fork_async_flush_identity;
 mod fork_budget;
+pub mod fork_bulk_load;
 pub mod fork_cancel;
 pub mod fork_concurrent_writers;
 pub mod fork_create_concurrent_writes;

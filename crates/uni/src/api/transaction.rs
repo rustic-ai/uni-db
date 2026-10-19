@@ -234,6 +234,16 @@ fn classify_verb(cypher: &str) -> &'static str {
     "write"
 }
 
+/// Map a writer error into a `UniError`, keeping a typed error the writer
+/// raised (e.g. a reserved property name) instead of wrapping it in
+/// `Internal`.
+fn writer_error(e: anyhow::Error) -> UniError {
+    match e.downcast::<UniError>() {
+        Ok(typed) => typed,
+        Err(other) => UniError::Internal(other),
+    }
+}
+
 impl Transaction {
     pub(crate) async fn new(session: &Session) -> Result<Self> {
         Self::new_with_options(session, None, IsolationLevel::default(), false).await
@@ -841,7 +851,7 @@ impl Transaction {
                 Some(&self.tx_l0),
             )
             .await
-            .map_err(UniError::Internal);
+            .map_err(writer_error);
         // A partially-applied batch leaves rows in `tx_l0`; poison the tx so it
         // cannot commit (bug #15).
         self.mark_on_err(result)?;
@@ -941,7 +951,7 @@ impl Transaction {
                         Some(&self.tx_l0),
                     )
                     .await
-                    .map_err(UniError::Internal)?;
+                    .map_err(writer_error)?;
             }
             Ok(())
         }

@@ -3,6 +3,7 @@ pub mod branched_backend_writes;
 pub mod compaction_property_fidelity;
 pub mod extid_index_test;
 pub mod json_index_test;
+pub mod lance_backtick_column_probe;
 pub mod lance_merge_insert_probe;
 pub mod overflow_json_tests;
 pub mod snapshot_manager_test;

@@ -725,8 +725,14 @@ fn modification_to_py(py: Python, m: uni_locy::Modification) -> PyResult<Py<PyAn
             edge_var,
             edge_type,
             match_properties,
+            eid,
+            source_vid,
+            target_vid,
         } => {
             dict.set_item("type", "remove_edge")?;
+            dict.set_item("eid", eid.map(|e| e.as_u64()))?;
+            dict.set_item("source_vid", source_vid.map(|v| v.as_u64()))?;
+            dict.set_item("target_vid", target_vid.map(|v| v.as_u64()))?;
             dict.set_item("source_var", source_var)?;
             dict.set_item("target_var", target_var)?;
             dict.set_item("edge_var", edge_var)?;
@@ -742,8 +748,12 @@ fn modification_to_py(py: Python, m: uni_locy::Modification) -> PyResult<Py<PyAn
             property,
             old_value,
             new_value,
+            vid,
+            eid,
         } => {
             dict.set_item("type", "change_property")?;
+            dict.set_item("vid", vid.map(|v| v.as_u64()))?;
+            dict.set_item("eid", eid.map(|e| e.as_u64()))?;
             dict.set_item("element_var", element_var)?;
             dict.set_item("property", property)?;
             dict.set_item("old_value", value_to_py(py, &old_value)?)?;
@@ -754,8 +764,12 @@ fn modification_to_py(py: Python, m: uni_locy::Modification) -> PyResult<Py<PyAn
             target_var,
             edge_type,
             properties,
+            source_vid,
+            target_vid,
         } => {
             dict.set_item("type", "add_edge")?;
+            dict.set_item("source_vid", source_vid.map(|v| v.as_u64()))?;
+            dict.set_item("target_vid", target_vid.map(|v| v.as_u64()))?;
             dict.set_item("source_var", source_var)?;
             dict.set_item("target_var", target_var)?;
             dict.set_item("edge_type", edge_type)?;

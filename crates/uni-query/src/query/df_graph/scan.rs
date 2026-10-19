@@ -212,12 +212,16 @@ pub struct GraphScanExec {
     /// `extra_runtime_filter`; an empty slot means "no restriction".
     dynamic_property_filter: Option<Arc<DynamicPropertyFilter>>,
 
-    /// Equality constraints a schemaless (main-table) scan may use to skip
-    /// L0 rows that cannot match before building them (W3b). Set by the
-    /// planner from the scan's Cypher filter, which stays authoritative above
-    /// the scan; ignored by the per-label path, which recovers its own from
-    /// `extra_runtime_filter`.
-    schemaless_l0_prefilter: Option<L0PropertyPrefilter>,
+    /// Equality constraints the scan may use to skip L0 rows that cannot
+    /// match before building them (W3b), set by the planner from the scan's
+    /// Cypher filter, which stays authoritative above the scan.
+    ///
+    /// A schemaless (main-table) scan always reads its L0 prefilter here. The
+    /// per-label path recovers its own from `extra_runtime_filter` and falls
+    /// back to this one when that yields none; the planner sets it there for
+    /// an `ext_id` equality, which is pushed to Lance as SQL only and so has
+    /// no runtime filter to recover a prefilter from.
+    planner_l0_prefilter: Option<L0PropertyPrefilter>,
 
     /// Metrics for execution tracking.
     metrics: ExecutionPlanMetricsSet,
@@ -251,14 +255,14 @@ impl GraphScanExec {
         self.with_dynamic_vid_filter_opt(Some(slot))
     }
 
-    /// Attach the equality prefilter a schemaless scan applies to its L0 rows.
+    /// Attach the equality prefilter the scan applies to its L0 rows.
     ///
-    /// See the `schemaless_l0_prefilter` field; `None` keeps every L0 row.
-    pub(crate) fn with_schemaless_l0_prefilter(
+    /// See the `planner_l0_prefilter` field; `None` keeps every L0 row.
+    pub(crate) fn with_planner_l0_prefilter(
         mut self,
         prefilter: Option<L0PropertyPrefilter>,
     ) -> Self {
-        self.schemaless_l0_prefilter = prefilter;
+        self.planner_l0_prefilter = prefilter;
         self
     }
 
@@ -275,7 +279,7 @@ impl GraphScanExec {
             extra_runtime_filter: self.extra_runtime_filter.clone(),
             dynamic_vid_filter: slot,
             dynamic_property_filter: self.dynamic_property_filter.clone(),
-            schemaless_l0_prefilter: self.schemaless_l0_prefilter.clone(),
+            planner_l0_prefilter: self.planner_l0_prefilter.clone(),
             is_schemaless: self.is_schemaless,
             schema: self.schema.clone(),
             properties: self.properties.clone(),
@@ -388,7 +392,7 @@ impl GraphScanExec {
             extra_runtime_filter: None,
             dynamic_vid_filter: None,
             dynamic_property_filter: None,
-            schemaless_l0_prefilter: None,
+            planner_l0_prefilter: None,
             is_schemaless: false,
             schema,
             properties,
@@ -439,8 +443,12 @@ impl GraphScanExec {
             .collect();
 
         let uni_schema = graph_ctx.storage().schema_manager().schema();
-        let schema =
-            Self::build_schemaless_vertex_schema(&variable, &projected_properties, &uni_schema);
+        let schema = Self::build_schemaless_vertex_schema(
+            &variable,
+            &label,
+            &projected_properties,
+            &uni_schema,
+        );
         let properties = compute_plan_properties(schema.clone());
 
         Self {
@@ -454,7 +462,7 @@ impl GraphScanExec {
             extra_runtime_filter: None,
             dynamic_vid_filter: None,
             dynamic_property_filter: None,
-            schemaless_l0_prefilter: None,
+            planner_l0_prefilter: None,
             is_schemaless: true,
             schema,
             properties,
@@ -509,22 +517,31 @@ impl GraphScanExec {
 
     /// Build schema for schemaless vertex scan.
     ///
-    /// Resolves property types from all labels in the schema. Falls back to
-    /// LargeBinary (CypherValue encoding) for properties not found in any
-    /// label's schema.
+    /// `label` is the scan's label encoding: one label, the colon-joined set
+    /// a vertex must carry all of, or empty for "scan all". A property takes
+    /// a declared type only when one of the scanned labels declares it (and
+    /// those that do agree), since every scanned vertex then carries a label
+    /// whose writes are coerced to that type. Anything else is LargeBinary
+    /// (CypherValue encoding), which keeps each value as it was written.
+    ///
+    /// It used to merge the declarations of every label in the schema by
+    /// property name, so a `v: Float64` declared on one label typed `s.v` on
+    /// an unrelated schemaless label, and an integer stored there read back
+    /// widened: `9007199254740993` as `9007199254740992.0`.
     fn build_schemaless_vertex_schema(
         variable: &str,
+        label: &str,
         properties: &[String],
         uni_schema: &uni_common::core::schema::Schema,
     ) -> SchemaRef {
-        // Merge property metadata from all labels for type resolution.
-        let mut merged: std::collections::HashMap<&str, &uni_common::core::schema::PropertyMeta> =
-            std::collections::HashMap::new();
-        for label_props in uni_schema.properties.values() {
-            for (name, meta) in label_props {
-                merged.entry(name.as_str()).or_insert(meta);
-            }
-        }
+        let scanned: Vec<&str> = label.split(':').filter(|l| !l.is_empty()).collect();
+        let declared = |prop: &str| -> Option<&uni_common::core::schema::PropertyMeta> {
+            let mut metas = scanned
+                .iter()
+                .filter_map(|l| uni_schema.properties.get(*l)?.get(prop));
+            let first = metas.next()?;
+            metas.all(|m| m.r#type == first.r#type).then_some(first)
+        };
 
         let mut fields = vec![
             Field::new(format!("{}._vid", variable), DataType::UInt64, false),
@@ -533,7 +550,7 @@ impl GraphScanExec {
 
         for prop in properties {
             let col_name = format!("{}.{}", variable, prop);
-            let uni_type = merged.get(prop.as_str()).map(|meta| &meta.r#type);
+            let uni_type = declared(prop.as_str()).map(|meta| &meta.r#type);
             let arrow_type = uni_type
                 .map(|t| t.to_arrow())
                 .unwrap_or(DataType::LargeBinary);
@@ -679,7 +696,7 @@ impl ExecutionPlan for GraphScanExec {
             context.session_config().batch_size(),
             context.memory_pool(),
             self.fetch,
-            self.schemaless_l0_prefilter.clone(),
+            self.planner_l0_prefilter.clone(),
         )))
     }
 
@@ -715,7 +732,7 @@ impl ExecutionPlan for GraphScanExec {
             extra_runtime_filter: self.extra_runtime_filter.clone(),
             dynamic_vid_filter: self.dynamic_vid_filter.clone(),
             dynamic_property_filter: self.dynamic_property_filter.clone(),
-            schemaless_l0_prefilter: self.schemaless_l0_prefilter.clone(),
+            planner_l0_prefilter: self.planner_l0_prefilter.clone(),
             is_schemaless: self.is_schemaless,
             schema: self.schema.clone(),
             properties: self.properties.clone(),
@@ -986,7 +1003,7 @@ struct GraphScanStream {
     extra_runtime_filter: Option<Arc<dyn PhysicalExpr>>,
 
     /// The schemaless scan's L0 equality prefilter (W3b).
-    schemaless_l0_prefilter: Option<L0PropertyPrefilter>,
+    planner_l0_prefilter: Option<L0PropertyPrefilter>,
 
     /// Output schema.
     schema: SchemaRef,
@@ -1038,7 +1055,7 @@ impl GraphScanStream {
         slice_size: usize,
         pool: &Arc<dyn MemoryPool>,
         fetch: Option<usize>,
-        schemaless_l0_prefilter: Option<L0PropertyPrefilter>,
+        planner_l0_prefilter: Option<L0PropertyPrefilter>,
     ) -> Self {
         Self {
             range_target_bytes: range_target_bytes(pool),
@@ -1052,7 +1069,7 @@ impl GraphScanStream {
             vid_list_filter,
             extra_lance_filter,
             extra_runtime_filter,
-            schemaless_l0_prefilter,
+            planner_l0_prefilter,
             schema,
             state: GraphScanState::Init,
             metrics,
@@ -1080,7 +1097,7 @@ impl GraphScanStream {
         let filter = self.filter.clone();
         let extra_lance_filter = self.extra_lance_filter.clone();
         let extra_runtime_filter = self.extra_runtime_filter.clone();
-        let schemaless_l0_prefilter = self.schemaless_l0_prefilter.clone();
+        let planner_l0_prefilter = self.planner_l0_prefilter.clone();
         let schema = self.schema.clone();
         let index_consulted = self.index_consulted.clone();
 
@@ -1099,7 +1116,7 @@ impl GraphScanStream {
                     vid_range,
                     extra_lance_filter.as_deref(),
                     extra_runtime_filter.as_ref(),
-                    schemaless_l0_prefilter.as_ref(),
+                    planner_l0_prefilter.as_ref(),
                 )
                 .await?
             } else {
@@ -1114,6 +1131,7 @@ impl GraphScanStream {
                     vid_range,
                     extra_lance_filter.as_deref(),
                     extra_runtime_filter.as_ref(),
+                    planner_l0_prefilter.as_ref(),
                     Some(&index_consulted),
                 )
                 .await?
@@ -1606,6 +1624,7 @@ pub(crate) async fn prefetch_vids_columnar(
                 None,
                 None,
                 None,
+                None,
             )
             .await?,
         );
@@ -1621,6 +1640,7 @@ pub(crate) async fn prefetch_vids_columnar(
                     &output_schema,
                     &None,
                     Some(chunk),
+                    None,
                     None,
                     None,
                     None,
@@ -1681,6 +1701,9 @@ pub(crate) async fn columnar_scan_vertex_batch_static(
     vid_range: Option<(u64, u64)>,
     extra_lance_filter: Option<&str>,
     extra_runtime_filter: Option<&Arc<dyn PhysicalExpr>>,
+    // Used when `extra_runtime_filter` yields no L0 prefilter: the planner's
+    // own, for a predicate pushed to Lance without a runtime filter (`ext_id`).
+    planner_l0_prefilter: Option<&L0PropertyPrefilter>,
     // Per-node sink for `index_hits`. Separate from the query-level counters
     // because `collect_plan_metrics` reports per operator: copying a
     // query-wide total onto every node would print the same number on a
@@ -1698,8 +1721,9 @@ pub(crate) async fn columnar_scan_vertex_batch_static(
     let target_vid = filter.as_ref().and_then(extract_vid_from_physical_filter);
     // The runtime filter below stays authoritative; this structured copy only
     // lets the storage layer skip L0 rows that cannot match (W3b).
-    let l0_prefilter =
-        extra_runtime_filter.and_then(|f| l0_property_prefilter(f, &format!("{variable}.")));
+    let l0_prefilter = extra_runtime_filter
+        .and_then(|f| l0_property_prefilter(f, &format!("{variable}.")))
+        .or_else(|| planner_l0_prefilter.cloned());
 
     let mut index_hits = 0usize;
     let mapped = uni_store::runtime::columnar_scan::columnar_scan_vertex_batch(
@@ -3182,6 +3206,7 @@ mod tests {
         let empty_schema = uni_common::core::schema::Schema::default();
         let schema = GraphScanExec::build_schemaless_vertex_schema(
             "n",
+            "Person",
             &["name".to_string(), "age".to_string()],
             &empty_schema,
         );
@@ -3200,7 +3225,7 @@ mod tests {
     #[test]
     fn test_schemaless_all_scan_has_empty_label() {
         let empty_schema = uni_common::core::schema::Schema::default();
-        let schema = GraphScanExec::build_schemaless_vertex_schema("n", &[], &empty_schema);
+        let schema = GraphScanExec::build_schemaless_vertex_schema("n", "", &[], &empty_schema);
 
         // Verify the schema has _vid and _labels columns for a scan with no properties
         assert_eq!(schema.fields().len(), 2);

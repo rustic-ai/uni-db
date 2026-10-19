@@ -174,10 +174,14 @@ impl StreamingAppender {
             .writer
             .as_mut()
             .ok_or_else(|| UniError::Internal(anyhow::anyhow!("Appender already finished")))?;
+        // Keep a typed rejection (e.g. a reserved property name) typed.
         writer
             .insert_vertices(&self.label, rows)
             .await
-            .map_err(UniError::Internal)?;
+            .map_err(|e| match e.downcast::<UniError>() {
+                Ok(typed) => typed,
+                Err(other) => UniError::Internal(other),
+            })?;
         Ok(())
     }
 }

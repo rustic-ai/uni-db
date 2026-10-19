@@ -22,7 +22,7 @@ use uni_common::cypher_value_codec::encode_int;
 use uni_cypher::ast::{BinaryOp, CypherLiteral, Expr as CyExpr};
 
 use uni_query_functions::df_expr::{apply_type_coercion, cypher_expr_to_df};
-use uni_query_functions::df_udfs::create_cypher_sum_udaf;
+use uni_query_functions::df_udfs::{create_cypher_sum_udaf, register_cypher_udfs};
 
 /// Finding [1] df_expr.rs:3368 — `coerce_case_expr` wraps the WHEN of a
 /// simple/operand CASE in `_cv_to_bool` (whose type is Null); the subsequent
@@ -67,43 +67,90 @@ fn repro_finding_01_simple_case_when_becomes_literal_null() {
     );
 }
 
-/// Finding [6] df_expr.rs:1374 — the regex operator `=~` is translated as
+/// Finding [6] df_expr.rs:1374 — the regex operator `=~` was translated as
 /// `regexp_match(left, right).is_not_null()`, collapsing NULL inputs to `false`
 /// instead of propagating NULL per Cypher three-valued semantics.
+///
+/// `=~` now translates to a `_cypher_regex` placeholder that the planner binds
+/// in two passes: type coercion turns a string-typed pair into a native regex
+/// match, and anything else (a CypherValue operand) resolves to the registered
+/// per-row UDF. The repro therefore drives the same pipeline the planner runs
+/// (translate, resolve, coerce, resolve) rather than evaluating the bare
+/// translation, and checks both bindings, since each one answers NULL on its
+/// own code path.
 #[tokio::test]
 async fn repro_finding_06_regex_null_collapses_to_false() {
-    // Cypher `x =~ 'foo'` where x is a column reference.
+    // A Utf8 column binds the native match; a schemaless CypherValue column
+    // binds the `_cypher_regex` UDF.
+    let utf8_null: Arc<dyn Array> = Arc::new(StringArray::from(vec![None as Option<&str>]));
+    let cv_null: Arc<dyn Array> = Arc::new(LargeBinaryArray::from(vec![None as Option<&[u8]>]));
+    for (label, data_type, column) in [
+        ("native string match", DataType::Utf8, utf8_null),
+        ("CypherValue UDF", DataType::LargeBinary, cv_null),
+    ] {
+        let result = eval_regex_against_foo(data_type, column).await;
+        // FIXED (df_expr.rs): `null =~ 'foo'` propagates NULL per Cypher
+        // three-valued logic instead of collapsing to a concrete false.
+        assert!(
+            result.is_null(0),
+            "[{label}] null =~ pattern must yield NULL, not a concrete boolean: {result:?}"
+        );
+    }
+}
+
+/// Evaluates Cypher `x =~ 'foo'` over a single-row column `x`, binding the
+/// translated expression the way the physical planner does.
+async fn eval_regex_against_foo(data_type: DataType, column: Arc<dyn Array>) -> BooleanArray {
+    use datafusion::common::tree_node::{Transformed, TreeNode};
+
     let cy = CyExpr::BinaryOp {
         left: Box::new(CyExpr::Variable("x".to_string())),
         op: BinaryOp::Regex,
         right: Box::new(CyExpr::Literal(CypherLiteral::String("foo".to_string()))),
     };
-    let df_expr = cypher_expr_to_df(&cy, None).unwrap();
+    let translated = cypher_expr_to_df(&cy, None).unwrap();
 
-    // A single row where x IS NULL.
-    let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Utf8, true)]));
-    let x = StringArray::from(vec![None as Option<&str>]);
-    let batch = RecordBatch::try_new(schema, vec![Arc::new(x)]).unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new("x", data_type, true)]));
+    let df_schema = DFSchema::try_from(schema.as_ref().clone()).unwrap();
+    let batch = RecordBatch::try_new(schema, vec![column]).unwrap();
 
     let ctx = SessionContext::new();
+    register_cypher_udfs(&ctx).unwrap();
+    let state = ctx.state();
+    // Mirrors `HybridPhysicalPlanner::resolve_udfs`: swap each placeholder for
+    // the registered UDF of the same name.
+    let resolve = |e: DfExpr| {
+        e.transform_up(|e| match &e {
+            DfExpr::ScalarFunction(f) => match state.scalar_functions().get(f.func.name()) {
+                Some(udf) => Ok(Transformed::yes(DfExpr::ScalarFunction(
+                    datafusion::logical_expr::expr::ScalarFunction {
+                        func: udf.clone(),
+                        args: f.args.clone(),
+                    },
+                ))),
+                None => Ok(Transformed::no(e)),
+            },
+            _ => Ok(Transformed::no(e)),
+        })
+        .unwrap()
+        .data
+    };
+    let bound = resolve(apply_type_coercion(&resolve(translated), &df_schema).unwrap());
+
     let out = ctx
         .read_batch(batch)
         .unwrap()
-        .select(vec![df_expr.alias("r")])
+        .select(vec![bound.alias("r")])
         .unwrap()
         .collect()
         .await
         .unwrap();
-
-    let column = out[0].column(0);
-    let result = column.as_any().downcast_ref::<BooleanArray>().unwrap();
-
-    // FIXED (df_expr.rs): `null =~ 'foo'` propagates NULL per Cypher three-valued
-    // logic instead of collapsing to a concrete false.
-    assert!(
-        result.is_null(0),
-        "null =~ pattern must yield NULL, not a concrete boolean"
-    );
+    out[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .expect("`=~` must evaluate to a Boolean column")
+        .clone()
 }
 
 /// Finding [8] df_udfs.rs:6959 — `CypherSumAccumulator` accumulates integers

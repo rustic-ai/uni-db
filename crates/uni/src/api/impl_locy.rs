@@ -1056,6 +1056,9 @@ impl<'a> LocyEngine<'a> {
         }
 
         let evaluation_time = start.elapsed();
+        // ASSUME and ABDUCE plan strata again for each hypothetical state;
+        // that planning ran inside `evaluation_time` and is planning too.
+        let plan_time = plan_time + native_ctx.hypothetical_plan_time();
 
         // 9. Build the returned derived map, every rule hydrated.
         //
@@ -1186,6 +1189,9 @@ impl<'a> LocyEngine<'a> {
     /// `reused` strata are copied from an earlier evaluation instead of
     /// derived (incremental ASSUME / ABDUCE).
     ///
+    /// Returns the derived facts and the time spent building the logical
+    /// plan, the same step the program's own `plan_time` measures.
+    ///
     /// # Errors
     ///
     /// A planning or execution failure, and `UniError::LocyIncomplete` when
@@ -1197,10 +1203,18 @@ impl<'a> LocyEngine<'a> {
         compiled: &CompiledProgram,
         config: &LocyConfig,
         reused: Option<uni_query::query::df_graph::ReusedStrata>,
-    ) -> Result<uni_query::query::df_graph::DerivedStore> {
+    ) -> Result<(uni_query::query::df_graph::DerivedStore, Duration)> {
+        let plan_start = Instant::now();
         let schema = self.db.schema.schema();
         let query_planner = uni_query::QueryPlanner::new(schema);
-        let plan_builder = uni_query::query::locy_planner::LocyPlanBuilder::new(&query_planner);
+        // Reused strata are copied, not evaluated, so they are not planned.
+        let plan_builder = uni_query::query::locy_planner::LocyPlanBuilder::new(&query_planner)
+            .with_reused_strata(
+                reused
+                    .as_ref()
+                    .map(|r| r.positions.clone())
+                    .unwrap_or_default(),
+            );
         let logical = plan_builder
             .build_program_plan_with_semiring(
                 compiled,
@@ -1225,6 +1239,7 @@ impl<'a> LocyEngine<'a> {
                 message: format!("LocyPlanBuildError: {e}"),
                 query: None,
             })?;
+        let plan_time = plan_start.elapsed();
 
         let mut df_executor = uni_query::Executor::new(self.db.storage.clone());
         let executor_config = self.executor_config(config);
@@ -1288,11 +1303,12 @@ impl<'a> LocyEngine<'a> {
                 detail: Box::new(detail),
             });
         }
-        Ok(derived_store_slot
+        let store = derived_store_slot
             .write()
             .unwrap()
             .take()
-            .unwrap_or_default())
+            .unwrap_or_default();
+        Ok((store, plan_time))
     }
 }
 
@@ -1402,6 +1418,10 @@ struct NativeExecutionAdapter<'a> {
     /// Cancellation scope, cloned from the `LocyEngine`, for the Cypher
     /// statements command dispatch runs.
     cancel: crate::api::impl_query::CancelScope,
+    /// Time spent planning the strata of hypothetical re-evaluations
+    /// (`ASSUME` bodies, `ABDUCE` candidates), in nanoseconds. Reported in
+    /// the result's `plan_time` next to the program's own planning.
+    hypothetical_plan_nanos: std::sync::atomic::AtomicU64,
 }
 
 impl<'a> NativeExecutionAdapter<'a> {
@@ -1436,7 +1456,16 @@ impl<'a> NativeExecutionAdapter<'a> {
             epoch_save_stack: std::sync::Mutex::new(Vec::new()),
             baselines: std::sync::Mutex::new(Vec::new()),
             cancel,
+            hypothetical_plan_nanos: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Total planning time of the hypothetical re-evaluations run so far.
+    fn hypothetical_plan_time(&self) -> Duration {
+        Duration::from_nanos(
+            self.hypothetical_plan_nanos
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// Offer the program's own facts to ASSUME / ABDUCE for reuse.
@@ -1941,12 +1970,16 @@ impl LocyExecutionContext for NativeExecutionAdapter<'_> {
             // re-entry comes from the database config, as it did before.
             max_memory: None,
         };
-        let native_store = engine
+        let (native_store, plan_time) = engine
             .run_strata_native(&strata_only, config, reused)
             .await
             .map_err(|e| LocyError::ExecutorError {
                 message: e.to_string(),
             })?;
+        self.hypothetical_plan_nanos.fetch_add(
+            u64::try_from(plan_time.as_nanos()).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let mut store = native_store_to_row_store(&native_store, program);
 
         // Enrich VID / EID integers → Node / Edge objects so QUERY inside

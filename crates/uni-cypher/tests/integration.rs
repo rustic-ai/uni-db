@@ -7,6 +7,7 @@ mod parse_depth_limit;
 mod parser_backtracking_regression;
 mod path_quantifier_range;
 mod repro_backtick_property_name;
+mod repro_escaped_identifier;
 mod repro_locy_derive_backtick_label;
 mod repro_map_key_not_unescaped;
 mod repro_nesting_guard_end_evasion;

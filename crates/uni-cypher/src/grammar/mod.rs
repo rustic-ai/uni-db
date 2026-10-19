@@ -71,7 +71,8 @@ fn check_nesting_depth(input: &str) -> Result<(), ParseError> {
                 }
             }
             b'`' => {
-                // Backtick-quoted identifier (no escapes in the grammar).
+                // Backtick-quoted identifier. A doubled backtick (the escape)
+                // scans as two adjacent quoted spans, which skips the same text.
                 i += 1;
                 while i < bytes.len() && bytes[i] != b'`' {
                     i += 1;

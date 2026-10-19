@@ -10,8 +10,8 @@
 //! - **VLP property maps.** `-[:R*1..3 {w: 0}]->` and `->(b:N {x: 2})` used to
 //!   enumerate the whole edge type before the anchored walk; O1 made that scan
 //!   reach `rows_scanned`. P7 replaced it with a read of the reachable region
-//!   only, and the guard now pins that read exactly. A QPP's per-hop map still
-//!   pre-scans the whole type and is guarded for counting separately.
+//!   only, and the guard now pins that read exactly. A QPP's per-hop maps are
+//!   read the same way, one slot per hop of the iteration, and pinned too.
 //! - **Locy IS NOT anti-join and fact dedup.** Both ran outside any physical
 //!   plan, so the per-iteration operator tree of a rule never showed them.
 //! - **Planning.** Physical planning — once per query, once per correlated row,
@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use uni_db::locy::LocyConfig;
-use uni_db::{Uni, Value};
+use uni_db::{Uni, UniConfig, Value};
 
 fn locy_config() -> LocyConfig {
     LocyConfig {
@@ -186,33 +186,97 @@ async fn vlp_property_map_reads_only_the_reachable_region() -> Result<()> {
     Ok(())
 }
 
-/// The whole-type pre-scan is still how a quantified path pattern's per-hop
-/// map is evaluated, and it still counts toward `rows_scanned` (O1).
+/// What a quantified walk from vertex 0 must read for
+/// `((x)-[:R {w: 0}]->(y)-[:R]->(z)){1,iterations}`: the hop-0 edges leaving
+/// every vertex reached at the start of an iteration through passing edges,
+/// each read once. Hop 1 has no map and reads nothing.
 ///
-/// A QPP's hops carry their own types, directions and node maps, which the
-/// region walk does not model, so they keep `build_edge_property_filter`.
-/// This keeps O1's counting of `build_edge_adjacency_map` under a guard now
-/// that a simple pattern no longer goes through it.
+/// The region pass tracks `(vertex, hop of the iteration)` pairs at their
+/// shallowest depth, up to `2 * iterations` hops; this is that pass computed
+/// from the graph alone.
+fn qpp_region_reads(n: usize, iterations: usize, keep: impl Fn(i64) -> bool) -> usize {
+    let edges = ladder_edges(n);
+    let mut depth: HashMap<(usize, usize), usize> = HashMap::from([((0, 0), 0)]);
+    let mut frontier = vec![(0usize, 0usize)];
+    let mut read = std::collections::HashSet::new();
+    let mut d = 0;
+    while !frontier.is_empty() && d < 2 * iterations {
+        let mut next = Vec::new();
+        for &(v, slot) in &frontier {
+            for (k, &(src, dst, w)) in edges.iter().enumerate() {
+                if src != v {
+                    continue;
+                }
+                if slot == 0 {
+                    read.insert(k);
+                    if !keep(w) {
+                        continue;
+                    }
+                }
+                let state = (dst, (slot + 1) % 2);
+                if depth.get(&state).is_none_or(|&s| s > d + 1) {
+                    depth.insert(state, d + 1);
+                    next.push(state);
+                }
+            }
+        }
+        frontier = next;
+        d += 1;
+    }
+    read.len()
+}
+
+/// A quantified path pattern's per-hop map reads properties only for the
+/// region the walk can reach, and `rows_scanned` reports exactly that read.
+///
+/// History. A QPP's hop maps were evaluated by the whole-type pre-scan
+/// (`build_edge_property_filter`), so `{w: 0}` on one hop read all `2n` `:R`
+/// edges before an anchored walk, and this guard asserted `rows_scanned >=
+/// 2n`. The region read now models each hop of the iteration as its own slot
+/// (`ReachableMapFilter::for_steps`), so the guard pins the read exactly, as
+/// computed from the graph by [`qpp_region_reads`]: the anchor's one row plus
+/// one row per hop-0 edge whose `w` was read. The answer is checked against
+/// the same walk with the map written in `WHERE`. A return of the whole-type
+/// scan makes the count grow with `n`; reads hidden from `rows_scanned` make
+/// it fall to 1.
 #[tokio::test(flavor = "multi_thread")]
-async fn qpp_property_map_prescan_counts_toward_rows_scanned() -> Result<()> {
-    const QPP: &str = "MATCH (a:N {uid: 'u0'})((x)-[:R {w: 1}]->(y)-[:R]->(z)){1,2}(b) \
+async fn qpp_property_map_reads_only_the_reachable_region() -> Result<()> {
+    const QPP: &str = "MATCH (a:N {uid: 'u0'})((x)-[:R {w: 0}]->(y)-[:R]->(z)){1,2}(b) \
                        RETURN count(*) AS c";
-    let mut scanned = Vec::new();
+    // One and two iterations, spelled out.
+    const REFERENCE: [&str; 2] = [
+        "MATCH (a:N {uid: 'u0'})-[r1:R]->()-[:R]->(b) WHERE r1.w = 0 RETURN count(*) AS c",
+        "MATCH (a:N {uid: 'u0'})-[r1:R]->()-[:R]->()-[r2:R]->()-[:R]->(b) \
+         WHERE r1.w = 0 AND r2.w = 0 RETURN count(*) AS c",
+    ];
+    const CONTROL: &str = "MATCH (a:N {uid: 'u0'})((x)-[:R]->(y)-[:R]->(z)){1,2}(b) \
+                           RETURN count(*) AS c";
     for n in [200usize, 800] {
         let db = flushed_graph(n).await?;
-        let (_, rows, _) = profiled(&db, QPP).await?;
-        eprintln!("N={n}: QPP map rows_scanned={rows}");
+        let (count, rows, _) = profiled(&db, QPP).await?;
+        let want = profiled(&db, REFERENCE[0]).await?.0 + profiled(&db, REFERENCE[1]).await?.0;
+        let (_, control_rows, _) = profiled(&db, CONTROL).await?;
+        let reads = qpp_region_reads(n, 2, |w| w == 0);
+        eprintln!(
+            "N={n}: QPP map rows_scanned={rows} (region {reads} edges) control={control_rows}"
+        );
+        assert_eq!(count, want, "N={n}: the QPP map changed the answer");
         assert!(
-            rows >= 2 * n,
-            "N={n}: the QPP map pre-scan reads all {} :R edges but rows_scanned = {rows}",
+            count > 0 && reads > 1,
+            "N={n}: fixture must match and read something"
+        );
+        assert_eq!(
+            control_rows, 1,
+            "N={n}: the map-free walk reads only its anchor"
+        );
+        assert_eq!(
+            rows,
+            1 + reads,
+            "N={n}: the hop map must read exactly the {reads} hop-0 edges of the reachable \
+             region (plus the anchor) and report them in rows_scanned, not all {} :R edges",
             2 * n
         );
-        scanned.push(rows);
     }
-    assert!(
-        scanned[1] >= scanned[0] * 3,
-        "pre-scan should follow the edge type: {scanned:?}"
-    );
     Ok(())
 }
 
@@ -225,7 +289,16 @@ async fn qpp_property_map_prescan_counts_toward_rows_scanned() -> Result<()> {
 /// the property layer does not report, so `l0_reads` is not asserted.
 #[tokio::test]
 async fn vlp_property_map_region_read_counts_l0_edges() -> Result<()> {
-    let db = Uni::in_memory().build().await?;
+    // No timer flush: the graph must stay in L0 across both profiled queries.
+    // A flush landing between them, or in flight during one (which scans the
+    // pending L0 and the written Lance version both), skews the difference.
+    let db = Uni::in_memory()
+        .config(UniConfig {
+            auto_flush_interval: None,
+            ..Default::default()
+        })
+        .build()
+        .await?;
     let tx = db.session().tx().await?;
     tx.execute("CREATE LABEL N (uid STRING, x INT)").await?;
     tx.execute("CREATE EDGE TYPE R (w INT) FROM N TO N").await?;

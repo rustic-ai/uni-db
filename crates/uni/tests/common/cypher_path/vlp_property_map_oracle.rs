@@ -932,10 +932,10 @@ async fn merge_with_a_non_constant_map_matches_and_creates_on_it() -> Result<()>
 }
 
 /// A non-constant value where it has to gate a walk that no later filter can
-/// stand in for is refused, not dropped: a shortest-path relationship (the
-/// shortest admitted path is not the shortest path filtered) and an element
-/// inside a quantified sub-pattern that is not planned as a plain
-/// variable-length relationship (its map applies per iteration).
+/// stand in for is refused, not dropped: an element inside a quantified
+/// sub-pattern that is not planned as a plain variable-length relationship
+/// (its map applies per iteration). A shortest-path relationship's map with
+/// such a value gates the search per row; see `shortest_path_row_dependent_map`.
 #[tokio::test(flavor = "multi_thread")]
 async fn non_constant_map_values_that_must_gate_a_walk_are_refused() -> Result<()> {
     let g = random_graph(0x97_7000);
@@ -946,16 +946,6 @@ async fn non_constant_map_values_that_must_gate_a_walk_are_refused() -> Result<(
     commit_all(&session, &edge_statements(&g.edges)).await?;
     let reader = Reader::Session(&session);
     for (q, needle) in [
-        (
-            "MATCH (a:N {id: 0}), (b:N) MATCH p = shortestPath((a)-[:R*1..4 {w: a.x}]->(b)) \
-             RETURN b.id, length(p)",
-            "shortestPath",
-        ),
-        (
-            "MATCH (a:N {id: 0}), (b:N) \
-             MATCH p = allShortestPaths((a)-[:R*1..4 {w: 1, k: a.x}]->(b)) RETURN b.id",
-            "shortestPath",
-        ),
         (
             "MATCH (a:N) MATCH (a)((x)-[r:R {w: a.x}]->(y)){1,3}(b:N) RETURN a.id, b.id",
             "quantified path pattern",

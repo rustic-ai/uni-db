@@ -10,3 +10,4 @@ mod bug_deferral_name_collision;
 mod bug_probe_tombstone_skip;
 mod bug_scheduler_cancel_persistence;
 mod bug_scheduler_duplicate_registration;
+mod deferral_push_contention;

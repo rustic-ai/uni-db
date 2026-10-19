@@ -207,6 +207,70 @@ async fn shutdown_leaves_no_background_task_alive() -> Result<()> {
     Ok(())
 }
 
+/// `shutdown_in_place` cancels a pass in flight instead of waiting for it to
+/// run to completion.
+///
+/// The pass is held at a safe point by a fail point that waits for the
+/// compaction token to be cancelled, for at most `HOLD`. Released by the
+/// cancel, the pass stops at that safe point; without the cancel, shutdown
+/// would signal the background loop, which does not look at the signal until
+/// the pass ends, and wait out the whole hold.
+#[cfg(feature = "failpoints")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_cancels_the_pass_in_flight() -> Result<()> {
+    const SEAM: &str = "compaction::safe-point::before-adjacency";
+    const HOLD: Duration = Duration::from_secs(10);
+
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().to_str().unwrap().to_string();
+    let root = storage_root(dir.path());
+    let db = Uni::open(&path).config(aggressive()).build().await?;
+
+    let entered = Arc::new(AtomicUsize::new(0));
+    let cancelled = Arc::new(AtomicUsize::new(0));
+    {
+        let token = db.storage().compaction_cancel_token().clone();
+        let (entered, cancelled) = (Arc::clone(&entered), Arc::clone(&cancelled));
+        fail::cfg_callback(SEAM, move || {
+            entered.fetch_add(1, Ordering::SeqCst);
+            let t = Instant::now();
+            while t.elapsed() < HOLD {
+                if token.is_cancelled() {
+                    cancelled.fetch_add(1, Ordering::SeqCst);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+        .unwrap();
+    }
+    load(&db, 0, true).await?;
+    let t = Instant::now();
+    while entered.load(Ordering::SeqCst) == 0 {
+        assert!(
+            t.elapsed() < Duration::from_secs(20),
+            "no compaction pass reached {SEAM}; the test would prove nothing"
+        );
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    let t = Instant::now();
+    db.shutdown_in_place().await?;
+    let took = t.elapsed();
+    fail::remove(SEAM);
+    assert_eq!(
+        cancelled.load(Ordering::SeqCst),
+        1,
+        "shutdown did not cancel the pass in flight; it waited {took:?} for it to finish"
+    );
+    assert!(took < HOLD, "shutdown took {took:?}");
+    assert!(
+        CompactionDirLock::try_acquire(&root)?.is_some(),
+        "a compaction pass was still running after shutdown returned"
+    );
+    Ok(())
+}
+
 /// A writable open waits while another handle compacts the same directory,
 /// since that pass's table overwrites would discard this handle's writes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

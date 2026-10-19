@@ -255,7 +255,7 @@ impl UniWorld {
         let result = self.db().session().query("MATCH (n) RETURN n").await?;
         for row in result.rows() {
             if let Some(node_val) = row.values().first() {
-                self.add_entity_to_snapshot(&mut snapshot, "n", node_val);
+                Self::add_entity_to_snapshot(&mut snapshot, "n", node_val)?;
             }
         }
 
@@ -267,7 +267,7 @@ impl UniWorld {
             .await?;
         for row in result.rows() {
             if let Some(rel_val) = row.values().first() {
-                self.add_entity_to_snapshot(&mut snapshot, "r", rel_val);
+                Self::add_entity_to_snapshot(&mut snapshot, "r", rel_val)?;
             }
         }
 
@@ -277,12 +277,17 @@ impl UniWorld {
     /// Adds (entity_id::prop_key -> value) entries from a single entity value
     /// to the snapshot map.  Handles both `Value::Map` and `Value::Node` /
     /// `Value::Edge` representations.
+    ///
+    /// # Errors
+    /// Fails on a value that is not an entity, or a map that carries no entity
+    /// identity. Skipping it would leave that entity's properties out of the
+    /// snapshot, and a side-effect assertion would then pass on a diff that
+    /// never saw them.
     fn add_entity_to_snapshot(
-        &self,
         snapshot: &mut HashMap<String, Value>,
         prefix: &str,
         entity: &Value,
-    ) {
+    ) -> anyhow::Result<()> {
         let insert_props =
             |snapshot: &mut HashMap<String, Value>, id: u64, props: &HashMap<String, Value>| {
                 for (k, v) in props {
@@ -303,9 +308,10 @@ impl UniWorld {
                     uni_common::value::EntityRef::Vertex(vid) => vid.as_u64(),
                     uni_common::value::EntityRef::Edge(eid) => eid.as_u64(),
                 });
-                if let Some(id) = id {
-                    insert_props(snapshot, id, map);
-                }
+                let Some(id) = id else {
+                    anyhow::bail!("snapshot row is a map without an entity identity: {map:?}");
+                };
+                insert_props(snapshot, id, map);
             }
             Value::Node(node) => {
                 insert_props(snapshot, u64::from(node.vid), &node.properties);
@@ -313,8 +319,9 @@ impl UniWorld {
             Value::Edge(edge) => {
                 insert_props(snapshot, u64::from(edge.eid), &edge.properties);
             }
-            _ => {}
+            other => anyhow::bail!("snapshot row is not an entity: {other:?}"),
         }
+        Ok(())
     }
 
     /// Collect all node IDs (VIDs) currently in the graph.
@@ -331,15 +338,21 @@ impl UniWorld {
     /// Run an `id`-returning query and collect the integer IDs into a set.
     ///
     /// # Errors
-    /// Propagates the snapshot query error. A swallowed error here would report
-    /// zero ids, silently corrupting the before/after side-effect diff (a failing
+    /// Propagates the snapshot query error, and fails on a row whose first
+    /// column is not a non-negative integer. Either swallowed would under-count
+    /// ids, silently corrupting the before/after side-effect diff (a failing
     /// query is indistinguishable from an empty graph).
     async fn collect_ids(&self, query: &str) -> anyhow::Result<HashSet<u64>> {
         let result = self.db().session().query(query).await?;
         let mut ids = HashSet::new();
         for row in result.rows() {
-            if let Some(Value::Int(id)) = row.values().first() {
-                ids.insert(*id as u64);
+            match row.values().first() {
+                Some(Value::Int(id)) => {
+                    let id = u64::try_from(*id)
+                        .map_err(|_| anyhow::anyhow!("snapshot id {id} is negative"))?;
+                    ids.insert(id);
+                }
+                other => anyhow::bail!("snapshot id is not an integer: {other:?}"),
             }
         }
         Ok(ids)
@@ -357,11 +370,9 @@ impl UniWorld {
         let result = self.db().session().query(query).await?;
         let mut all_labels = HashSet::new();
         for row in result.rows() {
-            if let Ok(labels_list) = row.get::<Vec<String>>("labels") {
-                for label in labels_list {
-                    all_labels.insert(label);
-                }
-            }
+            // A row that does not decode is an error, not "no labels": skipping it
+            // would hide a created or removed label from the side-effect diff.
+            all_labels.extend(row.get::<Vec<String>>("labels")?);
         }
         Ok(all_labels)
     }
@@ -415,5 +426,87 @@ fn apply_execution_overrides(config: &mut uni_common::UniConfig) {
     }
     if let Some(b) = read("UNI_TCK_EXECUTION_BATCH_SIZE") {
         config.execution_batch_size = Some(b);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The side-effect snapshot helpers are private and run fixed introspection
+    //! queries that never fail against a healthy database, so these tests drive
+    //! them directly with the inputs a healthy database cannot produce.
+
+    use super::*;
+
+    async fn world_with_two_nodes() -> UniWorld {
+        let mut world = UniWorld::default();
+        world.init_db().await.expect("in-memory database");
+        let session = world.db().session();
+        let tx = session.tx().await.expect("open a transaction");
+        tx.execute("CREATE (:A {p: 1}), (:B)")
+            .await
+            .expect("seed the graph");
+        tx.commit().await.expect("commit the seed");
+        world
+    }
+
+    /// The control for the refusals below: a healthy introspection query
+    /// returns every id, so an `Err` from them is not a helper that always fails.
+    #[tokio::test]
+    async fn collect_ids_returns_every_id_of_a_healthy_query() {
+        let world = world_with_two_nodes().await;
+        let ids = world.collect_node_ids().await.expect("healthy query");
+        assert_eq!(ids.len(), 2);
+    }
+
+    /// A failing introspection query must fail the step. Swallowed, it reported
+    /// an empty id set, so every surviving entity looked newly created.
+    #[tokio::test]
+    async fn collect_ids_propagates_a_query_error() {
+        let world = world_with_two_nodes().await;
+        let err = world
+            .collect_ids("MATCH (n RETURN id(n) AS id")
+            .await
+            .expect_err("a query that does not parse must not read as an empty graph");
+        assert!(!err.to_string().is_empty());
+    }
+
+    /// A row whose id is not an integer was skipped, under-counting the graph.
+    #[tokio::test]
+    async fn collect_ids_refuses_a_non_integer_id() {
+        let world = world_with_two_nodes().await;
+        let err = world
+            .collect_ids("MATCH (n) RETURN toString(id(n)) AS id")
+            .await
+            .expect_err("a string id must not be dropped from the set");
+        assert!(err.to_string().contains("not an integer"), "{err}");
+    }
+
+    /// A snapshot row that is not an entity was skipped, dropping its
+    /// properties from the before/after diff.
+    #[test]
+    fn snapshot_refuses_a_non_entity_row() {
+        let mut snapshot = HashMap::new();
+        let err = UniWorld::add_entity_to_snapshot(&mut snapshot, "n", &Value::Int(7))
+            .expect_err("a scalar is not an entity");
+        assert!(err.to_string().contains("not an entity"), "{err}");
+
+        let mut anonymous = HashMap::new();
+        anonymous.insert("p".to_string(), Value::Int(1));
+        let err = UniWorld::add_entity_to_snapshot(&mut snapshot, "n", &Value::Map(anonymous))
+            .expect_err("a map without an identity is not an entity");
+        assert!(err.to_string().contains("entity identity"), "{err}");
+        assert!(snapshot.is_empty());
+    }
+
+    /// The full capture over a healthy graph counts nodes, properties and
+    /// labels, so the stricter helpers do not refuse what the TCK produces. Any
+    /// `Err` they return reaches `run_query_step`, which panics the step.
+    #[tokio::test]
+    async fn capture_state_before_succeeds_on_a_healthy_graph() {
+        let mut world = world_with_two_nodes().await;
+        world.capture_state_before().await.expect("healthy capture");
+        assert_eq!(world.side_effects().nodes_before, 2);
+        assert_eq!(world.side_effects().properties_before, 1);
+        assert_eq!(world.side_effects().labels_before.len(), 2);
     }
 }

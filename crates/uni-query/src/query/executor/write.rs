@@ -1310,14 +1310,37 @@ impl Executor {
         ))
     }
 
+    /// Check every property of a `CREATE LABEL` / `CREATE EDGE TYPE` before the
+    /// schema is touched, returning the parsed data types in order.
+    ///
+    /// The element is added first and its properties one at a time, so a
+    /// property that fails validation part-way used to leave the element (and
+    /// the properties before it) in the live schema although the statement
+    /// failed: a retry then hit "already exists".
+    fn prevalidate_property_definitions(
+        properties: &[uni_cypher::ast::PropertyDefinition],
+    ) -> Result<Vec<DataType>> {
+        let mut seen = std::collections::HashSet::new();
+        properties
+            .iter()
+            .map(|prop| {
+                uni_common::core::schema::validate_property_name(&prop.name)?;
+                if !seen.insert(prop.name.as_str()) {
+                    return Err(anyhow!("Property '{}' is declared twice", prop.name));
+                }
+                Self::parse_data_type(&prop.data_type)
+            })
+            .collect()
+    }
+
     pub(crate) async fn execute_create_label(&self, clause: CreateLabel) -> Result<()> {
         let sm = self.storage.schema_manager_arc();
         if clause.if_not_exists && sm.schema().labels.contains_key(&clause.name) {
             return Ok(());
         }
+        let types = Self::prevalidate_property_definitions(&clause.properties)?;
         sm.add_label_with_desc(&clause.name, clause.description)?;
-        for prop in clause.properties {
-            let dt = Self::parse_data_type(&prop.data_type)?;
+        for (prop, dt) in clause.properties.into_iter().zip(types) {
             sm.add_property_with_desc(
                 &clause.name,
                 &prop.name,
@@ -1421,14 +1444,14 @@ impl Executor {
         if clause.if_not_exists && sm.schema().edge_types.contains_key(&clause.name) {
             return Ok(());
         }
+        let types = Self::prevalidate_property_definitions(&clause.properties)?;
         sm.add_edge_type_with_desc(
             &clause.name,
             clause.src_labels,
             clause.dst_labels,
             clause.description,
         )?;
-        for prop in clause.properties {
-            let dt = Self::parse_data_type(&prop.data_type)?;
+        for (prop, dt) in clause.properties.into_iter().zip(types) {
             sm.add_property_with_desc(
                 &clause.name,
                 &prop.name,

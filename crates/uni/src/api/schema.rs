@@ -166,6 +166,19 @@ impl<'a> SchemaBuilder<'a> {
         // loop so each table is widened once, in one commit.
         let mut added_properties: Vec<(String, arrow_schema::Field)> = Vec::new();
 
+        // Changes apply one at a time to the live schema, so a property name
+        // refused part-way would leave the labels and properties before it
+        // behind although `apply` failed. Names are checked up front instead.
+        for change in &self.pending {
+            if let SchemaChange::AddProperty { name, .. } = change {
+                uni_common::core::schema::validate_property_name(name).map_err(|e| {
+                    UniError::Schema {
+                        message: e.to_string(),
+                    }
+                })?;
+            }
+        }
+
         for change in self.pending {
             match change {
                 SchemaChange::AddLabel { name, description } => {
@@ -1001,25 +1014,10 @@ fn element_active(state: Option<&uni_common::core::schema::SchemaElementState>) 
 /// `.` — the latter explicitly documented as supported for qualified names —
 /// leading digits, and every non-ASCII character, since `cypher.pest` matches
 /// `ASCII_ALPHA` only. Interpolating any of those unquoted produces a parse
-/// error rather than a query.
-///
-/// # Errors
-///
-/// A name containing a backtick cannot be expressed at all: the grammar's
-/// quoted form is `` "`" ~ (!"`" ~ ANY)* ~ "`" `` with no doubling or escape
-/// rule, so there is no encoding for it. Such a name is refused rather than
-/// silently mis-parsed.
-fn quote_cypher_identifier(name: &str) -> Result<String> {
-    if name.contains('`') {
-        return Err(UniError::Query {
-            message: format!(
-                "schema element name {name:?} contains a backtick, which Cypher's \
-                 quoted-identifier syntax cannot escape"
-            ),
-            query: None,
-        });
-    }
-    Ok(format!("`{name}`"))
+/// error rather than a query. A backtick inside the name is written doubled,
+/// openCypher's escape (`` `a``b` `` is the name ``a`b``).
+fn quote_cypher_identifier(name: &str) -> String {
+    format!("`{}`", name.replace('`', "``"))
 }
 
 /// Build the `PropertyInfo` projection for a label or edge type.
@@ -1305,7 +1303,7 @@ impl Uni {
             // raw-dataset `open_raw()` path, whose `.lance` URI was wrong so it
             // reported 0 for *flushed* tables. Cypher is a third path and is
             // subject to neither failure.
-            let quoted = quote_cypher_identifier(name)?;
+            let quoted = quote_cypher_identifier(name);
             let query = format!("MATCH (n:{quoted}) RETURN count(n) AS cnt");
             let count = self
                 .inner
@@ -1359,7 +1357,7 @@ impl Uni {
         // all non-ASCII. Paired with the `Err(_) => 0` this silently reported an
         // empty edge type instead of failing.
         let count = {
-            let quoted = quote_cypher_identifier(name)?;
+            let quoted = quote_cypher_identifier(name);
             let query = format!("MATCH ()-[r:{quoted}]->() RETURN count(r) AS cnt");
             let result = self.inner.execute_internal(&query, HashMap::new()).await?;
             result

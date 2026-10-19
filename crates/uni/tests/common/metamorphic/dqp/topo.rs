@@ -222,6 +222,18 @@ pub async fn build_topo(
     let db = Uni::in_memory()
         .config(UniConfig {
             execution_batch_size,
+            // The per-query deadline is not what this harness measures, and the
+            // default 30 s one fails it spuriously under load. The `locy_negation`
+            // reference `MATCH (a:Person), (b:Person) WHERE NOT EXISTS { MATCH
+            // (a)-[:KNOWS*1..]->(b) }` once evaluated its unbounded VLP per pair
+            // (52 x 52), measured at 5.9 s alone with a two-row batch; with the
+            // machine oversubscribed (36 concurrent copies plus a build) it crossed
+            // 30 s in 34 of 36 runs and surfaced as a "divergence". It now runs
+            // once per source (0.29 s, debug build), but the deadline is still
+            // not what this harness measures. A hang or a runaway rewrite is
+            // still caught, by the six-minute nextest limit on these tests
+            // (`.config/nextest.toml`).
+            query_timeout: std::time::Duration::from_secs(300),
             // The test decides what is flushed.
             auto_flush_interval: None,
             auto_flush_threshold: usize::MAX,

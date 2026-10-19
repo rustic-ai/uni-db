@@ -222,6 +222,9 @@ impl IndexRebuildManager {
 
     /// Save current state to storage.
     async fn save_state(&self) -> Result<()> {
+        // Lets tests observe (and delay) every state write, including one a
+        // stray task makes after its database has shut down.
+        fail::fail_point!("index_rebuild::save-state");
         let tasks: Vec<IndexRebuildTask> = self.tasks.read().values().cloned().collect();
         let state = IndexRebuildState {
             tasks,
@@ -605,6 +608,9 @@ impl IndexRebuildManager {
     /// Execute the actual index rebuild for a label.
     #[cfg(feature = "lance-backend")]
     async fn execute_rebuild(&self, label: &str) -> Result<()> {
+        fail::fail_point!("index_rebuild::execute", |_| Err(anyhow!(
+            "injected index rebuild failure"
+        )));
         let idx_mgr = IndexManager::new(self.storage.base_path(), self.schema_manager.clone())
             .with_backend(self.storage.backend_arc());
         idx_mgr.rebuild_indexes_for_label(label).await

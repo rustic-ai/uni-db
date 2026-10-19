@@ -45,10 +45,13 @@ const NAMES: &[&str] = &[
     "1lead",
 ];
 
-// A name containing a backtick is absent too. The renderer refuses it (no
-// Lance filter spelling reaches it; pinned by the uni-store unit tests), but
-// it cannot be written from Cypher at all: the grammar rejects the openCypher
-// doubled-backtick escape (`n.`has``tick``) with `UnexpectedSyntax`.
+// A name containing a backtick is absent too. Cypher can spell it (the
+// doubled-backtick escape, `n.`has``tick``), but it cannot be a declared
+// property: Lance writes such a column and then cannot project it, so
+// `validate_property_name` refuses the declaration (see uni-store's
+// `lance_backtick_column_probe`). The filter renderer refuses it as well and
+// leaves the conjunct to the residual filter. As an undeclared property it is
+// covered by `bugs::escaped_identifier_round_trip`.
 
 /// The three labels, by index kind (`ScalarType` is neither `Copy` nor
 /// `Clone`, so the kind is rebuilt per use).
@@ -271,12 +274,11 @@ async fn awkward_property_names_match_the_unpushed_oracle() {
 
 /// Awkward edge property names in a variable-length pattern's property map.
 ///
-/// The planner renders this map through `LanceFilterGenerator::generate`
-/// without a schema, so every name reaches `to_sql`. The rendered string is
-/// not consumed today (`edge_lance_filter` is `#[expect(dead_code)]` in the
-/// VLP execs), so this test does **not** discriminate the renderer: measured,
-/// it passes with bare identifiers too. It pins the end-to-end answer for when
-/// that preselection is wired up.
+/// The map is applied per edge during the traversal (from
+/// `edge_property_conditions`); no Lance filter is rendered for it. (An
+/// `edge_lance_filter` string used to be rendered and handed to the VLP execs,
+/// which never read it; it was removed.) So this test does not exercise the
+/// renderer: it pins the end-to-end answer for awkward edge property names.
 #[tokio::test]
 async fn awkward_edge_property_names_in_a_var_length_filter() {
     for split_l0 in [false, true] {

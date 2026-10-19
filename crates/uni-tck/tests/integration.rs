@@ -11,9 +11,9 @@
 //! Adding a repro? Add a `mod` line here — do not create a new top-level
 //! `tests/*.rs`. See `docs/test_layout.md`.
 
-// `collect_ids` swallows query errors via `if let Ok(...)`; the repro is
-// blocked on there being no seam to inject an introspection failure.
-mod repro_collect_ids_swallows_error;
+// The `collect_ids` swallowed-error repro lives as unit tests in
+// `src/world.rs`: the helpers are private, and only an in-module test can hand
+// them a failing query.
 // A scenario asserting side effects passed even when none were produced.
 mod repro_side_effects_false_pass;
 // Value sort key ordered nodes and lists inconsistently with the TCK.

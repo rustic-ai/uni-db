@@ -311,45 +311,19 @@ impl GraphProcedureCallExec {
                 // Non-node-yield procedures: exact-name match against the
                 // signature; Utf8 fallback if the user requested a yield
                 // not declared by the plugin.
-                let field = entry
-                    .signature
-                    .yields
-                    .iter()
-                    .find(|f| f.name() == yield_name.as_str())
-                    .map(|f| field_from_signature(col_name, f))
+                let field = declared_yield_field(registry, procedure_name, yield_name, col_name)
                     .unwrap_or_else(|| Field::new(col_name, DataType::Utf8, true));
                 fields.push(field);
             }
         } else if let Some(registry) = graph_ctx.procedure_registry()
-            && let Some(entry) = registry.resolve_user_algorithm(procedure_name)
+            && (registry.resolve_user_algorithm(procedure_name).is_some()
+                || registry.get(procedure_name).is_some())
         {
-            // Algorithm-provider path: types come from the provider's
-            // declared output fields, matched to YIELD names. Providers
-            // are registered without a procedure signature, so without
-            // this branch a `YIELD nodeId` would default to Utf8 and
-            // clash with an Int64-producing algorithm at execution time.
-            let output_fields = &entry.provider.signature().output_fields;
             for (name, alias) in yield_items {
                 let col_name = alias.as_ref().unwrap_or(name);
-                let field = output_fields
-                    .iter()
-                    .find(|f| f.name() == name.as_str())
-                    .map(|f| Field::new(col_name, f.data_type().clone(), f.is_nullable()))
+                let field = declared_yield_field(registry, procedure_name, name, col_name)
                     .unwrap_or_else(|| Field::new(col_name, DataType::Utf8, true));
                 fields.push(field);
-            }
-        } else if let Some(registry) = graph_ctx.procedure_registry()
-            && let Some(proc_def) = registry.get(procedure_name)
-        {
-            for (name, alias) in yield_items {
-                let col_name = alias.as_ref().unwrap_or(name);
-                let data_type = proc_def
-                    .outputs
-                    .iter()
-                    .find(|o| o.name == *name)
-                    .map(|o| procedure_value_type_to_arrow(&o.output_type))
-                    .unwrap_or(DataType::Utf8);
-                fields.push(Field::new(col_name, data_type, true));
             }
         } else if yield_items.is_empty() {
             // Void procedure (no YIELD) — no output columns.
@@ -362,6 +336,52 @@ impl GraphProcedureCallExec {
 
         Arc::new(Schema::new(fields))
     }
+}
+
+/// The output field a procedure declares for `yield_name`, renamed to
+/// `col_name`; `None` when no registered procedure declares it.
+///
+/// Looks in the order dispatch resolves a name: a plugin signature, an
+/// algorithm provider's output fields (registered without a procedure
+/// signature), then a legacy registered procedure's outputs. Both the
+/// standalone call and the per-row call under `Apply` type their columns
+/// from this, so a yield has the same type in either position.
+pub(crate) fn declared_yield_field(
+    registry: &crate::query::executor::procedure::ProcedureRegistry,
+    procedure_name: &str,
+    yield_name: &str,
+    col_name: &str,
+) -> Option<Field> {
+    if let Some(entry) = registry.resolve_user_procedure(procedure_name) {
+        return entry
+            .signature
+            .yields
+            .iter()
+            .find(|f| f.name() == yield_name)
+            .map(|f| field_from_signature(col_name, f));
+    }
+    if let Some(entry) = registry.resolve_user_algorithm(procedure_name) {
+        return entry
+            .provider
+            .signature()
+            .output_fields
+            .iter()
+            .find(|f| f.name() == yield_name)
+            .map(|f| field_from_signature(col_name, f));
+    }
+    registry.get(procedure_name).and_then(|proc_def| {
+        proc_def
+            .outputs
+            .iter()
+            .find(|o| o.name == yield_name)
+            .map(|o| {
+                Field::new(
+                    col_name,
+                    procedure_value_type_to_arrow(&o.output_type),
+                    true,
+                )
+            })
+    })
 }
 
 /// Convert an algorithm `ValueType` to an Arrow `DataType`.
@@ -381,18 +401,28 @@ pub(crate) fn value_type_to_arrow(vt: &uni_algo::algo::procedures::ValueType) ->
     }
 }
 
-/// Returns true if the ValueType is a complex type that should be JSON-encoded as Utf8
-/// and tagged with `cv_encoded=true` metadata for downstream parsing.
-pub(crate) fn is_complex_value_type(vt: &uni_algo::algo::procedures::ValueType) -> bool {
+/// The output field for an algorithm yield named `name` of type `vt`.
+///
+/// A list, map or path yield is a `LargeBinary` CypherValue column tagged
+/// `cv_encoded`, the engine's representation of a dynamic value, so every
+/// consumer (`size()`, `UNWIND`, indexing, `IN`, comparison) sees the value
+/// itself. A node or relationship yield carries the entity's id and is an
+/// `Int64` column, comparable with `id(n)`. Both used to be `Utf8` columns of
+/// the value's text, parsed back only when rows were returned, so inside the
+/// query `size(nodeIds)` counted characters and `id(n) = node` never matched.
+pub(crate) fn algo_yield_field(name: &str, vt: &uni_algo::algo::procedures::ValueType) -> Field {
     use uni_algo::algo::procedures::ValueType;
-    matches!(
-        vt,
-        ValueType::List
-            | ValueType::Map
-            | ValueType::Node
-            | ValueType::Relationship
-            | ValueType::Path
-    )
+    match vt {
+        ValueType::List | ValueType::Map | ValueType::Path => {
+            Field::new(name.to_owned(), DataType::LargeBinary, true).with_metadata(HashMap::from([
+                ("cv_encoded".to_owned(), "true".to_owned()),
+            ]))
+        }
+        ValueType::Node | ValueType::Relationship => {
+            Field::new(name.to_owned(), DataType::Int64, true)
+        }
+        other => Field::new(name.to_owned(), value_type_to_arrow(other), true),
+    }
 }
 
 /// Convert a `ProcedureValueType` to an Arrow `DataType`.
@@ -1110,6 +1140,18 @@ pub(crate) fn build_typed_column<'a>(
                 match val.and_then(|v| v.as_bool()) {
                     Some(b) => builder.append_value(b),
                     None => builder.append_null(),
+                }
+            }
+            Arc::new(builder.finish())
+        }
+        DataType::LargeBinary => {
+            // A dynamic value: the CypherValue encoding every consumer decodes.
+            let mut builder =
+                arrow_array::builder::LargeBinaryBuilder::with_capacity(num_rows, num_rows * 16);
+            for val in values {
+                match val {
+                    Some(Value::Null) | None => builder.append_null(),
+                    Some(v) => builder.append_value(uni_common::cypher_value_codec::encode(v)),
                 }
             }
             Arc::new(builder.finish())

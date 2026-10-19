@@ -21,8 +21,9 @@
 //! bit pattern, so a bit-exact hash or comparison of the key groups by
 //! Cypher equivalence.
 //!
-//! An integer compared with a float is widened to `f64` first, as
-//! `cypher_eq` and `cypher_partial_cmp` do.
+//! An integer compared with a float is compared exactly, by value, as
+//! `cypher_eq` and `cypher_partial_cmp` do; it is never widened to `f64`,
+//! which rounds above 2^53.
 
 use super::*;
 use arrow::compute::kernels::cast::cast;
@@ -131,15 +132,25 @@ fn canonical_float32(f: f32) -> f32 {
     }
 }
 
-/// Build the comparison UDF for `op`: `(Float64, Float64) -> Boolean`.
+/// Build the comparison UDF for `op`: `(Float64 | Int64, Float64 | Int64) ->
+/// Boolean`.
 ///
-/// `null` on either side gives `null`. The planner casts integer and `Float32`
-/// operands to `Float64` before calling it.
+/// `null` on either side gives `null`. The planner casts narrower integers to
+/// `Int64` and `Float32` to `Float64` before calling it; an `Int64` operand is
+/// kept, not widened, and compared with a float exactly
+/// ([`FloatCmp::apply_int_float`]).
 pub fn create_cypher_float_compare_udf(op: FloatCmp) -> ScalarUDF {
+    use datafusion::logical_expr::TypeSignature;
+    let pair = |l: DataType, r: DataType| TypeSignature::Exact(vec![l, r]);
     ScalarUDF::new_from_impl(CypherFloatCompareUdf {
         op,
-        signature: Signature::exact(
-            vec![DataType::Float64, DataType::Float64],
+        signature: Signature::one_of(
+            vec![
+                pair(DataType::Float64, DataType::Float64),
+                pair(DataType::Int64, DataType::Float64),
+                pair(DataType::Float64, DataType::Int64),
+                pair(DataType::Int64, DataType::Int64),
+            ],
             Volatility::Immutable,
         ),
     })
@@ -151,27 +162,117 @@ struct CypherFloatCompareUdf {
     signature: Signature,
 }
 
-/// The argument as a `Float64Array`, or as a scalar `Option<f64>`.
-enum FloatArg {
-    Array(ArrayRef),
-    Scalar(Option<f64>),
+/// One number, from either side of a comparison.
+#[derive(Clone, Copy)]
+enum Num {
+    I(i64),
+    F(f64),
 }
 
-fn float_arg(arg: &ColumnarValue, name: &str) -> DFResult<FloatArg> {
+impl FloatCmp {
+    /// Compare an integer with a float exactly.
+    ///
+    /// The integer is not widened to `f64`, which rounds above 2^53 and made
+    /// `9007199254740993 = 9007199254740992.0` true. A NaN float is
+    /// incomparable: every operator is false except `<>`.
+    #[inline]
+    pub fn apply_int_float(self, i: i64, f: f64) -> bool {
+        if f.is_nan() {
+            return self == Self::NotEq;
+        }
+        self.holds(uni_common::cmp_i64_f64(i, f))
+    }
+
+    /// Whether `ord` (left against right) satisfies this operator.
+    #[inline]
+    fn holds(self, ord: std::cmp::Ordering) -> bool {
+        use std::cmp::Ordering as O;
+        match self {
+            Self::Eq => ord == O::Equal,
+            Self::NotEq => ord != O::Equal,
+            Self::Lt => ord == O::Less,
+            Self::LtEq => ord != O::Greater,
+            Self::Gt => ord == O::Greater,
+            Self::GtEq => ord != O::Less,
+        }
+    }
+
+    /// The operator with its operands swapped: `a op b` is `b op.flip() a`.
+    #[inline]
+    pub fn flip(self) -> Self {
+        match self {
+            Self::Eq => Self::Eq,
+            Self::NotEq => Self::NotEq,
+            Self::Lt => Self::Gt,
+            Self::LtEq => Self::GtEq,
+            Self::Gt => Self::Lt,
+            Self::GtEq => Self::LtEq,
+        }
+    }
+
+    #[inline]
+    fn apply_num(self, l: Num, r: Num) -> bool {
+        match (l, r) {
+            (Num::F(l), Num::F(r)) => self.apply(l, r),
+            (Num::I(l), Num::I(r)) => self.holds(l.cmp(&r)),
+            (Num::I(i), Num::F(f)) => self.apply_int_float(i, f),
+            (Num::F(f), Num::I(i)) => self.flip().apply_int_float(i, f),
+        }
+    }
+}
+
+/// The argument as an `Int64Array` or `Float64Array`, or as a scalar number.
+enum NumArg {
+    Ints(Int64Array),
+    Floats(Float64Array),
+    Scalar(Option<Num>),
+}
+
+impl NumArg {
+    /// Row `i`'s number, `None` for a null.
+    #[inline]
+    fn get(&self, i: usize) -> Option<Num> {
+        match self {
+            Self::Ints(a) => a.is_valid(i).then(|| Num::I(a.value(i))),
+            Self::Floats(a) => a.is_valid(i).then(|| Num::F(a.value(i))),
+            Self::Scalar(s) => *s,
+        }
+    }
+}
+
+fn num_arg(arg: &ColumnarValue, name: &str) -> DFResult<NumArg> {
+    let err = |dt: &DataType| {
+        datafusion::error::DataFusionError::Execution(format!(
+            "{name}(): expected a number, got {dt}"
+        ))
+    };
     match arg {
         ColumnarValue::Array(a) => {
-            let a = if a.data_type() == &DataType::Float64 {
-                a.clone()
+            if a.data_type().is_integer() {
+                let a = cast(a, &DataType::Int64)?;
+                let a = a
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .ok_or_else(|| err(a.data_type()))?;
+                Ok(NumArg::Ints(a.clone()))
             } else {
-                cast(a, &DataType::Float64)?
-            };
-            Ok(FloatArg::Array(a))
+                let a = cast(a, &DataType::Float64)?;
+                let a = a
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .ok_or_else(|| err(a.data_type()))?;
+                Ok(NumArg::Floats(a.clone()))
+            }
+        }
+        ColumnarValue::Scalar(s) if s.data_type().is_integer() => {
+            match s.cast_to(&DataType::Int64)? {
+                ScalarValue::Int64(v) => Ok(NumArg::Scalar(v.map(Num::I))),
+                other => Err(err(&other.data_type())),
+            }
         }
         ColumnarValue::Scalar(s) => match s.cast_to(&DataType::Float64)? {
-            ScalarValue::Float64(v) => Ok(FloatArg::Scalar(v)),
-            other => Err(datafusion::error::DataFusionError::Execution(format!(
-                "{name}(): expected a float, got {other:?}"
-            ))),
+            ScalarValue::Float64(v) => Ok(NumArg::Scalar(v.map(Num::F))),
+            other => Err(err(&other.data_type())),
         },
     }
 }
@@ -197,35 +298,25 @@ impl ScalarUDFImpl for CypherFloatCompareUdf {
             )));
         };
         let op = self.op;
-        let as_f64 = |a: &ArrayRef| -> DFResult<Float64Array> {
-            a.as_any()
-                .downcast_ref::<Float64Array>()
-                .cloned()
-                .ok_or_else(|| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "{name}(): expected Float64, got {}",
-                        a.data_type()
-                    ))
-                })
-        };
-        let out = match (float_arg(l, name)?, float_arg(r, name)?) {
-            (FloatArg::Scalar(l), FloatArg::Scalar(r)) => {
-                let v = l.zip(r).map(|(l, r)| op.apply(l, r));
-                return Ok(ColumnarValue::Scalar(ScalarValue::Boolean(v)));
+        let (l, r) = (num_arg(l, name)?, num_arg(r, name)?);
+        if let (NumArg::Scalar(l), NumArg::Scalar(r)) = (&l, &r) {
+            let v = l.zip(*r).map(|(l, r)| op.apply_num(l, r));
+            return Ok(ColumnarValue::Scalar(ScalarValue::Boolean(v)));
+        }
+        let out = match (&l, &r) {
+            // The common case keeps the vectorized kernel.
+            (NumArg::Floats(a), NumArg::Floats(b)) => {
+                BooleanArray::from_binary(a, b, |l, r| op.apply(l, r))
             }
-            (FloatArg::Array(_), FloatArg::Scalar(None))
-            | (FloatArg::Scalar(None), FloatArg::Array(_)) => {
-                BooleanArray::new_null(args.number_rows)
+            (NumArg::Floats(a), NumArg::Scalar(Some(Num::F(s)))) => {
+                BooleanArray::from_unary(a, |v| op.apply(v, *s))
             }
-            (FloatArg::Array(a), FloatArg::Scalar(Some(s))) => {
-                BooleanArray::from_unary(&as_f64(&a)?, |v| op.apply(v, s))
+            (NumArg::Scalar(Some(Num::F(s))), NumArg::Floats(a)) => {
+                BooleanArray::from_unary(a, |v| op.apply(*s, v))
             }
-            (FloatArg::Scalar(Some(s)), FloatArg::Array(a)) => {
-                BooleanArray::from_unary(&as_f64(&a)?, |v| op.apply(s, v))
-            }
-            (FloatArg::Array(a), FloatArg::Array(b)) => {
-                BooleanArray::from_binary(&as_f64(&a)?, &as_f64(&b)?, |l, r| op.apply(l, r))
-            }
+            _ => (0..args.number_rows)
+                .map(|i| Some(op.apply_num(l.get(i)?, r.get(i)?)))
+                .collect(),
         };
         Ok(ColumnarValue::Array(Arc::new(out)))
     }
@@ -307,8 +398,9 @@ impl ScalarUDFImpl for CypherFloatKeyUdf {
 ///
 /// A `CypherValue` column groups by its encoded bytes, so `-0.0` and `0.0`
 /// (and NaNs of either sign) were different groups there too, directly or
-/// nested in a list or map. Every float inside is replaced by
-/// [`canonical_float`] and the value re-encoded. Nested values are tagged
+/// nested in a list or map, as were `1` and `1.0`. Every float inside is
+/// replaced by its integer when it is integral and fits `i64`, and by
+/// [`canonical_float`] otherwise, and the value re-encoded. Nested values are tagged
 /// blobs, so a value with no `TAG_FLOAT` byte anywhere holds no float and is
 /// skipped without decoding; other kinds (entities, vectors, handles) are left
 /// alone, as is anything that fails to decode.
@@ -324,15 +416,53 @@ pub fn canonical_cypher_value_key(bytes: &[u8]) -> Option<Vec<u8>> {
     changed.then(|| encode(&canonical))
 }
 
+/// The one representative of `f`'s equivalence class among all numbers.
+///
+/// An integral float that an `i64` holds exactly is that integer (`1.0` is
+/// `1`, `-0.0` is `0`); any other float is [`canonical_float`]. Two numbers
+/// are equivalent exactly when their representatives are identical.
+pub(crate) fn canonical_number(f: f64) -> Value {
+    uni_common::f64_to_exact_i64(f).map_or_else(|| Value::Float(canonical_float(f)), Value::Int)
+}
+
+/// The one representative of `value`'s Cypher equivalence class.
+///
+/// Every float, at any depth of lists and maps, becomes its integer when it
+/// is integral and an `i64` holds it exactly, and its [`canonical_float`]
+/// otherwise. Two values are equivalent (`1` and `1.0`, `[1]` and `[1.0]`,
+/// `0.0` and `-0.0`, any two NaNs) exactly when their representatives are
+/// equal. Use it as a key only: the value a DISTINCT keeps is the first one
+/// seen, not the representative.
+///
+/// # Examples
+/// ```
+/// use uni_common::Value;
+/// use uni_query_functions::df_udfs::canonical_cypher_value;
+///
+/// assert_eq!(canonical_cypher_value(Value::Float(1.0)), Value::Int(1));
+/// assert_eq!(
+///     canonical_cypher_value(Value::Float(9_223_372_036_854_775_808.0)),
+///     Value::Float(9_223_372_036_854_775_808.0)
+/// );
+/// ```
+#[must_use]
+pub fn canonical_cypher_value(value: Value) -> Value {
+    canonical_value(value, &mut false)
+}
+
 /// `value` with every float, at any depth of lists and maps, canonicalized.
+///
+/// An integral float that an `i64` holds exactly becomes that integer, so
+/// `1` and `1.0` (and `0`, `0.0`, `-0.0`) share one key: they are equal
+/// numbers, and openCypher equivalence follows equality.
 fn canonical_value(value: Value, changed: &mut bool) -> Value {
     match value {
         Value::Float(f) => {
-            let c = canonical_float(f);
-            if c.to_bits() != f.to_bits() {
+            let c = canonical_number(f);
+            if !matches!(c, Value::Float(c) if c.to_bits() == f.to_bits()) {
                 *changed = true;
             }
-            Value::Float(c)
+            c
         }
         Value::List(items) => Value::List(
             items
@@ -419,6 +549,156 @@ impl ScalarUDFImpl for CypherValueKeyUdf {
                 "_cypher_value_key(): expected LargeBinary, got {other:?}"
             ))),
         }
+    }
+}
+
+/// Name of the aggregate [`create_cypher_first_seen_udaf`] builds.
+pub const CYPHER_FIRST_SEEN_UDAF: &str = "_cypher_first_seen";
+
+/// Build the `_cypher_first_seen` aggregate: the first value its group saw.
+///
+/// Grouping on [`canonical_cypher_value_key`] makes `1` and `1.0` one group,
+/// but the key itself is the canonical form (`1`), not a value the query
+/// produced. openCypher keeps one of the equal values; Neo4j keeps the first
+/// one seen, so `UNWIND [1.0, 1] AS x RETURN DISTINCT x` is `1.0`. A
+/// `CypherValue` group key is grouped on its canonical key and emitted through
+/// this aggregate over the original column. The output field is the input
+/// field, metadata included.
+pub fn create_cypher_first_seen_udaf() -> datafusion::logical_expr::AggregateUDF {
+    datafusion::logical_expr::AggregateUDF::from(CypherFirstSeenUdaf {
+        signature: Signature::exact(vec![DataType::LargeBinary], Volatility::Immutable),
+    })
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct CypherFirstSeenUdaf {
+    signature: Signature,
+}
+
+impl datafusion::logical_expr::AggregateUDFImpl for CypherFirstSeenUdaf {
+    fn name(&self) -> &str {
+        CYPHER_FIRST_SEEN_UDAF
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _args: &[DataType]) -> DFResult<DataType> {
+        Ok(DataType::LargeBinary)
+    }
+
+    fn return_field(
+        &self,
+        args: &[arrow::datatypes::FieldRef],
+    ) -> DFResult<arrow::datatypes::FieldRef> {
+        args.first().cloned().ok_or_else(|| {
+            datafusion::error::DataFusionError::Plan(format!(
+                "{CYPHER_FIRST_SEEN_UDAF}(): requires 1 argument"
+            ))
+        })
+    }
+
+    fn accumulator(
+        &self,
+        _acc_args: datafusion::logical_expr::function::AccumulatorArgs,
+    ) -> DFResult<Box<dyn datafusion::logical_expr::Accumulator>> {
+        Ok(Box::new(FirstSeenAccumulator { first: None }))
+    }
+
+    fn state_fields(
+        &self,
+        args: datafusion::logical_expr::function::StateFieldsArgs,
+    ) -> DFResult<Vec<arrow::datatypes::FieldRef>> {
+        Ok(vec![
+            Arc::new(arrow::datatypes::Field::new(
+                format!("{}_value", args.name),
+                DataType::LargeBinary,
+                true,
+            )),
+            Arc::new(arrow::datatypes::Field::new(
+                format!("{}_seen", args.name),
+                DataType::Boolean,
+                false,
+            )),
+        ])
+    }
+}
+
+/// The first value of the group: `None` until a row arrives, then the row's
+/// value (`Some(None)` for a null).
+#[derive(Debug)]
+struct FirstSeenAccumulator {
+    first: Option<Option<Vec<u8>>>,
+}
+
+impl FirstSeenAccumulator {
+    fn binary(arr: &ArrayRef) -> DFResult<&LargeBinaryArray> {
+        arr.as_any()
+            .downcast_ref::<LargeBinaryArray>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "{CYPHER_FIRST_SEEN_UDAF}(): expected LargeBinary, got {}",
+                    arr.data_type()
+                ))
+            })
+    }
+}
+
+impl datafusion::logical_expr::Accumulator for FirstSeenAccumulator {
+    fn update_batch(&mut self, values: &[ArrayRef]) -> DFResult<()> {
+        if self.first.is_none()
+            && let Some(arr) = values.first()
+            && !arr.is_empty()
+        {
+            let a = Self::binary(arr)?;
+            self.first = Some(a.is_valid(0).then(|| a.value(0).to_vec()));
+        }
+        Ok(())
+    }
+
+    fn merge_batch(&mut self, states: &[ArrayRef]) -> DFResult<()> {
+        if self.first.is_some() {
+            return Ok(());
+        }
+        let [values, seen] = states else {
+            return Err(datafusion::error::DataFusionError::Execution(format!(
+                "{CYPHER_FIRST_SEEN_UDAF}(): expected 2 state columns"
+            )));
+        };
+        let values = Self::binary(values)?;
+        let seen = seen
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "{CYPHER_FIRST_SEEN_UDAF}(): expected a Boolean state"
+                ))
+            })?;
+        if let Some(i) = (0..seen.len()).find(|&i| seen.is_valid(i) && seen.value(i)) {
+            self.first = Some(values.is_valid(i).then(|| values.value(i).to_vec()));
+        }
+        Ok(())
+    }
+
+    fn state(&mut self) -> DFResult<Vec<ScalarValue>> {
+        Ok(vec![
+            ScalarValue::LargeBinary(self.first.clone().flatten()),
+            ScalarValue::Boolean(Some(self.first.is_some())),
+        ])
+    }
+
+    fn evaluate(&mut self) -> DFResult<ScalarValue> {
+        Ok(ScalarValue::LargeBinary(self.first.clone().flatten()))
+    }
+
+    fn size(&self) -> usize {
+        std::mem::size_of_val(self)
+            + self
+                .first
+                .as_ref()
+                .and_then(|v| v.as_ref())
+                .map_or(0, Vec::capacity)
     }
 }
 

@@ -28,6 +28,6 @@ pub mod flush_intent;
 pub use appender::{AppenderBuilder, StreamingAppender};
 pub use bulk::{
     BulkBackend, BulkConfig, BulkPhase, BulkProgress, BulkStats, BulkWriter, BulkWriterBuilder,
-    EdgeData, IntoArrow, record_batch_to_property_maps,
+    EdgeData, IntoArrow, RebuildManagerSource, record_batch_to_property_maps,
 };
 pub use flush_intent::recover_interrupted_bulk_load;

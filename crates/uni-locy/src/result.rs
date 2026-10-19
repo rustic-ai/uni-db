@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use uni_common::{Properties, Value};
+use uni_common::{Eid, Properties, Value, Vid};
 
 use crate::types::{RuntimeWarning, RuntimeWarningCode};
 
@@ -234,25 +234,55 @@ pub struct ValidatedModification {
 /// A proposed graph modification from ABDUCE.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum Modification {
+    /// Remove one relationship the derivation read.
+    ///
+    /// The `*_var` fields name the rule body's variables, for display. The
+    /// edge itself is identified by `eid` when the body binds it, otherwise by
+    /// its endpoints `source_vid` / `target_vid` (`source_vid` is the edge's
+    /// actual source, whatever the direction the body wrote it in).
     RemoveEdge {
         source_var: String,
         target_var: String,
         edge_var: String,
         edge_type: String,
-        /// Property constraints used to identify the specific edge to remove.
+        /// Property constraints on the edge, applied in addition to its
+        /// identity.
         match_properties: HashMap<String, Value>,
+        /// Identity of the edge to remove, when the rule body binds it.
+        eid: Option<Eid>,
+        /// Identity of the edge's source node.
+        source_vid: Option<Vid>,
+        /// Identity of the edge's target node.
+        target_vid: Option<Vid>,
     },
+    /// Change one property of one node or edge the derivation read.
+    ///
+    /// `element_var` is the rule body's variable; the entity changed is the
+    /// one `vid` (a node) or `eid` (an edge) identifies.
     ChangeProperty {
         element_var: String,
         property: String,
         old_value: Box<Value>,
         new_value: Box<Value>,
+        /// Identity of the node to change, when the element is a node.
+        vid: Option<Vid>,
+        /// Identity of the edge to change, when the element is an edge.
+        eid: Option<Eid>,
     },
+    /// Add one relationship between two existing nodes.
+    ///
+    /// The `*_var` fields name the rule body's variables, for display, in the
+    /// edge's own direction. The nodes the edge joins are `source_vid` and
+    /// `target_vid`.
     AddEdge {
         source_var: String,
         target_var: String,
         edge_type: String,
         properties: HashMap<String, Value>,
+        /// Identity of the new edge's source node.
+        source_vid: Option<Vid>,
+        /// Identity of the new edge's target node.
+        target_vid: Option<Vid>,
     },
 }
 
@@ -475,6 +505,8 @@ mod tests {
                         property: "flagged".into(),
                         old_value: Box::new(Value::String("false".into())),
                         new_value: Box::new(Value::String("true".into())),
+                        vid: Some(Vid::new(1)),
+                        eid: None,
                     },
                     validated: true,
                     cost: 0.5,
@@ -486,6 +518,9 @@ mod tests {
                         edge_var: "e".into(),
                         edge_type: "TRANSFERS_TO".into(),
                         match_properties: HashMap::from([("amount".into(), Value::Float(1000.0))]),
+                        eid: Some(Eid::new(7)),
+                        source_vid: Some(Vid::new(1)),
+                        target_vid: Some(Vid::new(2)),
                     },
                     validated: false,
                     cost: 1.0,
@@ -496,6 +531,8 @@ mod tests {
                         target_var: "b".into(),
                         edge_type: "FLAGGED_BY".into(),
                         properties: HashMap::new(),
+                        source_vid: Some(Vid::new(1)),
+                        target_vid: Some(Vid::new(3)),
                     },
                     validated: true,
                     cost: 1.5,

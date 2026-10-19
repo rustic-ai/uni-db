@@ -348,3 +348,33 @@ class TestPatternMatching:
         names = [r["name"] for r in results]
         assert "Alice" in names
         assert "Charlie" in names
+
+
+class TestQuotedIdentifiers:
+    """A quoted identifier, with the doubled-backtick escape, is one name."""
+
+    def test_escaped_names_round_trip(self):
+        db = uni_db.UniBuilder.temporary().build()
+        db.schema().label("Doc").property("my prop", "string").apply()
+        session = db.session()
+        tx = session.tx()
+        tx.execute("CREATE (:Doc {`my prop`: 'a', `has``tick`: 't', `a.b`: 'd'})")
+        tx.commit()
+        db.flush()
+
+        builder = session.query_with(
+            "MATCH (`d d`:Doc) WHERE `d d`.`my prop` = $`p q` "
+            "RETURN `d d`.`has``tick` AS `x``y`, `d d`.`a.b` AS dotted"
+        )
+        builder.param("p q", "a")
+        results = builder.fetch_all()
+
+        assert len(results) == 1
+        assert results[0]["x`y"] == "t"
+        assert results[0]["dotted"] == "d"
+
+    def test_declaring_an_unstorable_property_name_is_refused(self):
+        db = uni_db.UniBuilder.temporary().build()
+        for name in ("a.b", "has`tick"):
+            with pytest.raises(Exception, match="cannot contain"):
+                db.schema().label("Doc").property(name, "string").apply()

@@ -323,3 +323,94 @@ async fn on_deferred_receives_payload_from_first_fire() -> Result<()> {
     );
     Ok(())
 }
+
+/// Defers its first fire; its `on_deferred` then blocks its thread for `hold`.
+struct SlowOnDeferred {
+    sub: TriggerSubscription,
+    hold: Duration,
+    started: Arc<AtomicU64>,
+    finished: Arc<AtomicU64>,
+}
+
+impl TriggerPlugin for SlowOnDeferred {
+    fn subscription(&self) -> &TriggerSubscription {
+        &self.sub
+    }
+
+    fn fire(
+        &self,
+        _ctx: TriggerContext<'_>,
+        _events: &MutationBatch,
+    ) -> Result<TriggerOutcome, FnError> {
+        Ok(TriggerOutcome::Defer {
+            until: TriggerDeferral::from_payload("slow"),
+        })
+    }
+
+    fn on_deferred(
+        &self,
+        _ctx: TriggerContext<'_>,
+        _events: &MutationBatch,
+        _payload: &str,
+    ) -> Result<TriggerOutcome, FnError> {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        std::thread::sleep(self.hold);
+        self.finished.fetch_add(1, Ordering::SeqCst);
+        Ok(TriggerOutcome::Continue)
+    }
+}
+
+/// The deferral tick runs deferred fires off the executor.
+///
+/// A tick calls each due item's synchronous `on_deferred` and rewrites the
+/// fsynced sidecar. Run inline in the tick task, a slow plugin held the
+/// executor thread for its whole call, which on a `current_thread` runtime
+/// (this test's) stalls every other task, the caller's own included. The
+/// caller here keeps a 10 ms timer running while the slow fire is in flight
+/// and records the longest gap between its wake-ups.
+#[tokio::test]
+async fn a_slow_deferred_fire_does_not_stall_a_current_thread_runtime() -> Result<()> {
+    const HOLD: Duration = Duration::from_secs(2);
+    let db = db_with_audit_schema().await?;
+    let started = Arc::new(AtomicU64::new(0));
+    let finished = Arc::new(AtomicU64::new(0));
+    let trigger = SlowOnDeferred {
+        sub: TriggerSubscription {
+            phase: TriggerPhase::BeforeCommit,
+            events: TriggerEventMask::NODE_CREATE.union(TriggerEventMask::NODE_UPDATE),
+            labels: Some(vec![SmolStr::new("_AuditMe")]),
+            edge_types: None,
+            properties: None,
+            predicate_source: None,
+            fire_mode: FireMode::Synchronous,
+            docs: "slow-on-deferred".to_owned(),
+        },
+        hold: HOLD,
+        started: Arc::clone(&started),
+        finished: Arc::clone(&finished),
+    };
+    register_trigger(&db, "test-slow-deferred", Arc::new(trigger))?;
+
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:_AuditMe {x: 1})").await?;
+    tx.commit().await?;
+
+    let t = Instant::now();
+    let mut worst_gap = Duration::ZERO;
+    while finished.load(Ordering::SeqCst) == 0 {
+        assert!(
+            t.elapsed() < HOLD * 5,
+            "the deferred fire never completed (started: {})",
+            started.load(Ordering::SeqCst)
+        );
+        let before = Instant::now();
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        worst_gap = worst_gap.max(before.elapsed());
+    }
+    assert!(
+        worst_gap < HOLD / 2,
+        "a deferred fire stalled the runtime for {worst_gap:?}: the deferral tick ran it \
+         on the executor thread"
+    );
+    Ok(())
+}

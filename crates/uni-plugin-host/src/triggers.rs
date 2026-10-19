@@ -1122,6 +1122,7 @@ impl PreExistingProbe {
         use std::collections::HashMap as StdHashMap;
         use uni_store::storage::arrow_convert::arrow_to_value;
         const CHUNK_SIZE: usize = 1024;
+        const OVERFLOW_COLUMN: &str = "overflow_json";
 
         let mut by_label: StdHashMap<String, Vec<uni_common::Vid>> = StdHashMap::new();
         for (vid, label) in candidates {
@@ -1177,9 +1178,14 @@ impl PreExistingProbe {
                     continue;
                 };
                 // Cache (column_index, column_name) pairs for the
-                // per-row property assembly. Skip storage-internal
-                // columns (`_vid`, `_version`, `_label`) — user
-                // properties are everything else.
+                // per-row property assembly. The pre-image is the vertex's
+                // user property set, the same map the L0-chain probe
+                // captures: declared columns plus `ext_id`, with the
+                // undeclared properties unpacked from `overflow_json`.
+                // Every other storage column (`_vid`, `_uid`, `_deleted`,
+                // `_version`, `_labels`, `_created_at`, `_updated_at`) is
+                // `_`-prefixed and skipped, and the blob is never surfaced
+                // as a property of its own.
                 let schema = batch.schema();
                 let property_cols: Vec<(usize, String)> = schema
                     .fields()
@@ -1187,17 +1193,16 @@ impl PreExistingProbe {
                     .enumerate()
                     .filter_map(|(idx, f)| {
                         let name = f.name();
-                        if name == "_vid"
-                            || name == "_version"
-                            || name == "_label"
-                            || name == "_labels"
-                        {
+                        if name.starts_with('_') || name == OVERFLOW_COLUMN {
                             None
                         } else {
                             Some((idx, name.clone()))
                         }
                     })
                     .collect();
+                let overflow_col = batch
+                    .column_by_name(OVERFLOW_COLUMN)
+                    .and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>());
 
                 for row in 0..vid_col.len() {
                     if vid_col.is_null(row) {
@@ -1232,6 +1237,29 @@ impl PreExistingProbe {
                         };
                         if !matches!(value, uni_common::Value::Null) {
                             props.insert(col_name.clone(), value);
+                        }
+                    }
+                    if let Some(blob) = overflow_col.filter(|c| !c.is_null(row)) {
+                        // Same degrade-not-fail contract as a column decode
+                        // failure above. A declared column wins a shared key,
+                        // as on the read path.
+                        match uni_common::cypher_value_codec::decode(blob.value(row)) {
+                            Ok(uni_common::Value::Map(overflow)) => {
+                                for (k, v) in overflow {
+                                    if !v.is_null() {
+                                        props.entry(k).or_insert(v);
+                                    }
+                                }
+                            }
+                            Ok(uni_common::Value::Null) => {}
+                            Ok(other) => tracing::error!(
+                                value = ?other,
+                                "trigger pre-image: overflow_json decoded to a non-map value"
+                            ),
+                            Err(e) => tracing::error!(
+                                error = %e,
+                                "trigger pre-image: overflow_json failed to decode"
+                            ),
                         }
                     }
                     // First insert wins: L0-chain entries always come
@@ -1724,6 +1752,7 @@ fn eid_to_i64(eid: uni_common::Eid) -> i64 {
 /// `Defer` from cascading.
 const DEFER_MAX_ATTEMPTS: u32 = 10;
 
+#[derive(Clone)]
 struct DeferredItem {
     plugin: Arc<dyn TriggerPlugin>,
     name: String,
@@ -1980,6 +2009,9 @@ impl EcQueue {
 ///   Built via [`DeferralQueue::with_persistence`] it mirrors every
 ///   `push`/`drain_due` to a JSON sidecar (FU-5) and reloads on restart
 ///   via [`DeferralQueue::load_from_sidecar`].
+/// - With persistence, a push returns once the sidecar holds the item. The
+///   write runs outside the queue lock, and concurrent pushes share one write
+///   when a later snapshot already covers them.
 /// - Even with persistence there is no transactional guarantee tying a
 ///   deferred fire to the originating commit; a crash between commit and
 ///   the next sidecar write can still lose an item.
@@ -2012,6 +2044,22 @@ pub struct DeferralQueue {
     /// blocking `fsync`s per tick on the caller's runtime for every database
     /// with a local data path.
     persist_dirty: std::sync::atomic::AtomicBool,
+    /// Bumped, under the `inner` lock, by every change to the queue, so a
+    /// snapshot taken under that lock is labelled with the change it reflects.
+    generation: std::sync::atomic::AtomicU64,
+    /// Serializes sidecar writes and holds the generation of the last
+    /// snapshot written.
+    ///
+    /// The write (and its `fsync`s) runs under this lock and never under
+    /// `inner`: `push` is on the commit path, and holding `inner` across the
+    /// write made every concurrent deferring commit, the deferral tick, and
+    /// `pending` wait for each other's disk I/O. A writer that finds a later
+    /// generation already written skips its own write, since that snapshot
+    /// contains its change, so concurrent pushes share one write.
+    persisted: parking_lot::Mutex<u64>,
+    /// Test seam: runs inside the sidecar write, before the file is written.
+    #[cfg(test)]
+    before_write: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl std::fmt::Debug for DeferralQueue {
@@ -2141,93 +2189,141 @@ impl DeferralQueue {
         restored
     }
 
-    /// Persist the current queue state to the sidecar (no-op when
-    /// persistence is disabled). I/O errors degrade to debug log.
-    fn persist_locked(
-        &self,
-        guard: &parking_lot::MutexGuard<'_, BTreeMap<StdInstant, Vec<DeferredItem>>>,
-    ) {
+    /// Bumps the change counter. Call with the `inner` lock held.
+    fn bump_generation(&self) -> u64 {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
+    }
+
+    /// Makes the sidecar reflect at least change `generation` of the queue
+    /// (no-op when persistence is disabled). I/O errors degrade to a warn and
+    /// mark the queue dirty, so the next drain retries.
+    ///
+    /// Must be called without the `inner` lock held: the snapshot is taken
+    /// under it, briefly, and the encode and write run outside it.
+    fn persist(&self, generation: u64) {
         let Some(sidecar) = self.sidecar.lock().clone() else {
             return;
         };
-        let now_wall = std::time::SystemTime::now();
-        let now_mono = StdInstant::now();
-        let mut rows: Vec<PersistedDeferral> = Vec::new();
-        for (fire_at_mono, items) in guard.iter() {
-            for item in items {
-                // Convert the monotonic Instant back to wall-clock by
-                // measuring the delta against `now` and offsetting
-                // `now_wall`. Past-due items get a fire_at slightly
-                // before `now_wall` so they fire immediately on
-                // restart.
-                let fire_at_wall = if *fire_at_mono <= now_mono {
-                    now_wall
-                } else {
-                    now_wall + fire_at_mono.duration_since(now_mono)
-                };
-                let fire_at_epoch_ms = fire_at_wall
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as u64)
-                    .unwrap_or(0);
-                let batch_ipc = match arrow_ipc_encode(&item.batch.events) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        tracing::debug!(error = %e, "DeferralQueue: IPC encode failed; skipping row");
-                        continue;
-                    }
-                };
-                rows.push(PersistedDeferral {
-                    name: item.name.clone(),
-                    name_ordinal: item.name_ordinal,
-                    session_id: item.session_id.clone(),
-                    tx_id: item.tx_id,
-                    attempts: item.attempts,
-                    payload: item.payload.clone(),
-                    batch_ipc,
-                    fire_at_epoch_ms,
-                });
-            }
-        }
         if self.load_failed.load(std::sync::atomic::Ordering::SeqCst) {
             // The in-memory map does not contain whatever the failed read held,
             // so writing it back would destroy those rows (#233).
             return;
         }
+        let mut persisted = self.persisted.lock();
+        if *persisted >= generation && !self.persist_dirty.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            // A write that started after this change already covered it.
+            return;
+        }
+        // Snapshot the latest state, not the state as of `generation`: writes
+        // are serialized here, so the file only moves forward.
+        let (snapshot, snapshot_generation) = {
+            let guard = self.inner.lock();
+            let snapshot: Vec<(StdInstant, DeferredItem)> = guard
+                .iter()
+                .flat_map(|(at, items)| items.iter().map(|item| (*at, item.clone())))
+                .collect();
+            (
+                snapshot,
+                self.generation.load(std::sync::atomic::Ordering::SeqCst),
+            )
+        };
+        let rows = Self::encode_rows(&snapshot);
+        #[cfg(test)]
+        if let Some(hook) = self.before_write.lock().clone() {
+            hook();
+        }
         let result = sidecar.write_all(&rows);
         self.persist_dirty
             .store(result.is_err(), std::sync::atomic::Ordering::SeqCst);
-        if let Err(e) = result {
-            tracing::warn!(
+        match result {
+            Ok(()) => *persisted = snapshot_generation,
+            Err(e) => tracing::warn!(
                 error = %e,
                 "DeferralQueue: sidecar write failed; drained items may fire again after a \
                  restart (at-least-once)",
-            );
+            ),
         }
     }
 
+    /// Encodes a queue snapshot as sidecar rows.
+    fn encode_rows(snapshot: &[(StdInstant, DeferredItem)]) -> Vec<PersistedDeferral> {
+        let now_wall = std::time::SystemTime::now();
+        let now_mono = StdInstant::now();
+        let mut rows: Vec<PersistedDeferral> = Vec::with_capacity(snapshot.len());
+        for (fire_at_mono, item) in snapshot {
+            // Convert the monotonic Instant back to wall-clock by
+            // measuring the delta against `now` and offsetting
+            // `now_wall`. Past-due items get a fire_at slightly
+            // before `now_wall` so they fire immediately on
+            // restart.
+            let fire_at_wall = if *fire_at_mono <= now_mono {
+                now_wall
+            } else {
+                now_wall + fire_at_mono.duration_since(now_mono)
+            };
+            let fire_at_epoch_ms = fire_at_wall
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let batch_ipc = match arrow_ipc_encode(&item.batch.events) {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::debug!(error = %e, "DeferralQueue: IPC encode failed; skipping row");
+                    continue;
+                }
+            };
+            rows.push(PersistedDeferral {
+                name: item.name.clone(),
+                name_ordinal: item.name_ordinal,
+                session_id: item.session_id.clone(),
+                tx_id: item.tx_id,
+                attempts: item.attempts,
+                payload: item.payload.clone(),
+                batch_ipc,
+                fire_at_epoch_ms,
+            });
+        }
+        rows
+    }
+
+    /// Enqueues `item`; with persistence on, returns once the sidecar holds it.
     fn push(&self, item: DeferredItem, fire_at: StdInstant) {
-        let mut guard = self.inner.lock();
-        guard.entry(fire_at).or_default().push(item);
-        self.persist_locked(&guard);
+        let generation = {
+            let mut guard = self.inner.lock();
+            guard.entry(fire_at).or_default().push(item);
+            self.bump_generation()
+        };
+        self.persist(generation);
     }
 
     /// Pop every item whose scheduled fire instant is `<= now`.
     fn drain_due(&self, now: StdInstant) -> Vec<DeferredItem> {
-        let mut guard = self.inner.lock();
-        let mut due = Vec::new();
-        // BTreeMap::split_off gives us [now+ε..) so we keep that half
-        // and the front half is everything ≤ now.
-        let mut to_keep = guard.split_off(&(now + Duration::from_nanos(1)));
-        std::mem::swap(&mut *guard, &mut to_keep);
-        for (_, mut items) in to_keep {
-            due.append(&mut items);
-        }
+        let (due, generation) = {
+            let mut guard = self.inner.lock();
+            let mut due = Vec::new();
+            // BTreeMap::split_off gives us [now+ε..) so we keep that half
+            // and the front half is everything ≤ now.
+            let mut to_keep = guard.split_off(&(now + Duration::from_nanos(1)));
+            std::mem::swap(&mut *guard, &mut to_keep);
+            for (_, mut items) in to_keep {
+                due.append(&mut items);
+            }
+            let generation = if due.is_empty() {
+                self.generation.load(std::sync::atomic::Ordering::SeqCst)
+            } else {
+                self.bump_generation()
+            };
+            (due, generation)
+        };
         // FU-5: persist the remaining queue state after each drain so
         // a restart sees only the still-pending items. A drain that removed
         // nothing left the queue as last persisted, so skip the rewrite
         // unless the previous write failed and the file may be stale.
         if !due.is_empty() || self.persist_dirty.load(std::sync::atomic::Ordering::SeqCst) {
-            self.persist_locked(&guard);
+            self.persist(generation);
         }
         due
     }
@@ -2716,5 +2812,99 @@ mod tests {
 
         // Silence unused-import warnings for the deferral helper type.
         let _ = TriggerDeferral::from_payload("");
+    }
+
+    /// A deferred item for `entry`, carrying `int_batch(&[n])`.
+    fn deferred(entry: &RouteEntry, n: i64) -> DeferredItem {
+        DeferredItem {
+            plugin: Arc::clone(&entry.plugin),
+            name: entry.name.clone(),
+            name_ordinal: entry.name_ordinal,
+            batch: MutationBatch {
+                events: int_batch(&[n]),
+            },
+            session_id: "s".to_owned(),
+            tx_id: n as u64,
+            attempts: 0,
+            payload: String::new(),
+        }
+    }
+
+    /// The sidecar write runs outside the queue lock.
+    ///
+    /// `push` is on the commit path and used to write and `fsync` the sidecar
+    /// while holding the queue mutex, so a slow disk stalled every concurrent
+    /// deferring commit, the deferral tick, and `pending` for the length of
+    /// the write. The write is held open here by the test seam; a `pending`
+    /// call from another thread must still return.
+    #[test]
+    fn the_sidecar_write_does_not_hold_the_queue_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = DeferralQueue::with_persistence(dir.path().to_path_buf());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = Arc::new(parking_lot::Mutex::new(release_rx));
+        *queue.before_write.lock() = Some(Arc::new(move || {
+            let _ = entered_tx.send(());
+            let _ = release_rx.lock().recv_timeout(Duration::from_secs(10));
+        }));
+
+        let entry = ec_route("t", 0);
+        let pusher = {
+            let queue = Arc::clone(&queue);
+            let item = deferred(&entry, 1);
+            std::thread::spawn(move || queue.push(item, StdInstant::now()))
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the push never reached the sidecar write");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || {
+                let _ = done_tx.send(queue.pending());
+            });
+        }
+        let seen = done_rx.recv_timeout(Duration::from_secs(2));
+        release_tx.send(()).expect("release the write");
+        pusher.join().expect("pusher");
+        assert_eq!(
+            seen,
+            Ok(1),
+            "`pending` waited for an in-flight sidecar write: the write holds the queue lock"
+        );
+    }
+
+    /// Concurrent pushes all reach the sidecar, whichever of them writes it.
+    #[test]
+    fn concurrent_pushes_are_all_persisted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let queue = DeferralQueue::with_persistence(dir.path().to_path_buf());
+        let entry = Arc::new(ec_route("t", 0));
+        let far = StdInstant::now() + Duration::from_secs(3600);
+        let threads: Vec<_> = (0..8i64)
+            .map(|t| {
+                let (queue, entry) = (Arc::clone(&queue), Arc::clone(&entry));
+                std::thread::spawn(move || {
+                    for i in 0..10 {
+                        queue.push(deferred(&entry, t * 10 + i), far);
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().expect("pusher");
+        }
+        let rows = DeferralSidecar::new(dir.path().to_path_buf())
+            .read_all()
+            .expect("read the sidecar");
+        let mut ids: Vec<u64> = rows.iter().map(|r| r.tx_id).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            (0..80).collect::<Vec<u64>>(),
+            "a pushed item is missing"
+        );
     }
 }

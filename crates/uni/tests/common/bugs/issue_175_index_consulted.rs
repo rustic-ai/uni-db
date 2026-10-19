@@ -21,7 +21,7 @@
 //! `index_scans == 0`. Without that pairing, deleting the callback would make
 //! all of them pass.
 
-use uni_db::{DataType, IndexType, ScalarType, Uni, Value};
+use uni_db::{DataType, IndexType, ScalarType, Uni, UniConfig, Value};
 
 /// Large enough that Lance does not brute-force past the index.
 const N: i64 = 3000;
@@ -216,7 +216,15 @@ async fn the_index_counter_is_not_a_constant() {
 /// is the distinction `scans_reported` exists to make.
 #[tokio::test]
 async fn an_unflushed_query_reports_no_lance_scan() {
-    let db = Uni::temporary().build().await.unwrap();
+    // No timer flush: the row must still be in L0 when the query runs.
+    let db = Uni::temporary()
+        .config(UniConfig {
+            auto_flush_interval: None,
+            ..Default::default()
+        })
+        .build()
+        .await
+        .unwrap();
     db.schema()
         .label("Item")
         .property("name", DataType::String)
