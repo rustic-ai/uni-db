@@ -86,7 +86,10 @@ edition = "2024"
 # graph had already invalidated, so the advertised MSRV did not hold.)
 # Keep it pinned so a stale toolchain fails fast with an actionable cargo error
 # instead of a parse failure or a mid-build trait error.
-rust-version = "1.91"
+# Raised 1.91 -> 1.96 on 2026-10-19: wasmtime/wasmtime-wasi 49 (the first major
+# with the RUSTSEC-2026-0352/0359/0362/0363 fixes that extism also supports,
+# via extism 1.41) declare `rust-version = "1.96.0"`.
+rust-version = "1.96"
 authors = ["Dragonscale Industries Inc. <dev@dragonscale.ai>"]
 license = "Apache-2.0"
 repository = "https://github.com/rustic-ai/uni-db"

@@ -28,7 +28,7 @@ RUST_LOG=uni_db=debug uni query "RETURN 1" --path ./storage 2>&1 | tail -50
 
 **Symptom:**
 ```
-error: package `uni-db v0.1.0` cannot be built because it requires rustc 1.91 or newer
+error: package `uni-db v0.1.0` cannot be built because it requires rustc 1.96 or newer
 ```
 
 **Solution:**
@@ -37,7 +37,7 @@ error: package `uni-db v0.1.0` cannot be built because it requires rustc 1.91 or
 rustup update stable
 
 # Verify version
-rustc --version  # Should be 1.91+
+rustc --version  # Should be 1.96+
 ```
 
 #### Missing System Dependencies

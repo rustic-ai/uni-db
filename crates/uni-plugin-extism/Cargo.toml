@@ -34,12 +34,13 @@ futures = { workspace = true }
 # so embedders that only want the trait surface (e.g., for compile-time
 # Rust-only plugins) can opt out.
 #
-# VERSION SYNC: extism pins a specific wasmtime major (1.30 → wasmtime 43).
+# VERSION SYNC: extism pins a specific wasmtime major (1.41 → wasmtime 49).
 # Keep wasmtime/wasmtime-wasi in crates/uni-plugin-wasm on that same major —
 # a mismatch links two wasmtime copies into every uni-db binary. When bumping
 # extism, bump uni-plugin-wasm's wasmtime to extism's wasmtime major in the
-# same change.
-extism = { version = "1", optional = true }
+# same change. The 1.41 floor is load-bearing: 1.30 resolves wasmtime 43,
+# which carries RUSTSEC advisories with no 43.x backport (see deny.toml).
+extism = { version = "1.41", optional = true }
 
 [features]
 default = ["extism-runtime"]

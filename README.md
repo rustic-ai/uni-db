@@ -1,7 +1,7 @@
 # Uni: Embedded Graph & Vector Database
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Rust](https://img.shields.io/badge/rust-1.91+-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.96+-orange.svg)](https://www.rust-lang.org)
 [![Python](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org)
 
 **Uni** is an embedded database that combines a property graph (OpenCypher), vector search, and columnar storage (Lance) into a single engine. Designed for applications requiring local, fast, multimodal data access with object storage (S3/GCS/local) durability.

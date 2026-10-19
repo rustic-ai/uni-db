@@ -36,27 +36,26 @@ ignore = [
   { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.38.4 via lance-io->opendal-core; needs >=0.41.0, opendal-pinned. Namespace-allocation DoS, same reachability." },
   { id = "RUSTSEC-2023-0071", reason = "rsa 0.9.10 via lance-io->opendal->reqsign-azure-storage. Marvin timing attack; upstream states NO safe upgrade exists. Only reachable on Azure blob auth." },
 
-  # ---- extism 1.30 pins wasmtime 43 ----
-  # `cargo update -p wasmtime` cannot move these: extism 1.30.0 constrains the
-  # major. Clearing them needs an extism release built against a patched
-  # wasmtime. Re-test on every extism upgrade.
-  { id = "RUSTSEC-2026-0222", reason = "wasmtime 43.0.2 pinned by extism 1.30.0. Cross-engine type-index confusion; we run a single engine per process." },
-  { id = "RUSTSEC-2026-0149", reason = "wasmtime-wasi 43.0.2 pinned by extism 1.30.0. path_open(TRUNCATE) bypasses FilePerms::WRITE." },
-  { id = "RUSTSEC-2026-0182", reason = "wasmtime-wasi 43.0.2 pinned by extism 1.30.0. Leak in WASIp1 fd_renumber." },
-  { id = "RUSTSEC-2026-0188", reason = "wasmtime-wasi 43.0.2 pinned by extism 1.30.0. Hard links/renames bypass the preopen sandbox." },
-  { id = "RUSTSEC-2026-0269", reason = "wasmtime 43.0.2 pinned by extism 1.30.0. Trailing-slash path/symlink sandbox escape. Verified 2026-09-02: the advisory's patched ranges are >=24.0.13, >=36.0.14, >=46.0.3, >=47.0.4 -- 43 was never backported and crates.io has no 43.x above 43.0.2, so `cargo update -p wasmtime` cannot clear it. extism 1.30.0 is still the newest release." },
-  # Six more, published after 2026-09-16. Verified 2026-10-03: each advisory's
-  # patched ranges are 36.0.16+/36.0.17+ (36.x LTS), 48.0.3+/48.0.4+ and
-  # 49.0.1+/49.0.2+ -- 43 is not among them, and extism 1.30.0 (requires
-  # wasmtime "43") is still the newest release. uni-plugin-wasm stays on 43 with
-  # it (VERSION SYNC in its Cargo.toml: two majors would link two wasmtimes).
-  { id = "RUSTSEC-2026-0316", reason = "wasmtime 43.0.2 pinned by extism 1.30.0. Component-model dynamic record lifting can allocate beyond the hostcall fuel limit." },
-  { id = "RUSTSEC-2026-0327", reason = "wasmtime 43.0.2 pinned by extism 1.30.0. Async-lifted component callback result count unvalidated (native stack overflow). component-model-async IS enabled in the unified build (via wasmtime-wasi / extism), so this is reachable for an async-lifted guest export." },
-  { id = "RUSTSEC-2026-0314", reason = "wasmtime-wasi 43.0.2 pinned by extism 1.30.0. Guest can panic the host through a filesystem datetime overflow." },
-  { id = "RUSTSEC-2026-0321", reason = "wasmtime-wasi 43.0.2 pinned by extism 1.30.0. WASI preview 0 poll_oneoff circumvents fuel consumption." },
-  { id = "RUSTSEC-2026-0322", reason = "wasmtime-wasi 43.0.2 pinned by extism 1.30.0. Excessive host allocation when guests have no stdio." },
-  { id = "RUSTSEC-2026-0323", reason = "wasmtime-wasi 43.0.2 pinned by extism 1.30.0. fd_readdir copies uninitialized struct padding into guest memory." },
+  # ---- candle-core 0.10 -> zip 7.2 ----
+  # Patched only in zip >= 9.0.0. candle-core 0.10.2 requires zip "^7.2.0" and
+  # even the newest candle-core (0.11.0) requires "^8.6.0", so no candle release
+  # reaches a patched zip; candle-core is pinned at 0.10 here and transitively by
+  # mistralrs 0.8 / uni-xervo. Re-test on every candle / mistralrs upgrade.
+  # Exposure, verified 2026-10-19: all three advisories are in the *extraction*
+  # API (`ZipArchive::extract`, `ZipStreamReader::extract`). candle-core only
+  # opens archives with `ZipArchive::new` and reads named entries (npz/pth tensor
+  # loading in npy.rs / pickle.rs); neither candle-*, mistralrs-* nor uni-xervo
+  # calls `extract`, and no uni crate depends on zip directly.
+  { id = "RUSTSEC-2026-0367", reason = "zip 7.2.0 via candle-core 0.10.2 (zip ^7.2; candle 0.11 still ^8.6), patched only in >=9.0.0. SUID/SGID bits preserved by extract(); we never call extract()." },
+  { id = "RUSTSEC-2026-0368", reason = "zip 7.2.0 via candle-core 0.10.2, patched only in >=9.0.0. extract() creates symlinks escaping the destination; we never call extract()." },
+  { id = "RUSTSEC-2026-0369", reason = "zip 7.2.0 via candle-core 0.10.2, patched only in >=9.0.0. extract() applies Unix permissions through symlinks; we never call extract()." },
 
+  # The extism -> wasmtime 43 block (RUSTSEC-2026-0149/0182/0188/0222/0269/
+  # 0314/0316/0321/0322/0323/0327) was here and is gone: extism 1.41.0 moved to
+  # wasmtime 49, and wasmtime/wasmtime-wasi 49.0.3 are patched for all of them
+  # plus 0352/0359/0362/0363 (2026-10-19). uni-plugin-wasm moved to 49.0.3 in
+  # the same change (VERSION SYNC in both plugin Cargo.toml files).
+  #
   # RUSTSEC-2025-0057 (fxhash, unmaintained) was here and is gone (#174).
   #
   # The migration to `rustc-hash` removed fxhash as a *workspace-direct*

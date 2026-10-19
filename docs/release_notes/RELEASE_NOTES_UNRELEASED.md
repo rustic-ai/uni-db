@@ -398,6 +398,12 @@ ceiling when no trail could have been that long.
 
 ### API changes
 
+**Minimum supported Rust version is now 1.96 (was 1.91).** The WASM plugin
+runtime moves to wasmtime/wasmtime-wasi 49 (and extism 1.41), the first
+releases carrying the fixes for RUSTSEC-2026-0352, -0359, -0362 and -0363;
+wasmtime 49 declares `rust-version = "1.96.0"`. rustls moves to 0.23.46
+(RUSTSEC-2026-0346 to -0349). Run `rustup update stable` before building.
+
 **The in-memory CDC provider is no longer registered by default.** Every
 database registered `MemoryCdcOutputProvider`, which kept every committed batch
 until shutdown and made every commit extract CDC events (236.6 MB of RSS over
