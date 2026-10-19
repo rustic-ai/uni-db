@@ -68,6 +68,23 @@ Returns the minimal set of changes that achieve (or prevent) the goal. The datab
 
 Typical outputs include modification candidates, validation flags, and estimated costs.
 
+An `ABDUCE NOT` candidate edits the one entity the derivation read: a removal
+carries the edge's `eid` (or, for an anonymous relationship, its endpoints'
+`source_vid` / `target_vid`), and a property change carries the node's `vid` or
+the edge's `eid`. Validation applies exactly that edit. A relationship that can
+be identified by neither is not proposed, so `ABDUCE NOT` with a goal several
+facts satisfy validates only an edit that removes all of them.
+
+A positive `ABDUCE` candidate adds one edge between two existing nodes, named by
+`source_vid` / `target_vid`, and validation adds exactly that edge. For each
+relationship of the rule body, endpoint pairs are taken from the nodes that
+carry the pattern's endpoint labels, in id order; when the goal's `WHERE` reads
+only that relationship's endpoint variables (`ABDUCE t WHERE a.name = 'A'` for a
+hop out of `a`) it filters the pairs. At most `max_abduce_candidates` pairs are
+proposed in total, so a goal that needs edges into nodes late in id order may
+need a larger budget or a more selective `WHERE`. An edit that needs two new
+edges is never validated, since each candidate is a single edge.
+
 ## Safe Usage
 
 - Keep candidate search bounded.

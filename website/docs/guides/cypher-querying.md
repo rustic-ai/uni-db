@@ -40,6 +40,22 @@ ORDER BY p.year DESC
 LIMIT 10
 ```
 
+### Quoted Identifiers
+
+Any name (variable, label, relationship type, property key, map key, alias,
+parameter, procedure, index or constraint name) can be written in backticks,
+which allows spaces, punctuation and keywords. A backtick inside the name is
+written doubled:
+
+```cypher
+MATCH (`the paper`:Paper)
+WHERE `the paper`.`order` = $`min order`
+RETURN `the paper`.`has``tick` AS `a``b`   // property has`tick, column a`b
+```
+
+The quoted and the bare spelling of a name are the same name: `` `p` `` and
+`p` are one variable.
+
 ---
 
 ## MATCH Clause
@@ -265,6 +281,21 @@ Writing `p.title` is an error, because `p` holds many nodes. The message names
 the replacement: `[n IN p | n.title]` for all of them, or `last(p).title` for
 the final one.
 
+#### Inner node labels
+
+A label on an inner node holds on every iteration. A label on the sub-pattern's
+first node holds for the node that starts each iteration: the outer start node,
+and each node where one iteration ends and the next begins. A label on a later
+inner node holds for that node on every iteration. Each inner node may carry at
+most one label; filter extra labels in `WHERE`.
+
+<!-- doctest: skip -->
+```cypher
+// Every node a hop starts from is a Person; the final node may be anything.
+MATCH (a {name: 'Alice'})((x:Person)-[:KNOWS]->(y)){1,3}(b)
+RETURN b.name
+```
+
 **Restrictions.** A quantified pattern is compiled against declared
 relationship types, so an undeclared type is refused — either declare it, or
 write the sub-pattern without inner variable names so it is planned as an
@@ -300,6 +331,18 @@ every number `x` (including `NaN`), and `<`, `<=`, `>`, `>=` with a `NaN`
 operand are false. `DISTINCT` and grouping treat `-0.0` and `0.0` as one value
 and every `NaN` as one value; `ORDER BY` puts `NaN` after positive infinity.
 
+An integer and a float compare by exact value; the integer is never rounded to
+a float. `9007199254740993 = 9007199254740992.0` is false and
+`9007199254740993 > 9007199254740992.0` is true, in `WHERE`, `IN`, joins,
+`ORDER BY`, `min` and `max`, on literals, parameters and stored properties
+alike. An integer equal to a float is the same value: `1` and `1.0` are one row
+under `DISTINCT` and `UNION`, one group, and one element of
+`collect(DISTINCT ...)`. The value kept is the first one seen, so
+`UNWIND [1.0, 1] AS x RETURN DISTINCT x` returns `1.0`. An aggregate over
+`DISTINCT` sees those same first values: `sum(DISTINCT x)` over `[1.0, 1]` is
+`1.0`, and `collect(DISTINCT x)` is `[1.0]`. `UNION` of an integer column with
+a float column keeps each row's own type.
+
 ### Boolean Logic
 
 <!-- doctest: skip -->
@@ -328,6 +371,21 @@ WHERE p.doi IS NOT NULL
 // COALESCE (use default if NULL)
 RETURN COALESCE(p.nickname, p.name) AS display_name
 ```
+
+Operators follow openCypher's NULL rules, whether an operand is a literal, a
+declared property or a schemaless one:
+
+- Arithmetic, comparison, string and regex operators over NULL return NULL,
+  whatever the other operand is: `'ab' + null`, `p.missing ^ 2` and
+  `p.title =~ null` are all NULL.
+- `AND`, `OR` and `XOR` use three-valued (Kleene) logic. An operand that decides
+  the answer wins whatever the other operand is, in either position:
+  `false AND x` is false and `true OR x` is true. Otherwise a non-boolean
+  operand is a type error, beside NULL too: `null AND p.count` is an error, not
+  NULL. A number, string, list or map *literal* under `AND`/`OR`/`XOR`/`NOT` is
+  rejected when the query is compiled.
+- `STARTS WITH`, `ENDS WITH` and `CONTAINS` with a non-string operand return
+  NULL.
 
 ### String Operations
 
@@ -428,6 +486,18 @@ RETURN p.citations * 2 AS double_citations
 
 // String concatenation
 RETURN p.title + ' (' + p.venue + ')' AS formatted
+
+// A number, boolean or temporal concatenates its toString()
+RETURN 'v' + 1.0, 'due ' + duration('P1D')   // 'v1.0', 'due P1D'
+
+// `^` is always a float
+RETURN 2 ^ 3   // 8.0
+
+// Temporal arithmetic takes durations; subtracting two values of one
+// temporal type gives a duration, and a number is not a duration
+RETURN date('2020-01-02') - date('2020-01-01')   // P1D
+RETURN duration('P1D') * 2                        // P2D
+// date('2020-01-02') + 1 is a type error
 
 // Conditional (CASE)
 RETURN CASE
@@ -573,6 +643,8 @@ Uni provides a comprehensive set of scalar functions for data transformation.
 ### Math Functions
 
 Math functions take numbers: `NULL` gives `NULL`, and any other value (a string, a duration) is a type error. So are `stDev`, `variance` and the percentiles over a value that is not a number.
+
+`percentileDisc(x, p)` returns one of its inputs, unchanged: over integers it returns an integer, exactly. `percentileCont(x, p)` returns a float interpolated between the inputs around the percentile. The percentile `p` must be a number between `0.0` and `1.0`.
 
 | Function | Description | Example |
 |----------|-------------|---------|
@@ -844,6 +916,19 @@ CREATE (a:Author {name: name})
 ## CALL Clause (Procedures)
 
 Invoke built-in procedures.
+
+A `CALL` can stand alone or follow other clauses. Standalone, `YIELD` is
+optional and every result column is returned. Inside a query, the procedure
+runs once per input row, and a procedure that returns results must name the
+ones it uses with `YIELD`; only a procedure with no results may be called
+without it. Each yielded column has the type the procedure declares.
+
+<!-- doctest: skip -->
+```cypher
+UNWIND ['1', '2'] AS s
+CALL uni.number.parseInt(s) YIELD result
+RETURN s, result + 1 AS next
+```
 
 ### Vector Search
 
@@ -1542,6 +1627,21 @@ RETURN a.name, b.name, length(p)
 
 A `WHERE` on the path (`WHERE length(p) > 2`) filters the shortest path that was
 found; it does not search for a longer path that would pass.
+
+**A property map on the relationship restricts the search.** The result is the
+shortest path whose every relationship matches the map, not the shortest path
+filtered afterwards. A map value may be computed from the row — the endpoints
+or variables from earlier clauses — and each row is searched under its own
+values; a `NULL` value matches no relationship.
+
+```cypher
+// Shortest route over roads of the traveller's own class
+MATCH (a:City {name: 'Oslo'}), (b:City {name: 'Rome'}), (t:Traveller {id: $id})
+MATCH p = shortestPath((a)-[:ROAD* {class: t.class}]-(b))
+RETURN length(p)
+```
+
+A value that names the path or its relationship variable is refused.
 
 !!! warning "Changed in the next release"
     Up to 4.2.0 a mandatory `MATCH` kept every no-path pair as a row with a

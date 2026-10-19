@@ -164,6 +164,27 @@ MATCH (a:Company {id: 'X'})-[:OWNS*1..6]->(b:Company)
 RETURN DISTINCT b
 ```
 
+A correlated `EXISTS { ... }` or `COUNT { ... }` between two nodes the outer
+query binds is evaluated once per source, not once per pair, when the body
+names one of them only as a bare node (no label, property map or `WHERE` on
+it). The other one is the source:
+
+```cypher
+// One search per a, shared by every b
+MATCH (a:Person), (b:Person)
+WHERE NOT EXISTS { MATCH (a)-[:KNOWS*1..]->(b) }
+RETURN a, b
+
+// One search per (a, b) pair: the body reads both endpoints
+MATCH (a:Person), (b:Person)
+WHERE NOT EXISTS { MATCH (a)-[:KNOWS*1..]->(b) WHERE a.active AND b.active }
+RETURN a, b
+```
+
+Move such filters to the outer query (`WHERE a.active AND b.active AND NOT
+EXISTS { ... }`) to keep the shared search. The body is planned each time it
+runs, so `result.metrics().physical_plans` minus one is how many times it ran.
+
 When you genuinely need paths:
 
 - **`shortestPath`** stops at the first path it finds — use it whenever one path

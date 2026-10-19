@@ -211,6 +211,26 @@ Be intentional about nullable properties:
 | Descriptive | `citation_count` not `cc` | Self-documenting |
 | No prefixes | `title` not `paper_title` | Label provides context |
 
+**Reserved names.** A few names belong to the storage layer. A write that sets
+a property named `overflow_json`, `_vid`, `_uid`, `_eid`, `_deleted`,
+`_version`, `_labels`, `_created_at` or `_updated_at` — through `CREATE`, `SET`,
+`MERGE`, bulk insert, the bulk writer or the Python API — fails with
+`UniError::InvalidIdentifier` (Python: `UniInvalidIdentifierError`), declared
+label or not. Declaring a property cannot use them either, nor any other name
+starting with `_`, nor `ext_id`, `eid`, `src_vid`, `dst_vid` or `op`. Avoid a
+leading `_` for undeclared properties as well: such a property is not listed by
+`keys()`, and on a declared label it is not stored. `ext_id` is the vertex's
+external id; `eid`, `src_vid`, `dst_vid`, `op`, `type`, `labels` and
+`props_json` work as undeclared properties.
+
+**Characters a declared property cannot use.** A declared property is a storage
+column, and a column name cannot contain `.` or a backtick: declaring one fails
+with a schema error (through `CREATE LABEL`, `CREATE EDGE TYPE`,
+`ALTER … ADD PROPERTY`, rename, and the schema builder). Such a name still works
+as an undeclared property, written with backticks in Cypher (`` n.`a.b` ``,
+`` n.`has``tick` ``). Spaces, keywords and other punctuation are fine in a
+declared name.
+
 ### Avoid Property Bloat
 
 ```

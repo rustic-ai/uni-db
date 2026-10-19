@@ -181,13 +181,15 @@ Key lowering, by the dtypes of the two compiled sides:
 
 **Float comparison and equivalence are openCypher's, not Arrow's.** Arrow's comparison kernels, hash grouping and `DISTINCT` order `f64` by IEEE total order (`-0.0 < 0.0`, a NaN equal to itself bit-for-bit, a sign-bit NaN below `-inf`). openCypher (CIP2016-06-14) compares floats numerically: `-0.0 = 0.0`, every comparison with NaN is false except `<>`, and equivalence (grouping, `DISTINCT`) is equality except that all NaNs are one value. `df_expr::float_comparison` lowers every comparison between two numbers at least one of which is a float — in the logical translator, `build_cypher_comparison` (simple `CASE`, `IN` chains) and the physical compiler's `compile_binary_op` — to `_cypher_float_{eq,not_eq,lt,lt_eq,gt,gt_eq}` (`df_udfs/float_cmp.rs`, Rust's IEEE operators over `Float64`). Against a numeric literal it keeps a native `BinaryExpr` where that is exact (an integer operand; a float column and a finite non-zero literal, guarded by `AND NOT isnan(col)` / `OR isnan(col)` for `<>`; `-0.0` literals become `0.0`), because the scan's L0 pre-filter recovers column-versus-literal `BinaryExpr`s and a UDF is opaque to it. Joins need nothing extra: the `_cypher_join_key` bucket already folds `-0.0` into `0` and the re-check compiles through the same lowering. Group keys (`Distinct`, `Aggregate`, `UNION` dedup) and `DISTINCT` aggregate arguments go through `_cypher_float_key` (type-preserving: `-0.0` → `0.0`, any NaN → `f64::NAN`) for float columns and `_cypher_value_key` for `CypherValue` columns (re-encodes only when a `TAG_FLOAT` byte is present).
 
+**Integers compare with floats exactly.** An `i64` widened to `f64` rounds above 2^53, so every path that compared an integer with a float through `as f64` (or an Arrow cast to `Float64`) answered `9007199254740993 = 9007199254740992.0` true. The single primitive is `uni_common::cmp_i64_f64`; `expr_eval::cypher_numeric_cmp` wraps it for `Value`s and is what `cypher_eq` / `cypher_partial_cmp`, the CypherValue fast paths in `df_udfs.rs` (`compare_numbers`), and list ordering (`cypher_value_cmp`) use. Not yet converted (no reproduction built): Locy's `values_equal` / `value_less_than` and the legacy executor's `cypher_cross_type_cmp`. `float_comparison` casts an integer operand to `Int64`, not `Float64` (`float_comparison_operand_type`), and `_cypher_float_*` accepts `Int64` on either side. Against a literal it rewrites to the operand's own type so the native form stays exact and pushable: an integer operand against a float takes `integer_bound` (`x < 2.5` → `x <= 2`; no form for `=`/`<>` against a fraction, NaN, infinities or values outside `i64`), a float operand against an integer no `f64` holds takes `float_bound` (`y < 2^53+1` → `y <= 2^53`). Equivalence follows equality: `_cypher_value_key` maps an integral float that fits `i64` to that integer (`float_cmp::canonical_number`), so `1` and `1.0` share a group. Because the key is then not the value, a `CypherValue` group key (`Distinct`, `Aggregate`, `UNION` dedup) is emitted through `_cypher_first_seen` over the original column (`equivalence_group_key` / `plan_equivalence_distinct` in `df_planner.rs`), keeping the first value of the group as Neo4j does. `UNION` of an integer column with a float column encodes both as `CypherValue` (`coerce_union_entity_columns`).
+
 Every pair keyed that way also contributes its original equality, compiled exactly as the cross-join fallback would compile it, to a `JoinFilter` on the `HashJoinExec`. The answer is therefore identical to the fallback's by construction; the filter (not a post-join `FilterExec`) keeps OPTIONAL MATCH right, since a candidate rejected by the re-check leaves the outer row NULL-padded. `VidLookupJoinExec` compares non-anchor pairs with `ScalarValue` equality, so it is only chosen when no pair needs a re-check.
 
 **Sideways information passing into an indexed property (`PropertyLookupJoinExec`, P9/A7, 2026-10-18).** `MATCH (a:N {uid: $x}), (b:N) WHERE b.uid = a.name` used to hash-join the one bound `a` row against a scan of every `N` (`rows_scanned` 401 / 1,601 at |N| = 400 / 1,600). When one side of a cross-join equi-pair is `v.prop` with `prop` under an online Hash/BTree scalar index on `v`'s label, and that side plans to a row-wise chain (`ReadSetRecordingExec`, unprojected `FilterExec`, a projection passing `v.prop` through) over a per-label `GraphScanExec`, `try_emit_property_lookup_join` (`df_planner.rs`) emits `PropertyLookupJoinExec` (`df_graph/property_lookup_join.rs`) instead. It materializes the build side, collects the distinct non-null keys, and publishes `prop IN (keys)` into the scan's `DynamicPropertyFilter` slot — as a Lance SQL string (the index serves flushed rows) and as an Arrow `IN` predicate over the merged Lance + L0 batch (unflushed rows stay exact; superseded flushed rows are dropped by the existing pushdown MVCC path). Keys go in chunks of 1,024; above 4,096 keys, or when `vertex_scan_beats_lookup` says the key count is ≥ 25 % of the table, it publishes nothing and runs one unrestricted probe, so the large-bound case reads what the hash join read (`rows_scanned` 800 / 3,200 for an all-`N` build, unchanged). Exactness: every pair must compile to bare columns of one dtype with no re-check (the table above's first row) and the anchor dtype must be a string or `Int64`, so NULL keys match nothing and mixed types (`8 = 8.0`, a string against an int) keep the hash join with its re-check filter. INNER, or LEFT with the probe on the right (OPTIONAL MATCH: unmatched and NULL-keyed build rows are null-padded); a cross-side residual sits above it as above the hash join. When both sides qualify the unfiltered scan is probed. Measured after: 2 / 2 rows scanned, `index_scans` 2. Guards and differentials (flushed, L0, tx, fork, OPTIONAL, type mismatches): `crates/uni/tests/common/perf/anchored_lookup_test.rs`.
 
 History: until 2026-10 the mixed case was handled by wrapping both sides in `toInteger`, and everything else was refused. `toInteger` truncates (`1 = 1.5` matched), parses strings (`1 = '1'` matched) and raises a type error on a boolean or list key; `LargeBinary = LargeBinary` compared raw bytes (`1 = 1.0` missed); and the `Utf8 = CypherValue` refusal made the in-memory load above quadratic (502,000 cross-join rows at N = 1k). `crates/uni/tests/common/bugs/mixed_type_hash_join.rs` runs every pairing against the fallback's answer, flushed and unflushed.
 
-**`IN` over a constant list is a probe, not a scan.** `_cypher_in` scanned the list once per row, so a filter over `n` rows with a literal or parameter list of `k` items made `n × k` comparisons (P10: `FilterExec` 38.6 → 585.8 ms for 2k → 8k ids). When the list argument is a DataFusion scalar (a literal, or a parameter after substitution) and the element is a column of at least two rows, `in_list::invoke_constant_list` (`uni-query-functions/src/df_udfs/in_list.rs`) decodes the list once per batch and builds an `InListIndex`: items of a bucketable kind (entity, boolean, number, string, bytes, temporal) are bucketed by `_cypher_join_key`, entity items are also indexed by their bare id, and every other item (`null`, lists, maps, vectors) goes to a residual list. A bucketable element is compared, with the same `entity_aware_eq` the scan uses, against its key's bucket, the entities or bare ids `entity_aware_eq` equates with it across keys (`n IN [5]` after the `_vid` rewrite, `5 IN [n]`), and the whole residual. Every other item is a bucketable kind with a different key, which `entity_aware_eq` answers `false` for, so the three-valued answer equals the scan's: a key hit is re-checked (keys collide above 2^53), and `null` comes only from the residual. Any other element (a list, a map) takes the scan. A list that arrives as a column (`WITH`-bound, `collect()`ed) keeps the per-row scan, which the run-length decode memo (#245) already serves. Pinned by `in_list::tests` (scan-vs-probe differential over a 41-value matrix, known answers, an exact comparison-count guard: 512 rows against 256 and 4096 items, 131,072 and 2,097,152 comparisons on the scan) and `cypher_read/constant_in_list_test.rs` (parameter and literal lists against the `WITH`-bound oracle, entities, and a wall-time growth ratio against a linear control).
+**`IN` over a constant list is a probe, not a scan.** `_cypher_in` scanned the list once per row, so a filter over `n` rows with a literal or parameter list of `k` items made `n × k` comparisons (P10: `FilterExec` 38.6 → 585.8 ms for 2k → 8k ids). When the list argument is a DataFusion scalar (a literal, or a parameter after substitution) and the element is a column of at least two rows, `in_list::invoke_constant_list` (`uni-query-functions/src/df_udfs/in_list.rs`) decodes the list once per batch and builds an `InListIndex`: items of a bucketable kind (entity, boolean, number, string, bytes, temporal) are bucketed by `_cypher_join_key`, entity items are also indexed by their bare id, and every other item (`null`, lists, maps, vectors) goes to a residual list. A bucketable element is compared, with the same `entity_aware_eq` the scan uses, against its key's bucket, the entities or bare ids `entity_aware_eq` equates with it across keys (`n IN [5]` after the `_vid` rewrite, `5 IN [n]`), and the whole residual. Every other item is a bucketable kind with a different key, which `entity_aware_eq` answers `false` for, so the three-valued answer equals the scan's: a key hit is re-checked (keys collide above 2^53), and `null` comes only from the residual. Any other element (a list, a map) takes the scan. A list that arrives as a column (`WITH`-bound, `collect()`ed — the IC5 shape) is split by `in_list::invoke_column_list` into runs of identical rows (equal bytes for a CypherValue `LargeBinary`, equal Arrow values otherwise — exact, never Cypher equality); each run's list is decoded once, and a run of two or more rows is answered from an `InListIndex` built for it, a single row by the scan. `WITH [8 lists of k] UNWIND 1,024 rows each WHERE x IN fs`, debug, IN cost over a control carrying the same lists: 40 / 149 / 613 ms at k = 256 / 1,024 / 4,096 before, 6 / 16 / 91 ms after; what remains is the per-row byte comparison of the replicated list. Pinned by `in_list::tests::list_column_runs_*` (runs, `NULL` lists and lists holding `NULL` against the scan; 2,097,152 comparisons on the scan for 512 rows of 4,096-item runs, at most 2,048 now) and `perf/in_list_column_runs.rs` (against `any(y IN fs WHERE y = x)`). Pinned by `in_list::tests` (scan-vs-probe differential over a 41-value matrix, known answers, an exact comparison-count guard: 512 rows against 256 and 4096 items, 131,072 and 2,097,152 comparisons on the scan) and `cypher_read/constant_in_list_test.rs` (parameter and literal lists against the `WITH`-bound oracle, entities, and a wall-time growth ratio against a linear control).
 
 **List parameters keep their items.** `value_to_scalar` coerced every item of a list with no common native type to `LargeBinary` by stringifying it, so `$l = [[]]` arrived as `[Bytes("[]")]` (`[] IN $l` false while `[] IN [[]]` is true), and a list of dates matched no date. Such a list is now encoded whole as one CypherValue, as a mixed list literal is; a list of only binary items keeps the per-item form.
 
@@ -516,9 +518,45 @@ without it (the key is unique), and a fork-only `ext_id` is carried over
 per-label column's BTree index as Lance SQL (`df_planner.rs`, next to the
 indexed-property pushdown); the outer `FilterExec` still applies it to every
 row. Measured (`perf::anchored_lookup_test::a10_…`, flushed): `rows_scanned`
-400 / 1,600 → 1 / 1, `index_scans` 0 → 1. Open: a user property named
-`overflow_json` is accepted at write and collides with the blob (ignored
-repro `ext_id_on_labelled_nodes_overflow_json_name_round_trip`).
+400 / 1,600 → 1 / 1, `index_scans` 0 → 1. The same equality narrows the
+scan's unflushed read: the planner hands it to the scan as an
+`L0PropertyPrefilter` (`with_planner_l0_prefilter`), since a Lance-SQL-only
+pushdown leaves no runtime filter to recover one from, and the L0 pass treats
+`ext_id` as the `STRING` column it is on disk (`l0_value_may_equal` keeps any
+non-string value). Unflushed lookup: `rows_scanned` 2,000 / 8,000 → 1 / 1
+(`index::l0_equality_prefilter::unflushed_ext_id_lookup_…`).
+
+**Global uniqueness reads the holder's newest version.** `MainVertexDataset::
+find_by_ext_id(s)` picks the newest row *carrying* the `ext_id`, which is
+stale once the holder took another value, removed it, or was rewritten
+without it; `current_ext_id_holders` re-reads each candidate's newest row and
+keeps it only if live and still carrying the `ext_id`. The writer's checks
+then ask the L0 buffers, newest first, whether a newer version superseded the
+flushed or older-buffer holder (`Writer::l0_ext_id_verdict`; a partial row
+that leaves `ext_id` untouched decides nothing), and the batch path collects
+constraint keys from each vid's newest L0 version only. Before, a freed
+`ext_id` stayed taken for good once its holder had been flushed
+(`index::batch_extid_uniqueness::freed_ext_id_…`).
+
+**Storage column names are refused as written property names.**
+`uni_common::core::schema::WRITE_RESERVED_PROPERTY_NAMES` (`overflow_json`,
+`_vid`, `_uid`, `_eid`, `_deleted`, `_version`, `_labels`, `_created_at`,
+`_updated_at`) is checked on every vertex and edge insert path in `Writer`, in
+`BulkWriter::insert_vertices`/`insert_edges` (whatever `validate_constraints`
+says), and at plan time for a literal `SET x.k = …` target (a SET of a
+`_`-prefixed system column fails earlier, in the scan beneath it). The error
+is `UniError::InvalidIdentifier`; it crosses the executor's string boundary
+tagged (`RESERVED_PROPERTY_TAG`) and is recovered in `impl_query.rs`. The
+non-`_` storage names (`ext_id`, `eid`, `src_vid`, `dst_vid`, `op`, `type`,
+`labels`, `props_json`) round-trip and stay writable. Other `_`-prefixed
+names (`_id`, `_foo`) are not refused, though DDL refuses them: measured, they
+are dropped on a declared label and hidden from `keys()` on a schemaless one.
+
+**The storage blob never enters a property map.** The planner requests
+`overflow_json` beside `_all_props` for an edge type with no declared
+properties, and `PropertyManager::merge_overflow_into_props` answered by
+storing the blob, as byte values, in the map: every such flushed edge showed
+it in `keys(r)`, `properties(r)` and `RETURN r`, and a SET staged it back.
 
 ## Complete Type System
 
@@ -1237,17 +1275,22 @@ so both go to `spawn_blocking`. The audit of `uni`, `uni-store` and
 | Post-flush rebuild scheduling (`writer.rs`) | a detached task to persist `schedule` | `IndexRebuildManager::enqueue` (in memory); the worker persists when it claims the task. Indexes are already `Stale`, so a crash before that re-triggers |
 | `StorageManager::trigger_async_compaction` | detached, no callers | deleted |
 | Async-flush stream tasks | awaited only by `FlushCoordinator::shutdown`, which `Drop` does not call | counted by `background_task_count` (`FlushCoordinator::live_stream_count`); `Drop` waits for them first, then closes the submit channel so their submissions are still finalized, then waits for the tracked tasks, all under one `DROP_TASK_JOIN_TIMEOUT` |
+| `DeferralQueue::push` / `drain_due` (Wave C) | the sidecar rewrite and its fsyncs under the queue mutex, on the commit path for a `Defer` outcome | the snapshot is taken under the mutex and encoded and written outside it, under a separate write lock that records the generation written; a push whose change a later write already covered skips its own write. A push still returns only once the sidecar holds it |
+| Fork and snapshot `UniInner`s (Wave C) | a fresh `ShutdownHandle` that nothing signalled or awaited | `ShutdownHandle::derive`: own signal, the parent's task list. The parent's shutdown and `Drop` signal, count and wait for the view's tasks; `Drop for UniInner` calls `release`, which signals that view's own tasks only (a nested fork may still be in use). Same-fork sessions share one `UniInner`, so this runs when the last of them goes |
+| Bulk load with `async_indexes` (Wave C) | a new `IndexRebuildManager` and worker per load | `BulkBackend::rebuild_manager` hands the load the view's one manager |
+| Time-based auto-flush task (Wave C) | `check_flush` → `flush_to_l1`, which holds `flush_lock` across the Lance write; a commit waits at most `commit_timeout` for that lock, so one slow background flush failed a commit with `CommitTimeout` | `Writer::check_flush_in_background`: with async flush on, rotate under the lock and write through the coordinator, as the commit path's trigger does |
 
 `ShutdownHandle` is `Clone` (clones share state) so components that spawn per
 event can track; its handle list prunes finished tasks amortized (logging any
 that panicked), so tracking one task per commit or per run does not grow it
 without bound.
 
-Still open: `DeferralQueue::push` rewrites the fsynced sidecar under its lock
-on the commit path (a `Defer` outcome); `Synchronous` triggers run inline in
-the commit future by contract; fork and snapshot `UniInner`s get a fresh
-`ShutdownHandle` that nothing signals, so tasks tracked on a fork view are
-neither signalled nor waited for by the primary's shutdown.
+Still open: `Synchronous` triggers run inline in the commit future by
+contract, and a `Defer` outcome's sidecar write (now outside the queue lock)
+still runs on the committing task's thread; the async-flush finalize step
+holds `flush_lock` while it publishes the manifest, so it is still a commit
+lock holder of unbounded duration; tasks tracked by a fork view hold no claim
+on an `in_memory()` scratch directory (only the primary's do).
 
 A leak here is worth more than the kilobytes suggest. The survivors never
 expire, so a suite opening thousands of databases strands many per run; on a
@@ -1707,10 +1750,32 @@ Invariants:
 - **Staged files are protected from cleanup by Lance's unverified-file rule**
   (unreferenced files younger than 7 days are kept unless `delete_unverified` is
   set, which uni never sets) — independent of `compaction.version_retention`.
+- **A fork stages on its own branches.** `BranchedBackend::stage_append` cuts
+  the fork's branch of the table if it has none (empty of fork writes), then
+  `ForkBranching::stage_on_branch` runs the same two-step write against the
+  branch-checked-out dataset; `publish_staged` commits the fragments on the
+  branch (`publish_on_branch`), `discard_staged` deletes them. A fork's load
+  is therefore as invisible before `commit()` as primary's, and its abort
+  touches no table.
+- **A fork writes no crash marker** (`BulkWriter::writes_crash_marker`). The
+  marker is the database's and recovery applies it to primary's tables, while
+  the versions a fork's backend reports are primary's
+  (`BranchedBackend::get_table_version` delegates). Before forks staged, every
+  fork flush wrote one, and reopening after an interrupted fork load rolled
+  primary back to those versions, losing primary commits made meanwhile, and
+  dropped primary tables the load had seen absent
+  (`fork::fork_bulk_load::*_leaves_primary_intact_at_reopen`). The residual: a
+  fork load that fails part-way through `commit()` can leave its per-label
+  tables published and its main table not, and nothing reconciles a fork.
+- **One marker per database.** The marker is a single file, and two sessions
+  can each run a bulk load (the write guard is per session), so a second
+  load's `Active` marker overwrites the first's and either load's `commit()`
+  clears the other's. A crash in one load's publish while the other is open is
+  then reconciled for at most one of them. Per-load markers would not fix it
+  on their own: rolling a shared table back by version, as recovery does,
+  also discards the other load's published rows.
 - **A backend that cannot stage keeps the old protocol** — visible writes, abort
-  by version restore. Today that is a fork's `BranchedBackend`, whose
-  `rollback_table`/`drop_table` refuse, so an abort of a bulk load on a fork
-  fails as it did before.
+  by version restore. No in-tree backend is in that position any longer.
 
 ## L0Buffer
 
@@ -2229,7 +2294,34 @@ property maps) and a map-projection selector kept the backticks, while property
 access stripped them — so the write went to an overflow property literally
 named `` `order` `` and `n.`order`` read NULL. The walker now unquotes all four
 through `normalize_identifier` (`uni-cypher/tests/repro_backtick_property_name.rs`).
-The doubled-backtick escape (`` `has``tick` ``) is still a parse error.
+**Quoted identifiers (wave C).** The grammar's quoted form is the shared
+`escaped_name` rule, openCypher's `EscapedSymbolicName`: a doubled backtick
+inside stands for one backtick (`` `has``tick` `` is ``has`tick``), and
+`$`p q`` is a parameter. `normalize_identifier` strips the quotes and undoubles
+the backticks; it must run exactly once per token, since its output can look
+quoted again. Every identifier the walkers extract now goes through it
+(`walker::ident`): before, variables (pattern, UNWIND, FOREACH, comprehension,
+quantifier, REDUCE, SET/REMOVE targets, map-projection selectors), procedure
+names, parameters, index and constraint names, DDL property names and Locy
+generator names/outputs kept their backticks, so `` MATCH (`n`) RETURN n ``
+failed to plan and `` CREATE LABEL L (`my prop` STRING) `` declared a property
+literally named `` `my prop` ``. Index DDL took the property name by splitting
+the text on `.`, which broke on `` p.`a.b` ``; it now reads the last token.
+Oracle: `uni-cypher/tests/repro_escaped_identifier.rs` (quoted AST equals bare
+AST) and `crates/uni/tests/common/bugs/escaped_identifier_round_trip.rs`.
+
+A *declared* property cannot contain `.` or a backtick
+(`validate_property_name`): Lance refuses a top-level field named with `.` at
+table creation (the declaration used to succeed and every later flush of the
+label failed), and writes a field named with a backtick but cannot project it —
+`Scanner::project` escapes the name, but lance-datafusion's
+`ColumnCapturingVisitor` hands the unescaped root name to the field-path
+parser, so the column is silently not loaded and the read fails with
+`No field named` (`uni-store/tests/common/storage/lance_backtick_column_probe.rs`).
+Undeclared, both live in `overflow_json` and work. `CREATE LABEL` /
+`CREATE EDGE TYPE` and `SchemaBuilder::apply` validate property names before
+touching the schema; they used to add the element first and leave it behind
+when a later property was refused.
 
 Two prerequisites sat outside the translation. `PredicateAnalyzer::is_pushable`
 accepted only a string literal for `STARTS WITH` / `CONTAINS` / `ENDS WITH`,
@@ -2693,8 +2785,13 @@ Parameters prevent injection and enable query plan caching.
 | `min(expr)` | Minimum | `min(n.created_at)` |
 | `max(expr)` | Maximum | `max(n.price)` |
 | `collect(expr)` | Collect into list | `collect(n.name)`, `collect(DISTINCT n.tag)` |
-| `percentileDisc(expr, p)` | Discrete percentile | `percentileDisc(n.latency, 0.99)` |
-| `percentileCont(expr, p)` | Continuous percentile | `percentileCont(n.score, 0.5)` |
+| `percentileDisc(expr, p)` | Discrete percentile: the input at index `round(p * (n - 1))` of the sorted inputs, with its own type and exact value | `percentileDisc(n.latency, 0.99)` |
+| `percentileCont(expr, p)` | Continuous percentile: a float, interpolated between the exact inputs around position `p * (n - 1)` | `percentileCont(n.score, 0.5)` |
+
+Both percentiles are one definition (`uni-query-functions/src/percentile.rs`)
+shared by the DataFusion aggregates and the fallback executor. The input
+reaches the aggregate uncast, so integers stay integers; the percentile is the
+first non-NULL value of the second argument and must be a number in `[0, 1]`.
 
 ## Window Functions
 
@@ -2978,8 +3075,34 @@ far). It falls back to the whole-type pre-scan (`build_edge_property_filter`,
 `build_accepting_vid_filter`) once its sequential read rounds cost about what
 that scan would (`max(16, type edges / 160)` rounds, from measured 0.8 ms per
 round against about 5 µs per scanned edge), or past half the type's edges for
-a type of 4096 edges or more. A quantified path pattern keeps the whole-type
-form: its hops have their own types, directions and node maps.
+a type of 4096 edges or more. A quantified path pattern is read the same way
+(`ReachableMapFilter::for_steps`): each hop of the iteration is a slot with its
+own types, direction, edge map and vertex map, hop `d` of a walk uses slot
+`d mod k` (the slots `PathNfa::from_qpp` stamps), and the pass tracks
+`(vertex, slot)` pairs at their shallowest depth. A hop's vertex map is the
+authoritative check there, so its allow-set is fail-closed, as the whole-type
+`build_vertex_property_filter` it replaces is. The fall-back builds every slot's
+whole-type filters. `((x)-[:R {w: 0}]->(y)-[:R]->(z)){1,2}` from one anchor
+reads 1 + 10 rows at both 400 and 1,600 edges, where the whole-type pre-scan
+read 401 / 1,601 (`qpp_property_map_reads_only_the_reachable_region`;
+answers against fixed-length references in `cypher_path/qpp_region_map_oracle.rs`).
+
+**A shortest-path map value computed per row gates the search per value set.**
+`shortestPath((a)-[:R* {w: a.x}]->(b))` carries the map's non-constant entries
+on `LogicalPlan::ShortestPath`/`AllShortestPaths` as `edge_row_conditions`;
+the physical planner compiles each value against the operator's input, and
+`GraphShortestPathExec` evaluates them per batch. Rows are grouped by
+(source, value set); each distinct value set gets its own allow-set (the
+map's constant entries plus that set's values, a `ReachableMapFilter` covered
+over that set's sources), kept across batches in `keyed_filters` and charged to
+the operator's reservation, and the retained source search is keyed by
+(source, value set). A `NULL` value admits no edge, without a read. A value
+may name the endpoints and earlier variables, not the path or the relationship
+variable (refused at planning). Before, such a map was refused. Oracle:
+`cypher_path/shortest_path_row_dependent_map.rs` (minimum length, and the
+count of minimum-length trails for `allShortestPaths`, of the variable-length
+match with `all(r IN rs WHERE …)`, random graphs, schema and schemaless,
+flushed and unflushed).
 Measured (debug, flushed, anchored `*1..3`): `{w: 0}` 172 ms → 9.7 ms at 20k
 nodes / 40k edges and 736 ms → 14.2 ms at 80k / 160k; `(b:N {x: 2})` 262 →
 10.0 ms and 1149 → 13.8 ms. `rows_scanned` 40,001 / 160,001 → 7 / 7.
@@ -3038,10 +3161,10 @@ planner (`planner.rs`):
   scan; it carried no optional variables, so it dropped every `a` with no
   such `b`. It now nulls `b`.
 - Refused rather than dropped, because no later filter is equivalent:
-  a non-walk-constant value on a `shortestPath`/`allShortestPaths`
-  relationship (the map must gate the search), and one inside a quantified
-  sub-pattern planned per hop (its map applies per iteration and may name
-  per-iteration variables). A shortest-path *target* node map naming the
+  a non-walk-constant value inside a quantified sub-pattern planned per hop
+  (its map applies per iteration and may name per-iteration variables). On a
+  `shortestPath`/`allShortestPaths` relationship such a value was refused too;
+  it now gates the search per value set (see the shortest-path section). A shortest-path *target* node map naming the
   source (`(b:N {x: a.x})`) is split: the scan takes the self-only entries,
   a `Filter` above the join takes the rest.
 
@@ -3330,6 +3453,29 @@ row. Its imports start the plan as one `LogicalPlan::OuterRow` leaf.
   outer row, which emitted the body's rows as if the input had one (and a
   correlated body failed with `Unresolved parameter`). The fallback
   executor's `execute_apply` made the same mistake and now returns nothing.
+- **`EXISTS` / `COUNT` bodies run once per source, not once per row**
+  (`df_graph/exists_decorrelate.rs`). When an outer node occurs in the body
+  only as a bare `(b)` — no label, map or `WHERE` naming it, no parameter of
+  its name — and at least one other outer entity the body's pattern names
+  stays bound, `ExistsExecExpr` plans the body a second time against the
+  outer row minus `b`'s columns, so `b` is a fresh pattern variable. One
+  execution per distinct binding of the other imports (keyed on every column
+  of every name the body reads, row-encoded) returns each matching `b`; a row
+  answers from the count for its own `b._vid`. Binding a pattern node is an
+  equality constraint on it, so this is exact for `EXISTS` (which keeps its
+  `MultiplicityInsensitive` wrapper on both plans) and `COUNT` alike, with any
+  direction or range, `*2..3` included — nothing is reinterpreted as
+  reachability. The bare-`b` rule is what keeps it exact: a label or property
+  of `b` read with `b` free comes from storage, where the bound body reads the
+  outer row's columns. A key is executed free only once it is seen twice
+  (twice in the batch, or once before), so a source with one row stays on the
+  cheaper bound path; answers are kept across batches in the expression,
+  which is built per execution, up to 4M identities. Rows with a NULL import
+  identity, `COLLECT`, `OPTIONAL MATCH`/`WITH`/`RETURN` bodies, quantified
+  groups, `shortestPath` and nested subqueries keep the per-row path.
+  Each body execution builds one physical plan, so `physical_plans` shows the
+  cost: 52 x 52 pairs over the DQP topology fixture went from 2,705 plans to
+  53.
 
 **An in-query procedure call is an `Apply` over a `ProcedureCall`.**
 `MATCH … CALL p(args) YIELD …` plans as `Apply { input, ProcedureCall }`; the
@@ -3423,6 +3569,17 @@ for each `(dst_vid, dst_state, depth)`, a linked list of the
 (`df_graph/pred_dag.rs`). The DAG is a compact `Vec<PredRec>` pool plus a head
 map; it is linear in edges explored, not in paths.
 
+A QPP's inner-node labels live in the NFA in two forms. A destination
+constraint (`PathNfa::state_constraint`) holds for the vertex *reaching* a
+state: step `j`'s target label sits on every state `j + 1 + k·hops`. The first
+inner node's label cannot be put there: the vertex an iteration ends on starts
+the next one only if the path goes on, and an accepting state may also
+continue. It is a *departure* constraint instead
+(`NfaTransition::source_constraint`, set by
+`PathNfa::with_iteration_source_constraint`): every transition that begins an
+iteration checks the vertex it leaves, the outer start node included. Both are
+checked in `expand_neighbors`.
+
 Two safety caps bound this stage: `MAX_FRONTIER_SIZE` (500,000 vertices in one
 frontier) and `MAX_PRED_POOL_SIZE` (2,000,000 predecessor records). Hitting
 either stops the search and pushes a `QueryWarning` — results below are
@@ -3464,11 +3621,35 @@ regression tests (`cypher_path::vlp_anonymous_path_multiplicity`) run each
 query shape with the relationship anonymous and named and require identical
 results.
 
-`Reachability` is cheap only where the frontier drains. On a dense cyclic graph
-under an unbounded `*` it runs to the hop ceiling, and the per-depth trail check
-is itself a search over the predecessor DAG: `EXISTS { (a)-[:R*]->(b) }` on a
-9-vertex complete digraph does not finish in minutes. That is a separate
-problem from the mode choice.
+**Deciding reachability from distances (`df_graph/trail_reach.rs`).** The
+per-depth search above is cheap only where the frontier drains. On a cyclic
+graph a walk can always step back the way it came (an undirected pattern is
+cyclic as soon as it has one edge), so the frontier lasts to the hop ceiling,
+and each depth asks the predecessor DAG for a trail of exactly that length, an
+exponential search where none exists: one 5-clique took 3 s in a debug build,
+a 6-clique over 150 s. For a plain `[:T*min..max]` (the linear-chain NFA,
+`PathNfa::simple_chain_range`, Trail mode), `bfs_endpoints_only` first decides
+from breadth-first distances:
+
+- a shortest walk is a path, hence a trail, so for `v != s` the shortest trail
+  is `dist(s, v)` and none is shorter: `min <= dist <= max` means yes,
+  `dist > max` means no;
+- a closed trail from `s` leaves by some relationship `e` to `u` and returns by
+  a trail that avoids `e`, so the shortest is `1 + min over e of
+  dist_{G-e}(u, s)` (a self-loop is 1, a parallel pair 2).
+
+When an accepted endpoint's shortest trail is shorter than `min` (a `*2..` to a
+neighbour) the answer depends on which longer trails exist, a longest-trail
+question, so that source keeps the per-depth search. That search is now
+capped at the number of relationships reachable from the source, since no
+trail is longer: on a cyclic graph it used to run to the hop ceiling and then
+warn of a truncation that could not have hidden a trail. An undirected
+unbounded range with `min >= 2` therefore stays exponential in the worst case.
+
+The schemaless traversal (`GraphVariableLengthTraverseMainExec`) ignored its
+output mode and listed every trail; in `Reachability` mode it now answers from
+the same distances (`reachable_endpoints`), falling back to the listing on the
+same condition.
 
 Enumeration is a backward depth-first walk from each accepting endpoint. The
 count is **not** bounded by the DAG's size: a DAG with 15,000 accepting entries
@@ -4613,9 +4794,9 @@ each `ScanRequest`.
   `MainEdgeDataset::find_edges_by_type_names_counted` for main-edge-table
   scans (every returned row, tombstones included, before per-eid ranking).
   The L0 overlay of `build_edge_adjacency_map` counts each L0 edge of the type
-  it examines, which keeps a QPP's whole-type map pre-scan visible
-  (`qpp_property_map_prescan_counts_toward_rows_scanned`). A simple
-  variable-length or shortest-path map is read over the reachable region
+  it examines, which keeps the whole-type fall-back visible
+  (`vlp_property_map_falls_back_to_the_whole_type_on_a_deep_walk`). A simple
+  variable-length, shortest-path or quantified map is read over the reachable region
   (`ReachableMapFilter`, P7) and counts one row per edge and per target vertex
   whose properties it reads: `-[:R*1..3 {w: 0}]->` from one anchor reads
   1 + 6 rows at both 400 and 1,600 edges, where the whole-type pre-scan read
@@ -4636,8 +4817,10 @@ each `ScanRequest`.
   `QueryMetrics::plan_time` on the profile path. A Locy evaluation's
   program-level plan (`build_program_plan_with_full_neural`, every stratum's
   clause bodies) is `LocyResult::metrics().plan_time`, and `exec_time` is the
-  remainder of `total_time`; ASSUME/ABDUCE re-evaluation plans
-  (`run_strata_native`) are not included.
+  remainder of `total_time`. The plans ASSUME bodies and ABDUCE candidates
+  build for their hypothetical states (`run_strata_native`) are added to it:
+  the adapter accumulates them (`NativeExecutionAdapter::hypothetical_plan_time`)
+  and they run inside `total_time`, so `plan_time <= total_time` still holds.
 - **Python.** The same counters are bound: `QueryMetrics.{physical_plans,
   physical_plan_time_ms, shortest_path_searches, shortest_path_adjacency_reads,
   subquery_executions,
@@ -5210,6 +5393,8 @@ CREATE RULE best_route AS
 
 Enables `LIMIT 1` optimization — the engine can prune suboptimal paths early during semi-naive evaluation.
 
+Criteria rank as Cypher's `ORDER BY` does. A CypherValue (`LargeBinary`) criterion column — a schemaless property, or a column mixing integers and floats — is sorted by its values' Cypher sort keys (`locy_best_by::order_column`, over `encode_cypher_sort_key`), not by its encoded bytes, which ranked every integer below every float and negatives above positives. A recursive rule selects among one iteration's candidates through the same `BestByExec`, and its merge against held facts (`merge_best_by` in `locy_fixpoint.rs`) compares through `order_column` too. That merge resolves each criterion by its column name (`SortCriterion::column`) in the facts' schema and refuses one the facts do not hold; it used the position and silently dropped one past the schema's end. A `QUERY`'s `ORDER BY`, `min`/`max` and `DISTINCT` likewise use Cypher's orderability (`cypher_value_order`) and equivalence (`canonical_cypher_value`): numbers by exact value, `1` and `1.0` one value, the first seen kept.
+
 `BEST BY` cannot be combined with a *declared lattice fold* — `MMAX`, `MMIN`, `MCOUNT`, `MNOR`, `MPROD`, `MSUM` — and the combination is rejected with `BestByWithMonotonicFold`. That guard is purely syntactic over those six spellings and is deliberately decoupled from the monotonicity oracle above: the oracle asks whether an aggregate is sound under a fixpoint, this asks whether the user wrote a lattice fold. It also runs for **every** rule, not just recursive ones. `BEST BY … FOLD MAX(x)` / `MIN` / `COUNT` / `COLLECT` are therefore legal, even though those aggregates are `monotone_join: true`.
 
 ### YIELD KEY (Grouping)
@@ -5360,6 +5545,7 @@ Iteration n: deltaₙ = ∅ → fixpoint reached
 - **A linear clause** (one reference into its stratum) reads the referenced rule's latest **delta**, whether the reference is to its own rule or to the other rule of a mutually recursive stratum (R3 mutual). Every fact enters exactly one delta, every rule merges once per iteration, and every clause runs once per iteration in a fixed order, so between two merges of a rule each consumer runs exactly once: it meets each delta exactly once. Before P5 a cross-reference read the other rule's whole relation every iteration (`DerivedScanExec` 55/820 rows at chain length 20/80 for even/odd, against 20/80 now).
 - **A non-linear clause** (two or more references into its stratum, e.g. `a IS tc TO m, m IS tc TO b`, or `p :- q, q` with `q` in the stratum) gets one **exclusive** handle per reference (`DerivedScanEntry::exclusive`; the planner still mints the shared handle, which negation and provenance resolve to). The clause runs in k passes; pass i feeds scan i the **delta**, scans j < i the **old** facts (`FixpointState::old_facts`, full minus delta; `folded_old` for the folded view) and scans j > i the **full** facts. `F_new^k \ F_old^k` is exactly the disjoint union over i of `F_old^{<i} × Δ_i × F_new^{>i}`: a tuple of facts is joined in the pass of its *first* member from the latest delta, and in no other. So each derivation — and with it each per-path (`ALONG`) or `FOLD` contribution row, whose `__deriv_ref_*` identity is the tuple of referenced facts — is produced exactly once, at the evaluation where its last member arrived, which is when reading every position in full would first produce it. Merges are idempotent on a re-produced identical row, so the facts equal full feeding's; only the repetition is gone. A pass whose delta is empty is skipped (every stratum reference is an inner join), so the converging iteration does no join work; before P5 it re-joined the whole relation with itself. Measured on the non-linear TC probe (chains of 20, 2k / 8k nodes): `HashJoinExec` rows summed over the run 722,800 / 2,891,200 → 114,000 / 456,000 (exactly one row per derivation `(a, m, b)`), the converging iteration's 247k / 988k → 800 / 3,200. The old and full scans are still read in full per pass, so `DerivedScanExec` per iteration stays proportional to the relation (38,600 rows in the last iteration at 2k, as before): a hash join over an in-memory relation, not a persistent index.
 - **BEST BY** (R2): `merge_best_by`'s delta is the winners that are new for their KEY or strictly better, not the whole pruned set. On an exact tie the held row wins (origin is the last sort key), and a candidate whose rounded criteria equal the held row's keeps the held row, so the delta never churns between equals. A self-reference fed an unchanged row would only re-derive candidates it derived when that row entered; a superseded row's derivations were made while it was current, exactly as under full feeding. `DerivedScanExec` on a chain: 190/3,160 → 19/79 at length 20/80.
+- **BEST BY merge cost** (Wave C): `FixpointState::best_index` maps each KEY (rounded key view) to its held row (`batch`, `row`) and rounded criteria. A merge picks the best candidate per KEY (earliest on an exact tie), compares it with the held row through `make_comparator` on the exact criteria (held rows gathered with `interleave`), and admits it only when strictly better and its rounded criteria differ. A displaced row is filtered out of the one batch holding it; emptied batches are dropped and the tail batches merged binary-counter style (`compact_best_tail`), re-indexing only batches whose index changed. So a merge is O(candidates + rewritten batches), not O(facts · log facts); `row_dedup` is `None` for these states, since no BEST BY rule takes the whole-row dedup path.
 - **The folded view.** A rule serving the **`Folded`** view keeps a full per-KEY snapshot — an aggregate is a whole-relation quantity — so for those rules the fixpoint has settled when no KEY has been added *and* no value has moved, not merely when the delta is empty. A reference fed by delta reads only the snapshot rows that are new or changed since the previous snapshot (`FoldViewState::folded_delta`, compared exactly over every column): contributions are replaced on the derivation key, so an unchanged row would only re-derive contributions already held, and a changed row is re-fed so every value-dependent contribution is recomputed (issue #301; the argument is at `update_derived_scan_handles`). It applies to a cross-reference as much as to a self-reference: the consumer meets each snapshot change once.
 - **BEST BY ranks after IS NOT.** A non-FOLD clause's body used to carry its own `LocyBestBy`, an early prune per KEY; the fixpoint applies `IS NOT` (anti-join or complement) *after* the body, so a clause with a negation kept the best row, negation removed it, and the runner-up negation keeps was already gone (a silent wrong answer, under full and semi-naive feeding alike; found by the P5 oracle families). A clause with a negated reference no longer prunes in its body; the rule-level BEST BY ranks after negation.
 - **IS NOT** (R5): a negated reference always targets a lower stratum (cyclic negation is a compile error), so its facts are fixed while the stratum iterates. `locy_complement::NegationIndexCache` builds each banned-key set / probability map once per fixpoint and reuses it while the handle still holds the very batches it was built from (column `Arc` identity; the cache keeps its source batches alive so an address cannot be reused). Each build is reported as `LocyIsNotBuild` with the negated facts it read: 202 rows over a whole run at chain length 20 and 80, against 202 per iteration before.
@@ -5458,6 +5644,7 @@ The hypothetical state differs from the state before the block only by the block
 - **Criterion** (`uni_locy::incremental`, purely syntactic). The mutation's `MutationFootprint`: labels whose membership changes (created nodes' labels, `SET`/`REMOVE` labels, *every* label for a node `DELETE`), relationship types created or deleted (a `DELETE r` narrows to `r`'s bound types; a node `DELETE` is every type), property keys that may change on existing entities (`SET n = …` / `+=` is every key), and `opaque` for `CALL` / `WITH RECURSIVE`. Each rule's `RuleReads`: node-pattern labels (an unlabelled pattern reads every label), relationship types (untyped reads every type), property keys read anywhere in the body (MATCH maps, WHERE, YIELD, ALONG, FOLD, BEST BY, REQUIRE, HAVING); a named path, a variable-length relationship variable, a map projection, a dynamic index, `labels`/`keys`/`properties` or an entity passed whole to a non-id function reads every property (and label). A rule is **opaque** (always recomputed) with a subquery / `EXISTS` / pattern comprehension, a generator, a neural model, a namespaced or retrieval function, or a non-deterministic one (`rand`, `timestamp`, nullary temporal constructors). A stratum is affected when a rule is opaque, its reads meet the footprint, or it references (`IS` / `IS NOT`) a rule in an affected stratum or one the program does not hold. Strata are in dependency order, so one forward pass closes the relation.
 - **Same state, same program, same settings.** The adapter (`NativeExecutionAdapter`) offers a baseline only while its state is current: an *epoch* is replaced by a fresh value on every Locy-issued write (`execute_mutation`, a writing Cypher command) and restored by `restore_l0`; under the session path a `BaseFingerprint` of the writer's L0 (buffer identity, version, mutation count, pending flushes) detects a commit or flush by someone else (under a pinned read snapshot nothing can move). The program's own facts are a baseline only when no provenance tracker ran (a tracker can change PROB values via shared-proof BDD, which a re-evaluation does not reproduce). Inside an ASSUME body the parent strata re-derived for the body become the baseline for nested ASSUME / ABDUCE; the body's own strata reuse the parent strata positionally (a body rule may shadow a parent rule's name). ABDUCE takes the baseline once and every candidate reuses it, since each candidate's fork is restored before the next.
 - **Hydration.** Reused facts are copied as raw facts (`LocyProgramExec::set_reused_strata` skips the stratum and seeds the run's store, which later strata read as usual) and re-hydrated in the hypothetical state, unless the mutation only *adds* entities (`MutationFootprint::preserves_existing_entities`), in which case the baseline's hydrated rows are reused too.
+- **Reused strata are not planned.** `LocyPlanBuilder::with_reused_strata` emits a reused stratum as a stub (`reused_stratum_stub`: rule names and YIELD columns, no clause bodies), since `LocyProgramExec` reads nothing else of it. Planning every stratum anyway was the dominant cost of a block that reuses most of the program: 60 one-rule strata, 8 ASSUMEs that reuse all of them, `plan_time` 26.7 ms before and 3.4 ms after, against 3.2 ms for the program alone (`locy_program_plan_time::locy_program_plan_time_skips_reused_strata`).
 - **Why not delta-seeded semi-naive.** Seeding an affected stratum from the change needs each base clause's delta (the matches the mutation added or removed), which no operator computes, and is unsound for deletions, negation and aggregates. Affected strata recompute in full; that is the conservative choice and leaves the O(change) case for later.
 - **Side fixes in the re-evaluation path.** It now runs under the program's pinned read snapshot and custom functions (it read live storage and dropped UDFs), and an incomplete hypothetical run (timeout, iteration limit) is an error unless `allow_partial` — it used to return the partial facts silently.
 - **Measured** (`locy_assume_incremental::assume_cost_does_not_scale_with_unaffected_strata`, a KNOWS chain of n people plus 3 Company nodes, ASSUME creates a Company): `rows_scanned` plain / ASSUME = 6,006 / 6,016 at n = 2,000 and 24,006 / 24,016 at n = 8,000 (ASSUME adds 10 rows at both scales); with reuse disabled the ASSUME read 12,015 at n = 2,000. `LocyStats::hypothetical_strata_{evaluated,reused}` and `hypothetical_facts_derived` report the split. Differential: `uni-locy-oracle` `assume.rs` compares every relation's ASSUME answer over random programs and random mutations with a fresh evaluation of the committed mutation.
@@ -6052,7 +6239,7 @@ recover a prefilter from: with `V` unflushed vertices they reported
 Cypher filter (`scan::schemaless_l0_prefilter`: `var.prop = literal|$param` on
 either side, `IN` a literal list or list parameter, the first recognized
 conjunct of an `AND`, an `OR` over one property; a NULL never matches and is
-dropped) and attaches it with `GraphScanExec::with_schemaless_l0_prefilter`.
+dropped) and attaches it with `GraphScanExec::with_planner_l0_prefilter`.
 `columnar_scan::schemaless_l0_prefilter_candidates` mirrors the schemaless L0
 builder's membership (every vid of a buffer's property map with no label, the
 vids carrying every label otherwise) and its merge order, and the build runs on
@@ -6064,12 +6251,25 @@ used on this path. Every vid of the flushed side is kept, as on the labelled
 path. Measured: removing that shadow set left the schemaless differential
 green, because `map_to_schemaless_output_schema` re-resolves every projected
 property and the labels from L0 by vid and tombstones are filtered after the
-merge; it is kept so the scan does not depend on that overlay. The planner
-pushes a `WHERE` into a label-less `ScanAll` but not into a scan of an
-undeclared label (`ScanMainByLabels`), so for the latter only an inline
-property map (`(a:E {uid: $s})`) reaches the prefilter. Unflushed lookup:
-`V → ≤ 1` at 2k and 8k, label-less and undeclared-label; label-less write loop
+merge; it is kept so the scan does not depend on that overlay. A `WHERE`
+conjunct is pushed into the undeclared label's `ScanMainByLabels` as it is
+into `Scan` and `ScanAll` (`rewrite_target_reachable`, `optional_scan_reachable`,
+`push_predicate_to_scan`); `finalize_schemaless_scan` applies the filter in
+full above the scan, so this is the inline `(a:E {uid: $s})` form. The
+cross-product arm of `push_predicate_to_scan` picks its side with
+`find_scan_label_id`, which does not see a `ScanMainByLabels`; it now also asks
+`rewrite_target_reachable`, or the predicate went to the side not binding the
+variable and was lost (measured with that check removed: 2,000 rows for 1).
+Unflushed lookup: `V → ≤ 1` at 2k and 8k, label-less, undeclared-label inline
+and undeclared-label `WHERE` (was `V` for the last); label-less write loop
 worst statement `2099 → ≤ 2` at 2k.
+
+The candidate pass on both paths is O(L0 label members) per query, measured
+(debug build, one buffer): 1.6 ms at 2k and 7.5 ms at 8k unflushed vertices.
+It now records the merged verdict as set membership (insert on a possible
+match, remove otherwise) instead of building a per-vid verdict map, and the
+schemaless pass walks the smallest label set instead of every vertex in the
+buffer: 1.24 ms and 5.3 ms. The walk itself stays, for the reason given above.
 
 ## Write Throttling
 
@@ -6107,6 +6307,7 @@ Triggers react to mutations. A `TriggerPlugin` (see [Part XVII](#part-xvii-plugi
 - **Fire mode** (`FireMode`) decides *how* it runs: `Synchronous` (blocks the writer), `Async` (spawned on the runtime, never blocks the commit), or `EventualConsistency` (best-effort through a durable retry queue).
 - **Outcome** (`TriggerOutcome`): `Continue` (allow), `Reject { reason }` (abort, before-phase only), or `Defer { until }` (re-enqueue for later).
 - The mutation payload is an Arrow `MutationBatch` with columns `event_kind | vid_or_eid | label | property | old_value | new_value`; event kinds are bit-flags (`NODE_CREATE` … `LABEL_REMOVED`).
+- `old_value` is the entity's user property map, whether the pre-image came from the L0 chain or from storage (`PreExistingProbe::extend_with_l1`): declared columns and `ext_id`, plus the undeclared properties unpacked from `overflow_json`; no `_`-prefixed storage column and never the blob. The L1 probe used to copy every column, so a flushed vertex's pre-image carried `overflow_json` (its undeclared properties nested under it), `_deleted`, `_uid`, `_created_at` and `_updated_at` (`triggers::trigger_dispatch::update_pre_image_matches_between_l0_and_flushed_vertex`).
 
 Triggers can be declared from Cypher via `CALL uni.plugin.declareTrigger(...)` (see Part VIII) or registered as a compiled `TriggerPlugin`.
 
@@ -7253,6 +7454,11 @@ entirely inside one poll, so only a check of their own can stop them:
   `query_timeout` and ignored cancellation. A host built from components (the
   simple executor's `CALL` dispatch and its graph-projection resolver) gets the
   executor's budget through `Executor::procedure_budget`.
+  The inner `Executor` also takes the host's transaction L0
+  (`L0Context::transaction_l0`) as its `transaction_l0_override`, so a `WRITE`
+  procedure's mutations land in the calling transaction's private buffer and
+  commit, roll back and conflict-check with it. Without a transaction buffer
+  (a declared trigger's after-commit action) they land in main L0.
 
 - **Searches over unflushed rows.** `StorageManager::vector_search` and
   `fts_search` score every L0 row of the label in one synchronous span
@@ -8604,18 +8810,48 @@ path, and `ALONG`/`prev` through `eval_locy_binary_op`) calls the shared
 The copy had numeric-only `+` (`'a' + 'b'` failed with "numeric op requires
 number"), wrapping integer arithmetic (a panic in debug builds), no `=~`,
 two-valued list equality, ordered durations and NULL for `AND` over a
-non-boolean. Four operators deviate from the shared function to match what a
-Cypher `RETURN` answers: `AND`/`OR` with a non-boolean, non-NULL operand is a
-type error (the shared function answers `NULL AND 1` NULL, `false AND 1`
-false); string predicates over a non-string are NULL (it errors); `^` is a
-float (it answers `Int` for whole int results); `string + scalar`
-concatenates `toString` (it errors). Unary `-` uses `checked_neg` and negates
-durations. `locy::locy_operator_parity` compares Locy with Cypher over every
-operator × operand-type pairing in literal and property form; Cypher's own
-literal and row paths disagree on ~236 of those (static planning errors on
-NULL operands, `datetime + 1`, `duration * n`; `'ab' + duration` rendered as
-`ab1 days`; `date - date` as an `Int`; `true OR n.i` true by batch
-short-circuit; a panic on `n.missing AND null`), and the test lists them.
+non-boolean. Unary `-` uses `checked_neg` and negates durations. The only
+Locy-side rule left is the compile-time one Cypher's planner applies
+(`planner::is_non_boolean_literal`): a number, string, list or map literal
+under `AND`/`OR`/`XOR`/`NOT` is a type error.
+
+**One definition of every binary operator (Wave C).** The shared
+`expr_eval::eval_binary_op` is the openCypher definition, and both Cypher
+paths now reach it or agree with it:
+
+- NULL propagates through every operator but `AND`/`OR`/`XOR`.
+- `AND`/`OR` are Kleene logic with a dominating operand in either position
+  (`false AND x`, `true OR x`). Without one, a non-boolean, non-NULL operand
+  is a type error, beside NULL too. `XOR` rejects a non-boolean even beside
+  NULL.
+- `^` is a float. String predicates over a non-string are NULL.
+- `string + scalar` concatenates `toString`.
+- A number is never a duration (the old microsecond reading is gone).
+
+On the literal path, `translate_binary_op` lowers `^` to `_cypher_pow` and
+`=~` to `_cypher_regex`. `coerce_scalar_function` puts `regexp_match` back
+when both operands are strings. `coerce_binary_expr` folds arithmetic with an
+untyped NULL beside a non-numeric operand to NULL, and routes temporal
+arithmetic to the `_cypher_*` arithmetic UDFs
+(`needs_cypher_temporal_arithmetic`). Only date/local datetime ± duration and
+duration ± duration stay on Arrow kernels. `build_cypher_plus` sends
+`string + float/temporal` to `_cypher_add`. `coerce_logical_operands` sends a
+CypherValue or other non-boolean operand to `_cypher_and` / `_cypher_or`.
+
+On the physical path, `compile_binary_op` does the same for AND/OR over a
+CypherValue and casts an untyped NULL operand to Boolean otherwise.
+DataFusion's `BinaryExpr` panics on a Null right operand of `AND`. `=~` over
+anything but two strings goes to `_cypher_regex`. The per-row UDFs
+(`CypherBooleanOpUdf`) evaluate both operands. DataFusion's batch
+short-circuit on `AND`/`OR` made `true OR n.i` answer by batch composition.
+The CypherValue × Int64/Float64 arithmetic fast path hands a batch holding a
+non-numeric value to the evaluator (`CvArithOutcome::Fallback`). It used to
+answer NULL, so `n.dur * n.k` was NULL. A local datetime (`Timestamp(_,
+None)`) is incomparable with a zoned datetime or a string
+(`coerce_temporal_comparisons`). `locy::locy_operator_parity` asserts that
+every literal and property form of 13 operand types × 20 operators agrees,
+with no panic (`cypher_read::expression_value_semantics_test` pins each
+class).
 
 **A condition that cannot be evaluated is an error, not a dropped row** (W6).
 Every Locy filter goes through `locy_eval::eval_condition`: true keeps the
@@ -8635,8 +8871,8 @@ by `values_equal`, so `k = 3.0` matches an integer `k`
 On the Cypher side `_cv_to_bool` reads an encoded NULL as NULL and a
 non-boolean as a type error; both read as `false`, so `NOT n.b` kept a row
 whose `b` is `1`. `CypherPhysicalExprCompiler::compile_predicate` wraps a
-CypherValue `WHERE`, and `compile_binary_op` wraps CypherValue AND/OR
-operands, in `_cv_to_bool`. Before, `WHERE n.b` on a schemaless property failed
+CypherValue `WHERE` in `_cv_to_bool`; CypherValue AND/OR operands go to
+`_cypher_and` / `_cypher_or`, which apply the same reading per row. Before, `WHERE n.b` on a schemaless property failed
 to plan. A list slice bound that is not an integer is a type error. In debug
 builds `debug_assert_facts_are_rows` checks that every non-ALONG rule's facts
 entering the derived store are distinct rows (`locy::locy_facts_and_filters`,

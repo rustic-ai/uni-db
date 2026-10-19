@@ -696,10 +696,10 @@ pub enum VectorMetric {
 On both `LabelInfo` and `EdgeTypeInfo`, `count` is obtained with a Cypher
 `count(...)` over the element, so it includes rows still buffered in L0 and
 excludes tombstoned or superseded versions. The
-element name is backtick-quoted, so names containing punctuation (such as `.`),
-leading digits, or non-ASCII characters count correctly; a name containing a
-backtick cannot be quoted and is refused with `UniError::Query`. Counting
-failures propagate as an `Err` rather than being reported as `count: 0`.
+element name is backtick-quoted (a backtick inside it doubled), so names
+containing punctuation (such as `.` or a backtick), leading digits, or non-ASCII
+characters count correctly. Counting failures propagate as an `Err` rather than
+being reported as `count: 0`.
 
 **`PropertyInfo`:** `name: String`, `data_type: String`, `nullable: bool`, `is_indexed: bool`, `description: Option<String>`
 

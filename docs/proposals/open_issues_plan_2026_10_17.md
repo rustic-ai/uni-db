@@ -1487,3 +1487,1393 @@ approval.
   is byte-identical. All 7 patches apply, and the teeth test passes.
 - **No temporary probes remain.** The only open-defect `#[ignore]` is the
   `overflow_json` property-name collision.
+
+## Wave C (2026-10-18)
+
+**Locy ABDUCE / ASSUME runtime (items C-L1..C-L6): done, uncommitted.**
+- **`RemoveEdge` deleted every edge of its type, so ABDUCE NOT accepted the wrong
+  edits. Fixed.**
+  - Validation ran `MATCH (a)-[e:R]->(b) DELETE e` with no identity, because
+    `match_properties` was filled only for String bindings.
+  - With `A1` holding two `R` edges, a single removal came back `validated`.
+  - `RemoveEdge` now carries `eid`, `source_vid` and `target_vid`. The mutation
+    is pinned with `id()`, and the source/target follow the edge's direction.
+  - A hop that can be identified neither way is not proposed.
+  - Tests: `locy_abduce_identity::abduce_remove_{named,anonymous,incoming}_edge_removes_only_that_edge`.
+    Revert: all 3 fail.
+- **`ChangeProperty` was applied to every node, and to nodes instead of an edge.
+  Duplicates under `a._all_props`. Fixed.**
+  - It now carries `vid` or `eid`. An edge is set through `()-[e]-()`.
+  - Only the user's (undotted) entity variables are read, in sorted order.
+  - Tests: `abduce_change_property_changes_only_that_entity` (zeroing `b.k` no
+    longer validates; no dotted or duplicate candidates) and
+    `abduce_change_edge_property_changes_the_edge`. Revert: both fail.
+  - `locy_is_ref_binding::is_ref_binding_abduce_follows_the_binding` passed only
+    because of the delete-all bug: its goal matched two facts, which no single
+    removal ends. Its goal now names one fact (`AND t.name = 'b'`). It still
+    fails if the tree stops at `via`.
+  - API: new fields on `Modification`, and new keys in the Python dicts.
+- **"`evaluate_abduce` reads the top-level store inside ASSUME": no observable
+  defect.**
+  - The `ctx.lookup_derived` read fed only the unused `_matching` parameter. The
+    tree and validation already used the passed store, so the read was removed
+    as dead code.
+  - Two things keep any ABDUCE-in-ASSUME issue from being observed:
+    - An ASSUME body discards ABDUCE results; only QUERY and Cypher rows are
+      surfaced.
+    - ABDUCE validation inside ASSUME re-derives only the parent's strata, so an
+      ABDUCE of a body-local rule would validate against no facts.
+  - Whether to surface ABDUCE results from ASSUME bodies is a design decision.
+- **`plan_time` now counts ASSUME/ABDUCE re-planning.**
+  - `run_strata_native` returns its plan time and the adapter accumulates it.
+  - 60 strata + 8 affecting ASSUMEs: 3.14 ms before (equal to the program
+    alone), 28.8 ms after. `plan_time <= total_time` still holds.
+  - Test: `locy_program_plan_time_counts_assume_replanning`. Revert: fails.
+- **Reused strata are no longer planned.**
+  - `LocyPlanBuilder::with_reused_strata` emits a stub: names and YIELD columns,
+    no clause bodies.
+  - 8 ASSUMEs reusing all 60 strata: 26.7 ms → 3.4 ms (program alone 3.2 ms).
+  - Test: `locy_program_plan_time_skips_reused_strata`. Revert: fails.
+  - Delta seeding: not done. It needs per-clause match deltas that no operator
+    computes, and is unsound for deletions, negation and aggregates.
+- **Exact WMC, silent wrong answer, fixed.**
+  - PROB was looked up under the YIELD alias, but pre-fold facts carry the fold
+    variable.
+  - `FOLD prob = MNOR(..) YIELD prob AS pr` gave 0.7 instead of 0.79.
+  - Test: `wmc_shared_lineage_exact_path_with_renamed_fold_output`. Revert: 0.7.
+- **Exact WMC positional reads, fixed.**
+  - `detect_shared_lineage`, `apply_exact_wmc` and both provenance recorders
+    grouped and hashed facts by position. They now resolve columns by name and
+    fail closed on a missing column.
+  - Tests: `exact_wmc_resolves_key_and_hash_columns_by_name` and
+    `exact_wmc_fails_closed_on_missing_yield_column`.
+- **TopK mixed-support group: already fixed by 430ea620a, now tested.**
+  - Test: `topk_mixed_support_group_folds_unsupported_rows_independently`
+    (0.76). Revert: 1.0.
+- **Two ignored e2e tests removed, with pointers left in their place.** Each
+  asserted a value no fix could produce:
+  - 1.0, on a group that is not mixed;
+  - 0.745, against the TCK's 0.79.
+- **Open.**
+  - Exact mode and the IS-reference probability (0.745 vs 0.79): a semantics
+    decision.
+  - Positive ABDUCE `AddEdge` validates through `MATCH (a), (b) CREATE ...`, a
+    cross product with no labels. Candidate (by inspection, unverified): this
+    over-approximates. A fix needs concrete endpoint enumeration.
+  - `find_clause_for_row` and the TopK support map still index by position.
+- **Tests.**
+  - Locy TCK: 530/530 in both modes.
+  - uni-locy-oracle: 46/46.
+  - uni-query: 881/881.
+  - Locy integration: green except `locy_facts_and_filters_query_where_matches_cypher`
+    (QUERY WHERE `^` error text) and `locy_operator_parity_matches_cypher`
+    (22 disagreements). Both are in the expression evaluator, which other
+    agents are editing.
+
+**Wave C outcome: Cypher expression-evaluation defects from the B3 matrix
+(plan L1273-1281). Done, uncommitted.**
+- **The matrix now asserts.** `locy::locy_operator_parity` used to list Cypher
+  defects and pass anyway. It now fails when any literal or property form of a
+  pairing disagrees, when a form panics, or when a form differs from the
+  openCypher rule. Unary `NOT`/`-` forms are checked the same way.
+- **Coverage.** The matrix grew from 10 to 13 operand types (`localdatetime`,
+  `localtime`, `time`): 10,274 expressions. Edge cases now carry openCypher
+  answers.
+- **Before and after.** The matrix had 236 Cypher oracle defects before; it has
+  0 now. `cypher_read::expression_value_semantics_test` has 10 tests, one per
+  class.
+- **Root causes, by item:**
+  1. **`n.missing AND null` panic.** `compile_binary_op` built DataFusion's
+     `BinaryExpr::And` over a `Null`-typed right operand, and DataFusion
+     panics on that. A NULL left operand failed to plan instead. Fix: a
+     CypherValue operand of AND/OR goes to the new `_cypher_and` /
+     `_cypher_or` UDFs; an untyped NULL operand is cast to Boolean.
+  2. **About 150 errors on NULL operands, in three classes:**
+     - `coerce_binary_expr` cast an untyped NULL to the other operand's type,
+       so `'ab' + null` reached DataFusion's arithmetic coercion. That NULL is
+       now folded to NULL.
+     - `^` was `power(cypher_number(l), cypher_number(r))`, which decoded
+       `'ab'` before looking at the NULL. It is now `_cypher_pow`.
+     - `=~` went to DataFusion's regex operator with a LargeBinary or Null
+       operand. It is now `_cypher_regex`, with `regexp_match` kept for two
+       strings.
+  3. **Temporal and string arithmetic, literal vs row path.** Arrow kernels
+     answered `date - date` as an Int and rendered a duration as `1 days`. They
+     had no kernel for a datetime/time struct or for `duration * n`.
+     `needs_cypher_temporal_arithmetic` and `build_cypher_plus` now route those
+     to `_cypher_*`. `cypher_arith_return_type` declared `Float64` for
+     `2.5 * duration`; that is fixed. On the row path, `eval_add` had no
+     `string + scalar`.
+  4. **`n.s =~ 'ab'`.** Fixed under item 2.
+  5. **`true OR n.i`.** DataFusion's batch short-circuit decided this, so the
+     answer depended on batch composition. The UDF evaluates per row.
+  6. **`eval_binary_op` vs DataFusion.** `eval_binary_op` is now the
+     openCypher definition:
+     - `^` is a float.
+     - AND/OR: a dominating operand wins in either position. Otherwise a
+       non-boolean is a type error, so `NULL AND 1` is an error. The TCK
+       rejects a non-boolean literal at compile time (Boolean1-3 [8]); Locy
+       now applies the same literal check in `locy_eval::eval_expr`.
+     - XOR rejects a non-boolean beside NULL.
+     - String predicates over a non-string are NULL.
+     - `string + scalar` concatenates.
+
+     Locy's four local overrides are deleted.
+- **Found along the way, and fixed:**
+  - **A silent wrong answer.** On the CypherValue × Int64/Float64 fast path,
+    `n.dur * n.k` was NULL. A non-numeric value answered NULL; it now falls
+    back to the evaluator (`CvArithOutcome::Fallback`).
+  - **Numbers as durations.** The row path read a number as a duration in
+    microseconds, so `date - 1` returned the previous day. That is now a type
+    error, as in openCypher.
+  - **Local datetime comparisons.** `localdatetime = datetime` compared
+    instants on literals. `'ab' = localdatetime(..)` failed parsing a
+    timestamp.
+  - **Negation.** `-localdatetime(..)` negated the epoch offset.
+- **Revert checks.**
+  - With every source hunk reverted (scoped patch, restored byte-identically),
+    all 10 new tests and the matrix fail on assertions. The AND/OR test
+    panics inside DataFusion, which is the defect itself.
+  - Targeted: reverting the physical AND/OR routing fails the batch, panic
+    and Kleene tests.
+  - Targeted: reverting `Fallback` fails
+    `non_numeric_property_against_an_integer_column_is_not_null` (NULL
+    durations).
+- **Tests run:**
+  - uni-query + uni-query-functions lib tests: 794/794.
+  - uni-db integration, from a frozen nextest archive: 3428/3432. The 4
+    failures are in other agents' in-flight areas (bulk/fork store, a
+    parenthesized Locy MATCH). They passed in the previous archive run, and
+    my only change since was an error string.
+  - Cypher TCK, every scenario, both modes: 3925/3925.
+  - Locy TCK, both modes: 530/530.
+  - clippy `-D warnings` is clean on my code. uni-query is blocked only by
+    another agent's doc-comment lint at `expr_compiler.rs:1593`.
+- **Open, not taken:**
+  - `=~` is a partial match (`'ab' =~ 'b'` is true). Neo4j matches the whole
+    string. Both Cypher paths and Locy agree on partial, so this is a
+    decision for the user.
+  - `'2020-01-02' + duration('P1D')` still does date arithmetic on the row
+    path for legacy string-encoded temporals; the literal path concatenates.
+  - Docs updated: `website/docs/guides/cypher-querying.md`, black book,
+    release notes.
+
+### Wave C — storage and write path (2026-10-18)
+
+**C-S1 `overflow_json` / storage-column names: fixed (rejection).**
+- **Measured.** Every name in the storage schema builders was written as an
+  undeclared property and read back on a declared label, a schemaless label and
+  an edge, unflushed and flushed. `ext_id`, `eid`, `src_vid`, `dst_vid`, `op`,
+  `type`, `labels`, `props_json` round-trip, so they stay writable.
+  `overflow_json` reads NULL while `properties()` holds it. `_vid`, `_uid`,
+  `_eid`, `_deleted`, `_version`, `_labels`, `_created_at`, `_updated_at` read
+  NULL on a declared label, are hidden from `keys()` on a schemaless one, or
+  return the system value (`n._vid` = vertex id, `n._created_at` = timestamp).
+  `SET n._deleted = 7` failed with an Arrow type error.
+- **Fix.** `WRITE_RESERVED_PROPERTY_NAMES` + `check_written_property_names`
+  (`uni-common/src/core/schema.rs`). The check runs in every `Writer` vertex and
+  edge insert path, in `BulkWriter::insert_vertices`/`insert_edges` (regardless
+  of `validate_constraints`), and at plan time for a literal `SET x.k` target
+  (`planner.rs::reject_reserved_set_target`). The error is
+  `UniError::InvalidIdentifier`. It is tagged across the executor's string
+  boundary (`RESERVED_PROPERTY_TAG`) and recovered in `impl_query.rs`.
+  Transaction bulk inserts and the appender no longer flatten it to `Internal`.
+- **Found on the way and fixed: silent wrong answer.** On an edge type declared
+  with no properties, every flushed edge with an undeclared property reported
+  `overflow_json` (the blob as byte values) in `keys(r)`, `properties(r)` and
+  `RETURN r`, and a `SET` staged it back. Cause:
+  `PropertyManager::merge_overflow_into_props` stored the blob in the map when
+  the planner requested `overflow_json`.
+- **Tests.** The ignored repro became
+  `bugs::ext_id_on_labelled_nodes::..._reserved_storage_names_are_refused_at_write`.
+  It covers 9 names × 12 Cypher forms, plus both bulk inserts, `BulkWriter` and
+  the appender, with a no-trace check before and after flush.
+  `..._flushed_edge_does_not_expose_overflow_blob` covers the leak.
+  `..._other_reserved_names_round_trip` now also covers `type`/`labels`/`props_json`.
+  A refused write is now a failure there, where it used to be skipped.
+  Python: `test_e2e_errors.py::test_storage_column_property_name_refused`.
+- **Revert checks.** Check stubbed: the refusal test fails. Blob insertion
+  restored: the leak test fails.
+- **Open (decision).** Other `_`-prefixed names (`_id`, `_foo`) are accepted at
+  write, while DDL refuses them. Measured: such a name is dropped on a declared
+  label and hidden from `keys()` on a schemaless one. Refusing the whole prefix
+  matches DDL, but it is breaking. `bugs::user_maps_are_not_entities` writes
+  `_id` as a stored property today. Options: refuse all `_` names at write, or
+  make the read path honour them.
+
+**C-S2 trigger pre-image: real, fixed.**
+- **Cause.** `PreExistingProbe::extend_with_l1` (`uni-plugin-host/src/triggers.rs`)
+  copied every column. A flushed vertex's `old_value` carried `overflow_json`
+  (undeclared properties nested under it), `_deleted`, `_uid`, `_created_at`
+  and `_updated_at`.
+- **Fix.** Skip `_` columns, unpack the blob, and let declared columns win.
+- **Test.** `triggers::trigger_dispatch::update_pre_image_matches_between_l0_and_flushed_vertex`.
+- **Revert check.** Fails with the full storage map.
+- **Open.** Flushed edges still have no L1 pre-image (L0 only, as documented).
+
+**C-S3 `ext_id` on unflushed labelled rows: fixed.**
+- **Measured.** `rows_scanned` 2000/8000 → ≤ 1 for both spellings.
+- **Cause.** The `ext_id` pushdown is Lance SQL only, so there was no runtime
+  filter to recover a prefilter from.
+- **Fix.** The planner hands the scan an `L0PropertyPrefilter`
+  (`GraphScanExec::with_planner_l0_prefilter`, which was the schemaless-only
+  field). `columnar_scan` treats `ext_id` as a `STRING` column.
+- **Tests.** `index::l0_equality_prefilter::unflushed_ext_id_lookup_reads_only_matching_rows`,
+  and `ext_id_shadowing_cases_match_an_unpushed_reference` (L1/L0, tx, rollback,
+  fork, non-string ext_id).
+- **Revert checks.** Fallback removed: the counter guard fails (2000). The
+  differential fails on an over-eager prefilter. The shadow set is not
+  load-bearing here: with it emptied the differential stays green, because
+  `build_ext_id_property_column` re-reads L0.
+- **Found on the way and fixed: a freed `ext_id` stayed taken forever once its
+  holder was flushed.** This applied to SET away, REMOVE and DELETE, even after
+  re-flush, on CREATE, SET, UNWIND CREATE and bulk insert. Causes:
+  `find_by_ext_id(s)` took the newest row *carrying* the id, and the writer
+  never asked L0 whether a newer version superseded it. The batch path also
+  read stale cross-buffer L0 versions. Fix: `current_ext_id_holders`,
+  `Writer::l0_ext_id_verdict`, and newest-version-only key collection in
+  `validate_vertex_batch_constraints`. Tests:
+  `index::batch_extid_uniqueness::freed_ext_id_can_be_taken_again_in_every_storage_state`
+  (12 states × 4 paths) and `held_ext_id_is_refused_in_every_storage_state`
+  (anti-vacuity). Revert check: the freed test fails.
+
+**C-S4 W3b `WHERE` on an undeclared label: fixed.**
+- **Measured.** `MATCH (n:M) WHERE n.p = v` read 2000/8000 rows, and now reads
+  ≤ 1. This holds for `=`, `$p = n.p`, `IN`, `AND`, and both cross-product
+  orders. OPTIONAL MATCH still null-extends.
+- **Fix.** `ScanMainByLabels` is now a target in `rewrite_target_reachable`,
+  `optional_scan_reachable` and `push_predicate_to_scan`. The cross-product arm
+  of `push_predicate_to_scan` now asks `rewrite_target_reachable`. Without that,
+  the predicate went to the side that does not bind the variable and was lost
+  (measured with the check removed: 2000 rows instead of 1).
+- **Test.** `index::l0_equality_prefilter::unflushed_where_on_undeclared_label_reads_only_matching_rows`.
+  The existing schemaless shadowing differentials now run through the pushed
+  form.
+- **Revert checks.** Arm removed: the counter fails. Side check removed: the
+  row count fails.
+- **O(V).** Confirmed by timer (debug): the candidate pass was 1.6 ms at 2k and
+  7.5 ms at 8k. It now records membership instead of a per-vid verdict map and
+  walks the smallest label set: 1.24 ms and 5.3 ms. The walk itself remains,
+  for the same no-L0-index reason as before.
+
+**C-S5 bulk residuals.**
+- **Abort on a fork: reproduced and fixed.** Abort errored, and the 20 aborted
+  rows stayed on the fork. They were also visible mid-load.
+- **Found and fixed: data loss on primary.** An interrupted fork load
+  (writer dropped) made reopen roll **primary** back. A primary vertex
+  committed and flushed meanwhile was lost (3 → 2). A primary table the fork
+  load saw absent was dropped (1 → 0). Cause: each fork flush wrote the
+  database crash marker with `BranchedBackend::get_table_version`, which is
+  primary's.
+- **Fix.** `ForkBranching::{stages_on_branch, stage_on_branch, publish_on_branch,
+  discard_on_branch}` (Lance impl in `lance_branch.rs`). `BranchedBackend`
+  implements staging on the fork's branch. `BulkWriter::writes_crash_marker`
+  is false on a fork (no `Active`/`Committed` marker, and no `clear`).
+- **Tests.** `fork::fork_bulk_load::*` (4): abort ×3 states, commit
+  (fork-only, traversal), interrupted reopen ×2 labels, and a publish failure
+  via `FAIL_AFTER_PERLABEL_WRITE`.
+- **Revert checks.** Staging off: the abort and publish tests fail.
+  Marker kept on forks: the publish-crash test fails (primary 3 → 2).
+- **Crash mid-publish (primary): reported, not changed.** The marker is written
+  `Active` just before the first publish commit. Recovery restores each
+  published table, and the touched L2 adjacency tables, to its pre-publish
+  version. So it also discards any other writer's commit to those tables
+  inside the publish window. A fork has no reconciliation at all: a failed
+  publish leaves per-label published and main not (pinned in the test).
+- **One marker per database: reported, not changed.** The write guard is per
+  session, so two sessions can bulk-load at once. B's `Active` overwrites A's,
+  and either load's commit clears the other's marker. Per-load markers would
+  not suffice, because version rollback of a shared table also discards the
+  other load's rows. That needs fragment-targeted rollback (a design change).
+
+**Verification.**
+- uni-db integration: 3431/3438. The 7 failures are another agent's in-progress
+  untracked tests: 6 `cypher_read::numeric_exact_comparison_test` and
+  `locy::locy_abduce_identity::abduce_add_edge_validates_one_edge_not_every_pair`.
+  The latter still fails with my writer changes stubbed out.
+- uni-store + uni-common + uni-bulk + uni-plugin-host: 1054/1054.
+- Failpoints lane: 180/180, plus 25/25 non-feature.
+
+**Wave C outcome: lifecycle and background tasks (DeferralQueue fsync, fork
+`ShutdownHandle`, revert tests, "commit timed out").** Uncommitted.
+
+- **1. `DeferralQueue::push` fsync under the queue lock (L1028).** Real.
+  - Measured with `deferral_push_contention::concurrent_deferrals_are_all_persisted`
+    (uni-plugin-host; 8 threads x 25 `dispatch_before` deferrals, sidecar on):
+    before, 6.6-10.2 s wall, per-commit p50 243-385 ms, a reader blocked on the
+    queue lock for up to 473-656 ms; after, 2.2-2.7 s, p50 51-83 ms, reader
+    waits 0.2-2.8 ms. p99 is still 275-470 ms: a push behind a write waits for
+    that write plus its own.
+  - Contract (struct docs): no transactional tie between a deferral and its
+    commit, but `push` persisted before returning. Kept: `push` still returns
+    once the sidecar holds the item.
+  - Fix (`triggers.rs`): snapshot under the queue lock, encode and write
+    outside it, under a separate write lock holding the last written
+    generation; a push already covered by a later write skips its own.
+  - Tests: `the_sidecar_write_does_not_hold_the_queue_lock` (test seam inside
+    the write; `pending()` must return), `concurrent_pushes_are_all_persisted`.
+    Revert check: re-taking the queue lock around the write makes the first
+    red (`Err(Timeout)`).
+  - Open: the write still runs on the committing task's executor thread.
+- **2. Fork/snapshot `ShutdownHandle` never signalled (L1029).** Real.
+  - Repro: `trigger_dispatch::async_fire_on_a_fork_is_counted_and_awaited_by_shutdown`,
+    `..._awaited_by_drop`, `background_task_lifecycle_test::fork_worker_is_counted_and_stopped_by_primary_shutdown`,
+    `fork_worker_stops_when_the_fork_is_dropped`. All four red before the fix
+    (fire not counted; `drop` returned with the fire running; fork rebuild
+    worker not counted).
+  - Fix: `ShutdownHandle::derive` (own signal, parent's task list; the
+    parent's shutdown fires derived signals recursively) used by
+    `UniInner::derived_clone`; `Drop for UniInner` calls `release` (signals
+    only that view's tasks, so a live nested fork keeps its own). The
+    same-fork shared `Arc<UniInner>` invariant is untouched: release runs
+    when the last sibling session goes.
+  - `release` is not independently revert-tested: with it removed the fork
+    drop test still passes, because dropping the handle's last clone closes
+    the channel and the rebuild worker treats `Closed` as shutdown. It is
+    kept so stopping does not depend on each task handling `Closed`. Unit
+    tests `parent_shutdown_reaches_derived_handles`, `release_does_not_cascade`.
+  - Found on the way: each `async_indexes(true)` bulk load built its own
+    `IndexRebuildManager` and worker (3 loads left 3 live tasks:
+    `bulk_loads_with_async_indexes_share_one_worker`). Fixed with
+    `BulkBackend::rebuild_manager` (the view's one manager). Revert check:
+    red (3 tasks).
+- **3. Revert tests for the earlier un-revert-tested fixes.** All four now
+  have a test that is red with the fix reverted:
+  - compaction `:757` propagation: new fail point `main_edge::exists-by-eid`;
+    `compaction_resilience::main_edges_read_failure_in_the_invariant_check_is_an_error`
+    (uni-store, failpoints, debug builds only since the check is
+    `cfg(debug_assertions)`). Reverted to `unwrap_or(false)`: the pass panics
+    "EID 0 … not found in main_edges".
+  - cancel in `shutdown_in_place`:
+    `compaction_lifecycle_test::shutdown_cancels_the_pass_in_flight`
+    (fail point holds the pass at a safe point until cancelled). Reverted:
+    shutdown waited 25.6 s and the pass was not cancelled.
+  - detached-spawn removals: new fail points `index_rebuild::save-state` and
+    `index_rebuild::execute`; `a_failed_rebuild_writes_nothing_after_shutdown`
+    (re-adding the detached retry task: a state write lands after shutdown,
+    5 vs 4) and `post_flush_rebuild_scheduling_writes_nothing_after_shutdown`
+    (re-adding the detached `schedule` spawn: 3 vs 2).
+  - deferral tick on the blocking pool:
+    `trigger_defer::a_slow_deferred_fire_does_not_stall_a_current_thread_runtime`.
+    Inline tick: the runtime stalled 2.0 s.
+- **4. "commit timed out" under four probes (L206-207).** Not reproduced: 12
+  runs of 4 concurrent `default_disk` W2 probes x 8,000 commits, then 4 x
+  6,000 and 8 x 6,000 instrumented, load average up to 30; no timeout.
+  - Instrumented (temporary prints, removed): the background auto-flush
+    (`check_flush` → `flush_to_l1`) held `flush_lock` for up to 0.94 s across
+    its Lance write; commits waited for the lock up to 1.47 s (budget 5 s).
+    Waits longer than any measured flush hold also occur, so the async
+    finalize (which takes `flush_lock`) and scheduling delay contribute.
+  - Mechanism shown deterministically with an injected slow Lance write:
+    `a_slow_background_flush_does_not_time_out_commits` (commit_timeout 1 s,
+    write held 2.5 s → `CommitTimeout`). Fix: `Writer::check_flush_in_background`
+    rotates under the lock and writes through the flush coordinator, as the
+    commit path does. Revert check: red. That this was the cause of the one
+    original failure is inferred, not confirmed.
+  - Test note: a tokio-timer wait in that test does not wake while the
+    injected `std::thread::sleep` blocks a worker, so the test waits on its
+    own thread instead.
+  - Open: the async finalize still holds `flush_lock` while publishing.
+- **Suites.** uni-plugin-host 87/87; uni-store + uni-bulk 775/775; failpoints
+  lane (`-p uni-db -p uni-store --features failpoints --run-ignored all`,
+  resilience/recovery/durability/crash_harness/lifecycle filter) 219/219;
+  uni-db runtime/triggers/connectors/fork/bulk 314/314. Full uni-db
+  integration: 3439 run; 179 failed to exec because a concurrent rebuild
+  replaced the binary, and passed on rerun; 2 failed for value reasons outside
+  this area (`constant_in_list_known_answers`, `9007199254740993 IN
+  [9007199254740992.0]`; `abduce_add_edge_validates_one_edge_not_every_pair`,
+  a test file another agent added today). Clippy: no warnings in uni-bulk,
+  uni-store, uni-db or uni-plugin-host. `-D warnings` itself was blocked by
+  other agents' in-progress uni-cypher / uni-query warnings.
+
+### Wave C — Cypher planner items (L1427–L1435, L1304, L795, L1295)
+
+- **UNWIND'd entity with a label (L1427): reproduced, fixed.** Wider than
+  reported: any `LabelCheck`/`hasLabel` on a whole-entity column failed
+  (`MATCH (a:L)`, `EXISTS { MATCH (a:L)… }`, `WHERE a:L`, `RETURN a:L`).
+  - Cause: both compile against a flat `{var}._labels` column
+    (`df_expr.rs` `LabelCheck`/`HASLABEL`).
+  - Fix: `expr_compiler.rs::resolve_flat_column_properties` rewrites the
+    check to a new `_cypher_has_labels` UDF (`df_udfs.rs`) when the schema has
+    `var` but no `var._labels/_type/_vid/_eid`. The UDF takes either encoding,
+    nodes and edges.
+  - Test: `bugs/unwound_entity_label_check.rs` (3 tests, both modes, flushed
+    and L0).
+- **`coalesce(r['w'], 0)` ambiguous (L1429): reproduced (schema mode), fixed.**
+  The wildcard edge-property expansion (`df_planner.rs`, schema'd traverse)
+  listed `w` once per edge type, which made two `r.w` columns. It is now
+  deduplicated. Test: `bugs/edge_wildcard_shared_property.rs`.
+- **In-query `CALL p(x)` without YIELD (L1431): reproduced, fixed.** The
+  planner dropped the clause (a declared WRITE procedure made 0 markers).
+  - A void procedure now plans as `Apply` and runs once per row.
+  - A procedure with results needs `YIELD` inside a query (openCypher and
+    Neo4j). This is a new `SyntaxError`; before, the call was silently
+    skipped.
+  - Found on the way:
+    - Sub-plans were built without the transaction's writer, so a per-row
+      WRITE procedure failed loudly (`common.rs`).
+    - `Apply` memoised procedure calls, so `UNWIND [1,1,1] … uni.create.uuid()`
+      gave 1 distinct uuid.
+    - A unit `CALL {}` repeated its input row once per body row: 6 rows
+      instead of 2 (`apply.rs`).
+- **`plan_apply` stringifies yields (L1433): reproduced, fixed.** `result + 1`
+  gave `"11"`. `infer_logical_plan_schema` now takes the procedure registry.
+  The new `procedure_call::declared_yield_field` (plugin signature, then
+  algorithm provider, then legacy outputs) types the yields; the standalone
+  `build_schema` uses it too.
+  - Test: `bugs/in_query_procedure_call.rs` (7 tests).
+- **WITH…LIMIT…WHERE (L1435): not reproduced.** Probed label scans with and
+  without a BTree index, flushed and L0, projections, a following MATCH, a
+  `~=` KNN and an ORDER BY over similarity. All filter the page.
+  - Pinned by `cypher_read/with_where_after_page_scans.rs`. The test fails
+    when `where_after_page` is forced off.
+- **QPP inner-source label (L1304): reproduced, fixed.** Worse than "first
+  iteration only". With an outer node before the group, the label was never
+  checked. Unquantified `(a) ((x:M)-->(y)) (b)` ignored `:M` as well.
+  - Fix: a departure constraint, `NfaTransition::source_constraint` via
+    `PathNfa::with_iteration_source_constraint`, checked in
+    `expand_neighbors`. It is carried as `QppStepInfo::source_label`.
+    `use_simple_vlp` no longer swallows a labelled inner source or target.
+    Two labels on the source are refused.
+  - Found on the way: an inner target label the schema does not declare was
+    dropped, so `(y:Nope)` matched every node.
+- **QPP outer-source filter sites (L795): reproduced, fixed (W4 class).**
+  `MATCH (a:L) OPTIONAL MATCH (a) ((x {id:1})-[:R]->(y)) (b)` dropped 3 of
+  4 rows. Under OPTIONAL, the inner-source filter on a bound source now runs
+  after the walk as an `OptionalFilterExec` over the clause's variables.
+  - Test: `cypher_path/qpp_inner_source_constraints.rs` (4 tests;
+    variable-length oracle).
+- **New, found while probing item 1: schemaless rebound relationship (silent
+  wrong answer), fixed.** `MATCH ()-[r:R]->() WITH r MATCH (x)-[r:R]->(y)`
+  with `R` undeclared gave 16 rows for 4 edges, or ignored the type. The
+  schemaless branch now walks `__rebound_r` and adds the `_eid` filter, like
+  the schema'd path. Both share `rebound_relationship_check`.
+  - Test: `bugs/rebound_relationship_schemaless.rs`, with the declared-schema
+    run as the oracle.
+- **Non-constant shortestPath edge maps (L1295): not implemented; design
+  only.** The allow-set is built once per operator at warming. A row-dependent
+  map needs per-row conditions inside `GraphShortestPathExec`:
+  1. Carry the non-walk-constant entries on `LogicalPlan::ShortestPath`.
+  2. Compile them against the input schema.
+  3. Per batch, evaluate them per row and group the rows by the condition
+     key.
+  4. Build or cache an `EidFilter` (or `ReachableMapFilter`) per key,
+     charged to the reservation.
+  5. Key the retained source BFS by (source, key).
+  6. A NULL value admits no edge.
+
+  The oracle must be the minimum length over the filtered variable-length
+  paths, not `shortestPath(...) WHERE all(...)`, which filters after the
+  search. Estimate: about 300 lines in `shortest_path.rs` plus plumbing.
+- **Revert checks.** Every fix was toggled off in place, scoped to my hunks,
+  and restored. Every new test went red on an assertion; the writer revert
+  gives a loud error.
+- **Tests run.**
+  - uni-query + uni-query-functions: 1201/1202. The one failure,
+    `repro_finding_06_regex_null_collapses_to_false`, is in the concurrent
+    `df_expr` regex work, not in these changes.
+  - uni-db integration full run: the first pass had transient mass failures
+    under concurrent load. Every failed test was rerun: all pass, except
+    `locy_warded_parenthesized_path`. That one was a regression from the
+    first `use_simple_vlp` change, fixed by allowing the plain path when
+    there is no quantifier and no outer target.
+  - Cypher TCK (Match|With|Unwind|Call|Quantif|Path|Pattern|Return|Optional):
+    1744/1744 in each mode.
+- **Open, outside this area.**
+  - `size()` of an algorithm's list yield counts characters, standalone and
+    per row. `cv_encoded` Utf8 is not decoded by `size()`.
+  - A declared WRITE procedure's writes bypass the transaction: they survive
+    `rollback()` and are invisible inside the tx before commit.
+  - `range(0, null)` raises instead of returning null. Unverified against
+    the spec.
+- Cypher TCK, both modes: 3925/3925.
+- Python: 1031 passed, 15 skipped (new `test_storage_column_property_name_refused` ×4 included).
+- Clippy `-D warnings`: clean on every file touched here. The workspace run is
+  red only in other agents' in-flight hunks: `uni-cypher` walker,
+  `uni-query-functions` float_cmp, `locy_fixpoint`, and `df_planner` around
+  line 10535.
+
+**Wave C outcome: Locy runtime performance and positional reads (BEST BY merge,
+non-linear scans, provenance by name, positive ABDUCE): uncommitted.**
+- **`merge_best_by` re-sorted all facts every merge: fixed.**
+  - Each merge concatenated the facts with the candidates, lexsorted
+    everything, and rebuilt the key map and the row-dedup set: O(F log F) per
+    merge.
+  - `FixpointState::best_index` now maps each KEY to its held row and rounded
+    criteria. A merge compares the best candidate per KEY with the held row
+    (`make_comparator` on exact criteria) and filters a displaced row out of
+    the one batch holding it. Tail batches merge binary-counter style. Tie and
+    rounding rules are unchanged: the held row wins an exact tie, and a
+    candidate whose rounded criteria match does not displace it.
+  - Measured with `perf_class_probe_best_by_merge` (40 layers x 500, skip
+    edges so held rows are improved; 19,500 facts, 40 iterations):
+    `LocyBestByMerge` 4.4 s → 0.73 s over the run, with identical facts (19,500)
+    and delta rows (209,500). Wall time on this contended box: 34–43 s →
+    14–21 s.
+  - What remains is not the merge. BEST BY is still about 9x plain reach
+    (1.6–2.0 s) on this graph because it derives 209,500 delta rows to plain
+    reach's 19,500: each node improves about 10 times (Bellman-Ford order).
+  - Test: `recursion_semi_naive_best_by_matches_dijkstra_with_improvements`
+    (a cyclic graph with late improvements, checked against Dijkstra). All
+    existing BEST BY and semi-naive guards pass.
+- **Non-linear old/full scans: measured, not implemented. Decision needed.**
+  - `perf_class_probe_nonlinear_full_scan`: TC (`a IS tc TO m, m IS tc TO b`)
+    on a 128-chain plus an inert bipartite block that never composes.
+    - Recursive iterations: 343–438 ms with no inert facts; 856–879 ms with
+      90,000 inert facts.
+    - `DerivedScanExec` rows: 51,308 → 1,581,308. `HashJoinExec` output is the
+      same 341,376 in both cases.
+    - 9 iterations either way: non-linear TC converges in log(diameter).
+  - An index would cut this by up to about 2x, and only when a large part of
+    the relation never joins. The change is a new physical operator: a
+    persistent join index per derived scan, grown with each delta, with old
+    and full views. It would replace `HashJoinExec` for Old/Full feeds. That
+    is an architecture decision, not a local fix.
+- **`find_clause_for_row` and the TopK support map indexed by position: fixed.**
+  - `find_clause_for_row` compared columns by position, skipped any candidate
+    batch whose width differed, and gave a fact no clause matched to clause 0.
+    It was also O(delta x candidates).
+  - Now `clause_attribution` builds a by-name map once per
+    `record_provenance` call. A missing column or an unmatched fact is an
+    error.
+  - The TopKProofs `body_support_map` is now a `BodySupportMap` that hashes
+    named columns. FoldExec resolves them in its own batch, and a missing
+    column is an error.
+  - Tests (unit): `find_clause_for_row_matches_candidates_by_name`,
+    `find_clause_for_row_fails_closed`,
+    `topk_support_map_resolves_columns_by_name_under_reorder` (0.8 instead of
+    0.6 under the positional hash), `topk_support_map_fails_closed_on_a_renamed_column`.
+    Revert: all 4 fail.
+  - No end-to-end column reorder was found within the fixpoint. Clause batches
+    reach the merge in one column order, so these were latent.
+- **Positive ABDUCE `AddEdge` over-approximated: reproduced, fixed.**
+  - Validation ran `MATCH (a)(b) CREATE (a)-[:T]->(b)`: an edge between every
+    pair of nodes.
+  - On `(a)-[:R]->(b)-[:R]->(c)` with no edges, each single `AddEdge` came
+    back `validated: true`, though no single edge derives the goal.
+  - Candidates are now concrete. `AddEdge` gains `source_vid` and
+    `target_vid` (Rust and the Python dicts), and validation pins both
+    endpoints with `id()`.
+  - Endpoints come from the hop's labelled nodes in id order. The goal `WHERE`
+    filters them when it reads only that hop's endpoint variables. The total
+    is capped by `max_abduce_candidates`.
+  - Hop direction is honoured: `(b)<-[:R]-(a)` adds `a -> b`.
+  - Tests: `abduce_add_edge_validates_one_edge_not_every_pair` and
+    `abduce_add_edge_proposes_concrete_endpoints` (only `A -> C` validates).
+    Revert (unpinned validation): both fail.
+  - The enumeration policy is a choice the user may revisit: label-scoped
+    pairs, filtered by the goal, in id order, within the budget. A goal that
+    needs an edge to a node late in id order can fall outside the budget when
+    the `WHERE` does not filter the hop.
+- **Tests.**
+  - Locy integration: 410/410 on the second run. On the first run,
+    `assume_cost_does_not_scale_with_unaffected_strata` and
+    `locy_entity_hydration_edge_cost_does_not_grow_with_the_graph` (wall-clock)
+    failed. Both passed in isolation, in 5 repeats and in the rerun. The
+    first test's failure message was not captured.
+  - Locy TCK: 530/530 in both modes.
+  - uni-locy-oracle: 46/46 on the first run.
+    - Open: `random_programs_match_the_oracle` failed once in 15 runs. It
+      draws a clock seed per run, and the failing run's seed and divergence
+      were not captured (only the summary line was kept).
+    - The other 14 runs passed, 12 of them in isolation.
+    - It is not attributed to this change or excluded from it. Re-run with
+      `--no-capture` until it fails, then replay it with
+      `ORACLE_RANDOM_SEED`.
+  - uni-query lib: 498/498.
+  - uni-locy: 224/224.
+
+**Wave C outcome: numeric (int/float) value semantics (plan L1357-1361). Done, uncommitted.**
+- **Oracle.** `cypher_read::numeric_exact_comparison_test`, 9 tests. Expectations
+  come from an exact `i64`/`f64` comparison, not a transcription. Values: around
+  2^53, `i64::MIN`/`MAX`, ±2^63, ±0.0, NaN, ±inf. Every check runs on literals,
+  on parameters, and on typed, indexed and schemaless properties, in L0 and
+  after a flush. It covers 1,008 predicate forms per flush state, projected
+  values, 3,456 literal pairs, column pairs, hash joins, `IN`, `ORDER BY`,
+  `min`/`max`, DISTINCT, grouping and UNION.
+- **Item 1: int vs float widened to f64. Reproduced on every path; fixed.**
+  - The row evaluator (`cypher_eq` / `cypher_partial_cmp`, expr_eval.rs) went
+    through `as_f64`. The new `cypher_numeric_cmp` wraps `uni_common::cmp_i64_f64`.
+  - DataFusion path: `float_comparison` cast the integer operand to `Float64`.
+    It now casts to `Int64` (`float_comparison_operand_type`), and
+    `_cypher_float_*` accepts `Int64` on either side (float_cmp.rs). The physical
+    compiler had the same cast (expr_compiler.rs).
+  - Literal native form: `native_float_comparison` compared a widened integer
+    column. It now rewrites to the operand's own type, which keeps L0 prefilter
+    and index pushdown exact:
+    - `integer_bound`: `x < 2.5` becomes `x <= 2`.
+    - `float_bound`: `y < 2^53+1` becomes `y <= 2^53`.
+    - `=` / `<>` against an unrepresentable value keeps the UDF.
+  - CypherValue fast paths widened: `cv_bytes_as_f64` in `compare_cv_numeric`,
+    `compare_cv_vs_i64`, and CV×CV in `try_fast_compare`. They now go through
+    `compare_numbers`. List ordering (`cypher_value_cmp`) is fixed too.
+  - Join keys needed no change. The bucket is coarse, and the re-check is now
+    exact.
+  - Storage pushdown was already type-exact (`index_operand_fits_column`,
+    `indexed_range_filter`).
+- **Item 2: `1` and `1.0` as one value. Reproduced; fixed.**
+  - Neo4j keeps the first value seen (`Distinct` emits the original row, and
+    `IntegralValue`/`FloatingPointValue` hash and compare numerically). The TCK
+    does not pin it.
+  - `_cypher_value_key` now folds an integral float that fits `i64` to that
+    integer (`canonical_number`).
+  - A CypherValue group key (Distinct, Aggregate, UNION dedup) is emitted through
+    a new `_cypher_first_seen` UDAF over the original column, via
+    `equivalence_group_key` / `plan_equivalence_distinct` in df_planner.rs. So
+    `UNWIND [1.0, 1] AS x RETURN DISTINCT x` gives `1.0`, and `[1, 1.0]` gives `1`.
+  - The `collect(DISTINCT)` key canonicalizes numbers.
+  - `RETURN 1 AS x UNION RETURN 1.0 AS x` failed to plan ("mismatched schemas").
+    Int-vs-float union columns are now encoded as CypherValue
+    (`coerce_union_entity_columns`).
+  - Typed `Float64` keys still show the canonical float, as in wave B.
+- **Item 3: `[1, n.f]` widened by `make_array`. Did not reproduce.**
+  - `list_of_int_and_float_expression_keeps_element_types` covers
+    `[2^53+1, n.f]`, `[n.f, 1]` and `[n.i, 0.5]`, in L0 and flushed. It passed
+    before any change in this wave. No fix was made.
+- **Item 4: VLP edge L0 float checks. Real, but not L0-specific.**
+  - The schemaless VLP walk (`GraphVariableLengthTraverseMainStream`,
+    traverse.rs) matched inline edge maps with structural `Value ==`, and
+    nothing re-checks it. `[:R*1..2 {w: 0}]` missed `w = 0.0`, and NaN matched NaN.
+  - It now uses `map_matches` (Cypher equality), as the declared-type walks
+    already did.
+  - Same class in pattern predicates (`pattern_exists.rs`): `(a)-->(:B {k: 1})`
+    missed `k = 1.0`, and `{k: null}` matched a node without `k`. Fixed with
+    `cypher_eq`.
+  - Declared-type VLP, shortest path and fixed-hop edges were already correct.
+- **Found along the way: a planning error, fixed.** `n.i IN [m.i]` (any types)
+  failed with "No field named m". `PredicateAnalyzer::is_pushable` (pushdown.rs)
+  accepted any `Expr::List` as constant. It now requires literal/parameter items
+  (`is_constant_list`).
+  - Test: `in_list_of_another_variables_property_stays_above_the_scan`.
+- **Revert checks.** Each fix was reverted on its own, by a scoped string swap
+  restored byte-identically, and its tests failed on assertions:
+  - row/CV evaluator;
+  - UDF operand cast;
+  - literal integer bound;
+  - CV fast paths;
+  - CV key folding;
+  - first-seen;
+  - UNION coercion;
+  - schemaless VLP map;
+  - pattern-predicate map;
+  - pushdown list check.
+
+  An `IN`-list change in `build_cypher_in_list` was dropped. Its `InList` is only
+  built for `._vid` correlation keys, so a revert changed nothing.
+- **Updated tests.** Three asserted the defect, `2^53+1 = 2^53.0` true, and now
+  assert the exact answer:
+  - `in_list::constant_list_known_answers`;
+  - `join_key::integers_that_round_to_one_float_share_a_bucket`;
+  - `constant_in_list_test`'s known-answer table.
+- **Open.**
+  - Not converted, because no reproduction was built: Locy's `values_equal` /
+    `value_less_than` (locy_eval.rs) and the legacy executor's
+    `cypher_cross_type_cmp` still widen.
+  - `canonical_numeric_key` (executor/core.rs) and `canonical_value_key`
+    (executor/read.rs) admit `f = 2^63` through `<= i64::MAX as f64`, which
+    saturates.
+  - `sum(DISTINCT x)` over a CypherValue column sums the canonical keys:
+    `[1.0, 1]` gives `1`, not `1.0`.
+
+### Wave C — test-harness hygiene and release notes (2026-10-18)
+
+- **`topo_rewrites_unflushed_small_batches` under load: reproduced, fixed.**
+  - Repro: 36 concurrent copies of the test binary plus a build. 34 of 36
+    failed, every one with the same message:
+    `[locy_negation] Operation timed out after 30000ms`. The query was
+    `MATCH (a:Person), (b:Person) WHERE … AND NOT EXISTS { MATCH
+    (a)-[:KNOWS*1..]->(b) }`. With 12 concurrent copies, 48 of 48 passed.
+  - Root cause: the fixture inherited the default 30 s `query_timeout`. That
+    reference query evaluates its unbounded VLP once per pair (52 × 52), at
+    5.9 s alone with the two-row batch and 3.8 s with the default batch. It
+    crosses 30 s once the box is oversubscribed. The seed is fixed and the
+    answers never diverged; the "divergence" was the deadline.
+  - Fix: `build_topo` sets `query_timeout` to 300 s
+    (`metamorphic/dqp/topo.rs`). The six-minute nextest limit still catches a
+    hang or a runaway rewrite.
+  - A/B under identical load (24 old + 24 fixed copies per round, two rounds):
+    the old binary failed 25 of 48 runs, all on the same timeout; the fixed
+    binary passed 48 of 48, with a slowest run of 302 s.
+  - Open: costing 5.9 s for 2,704 pairs is a perf finding. The correlated
+    `NOT EXISTS` over a VLP is not decorrelated into one reachability pass per
+    distinct `a`. It is not fixed here.
+- **`collect_ids` swallowed errors: the propagation was already in place.**
+  - `collect_ids` and `collect_property_snapshot` already used `?`, and
+    `run_query_step` panics on `Err`.
+  - Three fail-open paths remained:
+    - `collect_ids` skipped a non-integer id.
+    - `add_entity_to_snapshot` skipped a non-entity value, or a map with no
+      identity.
+    - `get_labels` skipped a row that did not decode.
+  - All three now return an error.
+  - The seam is an in-module test: the helpers are private, but they take the
+    query string. The blocked placeholder
+    `tests/repro_collect_ids_swallows_error.rs` is replaced by five unit tests
+    in `src/world.rs`: three refusals and two healthy-path controls.
+  - Revert check: restoring the old forms fails all three refusal tests.
+  - Full Cypher TCK, with the stricter helpers: schemaless 3925/3926 and
+    sidecar 3925/3926 (1 skipped), 0 failed in both. The counts are the same as
+    the previous run, so no scenario was passing on a swallowed error.
+  - The script rewrote `compliance_reports/{schema,schemaless}/`. Those files
+    are excluded from commits.
+- **Stale ignore comments:**
+  - `l3e_vlp_path_edges_set`: passes, and asserts `count(e.flag) = 2` on edges
+    created without `flag`, so a no-op SET fails it. The doc said the SET
+    no-ops and the test was ignored; both corrected.
+  - `repro_rule_registry_lost_update`: not ignored; it passes. The doc now says
+    it is a race detector whose detection of a reverted fix is likely, not
+    certain. This was reasoned, not measured: `impl_locy.rs` is being edited
+    by another agent. A dead `reproduced_at` variable was removed.
+  - `correctness_repros.rs` header (L8) and Locy section (L1606): no test is
+    ignored. The comments now say so, and name the uni-db / uni-query
+    behavioral guards for [25], [24], [13] and [10].
+    - Gap: no test covers multi-hop `ABDUCE NOT`.
+  - Tightening the vacuous arms found one dead test. `repro_19` asserted
+    nothing (it only printed); it now asserts the filter. The `Err` arms of
+    [16], [35], [19-COPY], [24], [13] and [10] printed and passed; they now
+    panic. [13]'s program (`… OUTPUT PROB e.w`) had never parsed, so that test
+    had passed without planning anything; its syntax is corrected. 41/41 pass.
+  - `repro_vertex_props_unresolved_vid_fan_out`: the stale line references
+    and "the defect" docs are corrected. Revert check: disabling the L0 label
+    lookup in `get_batch_vertex_props` fails 2 of 3 tests (the control still
+    passes); the file was restored byte-identically.
+- **`repro_finding_06_regex_null_collapses_to_false`: the test was out of
+  date; the engine was correct.**
+  - The test evaluated the bare translation in a plain `SessionContext`, and
+    `=~` now translates to a `_cypher_regex` placeholder: "UDF not
+    registered".
+  - The test now runs the planner's pipeline: translate, resolve, coerce,
+    resolve. It asserts NULL on both bindings: native string match (Utf8) and
+    the CypherValue UDF.
+  - Revert check: making `native_regex_match` drop its NULL guard fails it.
+- **Release notes:** added entries for:
+  - the memory CDC provider no longer being registered by default, with the
+    `MemoryCdcOutputProvider` and `delivered` type changes;
+  - `LocyResult::rows()`;
+  - `vector_similarity` thresholds no longer using the index (from
+    `2650428b2`);
+  - the compaction file lock / 30 s writable-open wait (from `5ebf6f0c6`, not
+    marked breaking in its commit).
+  - The mandatory-`shortestPath` entry was already present.
+
+### Wave C — procedure-call defects found by C3 (2026-10-18)
+
+- **WRITE procedure writes bypassed the transaction: reproduced, fixed.**
+  - In a `tx`, `CALL t.mark()` (declared `WRITE`, body `CREATE (:Marker)`)
+    survived `rollback()`. Other sessions saw it before `commit()`, and the
+    transaction's own reads did not. This held standalone and per row.
+  - Two transactions that bumped one counter through a procedure both
+    committed, with n = 2. The same plain `SET` refuses the second commit.
+  - Cause: `QueryProcedureHost::execute_inner_query`
+    (`procedure_host.rs`) built the inner `Executor` with the writer but no
+    `transaction_l0_override`. Mutations went to the writer's main L0, and the
+    tx buffer was only appended to the read list.
+  - Fix: the inner executor takes `l0_context.transaction_l0` as its
+    transaction L0. It is no longer duplicated into the pending list.
+  - Outside a transaction nothing changes: `Session::run` auto-commits, and a
+    declared trigger's after-commit action (no tx buffer) writes main L0.
+  - Test: `bugs/write_procedure_in_transaction.rs` (4 tests: rollback, read
+    your writes plus isolation, autocommit, conflict parity with plain
+    writes). Revert: 3 fail on assertions. The autocommit test passes either
+    way, as expected.
+  - Other write procedures checked:
+    - `uni.periodic.submit` and `iterate` run their own session and
+      transaction through `SchedulerControl`, so they commit independently,
+      as APOC's do. Left as designed.
+    - WASM, Rhai and PyO3 procedures have no graph-write channel through the
+      procedure host. Their `write` mode is a declaration only.
+    - The algorithm adapters run their inner queries in `Read` mode.
+- **Algorithm list yields were text: reproduced, fixed. Node yields had the
+  same defect.**
+  - `size(clique)` gave 7 for 3 ids. The cause was
+    `procedure_call::json_to_value`: arrays and objects became
+    `Value::String(json)`, written into a `Utf8` column (`value_type_to_arrow`).
+    Only `record_batches_to_rows` parsed the text back, through `cv_encoded`.
+  - Fix: a new `procedure_call::algo_yield_field` is now the algorithm
+    adapter's yield typing.
+    - List, map and path yields are `LargeBinary` CypherValue columns tagged
+      `cv_encoded`.
+    - Node and relationship yields are `Int64` ids.
+  - The other parts of the fix:
+    - `build_typed_column` gained a `LargeBinary` arm (codec encode).
+    - `build_algo_record_batch` converts structured JSON with `Value::from`.
+    - `declared_yield_field` keeps the provider field's metadata.
+  - Consumers covered by tests, standalone and per row: `size`, `UNWIND`,
+    `[i]`, `IN`, list comprehension, `keys()` on the map yield, and
+    `WHERE id(t) IN clique`.
+  - Node yield: `articulationPoints … YIELD node MATCH (p) WHERE id(p) = node`
+    returned `[]`, because `node` was the string `"1"`.
+  - Test: `bugs/algorithm_list_yield_values.rs` (3 tests). Revert: the list
+    tests give 7 instead of 3, and the node test gives `[]`.
+- **`range(0, null)`: not changed.**
+  - The openCypher TCK (`List11`) has no null case. It requires
+    `InvalidArgumentType` only for non-integer types and `NumberOutOfRange`
+    for step 0.
+  - The Neo4j Cypher Manual's `range()` section says nothing about null.
+    Its signature types every argument `INTEGER`.
+  - The current error (`InvalidArgumentType … must be an integer`) deviates
+    from neither. Returning null instead would follow the general
+    null-in/null-out convention. That is a design choice for the user.
+- **Found, not fixed.**
+  - `uni.plugin.declareProcedure` has no argument-names parameter, but
+    `SyntheticProcedurePlugin` reads `arg_names` from the signature JSON. So a
+    declared procedure cannot take arguments: a body using `$k` fails with
+    `Unresolved parameter: $k`. Fixing it is an API change (a new argument).
+  - `isBipartite` yields `partition`, a reserved word (window `PARTITION
+    BY`). `YIELD partition RETURN partition` fails to parse; it needs
+    `AS p` or backticks.
+  - `uni.algo.diameter` always yields `path = null` (its `map_result` emits
+    `Value::Null`).
+  - `AlgoProviderBridge` (`uni-plugin-builtin/src/algorithms/bridge.rs`)
+    writes list yields as `LargeBinary` serde_json bytes, not the CypherValue
+    codec. No `CALL` reaches it for a static algorithm, because the plugin
+    procedure resolves first. Its consumers were not checked.
+  - Inner procedure reads in a tx use the live main L0, not the
+    transaction's pinned snapshot (`L0Context` has no `SnapshotView`).
+    Candidate: a SNAPSHOT-isolation gap for procedure bodies. Unverified.
+- **Tests run.**
+  - uni-db integration, `bugs|plugin|algo|graph_algo|triggers|session_tx|ssi_*|scratch_tx|hooks|auth|cypher_read|cypher_write|e2e`
+    plus `procedure`/`trigger` names: 1740/1745. The 5 failures are
+    `bugs::mixed_type_hash_join` (3),
+    `cypher_read::numeric_exact_comparison_test` (untracked, in progress) and
+    `bugs::issue_269…an_unflushed_vid…`. None of these issues a `CALL`, and
+    every changed line is on a procedure path. These belong to the
+    join-key/comparison and bulk work in flight.
+  - Unit tests for uni-query, uni-plugin-host, uni-plugin-custom and
+    uni-plugin-builtin: 914/914.
+  - Cypher TCK `~Call`: 52/52 in each mode, plus 1 skipped.
+  - Python (`maturin develop`, then transaction, procedure, algo, plugin and
+    error files): 288 passed, 10 skipped. A probe confirmed the built wheel
+    returns 3 for `size(clique)`.
+  - `cargo clippy -D warnings`: clean for uni-query and for uni-db
+    (`--lib --test integration`).
+
+### Wave C — identifier quoting (L1330–L1332)
+
+**Done, uncommitted.**
+- **Doubled-backtick escape (measured, fixed).** `` `a``b` `` was a parse error,
+  so no name containing a backtick could be written. New shared pest rule
+  `escaped_name` (openCypher `EscapedSymbolicName`) used by `identifier`,
+  `identifier_or_keyword`, `alias_identifier`, `locy_identifier`, and by
+  `parameter` (`` $`p q` ``, which the openCypher grammar allows).
+  `normalize_identifier` undoubles the escape.
+- **Walker sites kept backticks (candidate → confirmed, fixed).** Variables
+  (pattern, UNWIND, FOREACH, comprehension, quantifier, REDUCE, SET/REMOVE
+  targets, map-projection selector), `WITH RECURSIVE` name, procedure names,
+  parameters, index/constraint names, DDL property names (`CREATE LABEL`,
+  `CREATE EDGE TYPE`, `ALTER … PROPERTY`, composite constraint lists), and Locy
+  generator names/outputs and `prev` fields all used raw `as_str()`.
+  `` MATCH (`n`) RETURN n `` failed to plan; `` CREATE LABEL L (`my prop` STRING) ``
+  declared `` `my prop` ``. `extract_property_name` split the raw text on `.`
+  (`` p.`a.b` `` → `` b` ``). All now go through `walker::ident`.
+  Test: `uni-cypher/tests/repro_escaped_identifier.rs` (6; quoted AST == bare
+  AST over 40 query pairs, escape cases, Locy). Revert: grammar 4 fail, `ident`
+  5 fail, unescape step 3 fail, `extract_property_name` 1 fail, Locy generator
+  1 fail.
+- **Storage round trip: two declared names Lance cannot hold (found, fixed by
+  refusal).** A declared `a.b` was accepted and took writes, then every flush of
+  the label failed (`Top level field a.b cannot contain .`). A declared
+  `` has`tick `` flushed, then every read of the label failed (`No field named`):
+  `Scanner::project` escapes the name, but lance-datafusion's
+  `ColumnCapturingVisitor` passes the unescaped root name to the field-path
+  parser, so the column is never loaded. Pinned by
+  `uni-store` `storage::lance_backtick_column_probe` (fails, by design, when
+  Lance fixes it). `validate_property_name` now refuses `.` and backtick in a
+  declared name; undeclared they work via `overflow_json`.
+  Revert: `unstorable_property_names_are_schemaless_only` fails.
+- **Refused `CREATE LABEL` / `CREATE EDGE TYPE` / `SchemaBuilder::apply` left the
+  label behind (found while testing, fixed).** Properties are now validated
+  before the schema is touched. Revert of the DDL pre-check: "label D leaked".
+  The builder pre-check covers property *names* only; a builder failing for
+  another reason part-way (e.g. a type conflict) still leaves earlier changes.
+- **`quote_cypher_identifier`** (`get_label_info` / `get_edge_type_info`) now
+  escapes instead of refusing a backtick. Revert: `quoted_ddl_names_round_trip`
+  fails.
+- **Lance filter pushdown:** unchanged. B6's `quote_ident` already refuses a
+  backtick name and leaves it to the residual filter; the end-to-end test
+  filters on an undeclared `` has`tick `` flushed and in L0.
+- **EXPLAIN / Python:** EXPLAIN carries the unescaped names (asserted).
+  Python: `TestQuotedIdentifiers` in `test_cypher_features.py` (2), result keys
+  are unescaped (`"x`y"`).
+- **VLP `edge_lance_filter` (confirmed dead, removed).** Rendered in
+  `df_planner.rs` (two sites), threaded through both VLP execs and streams,
+  never read (`#[expect(dead_code)]` since the first release). The VLP property
+  map is enforced per edge by `edge_property_conditions`. Wiring it as a
+  preselection would need an L0 union and a design; not done.
+- **Tests run.** uni-cypher integration 53/53; uni-cypher + uni-locy +
+  uni-locy-tck + uni-common + uni-query 1972/1973 (the one failure was my
+  new docs snippet using `--` as a comment; fixed to `//`, uni-cypher re-run
+  53/53); uni-store
+  storage/schema 113/113; uni-db integration 3458/3458 (first pass: 321 exec
+  failures because another build replaced the binary mid-run, plus one
+  timeout under load; all 322 re-run green); TCK schemaless 3925/3925,
+  sidecar 3925/3925; pytest cypher features 23, schema suites 63. Clippy
+  `-D warnings` clean on touched crates except two lints in files outside
+  this area (`float_cmp.rs:617`, `df_planner.rs:10558`).
+- **Open.**
+  - A declared property with `.` or a backtick could be supported by encoding
+    column names for Lance; refused for now (design choice).
+  - `SchemaBuilder::apply` is not atomic for non-name failures.
+  - The pydantic OGM interpolates names into Cypher unquoted (not audited).
+
+### Wave C — planner/executor: shortest-path row maps, QPP region maps, IN column runs (2026-10-18)
+
+- **Non-constant shortestPath / allShortestPaths maps (L1295, C3's design):
+  implemented.** `shortestPath((a)-[:R*1..4 {w: a.x}]->(b))` was refused.
+  - Planning: `planner.rs` splits the map; walk-constant entries stay in
+    `edge_filter_expr`, the rest go on the new
+    `ShortestPath`/`AllShortestPaths.edge_row_conditions`. A value may name the
+    endpoints and earlier variables. One naming the path or the relationship
+    variable is refused. The property collector reads `a.x` from these values.
+  - Execution: `df_planner.rs` compiles each value against the operator's
+    input. `GraphShortestPathExec` evaluates them per batch and groups rows by
+    (source, value set). Each value set gets its own allow-set (the constant
+    entries plus that set's values), a `ReachableMapFilter` covered over that
+    set's sources. The sets are kept across batches in `keyed_filters` and
+    charged to the reservation. The retained source search is keyed by
+    (source, value set). A `NULL` value admits no edge, without a read.
+  - Oracle: `cypher_path/shortest_path_row_dependent_map.rs`. It takes the
+    minimum length, and for `allShortestPaths` the number of minimum-length
+    trails, of the variable-length match with `all(r IN rs WHERE …)`. Cases:
+    7 maps × 3 directions × 3 hop ranges × 2 binding forms, random graphs
+    (parallel edges, self-loops, missing `w`, `NULL` `x`), schema and
+    schemaless, flushed and unflushed. A per-relationship check confirms every
+    returned relationship satisfies the map. A hand-worked ring checks
+    grouping, OPTIONAL and the refusals. Before the fix, 270 of 315 cases per
+    run failed with the refusal; the 45 that passed are the constant-map
+    controls.
+  - Revert checks: grouping every row under one value set gives 159 failures
+    plus the ring. Reusing the retained search across value sets gives 78
+    failures. Both are assertions.
+  - `vlp_property_map_oracle::non_constant_map_values_that_must_gate_a_walk_are_refused`
+    no longer lists the two shortestPath queries; they are answered now. The
+    QPP refusals stay.
+- **QPP per-hop maps pre-scanned the whole type (L496, L1076): fixed.**
+  - `ReachableMapFilter` is generalized to hop slots
+    (`traverse.rs`, `ReachableMapFilter::for_steps`). Each hop of the
+    iteration has its own types, direction, edge map and fail-closed vertex
+    map. The pass tracks `(vertex, slot)` at the shallowest depth, and the
+    simple pattern is the one-slot case. The fall-back builds every slot's
+    whole-type filters.
+  - Counters: `perf::profiler_blind_spots::qpp_property_map_reads_only_the_reachable_region`
+    replaces the old ">= 2n" guard. It pins `rows_scanned = 1 + region edges`,
+    computed from the graph: 11 at N=200 and at N=800. With the QPP branch
+    reverted it reads 401, and the test fails.
+  - Answers: `cypher_path/qpp_region_map_oracle.rs` compares 4 shapes
+    against spelled-out one- and two-iteration patterns: edge and vertex maps,
+    mixed and undirected hops, the same type on both hops. It runs over 8
+    random graphs, mixed L0/L1, then all flushed. Schemaless is not covered,
+    because a multi-hop QPP needs declared types (an existing refusal).
+- **IN over a list column repeated in runs (L1145-1146, IC5): fixed.**
+  `in_list::invoke_column_list` splits the list column into runs of identical
+  rows (equal bytes, or equal Arrow values). It decodes each run once and
+  answers a run of 2+ rows from an `InListIndex`, a single row by the scan.
+  - Counter (unit test): 512 rows in runs of 4,096 items made 2,097,152
+    comparisons on the scan, and now no more than the 256-item case.
+    `list_column_runs_cost_does_not_grow_with_list` fails with the path
+    disabled.
+  - Time (debug, 8 runs × 1,024 rows, IN cost above a control carrying the
+    same lists): 40 / 149 / 613 ms → 6 / 16 / 91 ms at 256 / 1,024 / 4,096
+    items. The remainder is the per-row byte comparison of the replicated
+    list. Not measured on LDBC IC5 itself.
+  - Answers: three-valued, with `NULL` lists and lists holding `NULL`, against
+    the scan (`list_column_runs_match_the_scan`) and against
+    `any(y IN fs WHERE y = x)` (`perf/in_list_column_runs.rs`).
+- **Tests run.** cypher_path + perf + cypher_read: 907/907. uni-db
+  integration full: 3460/3460. uni-query + uni-query-functions: 1208/1208.
+  TCK `/Match|Path|Quantif|List/`: 1268/1268 in each mode. Clippy
+  `-D warnings` is clean on uni-query, uni-query-functions and uni-db
+  (lib + integration).
+
+### C12: two intermittent failures (`random_programs_match_the_oracle`, `assume_cost_does_not_scale_with_unaffected_strata`)
+
+- **`random_programs_match_the_oracle`: reproduced, 2 failures in 104
+  clock-seeded runs.** Both were coverage-floor misses, and neither was an
+  engine/oracle divergence. Across about 10,000 cases there were 0
+  divergences. Seed `1792828304592699810`: `AmbiguousExpected in 1 of 96
+  (bounds 3%..20%)`. Seed `1792839557312118029`: `cost`/`tot` non-empty in
+  18 of 96 (floor 20%). Replaying them oracle-only reproduces both, so the
+  cause is the generator alone.
+  - Root cause: the floors were set too close to the generator's own rates.
+    `AmbiguousExpected` comes from family 4 (50%) × variant < 15, which gives
+    7.5%. A binomial at 96 cases falls below 3 about once in 45 runs, and
+    because the band is two-sided, no per-case rate does better than once
+    in about 250 (best at 10.5%). `cost` was non-empty in 36% of cases (miss
+    about once in 3,000). `ScalarKeyStr` reached 29% against a 15% floor
+    (about once in 1,100).
+  - Fix, with no floor lowered:
+    - `random.rs` `draw_case` and `AMBIGUOUS_EVERY = 10` give an exact quota:
+      1 case in 10 is redrawn until it has the ambiguity, the rest until they
+      lack it. The redraw is capped at 2,000 draws, so the floor still fires
+      if the generator loses the shape.
+    - `generator.rs` weights `along` to 0.65 (`cost` now 48%) and draws the
+      scalar-KEY kinds at 75/70 (`ScalarKeyStr` now 38%).
+  - Measured with an oracle-only probe (scratch, removed) over 96-case
+    batches:
+    - Before: floor misses in 9 of 600 and 5 of 200 batches.
+    - After: 0 of 500. The summed binomial miss probability of the remaining
+      lower floors is about 5e-5 per run.
+    - Post-fix end to end: 36/36 runs green, and the `uni-locy-oracle` suite
+      passed 46/46.
+- **`assume_cost_does_not_scale_with_unaffected_strata`: mechanism
+  reproduced.** Running it concurrently (and in the full locy filter) doubled
+  `rows_scanned` for one arm at n=8000 in 5–12 of 40 runs: 48012 vs 24006,
+  with l0/storage = 32005/24006. Seeding crosses `auto_flush_threshold`
+  (10k), and the 5 s `auto_flush_interval` timer can fire at either scale
+  under load. While a flush is in flight, a scan reads the rows from both
+  the pending L0 and the Lance version already written. MVCC dedup keeps the
+  results correct, but the counters count both tiers
+  (`merge_lance_and_l0`, `crates/uni-store/src/runtime/columnar_scan.rs`).
+  The window runs from the Lance writes (`flush_stream_l1`) to
+  `complete_flush` (`writer.rs` phase J). The test fails when the doubled
+  read lands in the ASSUME arm and not in the plain one.
+  - Fix: `db.flush().await?` (a drain barrier) after seeding, so both arms
+    read quiescent tiers. With it, 0 of 40 concurrent runs doubled, and all 3
+    full locy runs gave a stable `extra = 10` at both scales.
+  - A class survey of every counter-asserting test under
+    `crates/uni/tests/common` found 3 more exposed to the timer:
+    `dqp::counters::l0_reads_zero_when_flushed_and_nonzero_when_dirty`
+    (exact), `profiler_blind_spots::vlp_property_map_region_read_counts_l0_edges`
+    (exact difference) and
+    `issue_175_index_consulted::an_unflushed_query_reports_no_lance_scan`.
+    Each needs its data in L0, so each now builds with
+    `auto_flush_interval: None`. Targeted suites pass 50/50.
+  - Still open, a design question: reads during a flush do the work twice.
+    Removing that would mean readers skip a pending L0 whose table is
+    already committed at or below the Lance version they read, and that
+    needs per-buffer, per-table committed versions. This was not built.
+- **`locy_entity_hydration_edge_cost_does_not_grow_with_the_graph`: did not
+  fail** in 3 full locy runs under the oracle loops' load. Ratios were
+  0.014/0.012, 0.010/0.003 and 0.008/0.002 against a 0.05 guard, and the
+  control ran 418–3060 ms. The design is already ratio-based (min of 3), and
+  its fixture flushes, so the flush window does not reach it. There is no
+  evidence for changing it.
+- **Seen in the full locy runs, outside C12's area and left alone (files under
+  active edit):** `locy_operator_parity_matches_cypher` failed in all 3 runs
+  (`[9007199254740993] = [9007199254740992.0]`: Cypher returns true, the
+  oracle wants false; the third run timed out at 180 s).
+  `locy_numeric_exact_recursive_best_by_orders_by_value` failed in run 1 only
+  (`BEST BY w ASC` gave `[-1.0, 3.0, 2.0]`, wanted `[-1.0, -1.0, 2.0]`).
+
+**Wave C outcome: numeric follow-ups (C2's open list: Locy comparisons, the
+fallback executor, DISTINCT aggregates). Done, uncommitted.**
+- **Item 1: Locy `values_equal` / `value_less_than` widened. Reproduced; fixed.**
+  - Rule `WHERE`, `QUERY WHERE`, FOLD `MIN`/`MAX` and the scalar IS-reference
+    join were already exact (shared evaluator and DataFusion path). They are
+    pinned as controls in `locy::locy_numeric_exact`.
+  - `QUERY ... ORDER BY` and `QUERY RETURN min/max` went through `value_cmp`,
+    which widened, and tied any two values of different types. `2^53 + 1`
+    tied with `2^53.0`, and `i64::MAX` with `2^63`. `value_cmp` is now
+    `cypher_value_order` (Cypher's `ORDER BY` order), and `value_less_than`
+    uses `cypher_numeric_cmp` (locy_eval.rs).
+  - `QUERY RETURN DISTINCT`, `count(DISTINCT)` and `collect(DISTINCT)` kept `1`
+    and `1.0` apart: 4 rows where Cypher gives 3. They now key on
+    `canonical_cypher_value` (newly public in float_cmp.rs) and keep the first
+    value seen (locy_query.rs).
+  - `values_equal` (EXPLAIN's in-memory IS-ref matching) is now exact. Only a
+    unit test shows the defect: the DataFusion join builds the facts exactly,
+    so no fact can carry a colliding key.
+  - **Found: BEST BY sorted a CypherValue criterion by its encoded bytes.**
+    Every integer ranked below every float, so `BEST BY v` over `5` and `1.5`
+    chose `5`, and negative numbers ranked above positive ones.
+    - Fixed in `BestByExec` with `locy_best_by::order_column` (Cypher sort keys).
+    - Fixed in the recursive merge `merge_best_by` (`criteria_comparators`,
+      `held_cmp`): `(a, c)` held `3` from iteration 1 against `-1` from
+      iteration 2. Before the fix this failed 10 of 10 runs; after, 30 of 30
+      passed. It is deterministic.
+    - The one "intermittent" failure in C12's logs (`locyfull_1.log`) was
+      that graph, briefly in the tree before the fixpoint fix was applied.
+  - **BEST BY criteria in the fixpoint merge are resolved by name.** They
+    were resolved by position, and a position past the schema's end was
+    silently dropped. `SortCriterion::column` is resolved in the facts'
+    schema, and an absent column is a plan error
+    (`resolve_best_by_columns`).
+  - The parity matrix gained near-2^53 edge cases.
+    - **Found: typed Cypher list comparison widened.**
+      `[9007199254740993] = [9007199254740992.0]` was true. Cause:
+      `coerce_mismatched_types` cast a `List<Int64>` and a `List<Float64>` to
+      `List<Float64>` (df_expr.rs).
+    - Fix: an integer list against a float list is no longer cast. It goes to
+      the list UDFs, which compare elements exactly.
+    - The matrix measured 90 s alone and 180 s in the full suite, where it
+      hit the default three-minute kill. The nextest ceiling is now six
+      minutes (`.config/nextest.toml`, default and ci).
+- **Item 2: fallback executor. Reproduced; fixed.**
+  - Public path: a standalone `CALL` of a registered (non-DataFusion)
+    procedure runs the whole statement on the fallback executor
+    (`is_ddl_or_admin` recurses into children).
+  - Reproduced there:
+    - `min`/`max` widened (`cypher_cross_type_cmp`, now `cypher_numeric_cmp`);
+    - `DISTINCT`, grouping and `UNION` folded `2^63` into `i64::MAX`
+      (`canonical_value_key`);
+    - only `count` honored `DISTINCT`; `sum`, `avg`, `min`, `max`, `collect`
+      and the percentiles folded every row. Now there is a generic
+      `Accumulator::Distinct` keyed on `canonical_cypher_value`.
+  - `canonical_numeric_key` had the same saturation, and it also keys
+    **MERGE** on the main path. `MERGE (:K {k: 9223372036854775808.0})`
+    matched the `i64::MAX` node, and `UNWIND` MERGE deduplicated the two.
+  - New shared helper `uni_common::f64_to_exact_i64`, bounded to
+    `[-2^63, 2^63)`. `numeric_to_value` and `canonical_number` use it too.
+- **Item 3: `sum(DISTINCT x)` over `[1.0, 1]`. Reproduced; fixed.** The answer
+  was `2.0`, not the `1` C2 noted: nothing was deduplicated.
+  - The `DistinctUdaf` wrapper (`_cypher_sum` / `_cypher_avg` / `_cypher_min`
+    / `_cypher_max` / plugins) compared argument tuples as raw scalars. It now
+    dedups by equivalence class and keeps the first tuple
+    (`DistinctAccumulator::equivalence_key`).
+  - `collect(DISTINCT x)` gave `[1]`, not `[1.0]`.
+    `coerce_aggregate_function` replaced the argument with its class key.
+    `_cypher_collect` is now exempt, because its accumulator dedups by class
+    itself. `count(DISTINCT)` keeps the key, which is harmless for a count.
+- **Tests (new).**
+  - `locy::locy_numeric_exact` (9).
+  - `cypher_read::numeric_exact_comparison_test`:
+    `distinct_aggregates_see_the_first_value_seen`,
+    `merge_keys_are_exact_at_the_i64_boundary`,
+    `fallback_executor_compares_numbers_exactly`,
+    `integer_and_float_lists_compare_exactly`.
+  - Unit tests: `locy_eval::numeric_tests` (2); `executor::core::tests` (3);
+    `locy_fixpoint::tests::best_by_merge_resolves_criteria_by_name_and_fails_closed`.
+  - Doctests for `f64_to_exact_i64` and `canonical_cypher_value`.
+- **Revert checks.** Each fix was reverted by a scoped string swap and
+  restored byte-identically (md5 checked). Its tests failed on assertions:
+  - `value_cmp`;
+  - Locy DISTINCT;
+  - `BestByExec` order;
+  - merge comparators;
+  - by-name criteria;
+  - `DistinctAccumulator`;
+  - collect exemption;
+  - list cast;
+  - `canonical_numeric_key`;
+  - `cypher_cross_type_cmp`;
+  - `canonical_value_key`;
+  - legacy `Distinct`;
+  - `values_equal` / `value_less_than` (unit).
+- **Verification.**
+  - uni-common, uni-query-functions and uni-query lib: 994 and 507 passed.
+  - uni-db integration, full: 3472/3475. The 3 failures:
+    - `locy_operator_parity` (the list defect above), since fixed and passing;
+    - `unanchored_pattern_comprehension_test::a_subquery_in_the_body_still_takes_the_per_row_path`
+      and `exists_per_source_test::exists_per_source_matches_per_row_and_brute_force`.
+      Both are in the EXISTS/comprehension decorrelation area, where another
+      agent's `exists_decorrelate.rs` is in progress. They are not
+      investigated here.
+  - Locy subset after the fixpoint change: 395/395.
+  - Cypher TCK, `/Aggregation|Call|Union|Return|With/`: 700/700 in both modes.
+    `/List|Comparison|Equality|Null/`: 381/381 in both modes.
+  - Locy TCK: 530/530 in both modes.
+  - clippy `-D warnings` is clean on my crates. On uni-query it needed
+    `-A clippy::type_complexity`, because of the foreign
+    `exists_decorrelate.rs:343`.
+- **Open (probed, not fixed).**
+  - `percentileDisc` on the fallback executor ignores its percentile
+    argument (always 0): `percentileDisc(v, 1.0)` over `[1, 2, 3, 2^53+1]`
+    gives `1`.
+  - On the DataFusion path, `percentileDisc` folds through `f64` and returns
+    a float. The same query gives `9007199254740992.0` for `2^53 + 1`, and
+    `3.0` for an integer input.
+
+### Wave C — correlated `EXISTS` over a VLP, once per source (C11 follow-up, 2026-10-18)
+
+- **Reproduced.** `MATCH (a:Person), (b:Person) WHERE NOT EXISTS { MATCH
+  (a)-[:KNOWS*1..]->(b) }` over the DQP topology fixture (52 x 52, half in L0,
+  two-row batch): 6.25 s in a debug build, 1,383 ms in release; 2,705
+  physical plans (the query's own plus one per pair). `rows_scanned` stayed at
+  104 throughout, so it cannot see this cost: the per-pair walks read
+  adjacency, not scans.
+- **Root cause.** `ExistsExecExpr::evaluate` (`df_graph/expr_compiler.rs`)
+  physically plans and executes the body once per outer row, with every
+  import bound. Reachability mode was already engaged (the body is wrapped in
+  `MultiplicityInsensitive`); the cost was 2,704 sub-plan builds and runs,
+  each walking out of the same `a` again to test a different `b`.
+- **Fix: per-source evaluation** (`df_graph/exists_decorrelate.rs`, wired into
+  `ExistsExecExpr`).
+  - `BodyShape::analyze` accepts a body of non-optional `MATCH` clauses whose
+    references `free_variables` can determine. Its candidates are node
+    variables that occur only as bare `(v)`: no label, map, inline or clause
+    `WHERE` naming them, and no parameter of that name.
+  - At run time, a candidate the outer row binds as a node is left free when
+    another outer entity named by the pattern stays bound (otherwise the free
+    body would be an unanchored whole-graph enumeration). The body is planned
+    a second time against the batch minus `v`'s columns. Rows are grouped by
+    a row-encoded key over every column of every other referenced name, and
+    one execution per key returns each matching `v`. A row answers from the
+    count at its own `v._vid`.
+  - Exact for `EXISTS` (both plans keep `MultiplicityInsensitive`) and for
+    `COUNT`. Nothing is reinterpreted as reachability, so bounded ranges
+    (`*2..3`), undirected trails at `a = b` and `*0..` keep their semantics.
+    That covers the walk-vs-trail question in the brief without answering it.
+  - A key runs free only on its second sighting (twice in a batch, or seen in
+    an earlier batch); a single-row source stays on the cheaper bound path.
+    Answers are cached in the expression, which is built per execution, up to
+    4M identities. NULL import identities, `COLLECT`, `OPTIONAL MATCH` /
+    `WITH` / `RETURN` bodies, quantified groups, `shortestPath` and nested
+    subqueries keep the per-row path.
+- **Measured.** Fixture query, physical plans 2,705 → 53 (half in L0) and
+  2,305 → 49 (flushed). Wall time: debug 6.25 s → 0.29 s; release 1,383 →
+  105 ms (half in L0, batch 2) and 504 → 26 ms (flushed, default batch).
+  Answers are identical (2,584 / 2,238 / 120 / 66 / 188 / 180).
+  `topo_rewrites_unflushed_small_batches` took 56 s and `topo_rewrites_flushed`
+  84 s in a loaded run; most of a case is the other relations. The 300 s
+  timeout is left as it is, and its comment now records the new figure.
+- **Tests** (`cypher_read/exists_per_source_test.rs`):
+  - `exists_per_source_matches_per_row_and_brute_force`: 4 random graphs
+    (cycles, a self-loop and a parallel edge in each), schema and schemaless,
+    flushed and half-L0, batch default / 2 / 3. It covers three directions and
+    9 ranges (`""`, `*`, `*1..`, `*1..2`, `*2..3`, `*2..`, `*0..`, `*0..1`,
+    `*3`). The checks are: EXISTS against the per-row path and against a
+    brute-force trail search; NOT EXISTS as the complement; the
+    pattern-predicate spelling; COUNT against the per-row path and the
+    top-level enumeration. Six more shapes: a fresh intermediate, `WHERE`
+    on `a`, a third import, NULL endpoints from `OPTIONAL MATCH` (EXISTS and
+    COUNT), and an outer relationship variable.
+  - `exists_per_source_undirected_unbounded`: undirected unbounded ranges on a
+    fixed graph. On the random graphs they are exponential, so the random
+    graphs skip them.
+  - `exists_per_source_cost_does_not_scale_with_targets`: 30 x 30, batch
+    default and 2. The per-row form builds exactly 1 + 900 plans; the
+    per-source form builds at most 1 + 60.
+  - Three `BodyShape` unit tests in uni-query.
+  - Revert check: disabling `BatchGrouping::build` fails the cost test (900
+    sub-plans for 30 sources). A mutation that drops the grouping key fails
+    both oracle tests (`EXISTS per-source vs per-row`). Restored
+    byte-identically both times.
+- **Not changed.** At first I counted EXISTS executions into
+  `subquery_executions`. That broke
+  `unanchored_pattern_comprehension_test::a_subquery_in_the_body_still_takes_the_per_row_path`
+  (6 against 3), because the metric's meaning had changed. I reverted it, and
+  the cost test uses `physical_plans` instead. The earlier full-run failures
+  of that test and of `exists_per_source_matches_per_row_and_brute_force`
+  (reported above by another item) came from this in-progress state. Both
+  pass now.
+- **Verification.**
+  - uni-query lib: 507/507.
+  - uni-db integration, `cypher_read` + `cypher_path` + `bugs` + `perf` +
+    `topo`: 1480/1481. The one failure was the counter test above, now fixed
+    and passing.
+  - Exists tests in debug: 26 s, 14 s and 4 s.
+  - Full Cypher TCK: schemaless 3925/3926 and sidecar 3925/3926 (1 skipped),
+    0 failed.
+  - clippy `-D warnings` is clean on uni-query (`--lib --tests`) and uni-db
+    (`--lib --test integration`).
+- **Open (observed, not fixed).**
+  - An undirected unbounded VLP (`-[:R*]-`) under EXISTS is not run in
+    reachability mode. It enumerates trails: about 0.65 s for a
+    `count(*)`-sized enumeration on graphs of at most 10 edges, in release.
+  - On the same graphs, the per-row form with a `WHERE` inside the body
+    (`… WHERE a.id = a.id`) took 2.6–6 s against 0.65 s. One candidate cause,
+    unverified, is that a body `WHERE` also keeps the walk out of
+    reachability mode.
+  - Neither is decided here.
+
+### Wave C — percentiles exact, reachability from distances (C13/C14 follow-ups, 2026-10-18)
+
+- **Item 1: fallback `percentileDisc` ignored its percentile. Reproduced;
+  fixed.** `Executor::update_accumulators` (`executor/read.rs`) never
+  evaluated the second argument, and `Accumulator::new` fixed the percentile at
+  `0.0`. It now reads the first non-NULL percentile per group
+  (`Accumulator::set_percentile`, `wants_percentile`), with the same
+  `NumberOutOfRange` check as the DataFusion path. The fallback also turned a
+  float result into an integer (`numeric_to_value`: `10.0` became `10`); that
+  helper had no other caller and is gone.
+- **Item 2: DataFusion `percentileDisc` went through `f64`. Reproduced;
+  fixed.** Both planners (`df_planner.rs`, `df_expr.rs`) cast the input to
+  Float64 before the aggregate. The input now goes in uncast, and one UDAF
+  (`CypherPercentileUdaf`, disc and cont) keeps exact `Int`/`Float` values,
+  state as Cypher values. Its return type is the input's (`Int64`, `Float64`,
+  else a Cypher value). Both executors call one definition,
+  `uni_query_functions::percentile` (exact sort with NaN last, index
+  `round(p * (n - 1))`, interpolation of two integers in integer arithmetic,
+  so it is rounded once). A non-number percentile is now an error on both
+  paths; it was read as `0`.
+  - TCK `Aggregation6` expects only float inputs, so it did not see this. The
+    index rule is unchanged and both paths share it. Neo4j's implementation
+    is believed to use nearest rank, which would give `2` for
+    `percentileDisc([1,2,3,4], 0.5)` where this gives `3`. That was not checked
+    against Neo4j; it is a design question, left open.
+  - `bugs::numeric_functions_take_numbers` expected `Float(4.0)` for
+    `percentileDisc` over `[-2.5, 4]`. It now expects the input, `Int(4)`.
+- **Found while testing item 2: cross-label property type leak. Reproduced;
+  fixed.** `GraphScanExec::build_schemaless_vertex_schema` (`scan.rs`) typed
+  each property of a schemaless scan from the first label anywhere in the
+  schema that declared it. With `F.v FLOAT`, `MATCH (s:S) RETURN s.v` on the
+  undeclared `S` read `2^53 + 1` as `2^53`, a string as NULL, and
+  `WHERE s.v = 2^53 + 1` matched nothing. Read side only: the writer coerces
+  under a vertex's own labels. A property now takes a declared type only from
+  the scanned labels (agreeing). `MATCH (n)` is always the stored value.
+  - Locy's planner mirrored the old rule (`undeclared_property_arrow_type`). It
+    now returns `LargeBinary`, as its own comment said it should.
+  - Locy's `LargeBinary → Int64` coercion (`coerce_physical_expr`) read
+    through Float64. It now uses a new exact `_cypher_integer` UDF; a float
+    still truncates.
+  - Without these two Locy changes, `locy_schemaless_property_type_inference::partially_declared_schema_undeclared_label_round_trips`
+    and `locy_value_types_recursive_max` failed.
+  - The same first-wins lookup remains in `df_graph/common.rs`
+    `infer_expr_type` (correlated-subquery output schemas). It is open and not
+    probed.
+- **Item 3: undirected unbounded VLP under EXISTS. The premise was wrong; the
+  cost was real and is fixed.** Instrumenting the dispatch showed that
+  `Reachability` mode *was* engaged for `-[:R*]-` under EXISTS, directed or
+  not, with or without a body WHERE.
+  - The cost was inside that mode. On a cyclic graph (every undirected one with
+    an edge) `bfs_endpoints_only` kept a frontier to the hop ceiling. Each depth
+    then ran an exponential `has_trail_valid_path` search. Debug build: 295 ms
+    for 7 sources on a 10-edge graph, 3 s for a 5-clique, more than 150 s for a
+    6-clique.
+  - The schemaless `GraphVariableLengthTraverseMainExec::bfs` ignored the
+    output mode and listed every trail: a 6-clique took 7 s, or 20 s for
+    `DISTINCT`.
+  - Fix (`df_graph/trail_reach.rs`, `PathNfa::simple_chain_range`): for a plain
+    `[:T*min..max]` in Trail mode, decide from BFS distances. A shortest walk is
+    a trail, so for `v != s` the answer is `min <= dist <= max`. The shortest
+    closed trail is `1 + min over e of dist_{G-e}(u, s)`.
+  - Undecidable cases fall back per source: an accepted endpoint whose shortest
+    trail is shorter than `min`, i.e. a longest-trail question.
+  - The fallback search is now capped at the number of relationships reachable
+    from the source. It used to go to the ceiling and then emit a false
+    "default hop bound … results are incomplete" warning on any cyclic graph.
+  - The schemaless exec uses the same function (`reachable_endpoints`).
+  - Measured: 10-edge graph 295 ms to 1.4 ms (debug, VLP time); 4×K5 + K6 runs
+    in under 1 s, against more than 150 s / 7 s before.
+- **Item 4: body WHERE. Did not reproduce as stated.** With and without
+  `WHERE a.id = a.id`, the VLP ran in `Reachability` mode with equal VLP time.
+  The guarded form is slower (11 ms to 28 ms here) because it takes C14's
+  per-row path: `b` is named in the WHERE, so the body runs per pair. The walk
+  mode is not the cause. C14's 2.6–6 s against 0.65 s is consistent with the
+  old per-call search being multiplied by per-row execution, but that was not
+  re-measured on the old code.
+- **Tests.**
+  - `cypher_read::percentile_exact_test` (3): disc over ints, floats, mixed
+    and 2^53 sets on UNWIND, typed and schemaless columns, the fallback, L0 and
+    flushed, and grouped; cont exactness; bad arguments.
+  - `cypher_read::schemaless_property_type_scope_test` (1).
+  - `cypher_read::trail_reachability_test`:
+    - `matches_brute_force`: 4 random graphs of up to 15 edges plus a small
+      graph, 3 directions, 9 ranges, against a `(vertex, used-edge-set)`
+      exhaustive oracle. Covers EXISTS per-source and per-row, the pattern
+      predicate, `DISTINCT` and NOT EXISTS, and asserts no warnings.
+    - `does_not_list_trails`: 4×K5 + K6 under a 5 s deadline.
+  - Unit tests: `trail_reach::tests` (4) and `percentile::tests` (3), plus
+    doctests.
+  - `exists_per_source_test` helpers are now `pub(crate)` for reuse.
+- **Revert checks.** All failed as stated, then were restored byte-identically
+  (md5):
+  - fallback `set_percentile`: assertion;
+  - uncast DF input: assertion;
+  - scan label scoping: assertion (Float, NULL, empty filter);
+  - schema'd distance path: deadline error;
+  - schemaless distance path: deadline error;
+  - trail cap: the warning assertion.
+- **Verification.**
+  - uni-query + uni-query-functions lib: 816/816.
+  - uni-db integration full: 3483/3483.
+  - Cypher TCK, full: 3925/3925 in both schemaless and sidecar modes.
+  - Locy TCK: 530/530 in both modes.
+  - clippy `-D warnings` is clean on uni-query-functions and uni-query
+    (`--lib --tests`) and uni-db (`--lib --test integration`).
+- **Open.** An undirected unbounded range with `min >= 2` (`-[:R*2..]-`) keeps
+  the exponential per-depth search wherever an endpoint is nearer than `min`.
+  Other open items: `infer_expr_type` above; the percentile index rule
+  (unverified against Neo4j);
+  a named but unused relationship variable (`-[r:R*]-`) still forces
+  `StepVariable` enumeration.

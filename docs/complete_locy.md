@@ -1188,9 +1188,9 @@ ABDUCE flagged WHERE account.id = 'ACC-999' RETURN assumptions
 Returns `CommandResult::Abduce(AbductionResult)` containing `Vec<ValidatedModification>`.
 
 **Modification types:**
-- `RemoveEdge { source_var, target_var, edge_var, edge_type, match_properties }`
+- `RemoveEdge { source_var, target_var, edge_var, edge_type, match_properties, eid, source_vid, target_vid }` — the edge is identified by `eid` when the rule body binds it, else by its endpoints (`source_vid` is the edge's actual source)
 - `AddEdge { source_var, target_var, edge_type, properties }`
-- `ChangeProperty { element_var, property, old_value, new_value }`
+- `ChangeProperty { element_var, property, old_value, new_value, vid, eid }` — `element_var` is the rule body's variable; the entity is the node `vid` or the edge `eid`
 
 ## 13.6 EXPLAIN RULE (Proof Traces)
 
