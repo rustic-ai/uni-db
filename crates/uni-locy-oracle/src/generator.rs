@@ -30,8 +30,8 @@ use proptest::prelude::*;
 use crate::eval::{OracleError, check_program};
 use crate::ir::{
     Agg, ColKind, ColumnRead, Computed, Feature, Filter, FoldAgg, Generated, IsRef, OracleBest,
-    OracleClause, OracleFold, OracleProgram, OracleRule, PROB_SCALE, ProbComplement, RuleColumn,
-    Tuple, WireKind,
+    OracleClause, OracleFold, OracleProgram, OracleRule, PROB_SCALE, ProbComplement, ProbFactor,
+    RuleColumn, Tuple, WireKind,
 };
 use crate::ir::{CmpOp, Operand};
 use crate::surface::{
@@ -1156,6 +1156,51 @@ pub fn build_random_program(shape: &RandomShape) -> Generated {
                 best: None,
             });
         }
+        // `hop`: one edge, then a fact of `nor`. The fold input does not read
+        // `nor`'s probability, so the reference multiplies it in: a hop holds
+        // only when the edge and the `nor` fact both do.
+        stmts.push(clause(
+            "hop",
+            "({a}:Node)-[{e}:EDGE]->({m}:Node)",
+            vec![is_ref(&["m"], "nor", Some("b"))],
+            "FOLD {hop:hp} = MNOR({e}.w / 10.0)",
+            vec![key_var("a"), key_var("b"), own_col("hop", "hp")],
+        ));
+        after_folds.push(OracleRule {
+            name: "hop".to_string(),
+            columns: columns(&[
+                ("a", ColKind::Node),
+                ("b", ColKind::Node),
+                ("hp", ColKind::Prob),
+            ]),
+            key_count: 2,
+            clauses: vec![OracleClause {
+                base: first.clone(),
+                var_cols: var_cols(&[("a", 0), ("m", 1), ("w", 3)]),
+                pos_refs: vec![IsRef {
+                    rule: "nor".to_string(),
+                    subjects: vec!["m".to_string()],
+                    target: Some("b".to_string()),
+                    values: Vec::new(),
+                }],
+                neg_refs: Vec::new(),
+                yield_vars: ["a", "b", "hp"].map(String::from).to_vec(),
+                computed: vec![tenths("hp", "w")],
+                prob_complements: Vec::new(),
+                prob_factors: vec![ProbFactor {
+                    reference: 0,
+                    prob_column: 2,
+                    prob_var: "hp".to_string(),
+                }],
+                ..OracleClause::default()
+            }],
+            fold: Some(OracleFold {
+                key_count: 2,
+                aggs: vec![agg(Agg::NoisyOr, Some(2))],
+            }),
+            per_path: false,
+            best: None,
+        });
         stmts.push(clause(
             "safe",
             "({a}:Node), ({b}:Node)",
@@ -3191,6 +3236,11 @@ mod tests {
                      FOLD pb = {function}(e.w / 10.0) YIELD KEY a, KEY b, pb"
                 ));
             }
+            text.push(
+                "CREATE RULE hop AS MATCH (a:Node)-[e:EDGE]->(m:Node) WHERE m IS nor TO b \
+                 FOLD hp = MNOR(e.w / 10.0) YIELD KEY a, KEY b, hp"
+                    .to_string(),
+            );
             text.push(
                 "CREATE RULE safe AS MATCH (a:Node), (b:Node) WHERE a IS NOT nor TO b \
                  YIELD KEY a, KEY b, 1.0 AS pb PROB"

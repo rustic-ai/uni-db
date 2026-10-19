@@ -1257,7 +1257,7 @@ fn eval_entity_function(name: &str, args: &[Value]) -> Result<Value> {
             // A plain map is its own properties.
             (None, Value::Map(map)) => Value::Map(
                 map.iter()
-                    .filter(|(k, _)| !k.starts_with('_'))
+                    .filter(|(k, _)| !uni_common::core::schema::is_reserved_property_name(k))
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
             ),
@@ -1283,11 +1283,22 @@ fn eval_keys(arg: &Value) -> Result<Value> {
             // Entities (nodes/edges) are detected by internal fields (_vid, _eid).
             // For entities, null-valued properties don't exist (REMOVE sets them to Null).
             // For plain maps, null-valued keys are valid and must be included.
-            let is_entity =
-                map.contains_key("_vid") || map.contains_key("_eid") || map.contains_key("_labels");
-            let mut keys: Vec<&String> = map
+            // A schemaless or serialised entity nests its properties.
+            let (source, is_entity) = match uni_common::value::entity_property_container(map) {
+                Some(props) => (props, true),
+                None => (
+                    map,
+                    map.contains_key("_vid")
+                        || map.contains_key("_eid")
+                        || map.contains_key("_labels"),
+                ),
+            };
+            let mut keys: Vec<&String> = source
                 .iter()
-                .filter(|(k, v)| !k.starts_with('_') && (!is_entity || !v.is_null()))
+                .filter(|(k, v)| {
+                    !uni_common::core::schema::is_reserved_property_name(k)
+                        && (!is_entity || !v.is_null())
+                })
                 .map(|(k, _)| k)
                 .collect();
             keys.sort();
@@ -1971,21 +1982,27 @@ fn eval_range_function(args: &[Value]) -> Result<Value> {
     if args.len() < 2 || args.len() > 3 {
         return Err(anyhow!("range() requires 2 or 3 arguments"));
     }
-    let start = args[0]
-        .as_i64()
-        .ok_or_else(|| anyhow!("range() start must be an integer"))?;
-    let end = args[1]
-        .as_i64()
-        .ok_or_else(|| anyhow!("range() end must be an integer"))?;
+    // Null in, null out: an absent bound or step is not a wrong type, and it
+    // wins over every other check, including a zero step.
+    if args.iter().any(Value::is_null) {
+        return Ok(Value::Null);
+    }
+    let int_arg = |v: &Value, name: &str| {
+        v.as_i64().ok_or_else(|| {
+            anyhow!("ArgumentError: InvalidArgumentType - range() {name} must be an integer")
+        })
+    };
+    let start = int_arg(&args[0], "start")?;
+    let end = int_arg(&args[1], "end")?;
     let step = if args.len() == 3 {
-        args[2]
-            .as_i64()
-            .ok_or_else(|| anyhow!("range() step must be an integer"))?
+        int_arg(&args[2], "step")?
     } else {
         1
     };
     if step == 0 {
-        return Err(anyhow!("range() step cannot be zero"));
+        return Err(anyhow!(
+            "ArgumentError: NumberOutOfRange - range() step cannot be zero"
+        ));
     }
     let mut result = Vec::new();
     let mut i = start;
@@ -3716,5 +3733,35 @@ mod tests {
         let result = eval_scalar_function("range", &[i(i64::MAX - 1), i(i64::MAX)], None);
         // We only assert the absence of a panic; either Ok or Err is acceptable.
         let _ = result.is_ok();
+    }
+
+    /// `range` is null-in/null-out: any null argument answers null, ahead of
+    /// a non-integer or zero step in another position.
+    #[test]
+    fn test_range_null_argument_returns_null() {
+        let n = Value::Null;
+        for args in [
+            vec![i(0), n.clone()],
+            vec![n.clone(), i(3)],
+            vec![i(0), i(3), n.clone()],
+            vec![n.clone(), i(3), i(0)],
+            vec![Value::Float(0.5), n.clone()],
+        ] {
+            let result = eval_scalar_function("range", &args, None).unwrap();
+            assert_eq!(result, Value::Null, "range({args:?})");
+        }
+    }
+
+    /// A non-null, non-integer argument and a zero step keep their errors.
+    #[test]
+    fn test_range_type_and_step_errors_are_tagged() {
+        let err = eval_scalar_function("range", &[i(0), Value::String("a".into())], None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("InvalidArgumentType"), "{err}");
+        let err = eval_scalar_function("range", &[i(0), i(3), i(0)], None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("NumberOutOfRange"), "{err}");
     }
 }

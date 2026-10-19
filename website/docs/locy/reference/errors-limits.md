@@ -45,6 +45,7 @@ Locy has two warning channels. **Runtime warnings** (`RuntimeWarningCode`) surfa
 - `CrossGroupCorrelationNotExact`: shared evidence spans multiple aggregate groups; each group is exact internally, but correlation across groups is still approximate.
 - `FuzzyNotProbabilistic`: `LocyConfig.semiring = MaxMinProb` is active and a rule emits `PROB`. Fuzzy-truth math is being applied to a column declared as a probability; either pick the right semiring or drop the `PROB` annotation.
 - `TopKPruningCrossedDependency`: under `TopKProofs(k)`, pruning dropped a proof that shared a base fact with a kept proof. The kept set is an approximation; increase `k` for exactness.
+- `ProbabilityReadNotFactor`: a clause's `PROB` expression reads the probability of a positive `IS` reference other than as one product factor (`1 - p`, `p * p`). The referenced probability is not multiplied in again, and exact mode treats each such row as one independent event. See [Probabilistic Logic](../advanced/probabilistic-logic.md#positive-is-references-to-a-prob-rule).
 
 ### Compile-time warnings (`compile_warnings`)
 

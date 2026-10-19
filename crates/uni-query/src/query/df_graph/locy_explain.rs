@@ -76,13 +76,22 @@ pub struct ProvenanceAnnotation {
 #[derive(Debug)]
 pub struct ProvenanceStore {
     entries: RwLock<HashMap<Vec<u8>, Vec<ProvenanceAnnotation>>>,
+    /// The lineage of every `MNOR`/`MPROD` rule evaluated in this run, which
+    /// exact inference and shared-proof detection read.
+    lineage: super::locy_lineage::LineageStore,
 }
 
 impl ProvenanceStore {
     pub fn new() -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
+            lineage: super::locy_lineage::LineageStore::new(),
         }
+    }
+
+    /// The lineage of the run's `MNOR`/`MPROD` rules.
+    pub(crate) fn lineage(&self) -> &super::locy_lineage::LineageStore {
+        &self.lineage
     }
 
     /// Record a provenance annotation. First-derivation-wins: if the hash is already

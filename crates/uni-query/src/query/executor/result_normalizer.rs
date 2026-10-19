@@ -135,7 +135,7 @@ impl ResultNormalizer {
 
     /// Returns `true` if the key is a user-facing property (not an internal or reserved field).
     fn is_user_property(key: &str) -> bool {
-        !key.starts_with('_')
+        !uni_common::core::schema::is_reserved_property_name(key)
             && key != "properties"
             && key != "label"
             && key != "type"

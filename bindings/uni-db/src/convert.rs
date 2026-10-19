@@ -1682,6 +1682,8 @@ pub const UNI_CONFIG_KEYS: &[&str] = &[
     "fork_sweeper_interval",
     "disable_fork_sweeper",
     "vector_knn_default_k",
+    "lance_metadata_cache_bytes",
+    "lance_index_cache_bytes",
 ];
 
 /// Build a fresh [`uni_common::UniConfig`] from a Python dict.
@@ -1759,6 +1761,13 @@ pub fn apply_uni_config(
     }
     if let Some(v) = config.get("vector_knn_default_k") {
         uni_config.vector_knn_default_k = v.extract::<usize>(py)?;
+    }
+    // `None` keeps Lance's default capacity for that cache.
+    if let Some(v) = config.get("lance_metadata_cache_bytes") {
+        uni_config.lance_metadata_cache_bytes = v.extract::<Option<usize>>(py)?;
+    }
+    if let Some(v) = config.get("lance_index_cache_bytes") {
+        uni_config.lance_index_cache_bytes = v.extract::<Option<usize>>(py)?;
     }
     // Phase 4b — fork lifecycle config
     if let Some(v) = config.get("max_forks") {
@@ -1966,6 +1975,8 @@ pub fn database_metrics_to_py(
         wal_lsn: m.wal_lsn,
         total_queries: m.total_queries,
         total_commits: m.total_commits,
+        storage_metadata_cache_bytes: m.storage_metadata_cache_bytes,
+        storage_index_cache_bytes: m.storage_index_cache_bytes,
     })
 }
 
@@ -2001,6 +2012,11 @@ pub fn uni_config_to_py(py: Python, config: &uni_common::UniConfig) -> PyResult<
     )?;
     dict.set_item("disable_fork_sweeper", config.disable_fork_sweeper)?;
     dict.set_item("vector_knn_default_k", config.vector_knn_default_k)?;
+    dict.set_item(
+        "lance_metadata_cache_bytes",
+        config.lance_metadata_cache_bytes,
+    )?;
+    dict.set_item("lance_index_cache_bytes", config.lance_index_cache_bytes)?;
     Ok(dict.into())
 }
 

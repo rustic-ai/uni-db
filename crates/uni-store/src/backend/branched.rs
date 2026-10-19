@@ -719,6 +719,12 @@ impl StorageBackend for BranchedBackend {
         self.inner.clear_cache();
     }
 
+    /// A fork reads through its primary's backend, so it shares (and reports)
+    /// the primary's caches.
+    fn cache_usage(&self) -> Option<BackendCacheUsage> {
+        self.inner.cache_usage()
+    }
+
     fn base_uri(&self) -> &str {
         self.inner.base_uri()
     }

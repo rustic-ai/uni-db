@@ -548,9 +548,9 @@ impl BulkWriter {
 
         // A property named after a storage column is refused whether or not
         // constraint validation is on: it is a storage collision, not a
-        // constraint (see `WRITE_RESERVED_PROPERTY_NAMES`).
+        // constraint (see `RESERVED_PROPERTY_NAMES`).
         for props in &vertices {
-            uni_common::core::schema::check_written_property_names(props.keys())?;
+            uni_common::core::schema::check_written_property_names(props.keys(), &schema)?;
         }
 
         // Validate constraints before buffering (if enabled)
@@ -1112,7 +1112,10 @@ impl BulkWriter {
 
         // Unconditional, as for vertices.
         for edge in &edges {
-            uni_common::core::schema::check_written_property_names(edge.properties.keys())?;
+            uni_common::core::schema::check_written_property_names(
+                edge.properties.keys(),
+                &schema,
+            )?;
         }
 
         // Allocate EIDs in one IdAllocator mutex acquisition.

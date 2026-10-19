@@ -1183,8 +1183,8 @@ impl PreExistingProbe {
                 // captures: declared columns plus `ext_id`, with the
                 // undeclared properties unpacked from `overflow_json`.
                 // Every other storage column (`_vid`, `_uid`, `_deleted`,
-                // `_version`, `_labels`, `_created_at`, `_updated_at`) is
-                // `_`-prefixed and skipped, and the blob is never surfaced
+                // `_version`, `_labels`, `_created_at`, `_updated_at`) is a
+                // reserved name and skipped, and the blob is never surfaced
                 // as a property of its own.
                 let schema = batch.schema();
                 let property_cols: Vec<(usize, String)> = schema
@@ -1193,7 +1193,9 @@ impl PreExistingProbe {
                     .enumerate()
                     .filter_map(|(idx, f)| {
                         let name = f.name();
-                        if name.starts_with('_') || name == OVERFLOW_COLUMN {
+                        if uni_common::core::schema::is_reserved_property_name(name)
+                            || name == OVERFLOW_COLUMN
+                        {
                             None
                         } else {
                             Some((idx, name.clone()))

@@ -13,6 +13,7 @@
 
 use crate::api::error::UniError;
 use crate::core::id::{Eid, Vid};
+use crate::core::schema::is_reserved_property_name;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
@@ -762,7 +763,7 @@ impl Value {
 
         // User properties live under `_all_props` for a schemaless entity and
         // under `properties` for a serialised one; otherwise take the
-        // non-underscore keys, which is how a flattened projection spells them.
+        // non-reserved keys, which is how a flattened projection spells them.
         // A null-valued property does not exist on an entity under the property
         // graph model — `SET n.p = null` removes it — so the native form must
         // not carry one. The map form can: its flattened columns are read
@@ -777,22 +778,22 @@ impl Value {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect()
         };
-        let properties: HashMap<String, Value> = match map
-            .get("_all_props")
-            .or_else(|| map.get("properties"))
-        {
-            Some(Value::Map(props)) => keep(props),
-            // Flattened projection: the user properties are the plain keys.
-            // `properties` is excluded by name as well as by the underscore
-            // rule — when it is present but null, meaning an entity with
-            // none, it is still a container key, and collecting it would
-            // invent a user property called "properties" holding null.
-            _ => map
-                .iter()
-                .filter(|(k, v)| !k.starts_with('_') && k.as_str() != "properties" && !v.is_null())
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-        };
+        let properties: HashMap<String, Value> =
+            match map.get("_all_props").or_else(|| map.get("properties")) {
+                Some(Value::Map(props)) => keep(props),
+                // Flattened projection: the user properties are the plain keys.
+                // `properties` is excluded by name as well as by the reserved-name
+                // rule — when it is present but null, meaning an entity with
+                // none, it is still a container key, and collecting it would
+                // invent a user property called "properties" holding null.
+                _ => map
+                    .iter()
+                    .filter(|(k, v)| {
+                        !is_reserved_property_name(k) && k.as_str() != "properties" && !v.is_null()
+                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect(),
+            };
 
         // `Option` so the edge arm can decline: returning `self` directly from
         // inside the match would move it while `map` still borrows it.
@@ -905,17 +906,17 @@ impl Value {
         let (props, is_entity): (&HashMap<String, Value>, bool) = match self {
             Value::Node(node) => (&node.properties, true),
             Value::Edge(edge) => (&edge.properties, true),
-            Value::Map(map) => match map.get("_all_props") {
-                // A schemaless entity keeps its properties in `_all_props`;
-                // the top level holds system fields only.
-                Some(Value::Map(all)) => (all, true),
-                _ => (map, false),
+            // A nested container holds an entity's properties; the top level
+            // holds system fields only.
+            Value::Map(map) => match entity_property_container(map) {
+                Some(props) => (props, true),
+                None => (map, false),
             },
             _ => return None,
         };
         let mut names: Vec<String> = props
             .iter()
-            .filter(|(k, v)| !k.starts_with('_') && (!is_entity || !v.is_null()))
+            .filter(|(k, v)| !is_reserved_property_name(k) && (!is_entity || !v.is_null()))
             .map(|(k, _)| k.clone())
             .collect();
         names.sort();
@@ -936,17 +937,14 @@ impl Value {
             Value::Edge(edge) => &edge.properties,
             Value::Map(map) => {
                 entity_ref_from_map(map)?;
-                match map.get("_all_props") {
-                    Some(Value::Map(all)) => all,
-                    _ => map,
-                }
+                entity_property_container(map).unwrap_or(map)
             }
             _ => return None,
         };
         Some(
             props
                 .iter()
-                .filter(|(k, v)| !k.starts_with('_') && !v.is_null())
+                .filter(|(k, v)| !is_reserved_property_name(k) && !v.is_null())
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         )
@@ -2090,6 +2088,26 @@ fn extract_properties(value: &Value) -> HashMap<String, Value> {
     match value {
         Value::Map(m) => m.clone(),
         _ => HashMap::new(),
+    }
+}
+
+/// The nested map holding an entity's user properties in its map encoding.
+///
+/// A schemaless entity keeps them under `_all_props`, and a serialised one
+/// (a path element, for one) under `properties`; a flattened projection has no
+/// container and spells them as top-level keys, for which this is `None`.
+/// `properties` counts only on a map that encodes an entity, so a plain map
+/// with a `properties` entry keeps it as an ordinary key. Every reader of an
+/// entity's property map asks this, so `keys()` and `properties()` agree with
+/// property access about where the properties are.
+#[must_use]
+pub fn entity_property_container(map: &HashMap<String, Value>) -> Option<&HashMap<String, Value>> {
+    match map.get("_all_props") {
+        Some(Value::Map(all)) => Some(all),
+        _ => match map.get("properties") {
+            Some(Value::Map(props)) if entity_ref_from_map(map).is_some() => Some(props),
+            _ => None,
+        },
     }
 }
 

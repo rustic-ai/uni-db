@@ -218,6 +218,12 @@ ASSUME {
 }
 ```
 
+The body may hold rules, `QUERY`, Cypher, `DERIVE` and nested `ASSUME`.
+`ABDUCE` and `EXPLAIN RULE` in an ASSUME body are compile errors: run them at
+the top level, or inside a transaction you roll back (`tx()` or
+`session.scratch()`). See
+[DERIVE, ASSUME, ABDUCE](advanced/derive-assume-abduce.md#assume).
+
 ## Abductive Reasoning
 
 ```locy

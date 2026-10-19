@@ -63,6 +63,7 @@ pub mod locy_explain;
 pub mod locy_fixpoint;
 pub mod locy_fold;
 pub mod locy_generate;
+pub(crate) mod locy_lineage;
 pub mod locy_model_invoke;
 pub mod locy_priority;
 pub mod locy_profile;

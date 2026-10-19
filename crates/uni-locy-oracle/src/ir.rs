@@ -92,6 +92,24 @@ pub struct ProbComplement {
     pub prob_var: String,
 }
 
+/// A positive reference to a PROB rule from a clause with a PROB variable.
+///
+/// The row holds only when the referenced fact does, so the fact's
+/// probability is multiplied into the clause's PROB variable — the positive
+/// mirror of [`ProbComplement`]. A clause whose PROB expression already reads
+/// the referenced probability as a factor has no `ProbFactor` for it: it is
+/// counted once, by that expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbFactor {
+    /// Index of the reference in the clause's
+    /// [`pos_refs`](OracleClause::pos_refs).
+    pub reference: usize,
+    /// The referenced rule's PROB column.
+    pub prob_column: usize,
+    /// This clause's PROB variable, multiplied in place.
+    pub prob_var: String,
+}
+
 /// The kind of value a rule column or a clause variable holds.
 ///
 /// Every value is an `i64` in the oracle, so the kind is what keeps values of
@@ -260,6 +278,9 @@ pub struct OracleClause {
     pub computed: Vec<Computed>,
     /// Probabilistic `IS NOT` references, applied after `computed`.
     pub prob_complements: Vec<ProbComplement>,
+    /// Positive references to PROB rules whose probability is multiplied
+    /// into the clause's PROB variable, applied after `computed`.
+    pub prob_factors: Vec<ProbFactor>,
 }
 
 /// A rule: a named relation defined as the union of its [`clauses`](OracleRule::clauses).

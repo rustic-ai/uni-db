@@ -404,6 +404,14 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// Clear all cached state.
     fn clear_cache(&self) {}
 
+    /// Occupancy of the backend's own in-process caches, if it has any.
+    ///
+    /// A cheap, synchronous read. `None` (the default) means the backend
+    /// keeps no such cache, not that it is empty.
+    fn cache_usage(&self) -> Option<BackendCacheUsage> {
+        None
+    }
+
     // ========================
     // Metadata
     // ========================

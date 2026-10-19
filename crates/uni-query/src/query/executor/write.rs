@@ -249,7 +249,10 @@ impl Executor {
                     // Filter out internal bookkeeping keys
                     let user_props: HashMap<String, Value> = map
                         .iter()
-                        .filter(|(k, _)| !k.starts_with('_') && k.as_str() != "ext_id")
+                        .filter(|(k, _)| {
+                            !uni_common::core::schema::is_reserved_property_name(k)
+                                && k.as_str() != "ext_id"
+                        })
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
                     // When mutation output omits dotted property columns, user
@@ -395,7 +398,9 @@ impl Executor {
                 // Update the in-memory map-encoded node binding
                 if let Some(Value::Map(node_map)) = row.get_mut(variable) {
                     // Remove old user property keys, keep internal fields
-                    node_map.retain(|k, _| k.starts_with('_') || k == "ext_id");
+                    node_map.retain(|k, _| {
+                        uni_common::core::schema::is_reserved_property_name(k) || k == "ext_id"
+                    });
                     // Build effective (non-null) properties
                     let effective: HashMap<String, Value> =
                         enriched.into_iter().filter(|(_, v)| !v.is_null()).collect();
@@ -476,7 +481,7 @@ impl Executor {
                     .await?;
                 // Update the in-memory map-encoded edge binding
                 if let Some(Value::Map(edge_map)) = row.get_mut(variable) {
-                    edge_map.retain(|k, _| k.starts_with('_'));
+                    edge_map.retain(|k, _| uni_common::core::schema::is_reserved_property_name(k));
                     let effective: HashMap<String, Value> = write_props
                         .into_iter()
                         .filter(|(_, v)| !v.is_null())
@@ -925,7 +930,9 @@ impl Executor {
                                 value.as_str().and_then(|s| s.parse().ok()).unwrap_or(0)
                             });
                             dst_vid = Some(Vid::new(raw));
-                        } else if !col_name.starts_with('_') && !value.is_null() {
+                        } else if !uni_common::core::schema::is_reserved_property_name(col_name)
+                            && !value.is_null()
+                        {
                             properties.insert(col_name.clone(), value);
                         }
                     }
@@ -989,7 +996,7 @@ impl Executor {
                         let col_name = field.name();
 
                         // Skip internal columns
-                        if col_name.starts_with('_') {
+                        if uni_common::core::schema::is_reserved_property_name(col_name) {
                             continue;
                         }
 
@@ -1947,6 +1954,33 @@ impl Executor {
         Some((src_var.clone(), dst_var.clone(), type_id, dir, rel_var))
     }
 
+    /// Whether every key of a keyed MERGE pattern on `label` is a column the
+    /// persisted key scan can filter on.
+    ///
+    /// On a declared label that scan filters the per-label table by the key
+    /// columns, and an undeclared key has none: it lives in `overflow_json`,
+    /// so the scan failed with `No field named …` once the label had been
+    /// flushed. Such a pattern takes the general path, which reads the
+    /// overflow properties. A schemaless label is always eligible: its lookup
+    /// decodes each row's full property map.
+    fn merge_keys_are_stored_columns(&self, node: &NodePattern, label: &str) -> bool {
+        let schema = self.storage.schema_manager().schema();
+        if schema.get_label_case_insensitive(label).is_none() {
+            return true;
+        }
+        let declared = schema
+            .properties
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(label))
+            .map(|(_, props)| props);
+        match &node.properties {
+            Some(Expr::Map(entries)) => entries.iter().all(|(k, _)| {
+                k == "ext_id" || declared.is_some_and(|props| props.contains_key(k.as_str()))
+            }),
+            _ => true,
+        }
+    }
+
     /// Whether a MERGE key can take the batched persisted-scan fast path.
     ///
     /// `false` sends the caller to the general per-row path, so unusual key
@@ -2729,6 +2763,8 @@ impl Executor {
             (None, Some(shape)) => Some((shape.keyed, &shape.keyed_label)),
             _ => None,
         };
+        let key_source =
+            key_source.filter(|(node, label)| self.merge_keys_are_stored_columns(node, label));
         if let Some((node, label)) = key_source {
             let mut key_names: Vec<String> = match &node.properties {
                 Some(Expr::Map(entries)) => entries.iter().map(|(k, _)| k.clone()).collect(),
@@ -5402,7 +5438,7 @@ impl Executor {
                 let labels = val.entity_labels().unwrap_or_default();
                 let properties: HashMap<String, Value> = map
                     .iter()
-                    .filter(|(k, _)| !k.starts_with('_'))
+                    .filter(|(k, _)| !uni_common::core::schema::is_reserved_property_name(k))
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 Some(uni_common::value::Node {
@@ -5438,7 +5474,7 @@ impl Executor {
                 let (src, dst) = (src?, dst?);
                 let properties: HashMap<String, Value> = map
                     .iter()
-                    .filter(|(k, _)| !k.starts_with('_'))
+                    .filter(|(k, _)| !uni_common::core::schema::is_reserved_property_name(k))
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 Some(uni_common::value::Edge {

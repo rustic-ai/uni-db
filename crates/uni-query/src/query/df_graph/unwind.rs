@@ -566,14 +566,15 @@ impl GraphUnwindStream {
                                 _ => {
                                     return Err(datafusion::error::DataFusionError::Execution(
                                         format!(
-                                            "range() requires integer arguments, got start={start:?}, end={end:?}, step={step:?}"
+                                            "ArgumentError: InvalidArgumentType - range() requires integer arguments, got start={start:?}, end={end:?}, step={step:?}"
                                         ),
                                     ));
                                 }
                             };
                             if st == 0 {
                                 return Err(datafusion::error::DataFusionError::Execution(
-                                    "range() step argument cannot be 0".to_string(),
+                                    "ArgumentError: NumberOutOfRange - range() step cannot be zero"
+                                        .to_string(),
                                 ));
                             }
                             let mut result = Vec::new();
@@ -1521,6 +1522,34 @@ mod tests {
     fn test_range_zero_step_errors() {
         let err = eval_scalar_fn("range", vec![int_lit(1), int_lit(5), int_lit(0)]);
         assert!(err.is_err(), "range(1, 5, 0) must error, got {err:?}");
+    }
+
+    /// `range` is null-in/null-out here as in the UDF: a null argument
+    /// answers null (so `UNWIND` produces no rows), even beside a zero step,
+    /// and the errors that remain carry their openCypher codes.
+    #[test]
+    fn test_range_null_argument_returns_null() {
+        let null = || Expr::Literal(CypherLiteral::Null);
+        for args in [
+            vec![int_lit(0), null()],
+            vec![null(), int_lit(3)],
+            vec![int_lit(0), int_lit(3), null()],
+            vec![null(), int_lit(3), int_lit(0)],
+        ] {
+            let result = eval_scalar_fn("range", args.clone()).unwrap();
+            assert_eq!(result, Value::Null, "range({args:?})");
+        }
+        let err = eval_scalar_fn("range", vec![int_lit(1), int_lit(5), int_lit(0)])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("NumberOutOfRange"), "{err}");
+        let err = eval_scalar_fn(
+            "range",
+            vec![int_lit(0), Expr::Literal(CypherLiteral::Float(1.5))],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("InvalidArgumentType"), "{err}");
     }
 
     /// H5: float bounds are a type error (openCypher), NOT a silent empty list.

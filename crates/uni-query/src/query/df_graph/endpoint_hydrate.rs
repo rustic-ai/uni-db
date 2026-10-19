@@ -328,7 +328,7 @@ fn hydrate_node(
     let mut properties: HashMap<String, Value> = HashMap::new();
     if let Some(props) = props {
         for (k, v) in props.iter() {
-            if !k.starts_with('_') {
+            if !uni_common::core::schema::is_reserved_property_name(k) {
                 properties.insert(k.clone(), v.clone());
             }
         }

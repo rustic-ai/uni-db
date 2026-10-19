@@ -70,6 +70,8 @@ def test_every_accepted_key_is_accepted(tmp_path):
         "fork_sweeper_interval": timedelta(seconds=30),
         "disable_fork_sweeper": True,
         "vector_knn_default_k": 500,
+        "lance_metadata_cache_bytes": 64 * 1024 * 1024,
+        "lance_index_cache_bytes": None,
     }
     # One at a time, so a failure names the key rather than the whole dict.
     for key, value in accepted.items():
@@ -178,3 +180,69 @@ def test_vector_knn_default_k_larger_than_the_label_does_not_warn(tmp_path):
     result = session.query("MATCH (d:Doc) WHERE d.emb ~= [1.0, 0.0] RETURN d.id")
     assert len(result) == 10
     assert not any("vector_knn_default_k" in w.message for w in result.warnings)
+
+
+# --- Lance session cache sizing ---------------------------------------------
+
+_LANCE_CAP = 16 * 1024
+
+
+def _lance_cache_bytes(tmp_path, name, config):
+    """Run a flush-and-read workload; return `(metadata, index)` cache bytes.
+
+    Each flush writes a new Lance version whose metadata the next read caches,
+    and the indexed lookup opens the scalar index, so uncapped both caches
+    grow past `_LANCE_CAP`.
+    """
+    builder = _builder(tmp_path, name)
+    if config:
+        builder = builder.config(config)
+    db = builder.build()
+    (
+        db.schema()
+        .label("Doc")
+        .property("n", "int")
+        .property("title", "string")
+        .index("n", "btree")
+        .done()
+        .apply()
+    )
+    session = db.session()
+    for r in range(12):
+        tx = session.tx()
+        tx.execute(
+            f"UNWIND range(1, 50) AS i CREATE (:Doc {{n: {r} * 100 + i, title: 'doc'}})"
+        )
+        tx.commit()
+        db.flush()
+        session.query(f"MATCH (d:Doc) WHERE d.n = {r * 100 + 7} RETURN d.title")
+        session.query("MATCH (d:Doc) RETURN count(d)")
+    m = db.metrics()
+    return db, m.storage_metadata_cache_bytes, m.storage_index_cache_bytes
+
+
+def test_lance_cache_caps_reach_the_storage_engine(tmp_path):
+    """The keys are honoured, not merely accepted: the live cache occupancy
+    stays under the cap. The uncapped run is what makes that discriminating --
+    it shows the same workload overflows the cap without it."""
+    _db, meta, index = _lance_cache_bytes(tmp_path, "uncapped", None)
+    assert meta > _LANCE_CAP and index > _LANCE_CAP, (meta, index)
+
+    db, meta, index = _lance_cache_bytes(
+        tmp_path,
+        "capped",
+        {
+            "lance_metadata_cache_bytes": _LANCE_CAP,
+            "lance_index_cache_bytes": _LANCE_CAP,
+        },
+    )
+    assert meta <= _LANCE_CAP, meta
+    assert index <= _LANCE_CAP, index
+    assert db.config()["lance_metadata_cache_bytes"] == _LANCE_CAP
+    assert db.config()["lance_index_cache_bytes"] == _LANCE_CAP
+
+
+def test_lance_cache_keys_default_to_none(tmp_path):
+    db = _builder(tmp_path).build()
+    assert db.config()["lance_metadata_cache_bytes"] is None
+    assert db.config()["lance_index_cache_bytes"] is None

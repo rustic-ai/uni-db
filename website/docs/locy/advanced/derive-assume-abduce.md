@@ -49,6 +49,32 @@ ASSUME {
 
 Think of this as savepoint-scoped what-if execution.
 
+The ASSUME command's result is the rows of the `QUERY` and Cypher commands in
+its body. A body may also define rules, `DERIVE` (the derived edges are part of
+the hypothetical graph, so a later Cypher command in the body reads them), and
+nest another `ASSUME`.
+
+`ABDUCE` and `EXPLAIN RULE` are **not allowed** in an ASSUME body, at any
+nesting depth: the program fails to compile with
+`LocyCompileError::AssumeBodyCommandNotAllowed`. Their results are not rows, so
+an ASSUME has nowhere to put them. To combine either with a hypothetical change:
+
+- run it at the top level after the ASSUME, against the stored graph;
+- apply the change in a transaction and roll it back: `tx = session.tx()`,
+  mutate, `tx.locy("ABDUCE ...")`, `tx.rollback()`;
+- or use a scratch transaction (`session.scratch()` in Python,
+  `Session::scratch()` in Rust), which behaves like `tx()` but refuses
+  `commit()`, so its writes are always discarded.
+
+```locy
+// Rejected: ABDUCE inside the ASSUME body
+ASSUME {
+  CREATE (:Node {name: 'X'})-[:EDGE]->(:Node {name: 'Y'})
+} THEN {
+  ABDUCE NOT reachable WHERE a.name = 'A'
+}
+```
+
 ## ABDUCE
 
 `ABDUCE` asks: "what minimal changes would make (or prevent) this conclusion hold?"

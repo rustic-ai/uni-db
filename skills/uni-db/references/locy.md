@@ -519,22 +519,22 @@ CREATE RULE safe AS
 - If `a` has risk 0.8 in `risky`: `confidence = 1 - 0.8 = 0.2`
 - If `a` is not in `risky` at all: `confidence = 1.0`
 
-Multiple IS/IS NOT references with PROB in a clause multiply their probability terms.
+A positive `IS` reference to a PROB rule multiplies the referenced probability `p` into the calling rule's PROB value (the mirror of `IS NOT`'s `1 - p`), unless the clause's PROB expression already reads `p` as one product factor (`FOLD p = MNOR(p)`, `MNOR(e.w * p)`): count once. Any other read (`1 - p`) is not multiplied and raises `ProbabilityReadNotFactor`. Over `s -0.7-> t`, `s -0.3-> m -0.5-> t`, a reachability `MNOR(e.p)` gives `reach(s,t) = 1 - 0.3 * (1 - 0.15) = 0.745`.
 
 ### Shared Proof Detection
 
-When recursive rules have diamond-shaped derivation graphs, multiple proof paths may share base facts, violating the independence assumption. Uni detects this via a DerivationTracker and emits `SharedProbabilisticDependency` warning.
+When two proofs of one fact rest on the same evidence (the same edge, the same referenced fact, or the fact itself through a cycle), the independence assumption fails and Uni emits `SharedProbabilisticDependency`. Shared nodes alone are not shared evidence: the diamond above warns about nothing. Without a warning, default and exact mode agree.
 
 ### Exact Probability (BDD-Based)
 
-When `exact_probability = true`, shared-proof groups use BDD-based weighted model counting:
-1. Collect unique base facts across derivation rows
-2. Build BDD variable set (one per base fact)
-3. Per derivation row: AND its base-fact variables
-4. Combine rows: OR for MNOR, AND for MPROD
-5. Evaluate via Shannon expansion
+When `exact_probability = true`, each shared fact is recomputed under possible-worlds semantics:
+1. Each derivation row = its own event AND the formula of every positively referenced fact (rows over the same expression and the same nodes/relationships share one event)
+2. A fact = OR (MNOR) or AND (MPROD) of its rows, as a least fixpoint
+3. Build a BDD over the events and evaluate via Shannon expansion
 
-Fallback: when unique base facts exceed `max_bdd_variables` (default 1000), falls back to independence mode with `BddLimitExceeded` warning.
+Example: `A -0.5-> B -0.4-> C -0.6-> D` plus `A -0.3-> C`: both proofs of `reach(A,D)` need `C -> D`; exact 0.264, independence 0.2784.
+
+Fallback: when a fact's formula needs more than `max_bdd_variables` (default 1000) events, falls back to independence mode with `BddLimitExceeded` warning.
 
 ### Top-K Proof Filtering
 
@@ -593,6 +593,8 @@ THEN {
 ```
 
 Execution: fork L0 buffer -> apply mutations -> re-evaluate strata -> execute body -> rollback. Database is never permanently modified. Can be nested. Returns `CommandResult::Assume(Vec<FactRow>)`.
+
+The result is the rows of the body's `QUERY` and Cypher commands. `ABDUCE` and `EXPLAIN RULE` inside an ASSUME body (at any nesting depth) are compile errors (`LocyCompileError::AssumeBodyCommandNotAllowed`): run them at the top level after the ASSUME, or apply the change in `tx()` / `session.scratch()`, run the command there, and roll back. `DERIVE` and nested `ASSUME` are allowed.
 
 ### ABDUCE (Abductive Reasoning)
 

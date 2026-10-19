@@ -236,6 +236,7 @@ An async query session with scoped variables.
 | `async prepare(cypher: str) -> PreparedQuery` | — |
 | `async prepare_locy(program: str) -> PreparedLocy` | — |
 | `async tx(timeout: float | None=None) -> AsyncTransaction` | — |
+| `async scratch() -> AsyncTransaction` | Begin a scratch transaction: like ``tx()``, but ``commit()`` is |
 | `tx_with() -> AsyncTransactionBuilder` | — |
 | `fork(name: str) -> AsyncForkBuilder` | — |
 | `fork_schema() -> AsyncForkSchemaBuilder` | — |
@@ -884,6 +885,8 @@ Database-wide metrics snapshot.
 | `wal_lsn` | `int` |
 | `total_queries` | `int` |
 | `total_commits` | `int` |
+| `storage_metadata_cache_bytes` | `int` |
+| `storage_index_cache_bytes` | `int` |
 
 ---
 
@@ -1845,6 +1848,7 @@ A query session with scoped variables.
 | `prepare(cypher: str) -> PreparedQuery` | — |
 | `prepare_locy(program: str) -> PreparedLocy` | — |
 | `tx() -> Transaction` | — |
+| `scratch() -> Transaction` | Begin a scratch transaction: like ``tx()``, but ``commit()`` is |
 | `tx_with() -> TransactionBuilder` | — |
 | `fork(name: str) -> ForkBuilder` | — |
 | `fork_schema() -> ForkSchemaBuilder` | — |

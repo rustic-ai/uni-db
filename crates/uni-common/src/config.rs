@@ -545,6 +545,29 @@ pub struct UniConfig {
     /// nothing.
     pub vector_knn_default_k: usize,
 
+    /// Capacity in bytes of Lance's metadata cache for this database
+    /// (default: `None`, Lance's own default of 1 GiB).
+    ///
+    /// Every Lance dataset this database opens through its storage backend
+    /// shares one Lance session, which owns two caches: this one (manifests,
+    /// fragment and file metadata) and the index cache sized by
+    /// [`Self::lance_index_cache_bytes`]. A fork shares its primary's
+    /// session. The caches fill as tables are opened, flushed and indexed and
+    /// are only trimmed when full, so a long-running process that flushes
+    /// often holds up to the full capacity. Set this to bound that memory;
+    /// `Some(0)` disables the cache. Misses are re-read from storage, so a
+    /// smaller cache costs I/O, never correctness.
+    pub lance_metadata_cache_bytes: Option<usize>,
+
+    /// Capacity in bytes of Lance's index cache for this database
+    /// (default: `None`, Lance's own default of 6 GiB).
+    ///
+    /// Holds opened scalar, vector and full-text index structures. A cache
+    /// too small for the working set of a vector index re-reads and
+    /// re-decodes it on every search, so size it above the index if ANN
+    /// latency matters. See [`Self::lance_metadata_cache_bytes`] for scope.
+    pub lance_index_cache_bytes: Option<usize>,
+
     /// Object store resilience configuration
     pub object_store: ObjectStoreConfig,
 
@@ -781,6 +804,8 @@ impl Default for UniConfig {
             max_compaction_rows: 5_000_000,             // 5M rows
             max_recursive_cte_iterations: 1000,
             vector_knn_default_k: DEFAULT_VECTOR_KNN_K,
+            lance_metadata_cache_bytes: None,
+            lance_index_cache_bytes: None,
             object_store: ObjectStoreConfig::default(),
             index_rebuild: IndexRebuildConfig::default(),
             strict_schema: false,

@@ -291,7 +291,10 @@ impl UniWorld {
         let insert_props =
             |snapshot: &mut HashMap<String, Value>, id: u64, props: &HashMap<String, Value>| {
                 for (k, v) in props {
-                    if !k.starts_with('_') && k != "ext_id" && !v.is_null() {
+                    if !uni_common::core::schema::is_reserved_property_name(k)
+                        && k != "ext_id"
+                        && !v.is_null()
+                    {
                         snapshot.insert(format!("{}:{}:{}", prefix, id, k), v.clone());
                     }
                 }

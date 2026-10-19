@@ -133,12 +133,30 @@ pub fn check(
 
         let mut yield_schema = infer_yield_schema(rule_name, definitions)?;
 
-        // Implicit PROB: if a fold uses MNOR/MPROD, mark the matching yield column as PROB
+        // Implicit PROB: if a fold uses MNOR/MPROD, mark the yield column it
+        // lands in as PROB — under its YIELD alias when renamed
+        // (`FOLD prob = MNOR(..) YIELD prob AS pr`), which was left unmarked.
         for def in definitions.iter() {
+            let aliases: Vec<(&str, &str)> = match &def.output {
+                RuleOutput::Yield(yc) => yc
+                    .items
+                    .iter()
+                    .filter_map(|item| match (&item.expr, &item.alias) {
+                        (Expr::Variable(v), Some(alias)) => Some((v.as_str(), alias.as_str())),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            };
             for_each_fold_call(&def.fold, |fold, name, _args| {
-                if matches!(name.to_uppercase().as_str(), "MNOR" | "MPROD")
-                    && let Some(col) = yield_schema.iter_mut().find(|c| c.name == fold.name)
-                {
+                if !matches!(name.to_uppercase().as_str(), "MNOR" | "MPROD") {
+                    return;
+                }
+                let column = aliases
+                    .iter()
+                    .find(|(v, _)| *v == fold.name)
+                    .map_or(fold.name.as_str(), |(_, alias)| alias);
+                if let Some(col) = yield_schema.iter_mut().find(|c| c.name == column) {
                     col.is_prob = true;
                 }
             });

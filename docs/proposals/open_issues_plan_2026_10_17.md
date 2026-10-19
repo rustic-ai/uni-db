@@ -2877,3 +2877,281 @@ fallback executor, DISTINCT aggregates). Done, uncommitted.**
   (unverified against Neo4j);
   a named but unused relationship variable (`-[r:R*]-`) still forces
   `StepVariable` enumeration.
+
+**Wave C outcome: exact-mode probability through an IS reference (0.745 vs
+0.79). Stopped at the TCK; no code changed.** (Superseded: the decisions were
+approved and implemented; see the next block.)
+- **Derivation.** The diamond has three independent edges: X = s→t (0.7),
+  Y = s→m (0.3), Z = m→t (0.5). Under possible-worlds semantics, `reach(s,t)`
+  holds iff X ∨ (Y ∧ Z). P = 1 − (1 − 0.7)(1 − 0.3·0.5) = 1 − 0.3·0.85 =
+  **0.745**. The terms do not share a variable, so the independence evaluation
+  of the same formula also gives 0.745.
+- **Where 0.79 comes from.** 0.79 = 1 − (1 − 0.7)(1 − 0.3) = P(X ∨ Y). That
+  treats `mid IS reach TO b` as certain, so worlds where Y holds and Z fails
+  still derive `reach(s,t)`. It is not double counting. The IS reference is a
+  dropped conjunct. The TCK scenario "BDD mode produces numeric probability
+  for MNOR diamond" (`monotonic/ExactProbability.feature`) is wrong under
+  possible-worlds semantics. So is "MPROD diamond with exact_probability"
+  (0.21 = 0.7·0.3; possible worlds give 0.7·0.3·0.5 = 0.105).
+- **Mechanism (measured).** The pre-fold `reach` rows carry `a, b, prob,
+  __deriv_clause, __deriv_eid_e, __deriv_vid_mid`. The provenance join for
+  `mid IS reach TO b` is `[("mid", "a")]`: it is keyed on a body column `mid`
+  that the rows do not carry (only `__deriv_vid_mid`), and it omits the `TO b`
+  target. `collect_is_ref_inputs` (`locy_fixpoint.rs`) therefore records no
+  support. `detect_shared_lineage` falls to its Tier-2 structural flag, and
+  `apply_exact_wmc` treats the recursive row as a base fact weighted by its own
+  `prob` (0.3). The BDD is X ∨ Y = 0.79, the independence value. The
+  `SharedProbabilisticDependency` warning on this diamond is a false positive.
+  Probe: exact and default mode both return 0.79. With two parallel s→t edges
+  at 0.5, both return 0.825; possible worlds give 0.7875.
+- **Why this needs a decision.** Positive IS is a Boolean semi-join in the
+  runtime (`target_has_prob` is read only for `IS NOT`). The TCK also relies on
+  a "read the referenced PROB explicitly" style: `FOLD p = MNOR(p)` in
+  `ProbabilisticStress` B2, and `FOLD pen = MNOR(hz)` in the complement chain.
+  If exact mode simply conjoined each referenced fact's event with the row's
+  weight, those programs would count the referenced probability twice (p²).
+  A correct exact mode has to tell a weight that reads the referenced PROB from
+  one that does not. `docs/complete_locy.md` §12.3 ("Multiple IS / IS NOT
+  references with PROB ... multiply") describes neither runtime behavior.
+- **Open.** The TCK change (0.79 → 0.745, 0.21 → 0.105) needs approval, as
+  does how a weight that reads the referenced PROB is counted. The provenance
+  join, the recursive lineage formula and per-row variable identity then need
+  reworking.
+
+### Wave C — ABDUCE / EXPLAIN RULE in an ASSUME body become compile errors (2026-10-18)
+
+Decision (user): reject rather than surface. Follows the B-wave note above
+("An ASSUME body discards ABDUCE results").
+
+- **Defect reproduced:** `evaluate_assume` (`crates/uni-query/src/query/df_graph/locy_assume.rs`,
+  body-command loop) kept only `CommandResult::Query` / `Cypher` rows; an ABDUCE
+  or EXPLAIN RULE in the body ran and its result was dropped. The old TCK
+  feature `AssumeNestedAbduce.feature` asserted only "evaluation should succeed".
+- **Fix:** `LocyCompileError::AssumeBodyCommandNotAllowed { command }`, raised in
+  `compiler/mod.rs` for each `AssumeBlock` whose body holds `AbduceQuery` or
+  `ExplainRule` (a nested body is checked when the recursive `extract_commands`
+  compiles it). The message names the alternatives: top-level command after
+  the ASSUME, `tx()` + mutate + command + `rollback()`, `Session::scratch()`.
+  `dispatch_body_command` refuses both arms too (for a hand-built program)
+  instead of evaluating and discarding.
+- **DERIVE in a body: kept.** It is not discarded in effect: its mutations land
+  in the hypothetical L0 and a later body Cypher command reads them
+  (`locy_entity_hydration_derive_inside_assume_reads_the_overlay` checks this
+  against a real transaction). Only its `affected` count is not part of the
+  ASSUME result, and a body whose only command is DERIVE returns no rows.
+- **Python:** `Session.scratch()` / `AsyncSession.scratch()` + stubs;
+  `bindings/uni-db/tests/test_session_scratch.py`.
+- **Tests:** `crates/uni-locy/tests/assume_body_command_not_allowed.rs` (6);
+  TCK feature flipped to 7 scenarios (parse ok, 4 compile errors incl. nested
+  and EXPLAIN, evaluation error, top-level ABDUCE alternative). Revert check:
+  removing the compiler check fails 5/6 unit tests by assertion.
+
+### Wave C — Lance session cache sizing, magic-sets default (2026-10-19)
+
+**(a) `UniConfig` sizing for Lance's session caches: done, uncommitted.**
+- **Shape found.** One `lance::session::Session` per database already
+  existed, in `LanceDirectory` (`backend/lance_directory.rs`), built with
+  `Session::default()` (6 GiB index + 1 GiB metadata). Every primary open
+  goes through it; a fork's `BranchedBackend` wraps the same
+  `LanceDbBackend`, so forks share it.
+- **Change.** `UniConfig::lance_metadata_cache_bytes` /
+  `lance_index_cache_bytes` (`Option<usize>`, `None` = Lance default) →
+  `StorageManager::new_with_store_and_storage_options` →
+  `LanceDbBackend::connect_with_cache_sizes` →
+  `LanceDirectory::connect_with_cache_sizes`, which builds the two
+  `QuickCacheBackend`s itself (`Session::with_cache_backends`) and keeps the
+  handles. New defaulted `StorageBackend::cache_usage()` (Lance: `Some`,
+  `BranchedBackend`: delegates) feeds new
+  `DatabaseMetrics::storage_{metadata,index}_cache_bytes` (Rust and Python).
+  Python: both keys in `UNI_CONFIG_KEYS`, `apply_uni_config`,
+  `uni_config_to_py`. Parity guard now also covers `DatabaseMetrics` fields.
+- **Not routed through the shared session.** `lance_branch` free functions
+  (fork branch reads/writes), `UidIndex`, `JsonPathIndex`, inverted/sparse
+  posting datasets and `Dataset::write` each build a fresh default session
+  per call that is dropped with the dataset. They retain nothing between
+  calls, so the W2 growth is not theirs, but the caps do not govern their
+  in-call caching either, and fork branch reads get no cross-query cache.
+  Routing them through the shared session is a separate decision: it changes
+  fork read caching (and needs a check that a deleted-and-recreated branch
+  cannot hit a stale cached manifest; Lance keys manifests by version plus
+  e-tag).
+- **Tests.** `storage::lance_cache_sizing` (3): metadata and index cap each
+  bound live occupancy (uncapped 622,389 B metadata / 51,010 B index; capped
+  at 16 KiB: 16,362 B / 14,954 B), and zero caps disable caching while the
+  indexed lookup still answers. Revert (caps not passed to the backend): all
+  3 fail on their assertions. Python
+  `test_config_merge_and_validation.py`: 2 new tests plus the new keys in
+  the accepted-keys test.
+- **W2 probe** (`W2_LANCE_CACHE`, new knob; debug build, 20k rewrite
+  commits, flush every 250): uncapped heap +13.4 MB, 454 B/commit over the
+  last 10k, metadata cache 6.02 MB at the end; 1 MiB caps: heap +8.0 MB,
+  94.7 B/commit, metadata cache 1.04 MB. The 5.4 MB heap gap matches the
+  5.0 MB metadata-cache gap.
+
+**(b) Locy magic sets default: verified Off, nothing changed.**
+`GoalDirected` is `#[default] Off` (`uni-locy/src/magic.rs`),
+`LocyConfig::default()` sets `Off` (`config.rs`), Python's `LocyConfig(...)`
+and dict form start from that default. Docs say Off: `locy/api/rust.md`,
+`locy/api/python.md`, `locy/reference/errors-limits.md`, Black Book.
+
+**Wave C outcome: `range()` with a null argument returns null (user decision,
+follow-up to the open item above): uncommitted.**
+- **Reproduced.** `RETURN range(0, null)`, a null parameter, a null `WITH`
+  binding, a null stored `Int64` value (L0 and flushed), the fallback executor
+  (`CALL test.range_null() YIELD v RETURN range(0, v)`) and Locy
+  `QUERY … RETURN range(0, x)` all raised
+  `InvalidArgumentType - range() end must be an integer`.
+- **Four evaluators, made to agree.**
+  - DataFusion UDF (`uni-query-functions/src/df_udfs.rs`, `RangeUdf` and
+    `extract_i64_range_arg`): the extractor returns `Option<i64>`; any null
+    (typed or untyped null scalar, null array slot, encoded Cypher null) nulls
+    that row. A null wins over a type error or zero step in another position,
+    so the row is null-checked before any argument error is raised.
+    `UInt64` above `i64::MAX` now raises `NumberOutOfRange` instead of
+    wrapping.
+  - Fallback/Locy evaluator (`expr_eval.rs::eval_range_function`): null check
+    first; its errors now carry `ArgumentError: InvalidArgumentType` /
+    `NumberOutOfRange` (they were untagged).
+  - `UNWIND` row evaluator (`df_graph/unwind.rs`): already null-propagated;
+    errors tagged with the same two codes.
+  - No constant folding or pushdown handles `range` (`is_constant_list` does
+    not); `expr_compiler::is_list_producing` only classifies it.
+- **Tests.** `cypher_read::range_null_test` (6 tests: DataFusion literal /
+  param / WITH / UNWIND-bound, stored column L0 + flushed, `UNWIND range(…)`
+  zero rows, fallback executor, Locy `QUERY … RETURN`, unchanged type and step
+  errors). Unit: 3 in `df_udfs`, 2 in `expr_eval`, 1 in `unwind`.
+- **Revert check.** Disabling the null handling in the UDF and `expr_eval`:
+  4 of 6 integration tests and 3 unit tests fail on the assertion; the
+  `UNWIND` test still passes because that evaluator null-propagated before.
+- **Runs.** uni-query-functions + uni-query lib 822/822; integration
+  `cypher_read` + `locy` + unwind/range filters 1071/1071; Cypher TCK
+  3925/3925 in each mode (a first pass showed 9 failures in undirected
+  self-loop and `keys()` scenarios while another agent's edits were mid-build;
+  they passed on the rerun); clippy `-D warnings` clean on uni-query-functions,
+  uni-query, uni-db.
+
+**`_`-prefixed user properties are readable (user decision on the C-S1 open item).**
+- **Reproduced** (`bugs::underscore_property_reads::underscore_property_reads_every_form_and_state`,
+  declared + schemaless label, vertex + edge, unflushed + flushed): 46 probe
+  failures before the fix. `keys()`, `properties()` (vertex and edge) and
+  `n {.*}` / `e {.*}` dropped `_foo` / `__dbl` / `_bar` in every state and
+  mode; `n {._foo}` failed to plan on a declared label (`No field named
+  "n._foo"`). Already correct before the fix: `n._foo`, `WHERE n._foo = …`,
+  `{_foo: 6}` inline match, ORDER BY, traversal reads, the returned node /
+  relationship, Locy rule bodies.
+- **Root cause.** 48 sites (17 files) separated an entity's user properties
+  from its system fields with `starts_with('_')`. Replaced by one predicate,
+  `uni_common::core::schema::is_reserved_property_name`
+  (`RESERVED_PROPERTY_NAMES` + `RESERVED_PROPERTY_PREFIXES`, the renamed and
+  widened `WRITE_RESERVED_PROPERTY_NAMES`), which the write refusal uses too.
+  Column- and variable-name checks (`__` planner columns, batch-field names in
+  `expr_compiler`, `optional_filter`, `traverse`) were left alone: a different
+  namespace. Declaring a `_` property is still refused.
+- **Reserved set, verified in code:** storage columns; entity-map keys
+  `entity_ref_from_map` reads as an edge tell (`_type`, `_type_name`, `_src`,
+  `_dst`, `_src_vid`, `_dst_vid`) and `_all_props`; planner per-variable
+  columns `_label`, `_score`, `_fwd`; Lance row columns (`_rowid`, ...); the
+  property-set sentinels; prefixes `_gen_`, `__fde_`, `__alias_of__`. `_fwd`
+  was missed first and caught by the TCK (Graph8 [6]/[7], Match3, Match7 [24],
+  Merge5 [12]: an undirected relationship listed `_fwd` in `keys()`). `_id` is
+  deliberately NOT reserved (`bugs::user_maps_are_not_entities` stores it as
+  imported-JSON data); `underscore_property_reads_id_is_a_user_property` pins
+  it reads back, and Python `Node["_id"]` / `Edge["_id"]` now return a stored
+  `_id` property before the deprecated id alias.
+- **Write refusal widened accordingly**, with one exemption: a prefixed name
+  the schema declares (a generated `_gen_*`, a MUVERA `__fde_*`) is the
+  engine's own column and passes `check_written_property_names(keys,
+  schema)`. Without it 5 tests failed (c1-c3 partial SET with generators,
+  `test_expression_index`, `muvera_update_and_tombstone`). MERGE literal keys
+  are now refused at plan time (`reject_reserved_merge_keys`): with the MERGE
+  fix below a reserved key reached a read plan and failed untyped.
+- **Two non-`_` defects the probes exposed, fixed:** (1) `MERGE (n:N {k: v})`
+  with `k` undeclared on a declared, flushed label failed `No field named k`
+  (batched key scan filtered a column the key does not have); such keys now
+  take the general path (`merge_keys_are_stored_columns`, write.rs) — the
+  batched fast path is lost for that shape (perf, unmeasured).
+  `underscore_property_reads_merge_on_undeclared_key_after_flush`. (2)
+  `keys()` / `properties()` of a path element read the `properties` container
+  as a property (`["properties"]`, `{properties: {...}}`); shared
+  `uni_common::value::entity_property_container`.
+- **Revert check** (keys-UDF filter back to `starts_with('_')`, properties-UDF
+  container back to `_all_props`-only, MERGE gate disabled): both tests failed
+  on assertions — `keys(n)`/`keys(e)` lost `_foo`/`_bar`, path
+  `properties(...)` returned `{properties:{...}}`, MERGE failed `No field named
+  _foo` / `nick`. Restored byte-identically (cmp).
+- **Runs:** uni-db `--test integration` 3495/3495; TCK schemaless 3925/3925
+  and sidecar 3925/3925 (direct nextest, compliance_reports untouched);
+  uni-locy-tck 535/535; lib tests of uni-common, uni-store,
+  uni-query-functions, uni-query, uni-plugin-host, uni-bulk 1488/1488; clippy
+  `-D warnings` clean on those plus uni-tck, uni-db and uni-python. Python:
+  full suite 1047 passed / 15 skipped; new
+  `test_e2e_crud.py::test_underscore_property_reads_back` (4 params). Its
+  revert check (alias restored ahead of the property in `types.rs`) failed on
+  `node["_id"] == "u1"`; restored byte-identically.
+- **Left open:** CSV `COPY TO` export emits storage columns and not undeclared
+  properties (any name, not `_`-specific); `catalog_scan` still refuses any
+  `_`-prefixed plugin catalog column (explicit error, not a silent drop);
+  `result_normalizer::is_user_property` also drops user properties named
+  `label` / `type` / `properties` (not probed).
+
+**Wave C outcome: positive IS references to PROB rules: implemented,
+uncommitted.**
+- **Semantics.**
+  - A positive `IS` reference to a PROB rule, from a rule with a PROB column,
+    multiplies the referenced probability into the row's PROB value. This
+    mirrors `IS NOT`'s `1 - p`.
+  - Count once: a PROB expression that already reads `p` as exactly one
+    product factor (`MNOR(p)`, `MNOR(e.w * p)`) is not multiplied again.
+  - Any other read of `p` is not multiplied either, and raises the new
+    runtime warning `ProbabilityReadNotFactor`. The planner classifies each
+    reference (`locy_planner::classify_prob_read`).
+  - Exact mode evaluates each MNOR/MPROD fact as OP over its rows of
+    (row event AND each referenced fact's formula), by BDD, as a least
+    fixpoint. The new module `locy_lineage.rs` replaces the old
+    `detect_shared_lineage` / `apply_exact_wmc` / `compute_lineage`.
+  - Two rows share an event when their weight is the same expression over
+    the same nodes and relationships (`__deriv_event`).
+  - Referenced facts are joined through a hash of their KEY
+    (`__deriv_isref_*`), not the old `(mid, a)` join, which never matched.
+  - `SharedProbabilisticDependency` fires only when a formula reads an event
+    twice. Without it, default and exact mode agree.
+- **Values.**
+  - MNOR diamond: 0.745 in both modes (was 0.79).
+  - MPROD diamond: 0.105 (was 0.21).
+  - Parallel 0.5 edges: 0.7875 in both modes (was 0.825).
+  - Shared `C->D` graph: exact 0.264, default 0.2784.
+  - Self-loop and cycle graphs are exact against a brute-force enumeration of
+    possible worlds.
+- **Found on the way and fixed.**
+  - The diamond's warning was a false positive: nodes in common, no edge in
+    common.
+  - Exact mode treated two rows on one edge as two events: 0.145 instead of
+    0.1 with a self-loop, found by the property test.
+  - A renamed MNOR/MPROD output (`YIELD prob AS pr`) was not marked PROB
+    (`typecheck.rs`).
+  - The row-hash column was declared non-nullable, so clauses with and
+    without a lineage column failed to union.
+- **TCK.** 12 scenarios were rewritten with derivations in the feature
+  comments (10 in `ExactProbability`, 2 in `SharedProofDetection`), and 2
+  were added to `SharedProofDetection`. All other positive-PROB scenarios
+  read the referenced probability as a factor and are unchanged.
+- **Tests.**
+  - `locy::locy_prob_is_ref_semantics`: 11 tests, including a 24-graph
+    property test against brute-force worlds.
+  - `locy_lineage` unit tests: 5. `locy_bdd` unit tests: 3.
+  - Oracle: a `ProbFactor` IR, a `hop` rule in random programs, and a
+    possible-worlds unit test.
+  - Revert checks: the join, formula construction, count-once, default
+    multiply and oracle factor each fail their tests when undone.
+  - Locy TCK: 535/535 in both modes. Locy integration: 391/391.
+  - uni-locy: 230. uni-locy-oracle: 47. uni-query lib: 507.
+  - Clippy `-D warnings`: clean on uni-query, uni-locy, uni-locy-oracle and
+    uni-db.
+- **Open.**
+  - EXPLAIN Mode B and the TopKProofs support map still use the old
+    `collect_is_ref_inputs` join, which records no support when the subject
+    is projected away.
+  - `IS NOT` stays an independence factor inside exact formulas: the
+    complement is not a negated BDD literal.
+  - Cross-group correlation is reported only for shared referenced facts,
+    not for shared row events.

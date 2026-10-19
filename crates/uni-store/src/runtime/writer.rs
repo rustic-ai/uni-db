@@ -413,12 +413,16 @@ fn props_subset(props: &Properties, keys: &HashSet<String>) -> Properties {
 }
 
 /// Reject a write whose property map is keyed by a storage column name
-/// (`uni_common::core::schema::WRITE_RESERVED_PROPERTY_NAMES`). Every vertex
+/// (`uni_common::core::schema::RESERVED_PROPERTY_NAMES`). Every vertex
 /// and edge insert path runs this, so CREATE, SET, MERGE and the batch
 /// inserts share one rule. The error stays a typed `UniError` inside the
 /// `anyhow` chain.
-fn check_property_names(props: &Properties) -> Result<()> {
-    uni_common::core::schema::check_written_property_names(props.keys()).map_err(anyhow::Error::new)
+fn check_property_names(
+    props: &Properties,
+    schema: &uni_common::core::schema::Schema,
+) -> Result<()> {
+    uni_common::core::schema::check_written_property_names(props.keys(), schema)
+        .map_err(anyhow::Error::new)
 }
 
 /// Output of [`Writer::flush_stream_l1`]: the built (but not yet
@@ -2046,7 +2050,7 @@ impl Writer {
         labels: &[String],
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
     ) -> Result<()> {
-        check_property_names(properties)?;
+        check_property_names(properties, &self.schema_manager.schema())?;
         let schema = self.schema_manager.schema();
 
         // Validate constraints only for known labels
@@ -2078,7 +2082,7 @@ impl Writer {
         labels: &[String],
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
     ) -> Result<()> {
-        check_property_names(touched)?;
+        check_property_names(touched, &self.schema_manager.schema())?;
         let schema = self.schema_manager.schema();
         for label in labels {
             if schema.get_label_case_insensitive(label).is_none() {
@@ -2208,11 +2212,10 @@ impl Writer {
         if vids.len() != properties_batch.len() {
             return Err(anyhow!("VID/properties length mismatch"));
         }
-        for properties in properties_batch {
-            check_property_names(properties)?;
-        }
-
         let schema = self.schema_manager.schema();
+        for properties in properties_batch {
+            check_property_names(properties, &schema)?;
+        }
 
         // 1. Validate NOT NULL constraints for each vertex
         if let Some(props_meta) = schema.properties.get(label) {
@@ -4147,7 +4150,7 @@ impl Writer {
         }
 
         let start = std::time::Instant::now();
-        check_property_names(&props)?;
+        check_property_names(&props, &self.schema_manager.schema())?;
         self.check_write_pressure().await?;
         self.check_transaction_memory(tx_l0)?;
         let mut props = props;
@@ -4210,7 +4213,7 @@ impl Writer {
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
     ) -> Result<()> {
         let start = std::time::Instant::now();
-        check_property_names(&properties)?;
+        check_property_names(&properties, &self.schema_manager.schema())?;
         self.check_write_pressure().await?;
         self.check_transaction_memory(tx_l0)?;
         self.freeze_for_non_tx_write_if_pinned(tx_l0).await; // C1 (G4)

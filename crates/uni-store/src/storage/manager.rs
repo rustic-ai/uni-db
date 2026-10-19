@@ -767,7 +767,18 @@ impl StorageManager {
         config: UniConfig,
         lancedb_storage_options: Option<HashMap<String, String>>,
     ) -> Result<Self> {
-        let backend = Arc::new(LanceDbBackend::connect(base_uri, lancedb_storage_options).await?);
+        let cache_sizes = crate::backend::lance_directory::LanceCacheSizes {
+            index_bytes: config.lance_index_cache_bytes,
+            metadata_bytes: config.lance_metadata_cache_bytes,
+        };
+        let backend = Arc::new(
+            LanceDbBackend::connect_with_cache_sizes(
+                base_uri,
+                lancedb_storage_options,
+                cache_sizes,
+            )
+            .await?,
+        );
         Self::new_with_backend(base_uri, store, backend, schema_manager, config).await
     }
 

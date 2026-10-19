@@ -32,8 +32,6 @@ use uni_locy::types::{CompiledAssume, CompiledCommand};
 use uni_locy::{CompiledProgram, FactRow, LocyConfig, LocyError, LocyStats};
 
 use super::locy_delta::RowStore;
-
-use super::locy_explain::ProvenanceStore;
 use super::locy_program::ReusedStrata;
 use super::locy_traits::{LocyExecutionContext, ReEvaluation, StrataBaseline};
 
@@ -292,10 +290,10 @@ pub async fn evaluate_assume(
     // shared reference, as top-level commands do.
     let assume_derived_store = assume_derived_store;
 
-    // Nested hypothetical commands (ASSUME, ABDUCE) start from this state, so
-    // they reuse the parent strata derived here. The parent's facts, not the
-    // body's: a nested command re-evaluates `command_program`, whose strata
-    // are the parent's, and a body rule may shadow a parent rule's name.
+    // A nested ASSUME starts from this state, so it reuses the parent strata
+    // derived here. The parent's facts, not the body's: a nested ASSUME
+    // re-evaluates `command_program`, whose strata are the parent's, and a
+    // body rule may shadow a parent rule's name.
     let pushed_baseline = parent_facts.is_some();
     if let Some(facts) = parent_facts {
         ctx.push_reuse_baseline(StrataBaseline {
@@ -371,31 +369,17 @@ fn dispatch_body_command<'a>(
                         .await?;
                 Ok(CommandResult::Derive { affected })
             }
-            CompiledCommand::ExplainRule(eq) => {
-                let node = super::locy_explain::explain_rule(
-                    eq,
-                    program,
-                    ctx,
-                    config,
-                    derived_store,
-                    stats,
-                    None::<&ProvenanceStore>,
-                    None,
-                )
-                .await?;
-                Ok(CommandResult::Explain(node))
-            }
-            CompiledCommand::Abduce(aq) => {
-                let result = super::locy_abduce::evaluate_abduce(
-                    aq,
-                    program,
-                    ctx,
-                    config,
-                    derived_store,
-                    stats,
-                )
-                .await?;
-                Ok(CommandResult::Abduce(result))
+            CompiledCommand::ExplainRule(_) | CompiledCommand::Abduce(_) => {
+                // The compiler rejects both in an ASSUME body
+                // (`LocyCompileError::AssumeBodyCommandNotAllowed`): their
+                // results are not rows, so an ASSUME would compute them and
+                // drop them. A hand-built program reaching here fails the same
+                // way rather than running a discarded command.
+                Err(LocyError::EvaluationError {
+                    message: "ABDUCE and EXPLAIN RULE are not allowed inside an ASSUME body; \
+                              run them at the top level after the ASSUME"
+                        .to_string(),
+                })
             }
             CompiledCommand::Assume(ca) => {
                 let rows = evaluate_assume(ca, program, ctx, config, stats).await?;

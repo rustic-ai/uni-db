@@ -288,10 +288,10 @@ fn encode_map_as_node_payload(map: &std::collections::HashMap<String, Value>, bu
     // VID
     buf.extend_from_slice(&vid.to_be_bytes());
 
-    // Properties (all keys except internal ones)
+    // Properties (all keys except reserved ones)
     let mut props: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     for (k, v) in map {
-        if !k.starts_with('_') {
+        if !uni_common::core::schema::is_reserved_property_name(k) {
             props.insert(k.clone(), v.clone());
         }
     }
@@ -327,10 +327,10 @@ fn encode_map_as_edge_payload(map: &std::collections::HashMap<String, Value>, bu
     buf.extend_from_slice(&dst.to_be_bytes());
     buf.extend_from_slice(&eid.to_be_bytes());
 
-    // Properties (all keys except internal ones)
+    // Properties (all keys except reserved ones)
     let mut props: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     for (k, v) in map {
-        if !k.starts_with('_') {
+        if !uni_common::core::schema::is_reserved_property_name(k) {
             props.insert(k.clone(), v.clone());
         }
     }

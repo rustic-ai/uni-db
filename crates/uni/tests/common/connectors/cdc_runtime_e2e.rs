@@ -436,6 +436,19 @@ async fn w2_commit_loop(regime: W2Regime, checkpoints: &[usize]) -> Result<()> {
         flush_every,
         update,
     } = regime;
+    // `W2_LANCE_CACHE` (bytes) caps both Lance session caches in every regime.
+    let lance_cap = std::env::var("W2_LANCE_CACHE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let config = uni_db::UniConfig {
+        lance_metadata_cache_bytes: lance_cap.or(config.lance_metadata_cache_bytes),
+        lance_index_cache_bytes: lance_cap.or(config.lance_index_cache_bytes),
+        ..config
+    };
+    let label = match lance_cap {
+        Some(cap) => format!("{label}+lance_cap={cap}"),
+        None => label,
+    };
     let dir = tempfile::tempdir()?;
     let builder = if in_memory {
         Uni::in_memory()
@@ -488,12 +501,15 @@ async fn w2_commit_loop(regime: W2Regime, checkpoints: &[usize]) -> Result<()> {
     db.flush().await?;
     let heap = live_heap_bytes();
     let rss = rss_bytes();
+    let metrics = db.metrics();
     eprintln!(
         "[w2] {label}: after final flush heap_delta={:.1} MB rss_delta={:.1} MB \
-         allocator_free={:.1} MB",
+         allocator_free={:.1} MB lance_cache metadata={} B index={} B",
         (heap as f64 - heap0 as f64) / 1e6,
         (rss as f64 - rss0 as f64) / 1e6,
         allocator_free_bytes() as f64 / 1e6,
+        metrics.storage_metadata_cache_bytes,
+        metrics.storage_index_cache_bytes,
     );
     trim_allocator();
     eprintln!(
@@ -529,7 +545,8 @@ async fn w2_commit_loop(regime: W2Regime, checkpoints: &[usize]) -> Result<()> {
 /// builds outlast nextest's 180 s ceiling at 20k commits; run the test binary
 /// directly with `--ignored --nocapture --exact` for those). Environment:
 /// `W2_COMMITS` (default 40000), `W2_ONLY` (one regime name, or `custom` with
-/// `W2_FLUSH`, `W2_UPDATE=1`, `W2_MEM=1`).
+/// `W2_FLUSH`, `W2_UPDATE=1`, `W2_MEM=1`), `W2_LANCE_CACHE` (bytes; sets
+/// `UniConfig::lance_{metadata,index}_cache_bytes` in every regime).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "observation; run with --run-ignored all --no-capture"]
 async fn w2_residual_memory_growth_observation() -> Result<()> {

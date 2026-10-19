@@ -202,8 +202,39 @@ fail with an error on a missing column.
 `exact_probability`, a probabilistic FOLD whose output was renamed in YIELD
 (`FOLD prob = MNOR(e.p) YIELD ..., prob AS pr`) never received its exact (BDD)
 probability for shared-proof groups: the group silently kept one derivation's
-weight (0.7 instead of 0.79 on the reachability diamond). The exact path now
-resolves columns by name and fails with an error instead of skipping.
+weight (0.7 on the reachability diamond, whose exact value is 0.745 — see
+below). The exact path now resolves columns by name and fails with an error
+instead of skipping.
+
+**Locy: a positive `IS` reference to a PROB rule carries its probability
+(breaking: probability values change).** The row holds only when the
+referenced fact does, so the fact's probability is now multiplied into the
+calling row's PROB value, as `IS NOT` multiplies `1 - p`; it was a Boolean
+filter. On the reachability diamond `s -0.7-> t`, `s -0.3-> m -0.5-> t` with
+`FOLD prob = MNOR(e.p)` in both clauses, `reach(s,t)` was
+`1 - (1 - 0.7)(1 - 0.3) = 0.79`, which treated `reach(m,t)` as certain; it is
+`1 - (1 - 0.7)(1 - 0.3 · 0.5) = 0.745`, the probability that `t` is reachable
+when each edge is present independently. With MPROD it was 0.21 and is 0.105.
+- **Count once.** A clause whose PROB expression already reads the referenced
+  probability as one product factor (`FOLD p = MNOR(p)`,
+  `MNOR(e.w * p)`) is unchanged. Any other read (`1 - p`, `p * p`) is not
+  multiplied either and raises the new runtime warning
+  `ProbabilityReadNotFactor` (`probability_read_not_factor`).
+- **Exact mode** (`exact_probability`) evaluates each fact under
+  possible-worlds semantics: the OR (MNOR) or AND (MPROD) of its rows, each row
+  its own event AND the formula of every fact it references. Two rows over the
+  same expression and the same nodes and relationships are one event. It used
+  to treat a recursive row as an independent fact of its own weight, so it
+  never corrected anything a positive reference shared.
+- **`SharedProbabilisticDependency` fires only on shared evidence** — two
+  proofs over one edge or one referenced fact, or a cycle — not on any
+  recursive clause. The diamond above no longer warns (its proofs share no
+  edge); `A -0.5-> B -0.4-> C -0.6-> D` plus `A -0.3-> C` does, and exact mode
+  gives `reach(A,D) = 0.264` against the independence 0.2784. Without a
+  warning the two modes agree.
+- **A renamed MNOR/MPROD output is a PROB column.** `FOLD prob = MNOR(..) YIELD
+  prob AS pr` left `pr` unmarked, so neither `IS` nor `IS NOT` read it as a
+  probability.
 
 **A property named after a storage column is refused at write.** `CREATE`,
 `SET`, `MERGE`, `Transaction::bulk_insert_*`, `BulkWriter`, the streaming
@@ -216,6 +247,35 @@ declared label, hidden from `keys()` on a schemaless one, or shadowed by the
 system value (`n._vid` returned the vertex id). The other storage column names
 (`ext_id`, `eid`, `src_vid`, `dst_vid`, `op`, `type`, `labels`, `props_json`)
 round-trip and stay writable. Schema DDL already refused all of these.
+
+**A property whose name starts with `_` reads back.** Only the engine's own
+names are reserved now (`uni_common::core::schema::is_reserved_property_name`,
+one rule for writes and reads). Any other `_`-prefixed property — `_source`,
+`__tag` — was accepted on write and then hidden by every read path that
+treated a leading `_` as internal: it was missing from `keys()`,
+`properties()` and `n {.*}` on vertices and relationships, flushed or not,
+and `n {._foo}` failed to plan on a declared label. It now appears in every
+read form, as `n._foo` and `WHERE n._foo = …` already did. In exchange the
+reserved set grew to the map-encoding keys and planner columns the engine gives
+a meaning (`_type`, `_type_name`, `_src`, `_dst`, `_src_vid`,
+`_dst_vid`, `_all_props`, `_label`, `_score`, `_fwd`, Lance's `_rowid`-family
+row columns, `__set_struct__`,
+`__with_passthrough__`, and names starting with `_gen_`, `__fde_` or
+`__alias_of__`): a write of one is refused with `UniError::InvalidIdentifier`.
+Such a property was already hidden on read, and each of these names is one
+the engine reads with its own meaning (`_type`, or `_src` with `_dst`, is how
+an entity map is recognized as an edge).
+
+**`MERGE` keyed on an undeclared property of a declared label works after a
+flush.** `MERGE (n:N {nick: 'q'})`, where `N` is declared and `nick` is not,
+failed with `No field named nick` once `N` had been flushed: the batched key
+lookup filtered the label's table by a column the property does not have. Such
+a pattern now takes the general MERGE path, which reads undeclared properties.
+
+**`keys()` and `properties()` of a path element list its properties.**
+`keys(relationships(p)[0])` returned `["properties"]` and
+`properties(relationships(p)[0])` a map nesting them under `properties`,
+while `relationships(p)[0].w` read the value.
 
 **A flushed relationship no longer reports its storage blob.** On an edge type
 declared with no properties, every flushed edge carrying an undeclared property
@@ -396,6 +456,16 @@ bound above the shortest trail) stops at the number of relationships it can
 reach, and no longer warns that an unbounded pattern was truncated at the hop
 ceiling when no trail could have been that long.
 
+**`range()` with a null argument returns null.** `range(0, null)`,
+`range(null, 3)` and `range(0, 3, null)` raised `InvalidArgumentType … must be
+an integer`; they now return null, as other scalar functions do for a null
+argument, and `UNWIND range(0, null) AS i` produces no rows. A null wins over
+every other check, so `range(null, 3, 0)` is null too. A non-null argument that
+is not an integer still raises `InvalidArgumentType`, and a zero step still
+raises `NumberOutOfRange`. All four evaluators agree: the DataFusion function,
+the `UNWIND` evaluator, the fallback executor (whose errors now carry those
+two codes; they were untagged) and Locy's `QUERY … RETURN`.
+
 ### API changes
 
 **Minimum supported Rust version is now 1.96 (was 1.91).** The WASM plugin
@@ -403,6 +473,17 @@ runtime moves to wasmtime/wasmtime-wasi 49 (and extism 1.41), the first
 releases carrying the fixes for RUSTSEC-2026-0352, -0359, -0362 and -0363;
 wasmtime 49 declares `rust-version = "1.96.0"`. rustls moves to 0.23.46
 (RUSTSEC-2026-0346 to -0349). Run `rustup update stable` before building.
+
+**`ABDUCE` and `EXPLAIN RULE` inside a Locy `ASSUME … THEN` body are compile
+errors.** An ASSUME returns the rows of its body's `QUERY` and Cypher commands;
+an `ABDUCE` or `EXPLAIN RULE` in the body (or in a nested ASSUME's body) was
+evaluated and its result silently dropped, so the program succeeded with no
+abduction or explanation to show. Such a program now fails to compile with
+`LocyCompileError::AssumeBodyCommandNotAllowed`. Run the command at the top
+level after the ASSUME, or apply the hypothetical change in a transaction and
+roll it back (`tx()`, mutate, run the command, `rollback()`), or in a scratch
+transaction, whose writes are always discarded. Rules, `QUERY`, Cypher,
+`DERIVE` and nested `ASSUME` remain allowed in a body.
 
 **The in-memory CDC provider is no longer registered by default.** Every
 database registered `MemoryCdcOutputProvider`, which kept every committed batch
@@ -441,6 +522,25 @@ lock and then fails with "another handle is still compacting"; remote stores are
 unaffected. A cancelled pass reports `CompactionCancelled`.
 
 ### New
+
+**Python: `Session.scratch()` and `AsyncSession.scratch()`.** They expose
+Rust's `Session::scratch()`: a transaction with read-your-writes over a pinned
+read base whose `commit()` is refused, so its writes are always discarded on
+`rollback()` or drop. It is the cheap way to run a command such as `ABDUCE`
+against a hypothetical change.
+
+**The storage engine's caches can be sized.** Every table a database opens
+reads through one Lance session whose metadata and index caches default to
+1 GiB and 6 GiB. They fill as tables are flushed and read and are trimmed only
+when full, so a long-running process that flushes often kept growing toward
+that size (about 100–170 KB per flush in the W2 commit-loop probe). Two new
+`UniConfig` fields set the capacities: `lance_metadata_cache_bytes` and
+`lance_index_cache_bytes` (`None`, the default, keeps Lance's sizes; `Some(0)`
+disables a cache). A fork shares its primary's caches. Both are accepted by
+the Python `config({...})` dict, and `DatabaseMetrics` (Rust and Python) now
+reports occupancy as `storage_metadata_cache_bytes` and
+`storage_index_cache_bytes`. `StorageBackend` gains a defaulted
+`cache_usage()` method.
 
 **A correlated `EXISTS` or `COUNT` between two bound nodes runs once per
 source.** `MATCH (a), (b) WHERE NOT EXISTS { MATCH (a)-[:R*1..]->(b) }`

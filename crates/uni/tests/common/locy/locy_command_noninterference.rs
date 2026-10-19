@@ -187,22 +187,34 @@ async fn command_noninterference_to_target_binding() -> Result<()> {
     .await
 }
 
-/// An `ASSUME` body keeps its own store; a command inside it must not change
-/// what a later command in the same body reads.
+/// An `ASSUME` body reads the same facts whatever command ran before it.
+///
+/// `EXPLAIN RULE` and `ABDUCE` are compile errors inside an ASSUME body (their
+/// results are not rows, so the body used to discard them), so they are run
+/// at the top level ahead of the ASSUME, which is the form the error points
+/// to, and must not change what the body's `QUERY` reads.
 #[tokio::test]
 async fn command_noninterference_inside_assume() -> Result<()> {
     let rules = "CREATE RULE tot AS MATCH (x:N)-[e:E]->(y:N) FOLD s = SUM(e.w) YIELD KEY x, s\n";
     let query = "QUERY tot RETURN x.name AS x, s";
-    let assume =
-        |body: &str| format!("{rules}ASSUME {{ CREATE (:N {{name: 'z'}}) }} THEN {{ {body} }}");
-    let baseline = last_query(FAN, &assume(query)).await?;
+    let assume = |body: &str| format!("ASSUME {{ CREATE (:N {{name: 'z'}}) }} THEN {{ {body} }}");
+    let baseline = last_query(FAN, &format!("{rules}{}", assume(query))).await?;
     assert_eq!(baseline, ["s=12.0 x=a"], "control");
     for command in commands("tot") {
-        let after = last_query(FAN, &assume(&format!("{command}\n{query}"))).await?;
+        let after = last_query(FAN, &format!("{rules}{command}\n{}", assume(query))).await?;
         assert_eq!(
             after, baseline,
-            "`{command}` inside ASSUME changed the answer of `{query}`"
+            "`{command}` before ASSUME changed the answer of `{query}` in its body"
         );
+        let in_body = last_query(
+            FAN,
+            &format!("{rules}{}", assume(&format!("{command}\n{query}"))),
+        )
+        .await;
+        match in_body {
+            Err(e) if e.to_string().contains("is not allowed inside an ASSUME") => {}
+            other => bail!("`{command}` inside an ASSUME body must fail to compile, got {other:?}"),
+        }
     }
     Ok(())
 }

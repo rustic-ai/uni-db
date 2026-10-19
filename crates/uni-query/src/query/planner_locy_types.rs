@@ -131,7 +131,79 @@ pub struct LocyIsRef {
     /// the planner's positive join instead of taking the derived scan's fields
     /// by position.
     pub binding_columns: Vec<String>,
+    /// For a positive reference to a PROB rule from a rule with a PROB
+    /// column: where the referenced probability travels and how the clause
+    /// already reads it. `None` otherwise, and the reference is a plain
+    /// semi-join.
+    pub prob_ref: Option<PositiveProbRef>,
 }
+
+/// How a clause's PROB expression reads the probability of one positive
+/// reference to a PROB rule.
+///
+/// A positive reference to a PROB rule is a probabilistic condition: the row
+/// holds only when the referenced fact does, so the fact's probability is
+/// multiplied into the row's PROB value, as `IS NOT` multiplies `1 - p`. A
+/// clause that already reads that probability (`FOLD p = MNOR(p)`) must not
+/// count it a second time; this classification decides which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbRead {
+    /// The PROB expression does not read the referenced probability: it is
+    /// multiplied in.
+    Absent,
+    /// The PROB expression is a product with the referenced probability as
+    /// exactly one factor (`p`, `e.w * p`): it is already counted once.
+    Factor,
+    /// The PROB expression reads the referenced probability other than as one
+    /// product factor (`1 - p`, `p * p`, `max(p, e.w)`). Nothing is multiplied
+    /// in (never counting it twice), exact inference treats the row as an
+    /// independent event, and a `ProbabilityReadNotFactor` warning is raised.
+    Opaque,
+}
+
+/// The hidden columns and classification of one positive reference to a PROB
+/// rule (see [`LocyIsRef::prob_ref`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PositiveProbRef {
+    /// The hidden body column holding the referenced fact's PROB value.
+    pub prob_column: String,
+    /// The hidden body column holding a hash of the referenced fact's KEY
+    /// columns, for exact inference. Set only when the calling rule's PROB
+    /// column is an `MNOR`/`MPROD` fold, whose rows are kept as lineage.
+    pub key_column: Option<String>,
+    /// The calling rule's PROB column as the clause body names it (the FOLD
+    /// variable for a folded PROB column).
+    pub into_column: String,
+    /// How the clause's PROB expression reads the referenced probability.
+    pub read: ProbRead,
+}
+
+/// Prefix of the transient hidden column carrying a referenced probability
+/// into a clause whose rule keeps no lineage. Stripped once multiplied in.
+pub const ISPROB_COL_PREFIX: &str = "__isprob_";
+
+/// Prefix of the persistent hidden column carrying a referenced probability in
+/// an `MNOR`/`MPROD` rule's pre-fold rows. It starts with
+/// [`FOLD_DISCRIMINATOR_COL_PREFIX`] so it is nullable and stripped like the
+/// discriminators, but it is a value, not an identity: it is excluded from the
+/// derivation key.
+pub const DERIV_ISPROB_COL_PREFIX: &str = "__deriv_isprob_";
+
+/// Prefix of the persistent hidden column carrying the hash of a referenced
+/// fact's KEY columns in an `MNOR`/`MPROD` rule's pre-fold rows.
+pub const DERIV_ISREF_COL_PREFIX: &str = "__deriv_isref_";
+
+/// The row-event column of an `MNOR`/`MPROD` rule's pre-fold rows.
+///
+/// A row's own probability is its PROB expression with the referenced
+/// probabilities it reads factored out — `e.p` in `MNOR(e.p * w)`. Two rows
+/// whose local part is the same expression over the same nodes and
+/// relationships are one event: the direct `s→t` row of a reachability rule
+/// and its row through a self-loop at `t` both rest on the edge `s→t`. The
+/// column holds a hash of the expression's shape and those identities; NULL
+/// when the local part reads no node or relationship, which makes the row its
+/// own event.
+pub const DERIV_EVENT_COL: &str = "__deriv_event";
 
 /// One component of a negated IS-reference's anti-join key.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -538,19 +538,44 @@ constraint keys from each vid's newest L0 version only. Before, a freed
 `ext_id` stayed taken for good once its holder had been flushed
 (`index::batch_extid_uniqueness::freed_ext_id_…`).
 
-**Storage column names are refused as written property names.**
-`uni_common::core::schema::WRITE_RESERVED_PROPERTY_NAMES` (`overflow_json`,
+**Reserved property names: one rule for writes and reads.**
+`uni_common::core::schema::is_reserved_property_name` is the single test. It
+is true for `RESERVED_PROPERTY_NAMES` — the storage columns (`overflow_json`,
 `_vid`, `_uid`, `_eid`, `_deleted`, `_version`, `_labels`, `_created_at`,
-`_updated_at`) is checked on every vertex and edge insert path in `Writer`, in
+`_updated_at`), the map-encoding keys `entity_ref_from_map` reads to tell a
+vertex from an edge (`_type`, `_type_name`, `_src`, `_dst`,
+`_src_vid`, `_dst_vid`, `_all_props`), the per-variable columns the planner
+synthesizes (`_label`, `_score`, `_fwd`), Lance's row columns (`_rowid`,
+`_rowaddr`, `_rowoffset`, `_row_created_at_version`,
+`_row_last_updated_at_version`) and the planner's property-set markers
+(`__set_struct__`, `__with_passthrough__`) — and for the
+`RESERVED_PROPERTY_PREFIXES` families `_gen_`, `__fde_` and `__alias_of__`.
+Writes (`check_written_property_names`, which takes the schema: a prefixed
+name the schema declares is the engine's own generated or FDE column and is
+allowed, since the engine writes it and a SET stages it back): checked on
+every vertex and edge insert path in `Writer`, in
 `BulkWriter::insert_vertices`/`insert_edges` (whatever `validate_constraints`
-says), and at plan time for a literal `SET x.k = …` target (a SET of a
-`_`-prefixed system column fails earlier, in the scan beneath it). The error
-is `UniError::InvalidIdentifier`; it crosses the executor's string boundary
-tagged (`RESERVED_PROPERTY_TAG`) and is recovered in `impl_query.rs`. The
-non-`_` storage names (`ext_id`, `eid`, `src_vid`, `dst_vid`, `op`, `type`,
-`labels`, `props_json`) round-trip and stay writable. Other `_`-prefixed
-names (`_id`, `_foo`) are not refused, though DDL refuses them: measured, they
-are dropped on a declared label and hidden from `keys()` on a schemaless one.
+says), and at plan time for a literal `SET x.k = …` target. The error is
+`UniError::InvalidIdentifier`; it crosses the executor's string boundary
+tagged (`RESERVED_PROPERTY_TAG`) and is recovered in `impl_query.rs`. Reads:
+every path that separates an entity's user properties from its system fields
+(`Value::property_names` / `entity_properties` / `canonical_entity`, the
+`keys`/`properties`/map-projection UDFs and the fallback evaluator, the
+planner's property-projection and overflow decisions, the columnar
+`_all_props` builder, path construction, SET's in-place binding update,
+Locy's property views, the trigger pre-image, the sort key) asks the same
+predicate. Any other name — `_foo`, `__x` — is a user property in every read
+form; the read paths used to hide every `_`-prefixed key, so such a property
+was accepted on write and then missing from `keys()`, `properties()` and
+`n {.*}` (and `n {._foo}` failed to plan on a declared label)
+(`bugs::underscore_property_reads`). The non-reserved storage names (`ext_id`,
+`eid`, `src_vid`, `dst_vid`, `op`, `type`, `labels`, `props_json`) round-trip
+and stay writable. Declaring a property still refuses every `_`-prefixed name
+(`validate_property_name`): a declared property is a storage column, and
+column-level code (schema widening, CSV export) still treats a `_` column as
+a system one. Column- and variable-name checks (`__`-prefixed planner
+columns, `name.starts_with('_')` on batch fields) are a different namespace and
+are unchanged.
 
 **The storage blob never enters a property map.** The planner requests
 `overflow_json` beside `_all_props` for an edge type with no declared
@@ -2283,8 +2308,8 @@ reaches is one containing a backtick (Lance resolves the unescaped identifier
 as a field path, where a bare backtick is invalid, and refuses to index it
 too): `to_sql` returns `ToSqlError::Unsupported`, so `sql_pushable` drops that
 conjunct to the residual filter. `indexed_range_filter`'s former
-`is_bare_identifier` gate is gone; only `_`-prefixed system columns are
-excluded. A Lance column name cannot contain `.` at all (rejected at write).
+`is_bare_identifier` gate is gone; only reserved system columns
+(`is_reserved_property_name`) are excluded. A Lance column name cannot contain `.` at all (rejected at write).
 Tests: `uni-store` `backend::eval::tests::awkward_column_names_*`,
 `crates/uni/tests/common/index/awkward_property_name_pushdown.rs`
 (pushed vs unpushed, BTree / Hash / unindexed, flushed and half in L0).
@@ -2905,7 +2930,7 @@ ORDER BY last_touched DESC LIMIT 10
 | `last(list)` | Value | Last element |
 | `tail(list)` | List | All except first |
 | `reverse(list)` | List | Reverse order |
-| `range(start, end, step?)` | List | Integer range |
+| `range(start, end, step?)` | List | Integer range; null if any argument is null (all four evaluators: UDF, UNWIND, fallback, Locy) |
 | `index(list, elem)` | Integer | Position of element |
 | `coalesce(a, b, ...)` | Value | First non-null |
 
@@ -5365,14 +5390,26 @@ CREATE RULE usable_supplier AS
 ```
 
 - If the referenced rule has a `PROB` column, `IS NOT` contributes `1 - p`
-- If multiple probabilistic `IS` / `IS NOT` references appear in one clause, their probability terms multiply into the caller's `PROB` column
 - If the referenced rule has no `PROB` column, `IS NOT` keeps normal Boolean semantics
+
+A **positive** `IS` reference to a `PROB` rule is the mirror image: the row holds only when the referenced fact does, so its probability `p` is multiplied into the caller's `PROB` value — `P(r) + P(NOT r) = 1`. The **count-once rule** keeps a clause that already reads `p` from counting it twice: the planner (`locy_planner::classify_prob_read`) inspects the clause's resolved PROB expression (the FOLD input, or the PROB YIELD item):
+
+- `p` absent → multiplied in (`ProbRead::Absent`);
+- `p` exactly one factor of a product (`MNOR(p)`, `MNOR(e.w * p)`) → already counted, nothing multiplied (`ProbRead::Factor`);
+- any other read (`1 - p`, `p * p`, `max(p, x)`) → nothing multiplied either (never double-counts), the row is one independent event in exact mode, and a `ProbabilityReadNotFactor` runtime warning is raised (`ProbRead::Opaque`).
+
+The referenced probability travels in a hidden body column: transient `__isprob_{clause}_{occurrence}` (stripped after the multiply, `locy_lineage::apply_positive_prob_factors`) for a rule without lineage, persistent `__deriv_isprob_*` next to `__deriv_isref_*` (a hash of the referenced fact's KEY) and `__deriv_event` (see below) for an `MNOR`/`MPROD` rule. `__deriv_isprob_*` moves with the child's folded value, so `merge_fold_contributions` leaves it out of the derivation key, like a fold input. A PROB column computed after the fold (`YIELD 1 - total AS x PROB`) has no per-row value, and its positive references stay Boolean.
 
 ### Shared-Proof Detection and Exact Probability Mode
 
-MNOR and MPROD assume independent derivations. When multiple proof paths share the same underlying evidence, the runtime detects that overlap and emits `SharedProbabilisticDependency`.
+MNOR and MPROD assume independent derivations. Every `MNOR`/`MPROD` rule records its pre-fold rows as **lineage** (`locy_lineage::LineageStore`, held by the run's `ProvenanceStore`) once its stratum converges — every rule of the stratum before any is corrected, since a rule's formula reads its stratum-mates. A fact's possible-worlds formula is `OP over its rows of (row event AND each referenced fact's formula)`, OP = OR for MNOR, AND for MPROD:
 
-With `LocyConfig::exact_probability = true`, Uni builds a per-group Boolean formula and uses a BDD-backed evaluator to compute exact probabilities for shared-proof MNOR/MPROD groups. Two fallbacks remain important:
+- **Row event.** The row's PROB value divided by the referenced probabilities it carries, which recovers the clause's own weight whether the reference was multiplied in or read as a factor. Two rows whose own weight is the same expression over the same nodes and relationships are one event: `__deriv_event` hashes the expression's shape and their identities (`locy_planner::row_event_expr`), so the direct `s→t` row of a reachability rule and its row through a self-loop at `t` share the edge `s→t`. A weight that reads no node or relationship (a constant) makes the row its own event.
+- **Referenced fact.** Found by `(rule, __deriv_isref_*)`; a fact of a rule without lineage (a non-fold PROB rule) is one independent event of the probability read. A reference to a lineage rule that holds no such fact fails the run.
+
+`SharedProbabilisticDependency` fires when some fact's formula reads a variable twice — two rows, or two parts of one row, sharing an event or a referenced fact, or a cycle (`Analysis` walks strongly connected components dependencies first; a support past `ANALYSIS_SUPPORT_CAP` variables counts as shared). Nodes in common are not evidence in common: the Source/Mid/Target diamond's proofs `{S→T}` and `{S→M, M→T}` share nothing, and independence is exact there (0.745). When no fact of a program is shared, the default value of every fact is already its possible-worlds probability, so the two modes agree — pinned by `locy_prob_is_ref_semantics::exact_matches_possible_worlds_and_default_agrees_without_sharing` against a brute-force enumeration of worlds.
+
+With `LocyConfig::exact_probability = true`, each fact whose formula is not read-once is rebuilt as a BDD (least fixpoint from false, so a derivation through itself adds nothing) and evaluated by Shannon expansion; the group keeps one row carrying that probability. Two fallbacks remain important:
 
 - `BddLimitExceeded` — the group exceeded `max_bdd_variables`, so Uni falls back to the independence result for that key group
 - `CrossGroupCorrelationNotExact` — shared evidence crosses separate aggregate groups; each group is exact internally, but cross-group correlation is still approximate
@@ -5635,14 +5672,16 @@ THEN {
 }
 ```
 
-Executes within a savepoint: applies mutations, re-evaluates all strata in the mutated state, dispatches body commands (which can be nested DERIVE/ABDUCE/ASSUME), collects results, then rolls back. The database is never permanently modified.
+Executes within a savepoint: applies mutations, re-evaluates all strata in the mutated state, dispatches body commands (QUERY, Cypher, DERIVE, nested ASSUME), collects the rows of its QUERY and Cypher commands, then rolls back. The database is never permanently modified. A DERIVE in the body writes into the hypothetical L0, so a later body Cypher command reads its edges; its `affected` count is not part of the ASSUME result.
+
+**ABDUCE and EXPLAIN RULE are rejected in an ASSUME body** at compile time (`LocyCompileError::AssumeBodyCommandNotAllowed`, raised in `compiler/mod.rs` for each `AssumeBlock`, so a nested body is checked when it is compiled). `CommandResult::Assume` carries rows only; the dispatcher used to evaluate them and drop the result. `dispatch_body_command` in `locy_assume.rs` refuses both too, for a hand-built `CompiledProgram`. The replacements are a top-level ABDUCE after the ASSUME, or `tx()` / `Session::scratch()` + mutate + command + `rollback()`.
 
 #### Incremental re-evaluation (A4, 2026-10-18)
 
 The hypothetical state differs from the state before the block only by the block's mutations, so a stratum the mutations cannot affect keeps its facts. `locy_assume::re_evaluate_hypothetical` re-derives only the affected strata (from scratch) and copies the rest from the facts of the state before the mutation. Before this, every ASSUME and every ABDUCE candidate re-derived the whole program (`rows_scanned` 1.97x the plain program for an ASSUME adding one isolated node).
 
 - **Criterion** (`uni_locy::incremental`, purely syntactic). The mutation's `MutationFootprint`: labels whose membership changes (created nodes' labels, `SET`/`REMOVE` labels, *every* label for a node `DELETE`), relationship types created or deleted (a `DELETE r` narrows to `r`'s bound types; a node `DELETE` is every type), property keys that may change on existing entities (`SET n = …` / `+=` is every key), and `opaque` for `CALL` / `WITH RECURSIVE`. Each rule's `RuleReads`: node-pattern labels (an unlabelled pattern reads every label), relationship types (untyped reads every type), property keys read anywhere in the body (MATCH maps, WHERE, YIELD, ALONG, FOLD, BEST BY, REQUIRE, HAVING); a named path, a variable-length relationship variable, a map projection, a dynamic index, `labels`/`keys`/`properties` or an entity passed whole to a non-id function reads every property (and label). A rule is **opaque** (always recomputed) with a subquery / `EXISTS` / pattern comprehension, a generator, a neural model, a namespaced or retrieval function, or a non-deterministic one (`rand`, `timestamp`, nullary temporal constructors). A stratum is affected when a rule is opaque, its reads meet the footprint, or it references (`IS` / `IS NOT`) a rule in an affected stratum or one the program does not hold. Strata are in dependency order, so one forward pass closes the relation.
-- **Same state, same program, same settings.** The adapter (`NativeExecutionAdapter`) offers a baseline only while its state is current: an *epoch* is replaced by a fresh value on every Locy-issued write (`execute_mutation`, a writing Cypher command) and restored by `restore_l0`; under the session path a `BaseFingerprint` of the writer's L0 (buffer identity, version, mutation count, pending flushes) detects a commit or flush by someone else (under a pinned read snapshot nothing can move). The program's own facts are a baseline only when no provenance tracker ran (a tracker can change PROB values via shared-proof BDD, which a re-evaluation does not reproduce). Inside an ASSUME body the parent strata re-derived for the body become the baseline for nested ASSUME / ABDUCE; the body's own strata reuse the parent strata positionally (a body rule may shadow a parent rule's name). ABDUCE takes the baseline once and every candidate reuses it, since each candidate's fork is restored before the next.
+- **Same state, same program, same settings.** The adapter (`NativeExecutionAdapter`) offers a baseline only while its state is current: an *epoch* is replaced by a fresh value on every Locy-issued write (`execute_mutation`, a writing Cypher command) and restored by `restore_l0`; under the session path a `BaseFingerprint` of the writer's L0 (buffer identity, version, mutation count, pending flushes) detects a commit or flush by someone else (under a pinned read snapshot nothing can move). The program's own facts are a baseline only when no provenance tracker ran (a tracker can change PROB values via shared-proof BDD, which a re-evaluation does not reproduce). Inside an ASSUME body the parent strata re-derived for the body become the baseline for a nested ASSUME; the body's own strata reuse the parent strata positionally (a body rule may shadow a parent rule's name). ABDUCE takes the baseline once and every candidate reuses it, since each candidate's fork is restored before the next.
 - **Hydration.** Reused facts are copied as raw facts (`LocyProgramExec::set_reused_strata` skips the stratum and seeds the run's store, which later strata read as usual) and re-hydrated in the hypothetical state, unless the mutation only *adds* entities (`MutationFootprint::preserves_existing_entities`), in which case the baseline's hydrated rows are reused too.
 - **Reused strata are not planned.** `LocyPlanBuilder::with_reused_strata` emits a reused stratum as a stub (`reused_stratum_stub`: rule names and YIELD columns, no clause bodies), since `LocyProgramExec` reads nothing else of it. Planning every stratum anyway was the dominant cost of a block that reuses most of the program: 60 one-rule strata, 8 ASSUMEs that reuse all of them, `plan_time` 26.7 ms before and 3.4 ms after, against 3.2 ms for the program alone (`locy_program_plan_time::locy_program_plan_time_skips_reused_strata`).
 - **Why not delta-seeded semi-naive.** Seeding an affected stratum from the change needs each base clause's delta (the matches the mutation added or removed), which no operator computes, and is unsound for deletions, negation and aggregates. Affected strata recompute in full; that is the conservative choice and leaves the O(change) case for later.
@@ -7320,6 +7359,28 @@ graph TB
 | `max_compaction_rows` | `usize` | 5,000,000 | OOM guard for in-memory compaction |
 | `max_recursive_cte_iterations` | `usize` | 1,000 | Maximum iterations for recursive CTE evaluation |
 | `strict_schema` | `bool` | `false` | Reject writes referencing undeclared labels or edge types |
+| `lance_metadata_cache_bytes` | `Option<usize>` | `None` (Lance: 1 GiB) | Capacity of the shared Lance session's metadata cache |
+| `lance_index_cache_bytes` | `Option<usize>` | `None` (Lance: 6 GiB) | Capacity of the shared Lance session's index cache |
+
+**One Lance session per database.** `LanceDirectory` (`crates/uni-store/src/backend/lance_directory.rs`)
+owns the `lance::session::Session` every primary dataset open goes through
+(`DatasetBuilder::with_session`); a fork's `BranchedBackend` wraps the same
+`LanceDbBackend`, so its non-branch reads share it. The two `lance_*_cache_bytes`
+fields reach it via `StorageManager::new_with_store_and_storage_options` →
+`LanceDbBackend::connect_with_cache_sizes` → `LanceDirectory::connect_with_cache_sizes`,
+which builds the `QuickCacheBackend`s itself (`Session::with_cache_backends`) and keeps
+the handles so `StorageBackend::cache_usage` can read occupancy synchronously for
+`DatabaseMetrics::storage_{metadata,index}_cache_bytes`. Opens that do not go through
+`LanceDirectory` — the `lance_branch` free functions (fork branch reads and writes),
+`UidIndex`, `JsonPathIndex`, the inverted and sparse posting datasets, and
+`Dataset::write` — get a fresh default-sized session per call that is dropped
+with the dataset; they retain nothing between calls and are not governed by the
+caps. The caches are trimmed only at capacity, so without a cap a process that
+flushes often keeps growing toward 7 GiB: in
+`cdc_runtime_e2e::w2_residual_memory_growth_observation` (debug, 20k one-row
+rewrites, flush every 250) the metadata cache held 6.0 MB after 80 flushes and
+the heap grew 454 B/commit; with `W2_LANCE_CACHE=1048576` it held 1.04 MB and
+the heap grew 94.7 B/commit.
 
 ### What `max_query_memory` actually covers
 

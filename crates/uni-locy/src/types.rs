@@ -448,6 +448,11 @@ pub enum RuntimeWarningCode {
     /// approximation. Emitted from library code; Stage 2 wires it
     /// into the runtime tag flow.
     TopKPruningCrossedDependency,
+    /// A clause's PROB value reads the probability of a positive `IS`
+    /// reference other than as one product factor (`1 - p`, `p * p`). The
+    /// referenced probability is not multiplied in a second time, and exact
+    /// inference treats each such row as an independent event.
+    ProbabilityReadNotFactor,
 }
 
 impl RuntimeWarningCode {
@@ -471,6 +476,7 @@ impl RuntimeWarningCode {
             RuntimeWarningCode::FuzzyNotProbabilistic => "fuzzy_not_probabilistic",
             RuntimeWarningCode::EntityHydrationIncomplete => "entity_hydration_incomplete",
             RuntimeWarningCode::TopKPruningCrossedDependency => "top_k_pruning_crossed_dependency",
+            RuntimeWarningCode::ProbabilityReadNotFactor => "probability_read_not_factor",
         }
     }
 }

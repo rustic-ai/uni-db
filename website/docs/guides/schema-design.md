@@ -211,17 +211,23 @@ Be intentional about nullable properties:
 | Descriptive | `citation_count` not `cc` | Self-documenting |
 | No prefixes | `title` not `paper_title` | Label provides context |
 
-**Reserved names.** A few names belong to the storage layer. A write that sets
-a property named `overflow_json`, `_vid`, `_uid`, `_eid`, `_deleted`,
-`_version`, `_labels`, `_created_at` or `_updated_at` — through `CREATE`, `SET`,
-`MERGE`, bulk insert, the bulk writer or the Python API — fails with
+**Reserved names.** A few names belong to the engine. A write that sets a
+property named `overflow_json`, `_vid`, `_uid`, `_eid`, `_labels`,
+`_label`, `_type`, `_type_name`, `_src`, `_dst`, `_src_vid`, `_dst_vid`,
+`_all_props`, `_score`, `_fwd`, `_deleted`, `_version`, `_created_at`,
+`_updated_at`, Lance's row columns (`_rowid`, `_rowaddr`, `_rowoffset`,
+`_row_created_at_version`, `_row_last_updated_at_version`), `__set_struct__`
+or `__with_passthrough__`, or one starting with `_gen_`, `__fde_` or
+`__alias_of__` — through `CREATE`, `SET`, `MERGE`, bulk insert, the bulk
+writer or the Python API — fails with
 `UniError::InvalidIdentifier` (Python: `UniInvalidIdentifierError`), declared
-label or not. Declaring a property cannot use them either, nor any other name
-starting with `_`, nor `ext_id`, `eid`, `src_vid`, `dst_vid` or `op`. Avoid a
-leading `_` for undeclared properties as well: such a property is not listed by
-`keys()`, and on a declared label it is not stored. `ext_id` is the vertex's
-external id; `eid`, `src_vid`, `dst_vid`, `op`, `type`, `labels` and
-`props_json` work as undeclared properties.
+label or not. Any other name is yours, including one that starts with `_`: an
+undeclared `_source` or `__tag` property reads back like any other, through
+`n._source`, `keys(n)`, `properties(n)`, `n {.*}`, the returned node and Locy.
+Declaring a property cannot use a leading `_` at all, nor `ext_id`, `eid`,
+`src_vid`, `dst_vid` or `op`. `ext_id` is the vertex's external id; `eid`,
+`src_vid`, `dst_vid`, `op`, `type`, `labels` and `props_json` work as
+undeclared properties.
 
 **Characters a declared property cannot use.** A declared property is a storage
 column, and a column name cannot contain `.` or a backtick: declaring one fails

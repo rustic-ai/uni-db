@@ -1024,6 +1024,8 @@ class DatabaseMetrics:
     wal_lsn: int
     total_queries: int
     total_commits: int
+    storage_metadata_cache_bytes: int
+    storage_index_cache_bytes: int
 
 class SessionMetrics:
     """Metrics for a session's lifetime."""
@@ -1599,6 +1601,10 @@ class Session:
 
     # --- Transaction Factory ---
     def tx(self) -> Transaction: ...
+    def scratch(self) -> Transaction:
+        """Begin a scratch transaction: like ``tx()``, but ``commit()`` is
+        refused, so its writes are always discarded."""
+        ...
     def tx_with(self) -> TransactionBuilder: ...
 
     # --- Forks ---
@@ -2209,6 +2215,10 @@ class AsyncSession:
 
     # --- Transaction Factory ---
     async def tx(self, timeout: float | None = None) -> AsyncTransaction: ...
+    async def scratch(self) -> AsyncTransaction:
+        """Begin a scratch transaction: like ``tx()``, but ``commit()`` is
+        refused, so its writes are always discarded."""
+        ...
     def tx_with(self) -> AsyncTransactionBuilder: ...
 
     # --- Forks ---

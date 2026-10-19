@@ -56,6 +56,7 @@ pub mod pattern_exists_unbound_param;
 pub mod relationship_uniqueness_invariant;
 pub mod repro_233_periodic_cancel_durability;
 pub mod repro_edge_export;
+pub mod underscore_property_reads;
 // Correctness-scan Wave 0 repros.
 pub mod repro_fork_sweeper_shutdown;
 pub mod repro_hybrid_dense_arm_swallow;

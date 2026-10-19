@@ -859,8 +859,10 @@ use super::planner::{
     LogicalPlan, QueryPlanner, VariableInfo, WhereScope, collect_expr_variables, is_var_in_scope,
 };
 use super::planner_locy_types::{
-    FOLD_DISCRIMINATOR_COL_PREFIX, ISNOT_VID_COL_PREFIX, LocyClausePlan, LocyCommand, LocyIsRef,
-    LocyRulePlan, LocyStratum, LocyYieldColumn, NegationKey,
+    DERIV_EVENT_COL, DERIV_ISPROB_COL_PREFIX, DERIV_ISREF_COL_PREFIX,
+    FOLD_DISCRIMINATOR_COL_PREFIX, ISNOT_VID_COL_PREFIX, ISPROB_COL_PREFIX, LocyClausePlan,
+    LocyCommand, LocyIsRef, LocyRulePlan, LocyStratum, LocyYieldColumn, NegationKey,
+    PositiveProbRef, ProbRead,
 };
 
 // ---------------------------------------------------------------------------
@@ -995,17 +997,258 @@ fn derivation_discriminator_columns(
     stratum_rule_names: &HashSet<String>,
     rule_catalog: &HashMap<String, CompiledRule>,
 ) -> Vec<(String, DataType)> {
-    derivation_discriminators(rule, is_recursive, stratum_rule_names, rule_catalog).map_or_else(
-        Vec::new,
-        |vars| {
-            std::iter::once((
-                format!("{FOLD_DISCRIMINATOR_COL_PREFIX}clause"),
-                DataType::Int64,
-            ))
-            .chain(vars.iter().map(|d| (d.column(), d.kind.data_type())))
-            .collect()
-        },
-    )
+    let mut columns: Vec<(String, DataType)> =
+        derivation_discriminators(rule, is_recursive, stratum_rule_names, rule_catalog)
+            .map_or_else(Vec::new, |vars| {
+                std::iter::once((
+                    format!("{FOLD_DISCRIMINATOR_COL_PREFIX}clause"),
+                    DataType::Int64,
+                ))
+                .chain(vars.iter().map(|d| (d.column(), d.kind.data_type())))
+                .collect()
+            });
+    // The lineage columns of an `MNOR`/`MPROD` rule, recursive or not: the
+    // row event, then each slot's, following the discriminators in every
+    // clause's projection.
+    if prob_column_is_probability_fold(rule) && prefold_prob_column(rule).is_some() {
+        columns.push((
+            DERIV_EVENT_COL.to_string(),
+            crate::query::df_graph::locy_row_hash::row_hash_type(),
+        ));
+    }
+    for slot in prob_ref_slots(rule, rule_catalog)
+        .iter()
+        .filter(|s| s.keeps_lineage)
+    {
+        columns.push((
+            slot.key_column(),
+            crate::query::df_graph::locy_row_hash::row_hash_type(),
+        ));
+        columns.push((slot.prob_column(), DataType::Float64));
+    }
+    columns
+}
+
+/// A positive reference, from a clause of a rule with a PROB column, to a rule
+/// that has one too: the referenced probability flows into the calling row's
+/// PROB value (see [`ProbRead`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProbRefSlot {
+    /// The clause holding the reference.
+    clause_index: usize,
+    /// Its position among the clause's positive references, in text order.
+    occurrence: usize,
+    /// Whether the calling rule's PROB column is an `MNOR`/`MPROD` fold, whose
+    /// pre-fold rows are kept as lineage for exact inference and shared-proof
+    /// detection.
+    keeps_lineage: bool,
+    /// The calling rule's PROB column as the clause body names it.
+    into_column: String,
+}
+
+impl ProbRefSlot {
+    /// The hidden column carrying the referenced fact's PROB value.
+    fn prob_column(&self) -> String {
+        let prefix = if self.keeps_lineage {
+            DERIV_ISPROB_COL_PREFIX
+        } else {
+            ISPROB_COL_PREFIX
+        };
+        format!("{prefix}{}_{}", self.clause_index, self.occurrence)
+    }
+
+    /// The hidden column carrying the hash of the referenced fact's KEY.
+    fn key_column(&self) -> String {
+        format!(
+            "{DERIV_ISREF_COL_PREFIX}{}_{}",
+            self.clause_index, self.occurrence
+        )
+    }
+}
+
+/// The PROB column of `rule` as its clause bodies name it before any FOLD: the
+/// FOLD variable when the PROB column is a fold output, the YIELD name for a
+/// rule without FOLD. `None` when the rule has no PROB column, or when its PROB
+/// column is computed after the fold (`YIELD 1 - total AS x PROB`), where no
+/// per-row value exists to multiply a referenced probability into.
+fn prefold_prob_column(rule: &CompiledRule) -> Option<String> {
+    let prob = rule.yield_schema.iter().find(|c| c.is_prob)?;
+    if let Some((fold_var, _)) = rule_fold_layout(rule)
+        .into_iter()
+        .find(|(_, yield_name)| *yield_name == prob.name)
+    {
+        return Some(fold_var);
+    }
+    rule.clauses
+        .iter()
+        .all(|c| c.fold.is_empty())
+        .then(|| prob.name.clone())
+}
+
+/// Whether `rule`'s PROB column is an `MNOR` or `MPROD` fold.
+fn prob_column_is_probability_fold(rule: &CompiledRule) -> bool {
+    let Some(prob) = rule.yield_schema.iter().find(|c| c.is_prob) else {
+        return false;
+    };
+    let Some((fold_var, _)) = rule_fold_layout(rule)
+        .into_iter()
+        .find(|(_, yield_name)| *yield_name == prob.name)
+    else {
+        return false;
+    };
+    rule.clauses.iter().flat_map(|c| c.fold.iter()).any(|fb| {
+        fb.name == fold_var
+            && fold_function_name(&fb.aggregate)
+                .is_some_and(|n| matches!(n.to_uppercase().as_str(), "MNOR" | "MPROD"))
+    })
+}
+
+/// Every positive reference to a PROB rule whose probability flows into
+/// `rule`'s PROB column, in clause then text order (see [`ProbRefSlot`]).
+fn prob_ref_slots(
+    rule: &CompiledRule,
+    rule_catalog: &HashMap<String, CompiledRule>,
+) -> Vec<ProbRefSlot> {
+    let Some(into_column) = prefold_prob_column(rule) else {
+        return Vec::new();
+    };
+    let keeps_lineage = prob_column_is_probability_fold(rule);
+    let mut slots = Vec::new();
+    for (clause_index, clause) in rule.clauses.iter().enumerate() {
+        let positives = clause.where_conditions.iter().filter_map(|c| match c {
+            RuleCondition::IsReference(r) if !r.negated => Some(r),
+            _ => None,
+        });
+        for (occurrence, is_ref) in positives.enumerate() {
+            let target_has_prob = rule_catalog
+                .get(&is_ref.rule_name.to_string())
+                .is_some_and(|t| t.yield_schema.iter().any(|c| c.is_prob));
+            if target_has_prob {
+                slots.push(ProbRefSlot {
+                    clause_index,
+                    occurrence,
+                    keeps_lineage,
+                    into_column: into_column.clone(),
+                });
+            }
+        }
+    }
+    slots
+}
+
+/// The row-event hash expression for a clause (see [`DERIV_EVENT_COL`]), or
+/// `None` when the row is its own event.
+///
+/// `expr` is the resolved PROB expression, `factored` the batch columns of
+/// the referenced probabilities it reads as product factors, and `entity`
+/// the identity column of a name that is a node or relationship.
+fn row_event_expr(
+    expr: &Expr,
+    factored: &HashSet<String>,
+    entity: &dyn Fn(&str) -> Option<String>,
+) -> Option<Expr> {
+    fn factors(expr: &Expr, out: &mut Vec<Expr>) {
+        match expr {
+            Expr::BinaryOp {
+                left,
+                op: uni_cypher::ast::BinaryOp::Mul,
+                right,
+            } => {
+                factors(left, out);
+                factors(right, out);
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    fn names(expr: &Expr, out: &mut Vec<String>) {
+        if let Expr::Variable(v) = expr {
+            out.push(v.clone());
+        }
+        expr.for_each_child_in_scope(&mut |child| names(child, out));
+    }
+    let mut product = Vec::new();
+    factors(expr, &mut product);
+    product.retain(|f| !matches!(f, Expr::Variable(v) if factored.contains(v)));
+    let mut read = Vec::new();
+    for factor in &product {
+        names(factor, &mut read);
+    }
+    // A value that is no graph property (a referenced value column, a
+    // generator output) is identified by no node or relationship.
+    let mut identities: Vec<(String, String)> = Vec::new();
+    for name in read {
+        let column = entity(&name)?;
+        if !identities.iter().any(|(n, _)| *n == name) {
+            identities.push((name, column));
+        }
+    }
+    if identities.is_empty() {
+        return None;
+    }
+    let shape: Vec<String> = product
+        .into_iter()
+        .map(|factor| {
+            let renamed = map_variables(factor, &|name| {
+                identities
+                    .iter()
+                    .position(|(n, _)| n == name)
+                    .map(|i| Expr::Variable(format!("#{i}")))
+            });
+            format!("{renamed:?}")
+        })
+        .collect();
+    let args = std::iter::once(Expr::Literal(CypherLiteral::String(shape.join(" * "))))
+        .chain(
+            identities
+                .into_iter()
+                .map(|(_, column)| Expr::Variable(column)),
+        )
+        .collect();
+    Some(Expr::FunctionCall {
+        name: crate::query::df_graph::locy_row_hash::ROW_HASH_FN.to_string(),
+        args,
+        distinct: false,
+        window_spec: None,
+    })
+}
+
+/// How `expr` — a clause's resolved PROB expression — reads a referenced
+/// probability, any of whose batch columns `names` lists (see [`ProbRead`]).
+fn classify_prob_read(expr: &Expr, names: &HashSet<String>) -> ProbRead {
+    fn count_reads(expr: &Expr, names: &HashSet<String>) -> usize {
+        let own = usize::from(matches!(expr, Expr::Variable(v) if names.contains(v)));
+        let mut children = 0;
+        expr.for_each_child_in_scope(&mut |child| children += count_reads(child, names));
+        own + children
+    }
+    fn factors<'e>(expr: &'e Expr, out: &mut Vec<&'e Expr>) {
+        match expr {
+            Expr::BinaryOp {
+                left,
+                op: uni_cypher::ast::BinaryOp::Mul,
+                right,
+            } => {
+                factors(left, out);
+                factors(right, out);
+            }
+            other => out.push(other),
+        }
+    }
+    let reads = count_reads(expr, names);
+    if reads == 0 {
+        return ProbRead::Absent;
+    }
+    let mut product = Vec::new();
+    factors(expr, &mut product);
+    let direct = product
+        .iter()
+        .filter(|f| matches!(f, Expr::Variable(v) if names.contains(v)))
+        .count();
+    if direct == 1 && reads == 1 {
+        ProbRead::Factor
+    } else {
+        ProbRead::Opaque
+    }
 }
 
 /// The discriminating variables behind [`derivation_discriminator_columns`],
@@ -1481,6 +1724,14 @@ struct ClauseCtx<'a> {
     /// This clause's index within the rule, projected as `__deriv_clause` so
     /// two clauses' rows can never collide through NULL padding.
     clause_index: usize,
+    /// The rule's positive references to PROB rules, across all its clauses
+    /// (see [`prob_ref_slots`]). A lineage-keeping rule projects every slot's
+    /// columns in every clause, NULL outside the slot's own clause.
+    prob_slots: &'a [ProbRefSlot],
+    /// For an `MNOR`/`MPROD` rule, which keeps lineage: its PROB column as
+    /// the clause bodies name it. Every clause then projects the row-event
+    /// column [`DERIV_EVENT_COL`].
+    lineage_prob_column: Option<&'a str>,
 }
 
 impl<'a> LocyPlanBuilder<'a> {
@@ -1797,6 +2048,10 @@ impl<'a> LocyPlanBuilder<'a> {
         }
         seed_types.extend(unified.iter().map(|(k, v)| (k.clone(), v.clone())));
 
+        let prob_slots = prob_ref_slots(rule, rule_catalog);
+        let lineage_prob_column = prob_column_is_probability_fold(rule)
+            .then(|| prefold_prob_column(rule))
+            .flatten();
         let mut clauses = Vec::with_capacity(rule.clauses.len());
         for (clause_index, clause) in rule.clauses.iter().enumerate() {
             let named;
@@ -1819,6 +2074,8 @@ impl<'a> LocyPlanBuilder<'a> {
                     fold_layout: &fold_layout,
                     is_recursive,
                     clause_index,
+                    prob_slots: &prob_slots,
+                    lineage_prob_column: lineage_prob_column.as_deref(),
                 },
                 classifiers,
             )?);
@@ -2611,8 +2868,13 @@ impl<'a> LocyPlanBuilder<'a> {
                     .iter()
                     .map(|p| p.column.clone())
                     .collect(),
+                prob_ref: None,
             });
         }
+        // Filled in once the projection is built (the classification reads
+        // the projected PROB expression), keyed by index into `binding.refs`
+        // — the order of `is_refs`.
+        let mut prob_refs_by_ref: HashMap<usize, PositiveProbRef> = HashMap::new();
 
         let along_bindings: Vec<String> = clause.along.iter().map(|a| a.name.clone()).collect();
 
@@ -2885,6 +3147,146 @@ impl<'a> LocyPlanBuilder<'a> {
             }
         }
 
+        // Positive references to PROB rules (see `ProbRead`): each carries the
+        // referenced fact's probability, and — for an `MNOR`/`MPROD` rule,
+        // which keeps lineage — the hash of the referenced fact's KEY, into
+        // the projected body. A lineage rule projects every slot of every
+        // clause (typed NULL outside the slot's own clause) so the clauses stay
+        // union-compatible; these follow the discriminators, matching
+        // `derivation_discriminator_columns`.
+        let positive_refs_in_text_order: Vec<usize> = {
+            let mut refs: Vec<usize> = (0..binding.refs.len())
+                .filter(|&r| !binding.refs[r].negated)
+                .collect();
+            refs.sort_by_key(|&r| binding.refs[r].condition_index);
+            refs
+        };
+        let slot_ref = |slot: &ProbRefSlot| -> Option<usize> {
+            (slot.clause_index == ctx.clause_index)
+                .then(|| positive_refs_in_text_order.get(slot.occurrence).copied())
+                .flatten()
+        };
+        let ref_prob_columns = |r: usize| -> Result<(String, Vec<String>)> {
+            let ref_binding = &binding.refs[r];
+            let target = rule_catalog
+                .get(&ref_binding.rule)
+                .with_context(|| format!("IS-reference to unknown rule '{}'", ref_binding.rule))?;
+            let prob = target
+                .yield_schema
+                .iter()
+                .find(|c| c.is_prob)
+                .with_context(|| {
+                    format!(
+                        "internal error: IS-reference to '{}' has no PROB column",
+                        ref_binding.rule
+                    )
+                })?;
+            let keys = target
+                .yield_schema
+                .iter()
+                .filter(|c| c.is_key)
+                .map(|c| format!("{}{}", ref_binding.prefix, c.name))
+                .collect();
+            Ok((format!("{}{}", ref_binding.prefix, prob.name), keys))
+        };
+        let mut factored_prob_names: HashSet<String> = HashSet::new();
+        let mut opaque_prob_read = false;
+        // How this clause's PROB expression reads each of its references'
+        // probabilities, from the expression as projected.
+        for slot in ctx.prob_slots {
+            let Some(r) = slot_ref(slot) else {
+                continue;
+            };
+            let ref_binding = &binding.refs[r];
+            let (prob_physical, _) = ref_prob_columns(r)?;
+            let target_prob = prob_physical
+                .strip_prefix(ref_binding.prefix.as_str())
+                .unwrap_or(&prob_physical)
+                .to_string();
+            let mut names: HashSet<String> = HashSet::from([prob_physical]);
+            for position in ref_binding
+                .positions
+                .iter()
+                .filter(|p| p.column == target_prob)
+            {
+                names.insert(position.physical.clone());
+                if let Ok(Expr::Variable(column)) = scope.identity(&position.variable) {
+                    names.insert(column);
+                }
+            }
+            let read = projections
+                .iter()
+                .find(|(_, alias)| alias.as_deref() == Some(slot.into_column.as_str()))
+                .map_or(ProbRead::Absent, |(expr, _)| {
+                    classify_prob_read(expr, &names)
+                });
+            match read {
+                ProbRead::Factor => factored_prob_names.extend(names),
+                ProbRead::Opaque => opaque_prob_read = true,
+                ProbRead::Absent => {}
+            }
+            prob_refs_by_ref.insert(
+                r,
+                PositiveProbRef {
+                    prob_column: slot.prob_column(),
+                    key_column: slot.keeps_lineage.then(|| slot.key_column()),
+                    into_column: slot.into_column.clone(),
+                    read,
+                },
+            );
+        }
+
+        // The row event of a lineage rule (see `DERIV_EVENT_COL`): every
+        // clause projects it, NULL when the row is its own event.
+        if let Some(prob_column) = ctx.lineage_prob_column {
+            let event = projections
+                .iter()
+                .find(|(_, alias)| alias.as_deref() == Some(prob_column))
+                .filter(|_| !opaque_prob_read)
+                .and_then(|(expr, _)| {
+                    row_event_expr(expr, &factored_prob_names, &|name| match projection_scope
+                        .source(name)
+                    {
+                        Some(NameSource::Entity(column)) => Some(column),
+                        _ => None,
+                    })
+                })
+                .unwrap_or(Expr::Literal(CypherLiteral::Null));
+            projections.push((event, Some(DERIV_EVENT_COL.to_string())));
+            target_types.push(crate::query::df_graph::locy_row_hash::row_hash_type());
+        }
+        let mut transient_prob_projections: Vec<(Expr, String)> = Vec::new();
+        for slot in ctx.prob_slots {
+            let own = slot_ref(slot);
+            if slot.keeps_lineage {
+                let (key_expr, prob_expr) = match own {
+                    Some(r) => {
+                        let (prob, keys) = ref_prob_columns(r)?;
+                        (
+                            Expr::FunctionCall {
+                                name: crate::query::df_graph::locy_row_hash::ROW_HASH_FN
+                                    .to_string(),
+                                args: keys.into_iter().map(Expr::Variable).collect(),
+                                distinct: false,
+                                window_spec: None,
+                            },
+                            Expr::Variable(prob),
+                        )
+                    }
+                    None => (
+                        Expr::Literal(CypherLiteral::Null),
+                        Expr::Literal(CypherLiteral::Null),
+                    ),
+                };
+                projections.push((key_expr, Some(slot.key_column())));
+                target_types.push(crate::query::df_graph::locy_row_hash::row_hash_type());
+                projections.push((prob_expr, Some(slot.prob_column())));
+                target_types.push(DataType::Float64);
+            } else if let Some(r) = own {
+                let (prob, _) = ref_prob_columns(r)?;
+                transient_prob_projections.push((Expr::Variable(prob), slot.prob_column()));
+            }
+        }
         // Hidden YIELD items emitted by `extract_model_invocations` for
         // property feature exprs (e.g. `scorer(s.tier)`). These columns
         // (named `__feat_<var>_<prop>`) flow through the body batch so
@@ -2911,6 +3313,11 @@ impl<'a> LocyPlanBuilder<'a> {
         // `plan_locy_project` skips the coercion cast when `target_types.get(i)`
         // is `None`, preserving the native type the anti-join compares.
         for (expr, hidden) in negation_projections {
+            projections.push((expr, Some(hidden)));
+        }
+        // The transient probability columns, untyped for the same reason;
+        // the fixpoint strips them once multiplied in.
+        for (expr, hidden) in transient_prob_projections {
             projections.push((expr, Some(hidden)));
         }
 
@@ -3096,6 +3503,12 @@ impl<'a> LocyPlanBuilder<'a> {
             &pattern_vars.iter().map(|v| v.name.clone()).collect(),
             &plan,
         )?;
+
+        for (index, prob_ref) in prob_refs_by_ref {
+            if let Some(is_ref) = is_refs.get_mut(index) {
+                is_ref.prob_ref = Some(prob_ref);
+            }
+        }
 
         Ok(LocyClausePlan {
             body: plan,
@@ -4658,6 +5071,8 @@ mod tests {
                     fold_layout: &[],
                     is_recursive: false,
                     clause_index: 0,
+                    prob_slots: &[],
+                    lineage_prob_column: None,
                 },
                 &test_classifier_ctx(),
             )
@@ -4728,6 +5143,8 @@ mod tests {
                     fold_layout: &[],
                     is_recursive: false,
                     clause_index: 0,
+                    prob_slots: &[],
+                    lineage_prob_column: None,
                 },
                 &test_classifier_ctx(),
             )
@@ -4795,6 +5212,8 @@ mod tests {
                     fold_layout: &[],
                     is_recursive: false,
                     clause_index: 0,
+                    prob_slots: &[],
+                    lineage_prob_column: None,
                 },
                 &test_classifier_ctx(),
             )
@@ -4857,6 +5276,8 @@ mod tests {
                     fold_layout: &[],
                     is_recursive: false,
                     clause_index: 0,
+                    prob_slots: &[],
+                    lineage_prob_column: None,
                 },
                 &test_classifier_ctx(),
             )
@@ -4929,6 +5350,8 @@ mod tests {
                     fold_layout: &[],
                     is_recursive: false,
                     clause_index: 0,
+                    prob_slots: &[],
+                    lineage_prob_column: None,
                 },
                 &test_classifier_ctx(),
             )
@@ -4989,6 +5412,8 @@ mod tests {
                     fold_layout: &[],
                     is_recursive: false,
                     clause_index: 0,
+                    prob_slots: &[],
+                    lineage_prob_column: None,
                 },
                 &test_classifier_ctx(),
             )
@@ -5071,6 +5496,8 @@ mod tests {
                     fold_layout: &[],
                     is_recursive: false,
                     clause_index: 0,
+                    prob_slots: &[],
+                    lineage_prob_column: None,
                 },
                 &test_classifier_ctx(),
             )
@@ -5298,6 +5725,8 @@ mod tests {
                     fold_layout: &[],
                     is_recursive: false,
                     clause_index: 0,
+                    prob_slots: &[],
+                    lineage_prob_column: None,
                 },
                 &test_classifier_ctx(),
             )
@@ -5363,6 +5792,8 @@ mod tests {
                     fold_layout: &[],
                     is_recursive: false,
                     clause_index: 0,
+                    prob_slots: &[],
+                    lineage_prob_column: None,
                 },
                 &test_classifier_ctx(),
             )
@@ -5426,6 +5857,8 @@ mod tests {
                     fold_layout: &[],
                     is_recursive: false,
                     clause_index: 0,
+                    prob_slots: &[],
+                    lineage_prob_column: None,
                 },
                 &test_classifier_ctx(),
             )
@@ -5496,6 +5929,8 @@ mod tests {
                     fold_layout: &[],
                     is_recursive: false,
                     clause_index: 0,
+                    prob_slots: &[],
+                    lineage_prob_column: None,
                 },
                 &test_classifier_ctx(),
             )
@@ -5539,6 +5974,8 @@ mod tests {
                     fold_layout: &[],
                     is_recursive: false,
                     clause_index: 0,
+                    prob_slots: &[],
+                    lineage_prob_column: None,
                 },
                 &test_classifier_ctx(),
             )
@@ -5625,6 +6062,8 @@ mod tests {
                     fold_layout: &[],
                     is_recursive: false,
                     clause_index: 0,
+                    prob_slots: &[],
+                    lineage_prob_column: None,
                 },
                 &test_classifier_ctx(),
             )
@@ -6397,6 +6836,8 @@ mod tests {
                 fold_layout: &[],
                 is_recursive: false,
                 clause_index: 0,
+                prob_slots: &[],
+                lineage_prob_column: None,
             },
             &test_classifier_ctx(),
         );
@@ -6452,6 +6893,8 @@ mod tests {
                 fold_layout: &[],
                 is_recursive: false,
                 clause_index: 0,
+                prob_slots: &[],
+                lineage_prob_column: None,
             },
             &test_classifier_ctx(),
         );
@@ -6510,6 +6953,8 @@ mod tests {
                 fold_layout: &[],
                 is_recursive: false,
                 clause_index: 0,
+                prob_slots: &[],
+                lineage_prob_column: None,
             },
             &test_classifier_ctx(),
         );
@@ -6562,6 +7007,8 @@ mod tests {
                 fold_layout: &[],
                 is_recursive: false,
                 clause_index: 0,
+                prob_slots: &[],
+                lineage_prob_column: None,
             },
             &test_classifier_ctx(),
         );
@@ -6621,6 +7068,8 @@ mod tests {
                     fold_layout: &[],
                     is_recursive: false,
                     clause_index: 0,
+                    prob_slots: &[],
+                    lineage_prob_column: None,
                 },
                 &test_classifier_ctx(),
             );
@@ -6681,6 +7130,8 @@ mod tests {
                 fold_layout: &[],
                 is_recursive: false,
                 clause_index: 0,
+                prob_slots: &[],
+                lineage_prob_column: None,
             },
             &test_classifier_ctx(),
         );

@@ -33,6 +33,33 @@ pub(crate) fn row_hash_type() -> DataType {
     DataType::FixedSizeBinary(ROW_HASH_WIDTH)
 }
 
+/// The identity `__locy_row_hash` gives row `row` of `columns`.
+///
+/// Exposed so a runtime component can recompute, from a rule's own facts, the
+/// identity a clause body projected for a referenced fact: both sides hash the
+/// same values in the same order with the same keys.
+///
+/// # Errors
+///
+/// Fails when a value cannot be read from a column.
+pub(crate) fn row_hash(
+    columns: &[arrow_array::ArrayRef],
+    row: usize,
+) -> datafusion::error::Result<[u8; ROW_HASH_WIDTH as usize]> {
+    let mut low = std::collections::hash_map::DefaultHasher::new();
+    let mut high = std::collections::hash_map::DefaultHasher::new();
+    high.write_u8(0x5a);
+    for column in columns {
+        let value = ScalarValue::try_from_array(column, row)?;
+        value.hash(&mut low);
+        value.hash(&mut high);
+    }
+    let mut bytes = [0u8; ROW_HASH_WIDTH as usize];
+    bytes[..8].copy_from_slice(&low.finish().to_le_bytes());
+    bytes[8..].copy_from_slice(&high.finish().to_le_bytes());
+    Ok(bytes)
+}
+
 /// Hashes its children's values row by row into a 16-byte identity.
 ///
 /// Values are hashed through `ScalarValue`'s `Hash`, which is defined for every
@@ -99,7 +126,10 @@ impl PhysicalExpr for RowHashExpr {
     }
 
     fn nullable(&self, _input_schema: &Schema) -> datafusion::error::Result<bool> {
-        Ok(false)
+        // Never NULL itself, but the column it fills is: a sibling clause
+        // that has no such identity projects a typed NULL into it, and the
+        // clauses' batches are unioned under the first one's schema.
+        Ok(true)
     }
 
     fn evaluate(
@@ -114,18 +144,7 @@ impl PhysicalExpr for RowHashExpr {
             .collect::<datafusion::error::Result<Vec<_>>>()?;
         let mut out = FixedSizeBinaryBuilder::with_capacity(rows, ROW_HASH_WIDTH);
         for row in 0..rows {
-            let mut low = std::collections::hash_map::DefaultHasher::new();
-            let mut high = std::collections::hash_map::DefaultHasher::new();
-            high.write_u8(0x5a);
-            for column in &columns {
-                let value = ScalarValue::try_from_array(column, row)?;
-                value.hash(&mut low);
-                value.hash(&mut high);
-            }
-            let mut bytes = [0u8; ROW_HASH_WIDTH as usize];
-            bytes[..8].copy_from_slice(&low.finish().to_le_bytes());
-            bytes[8..].copy_from_slice(&high.finish().to_le_bytes());
-            out.append_value(bytes)?;
+            out.append_value(row_hash(&columns, row)?)?;
         }
         Ok(ColumnarValue::Array(Arc::new(out.finish())))
     }

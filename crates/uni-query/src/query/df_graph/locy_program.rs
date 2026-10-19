@@ -1145,6 +1145,12 @@ async fn run_program(
                             &complement_cols,
                         )?;
                     }
+                    // Positive references to PROB rules: multiply in each
+                    // referenced probability the clause does not already read.
+                    batches = super::locy_lineage::apply_positive_prob_factors(
+                        batches,
+                        &fp_clause.is_ref_bindings,
+                    )?;
 
                     // The anti-join has run; drop its hidden subject-`_vid`
                     // columns before `write_facts_to_registry`, which would
@@ -1154,22 +1160,9 @@ async fn run_program(
                     tagged_clause_facts.push((clause_idx, batches));
                 }
 
-                // Record provenance and detect shared proofs for non-recursive rules.
-                //
-                // TODO(C0-stage2): swap `record_and_detect_lineage_nonrecursive`
-                // for `TopKTag` DNF inspection when
-                // `semiring_kind == TopKProofs { k }`. Library-layer
-                // tag math landed in
-                // `crates/uni-locy/src/top_k_proofs.rs` (Phase C C0
-                // Stage 1); Stage 2 wires per-row tags through the
-                // runtime so dependencies are visible here.
-                //
-                // Under MaxMinProb, `plus = max` is idempotent so shared
-                // proofs don't double-count — skip the (misleading) warning.
-                let shared_info = if semiring_kind == SemiringKind::MaxMinProb {
-                    None
-                } else if let Some(ref tracker) = derivation_tracker {
-                    super::locy_fixpoint::record_and_detect_lineage_nonrecursive(
+                // Record provenance (EXPLAIN, top-k proofs) for non-recursive rules.
+                if let Some(ref tracker) = derivation_tracker {
+                    super::locy_fixpoint::record_provenance_nonrecursive(
                         fp_rule,
                         &tagged_clause_facts,
                         tracker,
@@ -1181,12 +1174,9 @@ async fn run_program(
                             cache: classifier_cache.as_ref(),
                             provenance_store: classifier_provenance_store.as_ref(),
                         },
-                        semiring_kind,
                     )
-                    .await?
-                } else {
-                    None
-                };
+                    .await?;
+                }
 
                 // Flatten tagged facts for post-fixpoint chain.
                 let mut all_clause_facts: Vec<RecordBatch> = tagged_clause_facts
@@ -1194,20 +1184,27 @@ async fn run_program(
                     .flat_map(|(_, batches)| batches)
                     .collect();
 
-                // Apply BDD for shared groups if exact_probability is enabled.
-                if exact_probability
-                    && let Some(ref info) = shared_info
-                    && let Some(ref tracker) = derivation_tracker
-                {
-                    all_clause_facts = super::locy_fixpoint::apply_exact_wmc(
-                        all_clause_facts,
-                        fp_rule,
-                        info,
-                        tracker,
-                        max_bdd_variables,
-                        &warnings_slot,
-                        &approximate_slot,
-                    )?;
+                // Lineage, shared-proof detection and, with
+                // `exact_probability`, exact inference (`locy_lineage`).
+                // Under MaxMinProb, `plus = max` is idempotent so shared
+                // proofs don't double-count — skip the (misleading) warning.
+                super::locy_lineage::warn_opaque_prob_reads(fp_rule, &warnings_slot);
+                if let Some(ref tracker) = derivation_tracker {
+                    tracker.lineage().record_rule(fp_rule, &all_clause_facts)?;
+                    if semiring_kind != SemiringKind::MaxMinProb {
+                        let (corrected, _) = tracker.lineage().correct(
+                            fp_rule,
+                            all_clause_facts,
+                            &super::locy_lineage::ExactCtx {
+                                exact: exact_probability,
+                                max_bdd_variables,
+                                semiring_kind,
+                                warnings_slot: &warnings_slot,
+                                approximate_slot: &approximate_slot,
+                            },
+                        )?;
+                        all_clause_facts = corrected;
+                    }
                 }
 
                 // Apply post-fixpoint operators (PRIORITY, FOLD, BEST BY) on union.
@@ -1813,6 +1810,7 @@ fn convert_is_refs(
                 target_has_prob: is_ref.target_has_prob,
                 target_prob_col: is_ref.target_prob_col.clone(),
                 provenance_join_cols,
+                prob_ref: is_ref.prob_ref.clone(),
             })
         })
         .collect()

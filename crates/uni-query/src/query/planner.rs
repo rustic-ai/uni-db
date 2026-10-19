@@ -1389,7 +1389,7 @@ fn reject_reserved_set_target(item: &SetItem) -> Result<()> {
         expr: Expr::Property(_, name),
         ..
     } = item
-        && uni_common::core::schema::WRITE_RESERVED_PROPERTY_NAMES.contains(&name.as_str())
+        && uni_common::core::schema::is_reserved_property_name(name)
     {
         return Err(anyhow::Error::new(
             uni_common::UniError::reserved_property_name(name),
@@ -1474,7 +1474,40 @@ fn collect_pattern_labels(pattern: &uni_cypher::ast::Pattern) -> Vec<String> {
     out
 }
 
+/// Refuse a MERGE pattern whose literal property map uses a reserved name.
+///
+/// The writer refuses such a property when MERGE creates, but MERGE first
+/// matches, and the match plans a read of the key: `n._uid` names a column
+/// the scan does not project, so the statement failed at plan time with an
+/// untyped `No field named` error rather than the typed refusal.
+fn reject_reserved_merge_keys(pattern: &Pattern) -> Result<()> {
+    let reserved_key = |props: &Option<Expr>| match props {
+        Some(Expr::Map(entries)) => entries
+            .iter()
+            .map(|(k, _)| k)
+            .find(|k| uni_common::core::schema::is_reserved_property_name(k))
+            .cloned(),
+        _ => None,
+    };
+    for path in &pattern.paths {
+        for element in &path.elements {
+            let key = match element {
+                PatternElement::Node(n) => reserved_key(&n.properties),
+                PatternElement::Relationship(r) => reserved_key(&r.properties),
+                PatternElement::Parenthesized { .. } => None,
+            };
+            if let Some(name) = key {
+                return Err(anyhow::Error::new(
+                    uni_common::UniError::reserved_property_name(&name),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_merge_clause(merge_clause: &MergeClause, vars_in_scope: &[VariableInfo]) -> Result<()> {
+    reject_reserved_merge_keys(&merge_clause.pattern)?;
     for path in &merge_clause.pattern.paths {
         for element in &path.elements {
             match element {
@@ -4964,16 +4997,19 @@ impl QueryPlanner {
                 input: Box::new(LogicalPlan::Empty),
                 pattern: c.pattern.clone(),
             },
-            Clause::Merge(c) => LogicalPlan::Merge {
-                input: Box::new(LogicalPlan::Empty),
-                pattern: c.pattern.clone(),
-                on_match: Some(SetClause {
-                    items: c.on_match.clone(),
-                }),
-                on_create: Some(SetClause {
-                    items: c.on_create.clone(),
-                }),
-            },
+            Clause::Merge(c) => {
+                reject_reserved_merge_keys(&c.pattern)?;
+                LogicalPlan::Merge {
+                    input: Box::new(LogicalPlan::Empty),
+                    pattern: c.pattern.clone(),
+                    on_match: Some(SetClause {
+                        items: c.on_match.clone(),
+                    }),
+                    on_create: Some(SetClause {
+                        items: c.on_create.clone(),
+                    }),
+                }
+            }
             Clause::Foreach(c) => {
                 let mut inner_scope = vars_in_scope.to_vec();
                 add_var_to_scope(

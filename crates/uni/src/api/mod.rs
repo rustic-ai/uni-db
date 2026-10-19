@@ -353,6 +353,13 @@ pub struct DatabaseMetrics {
     pub total_queries: u64,
     /// Total transactions committed across all sessions.
     pub total_commits: u64,
+    /// Bytes held by the storage engine's metadata cache (Lance's shared
+    /// session), bounded by `UniConfig::lance_metadata_cache_bytes`. Shared
+    /// with every fork of this database. `0` for a backend without one.
+    pub storage_metadata_cache_bytes: u64,
+    /// Bytes held by the storage engine's index cache, bounded by
+    /// `UniConfig::lance_index_cache_bytes`. `0` for a backend without one.
+    pub storage_index_cache_bytes: u64,
 }
 
 /// Main entry point for Uni embedded database.
@@ -975,6 +982,12 @@ impl Uni {
     pub fn metrics(&self) -> DatabaseMetrics {
         let schema_version = self.inner.schema.schema().schema_version as u64;
         let compaction_status = self.inner.storage.compaction_status().unwrap_or_default();
+        let cache_usage = self
+            .inner
+            .storage
+            .backend()
+            .cache_usage()
+            .unwrap_or_default();
         DatabaseMetrics {
             l0_mutation_count: self.inner.cached_l0_mutation_count.load(Ordering::Relaxed),
             l0_estimated_size_bytes: self.inner.cached_l0_estimated_size.load(Ordering::Relaxed),
@@ -988,6 +1001,8 @@ impl Uni {
             wal_lsn: self.inner.cached_wal_lsn.load(Ordering::Relaxed),
             total_queries: self.inner.total_queries.load(Ordering::Relaxed),
             total_commits: self.inner.total_commits.load(Ordering::Relaxed),
+            storage_metadata_cache_bytes: cache_usage.metadata_bytes,
+            storage_index_cache_bytes: cache_usage.index_bytes,
         }
     }
 

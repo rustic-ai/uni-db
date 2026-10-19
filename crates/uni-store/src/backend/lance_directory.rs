@@ -38,11 +38,15 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use lance::Dataset;
+use lance::cache::{CacheBackend, QuickCacheBackend};
 use lance::dataset::builder::DatasetBuilder;
+use lance::dataset::{DEFAULT_INDEX_CACHE_SIZE, DEFAULT_METADATA_CACHE_SIZE};
 use lance::dataset::{WriteMode, WriteParams};
 use lance::io::{ObjectStore, ObjectStoreParams, ObjectStoreRegistry, StorageOptionsAccessor};
-use lance::session::Session;
+use lance::session::{CacheSpec, Session};
 use object_store::path::Path as ObjectPath;
+
+use super::types::BackendCacheUsage;
 
 /// Directory suffix marking a Lance dataset. Matches lancedb's
 /// `LANCE_EXTENSION`.
@@ -78,6 +82,33 @@ pub struct LanceDirectory {
     /// which pins a manifest version. Every open still loads the current
     /// manifest; only content-addressed index and metadata blocks are reused.
     session: Arc<Session>,
+    /// The backend behind `session`'s index cache, kept so its occupancy can
+    /// be read synchronously (Lance only exposes an async stats call).
+    index_cache: Arc<QuickCacheBackend>,
+    /// The backend behind `session`'s metadata cache; see `index_cache`.
+    metadata_cache: Arc<QuickCacheBackend>,
+    /// The capacities the two caches were built with, after defaulting.
+    cache_sizes: ResolvedCacheSizes,
+}
+
+/// Capacities for the shared Lance session's two caches.
+///
+/// `None` keeps Lance's default for that cache (6 GiB index, 1 GiB metadata).
+/// Mirrors `UniConfig::lance_index_cache_bytes` and
+/// `UniConfig::lance_metadata_cache_bytes`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LanceCacheSizes {
+    /// Index cache capacity in bytes.
+    pub index_bytes: Option<usize>,
+    /// Metadata cache capacity in bytes.
+    pub metadata_bytes: Option<usize>,
+}
+
+/// [`LanceCacheSizes`] with Lance's defaults filled in.
+#[derive(Debug, Clone, Copy)]
+struct ResolvedCacheSizes {
+    index_bytes: usize,
+    metadata_bytes: usize,
 }
 
 impl std::fmt::Debug for LanceDirectory {
@@ -104,6 +135,24 @@ impl LanceDirectory {
         base_uri: &str,
         storage_options: Option<HashMap<String, String>>,
     ) -> Result<Self> {
+        Self::connect_with_cache_sizes(base_uri, storage_options, LanceCacheSizes::default()).await
+    }
+
+    /// Open the directory at `base_uri`, sizing the shared session's caches.
+    ///
+    /// Every dataset opened through this directory reads through one Lance
+    /// session; `cache_sizes` bounds the memory its index and metadata caches
+    /// may hold. See [`Self::connect`] for `storage_options`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `base_uri` cannot be parsed or its object store
+    /// cannot be constructed (bad scheme, missing credentials).
+    pub async fn connect_with_cache_sizes(
+        base_uri: &str,
+        storage_options: Option<HashMap<String, String>>,
+        cache_sizes: LanceCacheSizes,
+    ) -> Result<Self> {
         // Storage options reach `ObjectStoreParams` through an accessor rather
         // than a plain field, because Lance supports refreshing credentials
         // mid-session. Ours are fixed for the process, hence the static form.
@@ -117,13 +166,46 @@ impl LanceDirectory {
         let (store, base_path) = ObjectStore::from_uri_and_params(registry, base_uri, &params)
             .await
             .with_context(|| format!("open object store for '{base_uri}'"))?;
+        let cache_sizes = ResolvedCacheSizes {
+            index_bytes: cache_sizes.index_bytes.unwrap_or(DEFAULT_INDEX_CACHE_SIZE),
+            metadata_bytes: cache_sizes
+                .metadata_bytes
+                .unwrap_or(DEFAULT_METADATA_CACHE_SIZE),
+        };
+        // The same backends `Session::new` builds, constructed here so their
+        // occupancy stays readable. Lance's default session uses its own
+        // fresh store registry, kept as is.
+        let index_cache = Arc::new(QuickCacheBackend::with_capacity(cache_sizes.index_bytes));
+        let metadata_cache = Arc::new(QuickCacheBackend::with_capacity(cache_sizes.metadata_bytes));
+        let session = Session::with_cache_backends(
+            CacheSpec::Backend(index_cache.clone()),
+            CacheSpec::Backend(metadata_cache.clone()),
+            Arc::new(ObjectStoreRegistry::default()),
+        );
         Ok(Self {
             base_uri: base_uri.to_string(),
             store,
             base_path,
             storage_options,
-            session: Arc::new(Session::default()),
+            session: Arc::new(session),
+            index_cache,
+            metadata_cache,
+            cache_sizes,
         })
+    }
+
+    /// Current occupancy and capacity of the shared session's caches.
+    ///
+    /// Sizes are the caches' weighted byte totals, the same figure their
+    /// eviction is bounded by.
+    #[must_use]
+    pub fn cache_usage(&self) -> BackendCacheUsage {
+        BackendCacheUsage {
+            index_bytes: self.index_cache.approx_size_bytes() as u64,
+            index_capacity_bytes: self.cache_sizes.index_bytes as u64,
+            metadata_bytes: self.metadata_cache.approx_size_bytes() as u64,
+            metadata_capacity_bytes: self.cache_sizes.metadata_bytes as u64,
+        }
     }
 
     /// The configured base URI.

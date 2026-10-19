@@ -157,11 +157,46 @@ YIELD KEY s, 1.0 AS confidence PROB
 
 If the referenced rule has no `PROB` column, `IS NOT` keeps standard Boolean semantics.
 
+### Positive `IS` References to a `PROB` Rule
+
+A positive reference is the mirror image: the row holds only when the referenced fact does, so its
+probability is multiplied into the row's `PROB` value (`P(r) + P(NOT r) = 1`).
+
+```locy
+CREATE RULE reach AS
+MATCH (a:Node)-[e:LINK]->(b:Node)
+FOLD prob = MNOR(e.p)
+YIELD KEY a, KEY b, prob
+
+CREATE RULE reach AS
+MATCH (a:Node)-[e:LINK]->(mid:Node) WHERE mid IS reach TO b
+FOLD prob = MNOR(e.p)
+YIELD KEY a, KEY b, prob
+```
+
+Over `s -0.7-> t` and `s -0.3-> m -0.5-> t`, the recursive row is `0.3 × reach(m, t) = 0.15`, and
+`reach(s, t) = 1 - (1 - 0.7)(1 - 0.15) = 0.745` — the probability that `t` is reachable when every
+edge is present independently with its `p`.
+
+**Count-once rule.** A clause whose `PROB` expression (the `FOLD` input, or the `PROB` `YIELD` item)
+already reads the referenced probability is not charged for it twice:
+
+| The `PROB` expression reads `p` | Multiplied in |
+|---|---|
+| not at all: `MNOR(e.p)` | yes |
+| as one product factor: `MNOR(p)`, `MNOR(e.p * p)` | no — already counted |
+| any other way: `MNOR(1.0 - p)`, `MNOR(p * p)` | no — never counted twice; a `ProbabilityReadNotFactor` warning is raised |
+
+!!! warning "Breaking change"
+    Before this release a positive reference was a Boolean filter: `reach(s, t)` above was
+    `1 - (1 - 0.7)(1 - 0.3) = 0.79`, treating `reach(m, t)` as certain. Programs that relied on
+    that and did not read the referenced probability see lower values now.
+
 ## Shared-Proof Detection and Exact Mode
 
-MNOR and MPROD assume independent derivations. When multiple proof paths in the same aggregate group share the same underlying evidence, the runtime emits `SharedProbabilisticDependency`.
+MNOR and MPROD assume independent derivations. When two proofs of one fact rest on the same evidence — the same edge, the same referenced fact, or the fact itself through a cycle — the runtime emits `SharedProbabilisticDependency`. Nodes in common are not evidence in common: the two proofs of `reach(s, t)` above share no edge, so the independence value 0.745 is already exact and nothing is reported.
 
-Set `exact_probability = true` in `LocyConfig` to enable BDD-backed exact probability computation for those groups. Two important fallbacks remain:
+Set `exact_probability = true` in `LocyConfig` to compute those facts exactly, under possible-worlds semantics: each fact is the OR (MNOR) or AND (MPROD) of its rows, each row is its own event AND every fact it references, and the formula is evaluated with a BDD. On `A -0.5-> B -0.4-> C -0.6-> D` plus `A -0.3-> C`, both proofs of `reach(A, D)` need `C -> D`; exact mode gives `0.6 × (1 - 0.7 × 0.8) = 0.264` where independence gives 0.2784. When no fact is shared, the two modes agree. Two important fallbacks remain:
 
 - `BddLimitExceeded`: the group exceeded `max_bdd_variables`, so Locy falls back to the independence result for that key group.
 - `CrossGroupCorrelationNotExact`: shared evidence spans multiple aggregate groups; each group is exact internally, but cross-group correlation is still approximate.

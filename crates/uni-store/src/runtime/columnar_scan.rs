@@ -23,6 +23,7 @@ use arrow_array::builder::{
 use arrow_array::{ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{DataType, Field, Fields, IntervalUnit, Schema, SchemaRef, TimeUnit};
 use uni_common::core::id::Vid;
+use uni_common::core::schema::is_reserved_property_name;
 use uni_common::{Properties, Value};
 
 use crate::backend::types::{CmpOp, FilterExpr, Scalar};
@@ -253,7 +254,7 @@ pub fn build_all_props_column_for_schema_scan(
     // Collect schema-defined property column names (non-internal, non-overflow, non-_all_props)
     let schema_props: Vec<&str> = projected_properties
         .iter()
-        .filter(|p| *p != "overflow_json" && *p != "_all_props" && !p.starts_with('_'))
+        .filter(|p| !is_reserved_property_name(p))
         .map(String::as_str)
         .collect();
 
@@ -2398,7 +2399,7 @@ pub fn build_l0_vertex_batch(
                     let (props, _) = &vid_data[vid_u64];
                     let mut overflow: HashMap<String, Value> = HashMap::new();
                     for (k, v) in props {
-                        if stored_in_ext_id_column(k, v) || k.starts_with('_') {
+                        if stored_in_ext_id_column(k, v) || is_reserved_property_name(k) {
                             continue;
                         }
                         if !schema_prop_names.contains(k.as_str()) {
@@ -2591,7 +2592,7 @@ pub fn map_to_output_schema(
             // Check if this label has schema-defined columns (besides system columns)
             let has_schema_cols = projected_properties
                 .iter()
-                .any(|p| p != "overflow_json" && p != "_all_props" && !p.starts_with('_'));
+                .any(|p| !is_reserved_property_name(p));
 
             let has_ext_id = batch
                 .column_by_name(EXT_ID_COLUMN)

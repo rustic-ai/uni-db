@@ -817,13 +817,17 @@ impl ScalarUDFImpl for KeysUdf {
                     // a null-valued property does not exist on the entity, so we
                     // must filter it out.  For plain maps (literal or parameter),
                     // null-valued keys are valid and must be included.
-                    let (source, is_entity) = match map.get("_all_props") {
-                        Some(Value::Map(all)) => (all, true),
-                        _ => (map, false),
-                    };
+                    let (source, is_entity) =
+                        match uni_common::value::entity_property_container(map) {
+                            Some(props) => (props, true),
+                            None => (map, false),
+                        };
                     let mut key_strings: Vec<String> = source
                         .iter()
-                        .filter(|(k, v)| !k.starts_with('_') && (!is_entity || !v.is_null()))
+                        .filter(|(k, v)| {
+                            !uni_common::core::schema::is_reserved_property_name(k)
+                                && (!is_entity || !v.is_null())
+                        })
                         .map(|(k, _)| k.clone())
                         .collect();
                     key_strings.sort();
@@ -927,15 +931,12 @@ impl ScalarUDFImpl for PropertiesUdf {
                         return Ok(Value::Null);
                     }
 
-                    // For schemaless entities, properties are in _all_props.
-                    let source = match map.get("_all_props") {
-                        Some(Value::Map(all)) => all,
-                        _ => map,
-                    };
-                    // Filter out internal properties (those starting with '_')
+                    // A schemaless or serialised entity nests its properties.
+                    let source = uni_common::value::entity_property_container(map).unwrap_or(map);
+                    // Filter out the engine's reserved fields
                     let filtered: std::collections::HashMap<String, Value> = source
                         .iter()
-                        .filter(|(k, _)| !k.starts_with('_'))
+                        .filter(|(k, _)| !uni_common::core::schema::is_reserved_property_name(k))
                         .map(|(k, v)| (k.clone(), v.clone()))
                         .collect();
                     Ok(Value::Map(filtered))
@@ -1405,111 +1406,48 @@ fn extract_vid(val: &Value) -> Option<u64> {
 // range(start, end, [step]) -> List<Int64>
 // ============================================================================
 
-/// Extract an i64 from a ColumnarValue, coercing from any integer type.
-/// Rejects floats, booleans, strings, lists, and maps with `InvalidArgumentType`.
-fn extract_i64_range_arg(arg: &ColumnarValue, row_idx: usize, name: &str) -> DFResult<i64> {
-    match arg {
-        ColumnarValue::Scalar(sv) => match sv {
-            ScalarValue::Int8(Some(v)) => Ok(*v as i64),
-            ScalarValue::Int16(Some(v)) => Ok(*v as i64),
-            ScalarValue::Int32(Some(v)) => Ok(*v as i64),
-            ScalarValue::Int64(Some(v)) => Ok(*v),
-            ScalarValue::UInt8(Some(v)) => Ok(*v as i64),
-            ScalarValue::UInt16(Some(v)) => Ok(*v as i64),
-            ScalarValue::UInt32(Some(v)) => Ok(*v as i64),
-            ScalarValue::UInt64(Some(v)) => Ok(*v as i64),
-            ScalarValue::LargeBinary(Some(bytes)) => {
-                scalar_binary_to_value(bytes)?.as_i64().ok_or_else(|| {
-                    datafusion::error::DataFusionError::Execution(format!(
-                        "ArgumentError: InvalidArgumentType - range() {} must be an integer",
-                        name
-                    ))
-                })
-            }
-            _ => Err(datafusion::error::DataFusionError::Execution(format!(
-                "ArgumentError: InvalidArgumentType - range() {} must be an integer",
-                name
-            ))),
-        },
+/// Extract one row of a `range()` argument as an `i64`, coercing from any
+/// integer type.
+///
+/// Returns `Ok(None)` for a null, whether a typed or untyped null scalar, a
+/// null array slot, or an encoded Cypher null: `range` is null-in/null-out.
+/// Rejects floats, booleans, strings, lists, and maps with
+/// `InvalidArgumentType`.
+fn extract_i64_range_arg(arg: &ColumnarValue, row_idx: usize, name: &str) -> DFResult<Option<i64>> {
+    let type_err = || {
+        datafusion::error::DataFusionError::Execution(format!(
+            "ArgumentError: InvalidArgumentType - range() {name} must be an integer"
+        ))
+    };
+    let owned;
+    let sv = match arg {
+        ColumnarValue::Scalar(sv) => sv,
         ColumnarValue::Array(arr) => {
-            if row_idx >= arr.len() || arr.is_null(row_idx) {
-                return Err(datafusion::error::DataFusionError::Execution(format!(
-                    "ArgumentError: InvalidArgumentType - range() {} must be an integer",
-                    name
-                )));
-            }
-            // Handle array inputs row-wise.
-            if !arr.is_empty() {
-                use datafusion::arrow::array::{
-                    Int8Array, Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array,
-                    UInt32Array, UInt64Array,
-                };
-                match arr.data_type() {
-                    DataType::Int8 => Ok(arr
-                        .as_any()
-                        .downcast_ref::<Int8Array>()
-                        .unwrap()
-                        .value(row_idx) as i64),
-                    DataType::Int16 => Ok(arr
-                        .as_any()
-                        .downcast_ref::<Int16Array>()
-                        .unwrap()
-                        .value(row_idx) as i64),
-                    DataType::Int32 => Ok(arr
-                        .as_any()
-                        .downcast_ref::<Int32Array>()
-                        .unwrap()
-                        .value(row_idx) as i64),
-                    DataType::Int64 => Ok(arr
-                        .as_any()
-                        .downcast_ref::<Int64Array>()
-                        .unwrap()
-                        .value(row_idx)),
-                    DataType::UInt8 => Ok(arr
-                        .as_any()
-                        .downcast_ref::<UInt8Array>()
-                        .unwrap()
-                        .value(row_idx) as i64),
-                    DataType::UInt16 => Ok(arr
-                        .as_any()
-                        .downcast_ref::<UInt16Array>()
-                        .unwrap()
-                        .value(row_idx) as i64),
-                    DataType::UInt32 => Ok(arr
-                        .as_any()
-                        .downcast_ref::<UInt32Array>()
-                        .unwrap()
-                        .value(row_idx) as i64),
-                    DataType::UInt64 => Ok(arr
-                        .as_any()
-                        .downcast_ref::<UInt64Array>()
-                        .unwrap()
-                        .value(row_idx) as i64),
-                    DataType::LargeBinary => {
-                        let bytes = arr
-                            .as_any()
-                            .downcast_ref::<LargeBinaryArray>()
-                            .unwrap()
-                            .value(row_idx);
-                        scalar_binary_to_value(bytes)?.as_i64().ok_or_else(|| {
-                            datafusion::error::DataFusionError::Execution(format!(
-                                "ArgumentError: InvalidArgumentType - range() {} must be an integer",
-                                name
-                            ))
-                        })
-                    }
-                    _ => Err(datafusion::error::DataFusionError::Execution(format!(
-                        "ArgumentError: InvalidArgumentType - range() {} must be an integer",
-                        name
-                    ))),
-                }
-            } else {
-                Err(datafusion::error::DataFusionError::Execution(format!(
-                    "ArgumentError: InvalidArgumentType - range() {} must be an integer",
-                    name
-                )))
-            }
+            owned = ScalarValue::try_from_array(arr, row_idx)?;
+            &owned
         }
+    };
+    if sv.is_null() {
+        return Ok(None);
+    }
+    match sv {
+        ScalarValue::Int8(Some(v)) => Ok(Some(i64::from(*v))),
+        ScalarValue::Int16(Some(v)) => Ok(Some(i64::from(*v))),
+        ScalarValue::Int32(Some(v)) => Ok(Some(i64::from(*v))),
+        ScalarValue::Int64(Some(v)) => Ok(Some(*v)),
+        ScalarValue::UInt8(Some(v)) => Ok(Some(i64::from(*v))),
+        ScalarValue::UInt16(Some(v)) => Ok(Some(i64::from(*v))),
+        ScalarValue::UInt32(Some(v)) => Ok(Some(i64::from(*v))),
+        ScalarValue::UInt64(Some(v)) => i64::try_from(*v).map(Some).map_err(|_| {
+            datafusion::error::DataFusionError::Execution(format!(
+                "ArgumentError: NumberOutOfRange - range() {name} {v} exceeds the integer range"
+            ))
+        }),
+        ScalarValue::LargeBinary(Some(bytes)) => match scalar_binary_to_value(bytes)? {
+            Value::Null => Ok(None),
+            v => v.as_i64().map(Some).ok_or_else(type_err),
+        },
+        _ => Err(type_err()),
     }
 }
 
@@ -1571,17 +1509,29 @@ impl ScalarUDFImpl for RangeUdf {
             arrow_array::builder::ListBuilder::new(arrow_array::builder::Int64Builder::new());
 
         for row_idx in 0..len {
-            let start = extract_i64_range_arg(&args.args[0], row_idx, "start")?;
-            let end = extract_i64_range_arg(&args.args[1], row_idx, "end")?;
+            let start = extract_i64_range_arg(&args.args[0], row_idx, "start");
+            let end = extract_i64_range_arg(&args.args[1], row_idx, "end");
             let step = if args.args.len() == 3 {
-                extract_i64_range_arg(&args.args[2], row_idx, "step")?
+                extract_i64_range_arg(&args.args[2], row_idx, "step")
             } else {
-                1
+                Ok(Some(1))
+            };
+            // Null in, null out: a null bound or step makes this row null,
+            // ahead of every other check, so a non-integer or a zero step in
+            // another position does not raise.
+            let any_null = [&start, &end, &step].iter().any(|a| matches!(a, Ok(None)));
+            if any_null {
+                list_builder.append_null();
+                continue;
+            }
+            let (Some(start), Some(end), Some(step)) = (start?, end?, step?) else {
+                list_builder.append_null();
+                continue;
             };
 
             if step == 0 {
                 return Err(datafusion::error::DataFusionError::Execution(
-                    "range(): step cannot be zero".to_string(),
+                    "ArgumentError: NumberOutOfRange - range() step cannot be zero".to_string(),
                 ));
             }
 
@@ -5104,7 +5054,7 @@ cypher_scalar_udf! {
             let value = &val_args[i + 1];
             if let Some(k) = key.as_str() {
                 if k == "__all__" {
-                    // AllProperties: expand entity map, skip _-prefixed keys
+                    // AllProperties: expand entity map, skip reserved keys
                     match value {
                         Value::Map(map) => {
                             // Prefer `_all_props` (the CypherValue-encoded
@@ -5118,7 +5068,7 @@ cypher_scalar_udf! {
                                 _ => map,
                             };
                             for (mk, mv) in source {
-                                if !mk.starts_with('_') {
+                                if !uni_common::core::schema::is_reserved_property_name(mk) {
                                     result_map.insert(mk.clone(), mv.clone());
                                 }
                             }
@@ -7715,6 +7665,117 @@ mod tests {
         } else {
             panic!("Unexpected result: {:?}", result);
         }
+    }
+
+    // ====================================================================
+    // range() null handling
+    // ====================================================================
+
+    fn range_lists(cv: &ColumnarValue) -> Vec<Option<Vec<i64>>> {
+        let arr = cv.clone().into_array(1).unwrap();
+        let list = arr
+            .as_any()
+            .downcast_ref::<arrow_array::ListArray>()
+            .expect("range returns a List<Int64>");
+        (0..list.len())
+            .map(|r| {
+                (!list.is_null(r)).then(|| {
+                    let v = list.value(r);
+                    let ints = v.as_any().downcast_ref::<Int64Array>().unwrap();
+                    ints.values().to_vec()
+                })
+            })
+            .collect()
+    }
+
+    /// Null scalars (untyped, typed, and an encoded Cypher null) make `range`
+    /// null, ahead of a zero step or a non-integer elsewhere.
+    #[test]
+    fn test_range_udf_null_scalar_returns_null() {
+        let udf = create_range_udf();
+        let cv_null =
+            ScalarValue::LargeBinary(Some(uni_common::cypher_value_codec::encode(&Value::Null)));
+        for args in [
+            vec![ScalarValue::Int64(Some(0)), ScalarValue::Null],
+            vec![ScalarValue::Int64(None), ScalarValue::Int64(Some(3))],
+            vec![
+                ScalarValue::Int64(Some(0)),
+                ScalarValue::Int64(Some(3)),
+                cv_null.clone(),
+            ],
+            vec![
+                ScalarValue::Null,
+                ScalarValue::Int64(Some(3)),
+                ScalarValue::Int64(Some(0)),
+            ],
+            vec![ScalarValue::Float64(Some(0.5)), ScalarValue::Null],
+        ] {
+            let out = udf
+                .invoke_with_args(make_multi_scalar_args_with_return(
+                    args.clone(),
+                    udf.return_type(&[]).unwrap(),
+                ))
+                .unwrap();
+            assert!(matches!(out, ColumnarValue::Scalar(_)), "{args:?}");
+            assert_eq!(range_lists(&out), vec![None], "range({args:?})");
+        }
+    }
+
+    /// A null slot in an argument column nulls that row only.
+    #[test]
+    fn test_range_udf_null_array_slot_nulls_that_row() {
+        use datafusion::arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+
+        let udf = create_range_udf();
+        let ends: ArrayRef = Arc::new(Int64Array::from(vec![Some(2), None, Some(0)]));
+        let args = ScalarFunctionArgs {
+            args: vec![
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(0))),
+                ColumnarValue::Array(ends),
+            ],
+            arg_fields: vec![
+                Arc::new(Field::new("s", DataType::Int64, true)),
+                Arc::new(Field::new("e", DataType::Int64, true)),
+            ],
+            number_rows: 3,
+            return_field: Arc::new(Field::new("r", udf.return_type(&[]).unwrap(), true)),
+            config_options: Arc::new(ConfigOptions::default()),
+        };
+        let out = udf.invoke_with_args(args).unwrap();
+        assert_eq!(
+            range_lists(&out),
+            vec![Some(vec![0, 1, 2]), None, Some(vec![0])]
+        );
+    }
+
+    /// A non-null, non-integer argument and a zero step keep their errors.
+    #[test]
+    fn test_range_udf_type_and_step_errors() {
+        let udf = create_range_udf();
+        let err = udf
+            .invoke_with_args(make_multi_scalar_args_with_return(
+                vec![
+                    ScalarValue::Int64(Some(0)),
+                    ScalarValue::Utf8(Some("a".into())),
+                ],
+                udf.return_type(&[]).unwrap(),
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("InvalidArgumentType"), "{err}");
+        let err = udf
+            .invoke_with_args(make_multi_scalar_args_with_return(
+                vec![
+                    ScalarValue::Int64(Some(0)),
+                    ScalarValue::Int64(Some(3)),
+                    ScalarValue::Int64(Some(0)),
+                ],
+                udf.return_type(&[]).unwrap(),
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("NumberOutOfRange"), "{err}");
     }
 
     // ====================================================================

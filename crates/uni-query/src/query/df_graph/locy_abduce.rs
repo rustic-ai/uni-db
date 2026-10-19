@@ -198,7 +198,9 @@ fn collect_leaf_candidates(
                 None => continue,
             };
             for (prop_name, prop_val) in entity_properties(value) {
-                if prop_name.starts_with('_') || prop_val.as_f64().is_none() {
+                if uni_common::core::schema::is_reserved_property_name(prop_name)
+                    || prop_val.as_f64().is_none()
+                {
                     continue;
                 }
                 candidates.push(Modification::ChangeProperty {
@@ -231,7 +233,10 @@ fn entity_properties(value: &Value) -> BTreeMap<&String, &Value> {
             if let Some(Value::Map(all)) = m.get("_all_props") {
                 props.extend(all);
             }
-            props.extend(m.iter().filter(|(k, _)| !k.starts_with('_')));
+            props.extend(
+                m.iter()
+                    .filter(|(k, _)| !uni_common::core::schema::is_reserved_property_name(k)),
+            );
         }
         _ => {}
     }

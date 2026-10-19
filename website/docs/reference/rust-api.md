@@ -1348,6 +1348,8 @@ println!("Total queries: {}", m.total_queries);
 | `wal_lsn` | `u64` | Highest flushed WAL log sequence number. |
 | `total_queries` | `u64` | Total queries across all sessions. |
 | `total_commits` | `u64` | Total committed transactions. |
+| `storage_metadata_cache_bytes` | `u64` | Bytes held by the storage engine's (Lance) metadata cache; bounded by `UniConfig::lance_metadata_cache_bytes`. |
+| `storage_index_cache_bytes` | `u64` | Bytes held by the storage engine's index cache; bounded by `UniConfig::lance_index_cache_bytes`. |
 
 ### SessionMetrics
 

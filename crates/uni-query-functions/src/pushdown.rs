@@ -987,8 +987,8 @@ impl LanceFilterGenerator {
                 if let Expr::Variable(var) = box_expr.as_ref()
                     && var == variable
                 {
-                    // System columns (starting with _) are always physical Lance columns
-                    if prop.starts_with('_') {
+                    // Reserved system columns are always physical Lance columns
+                    if uni_common::core::schema::is_reserved_property_name(prop) {
                         return Some(prop.clone());
                     }
                     // If schema_props is provided, only allow properties that are
@@ -1253,8 +1253,9 @@ pub fn indexed_range_filter(
             return None;
         };
         // System columns (`_vid`, `_version`, ...) have their own routes.
-        (matches!(base.as_ref(), Expr::Variable(v) if v == variable) && !prop.starts_with('_'))
-            .then(|| prop.clone())
+        (matches!(base.as_ref(), Expr::Variable(v) if v == variable)
+            && !uni_common::core::schema::is_reserved_property_name(prop))
+        .then(|| prop.clone())
     };
     match resolved {
         Expr::IsNull(inner) | Expr::IsNotNull(inner) => {

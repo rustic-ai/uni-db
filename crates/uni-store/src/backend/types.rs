@@ -1055,3 +1055,21 @@ pub struct TextSearch {
     /// `(id, score)` for each matching unstored document.
     pub unstored: Vec<(u64, f32)>,
 }
+
+/// Occupancy and capacity of a storage backend's in-process caches.
+///
+/// Reported by [`crate::backend::StorageBackend::cache_usage`]. For Lance
+/// these are the shared session's index and metadata caches, sized by
+/// `UniConfig::lance_index_cache_bytes` and
+/// `UniConfig::lance_metadata_cache_bytes`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BackendCacheUsage {
+    /// Bytes currently held by the index cache.
+    pub index_bytes: u64,
+    /// Capacity the index cache evicts down to.
+    pub index_capacity_bytes: u64,
+    /// Bytes currently held by the metadata cache.
+    pub metadata_bytes: u64,
+    /// Capacity the metadata cache evicts down to.
+    pub metadata_capacity_bytes: u64,
+}

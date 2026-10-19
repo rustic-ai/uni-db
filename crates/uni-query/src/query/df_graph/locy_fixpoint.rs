@@ -846,11 +846,21 @@ impl FixpointState {
         };
 
         let fold_inputs = self.fold_input_indices();
+        // A referenced probability moves with the child's folded value just
+        // as the fold input does, so it is no part of the derivation's
+        // identity either.
         let deriv_key_indices: Vec<usize> = self
             .all_column_indices
             .iter()
             .copied()
             .filter(|i| !fold_inputs.contains(i))
+            .filter(|&i| {
+                !self
+                    .schema
+                    .field(i)
+                    .name()
+                    .starts_with(crate::query::planner_locy_types::DERIV_ISPROB_COL_PREFIX)
+            })
             .collect();
 
         // Rows before this index are existing facts; the rest are candidates.
@@ -2123,6 +2133,10 @@ pub struct IsRefBinding {
     /// Used by shared-proof detection to find which source facts a derived row
     /// consumed. Populated for all IS-refs (not just negated ones).
     pub provenance_join_cols: Vec<(String, String)>,
+    /// For a positive reference to a PROB rule: the hidden columns carrying
+    /// the referenced probability (and KEY hash) and how the clause reads it
+    /// (see [`crate::query::planner_locy_types::PositiveProbRef`]).
+    pub prob_ref: Option<crate::query::planner_locy_types::PositiveProbRef>,
 }
 
 /// A single clause (body) within a fixpoint rule.
@@ -2567,52 +2581,44 @@ async fn run_fixpoint_loop(
     let task_ctx = session_ctx.read().task_ctx();
     let mut all_output = Vec::new();
 
-    for (rule_idx, state) in states.into_iter().enumerate() {
+    // Every rule's lineage is recorded before any is corrected: a rule's
+    // formula reads the facts of the stratum's other rules too.
+    let stratum_facts: Vec<Vec<RecordBatch>> =
+        states.into_iter().map(FixpointState::into_facts).collect();
+    if let Some(ref tracker) = derivation_tracker {
+        for (rule, facts) in rules.iter().zip(&stratum_facts) {
+            tracker.lineage().record_rule(rule, facts)?;
+        }
+    }
+    for (rule_idx, mut facts) in stratum_facts.into_iter().enumerate() {
         let rule = &rules[rule_idx];
-        let mut facts = state.into_facts();
         if facts.is_empty() {
             continue;
         }
+        super::locy_lineage::warn_opaque_prob_reads(rule, &warnings_slot);
 
-        // Detect shared proofs before FOLD collapses groups.
+        // Shared-proof detection and, with `exact_probability`, exact
+        // inference over the recorded lineage (`locy_lineage`). Under
+        // `MaxMinProb`, `plus = max` is idempotent — shared proofs don't
+        // double-count — so the warning is moot and the work is skipped.
         //
-        // TODO(C0-stage2): swap `detect_shared_lineage` for `TopKTag`
-        // DNF inspection when `semiring_kind == TopKProofs { k }`.
-        // The library-layer tag math has landed in
-        // `crates/uni-locy/src/top_k_proofs.rs` (Phase C C0 Stage 1);
-        // Stage 2 plumbs `TopKTag` through `MonotonicAggState` /
-        // `FoldExec` so per-row dependency DNFs are available here.
-        // Until Stage 2, this scalar `ProvenanceStore` path runs for
-        // every semiring including `TopKProofs` (per rollout D-4
-        // "graceful migration").
-        //
-        // Phase-3 shared-proof detection is meaningful only under
-        // `AddMultProb` (and `BddExact`, which is the AddMultProb math
-        // plus a WMC post-correction). Under `MaxMinProb`, `plus = max`
-        // is idempotent — shared proofs don't double-count — so the
-        // warning is moot and we skip the work.
-        let shared_info = if semiring_kind == SemiringKind::MaxMinProb {
-            None
-        } else if let Some(ref tracker) = derivation_tracker {
-            detect_shared_lineage(rule, &facts, tracker, &warnings_slot, semiring_kind)?
-        } else {
-            None
-        };
-
-        // Apply BDD for shared groups if exact_probability is enabled.
-        if exact_probability
-            && let Some(ref info) = shared_info
+        // TODO(C0-stage2): `TopKProofs` could read `TopKTag` DNFs here once
+        // `crates/uni-locy/src/top_k_proofs.rs` tags reach the runtime.
+        if semiring_kind != SemiringKind::MaxMinProb
             && let Some(ref tracker) = derivation_tracker
         {
-            facts = apply_exact_wmc(
-                facts,
+            let (corrected, _) = tracker.lineage().correct(
                 rule,
-                info,
-                tracker,
-                max_bdd_variables,
-                &warnings_slot,
-                &approximate_slot,
+                facts,
+                &super::locy_lineage::ExactCtx {
+                    exact: exact_probability,
+                    max_bdd_variables,
+                    semiring_kind,
+                    warnings_slot: &warnings_slot,
+                    approximate_slot: &approximate_slot,
+                },
             )?;
+            facts = corrected;
         }
 
         let processed = apply_post_fixpoint_chain(
@@ -2710,6 +2716,9 @@ async fn evaluate_clause_once(
     if !complement_cols.is_empty() {
         batches = multiply_prob_factors(batches, prob_column, &complement_cols)?;
     }
+    // Positive references to PROB rules: multiply in each referenced
+    // probability the clause does not already read.
+    batches = super::locy_lineage::apply_positive_prob_factors(batches, &clause.is_ref_bindings)?;
 
     // The anti-join has run; drop its hidden subject-`_vid` columns before
     // anything downstream can absorb them into fact identity.
@@ -2742,7 +2751,7 @@ pub(crate) struct ClassifierRefs<'a> {
 /// Borrowed bundle of provenance-recording state: the in-flight
 /// tracker, the derived-scan registry (used to resolve IS-ref inputs),
 /// and the shared warnings slot. Bundled to keep
-/// `record_provenance` / `record_and_detect_lineage_nonrecursive`
+/// `record_provenance` / `record_provenance_nonrecursive`
 /// under the too-many-arguments threshold.
 pub(crate) struct ProvenanceCtx<'a> {
     pub tracker: &'a Arc<ProvenanceStore>,
@@ -3304,37 +3313,8 @@ fn collect_is_ref_inputs_for_body_row(
 }
 
 // ---------------------------------------------------------------------------
-// Shared-lineage detection
+// Provenance fact identity
 // ---------------------------------------------------------------------------
-
-/// Detect KEY groups in a rule's pre-fold facts where recursive derivation
-/// may violate the independence assumption of MNOR/MPROD.
-///
-/// Uses a two-tier strategy:
-/// 1. **Precise**: If the `ProvenanceStore` has populated `support` for facts
-///    in the group, we recursively compute lineage (Cui & Widom 2000) and
-///    check for pairwise overlap. A shared base fact proves a dependency.
-/// 2. **Structural fallback**: When lineage tracking is unavailable (e.g., the
-///    IS-ref subject variables were projected away), we check whether any fact
-///    in a multi-row group was derived by a clause that has IS-ref bindings.
-///    Recursive derivation through shared relations is a strong signal that
-///    proof paths may share intermediate nodes.
-///
-/// Per-row data collected during shared-lineage detection.
-#[expect(
-    dead_code,
-    reason = "Fields accessed via SharedLineageInfo in detect_shared_lineage"
-)]
-pub(crate) struct SharedGroupRow {
-    pub fact_hash: Vec<u8>,
-    pub lineage: HashSet<Vec<u8>>,
-}
-
-/// Information about groups with shared proofs, returned by `detect_shared_lineage`.
-pub(crate) struct SharedLineageInfo {
-    /// KEY group → rows with their base fact sets.
-    pub shared_groups: HashMap<Vec<ScalarKey>, Vec<SharedGroupRow>>,
-}
 
 /// Build a byte key that uniquely identifies a row across all columns.
 pub(crate) fn fact_hash_key(batch: &RecordBatch, all_indices: &[usize], row_idx: usize) -> Vec<u8> {
@@ -3365,7 +3345,7 @@ pub(crate) fn provenance_fact_hash(
 /// A FOLD output is carried under its fold variable until the fold runs, and
 /// a YIELD may rename it (`FOLD risk = MNOR(e.p) YIELD risk AS risk_out`), so
 /// the pre-fold name is the binding's input column name, not the yield name.
-fn pre_fold_column_name(rule: &FixpointRulePlan, pos: usize) -> Option<&str> {
+pub(crate) fn pre_fold_column_name(rule: &FixpointRulePlan, pos: usize) -> Option<&str> {
     rule.fold_bindings
         .iter()
         .find(|fb| fb.input_col_index == pos)
@@ -3393,7 +3373,7 @@ fn pre_fold_column_name(rule: &FixpointRulePlan, pos: usize) -> Option<&str> {
 ///
 /// Fails when a yield column is missing from `schema`. Hashing or grouping on
 /// a subset would silently merge or split facts.
-fn yield_positions_in(
+pub(crate) fn yield_positions_in(
     rule: &FixpointRulePlan,
     schema: &SchemaRef,
 ) -> DFResult<(Vec<usize>, Vec<usize>)> {
@@ -3436,225 +3416,14 @@ fn yield_positions_in(
     Ok((all, key))
 }
 
-/// Emits at most one `SharedProbabilisticDependency` warning per rule.
-/// Returns `Some(SharedLineageInfo)` if any group has shared proofs.
-///
-/// # Errors
-///
-/// Fails when a fact batch lacks one of the rule's yield columns.
-fn detect_shared_lineage(
-    rule: &FixpointRulePlan,
-    pre_fold_facts: &[RecordBatch],
-    tracker: &Arc<ProvenanceStore>,
-    warnings_slot: &Arc<StdRwLock<Vec<RuntimeWarning>>>,
-    semiring_kind: SemiringKind,
-) -> DFResult<Option<SharedLineageInfo>> {
-    use uni_locy::{RuntimeWarning, RuntimeWarningCode};
-
-    // Only check rules with probability-domain fold bindings. M3:
-    // dispatches via the `LocyAggregate` trait so user-authored
-    // probability aggregates participate automatically — selected by the
-    // trait's `is_probability_aggregate()` flag, not by hardcoded name.
-    let has_prob_fold = rule
-        .fold_bindings
-        .iter()
-        .any(|fb| fb.aggregate.is_probability_aggregate());
-    if !has_prob_fold {
-        return Ok(None);
-    }
-
-    // Group facts by KEY columns.
-    let mut groups: HashMap<Vec<ScalarKey>, Vec<Vec<u8>>> = HashMap::new();
-    for batch in pre_fold_facts {
-        let (all_indices, key_indices) = yield_positions_in(rule, &batch.schema())?;
-        for row_idx in 0..batch.num_rows() {
-            let key = extract_scalar_key(batch, &key_indices, row_idx);
-            let fact_hash = provenance_fact_hash(&rule.name, batch, &all_indices, row_idx);
-            groups.entry(key).or_default().push(fact_hash);
-        }
-    }
-
-    let mut shared_groups: HashMap<Vec<ScalarKey>, Vec<SharedGroupRow>> = HashMap::new();
-    let mut any_shared = false;
-
-    // Check each group with ≥2 rows.
-    for (key, fact_hashes) in &groups {
-        if fact_hashes.len() < 2 {
-            continue;
-        }
-
-        // Tier 1: precise base-fact overlap detection via tracker inputs.
-        let mut has_inputs = false;
-        let mut per_row_bases: Vec<HashSet<Vec<u8>>> = Vec::new();
-        for fh in fact_hashes {
-            let bases = compute_lineage(fh, tracker, &mut HashSet::new());
-            if let Some(entry) = tracker.lookup(fh)
-                && !entry.support.is_empty()
-            {
-                has_inputs = true;
-            }
-            per_row_bases.push(bases);
-        }
-
-        let shared_found = if has_inputs {
-            // At least some facts have tracked inputs — do precise comparison.
-            let mut found = false;
-            'outer: for i in 0..per_row_bases.len() {
-                for j in (i + 1)..per_row_bases.len() {
-                    if !per_row_bases[i].is_disjoint(&per_row_bases[j]) {
-                        found = true;
-                        break 'outer;
-                    }
-                }
-            }
-            found
-        } else {
-            // Tier 2: structural fallback — check if any fact in the group was
-            // derived by a clause with IS-ref bindings (recursive derivation).
-            fact_hashes.iter().any(|fh| {
-                tracker.lookup(fh).is_some_and(|entry| {
-                    rule.clauses
-                        .get(entry.clause_index)
-                        .is_some_and(|clause| clause.is_ref_bindings.iter().any(|b| !b.negated))
-                })
-            })
-        };
-
-        if shared_found {
-            any_shared = true;
-            // Collect the group rows with their base facts for BDD use.
-            let rows: Vec<SharedGroupRow> = fact_hashes
-                .iter()
-                .zip(per_row_bases)
-                .map(|(fh, bases)| SharedGroupRow {
-                    fact_hash: fh.clone(),
-                    lineage: bases,
-                })
-                .collect();
-            shared_groups.insert(key.clone(), rows);
-        }
-    }
-
-    // Phase 5: Cross-group correlation warning.
-    // Check if any IS-ref input fact appears in multiple KEY groups.
-    // This is independent of within-group sharing: even rules whose KEY groups
-    // each have only one post-fold row can exhibit cross-group correlation when
-    // different groups consume the same IS-ref base fact.
-    {
-        let mut input_to_groups: HashMap<Vec<u8>, HashSet<Vec<ScalarKey>>> = HashMap::new();
-        for (key, fact_hashes) in &groups {
-            for fh in fact_hashes {
-                if let Some(entry) = tracker.lookup(fh) {
-                    for input in &entry.support {
-                        input_to_groups
-                            .entry(input.base_fact_id.clone())
-                            .or_default()
-                            .insert(key.clone());
-                    }
-                }
-            }
-        }
-        let has_cross_group = input_to_groups.values().any(|g| g.len() > 1);
-        if has_cross_group && let Ok(mut warnings) = warnings_slot.write() {
-            let already_warned = warnings.iter().any(|w| {
-                w.code == RuntimeWarningCode::CrossGroupCorrelationNotExact
-                    && w.rule_name == rule.name
-            });
-            if !already_warned {
-                // Phase D F3: pick one canonical example of a shared
-                // input fact and the KEY groups it bridges, so users
-                // can correlate the warning with EXPLAIN output.
-                let example =
-                    input_to_groups
-                        .iter()
-                        .find(|(_, g)| g.len() > 1)
-                        .map(|(input, groups)| {
-                            let short = input
-                                .iter()
-                                .take(8)
-                                .map(|b| format!("{:02x}", b))
-                                .collect::<String>();
-                            let mut group_strs: Vec<String> =
-                                groups.iter().map(|k| format!("{:?}", k)).collect();
-                            group_strs.sort();
-                            format!(
-                                "input {} shared by groups [{}]",
-                                short,
-                                group_strs.join(", ")
-                            )
-                        });
-                // Phase D F3 case 1 BDD-time deepening: count distinct
-                // base facts (= BDD variables) that cross groups, so the
-                // warning carries structured metadata mirroring
-                // `BddLimitExceeded`. Users can correlate
-                // `variable_count` with EXPLAIN's BDD output.
-                let shared_variable_count =
-                    input_to_groups.values().filter(|g| g.len() > 1).count();
-                warnings.push(RuntimeWarning {
-                    code: RuntimeWarningCode::CrossGroupCorrelationNotExact,
-                    message: format!(
-                        "Rule '{}': {} IS-ref base fact(s) are shared across different \
-                         KEY groups. BDD corrects per-group probabilities but cannot \
-                         account for cross-group correlations.",
-                        rule.name, shared_variable_count
-                    ),
-                    rule_name: rule.name.clone(),
-                    variable_count: Some(shared_variable_count),
-                    key_group: example,
-                });
-            }
-        }
-    }
-
-    if any_shared {
-        // Phase D D-C0b: under `SemiringKind::TopKProofs`, the FOLD-time
-        // DNF inclusion-exclusion math (shipped in D-C0) auto-corrects
-        // for within-group base-fact sharing — the "Results may
-        // overestimate" premise of `SharedProbabilisticDependency`
-        // is no longer true. Suppress the warning under TopK; users
-        // who chose TopKProofs explicitly opted into the
-        // correctness-preserving path. Cross-group correlation
-        // (`CrossGroupCorrelationNotExact`) still fires above because
-        // D-C0 doesn't span KEY-group boundaries.
-        let suppress_under_topk = matches!(semiring_kind, SemiringKind::TopKProofs { .. });
-        if !suppress_under_topk && let Ok(mut warnings) = warnings_slot.write() {
-            let already_warned = warnings.iter().any(|w| {
-                w.code == RuntimeWarningCode::SharedProbabilisticDependency
-                    && w.rule_name == rule.name
-            });
-            if !already_warned {
-                warnings.push(RuntimeWarning {
-                    code: RuntimeWarningCode::SharedProbabilisticDependency,
-                    message: format!(
-                        "Rule '{}' aggregates with MNOR/MPROD but some proof paths \
-                         share intermediate facts, violating the independence assumption. \
-                         Results may overestimate probability.",
-                        rule.name
-                    ),
-                    rule_name: rule.name.clone(),
-                    variable_count: None,
-                    key_group: None,
-                });
-            }
-        }
-        Ok(Some(SharedLineageInfo { shared_groups }))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Record provenance and detect shared proofs for non-recursive strata.
+/// Record provenance for non-recursive strata.
 ///
 /// Non-recursive rules are evaluated in a single pass (no fixpoint loop), so
-/// the regular `record_provenance` + `detect_shared_lineage` path is never hit.
-/// This function bridges that gap by recording a `ProvenanceAnnotation` for every
-/// fact produced by each clause and then running the same two-tier detection
-/// logic used by the recursive path.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "context bundle would be over-engineering for one call site"
-)]
-pub(crate) async fn record_and_detect_lineage_nonrecursive(
+/// the regular `record_provenance` path is never hit. This records a
+/// `ProvenanceAnnotation` for every fact produced by each clause, for EXPLAIN
+/// and top-k proofs. Shared-proof detection reads the lineage store instead
+/// (`locy_lineage`).
+pub(crate) async fn record_provenance_nonrecursive(
     rule: &FixpointRulePlan,
     tagged_clause_facts: &[(usize, Vec<RecordBatch>)],
     tracker: &Arc<ProvenanceStore>,
@@ -3662,8 +3431,7 @@ pub(crate) async fn record_and_detect_lineage_nonrecursive(
     registry: &Arc<DerivedScanRegistry>,
     top_k_proofs: usize,
     classifiers: ClassifierRefs<'_>,
-    semiring_kind: SemiringKind,
-) -> DFResult<Option<SharedLineageInfo>> {
+) -> DFResult<()> {
     let classifier_registry = classifiers.registry;
     let classifier_cache = classifiers.cache;
 
@@ -3733,282 +3501,7 @@ pub(crate) async fn record_and_detect_lineage_nonrecursive(
     }
 
     topk_acc.emit_warning_if_any(rule, top_k_proofs, warnings_slot);
-
-    // Flatten all clause facts and run detection.
-    let all_facts: Vec<RecordBatch> = tagged_clause_facts
-        .iter()
-        .flat_map(|(_, batches)| batches.iter().cloned())
-        .collect();
-    detect_shared_lineage(rule, &all_facts, tracker, warnings_slot, semiring_kind)
-}
-
-/// Apply exact weighted model counting (WMC) for shared-lineage groups.
-///
-/// Replaces multiple rows in groups with shared lineage with a single
-/// representative row whose PROB column carries the BDD-computed exact
-/// probability (Sang et al. 2005). For groups that exceed
-/// `max_bdd_variables`, rows are left unchanged and a `BddLimitExceeded`
-/// warning is emitted.
-pub(crate) fn apply_exact_wmc(
-    pre_fold_facts: Vec<RecordBatch>,
-    rule: &FixpointRulePlan,
-    shared_info: &SharedLineageInfo,
-    tracker: &Arc<ProvenanceStore>,
-    max_bdd_variables: usize,
-    warnings_slot: &Arc<StdRwLock<Vec<RuntimeWarning>>>,
-    approximate_slot: &Arc<StdRwLock<HashMap<String, Vec<String>>>>,
-) -> DFResult<Vec<RecordBatch>> {
-    use crate::query::df_graph::locy_bdd::{SemiringOp, weighted_model_count};
-    use uni_locy::{RuntimeWarning, RuntimeWarningCode};
-
-    // Find the probability-domain fold binding to know which column
-    // to overwrite. M3: dispatch through the `LocyAggregate` trait so
-    // user-authored probability aggregates participate.
-    let prob_fold = rule
-        .fold_bindings
-        .iter()
-        .find(|fb| fb.aggregate.is_probability_aggregate());
-    let prob_fold = match prob_fold {
-        Some(f) => f,
-        None => return Ok(pre_fold_facts),
-    };
-    let semiring_op = if prob_fold.aggregate.is_noisy_or() {
-        SemiringOp::Disjunction
-    } else {
-        SemiringOp::Conjunction
-    };
-    let prob_col_idx = prob_fold.input_col_index;
-    // The PROB column's name in the pre-fold facts — and so in the rows the
-    // provenance store recorded — which is the fold variable, not the YIELD
-    // alias. Under a rename the alias matched no column, so the exact
-    // probability was silently never written. Fail loud rather than panic if
-    // the PROB column index is out of range (the planner keeps it within the
-    // yield schema; a miss signals a bug).
-    let prob_col_name = pre_fold_column_name(rule, prob_col_idx)
-        .ok_or_else(|| {
-            datafusion::error::DataFusionError::Internal(format!(
-                "PROB aggregate '{}' column index {} out of range ({} yield columns)",
-                prob_fold.name,
-                prob_col_idx,
-                rule.yield_schema.fields().len(),
-            ))
-        })?
-        .to_string();
-
-    // Build a set of shared group keys for quick lookup.
-    let shared_keys: HashSet<Vec<ScalarKey>> = shared_info.shared_groups.keys().cloned().collect();
-
-    // Phase 1: Collect all rows for each shared KEY group across all batches.
-    // Store (batch_index, row_index) pairs for each group.
-    struct GroupAccum {
-        base_facts: Vec<HashSet<Vec<u8>>>,
-        base_probs: HashMap<Vec<u8>, f64>,
-        /// First occurrence: (batch_index, row_index) — used as representative.
-        representative: (usize, usize),
-        row_locations: Vec<(usize, usize)>,
-    }
-
-    let mut group_accums: HashMap<Vec<ScalarKey>, GroupAccum> = HashMap::new();
-    let mut non_shared_rows: Vec<(usize, usize)> = Vec::new(); // (batch_idx, row_idx)
-
-    for (batch_idx, batch) in pre_fold_facts.iter().enumerate() {
-        // By name, as `detect_shared_lineage` grouped and hashed them.
-        let (all_indices, key_indices) = yield_positions_in(rule, &batch.schema())?;
-        for row_idx in 0..batch.num_rows() {
-            let key = extract_scalar_key(batch, &key_indices, row_idx);
-            if shared_keys.contains(&key) {
-                let fact_hash = provenance_fact_hash(&rule.name, batch, &all_indices, row_idx);
-                let bases = compute_lineage(&fact_hash, tracker, &mut HashSet::new());
-
-                let accum = group_accums.entry(key).or_insert_with(|| GroupAccum {
-                    base_facts: Vec::new(),
-                    base_probs: HashMap::new(),
-                    representative: (batch_idx, row_idx),
-                    row_locations: Vec::new(),
-                });
-
-                // Look up probabilities for base facts.
-                for bf in &bases {
-                    if !accum.base_probs.contains_key(bf)
-                        && let Some(entry) = tracker.lookup(bf)
-                        && let Some(val) = entry.fact_row.get(&prob_col_name)
-                        && let Some(p) = value_to_f64(val)
-                    {
-                        accum.base_probs.insert(bf.clone(), p);
-                    }
-                }
-
-                accum.base_facts.push(bases);
-                accum.row_locations.push((batch_idx, row_idx));
-            } else {
-                non_shared_rows.push((batch_idx, row_idx));
-            }
-        }
-    }
-
-    // Phase 2: Compute BDD for each shared group (across all batches).
-    // Track which (batch_idx, row_idx) pairs to keep vs drop.
-    let mut keep_rows: HashSet<(usize, usize)> = HashSet::new();
-    // Map of (batch_idx, row_idx) → overridden PROB value (for BDD-succeeded groups).
-    let mut overrides: HashMap<(usize, usize), f64> = HashMap::new();
-
-    // All non-shared rows are kept.
-    for &loc in &non_shared_rows {
-        keep_rows.insert(loc);
-    }
-
-    for (key, accum) in &group_accums {
-        let bdd_result = weighted_model_count(
-            &accum.base_facts,
-            &accum.base_probs,
-            semiring_op,
-            max_bdd_variables,
-        );
-
-        if bdd_result.approximated {
-            // Emit BddLimitExceeded warning (one per key group).
-            if let Ok(mut warnings) = warnings_slot.write() {
-                let key_desc = format!("{key:?}");
-                let already_warned = warnings.iter().any(|w| {
-                    w.code == RuntimeWarningCode::BddLimitExceeded
-                        && w.rule_name == rule.name
-                        && w.key_group.as_deref() == Some(&key_desc)
-                });
-                if !already_warned {
-                    warnings.push(RuntimeWarning {
-                        code: RuntimeWarningCode::BddLimitExceeded,
-                        message: format!(
-                            "Rule '{}': BDD variable limit exceeded ({} > {}). \
-                             Falling back to independence-mode result.",
-                            rule.name, bdd_result.variable_count, max_bdd_variables
-                        ),
-                        rule_name: rule.name.clone(),
-                        variable_count: Some(bdd_result.variable_count),
-                        key_group: Some(key_desc),
-                    });
-                }
-            }
-            if let Ok(mut approx) = approximate_slot.write() {
-                let key_desc = format!("{key:?}");
-                approx.entry(rule.name.clone()).or_default().push(key_desc);
-            }
-            // Keep all rows unchanged.
-            for &loc in &accum.row_locations {
-                keep_rows.insert(loc);
-            }
-        } else {
-            // BDD succeeded: keep one representative row with overridden PROB.
-            keep_rows.insert(accum.representative);
-            overrides.insert(accum.representative, bdd_result.probability);
-        }
-    }
-
-    // Phase 3: Build output batches by filtering kept rows per batch.
-    let mut result_batches = Vec::new();
-    for (batch_idx, batch) in pre_fold_facts.iter().enumerate() {
-        let kept_indices: Vec<usize> = (0..batch.num_rows())
-            .filter(|&row_idx| keep_rows.contains(&(batch_idx, row_idx)))
-            .collect();
-
-        if kept_indices.is_empty() {
-            continue;
-        }
-
-        let indices = arrow::array::UInt32Array::from(
-            kept_indices.iter().map(|&i| i as u32).collect::<Vec<_>>(),
-        );
-        let mut columns: Vec<arrow::array::ArrayRef> = batch
-            .columns()
-            .iter()
-            .map(|col| arrow::compute::take(col, &indices, None))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(arrow_err)?;
-
-        // Check if any kept rows have PROB overrides.
-        let override_map: Vec<Option<f64>> = kept_indices
-            .iter()
-            .map(|&row_idx| overrides.get(&(batch_idx, row_idx)).copied())
-            .collect();
-
-        // Resolve the PROB column position in THIS batch by name rather than by
-        // the yield-schema position `prob_col_idx`: the post-fixpoint fact batch
-        // may column-order differently from the yield schema, so a raw positional
-        // write would overwrite the wrong column. `columns` mirrors `batch`'s
-        // order (built from `batch.columns()`), and the result reuses
-        // `batch.schema()`, so the batch-local index is the correct target.
-        // A column that does not resolve is an error, not a skipped write.
-        let (batch_indices, _) = yield_positions_in(rule, &batch.schema())?;
-        let bpi = *batch_indices.get(prob_col_idx).ok_or_else(|| {
-            datafusion::error::DataFusionError::Internal(format!(
-                "PROB aggregate '{}' column index {} out of range ({} yield columns)",
-                prob_fold.name,
-                prob_col_idx,
-                batch_indices.len(),
-            ))
-        })?;
-        if override_map.iter().any(|o| o.is_some()) {
-            // Rebuild the PROB column with overrides.
-            let existing_prob = columns[bpi]
-                .as_any()
-                .downcast_ref::<arrow::array::Float64Array>();
-            let new_values: Vec<f64> = override_map
-                .iter()
-                .enumerate()
-                .map(|(i, ov)| match ov {
-                    Some(p) => *p,
-                    None => existing_prob.map(|arr| arr.value(i)).unwrap_or(0.0),
-                })
-                .collect();
-            columns[bpi] = Arc::new(arrow::array::Float64Array::from(new_values));
-        }
-
-        let result_batch = RecordBatch::try_new(batch.schema(), columns).map_err(arrow_err)?;
-        result_batches.push(result_batch);
-    }
-
-    Ok(result_batches)
-}
-
-/// Extract an f64 from a `Value`, supporting Float and Int.
-fn value_to_f64(val: &uni_common::Value) -> Option<f64> {
-    match val {
-        uni_common::Value::Float(f) => Some(*f),
-        uni_common::Value::Int(i) => Some(*i as f64),
-        _ => None,
-    }
-}
-
-/// Compute the lineage of a derived fact (Cui & Widom 2000).
-///
-/// Recursively traverses the provenance store to collect the set of base-level
-/// fact hashes that contribute to this derivation. A base fact is one with no
-/// IS-ref support (a graph-level fact). Intermediate facts are expanded
-/// transitively through the store.
-fn compute_lineage(
-    fact_hash: &[u8],
-    tracker: &Arc<ProvenanceStore>,
-    visited: &mut HashSet<Vec<u8>>,
-) -> HashSet<Vec<u8>> {
-    if !visited.insert(fact_hash.to_vec()) {
-        return HashSet::new(); // Cycle guard.
-    }
-
-    match tracker.lookup(fact_hash) {
-        Some(entry) if !entry.support.is_empty() => {
-            let mut bases = HashSet::new();
-            for input in &entry.support {
-                let child_bases = compute_lineage(&input.base_fact_id, tracker, visited);
-                bases.extend(child_bases);
-            }
-            bases
-        }
-        _ => {
-            // Base fact (no tracker entry or no inputs).
-            let mut set = HashSet::new();
-            set.insert(fact_hash.to_vec());
-            set
-        }
-    }
+    Ok(())
 }
 
 /// The clause that produced each of this iteration's candidate rows, keyed by
@@ -7663,152 +7156,6 @@ mod tests {
             non_linear: false,
             yield_projection: Vec::new(),
         }
-    }
-
-    fn annotation(
-        rule: &str,
-        support: Vec<ProofTerm>,
-        fact_row: HashMap<String, Value>,
-    ) -> ProvenanceAnnotation {
-        ProvenanceAnnotation {
-            rule_name: rule.into(),
-            clause_index: 0,
-            support,
-            along_values: HashMap::new(),
-            iteration: 0,
-            fact_row,
-            proof_probability: None,
-            neural_calls: Vec::new(),
-        }
-    }
-
-    /// `detect_shared_lineage` and `apply_exact_wmc` group, hash and rewrite a
-    /// pre-fold batch by column NAME.
-    ///
-    /// The batch carries `(p, a)` while the yield schema is `(a, p)`. Read by
-    /// position, the KEY was the `p` column and the fact hash covered the
-    /// columns in the wrong order, so the two `x` proofs, which share one base
-    /// fact, were neither grouped together nor found in the provenance store:
-    /// no shared group was detected and the independence result stood.
-    #[test]
-    fn exact_wmc_resolves_key_and_hash_columns_by_name() {
-        let rule = mnor_rule_plan();
-        // Canonical layout: the provenance store keys a fact by its yield
-        // columns in yield order, whatever order a batch carries them in.
-        let canonical = RecordBatch::try_new(
-            Arc::clone(&rule.yield_schema),
-            vec![
-                Arc::new(StringArray::from(vec!["x", "x", "y"])),
-                Arc::new(Float64Array::from(vec![0.5, 0.4, 0.3])),
-            ],
-        )
-        .unwrap();
-        let permuted = RecordBatch::try_new(
-            Arc::new(Schema::new(vec![
-                Field::new("p", DataType::Float64, true),
-                Field::new("a", DataType::Utf8, true),
-            ])),
-            vec![
-                Arc::new(Float64Array::from(vec![0.5, 0.4, 0.3])),
-                Arc::new(StringArray::from(vec!["x", "x", "y"])),
-            ],
-        )
-        .unwrap();
-
-        let tracker = Arc::new(ProvenanceStore::new());
-        let base_hash = b"base-fact-b".to_vec();
-        tracker.record(
-            base_hash.clone(),
-            annotation(
-                "base",
-                Vec::new(),
-                HashMap::from([("p".to_string(), Value::Float(0.6))]),
-            ),
-        );
-        let shared = ProofTerm {
-            source_rule: "base".into(),
-            base_fact_id: base_hash,
-        };
-        for row in 0..2 {
-            tracker.record(
-                provenance_fact_hash("r", &canonical, &[0, 1], row),
-                annotation("r", vec![shared.clone()], HashMap::new()),
-            );
-        }
-
-        let warnings = Arc::new(StdRwLock::new(Vec::new()));
-        let info = detect_shared_lineage(
-            &rule,
-            std::slice::from_ref(&permuted),
-            &tracker,
-            &warnings,
-            SemiringKind::AddMultProb,
-        )
-        .unwrap()
-        .expect("the two `x` proofs share base fact b");
-        let x_key = vec![ScalarKey::Utf8("x".into())];
-        assert_eq!(
-            info.shared_groups.keys().collect::<Vec<_>>(),
-            vec![&x_key],
-            "only the `x` group shares lineage"
-        );
-
-        let approximate = Arc::new(StdRwLock::new(HashMap::new()));
-        let out = apply_exact_wmc(
-            vec![permuted],
-            &rule,
-            &info,
-            &tracker,
-            64,
-            &warnings,
-            &approximate,
-        )
-        .unwrap();
-        let mut rows: Vec<(String, f64)> = Vec::new();
-        for batch in &out {
-            let a_idx = batch.schema().index_of("a").unwrap();
-            let p_idx = batch.schema().index_of("p").unwrap();
-            let a = batch
-                .column(a_idx)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .unwrap();
-            let p = batch
-                .column(p_idx)
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap();
-            for i in 0..batch.num_rows() {
-                rows.push((a.value(i).to_string(), p.value(i)));
-            }
-        }
-        rows.sort_by(|l, r| l.0.cmp(&r.0));
-        // Both `x` proofs depend only on b, so the exact disjunction is P(b).
-        assert_eq!(rows, vec![("x".to_string(), 0.6), ("y".to_string(), 0.3)]);
-    }
-
-    /// A pre-fold batch missing a yield column fails instead of hashing or
-    /// grouping on whichever columns happen to sit at those positions.
-    #[test]
-    fn exact_wmc_fails_closed_on_missing_yield_column() {
-        let rule = mnor_rule_plan();
-        let narrow = RecordBatch::try_new(
-            Arc::new(Schema::new(vec![Field::new("a", DataType::Utf8, true)])),
-            vec![Arc::new(StringArray::from(vec!["x"]))],
-        )
-        .unwrap();
-        let tracker = Arc::new(ProvenanceStore::new());
-        let warnings = Arc::new(StdRwLock::new(Vec::new()));
-        let err = detect_shared_lineage(
-            &rule,
-            std::slice::from_ref(&narrow),
-            &tracker,
-            &warnings,
-            SemiringKind::AddMultProb,
-        )
-        .err()
-        .expect("a missing yield column is an error");
-        assert!(err.to_string().contains("'p'"), "{err}");
     }
 
     /// A batch of rule `r`'s rows `(a, p)` with the columns in `names` order.

@@ -1778,7 +1778,7 @@ pub(crate) fn schemaless_l0_prefilter(
         match e {
             Expr::Property(base, prop)
                 if matches!(base.as_ref(), Expr::Variable(v) if v == variable)
-                    && !prop.starts_with('_') =>
+                    && !uni_common::core::schema::is_reserved_property_name(prop) =>
             {
                 Some(prop.as_str())
             }
@@ -1944,7 +1944,8 @@ fn l0_leaf_prefilter(filter: &Arc<dyn PhysicalExpr>, prefix: &str) -> Option<L0P
     let property_of = |e: &Arc<dyn PhysicalExpr>| -> Option<String> {
         let col = e.downcast_ref::<datafusion::physical_expr::expressions::Column>()?;
         let prop = col.name().strip_prefix(prefix)?;
-        (!prop.is_empty() && !prop.starts_with('_')).then(|| prop.to_string())
+        (!prop.is_empty() && !uni_common::core::schema::is_reserved_property_name(prop))
+            .then(|| prop.to_string())
     };
 
     if let Some(bin) = filter.downcast_ref::<BinaryExpr>() {

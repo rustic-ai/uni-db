@@ -32,7 +32,12 @@
 //! * a `BEST BY` rule keeps the best row per key (shortest or longest path);
 //! * a PROB rule carries a probability (as a fixed-point integer), and an
 //!   `IS NOT` between two PROB rules multiplies by the complement of the
-//!   referenced facts' noisy-OR instead of anti-joining.
+//!   referenced facts' noisy-OR instead of anti-joining;
+//! * a positive `IS` between two PROB rules multiplies in the referenced
+//!   fact's probability, unless the clause's PROB expression already reads
+//!   it (one `ProbFactor` per multiplied reference). Where no two proofs
+//!   share an edge, that is the possible-worlds probability, which a unit
+//!   test checks by enumerating every world of small graphs.
 //!
 //! Per-path and recursive-sum rules terminate only on acyclic input, so the
 //! generator gives them the edges to a greater id. `DERIVE`, `ASSUME`,

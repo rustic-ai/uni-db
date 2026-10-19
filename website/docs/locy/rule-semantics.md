@@ -80,6 +80,8 @@ A disagreement is a compile error (`YieldSchemaMismatch` or `ClauseMismatch`).
 
 If the referenced rule exposes a `PROB` column, `IS NOT` becomes probabilistic complement (`1 - p`) rather than Boolean anti-join. Rules without a `PROB` column keep standard Boolean negation.
 
+Symmetrically, a positive `IS` reference to a `PROB` rule from a rule with a `PROB` column multiplies the referenced probability `p` into the row's `PROB` value, unless the row's `PROB` expression already reads `p` as a product factor (the count-once rule). See [Probabilistic Logic](advanced/probabilistic-logic.md#positive-is-references-to-a-prob-rule).
+
 ## Monotonic Recursion
 
 Recursive aggregation requires monotonic operators. Non-monotonic recursive shapes are rejected at compile time with `NonMonotonicInRecursion`.

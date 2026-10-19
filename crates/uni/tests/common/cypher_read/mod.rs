@@ -74,3 +74,5 @@ pub mod percentile_exact_test;
 pub mod schemaless_property_type_scope_test;
 // Reachability consumers of a variable-length pattern decide from distances.
 pub mod trail_reachability_test;
+// range() with a null argument returns null on every evaluator.
+pub mod range_null_test;

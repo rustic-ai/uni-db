@@ -245,7 +245,7 @@ fn merge_dotted_columns(row: &mut HashMap<String, Value>, var: &str) {
     for key in dotted_keys {
         let prop_name = key[prefix.len()..].to_string();
         let val = row.remove(&key);
-        if prop_name.starts_with('_') || prop_name == "overflow_json" {
+        if uni_common::core::schema::is_reserved_property_name(&prop_name) {
             continue;
         }
         if let (Some(val), Some(Value::Map(map))) = (val, row.get_mut(var)) {
@@ -2975,9 +2975,9 @@ impl Executor {
                                 }
                             }
                             MapProjectionItem::AllProperties => {
-                                // Include all properties except internal fields (those starting with _)
+                                // Include all properties except the engine's reserved fields
                                 for (key, value) in properties.iter() {
-                                    if !key.starts_with('_') {
+                                    if !uni_common::core::schema::is_reserved_property_name(key) {
                                         result_map.insert(key.clone(), value.clone());
                                     }
                                 }

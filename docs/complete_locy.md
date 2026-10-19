@@ -500,6 +500,11 @@ subject(s) exist in the target rule's derived relation. If found, the row passes
 matching fact; if not, it's filtered out. `prev.<column>` inside ALONG reads a column of the
 referenced fact in a recursive clause (§6).
 
+When both the target rule and the calling rule have a PROB column, the reference is also a
+**probabilistic condition**: the row holds only when the referenced fact does, so the fact's
+probability is multiplied into the row's PROB value — the mirror of `IS NOT`'s `1 − p` (§5.2), so
+`P(r) + P(¬r) = 1`. A clause that already reads that probability is not charged twice; see §12.3.
+
 ## 5.2 IS NOT References (Negation)
 
 Two syntax forms, same semantics:
@@ -1009,31 +1014,54 @@ CREATE RULE safe AS
 - If `a` has a risk of 0.8 in `risky`, then `safe` yields `confidence = 1 − 0.8 = 0.2`.
 - If `a` is not in `risky` at all, then `safe` yields `confidence = 1.0`.
 
-Multiple IS / IS NOT references with PROB in a single clause multiply their probability terms into the calling rule's PROB column.
+A positive `IS` reference to a PROB rule multiplies the referenced fact's probability `p` into the
+calling rule's PROB column, as `IS NOT` multiplies `1 − p`; several references in one clause each
+contribute their term. **Count-once rule:** a clause's PROB expression (the FOLD input, or the
+PROB YIELD item) that already reads `p` is not charged a second time:
+
+| The PROB expression reads `p` | Multiplied in | Exact mode |
+|---|---|---|
+| not at all: `FOLD prob = MNOR(e.p)` | yes: `e.p · p` | row event `e.p` ∧ the referenced fact |
+| as exactly one product factor: `MNOR(p)`, `MNOR(e.p * p)` | no (already counted) | the same decomposition |
+| any other way: `MNOR(1.0 - p)`, `MNOR(p * p)`, `max(p, e.p)` | no (never counted twice) | the row is one independent event; `ProbabilityReadNotFactor` warning |
+
+```
+CREATE RULE reach AS
+    MATCH (a)-[e:LINK]->(b)
+    FOLD prob = MNOR(e.p) YIELD KEY a, KEY b, prob
+CREATE RULE reach AS
+    MATCH (a)-[e:LINK]->(mid) WHERE mid IS reach TO b
+    FOLD prob = MNOR(e.p) YIELD KEY a, KEY b, prob
+```
+
+Over `s -0.7-> t`, `s -0.3-> m -0.5-> t`, the recursive row is `0.3 · reach(m, t) = 0.15` and
+`reach(s, t) = 1 − (1 − 0.7)(1 − 0.15) = 0.745`: the probability that `t` is reachable when each
+edge is present independently with its `p`. A PROB column computed after the fold
+(`YIELD 1 - total AS x PROB`) has no per-row value, and its positive references stay Boolean.
 
 ## 12.4 Shared Proof Detection
 
-When recursive rules have diamond-shaped derivation graphs, multiple proof paths may share the same base facts. The **independence assumption** (which MNOR/MPROD rely on) may not hold.
+MNOR and MPROD combine a group's rows as independent events. That holds unless two proofs of a fact rest on the same event: the same edge (or, generally, the same expression over the same nodes and relationships), or the same referenced fact, or the fact itself through a cycle. Nodes in common are not evidence in common: the two proofs of `reach(s, t)` in §12.3 share the node `s` but no edge, so independence is exact there.
 
-Uni detects this at runtime via a **DerivationTracker** that records the base-fact inputs for each derived fact. When overlap is detected, it emits a `SharedProbabilisticDependency` warning.
+Uni records each MNOR/MPROD rule's derivation rows as lineage and emits a `SharedProbabilisticDependency` warning for a rule when some fact's formula reads one event twice. When no rule warns, every default-mode value is already the possible-worlds probability.
 
 ## 12.5 Exact Probability (BDD-Based)
 
-When `exact_probability = true`, shared-proof groups use **BDD-based weighted model counting** instead of the independence assumption:
+When `exact_probability = true`, each fact whose formula reads an event twice is recomputed by **BDD-based weighted model counting** under possible-worlds semantics:
 
-1. Collect all unique base facts across the group's derivation rows
-2. Build a BDD variable set (one variable per base fact)
-3. For each derivation row: AND its base-fact variables
-4. Combine rows: OR for MNOR, AND for MPROD
-5. Evaluate exact probability via Shannon expansion
+1. Each derivation row is `(its own event) AND (the formula of every fact it references positively)`. The row's own event has the row's PROB value divided by the referenced probabilities it carries; rows over the same expression and the same nodes and relationships share one event, and a referenced fact of a rule without lineage (a non-fold PROB rule) is one event
+2. A fact is the OR (MNOR) or the AND (MPROD) of its rows, as a least fixpoint, so a derivation through itself adds nothing
+3. Build a BDD over the events (one variable each) and evaluate its probability via Shannon expansion
+
+On the graph `A -0.5-> B -0.4-> C -0.6-> D`, `A -0.3-> C`, both proofs of `reach(A, D)` need `C → D`: exact mode gives `0.6 · (1 − 0.7 · 0.8) = 0.264`, independence `1 − (1 − 0.12)(1 − 0.18) = 0.2784`.
 
 ### Fallback
 
-When unique base facts exceed `max_bdd_variables` (default 1000), the group falls back to independence mode and emits `BddLimitExceeded`. The affected rows are annotated with `approximate = true`.
+When a fact's formula needs more than `max_bdd_variables` (default 1000) events, the group falls back to independence mode and emits `BddLimitExceeded`. The affected rows are annotated with `approximate = true`.
 
 ### Cross-Group Correlation
 
-When base facts are shared across **different KEY groups**, per-group BDD is exact internally but cross-group correlation remains approximate. This emits `CrossGroupCorrelationNotExact`.
+When a referenced fact is consumed by **different KEY groups** of one rule, per-group BDD is exact internally but cross-group correlation remains approximate. This emits `CrossGroupCorrelationNotExact`.
 
 ## 12.6 Top-K Proof Filtering
 
@@ -1132,7 +1160,7 @@ ASSUME {
     CREATE (x:Account {name: 'Suspicious'})-[:TRANSFER]->(existing:Account)
 }
 THEN {
-    -- Locy body (rules, queries, other commands)
+    -- Locy body (rules, QUERY, Cypher, DERIVE, nested ASSUME)
     QUERY risk_propagation RETURN affected_nodes
 }
 ```
@@ -1149,6 +1177,8 @@ The database is never permanently modified. ASSUME blocks can be nested (stacked
 **Incremental re-evaluation.** A stratum is recomputed when one of its rules matches a label whose membership the mutations change (a created node's labels, an added or removed label, every label when a node is deleted), matches a relationship type that gains or loses a relationship, reads a property the mutations `SET` or `REMOVE`, references (`IS` / `IS NOT`) a recomputed rule, or uses a construct whose inputs cannot be read from the syntax (subqueries, `EXISTS`, generators, neural models, plugin or retrieval functions, `rand()`, `timestamp()`). Every other stratum is reused. Recomputed strata are evaluated from scratch. Answers are the same as evaluating the program on the mutated graph; `LocyStats::hypothetical_strata_evaluated` / `hypothetical_strata_reused` show the split. A hypothetical evaluation cut short by the timeout or iteration limit is an error unless `allow_partial` is set.
 
 A nested ASSUME's rows are not part of the enclosing block's result: an ASSUME body collects the rows of its own `QUERY` and Cypher commands.
+
+`ABDUCE` and `EXPLAIN RULE` are compile errors inside an ASSUME body, at any nesting depth (`LocyCompileError::AssumeBodyCommandNotAllowed`). Their results are not rows, so the ASSUME used to compute them and drop them. To combine them with a hypothetical change, run the `ABDUCE` / `EXPLAIN RULE` at the top level after the ASSUME, or apply the change in a transaction (`tx()`, mutate, run the command, `rollback()`), or in a scratch transaction (`Session::scratch()`, Python `session.scratch()`), whose writes are always discarded. A `DERIVE` in the body is allowed: its edges land in the hypothetical graph, where a later Cypher command in the same body reads them, and are rolled back with it.
 
 Returns `CommandResult::Assume(Vec<FactRow>)`.
 
@@ -1836,6 +1866,7 @@ session.locy_with(program) \
 | Shared proof | `SharedProbabilisticDependency` | MNOR/MPROD proof paths share base facts — independence assumption may not hold |
 | BDD limit | `BddLimitExceeded` | Group exceeded `max_bdd_variables` — fell back to independence mode |
 | Cross-group | `CrossGroupCorrelationNotExact` | Base facts shared across different KEY groups — per-group BDD is exact, cross-group is approximate |
+| Non-factor probability read | `ProbabilityReadNotFactor` | A clause's PROB expression reads a positively referenced probability other than as one product factor (`1 - p`) — it is not multiplied in again, and exact mode treats the row as one independent event (§12.3) |
 
 ---
 
@@ -2353,7 +2384,7 @@ struct ExplainRule { rule_name: QualifiedName, where_expr: Option<Expr>, return_
 
 ## Appendix D: TCK Coverage Map
 
-**72 feature files, 530 scenarios** covering all Locy features.
+**72 feature files, 535 scenarios** covering all Locy features.
 
 ### Core Evaluation
 

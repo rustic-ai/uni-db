@@ -400,7 +400,10 @@ fn sync_all_props_in_maps(rows: &mut [HashMap<String, Value>]) {
                 // Collect non-internal property keys and their values
                 let updates: Vec<(String, Value)> = map
                     .iter()
-                    .filter(|(k, _)| !k.starts_with('_') && k.as_str() != "ext_id")
+                    .filter(|(k, _)| {
+                        !uni_common::core::schema::is_reserved_property_name(k)
+                            && k.as_str() != "ext_id"
+                    })
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
 

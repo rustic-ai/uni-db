@@ -637,3 +637,51 @@ class TestParameterizedQueries:
             "MATCH (p:Person {name: 'Alice'}) RETURN count(p) AS count"
         )
         assert results[0]["count"] == 0
+
+
+@pytest.mark.parametrize("label", ["Person", "Loose"])
+@pytest.mark.parametrize("flushed", [False, True])
+def test_underscore_property_reads_back(social_db, label, flushed):
+    """A `_`-prefixed property that is not a storage column reads like any other.
+
+    `Person` is declared (so `_foo` is undeclared on it), `Loose` is
+    schemaless; both are probed before and after a flush, through the
+    converted `Node` / `Edge` objects as well as scalar projections.
+    """
+    session = social_db.session()
+    props = "name: 'A', age: 1, " if label == "Person" else ""
+    tx = session.tx()
+    tx.execute(
+        f"CREATE (a:{label} {{{props}id: 1, _foo: 5}}), (b:{label} {{{props}id: 2}}), "
+        f"(a)-[:LINK {{_bar: 7}}]->(b)"
+    )
+    tx.commit()
+    if flushed:
+        social_db.flush()
+
+    rows = session.query(
+        f"MATCH (n:{label} {{id: 1}}) RETURN n, n._foo AS f, keys(n) AS k"
+    )
+    assert len(rows) == 1
+    node = rows[0]["n"]
+    assert node["_foo"] == 5
+    assert "_foo" in node
+    assert rows[0]["f"] == 5
+    assert "_foo" in rows[0]["k"]
+    assert (
+        session.query(f"MATCH (n:{label}) WHERE n._foo = 5 RETURN n.id AS id")[0]["id"]
+        == 1
+    )
+
+    tx = session.tx()
+    tx.execute(f"MATCH (n:{label} {{id: 1}}) SET n._id = 'u1'")
+    tx.commit()
+    node = session.query(f"MATCH (n:{label} {{id: 1}}) RETURN n")[0]["n"]
+    assert node.get("_id") == "u1"
+    assert node["_id"] == "u1"
+    assert "_id" in node
+
+    rows = session.query(f"MATCH (:{label})-[r:LINK]->() RETURN r, r._bar AS b")
+    assert len(rows) == 1
+    assert rows[0]["r"]["_bar"] == 7
+    assert rows[0]["b"] == 7

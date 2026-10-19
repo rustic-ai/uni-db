@@ -523,6 +523,20 @@ fn resolve_clause<'c>(
     for r in &clause.neg_refs {
         negatives.push(negated(r, &mut kinds)?);
     }
+    for pf in &clause.prob_factors {
+        let Some(lookup) = positives.get(pf.reference) else {
+            return Err(malformed(format!(
+                "PROB factor reference {} is out of range",
+                pf.reference
+            )));
+        };
+        if pf.prob_column >= schemas[lookup.rule.as_str()].columns.len() {
+            return Err(malformed(format!(
+                "PROB column {} is out of range",
+                pf.prob_column
+            )));
+        }
+    }
     let mut complements = Vec::with_capacity(clause.prob_complements.len());
     for pc in &clause.prob_complements {
         let lookup = negated(&pc.reference, &mut kinds)?;
@@ -550,12 +564,14 @@ fn resolve_clause<'c>(
         }
         bound.insert(&c.name);
     }
-    if let Some(pc) = clause
+    if let Some(var) = clause
         .prob_complements
         .iter()
-        .find(|pc| !bound.contains(pc.prob_var.as_str()))
+        .map(|pc| &pc.prob_var)
+        .chain(clause.prob_factors.iter().map(|pf| &pf.prob_var))
+        .find(|v| !bound.contains(v.as_str()))
     {
-        return Err(unbound(&pc.prob_var, "prob"));
+        return Err(unbound(var, "prob"));
     }
     if let Some(v) = clause
         .yield_vars
@@ -811,19 +827,35 @@ fn eval_plan(plan: &Plan<'_>, rels: &HashMap<String, Bag>) -> Vec<Tuple> {
 
     let empty = Bag::new();
     let facts = |rule: &str| rels.get(rule).unwrap_or(&empty);
-    for lookup in &plan.positives {
+    // Each binding carries the product of the referenced probabilities its
+    // `ProbFactor`s multiply in, beside it (bindings are plain maps).
+    let mut factors: Vec<f64> = vec![1.0; bindings.len()];
+    for (i, lookup) in plan.positives.iter().enumerate() {
         let referenced = facts(&lookup.rule);
-        bindings = bindings
+        let column = clause
+            .prob_factors
             .iter()
-            .flat_map(|b| {
-                referenced
-                    .iter()
-                    .filter_map(|fact| unify(b, fact, &lookup.positions))
-            })
-            .collect();
+            .find(|pf| pf.reference == i)
+            .map(|pf| pf.prob_column);
+        let mut joined = Vec::new();
+        let mut joined_factors = Vec::new();
+        for (b, factor) in bindings.iter().zip(&factors) {
+            for fact in referenced {
+                if let Some(next) = unify(b, fact, &lookup.positions) {
+                    joined.push(next);
+                    joined_factors.push(match column {
+                        Some(c) => factor * from_scale(fact[c]),
+                        None => *factor,
+                    });
+                }
+            }
+        }
+        bindings = joined;
+        factors = joined_factors;
     }
 
-    bindings.retain(|b| {
+    let mut paired: Vec<(Binding, f64)> = bindings.into_iter().zip(factors).collect();
+    paired.retain(|(b, _)| {
         clause
             .filters
             .iter()
@@ -832,14 +864,15 @@ fn eval_plan(plan: &Plan<'_>, rels: &HashMap<String, Bag>) -> Vec<Tuple> {
 
     for lookup in &plan.negatives {
         let banned = facts(&lookup.rule);
-        bindings.retain(|b| {
+        paired.retain(|(b, _)| {
             !banned
                 .iter()
                 .any(|fact| unify(b, fact, &lookup.positions).is_some())
         });
     }
 
-    for b in &mut bindings {
+    let mut bindings = Vec::with_capacity(paired.len());
+    for (mut b, factor) in paired {
         for c in &clause.computed {
             let value = c.constant + c.factor * c.vars.iter().map(|v| b[v]).sum::<i64>();
             b.insert(c.name.clone(), value);
@@ -847,13 +880,19 @@ fn eval_plan(plan: &Plan<'_>, rels: &HashMap<String, Bag>) -> Vec<Tuple> {
         for pc in &plan.complements {
             let none = facts(&pc.lookup.rule)
                 .iter()
-                .filter(|fact| unify(b, fact, &pc.lookup.positions).is_some())
+                .filter(|fact| unify(&b, fact, &pc.lookup.positions).is_some())
                 .map(|fact| 1.0 - from_scale(fact[pc.prob_column]))
                 .product::<f64>();
             // `1 - q` with `q = 1 - none`: the complement is `none` itself.
             let p = from_scale(b[&pc.prob_var]) * none;
             b.insert(pc.prob_var.clone(), to_scale(p));
         }
+        if let Some(pf) = clause.prob_factors.first() {
+            // Every factor of a clause multiplies its one PROB variable.
+            let p = from_scale(b[&pf.prob_var]) * factor;
+            b.insert(pf.prob_var.clone(), to_scale(p));
+        }
+        bindings.push(b);
     }
     bindings
         .into_iter()
@@ -1113,6 +1152,84 @@ mod tests {
                 vec![1, 0, scale(0.7)],
                 vec![1, 1, scale(1.0)],
             ]
+        );
+    }
+
+    /// A positive reference to a PROB rule multiplies the referenced
+    /// probability in. Where no two proofs of a `hop` fact share an edge,
+    /// that is its possible-worlds probability: over every subset of the
+    /// independent edges (edge `w` present with probability `w / 10`), the
+    /// weight of the worlds holding an edge `a -> m` and an edge `m -> b`.
+    #[test]
+    fn positive_reference_is_the_possible_worlds_probability_without_sharing() {
+        let mut seed: u64 = 0x0dd_ba11;
+        let mut next = |bound: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % bound
+        };
+        let mut checked = 0;
+        for _ in 0..40 {
+            let nodes = 3;
+            let edges: Vec<(i64, i64, i64)> = (0..2 + next(5))
+                .map(|_| (next(nodes) as i64, next(nodes) as i64, 1 + next(9) as i64))
+                .collect();
+            let rels = shape_bags(
+                edges.iter().map(|&(a, b, w)| (a, b, w, false)).collect(),
+                nodes as usize,
+                |s| s.prob = true,
+            );
+            for fact in rels.get("hop").into_iter().flatten() {
+                let (a, b) = (fact[0], fact[1]);
+                // Shared lineage: two `a -> m` edges to one `m` both extend
+                // `nor(m, b)`, or a self-loop is both the hop and its `nor`.
+                let firsts: Vec<i64> = edges
+                    .iter()
+                    .filter(|e| e.0 == a && edges.iter().any(|f| f.0 == e.1 && f.1 == b))
+                    .map(|e| e.1)
+                    .collect();
+                let mut distinct = firsts.clone();
+                distinct.sort_unstable();
+                distinct.dedup();
+                if distinct.len() != firsts.len() || firsts.contains(&a) {
+                    continue;
+                }
+                let mut worlds = 0.0;
+                for world in 0u32..(1 << edges.len()) {
+                    let on = |i: usize| world & (1 << i) != 0;
+                    let weight: f64 = edges
+                        .iter()
+                        .enumerate()
+                        .map(|(i, e)| {
+                            let p = e.2 as f64 / 10.0;
+                            if on(i) { p } else { 1.0 - p }
+                        })
+                        .product();
+                    let holds = edges.iter().enumerate().any(|(i, e)| {
+                        on(i)
+                            && e.0 == a
+                            && edges
+                                .iter()
+                                .enumerate()
+                                .any(|(j, f)| on(j) && f.0 == e.1 && f.1 == b)
+                    });
+                    if holds {
+                        worlds += weight;
+                    }
+                }
+                let scaled = (worlds * PROB_SCALE as f64).round() as i64;
+                assert!(
+                    (fact[2] - scaled).abs() <= 2,
+                    "hop({a},{b}) over {edges:?}: oracle {}, possible worlds {scaled}",
+                    fact[2]
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 10,
+            "only {checked} unshared hop facts were checked"
         );
     }
 

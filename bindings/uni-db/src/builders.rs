@@ -892,6 +892,19 @@ impl Session {
         Ok(super::sync_api::Transaction { inner: Some(tx) })
     }
 
+    /// Begin a scratch transaction whose writes are always discarded.
+    ///
+    /// Behaves like `tx()` (`execute`, `query` and `locy` read their own
+    /// writes, `rollback()` and drop work), but reads from a pinned base, and
+    /// `commit()` is refused. Use it to run a command such as `ABDUCE`
+    /// against a hypothetical change. Raises `ReadOnly` on a pinned session.
+    fn scratch(&self, py: Python<'_>) -> PyResult<super::sync_api::Transaction> {
+        let tx = py
+            .detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(self.inner.scratch()))
+            .map_err(crate::exceptions::uni_error_to_pyerr)?;
+        Ok(super::sync_api::Transaction { inner: Some(tx) })
+    }
+
     // ── Forks (Phase 4b) ────────────────────────────────────────────────
 
     /// Open or create a fork. Returns a builder; chain `.new_()` to

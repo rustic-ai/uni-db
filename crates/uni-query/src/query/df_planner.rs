@@ -502,7 +502,7 @@ impl HybridPhysicalPlanner {
                             *p != "*"
                                 && *p != STRUCT_ONLY_SENTINEL
                                 && *p != WITH_PASSTHROUGH_SENTINEL
-                                && (!p.starts_with('_')
+                                && (!uni_common::core::schema::is_reserved_property_name(p)
                                     || matches!(p.as_str(), "_created_at" | "_updated_at"))
                         })
                         .cloned()
@@ -2671,7 +2671,9 @@ impl HybridPhysicalPlanner {
                     if let Some(props) = all_properties.get(output_name.as_str()) {
                         let prop_list: Vec<String> = props
                             .iter()
-                            .filter(|p| *p != "*" && !p.starts_with('_'))
+                            .filter(|p| {
+                                *p != "*" && !uni_common::core::schema::is_reserved_property_name(p)
+                            })
                             .cloned()
                             .collect();
                         target_properties.insert(output_name.clone(), prop_list);
@@ -2768,7 +2770,7 @@ impl HybridPhysicalPlanner {
         let label_props = self.schema.properties.get(label_name);
         let has_projection_overflow = properties.iter().any(|p| {
             p != "overflow_json"
-                && !p.starts_with('_')
+                && !uni_common::core::schema::is_reserved_property_name(p)
                 && !label_props.is_some_and(|lp| lp.contains_key(p.as_str()))
         });
         if has_projection_overflow && !properties.iter().any(|p| p == "overflow_json") {
@@ -2781,7 +2783,7 @@ impl HybridPhysicalPlanner {
             let filter_props = crate::query::df_expr::collect_properties(filter_expr);
             let has_overflow = filter_props.iter().any(|(var, prop)| {
                 var == variable
-                    && !prop.starts_with('_')
+                    && !uni_common::core::schema::is_reserved_property_name(prop)
                     && label_props.is_none_or(|props| !props.contains_key(prop.as_str()))
             });
             if has_overflow && !properties.iter().any(|p| p == "overflow_json") {
@@ -2942,7 +2944,10 @@ impl HybridPhysicalPlanner {
             .filter_map(|f| {
                 f.name()
                     .strip_prefix(&prefix)
-                    .filter(|prop| !prop.starts_with('_') || *prop == "_all_props")
+                    .filter(|prop| {
+                        !uni_common::core::schema::is_reserved_property_name(prop)
+                            || *prop == "_all_props"
+                    })
                     .map(|prop| prop.to_string())
             })
             .collect();
@@ -3125,7 +3130,10 @@ impl HybridPhysicalPlanner {
             .filter_map(|f| {
                 f.name()
                     .strip_prefix(&prefix)
-                    .filter(|prop| !prop.starts_with('_') && *prop != "overflow_json")
+                    .filter(|prop| {
+                        !uni_common::core::schema::is_reserved_property_name(prop)
+                            && *prop != "overflow_json"
+                    })
                     .map(|prop| prop.to_string())
             })
             .collect();
@@ -3601,7 +3609,9 @@ impl HybridPhysicalPlanner {
             .map(|props| {
                 props
                     .iter()
-                    .filter(|p| !p.starts_with('_') && *p != "*")
+                    .filter(|p| {
+                        !uni_common::core::schema::is_reserved_property_name(p) && *p != "*"
+                    })
                     .cloned()
                     .collect()
             })
@@ -3886,8 +3896,9 @@ impl HybridPhysicalPlanner {
                     // `created_at(r)` / `updated_at(r)` are kept too.
                     if let Some(props) = all_properties.get(edge_var) {
                         for p in props {
-                            let passthrough = !p.starts_with('_')
-                                || matches!(p.as_str(), "_created_at" | "_updated_at");
+                            let passthrough =
+                                !uni_common::core::schema::is_reserved_property_name(p)
+                                    || matches!(p.as_str(), "_created_at" | "_updated_at");
                             if p != "*" && passthrough && !schema_props.contains(p) {
                                 schema_props.push(p.clone());
                             }
@@ -3912,7 +3923,7 @@ impl HybridPhysicalPlanner {
                 let edge_type_props = self.merged_edge_type_properties(edge_type_ids);
                 let has_overflow_edge_props = edge_properties.iter().any(|p| {
                     p != "overflow_json"
-                        && !p.starts_with('_')
+                        && !uni_common::core::schema::is_reserved_property_name(p)
                         && !edge_type_props.contains_key(p.as_str())
                 });
                 // Add overflow_json if:
@@ -4018,7 +4029,7 @@ impl HybridPhysicalPlanner {
             let has_non_schema_props = target_properties.iter().any(|p| {
                 p != "overflow_json"
                     && p != "_all_props"
-                    && !p.starts_with('_')
+                    && !uni_common::core::schema::is_reserved_property_name(p)
                     && !is_schema_prop(p.as_str())
             });
             if has_non_schema_props && !target_properties.iter().any(|p| p == "_all_props") {
@@ -4031,7 +4042,7 @@ impl HybridPhysicalPlanner {
                 // filtered property schemaless.
                 let has_overflow_filter = filter_props.iter().any(|(var, prop)| {
                     var == target_variable
-                        && !prop.starts_with('_')
+                        && !uni_common::core::schema::is_reserved_property_name(prop)
                         && !is_schema_prop(prop.as_str())
                 });
                 if has_overflow_filter && !target_properties.iter().any(|p| p == "_all_props") {
@@ -5426,7 +5437,7 @@ impl HybridPhysicalPlanner {
         // Nothing to look up unless some side is a plain user property.
         let is_property_key = |e: &Expr| {
             matches!(e, Expr::Property(base, prop)
-                if !prop.starts_with('_') && matches!(base.as_ref(), Expr::Variable(_)))
+                if !uni_common::core::schema::is_reserved_property_name(prop) && matches!(base.as_ref(), Expr::Variable(_)))
         };
         if !equi_pairs
             .iter()
@@ -5490,7 +5501,7 @@ impl HybridPhysicalPlanner {
                 let Expr::Variable(var) = base.as_ref() else {
                     continue;
                 };
-                if prop.starts_with('_') {
+                if uni_common::core::schema::is_reserved_property_name(prop) {
                     continue;
                 }
                 let join_kind = match (join_type, side) {
@@ -5907,6 +5918,16 @@ impl HybridPhysicalPlanner {
                 let children = args
                     .iter()
                     .map(|arg| {
+                        // A string literal tags the identity (the shape of a
+                        // Locy row event's expression).
+                        if let Expr::Literal(uni_cypher::ast::CypherLiteral::String(tag)) = arg {
+                            return Ok(Arc::new(
+                                datafusion::physical_expr::expressions::Literal::new(
+                                    datafusion::common::ScalarValue::Utf8(Some(tag.clone())),
+                                ),
+                            )
+                                as Arc<dyn datafusion::physical_expr::PhysicalExpr>);
+                        }
                         let Expr::Variable(col) = arg else {
                             return Err(anyhow!("{name} takes column names"));
                         };
@@ -9271,7 +9292,7 @@ fn sanitize_vlp_target_properties(
     let has_non_schema_props = properties.iter().any(|p| {
         p != "_all_props"
             && p != "overflow_json"
-            && !p.starts_with('_')
+            && !uni_common::core::schema::is_reserved_property_name(p)
             && !target_label_props.is_some_and(|props| props.contains(p))
     });
     if has_non_schema_props && !properties.iter().any(|p| p == "_all_props") {

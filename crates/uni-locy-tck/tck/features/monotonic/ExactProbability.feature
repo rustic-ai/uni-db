@@ -1,26 +1,37 @@
 Feature: Exact BDD-based Probability Computation
-  When exact_probability is enabled, shared-proof groups use BDD-based
-  computation instead of the independence assumption. This produces correct
-  results for MNOR/MPROD when proof paths share base facts.
+  When exact_probability is enabled, each fact of an MNOR/MPROD rule is
+  computed under possible-worlds semantics: OP over its rows of (the row's own
+  event AND every positively referenced fact), OP being OR for MNOR and AND for
+  MPROD, every row event independent. Proofs that share an event are counted
+  once, which the independence evaluation cannot do.
+
+  A positive IS reference to a PROB rule is a probabilistic condition in both
+  modes: the referenced fact's probability is multiplied into the row, unless
+  the row's PROB expression already reads it as a product factor.
 
   Background:
     Given an empty graph
 
-  # ── BDD corrects shared-proof diamond ──────────────────────────────────
-  # Two paths in a recursive reach rule (Source→Mid→Target and Source→Target).
-  # MNOR folds over e.p values: Rule 1 contributes 0.7 (direct), Rule 2
-  # contributes 0.3 (first-hop edge). Independence MNOR: 1-(1-0.7)(1-0.3)=0.79.
-  # With exact_probability, a SharedProbabilisticDependency warning is emitted.
+  # ── BDD corrects shared proofs ─────────────────────────────────────────
+  # Two proofs of reach(A,D) both need the edge C->D:
+  #   A -0.5-> B -0.4-> C -0.6-> D  and  A -0.3-> C -0.6-> D.
+  # Possible worlds: CD AND (AC OR (AB AND BC)) = 0.6 * (1 - 0.7 * 0.8) = 0.264.
+  # Independence multiplies the two proofs as if unrelated:
+  #   1 - (1 - 0.5 * 0.24)(1 - 0.3 * 0.6) = 0.2784.
+  # (This scenario used the Source/Mid/Target diamond, whose two proofs share
+  # no edge; see "BDD mode produces numeric probability for MNOR diamond".)
 
   Scenario: Shared-proof diamond with exact_probability produces correct result
     Given having executed:
       """
-      CREATE (s:Node {name: 'Source'}),
-             (m:Node {name: 'Mid'}),
-             (t:Node {name: 'Target'}),
-             (s)-[:LINK {p: 0.3}]->(m),
-             (m)-[:LINK {p: 0.5}]->(t),
-             (s)-[:LINK {p: 0.7}]->(t)
+      CREATE (a:Node {name: 'A'}),
+             (b:Node {name: 'B'}),
+             (c:Node {name: 'C'}),
+             (d:Node {name: 'D'}),
+             (a)-[:LINK {p: 0.5}]->(b),
+             (a)-[:LINK {p: 0.3}]->(c),
+             (b)-[:LINK {p: 0.4}]->(c),
+             (c)-[:LINK {p: 0.6}]->(d)
       """
     When evaluating the following Locy program with exact_probability:
       """
@@ -34,21 +45,26 @@ Feature: Exact BDD-based Probability Computation
         YIELD KEY a, KEY b, prob
       """
     Then evaluation should succeed
+    And the derived relation 'reach' should contain a fact where a.name = 'A' and b.name = 'D' and prob = 0.264
     And the result should contain a SharedProbabilisticDependency warning for rule 'reach'
     And the result should not contain a BddLimitExceeded warning
 
   # ── BDD limit exceeded ─────────────────────────────────────────────────
-  # Set max_bdd_variables to 1 so the group exceeds the limit and falls back.
+  # Set max_bdd_variables to 1 so the shared group exceeds the limit and falls
+  # back. Uses the shared-edge graph: the diamond's proofs share nothing, so
+  # it needs no BDD at all.
 
   Scenario: BDD limit exceeded emits BddLimitExceeded warning
     Given having executed:
       """
-      CREATE (s:Node {name: 'Source'}),
-             (m:Node {name: 'Mid'}),
-             (t:Node {name: 'Target'}),
-             (s)-[:LINK {p: 0.3}]->(m),
-             (m)-[:LINK {p: 0.5}]->(t),
-             (s)-[:LINK {p: 0.7}]->(t)
+      CREATE (a:Node {name: 'A'}),
+             (b:Node {name: 'B'}),
+             (c:Node {name: 'C'}),
+             (d:Node {name: 'D'}),
+             (a)-[:LINK {p: 0.5}]->(b),
+             (a)-[:LINK {p: 0.3}]->(c),
+             (b)-[:LINK {p: 0.4}]->(c),
+             (c)-[:LINK {p: 0.6}]->(d)
       """
     When evaluating the following Locy program with exact_probability and max_bdd_variables 1:
       """
@@ -66,17 +82,19 @@ Feature: Exact BDD-based Probability Computation
     And the result should contain a SharedProbabilisticDependency warning for rule 'reach'
 
   # ── Default mode (exact_probability=false) ─────────────────────────────
-  # Only the SharedProbabilisticDependency warning, no BDD.
+  # Only the SharedProbabilisticDependency warning, no BDD (shared-edge graph).
 
   Scenario: Default mode emits only SharedProbabilisticDependency warning
     Given having executed:
       """
-      CREATE (s:Node {name: 'Source'}),
-             (m:Node {name: 'Mid'}),
-             (t:Node {name: 'Target'}),
-             (s)-[:LINK {p: 0.3}]->(m),
-             (m)-[:LINK {p: 0.5}]->(t),
-             (s)-[:LINK {p: 0.7}]->(t)
+      CREATE (a:Node {name: 'A'}),
+             (b:Node {name: 'B'}),
+             (c:Node {name: 'C'}),
+             (d:Node {name: 'D'}),
+             (a)-[:LINK {p: 0.5}]->(b),
+             (a)-[:LINK {p: 0.3}]->(c),
+             (b)-[:LINK {p: 0.4}]->(c),
+             (c)-[:LINK {p: 0.6}]->(d)
       """
     When evaluating the following Locy program:
       """
@@ -90,6 +108,7 @@ Feature: Exact BDD-based Probability Computation
         YIELD KEY a, KEY b, prob
       """
     Then evaluation should succeed
+    And the derived relation 'reach' should contain a fact where a.name = 'A' and b.name = 'D' and prob = 0.2784
     And the result should contain a SharedProbabilisticDependency warning for rule 'reach'
     And the result should not contain a BddLimitExceeded warning
 
@@ -116,17 +135,21 @@ Feature: Exact BDD-based Probability Computation
     And the result should not contain a BddLimitExceeded warning
 
   # ── MPROD with shared base facts ───────────────────────────────────────
-  # Verify exact AND computation works for MPROD.
+  # Exact AND over the rows of reach(A,D) on the shared-edge graph: every edge
+  # of both proofs, C->D once: 0.5 * 0.4 * 0.3 * 0.6 = 0.036. Independence
+  # multiplies C->D twice: (0.5 * 0.4 * 0.6) * (0.3 * 0.6) = 0.0216.
 
   Scenario: MPROD with shared base facts uses BDD
     Given having executed:
       """
-      CREATE (s:Node {name: 'Source'}),
-             (m:Node {name: 'Mid'}),
-             (t:Node {name: 'Target'}),
-             (s)-[:LINK {p: 0.3}]->(m),
-             (m)-[:LINK {p: 0.5}]->(t),
-             (s)-[:LINK {p: 0.7}]->(t)
+      CREATE (a:Node {name: 'A'}),
+             (b:Node {name: 'B'}),
+             (c:Node {name: 'C'}),
+             (d:Node {name: 'D'}),
+             (a)-[:LINK {p: 0.5}]->(b),
+             (a)-[:LINK {p: 0.3}]->(c),
+             (b)-[:LINK {p: 0.4}]->(c),
+             (c)-[:LINK {p: 0.6}]->(d)
       """
     When evaluating the following Locy program with exact_probability:
       """
@@ -140,13 +163,20 @@ Feature: Exact BDD-based Probability Computation
         YIELD KEY a, KEY b, prob
       """
     Then evaluation should succeed
+    And the derived relation 'reach' should contain a fact where a.name = 'A' and b.name = 'D' and prob = 0.036
     And the result should contain a SharedProbabilisticDependency warning for rule 'reach'
     And the result should not contain a BddLimitExceeded warning
 
   # ── Numeric probability assertions: exact_probability mode ─────────────
-  # Scenario 2A: BDD mode asserts actual prob = 0.79 for (Source, Target).
-  # MNOR folds: Rule 1 contributes 0.7, Rule 2 contributes 0.3.
-  # MNOR(0.7, 0.3) = 1 - (1-0.7)(1-0.3) = 0.79.
+  # Scenario 2A: the Source/Mid/Target diamond. Its edges are independent
+  # events X = S->T (0.7), Y = S->M (0.3), Z = M->T (0.5), and reach(S,T)
+  # holds in a world iff X OR (Y AND Z):
+  #   P = 1 - (1 - 0.7)(1 - 0.3 * 0.5) = 1 - 0.3 * 0.85 = 0.745.
+  # The recursive row holds only when reach(M,T) does, so its probability 0.5
+  # is part of the row. (This scenario asserted 0.79 = 1 - 0.3 * 0.7 =
+  # P(X OR Y), which treated `mid IS reach TO b` as certain: worlds where Y
+  # holds and Z fails still derived reach(S,T).) The two proofs share no edge,
+  # so there is no shared-lineage warning.
 
   Scenario: BDD mode produces numeric probability for MNOR diamond
     Given having executed:
@@ -170,13 +200,13 @@ Feature: Exact BDD-based Probability Computation
         YIELD KEY a, KEY b, prob
       """
     Then evaluation should succeed
-    And the derived relation 'reach' should contain a fact where a.name = 'Source' and prob = 0.79
-    And the result should contain a SharedProbabilisticDependency warning for rule 'reach'
+    And the derived relation 'reach' should contain a fact where a.name = 'Source' and b.name = 'Target' and prob = 0.745
+    And the result should not contain a SharedProbabilisticDependency warning
     And the result should not contain a BddLimitExceeded warning
 
   # ── Scenario 2B: Default mode (independence assumption) ────────────────
-  # Same graph, same program, default mode — independence assumption.
-  # MNOR(0.7, 0.3) = 0.79 (same value; confirms both paths compute correctly).
+  # Same graph, same program, default mode. The proofs share no edge, so the
+  # independence evaluation is exact too: 0.745 (it was 0.79, see 2A).
 
   Scenario: Default mode produces numeric probability for MNOR diamond
     Given having executed:
@@ -200,7 +230,8 @@ Feature: Exact BDD-based Probability Computation
         YIELD KEY a, KEY b, prob
       """
     Then evaluation should succeed
-    And the derived relation 'reach' should contain a fact where a.name = 'Source' and prob = 0.79
+    And the derived relation 'reach' should contain a fact where a.name = 'Source' and b.name = 'Target' and prob = 0.745
+    And the result should not contain a SharedProbabilisticDependency warning
 
   # ── Scenario 2C: Independent groups with exact_probability ─────────────
   # Two parallel edges A→B with p=0.4 and p=0.6.
@@ -228,17 +259,20 @@ Feature: Exact BDD-based Probability Computation
     And the result should not contain a BddLimitExceeded warning
 
   # ── Scenario 2D: BDD limit exceeded falls back to independence value ────
-  # max_bdd_variables=1 forces fallback. Result stays at independence value 0.79.
+  # max_bdd_variables=1 forces fallback on the shared-edge graph. reach(A,D)
+  # stays at the independence value 1 - (1 - 0.12)(1 - 0.18) = 0.2784.
 
   Scenario: BDD limit exceeded retains independence value
     Given having executed:
       """
-      CREATE (s:Node {name: 'Source'}),
-             (m:Node {name: 'Mid'}),
-             (t:Node {name: 'Target'}),
-             (s)-[:LINK {p: 0.3}]->(m),
-             (m)-[:LINK {p: 0.5}]->(t),
-             (s)-[:LINK {p: 0.7}]->(t)
+      CREATE (a:Node {name: 'A'}),
+             (b:Node {name: 'B'}),
+             (c:Node {name: 'C'}),
+             (d:Node {name: 'D'}),
+             (a)-[:LINK {p: 0.5}]->(b),
+             (a)-[:LINK {p: 0.3}]->(c),
+             (b)-[:LINK {p: 0.4}]->(c),
+             (c)-[:LINK {p: 0.6}]->(d)
       """
     When evaluating the following Locy program with exact_probability and max_bdd_variables 1:
       """
@@ -252,13 +286,15 @@ Feature: Exact BDD-based Probability Computation
         YIELD KEY a, KEY b, prob
       """
     Then evaluation should succeed
-    And the derived relation 'reach' should contain a fact where a.name = 'Source' and prob = 0.79
+    And the derived relation 'reach' should contain a fact where a.name = 'A' and b.name = 'D' and prob = 0.2784
     And the result should contain a BddLimitExceeded warning for rule 'reach'
     And the result should contain a SharedProbabilisticDependency warning for rule 'reach'
 
   # ── Scenario 2E: MPROD diamond with exact_probability ──────────────────
-  # MPROD folds: Rule 1 contributes 0.7, Rule 2 contributes 0.3.
-  # MPROD(0.7, 0.3) = 0.7 * 0.3 = 0.21.
+  # MPROD is the conjunction of the rows: X AND (Y AND Z)
+  #   = 0.7 * 0.3 * 0.5 = 0.105.
+  # (It asserted 0.21 = 0.7 * 0.3, dropping reach(M,T)'s 0.5 as 2A did.) The
+  # rows share no edge, so there is no shared-lineage warning.
 
   Scenario: MPROD diamond with exact_probability produces correct probability
     Given having executed:
@@ -282,8 +318,8 @@ Feature: Exact BDD-based Probability Computation
         YIELD KEY a, KEY b, prob
       """
     Then evaluation should succeed
-    And the derived relation 'reach' should contain a fact where a.name = 'Source' and prob = 0.21
-    And the result should contain a SharedProbabilisticDependency warning for rule 'reach'
+    And the derived relation 'reach' should contain a fact where a.name = 'Source' and b.name = 'Target' and prob = 0.105
+    And the result should not contain a SharedProbabilisticDependency warning
     And the result should not contain a BddLimitExceeded warning
 
   # ── Scenario 2F: Multi-key disjoint groups ─────────────────────────────
@@ -352,19 +388,21 @@ Feature: Exact BDD-based Probability Computation
     And the CrossGroupCorrelationNotExact warning for rule 'derived' should have variable_count >= 1
 
   # ── Scenario 5A: BddLimitExceeded warning has structured metadata ────────
-  # Same diamond graph + max_bdd_variables=1. The shared group requires >= 2
+  # Shared-edge graph + max_bdd_variables=1. The shared group requires >= 2
   # variables, so BDD falls back. The warning should carry variable_count and
   # key_group as typed fields (not just in the message string).
 
   Scenario: BddLimitExceeded warning carries variable_count and key_group metadata
     Given having executed:
       """
-      CREATE (s:Node {name: 'Source'}),
-             (m:Node {name: 'Mid'}),
-             (t:Node {name: 'Target'}),
-             (s)-[:LINK {p: 0.3}]->(m),
-             (m)-[:LINK {p: 0.5}]->(t),
-             (s)-[:LINK {p: 0.7}]->(t)
+      CREATE (a:Node {name: 'A'}),
+             (b:Node {name: 'B'}),
+             (c:Node {name: 'C'}),
+             (d:Node {name: 'D'}),
+             (a)-[:LINK {p: 0.5}]->(b),
+             (a)-[:LINK {p: 0.3}]->(c),
+             (b)-[:LINK {p: 0.4}]->(c),
+             (c)-[:LINK {p: 0.6}]->(d)
       """
     When evaluating the following Locy program with exact_probability and max_bdd_variables 1:
       """
@@ -383,18 +421,20 @@ Feature: Exact BDD-based Probability Computation
     And the BddLimitExceeded warning for rule 'reach' should have a key_group
 
   # ── Scenario 5B: BDD fallback stamps _approximate on derived facts ────────
-  # Same diamond graph + max_bdd_variables=1. When a group falls back to
+  # Shared-edge graph + max_bdd_variables=1. When a group falls back to
   # independence mode, all facts in the rule are stamped with _approximate=true.
 
   Scenario: BDD fallback marks derived facts as approximate
     Given having executed:
       """
-      CREATE (s:Node {name: 'Source'}),
-             (m:Node {name: 'Mid'}),
-             (t:Node {name: 'Target'}),
-             (s)-[:LINK {p: 0.3}]->(m),
-             (m)-[:LINK {p: 0.5}]->(t),
-             (s)-[:LINK {p: 0.7}]->(t)
+      CREATE (a:Node {name: 'A'}),
+             (b:Node {name: 'B'}),
+             (c:Node {name: 'C'}),
+             (d:Node {name: 'D'}),
+             (a)-[:LINK {p: 0.5}]->(b),
+             (a)-[:LINK {p: 0.3}]->(c),
+             (b)-[:LINK {p: 0.4}]->(c),
+             (c)-[:LINK {p: 0.6}]->(d)
       """
     When evaluating the following Locy program with exact_probability and max_bdd_variables 1:
       """
@@ -409,7 +449,7 @@ Feature: Exact BDD-based Probability Computation
       """
     Then evaluation should succeed
     And the result should contain a BddLimitExceeded warning for rule 'reach'
-    And the derived relation 'reach' should contain a fact where a.name = 'Source' and _approximate = true
+    And the derived relation 'reach' should contain a fact where a.name = 'A' and _approximate = true
 
   # ── Scenario 5C: Non-fallback facts have no _approximate flag ────────────
   # Independent groups (no shared proofs) — BDD succeeds or is not needed.

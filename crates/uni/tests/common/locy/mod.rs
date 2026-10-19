@@ -37,6 +37,8 @@ pub mod locy_type_projection_matrix;
 pub mod repro_locy_runtime_abduce_target_var;
 pub mod repro_locy_runtime_topk_mnor_mixed_support;
 pub mod repro_locy_runtime_wmc_shared_lineage;
+// A positive IS reference to a PROB rule is a probabilistic condition.
+pub mod locy_prob_is_ref_semantics;
 pub mod value_assert;
 // Issue #158: IS NOT fails open when the negated subject is not a projected
 // column name (the reported "must be a KEY column" trigger is incorrect).

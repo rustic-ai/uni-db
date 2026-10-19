@@ -111,6 +111,12 @@ pub struct UniConfig {
     /// Neighbors a `~=` vector search returns when no LIMIT sizes it (default: 100)
     pub vector_knn_default_k: usize,
 
+    /// Lance metadata cache capacity in bytes (default: None = Lance's 1 GiB)
+    pub lance_metadata_cache_bytes: Option<usize>,
+
+    /// Lance index cache capacity in bytes (default: None = Lance's 6 GiB)
+    pub lance_index_cache_bytes: Option<usize>,
+
     /// Background index rebuild configuration
     pub index_rebuild: IndexRebuildConfig,
 
@@ -197,6 +203,8 @@ pub struct UniConfig {
 | `max_compaction_rows` | rows | 5,000,000 | OOM guard for in-memory compaction |
 | `max_recursive_cte_iterations` | count | 1,000 | Maximum iterations for recursive CTE evaluation |
 | `vector_knn_default_k` | count | 100 | `K` for an `n.prop ~= q` search that no `LIMIT` sizes (a residual filter, a traversal, a non-score `ORDER BY`, or no `LIMIT` at all). A search that returns exactly this many rows adds a warning to the result. Also settable from Python: `config({"vector_knn_default_k": 500})` |
+| `lance_metadata_cache_bytes` | bytes | `None` (Lance: 1 GiB) | Capacity of the storage engine's metadata cache (manifests, fragment and file metadata). One cache per database, shared by every table and every fork. It fills as tables are flushed and read and is trimmed only when full, so it is the main memory a long-running, often-flushing process retains. `Some(0)` disables it. Python: `config({"lance_metadata_cache_bytes": 64 << 20})` |
+| `lance_index_cache_bytes` | bytes | `None` (Lance: 6 GiB) | Capacity of the storage engine's index cache (opened scalar, vector and full-text index structures). Keep it above a vector index's size if ANN latency matters: a vector index evicted from it is re-read and re-decoded on each search. Python: `config({"lance_index_cache_bytes": 512 << 20})` |
 | `strict_schema` | bool | false | Reject writes with undeclared labels or edge types |
 | `ssi_enabled` | bool | true | Serializable Snapshot Isolation / OCC (false = last-writer-wins) |
 | `partial_lance_writes` | bool | false | Use Lance `MergeInsert` for SET-only flushes |
@@ -816,9 +824,15 @@ let config = UniConfig {
     parallelism: 2,
     execution_batch_size: Some(1024),  // Smaller engine batches
     max_query_memory: 256 * 1024 * 1024,  // 256 MB per query
+    // Bound the storage engine's caches (Lance defaults: 1 GiB + 6 GiB)
+    lance_metadata_cache_bytes: Some(64 * 1024 * 1024),
+    lance_index_cache_bytes: Some(256 * 1024 * 1024),
     ..Default::default()
 };
 ```
+
+Current occupancy of both storage caches is reported by `db.metrics()` as
+`storage_metadata_cache_bytes` and `storage_index_cache_bytes`.
 
 ---
 

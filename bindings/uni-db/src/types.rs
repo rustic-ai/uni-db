@@ -294,9 +294,10 @@ impl PyNode {
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
-        // Deprecated magic-key backward compatibility
+        // Deprecated magic-key backward compatibility. `_id` is not a reserved
+        // property name, so a stored `_id` property wins over the alias.
         match key {
-            "_id" => {
+            "_id" if !self.properties.contains_key(key) => {
                 deprecation_warning(py, "Node['_id'] is deprecated, use Node.id")?;
                 return self.id.into_py_any(py);
             }
@@ -452,8 +453,9 @@ impl PyEdge {
     }
 
     fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
+        // A stored `_id` property wins over the deprecated alias.
         match key {
-            "_id" => {
+            "_id" if !self.properties.contains_key(key) => {
                 deprecation_warning(py, "Edge['_id'] is deprecated, use Edge.id")?;
                 return self.id.into_py_any(py);
             }
@@ -2230,6 +2232,8 @@ pub struct PyDatabaseMetrics {
     pub wal_lsn: u64,
     pub total_queries: u64,
     pub total_commits: u64,
+    pub storage_metadata_cache_bytes: u64,
+    pub storage_index_cache_bytes: u64,
 }
 
 #[pymethods]

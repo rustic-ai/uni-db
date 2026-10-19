@@ -2226,23 +2226,43 @@ pub fn validate_property_name(name: &str) -> Result<()> {
     validate_reserved_property_name(name)
 }
 
-/// Storage column names that a write may not use as a property name.
+/// Property names the engine reserves for its own bookkeeping.
 ///
-/// [`validate_property_name`] guards the declared-property path; this guards
-/// the property maps a write carries (CREATE, SET, MERGE, bulk insert), where
-/// a name is never declared. Each entry is a column of the per-label vertex,
-/// per-type edge or main tables that the read path gives its own meaning, so
-/// a property of that name was accepted and then misread: `overflow_json`
-/// read NULL on a declared label while `properties()` held the value, and
-/// the `_`-prefixed columns were dropped on a declared label, hidden from
-/// `keys()` on a schemaless one, or shadowed by the system value (`n._vid`
-/// returned the vertex id).
+/// One definition serves both directions: a write that uses one of these
+/// names (or a [`RESERVED_PROPERTY_PREFIXES`] name) is refused by
+/// [`check_written_property_names`], and every read path that separates an
+/// entity's user properties from its system fields hides exactly these — see
+/// [`is_reserved_property_name`]. Any other name, including one that starts
+/// with `_`, is a user property and reads back like any other.
+///
+/// Each entry is a name the engine itself gives a meaning:
+///
+/// * storage columns of the per-label vertex, per-type edge and main tables:
+///   `overflow_json`, `_vid`, `_uid`, `_eid`, `_deleted`, `_version`,
+///   `_labels`, `_created_at`, `_updated_at`;
+/// * keys of the map encoding of an entity, read by `entity_ref_from_map` to
+///   tell an edge from a vertex: `_type`, `_type_name`, `_src`, `_dst`,
+///   `_src_vid`, `_dst_vid`, and `_all_props`, which holds a schemaless
+///   entity's properties;
+/// * Lance's own row columns, which a scan can project: `_rowid`, `_rowaddr`,
+///   `_rowoffset`, `_row_created_at_version`, `_row_last_updated_at_version`;
+/// * per-variable query columns the planner synthesizes beside an entity:
+///   `_label` (external-id lookup), `_score` (vector and full-text search) and
+///   `_fwd` (an undirected traversal's per-row orientation);
+/// * planner markers recorded in a variable's property set:
+///   `__set_struct__` and `__with_passthrough__`.
+///
+/// A user property of any of these names would be read with the engine's
+/// meaning instead of its own: hidden, shadowed by the system value, or (a
+/// `_type` key, or `_src` with `_dst`) taken as the tell of an edge.
 ///
 /// The other storage column names (`ext_id`, `eid`, `src_vid`, `dst_vid`,
 /// `op`, `type`, `labels`, `props_json`) are deliberately absent: a write of
 /// any of them round-trips through every storage state, so rejecting them
-/// would break working data.
-pub const WRITE_RESERVED_PROPERTY_NAMES: &[&str] = &[
+/// would break working data. So is `_id`: a common key in imported JSON, and
+/// never what identifies an entity map on its own (an entity is recognised by
+/// a structural tell), so it is an ordinary user property.
+pub const RESERVED_PROPERTY_NAMES: &[&str] = &[
     "overflow_json",
     "_vid",
     "_uid",
@@ -2252,21 +2272,72 @@ pub const WRITE_RESERVED_PROPERTY_NAMES: &[&str] = &[
     "_labels",
     "_created_at",
     "_updated_at",
+    "_type",
+    "_type_name",
+    "_src",
+    "_dst",
+    "_src_vid",
+    "_dst_vid",
+    "_all_props",
+    "_label",
+    "_score",
+    "_fwd",
+    "_rowid",
+    "_rowaddr",
+    "_rowoffset",
+    "_row_created_at_version",
+    "_row_last_updated_at_version",
+    "__set_struct__",
+    "__with_passthrough__",
 ];
 
-/// Reject a write whose property map uses a [`WRITE_RESERVED_PROPERTY_NAMES`]
-/// key.
+/// Name prefixes of system-generated properties, reserved like
+/// [`RESERVED_PROPERTY_NAMES`].
+///
+/// `_gen_` names the columns of generated (expression-index) properties,
+/// `__fde_` a MUVERA index's derived vector column, and `__alias_of__` the
+/// alias marker the planner records in a variable's property set. Each is a
+/// family of names created by the engine, so a prefix is the exact rule.
+pub const RESERVED_PROPERTY_PREFIXES: &[&str] = &["_gen_", "__fde_", "__alias_of__"];
+
+/// Whether `name` is reserved by the engine rather than a user property.
+///
+/// The single test every read path uses to separate an entity's user
+/// properties from its system fields, and the one the write paths use to
+/// refuse a property name. A leading `_` alone does not make a name reserved.
+#[must_use]
+pub fn is_reserved_property_name(name: &str) -> bool {
+    RESERVED_PROPERTY_NAMES.contains(&name)
+        || RESERVED_PROPERTY_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+/// Reject a write whose property map uses a reserved key (see
+/// [`is_reserved_property_name`]).
+///
+/// A [`RESERVED_PROPERTY_PREFIXES`] name the schema declares is the engine's
+/// own column (a generated property's `_gen_*`, a MUVERA index's `__fde_*`)
+/// and is allowed: the engine writes it, and a write that stages an entity's
+/// current properties back carries it. An undeclared name of those families,
+/// and every [`RESERVED_PROPERTY_NAMES`] entry, is refused.
 ///
 /// # Errors
 ///
 /// Returns [`crate::UniError::InvalidIdentifier`] naming the first reserved key.
 pub fn check_written_property_names<'a>(
     keys: impl IntoIterator<Item = &'a String>,
+    schema: &Schema,
 ) -> std::result::Result<(), crate::UniError> {
-    match keys
-        .into_iter()
-        .find(|k| WRITE_RESERVED_PROPERTY_NAMES.contains(&k.as_str()))
-    {
+    let refused = |k: &str| {
+        RESERVED_PROPERTY_NAMES.contains(&k)
+            || (is_reserved_property_name(k)
+                && !schema
+                    .properties
+                    .values()
+                    .any(|props| props.contains_key(k)))
+    };
+    match keys.into_iter().find(|k| refused(k)) {
         Some(name) => Err(crate::UniError::reserved_property_name(name)),
         None => Ok(()),
     }

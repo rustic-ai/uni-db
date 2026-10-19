@@ -174,7 +174,7 @@ Fluent builder for advanced database configuration. Exposed as `uni_db.UniBuilde
 | `.xervo_catalog_from_str(json)` | Configure Xervo models from a JSON string |
 | `.xervo_runtime(runtime)` | Reuse an existing `ModelRuntime` instead of building one ([sharing models](#sharing-models-across-databases)) |
 | `.cloud_config(config_dict)` | Cloud storage credentials (`s3`, `gcs`, `azure`) |
-| `.config(config_dict)` | Database options (`query_timeout`, `max_query_memory`, etc.) |
+| `.config(config_dict)` | Database options (`query_timeout`, `max_query_memory`, `lance_metadata_cache_bytes`, `lance_index_cache_bytes`, etc.) |
 | `.batch_size(n)` | Rows per page a query cursor hands back (default 1024) |
 | `.wal_enabled(bool)` | Enable/disable write-ahead log (default `True`) |
 | `.strict_schema(bool)` | Reject writes with undeclared labels/edge types (default `False`) |

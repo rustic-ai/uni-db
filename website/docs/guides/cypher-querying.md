@@ -669,7 +669,7 @@ Math functions take numbers: `NULL` gives `NULL`, and any other value (a string,
 | `tail(list)` | All but first element | `RETURN tail([1,2,3])` → `[2,3]` |
 | `last(list)` | Last element | `RETURN last([1,2,3])` → `3` |
 | `keys(map)` | Keys of a map | `RETURN keys({a:1, b:2})` → `['a','b']` |
-| `range(start, end, [step])` | Generate number sequence | `RETURN range(1, 5)` → `[1,2,3,4,5]` |
+| `range(start, end, [step])` | Integer sequence from `start` to `end` inclusive; `null` if any argument is `null`. A non-integer argument raises `InvalidArgumentType`, a zero step `NumberOutOfRange` | `RETURN range(1, 5)` → `[1,2,3,4,5]`; `RETURN range(0, null)` → `null` |
 
 ### Path Functions
 

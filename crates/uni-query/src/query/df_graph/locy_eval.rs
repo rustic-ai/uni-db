@@ -904,15 +904,15 @@ fn extract_properties_from_map(map: &HashMap<String, Value>) -> HashMap<String, 
 /// Whether a storage column name is a real, user-visible node/edge property.
 ///
 /// `overflow_json` is a materialized storage column holding non-schema
-/// properties, not a property itself. It does not start with `_`, so the
-/// leading-underscore convention alone let it through and it surfaced in
-/// user-visible properties on the SLG `QUERY` path while the fixpoint path
-/// filtered it — the two surfaces disagreeing about the same node.
+/// properties, not a property itself; it surfaced in user-visible properties
+/// on the SLG `QUERY` path while the fixpoint path filtered it — the two
+/// surfaces disagreeing about the same node. A leading `_` alone does not make
+/// a name internal: a user property `_foo` is visible like any other.
 ///
-/// Mirrors the predicate the scan layer already applies
-/// (`df_graph/scan.rs`, the projected-property filter).
+/// The one reserved-name rule every read path shares
+/// (`uni_common::core::schema::is_reserved_property_name`).
 fn is_user_visible_property(name: &str) -> bool {
-    !name.starts_with('_') && name != "overflow_json" && name != "_all_props"
+    !uni_common::core::schema::is_reserved_property_name(name)
 }
 
 #[cfg(test)]

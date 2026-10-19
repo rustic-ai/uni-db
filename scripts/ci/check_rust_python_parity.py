@@ -82,6 +82,7 @@ FIELD_PARITY = {
         "ProfileOutput",
     ),
     "LocyStats": (ROOT / "crates/uni-locy/src/result.rs", "LocyStats"),
+    "DatabaseMetrics": (ROOT / "crates/uni/src/api/mod.rs", "DatabaseMetrics"),
 }
 # A `Duration` field is bound as a float with its unit in the name; either
 # suffix counts as the field being bound.
@@ -195,6 +196,7 @@ LOCY_OBJECT_NOT_BOUND = {
 FIELD_NOT_BOUND = {
     "ProfileOutput.explain": "bound as `plan_text`; the cost/index detail is session.explain()",
     "ProfileOutput.runtime_stats": "bound as `operators`, a list of dicts",
+    "DatabaseMetrics.compaction_status": "bound as `compaction_in_progress`, its one flag",
 }
 
 

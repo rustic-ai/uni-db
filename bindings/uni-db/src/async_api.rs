@@ -2456,6 +2456,30 @@ impl AsyncSession {
         })
     }
 
+    /// Begin a scratch transaction whose writes are always discarded.
+    ///
+    /// Behaves like `tx()` (`execute`, `query` and `locy` read their own
+    /// writes, `rollback()` and drop work), but reads from a pinned base, and
+    /// `commit()` is refused. Use it to run a command such as `ABDUCE`
+    /// against a hypothetical change. Raises `ReadOnly` on a pinned session.
+    fn scratch<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let tx = guard
+                .scratch()
+                .await
+                .map_err(crate::exceptions::uni_error_to_pyerr)?;
+            let rule_reg = tx.rules().clone_registry_arc();
+            let token = tx.cancellation_token();
+            Ok(AsyncTransaction {
+                inner: Arc::new(tokio::sync::Mutex::new(Some(tx))),
+                rule_registry_arc: rule_reg,
+                cancellation_token: token,
+            })
+        })
+    }
+
     /// Create a transaction builder for configuring transaction options.
     fn tx_with(&self) -> AsyncTransactionBuilder {
         AsyncTransactionBuilder {

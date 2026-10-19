@@ -17,7 +17,7 @@ use futures::{Stream, StreamExt, TryStreamExt};
 use uni_common::core::schema::TokenizerConfig;
 
 use super::lance_branch;
-use super::lance_directory::LanceDirectory;
+use super::lance_directory::{LanceCacheSizes, LanceDirectory};
 use super::traits::{RecordBatchStream, StorageBackend};
 use super::types::*;
 use crate::runtime::counters::{QueryCounters, SearchKind};
@@ -82,7 +82,26 @@ impl LanceDbBackend {
         uri: &str,
         storage_options: Option<HashMap<String, String>>,
     ) -> Result<Self> {
-        let directory = LanceDirectory::connect(uri, storage_options).await?;
+        Self::connect_with_cache_sizes(uri, storage_options, LanceCacheSizes::default()).await
+    }
+
+    /// Connect to the database at `uri`, sizing the shared Lance session's
+    /// index and metadata caches.
+    ///
+    /// Every table this backend opens, primary or through a fork's
+    /// `BranchedBackend` wrapper, reads through that one session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `uri` cannot be parsed or its object store cannot
+    /// be constructed.
+    pub async fn connect_with_cache_sizes(
+        uri: &str,
+        storage_options: Option<HashMap<String, String>>,
+        cache_sizes: LanceCacheSizes,
+    ) -> Result<Self> {
+        let directory =
+            LanceDirectory::connect_with_cache_sizes(uri, storage_options, cache_sizes).await?;
 
         Ok(Self {
             directory,
@@ -1033,6 +1052,10 @@ impl StorageBackend for LanceDbBackend {
 
     /// No-op — see [`Self::invalidate_cache`].
     fn clear_cache(&self) {}
+
+    fn cache_usage(&self) -> Option<BackendCacheUsage> {
+        Some(self.directory.cache_usage())
+    }
 
     // ========================
     // Metadata

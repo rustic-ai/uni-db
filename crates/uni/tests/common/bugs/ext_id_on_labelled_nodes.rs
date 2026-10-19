@@ -518,7 +518,7 @@ async fn reserved_name_round_trip(key: &str) -> Result<Vec<String>> {
 /// Probed 2026-10-18: `op`, `eid`, `src_vid` and `dst_vid` round-trip on both
 /// a vertex and an edge, so none shares the split. So do the main-table
 /// column names `type`, `labels` and `props_json`, which is why none of these
-/// is in `WRITE_RESERVED_PROPERTY_NAMES`: this test pins that the write-time
+/// is in `RESERVED_PROPERTY_NAMES`: this test pins that the write-time
 /// refusal stays off names that work.
 #[tokio::test]
 async fn ext_id_on_labelled_nodes_other_reserved_names_round_trip() -> Result<()> {
@@ -569,7 +569,15 @@ async fn ext_id_on_labelled_nodes_reserved_storage_names_are_refused_at_write() 
     }
 
     let mut failures = Vec::new();
-    for &key in uni_db::core::schema::WRITE_RESERVED_PROPERTY_NAMES {
+    let prefixed = uni_db::core::schema::RESERVED_PROPERTY_PREFIXES
+        .iter()
+        .map(|p| format!("{p}x"));
+    let keys: Vec<String> = uni_db::core::schema::RESERVED_PROPERTY_NAMES
+        .iter()
+        .map(|k| k.to_string())
+        .chain(prefixed)
+        .collect();
+    for key in keys.iter().map(String::as_str) {
         let db = Uni::in_memory().config(config()).build().await?;
         let session = db.session();
         seed(&session).await?;

@@ -436,6 +436,48 @@ let db = Uni::open("./graph")
 - Monitor cache hit ratio
 - Increase if traversals are slow after warmup
 
+### Storage Engine (Lance) Caches
+
+Every table a database opens reads through one Lance session, shared by all
+tables and by every fork of the database. It holds two caches:
+
+| Cache | `UniConfig` field | Lance default | Holds |
+|---|---|---|---|
+| Metadata | `lance_metadata_cache_bytes` | 1 GiB | manifests, fragment and file metadata |
+| Index | `lance_index_cache_bytes` | 6 GiB | opened scalar, vector and full-text indexes |
+
+Both caches fill as tables are flushed and read and are trimmed only when
+full. A long-running process that flushes often therefore keeps growing toward
+the full 7 GiB: each flush writes a new table version whose metadata the next
+read caches. Set a capacity to bound it:
+
+```rust
+use uni_db::{Uni, UniConfig};
+
+let config = UniConfig {
+    lance_metadata_cache_bytes: Some(64 * 1024 * 1024),
+    lance_index_cache_bytes: Some(512 * 1024 * 1024),
+    ..Default::default()
+};
+let db = Uni::open("./graph").config(config).build().await?;
+
+let m = db.metrics();
+println!("{} / {}", m.storage_metadata_cache_bytes, m.storage_index_cache_bytes);
+```
+
+```python
+db = (uni_db.UniBuilder.open("./graph")
+      .config({"lance_metadata_cache_bytes": 64 << 20,
+               "lance_index_cache_bytes": 512 << 20})
+      .build())
+db.metrics().storage_metadata_cache_bytes
+```
+
+A miss is re-read from storage, so a smaller cache costs I/O, never
+correctness. Keep the index cache above the size of any vector index you
+search: an ANN index evicted from it is re-read and re-decoded on every query.
+`Some(0)` disables a cache.
+
 ### Property Cache
 
 Property cache sizing is currently fixed internally. If you need explicit control, use the low-level APIs and construct a `PropertyManager` directly.
@@ -613,7 +655,7 @@ config.max_query_memory = 4 * 1024 * 1024 * 1024; // 4 GB
 ### Reducing Memory Usage
 
 1. **Smaller batch sizes**: use `UniConfig.execution_batch_size` (query execution) or `BulkWriter.batch_size()` (bulk ingest)
-2. **Smaller caches**: Reduce `UniConfig.cache_size`
+2. **Smaller caches**: Reduce `UniConfig.cache_size`, and cap the storage engine's caches with `lance_metadata_cache_bytes` / `lance_index_cache_bytes` (see [Storage Engine (Lance) Caches](#storage-engine-lance-caches))
 3. **Stream large results**: Use SKIP/LIMIT pagination
 4. **Avoid large intermediates**: Filter early
 
