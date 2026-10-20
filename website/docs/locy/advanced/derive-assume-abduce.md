@@ -49,10 +49,32 @@ ASSUME {
 
 Think of this as savepoint-scoped what-if execution.
 
-The ASSUME command's result is the rows of the `QUERY` and Cypher commands in
-its body. A body may also define rules, `DERIVE` (the derived edges are part of
-the hypothetical graph, so a later Cypher command in the body reads them), and
-nest another `ASSUME`.
+A body may also define rules, `DERIVE`, write with Cypher, and nest another
+`ASSUME`. Its commands run in sequence, exactly as they would one after another
+in a transaction that is rolled back at the end: a `DERIVE` or Cypher write
+changes the hypothetical graph, and every later command in the body — `QUERY`,
+another `DERIVE`, a Cypher read, a nested `ASSUME` — reads the changed graph
+and the rule facts derived from it.
+
+```locy
+CREATE RULE link AS MATCH (a:Person)-[:KNOWS]->(b:Person) DERIVE (a)-[:LINK]->(b)
+CREATE RULE linked AS MATCH (a:Person)-[:LINK]->(b:Person) YIELD KEY a, KEY b
+
+ASSUME { CREATE (:Marker) } THEN {
+  QUERY linked RETURN a.name AS a, b.name AS b   // no LINK edges yet: no rows
+  DERIVE link                                    // one row: {affected: 3}
+  QUERY linked RETURN a.name AS a, b.name AS b   // the three derived edges
+}
+```
+
+After a write, only the strata the write can affect are derived again; the
+rest keep their facts (see *Incremental re-evaluation* in the Locy reference).
+
+The ASSUME command's result is the concatenated rows of its body's commands, in
+order: a `QUERY` or Cypher command contributes its rows, a `DERIVE` one
+`{affected: n}` row (the count a top-level `DERIVE` reports as
+`CommandResult::Derive { affected }`), and a nested `ASSUME` its own rows. A body
+with no commands returns every fact its rules derived.
 
 `ABDUCE` and `EXPLAIN RULE` are **not allowed** in an ASSUME body, at any
 nesting depth: the program fails to compile with

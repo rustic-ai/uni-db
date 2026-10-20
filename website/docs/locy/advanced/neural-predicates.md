@@ -251,7 +251,7 @@ The semiring controls how probabilities compose through `MNOR`, `MPROD`, and sha
 
 - **`AddMultProb` (default)** — independence-mode noisy-OR for `MNOR` and product for `MPROD`. Byte-identical to the pre-neural Locy. Use unless you have a reason to opt out.
 - **`MaxMinProb` (Viterbi / fuzzy-truth)** — `MNOR` becomes max, `MPROD` becomes min. Useful when probabilities aren't actually probabilities (e.g. fuzzy-set memberships) and you want monotone composition without the independence assumption. Emits a `FuzzyNotProbabilistic` warning on any rule that also declares `PROB`, since you opted out of probability semantics.
-- **`TopKProofs(k)`** — keeps the top `k` proofs per derived fact ranked by proof probability. Under shared base facts, the runtime computes the exact joint via DNF inclusion-exclusion rather than the independence approximation. Pick this when shared proofs are a real concern and you want the inclusion-exclusion answer at bounded cost.
+- **`TopKProofs(k)`** — evaluates each `MNOR` fact over its `k` most probable rows (proofs), exactly: each proof is its own event AND the facts it references, so proofs sharing an edge count it once. With `k` at least a fact's number of rows the value is the possible-worlds probability. Pick this when shared proofs are a real concern and you want to bound the work per fact.
 
 Set via `LocyConfig.semiring` (Rust) or by string name in the Python `with_config({"semiring": "TopKProofs(8)"})`.
 
@@ -266,7 +266,7 @@ Locy distinguishes two warning channels. **Compile-time warnings** (`WarningCode
 | `FuzzyNotProbabilistic` | `MaxMinProb` semiring is active and a rule emits `PROB` | You're using fuzzy-truth math on a column declared as a probability. Pick one. (Unsuppressible.) |
 | `SharedProbabilisticDependency` | Two or more proof paths inside one `MNOR`/`MPROD` group reuse shared evidence | The independence assumption is violated; the aggregate over-/under-states joint probability. |
 | `BddLimitExceeded` | Exact mode was on but the group exceeded `max_bdd_variables` | The BDD fell back to the independence-mode result. |
-| `CrossGroupCorrelationNotExact` | `MNOR`/`MPROD` composes rule outputs sharing base facts across KEY groups | Each group is exact internally, but cross-group correlation is still approximate. Switching to `TopKProofs(k)` helps. |
+| `CrossGroupCorrelationNotExact` | `MNOR`/`MPROD` composes rule outputs sharing base facts across KEY groups | Each group is exact internally, but cross-group correlation is still approximate, under `TopKProofs(k)` too. |
 | `TopKPruningCrossedDependency` | `TopKProofs(k)` pruning dropped a proof that shared a base fact with a kept proof | The kept set is an approximation; bump `k` for exactness. |
 
 ### Compile-time warnings (`compile_warnings`)

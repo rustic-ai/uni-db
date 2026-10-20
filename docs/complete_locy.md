@@ -1013,6 +1013,12 @@ CREATE RULE safe AS
 
 - If `a` has a risk of 0.8 in `risky`, then `safe` yields `confidence = 1 − 0.8 = 0.2`.
 - If `a` is not in `risky` at all, then `safe` yields `confidence = 1.0`.
+- If the negation key matches several facts (a KEY column of `risky` that no literal binds is
+  existential), `p` is their noisy-OR.
+
+That `1 − p` is the default-mode value: it treats the negated fact as independent of the rest of
+the row. In exact mode (§12.5) the row instead conjoins the negation of the negated facts'
+formulas, which differs when they share an event with the rest of the row.
 
 A positive `IS` reference to a PROB rule multiplies the referenced fact's probability `p` into the
 calling rule's PROB column, as `IS NOT` multiplies `1 − p`; several references in one clause each
@@ -1041,7 +1047,7 @@ edge is present independently with its `p`. A PROB column computed after the fol
 
 ## 12.4 Shared Proof Detection
 
-MNOR and MPROD combine a group's rows as independent events. That holds unless two proofs of a fact rest on the same event: the same edge (or, generally, the same expression over the same nodes and relationships), or the same referenced fact, or the fact itself through a cycle. Nodes in common are not evidence in common: the two proofs of `reach(s, t)` in §12.3 share the node `s` but no edge, so independence is exact there.
+MNOR and MPROD combine a group's rows as independent events. That holds unless two proofs of a fact rest on the same event: the same edge (or, generally, the same expression over the same nodes and relationships), or the same referenced fact, or the fact itself through a cycle. The same goes for one row whose positive part and an `IS NOT` rest on one event: `reach(a, b) AND NOT link(m, b)` both read the edge `m → b` when it lies on a path from `a`. Nodes in common are not evidence in common: the two proofs of `reach(s, t)` in §12.3 share the node `s` but no edge, so independence is exact there.
 
 Uni records each MNOR/MPROD rule's derivation rows as lineage and emits a `SharedProbabilisticDependency` warning for a rule when some fact's formula reads one event twice. When no rule warns, every default-mode value is already the possible-worlds probability.
 
@@ -1049,11 +1055,26 @@ Uni records each MNOR/MPROD rule's derivation rows as lineage and emits a `Share
 
 When `exact_probability = true`, each fact whose formula reads an event twice is recomputed by **BDD-based weighted model counting** under possible-worlds semantics:
 
-1. Each derivation row is `(its own event) AND (the formula of every fact it references positively)`. The row's own event has the row's PROB value divided by the referenced probabilities it carries; rows over the same expression and the same nodes and relationships share one event, and a referenced fact of a rule without lineage (a non-fold PROB rule) is one event
-2. A fact is the OR (MNOR) or the AND (MPROD) of its rows, as a least fixpoint, so a derivation through itself adds nothing
+1. Each derivation row is `(its own event) AND (the formula of every fact it references positively) AND NOT (the formula of any fact its IS NOT references matched)`. The row's own event has the row's PROB value divided by the referenced probabilities and complements it carries; rows over the same expression and the same nodes and relationships share one event, and a referenced or negated fact of a rule without lineage (a non-fold PROB rule) is one event
+2. A fact is the OR (MNOR) or the AND (MPROD) of its rows, as a least fixpoint, so a derivation through itself adds nothing. A negated fact sits in a lower stratum, so it is complete before any formula negates it
 3. Build a BDD over the events (one variable each) and evaluate its probability via Shannon expansion
 
 On the graph `A -0.5-> B -0.4-> C -0.6-> D`, `A -0.3-> C`, both proofs of `reach(A, D)` need `C → D`: exact mode gives `0.6 · (1 − 0.7 · 0.8) = 0.264`, independence `1 − (1 − 0.12)(1 − 0.18) = 0.2784`.
+
+With negation, on `s -0.7-> t`, `s -0.3-> m -0.5-> t`:
+
+```
+CREATE RULE link AS
+    MATCH (a)-[e:LINK]->(b)
+    FOLD p = MNOR(e.p) YIELD KEY a, KEY b, p
+CREATE RULE odd AS
+    MATCH (a), (m) WHERE a IS reach TO b, m IS NOT link TO b
+    FOLD prob = MNOR(1.0) YIELD KEY a, KEY m, KEY b, prob
+```
+
+`odd(s, m, t)` is `(X ∨ (Y ∧ Z)) ∧ ¬Z = X ∧ ¬Z` with `X = s→t`, `Y = s→m`, `Z = m→t`: exact mode gives
+`0.7 · 0.5 = 0.35`. Default mode gives `reach(s, t) · (1 − link(m, t)) = 0.745 · 0.5 = 0.3725` and
+raises `SharedProbabilisticDependency` for `odd`.
 
 ### Fallback
 
@@ -1063,9 +1084,11 @@ When a fact's formula needs more than `max_bdd_variables` (default 1000) events,
 
 When a referenced fact is consumed by **different KEY groups** of one rule, per-group BDD is exact internally but cross-group correlation remains approximate. This emits `CrossGroupCorrelationNotExact`.
 
-## 12.6 Top-K Proof Filtering
+## 12.6 Top-K Proofs
 
-`top_k_proofs` bounds the number of proof annotations retained per derived fact. When `top_k_proofs > 0`, only the k highest-probability proofs are kept (Scallop, Huang et al. 2021). `top_k_proofs_training` optionally overrides this during training mode.
+**`TopKProofs { k }` semiring.** Each fact of an MNOR/MPROD rule is evaluated over its proofs as in §12.5, with each MNOR fact restricted to its `k` most probable rows (by row PROB value; ties by row order). The facts a kept row references keep all their rows. With `k` at least a fact's row count the value is the possible-worlds probability, shared events counted once; with fewer, it is the probability of the kept proofs, a lower bound. A fact with at most `k` rows and no shared event keeps its default value, which is already exact. On the `A … D` graph of §12.5, `TopKProofs(8)` gives `reach(A, D) = 0.264`, and `TopKProofs(1)` keeps `A → C, reach(C, D)` (0.18 against 0.12): `0.3 · 0.6 = 0.18`. A referenced fact of a rule without a PROB column is certain and contributes no event. The shared-proof warning is not raised under `TopKProofs`, which corrects the facts it names.
+
+**`top_k_proofs` (annotation retention).** `top_k_proofs` bounds the number of provenance annotations retained per derivation for EXPLAIN. When `top_k_proofs > 0`, only the k highest-probability annotations are kept (Scallop, Huang et al. 2021). `top_k_proofs_training` optionally overrides this during training mode.
 
 ```mermaid
 graph TD
@@ -1176,9 +1199,11 @@ The database is never permanently modified. ASSUME blocks can be nested (stacked
 
 **Incremental re-evaluation.** A stratum is recomputed when one of its rules matches a label whose membership the mutations change (a created node's labels, an added or removed label, every label when a node is deleted), matches a relationship type that gains or loses a relationship, reads a property the mutations `SET` or `REMOVE`, references (`IS` / `IS NOT`) a recomputed rule, or uses a construct whose inputs cannot be read from the syntax (subqueries, `EXISTS`, generators, neural models, plugin or retrieval functions, `rand()`, `timestamp()`). Every other stratum is reused. Recomputed strata are evaluated from scratch. Answers are the same as evaluating the program on the mutated graph; `LocyStats::hypothetical_strata_evaluated` / `hypothetical_strata_reused` show the split. A hypothetical evaluation cut short by the timeout or iteration limit is an error unless `allow_partial` is set.
 
-A nested ASSUME's rows are not part of the enclosing block's result: an ASSUME body collects the rows of its own `QUERY` and Cypher commands.
+**Body commands run in sequence.** The body behaves exactly like its commands run one after another in a transaction that is rolled back: a `DERIVE` or a Cypher write changes the hypothetical graph, and every later command in the body (`QUERY`, another `DERIVE`, Cypher, a nested ASSUME) reads the changed graph and the facts derived from it. After each command that writes, the parent's strata are re-derived incrementally against the write's footprint (the same criterion as above; a `DERIVE`'s footprint is that of the edge or node writes it ran, and a `DERIVE` that derived nothing writes nothing), and the body's own rules are derived again on top. Before, the body's facts were derived once, before its first command, so a `QUERY` after a `DERIVE` in the same body answered from the graph without the derived edges while a Cypher read saw them.
 
-`ABDUCE` and `EXPLAIN RULE` are compile errors inside an ASSUME body, at any nesting depth (`LocyCompileError::AssumeBodyCommandNotAllowed`). Their results are not rows, so the ASSUME used to compute them and drop them. To combine them with a hypothetical change, run the `ABDUCE` / `EXPLAIN RULE` at the top level after the ASSUME, or apply the change in a transaction (`tx()`, mutate, run the command, `rollback()`), or in a scratch transaction (`Session::scratch()`, Python `session.scratch()`), whose writes are always discarded. A `DERIVE` in the body is allowed: its edges land in the hypothetical graph, where a later Cypher command in the same body reads them, and are rolled back with it.
+The ASSUME's result is the body commands' rows, concatenated in order: a `QUERY` or Cypher command contributes its rows, a `DERIVE` one `{affected: n}` row (the count a top-level `DERIVE` reports as `CommandResult::Derive { affected }`), and a nested ASSUME its result rows. A body with no commands returns every fact its rules derived. (A `DERIVE` and a nested ASSUME used to contribute nothing, so a body whose only command was `DERIVE` returned no rows.)
+
+`ABDUCE` and `EXPLAIN RULE` are compile errors inside an ASSUME body, at any nesting depth (`LocyCompileError::AssumeBodyCommandNotAllowed`). Their results are not rows, so the ASSUME used to compute them and drop them. To combine them with a hypothetical change, run the `ABDUCE` / `EXPLAIN RULE` at the top level after the ASSUME, or apply the change in a transaction (`tx()`, mutate, run the command, `rollback()`), or in a scratch transaction (`Session::scratch()`, Python `session.scratch()`), whose writes are always discarded. A `DERIVE` in the body is allowed: its edges land in the hypothetical graph, where every later command in the same body reads them, and are rolled back with it.
 
 Returns `CommandResult::Assume(Vec<FactRow>)`.
 
@@ -1229,6 +1254,18 @@ EXPLAIN RULE rule_name [WHERE expr] [RETURN items [ORDER BY ...] [LIMIT n]]
 ```
 
 Returns the **derivation tree** showing which clauses and base facts produced a result.
+
+With recorded provenance (Mode A: the program has an EXPLAIN or an MNOR/MPROD fold), each
+derivation of a matching fact is a child of the root, and below each derivation are the facts it
+references positively through a probabilistic `IS` (to a PROB rule, from an MNOR/MPROD rule) —
+the same references exact mode and `TopKProofs` evaluate, read from the same hidden columns, so a
+subject the rule does not yield (`mid IS reach TO b`) is still shown. A referenced fact is expanded
+into its own derivations where it first appears in the tree, to `max_explain_depth` levels;
+elsewhere it is a leaf carrying its bindings, marked `(cycle)` (on the path from the root),
+`(derived above)` or `(depth limit)`. A reference to a rule without a PROB column is a certain
+condition and is not listed. Without recorded provenance (Mode B, also what ABDUCE uses), the
+tree is rebuilt from the published facts by re-running each clause's MATCH, one derivation per
+fact.
 
 ```
 EXPLAIN RULE reachable WHERE a.name = 'A' AND b.name = 'C'
@@ -2384,7 +2421,7 @@ struct ExplainRule { rule_name: QualifiedName, where_expr: Option<Expr>, return_
 
 ## Appendix D: TCK Coverage Map
 
-**72 feature files, 535 scenarios** covering all Locy features.
+**72 feature files, 539 scenarios** covering all Locy features.
 
 ### Core Evaluation
 
@@ -2393,9 +2430,9 @@ struct ExplainRule { rule_name: QualifiedName, where_expr: Option<Expr>, return_
 | `evaluate/NonRecursive.feature` | 4 | Basic YIELD rules, WHERE filters, multiple rules |
 | `evaluate/TransitiveClosure.feature` | 2 | Recursive IS-ref chains |
 | `evaluate/MultiStratum.feature` | 3 | Cross-stratum fact injection |
-| `evaluate/YieldValueColumns.feature` | 5 | YIELD schema, value columns |
+| `evaluate/YieldValueColumns.feature` | 7 | YIELD schema, value columns |
 | `evaluate/ParameterBinding.feature` | 5 | `$param` references in rules |
-| `evaluate/ErrorConditions.feature` | 5 | Compilation/runtime error cases |
+| `evaluate/ErrorConditions.feature` | 6 | Compilation/runtime error cases |
 | `evaluate/AlongWithIsRef.feature` | 3 | ALONG + IS-ref combinations |
 | `evaluate/CypherFunctions.feature` | 9 | Built-in function evaluation |
 | `rules/BasicRules.feature` | 6 | Base + recursive rules |
@@ -2405,19 +2442,19 @@ struct ExplainRule { rule_name: QualifiedName, where_expr: Option<Expr>, return_
 
 | Feature File | Scenarios | Coverage |
 |-------------|-----------|----------|
-| `fold/Aggregation.feature` | 11 | FOLD (SUM, MAX, MIN, COUNT, AVG) |
+| `fold/Aggregation.feature` | 12 | FOLD (SUM, MAX, MIN, COUNT, AVG) |
 | `bestby/OptimizedSelection.feature` | 6 | BEST BY (group-by + selection) |
 | `priority/PrioritizedRules.feature` | 5 | PRIORITY clause semantics |
-| `along/PathCarriedValues.feature` | 9 | ALONG for path-carried aggregation |
+| `along/PathCarriedValues.feature` | 10 | ALONG for path-carried aggregation |
 
 ### Probabilistic
 
 | Feature File | Scenarios | Coverage |
 |-------------|-----------|----------|
-| `monotonic/MonotonicAggregation.feature` | 30 | MSUM, MMAX, MMIN, MCOUNT, MNOR, MPROD |
-| `monotonic/ProbabilisticComplement.feature` | 13 | PROB + IS NOT complement |
-| `monotonic/SharedProofDetection.feature` | 4 | Shared-proof dependency warnings |
-| `monotonic/ExactProbability.feature` | 25 | BDD-based exact probability |
+| `monotonic/MonotonicAggregation.feature` | 36 | MSUM, MMAX, MMIN, MCOUNT, MNOR, MPROD |
+| `monotonic/ProbabilisticComplement.feature` | 19 | PROB + IS NOT complement |
+| `monotonic/SharedProofDetection.feature` | 6 | Shared-proof dependency warnings |
+| `monotonic/ExactProbability.feature` | 17 | BDD-based exact probability |
 | `monotonic/ProbabilisticStress.feature` | 10 | Large-scale probabilistic correctness |
 | `monotonic/TopKProofs.feature` | 4 | Top-K proof filtering |
 
@@ -2441,7 +2478,7 @@ struct ExplainRule { rule_name: QualifiedName, where_expr: Option<Expr>, return_
 
 | Feature File | Scenarios | Coverage |
 |-------------|-----------|----------|
-| `negation/StratifiedNegation.feature` | 5 | IS NOT negation, stratification |
+| `negation/StratifiedNegation.feature` | 9 | IS NOT negation, stratification |
 | `compile/Stratification.feature` | 6 | Compile-level stratification |
 
 ### Module System & Lexical

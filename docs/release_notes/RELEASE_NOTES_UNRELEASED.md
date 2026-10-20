@@ -9,6 +9,91 @@ the version it ships in.
 
 ### Results that change
 
+**Edge triggers see the edge's old properties after a flush, and delete
+triggers match their edge type.** An edge already flushed to storage was
+reported to triggers and CDC as `EDGE_CREATE` with no `old_value` when it was
+next updated (`SET`, `REMOVE`, `MERGE ... ON MATCH SET`), and as an
+`EDGE_DELETE` with no `old_value` when deleted directly or by `DETACH DELETE`
+of an endpoint; `old.<prop>` predicates on such edges never matched. An edge
+updated after a flush reported only the keys of that later write. The
+pre-image is now the edge's whole committed property set, declared,
+undeclared and schemaless, read in one batched lookup per commit. Edge deletes
+were also labelled `type:<id>` instead of the type name, so a trigger
+subscribed to `-[:R]` never fired on deleting an `R` edge; they now carry the
+name.
+
+**`partial_lance_writes` no longer applies to edges.** With the flag on, an
+edge update written through the writer's non-transactional API was flushed as
+a Lance `MergeInsert` of the touched columns into the edge's delta rows. An
+edge created and updated before one flush was dropped from storage (absent
+after reopen); a `REMOVE` followed by a `SET` of the same edge before one flush
+failed the whole flush ("ambiguous merge insert"); and an edge with several
+stored versions had all of them rewritten to the same version, leaving its
+current state to scan order. Edge writes are now always stored as full rows.
+Cypher writes were not affected: the transaction commit already stored edges
+as full rows. Measured on 1,000 edge updates, a flush took 28-33 ms as full
+rows against 37-43 ms as `MergeInsert`.
+
+**Updating a flushed edge no longer drops or restores properties.** A `SET` on
+an edge that had been flushed lost the edge's undeclared properties once the
+result was flushed again, and a property removed with `REMOVE` (then flushed)
+came back on the edge's next `SET`. The read that seeds an edge update now
+includes the undeclared properties and takes the newest stored row as the
+edge's state instead of merging older rows into it key by key.
+
+**A crash during a bulk load's `commit()` no longer loses other sessions'
+writes.** Reopening after a crash (or a failed `commit()`) part way through
+making a bulk load visible restored every table the load touched to its
+version from before the commit. That also discarded whatever other sessions
+had committed and flushed to those tables in the meantime: a vertex and an
+edge committed during the commit, or at any time after a failed one, were gone
+after reopen. Recovery now completes the interrupted load instead, publishing
+each table it had not reached exactly once onto the current version, so the
+load is present in full after reopen and nothing else is lost. Each load
+keeps its own recovery marker: with one marker per database, a second load
+overwrote or deleted the first's, which then stayed half-visible (vertices and
+one edge direction) for good. A crash during recovery is completed by the next
+open.
+
+**`=~` matches the whole string, as in Neo4j.** The regex operator was a
+partial ("find anywhere") match, so `'abc' =~ 'b'` was true. It now follows
+Java's `Pattern.matches`: the pattern must match the entire string, so
+`'abc' =~ 'b'` is false and `'abc' =~ '.*b.*'` is true. Anchors `^`/`$` are now
+redundant; the end is absolute, so `'abc\n' =~ 'abc'` and `'abc\n' =~ 'abc$'`
+are false (also under `(?m)`). Alternation is decided over the whole string
+(`'ab' =~ 'a|ab'` is true) and inline flags such as `(?i)` and `(?s)` still
+apply. This holds on every path: literals, parameters, typed and schemaless
+properties (in memory and flushed), the fallback executor and Locy rule
+bodies and `QUERY … RETURN`. NULL handling is unchanged. To keep a substring
+search, put `.*` on both sides of the pattern (`'.*b.*'`). The `uni-pydantic`
+`PropertyProxy.like()` filter is `=~` and changes the same way.
+
+**`=~` patterns are Java regular expressions, as in Neo4j.** Patterns were
+read with the Rust `regex` crate's syntax and defaults. They now follow
+`java.util.regex` with no flags, so these answers change:
+
+- `\w`, `\d`, `\s`, `\b` and POSIX classes such as `\p{Lower}` are ASCII:
+  `'é' =~ '\\w'` is now `false`. `(?U)` makes them Unicode.
+- `(?i)` folds ASCII letters only (`'É' =~ '(?i)é'` is now `false`); add
+  `(?u)` for Unicode case folding, which follows Java's rules.
+- `.` no longer matches `\r`, U+0085, U+2028 or U+2029 (without `(?s)`).
+- `$` also matches before a final line terminator: `'a\n' =~ 'a$\\n'` is now
+  `true`.
+- `\v` is vertical whitespace (it was a vertical tab), `\<` and `\>` are the
+  characters `<` and `>` (they were word-boundary assertions), and
+  `[[:alpha:]]` is a class of the characters `:alpha` (it was the POSIX class).
+- `\p{..}` names resolve as in Java: `\p{Greek}` and `\p{Alphabetic}` are now
+  errors (write `\p{IsGreek}`, `\p{IsAlphabetic}`).
+
+Java syntax that cannot be evaluated exactly is now an invalid-pattern error
+rather than a different answer: possessive quantifiers (`a*+` was read as
+`(a*)+`), lookaround, backreferences, atomic groups, `\Q…\E`, Unicode blocks
+and a few escapes (`\h`, `\R`, `\Z`, …). Rust-only syntax is also rejected
+(`(?P<name>…)`, `\u{..}`, `[a--b]`, `a{,3}`, `(?R)`). A handful of patterns
+are refused with an "Unsupported regex input" error only for specific input
+(for example `$` followed by more pattern over a string with an inner line
+break); see the Cypher querying guide.
+
 **Integers and floats compare exactly; `1` and `1.0` are one value.** An
 integer compared with a float was widened to `f64`, which rounds above 2^53:
 `9007199254740993 = 9007199254740992.0` was true, and orderings across the
@@ -236,6 +321,34 @@ when each edge is present independently. With MPROD it was 0.21 and is 0.105.
   prob AS pr` left `pr` unmarked, so neither `IS` nor `IS NOT` read it as a
   probability.
 
+**Locy: `IS NOT` inside exact formulas, `TopKProofs` over lineage, EXPLAIN
+shows referenced facts (breaking: probability values change).**
+- **Exact mode negates the negated facts' formulas.** In an MNOR/MPROD rule an
+  `IS NOT` against a PROB rule was an independent `1 - p` factor even in exact
+  mode, so a row needing a path and the absence of an edge on it was wrong.
+  On `s -0.7-> t`, `s -0.3-> m -0.5-> t`, `reach(s,t) AND NOT link(m,t)` was
+  0.3725 and is `0.7 · 0.5 = 0.35`. Default mode keeps `1 - p`, and now raises
+  `SharedProbabilisticDependency` when the negated fact shares an event with
+  the rest of the row (it did not, so the wrong value came without a warning).
+- **`TopKProofs { k }` is evaluated over lineage.** Each MNOR fact is the exact
+  probability of its `k` most probable rows, each row its own event AND the
+  facts it references. It used to treat a row's referenced facts as its only
+  events, weighted by the largest row, so two edges (0.7, 0.6) into one hub
+  both referencing a certain `hub_score(h)` folded to 0.7 instead of 0.88;
+  and through the old reference join it saw no reference at all for
+  `mid IS reach TO b`, where `mid` is not yielded, so `reach(A,D)` on the
+  shared-edge graph was 0.2784 instead of 0.264. With `k` at least a fact's
+  row count the value is now the possible-worlds probability.
+- **EXPLAIN RULE (recorded provenance) shows the facts each derivation
+  references,** expanded into their own derivations where first shown; it
+  showed no children at all. The references are the ones exact mode and
+  `TopKProofs` evaluate, so a subject the rule does not yield is no longer
+  lost. A recursive FOLD rule's derivations are one entry each: two
+  derivations with equal values through different facts were shown as one.
+  Hidden `__deriv_*` columns no longer appear in EXPLAIN bindings.
+- **Two `IS NOT` references to one PROB rule in a clause** each contribute
+  their own complement.
+
 **A property named after a storage column is refused at write.** `CREATE`,
 `SET`, `MERGE`, `Transaction::bulk_insert_*`, `BulkWriter`, the streaming
 appender and the Python bindings now fail with `UniError::InvalidIdentifier`
@@ -400,6 +513,31 @@ publishes them, reads in the transaction see them, and two transactions that
 update the same node through a procedure conflict as plain writes do.
 `Session::run` still auto-commits.
 
+**A procedure called inside a transaction reads the transaction's view.**
+Checked for declared Cypher procedures (`READ` and `WRITE`), `uni.algo.*`
+algorithms, `GraphView` providers, `uni.vector.query` and `uni.fts.query`,
+against the transaction's own Cypher reads:
+
+- An algorithm projection (`uni.algo.reachability`, `wcc`, `mst`, ...) did not
+  follow edges the transaction had created, still counted vertices and edges
+  it had deleted, and read committed edge weights instead of the
+  transaction's own updates. A flushed vertex deleted by an earlier,
+  committed transaction was also still projected until the delete was
+  flushed. The
+  projection now reads the transaction's buffer as its newest layer, applies
+  vertex and edge deletions from every layer, and reads edge properties as
+  Cypher does.
+- The body of a declared `WRITE` procedure saw nodes another session
+  committed after the transaction began. A declared `READ` procedure saw
+  them too once they had been flushed. Both now read the transaction's
+  snapshot.
+- Inside a read-write transaction, the vertices and edges an algorithm
+  projection reads join the transaction's read set, as a Cypher scan's do,
+  so a concurrent change to them fails the commit.
+- `uni.algo.astar` read its heuristic property from flushed storage only.
+
+Vector and full-text search already behaved correctly.
+
 **An algorithm's list, map and node yields have their real type inside the
 query.** They arrived as text that was parsed back only when rows were
 returned, so `RETURN nodeIds` looked right while `size(nodeIds)` counted
@@ -443,6 +581,32 @@ otherwise read as the stored value. Locy's rule planner mirrored the old rule
 and now mirrors the new one, and a Locy column of stored values brought to an
 integer column is read exactly rather than through `f64`.
 
+The same rule now holds everywhere a property column is typed before it is
+read:
+
+- **`CALL { ... }` subqueries.** Their output columns took the type from the
+  first label declaring the name, so `CALL { MATCH (s:S) RETURN s.v AS v }`
+  returned `9007199254740992.0` and `NULL`, and a later `WHERE v = ...` on the
+  integer matched nothing. A subquery's property column is now typed from the
+  labels or relationship types its variable is matched with, and is otherwise
+  the stored value. Arithmetic in a subquery's `RETURN` is numeric only when
+  both sides are: `s.v + 0` on a string concatenates (`'x0'`) instead of
+  returning `NULL`.
+- **Relationships matched over several types.** `MATCH ()-[e]->() RETURN e.w`
+  typed `w` from the one type declaring it, so a schemaless type's integer
+  rounded and its string read `NULL`. A relationship property is now typed
+  only when every type in the pattern declares it at the same type.
+- **Locy rules.** A property of a schemaless label, an unlabelled node or a
+  relationship type that does not declare it, used in `YIELD` arithmetic, an
+  `ALONG` binding or projected from an unlabelled node, failed the run with
+  `cannot read the string "x" as a number` (or rounded an integer) because it
+  took the type another label declared.
+- **`UNION` of differently typed columns.** `MATCH (s:S) RETURN s.v AS v UNION
+  ALL MATCH (f:F) RETURN f.v AS v`, and `RETURN 1 AS v UNION ALL RETURN 'a' AS
+  v`, were rejected as "cannot UNION branches with mismatched schemas". A
+  column whose branches differ in type is now unified as stored values, which
+  is valid openCypher.
+
 **Reachability over a variable-length pattern no longer lists trails.** An
 `EXISTS { MATCH (a)-[:R*]-(b) }`, a pattern predicate, or `RETURN DISTINCT` /
 `count(DISTINCT ...)` over `[:R*min..max]` is now answered from breadth-first
@@ -466,7 +630,69 @@ raises `NumberOutOfRange`. All four evaluators agree: the DataFusion function,
 the `UNWIND` evaluator, the fallback executor (whose errors now carry those
 two codes; they were untagged) and Locy's `QUERY … RETURN`.
 
+**An `ASSUME` body's commands run in sequence.** Inside
+`ASSUME { ... } THEN { body }`, a `DERIVE` or Cypher write changes the
+hypothetical graph, and every later command in the body now reads the changed
+graph *and the rule facts derived from it*. Before, the body's facts were
+derived once, before its first command: a `QUERY` (or a second `DERIVE`) after
+a `DERIVE` answered from the graph without the derived edges — silently, while
+a Cypher read in the same body saw them. The body now behaves exactly like its
+commands run one by one in a transaction that is rolled back. After a write,
+only the strata it can affect are derived again.
+
+- An ASSUME's rows now include a `DERIVE`'s result, as one `{affected: n}`
+  row, and a nested ASSUME's rows. Both used to be dropped, so a body whose only
+  command was `DERIVE` returned no rows. A body that mixes `DERIVE` and
+  `QUERY` now has the `affected` row among the `QUERY` rows.
+
+**`COPY ... TO` exports the user-visible properties.** A CSV export wrote the
+label's storage table — its declared columns and the raw `overflow_json` blob —
+so every undeclared property was missing, and rows still in memory (not yet
+flushed) were missing too. A Parquet export wrote the storage table verbatim
+(`_uid`, `_version`, `overflow_json`, ...; `src_vid`, `type`, `props_json` for
+edges), CSV edge export failed, and a schemaless label was "unknown". Every
+export now writes exactly what `properties()` returns, for declared and
+schemaless labels and edge types, flushed or not. Layout, both formats: `_vid`
+(vertices) or `_eid`, `_src`, `_dst` (edges), then one column per property — the
+union of the keys over all exported entities, sorted by name; an entity without
+one has an empty cell (CSV) or null (Parquet). Parquet keeps declared types and
+gives an undeclared column its values' shared type, or the tagged value encoding
+when they are mixed or structured.
+
+**`COPY ... FROM` reads that layout back.** `COPY E FROM` takes endpoints from
+`_src`/`_dst` when the file has them (still `src`/`dst` otherwise, and
+`src_col`/`dst_col` override). An empty CSV cell is now absent rather than an
+empty string; declared `INT64`, `FLOAT64` and `BOOLEAN` columns are parsed
+(only `INT32` was — the others failed the import); an unparsable endpoint id is
+an error instead of vertex 0; Parquet cells decode with the declared type; and
+schemaless labels and edge types are accepted unless `strict_schema` is on.
+CSV options `delimiter` and `header` (or `headers`) apply to both directions.
+Text is all CSV carries: an undeclared property imports from CSV as a string —
+use Parquet to round-trip its type.
+
+**`UniConfig::file_sandbox` is enforced.** The executor kept its own sandbox
+field that nothing in the database set, so an enabled sandbox never restricted
+`BACKUP` or `COPY`. Both now refuse a path outside `allowed_paths` when the
+sandbox is enabled ("Path validation failed"); the embedded default (disabled)
+is unchanged. `COPY` also reads and writes `s3://`, `gs://` and `az://` URLs,
+as documented — the live code path only took local paths.
+
+**A user property named `label`, `type` or `properties` is kept on every
+entity form.** `MATCH (n) CALL { WITH n SET ... } RETURN n` returned the node
+without those three properties (flushed or not), while `n.label` read them:
+the result normalizer dropped inline keys with those names when building a node
+or edge from a flattened entity map. Locy's entity decoding likewise dropped an
+inline `properties`, and `Value::canonical_entity` a non-map `properties`.
+Which keys are properties is now decided only by the reserved-name rule and the
+entity's property container. Plain `RETURN n`, `properties()`, `keys()`, map
+projection and paths were not affected.
+
 ### API changes
+
+**`LogicalPlan::Copy` is removed** (`uni-query`). The planner never built
+it; `COPY` plans as `CopyTo` / `CopyFrom`. The executor code behind it, a
+second COPY implementation, is gone with it. `Executor::set_file_sandbox` now
+overrides `config.file_sandbox`.
 
 **Minimum supported Rust version is now 1.96 (was 1.91).** The WASM plugin
 runtime moves to wasmtime/wasmtime-wasi 49 (and extism 1.41), the first
@@ -522,6 +748,12 @@ lock and then fails with "another handle is still compacting"; remote stores are
 unaffected. A cancelled pass reports `CompactionCancelled`.
 
 ### New
+
+**`CompiledProgram::needs_provenance_tracker()`.** Reports whether running a
+compiled Locy program attaches a provenance tracker (an `EXPLAIN RULE` command,
+or an `MNOR` / `MPROD` fold). The runtime now uses this method to decide, and
+when it holds `ASSUME` / `ABDUCE` do not reuse the program's top-level strata,
+so `LocyStats::hypothetical_strata_reused` stays zero for such programs.
 
 **Python: `Session.scratch()` and `AsyncSession.scratch()`.** They expose
 Rust's `Session::scratch()`: a transaction with read-your-writes over a pinned

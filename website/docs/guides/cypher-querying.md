@@ -406,20 +406,49 @@ WHERE a._doc CONTAINS 'graph database'
 // Path-specific JSON FTS search
 WHERE a._doc.title CONTAINS 'graph'
 
-// Regular expression matching
+// Regular expression matching: the pattern must match the WHOLE title
 WHERE p.title =~ '.*Transform.*'
 
 // Case-insensitive regex
 WHERE p.email =~ '(?i)john@.*'
 
-// Email pattern matching
-WHERE p.email =~ '^[\\w.-]+@[\\w.-]+\\.\\w+$'
+// Email pattern matching (anchors are implied)
+WHERE p.email =~ '[\\w.-]+@[\\w.-]+\\.\\w+'
 ```
 
 **Note:** The `CONTAINS` operator is automatically routed to JSON FTS indexes when the column has an FTS index, enabling BM25-based full-text search with relevance ranking.
 
 **Regex Notes:**
-- The `=~` operator uses Rust's regex engine (similar to PCRE)
+- `=~` matches the **whole** string, as in Neo4j (Java's `Pattern.matches`):
+  `'abc' =~ 'b'` is `false` and `'abc' =~ '.*b.*'` is `true`. Write `.*` on
+  either side to search inside a string.
+- The end of the pattern is the absolute end of the string: `'abc\n' =~ 'abc'`
+  and `'abc\n' =~ 'abc$'` are `false`, also under `(?m)`. Alternation is
+  decided over the whole string, so `'ab' =~ 'a|ab'` is `true`.
+- Patterns use Java's `java.util.regex` syntax and defaults, as Neo4j does
+  (`Pattern.compile(p)` with no flags):
+  - `\w`, `\d`, `\s`, `\b` and the POSIX classes (`\p{Lower}`, `\p{Alpha}`, …)
+    are ASCII: `'é' =~ '\\w'` is `false`. `(?U)` makes them Unicode.
+  - `(?i)` folds ASCII letters only: `'É' =~ '(?i)é'` is `false`. Add `(?u)`
+    (or `(?U)`) for Unicode case folding: `'É' =~ '(?iu)é'` is `true`.
+  - `.` matches any character except a line terminator (`\n`, `\r`, U+0085,
+    U+2028, U+2029); `(?s)` lets it match those too.
+  - `$` also matches before a final line terminator (`'a\n' =~ 'a$\\n'` is
+    `true`); `(?m)` makes `^`/`$` match at every line break.
+  - `\v` is vertical whitespace, `\<`/`\>` are the literal characters, and
+    `\p{..}` names follow Java (`\p{IsGreek}`, `\p{sc=Greek}`, `\p{Lu}`).
+- Java constructs the engine cannot evaluate exactly are rejected as an
+  invalid pattern rather than answered differently: possessive quantifiers
+  (`a*+`), lookahead/lookbehind, backreferences, atomic groups, `\Q…\E`,
+  `\h`, `\R`, `\X`, `\Z`, `\G`, octal and `\c` escapes, `\N{…}`, Unicode
+  blocks (`\p{InGreek}`), `\p{java…}`, the `(?d)` flag and repeated flags
+  (`(?i-i)`).
+- A few patterns are refused only for certain input, with an "Unsupported
+  regex input" error: `$` followed by more pattern over a string with a line
+  terminator before its last one; multi-line `^`/`$` over a string containing
+  U+0085, U+2028 or U+2029 (or, for a `^` that may match at the very end, an
+  empty string or one ending in a line terminator); and `\b`/`\B` over a string
+  with a combining mark right after a letter or digit.
 - NULL operands return NULL (Cypher semantics)
 - Invalid regex patterns return an error
 

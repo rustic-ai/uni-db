@@ -125,7 +125,7 @@ ORDER BY score DESC LIMIT 10
 `~=` is **vector-only** — it cannot do FTS or hybrid search. For hybrid search, use `similar_to()` with multi-source arrays.
 
 !!! note "`=~` is regex, `~=` is vector similarity"
-    These are unrelated operators that look similar. `n.name =~  '(?i)john'` is a regex match on strings. `n.embedding ~= $vec` is vector similarity search.
+    These are unrelated operators that look similar. `n.name =~ '(?i)john.*'` is a regex match on strings (over the whole string). `n.embedding ~= $vec` is vector similarity search.
 
 ## Expression-Based Scoring: `similar_to`
 

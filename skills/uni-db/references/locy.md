@@ -523,22 +523,26 @@ A positive `IS` reference to a PROB rule multiplies the referenced probability `
 
 ### Shared Proof Detection
 
-When two proofs of one fact rest on the same evidence (the same edge, the same referenced fact, or the fact itself through a cycle), the independence assumption fails and Uni emits `SharedProbabilisticDependency`. Shared nodes alone are not shared evidence: the diamond above warns about nothing. Without a warning, default and exact mode agree.
+When two proofs of one fact rest on the same evidence (the same edge, the same referenced fact, or the fact itself through a cycle), or a row's positive part and an `IS NOT` rest on the same edge, the independence assumption fails and Uni emits `SharedProbabilisticDependency`. Shared nodes alone are not shared evidence: the diamond above warns about nothing. Without a warning, default and exact mode agree.
 
 ### Exact Probability (BDD-Based)
 
 When `exact_probability = true`, each shared fact is recomputed under possible-worlds semantics:
-1. Each derivation row = its own event AND the formula of every positively referenced fact (rows over the same expression and the same nodes/relationships share one event)
+1. Each derivation row = its own event AND the formula of every positively referenced fact AND NOT the formula of every fact its `IS NOT` matched (rows over the same expression and the same nodes/relationships share one event); default mode keeps `1 - p` for `IS NOT`
 2. A fact = OR (MNOR) or AND (MPROD) of its rows, as a least fixpoint
 3. Build a BDD over the events and evaluate via Shannon expansion
 
-Example: `A -0.5-> B -0.4-> C -0.6-> D` plus `A -0.3-> C`: both proofs of `reach(A,D)` need `C -> D`; exact 0.264, independence 0.2784.
+Example: `A -0.5-> B -0.4-> C -0.6-> D` plus `A -0.3-> C`: both proofs of `reach(A,D)` need `C -> D`; exact 0.264, independence 0.2784. With negation, over `s -0.7-> t`, `s -0.3-> m -0.5-> t`: `reach(s,t) AND NOT link(m,t)` is exact 0.35 (`s->t` without `m->t`), default 0.3725 with the warning.
 
 Fallback: when a fact's formula needs more than `max_bdd_variables` (default 1000) events, falls back to independence mode with `BddLimitExceeded` warning.
 
-### Top-K Proof Filtering
+### Top-K Proofs
 
-`top_k_proofs` bounds proofs retained per derived fact (0 = unlimited). Keeps only the k highest-probability proofs. `top_k_proofs_training` optionally overrides during training.
+`semiring = TopKProofs(k)`: each MNOR fact is evaluated exactly over its `k` most probable rows (proofs), each row its own event AND the facts it references; with `k` at least a fact's row count it equals exact mode. A fact with at most `k` rows and no shared event keeps its default value.
+
+`top_k_proofs` bounds the provenance annotations retained per derivation for EXPLAIN (0 = unlimited). `top_k_proofs_training` optionally overrides during training.
+
+EXPLAIN RULE (recorded provenance) lists under each derivation the facts it references through a probabilistic `IS`, the same references exact mode and `TopKProofs` evaluate.
 
 ---
 

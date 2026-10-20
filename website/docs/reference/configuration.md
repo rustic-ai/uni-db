@@ -207,7 +207,7 @@ pub struct UniConfig {
 | `lance_index_cache_bytes` | bytes | `None` (Lance: 6 GiB) | Capacity of the storage engine's index cache (opened scalar, vector and full-text index structures). Keep it above a vector index's size if ANN latency matters: a vector index evicted from it is re-read and re-decoded on each search. Python: `config({"lance_index_cache_bytes": 512 << 20})` |
 | `strict_schema` | bool | false | Reject writes with undeclared labels or edge types |
 | `ssi_enabled` | bool | true | Serializable Snapshot Isolation / OCC (false = last-writer-wins) |
-| `partial_lance_writes` | bool | false | Use Lance `MergeInsert` for SET-only flushes |
+| `partial_lance_writes` | bool | false | Use Lance `MergeInsert` for SET-only vertex flushes (edge writes are always stored as full rows) |
 | `defer_embeddings` | bool | false | Defer per-row auto-embedding to the next L1 flush |
 | `fork_fragment_warn_threshold` | count | 256 | Per-fork L1 fragment count that triggers a warning |
 | `tx_id_reservoir_batch` | count | 16 | Per-transaction VID/EID reservoir refill size |

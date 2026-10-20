@@ -406,7 +406,7 @@ Person.email.is_null()
 Person.email.is_not_null()
 
 # String operations
-Person.name.like("Al%")
+Person.name.like("Al.*")   # regex (=~), matches the whole name
 Person.name.starts_with("Al")
 Person.name.ends_with("ice")
 Person.name.contains("lic")

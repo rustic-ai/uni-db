@@ -481,6 +481,18 @@ RETURN json_get_string(p.overflow_json, 'github')
 - `json_get_float(overflow_json, 'key')` - Extract float
 - `json_get_bool(overflow_json, 'key')` - Extract boolean
 
+### A Declaration Applies Only to Its Own Label
+
+Declaring `price: FLOAT` on `Product` types `price` on `Product` vertices only.
+The same name on another label, or on a relationship type that does not
+declare it, keeps whatever value was written: `MATCH (o:Offer) RETURN o.price`
+returns the integer or string stored there, in a `CALL { ... }` subquery and a
+Locy rule as much as in a plain `MATCH`. A relationship matched over several
+types (`[e]`, `[e:A|B]`) takes a declared type only when every one of those
+types declares it the same way. A `UNION` whose branches return different
+types for one column (a typed property and an untyped one, or `1` and `'a'`)
+returns each row's own value.
+
 ### Enforcing Strict Schema
 
 If you want to disable schemaless labels and edge types entirely, enable `strict_schema`:

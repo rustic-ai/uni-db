@@ -157,6 +157,10 @@ YIELD KEY s, 1.0 AS confidence PROB
 
 If the referenced rule has no `PROB` column, `IS NOT` keeps standard Boolean semantics.
 
+`1 - p` treats the negated fact as independent of the rest of the row. In exact mode (below) the
+row instead conjoins the *negation* of the negated fact's formula, so a row that needs a path and
+the absence of an edge on that path gets the right probability.
+
 ### Positive `IS` References to a `PROB` Rule
 
 A positive reference is the mirror image: the row holds only when the referenced fact does, so its
@@ -194,18 +198,35 @@ already reads the referenced probability is not charged for it twice:
 
 ## Shared-Proof Detection and Exact Mode
 
-MNOR and MPROD assume independent derivations. When two proofs of one fact rest on the same evidence — the same edge, the same referenced fact, or the fact itself through a cycle — the runtime emits `SharedProbabilisticDependency`. Nodes in common are not evidence in common: the two proofs of `reach(s, t)` above share no edge, so the independence value 0.745 is already exact and nothing is reported.
+MNOR and MPROD assume independent derivations. When two proofs of one fact rest on the same evidence — the same edge, the same referenced fact, or the fact itself through a cycle — or one row's positive part and an `IS NOT` rest on the same edge, the runtime emits `SharedProbabilisticDependency`. Nodes in common are not evidence in common: the two proofs of `reach(s, t)` above share no edge, so the independence value 0.745 is already exact and nothing is reported.
 
-Set `exact_probability = true` in `LocyConfig` to compute those facts exactly, under possible-worlds semantics: each fact is the OR (MNOR) or AND (MPROD) of its rows, each row is its own event AND every fact it references, and the formula is evaluated with a BDD. On `A -0.5-> B -0.4-> C -0.6-> D` plus `A -0.3-> C`, both proofs of `reach(A, D)` need `C -> D`; exact mode gives `0.6 × (1 - 0.7 × 0.8) = 0.264` where independence gives 0.2784. When no fact is shared, the two modes agree. Two important fallbacks remain:
+Set `exact_probability = true` in `LocyConfig` to compute those facts exactly, under possible-worlds semantics: each fact is the OR (MNOR) or AND (MPROD) of its rows, each row is its own event AND every fact it references AND NOT every fact its `IS NOT` matched, and the formula is evaluated with a BDD. On `A -0.5-> B -0.4-> C -0.6-> D` plus `A -0.3-> C`, both proofs of `reach(A, D)` need `C -> D`; exact mode gives `0.6 × (1 - 0.7 × 0.8) = 0.264` where independence gives 0.2784. When no fact is shared, the two modes agree.
+
+With negation: over `s -0.7-> t`, `s -0.3-> m -0.5-> t`, a rule
+`MATCH (a), (m) WHERE a IS reach TO b, m IS NOT link TO b` (with `link(a, b)` the noisy-OR of the
+`a -> b` edges) holds for `(s, m, t)` when `t` is reachable from `s` without the edge `m -> t`:
+exact mode gives `0.7 × 0.5 = 0.35`, default mode `0.745 × (1 - 0.5) = 0.3725` with a
+`SharedProbabilisticDependency` warning.
+
+Two important fallbacks remain:
 
 - `BddLimitExceeded`: the group exceeded `max_bdd_variables`, so Locy falls back to the independence result for that key group.
 - `CrossGroupCorrelationNotExact`: shared evidence spans multiple aggregate groups; each group is exact internally, but cross-group correlation is still approximate.
 
 Rows from approximate groups are marked with `_approximate = true`, and Rust `LocyResult` values also expose `approximate_groups`.
 
-### TopKProofs Semiring (DNF Inclusion-Exclusion)
+### TopKProofs Semiring
 
-`LocyConfig.semiring = TopKProofs(k)` is an alternative to the BDD path. The runtime keeps the top `k` proofs per derived fact (ranked by proof probability) and, for `MNOR` aggregates whose proofs share base facts, computes the exact joint via DNF inclusion-exclusion instead of the independence approximation. Cheaper than BDD for moderate `k`; emits `TopKPruningCrossedDependency` when pruning drops a proof that shares a base fact with a retained one, so you can decide whether to bump `k`.
+`LocyConfig.semiring = TopKProofs(k)` evaluates each `MNOR` fact over its `k` most probable rows (its proofs), exactly: each proof is its own event AND the facts it references, as in exact mode, so proofs sharing an edge — even one below a referenced fact — count it once. With `k` at least a fact's number of rows the value is the possible-worlds probability; with fewer it is the probability of the kept proofs. On the `A … D` graph above, `TopKProofs(8)` gives `reach(A, D) = 0.264` and `TopKProofs(1)` keeps the 0.18 proof through `C`. A fact with at most `k` rows and no shared event keeps its default value, which is already exact. A referenced fact of a rule without a `PROB` column is certain and adds no event: two edges into one hub both referencing `hub_score(h)` stay independent (`1 - 0.3 × 0.4 = 0.88`).
+
+!!! warning "Behavior change"
+    `TopKProofs` used to treat the referenced facts of a row as its only events, weighted by the
+    largest row, and to resolve references through the subject variable, which a rule that does not
+    yield it (`mid IS reach TO b`) dropped. The hub example above gave 0.7, and `reach(A, D)` gave
+    the independence value 0.2784.
+
+`EXPLAIN RULE` shows, under each derivation, the facts it references — the same references exact
+mode and `TopKProofs` evaluate.
 
 ### MaxMinProb Semiring (Viterbi / Fuzzy)
 

@@ -13,7 +13,7 @@ Locy can invoke neural classifiers inline as part of a rule body. Declare a mode
 - **`CALIBRATE rule USING method`** — fit a calibrator (Platt scaling, isotonic regression, temperature scaling, beta, Dirichlet) against held-out labels. Returns `CalibrationResult` with `raw_brier` / `raw_ece` / `calibrated_brier` / `calibrated_ece` so you can show the calibration delta.
 - **`VALIDATE rule USING brier, ece`** — score a rule's predictions against ground-truth labels. Returns `ValidationResult` with per-metric values.
 - **`EXPLAIN` with neural provenance** — every derivation that crossed a classifier carries a `NeuralProvenance` record with `model_name`, `raw_probability`, `calibrated_probability`, `confidence_band`, and `ConfidenceSource` so an auditor can reproduce the score.
-- **Three semirings** — `AddMultProb` (the default; noisy-OR / product), `MaxMinProb` (Viterbi-style fuzzy truth), `TopKProofs(k)` (DNF inclusion-exclusion over shared base facts). Pick per-call via `LocyConfig`.
+- **Three semirings** — `AddMultProb` (the default; noisy-OR / product), `MaxMinProb` (Viterbi-style fuzzy truth), `TopKProofs(k)` (each fact's `k` most probable proofs, evaluated exactly). Pick per-call via `LocyConfig`.
 
 ## Minimal Example
 

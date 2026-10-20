@@ -267,7 +267,7 @@ label).
 `~=` is **vector-only** — it cannot do FTS or hybrid search. For hybrid, use `similar_to()` with multi-source arrays (see [below](#similar_to-expression-function)).
 
 !!! note "`=~` is regex, `~=` is vector similarity"
-    These are unrelated operators that look similar. `n.name =~ '(?i)john'` is a regex match. `n.embedding ~= $vec` is a vector similarity scan.
+    These are unrelated operators that look similar. `n.name =~ '(?i)john.*'` is a regex match (over the whole string). `n.embedding ~= $vec` is a vector similarity scan.
 
 ### With Distance Threshold
 

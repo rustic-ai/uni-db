@@ -1446,6 +1446,37 @@ MATCH (n:Person) WHERE n.nickname = 'Bob' RETURN n
 // ... WHERE json_get_string(overflow_json, 'nickname') = 'Bob'
 ```
 
+### A declaration types a property only on its own label
+
+A declared property type belongs to the label or edge type that declares it,
+not to the property name. Every place that types a property column ahead of
+reading it resolves the type with `Schema::scoped_property_meta`
+(`uni-common/src/core/schema.rs`), from the labels the entity is known to
+carry, as an `EntityScope`:
+
+- `AllOf(labels)`: a vertex carrying every label (`(n:A:B)`, a schemaless
+  scan's labels). The labels among them that declare the property decide, and
+  must agree.
+- `OneOf(labels)`: an entity carrying exactly one (`[e:R|Q]`, the edge types
+  of an untyped `[e]`). Every alternative must declare it at the same type.
+
+No type from the scope means the column carries the stored value
+(`LargeBinary` / `CypherValue`). The callers are the schemaless vertex scan
+(`df_graph/scan.rs`), traversal edge-property typing
+(`merged_edge_schema_props`: a property not declared alike by every edge type
+in scope is listed with type `CypherValue`), correlated-subquery output typing
+(`infer_logical_plan_schema`, which collects each variable's scope from the
+subquery's own scans and traversals and treats imports, renames and
+conflicting bindings as unknown), and Locy's rule-column typing
+(`locy_planner::property_arrow_type`, from the clause's MATCH pattern). A
+lookup across every label in the schema read `F.v FLOAT` onto `s.v` of a
+schemaless `S`: an integer above 2^53 rounded, a string became NULL, and Locy
+failed with "cannot read the string as a number".
+
+`UNION` branches whose column types differ are encoded to `CypherValue` on
+both sides (`coerce_union_entity_columns`), since a schemaless property column
+meeting a declared one is ordinary.
+
 ## Edge Storage
 
 ### Delta Tables (`deltas_{edge_type}_{direction}`)
@@ -1760,14 +1791,38 @@ Invariants:
   folds a delta into L2 only on the strength of its `main_edges` row; the
   `delta::before-write-run` seam fires in `DeltaDataset::publish_runs` at the
   instant a run becomes readable), vertex tables before edges.
-- **The crash marker spans only the publish step.** `catalog/bulk_flush_intent.json`
-  is written `Active` immediately before the first publish commit, recording the
-  pre-publish version of every published table *and of the touched edge types'
-  L2 adjacency tables*: a pass between two publish commits can fold the
-  already-published deltas into L2, and recovery must roll L2 back with them or
-  the forward direction keeps edges whose `main_edges` rows were rolled back.
-  The rollback in that window still discards any other writer's commits made
-  inside it; the window is the publish step, not the whole load.
+- **A crash in the publish step is completed, never undone.** Each load owns
+  its marker, `catalog/bulk_flush_intents/{load id}.json` (`BulkWriter::load_id`),
+  written `Active` immediately before the first publish commit. It records, in
+  publish order, every table's staged rows as the backend's durable description
+  (`StorageBackend::staged_record`; for Lance, the fragments' serde form) and
+  each table's pre-publish version. The load is decided at that write: reopen
+  (`recover_interrupted_bulk_load`) calls
+  `StorageBackend::publish_staged_record` for each table, which appends onto the
+  current version, so it keeps every other writer's commit to the same tables.
+  Exactly once: the Lance impl treats a table as already published when the
+  current manifest, or the Append transaction of any retained version after the
+  pre-publish one, names one of its files. When every file is gone (published,
+  rewritten, then pruned), it is published; when only some are gone it refuses
+  and the marker stays. A pass that folded the published deltas into L2 is
+  consistent with this, because the rest of the load arrives instead of the
+  folded part leaving. User indexes on the load's labels are marked `Stale`.
+  The old design restored each table to its pre-publish version, which also
+  discarded other sessions' commits made inside the window or afterwards
+  (measured: a vertex and an edge committed and flushed during the publish, or
+  after a failed one, were gone after reopen).
+- **Markers are per load.** The single `catalog/bulk_flush_intent.json` let a
+  second load's `Active` overwrite the first's and either load's `commit()` or
+  `abort()` delete the other's (measured: load A left with its vertices and fwd
+  delta published and bwd not, after load B committed). Recovery reconciles
+  every marker independently, deletes each only after its reconciliation fully
+  succeeded, and still reads the legacy file (as a version rollback, which is
+  all it records). A crash during recovery is recovered by the next open
+  (`bulk::recover::after-table` seam).
+- **A `Committed` marker never moves the latest pointer backwards.** Recovery
+  flips the pointer to the load's snapshot only when the pointer is still at
+  that snapshot's parent; a flush that moved it on after the load's manifest
+  was saved keeps its snapshot (`bulk::commit::after-committed-marker` seam).
 - **A table that does not exist yet is created empty at the first flush** (from
   the batch schema, after `ensure_table_accepts`) so staged files carry the field
   ids later appends use. An empty table is the only thing a reader can observe
@@ -1783,7 +1838,7 @@ Invariants:
   is therefore as invisible before `commit()` as primary's, and its abort
   touches no table.
 - **A fork writes no crash marker** (`BulkWriter::writes_crash_marker`). The
-  marker is the database's and recovery applies it to primary's tables, while
+  markers are the database's and recovery applies them to primary's tables, while
   the versions a fork's backend reports are primary's
   (`BranchedBackend::get_table_version` delegates). Before forks staged, every
   fork flush wrote one, and reopening after an interrupted fork load rolled
@@ -1792,15 +1847,10 @@ Invariants:
   (`fork::fork_bulk_load::*_leaves_primary_intact_at_reopen`). The residual: a
   fork load that fails part-way through `commit()` can leave its per-label
   tables published and its main table not, and nothing reconciles a fork.
-- **One marker per database.** The marker is a single file, and two sessions
-  can each run a bulk load (the write guard is per session), so a second
-  load's `Active` marker overwrites the first's and either load's `commit()`
-  clears the other's. A crash in one load's publish while the other is open is
-  then reconciled for at most one of them. Per-load markers would not fix it
-  on their own: rolling a shared table back by version, as recovery does,
-  also discards the other load's published rows.
 - **A backend that cannot stage keeps the old protocol** — visible writes, abort
-  by version restore. No in-tree backend is in that position any longer.
+  and crash recovery by version restore, which discards other writers' commits
+  to the same tables. No in-tree backend is in that position any longer (only
+  test doubles).
 
 ## L0Buffer
 
@@ -3948,7 +3998,7 @@ Uni provides two syntaxes for similarity search. They serve **different purposes
 
 The `~=` operator is **vector-only** and cannot do FTS or hybrid search. For hybrid search, use `similar_to()` with multi-source arrays.
 
-> **Common confusion:** `=~` is regex match (`n.name =~ '(?i)john'`), `~=` is vector similarity. They are unrelated operators.
+> **Common confusion:** `=~` is regex match over the whole string (`n.name =~ '(?i)john.*'`), `~=` is vector similarity. They are unrelated operators.
 
 **A `vector_similarity` threshold is never index-served.**
 `WHERE vector_similarity(d.emb, q) > t` keeps exactly the rows whose cosine
@@ -4780,6 +4830,17 @@ COPY Person TO '/path/to/file' WITH {format: 'csv'}
 COPY Person FROM '/path/to/file' WITH {format: 'parquet'}
 ```
 
+`COPY` lives in `uni-query/src/query/executor/copy.rs` (plans
+`LogicalPlan::CopyTo` / `CopyFrom`). Export reads the entities through the
+query engine — `MATCH (n:L) RETURN id(n), properties(n)` (edges:
+`MATCH (a)-[r:T]->(b)`) — so a file carries exactly the user-visible
+properties, L0 included, never storage columns. Layout: `_vid` or
+`_eid`/`_src`/`_dst`, then the sorted union of property keys. Parquet columns
+are built with the storage `PropertyExtractor` (declared type, else the
+values' shared scalar type, else `CypherValue`); import decodes with the
+declared type or the field's raw-bytes hint. Local paths go through
+`Executor::validate_path`, which reads `config.file_sandbox`.
+
 ## Time Travel
 
 Query historical data using snapshots or timestamps:
@@ -5208,7 +5269,7 @@ Consequences:
 
 A recursive rule's own facts exist in two shapes while the fixpoint runs, and different consumers need different ones. `DerivedScanView` (`crates/uni-query/src/query/df_graph/locy_fixpoint.rs`) names them, and the `DerivedScanRegistry` keys handles by `(rule_name, is_self_ref, view)` so both can be live at once:
 
-- **`Contributions`** — the pre-fold rows, one per derivation, carrying the hidden `__deriv_*` discriminators. ALONG's `prev.x` needs these (it accumulates along a single path); so do a self-negated `IS NOT` and provenance, whose `base_fact_id` hashes must stay joinable with the ones `record_provenance` records.
+- **`Contributions`** — the pre-fold rows, one per derivation, carrying the hidden `__deriv_*` discriminators. ALONG's `prev.x` needs these (it accumulates along a single path); so does a self-negated `IS NOT`. (Provenance no longer joins against a view: a derivation's referenced facts are read from its own hidden `__deriv_isref_*` columns, see Shared-Proof Detection.)
 - **`Folded`** — one row per KEY carrying that KEY's folded value, refreshed at the end of every merge by running `PriorityExec` + `FoldExec` — the same operators the post-fixpoint chain uses — over the accumulated contributions and grafting the result onto a representative row per KEY. A clause that folds a child's value reads this.
 
 The planner picks the view **per clause**: a positive same-stratum reference to a rule carrying FOLD gets `Folded` unless the clause carries ALONG, in which case ALONG wins for that clause only. Before this split (issue #162), every self-reference read contributions, so a parent joined one row per *contribution* of its child rather than one row per child, and whole-row dedup then collapsed the equal-valued ones — a silently optimistic rollup.
@@ -5402,12 +5463,14 @@ The referenced probability travels in a hidden body column: transient `__isprob_
 
 ### Shared-Proof Detection and Exact Probability Mode
 
-MNOR and MPROD assume independent derivations. Every `MNOR`/`MPROD` rule records its pre-fold rows as **lineage** (`locy_lineage::LineageStore`, held by the run's `ProvenanceStore`) once its stratum converges — every rule of the stratum before any is corrected, since a rule's formula reads its stratum-mates. A fact's possible-worlds formula is `OP over its rows of (row event AND each referenced fact's formula)`, OP = OR for MNOR, AND for MPROD:
+MNOR and MPROD assume independent derivations. Every `MNOR`/`MPROD` rule records its pre-fold rows as **lineage** (`locy_lineage::LineageStore`, held by the run's `ProvenanceStore`) once its stratum converges — every rule of the stratum before any is corrected, since a rule's formula reads its stratum-mates. A fact's possible-worlds formula is `OP over its rows of (row event AND each referenced fact's formula AND NOT the disjunction of each negated reference's facts' formulas)`, OP = OR for MNOR, AND for MPROD:
 
-- **Row event.** The row's PROB value divided by the referenced probabilities it carries, which recovers the clause's own weight whether the reference was multiplied in or read as a factor. Two rows whose own weight is the same expression over the same nodes and relationships are one event: `__deriv_event` hashes the expression's shape and their identities (`locy_planner::row_event_expr`), so the direct `s→t` row of a reachability rule and its row through a self-loop at `t` share the edge `s→t`. A weight that reads no node or relationship (a constant) makes the row its own event.
+- **One reference resolution.** Which facts a row references is read in one place, `locy_lineage::RefResolver`, from the hidden columns: `__deriv_isref_*` (positive) and `__deriv_isnot_*` (negated). Lineage, EXPLAIN's provenance support (`locy_fixpoint::row_provenance`) and so `TopKProofs` all read it. The old provenance join (`collect_is_ref_inputs`, matching the subject's body column against the referenced rule) is gone: it found nothing when YIELD did not carry the subject (`mid IS reach TO b`) and dropped the `TO` target, so EXPLAIN Mode A and the TopK support map recorded no support. A reference without a hidden column (to a rule with no PROB column, or from a rule that keeps no lineage) is a certain condition and is not support.
+- **Row event.** The row's PROB value divided by the referenced probabilities and complements it carries, which recovers the clause's own weight whether the reference was multiplied in or read as a factor. A divisor of 0 (a referenced probability of 0, a negated one of 1) means a default value that is also exact, so the weight is never read. Two rows whose own weight is the same expression over the same nodes and relationships are one event: `__deriv_event` hashes the expression's shape and their identities (`locy_planner::row_event_expr`), so the direct `s→t` row of a reachability rule and its row through a self-loop at `t` share the edge `s→t`. A weight that reads no node or relationship (a constant) makes the row its own event.
 - **Referenced fact.** Found by `(rule, __deriv_isref_*)`; a fact of a rule without lineage (a non-fold PROB rule) is one independent event of the probability read. A reference to a lineage rule that holds no such fact fails the run.
+- **Negated facts.** The planner projects a typed-NULL `__deriv_isnot_{clause}_{occurrence}` (Binary) for every `IS NOT` to a PROB rule in an `MNOR`/`MPROD` rule (`NegatedLineageRef`), and the complement (`locy_complement::probe_prob_complement`) fills it with each fact its negation key matched: the fact's KEY hash, over the negated rule's KEY columns in yield order (the hash its lineage records), and the probability the complement used (24 bytes each, `encode_negated_facts`); NULL when nothing matched. Default mode keeps `1 - p`. Negation is stratified, so a negated fact is never in the referencing fact's strongly connected component; `fact_probability` evaluates components dependencies first, each a monotone least fixpoint, and the negated formula is complete before it is negated.
 
-`SharedProbabilisticDependency` fires when some fact's formula reads a variable twice — two rows, or two parts of one row, sharing an event or a referenced fact, or a cycle (`Analysis` walks strongly connected components dependencies first; a support past `ANALYSIS_SUPPORT_CAP` variables counts as shared). Nodes in common are not evidence in common: the Source/Mid/Target diamond's proofs `{S→T}` and `{S→M, M→T}` share nothing, and independence is exact there (0.745). When no fact of a program is shared, the default value of every fact is already its possible-worlds probability, so the two modes agree — pinned by `locy_prob_is_ref_semantics::exact_matches_possible_worlds_and_default_agrees_without_sharing` against a brute-force enumeration of worlds.
+`SharedProbabilisticDependency` fires when some fact's formula reads a variable twice — two rows, or two parts of one row (a negated fact's variables count like a referenced fact's), sharing an event or a referenced fact, or a cycle (`Analysis` walks strongly connected components dependencies first; a support past `ANALYSIS_SUPPORT_CAP` variables counts as shared). Nodes in common are not evidence in common: the Source/Mid/Target diamond's proofs `{S→T}` and `{S→M, M→T}` share nothing, and independence is exact there (0.745). When no fact of a program is shared, the default value of every fact is already its possible-worlds probability, so the two modes agree — pinned by `locy_prob_is_ref_semantics::exact_matches_possible_worlds_and_default_agrees_without_sharing` and, with `IS NOT` over shared lineage, `negation_exact_matches_possible_worlds_and_default_agrees_without_sharing`, against a brute-force enumeration of worlds.
 
 With `LocyConfig::exact_probability = true`, each fact whose formula is not read-once is rebuilt as a BDD (least fixpoint from false, so a derivation through itself adds nothing) and evaluated by Shannon expansion; the group keeps one row carrying that probability. Two fallbacks remain important:
 
@@ -5415,6 +5478,8 @@ With `LocyConfig::exact_probability = true`, each fact whose formula is not read
 - `CrossGroupCorrelationNotExact` — shared evidence crosses separate aggregate groups; each group is exact internally, but cross-group correlation is still approximate
 
 Derived rows from approximate groups are annotated with `_approximate = true`, and `LocyResult.approximate_groups` records the affected rule/key groups.
+
+`SemiringKind::TopKProofs { k }` runs through the same `LineageStore::correct`: every fact that is not read-once, and every `MNOR` fact with more than `k` rows, is evaluated by `fact_probability` over its `k` highest-weight rows (`top_rows`, ties by position), the facts those rows reference keeping all theirs. A read-once fact with at most `k` rows keeps its default value, already exact. The fold then sees one row per recomputed fact and runs the plain aggregate. This replaced the fold-time DNF (`BodySupportMap`, `topk_dnf_disjunction`), which weighted each referenced fact by the largest row reading it and treated it as the rows' only event, so two edges into one hub that both referenced a certain `hub_score(h)` folded to 0.7 instead of 0.88, and which, through the old join, saw no support for `mid IS reach TO b`.
 
 ### BEST BY (Ranked Selection)
 
@@ -5672,7 +5737,9 @@ THEN {
 }
 ```
 
-Executes within a savepoint: applies mutations, re-evaluates all strata in the mutated state, dispatches body commands (QUERY, Cypher, DERIVE, nested ASSUME), collects the rows of its QUERY and Cypher commands, then rolls back. The database is never permanently modified. A DERIVE in the body writes into the hypothetical L0, so a later body Cypher command reads its edges; its `affected` count is not part of the ASSUME result.
+Executes within a savepoint: applies mutations, re-evaluates the strata in the mutated state, dispatches body commands (QUERY, Cypher, DERIVE, nested ASSUME) in sequence, concatenates their rows, then rolls back. The database is never permanently modified.
+
+**Body commands are sequenced against the state they leave.** The semantic contract is the body's commands run one by one in a transaction that is rolled back. `evaluate_assume` keeps the body's facts as a `BodyFacts` (parent facts + hydrated parent rows + the full row store with the body's own rules on top), derived by `derive_body_facts`. `dispatch_body_command` returns a `BodyOutcome { rows, written: Option<MutationFootprint> }`; when a command wrote, `derive_body_facts` runs again with the previous `BodyFacts` as the baseline and the write's footprint, so `reuse_plan` keeps every parent stratum the write cannot affect and the body's strata are re-derived on top (positionally reusing the new parent strata). The nested-ASSUME baseline is popped and re-pushed for the new state. A DERIVE's footprint is the union (`MutationFootprint::extend`) of `query_footprint` over the mutations it ran (`locy_derive::derive_command_footprint`); a DERIVE with `affected == 0` ran none and writes nothing. A Cypher command counts as a write when its footprint is non-empty or does not preserve existing entities. Before this, the facts were derived once before the first command, so a QUERY or second DERIVE after a DERIVE read stale facts while a Cypher read saw the new edges. Rows: QUERY/Cypher rows, one `{affected: n}` row per DERIVE (the top-level `CommandResult::Derive { affected }`), a nested ASSUME's rows (the DERIVE and nested rows used to be dropped). Guard: `locy_assume_body_sequencing` (each case against the tx + rollback oracle).
 
 **ABDUCE and EXPLAIN RULE are rejected in an ASSUME body** at compile time (`LocyCompileError::AssumeBodyCommandNotAllowed`, raised in `compiler/mod.rs` for each `AssumeBlock`, so a nested body is checked when it is compiled). `CommandResult::Assume` carries rows only; the dispatcher used to evaluate them and drop the result. `dispatch_body_command` in `locy_assume.rs` refuses both too, for a hand-built `CompiledProgram`. The replacements are a top-level ABDUCE after the ASSUME, or `tx()` / `Session::scratch()` + mutate + command + `rollback()`.
 
@@ -5681,7 +5748,7 @@ Executes within a savepoint: applies mutations, re-evaluates all strata in the m
 The hypothetical state differs from the state before the block only by the block's mutations, so a stratum the mutations cannot affect keeps its facts. `locy_assume::re_evaluate_hypothetical` re-derives only the affected strata (from scratch) and copies the rest from the facts of the state before the mutation. Before this, every ASSUME and every ABDUCE candidate re-derived the whole program (`rows_scanned` 1.97x the plain program for an ASSUME adding one isolated node).
 
 - **Criterion** (`uni_locy::incremental`, purely syntactic). The mutation's `MutationFootprint`: labels whose membership changes (created nodes' labels, `SET`/`REMOVE` labels, *every* label for a node `DELETE`), relationship types created or deleted (a `DELETE r` narrows to `r`'s bound types; a node `DELETE` is every type), property keys that may change on existing entities (`SET n = …` / `+=` is every key), and `opaque` for `CALL` / `WITH RECURSIVE`. Each rule's `RuleReads`: node-pattern labels (an unlabelled pattern reads every label), relationship types (untyped reads every type), property keys read anywhere in the body (MATCH maps, WHERE, YIELD, ALONG, FOLD, BEST BY, REQUIRE, HAVING); a named path, a variable-length relationship variable, a map projection, a dynamic index, `labels`/`keys`/`properties` or an entity passed whole to a non-id function reads every property (and label). A rule is **opaque** (always recomputed) with a subquery / `EXISTS` / pattern comprehension, a generator, a neural model, a namespaced or retrieval function, or a non-deterministic one (`rand`, `timestamp`, nullary temporal constructors). A stratum is affected when a rule is opaque, its reads meet the footprint, or it references (`IS` / `IS NOT`) a rule in an affected stratum or one the program does not hold. Strata are in dependency order, so one forward pass closes the relation.
-- **Same state, same program, same settings.** The adapter (`NativeExecutionAdapter`) offers a baseline only while its state is current: an *epoch* is replaced by a fresh value on every Locy-issued write (`execute_mutation`, a writing Cypher command) and restored by `restore_l0`; under the session path a `BaseFingerprint` of the writer's L0 (buffer identity, version, mutation count, pending flushes) detects a commit or flush by someone else (under a pinned read snapshot nothing can move). The program's own facts are a baseline only when no provenance tracker ran (a tracker can change PROB values via shared-proof BDD, which a re-evaluation does not reproduce). Inside an ASSUME body the parent strata re-derived for the body become the baseline for a nested ASSUME; the body's own strata reuse the parent strata positionally (a body rule may shadow a parent rule's name). ABDUCE takes the baseline once and every candidate reuses it, since each candidate's fork is restored before the next.
+- **Same state, same program, same settings.** The adapter (`NativeExecutionAdapter`) offers a baseline only while its state is current: an *epoch* is replaced by a fresh value on every Locy-issued write (`execute_mutation`, a writing Cypher command) and restored by `restore_l0`; under the session path a `BaseFingerprint` of the writer's L0 (buffer identity, version, mutation count, pending flushes) detects a commit or flush by someone else (under a pinned read snapshot nothing can move). The program's own facts are a baseline only when no provenance tracker ran (`CompiledProgram::needs_provenance_tracker`: `EXPLAIN RULE` or an MNOR / MPROD fold; a tracker can change PROB values via shared-proof BDD, which a re-evaluation does not reproduce). Inside an ASSUME body the parent strata re-derived for the body become the baseline for a nested ASSUME; the body's own strata reuse the parent strata positionally (a body rule may shadow a parent rule's name). ABDUCE takes the baseline once and every candidate reuses it, since each candidate's fork is restored before the next.
 - **Hydration.** Reused facts are copied as raw facts (`LocyProgramExec::set_reused_strata` skips the stratum and seeds the run's store, which later strata read as usual) and re-hydrated in the hypothetical state, unless the mutation only *adds* entities (`MutationFootprint::preserves_existing_entities`), in which case the baseline's hydrated rows are reused too.
 - **Reused strata are not planned.** `LocyPlanBuilder::with_reused_strata` emits a reused stratum as a stub (`reused_stratum_stub`: rule names and YIELD columns, no clause bodies), since `LocyProgramExec` reads nothing else of it. Planning every stratum anyway was the dominant cost of a block that reuses most of the program: 60 one-rule strata, 8 ASSUMEs that reuse all of them, `plan_time` 26.7 ms before and 3.4 ms after, against 3.2 ms for the program alone (`locy_program_plan_time::locy_program_plan_time_skips_reused_strata`).
 - **Why not delta-seeded semi-naive.** Seeding an affected stratum from the change needs each base clause's delta (the matches the mutation added or removed), which no operator computes, and is unsound for deletions, negation and aggregates. Affected strata recompute in full; that is the conservative choice and leaves the O(change) case for later.
@@ -5969,6 +6036,24 @@ lose updates in this mode.
 - **`session.query()`** (outside a transaction) reads latest-visible data
   and does not participate in OCC; use a transaction when the read feeds a
   write.
+- **Procedures read the transaction's view (Wave P0).** A procedure called
+  in a transaction is bound by the same rules as its Cypher reads. Readers
+  that take an `L0Manager` rather than a `QueryContext` (algorithm
+  projections, `AlgoContext`, the `AlgorithmHost` bridge, `uni.graph.project`)
+  get theirs from `L0Context::read_view`, which builds
+  `L0Manager::from_view`: the transaction buffer stays the *newest* layer
+  (`SnapshotView::transaction`) instead of being appended to the
+  pending-flush list as the oldest one. `ProjectionBuilder` overlays that
+  buffer's edges with the shared `l0_visibility::overlay_l0_neighbors` (the
+  function Cypher's expansion uses), drops vertices tombstoned in any layer,
+  and records projected vertices and edges in the OCC read set. Edge
+  properties are read through the calling query's `PropertyManager`
+  (`AlgoContext::property_manager`), because one built over the pinned
+  storage treats the pin as a time-travel snapshot and skips the transaction
+  buffer. A declared procedure's inner query is given a `read_snapshot` over
+  the outer view (a writer-enabled executor otherwise reads its writer's live
+  L0), and the simple executor builds its host over `effective_storage()`.
+  Regression suite: `crates/uni/tests/common/bugs/procedure_reads_in_transaction.rs`.
 
 ### Runtime Affinity: the `uni-io` Runtime
 
@@ -6347,6 +6432,8 @@ Triggers react to mutations. A `TriggerPlugin` (see [Part XVII](#part-xvii-plugi
 - **Outcome** (`TriggerOutcome`): `Continue` (allow), `Reject { reason }` (abort, before-phase only), or `Defer { until }` (re-enqueue for later).
 - The mutation payload is an Arrow `MutationBatch` with columns `event_kind | vid_or_eid | label | property | old_value | new_value`; event kinds are bit-flags (`NODE_CREATE` … `LABEL_REMOVED`).
 - `old_value` is the entity's user property map, whether the pre-image came from the L0 chain or from storage (`PreExistingProbe::extend_with_l1`): declared columns and `ext_id`, plus the undeclared properties unpacked from `overflow_json`; no `_`-prefixed storage column and never the blob. The L1 probe used to copy every column, so a flushed vertex's pre-image carried `overflow_json` (its undeclared properties nested under it), `_deleted`, `_uid`, `_created_at` and `_updated_at` (`triggers::trigger_dispatch::update_pre_image_matches_between_l0_and_flushed_vertex`).
+- Edge pre-images come from `PreExistingProbe::extend_edges_with_committed_state`: every EID the transaction writes or deletes (minus those the committed L0 chain shows deleted) is read through `PropertyManager::get_batch_edge_props` with a `QueryContext` over the committed L0 chain (pending-flush, then current; never the tx buffer) and the `_all_props` wildcard, so the pre-image is the edge's committed state, L0 over L1, in one batched lookup per commit. `from_l0_chain` alone saw only edges still in L0 and only the newest buffer's row, so a flushed edge was `EDGE_CREATE` with no pre-image on its next update and an `EDGE_DELETE` with none. Edge-delete rows resolve the type name from the tombstone's type id, like writes (`triggers::trigger_edge_pre_image`).
+- Edge delta replay (`PropertyManager::replay_edge_delta_rows`, shared by the single-EID read and `get_batch_edge_props_for_type`, the mutation prefetch) treats the newest live delta row as the edge's whole state (CRDT columns still join across versions) and includes `overflow_json`. Every delta row is a whole row: every edge write, including a `SET` under `partial_lance_writes`, flushes as a full-row Append (`Writer::insert_edge_partial_full` delegates to `insert_edge`). The partial edge MergeInsert was removed: keyed on `eid` over an append log it failed on two source rows for one edge, dropped edges never flushed before (`WhenNotMatched::DoNothing`), and rewrote every logged row of the edge to one `_version`, tying the replay (`cypher_write::partial_lance_edge_state`).
 
 Triggers can be declared from Cypher via `CALL uni.plugin.declareTrigger(...)` (see Part VIII) or registered as a compiled `TriggerPlugin`.
 
@@ -7691,7 +7778,9 @@ Security configuration for file I/O operations (BACKUP, COPY, EXPORT):
 | `enabled` | `bool` | `false` (embedded), `true` (server) | Enable path restriction |
 | `allowed_paths` | `Vec<PathBuf>` | `[]` | Allowed directories for file operations |
 
-Prevents CWE-22 (path traversal) attacks in server mode.
+Prevents CWE-22 (path traversal) attacks in server mode. The executor reads
+it from its `UniConfig` (`Executor::validate_path`); before Wave P0 it read a
+separate field nothing set, so the sandbox was never enforced.
 
 ### IndexRebuildConfig
 
@@ -8890,8 +8979,9 @@ paths now reach it or agree with it:
 - A number is never a duration (the old microsecond reading is gone).
 
 On the literal path, `translate_binary_op` lowers `^` to `_cypher_pow` and
-`=~` to `_cypher_regex`. `coerce_scalar_function` puts `regexp_match` back
-when both operands are strings. `coerce_binary_expr` folds arithmetic with an
+`=~` to `_cypher_regex`, for every operand pair: DataFusion's `regexp_match`
+and `~` operator find a match anywhere, where Cypher's `=~` matches the whole
+string (see "`=~` is a full match" below). `coerce_binary_expr` folds arithmetic with an
 untyped NULL beside a non-numeric operand to NULL, and routes temporal
 arithmetic to the `_cypher_*` arithmetic UDFs
 (`needs_cypher_temporal_arithmetic`). Only date/local datetime ± duration and
@@ -8901,8 +8991,8 @@ CypherValue or other non-boolean operand to `_cypher_and` / `_cypher_or`.
 
 On the physical path, `compile_binary_op` does the same for AND/OR over a
 CypherValue and casts an untyped NULL operand to Boolean otherwise.
-DataFusion's `BinaryExpr` panics on a Null right operand of `AND`. `=~` over
-anything but two strings goes to `_cypher_regex`. The per-row UDFs
+DataFusion's `BinaryExpr` panics on a Null right operand of `AND`. `=~` always
+goes to `_cypher_regex`; two string operands take its vectorized path. The per-row UDFs
 (`CypherBooleanOpUdf`) evaluate both operands. DataFusion's batch
 short-circuit on `AND`/`OR` made `true OR n.i` answer by batch composition.
 The CypherValue × Int64/Float64 arithmetic fast path hands a batch holding a
@@ -8913,6 +9003,59 @@ None)`) is incomparable with a zoned datetime or a string
 every literal and property form of 13 operand types × 20 operators agrees,
 with no panic (`cypher_read::expression_value_semantics_test` pins each
 class).
+
+**`=~` is Java's `Pattern.matches`** (Wave P0). openCypher 9 dropped `=~`
+and the TCK has no scenario for it, so Neo4j is the reference: its
+`ValueBooleanLogic.regex` (and the interpreted `LiteralRegularExpression`)
+call `Pattern.compile(p).matcher(s).matches()` with no flags, on Java 21.
+Every evaluator — `_cypher_regex` (vectorized for two strings, per row
+otherwise), the fallback executor and Locy (both through
+`expr_eval::eval_binary_op`) — compiles through
+`expr_eval::compile_cypher_regex` into `java_regex::CypherRegex`, cached per
+thread by the pattern as written.
+
+`java_regex` parses the pattern into a `regex-syntax` **AST** and translates it
+node by node into an HIR that means what the Java pattern means, wraps it in
+`\A … \z`, and builds a `regex_automata::meta::Regex` from the HIR directly.
+(Printing the HIR and re-parsing it is not faithful: a repetition of a
+repetition prints as `a{2}?`, which reads back as a lazy quantifier, so
+`'' =~ '(?:a{2})?'` was false.) The translation tracks Java's flags (`i`,
+`u`, `U`, `m`, `s`, `x`; `(?U)` implies `u`) and applies Java's rules:
+ASCII `\w\d\s\b` and POSIX `\p{..}` unless `(?U)`; case folding per
+`Pattern.single` / `SliceU` / `BitClass.add` / `CIRange[U]`, using
+`Character.toUpperCase`/`toLowerCase` simple mappings (`java_upper`,
+`java_lower`: `char::to_uppercase` where it is one-to-one, plus the Greek
+iota-subscript table and U+0130); `.` excluding all five Java line
+terminators; `\v` as vertical whitespace; `\<`/`\>` as literals;
+`[[:alpha:]]` as a class of the characters `:alpha`; `[a&&]` ignoring the
+missing operand; `\p{..}` resolved like `Pattern.family`
+(`In`/`Is`/`sc=`/`gc=`, case rules, POSIX names, case-insensitive `Lu`/`Ll`/
+`Lt`/`Lower`/`Upper` matching every cased letter). Captures are dropped (only
+`is_match` is needed).
+
+Anchors use the node's position: `head` (only empty-matching nodes before it),
+`tail` (only empty-matching nodes after) and `rest_nonnull` (something after
+must consume). A tail `$` is `\z` in both modes; a multi-line `^` in tail
+position never matches (Java's never matches at the end); other `$`/`(?m)^`
+become `\r`/`\n` line anchors (`EndCRLF`/`StartCRLF`), which are exact under
+input conditions the regex crate cannot express. Those conditions are
+`Guards`, checked per input in `CypherRegex::is_match`; outside them the match
+is refused ("Unsupported regex input"): U+0085/U+2028/U+2029 with multi-line
+anchors; a line terminator before the final one with a non-tail default `$`;
+an empty input or one ending in a terminator when a multi-line `^` may sit at
+the end; and, for ASCII `\b`/`\B`, a nonspacing mark after a letter or digit
+(Java's `Bound` counts such a mark as a word character). Constructs with no
+exact translation are compile errors: possessive and stacked quantifiers,
+lookaround, backreferences, atomic groups, `\Q…\E`, blocks, `\p{java…}`,
+`--`/`~~` class operators, `(?R)`, `(?P<name>…)`, `\u{..}`, `{,n}`.
+
+`java_regex::tests::answers_match_java` checks every case in
+`crates/uni-query-functions/testdata/java_regex_oracle.tsv` against the
+answer Java gave (regenerate with `scripts/java_regex_oracle/regenerate.sh`);
+setting `UNI_JAVA_REGEX_ORACLE` points it at another oracle file, which is how
+the randomized differential runs were done. The simple case mappings agree
+with JDK 25's `Character` for every code point except the 56 characters new in
+Unicode 17 (Rust's tables are newer). No `=~` reaches Lance or an index.
 
 **A condition that cannot be evaluated is an error, not a dropped row** (W6).
 Every Locy filter goes through `locy_eval::eval_condition`: true keeps the
@@ -9032,8 +9175,18 @@ resolved as a VID binds an unrelated node. Before, a yielded relationship was
 typed as a string and came back NULL, which is the only reason EXPLAIN kept its
 own re-derivation. Mode A classifies KEY columns from the hydrated published
 facts, so an integer KEY stays an integer. ABDUCE always builds its tree from
-the published facts (Mode B): recorded provenance has no children, and the
-causes ABDUCE edits are in them. Provenance is keyed by rule and row
+the published facts (Mode B): the causes ABDUCE edits (edges, properties) are
+the evidence rows' bindings, which recorded provenance does not keep. Mode A's
+children are the facts a derivation references (its `support`, from
+`RefResolver`): each referenced fact is expanded into its derivations where it
+first appears (`ModeATree::node`) and is a leaf carrying its bindings elsewhere
+(`(cycle)`, `(derived above)`, `(depth limit)`), which bounds the tree by the
+number of derivations; expanding every occurrence is exponential in the depth.
+A recursive FOLD/ALONG rule's provenance is keyed per derivation (its yield
+columns other than the fold inputs, plus its `__deriv_*` columns,
+`derivation_hash_indices`) and re-recorded with its latest value
+(`ProvenanceStore::record_derivation`): keyed by yield values, two derivations
+through different referenced facts with equal values were one entry. Provenance is keyed by rule and row
 (`provenance_fact_hash`): keyed by row alone, a tuple two rules derive was
 recorded for the first, and EXPLAIN of the second lost it
 (`locy_single_engine`, `locy_generator_plugin`).

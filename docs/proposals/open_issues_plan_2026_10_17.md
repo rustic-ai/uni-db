@@ -3155,3 +3155,433 @@ uncommitted.**
     complement is not a negated BDD literal.
   - Cross-group correlation is reported only for shared referenced facts,
     not for shared row events.
+
+## Wave P0 (2026-10-19)
+
+### proctx — procedure reads inside a transaction
+
+- **Probe matrix.** Declared `READ` and `WRITE` Cypher procedures,
+  `uni.algo.wcc`, `uni.algo.reachability` (`GraphView`), `uni.algo.mst`
+  (edge weights), `uni.vector.query`, `uni.fts.query`; each against the
+  transaction's own Cypher read as oracle, unflushed and flushed:
+  read-your-writes, read-your-deletes (own and earlier committed), own
+  edge-property updates, isolation from a later commit (flushed and not),
+  rollback, and SSI read-set membership. Forks not probed.
+- **Violations found (before).**
+  - Algorithm projections: tx-created edges not followed (reachability 2
+    vs 3), deleted vertices still projected (wcc/reachability 2 vs 1, also a
+    flushed vertex deleted by an earlier committed tx), tx edge-weight
+    updates unread (mst 1.0 vs 5.0), projected rows not in the read set
+    (a concurrent change to `n0` committed cleanly, Cypher conflicted).
+  - Declared `WRITE` procedure bodies read the live L0: saw a later
+    commit (3 vs 2). Declared `READ` and `WRITE` saw it once flushed (simple
+    executor built its host over live storage).
+  - Vector and FTS: no violation.
+- **Root causes.** (1) Six sites built an `L0Manager` for algorithm readers by
+  appending the tx buffer to the pending-flush list (the oldest layer), and
+  `ProjectionBuilder` neither overlaid tx edges, applied tombstones nor
+  recorded reads. (2) Its property manager was built over the tx-pinned
+  storage, which skips the tx buffer. (3) A writer-enabled inner executor
+  reads its writer's live L0 unless given a read snapshot. (4)
+  `procedure.rs` used `self.storage` instead of `effective_storage()`.
+- **Fix.** One shared path: `L0Context::read_view` → `L0Manager::from_view`
+  (tx buffer kept newest, surfaced as `SnapshotView::transaction`);
+  `overlay_l0_neighbors` moved to `uni-store::l0_visibility` and used by both
+  Cypher expansion and `ProjectionBuilder`; projection applies vertex
+  tombstones from every layer and records the OCC read set;
+  `AlgoContext`/`ProjectionBuilder`/`AlgorithmHostBridge` carry the calling
+  query's property manager; inner queries get a `read_snapshot` over the
+  outer view; `astar`'s heuristic reads through the L0 view.
+- **Tests.** `bugs::procedure_reads_in_transaction`: 6 tests. Revert checks:
+  each of the five fix parts (read-set recording, inner read snapshot,
+  `effective_storage`, property manager, edge overlay + tombstones) undone
+  alone fails its test; files restored byte-identically (md5).
+- **Open.** A named projection (`uni.graph.project`) built inside a
+  transaction likely captures uncommitted rows that survive rollback
+  (unverified, from reading `graph.rs`; it is a materialized,
+  process-global object, so this needs a decision, not a patch).
+  `uni.graph.*` runs on the fallback executor over live storage. Forks
+  were not probed.
+
+### P0 infer — property types resolved only from the variable's own labels
+
+- **Repro (before → after), both L0 and flushed, `F.v FLOAT` declared, `S`/`Q`
+  schemaless.** `CALL { MATCH (s:S) RETURN s.v AS v }`:
+  `9007199254740992.0`/`NULL` → `9007199254740993`/`'x'`; a `WHERE v = 2^53+1`
+  after the CALL matched 0 rows → 1. `MATCH ()-[e]->() RETURN e.w` (R declares
+  `w FLOAT`, Q does not): rounded/`NULL` → exact/`'x'`. Locy `s.v + 0`,
+  `ALONG q = s.v`, unlabelled `(s)` `YIELD s.v`, `[e:Q]` `e.w`: run error
+  "cannot read the string as a number" → correct values. `UNION ALL` of `s.v`
+  and `f.v`, and of `1` and `'a'`: "mismatched schemas" error → mixed column.
+  Not reproduced (already correct): EXISTS/COUNT/COLLECT subqueries, pattern
+  comprehension, OPTIONAL MATCH, WITH chains, single-hop and VLP traversal
+  targets, plain-MATCH aggregates.
+- **Root cause.** Four sites typed a property by name across every label:
+  `infer_expr_type` (correlated-subquery output schema, first label wins),
+  `merged_edge_schema_props` (any one declaring edge type typed all of them),
+  Locy's `uniform_declared_type` (used for arithmetic, ALONG, unlabelled nodes
+  and every relationship), and the UNION reconciler rejected the resulting
+  `LargeBinary`-vs-typed pair.
+- **Fix.** `Schema::scoped_property_meta(EntityScope::{AllOf, OneOf}, prop)` in
+  `uni-common/src/core/schema.rs`, used by the schemaless scan (`scan.rs`),
+  `merged_edge_schema_props` and `infer_logical_plan_schema` (`common.rs`; a
+  variable's scope is collected from the subquery plan's own scans/traversals,
+  imports and rebindings are unknown → `LargeBinary`), and
+  `locy_planner::property_arrow_type` (scope from the clause's MATCH pattern,
+  edges included; `uniform_declared_type` and `property_declared_anywhere`
+  removed). Subquery arithmetic is numeric only over two numbers; `avg` of
+  integers is typed `Float64` (no visible symptom measured for the old `Int64`).
+  `coerce_union_entity_columns` (`df_planner.rs`) encodes any differing column
+  pair to CypherValue.
+- **Tests.** `cypher_read::schemaless_property_type_scope_test`: 3 new tests
+  (`_subqueries`, `_edges`, `_locy`, both flush modes); `uni-common`
+  unit test `scoped_property_meta_reads_only_the_labels_in_scope`.
+  `union_entity_test::a_non_entity_type_conflict_is_still_rejected` asserted
+  the non-openCypher rejection; replaced by
+  `a_non_entity_type_conflict_keeps_each_rows_value` (needs sign-off).
+  Revert check: all 3 new tests fail with the fix undone, pass restored
+  (md5-identical).
+- **Open.** `[e:R|Q]` mixing a declared and an undeclared edge type is
+  rejected at plan time ("Mixed known and unknown edge types not yet
+  supported"), in Cypher and Locy — a separate limitation, not touched.
+
+**Bulk publish crash recovery (data loss): reproduced and fixed, uncommitted.**
+- **Measured before the fix** (failpoints, `delta::before-write-run` at the bwd
+  delta publish):
+  - Another session committed and flushed a vertex and an edge while a bulk
+    publish was in flight. The process then crashed in that publish. After
+    reopen the vertex and the edge were both gone (`(0, 0)`, expected `(1, 1)`).
+  - The same loss happened when a publish failed and the process kept running:
+    writes committed afterwards were rolled back at the next open.
+  - One marker per database: load A failed mid-publish, then load B
+    committed. B's commit deleted A's marker, so A stayed half-published for
+    good (`vertices 20, fwd 30, bwd 0`). The same happened when two
+    publishes were interrupted before the process died.
+  - A `Committed` marker moved the latest snapshot pointer back past a flush
+    made after the load's manifest was saved. No rows were lost in that test.
+- **Root cause.** Recovery undid a publish by restoring each table to its
+  pre-publish Lance version, which drops every later commit to that table, not
+  only the load's. The marker was also one file shared by all loads.
+- **Fix.** A crash that happens after publishing starts is completed, not
+  undone.
+  - Before the first publish commit, the marker records each table's staged
+    fragments: `StorageBackend::staged_record`, which is Lance's fragment
+    serde form.
+  - Recovery calls `publish_staged_record`. It appends onto the current
+    version, exactly once: it skips a table when the current manifest, or the
+    Append transaction of a retained version after the pre-publish one, names
+    one of its files.
+    - If every file is gone, the table counts as published, because it was
+      rewritten and then pruned.
+    - If only some files are gone, recovery refuses and keeps the marker.
+  - Markers are per load: `catalog/bulk_flush_intents/{uuid}.json`. Commit and
+    abort touch only their own marker.
+  - Each marker is deleted only after its own reconciliation succeeds. The
+    legacy single file is still read, as a rollback.
+  - Recovery marks user indexes on the load's labels `Stale`.
+  - A `Committed` marker flips the latest pointer only if it still points at
+    the load snapshot's parent.
+  - Files: `uni-store/src/backend/{traits,lance}.rs`,
+    `uni-bulk/src/{flush_intent,bulk}.rs`, `uni-bulk/Cargo.toml` (`fail`,
+    `futures`).
+- **Contract change.** An interrupted publish used to be rolled back on
+  reopen. It is now completed. Two existing tests were changed to the new
+  outcome, with exact counts:
+  - `bulk_partial_flush_rolled_back_on_reopen` is now
+    `bulk_partial_publish_completed_on_reopen`. It expects 5 rows, checks
+    both vertex tables, then 8 rows after a clean load.
+  - `..._rolls_back_adjacency_resilience` is now
+    `..._completes_consistently_resilience`. It expects the full load in both
+    directions, exactly once, after two reopens and a compaction.
+- **Tests.**
+  - `bulk_isolation_resilience.rs`, 6 new tests: commits made inside the
+    publish; commits made after a failed publish; another load commits; two
+    interrupted publishes; recovery interrupted
+    (`bulk::recover::after-table`); `Committed` pointer
+    (`bulk::commit::after-committed-marker`).
+  - uni-store unit test `staged_record_publishes_exactly_once`: covers the
+    repeat, compaction followed by pruning, and a partly missing record.
+- **Revert checks.**
+  - Original sources restored: all 8 bulk crash tests failed. That is the 6
+    above plus the 2 changed ones. The `Committed` test needed its failpoint
+    added to the original.
+  - All-files-gone branch disabled: the unit test fails.
+  - Sources restored byte-identically (`cmp`).
+- **Open.**
+  - A publish that fails without a crash stays partly visible in the running
+    process until the next open completes it.
+  - A backend that cannot stage still recovers by version rollback. Only test
+    doubles are in that position.
+
+### props — COPY TO property set; entity-field name collisions
+
+- **Repro (before, measured on `d2b4875e0`).** `COPY D TO` with rows only in
+  L0: `No data for label 'D'`. Flushed CSV export: declared columns plus the
+  raw `overflow_json` blob, no undeclared properties. Parquet: the storage table
+  verbatim (`_uid`, `_version`, `overflow_json`; edges `src_vid`, `type`,
+  `props_json`). CSV edge export: unsupported. Schemaless label: `Unknown
+  label`. COPY FROM CSV into a declared `INT64`: `expected Int64 but found
+  Utf8`. With `file_sandbox` enabled, `COPY TO` outside `allowed_paths`
+  succeeded. `MATCH (n:F) CALL { WITH n SET ... } RETURN n` dropped user
+  properties `label`, `type`, `properties` (L0 and flushed).
+- **Root causes.** (1) Two COPY implementations: the live one
+  (`write.rs`, `CopyTo`/`CopyFrom`) dumped Lance tables; the other
+  (`read.rs`, `LogicalPlan::Copy`, with sandbox and cloud support) was never
+  planned. (2) The executor's `file_sandbox` field was never set; the
+  database's `UniConfig` reached `config.file_sandbox`, which nothing read.
+  (3) `ResultNormalizer::is_user_property` excluded `label`/`type`/`properties`
+  by name; Locy's `extract_properties_from_map` and
+  `Value::canonical_entity` excluded `properties` by name.
+- **Fix.** New `executor/copy.rs`: export reads `id(), properties()` through the
+  query engine; layout `_vid` | `_eid,_src,_dst` + sorted union of property
+  keys; Parquet via the storage `PropertyExtractor`; import of that layout
+  (declared-type parsing, endpoint columns, schemaless targets, cloud URLs,
+  sandbox). Dead `LogicalPlan::Copy` and its executor code removed (plus helpers
+  only it used). `validate_path` reads `config.file_sandbox`. Normalizer, Locy
+  decoder and `canonical_entity` use only `is_reserved_property_name` +
+  `entity_property_container`.
+- **Tests.** `cypher_read::copy_user_properties` (3: export matrix
+  declared/schemaless × vertex/edge × L0/flushed × CSV/Parquet; CSV and
+  Parquet round trip; sandbox for COPY TO/FROM and BACKUP),
+  `bugs::entity_field_name_collision` (3), normalizer unit test, `copy.rs`
+  unit tests (2), Python `test_property_name_collision.py` (3);
+  `bugs::repro_edge_export` updated (it pinned the storage-column layout).
+  Revert check: the new tests run against a `git archive` of `d2b4875e0` —
+  all 3 COPY tests, the flattened-map test and the normalizer unit test fail;
+  working tree untouched.
+- **Open.** (a) `CALL uni.fts.query(...) YIELD node RETURN node` returns the
+  node with **no** properties and `properties(node)` is NULL
+  (`plan_procedure_call` drops the `*` whole-entity request) — not a name
+  issue, not fixed. (b) A declared `MAP` property through
+  `CALL { WITH n SET ... }` hits `debug_assert` in
+  `apply.rs::value_to_single_row_array` (unhandled `List<Struct<key,value>>`;
+  release builds fall back to text). (c) `COPY FROM` writes with no
+  transaction buffer (bypasses an enclosing `tx`) and flushes. (d) A flattened
+  entity map carrying a map-valued user property named `properties` and no
+  `_all_props` is still read as a serialised entity — no producer found.
+
+### assume — ASSUME body commands run in sequence
+
+- **Defect (measured).** Inside `ASSUME { m } THEN { body }` the body's facts
+  were derived once before its first command, so a `QUERY` or a second
+  `DERIVE` after a `DERIVE` / Cypher write read the pre-write facts (every case
+  of `locy_assume_body_sequencing` returned `[]` against a tx + rollback oracle
+  that returns the derived rows). A `DERIVE`'s `affected` count and a nested
+  ASSUME's rows were dropped, so a DERIVE-only body returned no rows.
+- **Fix.** `locy_assume.rs`: `BodyFacts` / `derive_body_facts`; after each
+  writing body command the parent strata are re-derived incrementally against
+  the write's footprint (`reuse_plan`) and the body's strata on top; the
+  nested-ASSUME baseline is re-pushed. `locy_derive::derive_command_footprint`
+  returns the union footprint of the DERIVE's mutations
+  (`MutationFootprint::extend`, new in `uni_locy::incremental`). Rows: one
+  `{affected: n}` per DERIVE, nested ASSUME rows included.
+- **Open (measured, not fixed).** The same stale read exists at the **top
+  level**: `DERIVE link` then `QUERY linked` in one program (tx or session)
+  returns no QUERY rows; the docs describe commands as reading converged
+  facts, so this needs a semantics decision.
+
+### regex — `=~` is a full match (Java `Pattern.matches`)
+
+- Decision: `=~` matches the whole string, as in Neo4j. openCypher 9 dropped
+  `=~` and the TCK has no scenario for it, so Neo4j is the reference.
+- Before: every evaluator was a find-anywhere match (`'abc' =~ 'b'` was true):
+  the per-row evaluator used `Regex::is_match`, and two string operands were
+  lowered to DataFusion's `regexp_match` (logical) or `~` (physical).
+- Fix: one compiler, `expr_eval::compile_cypher_regex`, parses the pattern as
+  written with `regex-syntax` and wraps the syntax tree in `\A … \z`; all
+  paths (`_cypher_regex`, now vectorized for strings; fallback executor;
+  Locy) use it. The DataFusion `regexp_match` / `~` lowerings are removed.
+- Tests: `cypher_read::regex_full_match_test` (literals, params, typed /
+  schemaless / indexed columns in L0 and flushed, fallback executor, Locy
+  rule WHERE and QUERY RETURN, NULL and invalid patterns) and unit tests in
+  `expr_eval`. Revert check: 4 of 5 integration tests fail on the old code
+  (the NULL / invalid-pattern pin passes on both, as intended).
+- Follow-up (same day): patterns now follow Java's dialect and defaults.
+  `java_regex` translates the `regex-syntax` AST into an HIR with Java's
+  meaning (ASCII `\w\d\s\b`/POSIX, Java case folding, Java line terminators,
+  Java `\p{..}` resolution, `$` before a final terminator) and builds the
+  matcher from the HIR. Constructs with no exact translation (possessive,
+  lookaround, backreferences, …) are invalid-pattern errors; four
+  input-dependent cases are refused per input. The first round's HIR
+  `Display` round-trip was wrong for a repetition of a repetition
+  (`'' =~ '(?:a{2})?'` was false); the HIR is no longer printed.
+- Evidence: `testdata/java_regex_oracle.tsv` (381 cases, answers from JDK 25
+  `Pattern.matches`) passes; randomized differential runs (282k
+  pattern/subject pairs over two generators) gave no answer that differs from
+  Java, only deliberate refusals.
+- Open: Unicode-version skew (Rust std's case tables are Unicode 17, JDK 21 is 15.0,
+  JDK 25 is 16.0) changes answers for characters new since then; the rejected
+  constructs above are not translated.
+
+### P0 trigger — edge pre-images for flushed edges
+
+- **Repro (before → after), each unflushed vs flushed.** Declared `R {w, opt}`
+  edge carrying undeclared `note`, schemaless `S`. Flushed edge, `SET` /
+  `REMOVE` / `MERGE ... ON MATCH SET`: `EDGE_CREATE`, `old_value` NULL →
+  `EDGE_UPDATE` with `{w, opt, note}` (same as unflushed). `DELETE r` and
+  `DETACH DELETE` of an endpoint: `EDGE_DELETE` with NULL `old_value` →
+  full pre-image. `old.w = 1 AND n.w = 2` matched 0 → 1. Edge deletes,
+  flushed or not, were labelled `type:1` / `type:2147483649` → `R` / `S`, so
+  an `-[:R]`-filtered delete trigger never fired. An edge updated after a
+  flush reported only that write's keys (`{w:2}`) → `{w:2, note:'n'}`.
+- **Data defects found on the way (before → after).** Flushed edge, `SET r.w`,
+  flush: undeclared `note` → NULL (lost) → kept. `REMOVE r.opt`, flush,
+  `SET r.w`, flush: `opt` came back → stays NULL.
+- **Root causes.** (1) `PreExistingProbe` had an L1 lookup for vertices only;
+  edges came from the L0 chain's newest buffer. (2) Tombstone rows used a
+  `type:<id>` placeholder instead of resolving the id. (3) The edge delta
+  replay behind the mutation prefetch (`get_batch_edge_props_for_type`, and
+  the single-EID read) read only declared columns and merged versions key by
+  key, so an older row refilled keys the newest row had dropped.
+- **Fix.** `PreExistingProbe::pending_edge_candidates` +
+  `extend_edges_with_committed_state` (one `get_batch_edge_props` call over
+  the committed L0 chain and L1, `_all_props`); tombstone type resolved via
+  the schema; `PropertyManager::edge_delta_row_props` /
+  `replay_edge_delta_rows` shared by both replay sites. Files:
+  `crates/uni-plugin-host/src/triggers.rs`, `crates/uni/src/api/transaction.rs`,
+  `crates/uni-store/src/runtime/property_manager.rs`.
+- **Tests.** `triggers::trigger_edge_pre_image`: 14 tests. Revert checks: probe
+  + label fix undone → 10 fail; replay fix undone → 2 fail (the data tests);
+  files restored byte-identically (md5).
+- **Cost.** 1000 flushed edges updated in one commit with a trigger: 124–383 ms
+  with the probe (3 runs), 109–282 ms without (6 runs); the difference is
+  inside run-to-run noise at this size. The lookup is chunked `IN` scans, not
+  per edge.
+- **Open.** The probe now runs an L1 lookup for every edge a commit writes,
+  including new ones, whenever triggers or CDC are active (the vertex probe
+  already did this). No user-facing trigger page exists under `website/docs/`
+  to update.
+- **Suites.** uni-db integration `cypher_read|cypher_path|bugs|locy`: 1829 run,
+  1826 passed, 3 timed out under load (`vlp_property_maps_match_the_reference_on_a_fork`,
+  `trail_reachability_matches_brute_force`, `repro_get_edges_scales_with_graph_size`),
+  which pass alone (19–71 s). Cypher TCK 3925/3925 schemaless and sidecar;
+  Locy TCK 539/539 both modes. Clippy `-D warnings` clean on uni-common,
+  uni-query, uni-db (`--lib --test integration`).
+
+### lineage — one reference resolution; `IS NOT` in exact formulas
+
+- **Repro (before).** Diamond `s -0.7-> t`, `s -0.3-> m -0.5-> t`:
+  `reach(s,t) AND NOT link(m,t)` was 0.3725 in exact mode (possible worlds
+  0.35) with no warning in default mode. `TopKProofs(8)` on the shared
+  `C -> D` graph gave `reach(A,D)` 0.2784 (possible worlds 0.264); the hub
+  TCK scenario gave 0.7 (possible worlds 0.88). EXPLAIN (recorded
+  provenance) showed no child under any derivation, and a recursive FOLD
+  rule's derivation was one entry per iteration it changed value (28
+  entries for one derivation through a self-loop) while two derivations
+  with equal values were one. Two `IS NOT` of one PROB rule in a clause gave
+  `(1 - p_a)^2` (0.0441 instead of 0.105).
+- **Root causes.** (1) `collect_is_ref_inputs` resolved references by the
+  subject's body column, which YIELD drops (`mid`), and ignored `TO`: no
+  support for provenance or the TopK fold map. (2) The TopK fold weighted a
+  referenced fact by the largest row and treated it as the rows' only event.
+  (3) The complement folded into the row event as an independent factor.
+  (4) Provenance was keyed by the yield row (value included, and the plan's
+  yield schema already lists the `__deriv_*` columns, `__deriv_isprob_*`
+  among them). (5) The complement column was named by rule only.
+- **Fix.** `locy_lineage::RefResolver` is the one resolution (hidden
+  `__deriv_isref_*` / new `__deriv_isnot_*`); lineage, provenance support
+  (`row_provenance`) and so TopK read it; the old join, `BodySupportMap`,
+  `topk_dnf_disjunction` and `provenance_join_cols` are deleted. `IS NOT`
+  to a PROB rule in an MNOR/MPROD rule projects `__deriv_isnot_*`, filled by
+  the complement with each matched fact's KEY hash and probability; exact
+  mode conjoins `NOT (OR of their formulas)`, evaluated per strongly
+  connected component, dependencies first; the analysis counts negated
+  facts' variables, so the warning fires. `TopKProofs { k }` runs in
+  `LineageStore::correct`: non-read-once facts and MNOR facts with more
+  than `k` rows are evaluated exactly over their `k` best rows. Mode A
+  EXPLAIN builds children from support (expanded once per tree; leaves
+  `(cycle)` / `(derived above)` / `(depth limit)`), keys recursive-FOLD
+  provenance per derivation (`derivation_hash_indices`) with the latest
+  value (`record_derivation`), and hides `__deriv_*` bindings. Complement
+  columns are named per reference.
+- **Tests.** `locy_prob_is_ref_semantics`: +6 (negated literal on the
+  diamond, edge AND NOT its own reachability = 0, 24-graph negation
+  property test over 4 program shapes vs brute force incl. completeness,
+  EXPLAIN children vs graph derivations over 12 random graphs in both
+  modes, TopK(8)/TopK(1) values, two negations of one rule). `locy_lineage`
+  unit: +5. TCK: +4 scenarios (2 ExactProbability, 2 TopKProofs); the hub
+  scenario 0.7 -> 0.88 and `repro_locy_runtime_topk_mnor_mixed_support`
+  likewise, derivation in comments. Three `locy_fold` unit tests of the
+  deleted DNF code removed with it. Oracle: +1 (complement equals possible
+  worlds without sharing; the oracle models default mode, unchanged).
+- **Revert checks.** Support forced empty, TopK correction off, negated
+  columns ignored, complement named by rule: 6 integration + 3 unit tests
+  fail with the values above, the rest pass. Provenance keyed by yield row:
+  the EXPLAIN test fails. Restored byte-identically (md5).
+- **Suites.** uni-query lib 512/512; Locy integration 407/407; Locy TCK
+  539/539 both lanes; uni-locy 231/231; uni-locy-oracle 48/48. Clippy
+  `-D warnings` clean on uni-query, uni-locy-oracle, uni-db.
+- **Open.**
+  - Support lists only probabilistic references (to a PROB rule, from an
+    MNOR/MPROD rule); a reference to a non-PROB rule, or from a non-fold
+    PROB rule, has no hidden identity column, so Mode A shows no child for
+    it. Carrying one for every reference would change set-semantics rules'
+    fact identity; needs a decision.
+  - EXPLAIN Mode B (ABDUCE's tree) still re-runs each clause and shows one
+    derivation per fact; it binds `mid` from the re-run MATCH, so the
+    projected-away subject does not affect it (not probed further).
+  - `proof_probability` (`top_k_proofs` retention) is computed from
+    `base_fact_probs`, which keys by a literal `PROB` column; unchanged and
+    almost always `None`.
+  - A negated fact of a non-fold PROB rule is one variable, like a positive
+    one; its own dependence on other facts is not seen.
+
+### P0 trigger follow-up — `partial_lance_writes` and edges
+
+- **Cypher (flag off/on, primary and fork), scenarios A–D.** All four read
+  back correctly after flush, compaction (primary) and reopen, before this
+  change too. With the flag on, a Cypher edge `SET` still appended a second
+  full delta row: the commit merge (`L0Buffer::merge_validated` →
+  `insert_edge_impl`) re-inserts each edge as a full row and never carried
+  `edge_partial_keys`, so the partial edge route was unreachable from Cypher.
+- **Writer API (`Uni::writer()`, `tx_l0 = None`), flag on, before.** A:
+  `REMOVE` row then partial `SET` in one window → flush fails, "Ambiguous
+  merge inserts are prohibited: multiple source rows match the same target
+  row (eid = 0)". C: create + partial `SET` in one window → readable after
+  flush and compaction, **gone after reopen**; with no prior `R` flush the
+  flush fails (merge target table missing). B: Lance's MergeInsert updated
+  **both** delta rows of the edge to `_version` 5 (`p=1` on one, `p=NULL` on
+  the other); the read happened to return the right row, so the replay tie
+  is shown but a wrong read was not reproduced.
+- **Root cause.** Edge delta tables are an append log (one row per flushed
+  version, `op = 1` rows for deletes); a MergeInsert keyed on `eid` is
+  undefined on it.
+- **Fix.** Edges always store full rows: `Writer::insert_edge_partial_full`
+  delegates to `insert_edge`; the flush's partial edge split,
+  `L0Buffer::edge_partial_keys` / `insert_edge_partial_full`, and
+  `DeltaDataset::build_partial_record_batch` / `merge_insert_partial_run`
+  are removed. Vertices keep the partial path. Files: `writer.rs`, `l0.rs`,
+  `delta.rs`, `uni-common/src/config.rs` (doc), `property_manager.rs` (doc).
+- **Cost (measured, 1000 flushed edges, 3 flush rounds × 3 runs).** Flush
+  37–43 ms as MergeInsert vs 28–33 ms as full Append; delta rows after 3
+  rounds 1000 vs 4000 (the flag-off growth, folded by compaction). Read
+  latency on the larger delta table not measured.
+- **Tests.** `cypher_write::partial_lance_edge_state`: 8 tests (A–D over
+  {flag off, on} × {primary, fork}; A/B/C through the writer; a shape guard
+  that a flag-on edge `SET` appends a full row). Revert check: the three
+  files restored to their prior state → 3 fail (A-writer, C-writer, shape
+  guard); fix restored byte-identically (md5).
+- **Open.** The same commit merge drops `vertex_partial_keys`, so the vertex
+  partial path is likely unreachable from Cypher transactions too
+  (unverified; vertex tables were not inspected).
+
+### ASSUME differential reuse floor (test calibration)
+
+- **Repro.** `assume_matches_a_fresh_evaluation` required reused strata ≥ 10%
+  of all strata over every case. Programs with an MNOR / MPROD fold run with a
+  provenance tracker, and the runtime then skips the ASSUME baseline, so they
+  never reuse. Seed 1792452210422130158: 29 of 46 cases tracked (0 reused /
+  17,743 evaluated), 17 eligible (28.1%); total 7.0% → fail, 0 divergences.
+- **Fix.** The predicate is now `CompiledProgram::needs_provenance_tracker`
+  (`uni-locy/src/types.rs`), used by `impl_locy.rs` and by the test (on the
+  same ASSUME text). The 10% floor applies to tracker-free cases only, with at
+  least `max(compared / 6, 3)` such cases; tracked cases must reuse 0 (pins
+  current behaviour). Messages carry both subsets' counts.
+- **Data.** That seed now passes (eligible 28.1%). 10 random seeds: eligible
+  reuse 30.6–64.7%, eligible cases 16–26 of 42–47 compared (minimum is 7).
+  One of them (15273698863137603002) was at 7.8% total, so would also have
+  failed before.
+- **Teeth.** Baseline disabled in `impl_locy.rs` → the floor assertion fires
+  (eligible 0 / 5,901); file restored byte-identically (md5).
+- **Open.** The tracked-reuse-is-0 assertion was not exercised in a failing
+  state.

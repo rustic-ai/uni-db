@@ -300,6 +300,17 @@ bulk.abort().await?;
 // No data is persisted
 ```
 
+### Crashes During `commit()`
+
+A bulk load is all-or-nothing across a crash. Nothing it writes is visible
+before `commit()`. Once `commit()` starts making the load visible, a crash (or a
+failed `commit()`) is completed the next time the database is opened: every
+table the interrupted commit did not reach is published then, each row exactly
+once. Recovery never restores an older table version, so writes other sessions
+committed meanwhile, including another bulk load, are kept. Several loads
+interrupted at once are each completed. User indexes on the load's labels are
+marked `Stale` and rebuilt by the background index rebuild.
+
 ### Performance Guidelines
 
 | Dataset Size | Recommended Settings |
@@ -467,6 +478,42 @@ with open('citations.jsonl', 'w') as f:
         record = {'src': str(row[0]), 'dst': str(row[1])}
         f.write(json.dumps(record) + '\n')
 ```
+
+---
+
+## COPY TO and COPY FROM (Cypher)
+
+`COPY` exports one label or edge type to a file and imports one back. The
+format comes from `WITH {format: ...}` or the file extension (`.csv`,
+`.parquet`); paths may be local or `s3://`, `gs://`, `az://` URLs, and local
+paths are checked against `UniConfig::file_sandbox` when it is enabled.
+
+```cypher
+COPY Person TO '/data/people.parquet'
+COPY KNOWS TO '/data/knows.csv' WITH {delimiter: ';'}
+COPY Person FROM '/data/people.parquet'
+COPY KNOWS FROM '/data/knows.csv' WITH {delimiter: ';'}
+```
+
+**File layout.** A vertex file has a `_vid` column; an edge file has `_eid`,
+`_src` and `_dst`. Then comes one column per property: exactly the properties
+`properties(n)` returns — declared and undeclared, flushed or not — taken as the
+union over all exported entities and sorted by name. An entity without a
+property has an empty cell (CSV) or a null (Parquet). Internal storage columns
+never appear. Labels and edge types need not be declared.
+
+**Import.** Identity columns are not stored: imported vertices get new ids. An
+edge's endpoints are read from `_src`/`_dst` (or `src`/`dst` when the file has
+no `_src`/`_dst`; override with `src_col`/`dst_col`), so an edge file imports
+into the database whose vertices it references. An empty CSV cell is an absent
+property.
+
+**Types.** Parquet keeps them: a declared property keeps its declared type, and
+an undeclared column gets its values' shared type, or a tagged encoding the
+import decodes back when the values are mixed or structured (lists, temporals).
+CSV is text: on import a declared property is parsed as its declared type and an
+undeclared one is read as a string. Use Parquet to round-trip undeclared
+non-string properties.
 
 ---
 
