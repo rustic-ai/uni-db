@@ -76,3 +76,7 @@ pub mod schemaless_property_type_scope_test;
 pub mod trail_reachability_test;
 // range() with a null argument returns null on every evaluator.
 pub mod range_null_test;
+// `=~` matches the whole string (Java `matches()`) on every evaluator.
+pub mod regex_full_match_test;
+// COPY TO writes exactly the user-visible properties; COPY FROM reads them back.
+pub mod copy_user_properties;

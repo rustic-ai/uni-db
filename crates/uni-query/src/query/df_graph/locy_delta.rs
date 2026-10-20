@@ -341,7 +341,7 @@ pub async fn resolve_clause_with_is_refs(
                         &derived_facts,
                         &pairs,
                         tpc,
-                        &format!("__prob_complement_{rule_name}"),
+                        &format!("__prob_complement_{r}_{rule_name}"),
                     ),
                     // Boolean anti-join.
                     _ => anti_join_is_ref(&rows, &derived_facts, &pairs),

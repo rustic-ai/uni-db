@@ -84,23 +84,24 @@ impl AlgoProcedure for AStarProcedure {
             // 1. Build Projection
             let projection = ProjectionBuilder::new(ctx.storage.clone())
                 .l0_manager(ctx.l0_manager.clone())
+                .property_manager(ctx.property_manager.clone())
                 .node_labels(&labels.iter().map(|s| s.as_str()).collect::<Vec<_>>())
                 .edge_types(&[&edge_type])
                 .build()
                 .await?;
 
-            // 2. Load Heuristic Property
-            let prop_manager = uni_store::runtime::property_manager::PropertyManager::new(
-                ctx.storage.clone(),
-                ctx.storage.schema_manager_arc(),
-                1000,
-            );
+            // 2. Load Heuristic Property, through the same L0 view and
+            //    property manager as the projection: without the view an
+            //    unflushed heuristic value read as missing.
+            let prop_manager = ctx.property_manager();
+            let l0_view = ctx.l0_manager.as_ref().map(|m| m.pin_snapshot());
+            let query_ctx = l0_view.as_ref().map(|v| v.query_context());
 
             let mut heuristic = HashMap::new();
             let vids: Vec<Vid> = projection.vertices().map(|(_, vid)| vid).collect();
 
             for chunk in vids.chunks(1000) {
-                let props_map = prop_manager.get_batch_vertex_props(chunk, &[&heuristic_prop], None).await?;
+                let props_map = prop_manager.get_batch_vertex_props(chunk, &[&heuristic_prop], query_ctx.as_ref()).await?;
                 for (vid, props) in props_map {
                     if let Some(val) = props.get(&heuristic_prop)
                         && let Some(f) = val.as_f64() {

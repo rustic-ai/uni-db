@@ -9,6 +9,10 @@ Feature: Exact BDD-based Probability Computation
   modes: the referenced fact's probability is multiplied into the row, unless
   the row's PROB expression already reads it as a product factor.
 
+  An IS NOT against a PROB rule multiplies 1 - p into the row in default mode.
+  In exact mode the row instead conjoins the negation of the negated facts'
+  formulas, which differs when they share events with the rest of the row.
+
   Background:
     Given an empty graph
 
@@ -473,3 +477,77 @@ Feature: Exact BDD-based Probability Computation
     Then evaluation should succeed
     And the result should not contain a BddLimitExceeded warning
     And the derived relation 'risk' should not contain any approximate facts
+
+  # ── IS NOT inside an exact formula ─────────────────────────────────────
+  # The diamond s -0.7-> t, s -0.3-> m -0.5-> t. odd(s, m, t) holds when t is
+  # reachable from s but there is no m -> t edge. Both rest on m -> t:
+  #   (X OR (Y AND Z)) AND NOT Z = X AND NOT Z = 0.7 * 0.5 = 0.35,
+  # with X = s->t, Y = s->m, Z = m->t. Default mode multiplies the
+  # independent factors, 0.745 * (1 - 0.5) = 0.3725, and reports the sharing.
+  # (The only other odd(s, m, _) fact is odd(s, m, m) = s->m = 0.3.)
+
+  Scenario: A negated fact sharing an edge with the positive part is a negated literal in exact mode
+    Given having executed:
+      """
+      CREATE (s:Node {name: 's'}),
+             (m:Node {name: 'm'}),
+             (t:Node {name: 't'}),
+             (s)-[:LINK {p: 0.7}]->(t),
+             (s)-[:LINK {p: 0.3}]->(m),
+             (m)-[:LINK {p: 0.5}]->(t)
+      """
+    When evaluating the following Locy program with exact_probability:
+      """
+      CREATE RULE reach AS
+        MATCH (a:Node)-[e:LINK]->(b:Node)
+        FOLD prob = MNOR(e.p)
+        YIELD KEY a, KEY b, prob
+      CREATE RULE reach AS
+        MATCH (a:Node)-[e:LINK]->(mid:Node) WHERE mid IS reach TO b
+        FOLD prob = MNOR(e.p)
+        YIELD KEY a, KEY b, prob
+      CREATE RULE link AS
+        MATCH (a:Node)-[e:LINK]->(b:Node)
+        FOLD p = MNOR(e.p)
+        YIELD KEY a, KEY b, p
+      CREATE RULE odd AS
+        MATCH (a:Node), (m:Node) WHERE a IS reach TO b, m IS NOT link TO b
+        FOLD prob = MNOR(1.0)
+        YIELD KEY a, KEY m, KEY b, prob
+      """
+    Then evaluation should succeed
+    And the derived relation 'odd' should contain a fact where a.name = 's' and m.name = 'm' and prob = 0.35
+    And the result should contain a SharedProbabilisticDependency warning for rule 'odd'
+
+  Scenario: A negated fact sharing an edge with the positive part is an independent factor in default mode
+    Given having executed:
+      """
+      CREATE (s:Node {name: 's'}),
+             (m:Node {name: 'm'}),
+             (t:Node {name: 't'}),
+             (s)-[:LINK {p: 0.7}]->(t),
+             (s)-[:LINK {p: 0.3}]->(m),
+             (m)-[:LINK {p: 0.5}]->(t)
+      """
+    When evaluating the following Locy program:
+      """
+      CREATE RULE reach AS
+        MATCH (a:Node)-[e:LINK]->(b:Node)
+        FOLD prob = MNOR(e.p)
+        YIELD KEY a, KEY b, prob
+      CREATE RULE reach AS
+        MATCH (a:Node)-[e:LINK]->(mid:Node) WHERE mid IS reach TO b
+        FOLD prob = MNOR(e.p)
+        YIELD KEY a, KEY b, prob
+      CREATE RULE link AS
+        MATCH (a:Node)-[e:LINK]->(b:Node)
+        FOLD p = MNOR(e.p)
+        YIELD KEY a, KEY b, p
+      CREATE RULE odd AS
+        MATCH (a:Node), (m:Node) WHERE a IS reach TO b, m IS NOT link TO b
+        FOLD prob = MNOR(1.0)
+        YIELD KEY a, KEY m, KEY b, prob
+      """
+    Then evaluation should succeed
+    And the derived relation 'odd' should contain a fact where a.name = 's' and m.name = 'm' and prob = 0.3725
+    And the result should contain a SharedProbabilisticDependency warning for rule 'odd'

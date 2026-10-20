@@ -208,6 +208,7 @@ pub trait AlgoProcedure: Send + Sync {
 
 use std::sync::Arc;
 use uni_store::runtime::L0Manager;
+use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::storage::manager::StorageManager;
 
 /// Execution context for algorithm procedures.
@@ -215,6 +216,14 @@ pub struct AlgoContext {
     pub storage: Arc<StorageManager>,
     /// L0 manager for scanning in-memory vertices not yet flushed.
     pub l0_manager: Option<Arc<L0Manager>>,
+    /// The calling query's property manager, for property values.
+    ///
+    /// Inside a transaction `storage` is version-pinned, and a property
+    /// manager built over pinned storage hides the transaction's own writes
+    /// (it treats the pin as a time-travel snapshot). Cypher reads property
+    /// values through a manager over live storage; an algorithm must use the
+    /// same one. `None` builds one over `storage`.
+    pub property_manager: Option<Arc<PropertyManager>>,
 }
 
 impl AlgoContext {
@@ -223,6 +232,27 @@ impl AlgoContext {
         Self {
             storage,
             l0_manager,
+            property_manager: None,
         }
+    }
+
+    /// Read property values through the calling query's property manager.
+    #[must_use]
+    pub fn with_property_manager(mut self, property_manager: Option<Arc<PropertyManager>>) -> Self {
+        self.property_manager = property_manager;
+        self
+    }
+
+    /// The property manager algorithms read values through: the calling
+    /// query's, or a fresh one over [`Self::storage`].
+    #[must_use]
+    pub fn property_manager(&self) -> Arc<PropertyManager> {
+        self.property_manager.clone().unwrap_or_else(|| {
+            Arc::new(PropertyManager::new(
+                Arc::clone(&self.storage),
+                self.storage.schema_manager_arc(),
+                1000,
+            ))
+        })
     }
 }

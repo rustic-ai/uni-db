@@ -959,7 +959,6 @@ impl HybridPhysicalPlanner {
             | LogicalPlan::CreateJsonFtsIndex { .. }
             | LogicalPlan::DropIndex { .. }
             | LogicalPlan::ShowIndexes { .. }
-            | LogicalPlan::Copy { .. }
             | LogicalPlan::Backup { .. }
             | LogicalPlan::ShowDatabase
             | LogicalPlan::ShowConfig
@@ -1823,17 +1822,7 @@ impl HybridPhysicalPlanner {
                 // storage + L0 snapshot from graph_ctx. Construction
                 // mirrors `execute_algo_procedure` in procedure_call.rs.
                 let graph_algo = {
-                    let l0_ctx = self.graph_ctx.l0_context();
-                    let l0_mgr = l0_ctx.current_l0.as_ref().map(|current| {
-                        let mut pending = l0_ctx.pending_flush_l0s.clone();
-                        if let Some(tx_l0) = &l0_ctx.transaction_l0 {
-                            pending.push(tx_l0.clone());
-                        }
-                        Arc::new(uni_store::runtime::l0_manager::L0Manager::from_snapshot(
-                            current.clone(),
-                            pending,
-                        ))
-                    });
+                    let l0_mgr = self.graph_ctx.l0_context().read_view();
                     let l0_buffers = self.graph_ctx.l0_context().current_l0.as_ref().map(
                         |current| super::df_graph::locy_model_invoke::L0Buffers {
                             current: current.clone(),
@@ -1920,7 +1909,6 @@ impl HybridPhysicalPlanner {
             | LogicalPlan::CreateJsonFtsIndex { .. }
             | LogicalPlan::DropIndex { .. }
             | LogicalPlan::ShowIndexes { .. }
-            | LogicalPlan::Copy { .. }
             | LogicalPlan::Backup { .. }
             | LogicalPlan::ShowDatabase
             | LogicalPlan::ShowConfig
@@ -7004,9 +6992,12 @@ impl HybridPhysicalPlanner {
     /// agree on what a mixed pair becomes rather than one working and the
     /// other reporting a planner bug.
     ///
-    /// Entity columns, and an integer column against a float column, are
-    /// touched. A conflict between, say, an `Int64` and a `Utf8` is left for
-    /// the caller's schema check to reject.
+    /// The same holds for any other pair of differing types. Cypher columns
+    /// are dynamically typed, so `RETURN 1 AS x UNION RETURN 'a' AS x` is
+    /// valid; and a property column is typed only by its own label's
+    /// declaration, so `s.v` on a schemaless label (the stored value,
+    /// `LargeBinary`) meets `f.v` declared `FLOAT` on another. An integer
+    /// against a float is included: no Arrow type holds both exactly.
     fn coerce_union_entity_columns(
         left: Arc<dyn ExecutionPlan>,
         right: Arc<dyn ExecutionPlan>,
@@ -7015,20 +7006,9 @@ impl HybridPhysicalPlanner {
         if ls.fields().len() != rs.fields().len() {
             return Ok((left, right));
         }
-        let entity_or_cv = |t: &DataType| {
-            uni_query_functions::cypher_type_coerce::is_entity_struct(t)
-                || matches!(t, DataType::LargeBinary)
-        };
-        // An integer against a float: both are numbers, but no Arrow type
-        // holds both exactly (`Float64` rounds integers above 2^53 and turns
-        // `1` into `1.0`), so the pair becomes CypherValue too.
-        let int_vs_float = |l: &DataType, r: &DataType| {
-            let float = |t: &DataType| matches!(t, DataType::Float32 | DataType::Float64);
-            (l.is_integer() && float(r)) || (float(l) && r.is_integer())
-        };
-        let coercible = |l: &DataType, r: &DataType| {
-            l != r && ((entity_or_cv(l) && entity_or_cv(r)) || int_vs_float(l, r))
-        };
+        // Every differing pair becomes CypherValue, which represents any
+        // Cypher value exactly; `Float64` would round integers above 2^53.
+        let coercible = |l: &DataType, r: &DataType| l != r;
         let positions: Vec<usize> = (0..ls.fields().len())
             .filter(|&i| coercible(ls.field(i).data_type(), rs.field(i).data_type()))
             .collect();
@@ -8965,7 +8945,6 @@ pub(crate) fn collect_variable_kinds(
         | LogicalPlan::CreateJsonFtsIndex { .. }
         | LogicalPlan::DropIndex { .. }
         | LogicalPlan::ShowIndexes { .. }
-        | LogicalPlan::Copy { .. }
         | LogicalPlan::Backup { .. }
         | LogicalPlan::ShowDatabase
         | LogicalPlan::ShowConfig
@@ -9078,7 +9057,6 @@ fn collect_mutation_node_hints(plan: &LogicalPlan, hints: &mut Vec<String>) {
         | LogicalPlan::CreateJsonFtsIndex { .. }
         | LogicalPlan::DropIndex { .. }
         | LogicalPlan::ShowIndexes { .. }
-        | LogicalPlan::Copy { .. }
         | LogicalPlan::Backup { .. }
         | LogicalPlan::ShowDatabase
         | LogicalPlan::ShowConfig
@@ -9210,7 +9188,6 @@ fn collect_mutation_edge_hints(plan: &LogicalPlan, hints: &mut Vec<String>) {
         | LogicalPlan::CreateJsonFtsIndex { .. }
         | LogicalPlan::DropIndex { .. }
         | LogicalPlan::ShowIndexes { .. }
-        | LogicalPlan::Copy { .. }
         | LogicalPlan::Backup { .. }
         | LogicalPlan::ShowDatabase
         | LogicalPlan::ShowConfig
@@ -9562,7 +9539,6 @@ fn collect_plan_variables_into(plan: &LogicalPlan, out: &mut HashSet<String>) {
         | LogicalPlan::CreateJsonFtsIndex { .. }
         | LogicalPlan::DropIndex { .. }
         | LogicalPlan::ShowIndexes { .. }
-        | LogicalPlan::Copy { .. }
         | LogicalPlan::Backup { .. }
         | LogicalPlan::ShowDatabase
         | LogicalPlan::ShowConfig

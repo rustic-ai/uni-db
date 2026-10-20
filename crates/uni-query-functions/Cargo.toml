@@ -26,6 +26,8 @@ arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-row = { workspace = true }
 regex = { workspace = true }
+regex-syntax = { workspace = true }
+regex-automata = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 rand = { workspace = true }

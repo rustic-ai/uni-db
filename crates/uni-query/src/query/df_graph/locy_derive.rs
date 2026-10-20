@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use uni_common::Properties;
 use uni_cypher::ast::Query;
 use uni_cypher::locy_ast::{DeriveClause, DeriveCommand, DerivePattern, RuleOutput};
+use uni_locy::incremental::{MutationFootprint, query_footprint};
 use uni_locy::result::DerivedEdge;
 use uni_locy::{CompiledProgram, FactRow, LocyError, LocyStats};
 
@@ -45,12 +46,35 @@ pub async fn derive_command(
     derived_store: &RowStore,
     stats: &mut LocyStats,
 ) -> Result<usize, LocyError> {
+    derive_command_footprint(dc, program, ctx, derived_store, stats)
+        .await
+        .map(|(affected, _)| affected)
+}
+
+/// Executes a DERIVE command as [`derive_command`] does, and also returns
+/// the footprint of the mutations it ran (empty when it derived nothing).
+///
+/// A caller that keeps facts across commands (an `ASSUME` body) needs the
+/// footprint to tell which of them the DERIVE made stale.
+///
+/// # Errors
+///
+/// A rule lookup, `WHERE` evaluation or mutation failure.
+pub async fn derive_command_footprint(
+    dc: &DeriveCommand,
+    program: &CompiledProgram,
+    ctx: &dyn LocyExecutionContext,
+    derived_store: &RowStore,
+    stats: &mut LocyStats,
+) -> Result<(usize, MutationFootprint), LocyError> {
     let collected = collect_derive_facts_inner(dc, program, ctx, derived_store).await?;
+    let mut footprint = MutationFootprint::default();
     for query in collected.queries {
+        footprint.extend(&query_footprint(&query));
         ctx.execute_mutation(query, HashMap::new()).await?;
         stats.mutations_executed += 1;
     }
-    Ok(collected.affected)
+    Ok((collected.affected, footprint))
 }
 
 /// Collect derived facts without executing mutations (collect mode).

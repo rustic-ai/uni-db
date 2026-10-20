@@ -1,14 +1,14 @@
-Feature: TopKProofs semiring (Phase C C0 Stages 1 + 2 MVP)
+Feature: TopKProofs semiring
 
-  `SemiringKind::TopKProofs { k }` enables per-row dependency-DNF
-  tracking. Stage 1 landed the math library and config wiring; the
-  Stage 2 MVP wires per-fact `Proof` tag accumulation through
-  `record_provenance` and surfaces `TopKPruningCrossedDependency`
-  when the post-loop merge prunes proofs that share base RVs with
-  retained ones. Row math still routes through AddMultProb (the
-  full `MonotonicAggState` generalization remains deferred), so
-  scenarios without proof sharing are byte-identical to the
-  default semiring.
+  `SemiringKind::TopKProofs { k }` evaluates each fact of an MNOR/MPROD
+  rule over its proofs, as exact mode does: each derivation row is its own
+  event AND every fact it references (AND NOT every fact it negates),
+  evaluated under possible-worlds semantics, with each MNOR fact restricted
+  to its k most probable rows. With k at least the number of a fact's rows
+  the value is the possible-worlds probability; without shared events it is
+  the default (independence) value. `TopKPruningCrossedDependency` is raised
+  when proof retention (`top_k_proofs`) drops a proof that shares a base fact
+  with a retained one.
 
   Background:
     Given an empty graph
@@ -106,16 +106,17 @@ Feature: TopKProofs semiring (Phase C C0 Stages 1 + 2 MVP)
     And the derived relation 'risk' should contain a fact where p = 0.76
     And the result should not contain a TopKPruningCrossedDependency warning
 
-  # ── D-C0: shared-base DNF inclusion-exclusion ─────────────────────────
-  # Two derived facts of `risk` that share the SAME base fact (the hub
-  # node h_a). Under AddMultProb (pre-D-C0), the FOLD MNOR composes them
-  # as if independent: 1 - (1 - 0.7)(1 - 0.6) = 0.88. Under TopKProofs
-  # with D-C0, per-row base_rvs reveal the shared base (h_a) and DNF
-  # inclusion-exclusion yields the exact probability: the proof DNF is
-  # `{h_a} ∨ {h_a}` which collapses to `{h_a}`, so weight = P(h_a)
-  # extracted from base_weights — the row's per-base weight.
+  # ── Proofs over a certain referenced fact ─────────────────────────────
+  # Two rows of `risk` for KEY h_a, one per CAUSE edge, both referencing
+  # the same `hub_score(h_a)` fact. `hub_score` has no PROB column, so the
+  # fact is certain: it is no event, and the two rows are the two edges,
+  # independent events. Possible worlds: 1 - (1 - 0.7)(1 - 0.6) = 0.88.
+  # TopKProofs(8) keeps both proofs and evaluates them exactly.
+  # (This scenario used to expect 0.7: the shared referenced fact was
+  # treated as the proofs' only event, weighted by the larger row, which
+  # dropped the second edge.)
 
-  Scenario: TopKProofs(8) on shared-base proofs yields DNF inclusion-exclusion
+  Scenario: TopKProofs(8) over a certain shared referenced fact keeps the edges independent
     Given having executed:
       """
       CREATE (:Hub {name: 'h_a'}),
@@ -134,8 +135,8 @@ Feature: TopKProofs semiring (Phase C C0 Stages 1 + 2 MVP)
       """
     # hub_score is per-Hub (one fact per Hub), so risk's IS-ref join
     # gives exactly 1 hub_score fact per Hub × N CAUSE edges. The two
-    # `risk` pre-fold rows for KEY h_a both depend on the SAME
-    # `hub_score(h_a)` base fact — that's the shared-base correlation.
+    # `risk` pre-fold rows for KEY h_a both reference the SAME
+    # `hub_score(h_a)` fact, which, without a PROB column, is certain.
     When evaluating the following Locy program with semiring "TopKProofs(8)":
       """
       CREATE RULE hub_score AS
@@ -149,12 +150,7 @@ Feature: TopKProofs semiring (Phase C C0 Stages 1 + 2 MVP)
         YIELD KEY h, risk_p
       """
     Then evaluation should succeed
-    # Both pre-fold rows of `risk` for KEY h_a have support =
-    # `{hub_score(h_a)}` — the SAME base RV. The DNF over their proofs
-    # is `{rv_a} ∨ {rv_a}` ≡ `{rv_a}`; weight = base_weights[rv_a] =
-    # the first row's per-base weight (0.7 by insertion order).
-    # AddMultProb would have produced 1 - (1-0.7)(1-0.6) = 0.88.
-    And the derived relation 'risk' should contain a fact where risk_p = 0.7
+    And the derived relation 'risk' should contain a fact where risk_p = 0.88
 
   # ── Incoherent: TopKProofs(0) rejected at config-resolve time ─────────
 
@@ -171,3 +167,64 @@ Feature: TopKProofs semiring (Phase C C0 Stages 1 + 2 MVP)
       """
     Then evaluation should fail
     And the evaluation error should mention "TopKProofs"
+
+  # ── Proofs sharing an edge below a referenced fact ────────────────────
+  # A -0.5-> B -0.4-> C -0.6-> D and A -0.3-> C. reach(A, D) has two proofs,
+  # A->C then reach(C, D) (0.18) and A->B then reach(B, D) (0.12), and both
+  # rest on C->D. TopKProofs evaluates its proofs over their lineage, so
+  # with both kept it is the possible-worlds probability
+  #   0.6 * (1 - 0.7 * 0.8) = 0.264,
+  # not the independent 1 - (1 - 0.18)(1 - 0.12) = 0.2784. With k = 1 only
+  # the more probable proof is kept: 0.3 * 0.6 = 0.18.
+
+  Scenario: TopKProofs(8) counts an edge shared below referenced facts once
+    Given having executed:
+      """
+      CREATE (a:Node {name: 'A'}),
+             (b:Node {name: 'B'}),
+             (c:Node {name: 'C'}),
+             (d:Node {name: 'D'}),
+             (a)-[:LINK {p: 0.5}]->(b),
+             (a)-[:LINK {p: 0.3}]->(c),
+             (b)-[:LINK {p: 0.4}]->(c),
+             (c)-[:LINK {p: 0.6}]->(d)
+      """
+    When evaluating the following Locy program with semiring "TopKProofs(8)":
+      """
+      CREATE RULE reach AS
+        MATCH (a:Node)-[e:LINK]->(b:Node)
+        FOLD prob = MNOR(e.p)
+        YIELD KEY a, KEY b, prob
+      CREATE RULE reach AS
+        MATCH (a:Node)-[e:LINK]->(mid:Node) WHERE mid IS reach TO b
+        FOLD prob = MNOR(e.p)
+        YIELD KEY a, KEY b, prob
+      """
+    Then evaluation should succeed
+    And the derived relation 'reach' should contain a fact where a.name = 'A' and b.name = 'D' and prob = 0.264
+
+  Scenario: TopKProofs(1) keeps the most probable proof of each fact
+    Given having executed:
+      """
+      CREATE (a:Node {name: 'A'}),
+             (b:Node {name: 'B'}),
+             (c:Node {name: 'C'}),
+             (d:Node {name: 'D'}),
+             (a)-[:LINK {p: 0.5}]->(b),
+             (a)-[:LINK {p: 0.3}]->(c),
+             (b)-[:LINK {p: 0.4}]->(c),
+             (c)-[:LINK {p: 0.6}]->(d)
+      """
+    When evaluating the following Locy program with semiring "TopKProofs(1)":
+      """
+      CREATE RULE reach AS
+        MATCH (a:Node)-[e:LINK]->(b:Node)
+        FOLD prob = MNOR(e.p)
+        YIELD KEY a, KEY b, prob
+      CREATE RULE reach AS
+        MATCH (a:Node)-[e:LINK]->(mid:Node) WHERE mid IS reach TO b
+        FOLD prob = MNOR(e.p)
+        YIELD KEY a, KEY b, prob
+      """
+    Then evaluation should succeed
+    And the derived relation 'reach' should contain a fact where a.name = 'A' and b.name = 'D' and prob = 0.18

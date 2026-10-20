@@ -764,10 +764,11 @@ async fn test_bulk_unique_constraint_spans_buffer_flushes() -> Result<()> {
 
 /// H9: a bulk load writes the per-label table and the main table as separate
 /// Lance commits. A crash between them leaves the tables divergent with no
-/// reconciliation. The durable intent marker + reopen recovery must roll an
-/// interrupted load back so the tables stay consistent.
+/// reconciliation. The durable intent marker + reopen recovery must make an
+/// interrupted load all-or-nothing; the staged rows of a load whose publish
+/// had begun are recorded in the marker, so recovery completes it.
 #[tokio::test]
-async fn bulk_partial_flush_rolled_back_on_reopen() -> Result<()> {
+async fn bulk_partial_publish_completed_on_reopen() -> Result<()> {
     use std::sync::atomic::Ordering::SeqCst;
 
     let temp_dir = tempfile::tempdir()?;
@@ -813,8 +814,8 @@ async fn bulk_partial_flush_rolled_back_on_reopen() -> Result<()> {
         drop(db);
     }
 
-    // Reopen: recovery must roll the interrupted load back so the per-label and
-    // main tables are consistent (both empty), not divergent.
+    // Reopen: recovery must complete the interrupted load so the per-label and
+    // main tables are consistent (both hold the five rows), not divergent.
     let db = Uni::open(&path).build().await?;
     let result = db
         .session()
@@ -822,12 +823,23 @@ async fn bulk_partial_flush_rolled_back_on_reopen() -> Result<()> {
         .await?;
     assert_eq!(
         result.rows()[0].get::<i64>("c")?,
-        0,
-        "interrupted bulk load must be rolled back on reopen (no divergent rows)"
+        5,
+        "interrupted bulk load must be completed on reopen (per-label table)"
     );
+    let storage = db.storage();
+    for table in [
+        uni_store::backend::table_names::vertex_table_name("Person"),
+        uni_store::backend::table_names::main_vertex_table_name().to_string(),
+    ] {
+        assert_eq!(
+            storage.backend().count_rows(&table, None).await?,
+            5,
+            "interrupted bulk load must be completed on reopen ({table})"
+        );
+    }
 
     // And the database is healthy: a clean load after recovery yields exactly
-    // its rows, proving no orphaned per-label rows survived the rollback.
+    // its rows on top, proving no row was published twice.
     let s = db.session();
     let tx = s.tx().await?;
     let mut bulk = tx.bulk_writer().batch_size(1000).build()?;
@@ -847,7 +859,7 @@ async fn bulk_partial_flush_rolled_back_on_reopen() -> Result<()> {
         .await?;
     assert_eq!(
         result.rows()[0].get::<i64>("c")?,
-        3,
+        8,
         "clean load after recovery must yield exactly its rows"
     );
 

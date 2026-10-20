@@ -21,6 +21,40 @@ pub struct CompiledProgram {
     pub commands: Vec<CompiledCommand>,
 }
 
+impl CompiledProgram {
+    /// Whether running this program needs a provenance tracker.
+    ///
+    /// True when the program has an `EXPLAIN RULE` command, or a rule folds
+    /// with `MNOR` or `MPROD` (shared-proof detection for probabilistic
+    /// folds). The runtime attaches a tracker exactly when this holds, and
+    /// then does not let `ASSUME` / `ABDUCE` reuse the top-level facts:
+    /// the tracker can change `PROB` values (shared-proof BDD) in ways a
+    /// hypothetical re-evaluation, which runs without one, does not
+    /// reproduce. So `hypothetical_strata_reused` is always zero for such a
+    /// program.
+    #[must_use]
+    pub fn needs_provenance_tracker(&self) -> bool {
+        let has_explain = self
+            .commands
+            .iter()
+            .any(|c| matches!(c, CompiledCommand::ExplainRule(_)));
+        let has_prob_fold = self.strata.iter().any(|s| {
+            s.rules.iter().any(|r| {
+                r.clauses.iter().any(|c| {
+                    c.fold.iter().any(|f| {
+                        if let Expr::FunctionCall { name, .. } = &f.aggregate {
+                            matches!(name.to_uppercase().as_str(), "MNOR" | "MPROD")
+                        } else {
+                            false
+                        }
+                    })
+                })
+            })
+        });
+        has_explain || has_prob_fold
+    }
+}
+
 /// A compiled `CREATE MODEL` declaration (Phase B preview).
 ///
 /// Lowered from `uni_cypher::locy_ast::ModelDefinition`. The feature

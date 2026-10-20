@@ -13,8 +13,10 @@
 use crate::algo::IdMap;
 use anyhow::{Result, anyhow};
 use arrow_array::Array;
+use std::collections::HashSet;
 use uni_common::core::id::{Eid, Vid};
 use uni_store::runtime::L0Manager;
+use uni_store::runtime::l0_manager::SnapshotView;
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::storage::direction::Direction as CacheDir;
 use uni_store::storage::manager::StorageManager;
@@ -218,6 +220,8 @@ pub struct ProjectionBuilder {
     /// Opt-in escape hatch for a caller that genuinely wants flushed-only data
     /// from a live storage view. Off by default — see [`Self::build`].
     allow_detached_l0: bool,
+    /// The calling query's property manager (see [`Self::property_manager`]).
+    property_manager: Option<Arc<PropertyManager>>,
     config: ProjectionConfig,
 }
 
@@ -228,8 +232,22 @@ impl ProjectionBuilder {
             storage,
             l0_manager: None,
             allow_detached_l0: false,
+            property_manager: None,
             config: ProjectionConfig::default(),
         }
+    }
+
+    /// Read edge weights and properties through the calling query's property
+    /// manager.
+    ///
+    /// Inside a transaction the builder's storage is version-pinned, and a
+    /// property manager over pinned storage skips the transaction's own
+    /// buffer, so the projection would read committed values where the
+    /// transaction's Cypher reads its own. `None` (the default) builds one
+    /// over the builder's storage.
+    pub fn property_manager(mut self, property_manager: Option<Arc<PropertyManager>>) -> Self {
+        self.property_manager = property_manager;
+        self
     }
 
     /// Permit building with no L0 tier against a *live* storage view.
@@ -583,6 +601,27 @@ impl ProjectionBuilder {
 
             // The pinned main L0 generation
             all_vids.extend(snapshot.main.read().vids_for_labels(&label_names));
+
+            // The reading transaction's own, uncommitted vertices
+            if let Some(tx) = &snapshot.transaction {
+                all_vids.extend(tx.read().vids_for_labels(&label_names));
+            }
+
+            // A vertex deleted in any visible layer is gone, whichever layer
+            // (or flushed storage) still lists it: a vid is never reused, so a
+            // tombstone cannot be superseded by a later insert.
+            let mut deleted: HashSet<Vid> = HashSet::new();
+            for layer in snapshot
+                .extra
+                .iter()
+                .chain(std::iter::once(&snapshot.main))
+                .chain(snapshot.transaction.iter())
+            {
+                deleted.extend(layer.read().vertex_tombstones.iter().copied());
+            }
+            if !deleted.is_empty() {
+                all_vids.retain(|vid| !deleted.contains(vid));
+            }
         }
 
         // Sort and dedup to ensure IdMap is sorted for compaction
@@ -608,28 +647,55 @@ impl ProjectionBuilder {
         let mut raw_out_edges = Vec::new(); // (src_slot, dst_vid, eid)
         let mut raw_in_edges = Vec::new();
 
-        for (src_slot, src_vid) in id_map.iter() {
-            for &type_id in edge_type_ids {
-                // Outbound
-                let neighbors = self.storage.adjacency_manager().get_neighbors(
-                    src_vid,
-                    type_id,
-                    CacheDir::Outgoing,
-                );
-                for (dst_vid, eid) in neighbors {
-                    raw_out_edges.push((src_slot, dst_vid, eid));
-                }
-
-                // Inbound
-                if self.config.include_reverse {
-                    let in_neighbors = self.storage.adjacency_manager().get_neighbors(
-                        src_vid,
+        {
+            // The adjacency tier holds committed edges; a reading
+            // transaction's own edges and edge deletions live only in its
+            // private buffer, overlaid here exactly as Cypher's expansion
+            // overlays it (`overlay_l0_neighbors`).
+            let tx_guard = l0_snapshot
+                .and_then(|snap| snap.transaction.as_ref())
+                .map(|tx| tx.read());
+            let neighbors_of = |vid: Vid, type_id: u32, dir: CacheDir| {
+                let mut neighbors = self
+                    .storage
+                    .adjacency_manager()
+                    .get_neighbors(vid, type_id, dir);
+                if let Some(tx) = tx_guard.as_deref() {
+                    uni_store::runtime::l0_visibility::overlay_l0_neighbors(
+                        vid,
                         type_id,
-                        CacheDir::Incoming,
+                        dir,
+                        tx,
+                        &mut neighbors,
+                        None,
                     );
-                    for (dst_vid, eid) in in_neighbors {
-                        raw_in_edges.push((src_slot, dst_vid, eid));
+                }
+                neighbors
+            };
+
+            for (src_slot, src_vid) in id_map.iter() {
+                for &type_id in edge_type_ids {
+                    for (dst_vid, eid) in neighbors_of(src_vid, type_id, CacheDir::Outgoing) {
+                        raw_out_edges.push((src_slot, dst_vid, eid));
                     }
+                    if self.config.include_reverse {
+                        for (dst_vid, eid) in neighbors_of(src_vid, type_id, CacheDir::Incoming) {
+                            raw_in_edges.push((src_slot, dst_vid, eid));
+                        }
+                    }
+                }
+            }
+
+            // Inside a read-write transaction everything the projection read
+            // joins the SSI read set, as a Cypher scan and expansion record
+            // theirs, so a concurrent commit that changes it fails the
+            // transaction's commit instead of going unnoticed.
+            if let Some(read_set) = tx_guard.as_deref().and_then(|tx| tx.occ_read_set.as_ref()) {
+                let mut rs = read_set.lock();
+                rs.vertices.extend(id_map.iter().map(|(_, vid)| vid));
+                for &(_, dst, eid) in raw_out_edges.iter().chain(raw_in_edges.iter()) {
+                    rs.vertices.insert(dst);
+                    rs.edges.insert(eid);
                 }
             }
         }
@@ -639,18 +705,19 @@ impl ProjectionBuilder {
         // *values* are read through the same pinned L0 snapshot the structure
         // read uses (G12), so committed-but-unflushed L0 weights/props are
         // visible instead of silently falling back to the 1.0 / NaN default.
-        // Semantic limit: the snapshot carries no `transaction_l0`, so an
-        // *uncommitted* transaction's own writes stay invisible — GraphCompute
-        // runs over committed state by contract.
+        // Inside a transaction the view's newest layer is the transaction's
+        // own buffer, so its uncommitted values win, as in its Cypher reads.
         let edge_prop_names = &self.config.edge_properties;
         let weight_prop = self.config.weight_property.as_deref();
         let need_props = weight_prop.is_some() || !edge_prop_names.is_empty();
         let pm = need_props.then(|| {
-            PropertyManager::new(
-                self.storage.clone(),
-                self.storage.schema_manager_arc(),
-                1000,
-            )
+            self.property_manager.clone().unwrap_or_else(|| {
+                Arc::new(PropertyManager::new(
+                    self.storage.clone(),
+                    self.storage.schema_manager_arc(),
+                    1000,
+                ))
+            })
         });
 
         // Union of property names to fetch (weight + edge props), deduplicated.
@@ -688,13 +755,7 @@ impl ProjectionBuilder {
 
             // Overlay the pinned L0 snapshot (committed-but-unflushed) so edge
             // weights/properties are read consistently with the structure read.
-            let edge_ctx = l0_snapshot.map(|snap| {
-                uni_store::runtime::QueryContext::new_with_pending(
-                    snap.main.clone(),
-                    None,
-                    snap.extra.clone(),
-                )
-            });
+            let edge_ctx = l0_snapshot.map(SnapshotView::query_context);
             // The projection's scoped edge types. `scoped_edge_type_names`
             // already returns every type when the user scoped none, so this is
             // never narrower than the edges actually collected (#222).
@@ -791,13 +852,7 @@ impl ProjectionBuilder {
         // Overlay the pinned L0 snapshot (committed-but-unflushed) so stored
         // node-property values are read consistently with the structure read
         // (G12) instead of returning NaN until flush.
-        let node_ctx = l0_snapshot.map(|snap| {
-            uni_store::runtime::QueryContext::new_with_pending(
-                snap.main.clone(),
-                None,
-                snap.extra.clone(),
-            )
-        });
+        let node_ctx = l0_snapshot.map(SnapshotView::query_context);
         // Read columnarly rather than through `get_batch_vertex_props`, whose
         // `HashMap<Vid, HashMap<String, Value>>` costs a heap map per vertex --
         // for a whole-projection read that is every vertex of every scoped

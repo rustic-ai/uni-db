@@ -535,12 +535,9 @@ impl GraphScanExec {
         uni_schema: &uni_common::core::schema::Schema,
     ) -> SchemaRef {
         let scanned: Vec<&str> = label.split(':').filter(|l| !l.is_empty()).collect();
-        let declared = |prop: &str| -> Option<&uni_common::core::schema::PropertyMeta> {
-            let mut metas = scanned
-                .iter()
-                .filter_map(|l| uni_schema.properties.get(*l)?.get(prop));
-            let first = metas.next()?;
-            metas.all(|m| m.r#type == first.r#type).then_some(first)
+        let declared = |prop: &str| {
+            uni_schema
+                .scoped_property_meta(uni_common::core::schema::EntityScope::AllOf(&scanned), prop)
         };
 
         let mut fields = vec![

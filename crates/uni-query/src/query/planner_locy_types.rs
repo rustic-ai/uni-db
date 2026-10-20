@@ -136,6 +136,28 @@ pub struct LocyIsRef {
     /// already reads it. `None` otherwise, and the reference is a plain
     /// semi-join.
     pub prob_ref: Option<PositiveProbRef>,
+    /// For a negated reference to a PROB rule from an `MNOR`/`MPROD` rule:
+    /// the hidden column the complement fills with the negated facts it read,
+    /// for exact inference. `None` otherwise.
+    pub negated_lineage: Option<NegatedLineageRef>,
+}
+
+/// Where a negated reference records the facts its complement read (see
+/// [`LocyIsRef::negated_lineage`]).
+///
+/// The complement multiplies `1 - p` into the row, `p` the noisy-OR of every
+/// fact of the negated rule the row's negation key matches. Exact inference
+/// instead conjoins the negation of those facts' formulas, which is not the
+/// same when the negated facts share lineage with the rest of the row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NegatedLineageRef {
+    /// The hidden body column (`__deriv_isnot_{clause}_{occurrence}`): per
+    /// row, each matched fact's KEY hash and probability (see
+    /// `locy_lineage::encode_negated_facts`). NULL when nothing matched.
+    pub column: String,
+    /// The negated rule's KEY columns in yield order, hashed as the rule's
+    /// own lineage hashes its facts.
+    pub target_key_columns: Vec<String>,
 }
 
 /// How a clause's PROB expression reads the probability of one positive
@@ -192,6 +214,11 @@ pub const DERIV_ISPROB_COL_PREFIX: &str = "__deriv_isprob_";
 /// Prefix of the persistent hidden column carrying the hash of a referenced
 /// fact's KEY columns in an `MNOR`/`MPROD` rule's pre-fold rows.
 pub const DERIV_ISREF_COL_PREFIX: &str = "__deriv_isref_";
+
+/// Prefix of the persistent hidden column carrying the facts a negated
+/// reference's complement read, in an `MNOR`/`MPROD` rule's pre-fold rows (see
+/// [`NegatedLineageRef`]).
+pub const DERIV_ISNOT_COL_PREFIX: &str = "__deriv_isnot_";
 
 /// The row-event column of an `MNOR`/`MPROD` rule's pre-fold rows.
 ///

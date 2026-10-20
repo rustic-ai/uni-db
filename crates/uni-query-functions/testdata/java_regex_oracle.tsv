@@ -1,0 +1,398 @@
+# Cases for Cypher `=~` against Java's `Pattern.compile(p).matcher(s).matches()`.
+# Columns: pattern <TAB> subject [<TAB> reject]. Escapes: \\ \t \n \r \x{HEX}.
+# `reject` marks a valid Java pattern uni-db refuses because the regex crate
+# cannot evaluate it exactly. Regenerate the answers with
+# scripts/java_regex_oracle/regenerate.sh.
+#
+# Whole-string matching
+b	abc	false
+a	abc	false
+a.*	abc	true
+.*b.*	abc	true
+abc	abc	true
+a|ab	ab	true
+ab|a	ab	true
+a|ab	xab	false
+(a|ab)(c|bcd)	abcd	true
+		true
+a*		true
+	a	false
+x*	xxx	true
+# Case-insensitive, ASCII by default
+(?i)ABC	abc	true
+(?i)AB	abc	false
+(?i)abc	ABC	true
+(?i)\x{e9}	\x{c9}	false
+(?i)caf\x{e9}	CAF\x{c9}	false
+(?i:A)bc	abc	true
+(?i:a)BC	Abc	false
+(?i)k	\x{212a}	false
+(?i)s	\x{17f}	false
+(?i)[k]	K	true
+(?i)[^k]	K	false
+(?i)[a-z]	Q	true
+(?i)[A-Z]	q	true
+(?i)[Z-a]	z	true
+(?i)[\\x{e0}-\\x{ff}]	\x{c0}	false
+(?i)[\\x{e9}]	\x{c9}	false
+(?i)i	\x{130}	false
+(?i)\\x{130}	i	false
+a(?i)b|c	aB	true
+a(?i)b|c	C	true
+(?i)a(?-i)b	Ab	true
+(?i)a(?-i)b	AB	false
+# Unicode case with (?u)
+(?iu)\x{e9}	\x{c9}	true
+(?iu)caf\x{e9}	CAF\x{c9}	true
+(?iu)k	\x{212a}	true
+(?iu)s	\x{17f}	true
+(?iu)\x{df}	\x{1e9e}	false
+(?iu)\x{1e9e}	\x{df}	true
+(?iu)a\x{df}	a\x{1e9e}	true
+(?iu)\x{df}a	\x{1e9e}a	true
+(?iu)[\\x{df}]	\x{1e9e}	false
+(?iu)[\\x{1e9e}]	\x{df}	true
+(?iu)[\\x{e9}]	\x{c9}	true
+(?iu)[k]	\x{212a}	true
+(?iu)[\\x{c5}]	\x{212b}	true
+(?iu)[\\x{e5}]	\x{212b}	true
+(?iu)[\\x{b5}]	\x{3bc}	true
+(?iu)[\\x{ff}]	\x{178}	true
+(?iu)[i]	\x{130}	true
+(?iu)[i]	\x{131}	true
+(?iu)[a-z]	\x{212a}	true
+(?iu)[a-z]	\x{17f}	true
+(?iu)[\\x{e0}-\\x{ff}]	\x{c0}	true
+(?iu)[\\x{3b1}-\\x{3c9}]	\x{3a3}	true
+(?iu)\\x{130}	i	true
+(?iu)i	\x{130}	true
+(?iu)\\x{131}	I	true
+(?iu)a\\x{130}	ai	true
+(?iu)\\x{3c3}	\x{3c2}	true
+(?iu)\\x{3c2}	\x{3a3}	true
+(?iu)\\x{1fb3}	\x{1fbc}	true
+(?iu)\\x{1fbc}	\x{1fb3}	true
+(?iu)\\x{1f80}	\x{1f88}	true
+(?iu)\\x{345}	\x{3b9}	true
+(?iu)\\x{3b9}	\x{345}	true
+(?iu)\\x{1c4}	\x{1c5}	true
+(?iu)\\x{1c5}	\x{1c6}	true
+(?iu)\\x{10400}	\x{10428}	true
+(?u)\x{e9}	\x{c9}	false
+(?U)(?i)\x{e9}	\x{c9}	true
+(?iU-U)\x{e9}	\x{c9}	false	reject
+# Predefined classes: ASCII by default
+\\w	\x{e9}	false
+\\w	_	true
+\\d	\x{663}	false
+\\d	7	true
+\\s	\x{a0}	false
+\\s	\x{b}	true
+\\s	\x{85}	false
+\\W	\x{e9}	true
+\\D	\x{663}	true
+\\S	\x{a0}	true
+[\\w]	\x{e9}	false
+[^\\w]	\x{e9}	true
+(?U)\\w	\x{e9}	true
+(?U)\\w	\x{301}	true
+(?U)\\d	\x{663}	true
+(?U)\\s	\x{a0}	true
+(?U)\\s	\x{85}	true
+(?U)[\\w]	\x{e9}	true
+\\b\x{e9}	\x{e9}	false
+a\\b	a	true
+\\ba\\b	a	true
+a\\b-	a-	true
+a\\Bb	ab	true
+\x{e9}\\b	\x{e9}	false
+(?U)\\b\x{e9}	\x{e9}	true
+(?U)\x{e9}\\b	\x{e9}	true
+e\\x{301}\\b	e\x{301}	true	reject
+e\\b\\x{301}	e\x{301}	false	reject
+!\\x{301}\\b	!\x{301}	false
+e\\x{301}	e\x{301}	true
+(?U)e\\x{301}\\b	e\x{301}	true
+\\v	\n	true
+\\v	\x{b}	true
+\\v	\x{2028}	true
+\\v	\x{85}	true
+\\v	a	false
+[\\v]	\x{2028}	true
+(?i)[\\v]	\x{2028}	true
+[^\\v]	a	true
+# Dot and line terminators
+.	\n	false
+.	\r	false
+.	\x{85}	false
+.	\x{2028}	false
+.	\x{2029}	false
+.	\x{b}	true
+.	\x{c}	true
+(?s).	\n	true
+(?s).	\x{2028}	true
+a.c	a\x{85}c	false
+(?s)a.c	a\x{85}c	true
+abc	abc\n	false
+abc$	abc\n	false
+abc$	abc	true
+(?m)abc$	abc\n	false
+(?m)abc	abc\n	false
+abc\n	abc\n	true
+abc.	abc\n	false
+(?s)abc.	abc\n	true
+a\nb	a\nb	true
+a$\n	a\n	true
+a$\\s*	a\n	true
+a$\\s*	a	true
+a$\r\n	a\r\n	true
+a$\r	a\r	true
+a$\n	a\r\n	false
+a$\r\n	a\n	false
+a$.	a\r	false
+a$..	a\r\n	false
+a$\nb	a\nb	false	reject
+a$\x{85}	a\x{85}	true	reject
+x|a$\n	a\n	true
+(?:a$)+\n	a\n	true
+a$|b	a	true
+a$|b	b	true
+(a$)	a	true
+(a$)*	a	true
+(a$)*	a\n	false
+($)		true
+# Multi-line anchors
+(?m)^abc	x\nabc	false
+(?m).*\n^abc	x\nabc	true
+(?m)a$\nb	a\nb	true
+(?m)a$\r\nb	a\r\nb	true
+(?m)a\r$\nb	a\r\nb	false
+(?m)a$\rb	a\rb	true
+(?m)a\r^b	a\rb	true
+(?m)a\r\n^b	a\r\nb	true
+(?m)a\r^\nb	a\r\nb	false
+(?m)a\n^b	a\nb	true
+(?m)a$\x{2028}b	a\x{2028}b	true	reject
+(?m)a$\x{85}	a\x{85}	true	reject
+(?m)a\x{2028}^b	a\x{2028}b	true	reject
+(?m)^		false
+(?m)^$		false
+(?m)^$	a	false
+(?m)^.*$	abc	true
+(?m)^.*$	abc\n	false	reject
+(?m)^.*		false	reject
+(?m)^a	a	true
+(?m)^a$	a	true
+(?m)a\n^	a\n	false
+(?m)a\n^b*	a\n	false	reject
+(?m)^\\w+$\n^\\w+$	ab\ncd	true
+(?m)^\\w+$\n^\\w+$	ab\n\x{2028}d	false	reject
+(?m)(?s)^.*$	a\nb	true
+(?m)(?s).*^.*$	a\nb	true
+(?m)(?s).*^.*$	a\nb\n	true	reject
+\\A		true
+\\Aa\\z	a	true
+\\Za	a	false	reject
+\\Ga	a	true	reject
+a\\Z	a\n	false	reject
+# Quantifiers
+a*+a	aa	false	reject
+a++	aa	true	reject
+a?+	a	true	reject
+a{2}+	aa	true	reject
+a{1,3}+b	aab	true	reject
+a**	a	error
+a*?	aa	true
+a+?	aa	true
+a{2}	aa	true
+a{2,}	aaa	true
+a{2,3}	aaaa	false
+a{,3}	a	error
+x{1}{2}	xx	false	reject
+(a*)+	aa	true
+(?:a{2})?		true
+(?:a{2})?	a	false
+(?:a{2})?	aa	true
+(a{2}){0,1}		true
+(?:a+)?b	b	true
+(?:a{1,2}){2}	aaa	true
+(?:a{2})+	aaaa	true
+a{	a{	error
+{a	{a	error
+a}	a}	true
+# Character classes
+[[:alpha:]]	:	true
+[[:alpha:]]	a	true
+[[:alpha:]]	b	false
+[[:^alpha:]]	^	true
+[]a]	]	true
+[^]a]	b	true
+[]	]	error
+[a-]	-	true
+[-a]	-	true
+[a-\\d]	-	error
+[a-z&&[^aeiou]]	e	false
+[a-z&&[^aeiou]]	b	true
+[\\p{L}&&\\p{Lu}]	a	false
+[^a[b]]	b	false
+[a[b]]	b	true
+[a--b]	a	error
+[a~~b]	a	true	reject
+[a&&]	a	true
+[&&a]	a	true
+[a&&]	b	false
+[&&]	a	error
+[a&&&&b]	a	false
+[a&&b&&]	b	false
+(?x)[ a]	\x{20}	false
+(?x)[#]	#	error
+(?x)[\\#]	#	true
+(?x)a b	ab	true
+(?x)a#c\nb	ab	true
+(?x)a\\ b	a b	true
+# Unicode properties and POSIX names
+\\p{Lower}	\x{e9}	false
+\\p{Lower}	a	true
+\\p{Upper}	A	true
+\\p{Alpha}	\x{e9}	false
+\\p{Alnum}	\x{663}	false
+\\p{Digit}	\x{663}	false
+\\p{Punct}	\x{a1}	false
+\\p{Punct}	!	true
+\\p{Graph}	\x{e9}	false
+\\p{Print}	\x{a0}	false
+\\p{Blank}	\x{a0}	false
+\\p{Cntrl}	\x{85}	false
+\\p{XDigit}	\x{ff21}	false
+\\p{Space}	\x{85}	false
+\\p{ASCII}	\x{80}	false
+(?U)\\p{Lower}	\x{e9}	true
+(?U)\\p{lower}	a	true
+(?U)\\p{Alpha}	\x{e9}	true
+(?U)\\p{Graph}	\x{a0}	false
+(?U)\\p{Graph}	\x{378}	false
+(?U)\\p{Print}	\x{a0}	true
+(?U)\\p{Blank}	\x{a0}	true
+(?U)\\p{Blank}	\x{85}	false
+(?U)\\p{Space}	\x{85}	true
+(?U)\\p{XDigit}	\x{ff21}	true
+(?U)\\p{Punct}	\x{a1}	true
+(?U)\\p{Cntrl}	\x{85}	true
+(?U)\\p{Alnum}	\x{663}	true
+(?i)\\p{Lower}	A	true
+(?i)\\p{Lower}	\x{c9}	false
+(?iu)\\p{Lower}	\x{c9}	false
+(?iU)\\p{Lower}	\x{c9}	true
+(?i)\\p{Upper}	a	true
+(?i)\\P{Lower}	A	false
+(?i)[\\p{Lower}]	A	true
+(?i)\\p{Ll}	A	true
+(?i)\\p{Lu}	a	true
+(?i)\\p{Lt}	a	true
+(?i)\\p{IsLowercase}	A	true
+(?i)\\p{IsUppercase}	\x{e9}	true
+(?i)\\p{IsLu}	a	true
+(?i)\\p{gc=Lu}	a	true
+(?i)\\p{general_category=Lu}	a	true
+(?i)\\p{L}	a	true
+(?i)\\p{Alpha}	A	true
+\\p{lower}	a	error
+\\p{LOWER}	a	error
+\\p{Greek}	\x{3b1}	error
+\\p{IsGreek}	\x{3b1}	true
+\\p{Isgreek}	\x{3b1}	true
+\\p{InGreek}	\x{3b1}	true	reject
+\\p{block=Greek}	\x{3b1}	true	reject
+\\p{IsAlphabetic}	\x{e9}	true
+\\p{Alphabetic}	\x{e9}	error
+\\p{isalphabetic}	\x{e9}	error
+\\p{sc=Greek}	\x{3b1}	true
+\\p{script=Greek}	\x{3b1}	true
+\\p{sc=Latn}	a	true
+\\p{sc=latin}	a	true
+\\p{IsLatn}	a	true
+\\p{sc!=Greek}	a	error
+\\p{sc:Greek}	\x{3b1}	error
+\\p{IsL}	a	true
+\\pL	a	true
+\\pZ	\x{20}	true
+\\p{Z}	\x{20}	true
+\\pz	\x{20}	error
+\\p{Lu}	A	true
+\\p{lu}	A	error
+\\p{Lowercase}	a	error
+\\p{IsWhite_Space}	\x{20}	true
+\\p{IsWhiteSpace}	\x{20}	true
+\\p{IsWhite Space}	\x{20}	error
+\\p{White_Space}	\x{20}	error
+\\p{Hex_Digit}	a	error
+\\p{IsHex_Digit}	a	true
+\\p{IsHexDigit}	\x{ff21}	true
+\\p{IsEmoji}	\x{1f600}	true
+\\p{IsAssigned}	a	true
+\\p{IsBlank}	\x{a0}	true
+\\p{IsGraph}	\x{378}	false
+\\p{IsWord}	\x{301}	true
+\\p{IsLower}	\x{e9}	true
+\\p{IsAlnum}	\x{e9}	true
+\\p{IsLC}	\x{1c5}	true
+\\p{LC}	\x{1c5}	true
+\\p{gc=LC}	\x{1c5}	true
+\\p{LD}	\x{663}	true
+\\p{L1}	\x{ff}	true
+\\p{all}	\x{10ffff}	true
+\\p{Cs}	a	false
+\\P{Cn}	\x{378}	false
+\\P{L}	1	true
+\\p{javaLowerCase}	a	true	reject
+# Escapes and literals
+\\x{e9}	\x{e9}	true
+\\u00e9	\x{e9}	true
+(?i)\\u00e9	\x{c9}	false
+\\u{e9}	\x{e9}	error
+\\U000000e9	\x{e9}	error
+\\0101	A	true	reject
+\\cA	\x{1}	true	reject
+\\e	\x{1b}	true	reject
+\\a	\x{7}	true
+\\f	\x{c}	true
+\\t	\t	true
+\\n	\n	true
+\\r	\r	true
+\\-	-	true
+\\%	%	true
+\\_	_	true
+\\@	@	true
+\\<	<	true
+\\>	>	true
+\\<a\\>	<a>	true
+\\y	y	error
+\\h	\x{20}	true	reject
+\\R	\r\n	true	reject
+\\X	a	true	reject
+\\N{LATIN SMALL LETTER A}	a	true	reject
+\\Qa*\\E	a*	true	reject
+\\b{start}a	a	error
+\\b{g}		true	reject
+# Groups, flags, unsupported constructs
+(?<n1>a)	a	true
+(?<1n>a)	a	error
+(?<a_b>x)	x	error
+(?P<n>a)	a	error
+(?<n>a)(?<n>b)	ab	error
+(?:a)	a	true
+()		true
+(?)a	a	true	reject
+(?i-i)a	a	true	reject
+(?R)a	a	error
+(?d).	\r	true	reject
+(?U)a*?	a	true
+(?=a)a	a	true	reject
+(?!b)a	a	true	reject
+(?<=a)b	ab	false	reject
+(?>a)	a	true	reject
+(a)\\1	aa	true	reject
+\\1	a	false	reject
+\\k<n>	a	error
+a)|(b	a	error
+[a	a	error

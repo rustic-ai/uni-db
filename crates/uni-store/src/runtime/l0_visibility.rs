@@ -95,6 +95,53 @@ fn record_edge_read(ctx: &QueryContext, eid: Eid) {
     }
 }
 
+/// Overlays one L0 buffer's edges for `vid` onto `neighbors` (`(neighbor,
+/// eid)` pairs read from the adjacency tier).
+///
+/// Adds the buffer's edges of `edge_type` in `direction`, then drops every
+/// edge the buffer tombstones, whichever layer it came from. Edges newer than
+/// `version_hwm` are skipped. The result is sorted by `(neighbor, eid)`, the
+/// order the adjacency manager returns, so a walk over buffered edges is
+/// deterministic.
+///
+/// The one place a transaction's private edges join a traversal: Cypher's
+/// expansion and algorithm projections both read through it.
+pub fn overlay_l0_neighbors(
+    vid: Vid,
+    edge_type: u32,
+    direction: crate::storage::direction::Direction,
+    l0: &L0Buffer,
+    neighbors: &mut Vec<(Vid, Eid)>,
+    version_hwm: Option<u64>,
+) {
+    use crate::storage::direction::Direction;
+    use uni_common::graph::simple_graph::Direction as SimpleDirection;
+
+    let simple: &[SimpleDirection] = match direction {
+        Direction::Outgoing => &[SimpleDirection::Outgoing],
+        Direction::Incoming => &[SimpleDirection::Incoming],
+        Direction::Both => &[SimpleDirection::Outgoing, SimpleDirection::Incoming],
+    };
+    let mut neighbor_map: HashMap<Eid, Vid> = neighbors.drain(..).map(|(v, e)| (e, v)).collect();
+    for &dir in simple {
+        for (neighbor, eid, version) in l0.get_neighbors(vid, edge_type, dir) {
+            if version_hwm.is_some_and(|hwm| version > hwm) {
+                continue;
+            }
+            if l0.is_tombstoned(eid) {
+                neighbor_map.remove(&eid);
+            } else {
+                neighbor_map.insert(eid, neighbor);
+            }
+        }
+    }
+    for eid in l0.tombstones.keys() {
+        neighbor_map.remove(eid);
+    }
+    *neighbors = neighbor_map.into_iter().map(|(e, v)| (v, e)).collect();
+    neighbors.sort_unstable();
+}
+
 /// Look up a vertex property in the L0 chain.
 /// Returns the value if found, or None if not present in any L0 buffer.
 /// Does NOT check tombstones - caller should check `is_vertex_deleted` first.
@@ -922,6 +969,29 @@ impl L0Context {
             transaction_l0: ctx.transaction_l0.clone(),
             pending_flush_l0s: ctx.pending_flush_l0s.clone(),
         }
+    }
+
+    /// A read-only [`L0Manager`] presenting exactly this visibility, for
+    /// readers that take a manager rather than a context (algorithm
+    /// projections, a procedure's inner query).
+    ///
+    /// The single way to hand a query's L0 view to such a reader: the
+    /// transaction buffer stays the newest layer
+    /// ([`L0Manager::from_view`]) instead of being listed as one more,
+    /// oldest, pending-flush generation. `None` when there is no current
+    /// buffer.
+    ///
+    /// [`L0Manager`]: crate::runtime::l0_manager::L0Manager
+    /// [`L0Manager::from_view`]: crate::runtime::l0_manager::L0Manager::from_view
+    #[must_use]
+    pub fn read_view(&self) -> Option<Arc<crate::runtime::l0_manager::L0Manager>> {
+        self.current_l0.as_ref().map(|current| {
+            Arc::new(crate::runtime::l0_manager::L0Manager::from_view(
+                Arc::clone(current),
+                self.pending_flush_l0s.clone(),
+                self.transaction_l0.clone(),
+            ))
+        })
     }
 
     /// Iterate over all L0 buffers in visibility order.

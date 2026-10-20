@@ -2114,11 +2114,12 @@ pub fn infer_logical_plan_schema(
 ) -> SchemaRef {
     // Walk to outermost Project
     if let LogicalPlan::Project { projections, .. } = plan {
+        let scopes = entity_scopes(plan, schema_info);
         let fields: Vec<Field> = projections
             .iter()
             .map(|(expr, alias)| {
                 let name = alias.clone().unwrap_or_else(|| expr.to_string_repr());
-                let dt = infer_expr_type(expr, schema_info);
+                let dt = infer_expr_type(expr, schema_info, &scopes);
                 Field::new(name, dt, true)
             })
             .collect();
@@ -2147,27 +2148,159 @@ pub fn infer_logical_plan_schema(
     }
 }
 
-/// Infer Arrow DataType for a Cypher expression using schema metadata.
-fn infer_expr_type(expr: &Expr, schema_info: &UniSchema) -> DataType {
-    match expr {
-        Expr::Property(base, key) => {
-            if let Expr::Variable(_) = base.as_ref() {
-                // Look up key across all labels/edge types in schema
-                for props in schema_info.properties.values() {
-                    if let Some(meta) = props.get(key.as_str()) {
-                        return meta.r#type.to_arrow();
+/// The labels or edge types a plan variable is known to carry.
+#[derive(Debug, Clone, PartialEq)]
+enum VarScope {
+    /// A vertex carrying every one of these labels.
+    AllOf(Vec<String>),
+    /// An entity carrying exactly one of these labels or edge types.
+    OneOf(Vec<String>),
+}
+
+/// The scope of every entity variable `plan` binds, for typing its
+/// properties.
+///
+/// `None` marks a name bound in more than one way — two scans with different
+/// labels (a label disjunction plans as a `Union` of per-label scans), or a
+/// projection, unwind or path that rebinds it — whose properties therefore
+/// have no single declared type. A variable absent from the map is unknown
+/// too: an import from the outer query, or an unlabelled scan.
+fn entity_scopes(plan: &LogicalPlan, schema_info: &UniSchema) -> HashMap<String, Option<VarScope>> {
+    fn bind(scopes: &mut HashMap<String, Option<VarScope>>, var: &str, scope: Option<VarScope>) {
+        scopes
+            .entry(var.to_string())
+            .and_modify(|existing| {
+                if *existing != scope {
+                    *existing = None;
+                }
+            })
+            .or_insert(scope);
+    }
+    fn walk(
+        plan: &LogicalPlan,
+        schema_info: &UniSchema,
+        scopes: &mut HashMap<String, Option<VarScope>>,
+    ) {
+        match plan {
+            LogicalPlan::Scan {
+                labels, variable, ..
+            }
+            | LogicalPlan::FusedIndexScan {
+                labels, variable, ..
+            }
+            | LogicalPlan::ScanMainByLabels {
+                labels, variable, ..
+            } => bind(scopes, variable, Some(VarScope::AllOf(labels.clone()))),
+            LogicalPlan::ScanAll { variable, .. } | LogicalPlan::ExtIdLookup { variable, .. } => {
+                bind(scopes, variable, None)
+            }
+            LogicalPlan::Traverse {
+                target_variable,
+                target_label_id,
+                step_variable,
+                edge_type_ids,
+                is_variable_length,
+                path_variable,
+                ..
+            } => {
+                let target = schema_info
+                    .label_name_by_id(*target_label_id)
+                    .map(|l| VarScope::AllOf(vec![l.to_string()]));
+                bind(scopes, target_variable, target);
+                if let Some(step) = step_variable {
+                    let types = (!is_variable_length).then(|| {
+                        edge_type_ids
+                            .iter()
+                            .filter_map(|id| schema_info.edge_type_name_by_id_unified(*id))
+                            .collect::<Vec<_>>()
+                    });
+                    let scope = types
+                        .filter(|t| t.len() == edge_type_ids.len())
+                        .map(VarScope::OneOf);
+                    bind(scopes, step, scope);
+                }
+                if let Some(path) = path_variable {
+                    bind(scopes, path, None);
+                }
+            }
+            LogicalPlan::TraverseMainByType {
+                type_names,
+                target_variable,
+                step_variable,
+                is_variable_length,
+                path_variable,
+                ..
+            } => {
+                bind(scopes, target_variable, None);
+                if let Some(step) = step_variable {
+                    let scope = (!is_variable_length).then(|| VarScope::OneOf(type_names.clone()));
+                    bind(scopes, step, scope);
+                }
+                if let Some(path) = path_variable {
+                    bind(scopes, path, None);
+                }
+            }
+            LogicalPlan::Unwind { variable, .. } => bind(scopes, variable, None),
+            LogicalPlan::Project { projections, .. } => {
+                for (expr, alias) in projections {
+                    if let Some(alias) = alias
+                        && !matches!(expr, Expr::Variable(v) if v == alias)
+                    {
+                        bind(scopes, alias, None);
                     }
                 }
-                DataType::LargeBinary
-            } else {
-                DataType::LargeBinary
             }
+            _ => {}
+        }
+        for child in plan.children() {
+            walk(child, schema_info, scopes);
+        }
+    }
+    let mut scopes = HashMap::new();
+    walk(plan, schema_info, &mut scopes);
+    scopes
+}
+
+/// Infer Arrow DataType for a Cypher expression using schema metadata.
+///
+/// A property is typed only from the labels or edge types its variable is
+/// known to carry (`scopes`); anything else is the dynamically typed stored
+/// value. Typing `s.v` from whichever label happened to declare a `v` read an
+/// integer stored on an undeclared label as a float and a string as NULL.
+fn infer_expr_type(
+    expr: &Expr,
+    schema_info: &UniSchema,
+    scopes: &HashMap<String, Option<VarScope>>,
+) -> DataType {
+    use uni_common::core::schema::EntityScope;
+    match expr {
+        Expr::Property(base, key) => {
+            let Expr::Variable(var) = base.as_ref() else {
+                return DataType::LargeBinary;
+            };
+            let meta = match scopes.get(var.as_str()) {
+                Some(Some(VarScope::AllOf(labels))) => {
+                    schema_info.scoped_property_meta(EntityScope::AllOf(labels), key)
+                }
+                Some(Some(VarScope::OneOf(labels))) => {
+                    schema_info.scoped_property_meta(EntityScope::OneOf(labels), key)
+                }
+                Some(None) | None => None,
+            };
+            meta.map_or(DataType::LargeBinary, |m| m.r#type.to_arrow())
         }
         Expr::BinaryOp { left, op, right } => match op {
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
-                let lt = infer_expr_type(left, schema_info);
-                let rt = infer_expr_type(right, schema_info);
-                numeric_promotion(&lt, &rt)
+                let lt = infer_expr_type(left, schema_info, scopes);
+                let rt = infer_expr_type(right, schema_info, scopes);
+                // `+` also concatenates strings and lists, and `-` subtracts
+                // temporals: only two numbers make a number.
+                let numeric = |t: &DataType| t.is_integer() || t.is_floating();
+                if numeric(&lt) && numeric(&rt) {
+                    numeric_promotion(&lt, &rt)
+                } else {
+                    DataType::LargeBinary
+                }
             }
             BinaryOp::Eq
             | BinaryOp::NotEq
@@ -2190,21 +2323,23 @@ fn infer_expr_type(expr: &Expr, schema_info: &UniSchema) -> DataType {
         Expr::Variable(_) => DataType::LargeBinary,
         Expr::FunctionCall { name, args, .. } => match name.to_lowercase().as_str() {
             "count" => DataType::Int64,
+            // `sum` keeps an integer input integral; `avg` of numbers is a
+            // float. Either over a value of unknown type (or durations) is
+            // whatever that value makes it.
             "sum" | "avg" => {
-                if let Some(arg) = args.first() {
-                    let arg_type = infer_expr_type(arg, schema_info);
-                    if matches!(arg_type, DataType::Float32 | DataType::Float64) {
-                        DataType::Float64
-                    } else {
-                        DataType::Int64
-                    }
-                } else {
-                    DataType::Int64
+                let arg_type = args.first().map_or(DataType::LargeBinary, |arg| {
+                    infer_expr_type(arg, schema_info, scopes)
+                });
+                match arg_type {
+                    DataType::Float32 | DataType::Float64 => DataType::Float64,
+                    t if t.is_integer() && name.eq_ignore_ascii_case("sum") => DataType::Int64,
+                    t if t.is_integer() => DataType::Float64,
+                    _ => DataType::LargeBinary,
                 }
             }
             "min" | "max" => {
                 if let Some(arg) = args.first() {
-                    infer_expr_type(arg, schema_info)
+                    infer_expr_type(arg, schema_info, scopes)
                 } else {
                     DataType::LargeBinary
                 }
@@ -2471,31 +2606,63 @@ pub fn merged_label_props(
     Some(merged)
 }
 
+/// The property columns a traversal over `edge_type_ids` reads, typed.
+///
+/// Every property any of the edge types declares is listed, so the read
+/// treats it as a column rather than an overflow-only name. Its type is the
+/// declared one only when every edge type in scope declares it at that type:
+/// an edge of a type that does not (a schemaless type, or one declaring it
+/// differently) stores whatever was written, and typing its column from a
+/// sibling type's declaration read an integer above 2^53 as a rounded float
+/// and a string as NULL. Those properties are typed `CypherValue`.
 pub fn merged_edge_schema_props(
     uni_schema: &UniSchema,
     edge_type_ids: &[u32],
 ) -> HashMap<String, uni_common::core::schema::PropertyMeta> {
-    let mut merged: HashMap<String, uni_common::core::schema::PropertyMeta> = HashMap::new();
+    use uni_common::core::schema::{DataType as UniDataType, EntityScope};
     let mut sorted_ids = edge_type_ids.to_vec();
     sorted_ids.sort_unstable();
+    sorted_ids.dedup();
+    // An id with no name stays in scope as an alternative declaring nothing.
+    let names: Vec<String> = sorted_ids
+        .iter()
+        .map(|id| {
+            uni_schema
+                .edge_type_name_by_id_unified(*id)
+                .unwrap_or_default()
+        })
+        .collect();
 
-    for edge_type_id in sorted_ids {
-        if let Some(edge_type_name) = uni_schema.edge_type_name_by_id_unified(edge_type_id)
-            && let Some(props) = uni_schema.properties.get(edge_type_name.as_str())
-        {
-            for (prop_name, meta) in props {
-                match merged.get_mut(prop_name) {
-                    Some(existing) => {
-                        if existing.r#type != meta.r#type {
-                            existing.r#type = uni_common::core::schema::DataType::CypherValue;
-                        }
-                        existing.nullable |= meta.nullable;
-                    }
-                    None => {
-                        merged.insert(prop_name.clone(), meta.clone());
-                    }
-                }
+    let mut merged: HashMap<String, uni_common::core::schema::PropertyMeta> = HashMap::new();
+    for name in &names {
+        let Some(props) = uni_schema.properties.get(name.as_str()) else {
+            continue;
+        };
+        for (prop_name, meta) in props {
+            if merged.contains_key(prop_name) {
+                continue;
             }
+            let entry = match uni_schema.scoped_property_meta(EntityScope::OneOf(&names), prop_name)
+            {
+                Some(agreed) => {
+                    let mut agreed = agreed.clone();
+                    agreed.nullable = names.iter().any(|n| {
+                        uni_schema
+                            .properties
+                            .get(n.as_str())
+                            .and_then(|p| p.get(prop_name))
+                            .is_some_and(|m| m.nullable)
+                    });
+                    agreed
+                }
+                None => {
+                    let mut dynamic = meta.clone();
+                    dynamic.r#type = UniDataType::CypherValue;
+                    dynamic.nullable = true;
+                    dynamic
+                }
+            };
+            merged.insert(prop_name.clone(), entry);
         }
     }
 

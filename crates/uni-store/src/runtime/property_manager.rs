@@ -293,7 +293,7 @@ impl PropertyManager {
                 Err(_) => continue,
             };
 
-            // Collect all rows for this edge, sorted by version
+            // Collect all rows for this edge; replayed in version order below.
             let mut rows: Vec<(u64, u8, Properties)> = Vec::new();
 
             for batch in batches {
@@ -312,22 +312,11 @@ impl PropertyManager {
                 for row in 0..batch.num_rows() {
                     let ver = ver_col.value(row);
                     let op = op_col.value(row);
-                    let mut props = Properties::new();
-
-                    if op != 1 {
-                        // Not a delete - extract properties
-                        if let Some(tp) = type_props {
-                            for (p_name, p_meta) in tp {
-                                if let Some(col) = batch.column_by_name(p_name)
-                                    && !col.is_null(row)
-                                {
-                                    let val =
-                                        Self::value_from_column(col.as_ref(), &p_meta.r#type, row)?;
-                                    props.insert(p_name.clone(), val);
-                                }
-                            }
-                        }
-                    }
+                    let props = if op == 1 {
+                        Properties::new()
+                    } else {
+                        Self::edge_delta_row_props(&batch, row, type_props)?
+                    };
                     rows.push((ver, op, props));
                 }
             }
@@ -336,54 +325,9 @@ impl PropertyManager {
                 continue;
             }
 
-            // Sort by version (ascending) so we merge in order
-            rows.sort_by_key(|(ver, _, _)| *ver);
-
-            // Merge properties across all versions
-            // For CRDT properties: merge values
-            // For non-CRDT properties: later versions overwrite earlier ones
-            let mut merged_props: Properties = Properties::new();
-            let mut is_deleted = false;
-
-            for (_, op, props) in rows {
-                if op == 1 {
-                    // Delete operation - mark as deleted
-                    is_deleted = true;
-                    merged_props.clear();
-                } else {
-                    is_deleted = false;
-                    for (p_name, p_val) in props {
-                        // Check if this is a CRDT property
-                        let is_crdt = type_props
-                            .and_then(|tp| tp.get(&p_name))
-                            .map(|pm| matches!(pm.r#type, DataType::Crdt(_)))
-                            .unwrap_or(false);
-
-                        if is_crdt {
-                            // Merge CRDT values
-                            if let Some(existing) = merged_props.get(&p_name) {
-                                // A failed merge used to drop `p_val` and keep the
-                                // older value, silently. Two other sites resolved
-                                // the same failure the opposite way; propagating
-                                // removes the choice rather than picking a winner
-                                // nobody has the information to pick (#233).
-                                let merged = self.merge_crdt_values(existing, &p_val)?;
-                                merged_props.insert(p_name, merged);
-                            } else {
-                                merged_props.insert(p_name, p_val);
-                            }
-                        } else {
-                            // Non-CRDT: later version overwrites
-                            merged_props.insert(p_name, p_val);
-                        }
-                    }
-                }
-            }
-
-            if is_deleted {
+            let Some(merged_props) = self.replay_edge_delta_rows(rows, type_props)? else {
                 return Ok(None);
-            }
-
+            };
             if !merged_props.is_empty() {
                 return Ok(Some(merged_props));
             }
@@ -1734,20 +1678,11 @@ impl PropertyManager {
                 let eid = Eid::from(eid_col.value(row));
                 let ver = ver_col.value(row);
                 let op = op_col.value(row);
-                let mut props = Properties::new();
-
-                if op != 1
-                    && let Some(tp) = type_props
-                {
-                    for (p_name, p_meta) in tp {
-                        if let Some(col) = batch.column_by_name(p_name)
-                            && !col.is_null(row)
-                        {
-                            let val = Self::value_from_column(col.as_ref(), &p_meta.r#type, row)?;
-                            props.insert(p_name.clone(), val);
-                        }
-                    }
-                }
+                let props = if op == 1 {
+                    Properties::new()
+                } else {
+                    Self::edge_delta_row_props(&batch, row, type_props)?
+                };
                 per_eid_rows.entry(eid).or_default().push((ver, op, props));
             }
         }
@@ -1755,43 +1690,8 @@ impl PropertyManager {
         // Eids whose replay ends in a delete; gates the fallback below (C2).
         let mut replay_tombstoned: std::collections::HashSet<uni_common::core::id::Eid> =
             std::collections::HashSet::new();
-        for (eid, mut rows) in per_eid_rows {
-            rows.sort_by_key(|(ver, _, _)| *ver);
-
-            let mut merged_props: Properties = Properties::new();
-            let mut is_deleted = false;
-
-            for (_, op, props) in rows {
-                if op == 1 {
-                    is_deleted = true;
-                    merged_props.clear();
-                } else {
-                    is_deleted = false;
-                    for (p_name, p_val) in props {
-                        let is_crdt = type_props
-                            .and_then(|tp| tp.get(&p_name))
-                            .map(|pm| matches!(pm.r#type, DataType::Crdt(_)))
-                            .unwrap_or(false);
-                        if is_crdt {
-                            if let Some(existing) = merged_props.get(&p_name) {
-                                // A failed merge used to drop `p_val` and keep the
-                                // older value, silently. Two other sites resolved
-                                // the same failure the opposite way; propagating
-                                // removes the choice rather than picking a winner
-                                // nobody has the information to pick (#233).
-                                let merged = self.merge_crdt_values(existing, &p_val)?;
-                                merged_props.insert(p_name, merged);
-                            } else {
-                                merged_props.insert(p_name, p_val);
-                            }
-                        } else {
-                            merged_props.insert(p_name, p_val);
-                        }
-                    }
-                }
-            }
-
-            if is_deleted {
+        for (eid, rows) in per_eid_rows {
+            let Some(merged_props) = self.replay_edge_delta_rows(rows, type_props)? else {
                 // Deleted in storage; remove any L0 accumulation that may
                 // have been recorded under this EID by Phase 1 (matches
                 // is_edge_deleted single-EID semantics).
@@ -1802,7 +1702,7 @@ impl PropertyManager {
                 // not.
                 replay_tombstoned.insert(eid);
                 continue;
-            }
+            };
 
             // L0 takes precedence over storage for shared keys; insert
             // storage values only where L0 did not already provide them.
@@ -1954,6 +1854,91 @@ impl PropertyManager {
                 "overflow_json decoded to a non-map value: {other:?}"
             )),
         }
+    }
+
+    /// One live delta row's user properties: the edge type's declared
+    /// columns plus the undeclared ones carried in `overflow_json`.
+    ///
+    /// Reading only the declared columns lost every undeclared property of
+    /// a declared-type edge as soon as the edge had been flushed: the
+    /// mutation prefetch built on this row seeded the next `SET`'s full row
+    /// without them, and that row then replaced the stored one. A declared
+    /// column wins a key it shares with the overflow blob, as on the read
+    /// path.
+    fn edge_delta_row_props(
+        batch: &RecordBatch,
+        row: usize,
+        type_props: Option<&HashMap<String, uni_common::core::schema::PropertyMeta>>,
+    ) -> Result<Properties> {
+        let mut props = Properties::new();
+        if let Some(tp) = type_props {
+            for (p_name, p_meta) in tp {
+                if let Some(col) = batch.column_by_name(p_name)
+                    && !col.is_null(row)
+                {
+                    let val = Self::value_from_column(col.as_ref(), &p_meta.r#type, row)?;
+                    props.insert(p_name.clone(), val);
+                }
+            }
+        }
+        if let Some(overflow) = Self::extract_overflow_properties(batch, row)? {
+            for (k, v) in overflow {
+                if !v.is_null() {
+                    props.entry(k).or_insert(v);
+                }
+            }
+        }
+        Ok(props)
+    }
+
+    /// Replay one edge's delta rows `(version, op, props)` into its current
+    /// property set, or `None` when the newest row is a delete.
+    ///
+    /// Every live delta row is a whole row — every edge write, a `SET`
+    /// included, flushes as a full-row append (see
+    /// `Writer::insert_edge_partial_full`) — so the newest live row *is* the
+    /// edge's state, and a key absent from
+    /// it is absent from the edge. Merging rows key by key let an older
+    /// row's value fill a key the newer row had dropped, so a removed
+    /// property came back on the next `SET`. CRDT properties are the one
+    /// exception: their values join across versions.
+    fn replay_edge_delta_rows(
+        &self,
+        mut rows: Vec<(u64, u8, Properties)>,
+        type_props: Option<&HashMap<String, uni_common::core::schema::PropertyMeta>>,
+    ) -> Result<Option<Properties>> {
+        let is_crdt = |name: &str| {
+            type_props
+                .and_then(|tp| tp.get(name))
+                .is_some_and(|pm| matches!(pm.r#type, DataType::Crdt(_)))
+        };
+        rows.sort_by_key(|(ver, _, _)| *ver);
+        let mut merged: Properties = Properties::new();
+        let mut is_deleted = false;
+        for (_, op, props) in rows {
+            if op == 1 {
+                is_deleted = true;
+                merged.clear();
+                continue;
+            }
+            is_deleted = false;
+            merged.retain(|k, _| is_crdt(k));
+            for (p_name, p_val) in props {
+                if is_crdt(&p_name)
+                    && let Some(existing) = merged.get(&p_name)
+                {
+                    // A failed merge used to drop `p_val` and keep the older
+                    // value, silently; propagating removes the choice rather
+                    // than picking a winner nobody has the information to
+                    // pick (#233).
+                    let joined = self.merge_crdt_values(existing, &p_val)?;
+                    merged.insert(p_name, joined);
+                } else {
+                    merged.insert(p_name, p_val);
+                }
+            }
+        }
+        Ok((!is_deleted).then_some(merged))
     }
 
     /// Merge overflow properties from the overflow_json column into an existing props map.

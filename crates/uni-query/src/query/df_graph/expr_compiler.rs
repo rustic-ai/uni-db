@@ -2619,12 +2619,12 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
                 .map_err(|e| anyhow!("Failed to create binary expression: {}", e));
         }
 
-        // `=~` over anything but two strings (a CypherValue, a NULL literal)
-        // evaluates per row: DataFusion's regex operator has no common type
-        // for `LargeBinary ~ Utf8`, so `n.s =~ 'ab'` failed to plan.
-        let is_string =
-            |t: &Option<DataType>| matches!(t, Some(DataType::Utf8 | DataType::LargeUtf8));
-        if df_op == Operator::RegexMatch && !(is_string(&left_type) && is_string(&right_type)) {
+        // `=~` always goes through `_cypher_regex`: DataFusion's `~` operator
+        // finds a match anywhere in the string where Cypher's `=~` matches
+        // the whole string (Java `matches()`), and it has no common type for
+        // `LargeBinary ~ Utf8`, so `n.s =~ 'ab'` failed to plan. Two strings
+        // take the UDF's vectorized path.
+        if df_op == Operator::RegexMatch {
             return self
                 .plan_binary_udf(
                     "_cypher_regex",

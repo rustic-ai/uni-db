@@ -155,6 +155,20 @@ impl AlgorithmHostBridge {
         self
     }
 
+    /// Read property values through the calling query's property manager.
+    ///
+    /// Inside a transaction the bridge's storage is version-pinned, and a
+    /// property manager over pinned storage hides the transaction's own
+    /// writes; see [`AlgoContext::property_manager`].
+    #[must_use]
+    pub fn with_property_manager(
+        mut self,
+        property_manager: Option<Arc<uni_store::runtime::property_manager::PropertyManager>>,
+    ) -> Self {
+        self.algo_ctx.property_manager = property_manager;
+        self
+    }
+
     /// Attach the resolver without a primary `graphRef`.
     ///
     /// Needed when the primary projection is Native but a **named scope** is
@@ -366,6 +380,7 @@ impl AlgorithmHostBridge {
             if let Some(l0) = &self.algo_ctx.l0_manager {
                 let mut bufs = l0.get_pending_flush();
                 bufs.push(l0.get_current());
+                bufs.extend(l0.transaction_l0().cloned());
                 for buf in bufs {
                     present.extend(buf.read().label_to_vids.keys().cloned());
                 }
@@ -390,9 +405,11 @@ impl AlgorithmHostBridge {
         }
         let storage = Arc::clone(&self.algo_ctx.storage);
         let l0 = self.algo_ctx.l0_manager.as_ref().map(Arc::clone);
+        let pm = self.algo_ctx.property_manager.clone();
         let spec = spec.clone();
         Box::pin(async move {
-            let projection = build_projection(storage, l0, spec, "GraphCompute project").await?;
+            let projection =
+                build_projection(storage, l0, pm, spec, "GraphCompute project").await?;
             Ok(Arc::new(projection))
         })
     }
@@ -468,10 +485,12 @@ impl AlgorithmHost for AlgorithmHostBridge {
         // into the stream a provider returns from the synchronous `run`.
         let storage = Arc::clone(&self.algo_ctx.storage);
         let l0 = self.algo_ctx.l0_manager.as_ref().map(Arc::clone);
+        let pm = self.algo_ctx.property_manager.clone();
         let spec = spec.clone();
 
         Box::pin(async move {
-            let projection = build_projection(storage, l0, spec, "AlgorithmHost::project").await?;
+            let projection =
+                build_projection(storage, l0, pm, spec, "AlgorithmHost::project").await?;
             Ok(Arc::new(GraphViewImpl(Arc::new(projection))) as Arc<dyn GraphView>)
         })
     }
@@ -485,6 +504,7 @@ impl AlgorithmHost for AlgorithmHostBridge {
 async fn build_projection(
     storage: Arc<uni_store::storage::manager::StorageManager>,
     l0: Option<Arc<uni_store::runtime::L0Manager>>,
+    pm: Option<Arc<uni_store::runtime::property_manager::PropertyManager>>,
     spec: GraphProjectionSpec,
     err_ctx: &'static str,
 ) -> Result<GraphProjection, FnError> {
@@ -494,6 +514,7 @@ async fn build_projection(
     let edge_props: Vec<&str> = spec.edge_properties.iter().map(String::as_str).collect();
     let mut builder = ProjectionBuilder::new(storage)
         .l0_manager(l0)
+        .property_manager(pm)
         .node_labels(&node_labels)
         .edge_types(&edge_types)
         .include_reverse(spec.include_reverse)
@@ -576,7 +597,8 @@ impl AlgorithmProvider for AlgoProviderBridge {
         let algo_ctx = AlgoContext::new(
             Arc::clone(&bridge.algo_ctx.storage),
             bridge.algo_ctx.l0_manager.as_ref().map(Arc::clone),
-        );
+        )
+        .with_property_manager(bridge.algo_ctx.property_manager.clone());
         let proc = Arc::clone(&self.proc);
         let yields = self.yields.clone();
         let fields = self.signature.output_fields.clone();

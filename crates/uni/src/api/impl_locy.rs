@@ -853,24 +853,7 @@ impl<'a> LocyEngine<'a> {
             .map_err(|e| map_native_df_error(e, limits))?;
 
         // 4. Create tracker for EXPLAIN commands or shared-proof detection
-        let has_explain = compiled
-            .commands
-            .iter()
-            .any(|c| matches!(c, CompiledCommand::ExplainRule(_)));
-        let has_prob_fold = compiled.strata.iter().any(|s| {
-            s.rules.iter().any(|r| {
-                r.clauses.iter().any(|c| {
-                    c.fold.iter().any(|f| {
-                        if let uni_cypher::ast::Expr::FunctionCall { name, .. } = &f.aggregate {
-                            matches!(name.to_uppercase().as_str(), "MNOR" | "MPROD")
-                        } else {
-                            false
-                        }
-                    })
-                })
-            })
-        });
-        let needs_tracker = has_explain || has_prob_fold;
+        let needs_tracker = compiled.needs_provenance_tracker();
         let tracker: Option<Arc<uni_query::query::df_graph::ProvenanceStore>> = if needs_tracker {
             Some(Arc::new(uni_query::query::df_graph::ProvenanceStore::new()))
         } else {

@@ -16,7 +16,7 @@ use crate::query::df_graph::locy_errors::LocyRuntimeError;
 use crate::query::df_graph::locy_explain::{
     ProofTerm, ProvenanceAnnotation, ProvenanceStore, compute_proof_probability,
 };
-use crate::query::df_graph::locy_fold::{BodySupportMap, FoldBinding, FoldExec};
+use crate::query::df_graph::locy_fold::{FoldBinding, FoldExec};
 use crate::query::df_graph::locy_priority::PriorityExec;
 use crate::query::df_graph::locy_profile::{
     LocyProfileCollector, PlanningMark, synthetic_operator,
@@ -2128,15 +2128,14 @@ pub struct IsRefBinding {
     pub target_has_prob: bool,
     /// Name of the PROB column in the target rule, if any.
     pub target_prob_col: Option<String>,
-    /// `(body_col, derived_col)` pairs for provenance tracking.
-    ///
-    /// Used by shared-proof detection to find which source facts a derived row
-    /// consumed. Populated for all IS-refs (not just negated ones).
-    pub provenance_join_cols: Vec<(String, String)>,
     /// For a positive reference to a PROB rule: the hidden columns carrying
     /// the referenced probability (and KEY hash) and how the clause reads it
     /// (see [`crate::query::planner_locy_types::PositiveProbRef`]).
     pub prob_ref: Option<crate::query::planner_locy_types::PositiveProbRef>,
+    /// For a negated reference to a PROB rule from an `MNOR`/`MPROD` rule:
+    /// the hidden column its complement fills with the facts it read (see
+    /// [`crate::query::planner_locy_types::NegatedLineageRef`]).
+    pub negated_lineage: Option<crate::query::planner_locy_types::NegatedLineageRef>,
 }
 
 /// A single clause (body) within a fixpoint rule.
@@ -2490,7 +2489,6 @@ async fn run_fixpoint_loop(
                     record_provenance(
                         ProvenanceCtx {
                             tracker,
-                            registry: &registry,
                             warnings_slot: &warnings_slot,
                         },
                         rule,
@@ -2628,9 +2626,6 @@ async fn run_fixpoint_loop(
             strict_probability_domain,
             probability_epsilon,
             semiring_kind,
-            derivation_tracker.as_ref().map(Arc::clone),
-            top_k_proofs,
-            Some(Arc::clone(&registry)),
             // Recursive strata have no profile collector in scope here; the
             // non-recursive path in `locy_program.rs` is where these operators
             // become observable (#177).
@@ -2749,13 +2744,11 @@ pub(crate) struct ClassifierRefs<'a> {
 }
 
 /// Borrowed bundle of provenance-recording state: the in-flight
-/// tracker, the derived-scan registry (used to resolve IS-ref inputs),
-/// and the shared warnings slot. Bundled to keep
+/// tracker and the shared warnings slot. Bundled to keep
 /// `record_provenance` / `record_provenance_nonrecursive`
 /// under the too-many-arguments threshold.
 pub(crate) struct ProvenanceCtx<'a> {
     pub tracker: &'a Arc<ProvenanceStore>,
-    pub registry: &'a Arc<DerivedScanRegistry>,
     pub warnings_slot: &'a Arc<StdRwLock<Vec<RuntimeWarning>>>,
 }
 
@@ -2769,7 +2762,6 @@ async fn record_provenance(
     classifiers: ClassifierRefs<'_>,
 ) -> DFResult<()> {
     let tracker = prov.tracker;
-    let registry = prov.registry;
     let warnings_slot = prov.warnings_slot;
     let classifier_registry = classifiers.registry;
     let classifier_cache = classifiers.cache;
@@ -2785,14 +2777,22 @@ async fn record_provenance(
     let attribution = clause_attribution(rule, clause_candidates)?;
 
     for delta_batch in state.all_delta() {
-        let (hash_indices, _) = yield_positions_in(rule, &delta_batch.schema())?;
+        let (hash_indices, key_indices) = yield_positions_in(rule, &delta_batch.schema())?;
+        let key_columns: Vec<arrow_array::ArrayRef> = key_indices
+            .iter()
+            .map(|&i| Arc::clone(delta_batch.column(i)))
+            .collect();
+        let resolver = super::locy_lineage::RefResolver::new(rule, delta_batch)?;
+        let derivation_indices =
+            derivation_hash_indices(rule, &hash_indices, &delta_batch.schema());
         for row_idx in 0..delta_batch.num_rows() {
-            let row_hash = provenance_fact_hash(&rule.name, delta_batch, &hash_indices, row_idx);
+            let row_hash =
+                provenance_fact_hash(&rule.name, delta_batch, &derivation_indices, row_idx);
             let fact_row = batch_row_to_value_map(delta_batch, row_idx);
             let clause_index =
                 find_clause_for_row(rule, &attribution, delta_batch, &hash_indices, row_idx)?;
 
-            let support = collect_is_ref_inputs(rule, clause_index, delta_batch, row_idx, registry);
+            let (support, fact_key) = row_provenance(&resolver, &key_columns, row_idx)?;
 
             let proof_probability = if top_k_proofs > 0 {
                 compute_proof_probability(&support, &base_probs)
@@ -2803,6 +2803,7 @@ async fn record_provenance(
             let entry = ProvenanceAnnotation {
                 rule_name: rule.name.clone(),
                 clause_index,
+                fact_key,
                 support,
                 along_values: {
                     let along_names: Vec<String> = rule
@@ -2832,7 +2833,7 @@ async fn record_provenance(
                 topk_acc.accumulate(&entry, &row_hash);
                 tracker.record_top_k(row_hash, entry, top_k_proofs);
             } else {
-                tracker.record(row_hash, entry);
+                tracker.record_derivation(row_hash, entry);
             }
         }
     }
@@ -3190,126 +3191,35 @@ fn eval_feature_expr_against_fact_row(
     }
 }
 
-fn collect_is_ref_inputs(
-    rule: &FixpointRulePlan,
-    clause_index: usize,
-    delta_batch: &RecordBatch,
-    row_idx: usize,
-    registry: &Arc<DerivedScanRegistry>,
-) -> Vec<ProofTerm> {
-    let clause = match rule.clauses.get(clause_index) {
-        Some(c) => c,
-        None => return vec![],
-    };
-
-    let mut inputs = Vec::new();
-    let delta_schema = delta_batch.schema();
-
-    for binding in &clause.is_ref_bindings {
-        if binding.negated {
-            continue;
-        }
-        if binding.provenance_join_cols.is_empty() {
-            continue;
-        }
-
-        // Extract body-side values from the delta row for each provenance join col.
-        let body_values: Vec<(String, ScalarKey)> = binding
-            .provenance_join_cols
-            .iter()
-            .filter_map(|(body_col, _derived_col)| {
-                let col_idx = delta_schema
-                    .fields()
-                    .iter()
-                    .position(|f| f.name() == body_col)?;
-                let key = extract_scalar_key(delta_batch, &[col_idx], row_idx);
-                Some((body_col.clone(), key.into_iter().next()?))
+/// The provenance of row `row` of a batch of `rule`'s pre-fold rows: the
+/// facts it positively references (its support), and its own KEY hash, both
+/// as lineage names facts.
+///
+/// The support is read through the one reference resolution,
+/// [`super::locy_lineage::RefResolver`], so EXPLAIN shows, and `TopKProofs`
+/// and exact inference evaluate, the same references. A reference with no
+/// hidden identity column (to a rule without a PROB column, or from a rule
+/// that keeps no lineage) is a certain condition and is not support.
+fn row_provenance(
+    resolver: &super::locy_lineage::RefResolver<'_>,
+    key_columns: &[arrow_array::ArrayRef],
+    row: usize,
+) -> DFResult<(Vec<ProofTerm>, Vec<u8>)> {
+    let support = if resolver.is_empty() {
+        Vec::new()
+    } else {
+        resolver
+            .row(row)?
+            .positive
+            .into_iter()
+            .map(|r| ProofTerm {
+                source_rule: r.fact.0,
+                base_fact_id: r.fact.1.to_vec(),
             })
-            .collect();
-
-        if body_values.len() != binding.provenance_join_cols.len() {
-            continue;
-        }
-
-        // Read current data from the registry entry for this IS-ref's rule.
-        let entry = match registry.get(binding.derived_scan_index) {
-            Some(e) => e,
-            None => continue,
-        };
-        let source_batches = entry.data.read();
-        let source_schema = &entry.schema;
-
-        // Find matching source rows and hash them.
-        for src_batch in source_batches.iter() {
-            let all_src_indices: Vec<usize> = (0..src_batch.num_columns()).collect();
-            for src_row in 0..src_batch.num_rows() {
-                let matches = binding.provenance_join_cols.iter().enumerate().all(
-                    |(i, (_body_col, derived_col))| {
-                        let src_col_idx = source_schema
-                            .fields()
-                            .iter()
-                            .position(|f| f.name() == derived_col);
-                        match src_col_idx {
-                            Some(idx) => {
-                                let src_key = extract_scalar_key(src_batch, &[idx], src_row);
-                                src_key.first() == Some(&body_values[i].1)
-                            }
-                            None => false,
-                        }
-                    },
-                );
-                if matches {
-                    let fact_hash = provenance_fact_hash(
-                        &binding.rule_name,
-                        src_batch,
-                        &all_src_indices,
-                        src_row,
-                    );
-                    inputs.push(ProofTerm {
-                        source_rule: binding.rule_name.clone(),
-                        base_fact_id: fact_hash,
-                    });
-                }
-            }
-        }
-    }
-
-    inputs
-}
-
-/// Phase D D-C0: per-body-row variant of [`collect_is_ref_inputs`] used
-/// to pre-populate `FoldExec`'s `body_support_map` for TopKProofs MNOR.
-///
-/// At FOLD time, the rule's own facts haven't been recorded in the
-/// `ProvenanceStore` yet (`record_provenance` runs after fact
-/// materialization, and is keyed by post-YIELD hashes anyway), so the
-/// support set for each pre-fold body row must be reconstructed
-/// directly from the rule's IS-ref bindings + the source rules'
-/// registry data.
-///
-/// We don't know which clause produced each body row at this point —
-/// the iteration-local `clause_candidates` are gone — so we iterate
-/// **every** clause's `is_ref_bindings`. The `provenance_join_cols`
-/// schema check inside `collect_is_ref_inputs` already skips bindings
-/// whose body columns aren't in the row's schema, so cross-clause
-/// contamination is bounded (a binding only matches if its body cols
-/// are present and the values join). For the single-clause TopKProofs
-/// scenarios in TCK this is exact; for multi-clause TopKProofs rules
-/// it is a conservative over-approximation that may inflate base-RV
-/// counts (treated as the same RV under interning) — acceptable
-/// because the DNF math collapses duplicates by inclusion-exclusion.
-fn collect_is_ref_inputs_for_body_row(
-    rule: &FixpointRulePlan,
-    delta_batch: &RecordBatch,
-    row_idx: usize,
-    registry: &Arc<DerivedScanRegistry>,
-) -> Vec<ProofTerm> {
-    let mut combined: Vec<ProofTerm> = Vec::new();
-    for clause_index in 0..rule.clauses.len() {
-        let part = collect_is_ref_inputs(rule, clause_index, delta_batch, row_idx, registry);
-        combined.extend(part);
-    }
-    combined
+            .collect()
+    };
+    let key = super::locy_row_hash::row_hash(key_columns, row)?.to_vec();
+    Ok((support, key))
 }
 
 // ---------------------------------------------------------------------------
@@ -3338,6 +3248,56 @@ pub(crate) fn provenance_fact_hash(
     key.push(0);
     key.extend(fact_hash_key(batch, all_indices, row_idx));
     key
+}
+
+/// The columns a derivation's provenance is recorded under.
+///
+/// A rule with derivation discriminators (a recursive `FOLD` / `ALONG` rule,
+/// issue #159) is recorded per derivation: its yield columns and hidden
+/// derivation columns (`__deriv_*`, which the plan's yield schema may already
+/// list), but neither a fold input nor a referenced probability. A fold input is a derivation's value, which changes
+/// as the fixpoint refines the facts it references, not its identity. Any
+/// other rule is recorded per yield row, its identity.
+///
+/// Keyed by the yield columns alone, two derivations of one fact through
+/// different referenced facts that happened to carry the same value were one
+/// provenance entry, and EXPLAIN silently showed one of them.
+fn derivation_hash_indices(
+    rule: &FixpointRulePlan,
+    yield_indices: &[usize],
+    schema: &SchemaRef,
+) -> Vec<usize> {
+    use crate::query::planner_locy_types::{
+        DERIV_ISPROB_COL_PREFIX, FOLD_DISCRIMINATOR_COL_PREFIX,
+    };
+    let discriminated = schema
+        .index_of(&format!("{FOLD_DISCRIMINATOR_COL_PREFIX}clause"))
+        .is_ok();
+    if !discriminated {
+        return yield_indices.to_vec();
+    }
+    let fold_inputs: HashSet<usize> = rule
+        .fold_bindings
+        .iter()
+        .filter_map(|fb| yield_indices.get(fb.input_col_index).copied())
+        .collect();
+    let extra = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .filter(|(i, f)| {
+            f.name().starts_with(FOLD_DISCRIMINATOR_COL_PREFIX) && !yield_indices.contains(i)
+        })
+        .map(|(i, _)| i);
+    yield_indices
+        .iter()
+        .copied()
+        .chain(extra)
+        .filter(|i| {
+            !fold_inputs.contains(i)
+                && !schema.field(*i).name().starts_with(DERIV_ISPROB_COL_PREFIX)
+        })
+        .collect()
 }
 
 /// The name yield column `pos` of `rule` carries in a pre-fold fact batch.
@@ -3428,7 +3388,6 @@ pub(crate) async fn record_provenance_nonrecursive(
     tagged_clause_facts: &[(usize, Vec<RecordBatch>)],
     tracker: &Arc<ProvenanceStore>,
     warnings_slot: &Arc<StdRwLock<Vec<RuntimeWarning>>>,
-    registry: &Arc<DerivedScanRegistry>,
     top_k_proofs: usize,
     classifiers: ClassifierRefs<'_>,
 ) -> DFResult<()> {
@@ -3447,12 +3406,19 @@ pub(crate) async fn record_provenance_nonrecursive(
     // Record provenance for each clause's facts.
     for (clause_index, batches) in tagged_clause_facts {
         for batch in batches {
-            let (hash_indices, _) = yield_positions_in(rule, &batch.schema())?;
+            let (hash_indices, key_indices) = yield_positions_in(rule, &batch.schema())?;
+            let key_columns: Vec<arrow_array::ArrayRef> = key_indices
+                .iter()
+                .map(|&i| Arc::clone(batch.column(i)))
+                .collect();
+            let resolver = super::locy_lineage::RefResolver::new(rule, batch)?;
+            let derivation_indices = derivation_hash_indices(rule, &hash_indices, &batch.schema());
             for row_idx in 0..batch.num_rows() {
-                let row_hash = provenance_fact_hash(&rule.name, batch, &hash_indices, row_idx);
+                let row_hash =
+                    provenance_fact_hash(&rule.name, batch, &derivation_indices, row_idx);
                 let fact_row = batch_row_to_value_map(batch, row_idx);
 
-                let support = collect_is_ref_inputs(rule, *clause_index, batch, row_idx, registry);
+                let (support, fact_key) = row_provenance(&resolver, &key_columns, row_idx)?;
 
                 let proof_probability = if top_k_proofs > 0 {
                     compute_proof_probability(&support, &base_probs)
@@ -3463,6 +3429,7 @@ pub(crate) async fn record_provenance_nonrecursive(
                 let entry = ProvenanceAnnotation {
                     rule_name: rule.name.clone(),
                     clause_index: *clause_index,
+                    fact_key,
                     support,
                     along_values: {
                         let along_names: Vec<String> = rule
@@ -4553,7 +4520,8 @@ async fn precompute_graph_feature_maps(
         let algo_ctx = AlgoContext::new(
             storage.clone(),
             graph_algo.l0_manager.as_ref().map(Arc::clone),
-        );
+        )
+        .with_property_manager(graph_algo.property_manager.clone());
         // The AlgoProcedure trait routes direct (nodeLabels, edgeTypes)
         // args through the V2 projection entry point: build a projection
         // from the direct args, then execute against it.
@@ -5553,9 +5521,6 @@ pub(crate) async fn apply_post_fixpoint_chain(
     strict_probability_domain: bool,
     probability_epsilon: f64,
     semiring_kind: SemiringKind,
-    provenance_tracker: Option<Arc<ProvenanceStore>>,
-    top_k_proofs_k: usize,
-    registry: Option<Arc<DerivedScanRegistry>>,
     post_ops: Option<&mut Vec<OperatorStats>>,
     // The query's bound parameters, for the `$name` references a post-FOLD
     // REQUIRE / WHERE / YIELD expression compiles at execution time (#273).
@@ -5568,9 +5533,6 @@ pub(crate) async fn apply_post_fixpoint_chain(
         strict_probability_domain,
         probability_epsilon,
         semiring_kind,
-        provenance_tracker,
-        top_k_proofs_k,
-        registry,
         post_ops,
         params,
     )
@@ -5590,9 +5552,6 @@ async fn apply_post_fixpoint_chain_inner(
     strict_probability_domain: bool,
     probability_epsilon: f64,
     semiring_kind: SemiringKind,
-    provenance_tracker: Option<Arc<ProvenanceStore>>,
-    top_k_proofs_k: usize,
-    registry: Option<Arc<DerivedScanRegistry>>,
     // Sink for the operators this chain builds and runs (#177). `PriorityExec`,
     // `FoldExec` and the post-fixpoint `BestByExec` are assembled here rather
     // than lowered into a clause body, so they sit in no plan the profile
@@ -5614,48 +5573,6 @@ async fn apply_post_fixpoint_chain_inner(
         .find(|b| b.num_rows() > 0)
         .map(|b| b.schema())
         .unwrap_or_else(|| Arc::clone(&rule.yield_schema));
-
-    // Phase D D-C0: pre-compute body-row → IS-ref support map for
-    // TopKProofs MNOR's DNF inclusion-exclusion math. Must be built
-    // here because `facts` is moved into the memory source on the next
-    // line. The map is keyed by a full-column row hash — only
-    // meaningful when no downstream plan node strips/adds columns
-    // between this batch view and the FoldExec input. PRIORITY drops
-    // the `__priority` column, which would change row hashes; until
-    // we plumb the map past PRIORITY, skip map construction for
-    // PRIORITY rules (the failing TCK test doesn't use PRIORITY).
-    // Read the active K from `semiring_kind` rather than the separate
-    // `top_k_proofs_k` parameter — the latter is not always threaded
-    // from the LocyProgram config (the semiring's `k` is the source of
-    // truth).
-    let topk_k: Option<usize> = match semiring_kind {
-        SemiringKind::TopKProofs { k } if k > 0 => Some(k as usize),
-        _ => None,
-    };
-    let body_support_map: Option<Arc<BodySupportMap>> = if topk_k.is_some()
-        && !rule.has_priority
-        && let Some(registry) = registry.as_ref()
-    {
-        let mut map =
-            BodySupportMap::new(schema.fields().iter().map(|f| f.name().clone()).collect());
-        for batch in &facts {
-            let columns = map.resolve(&batch.schema())?;
-            for row_idx in 0..batch.num_rows() {
-                let support = collect_is_ref_inputs_for_body_row(rule, batch, row_idx, registry);
-                if support.is_empty() {
-                    continue;
-                }
-                map.insert(batch, &columns, row_idx, support);
-            }
-        }
-        if map.is_empty() {
-            None
-        } else {
-            Some(Arc::new(map))
-        }
-    } else {
-        None
-    };
 
     let input: Arc<dyn ExecutionPlan> =
         MemorySourceConfig::try_new_exec(&[facts], schema.clone(), None)?;
@@ -5726,16 +5643,13 @@ async fn apply_post_fixpoint_chain_inner(
 
     // Apply FOLD
     let current: Arc<dyn ExecutionPlan> = if rule.has_fold && !rule.fold_bindings.is_empty() {
-        Arc::new(FoldExec::new_with_topk(
+        Arc::new(FoldExec::new_with_semiring(
             current,
             key_column_indices.clone(),
             rule.fold_bindings.clone(),
             strict_probability_domain,
             probability_epsilon,
             semiring_kind,
-            provenance_tracker.clone(),
-            topk_k.unwrap_or(top_k_proofs_k),
-            body_support_map.clone(),
         ))
     } else {
         current

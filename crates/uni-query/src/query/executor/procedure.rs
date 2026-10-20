@@ -770,8 +770,12 @@ impl Executor {
             );
         }
 
+        // The version-pinned storage inside a transaction, as the outer
+        // query's own scans use: the live manager let a declared procedure's
+        // body read rows another session committed and flushed after the
+        // transaction began.
         let mut host = crate::query::executor::procedure_host::QueryProcedureHost::from_components(
-            Arc::clone(&self.storage),
+            self.effective_storage(),
             Some(Arc::clone(&self.algo_registry)),
             self.procedure_registry.clone(),
         );
@@ -785,6 +789,7 @@ impl Executor {
         if let Some(writer) = &self.writer {
             host = host.with_writer(Arc::clone(writer));
         }
+        host = host.with_property_manager(self.live_property_manager());
         // A declared procedure runs its body as an inner query, inside this
         // poll and under `block_in_place`, where the caller's timeout and
         // cancellation cannot reach it. Without the budget the body ran to
@@ -876,16 +881,8 @@ impl Executor {
         // path; L0 visibility flows through `QueryContext`). Mirrors the
         // planner path's `graph_ctx.l0_context()` construction so a
         // provider algorithm observes read-your-writes state.
-        let l0_manager = ctx.map(|qc| {
-            let mut pending = qc.pending_flush_l0s.clone();
-            if let Some(tx_l0) = &qc.transaction_l0 {
-                pending.push(tx_l0.clone());
-            }
-            Arc::new(uni_store::runtime::l0_manager::L0Manager::from_snapshot(
-                qc.l0.clone(),
-                pending,
-            ))
-        });
+        let l0_manager = ctx
+            .and_then(|qc| crate::query::df_graph::L0Context::from_query_context(qc).read_view());
 
         // Guest Cypher/Named projections (issue #151 P3) resolve through a query
         // host built from the executor's components (the simple-executor path has
@@ -897,7 +894,8 @@ impl Executor {
                 Arc::clone(&storage),
                 Some(Arc::clone(&self.algo_registry)),
                 self.procedure_registry.clone(),
-            );
+            )
+            .with_property_manager(self.live_property_manager());
         // The resolver's `nodeQuery` / `edgeQuery` must observe the same L0
         // snapshot the outer projection does (`l0_manager`, above). Without this
         // a guest Cypher/Named `graphRef` silently selects from flushed storage
@@ -916,6 +914,7 @@ impl Executor {
             entry,
             storage,
             l0_manager,
+            self.live_property_manager(),
             &config_json,
             Some(resolver),
         )

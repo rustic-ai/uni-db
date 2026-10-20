@@ -1185,13 +1185,36 @@ impl Transaction {
         // under a short sync lock; the async probe runs outside the
         // lock to keep the L0 buffer available to other readers and
         // to satisfy the Send bound on the surrounding async fn.
+        //
+        // Edges take a different route: every edge the tx writes or deletes
+        // gets its committed state (L0 chain over L1) read in one batched
+        // lookup, which both detects pre-existence for edges already flushed
+        // and supplies their whole pre-image.
         if let Some(ref mut probe) = probe_opt {
-            let candidates = {
+            let schema_manager = self.db.storage.schema_manager();
+            let (candidates, edge_candidates) = {
                 let l0 = self.tx_l0.read();
-                probe.pending_l1_candidates(&l0)
+                let resolve = |type_id: u32| schema_manager.edge_type_name_by_id_unified(type_id);
+                (
+                    probe.pending_l1_candidates(&l0),
+                    probe.pending_edge_candidates(&l0, &resolve),
+                )
             };
             if !candidates.is_empty() {
                 probe.extend_with_l1(candidates, &self.db.storage).await;
+            }
+            if !edge_candidates.is_empty()
+                && let Some(l0m) = l0_manager_for_probe.as_ref()
+            {
+                let schema = schema_manager.schema();
+                probe
+                    .extend_edges_with_committed_state(
+                        edge_candidates,
+                        l0m,
+                        &self.db.properties,
+                        &schema,
+                    )
+                    .await;
             }
         }
 

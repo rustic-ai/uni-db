@@ -86,6 +86,7 @@ impl AlgoProcedure for AllSimplePathsProcedure {
 
             let mut builder = ProjectionBuilder::new(ctx.storage.clone())
                 .l0_manager(ctx.l0_manager.clone())
+                .property_manager(ctx.property_manager.clone())
                 .edge_types(&edge_types.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
             if !node_labels.is_empty() {

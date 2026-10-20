@@ -1167,7 +1167,6 @@ async fn run_program(
                         &tagged_clause_facts,
                         tracker,
                         &warnings_slot,
-                        &registry,
                         top_k_proofs,
                         super::locy_fixpoint::ClassifierRefs {
                             registry: &classifier_registry,
@@ -1215,9 +1214,6 @@ async fn run_program(
                     strict_probability_domain,
                     probability_epsilon,
                     semiring_kind,
-                    derivation_tracker.as_ref().map(Arc::clone),
-                    top_k_proofs,
-                    Some(Arc::clone(&registry)),
                     // The chain's own operators join this rule's clause-body
                     // ops, so `FoldExec` and friends reach the Locy profile
                     // (#177). `None` when not profiling, so the metric walk is
@@ -1765,41 +1761,6 @@ fn convert_is_refs(
             // here, so a subject YIELD renamed or dropped still anti-joins
             // (issue #158), and an existential value position is absent.
             let anti_join_cols = is_ref.negation_keys.clone();
-            // The body column of a negated subject is its hidden identity
-            // column; a positive reference's subject keeps its own name.
-            let left_col = |var: &String| {
-                is_ref
-                    .negation_keys
-                    .iter()
-                    .find(|k| k.variable == *var)
-                    .map_or_else(|| var.clone(), |k| k.body_column.clone())
-            };
-
-            // Provenance join cols: for ALL IS-refs (not just negated), compute
-            // (body_col, derived_col) pairs so shared-proof detection can trace
-            // which source facts contributed to each derived row.
-            //
-            // Uses the same `left_col` resolution as the anti-join above: for a
-            // negated ref whose subject was renamed by YIELD, the bare name does
-            // not exist post-projection and lineage would silently attribute to
-            // nothing.
-            let provenance_join_cols: Vec<(String, String)> = is_ref
-                .subjects
-                .iter()
-                .enumerate()
-                .filter_map(|(i, s)| {
-                    if let uni_cypher::ast::Expr::Variable(var) = s {
-                        let right_col = is_ref
-                            .binding_columns
-                            .get(i)
-                            .cloned()
-                            .unwrap_or_else(|| var.clone());
-                        Some((left_col(var), right_col))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
 
             Ok(IsRefBinding {
                 derived_scan_index: entry.scan_index,
@@ -1809,8 +1770,8 @@ fn convert_is_refs(
                 anti_join_cols,
                 target_has_prob: is_ref.target_has_prob,
                 target_prob_col: is_ref.target_prob_col.clone(),
-                provenance_join_cols,
                 prob_ref: is_ref.prob_ref.clone(),
+                negated_lineage: is_ref.negated_lineage.clone(),
             })
         })
         .collect()

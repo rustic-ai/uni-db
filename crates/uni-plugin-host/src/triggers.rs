@@ -54,7 +54,9 @@
 //!   and edges visible there, and from the L1 probe (which now
 //!   projects every property column on the candidate label) for
 //!   vertices that were drained out of L0 by a previous flush. Edge
-//!   pre-images are captured in the L0 chain via `edge_properties`.
+//!   pre-images are each edge's committed state (L0 chain over L1), read
+//!   in one batched lookup by
+//!   [`PreExistingProbe::extend_edges_with_committed_state`].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -950,8 +952,9 @@ struct MutationRow {
 /// `NODE_CREATE` on its next mutation. The L1 probe also projects
 /// every property column on the target label so the resulting
 /// `old_value` carries the same pre-image fidelity as the L0-chain
-/// path. Edge pre-images are captured via the L0 chain's
-/// `edge_properties` snapshot.
+/// path. [`Self::extend_edges_with_committed_state`] does the same for
+/// edges, reading each edge's committed state (L0 overlay over L1) in one
+/// batched lookup.
 #[derive(Default)]
 pub struct PreExistingProbe {
     /// VIDs known to exist in committed state (with their pre-image
@@ -963,6 +966,11 @@ pub struct PreExistingProbe {
     /// uses `Properties::default()` for entries added through an
     /// existence-only path.
     edges: HashMap<uni_common::Eid, Properties>,
+    /// VIDs the committed L0 chain shows as deleted. A stale L1 row for
+    /// one of these must not be read back as a pre-image.
+    dead_vertices: HashSet<uni_common::Vid>,
+    /// EIDs the committed L0 chain shows as deleted; see `dead_vertices`.
+    dead_edges: HashSet<uni_common::Eid>,
 }
 
 impl PreExistingProbe {
@@ -1044,7 +1052,12 @@ impl PreExistingProbe {
             probe_buffer(&g);
         }
 
-        Self { vertices, edges }
+        Self {
+            vertices,
+            edges,
+            dead_vertices: dead_vids,
+            dead_edges: dead_eids,
+        }
     }
 
     /// Snapshot the (vid, label) pairs that should be probed against
@@ -1060,7 +1073,7 @@ impl PreExistingProbe {
             .keys()
             .chain(tx_l0.vertex_tombstones.iter())
         {
-            if self.vertices.contains_key(vid) {
+            if self.vertices.contains_key(vid) || self.dead_vertices.contains(vid) {
                 continue;
             }
             let label = tx_l0
@@ -1269,6 +1282,133 @@ impl PreExistingProbe {
                     self.vertices.entry(vid).or_insert(props);
                 }
             }
+        }
+    }
+
+    /// Snapshot the edges of `tx_l0` whose committed state has to be read:
+    /// every EID the transaction writes or deletes, minus those the
+    /// committed L0 chain shows as deleted. Sync — must run under the
+    /// `tx_l0` read lock; hand the result to
+    /// [`Self::extend_edges_with_committed_state`] outside it.
+    ///
+    /// Each EID carries its edge type name when one is known, from the
+    /// transaction's own `edge_types` or else from the type id it records
+    /// (`edge_endpoints` for a write, the tombstone for a delete) through
+    /// `resolve_edge_type`. The type is only a scan hint; an EID without one
+    /// is still probed.
+    #[must_use]
+    pub fn pending_edge_candidates(
+        &self,
+        tx_l0: &L0Buffer,
+        resolve_edge_type: &dyn Fn(u32) -> Option<String>,
+    ) -> Vec<(uni_common::Eid, Option<String>)> {
+        let mut seen: HashSet<uni_common::Eid> = HashSet::new();
+        let written = tx_l0
+            .edge_endpoints
+            .iter()
+            .map(|(eid, (_, _, type_id))| (*eid, *type_id));
+        let deleted = tx_l0
+            .tombstones
+            .iter()
+            .map(|(eid, ts)| (*eid, ts.edge_type));
+        written
+            .chain(deleted)
+            .filter(|(eid, _)| !self.dead_edges.contains(eid) && seen.insert(*eid))
+            .map(|(eid, type_id)| {
+                let name = tx_l0
+                    .edge_types
+                    .get(&eid)
+                    .cloned()
+                    .or_else(|| resolve_edge_type(type_id));
+                (eid, name)
+            })
+            .collect()
+    }
+
+    /// Replace the edge pre-images with each edge's committed state, read
+    /// through [`PropertyManager::get_batch_edge_props`] over the committed
+    /// L0 chain (pending-flush buffers, then the current one) layered on L1.
+    ///
+    /// [`Self::from_l0_chain`] alone sees only edges still in L0, and only
+    /// the newest buffer's row for them. An edge flushed to L1 was therefore
+    /// reported as `EDGE_CREATE` with no pre-image on its next update, and
+    /// as an `EDGE_DELETE` with no pre-image when deleted; an edge updated
+    /// after a flush reported only the keys of that later write. The
+    /// committed state is what a read of the edge returns before this
+    /// transaction, so it is the pre-image by definition.
+    ///
+    /// The lookup is one batched read for all `candidates` (chunked `IN`
+    /// scans inside the reader), never one scan per edge. Every property is
+    /// requested — declared columns of the hinted types plus the
+    /// `_all_props` wildcard for undeclared and schemaless properties.
+    /// `Null` values are dropped: a removed property is absent from the
+    /// pre-image, as it is from the L1 vertex pre-image.
+    ///
+    /// # Errors
+    ///
+    /// A failed read is logged and the L0-chain pre-images are kept — the
+    /// same degrade-not-fail contract as [`Self::extend_with_l1`].
+    ///
+    /// [`PropertyManager::get_batch_edge_props`]: uni_store::runtime::property_manager::PropertyManager::get_batch_edge_props
+    pub async fn extend_edges_with_committed_state(
+        &mut self,
+        candidates: Vec<(uni_common::Eid, Option<String>)>,
+        l0_manager: &L0Manager,
+        properties: &uni_store::runtime::property_manager::PropertyManager,
+        schema: &uni_common::core::schema::Schema,
+    ) {
+        const ALL_PROPS: &str = "_all_props";
+        if candidates.is_empty() {
+            return;
+        }
+        // A partial type hint would scan too few delta tables and miss the
+        // unhinted edges, so the hint is used only when every EID has one.
+        let hint: Option<Vec<String>> = candidates
+            .iter()
+            .map(|(_, t)| t.clone())
+            .collect::<Option<HashSet<String>>>()
+            .map(|set| set.into_iter().collect());
+        let declared: HashSet<&str> = match &hint {
+            Some(types) => types
+                .iter()
+                .filter_map(|t| schema.properties.get(t))
+                .flat_map(|props| props.keys().map(String::as_str))
+                .collect(),
+            None => schema
+                .edge_types
+                .keys()
+                .filter_map(|t| schema.properties.get(t))
+                .flat_map(|props| props.keys().map(String::as_str))
+                .collect(),
+        };
+        let mut wanted: Vec<&str> = declared.into_iter().collect();
+        wanted.push(ALL_PROPS);
+        let eids: Vec<uni_common::Eid> = candidates.iter().map(|(eid, _)| *eid).collect();
+
+        // Committed L0 only: the transaction's own buffer is the post-image.
+        let ctx = uni_store::runtime::context::QueryContext::new_with_pending(
+            l0_manager.get_current(),
+            None,
+            l0_manager.get_pending_flush(),
+        );
+        match properties
+            .get_batch_edge_props(&eids, &wanted, hint.as_deref(), Some(&ctx))
+            .await
+        {
+            Ok(found) => {
+                for (key, mut props) in found {
+                    // The reader keys edges by `Vid::from(eid)`.
+                    let eid = uni_common::Eid::from(key.as_u64());
+                    props.retain(|_, v| !v.is_null());
+                    self.edges.insert(eid, props);
+                }
+            }
+            Err(e) => warn!(
+                error = %e,
+                edges = eids.len(),
+                "edge pre-image read failed; edges not in L0 are reported as \
+                 EDGE_CREATE with no pre-image"
+            ),
         }
     }
 
@@ -1515,11 +1655,23 @@ impl MutationEvents {
         // Edge deletes. `old_value` is the pre-tx property image when
         // the probe captured it.
         for (eid, ts) in &l0.tombstones {
+            // Same recovery as the write loop above: a delete records the type
+            // id but often not the name, and a `type:<id>` placeholder never
+            // matches a trigger's declared edge type, so `ON -[:R]` delete
+            // triggers silently never fired.
             let etype = l0
                 .edge_types
                 .get(eid)
                 .cloned()
-                .unwrap_or_else(|| format!("type:{}", ts.edge_type));
+                .or_else(|| resolve_edge_type(ts.edge_type))
+                .unwrap_or_else(|| {
+                    warn!(
+                        eid = ?eid,
+                        type_id = ts.edge_type,
+                        "deleted edge's type name unresolvable; trigger routing will not match it",
+                    );
+                    format!("type:{}", ts.edge_type)
+                });
             let old = probe.and_then(|p| p.edge_old_bytes(*eid));
             let old_props_map = probe
                 .and_then(|p| p.edge_properties(*eid))

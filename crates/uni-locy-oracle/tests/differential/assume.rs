@@ -148,6 +148,32 @@ fn mutation(node_count: i64, rng: &mut u64) -> (&'static str, String) {
     }
 }
 
+/// Reuse counters over one subset of the compared cases.
+#[derive(Debug, Default)]
+struct Subset {
+    cases: usize,
+    reused: usize,
+    evaluated: usize,
+}
+
+impl Subset {
+    fn add(&mut self, (reused, evaluated): (usize, usize)) {
+        self.cases += 1;
+        self.reused += reused;
+        self.evaluated += evaluated;
+    }
+
+    /// Reused strata as a percentage of all strata, for messages.
+    fn reuse_pct(&self) -> f64 {
+        let all = self.reused + self.evaluated;
+        if all == 0 {
+            0.0
+        } else {
+            100.0 * self.reused as f64 / all as f64
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Totals {
     cases: usize,
@@ -155,6 +181,11 @@ struct Totals {
     changed: usize,
     reused: usize,
     evaluated: usize,
+    /// Compared cases whose program can reuse strata (no provenance tracker).
+    eligible: Subset,
+    /// Compared cases whose program runs with a provenance tracker, so the
+    /// runtime never offers `ASSUME` a baseline to reuse.
+    tracked: Subset,
     skipped_errors: usize,
     families: BTreeMap<&'static str, usize>,
     divergences: Vec<String>,
@@ -231,6 +262,12 @@ async fn run_case(g: &Generated, seed: u64, totals: &mut Totals) -> Result<()> {
             .collect::<Vec<_>>()
             .join("\n")
     );
+    // Whether the runtime will offer this program a baseline to reuse: the
+    // engine's own predicate over the same text it is about to run.
+    let tracked = base_db
+        .session()
+        .compile_locy(&assume_text)
+        .map(|p| p.needs_provenance_tracker());
     let hypothetical = answers(&base_db, &assume_text).await;
     let fresh_db = seeded(g, Some(&m)).await?;
     let fresh = answers(
@@ -245,6 +282,12 @@ async fn run_case(g: &Generated, seed: u64, totals: &mut Totals) -> Result<()> {
             totals.compared += 1;
             totals.reused += stats.0;
             totals.evaluated += stats.1;
+            // It ran, so it compiled.
+            match tracked {
+                Ok(true) => totals.tracked.add(stats),
+                Ok(false) => totals.eligible.add(stats),
+                Err(e) => anyhow::bail!("ASSUME ran but did not compile: {e}"),
+            }
             if want != base {
                 totals.changed += 1;
             }
@@ -307,13 +350,22 @@ fn drive(cases: u32) {
     }
     eprintln!(
         "[oracle:assume] {} cases in {:.1?}: compared {}, answers changed by the mutation {}, \
-         strata reused {} / evaluated {}, both-error {}, families {:?}, divergences {}",
+         strata reused {} / evaluated {}, reuse-eligible cases {} (reused {} / evaluated {}, \
+         {:.1}%), tracked cases {} (reused {} / evaluated {}), both-error {}, families {:?}, \
+         divergences {}",
         totals.cases,
         started.elapsed(),
         totals.compared,
         totals.changed,
         totals.reused,
         totals.evaluated,
+        totals.eligible.cases,
+        totals.eligible.reused,
+        totals.eligible.evaluated,
+        totals.eligible.reuse_pct(),
+        totals.tracked.cases,
+        totals.tracked.reused,
+        totals.tracked.evaluated,
         totals.skipped_errors,
         totals.families,
         totals.divergences.len()
@@ -337,9 +389,41 @@ fn drive(cases: u32) {
         totals.compared * 2 >= totals.cases,
         "seed={seed}: too few compared: {totals:?}"
     );
+    // Reuse is only possible where the runtime offers a baseline: a program
+    // with a provenance tracker (an MNOR / MPROD fold, or EXPLAIN) never
+    // gets one, so the reuse floor is taken over the other programs only,
+    // and needs enough of them that it cannot hold vacuously.
+    let min_eligible = (totals.compared / 6).max(3);
+    let e = &totals.eligible;
     assert!(
-        totals.reused * 100 >= 10 * (totals.reused + totals.evaluated),
-        "seed={seed}: {totals:?}"
+        e.cases >= min_eligible,
+        "seed={seed}: only {} of {} compared cases can reuse strata (no provenance \
+         tracker); the reuse floor needs at least {min_eligible}. eligible {:?}, tracked {:?}",
+        e.cases,
+        totals.compared,
+        e,
+        totals.tracked
+    );
+    assert!(
+        e.reused * 100 >= 10 * (e.reused + e.evaluated),
+        "seed={seed}: reuse-eligible cases reused {} of {} strata ({:.1}%), below the 10% \
+         floor. eligible {:?}, tracked {:?}",
+        e.reused,
+        e.reused + e.evaluated,
+        e.reuse_pct(),
+        e,
+        totals.tracked
+    );
+    // Pins today's behavior: with a provenance tracker the runtime skips the
+    // top-level baseline, so nothing is reused. Expected to change if
+    // baseline reuse is ever made sound under provenance; update this then.
+    assert_eq!(
+        totals.tracked.reused, 0,
+        "seed={seed}: programs with a provenance tracker reused {} strata, but the runtime \
+         skips the ASSUME baseline for them (impl_locy.rs, `enable_top_level_baseline`). If \
+         baseline reuse was made sound under provenance, this assertion is expected to \
+         change. tracked {:?}, eligible {:?}",
+        totals.tracked.reused, totals.tracked, totals.eligible
     );
     assert!(
         totals.evaluated * 100 >= 10 * (totals.reused + totals.evaluated),

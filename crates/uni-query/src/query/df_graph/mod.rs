@@ -1064,7 +1064,7 @@ impl GraphExecutionContext {
         if version_hwm.is_none()
             && let Some(tx_guard) = tx_guard
         {
-            overlay_l0_neighbors(
+            uni_store::runtime::l0_visibility::overlay_l0_neighbors(
                 vid,
                 edge_type,
                 direction,
@@ -1174,68 +1174,6 @@ impl GraphExecutionContext {
                     }
                 }
             }
-        }
-    }
-}
-
-/// Overlay L0 buffer neighbors onto existing neighbor list.
-///
-/// Adds new edges from L0 and removes tombstoned edges.
-/// Filters by version if a snapshot boundary is provided.
-fn overlay_l0_neighbors(
-    vid: Vid,
-    edge_type: u32,
-    direction: Direction,
-    l0: &L0Buffer,
-    neighbors: &mut Vec<(Vid, Eid)>,
-    version_hwm: Option<u64>,
-) {
-    use std::collections::HashMap;
-
-    // Convert to map for efficient updates
-    let mut neighbor_map: HashMap<Eid, Vid> = neighbors.drain(..).map(|(v, e)| (e, v)).collect();
-
-    // Query L0 for each direction
-    for &simple_dir in direction.to_simple_directions() {
-        for (neighbor, eid, version) in l0.get_neighbors(vid, edge_type, simple_dir) {
-            // Skip edges beyond snapshot boundary
-            if version_hwm.is_some_and(|hwm| version > hwm) {
-                continue;
-            }
-
-            // Apply insert or remove tombstone
-            if l0.is_tombstoned(eid) {
-                neighbor_map.remove(&eid);
-            } else {
-                neighbor_map.insert(eid, neighbor);
-            }
-        }
-    }
-
-    // Remove edges tombstoned in this L0 but originating from other layers
-    for eid in l0.tombstones.keys() {
-        neighbor_map.remove(eid);
-    }
-
-    // Back to a vector, in the `(neighbor vid, eid)` order the adjacency
-    // manager returns: the map's iteration order is seeded per call, and a
-    // search over transaction-local edges must expand them deterministically.
-    *neighbors = neighbor_map.into_iter().map(|(e, v)| (v, e)).collect();
-    neighbors.sort_unstable();
-}
-
-/// Extension trait to convert storage Direction to SimpleGraph directions.
-trait DirectionExt {
-    fn to_simple_directions(&self) -> &'static [uni_common::graph::simple_graph::Direction];
-}
-
-impl DirectionExt for Direction {
-    fn to_simple_directions(&self) -> &'static [uni_common::graph::simple_graph::Direction] {
-        use uni_common::graph::simple_graph::Direction as SimpleDirection;
-        match self {
-            Direction::Outgoing => &[SimpleDirection::Outgoing],
-            Direction::Incoming => &[SimpleDirection::Incoming],
-            Direction::Both => &[SimpleDirection::Outgoing, SimpleDirection::Incoming],
         }
     }
 }

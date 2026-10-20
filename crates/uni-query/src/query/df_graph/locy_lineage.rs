@@ -1,42 +1,60 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-//! Probability through positive `IS` references, and the lineage exact
-//! inference reads.
+//! Probability through `IS` references, and the lineage that exact inference,
+//! `TopKProofs` and EXPLAIN read.
 //!
 //! # Semantics
 //!
 //! A fact of a PROB rule holds with the probability its PROB column carries.
 //! A positive reference `x IS r` to such a rule is a probabilistic condition:
-//! the row holds only when the referenced fact does. So:
+//! the row holds only when the referenced fact does. A negated reference
+//! `x IS NOT r` holds only when no fact of `r` its key matches does. So:
 //!
 //! * **Default mode** multiplies the referenced probability into the calling
-//!   row's PROB value ([`apply_positive_prob_factors`]), as `IS NOT` multiplies
-//!   `1 - p`. A clause whose PROB expression already reads that probability as
-//!   one product factor (`FOLD p = MNOR(p)`) counts it once: nothing more is
-//!   multiplied in. A read that is not one product factor (`1 - p`) is never
-//!   multiplied in either, and is reported (`ProbabilityReadNotFactor`).
+//!   row's PROB value ([`apply_positive_prob_factors`]), and `IS NOT`
+//!   multiplies `1 - p`, `p` the noisy-OR of the matched facts
+//!   (`locy_complement`). Both treat the referenced facts as independent of
+//!   the rest of the row. A clause whose PROB expression already reads a
+//!   positive reference's probability as one product factor
+//!   (`FOLD p = MNOR(p)`) counts it once: nothing more is multiplied in. A
+//!   read that is not one product factor (`1 - p`) is never multiplied in
+//!   either, and is reported (`ProbabilityReadNotFactor`).
 //! * **Exact mode** evaluates each fact of an `MNOR`/`MPROD` rule as the
-//!   formula `OP over its rows of (row event AND each referenced fact's
-//!   formula)` under possible-worlds semantics, where OP is OR for `MNOR` and
-//!   AND for `MPROD`, every row event is an independent variable, and a fact
-//!   with no recorded lineage (a non-fold PROB rule's) is one variable.
+//!   formula `OP over its rows of (row event AND each positively referenced
+//!   fact's formula AND NOT each negated fact's formula)` under possible-worlds
+//!   semantics, where OP is OR for `MNOR` and AND for `MPROD`, every row event
+//!   is an independent variable, and a fact with no recorded lineage (a
+//!   non-fold PROB rule's) is one variable.
+//! * **`TopKProofs { k }`** evaluates the same formula with each `MNOR` fact
+//!   restricted to its `k` most probable rows (its proofs).
 //!
 //! The row event's own probability is the row's PROB value divided by the
-//! referenced probabilities it carries, which recovers the clause's local
-//! weight in both the multiplied and the already-a-factor case.
+//! referenced probabilities and complements it carries, which recovers the
+//! clause's local weight in both the multiplied and the already-a-factor case.
 //!
 //! When no fact's formula reads a variable twice, the default value of each
-//! fact is already its possible-worlds probability, so the two modes agree.
-//! A repeated variable (two proofs through one fact, or a cycle) is reported
-//! as `SharedProbabilisticDependency`, and only those facts are recomputed.
+//! fact is already its possible-worlds probability, so the modes agree. A
+//! repeated variable (two proofs through one fact, a fact and a negated fact
+//! resting on one edge, or a cycle) is reported as
+//! `SharedProbabilisticDependency`, and only those facts are recomputed.
+//!
+//! # One reference resolution
+//!
+//! Which facts a derivation row references is read in one place,
+//! [`RefResolver`], from the hidden columns the planner projects into every
+//! pre-fold row of an `MNOR`/`MPROD` rule: `__deriv_isref_*` (the hash of a
+//! positively referenced fact's KEY, subject and `TO` target included) and
+//! `__deriv_isnot_*` (the facts a complement read). Lineage, the provenance
+//! EXPLAIN shows and the proofs `TopKProofs` keeps are all built from it.
 
 // Rust guideline compliant
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock as StdRwLock};
 
-use arrow_array::{Array, ArrayRef, FixedSizeBinaryArray, Float64Array, RecordBatch};
+use arrow_array::builder::BinaryBuilder;
+use arrow_array::{Array, ArrayRef, BinaryArray, FixedSizeBinaryArray, Float64Array, RecordBatch};
 use biodivine_lib_bdd::{Bdd, BddVariable, BddVariableSet};
 use datafusion::common::Result as DFResult;
 use datafusion::error::DataFusionError;
@@ -45,17 +63,19 @@ use uni_locy::{RuntimeWarning, RuntimeWarningCode, SemiringKind};
 
 use super::common::{arrow_err, extract_scalar_key};
 use super::locy_bdd::bdd_probability;
-use super::locy_fixpoint::{
-    FixpointRulePlan, IsRefBinding, pre_fold_column_name, yield_positions_in,
-};
+use super::locy_fixpoint::{FixpointRulePlan, pre_fold_column_name, yield_positions_in};
 use super::locy_row_hash::{ROW_HASH_WIDTH, row_hash};
 use crate::query::planner_locy_types::{DERIV_EVENT_COL, ISPROB_COL_PREFIX, ProbRead};
 
 /// The identity of a fact: the hash of its KEY columns.
-type FactKey = [u8; ROW_HASH_WIDTH as usize];
+pub(crate) type FactKey = [u8; ROW_HASH_WIDTH as usize];
 
 /// A fact of a lineage-keeping rule: `(rule name, KEY hash)`.
 type FactId = (String, FactKey);
+
+/// The width of one encoded [`NegatedFact`]: its KEY hash, then its
+/// probability as little-endian `f64` bits.
+const NEGATED_FACT_WIDTH: usize = ROW_HASH_WIDTH as usize + 8;
 
 /// Fails with an internal error naming `what`.
 fn internal(what: String) -> DataFusionError {
@@ -70,7 +90,7 @@ fn internal(what: String) -> DataFusionError {
 /// # Errors
 ///
 /// Fails when the value is neither NULL nor a number.
-fn f64_at(col: &dyn Array, row: usize, name: &str) -> DFResult<Option<f64>> {
+pub(crate) fn f64_at(col: &dyn Array, row: usize, name: &str) -> DFResult<Option<f64>> {
     if col.is_null(row) {
         return Ok(None);
     }
@@ -103,6 +123,93 @@ fn f64_column(values: Vec<Option<f64>>, like: &ArrayRef) -> DFResult<ArrayRef> {
         .map_err(|e| internal(format!("Locy PROB column failed to re-encode: {e}")))
 }
 
+/// A fact a negated reference's complement read: its KEY hash and the
+/// probability the complement used.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct NegatedFact {
+    /// The hash of the negated fact's KEY columns, as its rule's lineage
+    /// hashes it.
+    pub key: FactKey,
+    /// The negated fact's probability.
+    pub prob: f64,
+}
+
+/// The columns of `batch` named `names`, in that order, for hashing a fact's
+/// KEY as its rule's lineage does.
+///
+/// # Errors
+///
+/// Fails when a column is missing: a fact hashed over fewer columns would be
+/// a different fact.
+pub(crate) fn fact_key_columns(batch: &RecordBatch, names: &[String]) -> DFResult<Vec<ArrayRef>> {
+    names
+        .iter()
+        .map(|name| {
+            batch
+                .schema()
+                .index_of(name)
+                .map(|i| Arc::clone(batch.column(i)))
+                .map_err(|_| {
+                    internal(format!(
+                        "Locy `IS NOT` lineage: KEY column `{name}` is missing from the \
+                         negated rule's facts"
+                    ))
+                })
+        })
+        .collect()
+}
+
+/// Encodes, per row, the facts a negated reference's complement read into a
+/// negated reference's lineage column (`__deriv_isnot_*`). A row that matched
+/// no fact is NULL.
+pub(crate) fn encode_negated_facts(rows: &[&[NegatedFact]]) -> ArrayRef {
+    let mut builder = BinaryBuilder::with_capacity(
+        rows.len(),
+        rows.iter().map(|r| r.len() * NEGATED_FACT_WIDTH).sum(),
+    );
+    for facts in rows {
+        if facts.is_empty() {
+            builder.append_null();
+            continue;
+        }
+        let mut bytes = Vec::with_capacity(facts.len() * NEGATED_FACT_WIDTH);
+        for fact in *facts {
+            bytes.extend_from_slice(&fact.key);
+            bytes.extend_from_slice(&fact.prob.to_le_bytes());
+        }
+        builder.append_value(&bytes);
+    }
+    Arc::new(builder.finish())
+}
+
+/// Decodes one row of a negated reference's lineage column.
+///
+/// # Errors
+///
+/// Fails on a value that is not a whole number of encoded facts.
+fn decode_negated_facts(bytes: &[u8], column: &str) -> DFResult<Vec<NegatedFact>> {
+    let (chunks, rest) = bytes.as_chunks::<NEGATED_FACT_WIDTH>();
+    if !rest.is_empty() {
+        return Err(internal(format!(
+            "Locy lineage column `{column}` holds a malformed negated-fact list"
+        )));
+    }
+    Ok(chunks
+        .iter()
+        .map(|chunk| {
+            let (key, prob) = chunk.split_at(ROW_HASH_WIDTH as usize);
+            let mut k = [0u8; ROW_HASH_WIDTH as usize];
+            k.copy_from_slice(key);
+            let mut p = [0u8; 8];
+            p.copy_from_slice(prob);
+            NegatedFact {
+                key: k,
+                prob: f64::from_le_bytes(p),
+            }
+        })
+        .collect())
+}
+
 /// Multiplies each positive reference's probability into the clause's PROB
 /// column, then drops the transient probability columns.
 ///
@@ -117,7 +224,7 @@ fn f64_column(values: Vec<Option<f64>>, like: &ArrayRef) -> DFResult<ArrayRef> {
 /// batch: skipping it would silently drop the condition's probability.
 pub(crate) fn apply_positive_prob_factors(
     batches: Vec<RecordBatch>,
-    bindings: &[IsRefBinding],
+    bindings: &[super::locy_fixpoint::IsRefBinding],
 ) -> DFResult<Vec<RecordBatch>> {
     let multiplied: Vec<(&str, &str)> = bindings
         .iter()
@@ -230,20 +337,236 @@ pub(crate) fn warn_opaque_prob_reads(
     });
 }
 
+/// A referenced fact, with the probability the row read for it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct RefTerm {
+    /// The referenced fact.
+    pub fact: (String, FactKey),
+    /// The probability the row read for it (default mode's value).
+    pub prob: f64,
+}
+
+/// The facts one derivation row references, as [`RefResolver`] reads them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct RowRefs {
+    /// Each positively referenced fact (`x IS r`).
+    pub positive: Vec<RefTerm>,
+    /// Each negated reference (`x IS NOT r`): the facts its complement read.
+    /// The row holds only when none of them does.
+    pub negated: Vec<Vec<RefTerm>>,
+    /// Whether the PROB expression reads a referenced probability other than
+    /// as one product factor: the row is then one independent event (its
+    /// references are still listed, as the facts it was derived from).
+    pub opaque: bool,
+    /// The product of the referenced probabilities and complements the row's
+    /// PROB value carries, which divides it to recover the row's own weight.
+    pub divisor: f64,
+}
+
+/// The hidden reference columns of one binding, as resolved in a batch.
+enum RefColumn<'a> {
+    /// A positive reference: the referenced KEY hash, its probability.
+    Positive {
+        rule: &'a str,
+        key: &'a FixedSizeBinaryArray,
+        prob: &'a ArrayRef,
+        prob_name: &'a str,
+        read: ProbRead,
+    },
+    /// A negated reference: the facts its complement read.
+    Negated {
+        rule: &'a str,
+        facts: &'a BinaryArray,
+        name: &'a str,
+    },
+}
+
+/// Resolves which facts each row of a batch of a rule's pre-fold rows
+/// references, from the rule's hidden reference columns.
+///
+/// This is the one reference resolution: lineage ([`LineageStore`]), the
+/// provenance EXPLAIN shows, and the proofs `TopKProofs` keeps all read it. A
+/// reference with no hidden column (one to a rule without a PROB column, or
+/// from a rule that keeps no lineage) contributes nothing: it is a certain
+/// condition, not an event.
+pub(crate) struct RefResolver<'a> {
+    columns: Vec<RefColumn<'a>>,
+}
+
+impl<'a> RefResolver<'a> {
+    /// The resolver for `batch`, a batch of `rule`'s pre-fold rows.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a hidden column the plan names is missing from the batch or
+    /// is not of its type: a reference read from the wrong column would be
+    /// silently certain or absent.
+    pub(crate) fn new(rule: &'a FixpointRulePlan, batch: &'a RecordBatch) -> DFResult<Self> {
+        let column = |name: &str| -> DFResult<&'a ArrayRef> {
+            batch
+                .schema()
+                .index_of(name)
+                .map(|i| batch.column(i))
+                .map_err(|_| {
+                    internal(format!(
+                        "rule '{}': lineage column `{name}` is missing from a fact batch",
+                        rule.name
+                    ))
+                })
+        };
+        let mut columns = Vec::new();
+        for binding in rule.clauses.iter().flat_map(|c| c.is_ref_bindings.iter()) {
+            if let Some(r) = binding.prob_ref.as_ref()
+                && let Some(key_name) = r.key_column.as_deref()
+            {
+                let key = column(key_name)?
+                    .as_any()
+                    .downcast_ref::<FixedSizeBinaryArray>()
+                    .ok_or_else(|| {
+                        internal(format!(
+                            "rule '{}': lineage column `{key_name}` is not a row hash",
+                            rule.name
+                        ))
+                    })?;
+                columns.push(RefColumn::Positive {
+                    rule: binding.rule_name.as_str(),
+                    key,
+                    prob: column(&r.prob_column)?,
+                    prob_name: r.prob_column.as_str(),
+                    read: r.read,
+                });
+            }
+            if let Some(n) = binding.negated_lineage.as_ref() {
+                let facts = column(&n.column)?
+                    .as_any()
+                    .downcast_ref::<BinaryArray>()
+                    .ok_or_else(|| {
+                        internal(format!(
+                            "rule '{}': lineage column `{}` is not a negated-fact list",
+                            rule.name, n.column
+                        ))
+                    })?;
+                columns.push(RefColumn::Negated {
+                    rule: binding.rule_name.as_str(),
+                    facts,
+                    name: n.column.as_str(),
+                });
+            }
+        }
+        Ok(Self { columns })
+    }
+
+    /// Whether the rule has any hidden reference column.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.columns.is_empty()
+    }
+
+    /// The facts row `row` references.
+    ///
+    /// A NULL hidden column belongs to another clause's reference, or (for a
+    /// negated reference) matched no fact: no condition. A NULL referenced
+    /// probability was not multiplied in, so the condition is certain.
+    ///
+    /// # Errors
+    ///
+    /// Fails on a malformed hash, list or probability.
+    pub(crate) fn row(&self, row: usize) -> DFResult<RowRefs> {
+        let mut refs = RowRefs {
+            divisor: 1.0,
+            ..RowRefs::default()
+        };
+        for column in &self.columns {
+            match column {
+                RefColumn::Positive {
+                    rule,
+                    key,
+                    prob,
+                    prob_name,
+                    read,
+                } => {
+                    if key.is_null(row) {
+                        continue;
+                    }
+                    let Some(p) = f64_at(prob.as_ref(), row, prob_name)? else {
+                        continue;
+                    };
+                    let p = p.clamp(0.0, 1.0);
+                    // An opaque read multiplied nothing in.
+                    if *read == ProbRead::Opaque {
+                        refs.opaque = true;
+                    } else {
+                        refs.divisor *= p;
+                    }
+                    let fact_key: FactKey = key
+                        .value(row)
+                        .try_into()
+                        .map_err(|_| internal(format!("rule '{rule}': malformed row hash")))?;
+                    refs.positive.push(RefTerm {
+                        fact: ((*rule).to_string(), fact_key),
+                        prob: p,
+                    });
+                }
+                RefColumn::Negated { rule, facts, name } => {
+                    if facts.is_null(row) {
+                        continue;
+                    }
+                    let matched = decode_negated_facts(facts.value(row), name)?;
+                    if matched.is_empty() {
+                        continue;
+                    }
+                    for fact in &matched {
+                        refs.divisor *= 1.0 - fact.prob.clamp(0.0, 1.0);
+                    }
+                    refs.negated.push(
+                        matched
+                            .into_iter()
+                            .map(|f| RefTerm {
+                                fact: ((*rule).to_string(), f.key),
+                                prob: f.prob.clamp(0.0, 1.0),
+                            })
+                            .collect(),
+                    );
+                }
+            }
+        }
+        Ok(refs)
+    }
+}
+
 /// One derivation row of a lineage fact.
 #[derive(Debug, Clone)]
 enum RowTerm {
-    /// The row's own event, of probability `local`, and every referenced fact.
-    Conj { local: f64, refs: Vec<RefTerm> },
+    /// The row's own event, of probability `local`, every positively
+    /// referenced fact, and the negation of every negated reference.
+    Conj {
+        local: f64,
+        /// The row's PROB value: its probability under default mode, which
+        /// ranks it among the fact's proofs.
+        weight: f64,
+        refs: Vec<RefTerm>,
+        negs: Vec<Vec<RefTerm>>,
+    },
     /// A row whose PROB value cannot be decomposed: one independent event.
     Opaque { prob: f64 },
 }
 
-/// A referenced fact, with the probability the row read for it.
-#[derive(Debug, Clone)]
-struct RefTerm {
-    fact: FactId,
-    prob: f64,
+impl RowTerm {
+    /// The row's PROB value.
+    fn weight(&self) -> f64 {
+        match self {
+            Self::Conj { weight, .. } => *weight,
+            Self::Opaque { prob } => *prob,
+        }
+    }
+
+    /// Every fact the row references, positively or negated.
+    fn referenced(&self) -> impl Iterator<Item = &RefTerm> {
+        let (refs, negs): (&[RefTerm], &[Vec<RefTerm>]) = match self {
+            Self::Conj { refs, negs, .. } => (refs, negs),
+            Self::Opaque { .. } => (&[], &[]),
+        };
+        refs.iter().chain(negs.iter().flatten())
+    }
 }
 
 /// The lineage of one `MNOR`/`MPROD` rule: each fact's derivation rows.
@@ -261,8 +584,9 @@ struct RuleLineage {
 /// The lineage of every `MNOR`/`MPROD` rule evaluated so far in a program run.
 ///
 /// Recorded from each rule's pre-fold rows after its stratum converges, and
-/// read by exact inference and shared-proof detection of the rules that
-/// reference it. Re-recording a rule (an `ASSUME` re-evaluation) replaces it.
+/// read by exact inference, `TopKProofs` and shared-proof detection of the
+/// rules that reference it. Re-recording a rule (an `ASSUME` re-evaluation)
+/// replaces it.
 #[derive(Debug, Default)]
 pub(crate) struct LineageStore {
     rules: StdRwLock<HashMap<String, Arc<RuleLineage>>>,
@@ -292,12 +616,24 @@ pub(crate) struct ExactCtx<'a> {
     pub exact: bool,
     /// The variable budget per fact (`max_bdd_variables`).
     pub max_bdd_variables: usize,
-    /// The active semiring; `TopKProofs` suppresses the shared-proof warning.
+    /// The active semiring. `TopKProofs { k }` recomputes shared facts too,
+    /// each `MNOR` fact over its `k` most probable rows, and suppresses the
+    /// shared-proof warning.
     pub semiring_kind: SemiringKind,
     /// Where warnings go.
     pub warnings_slot: &'a Arc<StdRwLock<Vec<RuntimeWarning>>>,
     /// Rules with a fact that exceeded the budget, with its KEY.
     pub approximate_slot: &'a Arc<StdRwLock<HashMap<String, Vec<String>>>>,
+}
+
+impl ExactCtx<'_> {
+    /// The proof budget per fact under `TopKProofs`.
+    fn top_k(&self) -> Option<usize> {
+        match self.semiring_kind {
+            SemiringKind::TopKProofs { k } if k > 0 => Some(k as usize),
+            _ => None,
+        }
+    }
 }
 
 impl LineageStore {
@@ -330,15 +666,6 @@ impl LineageStore {
                 rule.name, fold.input_col_index
             ))
         })?;
-        let refs: Vec<(&IsRefBinding, &str, &str, ProbRead)> = rule
-            .clauses
-            .iter()
-            .flat_map(|c| c.is_ref_bindings.iter())
-            .filter_map(|b| {
-                let r = b.prob_ref.as_ref()?;
-                Some((b, r.key_column.as_deref()?, r.prob_column.as_str(), r.read))
-            })
-            .collect();
         let mut facts: HashMap<FactKey, Vec<RowTerm>> = HashMap::new();
         let mut events: HashMap<FactKey, Vec<Option<FactKey>>> = HashMap::new();
         for batch in pre_fold.iter().filter(|b| b.num_rows() > 0) {
@@ -348,15 +675,15 @@ impl LineageStore {
                 .iter()
                 .map(|&i| Arc::clone(batch.column(i)))
                 .collect();
-            let column = |name: &str| -> DFResult<&ArrayRef> {
-                schema.index_of(name).map(|i| batch.column(i)).map_err(|_| {
+            let prob_column = schema
+                .index_of(prob_name)
+                .map(|i| batch.column(i))
+                .map_err(|_| {
                     internal(format!(
-                        "rule '{}': lineage column `{name}` is missing from a fact batch",
+                        "rule '{}': lineage column `{prob_name}` is missing from a fact batch",
                         rule.name
                     ))
-                })
-            };
-            let prob_column = column(prob_name)?;
+                })?;
             let event_column = schema
                 .index_of(DERIV_EVENT_COL)
                 .ok()
@@ -373,68 +700,36 @@ impl LineageStore {
                         })
                 })
                 .transpose()?;
-            let ref_columns = refs
-                .iter()
-                .map(|(binding, key, prob, read)| {
-                    let key = column(key)?
-                        .as_any()
-                        .downcast_ref::<FixedSizeBinaryArray>()
-                        .ok_or_else(|| {
-                            internal(format!(
-                                "rule '{}': lineage column `{key}` is not a row hash",
-                                rule.name
-                            ))
-                        })?;
-                    Ok((binding.rule_name.as_str(), key, column(prob)?, *prob, *read))
-                })
-                .collect::<DFResult<Vec<_>>>()?;
+            let resolver = RefResolver::new(rule, batch)?;
             for row in 0..batch.num_rows() {
                 // A NULL input is skipped by the fold, so it is no proof.
                 let Some(weight) = f64_at(prob_column.as_ref(), row, prob_name)? else {
                     continue;
                 };
                 let weight = weight.clamp(0.0, 1.0);
-                let mut opaque = false;
-                let mut divisor = 1.0;
-                let mut row_refs = Vec::new();
-                for (target, key, prob, name, read) in &ref_columns {
-                    if key.is_null(row) {
-                        continue;
-                    }
-                    // A NULL referenced probability was not multiplied in:
-                    // the condition is certain.
-                    let Some(p) = f64_at(prob.as_ref(), row, name)? else {
-                        continue;
-                    };
-                    let p = p.clamp(0.0, 1.0);
-                    if *read == ProbRead::Opaque {
-                        opaque = true;
-                        continue;
-                    }
-                    divisor *= p;
-                    let fact_key: FactKey = key.value(row).try_into().map_err(|_| {
-                        internal(format!("rule '{}': malformed row hash", rule.name))
-                    })?;
-                    row_refs.push(RefTerm {
-                        fact: ((*target).to_string(), fact_key),
-                        prob: p,
-                    });
-                }
-                let term = if opaque {
+                let refs = resolver.row(row)?;
+                let term = if refs.opaque {
                     RowTerm::Opaque { prob: weight }
                 } else {
-                    let local = if divisor > 0.0 {
-                        (weight / divisor).clamp(0.0, 1.0)
+                    // A divisor of 0 means a referenced probability of 0 or
+                    // a negated one of 1, so the weight is 0 as well. Such a
+                    // default value is also exact (a certain or impossible
+                    // fact stays so under any correlation), so the row's
+                    // own weight is never read.
+                    let local = if refs.divisor > 0.0 {
+                        (weight / refs.divisor).clamp(0.0, 1.0)
                     } else {
                         0.0
                     };
                     RowTerm::Conj {
                         local,
-                        refs: row_refs,
+                        weight,
+                        refs: refs.positive,
+                        negs: refs.negated,
                     }
                 };
                 let event = match event_column {
-                    Some(col) if !opaque && !col.is_null(row) => {
+                    Some(col) if !refs.opaque && !col.is_null(row) => {
                         Some(col.value(row).try_into().map_err(|_| {
                             internal(format!("rule '{}': malformed row hash", rule.name))
                         })?)
@@ -464,9 +759,11 @@ impl LineageStore {
         self.rules.read().map(|r| r.clone()).unwrap_or_default()
     }
 
-    /// Reports shared lineage and cross-group correlation for `rule`, and in
-    /// exact mode replaces each fact whose formula reads a variable twice by
-    /// one row carrying its possible-worlds probability.
+    /// Reports shared lineage and cross-group correlation for `rule`, and
+    /// replaces each fact whose value it recomputes by one row carrying it:
+    /// in exact mode and under `TopKProofs`, a fact whose formula reads a
+    /// variable twice; under `TopKProofs { k }`, also an `MNOR` fact with
+    /// more than `k` rows, evaluated over its `k` most probable.
     ///
     /// `rule` must have been recorded with [`Self::record_rule`].
     ///
@@ -501,17 +798,24 @@ impl LineageStore {
             shared: !shared.is_empty(),
         };
         self.warn(rule, lineage, &snapshot, outcome.shared, ctx);
-        if !ctx.exact {
+        let top_k = ctx.top_k();
+        if !ctx.exact && top_k.is_none() {
             return Ok((pre_fold, outcome));
         }
 
-        let needs_exact: HashSet<FactKey> = lineage
-            .facts
-            .keys()
-            .filter(|k| !analysis.read_once(&(rule.name.clone(), **k)))
-            .copied()
-            .collect();
-        if needs_exact.is_empty() {
+        // The rows each recomputed fact is evaluated over: all of them, or
+        // under `TopKProofs { k }` an `MNOR` fact's `k` most probable.
+        let mut needs: HashMap<FactKey, Option<Vec<usize>>> = HashMap::new();
+        for (key, rows) in &lineage.facts {
+            let pruned = match top_k {
+                Some(k) if !lineage.conjunction && rows.len() > k => Some(top_rows(rows, k)),
+                _ => None,
+            };
+            if pruned.is_some() || !analysis.read_once(&(rule.name.clone(), *key)) {
+                needs.insert(*key, pruned);
+            }
+        }
+        if needs.is_empty() {
             return Ok((pre_fold, outcome));
         }
         let prob_name = pre_fold_column_name(rule, fold.input_col_index)
@@ -541,21 +845,24 @@ impl LineageStore {
             for row in 0..batch.num_rows() {
                 let key = row_hash(&key_columns, row)?;
                 let current = f64_at(batch.column(prob_index).as_ref(), row, prob_name)?;
-                if !needs_exact.contains(&key) {
+                let Some(rows) = needs.get(&key) else {
                     keep.push(row as u32);
                     values.push(current);
                     continue;
-                }
+                };
                 let probability = match exact.get(&key) {
                     Some(p) => *p,
                     None => {
-                        let p = exact_probability(
+                        let p = fact_probability(
                             &snapshot,
                             (rule.name.clone(), key),
-                            &batch,
-                            &key_indices,
-                            row,
-                            ctx,
+                            rows.as_deref(),
+                            &BudgetReport {
+                                batch: &batch,
+                                key_indices: &key_indices,
+                                row,
+                                ctx,
+                            },
                         )?;
                         exact.insert(key, p);
                         p
@@ -567,7 +874,7 @@ impl LineageStore {
                         keep.push(row as u32);
                         values.push(current);
                     }
-                    // One row carries the fact's exact probability.
+                    // One row carries the fact's probability.
                     Some(p) => {
                         if kept_one.insert(key) {
                             keep.push(row as u32);
@@ -600,30 +907,55 @@ impl LineageStore {
     }
 }
 
-/// The exact probability of `root`, or `None` (with `BddLimitExceeded`) when
-/// its formula needs more than the budget's variables.
-fn exact_probability(
+/// The indices of the `k` rows of highest PROB value, ties broken by
+/// position so the choice is deterministic.
+fn top_rows(rows: &[RowTerm], k: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| {
+        rows[b]
+            .weight()
+            .total_cmp(&rows[a].weight())
+            .then(a.cmp(&b))
+    });
+    order.truncate(k);
+    order.sort_unstable();
+    order
+}
+
+/// Where [`fact_probability`] reports a fact over the variable budget.
+struct BudgetReport<'a, 'c> {
+    batch: &'a RecordBatch,
+    key_indices: &'a [usize],
+    row: usize,
+    ctx: &'a ExactCtx<'c>,
+}
+
+/// The possible-worlds probability of `root`, over only its rows `rows` when
+/// given (the facts it references keep all theirs), or `None` (with
+/// `BddLimitExceeded`) when its formula needs more than the budget's
+/// variables.
+fn fact_probability(
     snapshot: &HashMap<String, Arc<RuleLineage>>,
     root: FactId,
-    batch: &RecordBatch,
-    key_indices: &[usize],
-    row: usize,
-    ctx: &ExactCtx<'_>,
+    rows: Option<&[usize]>,
+    report: &BudgetReport<'_, '_>,
 ) -> DFResult<Option<f64>> {
-    let closure = closure_of(snapshot, &root)?;
+    // Dependencies first: a negated fact sits in a lower stratum, so no
+    // component holds a negation of one of its own members.
+    let components = sccs_from(snapshot, std::slice::from_ref(&root))?;
     let mut vars: Vec<(Var, f64)> = Vec::new();
     let mut var_index: HashMap<Var, usize> = HashMap::new();
-    let mut intern = |var: Var, p: f64, vars: &mut Vec<(Var, f64)>| -> usize {
-        *var_index.entry(var.clone()).or_insert_with(|| {
+    let mut intern = |var: Var, p: f64, vars: &mut Vec<(Var, f64)>| {
+        var_index.entry(var.clone()).or_insert_with(|| {
             vars.push((var, p));
             vars.len() - 1
-        })
+        });
     };
-    for fact in &closure {
+    for fact in components.iter().flatten() {
         for (index, term) in rows_of(snapshot, fact)?.iter().enumerate() {
             let p = match term {
-                RowTerm::Conj { local, refs } => {
-                    for r in refs {
+                RowTerm::Conj { local, .. } => {
+                    for r in term.referenced() {
                         if !has_lineage(snapshot, &r.fact) {
                             intern(Var::Base(r.fact.clone()), r.prob, &mut vars);
                         }
@@ -636,8 +968,12 @@ fn exact_probability(
         }
     }
     let rule_name = &root.0;
+    let ctx = report.ctx;
     if vars.len() > ctx.max_bdd_variables || vars.len() > usize::from(u16::MAX) {
-        let key_desc = format!("{:?}", extract_scalar_key(batch, key_indices, row));
+        let key_desc = format!(
+            "{:?}",
+            extract_scalar_key(report.batch, report.key_indices, report.row)
+        );
         if let Ok(mut warnings) = ctx.warnings_slot.write()
             && !warnings.iter().any(|w| {
                 w.code == RuntimeWarningCode::BddLimitExceeded
@@ -668,51 +1004,87 @@ fn exact_probability(
     let set = BddVariableSet::new_anonymous(vars.len() as u16);
     let bdd_vars: Vec<BddVariable> = set.variables();
     let var_bdd = |v: &Var| -> Bdd { set.mk_var(bdd_vars[var_index[v]]) };
-    // Least fixpoint: every fact false, then re-derive until stable. A
-    // derivation through a cycle needs the fact it derives, so it adds
-    // nothing; each round adds proofs one step longer, so `closure.len()`
-    // rounds reach the fixpoint.
-    let mut phi: HashMap<&FactId, Bdd> = closure.iter().map(|f| (f, set.mk_false())).collect();
-    for _ in 0..=closure.len() {
-        let mut changed = false;
-        for fact in closure.iter().rev() {
-            let lineage = &snapshot[&fact.0];
+    let mut phi: HashMap<FactId, Bdd> = HashMap::new();
+    // One row: its event, every referenced fact, no negated one.
+    let row_formula =
+        |fact: &FactId, index: usize, term: &RowTerm, phi: &HashMap<FactId, Bdd>| -> Bdd {
+            let operand = |r: &RefTerm| match phi.get(&r.fact) {
+                Some(b) => b.clone(),
+                None => var_bdd(&Var::Base(r.fact.clone())),
+            };
+            let mut t = var_bdd(&row_var(snapshot, fact, index));
+            if let RowTerm::Conj { refs, negs, .. } = term {
+                for r in refs {
+                    t = t.and(&operand(r));
+                }
+                for group in negs {
+                    let mut any = set.mk_false();
+                    for r in group {
+                        any = any.or(&operand(r));
+                    }
+                    t = t.and_not(&any);
+                }
+            }
+            t
+        };
+    let combine =
+        |fact: &FactId, selected: Option<&[usize]>, phi: &HashMap<FactId, Bdd>| -> DFResult<Bdd> {
+            let conjunction = snapshot[&fact.0].conjunction;
             let mut combined: Option<Bdd> = None;
             for (index, term) in rows_of(snapshot, fact)?.iter().enumerate() {
-                let mut t = var_bdd(&row_var(snapshot, fact, index));
-                if let RowTerm::Conj { refs, .. } = term {
-                    for r in refs {
-                        let operand = match phi.get(&r.fact) {
-                            Some(b) => b.clone(),
-                            None => var_bdd(&Var::Base(r.fact.clone())),
-                        };
-                        t = t.and(&operand);
-                    }
+                if selected.is_some_and(|s| !s.contains(&index)) {
+                    continue;
                 }
+                let t = row_formula(fact, index, term, phi);
                 combined = Some(match combined {
                     None => t,
-                    Some(acc) if lineage.conjunction => acc.and(&t),
+                    Some(acc) if conjunction => acc.and(&t),
                     Some(acc) => acc.or(&t),
                 });
             }
-            let new = combined.unwrap_or_else(|| set.mk_false());
-            if phi[fact] != new {
-                phi.insert(fact, new);
-                changed = true;
+            Ok(combined.unwrap_or_else(|| set.mk_false()))
+        };
+    // Each component is a least fixpoint over the formulas of the components
+    // before it: every member false, then re-derived until stable. A
+    // derivation through a cycle needs the fact it derives, so it adds
+    // nothing, and each round adds proofs one step longer, so
+    // `component.len()` rounds reach the fixpoint. Within a component every
+    // reference is positive, so the iteration is monotone.
+    for component in &components {
+        for fact in component {
+            phi.insert(fact.clone(), set.mk_false());
+        }
+        let mut stable = false;
+        for _ in 0..=component.len() {
+            let mut changed = false;
+            for fact in component {
+                let new = combine(fact, None, &phi)?;
+                if phi[fact] != new {
+                    phi.insert(fact.clone(), new);
+                    changed = true;
+                }
+            }
+            if !changed {
+                stable = true;
+                break;
             }
         }
-        if !changed {
-            let probs: HashMap<BddVariable, f64> = vars
-                .iter()
-                .enumerate()
-                .map(|(i, (_, p))| (bdd_vars[i], *p))
-                .collect();
-            return Ok(Some(bdd_probability(&phi[&root], &probs)));
+        if !stable {
+            return Err(internal(format!(
+                "rule '{rule_name}': exact inference did not reach a fixpoint"
+            )));
         }
     }
-    Err(internal(format!(
-        "rule '{rule_name}': exact inference did not reach a fixpoint"
-    )))
+    let formula = match rows {
+        Some(selected) => combine(&root, Some(selected), &phi)?,
+        None => phi[&root].clone(),
+    };
+    let probs: HashMap<BddVariable, f64> = vars
+        .iter()
+        .enumerate()
+        .map(|(i, (_, p))| (bdd_vars[i], *p))
+        .collect();
+    Ok(Some(bdd_probability(&formula, &probs)))
 }
 
 impl LineageStore {
@@ -730,10 +1102,8 @@ impl LineageStore {
         let mut consumers: HashMap<&FactId, HashSet<&FactKey>> = HashMap::new();
         for (key, rows) in &lineage.facts {
             for term in rows {
-                if let RowTerm::Conj { refs, .. } = term {
-                    for r in refs {
-                        consumers.entry(&r.fact).or_default().insert(key);
-                    }
+                for r in term.referenced() {
+                    consumers.entry(&r.fact).or_default().insert(key);
                 }
             }
         }
@@ -780,8 +1150,9 @@ impl LineageStore {
                 key_group: example.first().cloned(),
             });
         }
-        // Under `TopKProofs` the fold's own inclusion-exclusion corrects
-        // within-group sharing, so the "may overestimate" premise is false.
+        // Under `TopKProofs` shared facts are recomputed whatever
+        // `exact_probability` says, so the "may overestimate" premise is
+        // false.
         let suppress = matches!(ctx.semiring_kind, SemiringKind::TopKProofs { .. });
         if shared
             && !suppress
@@ -833,33 +1204,10 @@ fn rows_of<'s>(
         .map(Vec::as_slice)
         .ok_or_else(|| {
             internal(format!(
-                "Locy lineage: a positive IS reference names a fact rule '{}' does not hold",
+                "Locy lineage: an IS reference names a fact rule '{}' does not hold",
                 fact.0
             ))
         })
-}
-
-/// Every lineage fact `root` depends on, `root` first, in discovery order.
-fn closure_of(
-    snapshot: &HashMap<String, Arc<RuleLineage>>,
-    root: &FactId,
-) -> DFResult<Vec<FactId>> {
-    let mut seen: HashSet<FactId> = HashSet::from([root.clone()]);
-    let mut order = vec![root.clone()];
-    let mut queue = VecDeque::from([root.clone()]);
-    while let Some(fact) = queue.pop_front() {
-        for term in rows_of(snapshot, &fact)? {
-            if let RowTerm::Conj { refs, .. } = term {
-                for r in refs {
-                    if has_lineage(snapshot, &r.fact) && seen.insert(r.fact.clone()) {
-                        order.push(r.fact.clone());
-                        queue.push_back(r.fact.clone());
-                    }
-                }
-            }
-        }
-    }
-    Ok(order)
 }
 
 /// The most variables shared-lineage analysis tracks for one fact. Past it
@@ -912,7 +1260,9 @@ impl Support {
 ///
 /// Facts are visited in strongly connected components, dependencies first,
 /// so each support is computed once. A fact on a cycle reads itself and is
-/// shared by definition.
+/// shared by definition. A negated fact's variables count like a positively
+/// referenced one's: a row that conjoins a fact and the negation of another
+/// over one variable is not their independent product.
 struct Analysis {
     /// Facts whose own rows, or one row's parts, read a variable twice.
     local: HashSet<FactId>,
@@ -949,10 +1299,9 @@ impl Analysis {
             let members: HashSet<&FactId> = component.iter().collect();
             let cyclic = component.len() > 1 || {
                 let only = &component[0];
-                rows_of(snapshot, only)?.iter().any(|t| match t {
-                    RowTerm::Conj { refs, .. } => refs.iter().any(|r| r.fact == *only),
-                    RowTerm::Opaque { .. } => false,
-                })
+                rows_of(snapshot, only)?
+                    .iter()
+                    .any(|t| t.referenced().any(|r| r.fact == *only))
             };
             if cyclic {
                 let mut parts: Vec<Support> = Vec::new();
@@ -961,12 +1310,10 @@ impl Analysis {
                         parts.push(Support::Vars(HashSet::from([row_var(
                             snapshot, fact, index,
                         )])));
-                        if let RowTerm::Conj { refs, .. } = term {
-                            for r in refs.iter().filter(|r| !members.contains(&r.fact)) {
-                                parts.push(ref_support(r, &support));
-                                if tainted.contains(&r.fact) {
-                                    tainted.insert(fact.clone());
-                                }
+                        for r in term.referenced().filter(|r| !members.contains(&r.fact)) {
+                            parts.push(ref_support(r, &support));
+                            if tainted.contains(&r.fact) {
+                                tainted.insert(fact.clone());
                             }
                         }
                     }
@@ -989,11 +1336,9 @@ impl Analysis {
                 let mut parts = vec![Support::Vars(HashSet::from([row_var(
                     snapshot, &fact, index,
                 )]))];
-                if let RowTerm::Conj { refs, .. } = term {
-                    for r in refs {
-                        parts.push(ref_support(r, &support));
-                        inherited |= tainted.contains(&r.fact);
-                    }
+                for r in term.referenced() {
+                    parts.push(ref_support(r, &support));
+                    inherited |= tainted.contains(&r.fact);
                 }
                 overlap |= !Support::disjoint(&parts, cap);
                 rows.push(Support::union(&parts, cap));
@@ -1012,7 +1357,8 @@ impl Analysis {
 }
 
 /// The strongly connected components of the lineage graph reachable from
-/// `roots`, dependencies first (Tarjan, iterative).
+/// `roots`, dependencies first (Tarjan, iterative). A fact's successors are
+/// the lineage facts its rows reference, positively or negated.
 fn sccs_from(
     snapshot: &HashMap<String, Arc<RuleLineage>>,
     roots: &[FactId],
@@ -1020,13 +1366,11 @@ fn sccs_from(
     let successors = |fact: &FactId| -> DFResult<Vec<FactId>> {
         let mut out = Vec::new();
         for term in rows_of(snapshot, fact)? {
-            if let RowTerm::Conj { refs, .. } = term {
-                out.extend(
-                    refs.iter()
-                        .filter(|r| has_lineage(snapshot, &r.fact))
-                        .map(|r| r.fact.clone()),
-                );
-            }
+            out.extend(
+                term.referenced()
+                    .filter(|r| has_lineage(snapshot, &r.fact))
+                    .map(|r| r.fact.clone()),
+            );
         }
         Ok(out)
     };
@@ -1090,7 +1434,7 @@ fn sccs_from(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::df_graph::locy_fixpoint::FixpointClausePlan;
+    use crate::query::df_graph::locy_fixpoint::{FixpointClausePlan, IsRefBinding};
     use crate::query::df_graph::locy_fold::FoldBinding;
     use crate::query::planner::LogicalPlan;
     use crate::query::planner_locy_types::PositiveProbRef;
@@ -1117,13 +1461,13 @@ mod tests {
                     anti_join_cols: Vec::new(),
                     target_has_prob: true,
                     target_prob_col: Some("q".into()),
-                    provenance_join_cols: Vec::new(),
                     prob_ref: Some(PositiveProbRef {
                         prob_column: PROB_COL.into(),
                         key_column: Some(KEY_COL.into()),
                         into_column: "p".into(),
                         read: ProbRead::Absent,
                     }),
+                    negated_lineage: None,
                 }],
                 priority: None,
                 along_bindings: Vec::new(),
@@ -1336,13 +1680,13 @@ mod tests {
             anti_join_cols: Vec::new(),
             target_has_prob: true,
             target_prob_col: Some("q".into()),
-            provenance_join_cols: Vec::new(),
             prob_ref: Some(PositiveProbRef {
                 prob_column: "__isprob_0_0".into(),
                 key_column: None,
                 into_column: "conf".into(),
                 read: ProbRead::Absent,
             }),
+            negated_lineage: None,
         };
         let batch = RecordBatch::try_new(
             Arc::new(Schema::new(vec![
@@ -1369,5 +1713,208 @@ mod tests {
             0.8,
             "a NULL probability leaves the row as is"
         );
+    }
+
+    const NOT_COL: &str = "__deriv_isnot_0_0";
+
+    /// Rule `r` with a second reference, `IS NOT base`, whose complement
+    /// records the facts it read in `__deriv_isnot_0_0`.
+    fn rule_with_negation() -> FixpointRulePlan {
+        let mut rule = rule();
+        rule.clauses[0].is_ref_bindings.push(IsRefBinding {
+            derived_scan_index: 1,
+            rule_name: "base".into(),
+            is_self_ref: false,
+            negated: true,
+            anti_join_cols: Vec::new(),
+            target_has_prob: true,
+            target_prob_col: Some("q".into()),
+            prob_ref: None,
+            negated_lineage: Some(crate::query::planner_locy_types::NegatedLineageRef {
+                column: NOT_COL.into(),
+                target_key_columns: vec!["a".into()],
+            }),
+        });
+        rule
+    }
+
+    /// A pre-fold batch of [`rule_with_negation`]: per row `(a, p, positive
+    /// fact and its probability, negated facts)`.
+    /// One row of [`negation_batch`]: `a`, `p`, the positive fact and its
+    /// probability, the negated facts.
+    type NegationRow<'a> = (&'a str, f64, Option<([u8; 16], f64)>, &'a [NegatedFact]);
+
+    fn negation_batch(rows: &[NegationRow<'_>]) -> RecordBatch {
+        let negated: Vec<&[NegatedFact]> = rows.iter().map(|r| r.3).collect();
+        RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("a", DataType::Utf8, true),
+                Field::new("p", DataType::Float64, true),
+                Field::new(KEY_COL, DataType::FixedSizeBinary(ROW_HASH_WIDTH), true),
+                Field::new(PROB_COL, DataType::Float64, true),
+                Field::new(NOT_COL, DataType::Binary, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(
+                    rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+                )),
+                hashes(&rows.iter().map(|r| r.2.map(|f| f.0)).collect::<Vec<_>>()),
+                Arc::new(Float64Array::from(
+                    rows.iter().map(|r| r.2.map(|f| f.1)).collect::<Vec<_>>(),
+                )),
+                encode_negated_facts(&negated),
+            ],
+        )
+        .unwrap()
+    }
+
+    /// A row that needs a fact and the negation of the same fact cannot
+    /// hold. Default mode multiplied `p · (1 − p)` into it as independent
+    /// factors; exact mode conjoins the negated literal, and the reuse of
+    /// the fact's variable is shared lineage.
+    #[test]
+    fn a_negated_reference_is_a_negated_literal_of_the_fact() {
+        let rule = rule_with_negation();
+        let fact = [3u8; 16];
+        // Local weight 1: 1 · 0.6 · (1 − 0.6).
+        let batch = negation_batch(&[(
+            "x",
+            0.24,
+            Some((fact, 0.6)),
+            &[NegatedFact {
+                key: fact,
+                prob: 0.6,
+            }],
+        )]);
+        let store = LineageStore::new();
+        store
+            .record_rule(&rule, std::slice::from_ref(&batch))
+            .unwrap();
+        let warnings = Arc::new(StdRwLock::new(Vec::new()));
+        let approximate = Arc::new(StdRwLock::new(HashMap::new()));
+        let (out, outcome) = store
+            .correct(&rule, vec![batch], &ctx(&warnings, &approximate, 64))
+            .unwrap();
+        assert!(outcome.shared, "the fact and its negation share a variable");
+        let rows = rows_of_output(&out);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].1.abs() < 1e-12, "x ∧ ¬x is impossible: {rows:?}");
+    }
+
+    /// A negated reference matching several facts negates their
+    /// disjunction, and recovers the row's own weight from their noisy-OR
+    /// complement. Here no variable repeats, so default mode is exact and
+    /// nothing is recomputed: the row keeps `w · (1 − 0.5)(1 − 0.2)`.
+    #[test]
+    fn a_negated_reference_without_sharing_is_read_once() {
+        let rule = rule_with_negation();
+        let negated = [
+            NegatedFact {
+                key: [1u8; 16],
+                prob: 0.5,
+            },
+            NegatedFact {
+                key: [2u8; 16],
+                prob: 0.2,
+            },
+        ];
+        let batch = negation_batch(&[("x", 0.9 * 0.5 * 0.8, None, &negated)]);
+        let store = LineageStore::new();
+        store
+            .record_rule(&rule, std::slice::from_ref(&batch))
+            .unwrap();
+        let warnings = Arc::new(StdRwLock::new(Vec::new()));
+        let approximate = Arc::new(StdRwLock::new(HashMap::new()));
+        let (out, outcome) = store
+            .correct(&rule, vec![batch], &ctx(&warnings, &approximate, 64))
+            .unwrap();
+        assert!(!outcome.shared);
+        let rows = rows_of_output(&out);
+        assert!((rows[0].1 - 0.36).abs() < 1e-12, "{rows:?}");
+        // The recorded row: local 0.9, two negated facts.
+        let lineage = &store.snapshot()["r"];
+        let terms: Vec<&RowTerm> = lineage.facts.values().flatten().collect();
+        match terms.as_slice() {
+            [RowTerm::Conj { local, negs, .. }] => {
+                assert!((local - 0.9).abs() < 1e-12);
+                assert_eq!(negs.len(), 1);
+                assert_eq!(negs[0].len(), 2);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The negated-fact list round-trips, and a malformed one fails.
+    #[test]
+    fn negated_facts_round_trip() {
+        let facts = [NegatedFact {
+            key: [9u8; 16],
+            prob: 0.25,
+        }];
+        let column = encode_negated_facts(&[&facts, &[]]);
+        let column = column.as_any().downcast_ref::<BinaryArray>().unwrap();
+        assert!(column.is_null(1), "no matched fact is NULL");
+        assert_eq!(decode_negated_facts(column.value(0), "c").unwrap(), facts);
+        assert!(decode_negated_facts(&[0u8; 5], "c").is_err());
+    }
+
+    /// `TopKProofs { k }` evaluates an `MNOR` fact over its `k` most
+    /// probable rows; a fact with no more than `k` rows and no shared
+    /// variable keeps its rows.
+    #[test]
+    fn topk_keeps_the_k_most_probable_rows() {
+        let rule = rule();
+        let batch = permuted(&[
+            ("x", 0.3, None),
+            ("x", 0.5, None),
+            ("x", 0.2, None),
+            ("y", 0.4, None),
+            ("y", 0.1, None),
+        ]);
+        let store = LineageStore::new();
+        store
+            .record_rule(&rule, std::slice::from_ref(&batch))
+            .unwrap();
+        let warnings = Arc::new(StdRwLock::new(Vec::new()));
+        let approximate = Arc::new(StdRwLock::new(HashMap::new()));
+        let mut c = ctx(&warnings, &approximate, 64);
+        c.exact = false;
+        c.semiring_kind = SemiringKind::TopKProofs { k: 2 };
+        let (out, _) = store.correct(&rule, vec![batch], &c).unwrap();
+        let rows = rows_of_output(&out);
+        // x: 1 − (1 − 0.5)(1 − 0.3), its 0.2 row pruned; y: both rows kept.
+        assert_eq!(rows.len(), 3, "{rows:?}");
+        assert_eq!(rows[0].0, "x");
+        assert!((rows[0].1 - 0.65).abs() < 1e-12, "{rows:?}");
+        let mut y: Vec<f64> = rows[1..].iter().map(|r| r.1).collect();
+        y.sort_by(f64::total_cmp);
+        assert_eq!(y, vec![0.1, 0.4]);
+    }
+
+    /// The references a row resolves to are read by column NAME, and a
+    /// hidden column the plan names but the batch lacks is an error rather
+    /// than a silently certain condition.
+    #[test]
+    fn the_resolver_reads_references_by_name_and_fails_closed() {
+        let rule = rule();
+        let batch = permuted(&[("x", 0.3, Some(0.6)), ("y", 0.3, None)]);
+        let resolver = RefResolver::new(&rule, &batch).unwrap();
+        let x = resolver.row(0).unwrap();
+        assert_eq!(x.positive.len(), 1);
+        assert_eq!(x.positive[0].fact, ("base".to_string(), [7u8; 16]));
+        assert!((x.divisor - 0.6).abs() < 1e-12);
+        assert!(resolver.row(1).unwrap().positive.is_empty());
+        let narrow = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("a", DataType::Utf8, true)])),
+            vec![Arc::new(StringArray::from(vec!["x"]))],
+        )
+        .unwrap();
+        let err = RefResolver::new(&rule, &narrow)
+            .err()
+            .expect("a missing hidden column is an error");
+        assert!(err.to_string().contains(KEY_COL), "{err}");
     }
 }

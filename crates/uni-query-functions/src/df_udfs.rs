@@ -4619,6 +4619,16 @@ impl ScalarUDFImpl for CypherBooleanOpUdf {
             };
             return Ok(ColumnarValue::Array(Arc::new(result)));
         }
+        if self.op == BinaryOp::Regex
+            && args.arg_fields.iter().all(|f| {
+                matches!(
+                    f.data_type(),
+                    DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
+                )
+            })
+        {
+            return regex_match_strings(&args.args[0], &args.args[1], args.number_rows);
+        }
         let op = self.op;
         invoke_cypher_udf(args, &DataType::Boolean, |val_args| {
             // A logical operator reads a string-encoded boolean (UNWIND over
@@ -4635,6 +4645,71 @@ impl ScalarUDFImpl for CypherBooleanOpUdf {
             crate::expr_eval::eval_binary_op(&left, &op, &right)
                 .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
         })
+    }
+}
+
+/// `subject =~ pattern` over two string operands, vectorized: the full-match
+/// semantics of [`crate::expr_eval::compile_cypher_regex`], NULL for a NULL
+/// operand, and one compile (or cache hit) per batch for a constant pattern.
+fn regex_match_strings(
+    subject: &ColumnarValue,
+    pattern: &ColumnarValue,
+    rows: usize,
+) -> DFResult<ColumnarValue> {
+    let as_large_strings = |v: &ColumnarValue| -> DFResult<LargeStringArray> {
+        let array = arrow::compute::cast(&v.clone().into_array(rows)?, &DataType::LargeUtf8)?;
+        array
+            .as_any()
+            .downcast_ref::<LargeStringArray>()
+            .cloned()
+            .ok_or_else(|| {
+                datafusion::error::DataFusionError::Internal(
+                    "_cypher_regex(): string operand did not downcast".to_string(),
+                )
+            })
+    };
+    let subjects = as_large_strings(subject)?;
+    let result: BooleanArray = match pattern {
+        ColumnarValue::Scalar(scalar) => match scalar_to_string(scalar)? {
+            None => BooleanArray::new_null(subjects.len()),
+            Some(p) => crate::expr_eval::with_cached_regex(&p, |re| {
+                subjects
+                    .iter()
+                    .map(|s| s.map(|s| re.is_match(s)).transpose())
+                    .collect::<Result<BooleanArray, String>>()
+            })
+            .map_err(to_datafusion_err)?
+            .map_err(|e| {
+                datafusion::error::DataFusionError::Execution(format!(
+                    "Unsupported regex input: {e}"
+                ))
+            })?,
+        },
+        ColumnarValue::Array(_) => {
+            let patterns = as_large_strings(pattern)?;
+            subjects
+                .iter()
+                .zip(patterns.iter())
+                .map(|(s, p)| match (s, p) {
+                    (Some(s), Some(p)) => crate::expr_eval::cypher_regex_is_match(s, p).map(Some),
+                    _ => Ok(None),
+                })
+                .collect::<anyhow::Result<BooleanArray>>()
+                .map_err(to_datafusion_err)?
+        }
+    };
+    Ok(ColumnarValue::Array(Arc::new(result)))
+}
+
+/// The string held by a string scalar, `None` for a NULL one.
+fn scalar_to_string(scalar: &ScalarValue) -> DFResult<Option<String>> {
+    match scalar {
+        ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) | ScalarValue::Utf8View(s) => {
+            Ok(s.clone())
+        }
+        other => Err(datafusion::error::DataFusionError::Internal(format!(
+            "_cypher_regex(): expected a string pattern, got {other:?}"
+        ))),
     }
 }
 

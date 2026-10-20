@@ -2350,12 +2350,6 @@ pub enum LogicalPlan {
     ShowIndexes {
         filter: Option<String>,
     },
-    Copy {
-        target: String,
-        source: String,
-        is_export: bool,
-        options: HashMap<String, Value>,
-    },
     Backup {
         destination: String,
         options: HashMap<String, Value>,
@@ -10326,7 +10320,6 @@ impl QueryPlanner {
             | LogicalPlan::CreateJsonFtsIndex { .. }
             | LogicalPlan::DropIndex { .. }
             | LogicalPlan::ShowIndexes { .. }
-            | LogicalPlan::Copy { .. }
             | LogicalPlan::Backup { .. }
             | LogicalPlan::ShowDatabase
             | LogicalPlan::ShowConfig
@@ -10920,7 +10913,6 @@ impl QueryPlanner {
             | LogicalPlan::CreateJsonFtsIndex { .. }
             | LogicalPlan::DropIndex { .. }
             | LogicalPlan::ShowIndexes { .. }
-            | LogicalPlan::Copy { .. }
             | LogicalPlan::Backup { .. }
             | LogicalPlan::ShowDatabase
             | LogicalPlan::ShowConfig
@@ -11210,7 +11202,6 @@ pub fn projection_columns(plan: &LogicalPlan) -> Option<Vec<String>> {
         | LogicalPlan::CreateJsonFtsIndex { .. }
         | LogicalPlan::DropIndex { .. }
         | LogicalPlan::ShowIndexes { .. }
-        | LogicalPlan::Copy { .. }
         | LogicalPlan::Backup { .. }
         | LogicalPlan::Explain { .. }
         | LogicalPlan::ShowDatabase
@@ -13000,7 +12991,6 @@ fn collect_properties_recursive(
         | LogicalPlan::CreateJsonFtsIndex { .. }
         | LogicalPlan::DropIndex { .. }
         | LogicalPlan::ShowIndexes { .. }
-        | LogicalPlan::Copy { .. }
         | LogicalPlan::Backup { .. }
         | LogicalPlan::ShowDatabase
         | LogicalPlan::ShowConfig

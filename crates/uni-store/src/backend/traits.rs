@@ -105,6 +105,22 @@ impl StagedAppend {
     pub fn into_payload(self) -> Option<Box<dyn std::any::Any + Send + Sync>> {
         self.payload
     }
+
+    /// The backend-private payload by reference, `None` for a visible append.
+    #[must_use]
+    pub fn payload(&self) -> Option<&(dyn std::any::Any + Send + Sync)> {
+        self.payload.as_deref()
+    }
+}
+
+/// What [`StorageBackend::publish_staged_record`] found and did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordedPublish {
+    /// The recorded rows were not yet in the table; they are now.
+    Published,
+    /// The recorded rows were already published by an earlier attempt, so
+    /// nothing was committed.
+    AlreadyPublished,
 }
 
 impl std::fmt::Debug for StagedAppend {
@@ -344,6 +360,58 @@ pub trait StorageBackend: Send + Sync + 'static {
     async fn discard_staged(&self, table_name: &str, staged: Vec<StagedAppend>) -> Result<()> {
         let _ = (table_name, staged);
         Ok(())
+    }
+
+    /// A durable, backend-private description of the rows in `staged`.
+    ///
+    /// Written into a crash-recovery record before `staged` is published, so a
+    /// process that dies part way through a multi-table publish can complete it
+    /// at the next open with [`Self::publish_staged_record`]. Returns `None`
+    /// when nothing in `staged` awaits publishing (a backend that cannot stage
+    /// wrote it visibly).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `staged` holds rows this backend cannot describe.
+    fn staged_record(
+        &self,
+        table_name: &str,
+        staged: &[StagedAppend],
+    ) -> Result<Option<serde_json::Value>> {
+        if staged.iter().any(StagedAppend::is_pending) {
+            anyhow::bail!(
+                "staged_record('{table_name}'): this backend never stages rows, so it \
+                 cannot describe rows staged by another backend"
+            );
+        }
+        Ok(None)
+    }
+
+    /// Publish the rows described by `record` (from [`Self::staged_record`])
+    /// unless an earlier attempt already did.
+    ///
+    /// Exactly once: the backend recognizes its own earlier publish of the same
+    /// rows at any version after `published_after` (the table's version before
+    /// the first attempt), including one a later commit has since rewritten,
+    /// and then commits nothing. Like [`Self::publish_staged`] it appends onto
+    /// the current version, so other writers' commits are kept.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the commit fails, if `record` was not written by
+    /// this backend, or if only part of the recorded storage is still present,
+    /// so that neither publishing nor skipping it would be exact.
+    async fn publish_staged_record(
+        &self,
+        table_name: &str,
+        record: &serde_json::Value,
+        published_after: Option<u64>,
+    ) -> Result<RecordedPublish> {
+        let _ = (record, published_after);
+        anyhow::bail!(
+            "publish_staged_record('{table_name}'): this backend never stages rows, so \
+             it cannot publish a recorded staged append"
+        )
     }
 
     /// Acquire the per-table write lock, returning a guard held until dropped.

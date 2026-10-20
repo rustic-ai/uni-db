@@ -105,8 +105,7 @@ pub fn eval_binary_op(left: &Value, op: &BinaryOp, right: &Value) -> Result<Valu
             let pattern = right
                 .as_str()
                 .ok_or_else(|| anyhow!("Right operand of =~ must be a regex pattern string"))?;
-            let matched = with_cached_regex(pattern, |re| re.is_match(l))?;
-            Ok(Value::Bool(matched))
+            Ok(Value::Bool(cypher_regex_is_match(l, pattern)?))
         }
         BinaryOp::ApproxEq => eval_vector_similarity(left, right),
     }
@@ -147,25 +146,57 @@ fn eval_logical(left: &Value, right: &Value, op_name: &str, dominant: bool) -> R
 const REGEX_CACHE_CAP: usize = 64;
 
 thread_local! {
-    /// Per-thread compiled-regex cache for the interpreted `=~` path, which
-    /// previously recompiled the pattern on every row. Thread-local avoids
-    /// any cross-query lock; per-query pattern counts are tiny, so a full
-    /// clear at capacity is simpler than LRU and effectively never fires.
-    static REGEX_CACHE: std::cell::RefCell<std::collections::HashMap<String, regex::Regex>> =
+    /// Per-thread cache of compiled `=~` patterns, keyed by the pattern as
+    /// written. Thread-local avoids any cross-query lock; per-query pattern
+    /// counts are tiny, so a full clear at capacity is simpler than LRU and
+    /// effectively never fires.
+    static REGEX_CACHE: std::cell::RefCell<
+        std::collections::HashMap<String, crate::java_regex::CypherRegex>,
+    > =
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
-/// Run `f` against the compiled regex for `pattern`, compiling and caching on
-/// first use. Only successful compiles are cached — an invalid pattern errors
-/// identically on every row.
-fn with_cached_regex<T>(pattern: &str, f: impl FnOnce(&regex::Regex) -> T) -> Result<T> {
+/// Compiles `pattern` for Cypher's `=~`: Java (`java.util.regex`) syntax and
+/// defaults, matching the **whole** input, as `Pattern.matches` does in
+/// Neo4j. See [`crate::java_regex`] for what the translation covers and what
+/// it rejects.
+///
+/// # Errors
+///
+/// Returns an error naming the pattern when it is not a valid Java regular
+/// expression, or uses a Java construct that cannot be evaluated exactly.
+pub fn compile_cypher_regex(pattern: &str) -> Result<crate::java_regex::CypherRegex> {
+    crate::java_regex::CypherRegex::new(pattern)
+        .map_err(|e| anyhow!("Invalid regex pattern '{pattern}': {e}"))
+}
+
+/// Whether `text` matches `pattern` in full under Cypher's `=~`; see
+/// [`compile_cypher_regex`]. The compiled pattern is cached per thread.
+///
+/// # Errors
+///
+/// Returns an error when `pattern` is not a valid regular expression, or the
+/// answer depends on input the translation cannot evaluate exactly.
+pub fn cypher_regex_is_match(text: &str, pattern: &str) -> Result<bool> {
+    with_cached_regex(pattern, |re| {
+        re.is_match(text)
+            .map_err(|e| anyhow!("Unsupported regex input: {e}"))
+    })?
+}
+
+/// Run `f` against the compiled full-match regex for `pattern`, compiling
+/// and caching on first use. Only successful compiles are cached — an
+/// invalid pattern errors identically on every row.
+pub(crate) fn with_cached_regex<T>(
+    pattern: &str,
+    f: impl FnOnce(&crate::java_regex::CypherRegex) -> T,
+) -> Result<T> {
     REGEX_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let Some(re) = cache.get(pattern) {
             return Ok(f(re));
         }
-        let re = regex::Regex::new(pattern)
-            .map_err(|e| anyhow!("Invalid regex pattern '{}': {}", pattern, e))?;
+        let re = compile_cypher_regex(pattern)?;
         if cache.len() >= REGEX_CACHE_CAP {
             cache.clear();
         }
@@ -3248,35 +3279,107 @@ mod tests {
 
     #[test]
     fn test_regex_anchors() {
-        // Start anchor
-        assert_eq!(
-            eval_binary_op(&s("hello world"), &BinaryOp::Regex, &s("^hello")).unwrap(),
-            Value::Bool(true)
-        );
-        assert_eq!(
-            eval_binary_op(&s("say hello"), &BinaryOp::Regex, &s("^hello")).unwrap(),
-            Value::Bool(false)
-        );
+        // `=~` matches the whole string, so an explicit anchor is redundant
+        // and a pattern covering only part of the input does not match.
+        let cases = [
+            ("hello world", "^hello", false),
+            ("hello", "^hello", true),
+            ("say hello", "^hello", false),
+            ("hello world", "world$", false),
+            ("world", "world$", true),
+            ("hello", "^hello$", true),
+            ("hello world", "^hello$", false),
+        ];
+        for (subject, pattern, expected) in cases {
+            assert_eq!(
+                eval_binary_op(&s(subject), &BinaryOp::Regex, &s(pattern)).unwrap(),
+                Value::Bool(expected),
+                "{subject:?} =~ {pattern:?}"
+            );
+        }
+    }
 
-        // End anchor
-        assert_eq!(
-            eval_binary_op(&s("hello world"), &BinaryOp::Regex, &s("world$")).unwrap(),
-            Value::Bool(true)
-        );
-        assert_eq!(
-            eval_binary_op(&s("world hello"), &BinaryOp::Regex, &s("world$")).unwrap(),
-            Value::Bool(false)
-        );
+    /// `=~` follows Java's `Pattern.matches`: the match spans the whole
+    /// input, alternation is decided over the whole input, inline flags stay
+    /// in force, and the end is absolute (no match before a trailing
+    /// newline, in multi-line mode too).
+    #[test]
+    fn test_regex_is_a_full_match() {
+        let cases = [
+            ("abc", "b", false),
+            ("abc", "a", false),
+            ("abc", "a.*", true),
+            ("abc", ".*c", true),
+            ("ab", "a|ab", true),
+            ("ab", "ab|a", true),
+            ("ab", "(a|ab)", true),
+            ("aab", "a|ab", false),
+            ("abc", "(?i)ABC", true),
+            ("ABC", "(?i)abc", true),
+            ("abc", "(?i)AB", false),
+            ("abc", "(?i:A)bc", true),
+            ("Abc", "(?i:a)BC", false),
+            ("abc\n", "abc", false),
+            ("abc\n", "abc$", false),
+            ("abc\n", "(?m)abc$", false),
+            ("abc\n", "(?m)abc", false),
+            ("x\nabc", "(?m)^abc", false),
+            ("abc\n", "abc\n", true),
+            ("abc\n", "abc.", false),
+            ("abc\n", "(?s)abc.", true),
+            ("abc", "(?x) a b c # trailing comment", true),
+            ("ab", "(?x) a b c # trailing comment", false),
+            ("", "", true),
+            ("", "a*", true),
+            ("a", "", false),
+            ("aaa", "a+?", true),
+            // Java's `\w` is ASCII unless `(?U)` is on.
+            ("\u{e9}", r"\w", false),
+            ("\u{e9}", r"(?U)\w", true),
+            ("\u{c9}", "(?i)\u{e9}", false),
+            ("\u{c9}", "(?iu)\u{e9}", true),
+            ("\u{2028}", ".", false),
+        ];
+        for (subject, pattern, expected) in cases {
+            assert_eq!(
+                eval_binary_op(&s(subject), &BinaryOp::Regex, &s(pattern)).unwrap(),
+                Value::Bool(expected),
+                "{subject:?} =~ {pattern:?}"
+            );
+        }
+    }
 
-        // Full match with both anchors
-        assert_eq!(
-            eval_binary_op(&s("hello"), &BinaryOp::Regex, &s("^hello$")).unwrap(),
-            Value::Bool(true)
-        );
-        assert_eq!(
-            eval_binary_op(&s("hello world"), &BinaryOp::Regex, &s("^hello$")).unwrap(),
-            Value::Bool(false)
-        );
+    /// A pattern that does not parse on its own is rejected as written, even
+    /// when wrapping it in a group would make it parse; a verbose-mode
+    /// comment does not swallow the anchor.
+    #[test]
+    fn test_regex_invalid_pattern_is_not_rescued_by_anchoring() {
+        for pattern in ["a)|(b", "[a", "a{2,1}"] {
+            let err = eval_binary_op(&s("a"), &BinaryOp::Regex, &s(pattern))
+                .expect_err(pattern)
+                .to_string();
+            assert!(err.contains("Invalid regex"), "{pattern:?}: {err}");
+        }
+        // Java constructs the regex engine cannot express are errors, never
+        // a different answer: lookahead, lookbehind, a backreference, an
+        // atomic group, `\Q…\E` quoting, and possessive quantifiers (which
+        // the parser would otherwise read as a nested repetition `(a*)+`).
+        for pattern in [
+            "(?=a)a", "(?<=a)a", "(a)\\1", "(?>a)", "\\Qa\\E", "a*+a", "a++", "a?+", "a{1,2}+",
+        ] {
+            let err = eval_binary_op(&s("aa"), &BinaryOp::Regex, &s(pattern))
+                .expect_err(pattern)
+                .to_string();
+            assert!(err.contains("Invalid regex"), "{pattern:?}: {err}");
+        }
+        // `#)` is a comment in verbose mode, so this pattern is `a` alone.
+        for (subject, expected) in [("a", true), ("ab", false)] {
+            assert_eq!(
+                eval_binary_op(&s(subject), &BinaryOp::Regex, &s("(?x) a #)")).unwrap(),
+                Value::Bool(expected),
+                "{subject:?}"
+            );
+        }
     }
 
     #[test]

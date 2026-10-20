@@ -588,6 +588,11 @@ pub struct UniConfig {
     /// benefit most (~17 ms/row → ~3 ms/row on the issue #72 ingest
     /// workload). See the Round-11 plan section in
     /// `plan-and-implement-a-valiant-flame.md`.
+    ///
+    /// Vertices only: edge writes are always stored as full rows, because
+    /// the per-edge-type delta tables are an append log with one row per
+    /// flushed version, which a MergeInsert keyed on `eid` cannot update
+    /// correctly (see `Writer::insert_edge_partial_full`).
     pub partial_lance_writes: bool,
 
     /// When true, auto-embedding for vertex writes is deferred from the

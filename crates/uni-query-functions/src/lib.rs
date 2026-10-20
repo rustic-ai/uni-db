@@ -17,6 +17,7 @@ pub mod df_udfs;
 pub mod expr_eval;
 pub mod function_props;
 pub mod fusion;
+pub mod java_regex;
 pub mod percentile;
 pub mod pushdown;
 pub mod rewrite;

@@ -1,0 +1,398 @@
+# Cases for Cypher `=~` against Java's `Pattern.compile(p).matcher(s).matches()`.
+# Columns: pattern <TAB> subject [<TAB> reject]. Escapes: \\ \t \n \r \x{HEX}.
+# `reject` marks a valid Java pattern uni-db refuses because the regex crate
+# cannot evaluate it exactly. Regenerate the answers with
+# scripts/java_regex_oracle/regenerate.sh.
+#
+# Whole-string matching
+b	abc
+a	abc
+a.*	abc
+.*b.*	abc
+abc	abc
+a|ab	ab
+ab|a	ab
+a|ab	xab
+(a|ab)(c|bcd)	abcd
+	
+a*	
+	a
+x*	xxx
+# Case-insensitive, ASCII by default
+(?i)ABC	abc
+(?i)AB	abc
+(?i)abc	ABC
+(?i)\x{e9}	\x{c9}
+(?i)caf\x{e9}	CAF\x{c9}
+(?i:A)bc	abc
+(?i:a)BC	Abc
+(?i)k	\x{212a}
+(?i)s	\x{17f}
+(?i)[k]	K
+(?i)[^k]	K
+(?i)[a-z]	Q
+(?i)[A-Z]	q
+(?i)[Z-a]	z
+(?i)[\\x{e0}-\\x{ff}]	\x{c0}
+(?i)[\\x{e9}]	\x{c9}
+(?i)i	\x{130}
+(?i)\\x{130}	i
+a(?i)b|c	aB
+a(?i)b|c	C
+(?i)a(?-i)b	Ab
+(?i)a(?-i)b	AB
+# Unicode case with (?u)
+(?iu)\x{e9}	\x{c9}
+(?iu)caf\x{e9}	CAF\x{c9}
+(?iu)k	\x{212a}
+(?iu)s	\x{17f}
+(?iu)\x{df}	\x{1e9e}
+(?iu)\x{1e9e}	\x{df}
+(?iu)a\x{df}	a\x{1e9e}
+(?iu)\x{df}a	\x{1e9e}a
+(?iu)[\\x{df}]	\x{1e9e}
+(?iu)[\\x{1e9e}]	\x{df}
+(?iu)[\\x{e9}]	\x{c9}
+(?iu)[k]	\x{212a}
+(?iu)[\\x{c5}]	\x{212b}
+(?iu)[\\x{e5}]	\x{212b}
+(?iu)[\\x{b5}]	\x{3bc}
+(?iu)[\\x{ff}]	\x{178}
+(?iu)[i]	\x{130}
+(?iu)[i]	\x{131}
+(?iu)[a-z]	\x{212a}
+(?iu)[a-z]	\x{17f}
+(?iu)[\\x{e0}-\\x{ff}]	\x{c0}
+(?iu)[\\x{3b1}-\\x{3c9}]	\x{3a3}
+(?iu)\\x{130}	i
+(?iu)i	\x{130}
+(?iu)\\x{131}	I
+(?iu)a\\x{130}	ai
+(?iu)\\x{3c3}	\x{3c2}
+(?iu)\\x{3c2}	\x{3a3}
+(?iu)\\x{1fb3}	\x{1fbc}
+(?iu)\\x{1fbc}	\x{1fb3}
+(?iu)\\x{1f80}	\x{1f88}
+(?iu)\\x{345}	\x{3b9}
+(?iu)\\x{3b9}	\x{345}
+(?iu)\\x{1c4}	\x{1c5}
+(?iu)\\x{1c5}	\x{1c6}
+(?iu)\\x{10400}	\x{10428}
+(?u)\x{e9}	\x{c9}
+(?U)(?i)\x{e9}	\x{c9}
+(?iU-U)\x{e9}	\x{c9}	reject
+# Predefined classes: ASCII by default
+\\w	\x{e9}
+\\w	_
+\\d	\x{663}
+\\d	7
+\\s	\x{a0}
+\\s	\x{b}
+\\s	\x{85}
+\\W	\x{e9}
+\\D	\x{663}
+\\S	\x{a0}
+[\\w]	\x{e9}
+[^\\w]	\x{e9}
+(?U)\\w	\x{e9}
+(?U)\\w	\x{301}
+(?U)\\d	\x{663}
+(?U)\\s	\x{a0}
+(?U)\\s	\x{85}
+(?U)[\\w]	\x{e9}
+\\b\x{e9}	\x{e9}
+a\\b	a
+\\ba\\b	a
+a\\b-	a-
+a\\Bb	ab
+\x{e9}\\b	\x{e9}
+(?U)\\b\x{e9}	\x{e9}
+(?U)\x{e9}\\b	\x{e9}
+e\\x{301}\\b	e\x{301}	reject
+e\\b\\x{301}	e\x{301}	reject
+!\\x{301}\\b	!\x{301}
+e\\x{301}	e\x{301}
+(?U)e\\x{301}\\b	e\x{301}
+\\v	\n
+\\v	\x{b}
+\\v	\x{2028}
+\\v	\x{85}
+\\v	a
+[\\v]	\x{2028}
+(?i)[\\v]	\x{2028}
+[^\\v]	a
+# Dot and line terminators
+.	\n
+.	\r
+.	\x{85}
+.	\x{2028}
+.	\x{2029}
+.	\x{b}
+.	\x{c}
+(?s).	\n
+(?s).	\x{2028}
+a.c	a\x{85}c
+(?s)a.c	a\x{85}c
+abc	abc\n
+abc$	abc\n
+abc$	abc
+(?m)abc$	abc\n
+(?m)abc	abc\n
+abc\n	abc\n
+abc.	abc\n
+(?s)abc.	abc\n
+a\nb	a\nb
+a$\n	a\n
+a$\\s*	a\n
+a$\\s*	a
+a$\r\n	a\r\n
+a$\r	a\r
+a$\n	a\r\n
+a$\r\n	a\n
+a$.	a\r
+a$..	a\r\n
+a$\nb	a\nb	reject
+a$\x{85}	a\x{85}	reject
+x|a$\n	a\n
+(?:a$)+\n	a\n
+a$|b	a
+a$|b	b
+(a$)	a
+(a$)*	a
+(a$)*	a\n
+($)	
+# Multi-line anchors
+(?m)^abc	x\nabc
+(?m).*\n^abc	x\nabc
+(?m)a$\nb	a\nb
+(?m)a$\r\nb	a\r\nb
+(?m)a\r$\nb	a\r\nb
+(?m)a$\rb	a\rb
+(?m)a\r^b	a\rb
+(?m)a\r\n^b	a\r\nb
+(?m)a\r^\nb	a\r\nb
+(?m)a\n^b	a\nb
+(?m)a$\x{2028}b	a\x{2028}b	reject
+(?m)a$\x{85}	a\x{85}	reject
+(?m)a\x{2028}^b	a\x{2028}b	reject
+(?m)^	
+(?m)^$	
+(?m)^$	a
+(?m)^.*$	abc
+(?m)^.*$	abc\n	reject
+(?m)^.*		reject
+(?m)^a	a
+(?m)^a$	a
+(?m)a\n^	a\n
+(?m)a\n^b*	a\n	reject
+(?m)^\\w+$\n^\\w+$	ab\ncd
+(?m)^\\w+$\n^\\w+$	ab\n\x{2028}d	reject
+(?m)(?s)^.*$	a\nb
+(?m)(?s).*^.*$	a\nb
+(?m)(?s).*^.*$	a\nb\n	reject
+\\A	
+\\Aa\\z	a
+\\Za	a	reject
+\\Ga	a	reject
+a\\Z	a\n	reject
+# Quantifiers
+a*+a	aa	reject
+a++	aa	reject
+a?+	a	reject
+a{2}+	aa	reject
+a{1,3}+b	aab	reject
+a**	a
+a*?	aa
+a+?	aa
+a{2}	aa
+a{2,}	aaa
+a{2,3}	aaaa
+a{,3}	a
+x{1}{2}	xx	reject
+(a*)+	aa
+(?:a{2})?	
+(?:a{2})?	a
+(?:a{2})?	aa
+(a{2}){0,1}	
+(?:a+)?b	b
+(?:a{1,2}){2}	aaa
+(?:a{2})+	aaaa
+a{	a{
+{a	{a
+a}	a}
+# Character classes
+[[:alpha:]]	:
+[[:alpha:]]	a
+[[:alpha:]]	b
+[[:^alpha:]]	^
+[]a]	]
+[^]a]	b
+[]	]
+[a-]	-
+[-a]	-
+[a-\\d]	-
+[a-z&&[^aeiou]]	e
+[a-z&&[^aeiou]]	b
+[\\p{L}&&\\p{Lu}]	a
+[^a[b]]	b
+[a[b]]	b
+[a--b]	a
+[a~~b]	a	reject
+[a&&]	a
+[&&a]	a
+[a&&]	b
+[&&]	a
+[a&&&&b]	a
+[a&&b&&]	b
+(?x)[ a]	\x{20}
+(?x)[#]	#
+(?x)[\\#]	#
+(?x)a b	ab
+(?x)a#c\nb	ab
+(?x)a\\ b	a b
+# Unicode properties and POSIX names
+\\p{Lower}	\x{e9}
+\\p{Lower}	a
+\\p{Upper}	A
+\\p{Alpha}	\x{e9}
+\\p{Alnum}	\x{663}
+\\p{Digit}	\x{663}
+\\p{Punct}	\x{a1}
+\\p{Punct}	!
+\\p{Graph}	\x{e9}
+\\p{Print}	\x{a0}
+\\p{Blank}	\x{a0}
+\\p{Cntrl}	\x{85}
+\\p{XDigit}	\x{ff21}
+\\p{Space}	\x{85}
+\\p{ASCII}	\x{80}
+(?U)\\p{Lower}	\x{e9}
+(?U)\\p{lower}	a
+(?U)\\p{Alpha}	\x{e9}
+(?U)\\p{Graph}	\x{a0}
+(?U)\\p{Graph}	\x{378}
+(?U)\\p{Print}	\x{a0}
+(?U)\\p{Blank}	\x{a0}
+(?U)\\p{Blank}	\x{85}
+(?U)\\p{Space}	\x{85}
+(?U)\\p{XDigit}	\x{ff21}
+(?U)\\p{Punct}	\x{a1}
+(?U)\\p{Cntrl}	\x{85}
+(?U)\\p{Alnum}	\x{663}
+(?i)\\p{Lower}	A
+(?i)\\p{Lower}	\x{c9}
+(?iu)\\p{Lower}	\x{c9}
+(?iU)\\p{Lower}	\x{c9}
+(?i)\\p{Upper}	a
+(?i)\\P{Lower}	A
+(?i)[\\p{Lower}]	A
+(?i)\\p{Ll}	A
+(?i)\\p{Lu}	a
+(?i)\\p{Lt}	a
+(?i)\\p{IsLowercase}	A
+(?i)\\p{IsUppercase}	\x{e9}
+(?i)\\p{IsLu}	a
+(?i)\\p{gc=Lu}	a
+(?i)\\p{general_category=Lu}	a
+(?i)\\p{L}	a
+(?i)\\p{Alpha}	A
+\\p{lower}	a
+\\p{LOWER}	a
+\\p{Greek}	\x{3b1}
+\\p{IsGreek}	\x{3b1}
+\\p{Isgreek}	\x{3b1}
+\\p{InGreek}	\x{3b1}	reject
+\\p{block=Greek}	\x{3b1}	reject
+\\p{IsAlphabetic}	\x{e9}
+\\p{Alphabetic}	\x{e9}
+\\p{isalphabetic}	\x{e9}
+\\p{sc=Greek}	\x{3b1}
+\\p{script=Greek}	\x{3b1}
+\\p{sc=Latn}	a
+\\p{sc=latin}	a
+\\p{IsLatn}	a
+\\p{sc!=Greek}	a
+\\p{sc:Greek}	\x{3b1}
+\\p{IsL}	a
+\\pL	a
+\\pZ	\x{20}
+\\p{Z}	\x{20}
+\\pz	\x{20}
+\\p{Lu}	A
+\\p{lu}	A
+\\p{Lowercase}	a
+\\p{IsWhite_Space}	\x{20}
+\\p{IsWhiteSpace}	\x{20}
+\\p{IsWhite Space}	\x{20}
+\\p{White_Space}	\x{20}
+\\p{Hex_Digit}	a
+\\p{IsHex_Digit}	a
+\\p{IsHexDigit}	\x{ff21}
+\\p{IsEmoji}	\x{1f600}
+\\p{IsAssigned}	a
+\\p{IsBlank}	\x{a0}
+\\p{IsGraph}	\x{378}
+\\p{IsWord}	\x{301}
+\\p{IsLower}	\x{e9}
+\\p{IsAlnum}	\x{e9}
+\\p{IsLC}	\x{1c5}
+\\p{LC}	\x{1c5}
+\\p{gc=LC}	\x{1c5}
+\\p{LD}	\x{663}
+\\p{L1}	\x{ff}
+\\p{all}	\x{10ffff}
+\\p{Cs}	a
+\\P{Cn}	\x{378}
+\\P{L}	1
+\\p{javaLowerCase}	a	reject
+# Escapes and literals
+\\x{e9}	\x{e9}
+\\u00e9	\x{e9}
+(?i)\\u00e9	\x{c9}
+\\u{e9}	\x{e9}
+\\U000000e9	\x{e9}
+\\0101	A	reject
+\\cA	\x{1}	reject
+\\e	\x{1b}	reject
+\\a	\x{7}
+\\f	\x{c}
+\\t	\t
+\\n	\n
+\\r	\r
+\\-	-
+\\%	%
+\\_	_
+\\@	@
+\\<	<
+\\>	>
+\\<a\\>	<a>
+\\y	y
+\\h	\x{20}	reject
+\\R	\r\n	reject
+\\X	a	reject
+\\N{LATIN SMALL LETTER A}	a	reject
+\\Qa*\\E	a*	reject
+\\b{start}a	a
+\\b{g}		reject
+# Groups, flags, unsupported constructs
+(?<n1>a)	a
+(?<1n>a)	a
+(?<a_b>x)	x
+(?P<n>a)	a
+(?<n>a)(?<n>b)	ab
+(?:a)	a
+()	
+(?)a	a	reject
+(?i-i)a	a	reject
+(?R)a	a
+(?d).	\r	reject
+(?U)a*?	a
+(?=a)a	a	reject
+(?!b)a	a	reject
+(?<=a)b	ab	reject
+(?>a)	a	reject
+(a)\\1	aa	reject
+\\1	a	reject
+\\k<n>	a
+a)|(b	a
+[a	a

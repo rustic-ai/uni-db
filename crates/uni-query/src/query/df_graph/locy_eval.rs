@@ -876,25 +876,29 @@ fn map_to_graph_entity(map: HashMap<String, Value>) -> Value {
 
 /// Extract user-visible properties from a raw graph-entity map.
 ///
-/// Properties are stored in `_all_props` (deserialized by `arrow_to_value` from
-/// the LargeBinary CypherValue codec). Any non-internal keys at the top level
-/// are also included as schema-defined column properties.
+/// The container is found structurally, by
+/// [`uni_common::value::entity_property_container`]: `_all_props` (decoded
+/// from the CypherValue codec by `arrow_to_value`), whose entries are joined
+/// by the inline schema-defined property columns beside it, or a serialised
+/// entity's `properties` map. No user name is excluded beyond the reserved
+/// ones — an inline property called `properties` used to be dropped.
 fn extract_properties_from_map(map: &HashMap<String, Value>) -> HashMap<String, Value> {
-    let mut properties = HashMap::new();
+    let container = uni_common::value::entity_property_container(map);
+    let mut properties: HashMap<String, Value> = container
+        .into_iter()
+        .flatten()
+        .filter(|(k, _)| is_user_visible_property(k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
 
-    // Primary source: _all_props contains all properties from storage
-    if let Some(Value::Map(all_props)) = map.get("_all_props") {
-        for (k, v) in all_props {
+    // Inline non-internal keys (schema-defined property columns), unless the
+    // map is a serialised entity whose other keys are its own fields.
+    let serialised = container.is_some() && !map.contains_key("_all_props");
+    if !serialised {
+        for (k, v) in map {
             if is_user_visible_property(k) {
-                properties.insert(k.clone(), v.clone());
+                properties.entry(k.clone()).or_insert_with(|| v.clone());
             }
-        }
-    }
-
-    // Secondary: inline non-internal keys (schema-defined property columns)
-    for (k, v) in map {
-        if is_user_visible_property(k) && k != "properties" {
-            properties.entry(k.clone()).or_insert_with(|| v.clone());
         }
     }
 

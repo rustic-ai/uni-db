@@ -342,19 +342,19 @@ async fn two_different_labels_can_be_unioned() {
     assert_eq!(seen, vec!["P:a".to_string(), "Q:q1".to_string()]);
 }
 
-/// A genuine type conflict must still be rejected. Coercing an `Int64` against
-/// a node would be inventing a conversion, so this stays a loud error.
+/// Branches of different Cypher types still union: openCypher constrains a
+/// `UNION`'s column names, not their types, so each row keeps its own value.
+/// Neither is converted; the column carries both as stored values.
 #[tokio::test]
-async fn a_non_entity_type_conflict_is_still_rejected() {
+async fn a_non_entity_type_conflict_keeps_each_rows_value() {
     let db = fixture().await;
-    let err = db
+    let r = db
         .session()
         .query("MATCH (p:P) RETURN p AS n UNION ALL MATCH (q:P) RETURN id(q) AS n")
         .await
-        .expect_err("a node and an integer are not the same Cypher type");
-    let msg = err.to_string();
-    assert!(
-        msg.contains("mismatched schemas"),
-        "expected the union schema guard, got: {msg}"
-    );
+        .expect("a column may hold a node in one branch and an integer in another");
+    let vals = column_zero(&r);
+    let nodes = vals.iter().filter(|v| matches!(v, Value::Node(_))).count();
+    let ints = vals.iter().filter(|v| matches!(v, Value::Int(_))).count();
+    assert_eq!((nodes, ints, vals.len()), (3, 3, 6), "got {vals:?}");
 }

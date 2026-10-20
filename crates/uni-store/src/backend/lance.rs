@@ -3,7 +3,7 @@
 
 //! Lance implementation of the [`StorageBackend`] trait.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -307,6 +307,79 @@ fn staged_fragments(
         fragments.append(&mut f);
     }
     Ok(fragments)
+}
+
+impl LanceDbBackend {
+    /// Commit `fragments` as one Append onto `dataset`, which the caller opened
+    /// under the table's write lock.
+    ///
+    /// The transaction is built against the version opened under the lock,
+    /// not the one the rows were staged against. An Append's fragments do not
+    /// depend on the table's other contents, so re-basing them is exact:
+    /// whatever was committed since staging — a flush, a compaction rewrite, a
+    /// delete — stays, and nothing can conflict because the lock holds every
+    /// in-process writer off.
+    async fn commit_staged_append(
+        &self,
+        table_name: &str,
+        dataset: Arc<lance::Dataset>,
+        fragments: Vec<lance::table::format::Fragment>,
+    ) -> Result<()> {
+        use lance::dataset::transaction::{Operation, TransactionBuilder};
+
+        let transaction =
+            TransactionBuilder::new(dataset.version().version, Operation::Append { fragments })
+                .build();
+        let mut commit = lance::dataset::CommitBuilder::new(dataset);
+        if let Some(store_params) = self
+            .directory
+            .write_params(lance::dataset::WriteMode::Append)
+            .store_params
+        {
+            commit = commit.with_store_params(store_params);
+        }
+        commit
+            .execute(transaction)
+            .await
+            .map_err(|e| anyhow!("Failed to publish staged rows to '{table_name}': {e}"))?;
+        Ok(())
+    }
+}
+
+/// Whether some retained version of `dataset` after `published_after`
+/// references a data file in `paths`: the current manifest, or the Append
+/// transaction that first committed them (which survives a later rewrite of
+/// those fragments for as long as its version is retained).
+async fn staged_append_committed(
+    dataset: &lance::Dataset,
+    paths: &HashSet<&str>,
+    published_after: Option<u64>,
+) -> bool {
+    use lance::dataset::transaction::Operation;
+
+    let references = |fragments: &[lance::table::format::Fragment]| {
+        fragments.iter().any(|f| {
+            f.files
+                .iter()
+                .any(|file| paths.contains(file.path.as_str()))
+        })
+    };
+    if references(dataset.fragments()) {
+        return true;
+    }
+    let current = dataset.version().version;
+    let first = published_after.map_or(1, |v| v.saturating_add(1));
+    for version in first..=current {
+        // A pruned version (or one without a transaction file) cannot answer;
+        // the caller's file check covers what pruning can hide.
+        if let Ok(Some(transaction)) = dataset.read_transaction_by_version(version).await
+            && let Operation::Append { fragments } = &transaction.operation
+            && references(fragments)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[async_trait]
@@ -799,8 +872,6 @@ impl StorageBackend for LanceDbBackend {
         table_name: &str,
         staged: Vec<crate::backend::traits::StagedAppend>,
     ) -> Result<()> {
-        use lance::dataset::transaction::{Operation, TransactionBuilder};
-
         let fragments = staged_fragments(table_name, staged)?;
         if fragments.is_empty() {
             return Ok(());
@@ -809,29 +880,114 @@ impl StorageBackend for LanceDbBackend {
         // flush appends and with compaction's scan → overwrite.
         let lock = self.write_lock_for(table_name);
         let _guard = lock.lock().await;
-        // The transaction is built against the version opened *here*, under
-        // the lock, rather than the one the rows were staged against. An
-        // Append's fragments do not depend on the table's other contents, so
-        // re-basing them is exact: whatever was committed since staging — a
-        // flush, a compaction rewrite, a delete — stays, and nothing can
-        // conflict because the lock holds every in-process writer off.
         let dataset = Arc::new(self.directory.open(table_name).await?);
-        let transaction =
-            TransactionBuilder::new(dataset.version().version, Operation::Append { fragments })
-                .build();
-        let mut commit = lance::dataset::CommitBuilder::new(dataset);
-        if let Some(store_params) = self
-            .directory
-            .write_params(lance::dataset::WriteMode::Append)
-            .store_params
-        {
-            commit = commit.with_store_params(store_params);
-        }
-        commit
-            .execute(transaction)
+        self.commit_staged_append(table_name, dataset, fragments)
             .await
-            .map_err(|e| anyhow!("Failed to publish staged rows to '{table_name}': {e}"))?;
-        Ok(())
+    }
+
+    fn staged_record(
+        &self,
+        table_name: &str,
+        staged: &[crate::backend::traits::StagedAppend],
+    ) -> Result<Option<serde_json::Value>> {
+        let mut fragments: Vec<&lance::table::format::Fragment> = Vec::new();
+        for append in staged {
+            let Some(payload) = append.payload() else {
+                continue;
+            };
+            let StagedFragments(f) =
+                payload.downcast_ref::<StagedFragments>().ok_or_else(|| {
+                    anyhow!("rows staged for '{table_name}' were not staged by the Lance backend")
+                })?;
+            fragments.extend(f);
+        }
+        if fragments.is_empty() {
+            return Ok(None);
+        }
+        // Lance's own serde form of a fragment: its data files (paths under
+        // the dataset's `data/` directory), deletion file and row count.
+        Ok(Some(serde_json::to_value(&fragments).map_err(|e| {
+            anyhow!("Failed to record staged rows of '{table_name}': {e}")
+        })?))
+    }
+
+    async fn publish_staged_record(
+        &self,
+        table_name: &str,
+        record: &serde_json::Value,
+        published_after: Option<u64>,
+    ) -> Result<crate::backend::traits::RecordedPublish> {
+        use crate::backend::traits::RecordedPublish;
+
+        let fragments: Vec<lance::table::format::Fragment> = serde_json::from_value(record.clone())
+            .map_err(|e| {
+                anyhow!("Failed to read the recorded staged rows of '{table_name}': {e}")
+            })?;
+        let paths: HashSet<&str> = fragments
+            .iter()
+            .flat_map(|f| f.files.iter().map(|file| file.path.as_str()))
+            .collect();
+        if paths.is_empty() {
+            return Ok(RecordedPublish::AlreadyPublished);
+        }
+        // Under the table's write lock, so no in-process publish of the same
+        // record can interleave between the check and the commit.
+        let lock = self.write_lock_for(table_name);
+        let _guard = lock.lock().await;
+        let dataset = Arc::new(self.directory.open(table_name).await?);
+
+        if staged_append_committed(&dataset, &paths, published_after).await {
+            return Ok(RecordedPublish::AlreadyPublished);
+        }
+
+        // Not found in any retained version. The files settle what that means:
+        // all present — never published; all gone — published and later
+        // rewritten, with the versions that referenced them since pruned
+        // (Lance deletes an unreferenced data file only after its 7-day
+        // grace period, so a never-published file is still there); some gone —
+        // neither publishing nor skipping is exact, so refuse.
+        let data_dir = dataset.data_dir();
+        let mut missing = 0usize;
+        let mut total = 0usize;
+        for fragment in &fragments {
+            for file in &fragment.files {
+                total += 1;
+                let store = dataset
+                    .object_store(file.base_id)
+                    .await
+                    .map_err(|e| anyhow!("Failed to open the store of '{table_name}': {e}"))?;
+                let present = store
+                    .exists(&data_dir.clone().join(file.path.as_str()))
+                    .await
+                    .map_err(|e| {
+                        anyhow!(
+                            "Failed to check staged file '{}' of '{table_name}': {e}",
+                            file.path
+                        )
+                    })?;
+                if !present {
+                    missing += 1;
+                }
+            }
+        }
+        if missing == total {
+            tracing::warn!(
+                table = %table_name,
+                files = total,
+                "recorded staged rows are in no retained version and their files are gone; \
+                 treating them as published and since rewritten"
+            );
+            return Ok(RecordedPublish::AlreadyPublished);
+        }
+        if missing > 0 {
+            anyhow::bail!(
+                "cannot complete the recorded publish to '{table_name}': {missing} of {total} \
+                 staged files are missing and no retained version references them"
+            );
+        }
+        self.commit_staged_append(table_name, dataset, fragments)
+            .await?;
+        Ok(RecordedPublish::Published)
     }
 
     async fn discard_staged(
@@ -1764,6 +1920,108 @@ mod tests {
         backend.discard_staged("t", vec![discarded]).await.unwrap();
         assert_eq!(data_files(dir.path()), files_before);
         assert_eq!(backend.count_rows("t", None).await.unwrap(), 4);
+    }
+
+    /// A recorded staged append is published exactly once: a repeat finds the
+    /// earlier publish, still after compaction rewrote its fragments and
+    /// version cleanup pruned every version that referenced its files; and a
+    /// record whose storage is only partly present is refused, not guessed.
+    #[tokio::test]
+    async fn staged_record_publishes_exactly_once() {
+        use crate::backend::traits::RecordedPublish;
+
+        let (dir, backend) = create_test_backend().await;
+        backend
+            .create_table("t", vec![test_batch(vec![1], vec![1])])
+            .await
+            .unwrap();
+        let before = backend.get_table_version("t").await.unwrap();
+
+        let staged = backend
+            .stage_append("t", vec![test_batch(vec![2, 3], vec![2, 3])])
+            .await
+            .unwrap();
+        let record = backend
+            .staged_record("t", std::slice::from_ref(&staged))
+            .unwrap()
+            .expect("pending rows have a record");
+        drop(staged);
+
+        // Another writer's commit lands first; the first attempt still publishes.
+        backend
+            .write("t", vec![test_batch(vec![4], vec![4])], WriteMode::Append)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .publish_staged_record("t", &record, before)
+                .await
+                .unwrap(),
+            RecordedPublish::Published
+        );
+        assert_eq!(backend.count_rows("t", None).await.unwrap(), 4);
+        backend
+            .write("t", vec![test_batch(vec![5], vec![5])], WriteMode::Append)
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .publish_staged_record("t", &record, before)
+                .await
+                .unwrap(),
+            RecordedPublish::AlreadyPublished,
+            "a repeat must find the earlier publish"
+        );
+        assert_eq!(backend.count_rows("t", None).await.unwrap(), 5);
+
+        // Compaction rewrites the published fragments and cleanup prunes every
+        // version that named their files, deleting the files.
+        let report = backend
+            .optimize_table("t", std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(
+            report.fragments_removed > 0,
+            "premise: compaction must rewrite the fragments, got {report:?}"
+        );
+        assert_eq!(
+            backend
+                .publish_staged_record("t", &record, before)
+                .await
+                .unwrap(),
+            RecordedPublish::AlreadyPublished,
+            "a publish whose versions and files were pruned must not be repeated"
+        );
+        assert_eq!(backend.count_rows("t", None).await.unwrap(), 5);
+
+        // Two staged fragments, one of whose files is lost: refuse.
+        let first = backend
+            .stage_append("t", vec![test_batch(vec![6], vec![6])])
+            .await
+            .unwrap();
+        let second = backend
+            .stage_append("t", vec![test_batch(vec![7], vec![7])])
+            .await
+            .unwrap();
+        let staged = [first, second];
+        let record = backend.staged_record("t", &staged).unwrap().unwrap();
+        let fragments: Vec<lance::table::format::Fragment> =
+            serde_json::from_value(record.clone()).unwrap();
+        assert_eq!(fragments.len(), 2);
+        std::fs::remove_file(
+            dir.path()
+                .join("t.lance")
+                .join("data")
+                .join(&fragments[0].files[0].path),
+        )
+        .unwrap();
+        let after = backend.get_table_version("t").await.unwrap();
+        let refused = backend.publish_staged_record("t", &record, after).await;
+        assert!(
+            refused.is_err(),
+            "a partly missing record must be refused, got {refused:?}"
+        );
+        assert_eq!(backend.count_rows("t", None).await.unwrap(), 5);
     }
 
     /// **Phase 4B probe — does any per-query I/O count move across a compaction?**

@@ -159,20 +159,9 @@ impl ProcedurePlugin for AlgorithmProcedureAdapter {
 
         // Build AlgoContext with L0 visibility, mirroring
         // `procedure_call.rs::execute_algo_procedure` lines 1244-1258.
-        let l0_mgr = {
-            let l0_ctx = host.l0_context();
-            l0_ctx.current_l0.as_ref().map(|current| {
-                let mut pending = l0_ctx.pending_flush_l0s.clone();
-                if let Some(tx_l0) = &l0_ctx.transaction_l0 {
-                    pending.push(tx_l0.clone());
-                }
-                Arc::new(uni_store::runtime::l0_manager::L0Manager::from_snapshot(
-                    current.clone(),
-                    pending,
-                ))
-            })
-        };
-        let algo_ctx = AlgoContext::new(Arc::clone(host.storage()), l0_mgr);
+        let l0_mgr = host.l0_context().read_view();
+        let algo_ctx = AlgoContext::new(Arc::clone(host.storage()), l0_mgr)
+            .with_property_manager(host.property_manager().cloned());
 
         let proc = Arc::clone(&self.proc);
         let algo_yields = self.algo_yields.clone();
@@ -703,6 +692,7 @@ pub(crate) fn run_algorithm_provider(
     entry: &uni_plugin::registry::AlgorithmEntry,
     storage: Arc<uni_store::storage::manager::StorageManager>,
     l0_manager: Option<Arc<uni_store::runtime::L0Manager>>,
+    property_manager: Arc<uni_store::runtime::property_manager::PropertyManager>,
     config_json: &str,
     resolver: Option<Arc<dyn uni_plugin_builtin::algorithms::bridge::GraphProjectionResolver>>,
 ) -> Result<SendableRecordBatchStream, FnError> {
@@ -712,7 +702,8 @@ pub(crate) fn run_algorithm_provider(
         storage,
         l0_manager,
         entry.effective_caps.clone(),
-    );
+    )
+    .with_property_manager(Some(property_manager));
     // Cypher/Named graphRef (issue #151 P3): route projection through the
     // injected resolver instead of the Native storage scan. If no resolver is
     // available on this execution path, fail clearly rather than silently

@@ -319,6 +319,7 @@ pub async fn build_projection_from_direct_args(
 
     let builder = ProjectionBuilder::new(ctx.storage.clone())
         .l0_manager(ctx.l0_manager.clone())
+        .property_manager(ctx.property_manager.clone())
         .node_labels(&node_labels.iter().map(String::as_str).collect::<Vec<_>>())
         .edge_types(&edge_types.iter().map(String::as_str).collect::<Vec<_>>());
 

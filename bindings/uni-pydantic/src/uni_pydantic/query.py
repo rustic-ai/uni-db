@@ -220,7 +220,11 @@ class PropertyProxy(Generic[T]):
         return FilterExpr(self._property_name, FilterOp.NOT_IN, list(values))
 
     def like(self, pattern: str) -> FilterExpr:
-        """Match a regex pattern."""
+        """Match a regex pattern against the whole value (Cypher ``=~``).
+
+        The pattern must match the entire string, as in Neo4j: use
+        ``".*foo.*"`` to find ``foo`` anywhere.
+        """
         return FilterExpr(self._property_name, FilterOp.LIKE, pattern)
 
     def is_null(self) -> FilterExpr:

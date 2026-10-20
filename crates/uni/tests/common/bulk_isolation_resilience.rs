@@ -360,11 +360,13 @@ async fn bulk_abort_keeps_concurrent_committed_writes_resilience() -> Result<()>
 }
 
 /// A crash part way through publishing, after a compaction pass folded the
-/// already-published forward deltas into L2: reopen must roll L2 back with the
-/// rest, or the forward direction keeps edges whose `main_edges` rows were
-/// rolled back.
+/// already-published forward deltas into L2 (and cleared them from the delta
+/// table): reopen completes the publish, and must recognize the forward
+/// deltas as already published although no current fragment holds them, or
+/// the forward direction counts every bulk edge twice. Both directions must
+/// end up agreeing with `main_edges`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn bulk_publish_crash_after_compaction_rolls_back_adjacency_resilience() -> Result<()> {
+async fn bulk_publish_crash_after_compaction_completes_consistently_resilience() -> Result<()> {
     const SEAM: &str = "delta::before-write-run";
     let dir = tempfile::TempDir::new()?;
     let path = dir.path().to_str().unwrap().to_string();
@@ -447,10 +449,436 @@ async fn bulk_publish_crash_after_compaction_rolls_back_adjacency_resilience() -
     drop(db);
 
     let db = Uni::open(&path).config(config(false)).build().await?;
+    let completed = View {
+        bulk_edges: BULK_EDGES as i64,
+        bulk_vertices: 0,
+        ..committed_only(1 + BULK_EDGES as i64)
+    };
     assert_eq!(
         view(&db).await?,
-        committed_only(1),
-        "reopen after a crash mid-publish must leave no trace of the load"
+        completed,
+        "reopen after a crash mid-publish must complete the load exactly once"
     );
+    drop(db);
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    assert_eq!(
+        view(&db).await?,
+        completed,
+        "a second reopen changes nothing"
+    );
+    Compactor::new(db.storage()).compact_all().await?;
+    assert_eq!(view(&db).await?, completed, "after compaction");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// A crash mid-publish must not cost any other writer its committed data, and
+// every interrupted publish must be reconciled, not only the last one.
+// ---------------------------------------------------------------------------
+
+/// Rows of one bulk load as a reader sees them.
+#[derive(Debug, PartialEq, Eq)]
+struct LoadView {
+    /// Vertices of the load (`k` in its range).
+    vertices: i64,
+    /// Edges of the load (`w` in its range), traversed from the source side.
+    fwd: i64,
+    /// The same edges, traversed from the destination side.
+    bwd: i64,
+    /// The same edges, matched without endpoint labels.
+    edges: i64,
+}
+
+/// A bulk load's vertex `k` range and edge `w` range.
+#[derive(Debug, Clone, Copy)]
+struct Load {
+    k_from: i64,
+    w_from: i64,
+}
+
+/// The load the earlier tests use: `k` in `100..120`, `w` in `0..30`.
+const LOAD_A: Load = Load {
+    k_from: 100,
+    w_from: 0,
+};
+/// A second, disjoint load: `k` in `200..220`, `w` in `1000..1030`.
+const LOAD_B: Load = Load {
+    k_from: 200,
+    w_from: 1000,
+};
+
+impl Load {
+    fn vertices(self) -> Vec<HashMap<String, Value>> {
+        (0..BULK_VERTICES)
+            .map(|i| HashMap::from([("k".to_string(), Value::Int(self.k_from + i))]))
+            .collect()
+    }
+
+    fn edges(self, seed: &[Vid]) -> Vec<uni_bulk::EdgeData> {
+        (0..BULK_EDGES)
+            .map(|i| {
+                uni_bulk::EdgeData::new(
+                    seed[i % SEED],
+                    seed[(i * 7 + 3) % SEED],
+                    HashMap::from([("w".to_string(), Value::Int(self.w_from + i as i64))]),
+                )
+            })
+            .collect()
+    }
+
+    async fn view(self, db: &Uni) -> Result<LoadView> {
+        let w = format!(
+            "r.w >= {} AND r.w < {}",
+            self.w_from,
+            self.w_from + BULK_EDGES as i64
+        );
+        Ok(LoadView {
+            vertices: count(
+                db,
+                &format!(
+                    "MATCH (n:P) WHERE n.k >= {} AND n.k < {} RETURN count(n) AS c",
+                    self.k_from,
+                    self.k_from + BULK_VERTICES
+                ),
+            )
+            .await?,
+            fwd: count(
+                db,
+                &format!("MATCH (a:P)-[r:E]->(b:P) WHERE {w} RETURN count(r) AS c"),
+            )
+            .await?,
+            bwd: count(
+                db,
+                &format!("MATCH (b:P)<-[r:E]-(a:P) WHERE {w} RETURN count(r) AS c"),
+            )
+            .await?,
+            edges: count(
+                db,
+                &format!("MATCH ()-[r:E]->() WHERE {w} RETURN count(r) AS c"),
+            )
+            .await?,
+        })
+    }
+
+    /// Asserts the load is entirely present. An interrupted load whose
+    /// publish had begun is completed at the next open, so this is also what
+    /// recovery must leave: all of it, each row once.
+    async fn assert_all(self, db: &Uni, what: &str) -> Result<()> {
+        let seen = self.view(db).await?;
+        assert_eq!(
+            seen,
+            LoadView {
+                vertices: BULK_VERTICES,
+                fwd: BULK_EDGES as i64,
+                bwd: BULK_EDGES as i64,
+                edges: BULK_EDGES as i64,
+            },
+            "{what}: the load must be entirely present, each row once"
+        );
+        Ok(())
+    }
+}
+
+/// The seed's ten vertices and one edge.
+async fn assert_seed_intact(db: &Uni, what: &str) -> Result<()> {
+    assert_eq!(
+        count(
+            db,
+            &format!("MATCH (n:P) WHERE n.k < {SEED} RETURN count(n) AS c")
+        )
+        .await?,
+        SEED as i64,
+        "{what}: seed vertices"
+    );
+    assert_eq!(
+        count(db, "MATCH (:P)-[r:E {w: -1}]->(:P) RETURN count(r) AS c").await?,
+        1,
+        "{what}: seed edge"
+    );
+    Ok(())
+}
+
+/// Publish seam hits of one load with one edge type: 0 = fwd delta, 1 = bwd.
+const PUBLISH_SEAM: &str = "delta::before-write-run";
+
+/// Runs `load`'s commit with a crash injected at its bwd delta publish — after
+/// its vertex tables, `main_edges` and fwd delta are already published.
+/// Returns once the panic has unwound out of the commit.
+async fn crash_mid_publish(db: &Uni, load: Load, seed: &[Vid]) -> Result<()> {
+    crash_at_publish_hit(db, load, seed, 1).await
+}
+
+/// Runs `load`'s commit with a crash injected at publish seam hit `crash_hit`
+/// (0 = the fwd delta, 1 = the bwd delta).
+async fn crash_at_publish_hit(db: &Uni, load: Load, seed: &[Vid], crash_hit: usize) -> Result<()> {
+    let hits = Arc::new(AtomicUsize::new(0));
+    {
+        let hits = Arc::clone(&hits);
+        fail::cfg_callback(PUBLISH_SEAM, move || {
+            if hits.fetch_add(1, Ordering::SeqCst) == crash_hit {
+                panic!("injected crash while publishing a delta table");
+            }
+        })
+        .unwrap();
+    }
+    let tx = db.session().tx().await?;
+    let mut bulk = tx.bulk_writer().batch_size(10).build()?;
+    bulk.insert_vertices("P", load.vertices()).await?;
+    bulk.insert_edges("E", load.edges(seed)).await?;
+    let crashed = std::panic::AssertUnwindSafe(bulk.commit())
+        .catch_unwind()
+        .await
+        .is_err();
+    fail::remove(PUBLISH_SEAM);
+    assert!(
+        crashed,
+        "premise: the injected crash must interrupt the commit"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        crash_hit + 1,
+        "premise: the crash must come at publish seam hit {crash_hit}"
+    );
+    drop(tx);
+    Ok(())
+}
+
+/// Another session commits and flushes while a load's publish is part way
+/// through; the process then dies in that publish. Reopen must keep the other
+/// session's committed vertex and edge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_publish_crash_keeps_commits_made_inside_the_publish_resilience() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().to_str().unwrap().to_string();
+    let db = Arc::new(Uni::open(&path).config(config(false)).build().await?);
+    let seed = seed(&db).await?;
+
+    // Publish hit 1 (the bwd delta) parks until the other session has
+    // committed and flushed into the same tables, then crashes. The other
+    // session's flush passes the same seam; only hit 1 parks.
+    let (reached_tx, reached_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let hits = Arc::new(AtomicUsize::new(0));
+    {
+        let hits = Arc::clone(&hits);
+        fail::cfg_callback(PUBLISH_SEAM, move || {
+            if hits.fetch_add(1, Ordering::SeqCst) == 1 {
+                reached_tx.send(()).ok();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(30))
+                    .ok();
+                panic!("injected crash while publishing the bwd delta");
+            }
+        })
+        .unwrap();
+    }
+    let writer = tokio::spawn({
+        let db = Arc::clone(&db);
+        async move {
+            let reached = tokio::task::spawn_blocking(move || {
+                reached_rx.recv_timeout(Duration::from_secs(30))
+            })
+            .await?;
+            let result = match reached {
+                Ok(()) => commit_concurrent_writes(&db).await.map(|()| true),
+                Err(_) => Ok(false),
+            };
+            release_tx.send(()).ok();
+            result
+        }
+    });
+
+    let tx = db.session().tx().await?;
+    let mut bulk = tx.bulk_writer().batch_size(10).build()?;
+    bulk.insert_vertices("P", LOAD_A.vertices()).await?;
+    bulk.insert_edges("E", LOAD_A.edges(&seed)).await?;
+    let crashed = std::panic::AssertUnwindSafe(bulk.commit())
+        .catch_unwind()
+        .await
+        .is_err();
+    fail::remove(PUBLISH_SEAM);
+    assert!(
+        writer.await??,
+        "premise: the other session must commit inside the publish"
+    );
+    assert!(
+        crashed,
+        "premise: the injected crash must interrupt the commit"
+    );
+    assert_eq!(
+        concurrent_writes(&db).await?,
+        (1, 1),
+        "premise: the other session's writes are committed before the crash"
+    );
+    drop(tx);
+    drop(db);
+
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    assert_eq!(
+        concurrent_writes(&db).await?,
+        (1, 1),
+        "reopen after a crash mid-publish discarded an edge and a vertex another \
+         session committed and flushed during the publish"
+    );
+    assert_seed_intact(&db, "after reopen").await?;
+    LOAD_A.assert_all(&db, "after reopen").await?;
+    Ok(())
+}
+
+/// A publish fails part way and the process carries on: another session
+/// commits and flushes afterwards. The next open must keep those commits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_publish_failure_keeps_later_commits_resilience() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().to_str().unwrap().to_string();
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    let seed = seed(&db).await?;
+
+    crash_mid_publish(&db, LOAD_A, &seed).await?;
+    commit_concurrent_writes(&db).await?;
+    drop(db);
+
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    assert_eq!(
+        concurrent_writes(&db).await?,
+        (1, 1),
+        "reopen discarded an edge and a vertex committed after a failed publish"
+    );
+    assert_seed_intact(&db, "after reopen").await?;
+    LOAD_A.assert_all(&db, "after reopen").await?;
+    Ok(())
+}
+
+/// Load A's publish fails part way; load B then commits in full. The database
+/// must still reconcile A at the next open, and keep all of B.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_publish_failure_reconciled_after_another_load_commits_resilience() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().to_str().unwrap().to_string();
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    let seed = seed(&db).await?;
+
+    crash_mid_publish(&db, LOAD_A, &seed).await?;
+    let tx = db.session().tx().await?;
+    let mut bulk = tx.bulk_writer().batch_size(10).build()?;
+    bulk.insert_vertices("P", LOAD_B.vertices()).await?;
+    bulk.insert_edges("E", LOAD_B.edges(&seed)).await?;
+    bulk.commit().await?;
+    tx.commit().await?;
+    LOAD_B.assert_all(&db, "before reopen").await?;
+    drop(db);
+
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    assert_seed_intact(&db, "after reopen").await?;
+    LOAD_B.assert_all(&db, "after reopen").await?;
+    LOAD_A.assert_all(&db, "after reopen").await?;
+    Ok(())
+}
+
+/// Two publishes are interrupted before the process dies. Both must be
+/// reconciled at the next open, not only the one that wrote last.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_two_interrupted_publishes_both_reconciled_resilience() -> Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().to_str().unwrap().to_string();
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    let seed = seed(&db).await?;
+
+    crash_mid_publish(&db, LOAD_A, &seed).await?;
+    crash_mid_publish(&db, LOAD_B, &seed).await?;
+    drop(db);
+
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    assert_seed_intact(&db, "after reopen").await?;
+    LOAD_A.assert_all(&db, "load A after reopen").await?;
+    LOAD_B.assert_all(&db, "load B after reopen").await?;
+    Ok(())
+}
+
+/// Recovery itself is interrupted after publishing one of the tables the
+/// crashed publish had not reached. The next open must finish the rest and
+/// publish nothing twice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_recovery_interrupted_completes_exactly_once_resilience() -> Result<()> {
+    const RECOVERY_SEAM: &str = "bulk::recover::after-table";
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().to_str().unwrap().to_string();
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    let seed = seed(&db).await?;
+    // Crash at the fwd delta: both deltas are left for recovery.
+    crash_at_publish_hit(&db, LOAD_A, &seed, 0).await?;
+    drop(db);
+
+    fail::cfg(RECOVERY_SEAM, "1*return").unwrap();
+    let interrupted = Uni::open(&path).config(config(false)).build().await;
+    fail::remove(RECOVERY_SEAM);
+    assert!(
+        interrupted.is_err(),
+        "premise: the injected failure must interrupt recovery"
+    );
+    drop(interrupted);
+
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    assert_seed_intact(&db, "after the second recovery").await?;
+    LOAD_A.assert_all(&db, "after the second recovery").await?;
+    drop(db);
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    LOAD_A.assert_all(&db, "after a third open").await?;
+    Ok(())
+}
+
+/// A crash after the load's `Committed` marker, before it moved the latest
+/// snapshot pointer; another session then commits and flushes, moving the
+/// pointer on. Recovery must not move it back to the load's older snapshot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_committed_recovery_keeps_a_later_snapshot_resilience() -> Result<()> {
+    const SEAM: &str = "bulk::commit::after-committed-marker";
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().to_str().unwrap().to_string();
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    let seed = seed(&db).await?;
+
+    fail::cfg(SEAM, "panic").unwrap();
+    let tx = db.session().tx().await?;
+    let mut bulk = tx.bulk_writer().batch_size(10).build()?;
+    bulk.insert_vertices("P", LOAD_A.vertices()).await?;
+    bulk.insert_edges("E", LOAD_A.edges(&seed)).await?;
+    let crashed = std::panic::AssertUnwindSafe(bulk.commit())
+        .catch_unwind()
+        .await
+        .is_err();
+    fail::remove(SEAM);
+    assert!(
+        crashed,
+        "premise: the injected crash must interrupt the commit"
+    );
+    drop(tx);
+
+    commit_concurrent_writes(&db).await?;
+    let latest = db
+        .storage()
+        .snapshot_manager()
+        .load_latest_snapshot()
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("premise: a flush must leave a latest snapshot"))?;
+    drop(db);
+
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    let reopened = db
+        .storage()
+        .snapshot_manager()
+        .load_latest_snapshot()
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no latest snapshot after reopen"))?;
+    assert_eq!(
+        reopened.snapshot_id, latest.snapshot_id,
+        "recovery moved the latest snapshot pointer back to the bulk load's"
+    );
+    assert_eq!(concurrent_writes(&db).await?, (1, 1), "after reopen");
+    assert_seed_intact(&db, "after reopen").await?;
+    LOAD_A.assert_all(&db, "after reopen").await?;
     Ok(())
 }

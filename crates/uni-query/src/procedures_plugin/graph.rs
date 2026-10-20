@@ -230,6 +230,7 @@ impl ProcedurePlugin for ProjectProcedure {
                     let l0 = build_l0_manager(&host);
                     let mut builder = uni_algo::ProjectionBuilder::new(storage)
                         .l0_manager(l0)
+                        .property_manager(host.property_manager().cloned())
                         .node_labels(&node_labels.iter().map(String::as_str).collect::<Vec<_>>())
                         .edge_types(&edge_types.iter().map(String::as_str).collect::<Vec<_>>())
                         .include_reverse(include_reverse);
@@ -514,13 +515,5 @@ impl ProcedurePlugin for ExistsProcedure {
 /// `uni.graph.project` (Native) sees the same recently-written rows
 /// the outer query would.
 fn build_l0_manager(host: &QueryProcedureHost) -> Option<Arc<uni_store::runtime::L0Manager>> {
-    use uni_store::runtime::L0Manager;
-    let l0_ctx = host.l0_context();
-    l0_ctx.current_l0.as_ref().map(|current| {
-        let mut pending = l0_ctx.pending_flush_l0s.clone();
-        if let Some(tx_l0) = &l0_ctx.transaction_l0 {
-            pending.push(tx_l0.clone());
-        }
-        Arc::new(L0Manager::from_snapshot(current.clone(), pending))
-    })
+    host.l0_context().read_view()
 }

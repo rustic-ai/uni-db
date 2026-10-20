@@ -782,15 +782,12 @@ impl Value {
             match map.get("_all_props").or_else(|| map.get("properties")) {
                 Some(Value::Map(props)) => keep(props),
                 // Flattened projection: the user properties are the plain keys.
-                // `properties` is excluded by name as well as by the reserved-name
-                // rule — when it is present but null, meaning an entity with
-                // none, it is still a container key, and collecting it would
-                // invent a user property called "properties" holding null.
+                // No name beyond the reserved ones is excluded: a non-map
+                // `properties` here is a user property, and a null one (an
+                // entity with no properties) is dropped with the other nulls.
                 _ => map
                     .iter()
-                    .filter(|(k, v)| {
-                        !is_reserved_property_name(k) && k.as_str() != "properties" && !v.is_null()
-                    })
+                    .filter(|(k, v)| !is_reserved_property_name(k) && !v.is_null())
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
             };

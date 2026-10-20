@@ -286,21 +286,28 @@ pub(crate) struct ProbIndex {
     types: Option<Vec<arrow_schema::DataType>>,
     /// Composite key to combined probability.
     probs: HashMap<Box<[u8]>, f64>,
+    /// Composite key to each fact carrying it: its KEY hash and probability.
+    /// Built only for a reference that keeps lineage (see
+    /// [`crate::query::planner_locy_types::NegatedLineageRef`]).
+    facts: Option<HashMap<Box<[u8]>, Vec<super::locy_lineage::NegatedFact>>>,
 }
 
 /// Indexes `neg_facts` for a probabilistic complement over `join_cols`.
 ///
+/// With `lineage_keys` (the negated rule's KEY columns, for a reference that
+/// keeps lineage) the index also records, per composite key, each fact's KEY
+/// hash and probability.
+///
 /// # Errors
 ///
 /// An unresolvable key or PROB column in the negated facts (never a silently
-/// empty index).
+/// empty index), or a PROB value that is not a number.
 pub(crate) fn build_prob_index(
     neg_facts: &[RecordBatch],
     join_cols: &[NegationKey],
     prob_col: &str,
+    lineage_keys: Option<&[String]>,
 ) -> datafusion::error::Result<ProbIndex> {
-    use arrow_array::{Array as _, Float64Array};
-
     let types = match neg_facts.first() {
         Some(neg) => Some(negation_key_types(neg, join_cols)?),
         None => None,
@@ -308,6 +315,8 @@ pub(crate) fn build_prob_index(
 
     // Build composite-key → probability lookup from negative facts.
     let mut probs: HashMap<Box<[u8]>, f64> = HashMap::new();
+    let mut facts: Option<HashMap<Box<[u8]>, Vec<super::locy_lineage::NegatedFact>>> =
+        lineage_keys.map(|_| HashMap::new());
     if let Some(types) = &types {
         for batch in neg_facts {
             let keys = negation_key_rows(batch, join_cols, KeySide::NegatedFacts, types)?;
@@ -319,20 +328,25 @@ pub(crate) fn build_prob_index(
                 ))
             })?;
             let prob_arr = batch.column(prob_idx);
-            let prob_values = prob_arr.as_any().downcast_ref::<Float64Array>();
+            let fact_keys = lineage_keys
+                .map(|names| super::locy_lineage::fact_key_columns(batch, names))
+                .transpose()?;
             for (row, key) in keys.into_iter().enumerate() {
                 let Some(key) = key else {
                     continue;
                 };
-                let p = prob_values
-                    .and_then(|arr| {
-                        if arr.is_null(row) {
-                            None
-                        } else {
-                            Some(arr.value(row))
-                        }
-                    })
-                    .unwrap_or(0.0);
+                // A NULL probability is no evidence for the negated fact.
+                let p =
+                    super::locy_lineage::f64_at(prob_arr.as_ref(), row, prob_col)?.unwrap_or(0.0);
+                if let (Some(facts), Some(columns)) = (facts.as_mut(), fact_keys.as_deref()) {
+                    facts
+                        .entry(key.clone())
+                        .or_default()
+                        .push(super::locy_lineage::NegatedFact {
+                            key: super::locy_row_hash::row_hash(columns, row)?,
+                            prob: p.clamp(0.0, 1.0),
+                        });
+                }
                 // Noisy-OR combination for duplicate composite keys.
                 probs
                     .entry(key)
@@ -343,7 +357,11 @@ pub(crate) fn build_prob_index(
             }
         }
     }
-    Ok(ProbIndex { types, probs })
+    Ok(ProbIndex {
+        types,
+        probs,
+        facts,
+    })
 }
 
 /// Adds `complement_col_name` to each batch: `1 - p` for a body key the
@@ -357,30 +375,54 @@ pub(crate) fn probe_prob_complement(
     index: &ProbIndex,
     join_cols: &[NegationKey],
     complement_col_name: &str,
+    lineage_column: Option<&str>,
 ) -> datafusion::error::Result<Vec<RecordBatch>> {
     use arrow_array::Float64Array;
 
     let mut result = Vec::new();
     for batch in batches {
-        let complements: Vec<f64> = match &index.types {
-            Some(types) => negation_key_rows(&batch, join_cols, KeySide::Body, types)?
-                .into_iter()
+        let body_keys = match &index.types {
+            Some(types) => Some(negation_key_rows(&batch, join_cols, KeySide::Body, types)?),
+            None => {
+                let indices = resolve_key_indices(&batch, join_cols, KeySide::Body)?;
+                verify_key_columns_are_vids(&batch, join_cols, &indices)?;
+                None
+            }
+        };
+        let complements: Vec<f64> = match &body_keys {
+            Some(keys) => keys
+                .iter()
                 .map(|key| {
                     let p = key
-                        .and_then(|key| index.probs.get(&key).copied())
+                        .as_ref()
+                        .and_then(|key| index.probs.get(key).copied())
                         .unwrap_or(0.0);
                     1.0 - p
                 })
                 .collect(),
-            None => {
-                let indices = resolve_key_indices(&batch, join_cols, KeySide::Body)?;
-                verify_key_columns_are_vids(&batch, join_cols, &indices)?;
-                vec![1.0; batch.num_rows()]
-            }
+            None => vec![1.0; batch.num_rows()],
         };
 
         let complement_arr = Float64Array::from(complements);
         let mut columns: Vec<arrow_array::ArrayRef> = batch.columns().to_vec();
+        if let Some(name) = lineage_column {
+            let position = batch.schema().index_of(name).map_err(|_| {
+                datafusion::error::DataFusionError::Internal(format!(
+                    "Locy `IS NOT` lineage column `{name}` is missing from the clause body; \
+                     exact inference would read the negation as independent"
+                ))
+            })?;
+            let matched: Vec<&[super::locy_lineage::NegatedFact]> = (0..batch.num_rows())
+                .map(|row| {
+                    body_keys
+                        .as_ref()
+                        .and_then(|keys| keys[row].as_ref())
+                        .and_then(|key| index.facts.as_ref()?.get(key))
+                        .map_or(&[][..], Vec::as_slice)
+                })
+                .collect();
+            columns[position] = super::locy_lineage::encode_negated_facts(&matched);
+        }
         columns.push(Arc::new(complement_arr));
 
         let mut fields: Vec<Arc<arrow_schema::Field>> =
@@ -415,8 +457,8 @@ pub fn apply_prob_complement_composite(
     prob_col: &str,
     complement_col_name: &str,
 ) -> datafusion::error::Result<Vec<RecordBatch>> {
-    let index = build_prob_index(neg_facts, join_cols, prob_col)?;
-    probe_prob_complement(batches, &index, join_cols, complement_col_name)
+    let index = build_prob_index(neg_facts, join_cols, prob_col, None)?;
+    probe_prob_complement(batches, &index, join_cols, complement_col_name, None)
 }
 
 /// The composite keys of a boolean `IS NOT`'s negated facts.
@@ -533,8 +575,9 @@ enum NegationIndex {
 }
 
 /// What a [`NegationIndex`] was built from: the negated scan, the fact-side
-/// key columns, and the PROB column for a complement.
-type NegationIndexKey = (usize, Vec<String>, Option<String>);
+/// key columns, the PROB column for a complement, and the negated rule's KEY
+/// columns when the complement records lineage.
+type NegationIndexKey = (usize, Vec<String>, Option<String>, Option<Vec<String>>);
 
 /// Negation indexes reused across the iterations of one fixpoint (R5).
 ///
@@ -764,7 +807,7 @@ pub(crate) fn apply_negated_is_refs(
     mut cache: Option<&mut NegationIndexCache>,
     mut ops: Option<&mut Vec<crate::query::executor::core::OperatorStats>>,
 ) -> datafusion::error::Result<Vec<RecordBatch>> {
-    for binding in bindings {
+    for (position, binding) in bindings.iter().enumerate() {
         if !binding.negated || binding.anti_join_cols.is_empty() {
             continue;
         }
@@ -782,6 +825,8 @@ pub(crate) fn apply_negated_is_refs(
             // back to the boolean anti-join.
             _ => None,
         };
+        // Only a complement records which facts it read.
+        let lineage = complement_into.and(binding.negated_lineage.as_ref());
         let key: NegationIndexKey = (
             binding.derived_scan_index,
             binding
@@ -790,6 +835,7 @@ pub(crate) fn apply_negated_is_refs(
                 .map(|k| k.fact_column.clone())
                 .collect(),
             complement_into.cloned(),
+            lineage.map(|l| l.target_key_columns.clone()),
         );
         let build = || -> datafusion::error::Result<NegationIndex> {
             Ok(match complement_into {
@@ -797,6 +843,7 @@ pub(crate) fn apply_negated_is_refs(
                     &neg_facts,
                     &binding.anti_join_cols,
                     prob_col,
+                    lineage.map(|l| l.target_key_columns.as_slice()),
                 )?),
                 None => {
                     NegationIndex::Banned(build_banned_index(&neg_facts, &binding.anti_join_cols)?)
@@ -823,12 +870,17 @@ pub(crate) fn apply_negated_is_refs(
         let probe_started = std::time::Instant::now();
         let name = match index {
             NegationIndex::Prob(index) => {
-                let complement_col = format!("__prob_complement_{}", binding.rule_name);
+                // One column per reference: two negations of one rule in a
+                // clause each multiply their own factor. Named by the rule
+                // alone, the second column shadowed the first, which was then
+                // multiplied in twice and the second never.
+                let complement_col = format!("__prob_complement_{position}_{}", binding.rule_name);
                 batches = probe_prob_complement(
                     batches,
                     index,
                     &binding.anti_join_cols,
                     &complement_col,
+                    lineage.map(|l| l.column.as_str()),
                 )?;
                 "LocyIsNotComplement"
             }

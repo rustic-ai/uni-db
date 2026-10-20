@@ -1015,6 +1015,18 @@ pub fn is_virtual_label_id(id: u16) -> bool {
     (VIRTUAL_LABEL_ID_START..VIRTUAL_LABEL_ID_SENTINEL).contains(&id)
 }
 
+/// The labels or edge types an entity is known to carry, for resolving a
+/// property's declared type with [`Schema::scoped_property_meta`].
+#[derive(Clone, Copy, Debug)]
+pub enum EntityScope<'a, S> {
+    /// The entity carries every one of these: a vertex matched as `(n:A:B)`,
+    /// or a relationship of a single named type.
+    AllOf(&'a [S]),
+    /// The entity carries exactly one of these: `[e:R|Q]`, `(n:A|B)`, or a
+    /// traversal target whose declared endpoint labels are these.
+    OneOf(&'a [S]),
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Schema {
     pub schema_version: u32,
@@ -1066,6 +1078,49 @@ impl Schema {
             .iter()
             .find(|(_, meta)| meta.id == label_id)
             .map(|(name, _)| name.as_str())
+    }
+
+    /// The declaration that types `prop` on an entity in `scope`, if the
+    /// schema pins one.
+    ///
+    /// A property's declared type belongs to the label or edge type that
+    /// declares it, not to the property name: `F.v FLOAT` says nothing about
+    /// `v` on a vertex of the undeclared label `S`, which stores whatever was
+    /// written. Every place that types a property column ahead of reading it
+    /// resolves the type here, from the labels the entity is known to carry,
+    /// so none of them can borrow a declaration from an unrelated label.
+    ///
+    /// - [`EntityScope::AllOf`]: the entity carries every listed label. The
+    ///   labels among them that declare `prop` decide; a write coerces under
+    ///   each of them, so their declarations must agree to give a type.
+    /// - [`EntityScope::OneOf`]: the entity carries exactly one of them. Every
+    ///   alternative must declare `prop` at the same type, since a single
+    ///   alternative that does not leaves its values untyped.
+    ///
+    /// `None` when the scope is empty, no label in it declares `prop`, or the
+    /// declarations disagree. The caller then types the column as the
+    /// dynamically typed stored value (`DataType::CypherValue`), which holds
+    /// anything a schemaless write can store.
+    pub fn scoped_property_meta<S: AsRef<str>>(
+        &self,
+        scope: EntityScope<'_, S>,
+        prop: &str,
+    ) -> Option<&PropertyMeta> {
+        let declared = |label: &S| self.properties.get(label.as_ref())?.get(prop);
+        match scope {
+            EntityScope::AllOf(labels) => {
+                let mut metas = labels.iter().filter_map(declared);
+                let first = metas.next()?;
+                metas.all(|m| m.r#type == first.r#type).then_some(first)
+            }
+            EntityScope::OneOf(labels) => {
+                let mut metas = labels.iter().map(declared);
+                let first = metas.next()??;
+                metas
+                    .all(|m| m.is_some_and(|m| m.r#type == first.r#type))
+                    .then_some(first)
+            }
+        }
     }
 
     /// Returns the label ID for a given label name.
@@ -2387,6 +2442,49 @@ fn validate_reserved_property_name(name: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::value::{TemporalValue, Value};
+
+    /// A declaration types a property only on the labels in scope. `F` and
+    /// `G` declare `v` as `Float64`, `H` as `Int64`; `S` declares nothing.
+    #[test]
+    fn scoped_property_meta_reads_only_the_labels_in_scope() {
+        let meta = |t: DataType| PropertyMeta {
+            r#type: t,
+            nullable: true,
+            added_in: 1,
+            state: SchemaElementState::Active,
+            generation_expression: None,
+            description: None,
+        };
+        let mut schema = Schema::default();
+        for (label, t) in [
+            ("F", DataType::Float64),
+            ("G", DataType::Float64),
+            ("H", DataType::Int64),
+        ] {
+            schema
+                .properties
+                .insert(label.into(), HashMap::from([("v".to_string(), meta(t))]));
+        }
+        let ty = |scope: EntityScope<'_, &str>| {
+            schema
+                .scoped_property_meta(scope, "v")
+                .map(|m| m.r#type.clone())
+        };
+        let float = Some(DataType::Float64);
+        // The schemaless label borrows nothing from `F`.
+        assert_eq!(ty(EntityScope::AllOf(&["S"])), None);
+        assert_eq!(ty(EntityScope::AllOf(&[])), None);
+        // A vertex carrying `S` and `F` is written under `F`'s declaration.
+        assert_eq!(ty(EntityScope::AllOf(&["S", "F"])), float);
+        assert_eq!(ty(EntityScope::AllOf(&["F", "G"])), float);
+        assert_eq!(ty(EntityScope::AllOf(&["F", "H"])), None);
+        // One of several: every alternative must declare it alike.
+        assert_eq!(ty(EntityScope::OneOf(&["F", "G"])), float);
+        assert_eq!(ty(EntityScope::OneOf(&["F", "S"])), None);
+        assert_eq!(ty(EntityScope::OneOf(&["S", "F"])), None);
+        assert_eq!(ty(EntityScope::OneOf(&["F", "H"])), None);
+        assert_eq!(ty(EntityScope::OneOf(&[])), None);
+    }
 
     /// The two variants a downstream catch-all was silently swallowing, plus
     /// the nested forms, so a future tidy-up cannot change a Python-visible

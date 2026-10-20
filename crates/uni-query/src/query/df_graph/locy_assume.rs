@@ -26,13 +26,14 @@
 use std::collections::BTreeSet;
 
 use uni_cypher::ast::Query;
-use uni_locy::incremental::{MutationFootprint, affected_strata, mutation_footprint};
-use uni_locy::result::CommandResult;
+use uni_locy::incremental::{
+    MutationFootprint, affected_strata, mutation_footprint, query_footprint,
+};
 use uni_locy::types::{CompiledAssume, CompiledCommand};
 use uni_locy::{CompiledProgram, FactRow, LocyConfig, LocyError, LocyStats};
 
 use super::locy_delta::RowStore;
-use super::locy_program::ReusedStrata;
+use super::locy_program::{DerivedStore, ReusedStrata};
 use super::locy_traits::{LocyExecutionContext, ReEvaluation, StrataBaseline};
 
 /// The strata of `program` whose facts `baseline` can supply in the state a
@@ -133,6 +134,93 @@ fn binding_error(e: uni_locy::LocyCompileError) -> LocyError {
     }
 }
 
+/// The programs an ASSUME body's facts come from.
+struct BodyPrograms<'a> {
+    /// The enclosing program, whose strata the body's commands read.
+    parent: &'a CompiledProgram,
+    /// The parent's strata followed by the body's own rules, when the body
+    /// defines any.
+    body: Option<&'a CompiledProgram>,
+}
+
+/// The facts an ASSUME body's commands read, in one hypothetical state.
+struct BodyFacts {
+    /// The parent program's raw facts, for a later state or a nested ASSUME
+    /// to reuse; `None` when the adapter does not keep them.
+    parent_facts: Option<std::sync::Arc<DerivedStore>>,
+    /// The parent program's facts as hydrated rows, kept with `parent_facts`.
+    parent_rows: Option<std::sync::Arc<RowStore>>,
+    /// Every rule's rows: the parent's, with the body's own on top.
+    store: RowStore,
+}
+
+impl BodyFacts {
+    /// The parent's facts as the baseline of the next state.
+    fn baseline(&self) -> Option<StrataBaseline> {
+        self.parent_facts.clone().map(|facts| StrataBaseline {
+            facts,
+            rows: self.parent_rows.clone(),
+        })
+    }
+}
+
+/// Offers `facts` as the baseline a nested ASSUME reuses; returns whether
+/// one was pushed.
+fn push_baseline(ctx: &dyn LocyExecutionContext, facts: &BodyFacts) -> bool {
+    match facts.baseline() {
+        Some(baseline) => {
+            ctx.push_reuse_baseline(baseline);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Derives the facts an ASSUME body reads in the current hypothetical state:
+/// the state `baseline` was derived in, changed by a mutation with footprint
+/// `footprint`.
+///
+/// The parent's strata the mutation cannot affect are reused from `baseline`;
+/// the body's own strata are always derived, on top of the parent's.
+async fn derive_body_facts(
+    programs: &BodyPrograms<'_>,
+    ctx: &dyn LocyExecutionContext,
+    config: &LocyConfig,
+    baseline: Option<&StrataBaseline>,
+    footprint: &MutationFootprint,
+    stats: &mut LocyStats,
+) -> Result<BodyFacts, LocyError> {
+    let parent =
+        re_evaluate_hypothetical(programs.parent, ctx, config, baseline, footprint, stats).await?;
+    stats.queries_executed += 1; // rough accounting for the re-evaluation
+    let parent_facts = parent.facts;
+    // Kept for nested hypothetical commands only when there is a state to offer.
+    let parent_rows = parent_facts
+        .as_ref()
+        .map(|_| std::sync::Arc::new(parent.rows.clone()));
+    let mut store: RowStore = parent.rows;
+    if let Some(body_program) = programs.body {
+        // The parent's strata were derived in this very state a moment ago;
+        // only the body's own strata are new. Positional, not by name: a body
+        // rule may shadow a parent rule's name.
+        let reused = parent_facts.clone().map(|facts| ReusedStrata {
+            facts,
+            positions: (0..programs.parent.strata.len()).collect(),
+            // Hydrated in this very state.
+            hydrated: parent_rows.clone(),
+        });
+        let body = re_evaluate_counted(body_program, ctx, config, reused, stats).await?;
+        for (name, rel) in body.rows {
+            store.insert(name, rel);
+        }
+    }
+    Ok(BodyFacts {
+        parent_facts,
+        parent_rows,
+        store,
+    })
+}
+
 /// Evaluate an ASSUME block: fork L0, apply mutations, re-evaluate rules,
 /// execute body commands, collect results, then restore.
 pub async fn evaluate_assume(
@@ -211,42 +299,19 @@ pub async fn evaluate_assume(
         merged
     };
 
-    // 3. Re-evaluate the parent program's strata in the mutated state,
-    // reusing the strata the mutations cannot affect.
-    let parent = re_evaluate_hypothetical(
-        parent_program,
-        ctx,
-        config,
-        baseline.as_ref(),
-        &footprint,
-        stats,
-    )
-    .await?;
-    let parent_facts = parent.facts;
-    // Kept for nested hypothetical commands only when there is a state to offer.
-    let parent_rows = parent_facts
-        .as_ref()
-        .map(|_| std::sync::Arc::new(parent.rows.clone()));
-    let mut assume_derived_store: RowStore = parent.rows;
-    stats.queries_executed += 1; // rough accounting for the re-evaluation
-
-    // 4. Also evaluate the body program's strata, if any.
+    // The body's program: its strata, planned against the merged catalog,
+    // appended to the parent's so cross-references resolve. Parent strata
+    // come first — stratification order is a dependency order, and a body
+    // rule may depend on a parent rule but not the reverse.
     //
     // The body's strata are evaluated **after the parent's, in one run**, not
     // standalone. A body rule may IS-reference an outer rule
     // (`CREATE RULE eligible AS MATCH (p:Person) WHERE p IS adult ...`), and a
     // standalone evaluation of just the body's strata gives that reference no
     // facts to resolve against, so the rule derives nothing.
-    //
-    // That gap used to be invisible: the body's QUERY went through the SLG
-    // resolver, which re-derives a goal's dependencies on demand and so
-    // recomputed `adult` for itself. Now that QUERY answers from the derived
-    // store, the store has to actually contain the answer.
-    if !assume.body_program.strata.is_empty() {
-        // The body's strata, planned against the merged catalog, appended to
-        // the parent's so cross-references resolve. Parent strata come first —
-        // stratification order is a dependency order, and a body rule may
-        // depend on a parent rule but not the reverse.
+    let body_program = if assume.body_program.strata.is_empty() {
+        None
+    } else {
         let combined_strata: Vec<_> = parent_program
             .strata
             .iter()
@@ -261,20 +326,17 @@ pub async fn evaluate_assume(
         // The body was compiled without the parent's schemas, so a body clause
         // referencing a parent rule had no binding plan until this catalog.
         uni_locy::attach_binding_plans(&mut body_program).map_err(binding_error)?;
-        // The parent's strata were derived in this very state a moment ago;
-        // only the body's own strata are new. Positional, not by name: a body
-        // rule may shadow a parent rule's name.
-        let reused = parent_facts.clone().map(|facts| ReusedStrata {
-            facts,
-            positions: (0..parent_program.strata.len()).collect(),
-            // Hydrated in this very state.
-            hydrated: parent_rows.clone(),
-        });
-        let body = re_evaluate_counted(&body_program, ctx, config, reused, stats).await?;
-        for (name, rel) in body.rows {
-            assume_derived_store.insert(name, rel);
-        }
-    }
+        Some(body_program)
+    };
+    let programs = BodyPrograms {
+        parent: parent_program,
+        body: body_program.as_ref(),
+    };
+
+    // 3. Derive the facts the body reads in the mutated state, reusing the
+    // strata the mutations cannot affect.
+    let mut facts =
+        derive_body_facts(&programs, ctx, config, baseline.as_ref(), &footprint, stats).await?;
 
     // The parent's strata with the merged catalog: body commands must be able
     // to name the body's own rules, and a nested ASSUME must still see the
@@ -286,48 +348,43 @@ pub async fn evaluate_assume(
     };
     uni_locy::attach_binding_plans(&mut command_program).map_err(binding_error)?;
 
-    // The body's facts are fixed from here on: body commands read them by
-    // shared reference, as top-level commands do.
-    let assume_derived_store = assume_derived_store;
+    // A nested ASSUME starts from the current state, so it reuses the parent
+    // strata derived in it. The parent's facts, not the body's: a nested
+    // ASSUME re-evaluates `command_program`, whose strata are the parent's,
+    // and a body rule may shadow a parent rule's name.
+    let mut pushed_baseline = push_baseline(ctx, &facts);
 
-    // A nested ASSUME starts from this state, so it reuses the parent strata
-    // derived here. The parent's facts, not the body's: a nested ASSUME
-    // re-evaluates `command_program`, whose strata are the parent's, and a
-    // body rule may shadow a parent rule's name.
-    let pushed_baseline = parent_facts.is_some();
-    if let Some(facts) = parent_facts {
-        ctx.push_reuse_baseline(StrataBaseline {
-            facts,
-            rows: parent_rows,
-        });
-    }
-
-    // 5. Execute body commands and collect results
+    // 4. Execute body commands in sequence and collect results.
+    //
+    // The commands run as they would one after another in a transaction: a
+    // command that writes (DERIVE, a Cypher write) changes the hypothetical
+    // graph, so the facts every later command reads are derived again in
+    // the new state — only the strata that write can affect, the rest
+    // reused. Answering a later QUERY from the facts derived before the write
+    // was a silent stale read, while a later Cypher read saw the write.
     let mut result_rows = Vec::new();
     for cmd in &assume.body_commands {
-        let cmd_result = dispatch_body_command(
-            cmd,
-            &command_program,
-            ctx,
-            config,
-            &assume_derived_store,
-            stats,
-        )
-        .await?;
-        match cmd_result {
-            CommandResult::Query(rows) => result_rows.extend(rows),
-            CommandResult::Cypher(rows) => result_rows.extend(rows),
-            _ => {}
+        let outcome =
+            dispatch_body_command(cmd, &command_program, ctx, config, &facts.store, stats).await?;
+        result_rows.extend(outcome.rows);
+        let Some(written) = outcome.written else {
+            continue;
+        };
+        let before = facts.baseline();
+        facts = derive_body_facts(&programs, ctx, config, before.as_ref(), &written, stats).await?;
+        if pushed_baseline {
+            ctx.pop_reuse_baseline();
         }
+        pushed_baseline = push_baseline(ctx, &facts);
     }
 
     if pushed_baseline {
         ctx.pop_reuse_baseline();
     }
 
-    // If no commands produced rows, collect all derived facts
-    if result_rows.is_empty() && assume.body_commands.is_empty() {
-        for relation in assume_derived_store.values() {
+    // 5. A body with no commands returns every derived fact.
+    if assume.body_commands.is_empty() {
+        for relation in facts.store.values() {
             result_rows.extend(relation.rows.iter().cloned());
         }
     }
@@ -342,6 +399,24 @@ pub async fn evaluate_assume(
     Ok(result_rows)
 }
 
+/// What a body command produced.
+struct BodyOutcome {
+    /// The rows it contributes to the ASSUME's result.
+    rows: Vec<FactRow>,
+    /// The footprint of what it wrote to the hypothetical graph, when it
+    /// wrote: the facts later commands read must be derived again.
+    written: Option<MutationFootprint>,
+}
+
+impl BodyOutcome {
+    fn read(rows: Vec<FactRow>) -> Self {
+        Self {
+            rows,
+            written: None,
+        }
+    }
+}
+
 /// Dispatch a body command inside an ASSUME block.
 ///
 /// Uses Box::pin for recursive async (nested ASSUME may dispatch sub-commands).
@@ -352,22 +427,37 @@ fn dispatch_body_command<'a>(
     config: &'a LocyConfig,
     derived_store: &'a RowStore,
     stats: &'a mut LocyStats,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<CommandResult, LocyError>> + Send + 'a>,
-> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<BodyOutcome, LocyError>> + Send + 'a>>
+{
     Box::pin(async move {
         match cmd {
             CompiledCommand::GoalQuery(gq) => {
-                // The same path as a top-level QUERY: the facts this body's
-                // re-evaluation published, filtered and projected.
+                // The same path as a top-level QUERY: the facts of the
+                // current hypothetical state, filtered and projected.
                 let rows = super::locy_query::evaluate_query(gq, program, config, derived_store)?;
-                Ok(CommandResult::Query(rows))
+                Ok(BodyOutcome::read(rows))
             }
             CompiledCommand::DeriveCommand(dc) => {
-                let affected =
-                    super::locy_derive::derive_command(dc, program, ctx, derived_store, stats)
-                        .await?;
-                Ok(CommandResult::Derive { affected })
+                let (affected, footprint) = super::locy_derive::derive_command_footprint(
+                    dc,
+                    program,
+                    ctx,
+                    derived_store,
+                    stats,
+                )
+                .await?;
+                // A top-level DERIVE reports `CommandResult::Derive { affected }`;
+                // in a body, whose result is rows, that is one `affected` row.
+                // Dropping it left a DERIVE-only body silently empty.
+                let row: FactRow = [(
+                    "affected".to_string(),
+                    uni_common::Value::Int(affected as i64),
+                )]
+                .into();
+                Ok(BodyOutcome {
+                    rows: vec![row],
+                    written: (affected > 0).then_some(footprint),
+                })
             }
             CompiledCommand::ExplainRule(_) | CompiledCommand::Abduce(_) => {
                 // The compiler rejects both in an ASSUME body
@@ -382,13 +472,20 @@ fn dispatch_body_command<'a>(
                 })
             }
             CompiledCommand::Assume(ca) => {
+                // A nested ASSUME restores the state it started from, so it
+                // writes nothing the following commands can see.
                 let rows = evaluate_assume(ca, program, ctx, config, stats).await?;
-                Ok(CommandResult::Assume(rows))
+                Ok(BodyOutcome::read(rows))
             }
             CompiledCommand::Cypher(q) => {
                 let rows = ctx.execute_cypher_read(q.clone()).await?;
                 stats.queries_executed += 1;
-                Ok(CommandResult::Cypher(rows))
+                let footprint = query_footprint(q);
+                let wrote = !footprint.is_empty() || !footprint.preserves_existing_entities();
+                Ok(BodyOutcome {
+                    rows,
+                    written: wrote.then_some(footprint),
+                })
             }
             CompiledCommand::Calibrate(_) => {
                 // CALIBRATE inside an ASSUME body is rejected for now:

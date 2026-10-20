@@ -1233,6 +1233,51 @@ mod tests {
         );
     }
 
+    /// A probabilistic `IS NOT` multiplies in `1 - p`. `safe(a, b)` negates
+    /// the one `nor(a, b)` fact and reads nothing else, so `1 - p` is its
+    /// possible-worlds probability: the weight of the worlds with no edge
+    /// `a -> b`. (Default mode only: where the negated fact shares an edge
+    /// with the rest of a row, `1 - p` is not exact, and the engine reports
+    /// `SharedProbabilisticDependency`; the oracle models default mode.)
+    #[test]
+    fn probabilistic_complement_is_the_possible_worlds_probability_without_sharing() {
+        let mut seed: u64 = 0x5afe_ba11;
+        let mut next = |bound: u64| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (seed >> 33) % bound
+        };
+        let mut checked = 0;
+        for _ in 0..20 {
+            let nodes = 3;
+            let edges: Vec<(i64, i64, i64)> = (0..2 + next(5))
+                .map(|_| (next(nodes) as i64, next(nodes) as i64, 1 + next(9) as i64))
+                .collect();
+            let rels = shape_bags(
+                edges.iter().map(|&(a, b, w)| (a, b, w, false)).collect(),
+                nodes as usize,
+                |s| s.prob = true,
+            );
+            for fact in rels.get("safe").into_iter().flatten() {
+                let (a, b) = (fact[0], fact[1]);
+                let worlds: f64 = edges
+                    .iter()
+                    .filter(|e| e.0 == a && e.1 == b)
+                    .map(|e| 1.0 - e.2 as f64 / 10.0)
+                    .product();
+                let scaled = (worlds * PROB_SCALE as f64).round() as i64;
+                assert!(
+                    (fact[2] - scaled).abs() <= 2,
+                    "safe({a},{b}) over {edges:?}: oracle {}, possible worlds {scaled}",
+                    fact[2]
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 20, "only {checked} safe facts were checked");
+    }
+
     /// Stratified `IS NOT`: `unreached` is the exact complement of `reaches`.
     ///
     /// Graph 0->1->2. reaches = {(0,1),(1,2),(0,2)}; all 9 ordered pairs minus

@@ -250,6 +250,18 @@ impl QueryProcedureHost {
         self
     }
 
+    /// Read property values through the outer query's property manager.
+    ///
+    /// [`Self::from_components`] starts without one, and the inner query of
+    /// [`Self::execute_inner_query`] then builds one over this host's
+    /// storage. Inside a transaction that storage is version-pinned, and a
+    /// property manager over it skips the transaction's own buffer.
+    #[must_use]
+    pub fn with_property_manager(mut self, property_manager: Arc<PropertyManager>) -> Self {
+        self.property_manager = Some(property_manager);
+        self
+    }
+
     /// Attach the outer query's L0 visibility snapshot to this host.
     ///
     /// [`Self::from_components`] starts from [`L0Context::empty`] because the
@@ -461,12 +473,17 @@ impl QueryProcedureHost {
             executor.set_transaction_l0(Arc::clone(tx_l0));
         }
 
-        // Mirror outer L0 visibility into the inner executor. The transaction
+        // Read the outer query's L0 view, not the live tier. The transaction
         // buffer is not added here: it is already read as the transaction L0.
+        // A writer-less executor reads `l0_manager`; one with a writer reads
+        // its writer's live L0 unless a read snapshot is set, so it gets the
+        // same view as one. Without that a WRITE procedure's body inside a
+        // transaction saw rows other sessions committed after it began.
         if let Some(current) = self.l0_context.current_l0.as_ref() {
             let pending = self.l0_context.pending_flush_l0s.clone();
-            executor.l0_manager =
-                Some(Arc::new(L0Manager::from_snapshot(current.clone(), pending)));
+            let view = Arc::new(L0Manager::from_snapshot(current.clone(), pending));
+            executor.set_read_snapshot(Some(view.pin_snapshot()));
+            executor.l0_manager = Some(view);
         }
 
         let schema_manager_arc = self.storage.schema_manager_arc();

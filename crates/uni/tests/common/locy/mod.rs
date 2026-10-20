@@ -114,3 +114,6 @@ pub mod locy_value_types;
 pub mod locy_yield_list_values;
 // Locy compares an integer with a float by exact value, as Cypher does.
 pub mod locy_numeric_exact;
+// An ASSUME body's commands run in sequence: a QUERY after a DERIVE or a
+// Cypher write in the same body reads the state that write left.
+pub mod locy_assume_body_sequencing;

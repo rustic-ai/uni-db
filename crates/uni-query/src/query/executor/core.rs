@@ -348,8 +348,6 @@ pub struct Executor {
     pub(crate) l0_manager: Option<Arc<L0Manager>>,
     pub(crate) algo_registry: Arc<AlgorithmRegistry>,
     pub(crate) use_transaction: bool,
-    /// File sandbox configuration for BACKUP/COPY/EXPORT commands
-    pub(crate) file_sandbox: uni_common::config::FileSandboxConfig,
     pub(crate) config: uni_common::config::UniConfig,
     /// Cache for parsed generation expressions to avoid re-parsing on every row
     pub(crate) gen_expr_cache: Arc<RwLock<HashMap<GenExprCacheKey, Expr>>>,
@@ -426,7 +424,6 @@ impl Clone for Executor {
             l0_manager: self.l0_manager.clone(),
             algo_registry: self.algo_registry.clone(),
             use_transaction: self.use_transaction,
-            file_sandbox: self.file_sandbox.clone(),
             config: self.config.clone(),
             gen_expr_cache: self.gen_expr_cache.clone(),
             procedure_registry: self.procedure_registry.clone(),
@@ -462,7 +459,6 @@ impl Executor {
             l0_manager: None,
             algo_registry: Arc::new(AlgorithmRegistry::new()),
             use_transaction: false,
-            file_sandbox: uni_common::config::FileSandboxConfig::default(),
             config: uni_common::config::UniConfig::default(),
             gen_expr_cache: Arc::new(RwLock::new(HashMap::new())),
             procedure_registry: Some(proc_registry),
@@ -519,10 +515,13 @@ impl Executor {
         self.xervo_runtime = runtime;
     }
 
-    /// Set the file sandbox configuration for BACKUP/COPY/EXPORT commands.
-    /// MUST be called with sandboxed config in server mode.
+    /// Set the file sandbox configuration for BACKUP and COPY commands.
+    ///
+    /// Overrides `file_sandbox` of the configuration [`Self::set_config`]
+    /// applied; the sandbox is part of that configuration, so a `Uni`
+    /// database's executor already carries its `UniConfig::file_sandbox`.
     pub fn set_file_sandbox(&mut self, sandbox: uni_common::config::FileSandboxConfig) {
-        self.file_sandbox = sandbox;
+        self.config.file_sandbox = sandbox;
     }
 
     /// Apply a runtime configuration to this executor.
@@ -530,9 +529,15 @@ impl Executor {
         self.config = config;
     }
 
-    /// Validate a file path against the sandbox configuration.
+    /// Validate a file path against the configured file sandbox.
+    ///
+    /// The sandbox is read from `config` — the `UniConfig` a database applies
+    /// with [`Self::set_config`]. It used to be a separate field that only
+    /// `set_file_sandbox` wrote and nothing in the database called, so
+    /// `UniConfig::file_sandbox` was never enforced.
     pub(crate) fn validate_path(&self, path: &str) -> Result<std::path::PathBuf> {
-        self.file_sandbox
+        self.config
+            .file_sandbox
             .validate_path(path)
             .map_err(|e| anyhow!("Path validation failed: {}", e))
     }
@@ -633,6 +638,23 @@ impl Executor {
             .as_ref()
             .and_then(|s| s.pinned_storage.clone())
             .unwrap_or_else(|| self.storage.clone())
+    }
+
+    /// The property manager reads on this executor's behalf should use: the
+    /// shared one when installed, else a fresh one over **live** storage.
+    ///
+    /// Never one over [`Self::effective_storage`]: a property manager over
+    /// version-pinned storage treats the pin as a time-travel snapshot and
+    /// skips the transaction's own buffer, so a transaction would stop
+    /// reading its own property writes.
+    pub(crate) fn live_property_manager(&self) -> Arc<PropertyManager> {
+        self.prop_manager_arc.clone().unwrap_or_else(|| {
+            Arc::new(PropertyManager::new(
+                self.storage.clone(),
+                self.storage.schema_manager_arc(),
+                1000,
+            ))
+        })
     }
 
     /// Attach a per-transaction VID/EID reservoir. When set, CREATE/MERGE

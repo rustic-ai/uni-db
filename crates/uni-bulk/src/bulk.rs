@@ -279,6 +279,7 @@ impl BulkWriterBuilder {
             buffer_size_bytes: 0,
             committed: false,
             write_version: None,
+            load_id: Uuid::new_v4().to_string(),
         })
     }
 }
@@ -429,6 +430,9 @@ pub struct BulkWriter {
     /// MVCC version stamped on every row this writer produces, reserved from
     /// the live counter on first use. See [`BulkWriter::write_version`].
     write_version: Option<u64>,
+    /// Names this load's crash-recovery marker, so concurrent loads each keep
+    /// their own and never overwrite or delete another's.
+    load_id: String,
 }
 
 /// Stable identity for a UNIQUE constraint's seen-key namespace: its label plus
@@ -1295,12 +1299,14 @@ impl BulkWriter {
     /// Vertex tables first (edges must not reach a reader before their
     /// endpoints), then `main_edges`, then the delta tables: compaction folds a
     /// delta into L2 adjacency only on the strength of its `main_edges` row.
-    /// Before the first table is touched, every table this step may change —
-    /// including the L2 adjacency tables of the touched edge types, which a
-    /// compaction pass may rewrite from the published deltas while this step is
-    /// still running — is recorded in the durable intent marker, so a crash part
-    /// way through is rolled back on reopen. A no-op on a backend that cannot
-    /// stage: its rows became visible as they were written.
+    /// Before the first table is touched, the staged rows of every table are
+    /// recorded in this load's durable intent marker, so a crash part way
+    /// through is completed on reopen: each table not yet published is
+    /// published then, exactly once, onto its current version. Completing
+    /// rather than undoing is what keeps other writers' commits to the same
+    /// tables, and a compaction pass that already folded the published deltas
+    /// into L2 adjacency stays consistent with the rest. A no-op on a backend
+    /// that cannot stage: its rows became visible as they were written.
     async fn publish(&mut self) -> Result<()> {
         if self.staged.is_empty() {
             return Ok(());
@@ -1339,17 +1345,40 @@ impl BulkWriter {
         // reports those), so recovering an interrupted fork load rolled
         // primary back -- discarding primary commits made meanwhile -- and
         // dropped primary tables the fork load had seen absent.
+        //
+        // The marker records every table's staged rows before the first
+        // publish, which decides the load: a crash from here on is recovered
+        // by completing the publish onto each table's current version, never
+        // by restoring an older one -- that would also discard whatever other
+        // writers committed to the same tables in the meantime. The pre-publish
+        // versions bound recovery's search for a table already published.
         if self.writes_crash_marker() {
+            let storage = Arc::clone(&self.backend.storage);
+            let backend = storage.backend();
+            let mut records = Vec::with_capacity(order.len());
             for (table, _) in &order {
                 self.record_initial_version(table).await?;
-            }
-            for et in &edge_types {
-                for dir in ["fwd", "bwd"] {
-                    self.record_initial_version(&table_names::adjacency_table_name(et, dir))
-                        .await?;
+                let runs = self.staged.get(table).map_or(&[][..], Vec::as_slice);
+                if let Some(staged) = backend
+                    .staged_record(table, runs)
+                    .map_err(UniError::Internal)?
+                {
+                    records.push(flush_intent::StagedTablePublish {
+                        table: table.clone(),
+                        staged,
+                    });
                 }
             }
-            self.persist_active_intent().await?;
+            let store = self.backend.storage.store();
+            flush_intent::write_publishing(
+                &store,
+                &self.load_id,
+                &self.initial_table_versions,
+                records,
+                labels.clone(),
+            )
+            .await
+            .map_err(UniError::Internal)?;
         }
 
         let backend = self.backend.storage.backend();
@@ -1711,12 +1740,16 @@ impl BulkWriter {
             let store = self.backend.storage.store();
             flush_intent::write_committed(
                 &store,
+                &self.load_id,
                 &self.initial_table_versions,
                 &manifest.snapshot_id,
             )
             .await
             .map_err(UniError::Internal)?;
         }
+        // Test seam: a crash after the `Committed` marker, before the latest
+        // pointer flip.
+        fail::fail_point!("bulk::commit::after-committed-marker");
         self.backend
             .storage
             .snapshot_manager()
@@ -1764,10 +1797,11 @@ impl BulkWriter {
         // The load is fully finalized — drop the recovery marker. (A crash
         // before this point leaves the `Committed` marker, which reopen
         // reconciliation rolls forward; a crash before the `Committed` write
-        // leaves the `Active` marker, which it rolls back.)
+        // leaves the `Active` marker, which it completes — or, on a backend
+        // that cannot stage, rolls back.)
         if !self.initial_table_versions.is_empty() && self.writes_crash_marker() {
             let store = self.backend.storage.store();
-            flush_intent::clear(&store)
+            flush_intent::clear(&store, &self.load_id)
                 .await
                 .map_err(UniError::Internal)?;
         }
@@ -1867,7 +1901,7 @@ impl BulkWriter {
         // database's.
         let store = self.backend.storage.store();
         if self.writes_crash_marker()
-            && let Err(e) = flush_intent::clear(&store).await
+            && let Err(e) = flush_intent::clear(&store, &self.load_id).await
         {
             rollback_errors.push(format!("intent marker: {e}"));
         }
@@ -1888,11 +1922,7 @@ impl BulkWriter {
         }
     }
 
-    /// Persist the crash-recovery intent marker (phase `Active`) with the
-    /// current set of touched tables and their pre-load versions. Called before
-    /// anything this load writes becomes visible: before each multi-table
-    /// flush on a backend that cannot stage, before `publish` on one that can.
-    /// Whether this load keeps the database's crash-recovery marker.
+    /// Whether this load keeps a crash-recovery marker.
     ///
     /// Not on a fork: see `publish`. A fork's load that is interrupted is
     /// therefore not reconciled at reopen. On a staging fork (every Lance
@@ -1902,12 +1932,16 @@ impl BulkWriter {
         self.backend.storage.fork_scope().is_none()
     }
 
+    /// Persist this load's crash-recovery intent marker (phase `Active`) with
+    /// the current set of touched tables and their pre-load versions, before
+    /// each multi-table flush on a backend that cannot stage. (On one that can,
+    /// `publish` writes the marker, with the staged rows.)
     async fn persist_active_intent(&self) -> Result<()> {
         if !self.writes_crash_marker() {
             return Ok(());
         }
         let store = self.backend.storage.store();
-        flush_intent::write_active(&store, &self.initial_table_versions)
+        flush_intent::write_active(&store, &self.load_id, &self.initial_table_versions)
             .await
             .map_err(UniError::Internal)?;
         Ok(())

@@ -202,6 +202,8 @@ pub mod edge_wildcard_shared_property;
 pub mod in_query_procedure_call;
 // A WRITE procedure's writes belong to the calling transaction.
 pub mod write_procedure_in_transaction;
+// A procedure called in a transaction reads the transaction's view.
+pub mod procedure_reads_in_transaction;
 // An algorithm's list and map yields are lists and maps to every consumer.
 pub mod algorithm_list_yield_values;
 // A relationship bound earlier and matched again, with its type undeclared.
@@ -209,3 +211,6 @@ pub mod rebound_relationship_schemaless;
 // A quoted identifier (incl. the doubled-backtick escape) denotes one name
 // across DDL, writes, reads, indexes, constraints and parameters.
 pub mod escaped_identifier_round_trip;
+// A user property named `label`, `labels`, `type` or `properties` is an
+// ordinary property on every read path, never taken for an entity field.
+pub mod entity_field_name_collision;

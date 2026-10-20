@@ -1479,31 +1479,16 @@ fn translate_binary_op(left: DfExpr, op: &BinaryOp, right: DfExpr) -> Result<DfE
         BinaryOp::StartsWith => Ok(dummy_udf_expr("_cypher_starts_with", vec![left, right])),
         BinaryOp::EndsWith => Ok(dummy_udf_expr("_cypher_ends_with", vec![left, right])),
 
-        // Lowered to `regexp_match` by `apply_type_coercion` when both
-        // operands are strings (see `native_regex_match`); otherwise evaluated
-        // per row, so a CypherValue or NULL operand plans.
+        // Every operand pair goes through `_cypher_regex`, whose match is the
+        // whole string (Java `matches()`); DataFusion's `regexp_match` and
+        // `~` operator find a match anywhere. Two strings take the UDF's
+        // vectorized path; a CypherValue or NULL operand is evaluated per row.
         BinaryOp::Regex => Ok(dummy_udf_expr("_cypher_regex", vec![left, right])),
 
         BinaryOp::ApproxEq => Err(anyhow!(
             "Vector similarity operator (~=) cannot be pushed down to DataFusion"
         )),
     }
-}
-
-/// `l =~ r` over two string operands, vectorized.
-///
-/// Cypher `=~` is three-valued: `null =~ p` and `s =~ null` are null, not
-/// false. `regexp_match(s, p) IS NOT NULL` alone collapses a null operand to
-/// false (the match yields NULL both for "no match" and for a null input), so
-/// the null-operand case is guarded explicitly and NULL keeps propagating.
-fn native_regex_match(left: DfExpr, right: DfExpr) -> Result<DfExpr> {
-    let is_match = datafusion::functions::expr_fn::regexp_match(left.clone(), right.clone(), None)
-        .is_not_null();
-    Ok(datafusion::logical_expr::when(
-        left.is_null().or(right.is_null()),
-        lit(ScalarValue::Boolean(None)),
-    )
-    .otherwise(is_match)?)
 }
 
 /// Early-return `Some(Err(...))` from an `Option<Result<...>>` function if the args
@@ -4041,19 +4026,6 @@ fn coerce_scalar_function(
         .iter()
         .map(|a| apply_type_coercion(a, schema))
         .collect::<Result<Vec<_>>>()?;
-
-    // `=~` over two strings keeps DataFusion's vectorized `regexp_match`; any
-    // other operand (a CypherValue, a NULL literal, a number) stays on the
-    // per-row `_cypher_regex`, which answers NULL or the type error.
-    if func.func.name() == "_cypher_regex"
-        && let [l, r] = coerced_args.as_slice()
-        && [l, r].iter().all(|a| {
-            a.get_type(schema)
-                .is_ok_and(|t| matches!(t, DataType::Utf8 | DataType::LargeUtf8))
-        })
-    {
-        return native_regex_match(l.clone(), r.clone());
-    }
 
     // A Cypher list literal is heterogeneous by definition, but `make_array`
     // requires one child type. `translate_list_literal` routes mixed lists to

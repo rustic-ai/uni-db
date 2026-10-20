@@ -56,6 +56,31 @@ pub struct SnapshotView {
     /// carries a fresh `AdjacencyManager`); `None` for snapshots taken
     /// without a storage pin.
     pub pinned_storage: Option<Arc<crate::storage::manager::StorageManager>>,
+    /// The reading transaction's private, uncommitted L0 buffer, newest of all
+    /// layers.
+    ///
+    /// Set only on a view pinned from a manager built by
+    /// [`L0Manager::from_view`] for a read made inside a transaction (an
+    /// algorithm projection, say); a transaction's own snapshot leaves it
+    /// `None`, since the executor threads its buffer separately. Unlike `main`
+    /// and `extra` it is live: the transaction keeps writing into it, and its
+    /// reads must see those writes.
+    pub transaction: Option<Arc<RwLock<L0Buffer>>>,
+}
+
+impl SnapshotView {
+    /// A [`QueryContext`] reading exactly this view's layers, newest first:
+    /// [`Self::transaction`], then `main`, then `extra`.
+    ///
+    /// [`QueryContext`]: crate::runtime::QueryContext
+    #[must_use]
+    pub fn query_context(&self) -> crate::runtime::QueryContext {
+        crate::runtime::QueryContext::new_with_pending(
+            self.main.clone(),
+            self.transaction.clone(),
+            self.extra.clone(),
+        )
+    }
 }
 
 impl std::fmt::Debug for SnapshotView {
@@ -87,6 +112,9 @@ pub struct L0Manager {
     // buffer this manager mints (initial buffer via `set_plugin_registry`,
     // rotated buffers via `rotate`). `None` preserves native `try_merge`.
     plugin_registry: RwLock<Option<Arc<uni_plugin::PluginRegistry>>>,
+    // The reading transaction's private L0, for a read-only view built by
+    // `from_view`; `None` for every manager that owns an L0 lifecycle.
+    transaction: Option<Arc<RwLock<L0Buffer>>>,
 }
 
 impl L0Manager {
@@ -97,6 +125,7 @@ impl L0Manager {
             pending_flush: RwLock::new(Vec::new()),
             current_pin: RwLock::new(Arc::new(PinToken(()))),
             plugin_registry: RwLock::new(None),
+            transaction: None,
         }
     }
 
@@ -129,7 +158,34 @@ impl L0Manager {
             // Read-only snapshot manager: buffers already carry their registry
             // and this manager never rotates, so no stamping is needed.
             plugin_registry: RwLock::new(None),
+            transaction: None,
         }
+    }
+
+    /// A read-only manager over a query's L0 visibility, including the
+    /// reading transaction's private buffer.
+    ///
+    /// [`Self::from_snapshot`] has no place for a transaction buffer, and
+    /// listing it among the pending-flush generations makes it the *oldest*
+    /// layer, so the transaction's own updates lose to committed values.
+    /// Snapshots pinned from this manager carry the buffer as
+    /// [`SnapshotView::transaction`], the newest layer.
+    #[must_use]
+    pub fn from_view(
+        current: Arc<RwLock<L0Buffer>>,
+        pending_flush: Vec<Arc<RwLock<L0Buffer>>>,
+        transaction: Option<Arc<RwLock<L0Buffer>>>,
+    ) -> Self {
+        Self {
+            transaction,
+            ..Self::from_snapshot(current, pending_flush)
+        }
+    }
+
+    /// The transaction buffer of a manager built by [`Self::from_view`].
+    #[must_use]
+    pub fn transaction_l0(&self) -> Option<&Arc<RwLock<L0Buffer>>> {
+        self.transaction.as_ref()
     }
 
     /// Get the current L0 buffer.
@@ -260,6 +316,7 @@ impl L0Manager {
             pin,
             started_at_version,
             pinned_storage: None,
+            transaction: self.transaction.clone(),
         }
     }
 

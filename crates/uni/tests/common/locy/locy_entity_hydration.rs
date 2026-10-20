@@ -1141,14 +1141,20 @@ async fn locy_entity_hydration_derive_inside_assume_reads_the_overlay() -> Resul
             .with_config(config())
             .run()
             .await?;
-        let hypothetical = assumed
+        let assume_rows = assumed
             .command_results
             .iter()
             .find_map(|c| match c {
-                CommandResult::Assume(rows) => Some(pairs(rows)),
+                CommandResult::Assume(rows) => Some(rows.clone()),
                 _ => None,
             })
             .ok_or_else(|| anyhow::anyhow!("{rel}: no ASSUME result"))?;
+        // The body's DERIVE contributes one `{affected: n}` row, ahead of the
+        // Cypher read's rows.
+        let (derive_rows, read_rows): (Vec<_>, Vec<_>) = assume_rows
+            .into_iter()
+            .partition(|row| row.contains_key("affected"));
+        let hypothetical = pairs(&read_rows);
 
         let tx = db.session().tx().await?;
         tx.execute(mutation).await?;
@@ -1157,6 +1163,10 @@ async fn locy_entity_hydration_derive_inside_assume_reads_the_overlay() -> Resul
             .with_config(config())
             .run()
             .await?;
+        let real_affected = real.command_results.iter().find_map(|c| match c {
+            CommandResult::Derive { affected } => Some(*affected as i64),
+            _ => None,
+        });
         let real = real
             .command_results
             .iter()
@@ -1165,6 +1175,15 @@ async fn locy_entity_hydration_derive_inside_assume_reads_the_overlay() -> Resul
                 _ => None,
             })
             .ok_or_else(|| anyhow::anyhow!("{rel}: no Cypher result"))?;
+        let hypothetical_affected: Vec<_> = derive_rows
+            .iter()
+            .map(|row| row.get("affected").cloned())
+            .collect();
+        ensure!(
+            hypothetical_affected == vec![real_affected.map(Value::Int)],
+            "{rel}: DERIVE inside ASSUME reported {hypothetical_affected:?}, the real \
+             DERIVE {real_affected:?}"
+        );
         tx.rollback();
 
         eprintln!("{rel}: hypothetical={hypothetical:?} real={real:?}");

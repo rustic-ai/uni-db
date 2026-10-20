@@ -4121,8 +4121,24 @@ impl Writer {
         if is_deleted { Ok(None) } else { Ok(labels) }
     }
 
+    /// Write an edge `SET`: `props` is the edge's full merged property row
+    /// and `touched_keys` the keys the statement assigned.
+    ///
+    /// Always stored as a full row, whatever `partial_lance_writes` says.
+    /// The per-edge-type delta tables are an append log — every flush
+    /// appends a row per edge and a delete appends an `op = 1` row — so an
+    /// edge id has as many rows as it has flushed versions. A partial
+    /// flush used to `MergeInsert` the touched columns keyed on `eid`,
+    /// which that log cannot support: two source rows for one edge fail
+    /// the whole flush ("ambiguous merge insert"), an edge created and
+    /// updated in one flush window has no row to match and was dropped
+    /// (`WhenNotMatched::DoNothing`; gone after reopen), and every logged
+    /// row of the edge is updated to the same `_version`, leaving the
+    /// newest-row replay a tie between a stale and a current row.
+    /// `touched_keys` is accepted for the vertex-symmetric call site and
+    /// otherwise unused.
     #[expect(clippy::too_many_arguments)]
-    #[instrument(skip(self, props, touched_keys), level = "trace")]
+    #[instrument(skip(self, props, _touched_keys), level = "trace")]
     pub async fn insert_edge_partial_full(
         &self,
         src_vid: Vid,
@@ -4131,74 +4147,19 @@ impl Writer {
         eid: Eid,
         props: Properties,
         edge_type_name: Option<String>,
-        touched_keys: HashSet<String>,
+        _touched_keys: HashSet<String>,
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
     ) -> Result<()> {
-        self.freeze_for_non_tx_write_if_pinned(tx_l0).await; // C1 (G4)
-        if !self.config.partial_lance_writes {
-            return self
-                .insert_edge(
-                    src_vid,
-                    dst_vid,
-                    edge_type,
-                    eid,
-                    props,
-                    edge_type_name,
-                    tx_l0,
-                )
-                .await;
-        }
-
-        let start = std::time::Instant::now();
-        check_property_names(&props, &self.schema_manager.schema())?;
-        self.check_write_pressure().await?;
-        self.check_transaction_memory(tx_l0)?;
-        let mut props = props;
-        self.prepare_edge_upsert(eid, &mut props, tx_l0).await?;
-
-        // Enforce declared edge-type UNIQUE / NODE KEY constraints whose key
-        // properties are all present in this (possibly partial) write, then
-        // register them. A partial write touching only part of a composite key
-        // does not carry the full key, so like the vertex partial path it enforces
-        // only fully-present keys.
-        if let Some(type_name) = edge_type_name.as_deref() {
-            self.validate_edge_constraints(eid, type_name, &props, tx_l0)
-                .await?;
-        }
-
-        let l0 = self.resolve_l0(tx_l0);
-        if let Some(type_name) = edge_type_name.as_deref() {
-            self.populate_edge_constraint_index(eid, type_name, &props, &l0);
-        }
-        l0.write().insert_edge_partial_full(
+        self.insert_edge(
             src_vid,
             dst_vid,
             edge_type,
             eid,
             props,
             edge_type_name,
-            touched_keys,
-        )?;
-
-        if tx_l0.is_none() {
-            let version = l0.read().current_version;
-            self.adjacency_manager
-                .insert_edge(src_vid, dst_vid, eid, edge_type, version);
-        }
-
-        metrics::counter!("uni_l0_buffer_mutations_total").increment(1);
-        metrics::counter!("uni_partial_writes_total").increment(1);
-        self.update_metrics();
-        if tx_l0.is_none() {
-            self.check_flush().await?;
-        }
-        if start.elapsed().as_millis() > 100 {
-            log::warn!(
-                "Slow insert_edge_partial_full: {}ms",
-                start.elapsed().as_millis()
-            );
-        }
-        Ok(())
+            tx_l0,
+        )
+        .await
     }
 
     #[expect(clippy::too_many_arguments)]
@@ -5730,95 +5691,28 @@ impl Writer {
                 .edge_type_name_by_id_unified(edge_type_id)
                 .ok_or_else(|| anyhow!("Edge type ID {} not found", edge_type_id))?;
 
-            // FWD Run (sorted by src_vid)
-            // Round-12 §A: split entries into full-row Append and
-            // partial MergeInsert routes based on `edge_partial_keys`.
-            // Edges in `edge_partial_keys` were last written via
-            // `insert_edge_partial_full`; the per-edge-type delta
-            // tables receive only the touched schema columns plus
-            // (when any overflow key was touched) the regenerated
-            // `overflow_json` blob. Untouched columns retain their
-            // previous-version value via Lance MergeInsert.
-            let partial_eids: std::collections::HashSet<Eid> = {
-                let old_l0 = old_l0_arc.read();
-                entries
-                    .iter()
-                    .filter(|e| {
-                        self.config.partial_lance_writes
-                            && old_l0.edge_partial_keys.contains_key(&e.eid)
-                    })
-                    .map(|e| e.eid)
-                    .collect()
-            };
-            let touched_union_by_eid: HashMap<Eid, std::collections::HashSet<String>> = {
-                let old_l0 = old_l0_arc.read();
-                partial_eids
-                    .iter()
-                    .filter_map(|eid| old_l0.edge_partial_keys.get(eid).map(|s| (*eid, s.clone())))
-                    .collect()
-            };
-            let (full_entries, partial_entries): (Vec<L1Entry>, Vec<L1Entry>) = entries
-                .clone()
-                .into_iter()
-                .partition(|e| !partial_eids.contains(&e.eid));
-
+            // Every edge flushes as a full-row Append; see
+            // `Writer::insert_edge_partial_full` for why the delta log
+            // cannot take a partial MergeInsert.
             let backend = self.storage.backend();
 
             // FWD run (sorted by src_vid)
-            let mut fwd_full = full_entries.clone();
-            fwd_full.sort_by_key(|e| e.src_vid);
-            let mut fwd_partial = partial_entries.clone();
-            fwd_partial.sort_by_key(|e| e.src_vid);
+            let mut fwd_entries = entries.clone();
+            fwd_entries.sort_by_key(|e| e.src_vid);
             let fwd_ds = self.storage.delta_dataset(&edge_type_name, "fwd")?;
-            if !fwd_full.is_empty() {
-                let fwd_batch = fwd_ds.build_record_batch(&fwd_full, &schema)?;
+            if !fwd_entries.is_empty() {
+                let fwd_batch = fwd_ds.build_record_batch(&fwd_entries, &schema)?;
                 fwd_ds.write_run(backend, fwd_batch).await?;
-            }
-            if !fwd_partial.is_empty() {
-                let touched_union: std::collections::HashSet<String> = fwd_partial
-                    .iter()
-                    .flat_map(|e| {
-                        touched_union_by_eid
-                            .get(&e.eid)
-                            .cloned()
-                            .unwrap_or_default()
-                            .into_iter()
-                    })
-                    .collect();
-                let fwd_partial_batch =
-                    fwd_ds.build_partial_record_batch(&fwd_partial, &touched_union, &schema)?;
-                fwd_ds
-                    .merge_insert_partial_run(backend, fwd_partial_batch)
-                    .await?;
             }
             fwd_ds.ensure_eid_index(backend).await?;
 
-            // BWD Run (sorted by dst_vid)
-            let mut bwd_full = full_entries.clone();
-            bwd_full.sort_by_key(|e| e.dst_vid);
-            let mut bwd_partial = partial_entries.clone();
-            bwd_partial.sort_by_key(|e| e.dst_vid);
+            // BWD run (sorted by dst_vid)
+            let mut bwd_entries = entries.clone();
+            bwd_entries.sort_by_key(|e| e.dst_vid);
             let bwd_ds = self.storage.delta_dataset(&edge_type_name, "bwd")?;
-            if !bwd_full.is_empty() {
-                let bwd_batch = bwd_ds.build_record_batch(&bwd_full, &schema)?;
+            if !bwd_entries.is_empty() {
+                let bwd_batch = bwd_ds.build_record_batch(&bwd_entries, &schema)?;
                 bwd_ds.write_run(backend, bwd_batch).await?;
-            }
-            if !bwd_partial.is_empty() {
-                let touched_union: std::collections::HashSet<String> = bwd_partial
-                    .iter()
-                    .flat_map(|e| {
-                        touched_union_by_eid
-                            .get(&e.eid)
-                            .cloned()
-                            .unwrap_or_default()
-                            .into_iter()
-                    })
-                    .collect();
-                let bwd_partial_batch =
-                    bwd_ds.build_partial_record_batch(&bwd_partial, &touched_union, &schema)?;
-                bwd_ds
-                    .merge_insert_partial_run(backend, bwd_partial_batch)
-                    .await?;
             }
             bwd_ds.ensure_eid_index(backend).await?;
 

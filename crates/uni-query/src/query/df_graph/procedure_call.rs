@@ -815,17 +815,7 @@ fn run_algorithm_provider_raw(
 
     // L0 snapshot for read-your-writes visibility, mirroring the
     // `uni.algo.*` procedure adapter's host L0 construction.
-    let l0_ctx = graph_ctx.l0_context();
-    let l0_mgr = l0_ctx.current_l0.as_ref().map(|current| {
-        let mut pending = l0_ctx.pending_flush_l0s.clone();
-        if let Some(tx_l0) = &l0_ctx.transaction_l0 {
-            pending.push(tx_l0.clone());
-        }
-        Arc::new(uni_store::runtime::l0_manager::L0Manager::from_snapshot(
-            current.clone(),
-            pending,
-        ))
-    });
+    let l0_mgr = graph_ctx.l0_context().read_view();
 
     // Guest Cypher/Named projections (issue #151 P3) resolve through a query
     // host snapshot of this execution context.
@@ -836,6 +826,7 @@ fn run_algorithm_provider_raw(
         entry,
         Arc::clone(graph_ctx.storage()),
         l0_mgr,
+        Arc::clone(graph_ctx.property_manager()),
         &config_json,
         resolver,
     )

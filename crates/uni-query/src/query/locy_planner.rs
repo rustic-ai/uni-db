@@ -111,53 +111,100 @@ fn collect_match_node_vars(clause: &CompiledClause, node_vars: &mut HashSet<Stri
     }
 }
 
-/// Map node variables in a clause's MATCH pattern to their first declared label.
+/// The labels or edge types a clause's MATCH pattern pins on an entity
+/// variable.
+#[derive(Debug, Clone, PartialEq)]
+enum PatternScope {
+    /// A vertex carrying every one of these labels (`(n:A:B)`, or `(n)`).
+    AllOf(Vec<String>),
+    /// An entity carrying exactly one of these (`[e:R|Q]`, `(n:A|B)`).
+    OneOf(Vec<String>),
+}
+
+/// Every entity variable of a clause's MATCH pattern, with the labels or edge
+/// types the pattern pins on it. `None` marks one whose scope is not a single
+/// label set: a variable-length relationship (a list), or a name written with
+/// conflicting label expressions.
+type EntityScopes = HashMap<String, Option<PatternScope>>;
+
+/// Map the entity variables in a clause's MATCH pattern to their scopes.
 ///
 /// Used to resolve a property-access expression's declared type from the graph
 /// schema (e.g. `a.id` where `a` is `(:Node)` → `Node.id`).
-fn clause_var_labels(clause: &CompiledClause) -> HashMap<String, String> {
-    let mut labels = HashMap::new();
+fn clause_var_labels(clause: &CompiledClause) -> EntityScopes {
+    use uni_cypher::ast::LabelExpr;
+    fn bind(scopes: &mut EntityScopes, var: &str, scope: Option<PatternScope>) {
+        let Some(existing) = scopes.get_mut(var) else {
+            scopes.insert(var.to_string(), scope);
+            return;
+        };
+        *existing = match (existing.take(), scope) {
+            // A label repeated on a vertex: it carries all of them.
+            (Some(PatternScope::AllOf(mut a)), Some(PatternScope::AllOf(b))) => {
+                a.extend(b);
+                a.sort();
+                a.dedup();
+                Some(PatternScope::AllOf(a))
+            }
+            (Some(a), Some(b)) if a == b => Some(a),
+            _ => None,
+        };
+    }
+    let scope_of = |labels: &LabelExpr, node: bool| match labels {
+        LabelExpr::Empty if node => PatternScope::AllOf(Vec::new()),
+        LabelExpr::Empty => PatternScope::OneOf(Vec::new()),
+        LabelExpr::Conjunction(v) => PatternScope::AllOf(v.clone()),
+        LabelExpr::Disjunction(v) => PatternScope::OneOf(v.clone()),
+    };
+    let mut scopes = EntityScopes::new();
     for path in &clause.match_pattern.paths {
         for elem in &path.elements {
-            if let PatternElement::Node(np) = elem
-                && let Some(var) = &np.variable
-                && let Some(label) = np.labels.names().first()
-            {
-                labels.entry(var.clone()).or_insert_with(|| label.clone());
+            match elem {
+                PatternElement::Node(np) => {
+                    if let Some(var) = &np.variable {
+                        // An unlabelled occurrence adds nothing to a labelled one.
+                        if np.labels.names().is_empty() && scopes.contains_key(var) {
+                            continue;
+                        }
+                        bind(&mut scopes, var, Some(scope_of(&np.labels, true)));
+                    }
+                }
+                PatternElement::Relationship(rp) => {
+                    if let Some(var) = &rp.variable {
+                        let scope = rp.range.is_none().then(|| scope_of(&rp.types, false));
+                        bind(&mut scopes, var, scope);
+                    }
+                }
+                _ => {}
             }
         }
     }
-    labels
+    scopes
 }
 
-/// Resolve the Arrow type of a property access from the graph schema, given the
-/// node variable's label. Returns `None` when the label or property is unknown.
+/// The Arrow type the schema declares for `var.prop`, from the labels or edge
+/// types the pattern pins on `var` alone.
+///
+/// `None` when the schema does not type it there: `var` is not a pattern
+/// entity, its scope declares no `prop`, or the declarations disagree. Its
+/// column then carries the stored Cypher value (`LargeBinary`), whatever
+/// another label happens to declare under the same name.
 fn property_arrow_type(
     schema: &Schema,
-    var_labels: &HashMap<String, String>,
+    var_labels: &EntityScopes,
     var: &str,
     prop: &str,
 ) -> Option<DataType> {
-    let label = var_labels.get(var)?;
-    let meta = schema.properties.get(label)?.get(prop)?;
+    use uni_common::core::schema::EntityScope;
+    let meta = match var_labels.get(var)?.as_ref()? {
+        PatternScope::AllOf(labels) => {
+            schema.scoped_property_meta(EntityScope::AllOf(labels), prop)
+        }
+        PatternScope::OneOf(labels) => {
+            schema.scoped_property_meta(EntityScope::OneOf(labels), prop)
+        }
+    }?;
     Some(meta.r#type.to_arrow())
-}
-
-/// The type the schema declares for `prop`, when every label and edge type
-/// that declares it agrees.
-///
-/// For a property of a variable whose label or edge type the clause does not
-/// know (an unlabelled node, any relationship), this is the type its column
-/// carries. A disagreement, or no declaration, gives `None` and the caller's
-/// historical guess.
-fn uniform_declared_type(schema: &Schema, prop: &str) -> Option<DataType> {
-    let mut types = schema
-        .properties
-        .values()
-        .filter_map(|props| props.get(prop))
-        .map(|meta| meta.r#type.to_arrow());
-    let first = types.next()?;
-    types.all(|t| t == first).then_some(first)
 }
 
 /// The Arrow type of each ALONG column, unified over every clause binding it.
@@ -176,7 +223,7 @@ fn along_column_types(clauses: &[CompiledClause], schema: &Schema) -> HashMap<St
         Float,
         Dynamic,
     }
-    fn kind(expr: &LocyExpr, schema: &Schema, labels: &HashMap<String, String>) -> Kind {
+    fn kind(expr: &LocyExpr, schema: &Schema, labels: &EntityScopes) -> Kind {
         match expr {
             LocyExpr::PrevRef(_) => Kind::Neutral,
             LocyExpr::Cypher(Expr::Literal(CypherLiteral::Integer(_))) => Kind::Int,
@@ -185,20 +232,12 @@ fn along_column_types(clauses: &[CompiledClause], schema: &Schema) -> HashMap<St
                 let Expr::Variable(var) = object.as_ref() else {
                     return Kind::Float;
                 };
-                let declared = property_arrow_type(schema, labels, var, prop)
-                    .or_else(|| uniform_declared_type(schema, prop));
-                match declared {
+                // Not typed by the variable's own labels: the stored value,
+                // whatever another label declares under the same name.
+                match property_arrow_type(schema, labels, var, prop) {
                     Some(DataType::Int64 | DataType::Int32 | DataType::UInt64) => Kind::Int,
-                    Some(DataType::LargeBinary) => Kind::Dynamic,
+                    Some(DataType::LargeBinary) | None => Kind::Dynamic,
                     Some(_) => Kind::Float,
-                    None if !schema
-                        .properties
-                        .values()
-                        .any(|p| p.contains_key(prop.as_str())) =>
-                    {
-                        Kind::Dynamic
-                    }
-                    None => Kind::Float,
                 }
             }
             LocyExpr::Cypher(_) => Kind::Float,
@@ -265,7 +304,7 @@ fn along_column_types(clauses: &[CompiledClause], schema: &Schema) -> HashMap<St
 fn fold_argument_type(
     aggregate: &Expr,
     schema: &Schema,
-    var_labels: &HashMap<String, String>,
+    var_labels: &EntityScopes,
     node_vars: &HashSet<String>,
 ) -> Option<DataType> {
     let Expr::FunctionCall { args, .. } = aggregate else {
@@ -276,23 +315,13 @@ fn fold_argument_type(
             let Expr::Variable(var) = object.as_ref() else {
                 return None;
             };
-            property_arrow_type(schema, var_labels, var, prop)
-                .or_else(|| {
-                    var_labels
-                        .contains_key(var)
-                        .then(undeclared_property_arrow_type)
-                })
-                .or_else(|| uniform_declared_type(schema, prop))
-                // Declared nowhere (a schemaless graph): the value arrives as
-                // the stored Cypher value, which the aggregate reads as is.
-                // Casting it to Float64 turned an integer MAX into `0.0`.
-                .or_else(|| {
-                    (!schema
-                        .properties
-                        .values()
-                        .any(|p| p.contains_key(prop.as_str())))
-                    .then_some(DataType::LargeBinary)
-                })
+            // Not typed by the variable's own labels: the value arrives as
+            // the stored Cypher value, which the aggregate reads as is.
+            // Casting it to Float64 turned an integer MAX into `0.0`.
+            Some(
+                property_arrow_type(schema, var_labels, var, prop)
+                    .unwrap_or_else(undeclared_property_arrow_type),
+            )
         }
         arg @ Expr::Literal(_) => Some(infer_expr_type(arg, node_vars)),
         _ => None,
@@ -305,14 +334,6 @@ fn fold_function_name(aggregate: &Expr) -> Option<String> {
         Expr::FunctionCall { name, .. } => Some(name.to_uppercase()),
         _ => None,
     }
-}
-
-/// Whether any label or edge type in `schema` declares `prop`.
-fn property_declared_anywhere(schema: &Schema, prop: &str) -> bool {
-    schema
-        .properties
-        .values()
-        .any(|label_props| label_props.contains_key(prop))
 }
 
 /// The Arrow type the scan emits for a property its label does not declare.
@@ -367,7 +388,7 @@ fn infer_yield_type(
     rule_catalog: &HashMap<String, CompiledRule>,
     is_key: bool,
     schema: &Schema,
-    var_labels: &HashMap<String, String>,
+    var_labels: &EntityScopes,
 ) -> DataType {
     let mut visited = HashSet::new();
     infer_yield_type_rec(
@@ -397,7 +418,7 @@ fn infer_yield_type_rec(
     rule_catalog: &HashMap<String, CompiledRule>,
     is_key: bool,
     schema: &Schema,
-    var_labels: &HashMap<String, String>,
+    var_labels: &EntityScopes,
     visited: &mut HashSet<String>,
 ) -> DataType {
     // FOLD outputs — type depends on the aggregate function.
@@ -504,46 +525,21 @@ fn infer_yield_type_rec(
                     if let Some(dt) = property_arrow_type(schema, var_labels, var, prop) {
                         return dt;
                     }
-                    // `property_arrow_type` returns `None` for three different
-                    // reasons, and only two of them mean "schemaless":
+                    // Not typed by the variable's own labels or edge types: a
+                    // schemaless label, an unlabelled node, an edge type that
+                    // does not declare it, or not a pattern entity at all. The
+                    // column carries the stored Cypher value, so declare
+                    // LargeBinary: the declared and actual types match, no
+                    // coercion runs, and the value is decoded at read time.
+                    // Taking the type some other label declared for the same
+                    // name read an integer stored here as a float and a string
+                    // as an error.
                     //
-                    //   a. `var` is a labeled node variable whose label, or whose
-                    //      property, is absent from the schema. The value lives
-                    //      in `overflow_json` and the scan emits it as
-                    //      LargeBinary — declare LargeBinary so the declared and
-                    //      actual types match, no coercion runs, and the cv bytes
-                    //      are decoded at read time.
-                    //   b. `var` is not a labeled node variable at all — an edge
-                    //      variable, or an unlabeled node. `clause_var_labels`
-                    //      only maps labeled *node* vars, so an edge property
-                    //      like `e.weight` always lands here regardless of
-                    //      schema, and its column may well be a typed Float64.
-                    //      Declaring LargeBinary for those breaks schema'd edge
-                    //      properties, so keep the historical inference.
-                    //
-                    // Without this distinction the fallback fires for edge
-                    // properties too and regresses six schema-mode TCK scenarios.
-                    //
-                    // PROB columns are also excluded: a probability is numeric by
-                    // definition and the complement / noisy-OR arithmetic reads it
-                    // as a real Float64, so there the coercion is exactly right.
-                    if var_labels.contains_key(var) && !item.is_prob {
+                    // PROB columns are excluded: a probability is numeric by
+                    // definition and the complement / noisy-OR arithmetic reads
+                    // it as a real Float64, so there the coercion is right.
+                    if !item.is_prob {
                         return undeclared_property_arrow_type();
-                    }
-                    // An unlabelled node or a relationship: the schema's type,
-                    // when every declaration of the property agrees. The
-                    // `Property → Float64` guess below turned `b.id AS bid` into
-                    // `1.0`.
-                    if !item.is_prob
-                        && let Some(dt) = uniform_declared_type(schema, prop)
-                    {
-                        return dt;
-                    }
-                    // Declared nowhere: stored as an encoded value, so keep it
-                    // one. The `Property → Float64` guess turned a stored `5`
-                    // into `5.0`.
-                    if !item.is_prob && !property_declared_anywhere(schema, prop) {
-                        return DataType::LargeBinary;
                     }
                 }
                 let _ = is_key;
@@ -597,7 +593,7 @@ fn arithmetic_yield_type(
     along_types: &HashMap<String, DataType>,
     rule_catalog: &HashMap<String, CompiledRule>,
     schema: &Schema,
-    var_labels: &HashMap<String, String>,
+    var_labels: &EntityScopes,
     visited: &mut HashSet<String>,
 ) -> Option<DataType> {
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -614,7 +610,7 @@ fn arithmetic_yield_type(
         along_types: &HashMap<String, DataType>,
         rule_catalog: &HashMap<String, CompiledRule>,
         schema: &Schema,
-        var_labels: &HashMap<String, String>,
+        var_labels: &EntityScopes,
         visited: &mut HashSet<String>,
     ) -> Option<Kind> {
         let of_type = |dt: DataType| match dt {
@@ -630,12 +626,9 @@ fn arithmetic_yield_type(
                 let Expr::Variable(var) = object.as_ref() else {
                     return None;
                 };
-                let declared = property_arrow_type(schema, var_labels, var, prop)
-                    .or_else(|| uniform_declared_type(schema, prop));
-                match declared {
+                match property_arrow_type(schema, var_labels, var, prop) {
                     Some(dt) => of_type(dt),
-                    None if !property_declared_anywhere(schema, prop) => Some(Kind::Dynamic),
-                    None => None,
+                    None => Some(Kind::Dynamic),
                 }
             }
             Expr::Variable(v) if node_vars.contains(v) => None,
@@ -859,10 +852,10 @@ use super::planner::{
     LogicalPlan, QueryPlanner, VariableInfo, WhereScope, collect_expr_variables, is_var_in_scope,
 };
 use super::planner_locy_types::{
-    DERIV_EVENT_COL, DERIV_ISPROB_COL_PREFIX, DERIV_ISREF_COL_PREFIX,
+    DERIV_EVENT_COL, DERIV_ISNOT_COL_PREFIX, DERIV_ISPROB_COL_PREFIX, DERIV_ISREF_COL_PREFIX,
     FOLD_DISCRIMINATOR_COL_PREFIX, ISNOT_VID_COL_PREFIX, ISPROB_COL_PREFIX, LocyClausePlan,
-    LocyCommand, LocyIsRef, LocyRulePlan, LocyStratum, LocyYieldColumn, NegationKey,
-    PositiveProbRef, ProbRead,
+    LocyCommand, LocyIsRef, LocyRulePlan, LocyStratum, LocyYieldColumn, NegatedLineageRef,
+    NegationKey, PositiveProbRef, ProbRead,
 };
 
 // ---------------------------------------------------------------------------
@@ -1020,6 +1013,10 @@ fn derivation_discriminator_columns(
         .iter()
         .filter(|s| s.keeps_lineage)
     {
+        if slot.negated {
+            columns.push((slot.key_column(), DataType::Binary));
+            continue;
+        }
         columns.push((
             slot.key_column(),
             crate::query::df_graph::locy_row_hash::row_hash_type(),
@@ -1029,15 +1026,23 @@ fn derivation_discriminator_columns(
     columns
 }
 
-/// A positive reference, from a clause of a rule with a PROB column, to a rule
-/// that has one too: the referenced probability flows into the calling row's
-/// PROB value (see [`ProbRead`]).
+/// A reference, from a clause of a rule with a PROB column, to a rule that has
+/// one too. A positive reference's probability flows into the calling row's
+/// PROB value (see [`ProbRead`]); a negated one's complement does.
+///
+/// A negated reference has a slot only in a rule that keeps lineage: its
+/// column (`__deriv_isnot_*`) carries the negated facts the complement read,
+/// so exact inference can conjoin the negation of their formulas instead of
+/// an independent `1 - p` factor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProbRefSlot {
     /// The clause holding the reference.
     clause_index: usize,
-    /// Its position among the clause's positive references, in text order.
+    /// Its position among the clause's positive references (or, for a
+    /// negated reference, its negated references), in text order.
     occurrence: usize,
+    /// Whether the reference is `IS NOT`.
+    negated: bool,
     /// Whether the calling rule's PROB column is an `MNOR`/`MPROD` fold, whose
     /// pre-fold rows are kept as lineage for exact inference and shared-proof
     /// detection.
@@ -1057,12 +1062,15 @@ impl ProbRefSlot {
         format!("{prefix}{}_{}", self.clause_index, self.occurrence)
     }
 
-    /// The hidden column carrying the hash of the referenced fact's KEY.
+    /// The hidden column carrying the hash of the referenced fact's KEY, or,
+    /// for a negated reference, the negated facts the complement read.
     fn key_column(&self) -> String {
-        format!(
-            "{DERIV_ISREF_COL_PREFIX}{}_{}",
-            self.clause_index, self.occurrence
-        )
+        let prefix = if self.negated {
+            DERIV_ISNOT_COL_PREFIX
+        } else {
+            DERIV_ISREF_COL_PREFIX
+        };
+        format!("{prefix}{}_{}", self.clause_index, self.occurrence)
     }
 }
 
@@ -1103,8 +1111,10 @@ fn prob_column_is_probability_fold(rule: &CompiledRule) -> bool {
     })
 }
 
-/// Every positive reference to a PROB rule whose probability flows into
-/// `rule`'s PROB column, in clause then text order (see [`ProbRefSlot`]).
+/// Every reference to a PROB rule whose probability flows into `rule`'s PROB
+/// column, in clause then text order, positive references of a clause before
+/// its negated ones (see [`ProbRefSlot`]). Negated references have slots only
+/// when `rule` keeps lineage.
 fn prob_ref_slots(
     rule: &CompiledRule,
     rule_catalog: &HashMap<String, CompiledRule>,
@@ -1127,6 +1137,28 @@ fn prob_ref_slots(
                 slots.push(ProbRefSlot {
                     clause_index,
                     occurrence,
+                    negated: false,
+                    keeps_lineage,
+                    into_column: into_column.clone(),
+                });
+            }
+        }
+        if !keeps_lineage {
+            continue;
+        }
+        let negatives = clause.where_conditions.iter().filter_map(|c| match c {
+            RuleCondition::IsReference(r) if r.negated => Some(r),
+            _ => None,
+        });
+        for (occurrence, is_ref) in negatives.enumerate() {
+            let target_has_prob = rule_catalog
+                .get(&is_ref.rule_name.to_string())
+                .is_some_and(|t| t.yield_schema.iter().any(|c| c.is_prob));
+            if target_has_prob {
+                slots.push(ProbRefSlot {
+                    clause_index,
+                    occurrence,
+                    negated: true,
                     keeps_lineage,
                     into_column: into_column.clone(),
                 });
@@ -2869,12 +2901,15 @@ impl<'a> LocyPlanBuilder<'a> {
                     .map(|p| p.column.clone())
                     .collect(),
                 prob_ref: None,
+                negated_lineage: None,
             });
         }
         // Filled in once the projection is built (the classification reads
         // the projected PROB expression), keyed by index into `binding.refs`
         // — the order of `is_refs`.
         let mut prob_refs_by_ref: HashMap<usize, PositiveProbRef> = HashMap::new();
+        // The same for each negated reference's lineage column.
+        let mut negated_lineage_by_ref: HashMap<usize, NegatedLineageRef> = HashMap::new();
 
         let along_bindings: Vec<String> = clause.along.iter().map(|a| a.name.clone()).collect();
 
@@ -3161,9 +3196,21 @@ impl<'a> LocyPlanBuilder<'a> {
             refs.sort_by_key(|&r| binding.refs[r].condition_index);
             refs
         };
+        let negated_refs_in_text_order: Vec<usize> = {
+            let mut refs: Vec<usize> = (0..binding.refs.len())
+                .filter(|&r| binding.refs[r].negated)
+                .collect();
+            refs.sort_by_key(|&r| binding.refs[r].condition_index);
+            refs
+        };
         let slot_ref = |slot: &ProbRefSlot| -> Option<usize> {
+            let refs = if slot.negated {
+                &negated_refs_in_text_order
+            } else {
+                &positive_refs_in_text_order
+            };
             (slot.clause_index == ctx.clause_index)
-                .then(|| positive_refs_in_text_order.get(slot.occurrence).copied())
+                .then(|| refs.get(slot.occurrence).copied())
                 .flatten()
         };
         let ref_prob_columns = |r: usize| -> Result<(String, Vec<String>)> {
@@ -3193,7 +3240,7 @@ impl<'a> LocyPlanBuilder<'a> {
         let mut opaque_prob_read = false;
         // How this clause's PROB expression reads each of its references'
         // probabilities, from the expression as projected.
-        for slot in ctx.prob_slots {
+        for slot in ctx.prob_slots.iter().filter(|s| !s.negated) {
             let Some(r) = slot_ref(slot) else {
                 continue;
             };
@@ -3258,6 +3305,30 @@ impl<'a> LocyPlanBuilder<'a> {
         let mut transient_prob_projections: Vec<(Expr, String)> = Vec::new();
         for slot in ctx.prob_slots {
             let own = slot_ref(slot);
+            if slot.negated {
+                // Filled by the complement, which alone resolves the negated
+                // facts (`locy_complement::apply_negated_is_refs`).
+                if let Some(r) = own {
+                    let target = rule_catalog.get(&binding.refs[r].rule).with_context(|| {
+                        format!("IS-reference to unknown rule '{}'", binding.refs[r].rule)
+                    })?;
+                    negated_lineage_by_ref.insert(
+                        r,
+                        NegatedLineageRef {
+                            column: slot.key_column(),
+                            target_key_columns: target
+                                .yield_schema
+                                .iter()
+                                .filter(|c| c.is_key)
+                                .map(|c| c.name.clone())
+                                .collect(),
+                        },
+                    );
+                }
+                projections.push((Expr::Literal(CypherLiteral::Null), Some(slot.key_column())));
+                target_types.push(DataType::Binary);
+                continue;
+            }
             if slot.keeps_lineage {
                 let (key_expr, prob_expr) = match own {
                     Some(r) => {
@@ -3507,6 +3578,11 @@ impl<'a> LocyPlanBuilder<'a> {
         for (index, prob_ref) in prob_refs_by_ref {
             if let Some(is_ref) = is_refs.get_mut(index) {
                 is_ref.prob_ref = Some(prob_ref);
+            }
+        }
+        for (index, lineage) in negated_lineage_by_ref {
+            if let Some(is_ref) = is_refs.get_mut(index) {
+                is_ref.negated_lineage = Some(lineage);
             }
         }
 

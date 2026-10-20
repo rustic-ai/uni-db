@@ -7,6 +7,7 @@
 //! Uni storage, including DataFusion-based columnar execution, procedure
 //! dispatch, and result normalization.
 
+mod copy;
 pub mod core;
 pub mod ddl_procedures;
 pub mod path_builder;

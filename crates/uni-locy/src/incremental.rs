@@ -162,6 +162,17 @@ impl MutationFootprint {
         !self.opaque && !self.entities_modified && self.properties.is_empty()
     }
 
+    /// Adds what `other` can change: the footprint of running both
+    /// mutations, in either order.
+    pub fn extend(&mut self, other: &Self) {
+        self.nodes_changed |= other.nodes_changed;
+        self.node_labels.extend(&other.node_labels);
+        self.edge_types.extend(&other.edge_types);
+        self.properties.extend(&other.properties);
+        self.entities_modified |= other.entities_modified;
+        self.opaque |= other.opaque;
+    }
+
     fn change_everything_about_nodes(&mut self) {
         self.nodes_changed = true;
         self.node_labels.set_all();
@@ -774,6 +785,28 @@ mod tests {
         assert!(flag(&rows, "lonely"));
         assert!(!flag(&rows, "owns"));
         assert!(!flag(&rows, "big"));
+    }
+
+    #[test]
+    fn extended_footprint_affects_what_either_mutation_affects() {
+        let program = compile(LAYERED);
+        let mut fp = mutation(
+            "MATCH (a:Person {name: 'x'}), (b:Person {name: 'y'}) CREATE (a)-[:KNOWS]->(b)",
+        );
+        fp.extend(&mutation("CREATE (:Company {size: 3})"));
+        let rows = affected_by_rule(&program, &fp);
+        assert!(flag(&rows, "knows"));
+        assert!(flag(&rows, "big"));
+        assert!(flag(&rows, "owns"));
+        assert!(fp.preserves_existing_entities(), "{fp:?}");
+        fp.extend(&mutation("MATCH (c:Company) SET c.size = 1"));
+        assert!(!fp.preserves_existing_entities(), "{fp:?}");
+        let mut opaque = MutationFootprint::default();
+        opaque.extend(&MutationFootprint {
+            opaque: true,
+            ..MutationFootprint::default()
+        });
+        assert!(affected_strata(&program, &opaque).iter().all(|a| *a));
     }
 
     #[test]

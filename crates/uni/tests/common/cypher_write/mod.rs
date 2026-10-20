@@ -17,6 +17,7 @@ pub mod merge_failclosed_test;
 pub mod merge_keyed_endpoint_semantics;
 pub mod mutation_stress_test;
 pub mod partial_lance_delete_test;
+pub mod partial_lance_edge_state;
 pub mod partial_lance_edges_test;
 pub mod partial_lance_writes_test;
 pub mod plan_cache_param_fold_test;

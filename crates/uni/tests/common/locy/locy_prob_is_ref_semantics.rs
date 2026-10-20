@@ -479,3 +479,466 @@ async fn exact_matches_possible_worlds_and_default_agrees_without_sharing() -> R
     assert!(agreed > 0 && shared > 0, "agreed {agreed}, shared {shared}");
     Ok(())
 }
+
+// ── Negation inside exact formulas ─────────────────────────────────────────
+
+/// One possible world of a graph's edges: each edge present or not.
+struct World<'a> {
+    edges: &'a [(&'a str, &'a str, f64)],
+    mask: u32,
+}
+
+impl World<'_> {
+    /// Some `a → b` edge is present.
+    fn link(&self, a: &str, b: &str) -> bool {
+        self.edges
+            .iter()
+            .enumerate()
+            .any(|(i, (x, y, _))| self.mask & (1 << i) != 0 && *x == a && *y == b)
+    }
+
+    /// `b` is reachable from `a` by a path of at least one present edge.
+    fn reach(&self, a: &str, b: &str) -> bool {
+        let mut frontier = vec![a];
+        let mut seen: Vec<&str> = Vec::new();
+        while let Some(node) = frontier.pop() {
+            for (i, (x, y, _)) in self.edges.iter().enumerate() {
+                if self.mask & (1 << i) != 0 && *x == node && !seen.contains(y) {
+                    seen.push(y);
+                    frontier.push(y);
+                }
+            }
+        }
+        seen.contains(&b)
+    }
+}
+
+/// The probability, over the possible worlds of `edges`, that `holds`.
+fn worlds_probability(edges: &[(&str, &str, f64)], holds: impl Fn(&World<'_>) -> bool) -> f64 {
+    let mut total = 0.0;
+    for mask in 0u32..(1 << edges.len()) {
+        let world = World { edges, mask };
+        if holds(&world) {
+            let mut weight = 1.0;
+            for (i, (_, _, p)) in edges.iter().enumerate() {
+                weight *= if mask & (1 << i) != 0 { *p } else { 1.0 - p };
+            }
+            total += weight;
+        }
+    }
+    total
+}
+
+/// `link`: one fact per connected pair, the noisy-OR of its edges.
+const LINK: &str = "CREATE RULE link AS \
+     MATCH (a:N)-[e:E]->(b:N) \
+     FOLD p = MNOR(e.p) YIELD KEY a, KEY b, p \n";
+
+/// A rule `odd` over `reach` and `link` with an `IS NOT` whose negated facts
+/// can share edges with the positive part, and its possible-worlds meaning.
+struct NegatedProgram {
+    /// The `odd` rule's text.
+    rule: &'static str,
+    /// Whether `odd` keys on a middle node `m` too.
+    has_mid: bool,
+    /// `odd(a, m, b)` in one world (`m` is ignored without a middle key).
+    holds: fn(&World<'_>, &str, &str, &str) -> bool,
+}
+
+const NEGATED_PROGRAMS: &[NegatedProgram] = &[
+    // reach(a, b) AND NOT link(m, b)
+    NegatedProgram {
+        rule: "CREATE RULE odd AS \
+             MATCH (a:N), (m:N) WHERE a IS reach TO b, m IS NOT link TO b \
+             FOLD prob = MNOR(1.0) YIELD KEY a, KEY m, KEY b, prob \n",
+        has_mid: true,
+        holds: |w, a, m, b| w.reach(a, b) && !w.link(m, b),
+    },
+    // reach(a, b) AND NOT link(a, b): reachable, but not directly
+    NegatedProgram {
+        rule: "CREATE RULE odd AS \
+             MATCH (a:N) WHERE a IS reach TO b, a IS NOT link TO b \
+             FOLD prob = MNOR(1.0) YIELD KEY a, KEY b, prob \n",
+        has_mid: false,
+        holds: |w, a, _, b| w.reach(a, b) && !w.link(a, b),
+    },
+    // reach(a, b) AND NOT reach(b, a)
+    NegatedProgram {
+        rule: "CREATE RULE odd AS \
+             MATCH (a:N) WHERE a IS reach TO b, b IS NOT reach TO a \
+             FOLD prob = MNOR(1.0) YIELD KEY a, KEY b, prob \n",
+        has_mid: false,
+        holds: |w, a, _, b| w.reach(a, b) && !w.reach(b, a),
+    },
+    // an edge a → b AND NOT reach(a, b): the edge is part of the negated
+    // fact's lineage, so the conjunction is impossible
+    NegatedProgram {
+        rule: "CREATE RULE odd AS \
+             MATCH (a:N)-[e:E]->(b:N) WHERE a IS NOT reach TO b \
+             FOLD prob = MNOR(e.p) YIELD KEY a, KEY b, prob \n",
+        has_mid: false,
+        holds: |w, a, _, b| w.link(a, b) && !w.reach(a, b),
+    },
+];
+
+/// The `reach` rules alone, without their `QUERY`.
+fn reach_rules() -> &'static str {
+    REACH.split("QUERY").next().expect("REACH has rules")
+}
+
+/// A program's `odd` facts as `((a, m, b), prob)` (`m` empty without a
+/// middle key), and its warning codes.
+async fn run_odd(
+    db: &Uni,
+    case: &NegatedProgram,
+    config: LocyConfig,
+) -> Result<(Vec<((String, String, String), f64)>, Vec<String>)> {
+    let ret = if case.has_mid {
+        "QUERY odd RETURN a.name AS src, m.name AS mid, b.name AS dst, prob"
+    } else {
+        "QUERY odd RETURN a.name AS src, '' AS mid, b.name AS dst, prob"
+    };
+    let program = format!("{}\n{LINK}{}{ret}", reach_rules(), case.rule);
+    let result = db
+        .session()
+        .locy_with(&program)
+        .with_config(config)
+        .run()
+        .await?;
+    let rows = result
+        .rows()
+        .map(|rows| {
+            rows.iter()
+                .map(|r| {
+                    let name =
+                        |c: &str| r.get(c).and_then(Value::as_str).unwrap_or("?").to_string();
+                    let p = r.get("prob").and_then(Value::as_f64).unwrap_or(f64::NAN);
+                    ((name("src"), name("mid"), name("dst")), p)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let warnings = result
+        .warnings()
+        .iter()
+        .map(|w| format!("{:?}", w.code))
+        .collect();
+    Ok((rows, warnings))
+}
+
+fn mode(exact: bool) -> LocyConfig {
+    LocyConfig {
+        max_iterations: 1000,
+        exact_probability: exact,
+        ..Default::default()
+    }
+}
+
+/// `reach(s, t) AND NOT link(m, t)` on the diamond: both rest on `m → t`.
+///
+/// Possible worlds: (X ∨ (Y ∧ Z)) ∧ ¬Z = X ∧ ¬Z = 0.7 · 0.5 = 0.35, where X
+/// = s→t, Y = s→m, Z = m→t. Default mode multiplies the independent factors,
+/// 0.745 · (1 − 0.5) = 0.3725, and must say it is not exact.
+#[tokio::test]
+async fn negated_fact_sharing_an_edge_is_a_negated_literal_in_exact_mode() -> Result<()> {
+    let db = seeded(DIAMOND).await?;
+    let case = &NEGATED_PROGRAMS[0];
+    let expected = worlds_probability(DIAMOND, |w| (case.holds)(w, "s", "m", "t"));
+    assert_close(expected, 0.35, "possible worlds");
+    let key = ("s".to_string(), "m".to_string(), "t".to_string());
+    let (exact, _) = run_odd(&db, case, mode(true)).await?;
+    let p = exact.iter().find(|(k, _)| *k == key).map(|(_, p)| *p);
+    assert_close(p.expect("odd(s, m, t)"), 0.35, "exact odd(s, m, t)");
+    let (default, warnings) = run_odd(&db, case, mode(false)).await?;
+    let p = default.iter().find(|(k, _)| *k == key).map(|(_, p)| *p);
+    assert_close(p.expect("odd(s, m, t)"), 0.3725, "default odd(s, m, t)");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w == "SharedProbabilisticDependency"),
+        "the negated fact shares m → t with the positive one: {warnings:?}"
+    );
+    Ok(())
+}
+
+/// An edge and the negation of a reachability resting on it cannot both
+/// hold: exact mode gives 0, default mode `p · (1 − reach)` and a warning.
+#[tokio::test]
+async fn an_edge_and_the_negation_of_its_own_reachability_is_impossible() -> Result<()> {
+    let db = seeded(DIAMOND).await?;
+    let case = &NEGATED_PROGRAMS[3];
+    let (exact, _) = run_odd(&db, case, mode(true)).await?;
+    for (key, p) in &exact {
+        assert_close(*p, 0.0, &format!("exact odd{key:?}"));
+    }
+    assert!(!exact.is_empty());
+    let (_, warnings) = run_odd(&db, case, mode(false)).await?;
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w == "SharedProbabilisticDependency"),
+        "{warnings:?}"
+    );
+    Ok(())
+}
+
+/// Over random small graphs and programs with `IS NOT` over lineage shared
+/// with the positive part: exact mode equals the possible-worlds probability
+/// of every fact, every fact of nonzero probability is derived, and wherever
+/// no shared-lineage warning is raised the default mode equals it too.
+#[tokio::test]
+async fn negation_exact_matches_possible_worlds_and_default_agrees_without_sharing() -> Result<()> {
+    let mut rng = Lcg(0x0dd_5eed);
+    let mut agreed = 0;
+    let mut shared = 0;
+    for round in 0..24 {
+        let node_count = 3 + rng.next(2) as usize;
+        let edge_count = 2 + rng.next(4) as usize;
+        let edges: Vec<(&str, &str, f64)> = (0..edge_count)
+            .map(|_| {
+                let a = NODES[rng.next(node_count as u64) as usize];
+                let b = NODES[rng.next(node_count as u64) as usize];
+                let p = (1 + rng.next(9)) as f64 / 10.0;
+                (a, b, p)
+            })
+            .collect();
+        let case = &NEGATED_PROGRAMS[round % NEGATED_PROGRAMS.len()];
+        let db = seeded(&edges).await?;
+        let mut names: Vec<&str> = edges.iter().flat_map(|(a, b, _)| [*a, *b]).collect();
+        names.sort_unstable();
+        names.dedup();
+        let mids: Vec<&str> = if case.has_mid {
+            names.clone()
+        } else {
+            vec![""]
+        };
+        let (exact, _) = run_odd(&db, case, mode(true)).await?;
+        let (default, warnings) = run_odd(&db, case, mode(false)).await?;
+        let sharing = warnings
+            .iter()
+            .any(|w| w == "SharedProbabilisticDependency");
+        if sharing {
+            shared += 1;
+        } else {
+            agreed += 1;
+        }
+        for a in &names {
+            for m in &mids {
+                for b in &names {
+                    let key = (a.to_string(), m.to_string(), b.to_string());
+                    let worlds = worlds_probability(&edges, |w| (case.holds)(w, a, m, b));
+                    let what = format!("odd{key:?} over {edges:?} in\n{}", case.rule);
+                    match exact.iter().find(|(k, _)| *k == key) {
+                        Some((_, p)) => assert_close(*p, worlds, &format!("exact {what}")),
+                        None => assert_close(0.0, worlds, &format!("missing {what}")),
+                    }
+                    if !sharing && let Some((_, p)) = default.iter().find(|(k, _)| *k == key) {
+                        assert_close(*p, worlds, &format!("default (no sharing) {what}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(agreed > 0 && shared > 0, "agreed {agreed}, shared {shared}");
+    Ok(())
+}
+
+// ── EXPLAIN and TopKProofs read the same references as the lineage ─────────
+
+/// The name of a node bound in an EXPLAIN node's bindings.
+fn bound_name(node: &uni_locy::DerivationNode, var: &str) -> String {
+    match node.bindings.get(var) {
+        Some(Value::Node(n)) => n
+            .properties
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string(),
+        other => panic!("`{var}` is not a node in {:?}: {other:?}", node.bindings),
+    }
+}
+
+/// The EXPLAIN tree of `reach`, every fact.
+async fn explain_reach(db: &Uni, config: LocyConfig) -> Result<uni_locy::DerivationNode> {
+    let program = format!("{}\nEXPLAIN RULE reach", reach_rules());
+    let result = db
+        .session()
+        .locy_with(&program)
+        .with_config(config)
+        .run()
+        .await?;
+    Ok(result
+        .command_results()
+        .iter()
+        .find_map(|c| c.as_explain())
+        .expect("an EXPLAIN result")
+        .clone())
+}
+
+/// Every derivation EXPLAIN shows for `reach` references exactly the facts
+/// of `reach`'s lineage, over random graphs: a direct edge none, a step
+/// `a → m` then `reach(m, b)` that one fact — even though `mid` is not
+/// yielded. Each fact's derivations are one per edge and per (edge,
+/// referenced fact), whatever their values.
+#[tokio::test]
+async fn explain_shows_the_referenced_fact_of_every_derivation() -> Result<()> {
+    let mut rng = Lcg(0xe_c0de);
+    let mut referenced = 0;
+    for _ in 0..12 {
+        let node_count = 3 + rng.next(3) as usize;
+        let edge_count = 2 + rng.next(5) as usize;
+        let edges: Vec<(&str, &str, f64)> = (0..edge_count)
+            .map(|_| {
+                let a = NODES[rng.next(node_count as u64) as usize];
+                let b = NODES[rng.next(node_count as u64) as usize];
+                // Few distinct values, so derivations collide on value.
+                let p = (1 + rng.next(2)) as f64 / 4.0;
+                (a, b, p)
+            })
+            .collect();
+        let db = seeded(&edges).await?;
+        let all = World {
+            edges: &edges,
+            mask: u32::MAX,
+        };
+        for exact in [false, true] {
+            let tree = explain_reach(&db, mode(exact)).await?;
+            // (a, b) -> [referenced (m, b) per derivation, `None` if direct]
+            let mut derivations: Vec<((String, String), Option<(String, String)>)> = Vec::new();
+            for d in &tree.children {
+                let fact = (bound_name(d, "a"), bound_name(d, "b"));
+                if d.clause_index == 0 {
+                    assert!(d.children.is_empty(), "a direct edge references nothing");
+                    derivations.push((fact, None));
+                    continue;
+                }
+                // A referenced fact is expanded where it first appears and a
+                // leaf carrying its bindings elsewhere, so every child names it.
+                let targets: Vec<(String, String)> = d
+                    .children
+                    .iter()
+                    .map(|c| {
+                        assert_eq!(c.rule, "reach");
+                        (bound_name(c, "a"), bound_name(c, "b"))
+                    })
+                    .collect();
+                let target = targets
+                    .first()
+                    .unwrap_or_else(|| panic!("derivation of {fact:?} references no fact"))
+                    .clone();
+                assert!(
+                    targets.iter().all(|t| *t == target),
+                    "one derivation references one fact: {targets:?}"
+                );
+                assert_eq!(target.1, fact.1, "reach(m, b) for reach(a, b)");
+                derivations.push((fact, Some(target)));
+                referenced += 1;
+            }
+            // Expected from the graph: one derivation per edge a → b, and per
+            // edge a → m with b reachable from m.
+            let mut expected: Vec<((String, String), Option<(String, String)>)> = Vec::new();
+            for (a, m, _) in &edges {
+                expected.push(((a.to_string(), m.to_string()), None));
+                for b in NODES {
+                    if all.reach(m, b) {
+                        expected.push((
+                            (a.to_string(), b.to_string()),
+                            Some((m.to_string(), b.to_string())),
+                        ));
+                    }
+                }
+            }
+            derivations.sort();
+            expected.sort();
+            assert_eq!(derivations, expected, "exact={exact} over {edges:?}");
+        }
+    }
+    assert!(referenced > 0);
+    Ok(())
+}
+
+/// `TopKProofs { k }` evaluates each fact's `k` most probable rows exactly,
+/// the referenced facts included: with every row kept it is the
+/// possible-worlds probability, the shared `C → D` counted once.
+#[tokio::test]
+async fn topk_proofs_evaluate_the_lineage_of_their_rows() -> Result<()> {
+    let edges = [
+        ("A", "B", 0.5),
+        ("A", "C", 0.3),
+        ("B", "C", 0.4),
+        ("C", "D", 0.6),
+    ];
+    let db = seeded(&edges).await?;
+    let topk = |k: u32| LocyConfig {
+        max_iterations: 1000,
+        semiring: uni_locy::SemiringKind::TopKProofs { k },
+        ..Default::default()
+    };
+    let all = run_with(&db, REACH, topk(8)).await?;
+    for ((src, dst), p) in &all.probs {
+        assert_close(
+            *p,
+            reach_probability(&edges, src, dst),
+            &format!("TopKProofs(8) reach({src},{dst})"),
+        );
+    }
+    assert_close(all.prob("A", "D"), 0.264, "TopKProofs(8) reach(A, D)");
+    // k = 1: reach(A, D)'s best row is A→C then reach(C, D) (0.18 against
+    // 0.12 through B), so the value is P(AC ∧ CD).
+    let one = run_with(&db, REACH, topk(1)).await?;
+    assert_close(one.prob("A", "D"), 0.3 * 0.6, "TopKProofs(1) reach(A, D)");
+    // reach(A, C)'s best row is the direct 0.3 edge, over A→B→C's 0.2.
+    assert_close(one.prob("A", "C"), 0.3, "TopKProofs(1) reach(A, C)");
+    Ok(())
+}
+
+/// [`run`] under an explicit configuration.
+async fn run_with(db: &Uni, program: &str, config: LocyConfig) -> Result<Outcome> {
+    let result = db
+        .session()
+        .locy_with(program)
+        .with_config(config)
+        .run()
+        .await?;
+    let probs = result
+        .rows()
+        .map(|rows| {
+            rows.iter()
+                .map(|r| {
+                    let name =
+                        |c: &str| r.get(c).and_then(Value::as_str).unwrap_or("?").to_string();
+                    let p = r.get("prob").and_then(Value::as_f64).unwrap_or(f64::NAN);
+                    ((name("src"), name("dst")), p)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let warnings = result
+        .warnings()
+        .iter()
+        .map(|w| format!("{:?}", w.code))
+        .collect();
+    Ok(Outcome { probs, warnings })
+}
+
+/// Two `IS NOT` references to one PROB rule in a clause each contribute
+/// their own complement: (1 − risky(a)) · (1 − risky(b)).
+#[tokio::test]
+async fn two_negations_of_one_rule_each_contribute_their_complement() -> Result<()> {
+    let db = seeded(DIAMOND).await?;
+    let program = "CREATE RULE risky AS \
+         MATCH (a:N)-[e:E]->(b:N) \
+         FOLD r = MNOR(e.p) YIELD KEY a, r \n\
+         CREATE RULE both_clear AS \
+         MATCH (a:N)-[:E]->(b:N) WHERE a IS NOT risky, b IS NOT risky \
+         YIELD KEY a, KEY b, 1.0 AS prob PROB \n\
+         QUERY both_clear RETURN a.name AS src, b.name AS dst, prob";
+    for exact in [false, true] {
+        let out = run(&db, program, exact).await?;
+        // risky(s) = 1 − 0.3 · 0.7 = 0.79, risky(m) = 0.5, t is not risky.
+        assert_close(out.prob("s", "m"), 0.21 * 0.5, "both_clear(s, m)");
+        assert_close(out.prob("m", "t"), 0.5, "both_clear(m, t)");
+        assert_close(out.prob("s", "t"), 0.21, "both_clear(s, t)");
+    }
+    Ok(())
+}

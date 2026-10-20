@@ -110,42 +110,30 @@ async fn test_edge_export_failure() -> anyhow::Result<()> {
         let batch = batch_result?;
         count += batch.num_rows();
 
-        // Check that required columns exist from the main edge table schema
+        // The export carries the edge's identity and its user properties —
+        // never the storage table's columns (`src_vid`, `type`, `props_json`).
         let schema = batch.schema();
-        // The main edge table uses: _eid, src_vid, dst_vid, type, props_json, etc.
-        assert!(schema.column_with_name("_eid").is_some());
-        assert!(schema.column_with_name("src_vid").is_some());
-        assert!(schema.column_with_name("dst_vid").is_some());
-        assert!(schema.column_with_name("type").is_some());
-        // Properties are stored in props_json column in the main edge table
-        assert!(schema.column_with_name("props_json").is_some());
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, ["_eid", "_src", "_dst", "since"]);
 
-        // Verify the actual data if possible
         use arrow_array::Array;
         if batch.num_rows() > 0 {
-            let src_array = batch.column_by_name("src_vid").unwrap();
-            let dst_array = batch.column_by_name("dst_vid").unwrap();
-            let props_json_array = batch.column_by_name("props_json").unwrap();
-
-            // Check first row
-            if let Some(src) = src_array
-                .as_any()
-                .downcast_ref::<arrow_array::UInt64Array>()
-                && let Some(dst) = dst_array
+            let u64_at = |name: &str| {
+                batch
+                    .column_by_name(name)
+                    .unwrap()
                     .as_any()
                     .downcast_ref::<arrow_array::UInt64Array>()
-                && let Some(props) = props_json_array
-                    .as_any()
-                    .downcast_ref::<arrow_array::LargeBinaryArray>()
-            {
-                // props_json is a CypherValue binary blob containing {"since": 2022}
-                let bytes = props.value(0);
-                let uni_val = uni_common::cypher_value_codec::decode(bytes).expect("decode");
-                let json_val: serde_json::Value = uni_val.into();
-                let props_str = json_val.to_string();
-                if src.value(0) == 0 && dst.value(0) == 1 && props_str.contains("2022") {
-                    found_correct_edge = true;
-                }
+                    .unwrap()
+                    .value(0)
+            };
+            let since = uni_store::storage::arrow_convert::arrow_to_value(
+                batch.column_by_name("since").unwrap().as_ref(),
+                0,
+                None,
+            )?;
+            if u64_at("_src") == 0 && u64_at("_dst") == 1 && since == unival!(2022) {
+                found_correct_edge = true;
             }
         }
     }

@@ -133,70 +133,65 @@ impl ResultNormalizer {
         }
     }
 
-    /// Returns `true` if the key is a user-facing property (not an internal or reserved field).
+    /// Whether a top-level key of an entity map is a user property.
+    ///
+    /// The shared reserved-name rule alone decides. `label`, `labels`, `type`
+    /// and `properties` are ordinary property names (see
+    /// [`uni_common::core::schema::RESERVED_PROPERTY_NAMES`]); this used to
+    /// drop `label`, `type` and `properties` as well, so such a property
+    /// vanished from a node or edge built from a flattened map while `n.label`
+    /// still read it.
     fn is_user_property(key: &str) -> bool {
         !uni_common::core::schema::is_reserved_property_name(key)
-            && key != "properties"
-            && key != "label"
-            && key != "type"
-            && key != "overflow_json"
     }
 
-    /// Extract properties from a dedicated "properties" field (if present) or from inline fields.
+    /// The user properties of an entity map.
     ///
-    /// This handles two property storage formats:
-    /// 1. A "properties" field containing LargeBinary (JSON) or a Map
-    /// 2. Inline fields in the map (non-underscore fields)
+    /// Where they live is decided structurally, by
+    /// [`uni_common::value::entity_property_container`] — the rule `keys()`
+    /// and `properties()` use — never by excluding colliding names:
+    ///
+    /// 1. `_all_props` (schemaless and traverse scans): its entries, plus the
+    ///    inline user keys beside it (declared properties loaded as columns);
+    /// 2. a `properties` map (a serialised entity, e.g. a path element): its
+    ///    entries, the other keys being entity fields;
+    /// 3. otherwise (a flattened projection): every non-reserved key.
+    ///
+    /// A `properties` key holding JSON bytes is the legacy serialised form.
     fn extract_properties_from_field_or_inline(
         map: &HashMap<String, Value>,
     ) -> HashMap<String, Value> {
-        // First try to extract from a dedicated "properties" field
-        if let Some(props_value) = map.get("properties") {
-            match props_value {
-                // Properties stored as a Map
-                Value::Map(m) => {
-                    return Self::prune_null_properties(
-                        m.iter()
-                            .map(|(k, v)| (k.clone(), Self::normalize_property_value(v.clone())))
-                            .collect(),
-                    );
-                }
-                // Properties stored as Bytes (JSON serialized)
-                Value::Bytes(bytes) => {
-                    if let Ok(props) =
-                        serde_json::from_slice::<HashMap<String, serde_json::Value>>(bytes)
-                    {
-                        return Self::prune_null_properties(
-                            props
-                                .into_iter()
-                                .map(|(k, v)| (k, Self::json_value_to_value(v)))
-                                .collect(),
-                        );
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Expand _all_props JSONB blob (used by traverse and schemaless scan paths).
-        // _all_props is decoded from JSONB to Value::Map by arrow_to_value.
-        if let Some(Value::Map(all_props)) = map.get("_all_props") {
-            let mut properties: HashMap<String, Value> = all_props
-                .iter()
+        let normalized = |m: &HashMap<String, Value>| -> HashMap<String, Value> {
+            m.iter()
                 .map(|(k, v)| (k.clone(), Self::normalize_property_value(v.clone())))
-                .collect();
-            // Merge any inline non-internal properties (schema-defined props loaded as columns)
-            for (k, v) in map.iter() {
-                if Self::is_user_property(k) {
-                    properties
-                        .entry(k.clone())
-                        .or_insert_with(|| Self::normalize_property_value(v.clone()));
+                .collect()
+        };
+
+        if let Some(container) = uni_common::value::entity_property_container(map) {
+            let mut properties = normalized(container);
+            if map.contains_key("_all_props") {
+                for (k, v) in map.iter() {
+                    if Self::is_user_property(k) {
+                        properties
+                            .entry(k.clone())
+                            .or_insert_with(|| Self::normalize_property_value(v.clone()));
+                    }
                 }
             }
             return Self::prune_null_properties(properties);
         }
 
-        // Fall back to extracting inline properties (excluding internal and reserved fields)
+        if let Some(Value::Bytes(bytes)) = map.get("properties")
+            && let Ok(props) = serde_json::from_slice::<HashMap<String, serde_json::Value>>(bytes)
+        {
+            return Self::prune_null_properties(
+                props
+                    .into_iter()
+                    .map(|(k, v)| (k, Self::json_value_to_value(v)))
+                    .collect(),
+            );
+        }
+
         Self::prune_null_properties(
             map.iter()
                 .filter(|(k, _)| Self::is_user_property(k))
@@ -654,5 +649,63 @@ mod tests {
         assert_eq!(edge.properties.get("weight"), Some(&Value::Int(7)));
         assert!(!edge.properties.contains_key("since"));
         assert!(!edge.properties.contains_key("name"));
+    }
+
+    /// A flattened entity map keeps user properties named like entity
+    /// fields: `label`, `labels`, `type`, and a non-map `properties`.
+    #[test]
+    fn flattened_entity_keeps_colliding_property_names() {
+        let user = |extra: &[(&str, Value)]| {
+            let mut m: HashMap<String, Value> = ["label", "labels", "type", "properties"]
+                .iter()
+                .map(|k| ((*k).to_string(), Value::String(format!("{k}-v"))))
+                .collect();
+            for (k, v) in extra {
+                m.insert((*k).to_string(), v.clone());
+            }
+            m
+        };
+        let want = user(&[]);
+
+        let node = user(&[
+            ("_vid", Value::Int(1)),
+            ("_labels", Value::List(vec![Value::String("L".into())])),
+        ]);
+        match ResultNormalizer::normalize_value(Value::Map(node)).unwrap() {
+            Value::Node(n) => assert_eq!(n.properties, want),
+            other => panic!("expected a node, got {other:?}"),
+        }
+
+        let edge = user(&[
+            ("_eid", Value::Int(2)),
+            ("_type", Value::String("R".into())),
+            ("_src", Value::Int(1)),
+            ("_dst", Value::Int(3)),
+        ]);
+        match ResultNormalizer::normalize_value(Value::Map(edge)).unwrap() {
+            Value::Edge(e) => {
+                assert_eq!(e.properties, want);
+                assert_eq!(e.edge_type, "R");
+            }
+            other => panic!("expected an edge, got {other:?}"),
+        }
+
+        // Beside `_all_props`, the inline columns are user properties too.
+        let mut with_all = HashMap::from([
+            ("_vid".to_string(), Value::Int(1)),
+            ("_labels".to_string(), Value::List(vec![])),
+            (
+                "_all_props".to_string(),
+                Value::Map(HashMap::from([(
+                    "label".to_string(),
+                    Value::String("label-v".into()),
+                )])),
+            ),
+        ]);
+        with_all.extend(user(&[]).into_iter().filter(|(k, _)| k != "label"));
+        match ResultNormalizer::normalize_value(Value::Map(with_all)).unwrap() {
+            Value::Node(n) => assert_eq!(n.properties, want),
+            other => panic!("expected a node, got {other:?}"),
+        }
     }
 }
