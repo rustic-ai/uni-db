@@ -252,7 +252,7 @@ class UniWriteStalledError(UniError):
     hard_limit: int
 
 class UniRegexBacktrackLimitError(UniError):
-    """A `=~` match needed more backtracking steps than allowed.
+    r"""A `=~` match needed more backtracking steps than allowed.
 
     Patterns with look-around, backreferences, atomic groups, possessive
     quantifiers and a few other constructs (`\b`, `\X`, `\b{g}`, `(?c)`)
