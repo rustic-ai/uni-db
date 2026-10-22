@@ -34,7 +34,9 @@ use uni_query::{ExecuteResult, ExplainOutput, ProfileOutput, QueryCursor, QueryR
 fn read_only_violation(cypher: &str) -> UniError {
     UniError::Query {
         message: "Session.query() is read-only. Mutation clauses (CREATE, MERGE, DELETE, SET, \
-             REMOVE) require a transaction. Use session.tx() to start one."
+             REMOVE) and mutating procedures require a transaction. Use session.tx() to start \
+             one, or session.run() for an administrative procedure such as \
+             uni.admin.snapshot.restore()."
             .to_string(),
         query: Some(cypher.to_string()),
     }
@@ -433,16 +435,72 @@ impl Session {
     /// `Read`. Unknown procedure names return `false` — they are not
     /// classifiable here and fail later at dispatch if truly absent. Used by the
     /// read-only gate to reject write procedures alongside write clauses.
+    ///
+    /// Executor built-ins (`uni.admin.*`, `uni.schema.create*`/`drop*`) are not
+    /// in either registry; `uni_query::validate_read_only_with` classifies them
+    /// from `uni_query::BUILTIN_PROCEDURE_MODES` before consulting this.
     pub(crate) fn procedure_is_write(&self, name: &str) -> bool {
         use uni_plugin::traits::procedure::ProcedureMode;
-        let Ok(qname) = uni_plugin::QName::parse(name) else {
-            return false;
-        };
         let is_write = |reg: &uni_plugin::PluginRegistry| {
-            reg.procedure(&qname)
-                .is_some_and(|e| !matches!(e.signature.mode, ProcedureMode::Read))
+            registered_mode(reg, name).is_some_and(|mode| !matches!(mode, ProcedureMode::Read))
         };
         is_write(&self.session_plugin_registry) || is_write(&self.db.plugin_registry)
+    }
+
+    /// Mode of `name` as registered: the session-local registry's, unless that
+    /// is `Read` (or absent) and the instance registry holds a more privileged
+    /// one; `None` when neither holds it.
+    fn registered_procedure_mode(
+        &self,
+        name: &str,
+    ) -> Option<uni_plugin::traits::procedure::ProcedureMode> {
+        use uni_plugin::traits::procedure::ProcedureMode;
+        match (
+            registered_mode(&self.session_plugin_registry, name),
+            registered_mode(&self.db.plugin_registry, name),
+        ) {
+            (Some(ProcedureMode::Read), Some(other)) => Some(other),
+            (Some(mode), _) => Some(mode),
+            (None, other) => other,
+        }
+    }
+
+    /// Run an administrative statement (only reads plus `Dbms`-mode
+    /// procedures) outside any transaction, authorized as `"dbms"`.
+    ///
+    /// These procedures act on the database as a whole — a restore rewinds
+    /// every table, a compaction rewrites storage — so no rollback could undo
+    /// them, and `uni.admin.snapshot.restore()` refuses to run inside a
+    /// transaction. A pinned session or a read-only database refuses them
+    /// with [`UniError::ReadOnly`].
+    async fn run_admin_statement(&self, cypher: &str) -> Result<QueryResult> {
+        if self.is_pinned() || self.db.writer.is_none() {
+            return Err(UniError::ReadOnly {
+                operation: "administrative procedure".to_string(),
+            });
+        }
+        self.authorize(cypher, "dbms")?;
+        let params = self.merge_params(HashMap::new());
+        self.run_before_query_hooks(cypher, QueryType::Cypher, &params)?;
+        let result = uni_query::scoped_with_session_context(
+            Arc::clone(&self.session_plugin_registry),
+            self.principal.clone(),
+            self.db.execute_internal_with_config(
+                cypher,
+                params.clone(),
+                self.db.config.clone(),
+                self.cancel_scope(None),
+            ),
+        )
+        .await;
+        self.metrics_inner
+            .queries_executed
+            .fetch_add(1, Ordering::Relaxed);
+        self.db.total_queries.fetch_add(1, Ordering::Relaxed);
+        if let Ok(ref qr) = result {
+            self.run_after_query_hooks(cypher, QueryType::Cypher, &params, qr.metrics());
+        }
+        result
     }
 
     /// Load a PyO3 (Python source) plugin into this **session**'s
@@ -627,9 +685,13 @@ impl Session {
     /// Classifies `cypher` as read or write using the same read-only oracle
     /// [`Session::query`] enforces ([`uni_query::validate_read_only_with`], with
     /// this session's write-procedure predicate). Read statements are forwarded
-    /// to [`Session::query`]. Write statements (CREATE / MERGE / DELETE / SET /
-    /// REMOVE, write `CALL { … }` subqueries, write/schema/dbms procedures) are
-    /// executed inside a fresh auto-commit transaction: begin, run, commit.
+    /// to [`Session::query`]. An administrative statement — one calling a
+    /// `Dbms`-mode procedure such as `uni.admin.snapshot.restore()` or
+    /// `uni.admin.compact()` and otherwise only reading — runs outside any
+    /// transaction, authorized as `"dbms"`, since no rollback could undo it.
+    /// Other write statements (CREATE / MERGE / DELETE / SET / REMOVE, write
+    /// `CALL { … }` subqueries, write/schema procedures) are executed inside a
+    /// fresh auto-commit transaction: begin, run, commit.
     ///
     /// Unlike [`Session::query`], this never rejects a write; unlike a bare
     /// [`Session::tx`] write, the transaction is committed for you. It is the
@@ -654,6 +716,10 @@ impl Session {
 
         if is_read {
             return self.query(&cypher).await;
+        }
+        // Administrative: runs outside a transaction (see `run_admin_statement`).
+        if uni_query::is_admin_statement(&ast, &|name| self.registered_procedure_mode(name)) {
+            return self.run_admin_statement(&cypher).await;
         }
 
         // Write path: auto-commit transaction. `tx.query` (not `tx.execute`)
@@ -1054,6 +1120,34 @@ impl Session {
 
     // ── Version Pinning ──────────────────────────────────────────────
 
+    /// Whether the bulk load `load_id`, run through this session, is applied.
+    ///
+    /// The session-scoped counterpart of [`crate::Uni::bulk_load_applied`]. On
+    /// a primary session it answers exactly what that does. On a forked
+    /// session it answers for loads run on that fork, whose commit marker and
+    /// receipt live in the fork's catalog namespace
+    /// (`catalog/forks/{fork_id}/`): `true` once the load passed its commit
+    /// point -- its rows are visible on the fork, or the fork completes it the
+    /// next time it is opened -- and `false` when it never did, so retrying it
+    /// is safe. Dropping the fork removes its markers and receipts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UniError::InvalidArgument`] if `load_id` is not a load id (a
+    /// UUID), and [`UniError::Internal`] if the store cannot be read: an
+    /// unreadable answer is never reported as `false`.
+    pub async fn bulk_load_applied(&self, load_id: &str) -> Result<bool> {
+        if uuid::Uuid::parse_str(load_id).is_err() {
+            return Err(UniError::InvalidArgument {
+                arg: "load_id".to_string(),
+                message: format!("'{load_id}' is not a bulk load id"),
+            });
+        }
+        uni_bulk::flush_intent::bulk_load_applied(&self.db.storage, load_id)
+            .await
+            .map_err(UniError::Internal)
+    }
+
     /// Pin this session to a specific snapshot version.
     ///
     /// All subsequent reads see data as of that version. Writes are rejected.
@@ -1163,6 +1257,7 @@ impl Session {
             cypher,
             guards,
             self.cancel_scope(None),
+            &|name| self.procedure_is_write(name),
         )
         .await
     }
@@ -1362,7 +1457,7 @@ impl Session {
             let key = cache.effective_key(text_key, &params);
             cache
                 .get(key, cypher, schema_version)
-                .map(|entry| entry.plan.clone())
+                .map(|entry| (entry.plan.clone(), Arc::clone(&entry.parameters)))
         });
 
         // Session-local plugin registry — threaded across the async
@@ -1373,7 +1468,7 @@ impl Session {
         let session_pr = Arc::clone(&self.session_plugin_registry);
         let session_principal = self.principal.clone();
 
-        if let Some(plan) = cached {
+        if let Some((plan, parameters)) = cached {
             // Cache hit — skip parse and plan, execute the cached plan directly.
             //
             // `parse_time`/`plan_time` stay zero on this path and that is
@@ -1381,6 +1476,7 @@ impl Session {
             // durations to report.
             // The deep clone for the owned plan happens here, off the cache mutex.
             self.plan_cache_metrics.hits.fetch_add(1, Ordering::Relaxed);
+            crate::api::impl_query::check_parameters(&parameters, &params)?;
             let plan = Arc::unwrap_or_clone(plan);
             return uni_query::scoped_with_session_context(
                 session_pr,
@@ -1403,8 +1499,11 @@ impl Session {
 
         // Parse
         let parse_start = std::time::Instant::now();
-        let ast = uni_cypher::parse(cypher).map_err(crate::api::impl_query::into_parse_error)?;
+        let (ast, parameters) = uni_cypher::parse_with_parameters(cypher)
+            .map_err(crate::api::impl_query::into_parse_error)?;
         let parse_time = parse_start.elapsed();
+        self.db
+            .check_statement_parameters(&ast, &parameters, &params, cypher)?;
 
         // Enforce read-only semantics for session queries — mutations require
         // a transaction for isolation, WAL protection, and commit hooks. This
@@ -1452,6 +1551,7 @@ impl Session {
                 PlanCacheEntry {
                     plan: Arc::clone(&plan),
                     query: cypher.to_string(),
+                    parameters: parameters.into(),
                     schema_version,
                     hit_count: 0,
                 },
@@ -1820,6 +1920,9 @@ pub(crate) struct PlanCacheEntry {
     /// queries can collide — without this check a collision would silently
     /// execute the other query's plan.
     pub(crate) query: String,
+    /// Every parameter the query references, checked against the supplied
+    /// ones on a hit, which skips the parse that would otherwise find them.
+    pub(crate) parameters: std::sync::Arc<[String]>,
     pub(crate) schema_version: u32,
     pub(crate) hit_count: u64,
 }
@@ -2127,6 +2230,15 @@ fn walk_authz_query(
     }
 }
 
+/// Mode of `name` in `registry`, or `None` when it does not hold `name`.
+fn registered_mode(
+    registry: &uni_plugin::PluginRegistry,
+    name: &str,
+) -> Option<uni_plugin::traits::procedure::ProcedureMode> {
+    let qname = uni_plugin::QName::parse(name).ok()?;
+    registry.procedure(&qname).map(|e| e.signature.mode)
+}
+
 pub(crate) fn authorize_query(
     db: &UniInner,
     principal: Option<&uni_plugin::traits::connector::Principal>,
@@ -2258,6 +2370,7 @@ mod plan_cache_tests {
             PlanCacheEntry {
                 plan: std::sync::Arc::new(scan_plan("plan_for_query_a")),
                 query: query_a.to_string(),
+                parameters: std::sync::Arc::from(Vec::new()),
                 schema_version,
                 hit_count: 0,
             },

@@ -31,7 +31,7 @@ fn ident(pair: &Pair<Rule>) -> String {
 }
 
 /// The name a `$parameter` token denotes: `$p`, `$1` or `` $`p q` ``.
-fn parameter_name(pair: &Pair<Rule>) -> String {
+pub(super) fn parameter_name(pair: &Pair<Rule>) -> String {
     normalize_identifier(&pair.as_str()[1..])
 }
 

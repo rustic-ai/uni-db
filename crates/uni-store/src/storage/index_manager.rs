@@ -827,6 +827,9 @@ impl IndexManager {
             );
             BuildOutcome::NotAttempted
         };
+        // Test-only seam (no-op without the `failpoints` feature): the
+        // artifact is committed and the catalog does not yet record it.
+        fail::fail_point!("index_manager::scalar-built");
         let row_count = self.built_row_count(&config.label, outcome).await;
         config.metadata = outcome.into_metadata(row_count);
 

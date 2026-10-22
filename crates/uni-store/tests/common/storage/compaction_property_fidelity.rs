@@ -377,7 +377,7 @@ async fn a_truncated_delete_still_tombstones_every_label() -> Result<()> {
 
     for label in ["Person", "Staff"] {
         let batch = storage
-            .scan_vertex_table(label, &["_vid", "_deleted"], None)
+            .scan_vertex_table(label, &["_vid", "_deleted", "_version"], None)
             .await?
             .expect("per-label table exists");
         let vids = batch
@@ -392,8 +392,17 @@ async fn a_truncated_delete_still_tombstones_every_label() -> Result<()> {
             .as_any()
             .downcast_ref::<arrow_array::BooleanArray>()
             .unwrap();
+        let versions = batch
+            .column_by_name("_version")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .unwrap();
+        // Rows are appended per write, a delete included, so the vertex's
+        // state in this table is its newest row.
         let row = (0..vids.len())
-            .find(|&i| vids.value(i) == vid.as_u64())
+            .filter(|&i| vids.value(i) == vid.as_u64())
+            .max_by_key(|&i| (versions.value(i), deleted.value(i)))
             .unwrap_or_else(|| panic!("{label} table has no row for the vertex"));
         assert!(
             deleted.value(row),

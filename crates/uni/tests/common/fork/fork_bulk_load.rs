@@ -19,8 +19,10 @@
 //!   load had seen absent was dropped with the primary rows written to it
 //!   since.
 //!
-//! A fork now stages on its own branch of each table and writes no crash
-//! marker.
+//! A fork now stages on its own branch of each table. Its crash marker and
+//! receipt live in the fork's own catalog namespace (`catalog/forks/{id}/`),
+//! never the database's, so a fork load is completed on the fork's branches
+//! and never reconciled against primary (wave P1, B3).
 //!
 //! Run with:
 //!   cargo nextest run -p uni-db --test integration -E 'test(fork_bulk_load)'
@@ -135,8 +137,18 @@ async fn fork_bulk_load_commit_publishes_on_the_fork_only() -> Result<()> {
             .collect(),
     )
     .await?;
+    let load_id = bulk.load_id().to_string();
     bulk.commit().await?;
     tx.commit().await?;
+    // Measured on df777cb3e: `false` -- a fork load kept no receipt.
+    assert!(
+        fork.bulk_load_applied(&load_id).await?,
+        "the fork's session reports its applied load"
+    );
+    assert!(
+        !db.bulk_load_applied(&load_id).await?,
+        "primary has no record of a fork's load"
+    );
     for flushed in [false, true] {
         if flushed {
             fork.flush().await?;
@@ -203,14 +215,13 @@ async fn fork_bulk_load_interrupted_leaves_primary_intact_at_reopen() -> Result<
     Ok(())
 }
 
-/// A fork load that fails part-way through publishing does not touch primary
-/// at the next open.
+/// A fork load that fails part-way through publishing is completed on the
+/// fork, in-process, and does not touch primary at the next open.
 ///
-/// The publish step is where a staging load writes the crash marker, so this
-/// is the case the fork's marker-free publish exists for. What it leaves on
-/// the fork is pinned too: the per-label table is published and the main
-/// table is not, the residual a fork has no reconciliation for (a fork's
-/// branches are outside the database's single crash marker).
+/// Measured on df777cb3e: the commit returned `Internal`, and the fork kept
+/// the per-label table published and the main table not -- 22 vertices by
+/// label, 0 label-less -- through reopen. The fork's commit record now drives
+/// the same in-process completion as primary's.
 #[tokio::test]
 async fn fork_bulk_load_failed_publish_leaves_primary_intact_at_reopen() -> Result<()> {
     use std::sync::atomic::Ordering::SeqCst;
@@ -225,21 +236,27 @@ async fn fork_bulk_load_failed_publish_leaves_primary_intact_at_reopen() -> Resu
         let mut bulk = tx.bulk_writer().batch_size(5).build()?;
         bulk.insert_vertices("P", rows(100, 20)).await?;
         // Fails after the per-label table is published, before `vertices`.
+        let load_id = bulk.load_id().to_string();
         uni_db::api::bulk::FAIL_AFTER_PERLABEL_WRITE.store(true, SeqCst);
         let r = bulk.commit().await;
         uni_db::api::bulk::FAIL_AFTER_PERLABEL_WRITE.store(false, SeqCst);
-        assert!(r.is_err(), "the injected fault must fail the publish");
-        tx.rollback();
-        assert_eq!(
-            count(&fork, NODES).await?,
-            22,
-            "residual: the fork's per-label table was published"
+        let stats = r?;
+        assert!(
+            stats
+                .warnings
+                .iter()
+                .any(|w| w.contains("injected failure after per-label vertex commit")),
+            "the failed first attempt is reported: {:?}",
+            stats.warnings
         );
+        tx.rollback();
+        assert_eq!(count(&fork, NODES).await?, 22, "the fork's label scan");
         assert_eq!(
             count(&fork, "MATCH (n) WHERE n.k >= 100 RETURN count(n)").await?,
-            0,
-            "residual: the fork's main table was not"
+            20,
+            "the fork's label-less scan sees the whole load too"
         );
+        assert!(fork.bulk_load_applied(&load_id).await?);
         drop(fork);
         let tx = s.tx().await?;
         tx.execute("CREATE (:P {k: 7})").await?;
@@ -251,6 +268,44 @@ async fn fork_bulk_load_failed_publish_leaves_primary_intact_at_reopen() -> Resu
         count(&db.session(), NODES).await?,
         3,
         "primary after reopen"
+    );
+    Ok(())
+}
+
+/// A fork's bulk commit must not write the fork's schema over primary's.
+///
+/// A fork's `SchemaManager` is `primary ⊕ overlay` but keeps primary's path, so
+/// `SchemaManager::save` from a fork writes the merged view to primary's
+/// `catalog/schema.json`. The bulk commit saved the schema whatever the
+/// session, which published a fork-local label on primary at the next open.
+#[tokio::test]
+async fn fork_bulk_load_does_not_leak_fork_schema_to_primary() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().to_str().unwrap().to_string();
+    {
+        let db = primary(&path).await?;
+        let s = db.session();
+        let fork = s.fork("bulk_schema").await?;
+        fork.fork_schema().label("ForkOnly").apply().await?;
+        let tx = fork.tx().await?;
+        let mut bulk = tx.bulk_writer().batch_size(5).build()?;
+        bulk.insert_vertices("ForkOnly", rows(0, 3)).await?;
+        bulk.commit().await?;
+        tx.commit().await?;
+        assert_eq!(
+            count(&fork, "MATCH (n:ForkOnly) RETURN count(n)").await?,
+            3,
+            "premise: the fork sees its load"
+        );
+        assert!(
+            !db.label_exists("ForkOnly").await?,
+            "primary must not know the fork-local label (live)"
+        );
+    }
+    let db = Uni::open(&path).config(config()).build().await?;
+    assert!(
+        !db.label_exists("ForkOnly").await?,
+        "primary must not know the fork-local label after reopen"
     );
     Ok(())
 }

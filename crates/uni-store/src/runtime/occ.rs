@@ -252,6 +252,23 @@ impl CommitRegistry {
         next
     }
 
+    /// Makes every transaction that began before this call fail its next
+    /// commit check with [`Conflict::HistoryTruncated`], and every later one
+    /// unaffected.
+    ///
+    /// For a change that rewrites state wholesale rather than through a
+    /// write-set (a snapshot restore): a transaction that read before it cannot
+    /// have its reads validated against it. Advances the sequence by two and
+    /// keeps one empty entry, so the oldest retained sequence is more than one
+    /// past every earlier read sequence and equal to every later one. Must be
+    /// called under the Writer's `flush_lock`, like [`Self::commit`].
+    pub(crate) fn fence(&mut self, seq: &AtomicU64) -> u64 {
+        let next = seq.fetch_add(2, Ordering::Relaxed) + 2;
+        self.entries.clear();
+        self.entries.push_back((next, WriteSet::default()));
+        next
+    }
+
     /// Checks a committing transaction against all commits newer than its read
     /// sequence. Returns the first [`Conflict`] found, or `None` if it may commit.
     ///
@@ -305,6 +322,25 @@ mod tests {
             vertices: HashSet::new(),
             edges: eids.iter().map(|&e| Eid::from(e)).collect(),
         }
+    }
+
+    #[test]
+    fn fence_aborts_earlier_readers_only() {
+        let seq = AtomicU64::new(0);
+        let mut reg = CommitRegistry::new(16);
+        let before = reg.commit(&seq, ws(&[1]));
+        let fenced = reg.fence(&seq);
+        assert!(matches!(
+            reg.check(before, &ws(&[9]), None),
+            Some(Conflict::HistoryTruncated { .. })
+        ));
+        assert!(reg.check(fenced, &ws(&[9]), None).is_none());
+        let after = reg.commit(&seq, ws(&[2]));
+        assert!(reg.check(fenced, &ws(&[3]), None).is_none());
+        assert!(matches!(
+            reg.check(fenced, &ws(&[2]), None),
+            Some(Conflict::WriteWrite { seq }) if seq == after
+        ));
     }
 
     #[test]

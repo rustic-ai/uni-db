@@ -213,7 +213,7 @@ async fn list_of_map_round_trips() -> anyhow::Result<()> {
 async fn map_via_create_label_procedure() -> anyhow::Result<()> {
     let db = Uni::temporary().build().await?;
     db.session()
-        .query(
+        .run(
             r#"CALL uni.schema.createLabel('Doc', {
                 "properties": { "attrs": { "type": "MAP<STRING, FLOAT>" } }
             })"#,

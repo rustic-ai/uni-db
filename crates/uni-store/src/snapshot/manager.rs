@@ -7,13 +7,62 @@ use crate::store_utils::{
 use anyhow::Result;
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use object_store::ObjectStore;
 use object_store::path::Path as ObjectStorePath;
-use std::collections::HashMap;
+use object_store::{ObjectStore, ObjectStoreExt};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tracing::instrument;
 use uni_common::core::fork::ForkId;
+use uni_common::core::schema::{IndexDefinition, Schema};
 use uni_common::core::snapshot::SnapshotManifest;
+
+/// The physical state an explicit snapshot rewinds the store to.
+///
+/// A [`SnapshotManifest`] records only the MVCC high-water mark, which a
+/// time-travel read filters on. Rewinding needs more, because flushed writes
+/// after the snapshot changed rows in place (a delete flips `_deleted` on the
+/// stored row) and created tables and index datasets the snapshot never had.
+/// So an explicit snapshot also records the storage version of every table and
+/// index dataset, each pinned by a tag so version cleanup keeps it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RestorePoint {
+    /// The snapshot this point belongs to.
+    pub snapshot_id: String,
+    /// The tag pinning every recorded version against cleanup.
+    pub tag: String,
+    /// Storage table name to its version at the snapshot.
+    pub tables: BTreeMap<String, u64>,
+    /// Index dataset, as a path relative to the store root, to its version at
+    /// the snapshot.
+    #[serde(default)]
+    pub index_datasets: BTreeMap<String, u64>,
+    /// The catalog's index definitions at the snapshot, which say whether an
+    /// index's stored artifact still matches its definition after the rewind.
+    #[serde(default)]
+    pub indexes: Vec<IndexDefinition>,
+    /// The whole catalog at the snapshot (labels, edge types, properties,
+    /// indexes, constraints, the schemaless edge-type registry), which a
+    /// restore reinstates.
+    ///
+    /// `None` for a restore point recorded before the catalog was: such a
+    /// snapshot cannot be restored, since its catalog is unknown.
+    #[serde(default)]
+    pub catalog: Option<Schema>,
+}
+
+/// A restore that has started and not finished, persisted before the restore
+/// touches any table so that reopening the store completes it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RestoreIntent {
+    /// The snapshot being restored.
+    pub snapshot_id: String,
+    /// The manifest to publish as `latest` once every table is rewound.
+    pub manifest_id: String,
+    /// Labels and edge types whose indexes are rebuilt after the rewind.
+    #[serde(default)]
+    pub rebuild_indexes_for: Vec<String>,
+}
 
 /// Reads and writes snapshot manifests + the `latest` pointer.
 ///
@@ -83,7 +132,17 @@ impl SnapshotManager {
     #[instrument(skip(self, manifest), fields(snapshot_id = %manifest.snapshot_id, size_bytes), level = "info")]
     pub async fn save_snapshot(&self, manifest: &SnapshotManifest) -> Result<()> {
         let path = self.manifest_path(&manifest.snapshot_id);
-        let json = serde_json::to_string_pretty(manifest)?;
+        // Every manifest this binary writes records its writer features, also
+        // one cloned from a manifest an older binary wrote: an open that finds
+        // a latest manifest without them knows an older binary flushed last.
+        let json =
+            if manifest.writer_features.as_slice() == uni_common::core::schema::WRITER_FEATURES {
+                serde_json::to_string_pretty(manifest)?
+            } else {
+                let mut stamped = manifest.clone();
+                stamped.writer_features = uni_common::core::schema::current_writer_features();
+                serde_json::to_string_pretty(&stamped)?
+            };
         tracing::Span::current().record("size_bytes", json.len());
         put_with_timeout(&self.store, &path, Bytes::from(json), DEFAULT_TIMEOUT).await?;
         Ok(())
@@ -207,6 +266,217 @@ impl SnapshotManager {
         Ok(map.get(name).cloned())
     }
 
+    fn restore_point_path(&self, snapshot_id: &str) -> ObjectStorePath {
+        ObjectStorePath::from(format!(
+            "{}/restore_points/{}.json",
+            self.catalog_prefix(),
+            snapshot_id
+        ))
+    }
+
+    fn compaction_horizon_path(&self) -> ObjectStorePath {
+        ObjectStorePath::from(format!("{}/compaction_horizon.json", self.catalog_prefix()))
+    }
+
+    /// The version below which semantic compaction has merged history away,
+    /// as recorded by earlier passes; 0 when no pass recorded one.
+    ///
+    /// # Errors
+    ///
+    /// When the object store read fails for a reason other than absence, or
+    /// the record does not parse.
+    pub async fn load_compaction_horizon(&self) -> Result<u64> {
+        Ok(self
+            .load_json::<u64>(&self.compaction_horizon_path())
+            .await?
+            .unwrap_or(0))
+    }
+
+    /// Record the compaction horizon (see [`Self::load_compaction_horizon`]).
+    ///
+    /// # Errors
+    ///
+    /// When the object store write fails.
+    pub async fn save_compaction_horizon(&self, version: u64) -> Result<()> {
+        put_with_timeout(
+            &self.store,
+            &self.compaction_horizon_path(),
+            Bytes::from(serde_json::to_string(&version)?),
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        Ok(())
+    }
+
+    fn restore_intent_path(&self) -> ObjectStorePath {
+        ObjectStorePath::from(format!("{}/restore_intent.json", self.catalog_prefix()))
+    }
+
+    /// Persist the [`RestorePoint`] of an explicit snapshot.
+    ///
+    /// # Errors
+    ///
+    /// When the object store write fails.
+    pub async fn save_restore_point(&self, point: &RestorePoint) -> Result<()> {
+        let json = serde_json::to_string_pretty(point)?;
+        put_with_timeout(
+            &self.store,
+            &self.restore_point_path(&point.snapshot_id),
+            Bytes::from(json),
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The [`RestorePoint`] of `snapshot_id`, or `None` when the snapshot has
+    /// none: it was published by an ordinary flush, or taken by a version that
+    /// did not record one.
+    ///
+    /// # Errors
+    ///
+    /// When the object store read fails for a reason other than absence, or
+    /// the record does not parse.
+    pub async fn load_restore_point(&self, snapshot_id: &str) -> Result<Option<RestorePoint>> {
+        self.load_json(&self.restore_point_path(snapshot_id)).await
+    }
+
+    /// Remove the [`RestorePoint`] of `snapshot_id`; absent is not an error.
+    ///
+    /// # Errors
+    ///
+    /// When the object store delete fails for a reason other than absence.
+    pub async fn delete_restore_point(&self, snapshot_id: &str) -> Result<()> {
+        self.delete_if_present(&self.restore_point_path(snapshot_id))
+            .await
+    }
+
+    /// Remove the manifest of `snapshot_id`; absent is not an error.
+    ///
+    /// The caller must not remove the manifest `latest` names.
+    ///
+    /// # Errors
+    ///
+    /// When the object store delete fails for a reason other than absence.
+    pub async fn delete_snapshot_manifest(&self, snapshot_id: &str) -> Result<()> {
+        self.delete_if_present(&self.manifest_path(snapshot_id))
+            .await
+    }
+
+    /// Whether this manager's namespace holds a manifest for `snapshot_id`.
+    ///
+    /// # Errors
+    ///
+    /// When the object store read fails for a reason other than absence.
+    pub async fn snapshot_exists(&self, snapshot_id: &str) -> Result<bool> {
+        match self.store.head(&self.manifest_path(snapshot_id)).await {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The snapshot id `catalog/latest` names, if any.
+    ///
+    /// # Errors
+    ///
+    /// When the object store read fails for a reason other than absence.
+    pub async fn latest_snapshot_id(&self) -> Result<Option<String>> {
+        match get_with_timeout(&self.store, &self.latest_ptr_path(), DEFAULT_TIMEOUT).await {
+            Ok(result) => {
+                let bytes = result.bytes().await.map_err(anyhow::Error::from)?;
+                let id = String::from_utf8(bytes.to_vec())?.trim().to_string();
+                Ok((!id.is_empty()).then_some(id))
+            }
+            Err(e) if is_not_found(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Remove every name that refers to `snapshot_id`; returns whether any
+    /// did.
+    ///
+    /// # Errors
+    ///
+    /// When the names cannot be read or written back.
+    pub async fn remove_snapshot_names(&self, snapshot_id: &str) -> Result<bool> {
+        let mut map = self.load_named_snapshots().await?;
+        let before = map.len();
+        map.retain(|_, id| id != snapshot_id);
+        if map.len() == before {
+            return Ok(false);
+        }
+        let json = serde_json::to_string_pretty(&map)?;
+        put_with_timeout(
+            &self.store,
+            &self.named_snapshots_path(),
+            Bytes::from(json),
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        Ok(true)
+    }
+
+    async fn delete_if_present(&self, path: &ObjectStorePath) -> Result<()> {
+        match self.store.delete(path).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Record that a restore is under way, before it touches any table.
+    ///
+    /// # Errors
+    ///
+    /// When the object store write fails.
+    pub async fn save_restore_intent(&self, intent: &RestoreIntent) -> Result<()> {
+        let json = serde_json::to_string_pretty(intent)?;
+        put_with_timeout(
+            &self.store,
+            &self.restore_intent_path(),
+            Bytes::from(json),
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// The restore a crash interrupted, if any.
+    ///
+    /// # Errors
+    ///
+    /// When the object store read fails for a reason other than absence, or
+    /// the record does not parse.
+    pub async fn load_restore_intent(&self) -> Result<Option<RestoreIntent>> {
+        self.load_json(&self.restore_intent_path()).await
+    }
+
+    /// Remove the restore intent once the restore is complete.
+    ///
+    /// # Errors
+    ///
+    /// When the object store delete fails for a reason other than absence.
+    pub async fn clear_restore_intent(&self) -> Result<()> {
+        match self.store.delete(&self.restore_intent_path()).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn load_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &ObjectStorePath,
+    ) -> Result<Option<T>> {
+        match get_with_timeout(&self.store, path, DEFAULT_TIMEOUT).await {
+            Ok(result) => {
+                let bytes = result.bytes().await?;
+                Ok(Some(serde_json::from_slice(&bytes)?))
+            }
+            Err(e) if is_not_found(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Find the most recent snapshot created at or before the given timestamp.
     pub async fn find_snapshot_at_time(
         &self,
@@ -264,6 +534,28 @@ pub fn fsync_snapshot_pointer(
     let latest = prefix.join("latest");
     crate::runtime::wal::sync_file_and_parent(&manifest)?;
     crate::runtime::wal::sync_file_and_parent(&latest)?;
+    Ok(())
+}
+
+/// Make primary catalog files durable on a local-filesystem store, as
+/// [`fsync_snapshot_pointer`] does for a flush's manifest and pointer.
+///
+/// `files` are paths relative to `catalog/`. A no-op when `local_root` is
+/// `None` (remote stores provide their own durability on `put`).
+///
+/// # Errors
+///
+/// When a file or its directory cannot be synced.
+pub fn fsync_catalog_files(
+    local_root: Option<&std::path::Path>,
+    files: &[String],
+) -> std::io::Result<()> {
+    let Some(root) = local_root else {
+        return Ok(());
+    };
+    for file in files {
+        crate::runtime::wal::sync_file_and_parent(&root.join("catalog").join(file))?;
+    }
     Ok(())
 }
 

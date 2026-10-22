@@ -9,7 +9,7 @@
 
 use crate::storage::direction::Direction;
 use dashmap::DashMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uni_common::core::id::{Eid, Vid};
 
 /// A deleted edge with version range for time-travel reconstruction.
@@ -69,6 +69,11 @@ impl ShadowCsr {
         edges.push(edge);
     }
 
+    /// Drops every entry.
+    pub fn clear(&self) {
+        self.entries.clear();
+    }
+
     /// Total shadow entries retained, across every key.
     ///
     /// Exposed so retention is observable directly. `current_bytes` in
@@ -111,6 +116,21 @@ impl ShadowCsr {
         }
 
         result
+    }
+
+    /// Adds to `out` every vertex holding a shadow entry for
+    /// `(edge_type, direction)`, whatever its versions.
+    ///
+    /// A superset of the vertices [`Self::get_entries_at_version`] can return
+    /// entries for at any version.
+    pub fn collect_vids(&self, edge_type: u32, direction: Direction, out: &mut HashSet<Vid>) {
+        if let Some(map) = self.entries.get(&(edge_type, direction)) {
+            out.extend(
+                map.iter()
+                    .filter(|(_, edges)| !edges.is_empty())
+                    .map(|(vid, _)| *vid),
+            );
+        }
     }
 
     /// Returns raw shadow entries for a vertex (all versions).

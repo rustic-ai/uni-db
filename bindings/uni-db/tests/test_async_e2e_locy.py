@@ -220,3 +220,35 @@ async def test_tx_profile(async_social_db_populated):
     assert len(result.derived.get("reachable", [])) >= 3
     assert profile.total_time_ms >= 0.0
     assert isinstance(profile.strata, list) and len(profile.strata) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Top-level commands run in sequence
+# ---------------------------------------------------------------------------
+
+BACK_PROGRAM = """
+CREATE RULE knows AS MATCH (a:Person)-[:KNOWS]->(b:Person) YIELD KEY a, KEY b
+CREATE RULE back AS MATCH (a:Person)-[:KNOWS]->(b:Person) DERIVE (b)-[:KNOWS]->(a)
+QUERY knows RETURN a.name AS src
+DERIVE back
+QUERY knows RETURN a.name AS src
+"""
+
+
+@pytest.mark.parametrize("level", ["session", "tx"])
+async def test_query_after_derive_reads_the_derived_edges(
+    async_social_db_populated, level
+):
+    """Async: a QUERY after a DERIVE in the same program sees the derived edges."""
+    session = async_social_db_populated.session()
+    if level == "tx":
+        tx = await session.tx()
+        result = await tx.locy(BACK_PROGRAM)
+    else:
+        result = await session.locy(BACK_PROGRAM)
+    before, derive, after = result.command_results
+    # 4 KNOWS edges, then their 4 derived reverses on top.
+    assert len(before["rows"]) == 4
+    assert derive["affected"] == 4
+    assert len(after["rows"]) == 8
+    assert result.stats.sequenced_strata_evaluated > 0

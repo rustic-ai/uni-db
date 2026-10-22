@@ -22,6 +22,7 @@ use uni_db::{DataType, Uni, Value};
 
 fn flag_on_config() -> UniConfig {
     UniConfig {
+        #[expect(deprecated, reason = "exercises the deprecated no-op flag")]
         partial_lance_writes: true,
         ..UniConfig::default()
     }

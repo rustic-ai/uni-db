@@ -101,6 +101,16 @@ pub struct RuleDefinition {
     pub having: Vec<Expr>,
     pub best_by: Option<BestByClause>,
     pub output: RuleOutput,
+    /// Every parameter (`$name`) the definition references, in order of first
+    /// appearance and without repeats, read from the parse tree as
+    /// [`crate::parse_locy_with_parameters`] reads a whole program.
+    ///
+    /// Carried so a program that runs a previously registered rule can be
+    /// refused up front, with every missing name, when it does not supply
+    /// the rule's parameters. `#[serde(default)]` for the reason given on
+    /// [`Self::require`].
+    #[serde(default)]
+    pub parameters: Vec<String>,
 }
 
 /// A condition in a rule WHERE clause.

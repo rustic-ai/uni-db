@@ -36,6 +36,7 @@ use crate::query::df_expr::{TranslationContext, VariableKind, cypher_expr_to_df}
 use crate::query::df_graph::ReadSetRecordingExec;
 use crate::query::df_graph::bind_fixed_path::BindFixedPathExec;
 use crate::query::df_graph::bind_zero_length_path::BindZeroLengthPathExec;
+use crate::query::df_graph::edge_source_scan::EdgeSourceScanExec;
 use crate::query::df_graph::mutation_common::{
     MutationKind, extended_schema_for_new_vars, new_create_exec, new_merge_exec,
 };
@@ -2649,6 +2650,10 @@ impl HybridPhysicalPlanner {
 
         // Build target_properties map for node-like yields in search procedures
         let mut target_properties: HashMap<String, Vec<String>> = HashMap::new();
+        // Node yields used as whole entities (`RETURN node`, `labels(node)`,
+        // `properties(node)`, `node {.*}`): they need the node struct column a
+        // scan builds, not the VID-string placeholder the procedure emits.
+        let mut structural_yields: Vec<String> = Vec::new();
 
         if crate::query::df_graph::procedure_call::is_node_yield_procedure_static(procedure_name) {
             for (name, alias) in yield_items {
@@ -2657,13 +2662,23 @@ impl HybridPhysicalPlanner {
                 if canonical == "node" {
                     // Collect properties requested for this node variable
                     if let Some(props) = all_properties.get(output_name.as_str()) {
-                        let prop_list: Vec<String> = props
+                        let mut prop_list: Vec<String> = props
                             .iter()
                             .filter(|p| {
                                 *p != "*" && !uni_common::core::schema::is_reserved_property_name(p)
                             })
                             .cloned()
                             .collect();
+                        // A whole-entity read needs every property, declared or
+                        // not: `_all_props` carries them, the same column a
+                        // scan adds for `"*"`. Dropping the marker emitted a
+                        // node with no properties at all.
+                        if props.contains("*") {
+                            prop_list.push("_all_props".to_string());
+                        }
+                        if props.contains("*") || props.contains(STRUCT_ONLY_SENTINEL) {
+                            structural_yields.push(output_name.clone());
+                        }
                         target_properties.insert(output_name.clone(), prop_list);
                     }
                 }
@@ -2677,10 +2692,58 @@ impl HybridPhysicalPlanner {
             yield_items.to_vec(),
             self.params.clone(),
             self.outer_values.clone(),
-            target_properties,
+            target_properties.clone(),
         );
 
-        Ok(Arc::new(exec))
+        let mut plan: Arc<dyn ExecutionPlan> = Arc::new(exec);
+        for output_name in structural_yields {
+            plan = self.replace_vid_placeholder_with_node_struct(
+                plan,
+                &output_name,
+                target_properties
+                    .get(&output_name)
+                    .map_or(&[][..], Vec::as_slice),
+            )?;
+        }
+        Ok(plan)
+    }
+
+    /// Replace a procedure's VID-string placeholder column for a node yield
+    /// with the node struct a scan builds (`_vid`, `_labels`, properties).
+    ///
+    /// Inside the query the placeholder is only a string, so entity functions
+    /// (`labels`, `properties`, `keys`) and map projection saw no node at all;
+    /// only the final result conversion rebuilt one, from the narrowed property
+    /// columns.
+    fn replace_vid_placeholder_with_node_struct(
+        &self,
+        input: Arc<dyn ExecutionPlan>,
+        variable: &str,
+        properties: &[String],
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        use datafusion::physical_plan::projection::ProjectionExec;
+
+        let input_schema = input.schema();
+        let proj_exprs: Vec<(Arc<dyn datafusion::physical_expr::PhysicalExpr>, String)> =
+            input_schema
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| f.name() != variable)
+                .map(|(i, f)| {
+                    (
+                        Arc::new(datafusion::physical_expr::expressions::Column::new(
+                            f.name(),
+                            i,
+                        ))
+                            as Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+                        f.name().clone(),
+                    )
+                })
+                .collect();
+        let without_placeholder: Arc<dyn ExecutionPlan> =
+            Arc::new(ProjectionExec::try_new(proj_exprs, input)?);
+        self.add_structural_projection(without_placeholder, variable, properties)
     }
 
     /// Plan a vertex scan.
@@ -3740,6 +3803,24 @@ impl HybridPhysicalPlanner {
         optional: bool,
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        self.plan_scan_all_restricted(variable, filter, optional, all_properties, None)
+    }
+
+    /// [`Self::plan_scan_all`], optionally restricted to the sources of
+    /// `edge_sources` — the edge types and direction of the traversal the scan
+    /// feeds — by an [`EdgeSourceScanExec`] directly over the scan.
+    ///
+    /// The restriction sits below the filter, read-set recording and
+    /// structural projection, so everything above the scan is planned exactly
+    /// as for the unrestricted scan.
+    fn plan_scan_all_restricted(
+        &self,
+        variable: &str,
+        filter: Option<&Expr>,
+        optional: bool,
+        all_properties: &HashMap<String, HashSet<String>>,
+        edge_sources: Option<(&[u32], Direction)>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
         let (properties, need_full) = Self::resolve_schemaless_properties(variable, all_properties);
         // Extract VID(s) from filter for scan-level optimization. See the
         // detailed comment at the per-label scan site (issue #55 PR #4).
@@ -3773,7 +3854,15 @@ impl HybridPhysicalPlanner {
             .map_err(|e| anyhow!("ext_id pushdown: {e}"))?;
             scan_exec = scan_exec.with_extra_lance_filter(lance);
         }
-        let scan_plan: Arc<dyn ExecutionPlan> = Arc::new(scan_exec);
+        let mut scan_plan: Arc<dyn ExecutionPlan> = Arc::new(scan_exec);
+        if let Some((edge_type_ids, direction)) = edge_sources {
+            scan_plan = Arc::new(EdgeSourceScanExec::try_new(
+                scan_plan,
+                self.graph_ctx.clone(),
+                edge_type_ids.to_vec(),
+                direction,
+            )?);
+        }
         self.finalize_schemaless_scan(
             scan_plan,
             variable,
@@ -3782,6 +3871,58 @@ impl HybridPhysicalPlanner {
             &properties,
             need_full,
         )
+    }
+
+    /// The traversal's source planned as an all-vertex scan restricted to the
+    /// vertices with an edge of `edge_type_ids` along `direction`, when that
+    /// cannot change the traversal's rows; `None` when it can.
+    ///
+    /// Restricting is sound exactly when the source is an unfiltered,
+    /// non-optional `ScanAll` of `source_variable` and the traversal drops a
+    /// source with no neighbor: a fixed-length hop, not optional (an optional
+    /// one null-extends such a source), over native edge types only (a
+    /// virtual type has no adjacency to enumerate). See
+    /// [`EdgeSourceScanExec`] for why the rows are then unchanged.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors the traversal parameters the soundness test reads"
+    )]
+    fn plan_edge_driven_source(
+        &self,
+        input: &LogicalPlan,
+        source_variable: &str,
+        edge_type_ids: &[u32],
+        direction: Direction,
+        is_variable_length: bool,
+        optional: bool,
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        let LogicalPlan::ScanAll {
+            variable,
+            filter: None,
+            optional: false,
+        } = input
+        else {
+            return Ok(None);
+        };
+        if variable != source_variable
+            || is_variable_length
+            || optional
+            || edge_type_ids.is_empty()
+            || edge_type_ids
+                .iter()
+                .any(|&t| uni_common::core::edge_type::is_virtual_edge_type(t))
+        {
+            return Ok(None);
+        }
+        self.plan_scan_all_restricted(
+            variable,
+            None,
+            false,
+            all_properties,
+            Some((edge_type_ids, direction)),
+        )
+        .map(Some)
     }
 
     /// Plan a graph traversal.
@@ -3812,10 +3953,20 @@ impl HybridPhysicalPlanner {
         qpp_steps: Option<&[crate::query::planner::QppStepInfo]>,
         qpp_inner_source: Option<&str>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
-        let input_plan = self.plan_internal(input, all_properties)?;
-        let input_plan = tag_optional_source(input_plan, optional, optional_pattern_vars);
-
         let adj_direction = convert_direction(direction.clone());
+        let input_plan = match self.plan_edge_driven_source(
+            input,
+            source_variable,
+            edge_type_ids,
+            adj_direction,
+            is_variable_length,
+            optional,
+            all_properties,
+        )? {
+            Some(plan) => plan,
+            None => self.plan_internal(input, all_properties)?,
+        };
+        let input_plan = tag_optional_source(input_plan, optional, optional_pattern_vars);
         let (input_plan, source_col) = Self::resolve_source_vid_col(input_plan, source_variable)?;
 
         // M5b.3 — virtual edge-type dispatch. When the relationship type

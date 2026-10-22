@@ -409,7 +409,9 @@ pub fn cypher_expr_to_df(expr: &Expr, context: Option<&TranslationContext>) -> R
             {
                 return value_to_scalar(value).map(lit);
             }
-            Err(anyhow!("Unresolved parameter: ${}", name))
+            Err(anyhow!(uni_common::UniError::parameter_missing_message([
+                name
+            ])))
         }
 
         Expr::Literal(value) => {
@@ -841,7 +843,9 @@ fn translate_property_access(
                 }
                 return Ok(lit(ScalarValue::Null));
             }
-            return Err(anyhow!("Unresolved parameter: ${}", param_name));
+            return Err(anyhow!(uni_common::UniError::parameter_missing_message([
+                param_name
+            ])));
         }
 
         let base_expr = cypher_expr_to_df(base, context)?;

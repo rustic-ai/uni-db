@@ -124,9 +124,15 @@ async fn test_cypher_vector_search() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Node should be an object with _vid, _label, and properties
-    let node_obj = results[0].get("node").unwrap().as_object().unwrap();
-    let vid = node_obj.get("_vid").unwrap().as_u64().unwrap();
+    // The yielded node is a full node entity, the same shape a scan returns.
+    let vid = match results[0].get("node").unwrap() {
+        Value::Node(n) => {
+            assert_eq!(n.labels, vec!["Item".to_string()]);
+            assert!(n.properties.contains_key("embedding"), "{n:?}");
+            n.vid.as_u64()
+        }
+        other => panic!("expected a node, got {other:?}"),
+    };
     assert_eq!(
         vid, 1,
         "Expected VID 1 (closest to query vector), got {}",

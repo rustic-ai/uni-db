@@ -105,6 +105,7 @@ async fn b2_delete_then_create_same_id() -> Result<()> {
 async fn b3_delete_after_partial_set() -> Result<()> {
     use uni_common::UniConfig;
     let cfg = UniConfig {
+        #[expect(deprecated, reason = "exercises the deprecated no-op flag")]
         partial_lance_writes: true,
         ..UniConfig::default()
     };

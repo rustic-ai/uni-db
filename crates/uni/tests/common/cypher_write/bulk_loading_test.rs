@@ -762,11 +762,13 @@ async fn test_bulk_unique_constraint_spans_buffer_flushes() -> Result<()> {
     Ok(())
 }
 
-/// H9: a bulk load writes the per-label table and the main table as separate
-/// Lance commits. A crash between them leaves the tables divergent with no
-/// reconciliation. The durable intent marker + reopen recovery must make an
-/// interrupted load all-or-nothing; the staged rows of a load whose publish
-/// had begun are recorded in the marker, so recovery completes it.
+/// H9: a bulk load publishes the per-label table and the main table as
+/// separate Lance commits. A failure between them, after the commit marker is
+/// durable, used to return a plain `Err` while the load was decided: the next
+/// open completed it, so a caller who retried the "failed" load held it twice,
+/// and live readers saw the per-label table without `vertices` until then.
+/// `commit` now completes the publish in-process from the marker's record and
+/// returns `Ok`, reporting the failed first attempt in `warnings`.
 #[tokio::test]
 async fn bulk_partial_publish_completed_on_reopen() -> Result<()> {
     use std::sync::atomic::Ordering::SeqCst;
@@ -774,25 +776,23 @@ async fn bulk_partial_publish_completed_on_reopen() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let path = temp_dir.path().to_str().unwrap().to_string();
 
+    let load_id;
     {
         let db = Uni::open(&path).build().await?;
-        // Apply schema via the builder so it is durably persisted *before* the
-        // (about-to-fail) bulk load — load_schema only persists on a successful
-        // commit, which the injected fault prevents.
         db.schema()
             .label("Person")
             .property("name", uni_db::DataType::String)
             .apply()
             .await?;
 
-        // Arm the fault: the vertex flush commits the per-label `vertices_Person`
-        // table, then errors before the main `vertices` table — exactly the
-        // crash-in-the-middle the marker guards against.
+        // Arm the fault: the publish commits the per-label `vertices_Person`
+        // table, then errors before the main `vertices` table.
         uni_db::api::bulk::FAIL_AFTER_PERLABEL_WRITE.store(true, SeqCst);
 
         let s = db.session();
         let tx = s.tx().await?;
         let mut bulk = tx.bulk_writer().batch_size(1000).build()?;
+        load_id = bulk.load_id().to_string();
         let mut props = Vec::new();
         for i in 0..5 {
             let mut p: HashMap<String, uni_db::Value> = HashMap::new();
@@ -801,21 +801,38 @@ async fn bulk_partial_publish_completed_on_reopen() -> Result<()> {
         }
         bulk.insert_vertices("Person", props).await?;
         let commit_result = bulk.commit().await;
-        assert!(
-            commit_result.is_err(),
-            "commit must fail at the injected fault"
-        );
-
         uni_db::api::bulk::FAIL_AFTER_PERLABEL_WRITE.store(false, SeqCst);
+        let stats = commit_result.map_err(|e| {
+            anyhow::anyhow!(
+                "a publish failure after the commit point must be completed in-process: {e:#}"
+            )
+        })?;
+        assert_eq!(stats.load_id, load_id);
+        assert!(
+            stats
+                .warnings
+                .iter()
+                .any(|w| w.contains("injected failure after per-label vertex commit")),
+            "the failed first publish attempt must be reported: {:?}",
+            stats.warnings
+        );
+        assert!(db.bulk_load_applied(&load_id).await?, "applied, live");
 
-        // Simulate a crash: drop without abort() / clean shutdown so the marker
-        // is left behind for recovery.
+        // Live readers see all of it: the label scan and the label-less scan
+        // agree.
+        for q in [
+            "MATCH (p:Person) RETURN count(p) AS c",
+            "MATCH (p) RETURN count(p) AS c",
+        ] {
+            let result = db.session().query(q).await?;
+            assert_eq!(result.rows()[0].get::<i64>("c")?, 5, "live: {q}");
+        }
         drop(tx);
         drop(db);
     }
 
-    // Reopen: recovery must complete the interrupted load so the per-label and
-    // main tables are consistent (both hold the five rows), not divergent.
+    // Reopen: the per-label and main tables are consistent (both hold the
+    // five rows, once).
     let db = Uni::open(&path).build().await?;
     let result = db
         .session()
@@ -824,7 +841,7 @@ async fn bulk_partial_publish_completed_on_reopen() -> Result<()> {
     assert_eq!(
         result.rows()[0].get::<i64>("c")?,
         5,
-        "interrupted bulk load must be completed on reopen (per-label table)"
+        "the load must be present exactly once after reopen (per-label table)"
     );
     let storage = db.storage();
     for table in [
@@ -834,12 +851,16 @@ async fn bulk_partial_publish_completed_on_reopen() -> Result<()> {
         assert_eq!(
             storage.backend().count_rows(&table, None).await?,
             5,
-            "interrupted bulk load must be completed on reopen ({table})"
+            "the load must be present exactly once after reopen ({table})"
         );
     }
+    assert!(
+        db.bulk_load_applied(&load_id).await?,
+        "applied, after reopen"
+    );
 
-    // And the database is healthy: a clean load after recovery yields exactly
-    // its rows on top, proving no row was published twice.
+    // And the database is healthy: a clean load yields exactly its rows on top,
+    // proving no row was published twice.
     let s = db.session();
     let tx = s.tx().await?;
     let mut bulk = tx.bulk_writer().batch_size(1000).build()?;
@@ -850,7 +871,8 @@ async fn bulk_partial_publish_completed_on_reopen() -> Result<()> {
         props.push(p);
     }
     bulk.insert_vertices("Person", props).await?;
-    bulk.commit().await?;
+    let stats = bulk.commit().await?;
+    assert!(stats.warnings.is_empty(), "{:?}", stats.warnings);
     drop(tx);
 
     let result = db
@@ -863,6 +885,75 @@ async fn bulk_partial_publish_completed_on_reopen() -> Result<()> {
         "clean load after recovery must yield exactly its rows"
     );
 
+    Ok(())
+}
+
+/// A load's id is exposed before and after commit, and `bulk_load_applied`
+/// answers for it: `false` before the commit point, `true` after it, still
+/// `true` after a reopen (from the receipt, once the marker is gone), and
+/// `false` for a load that was aborted or never existed.
+#[tokio::test]
+async fn bulk_load_id_and_applied_check() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let path = temp_dir.path().to_str().unwrap().to_string();
+    let (applied_id, aborted_id);
+    {
+        let db = Uni::open(&path).build().await?;
+        db.schema()
+            .label("Person")
+            .property("name", uni_db::DataType::String)
+            .apply()
+            .await?;
+        let rows = || {
+            (0..4)
+                .map(|i| HashMap::from([("name".to_string(), unival!(format!("p{i}")))]))
+                .collect::<Vec<_>>()
+        };
+
+        let tx = db.session().tx().await?;
+        let mut bulk = tx.bulk_writer().batch_size(2).build()?;
+        applied_id = bulk.load_id().to_string();
+        uuid::Uuid::parse_str(&applied_id)?;
+        bulk.insert_vertices("Person", rows()).await?;
+        assert!(
+            !db.bulk_load_applied(&applied_id).await?,
+            "staged but before the commit point: not applied"
+        );
+        let stats = bulk.commit().await?;
+        assert_eq!(stats.load_id, applied_id);
+        assert!(stats.warnings.is_empty(), "{:?}", stats.warnings);
+        assert!(db.bulk_load_applied(&applied_id).await?, "after commit");
+
+        let mut bulk = tx.bulk_writer().batch_size(2).build()?;
+        aborted_id = bulk.load_id().to_string();
+        assert_ne!(aborted_id, applied_id, "each load has its own id");
+        bulk.insert_vertices("Person", rows()).await?;
+        bulk.abort().await?;
+        assert!(!db.bulk_load_applied(&aborted_id).await?, "aborted");
+        tx.commit().await?;
+    }
+
+    let db = Uni::open(&path).build().await?;
+    assert!(db.bulk_load_applied(&applied_id).await?, "after reopen");
+    assert!(
+        !db.bulk_load_applied(&aborted_id).await?,
+        "aborted, after reopen"
+    );
+    assert!(
+        !db.bulk_load_applied(&uuid::Uuid::new_v4().to_string())
+            .await?,
+        "an unknown load"
+    );
+    let invalid = db.bulk_load_applied("../schema").await;
+    assert!(
+        matches!(invalid, Err(uni_db::UniError::InvalidArgument { .. })),
+        "a non-id must be refused, not answered: {invalid:?}"
+    );
+    let result = db
+        .session()
+        .query("MATCH (p:Person) RETURN count(p) AS c")
+        .await?;
+    assert_eq!(result.rows()[0].get::<i64>("c")?, 4);
     Ok(())
 }
 

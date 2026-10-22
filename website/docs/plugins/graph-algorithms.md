@@ -155,7 +155,7 @@ Named scopes are a *guest-authored-algorithm* feature: the guest is what decides
 
 **The budget is sized across all of them.** A guest with three scopes can do `O(V+E)` work on each, so the size-derived default work budget sums every bound projection rather than measuring the primary alone.
 
-**The primary is still the primary.** `emit` keys its `nodeId` column to the primary projection, and rejects a column derived from a scope — see [index space](#value-identity-shape-and-index-space) below. To return per-vertex results *about* a scope, re-key them (below) or make that scope the primary.
+**The primary is still the primary.** `emit` keys its `nodeId` column to the primary projection, and rejects a column derived from a scope — see [index space](#tensor-identity-shape-and-index-space) below. To return per-vertex results *about* a scope, re-key them (below) or make that scope the primary.
 
 #### Combining values across scopes: `rekey`
 

@@ -41,14 +41,18 @@ const ASSUME_BODY: &str = "ASSUME { CREATE (:Person {name: 'Guest', age: 30}) } 
        QUERY eligible RETURN p.name AS name \
      }";
 
-/// Row count of the ASSUME's result.
+/// Row count of the ASSUME body's one `QUERY`.
 ///
 /// An `ASSUME … THEN { … }` is one top-level command, so its body's output
-/// arrives as a single `CommandResult::Assume` carrying the rows its body
-/// commands produced — not as a trailing `Cypher` result.
+/// arrives as a single `CommandResult::Assume` holding one result per body
+/// command — not as a trailing `Cypher` result. The body's only command is
+/// its `QUERY`.
 fn rows(result: &uni_db::locy::LocyResult) -> usize {
     match result.command_results.last().expect("no command results") {
-        CommandResult::Assume(r) => r.len(),
+        CommandResult::Assume { results, .. } => match results.as_slice() {
+            [CommandResult::Query(r)] => r.len(),
+            other => panic!("expected the ASSUME body's one QUERY result, got {other:?}"),
+        },
         CommandResult::Query(r) | CommandResult::Cypher(r) => r.len(),
         other => panic!("expected the ASSUME's rows, got {other:?}"),
     }

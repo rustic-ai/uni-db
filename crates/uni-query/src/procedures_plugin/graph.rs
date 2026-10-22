@@ -194,6 +194,27 @@ impl ProcedurePlugin for ProjectProcedure {
         let projection_input = parse_graph_ref(&graph_ref)
             .map_err(|e| FnError::new(0x820, format!("graphRef parse: {e}")))?;
 
+        // The projection catalog is shared by every session and is not undone
+        // by a rollback (as in GDS), so a projection built over a
+        // transaction's uncommitted writes would publish them -- before commit,
+        // and for good after a rollback. Refuse; a transaction without writes
+        // builds from its own snapshot.
+        if host
+            .l0_context()
+            .transaction_l0
+            .as_ref()
+            .is_some_and(|tx_l0| tx_l0.read().mutation_count > 0)
+        {
+            return Err(FnError::new(
+                0x824,
+                uni_common::UniError::uncommitted_writes_message(
+                    "uni.graph.project",
+                    "the projection catalog is not transactional, so the projection would \
+                     publish the transaction's uncommitted writes",
+                ),
+            ));
+        }
+
         // Pre-check duplicates eagerly so the caller sees the error
         // synchronously (matches `uni.graph.exists` ordering); the
         // actual materialisation work is async and runs inside the

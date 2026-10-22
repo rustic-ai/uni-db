@@ -477,6 +477,22 @@ impl AsyncDatabase {
         })
     }
 
+    /// Whether the bulk load `load_id` was applied (reached its commit point).
+    /// See the sync `Uni.bulk_load_applied`.
+    fn bulk_load_applied<'py>(
+        &self,
+        py: Python<'py>,
+        load_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner
+                .bulk_load_applied(&load_id)
+                .await
+                .map_err(crate::exceptions::uni_error_to_pyerr)
+        })
+    }
+
     // ========================================================================
     // Session Methods
     // ========================================================================
@@ -596,6 +612,21 @@ impl AsyncDatabase {
         let db = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             core::restore_snapshot_core(&db, &snapshot_id)
+                .await
+                .map_err(crate::exceptions::uni_error_to_pyerr)
+        })
+    }
+
+    /// Delete a snapshot: its restore point, names and manifest, and the
+    /// pins on its storage versions, which compaction then reclaims.
+    fn delete_snapshot<'py>(
+        &self,
+        py: Python<'py>,
+        snapshot_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            core::delete_snapshot_core(&db, &snapshot_id)
                 .await
                 .map_err(crate::exceptions::uni_error_to_pyerr)
         })
@@ -1854,10 +1885,12 @@ impl AsyncTxBulkWriterBuilder {
             let real_writer = builder
                 .build()
                 .map_err(crate::exceptions::anyhow_to_pyerr)?;
+            let load_id = real_writer.load_id().to_string();
             Ok(AsyncBulkWriter {
                 inner: Arc::new(std::sync::Mutex::new(
                     crate::builders::BulkWriterState::new(real_writer),
                 )),
+                load_id,
             })
         })
     }
@@ -1960,15 +1993,7 @@ impl AsyncStreamingAppender {
             })
             .await
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))??;
-            Ok(BulkStats {
-                vertices_inserted: stats.vertices_inserted,
-                edges_inserted: stats.edges_inserted,
-                indexes_rebuilt: stats.indexes_rebuilt,
-                duration_secs: stats.duration.as_secs_f64(),
-                index_build_duration_secs: stats.index_build_duration.as_secs_f64(),
-                index_task_ids: stats.index_task_ids.clone(),
-                indexes_pending: stats.indexes_pending,
-            })
+            Ok(BulkStats::from(&stats))
         })
     }
 
@@ -2430,6 +2455,24 @@ impl AsyncSession {
         })
     }
 
+    /// Run any Cypher statement, auto-committing writes.
+    ///
+    /// A read runs as `query()` does. An administrative statement (one calling
+    /// a DBMS-mode procedure such as `uni.admin.snapshot.restore()` or
+    /// `uni.admin.compact()`) runs outside any transaction. Any other write
+    /// runs in a fresh transaction that is committed for you.
+    fn run<'py>(&self, py: Python<'py>, cypher: String) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let result = guard
+                .run(cypher)
+                .await
+                .map_err(crate::exceptions::uni_error_to_pyerr)?;
+            Python::attach(|py| convert::query_result_to_py_class(py, result))
+        })
+    }
+
     /// Create a new async transaction for multi-statement writes.
     #[pyo3(signature = (timeout=None))]
     fn tx<'py>(&self, py: Python<'py>, timeout: Option<f64>) -> PyResult<Bound<'py, PyAny>> {
@@ -2678,6 +2721,23 @@ impl AsyncSession {
             let guard = inner.lock().await;
             guard.cancel();
             Ok(())
+        })
+    }
+
+    /// Whether the bulk load `load_id`, run through this session, was applied.
+    /// See the sync `Session.bulk_load_applied`.
+    fn bulk_load_applied<'py>(
+        &self,
+        py: Python<'py>,
+        load_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            guard
+                .bulk_load_applied(&load_id)
+                .await
+                .map_err(crate::exceptions::uni_error_to_pyerr)
         })
     }
 
@@ -3012,10 +3072,19 @@ pub struct AsyncBulkWriter {
     // raise while abort-after-abort stays a no-op, and `Option` cannot tell
     // those apart. See crate::builders::BulkWriterState.
     inner: Arc<std::sync::Mutex<crate::builders::BulkWriterState>>,
+    /// The load's id; see the sync `BulkWriter`.
+    load_id: String,
 }
 
 #[pymethods]
 impl AsyncBulkWriter {
+    /// The load's id: stable for the writer's lifetime and still readable
+    /// after `commit` or `abort`. Pass it to `AsyncUni.bulk_load_applied`.
+    #[getter]
+    fn load_id(&self) -> String {
+        self.load_id.clone()
+    }
+
     /// Insert vertices in bulk.
     fn insert_vertices<'py>(
         &self,
@@ -3094,15 +3163,7 @@ impl AsyncBulkWriter {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
         let writer = guard.active_ref("bulk")?;
         let s = writer.stats();
-        Ok(BulkStats {
-            vertices_inserted: s.vertices_inserted,
-            edges_inserted: s.edges_inserted,
-            indexes_rebuilt: s.indexes_rebuilt,
-            duration_secs: s.duration.as_secs_f64(),
-            index_build_duration_secs: s.index_build_duration.as_secs_f64(),
-            index_task_ids: s.index_task_ids.clone(),
-            indexes_pending: s.indexes_pending,
-        })
+        Ok(BulkStats::from(s))
     }
 
     /// Get labels that have been written to.
@@ -3140,15 +3201,7 @@ impl AsyncBulkWriter {
             })
             .await
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))??;
-            Ok(BulkStats {
-                vertices_inserted: stats.vertices_inserted,
-                edges_inserted: stats.edges_inserted,
-                indexes_rebuilt: stats.indexes_rebuilt,
-                duration_secs: stats.duration.as_secs_f64(),
-                index_build_duration_secs: stats.index_build_duration.as_secs_f64(),
-                index_task_ids: stats.index_task_ids.clone(),
-                indexes_pending: stats.indexes_pending,
-            })
+            Ok(BulkStats::from(&stats))
         })
     }
 

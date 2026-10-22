@@ -40,6 +40,9 @@ pub struct ProofTerm {
     /// The hash of the consumed fact's KEY columns: the
     /// [`ProvenanceAnnotation::fact_key`] of that fact's derivations.
     pub base_fact_id: Vec<u8>,
+    /// The probability the derivation read for the consumed fact: the factor
+    /// it contributes to the derivation's [`ProvenanceAnnotation::proof_probability`].
+    pub prob: f64,
 }
 
 /// Provenance annotation for a derived fact (Green et al. 2007, Definition 3.1).
@@ -55,6 +58,11 @@ pub struct ProvenanceAnnotation {
     /// The hash of the fact's KEY columns, which a [`ProofTerm`] of a fact
     /// derived from this one names it by.
     pub fact_key: Vec<u8>,
+    /// The hash identifying this derivation among the fact's derivations:
+    /// the key it is recorded under when proofs are not filtered. A
+    /// recursive rule re-records a derivation as the facts it references are
+    /// refined, under the same hash.
+    pub derivation: Vec<u8>,
     /// Proof terms: the facts this derivation positively references through a
     /// probabilistic `IS` (to a PROB rule, from an `MNOR`/`MPROD` rule). A
     /// reference to a rule without a PROB column is a certain condition and
@@ -66,7 +74,11 @@ pub struct ProvenanceAnnotation {
     pub iteration: usize,
     /// Full fact row stored for Mode A filtering/display.
     pub fact_row: FactRow,
-    /// Probability of this specific proof path (populated by top-k filtering).
+    /// The weight of this derivation: the row's own PROB value, which is its
+    /// local weight times every probability it referenced (each carried on
+    /// its [`ProofTerm`]). A leaf, referencing nothing, weighs its own PROB
+    /// value. `None` for a rule without a PROB column. Top-k filtering keeps
+    /// each fact's heaviest derivations by this weight.
     pub proof_probability: Option<f64>,
     /// Phase C B1–B3: per neural-model invocation that contributed
     /// to this fact's derivation. Populated by
@@ -136,21 +148,26 @@ impl ProvenanceStore {
         }
     }
 
-    /// Record a provenance annotation with top-k filtering.
+    /// Record a derivation of the fact `fact_hash` with top-k filtering.
     ///
-    /// Retains at most `k` annotations per fact, ordered by `proof_probability`
-    /// (highest first). Annotations without a proof probability are treated as
-    /// having probability 0.0 for ordering purposes.
+    /// `fact_hash` names the fact, not the derivation ([`top_k_fact_hash`]),
+    /// so the fact's derivations compete: at most `k` are retained, heaviest
+    /// [`ProvenanceAnnotation::proof_probability`] first, a derivation without
+    /// a weight counting as 0.0, and earlier derivations winning ties. A
+    /// derivation recorded again (a recursive rule refining it) replaces its
+    /// earlier record rather than competing with it.
     pub fn record_top_k(&self, fact_hash: Vec<u8>, entry: ProvenanceAnnotation, k: usize) {
         if let Ok(mut guard) = self.entries.write() {
             let vec = guard.entry(fact_hash).or_default();
-            vec.push(entry);
-            // Sort descending by proof_probability.
+            match vec.iter_mut().find(|e| e.derivation == entry.derivation) {
+                Some(existing) => *existing = entry,
+                None => vec.push(entry),
+            }
+            // Stable, so equal weights keep their recording order.
             vec.sort_by(|a, b| {
                 b.proof_probability
                     .unwrap_or(0.0)
-                    .partial_cmp(&a.proof_probability.unwrap_or(0.0))
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .total_cmp(&a.proof_probability.unwrap_or(0.0))
             });
             vec.truncate(k);
         }
@@ -167,30 +184,11 @@ impl ProvenanceStore {
         guard.get(fact_hash).cloned()
     }
 
-    /// Collect base fact probabilities from stored annotations.
-    ///
-    /// Scans all annotations for base facts (those with empty support, i.e. leaf
-    /// nodes in the proof tree) and extracts the PROB column value from their
-    /// `fact_row`. Used by top-k proof filtering to compute `proof_probability`.
-    pub fn base_fact_probs(&self) -> HashMap<Vec<u8>, f64> {
-        let mut probs = HashMap::new();
-        if let Ok(guard) = self.entries.read() {
-            for (fact_hash, annotations) in guard.iter() {
-                if let Some(ann) = annotations.first()
-                    && ann.support.is_empty()
-                    && let Some(uni_common::Value::Float(p)) = ann.fact_row.get("PROB")
-                {
-                    probs.insert(fact_hash.clone(), *p);
-                }
-            }
-        }
-        probs
-    }
-
-    /// The first annotation of every recorded fact, of every rule.
+    /// Every recorded derivation, of every rule: one per key, or under
+    /// top-k filtering each fact's retained derivations.
     pub fn all_entries(&self) -> Vec<ProvenanceAnnotation> {
         match self.entries.read() {
-            Ok(guard) => guard.values().filter_map(|a| a.first().cloned()).collect(),
+            Ok(guard) => guard.values().flatten().cloned().collect(),
             Err(_) => vec![],
         }
     }
@@ -212,22 +210,36 @@ impl ProvenanceStore {
     }
 }
 
-/// Compute the probability of a single proof path from its support terms.
+/// The key top-k filtering records a derivation of `rule`'s fact with KEY
+/// hash `fact_key` under: the fact, so that its derivations compete.
+pub fn top_k_fact_hash(rule: &str, fact_key: &[u8]) -> Vec<u8> {
+    let mut key = Vec::with_capacity(rule.len() + 1 + fact_key.len());
+    key.extend_from_slice(rule.as_bytes());
+    key.push(0);
+    key.extend_from_slice(fact_key);
+    key
+}
+
+/// The weight of one derivation: `own`, the row's PROB value, when the rule
+/// has a PROB column (`has_prob`); otherwise the product of the
+/// probabilities it referenced.
 ///
-/// Returns `None` if any base fact's probability is unknown.
+/// The row's PROB value is its local weight times every probability it
+/// referenced, so for a PROB rule it already is the product along the
+/// derivation; a leaf, referencing nothing, weighs exactly its own value,
+/// and `None` when that value is NULL. A rule without a PROB column derives
+/// certain facts: a derivation referencing nothing weighs 1, as does a
+/// reference to such a fact (its [`ProofTerm::prob`] is 1).
 pub fn compute_proof_probability(
+    has_prob: bool,
+    own: Option<f64>,
     support: &[ProofTerm],
-    base_probs: &HashMap<Vec<u8>, f64>,
 ) -> Option<f64> {
-    if support.is_empty() {
-        return None;
+    match own {
+        Some(p) => Some(p.clamp(0.0, 1.0)),
+        None if has_prob => None,
+        None => Some(support.iter().map(|t| t.prob.clamp(0.0, 1.0)).product()),
     }
-    let mut product = 1.0;
-    for term in support {
-        let p = base_probs.get(&term.base_fact_id)?;
-        product *= p;
-    }
-    Some(product)
 }
 
 impl Default for ProvenanceStore {
@@ -755,8 +767,16 @@ fn build_derivation_node<'a>(
         // (FOLD-aggregated, similar_to, etc.) are absent from those rows.
         // KEY columns uniquely identify a derived fact, so this is sufficient.
 
-        // Try each clause to find the one that produced this fact
-        for (clause_idx, clause) in rule.clauses.iter().enumerate() {
+        // Try each clause to find the one that produced this fact, highest
+        // PRIORITY first: PRIORITY keeps, per KEY, the rows of the
+        // highest-priority clause that derived it, so a lower one that also
+        // derives the KEY did not produce the fact. In text order, the first
+        // clause deriving the KEY was taken, whichever PRIORITY kept.
+        let mut clause_order: Vec<usize> = (0..rule.clauses.len()).collect();
+        clause_order
+            .sort_by_key(|&i| std::cmp::Reverse(rule.clauses[i].priority.unwrap_or(i64::MIN)));
+        for clause_idx in clause_order {
+            let clause = &rule.clauses[clause_idx];
             let has_is_refs = clause
                 .where_conditions
                 .iter()
@@ -791,7 +811,7 @@ fn build_derivation_node<'a>(
                     (Some(v1), Some(v2)) => values_equal_for_join(v1, v2),
                     (None, None) => true,
                     _ => false,
-                })
+                }) && yields_match(clause, row, fact)
             });
 
             if let Some(evidence_row) = matching_row {
@@ -908,6 +928,48 @@ fn build_derivation_node<'a>(
     })
 }
 
+/// Whether `row`, a body row of `clause`, yields `fact`'s values beyond its
+/// KEY: every non-KEY column the clause yields straight from its body
+/// (`e.w AS w`) must equal the fact's.
+///
+/// Matched on the KEY alone, the first body row sharing the fact's KEY
+/// explained it, even when BEST BY kept another row of that KEY (or the
+/// rule's facts differ in a non-KEY column): the tree then showed a
+/// derivation of another fact. A FOLD output and a PROB value are not
+/// compared (a body row carries neither: a fold aggregates rows, and a PROB
+/// value has referenced probabilities multiplied in), nor is a column whose
+/// expression the body row cannot evaluate (one reading an ALONG value or a
+/// referenced fact's column).
+fn yields_match(clause: &uni_locy::types::CompiledClause, row: &FactRow, fact: &FactRow) -> bool {
+    let uni_cypher::locy_ast::RuleOutput::Yield(yield_clause) = &clause.output else {
+        return true;
+    };
+    let fold_outputs: HashSet<&str> = clause.fold.iter().map(|f| f.name.as_str()).collect();
+    yield_clause.items.iter().all(|item| {
+        if item.is_key || item.is_prob {
+            return true;
+        }
+        let name = match (&item.alias, &item.expr) {
+            (Some(alias), _) => alias.as_str(),
+            (None, uni_cypher::ast::Expr::Variable(v)) => v.as_str(),
+            _ => return true,
+        };
+        if fold_outputs.contains(name) {
+            return true;
+        }
+        let Some(expected) = fact.get(name) else {
+            return true;
+        };
+        match super::locy_eval::eval_expr(&item.expr, row) {
+            Ok(value) => {
+                matches!((&value, expected), (Value::Null, Value::Null))
+                    || values_equal_for_join(&value, expected)
+            }
+            Err(_) => true,
+        }
+    })
+}
+
 /// Check if a binding variable matches a ref-fact key column via VID-based join.
 ///
 /// Looks up `var_name` in `primary` (falling back to `fallback`), then compares
@@ -989,6 +1051,7 @@ mod tests {
             rule_name: rule.to_string(),
             clause_index: 0,
             fact_key: Vec::new(),
+            derivation: rule.as_bytes().to_vec(),
             support: vec![],
             along_values: HashMap::new(),
             iteration: 0,
@@ -1043,37 +1106,55 @@ mod tests {
         assert_eq!(all[1].rule_name, "high");
     }
 
+    /// A derivation recorded again replaces its earlier record: it does not
+    /// take a second slot, and its new weight decides its rank.
     #[test]
-    fn compute_proof_probability_basic() {
-        let support = vec![
-            ProofTerm {
-                source_rule: "r1".to_string(),
-                base_fact_id: b"f1".to_vec(),
-            },
-            ProofTerm {
-                source_rule: "r2".to_string(),
-                base_fact_id: b"f2".to_vec(),
-            },
-        ];
-        let base_probs = HashMap::from([(b"f1".to_vec(), 0.3), (b"f2".to_vec(), 0.5)]);
-        let prob = compute_proof_probability(&support, &base_probs);
-        assert!((prob.unwrap() - 0.15).abs() < 1e-10);
+    fn record_top_k_replaces_a_rerecorded_derivation() {
+        let store = ProvenanceStore::new();
+        let hash = b"fact1".to_vec();
+        store.record_top_k(hash.clone(), make_annotation("a", Some(0.2)), 2);
+        store.record_top_k(hash.clone(), make_annotation("b", Some(0.5)), 2);
+        store.record_top_k(hash.clone(), make_annotation("a", Some(0.9)), 2);
+        let all = store.lookup_all(&hash).unwrap();
+        let ranked: Vec<(&str, Option<f64>)> = all
+            .iter()
+            .map(|e| (e.rule_name.as_str(), e.proof_probability))
+            .collect();
+        assert_eq!(ranked, vec![("a", Some(0.9)), ("b", Some(0.5))]);
+    }
+
+    fn term(prob: f64) -> ProofTerm {
+        ProofTerm {
+            source_rule: "r".to_string(),
+            base_fact_id: b"f".to_vec(),
+            prob,
+        }
     }
 
     #[test]
-    fn compute_proof_probability_empty_support() {
-        let prob = compute_proof_probability(&[], &HashMap::new());
-        assert!(prob.is_none());
+    fn compute_proof_probability_is_the_rows_own_weight() {
+        // 0.5 local x 0.8 referenced: the row's PROB value already holds it.
+        let prob = compute_proof_probability(true, Some(0.4), &[term(0.8)]);
+        assert_eq!(prob, Some(0.4));
     }
 
     #[test]
-    fn compute_proof_probability_missing_fact() {
-        let support = vec![ProofTerm {
-            source_rule: "r1".to_string(),
-            base_fact_id: b"unknown".to_vec(),
-        }];
-        let prob = compute_proof_probability(&support, &HashMap::new());
-        assert!(prob.is_none());
+    fn compute_proof_probability_of_a_leaf_is_its_own_value() {
+        assert_eq!(compute_proof_probability(true, Some(0.9), &[]), Some(0.9));
+        // A NULL PROB value is no weight.
+        assert_eq!(compute_proof_probability(true, None, &[]), None);
+    }
+
+    #[test]
+    fn compute_proof_probability_without_a_prob_column_multiplies_the_references() {
+        let prob = compute_proof_probability(false, None, &[term(0.3), term(0.5)]);
+        assert!((prob.unwrap() - 0.15).abs() < 1e-12);
+        // A certain fact: referencing nothing, or only certain facts.
+        assert_eq!(compute_proof_probability(false, None, &[]), Some(1.0));
+        assert_eq!(
+            compute_proof_probability(false, None, &[term(1.0), term(1.0)]),
+            Some(1.0)
+        );
     }
 
     #[test]

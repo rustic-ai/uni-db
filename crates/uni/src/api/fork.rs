@@ -272,6 +272,19 @@ async fn capture_fork_point_without_writer(
     Ok(fork_point)
 }
 
+/// How long fork creation waits for a bulk load being published on the parent
+/// to finish before giving up with a retryable error.
+const FORK_BULK_PUBLISH_WAIT: Duration = Duration::from_secs(30);
+
+/// [`FORK_BULK_PUBLISH_WAIT`], or the milliseconds the
+/// `fork::create-bulk-publish-wait` test seam returns.
+fn bulk_publish_wait() -> Duration {
+    fail::fail_point!("fork::create-bulk-publish-wait", |ms| {
+        Duration::from_millis(ms.and_then(|m| m.parse().ok()).unwrap_or(0))
+    });
+    FORK_BULK_PUBLISH_WAIT
+}
+
 async fn create_fork_2pc(
     parent: &Session,
     registry: &Arc<ForkRegistryHandle>,
@@ -341,25 +354,56 @@ async fn create_fork_2pc(
             .collect(),
         None => BTreeMap::new(),
     };
-    let fork_point = if let Some(writer_lock) = &parent.db.writer {
-        let writer: &uni_store::Writer = writer_lock.as_ref();
-        writer
-            .flush_and_capture_fork_point(&candidate_datasets, &parent_branches)
-            .await
-            .map_err(UniError::Internal)?
-    } else {
-        // A read-only parent has no writer, but a fork point is still fully
-        // determined: there is no L0 to flush, and every high-water mark the
-        // fork needs is readable from state the handle already holds.
-        //
-        // Defaulting here instead — which is what this branch used to do —
-        // handed the fork `version_hwm = vid_hwm = eid_hwm = 0` against a
-        // perfectly non-empty parent. The fork's MVCC floor then started at 0
-        // (its first commit reported version 1 rather than parent-HWM + 1) and
-        // its allocator bootstrapped from VID 0, colliding with the parent's
-        // pre-existing rows so that Lance's read-merge shadowed the fork's own
-        // writes. Issue #169.
-        capture_fork_point_without_writer(parent, &candidate_datasets, &parent_branches).await?
+    // Read before the capture; compared once the Pending entry below is
+    // persisted (see `Writer::restore_epoch`).
+    let restore_epoch = parent.db.writer.as_ref().map(|w| w.restore_epoch());
+    // A bulk load publishes table by table, hidden from the parent's readers
+    // by its bulk visibility gate until the last table lands. A fork point
+    // captured part way through would cut the branches with only some of the
+    // load's tables and keep that partial load for good (the fork reads with
+    // a gate of its own, which knows nothing of the parent's publish). So the
+    // capture waits for the parent's gate to open, and is retried when the
+    // gate's epoch moved during it -- a publish began meanwhile.
+    let gate = Arc::clone(parent.db.storage.bulk_gate());
+    let deadline = tokio::time::Instant::now() + bulk_publish_wait();
+    let fork_point = loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let Some(epoch) = gate.wait_open(remaining).await else {
+            return Err(UniError::ForkLifecycle {
+                name,
+                stage: "bulk_publish",
+                source: "a bulk load is still being published on the parent, and a fork \
+                         point taken now would keep only part of it; nothing was created, \
+                         retry the fork"
+                    .into(),
+            });
+        };
+        // Test seam: the gate was open; a publish may begin before the capture.
+        fail::fail_point!("fork::create-before-capture");
+        let captured = if let Some(writer_lock) = &parent.db.writer {
+            let writer: &uni_store::Writer = writer_lock.as_ref();
+            writer
+                .flush_and_capture_fork_point(&candidate_datasets, &parent_branches)
+                .await
+                .map_err(UniError::Internal)?
+        } else {
+            // A read-only parent has no writer, but a fork point is still fully
+            // determined: there is no L0 to flush, and every high-water mark the
+            // fork needs is readable from state the handle already holds.
+            //
+            // Defaulting here instead — which is what this branch used to do —
+            // handed the fork `version_hwm = vid_hwm = eid_hwm = 0` against a
+            // perfectly non-empty parent. The fork's MVCC floor then started at 0
+            // (its first commit reported version 1 rather than parent-HWM + 1) and
+            // its allocator bootstrapped from VID 0, colliding with the parent's
+            // pre-existing rows so that Lance's read-merge shadowed the fork's own
+            // writes. Issue #169.
+            capture_fork_point_without_writer(parent, &candidate_datasets, &parent_branches).await?
+        };
+        if gate.epoch() == epoch {
+            break captured;
+        }
+        debug!(fork = %name, "a bulk publish began during the fork-point capture; retrying it");
     };
 
     // Capture parent state at fork-point: snapshot id and schema version.
@@ -395,8 +439,29 @@ async fn create_fork_2pc(
         info.ttl_expires_at = Some(chrono::Utc::now() + chrono_d);
     }
 
+    // Crash/race seam: the fork point is captured but the fork is not yet
+    // registered, so a restore running now cannot see it.
+    fail::fail_point!("fork::create-before-begin");
+
     // Step 2: persist the Pending entry.
     registry.begin_create(info).await?;
+    // A restore that started after the capture rewound primary under the
+    // fork point just taken, and could not see this fork to refuse. Any
+    // restore starting from here on sees the Pending entry and refuses.
+    if let Some(writer) = parent.db.writer.as_ref()
+        && restore_epoch != Some(writer.restore_epoch())
+    {
+        if let Err(rb) = registry.rollback_create(&name).await {
+            tracing::warn!("rollback after a racing snapshot restore failed: {rb}");
+        }
+        return Err(UniError::ForkLifecycle {
+            name,
+            stage: "restore_race",
+            source: "a snapshot restore ran while the fork was being created, so its fork \
+                     point predates the restored state; retry the fork"
+                .into(),
+        });
+    }
     // Crash seam: a Pending entry exists with no allocator and no branches.
     // Recovery must roll it back — it never rolls a Pending fork forward,
     // because doing so would require verifying every branch exists.

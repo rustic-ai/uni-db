@@ -25,19 +25,17 @@ impl CompiledProgram {
     /// Whether running this program needs a provenance tracker.
     ///
     /// True when the program has an `EXPLAIN RULE` command, or a rule folds
-    /// with `MNOR` or `MPROD` (shared-proof detection for probabilistic
-    /// folds). The runtime attaches a tracker exactly when this holds, and
-    /// then does not let `ASSUME` / `ABDUCE` reuse the top-level facts:
-    /// the tracker can change `PROB` values (shared-proof BDD) in ways a
-    /// hypothetical re-evaluation, which runs without one, does not
-    /// reproduce. So `hypothetical_strata_reused` is always zero for such a
-    /// program.
+    /// with `MNOR` or `MPROD` (shared-proof detection and exact inference
+    /// for probabilistic folds), anywhere: at the top level or in an
+    /// `ASSUME` body, its own rules and commands included, at any depth.
+    /// The runtime attaches a tracker exactly when this holds, to the
+    /// program's own run and to every re-evaluation of it (after a write, in
+    /// a hypothetical state), and then reuses no stratum across states: the
+    /// tracker can change `PROB` values (shared-proof BDD), and a reused
+    /// stratum would carry no provenance. So `hypothetical_strata_reused` is
+    /// always zero for such a program.
     #[must_use]
     pub fn needs_provenance_tracker(&self) -> bool {
-        let has_explain = self
-            .commands
-            .iter()
-            .any(|c| matches!(c, CompiledCommand::ExplainRule(_)));
         let has_prob_fold = self.strata.iter().any(|s| {
             s.rules.iter().any(|r| {
                 r.clauses.iter().any(|c| {
@@ -51,8 +49,22 @@ impl CompiledProgram {
                 })
             })
         });
-        has_explain || has_prob_fold
+        has_prob_fold || commands_need_provenance_tracker(&self.commands)
     }
+}
+
+/// Whether any of `commands` needs a provenance tracker: an `EXPLAIN RULE`,
+/// or an `ASSUME` whose body needs one (see
+/// [`CompiledProgram::needs_provenance_tracker`]).
+fn commands_need_provenance_tracker(commands: &[CompiledCommand]) -> bool {
+    commands.iter().any(|c| match c {
+        CompiledCommand::ExplainRule(_) => true,
+        CompiledCommand::Assume(ca) => {
+            ca.body_program.needs_provenance_tracker()
+                || commands_need_provenance_tracker(&ca.body_commands)
+        }
+        _ => false,
+    })
 }
 
 /// A compiled `CREATE MODEL` declaration (Phase B preview).
@@ -152,6 +164,14 @@ pub struct CompiledRule {
     pub clauses: Vec<CompiledClause>,
     pub yield_schema: Vec<YieldColumn>,
     pub priority: Option<i64>,
+    /// Every parameter (`$name`) the rule's definitions reference, in order
+    /// of first appearance and without repeats. A rule the goal-directed
+    /// rewrite generates carries those of the rules it was generated from.
+    ///
+    /// Read when a program runs a previously registered rule: the program's
+    /// own text does not name the rule's parameters, so they are checked
+    /// from here, before evaluation, with every missing name reported.
+    pub parameters: Vec<String>,
 }
 
 /// A single clause (one CREATE RULE ... AS ... definition).

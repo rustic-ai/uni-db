@@ -13,11 +13,21 @@ Rust notebooks (examples/rust/) are skipped — they require the evcxr
 kernel which is not available in CI.
 
 Usage:
-    python website/scripts/convert_notebooks.py
+    python website/scripts/convert_notebooks.py               # execute + convert
+    python website/scripts/convert_notebooks.py --no-execute  # convert only
 
-Run this before ``zensical build`` or ``zensical serve``.
+Run this before ``zensical build`` or ``zensical serve``. The generated
+``.md`` files are gitignored; nav entries and ``*_overview.md`` pages link to
+them, so a build without this step reports every such link as missing.
+
+``--no-execute`` converts the committed (output-free) notebooks without
+running them. It needs only ``nbconvert`` -- no built ``uni_db`` wheel and no
+Jupyter kernel -- and leaves the tracked ``.ipynb`` files untouched, which is
+what the local docs check uses. Executing writes cell outputs back into the
+``.ipynb`` files; the deploy workflow does that on a throwaway checkout.
 """
 
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -91,6 +101,14 @@ def convert_to_markdown(notebook_path: Path) -> Path | None:
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--no-execute",
+        action="store_true",
+        help="convert notebooks without executing them (no kernel or uni_db needed)",
+    )
+    args = parser.parse_args()
+
     notebooks = find_notebooks(DOCS_DIR)
     if not notebooks:
         print("No notebooks found.")
@@ -102,7 +120,7 @@ def main():
     failed = 0
     for nb_path in notebooks:
         rel = nb_path.relative_to(DOCS_DIR)
-        execute = should_execute(nb_path)
+        execute = not args.no_execute and should_execute(nb_path)
         tag = "execute+convert" if execute else "convert only"
         print(f"  {rel} ({tag}) ", end="", flush=True)
 

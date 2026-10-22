@@ -13,10 +13,11 @@
 //!
 //! The oracle for every case is the same commands run one by one, each as its
 //! own Locy program, in a transaction that applies the ASSUME's mutation
-//! first and is rolled back afterwards. The ASSUME's rows must equal the
-//! concatenated results of that sequence, a `DERIVE` contributing one
-//! `{affected: n}` row as its top-level `CommandResult::Derive { affected }`
-//! does.
+//! first and is rolled back afterwards. The ASSUME returns one result per
+//! body command, and each must equal the result the same command returned in
+//! that sequence: the same kind (a `DERIVE` reports
+//! `CommandResult::Derive { affected }` in a body as at the top level) and the
+//! same rows.
 
 // Rust guideline compliant
 
@@ -69,79 +70,103 @@ fn render(row: &FactRow) -> String {
     cells.join(" ")
 }
 
-/// The rows a command contributes to an enclosing ASSUME's result.
-fn command_rows(result: &CommandResult) -> Result<Vec<String>> {
-    Ok(match result {
-        CommandResult::Query(rows) | CommandResult::Cypher(rows) | CommandResult::Assume(rows) => {
-            rows.iter().map(render).collect()
-        }
+/// A command's result: its kind, and its rows sorted. A `DERIVE`'s one row
+/// is its affected count; an ASSUME's rows are its body results' rows, each
+/// prefixed with the body command's index (`0:`), and its kind lists theirs.
+fn rendered(result: &CommandResult) -> Result<(String, Vec<String>)> {
+    let (kind, mut rows) = match result {
+        CommandResult::Query(rows) => ("Query".to_string(), rows.iter().map(render).collect()),
+        CommandResult::Cypher(rows) => ("Cypher".to_string(), rows.iter().map(render).collect()),
         CommandResult::Derive { affected } => {
             let row: FactRow = [("affected".to_string(), Value::Int(*affected as i64))].into();
-            vec![render(&row)]
+            ("Derive".to_string(), vec![render(&row)])
+        }
+        CommandResult::Assume { results, .. } => {
+            let mut kinds = Vec::new();
+            let mut rows = Vec::new();
+            for (i, r) in results.iter().enumerate() {
+                let (kind, body_rows) = rendered(r)?;
+                kinds.push(kind);
+                rows.extend(body_rows.into_iter().map(|row| format!("{i}:{row}")));
+            }
+            (format!("Assume[{}]", kinds.join(",")), rows)
         }
         other => bail!("unexpected command result in an ASSUME body: {other:?}"),
-    })
-}
-
-fn sorted(mut rows: Vec<String>) -> Vec<String> {
+    };
     rows.sort();
-    rows
+    Ok((kind, rows))
 }
 
-/// The ASSUME's rows, sorted.
+/// The ASSUME's body results, one per body command.
 async fn assume_answer(
     db: &Uni,
     mutation: &str,
     body_rules: &str,
     body: &[&str],
-) -> Result<Vec<String>> {
+) -> Result<Vec<(String, Vec<String>)>> {
     let program = format!(
         "{RULES}ASSUME {{ {mutation} }} THEN {{\n{body_rules}{}\n}}",
         body.join("\n")
     );
     let result: LocyResult = db.session().locy(&program).await?;
     match result.command_results.as_slice() {
-        [CommandResult::Assume(rows)] => Ok(sorted(rows.iter().map(render).collect())),
+        [CommandResult::Assume { results, .. }] => results.iter().map(rendered).collect(),
         other => bail!("expected one ASSUME result, got {other:?}"),
     }
 }
 
 /// The oracle: `mutation`, then each command as its own program, in a
-/// transaction that is rolled back.
+/// transaction that is rolled back. One result per command.
 async fn sequential_answer(
     db: &Uni,
     mutation: &str,
     body_rules: &str,
     body: &[&str],
-) -> Result<Vec<String>> {
+) -> Result<Vec<(String, Vec<String>)>> {
     let tx = db.session().tx().await?;
     tx.execute(mutation).await?;
-    let mut rows = Vec::new();
+    let mut results = Vec::new();
     for command in body {
         if command.starts_with("MATCH") {
             // A Cypher write: a Locy program's Cypher commands are read-only.
+            // In a body it returns no rows.
             let written = tx.execute(command).await?;
             assert!(written.affected_rows() > 0, "`{command}` wrote nothing");
+            results.push(("Cypher".to_string(), Vec::new()));
             continue;
         }
         let result = tx.locy(&format!("{RULES}{body_rules}{command}")).await?;
-        for r in &result.command_results {
-            rows.extend(command_rows(r)?);
+        match result.command_results.as_slice() {
+            [one] => results.push(rendered(one)?),
+            other => bail!("`{command}` alone returned {other:?}, not one result"),
         }
     }
     tx.rollback();
-    Ok(sorted(rows))
+    Ok(results)
 }
 
-/// Requires the ASSUME's rows to equal the oracle's, and the oracle to equal
-/// `expected` (so a case cannot pass by both sides being empty or wrong the
-/// same way). Also requires the stored graph to be unchanged afterwards.
-async fn check(mutation: &str, body_rules: &str, body: &[&str], expected: &[&str]) -> Result<()> {
+/// Requires each of the ASSUME's body results to equal the oracle's for the
+/// same command, and the oracle's rows to equal `expected`, one list per
+/// command (so a case cannot pass by both sides being empty or wrong the same
+/// way). Also requires the stored graph to be unchanged afterwards.
+async fn check(
+    mutation: &str,
+    body_rules: &str,
+    body: &[&str],
+    expected: &[&[&str]],
+) -> Result<()> {
     let db = seeded().await?;
     let oracle = sequential_answer(&db, mutation, body_rules, body).await?;
-    let mut want: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
-    want.sort();
-    assert_eq!(oracle, want, "oracle for body {body:?}");
+    let want: Vec<Vec<String>> = expected
+        .iter()
+        .map(|rows| {
+            let mut rows: Vec<String> = rows.iter().map(|s| s.to_string()).collect();
+            rows.sort();
+            rows
+        })
+        .collect();
+    let oracle_rows: Vec<Vec<String>> = oracle.iter().map(|(_, rows)| rows.clone()).collect();
+    assert_eq!(oracle_rows, want, "oracle for body {body:?}");
     let got = assume_answer(&db, mutation, body_rules, body).await?;
     assert_eq!(
         got, oracle,
@@ -171,6 +196,11 @@ fn affected(n: i64) -> String {
     format!("affected=Int({n})")
 }
 
+/// A row of a nested ASSUME's body command 0.
+fn in_nested(row: &str) -> String {
+    format!("0:{row}")
+}
+
 #[tokio::test]
 async fn derive_then_query_reads_the_derived_edges() -> Result<()> {
     let a3 = affected(3);
@@ -178,7 +208,7 @@ async fn derive_then_query_reads_the_derived_edges() -> Result<()> {
         UNRELATED,
         "",
         &["DERIVE link", Q_LINKED],
-        &[&a3, AB, BC, CD],
+        &[&[&a3], &[AB, BC, CD]],
     )
     .await
 }
@@ -190,7 +220,7 @@ async fn derive_then_query_after_a_mutation_the_rule_reads() -> Result<()> {
         EXTENDS_KNOWS,
         "",
         &["DERIVE link", Q_LINKED],
-        &[&a4, AB, BC, CD, DE],
+        &[&[&a4], &[AB, BC, CD, DE]],
     )
     .await
 }
@@ -202,7 +232,7 @@ async fn query_derive_query_reads_before_then_after() -> Result<()> {
         UNRELATED,
         "",
         &[Q_LINKED, "DERIVE link", Q_LINKED],
-        &[&a3, AB, BC, CD],
+        &[&[], &[&a3], &[AB, BC, CD]],
     )
     .await
 }
@@ -214,7 +244,7 @@ async fn derive_then_recursive_rule() -> Result<()> {
         UNRELATED,
         "",
         &["DERIVE link", Q_REACH],
-        &[&a3, AB, BC, CD, AC, AD, BD],
+        &[&[&a3], &[AB, BC, CD, AC, AD, BD]],
     )
     .await
 }
@@ -226,7 +256,7 @@ async fn second_derive_reads_the_first_derives_edges() -> Result<()> {
         UNRELATED,
         "",
         &["DERIVE link", "DERIVE link2", Q_LINKED2],
-        &[&a3, &a3, AB, BC, CD],
+        &[&[&a3], &[&a3], &[AB, BC, CD]],
     )
     .await
 }
@@ -234,7 +264,7 @@ async fn second_derive_reads_the_first_derives_edges() -> Result<()> {
 #[tokio::test]
 async fn derive_only_body_reports_affected() -> Result<()> {
     let a3 = affected(3);
-    check(UNRELATED, "", &["DERIVE link"], &[&a3]).await
+    check(UNRELATED, "", &["DERIVE link"], &[&[&a3]]).await
 }
 
 #[tokio::test]
@@ -244,7 +274,7 @@ async fn derive_feeding_a_body_rule() -> Result<()> {
         UNRELATED,
         "CREATE RULE via AS MATCH (a:Person) WHERE a IS linked TO b YIELD KEY a, KEY b\n",
         &["DERIVE link", "QUERY via RETURN a.name AS a, b.name AS b"],
-        &[&a3, AB, BC, CD],
+        &[&[&a3], &[AB, BC, CD]],
     )
     .await
 }
@@ -258,7 +288,7 @@ async fn cypher_write_then_query() -> Result<()> {
             "MATCH (a:Person {name: 'A'}), (c:Person {name: 'C'}) CREATE (a)-[:LINK]->(c)",
             Q_LINKED,
         ],
-        &[AC],
+        &[&[], &[AC]],
     )
     .await
 }
@@ -277,7 +307,16 @@ async fn nested_assume_after_derive_sees_it_and_is_discarded() -> Result<()> {
              CREATE (a)-[:LINK]->(d) } THEN { QUERY linked RETURN a.name AS a, b.name AS b }",
             Q_LINKED,
         ],
-        &[&a3, AB, BC, CD, AD, AB, BC, CD],
+        &[
+            &[&a3],
+            &[
+                &in_nested(AB),
+                &in_nested(BC),
+                &in_nested(CD),
+                &in_nested(AD),
+            ],
+            &[AB, BC, CD],
+        ],
     )
     .await
 }
@@ -285,5 +324,51 @@ async fn nested_assume_after_derive_sees_it_and_is_discarded() -> Result<()> {
 #[tokio::test]
 async fn derive_with_nothing_to_derive_changes_nothing() -> Result<()> {
     // `link2` reads LINK, which does not exist yet: zero affected.
-    check(UNRELATED, "", &["DERIVE link2", Q_LINKED2], &[&affected(0)]).await
+    check(
+        UNRELATED,
+        "",
+        &["DERIVE link2", Q_LINKED2],
+        &[&[&affected(0)], &[]],
+    )
+    .await
+}
+
+/// The ASSUME's `derived` facts are those of the state its first body command
+/// reads: after the mutation (`kn` sees the new `D -> E` edge) and before the
+/// body's DERIVE (`linked` is still empty, though the QUERY after the DERIVE
+/// reads 4 facts). A body rule's facts are among them.
+#[tokio::test]
+async fn derived_is_the_state_the_first_body_command_reads() -> Result<()> {
+    let db = seeded().await?;
+    let program = format!(
+        "{RULES}ASSUME {{ {EXTENDS_KNOWS} }} THEN {{\n\
+         CREATE RULE kn AS MATCH (a:Person)-[:KNOWS]->(b:Person) YIELD KEY a, KEY b\n\
+         DERIVE link\n{Q_LINKED}\n}}"
+    );
+    let result: LocyResult = db.session().locy(&program).await?;
+    let (results, derived) = match result.command_results.as_slice() {
+        [one] => one.as_assume().expect("an ASSUME result"),
+        other => bail!("expected one ASSUME result, got {other:?}"),
+    };
+    let rows: Vec<Vec<String>> = results
+        .iter()
+        .map(|r| rendered(r).map(|(_, rows)| rows))
+        .collect::<Result<_>>()?;
+    assert_eq!(
+        rows,
+        vec![
+            vec![affected(4)],
+            vec![AB.into(), BC.into(), CD.into(), DE.into()]
+        ]
+    );
+    let count = |rule: &str| derived.get(rule).map(Vec::len);
+    assert_eq!(count("kn"), Some(4), "the mutation's edge is in `derived`");
+    assert_eq!(count("linked"), Some(0), "the body's DERIVE is not");
+    // The program's own `derived` is the stored state: no body rule, and the
+    // hypothetical edge is not in it.
+    assert!(!result.derived.contains_key("kn"));
+    assert_eq!(result.derived.get("linked").map(Vec::len), Some(0));
+    // `rows()` is the first row-producing body result: the QUERY's.
+    assert_eq!(result.rows().map(Vec::len), Some(4));
+    Ok(())
 }

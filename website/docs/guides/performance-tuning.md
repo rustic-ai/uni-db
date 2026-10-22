@@ -398,7 +398,15 @@ config.compaction.check_interval = Duration::from_secs(30);// Check every 30s (d
 
 #### Manual Compaction (Optional)
 
-For on-demand compaction after bulk loads, you can trigger it manually:
+For on-demand compaction after bulk loads, you can trigger it manually.
+`CALL uni.admin.compact()` (run it with `session.run()` or the `uni query` CLI;
+`session.query()` is read-only and refuses it; Rust `StorageManager::compact`) runs the same full
+pass as background compaction -- folding L1 deltas, then optimizing every
+table -- and never at the same time as one: it waits for a running pass. It
+also lowers the flush-generation count that drives write throttling, so it
+releases writers stalled at `throttle.hard_limit`. The label- and
+edge-type-scoped calls only optimize those tables' files and leave the count
+unchanged.
 
 ```bash
 # Manual compaction (via Cypher)

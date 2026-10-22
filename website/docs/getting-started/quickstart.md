@@ -221,7 +221,7 @@ The `ASSUME` block creates a hypothetical world where `api.cve_score = 3.0`, eva
 
     out = session.locy(program)
     for cmd in out.command_results:
-        rows = cmd.rows if cmd.command_type == "query" else []
+        rows = cmd.rows if cmd.command_type in ("query", "assume") else []
         print(cmd.command_type, rows)
     ```
 

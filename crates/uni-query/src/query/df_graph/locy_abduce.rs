@@ -10,6 +10,7 @@
 //! Phase 3: Validate each candidate via ASSUME (fork L0 + mutate + re-eval + restore).
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use uni_common::value::EntityRef;
 use uni_common::{Eid, Value, Vid};
@@ -28,12 +29,47 @@ use super::locy_delta::RowStore;
 use super::locy_ast_builder::value_to_expr;
 use super::locy_eval::eval_condition;
 use super::locy_explain::explain_rule;
+use super::locy_sequence::SequencePrograms;
 use super::locy_traits::{LocyExecutionContext, StrataBaseline};
 
 /// Evaluate an ABDUCE query using a three-phase pipeline.
 pub async fn evaluate_abduce(
     query: &AbduceQuery,
     program: &CompiledProgram,
+    ctx: &dyn LocyExecutionContext,
+    config: &LocyConfig,
+    derived_store: &RowStore,
+    stats: &mut LocyStats,
+) -> Result<AbductionResult, LocyError> {
+    let validation = SequencePrograms {
+        parent: program,
+        body: None,
+    };
+    evaluate_abduce_with(
+        query,
+        program,
+        &validation,
+        ctx,
+        config,
+        derived_store,
+        stats,
+    )
+    .await
+}
+
+/// [`evaluate_abduce`] for an ABDUCE whose candidates are validated against
+/// `validation`: inside an `ASSUME` body, the parent's strata followed by the
+/// body's own rules, the programs the body's facts come from. `program`
+/// names the rules (its catalog holds the body's rules too).
+///
+/// # Errors
+///
+/// An unknown rule, or a failure building the derivation tree, applying a
+/// candidate or re-deriving in its state.
+pub async fn evaluate_abduce_with(
+    query: &AbduceQuery,
+    program: &CompiledProgram,
+    validation: &SequencePrograms<'_>,
     ctx: &dyn LocyExecutionContext,
     config: &LocyConfig,
     derived_store: &RowStore,
@@ -58,9 +94,17 @@ pub async fn evaluate_abduce(
     // the causes ABDUCE edits are in the children: with a tracker present (any
     // program with an EXPLAIN or a probabilistic FOLD) ABDUCE saw only the
     // root and could propose nothing that changes the answer.
+    //
+    // Built over a copy of the program whose rule bodies name every anonymous
+    // node and relationship (see `name_anonymous_elements`): a derivation's
+    // evidence row binds only named elements, and a hop is proposed only when
+    // its edge can be identified, so a body such as
+    // `(l:Lot)-[:OBSERVED]->(:Feature)-[:ON]->(t:Tool)` otherwise proposed
+    // no edge at all.
+    let (named_program, anonymous) = name_anonymous_elements(program);
     let derivation_tree = explain_rule(
         &explain_query,
-        program,
+        &named_program,
         ctx,
         config,
         derived_store,
@@ -72,7 +116,8 @@ pub async fn evaluate_abduce(
 
     // Phase 2: Generate candidate modifications from tree
     let mut candidates: Vec<Modification> = if query.negated {
-        extract_removal_candidates(&derivation_tree, rule, program)
+        let named_rule = named_program.rule_catalog.get(&rule_name).unwrap_or(rule);
+        extract_removal_candidates(&derivation_tree, named_rule, &named_program, &anonymous)
     } else {
         concrete_additions(
             &extract_addition_candidates(rule),
@@ -100,7 +145,7 @@ pub async fn evaluate_abduce(
             query.negated,
             &rule_name,
             query.where_expr.as_ref(),
-            program,
+            validation,
             ctx,
             config,
             baseline.as_ref(),
@@ -113,6 +158,11 @@ pub async fn evaluate_abduce(
             validated: is_valid,
             cost,
         });
+        // A candidate state cut short (`allow_partial`) validates nothing
+        // further: the program drops this ABDUCE's result and reports the cut.
+        if ctx.is_cut_short() {
+            break;
+        }
     }
 
     // Sort by cost ascending, validated first
@@ -130,14 +180,68 @@ pub async fn evaluate_abduce(
     })
 }
 
+/// A copy of `program` in which every anonymous node and relationship of a
+/// rule body's top-level paths carries a generated variable, and the set of
+/// generated names.
+///
+/// Naming an element does not change which rows a pattern matches, only which
+/// columns its rows carry; the copy is used solely to build ABDUCE's
+/// derivation tree, never to evaluate. A generated name is reported back as
+/// anonymous (an empty variable, see [`anonymize`]) and is never a property
+/// edit candidate. Each name is checked against the clause's whole text, so it
+/// cannot capture a variable the body already uses.
+fn name_anonymous_elements(program: &CompiledProgram) -> (CompiledProgram, Vec<String>) {
+    let mut named = program.clone();
+    let mut generated = Vec::new();
+    for rule in named.rule_catalog.values_mut() {
+        for clause in &mut rule.clauses {
+            let text = format!("{clause:?}");
+            let mut next = 0usize;
+            let mut fresh = || loop {
+                let name = format!("abduce_anon_{next}");
+                next += 1;
+                if !text.contains(&name) {
+                    break name;
+                }
+            };
+            for path in &mut clause.match_pattern.paths {
+                for element in &mut path.elements {
+                    let variable = match element {
+                        PatternElement::Node(node) => &mut node.variable,
+                        PatternElement::Relationship(rel) => &mut rel.variable,
+                        _ => continue,
+                    };
+                    if variable.as_deref().is_none_or(str::is_empty) {
+                        let name = fresh();
+                        generated.push(name.clone());
+                        *variable = Some(name);
+                    }
+                }
+            }
+        }
+    }
+    (named, generated)
+}
+
+/// `var`, or the empty (anonymous) variable when it is a name
+/// [`name_anonymous_elements`] generated.
+fn anonymize(var: String, anonymous: &[String]) -> String {
+    if anonymous.contains(&var) {
+        String::new()
+    } else {
+        var
+    }
+}
+
 /// Phase 2 (ABDUCE NOT): Extract removal/change candidates from the derivation tree.
 fn extract_removal_candidates(
     tree: &uni_locy::DerivationNode,
     rule: &CompiledRule,
     program: &CompiledProgram,
+    anonymous: &[String],
 ) -> Vec<Modification> {
     let mut candidates = Vec::new();
-    collect_leaf_candidates(tree, rule, program, &mut candidates);
+    collect_leaf_candidates(tree, rule, program, anonymous, &mut candidates);
     // Two leaves can propose the same edit (one per derivation that reads the
     // same entity); keep the first, so duplicates spend neither the candidate
     // budget nor a validation run.
@@ -161,6 +265,7 @@ fn collect_leaf_candidates(
     node: &uni_locy::DerivationNode,
     rule: &CompiledRule,
     program: &CompiledProgram,
+    anonymous: &[String],
     candidates: &mut Vec<Modification>,
 ) {
     if node.children.is_empty() && node.graph_fact.is_some() {
@@ -170,7 +275,7 @@ fn collect_leaf_candidates(
         if node.clause_index < effective_rule.clauses.len() {
             let clause = &effective_rule.clauses[node.clause_index];
             for element in &clause.match_pattern.paths {
-                extract_edge_candidates(element, &node.bindings, candidates);
+                extract_edge_candidates(element, &node.bindings, anonymous, candidates);
             }
         }
 
@@ -188,7 +293,7 @@ fn collect_leaf_candidates(
         let mut entity_bindings: Vec<(&String, &Value)> = node
             .bindings
             .iter()
-            .filter(|(key, _)| !key.contains('.'))
+            .filter(|(key, _)| !key.contains('.') && !anonymous.contains(key))
             .collect();
         entity_bindings.sort_by(|a, b| a.0.cmp(b.0));
         for (key, value) in entity_bindings {
@@ -216,7 +321,7 @@ fn collect_leaf_candidates(
     }
 
     for child in &node.children {
-        collect_leaf_candidates(child, rule, program, candidates);
+        collect_leaf_candidates(child, rule, program, anonymous, candidates);
     }
 }
 
@@ -270,6 +375,7 @@ fn zero_like(old: &Value) -> Value {
 fn extract_edge_candidates(
     path: &PathPattern,
     bindings: &FactRow,
+    anonymous: &[String],
     candidates: &mut Vec<Modification>,
 ) {
     /// A hop whose target node has not been reached yet.
@@ -309,12 +415,22 @@ fn extract_edge_candidates(
                         || (source_vid.is_some()
                             && target_vid.is_some()
                             && hop.direction != Direction::Both);
+                    // The type of the edge the derivation read, when the
+                    // body binds it: under `[e:E|G]` the first alternative
+                    // named another type, so the removal matched no edge
+                    // and was never validated.
+                    let edge_type = match bindings.get(&hop.edge_var) {
+                        Some(Value::Edge(edge)) if !hop.edge_var.is_empty() => {
+                            edge.edge_type.clone()
+                        }
+                        _ => hop.edge_type,
+                    };
                     if identified {
                         candidates.push(Modification::RemoveEdge {
-                            source_var: src,
-                            target_var: tgt,
-                            edge_var: hop.edge_var,
-                            edge_type: hop.edge_type,
+                            source_var: anonymize(src, anonymous),
+                            target_var: anonymize(tgt, anonymous),
+                            edge_var: anonymize(hop.edge_var, anonymous),
+                            edge_type,
                             match_properties: HashMap::new(),
                             eid,
                             source_vid,
@@ -550,7 +666,7 @@ async fn validate_modification(
     negated: bool,
     rule_name: &str,
     where_expr: Option<&Expr>,
-    program: &CompiledProgram,
+    validation: &SequencePrograms<'_>,
     ctx: &dyn LocyExecutionContext,
     config: &LocyConfig,
     baseline: Option<&StrataBaseline>,
@@ -586,11 +702,36 @@ async fn validate_modification(
     stats.mutations_executed += 1;
 
     // Re-evaluate strata, reusing those the modification cannot affect.
-    let assume_store: RowStore = super::locy_assume::re_evaluate_hypothetical(
-        program, ctx, config, baseline, &footprint, stats,
-    )
-    .await?
-    .rows;
+    // Inside an ASSUME body the body's own rules are derived too, on top of
+    // the parent's, as the body's facts are: validating against the
+    // parent's strata alone found a body rule empty in every candidate state.
+    let assume_store: RowStore = match validation.body {
+        None => {
+            super::locy_assume::re_evaluate_hypothetical(
+                validation.parent,
+                ctx,
+                config,
+                baseline,
+                &footprint,
+                stats,
+            )
+            .await?
+            .rows
+        }
+        Some(_) => Arc::unwrap_or_clone(
+            super::locy_sequence::derive_command_facts(
+                validation,
+                super::locy_sequence::SequenceScope::Hypothetical,
+                ctx,
+                config,
+                baseline,
+                &footprint,
+                stats,
+            )
+            .await?
+            .into_store(),
+        ),
+    };
 
     // Check if the conclusion still holds
     let facts = assume_store

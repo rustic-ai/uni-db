@@ -59,11 +59,29 @@ async fn test_snapshots_and_time_travel() -> Result<()> {
     }
     assert!(found_alice);
 
-    // Test Restore
+    // Restore cannot run inside a transaction: a rollback could not undo it.
     let tx = db.session().tx().await?;
-    tx.execute(&format!("CALL uni.admin.snapshot.restore('{}')", snap1_id))
+    let inside = tx
+        .execute(&format!("CALL uni.admin.snapshot.restore('{}')", snap1_id))
+        .await;
+    assert!(
+        inside
+            .as_ref()
+            .is_err_and(|e| e.to_string().contains("cannot run inside a transaction")),
+        "{inside:?}"
+    );
+    tx.rollback();
+
+    // Outside one it rewinds to the snapshot.
+    db.session()
+        .run(&format!("CALL uni.admin.snapshot.restore('{}')", snap1_id))
         .await?;
-    tx.commit().await?;
+    let res = db
+        .session()
+        .query("MATCH (n:Person) RETURN n.name AS name")
+        .await?;
+    assert_eq!(res.len(), 1);
+    assert_eq!(res.rows()[0].get::<String>("name")?, "Alice");
 
     Ok(())
 }

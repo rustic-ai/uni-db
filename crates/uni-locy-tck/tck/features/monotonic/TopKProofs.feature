@@ -73,3 +73,53 @@ Feature: Top-K Proof Filtering (Scallop, Huang et al. 2021)
     Then evaluation should succeed
     And the command result 0 should be an Explain with rule 'reach'
     And the command result 0 should be an Explain with 1 children
+    And the command result 0 should be an Explain where child 0 has proof_probability approximately 0.9
+
+  # reach(A, C) has two derivations: the edge A -> C (0.3), recorded first,
+  # and A -> B (0.5) times reach(B, C) (0.8), 0.4. A derivation weighs its own
+  # PROB value, so top_k_proofs 1 keeps the 0.4 one.
+  Scenario: top_k=1 keeps the heaviest derivation of a fact
+    Given having executed:
+      """
+      CREATE (a:Node {name: 'A'})-[:LINK {p: 0.5}]->(b:Node {name: 'B'}),
+             (b)-[:LINK {p: 0.8}]->(c:Node {name: 'C'}),
+             (a)-[:LINK {p: 0.3}]->(c)
+      """
+    When evaluating the following Locy program with exact_probability and top_k_proofs 1:
+      """
+      CREATE RULE reach AS
+        MATCH (x:Node)-[e:LINK]->(y:Node)
+        FOLD prob = MNOR(e.p)
+        YIELD KEY x, KEY y, prob
+      CREATE RULE reach AS
+        MATCH (x:Node)-[e:LINK]->(m:Node) WHERE m IS reach TO y
+        FOLD prob = MNOR(e.p)
+        YIELD KEY x, KEY y, prob
+      EXPLAIN RULE reach WHERE x.name = 'A' AND y.name = 'C'
+      """
+    Then evaluation should succeed
+    And the command result 0 should be an Explain with 1 children
+    And the command result 0 should be an Explain where child 0 has proof_probability approximately 0.4
+
+  Scenario: top_k=2 keeps both derivations of a fact
+    Given having executed:
+      """
+      CREATE (a:Node {name: 'A'})-[:LINK {p: 0.5}]->(b:Node {name: 'B'}),
+             (b)-[:LINK {p: 0.8}]->(c:Node {name: 'C'}),
+             (a)-[:LINK {p: 0.3}]->(c)
+      """
+    When evaluating the following Locy program with exact_probability and top_k_proofs 2:
+      """
+      CREATE RULE reach AS
+        MATCH (x:Node)-[e:LINK]->(y:Node)
+        FOLD prob = MNOR(e.p)
+        YIELD KEY x, KEY y, prob
+      CREATE RULE reach AS
+        MATCH (x:Node)-[e:LINK]->(m:Node) WHERE m IS reach TO y
+        FOLD prob = MNOR(e.p)
+        YIELD KEY x, KEY y, prob
+      EXPLAIN RULE reach WHERE x.name = 'A' AND y.name = 'C'
+      """
+    Then evaluation should succeed
+    And the command result 0 should be an Explain with 2 children
+    And the command result 0 should be an Explain where all children have proof_probability

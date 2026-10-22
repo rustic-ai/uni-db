@@ -60,9 +60,13 @@ fn strings(rows: &[FactRow], col: &str) -> BTreeSet<String> {
     rows.iter().map(|r| format!("{:?}", r.get(col))).collect()
 }
 
+/// The rows of the ASSUME at `idx`, whose body's only command is a QUERY.
 fn assume_rows(result: &uni_db::locy::LocyResult, idx: usize) -> Vec<FactRow> {
     match &result.command_results[idx] {
-        CommandResult::Assume(rows) => rows.clone(),
+        CommandResult::Assume { results, .. } => match results.as_slice() {
+            [CommandResult::Query(rows)] => rows.clone(),
+            other => panic!("expected the ASSUME body's one QUERY result, got {other:?}"),
+        },
         other => panic!("expected an ASSUME result, got {other:?}"),
     }
 }
@@ -164,6 +168,11 @@ async fn a_property_change_recomputes_only_rules_reading_it() -> Result<()> {
 
 /// A DERIVE before the ASSUME changes the state the program's facts were
 /// derived in, so they must not be reused.
+///
+/// Top-level commands run in sequence: the ASSUME reads the facts derived
+/// again after the DERIVE (`sequenced_strata_*`), and reuses *those* for the
+/// stratum its own mutation cannot affect. What must never be reused is the
+/// pre-DERIVE state: that would answer with the 4 forward edges only.
 #[tokio::test]
 async fn a_write_before_the_assume_disables_reuse() -> Result<()> {
     let db = seeded(5).await?;
@@ -179,7 +188,15 @@ async fn a_write_before_the_assume_disables_reuse() -> Result<()> {
     let rows = assume_rows(&result, 1);
     // 4 forward edges plus the 4 derived reverse ones.
     assert_eq!(rows.len(), 8, "{rows:?}");
-    assert_eq!(result.stats().hypothetical_strata_reused, 0);
+    let stats = result.stats();
+    // The DERIVE's write was folded in before the ASSUME read the facts:
+    // both strata (`knows` reads KNOWS; `back` is a DERIVE rule) derived again.
+    assert_eq!(stats.sequenced_strata_evaluated, 2, "{stats:?}");
+    assert_eq!(stats.sequenced_strata_reused, 0, "{stats:?}");
+    // The ASSUME's `CREATE (:Company)` cannot affect `knows`, so it reuses
+    // the post-DERIVE facts for it; only `back` is derived.
+    assert_eq!(stats.hypothetical_strata_reused, 1, "{stats:?}");
+    assert_eq!(stats.hypothetical_strata_evaluated, 1, "{stats:?}");
     Ok(())
 }
 
@@ -195,10 +212,31 @@ async fn nested_assume_reuses_the_outer_hypothetical_state() -> Result<()> {
                QUERY big_named RETURN name }}"
         ))
         .await?;
-    // An outer body collects its QUERY and Cypher rows, not a nested
-    // ASSUME's; the outer QUERY reads the outer hypothetical state.
-    let got = strings(&assume_rows(&result, 0), "name");
-    assert!(got.contains("Some(String(\"outer\"))"), "{got:?}");
+    // The outer ASSUME returns one result per body command: the nested
+    // ASSUME's (its own QUERY's rows), then the outer QUERY's. Both read a
+    // state with the outer `Company` in it; the nested ASSUME's KNOWS edge
+    // does not change `big_named`, so both answer acme, mid and outer.
+    let want: BTreeSet<String> = ["acme", "mid", "outer"]
+        .iter()
+        .map(|n| format!("{:?}", Some(Value::String((*n).to_string()))))
+        .collect();
+    let (nested, outer) = match &result.command_results[..] {
+        [CommandResult::Assume { results, .. }] => match results.as_slice() {
+            [
+                CommandResult::Assume { results: inner, .. },
+                CommandResult::Query(outer),
+            ] => match inner.as_slice() {
+                [CommandResult::Query(nested)] => (nested, outer),
+                other => panic!("expected the nested body's one QUERY, got {other:?}"),
+            },
+            other => panic!("expected the nested ASSUME, then the QUERY, got {other:?}"),
+        },
+        other => panic!("expected one ASSUME result, got {other:?}"),
+    };
+    assert_eq!(strings(nested, "name"), want, "nested ASSUME's QUERY");
+    assert_eq!(nested.len(), 3, "{nested:?}");
+    assert_eq!(strings(outer, "name"), want, "outer QUERY");
+    assert_eq!(outer.len(), 3, "{outer:?}");
     let stats = result.stats();
     // Outer: knows reused, big + big_named derived. Inner (KNOWS edge): knows
     // derived, big + big_named reused from the outer state.

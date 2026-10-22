@@ -1,0 +1,20 @@
+{
+  "edge_types": {
+    "KNOWS": { "id": 1, "src_labels": [], "dst_labels": [] },
+    "LINK": { "id": 2, "src_labels": [], "dst_labels": [] }
+  },
+  "indexes": [],
+  "labels": {
+    "Marker": { "id": 1 },
+    "Person": { "id": 2 }
+  },
+  "properties": {
+    "Marker": {
+      "name": { "type": "String", "nullable": true }
+    },
+    "Person": {
+      "name": { "type": "String", "nullable": true }
+    }
+  },
+  "schema_version": 1
+}

@@ -475,3 +475,77 @@ THEN { QUERY risk WHERE a.name = 'A' RETURN a.name AS name, p }
     # ASSUME should show 0.9
     assume_cmd = next(c for c in result.command_results if c.command_type == "assume")
     assert assume_cmd.rows[0]["p"] == pytest.approx(0.9, abs=1e-6)
+
+
+def _chain_session():
+    """A -> B -> C over KNOWS, schemaless."""
+    db = uni_db.Uni.in_memory()
+    session = db.session()
+    tx = session.tx()
+    tx.execute(
+        "CREATE (:Person {name: 'A'})-[:KNOWS]->(:Person {name: 'B'})"
+        "-[:KNOWS]->(:Person {name: 'C'})"
+    )
+    tx.commit()
+    return db, session
+
+
+ASSUME_SEQUENCE_PROGRAM = """
+CREATE RULE knows AS MATCH (a:Person)-[:KNOWS]->(b:Person) YIELD KEY a, KEY b
+CREATE RULE link AS MATCH (a:Person)-[:KNOWS]->(b:Person) DERIVE (a)-[:LINK]->(b)
+CREATE RULE linked AS MATCH (a:Person)-[:LINK]->(b:Person) YIELD KEY a, KEY b
+ASSUME { MATCH (c:Person {name: 'C'}) CREATE (c)-[:KNOWS]->(:Person {name: 'D'}) }
+THEN {
+  QUERY linked RETURN a.name AS a, b.name AS b
+  DERIVE link
+  QUERY linked RETURN a.name AS a, b.name AS b
+}
+"""
+
+
+def _pairs(rows):
+    return sorted((r["a"], r["b"]) for r in rows)
+
+
+def test_assume_returns_one_result_per_body_command():
+    """QUERY; DERIVE; QUERY in a body returns three results, not flat rows."""
+    _db, session = _chain_session()
+    result = session.locy(ASSUME_SEQUENCE_PROGRAM)
+    (assume_cmd,) = result.command_results
+    assert isinstance(assume_cmd, uni_db.AssumeCommandResult)
+    first, derive, second = assume_cmd.results
+    assert first.command_type == "query" and first.rows == []
+    assert derive.command_type == "derive" and derive.affected == 3
+    assert second.command_type == "query"
+    assert _pairs(second.rows) == [("A", "B"), ("B", "C"), ("C", "D")]
+    # `derived` is the state the first body command reads: the mutation's
+    # KNOWS edge is in it, the body's DERIVE is not.
+    assert len(assume_cmd.derived["knows"]) == 3
+    assert assume_cmd.derived["linked"] == []
+    # `rows` is the first row-producing body result's rows: the empty QUERY.
+    assert assume_cmd.rows == []
+    assert result.rows() == []
+    # The stored graph is untouched.
+    assert len(result.derived["knows"]) == 2
+
+
+def test_assume_rows_and_locy_result_rows_descend_depth_first():
+    """A DERIVE-only ASSUME has no rows; LocyResult.rows() moves past it."""
+    _db, session = _chain_session()
+    result = session.locy("""
+CREATE RULE link AS MATCH (a:Person)-[:KNOWS]->(b:Person) DERIVE (a)-[:LINK]->(b)
+CREATE RULE linked AS MATCH (a:Person)-[:LINK]->(b:Person) YIELD KEY a, KEY b
+ASSUME { CREATE (:Marker {name: 'm'}) } THEN { DERIVE link }
+ASSUME { CREATE (:Marker {name: 'm'}) } THEN {
+  DERIVE link
+  ASSUME { CREATE (:Marker {name: 'n'}) } THEN { QUERY linked RETURN a.name AS a, b.name AS b }
+}
+""")
+    derive_only, nested = result.command_results
+    assert derive_only.rows == []
+    assert [r.affected for r in derive_only.results] == [2]
+    inner = nested.results[1]
+    assert isinstance(inner, uni_db.AssumeCommandResult)
+    assert _pairs(inner.results[0].rows) == [("A", "B"), ("B", "C")]
+    assert _pairs(nested.rows) == [("A", "B"), ("B", "C")]
+    assert _pairs(result.rows()) == [("A", "B"), ("B", "C")]

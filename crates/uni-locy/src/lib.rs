@@ -51,7 +51,7 @@ pub use neural::{
 pub use result::{
     AbductionResult, CalibrationResult, CommandResult, ConfidenceBand, ConfidenceSource,
     DerivationNode, DerivedEdge, DerivedFactSet, FactRow, LocyResult, LocyStats, Modification,
-    NeuralProvenance, ValidatedModification, ValidationResult,
+    NeuralProvenance, RuleFacts, ValidatedModification, ValidationResult,
 };
 pub use semiring::merge_top_k_dispatch_owned as merge_top_k_runtime;
 pub use semiring::{

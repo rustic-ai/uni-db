@@ -120,7 +120,7 @@ async fn inverted_index_built_after_flush_returns_results() -> Result<()> {
     let db = db_with_flushed_items(40).await?;
 
     db.session()
-        .query("CALL uni.schema.createIndex('Item', 'tags', {type: 'inverted'})")
+        .run("CALL uni.schema.createIndex('Item', 'tags', {type: 'inverted'})")
         .await?;
 
     let res = db

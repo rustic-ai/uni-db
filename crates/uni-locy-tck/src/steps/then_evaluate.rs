@@ -264,6 +264,26 @@ async fn evaluation_should_be_incomplete_with_reason(world: &mut LocyWorld, expe
     );
 }
 
+#[then(regex = r#"^the incomplete evaluation should name rule ['"](.+)['"] as incomplete$"#)]
+async fn incomplete_names_rule(world: &mut LocyWorld, rule: String) {
+    let locy_result = world
+        .locy_result()
+        .expect("No evaluation result found - did you forget to evaluate a program?");
+    let rules = match locy_result {
+        Ok(result) => result
+            .incomplete
+            .as_ref()
+            .map(|d| d.incomplete_rules.clone())
+            .expect("evaluation completed normally; expected an incomplete result"),
+        Err(uni_common::UniError::LocyIncomplete { detail }) => detail.incomplete_rules.clone(),
+        Err(e) => panic!("expected LocyIncomplete (or a partial result), got error: {e}"),
+    };
+    assert!(
+        rules.contains(&rule),
+        "expected '{rule}' among the incomplete rules {rules:?}"
+    );
+}
+
 #[then("evaluation should fail")]
 async fn evaluation_should_fail(world: &mut LocyWorld) {
     let locy_result = world
@@ -295,7 +315,8 @@ async fn derived_relation_should_have_n_facts(
             let facts = result.derived.get(&relation_name);
             let actual = facts.map(|f| f.len()).unwrap_or(0);
             assert_eq!(
-                actual, expected_count,
+                actual,
+                expected_count,
                 "Expected derived relation '{}' to have {} facts, but got {}. Available relations: {:?}",
                 relation_name,
                 expected_count,
@@ -386,7 +407,14 @@ async fn derived_relation_should_contain_fact_where_and_and(
     assert!(
         found,
         "Expected derived relation '{}' to contain a fact where {} = {} and {} = {} and {} = {}, but no match found in {} facts",
-        relation, f1, v1, f2, v2, f3, v3, facts.len()
+        relation,
+        f1,
+        v1,
+        f2,
+        v2,
+        f3,
+        v3,
+        facts.len()
     );
 }
 
@@ -425,7 +453,12 @@ async fn derived_relation_should_contain_fact_where_and(
     assert!(
         found,
         "Expected derived relation '{}' to contain a fact where {} = {} and {} = {}, but no match found in {} facts",
-        relation, f1, v1, f2, v2, facts.len()
+        relation,
+        f1,
+        v1,
+        f2,
+        v2,
+        facts.len()
     );
 }
 
@@ -457,7 +490,10 @@ async fn derived_relation_should_contain_fact_where(
     assert!(
         found,
         "Expected derived relation '{}' to contain a fact where {} = {}, but no match found in {} facts",
-        relation, field, value_str, facts.len()
+        relation,
+        field,
+        value_str,
+        facts.len()
     );
 }
 
@@ -653,10 +689,37 @@ async fn command_result_query_containing_row(
     );
 }
 
+/// The rows of an ASSUME's single row-producing body command.
+///
+/// The ASSUME result holds one result per body command. The row-level steps
+/// below predate that shape and address "the ASSUME's rows"; they stay exact
+/// by requiring the body to have exactly one `QUERY` or Cypher command, so a
+/// multi-command body must be checked with the path-addressed steps instead
+/// of being silently reduced to one of its commands.
+fn assume_sole_rows(idx: usize, results: &[CommandResult]) -> &Vec<HashMap<String, Value>> {
+    let rows: Vec<&Vec<HashMap<String, Value>>> = results
+        .iter()
+        .filter_map(|r| match r {
+            CommandResult::Query(rows) | CommandResult::Cypher(rows) => Some(rows),
+            _ => None,
+        })
+        .collect();
+    match rows.as_slice() {
+        [only] => only,
+        _ => panic!(
+            "ASSUME command result {idx} has {} row-producing body results, not 1; \
+             address them by path (`the result at path {idx}.N ...`): {results:?}",
+            rows.len()
+        ),
+    }
+}
+
 #[then(regex = r#"^the command result (\d+) should be an Assume with (\d+) rows$"#)]
 async fn command_result_assume_rows(world: &mut LocyWorld, idx: usize, expected: usize) {
-    let rows =
-        expect_command_variant!(world, idx, "an Assume", CommandResult::Assume(rows) => rows);
+    let results = expect_command_variant!(
+        world, idx, "an Assume", CommandResult::Assume { results, .. } => results
+    );
+    let rows = assume_sole_rows(idx, results);
     assert_eq!(
         rows.len(),
         expected,
@@ -676,8 +739,10 @@ async fn command_result_assume_containing_row(
     field: String,
     value_str: String,
 ) {
-    let rows =
-        expect_command_variant!(world, idx, "an Assume", CommandResult::Assume(rows) => rows);
+    let results = expect_command_variant!(
+        world, idx, "an Assume", CommandResult::Assume { results, .. } => results
+    );
+    let rows = assume_sole_rows(idx, results);
     let expected = parse_gherkin_value(&value_str);
     let found = rows.iter().any(|row| {
         extract_field_value(row, field.trim())
@@ -692,6 +757,210 @@ async fn command_result_assume_containing_row(
         value_str,
         rows.len()
     );
+}
+
+#[then(regex = r#"^the command result (\d+) should be an Assume with (\d+) results$"#)]
+async fn command_result_assume_results(world: &mut LocyWorld, idx: usize, expected: usize) {
+    let results = expect_command_variant!(
+        world, idx, "an Assume", CommandResult::Assume { results, .. } => results
+    );
+    assert_eq!(
+        results.len(),
+        expected,
+        "Expected Assume command result {idx} to have {expected} results, got {results:?}"
+    );
+}
+
+// ── Path-addressed command results ───────────────────────────────────────
+//
+// A path `i.j.k` names top-level command `i`, then body command `j` of that
+// ASSUME, then body command `k` of the nested ASSUME, all 0-based.
+
+/// The command result at `path`, or a panic naming the step that failed.
+fn result_at_path<'a>(world: &'a LocyWorld, path: &str) -> &'a CommandResult {
+    let mut indices = path.split('.').map(|i| {
+        i.parse::<usize>()
+            .unwrap_or_else(|_| panic!("bad result path segment '{i}' in '{path}'"))
+    });
+    let first = indices.next().expect("empty result path");
+    let mut current = world.expect_command_result(first);
+    for (depth, idx) in indices.enumerate() {
+        let results = match current {
+            CommandResult::Assume { results, .. } => results,
+            other => panic!(
+                "result path '{path}': segment {} is not an Assume, got {other:?}",
+                depth + 1
+            ),
+        };
+        current = results.get(idx).unwrap_or_else(|| {
+            panic!(
+                "result path '{path}': the Assume has {} results, no index {idx}",
+                results.len()
+            )
+        });
+    }
+    current
+}
+
+/// The rows of the Query or Cypher result at `path`.
+fn rows_at_path<'a>(
+    world: &'a LocyWorld,
+    path: &str,
+    kind: &str,
+) -> &'a Vec<HashMap<String, Value>> {
+    match (kind, result_at_path(world, path)) {
+        ("Query", CommandResult::Query(rows)) | ("Cypher", CommandResult::Cypher(rows)) => rows,
+        (_, other) => panic!("result at path '{path}' is not a {kind}: {other:?}"),
+    }
+}
+
+#[then(regex = r#"^the result at path ([0-9.]+) should be an Assume with (\d+) results$"#)]
+async fn path_assume_results(world: &mut LocyWorld, path: String, expected: usize) {
+    match result_at_path(world, &path) {
+        CommandResult::Assume { results, .. } => assert_eq!(
+            results.len(),
+            expected,
+            "Expected the Assume at path '{path}' to have {expected} results, got {results:?}"
+        ),
+        other => panic!("result at path '{path}' is not an Assume: {other:?}"),
+    }
+}
+
+#[then(regex = r#"^the result at path ([0-9.]+) should be a (Query|Cypher) with (\d+) rows$"#)]
+async fn path_rows(world: &mut LocyWorld, path: String, kind: String, expected: usize) {
+    let rows = rows_at_path(world, &path, &kind);
+    assert_eq!(
+        rows.len(),
+        expected,
+        "Expected the {kind} at path '{path}' to have {expected} rows, got {rows:?}"
+    );
+}
+
+#[then(
+    regex = r#"^the result at path ([0-9.]+) should be a (Query|Cypher) containing row where (.+) = (.+)$"#
+)]
+async fn path_containing_row(
+    world: &mut LocyWorld,
+    path: String,
+    kind: String,
+    field: String,
+    value_str: String,
+) {
+    let rows = rows_at_path(world, &path, &kind);
+    let expected = parse_gherkin_value(&value_str);
+    let found = rows.iter().any(|row| {
+        extract_field_value(row, field.trim())
+            .map(|v| values_match(v, &expected))
+            .unwrap_or(false)
+    });
+    assert!(
+        found,
+        "The {kind} at path '{path}' has no row where {field} = {value_str}: {rows:?}"
+    );
+}
+
+#[then(regex = r#"^the result at path ([0-9.]+) should be a Derive affecting (\d+) elements$"#)]
+async fn path_derive_affecting(world: &mut LocyWorld, path: String, expected: usize) {
+    match result_at_path(world, &path) {
+        CommandResult::Derive { affected } => assert_eq!(
+            *affected, expected,
+            "Expected the Derive at path '{path}' to affect {expected} elements, got {affected}"
+        ),
+        other => panic!("result at path '{path}' is not a Derive: {other:?}"),
+    }
+}
+
+#[then(
+    regex = r#"^the result at path ([0-9.]+) should be an Assume whose derived relation ['"](.+)['"] has (\d+) facts$"#
+)]
+async fn path_assume_derived_facts(
+    world: &mut LocyWorld,
+    path: String,
+    relation: String,
+    expected: usize,
+) {
+    match result_at_path(world, &path) {
+        CommandResult::Assume { derived, .. } => {
+            let facts = derived.get(&relation).unwrap_or_else(|| {
+                let mut names: Vec<&String> = derived.keys().collect();
+                names.sort();
+                panic!(
+                    "the Assume at path '{path}' has no derived relation '{relation}': {names:?}"
+                )
+            });
+            assert_eq!(
+                facts.len(),
+                expected,
+                "Expected the Assume at path '{path}' to derive {expected} '{relation}' facts, \
+                 got {facts:?}"
+            );
+        }
+        other => panic!("result at path '{path}' is not an Assume: {other:?}"),
+    }
+}
+
+#[then(
+    regex = r#"^the result at path ([0-9.]+) should be an Explain with rule ['"](.+)['"] and (\d+) children$"#
+)]
+async fn path_explain_rule_children(
+    world: &mut LocyWorld,
+    path: String,
+    rule_name: String,
+    expected: usize,
+) {
+    match result_at_path(world, &path) {
+        CommandResult::Explain(node) => {
+            assert_eq!(
+                node.rule, rule_name,
+                "Expected the Explain at path '{path}' to explain '{rule_name}', got {node:?}"
+            );
+            assert_eq!(
+                node.children.len(),
+                expected,
+                "Expected the Explain at path '{path}' to have {expected} children, got {node:?}"
+            );
+        }
+        other => panic!("result at path '{path}' is not an Explain: {other:?}"),
+    }
+}
+
+#[then(
+    regex = r#"^the result at path ([0-9.]+) should be an Explain whose tree mentions ['"](.+)['"]$"#
+)]
+async fn path_explain_tree_mentions(world: &mut LocyWorld, path: String, needle: String) {
+    match result_at_path(world, &path) {
+        CommandResult::Explain(node) => {
+            let tree = format!("{node:?}");
+            assert!(
+                tree.contains(&needle),
+                "the Explain at path '{path}' does not mention '{needle}': {tree}"
+            );
+        }
+        other => panic!("result at path '{path}' is not an Explain: {other:?}"),
+    }
+}
+
+#[then(
+    regex = r#"^the result at path ([0-9.]+) should be an Abduce with (\d+) modifications of which (\d+) validated$"#
+)]
+async fn path_abduce_validated(
+    world: &mut LocyWorld,
+    path: String,
+    total: usize,
+    validated: usize,
+) {
+    match result_at_path(world, &path) {
+        CommandResult::Abduce(result) => {
+            let ok = result.modifications.iter().filter(|m| m.validated).count();
+            assert_eq!(
+                (result.modifications.len(), ok),
+                (total, validated),
+                "Expected the Abduce at path '{path}' to have {total} modifications, \
+                 {validated} validated: {result:?}"
+            );
+        }
+        other => panic!("result at path '{path}' is not an Abduce: {other:?}"),
+    }
 }
 
 #[then(regex = r#"^the command result (\d+) should be an Explain with rule ['"](.+)['"]$"#)]
@@ -988,6 +1257,25 @@ async fn calibration_confidence_band_quantile(
         tolerance,
         q
     );
+}
+
+#[then(
+    regex = r#"^the result at path ([0-9.]+) should be a Calibrate of (\d+) samples with (\d+) held out$"#
+)]
+async fn path_calibrate_samples(
+    world: &mut LocyWorld,
+    path: String,
+    samples: usize,
+    holdout: usize,
+) {
+    match result_at_path(world, &path) {
+        CommandResult::Calibrate(c) => assert_eq!(
+            (c.n_samples, c.holdout_size),
+            (samples, holdout),
+            "the Calibrate at path '{path}': (n_samples, holdout_size)"
+        ),
+        other => panic!("result at path '{path}' is not a Calibrate: {other:?}"),
+    }
 }
 
 #[then(regex = r#"^the calibration result for ['"](.+)['"] should report method ['"](.+)['"]$"#)]

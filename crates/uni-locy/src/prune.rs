@@ -221,6 +221,7 @@ mod tests {
             }],
             yield_schema: vec![],
             priority: None,
+            parameters: vec![],
         }
     }
 

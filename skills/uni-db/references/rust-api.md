@@ -553,7 +553,7 @@ pub struct LocyStats {
 
 ### CommandResult
 
-Variants: `Query(Vec<FactRow>)`, `Assume(Vec<FactRow>)`, `Explain(DerivationNode)`, `Abduce(AbductionResult)`, `Derive { affected }`, `Cypher(Vec<FactRow>)`. Accessors: `.as_explain()`, `.as_query()`, `.as_abduce()`.
+Variants: `Query(Vec<FactRow>)`, `Assume { results: Vec<CommandResult>, derived: HashMap<String, Vec<FactRow>> }`, `Explain(DerivationNode)`, `Abduce(AbductionResult)`, `Derive { affected }`, `Cypher(Vec<FactRow>)`. Accessors: `.as_explain()`, `.as_query()`, `.as_abduce()`, `.as_assume()`, `.rows()` (searches an `Assume` depth first).
 
 ### DerivationNode
 

@@ -153,12 +153,24 @@ async fn run_race(uri: &str, async_flush: bool) {
     db.shutdown().await.unwrap();
 }
 
-/// **Parallelism:** this races a fork creation against a writer loop on a
-/// 4-worker runtime, so it needs those workers to actually get scheduled. Under
-/// a saturated machine it can fail while passing in isolation — observed once
-/// in a full `cargo nextest run -p uni-db`, taking 34s there against 1.5s
-/// alone, and passing on the next full run of the same tree. Re-run it with
-/// `-j1` before reading a failure as a defect; a real one reproduces alone.
+/// **Load sensitivity, root-caused:** with `auto_flush_threshold: 4` the
+/// writer loop flushes every few commits, and under machine load the
+/// background compaction (10 s tick) falls behind, so the flush-generation
+/// count reaches the write throttle's soft band (16..32 runs). The soft
+/// throttle used to be one uninterruptible sleep of `10 ms × 2^(runs − 16)`:
+/// 40.96 s at 28 runs, 81.92 s at 29. That outlived the 30 s statement
+/// timeout, so the background `CREATE` failed with `Timeout { 30000 }` even
+/// after compaction had reset the count. Run as 16 parallel copies it failed
+/// in about half of them. Every failing run had taken that sleep and no
+/// passing run had throttled.
+///
+/// The soft band now re-checks the count every 100 ms and caps its wait at
+/// 1.6 s (`Writer::check_write_pressure`; pinned by
+/// `storage::write_backpressure_test` here and the `soft_throttle_*` tests in
+/// uni-store). A red run of this test is therefore no longer explained by
+/// load alone: look for a write stalled at the hard limit (32 runs, logged
+/// as "Write stalled"), which still waits for compaction without a time
+/// bound.
 ///
 /// The repository asks for this note at the test site rather than in a tracker,
 /// because the next person to see it red will be looking here.
@@ -168,7 +180,7 @@ async fn fork_point_atomic_under_concurrent_parent_writes_async_flush() {
     run_race(dir.path().to_str().unwrap(), true).await;
 }
 
-/// Same parallelism caveat as the async-flush twin above.
+/// Same load-sensitivity note as the async-flush twin above.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fork_point_atomic_under_concurrent_parent_writes_sync_flush() {
     let dir = tempfile::tempdir().unwrap();

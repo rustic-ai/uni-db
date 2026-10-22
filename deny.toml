@@ -54,7 +54,8 @@ ignore = [
   # 0314/0316/0321/0322/0323/0327) was here and is gone: extism 1.41.0 moved to
   # wasmtime 49, and wasmtime/wasmtime-wasi 49.0.3 are patched for all of them
   # plus 0352/0359/0362/0363 (2026-10-19). uni-plugin-wasm moved to 49.0.3 in
-  # the same change (VERSION SYNC in both plugin Cargo.toml files).
+  # the same change (VERSION SYNC in both plugin Cargo.toml files). 49.0.4
+  # (2026-10-20) fixes RUSTSEC-2026-0378/0379; the floor moved with it.
   #
   # RUSTSEC-2025-0057 (fxhash, unmaintained) was here and is gone (#174).
   #

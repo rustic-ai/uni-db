@@ -853,9 +853,10 @@ use super::planner::{
 };
 use super::planner_locy_types::{
     DERIV_EVENT_COL, DERIV_ISNOT_COL_PREFIX, DERIV_ISPROB_COL_PREFIX, DERIV_ISREF_COL_PREFIX,
-    FOLD_DISCRIMINATOR_COL_PREFIX, ISNOT_VID_COL_PREFIX, ISPROB_COL_PREFIX, LocyClausePlan,
-    LocyCommand, LocyIsRef, LocyRulePlan, LocyStratum, LocyYieldColumn, NegatedLineageRef,
-    NegationKey, PositiveProbRef, ProbRead,
+    FOLD_DISCRIMINATOR_COL_PREFIX, ISNOT_VID_COL_PREFIX, ISPROB_COL_PREFIX, LIN_EVENT_COL,
+    LIN_NOT_COL_PREFIX, LIN_PROB_COL_PREFIX, LIN_REF_COL_PREFIX, LIN_SUP_COL_PREFIX,
+    LIN_SUPP_COL_PREFIX, LocyClausePlan, LocyCommand, LocyIsRef, LocyRulePlan, LocyStratum,
+    LocyYieldColumn, NegatedLineageRef, NegationKey, PositiveProbRef, ProbRead, SupportRef,
 };
 
 // ---------------------------------------------------------------------------
@@ -945,6 +946,8 @@ pub struct LocyPlanBuilder<'a> {
     /// evaluated, so their clause bodies are not planned; see
     /// [`Self::with_reused_strata`].
     reused_strata: std::collections::BTreeSet<usize>,
+    /// Whether the run records provenance; see [`Self::with_provenance`].
+    provenance: bool,
 }
 
 /// Neural-classifier-related plumbing threaded through `build_stratum` →
@@ -1009,9 +1012,11 @@ fn derivation_discriminator_columns(
             crate::query::df_graph::locy_row_hash::row_hash_type(),
         ));
     }
-    for slot in prob_ref_slots(rule, rule_catalog)
+    // Transient lineage columns are never part of a fact's identity, so only
+    // an `MNOR`/`MPROD` rule's are listed (the flag does not change them).
+    for slot in prob_ref_slots(rule, rule_catalog, false)
         .iter()
-        .filter(|s| s.keeps_lineage)
+        .filter(|s| s.lineage == LineageMode::Deriv)
     {
         if slot.negated {
             columns.push((slot.key_column(), DataType::Binary));
@@ -1031,9 +1036,9 @@ fn derivation_discriminator_columns(
 /// PROB value (see [`ProbRead`]); a negated one's complement does.
 ///
 /// A negated reference has a slot only in a rule that keeps lineage: its
-/// column (`__deriv_isnot_*`) carries the negated facts the complement read,
-/// so exact inference can conjoin the negation of their formulas instead of
-/// an independent `1 - p` factor.
+/// column (`__deriv_isnot_*`, or `__lin_not_*`) carries the negated facts the
+/// complement read, so exact inference can conjoin the negation of their
+/// formulas instead of an independent `1 - p` factor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProbRefSlot {
     /// The clause holding the reference.
@@ -1043,21 +1048,54 @@ struct ProbRefSlot {
     occurrence: usize,
     /// Whether the reference is `IS NOT`.
     negated: bool,
-    /// Whether the calling rule's PROB column is an `MNOR`/`MPROD` fold, whose
-    /// pre-fold rows are kept as lineage for exact inference and shared-proof
-    /// detection.
-    keeps_lineage: bool,
+    /// How the calling rule keeps its rows' lineage for exact inference and
+    /// shared-proof detection.
+    lineage: LineageMode,
     /// The calling rule's PROB column as the clause body names it.
     into_column: String,
 }
 
+/// How a rule with a PROB column keeps its derivation rows' lineage: each
+/// row's event, the facts it references and the facts its negations read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineageMode {
+    /// No lineage: a referenced probability is only multiplied in.
+    None,
+    /// An `MNOR`/`MPROD` rule: its pre-fold rows are its lineage, and the
+    /// lineage columns are derivation columns (`__deriv_*`) of those rows.
+    Deriv,
+    /// A PROB rule without a fold, when provenance is recorded: its facts
+    /// are its rows, so the lineage columns are transient (`__lin_*`, see
+    /// [`LIN_COL_PREFIX`](crate::query::planner_locy_types::LIN_COL_PREFIX)), read before the facts are deduplicated.
+    Transient,
+}
+
+/// How `rule` keeps its rows' lineage, `provenance` saying whether the run
+/// records provenance (only then is a transient lineage read).
+fn rule_lineage_mode(rule: &CompiledRule, provenance: bool) -> LineageMode {
+    if prefold_prob_column(rule).is_none() {
+        LineageMode::None
+    } else if prob_column_is_probability_fold(rule) {
+        LineageMode::Deriv
+    } else if provenance && rule.clauses.iter().all(|c| c.fold.is_empty()) {
+        LineageMode::Transient
+    } else {
+        LineageMode::None
+    }
+}
+
 impl ProbRefSlot {
+    /// Whether the calling rule keeps lineage, so the slot names the fact.
+    fn keeps_lineage(&self) -> bool {
+        self.lineage != LineageMode::None
+    }
+
     /// The hidden column carrying the referenced fact's PROB value.
     fn prob_column(&self) -> String {
-        let prefix = if self.keeps_lineage {
-            DERIV_ISPROB_COL_PREFIX
-        } else {
-            ISPROB_COL_PREFIX
+        let prefix = match self.lineage {
+            LineageMode::Deriv => DERIV_ISPROB_COL_PREFIX,
+            LineageMode::Transient => LIN_PROB_COL_PREFIX,
+            LineageMode::None => ISPROB_COL_PREFIX,
         };
         format!("{prefix}{}_{}", self.clause_index, self.occurrence)
     }
@@ -1065,13 +1103,82 @@ impl ProbRefSlot {
     /// The hidden column carrying the hash of the referenced fact's KEY, or,
     /// for a negated reference, the negated facts the complement read.
     fn key_column(&self) -> String {
-        let prefix = if self.negated {
-            DERIV_ISNOT_COL_PREFIX
-        } else {
-            DERIV_ISREF_COL_PREFIX
+        let prefix = match (self.lineage, self.negated) {
+            (LineageMode::Transient, true) => LIN_NOT_COL_PREFIX,
+            (LineageMode::Transient, false) => LIN_REF_COL_PREFIX,
+            (_, true) => DERIV_ISNOT_COL_PREFIX,
+            (_, false) => DERIV_ISREF_COL_PREFIX,
         };
         format!("{prefix}{}_{}", self.clause_index, self.occurrence)
     }
+}
+
+/// A positive reference no [`ProbRefSlot`] names a fact for (one to a rule
+/// without a PROB column, or from a rule that keeps no lineage), when
+/// provenance is recorded: its transient columns name the referenced fact for
+/// EXPLAIN alone (see [`SupportRef`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SupportSlot {
+    /// The clause holding the reference.
+    clause_index: usize,
+    /// Its position among the clause's positive references, in text order.
+    occurrence: usize,
+    /// Whether the referenced rule has a PROB column, whose value the slot
+    /// carries too.
+    target_has_prob: bool,
+}
+
+impl SupportSlot {
+    /// The hidden column carrying the hash of the referenced fact's KEY.
+    fn key_column(&self) -> String {
+        format!(
+            "{LIN_SUP_COL_PREFIX}{}_{}",
+            self.clause_index, self.occurrence
+        )
+    }
+
+    /// The hidden column carrying the referenced fact's PROB value.
+    fn prob_column(&self) -> String {
+        format!(
+            "{LIN_SUPP_COL_PREFIX}{}_{}",
+            self.clause_index, self.occurrence
+        )
+    }
+}
+
+/// Every positive reference of `rule` that no [`ProbRefSlot`] names a fact
+/// for, in clause then text order; empty unless `provenance`.
+fn support_slots(
+    rule: &CompiledRule,
+    rule_catalog: &HashMap<String, CompiledRule>,
+    provenance: bool,
+) -> Vec<SupportSlot> {
+    if !provenance {
+        return Vec::new();
+    }
+    let lineage = rule_lineage_mode(rule, provenance);
+    let mut slots = Vec::new();
+    for (clause_index, clause) in rule.clauses.iter().enumerate() {
+        let positives = clause.where_conditions.iter().filter_map(|c| match c {
+            RuleCondition::IsReference(r) if !r.negated => Some(r),
+            _ => None,
+        });
+        for (occurrence, is_ref) in positives.enumerate() {
+            let target_has_prob = rule_catalog
+                .get(&is_ref.rule_name.to_string())
+                .is_some_and(|t| t.yield_schema.iter().any(|c| c.is_prob));
+            if target_has_prob && lineage != LineageMode::None {
+                // A lineage slot names this fact already.
+                continue;
+            }
+            slots.push(SupportSlot {
+                clause_index,
+                occurrence,
+                target_has_prob,
+            });
+        }
+    }
+    slots
 }
 
 /// The PROB column of `rule` as its clause bodies name it before any FOLD: the
@@ -1114,15 +1221,17 @@ fn prob_column_is_probability_fold(rule: &CompiledRule) -> bool {
 /// Every reference to a PROB rule whose probability flows into `rule`'s PROB
 /// column, in clause then text order, positive references of a clause before
 /// its negated ones (see [`ProbRefSlot`]). Negated references have slots only
-/// when `rule` keeps lineage.
+/// when `rule` keeps lineage; `provenance` says whether the run records
+/// provenance, which a transient lineage needs ([`rule_lineage_mode`]).
 fn prob_ref_slots(
     rule: &CompiledRule,
     rule_catalog: &HashMap<String, CompiledRule>,
+    provenance: bool,
 ) -> Vec<ProbRefSlot> {
     let Some(into_column) = prefold_prob_column(rule) else {
         return Vec::new();
     };
-    let keeps_lineage = prob_column_is_probability_fold(rule);
+    let lineage = rule_lineage_mode(rule, provenance);
     let mut slots = Vec::new();
     for (clause_index, clause) in rule.clauses.iter().enumerate() {
         let positives = clause.where_conditions.iter().filter_map(|c| match c {
@@ -1138,12 +1247,12 @@ fn prob_ref_slots(
                     clause_index,
                     occurrence,
                     negated: false,
-                    keeps_lineage,
+                    lineage,
                     into_column: into_column.clone(),
                 });
             }
         }
-        if !keeps_lineage {
+        if lineage == LineageMode::None {
             continue;
         }
         let negatives = clause.where_conditions.iter().filter_map(|c| match c {
@@ -1159,7 +1268,7 @@ fn prob_ref_slots(
                     clause_index,
                     occurrence,
                     negated: true,
-                    keeps_lineage,
+                    lineage,
                     into_column: into_column.clone(),
                 });
             }
@@ -1760,10 +1869,17 @@ struct ClauseCtx<'a> {
     /// (see [`prob_ref_slots`]). A lineage-keeping rule projects every slot's
     /// columns in every clause, NULL outside the slot's own clause.
     prob_slots: &'a [ProbRefSlot],
-    /// For an `MNOR`/`MPROD` rule, which keeps lineage: its PROB column as
-    /// the clause bodies name it. Every clause then projects the row-event
-    /// column [`DERIV_EVENT_COL`].
+    /// For a rule that keeps lineage ([`rule_lineage_mode`]): its PROB column
+    /// as the clause bodies name it. Every clause then projects the row-event
+    /// column, [`DERIV_EVENT_COL`] or, when `transient_lineage`,
+    /// [`LIN_EVENT_COL`].
     lineage_prob_column: Option<&'a str>,
+    /// Whether the rule's lineage is transient ([`LineageMode::Transient`]).
+    transient_lineage: bool,
+    /// The rule's positive references no [`ProbRefSlot`] names a fact for,
+    /// across all its clauses (see [`support_slots`]). Every clause projects
+    /// every slot's columns, NULL outside the slot's own clause.
+    support_slots: &'a [SupportSlot],
 }
 
 impl<'a> LocyPlanBuilder<'a> {
@@ -1774,7 +1890,22 @@ impl<'a> LocyPlanBuilder<'a> {
             derived_scan_handles: RefCell::new(Vec::new()),
             plugin_registry: crate::query::df_graph::locy_fold::default_locy_plugin_registry(),
             reused_strata: std::collections::BTreeSet::new(),
+            provenance: false,
         }
+    }
+
+    /// Plan for a run that records provenance (a provenance tracker is
+    /// attached: `CompiledProgram::needs_provenance_tracker`).
+    ///
+    /// The clause bodies then also project the transient columns
+    /// ([`LIN_COL_PREFIX`](crate::query::planner_locy_types::LIN_COL_PREFIX)) that name, for each derivation row, the facts it
+    /// references — for EXPLAIN — and, for a PROB rule without a fold, its
+    /// lineage — for exact inference over the facts that reference it.
+    /// Without a tracker nothing reads them, so they are not projected.
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: bool) -> Self {
+        self.provenance = provenance;
+        self
     }
 
     /// Skip planning the strata at `positions`, whose facts the run reuses.
@@ -2080,8 +2211,10 @@ impl<'a> LocyPlanBuilder<'a> {
         }
         seed_types.extend(unified.iter().map(|(k, v)| (k.clone(), v.clone())));
 
-        let prob_slots = prob_ref_slots(rule, rule_catalog);
-        let lineage_prob_column = prob_column_is_probability_fold(rule)
+        let prob_slots = prob_ref_slots(rule, rule_catalog, self.provenance);
+        let support_slots = support_slots(rule, rule_catalog, self.provenance);
+        let lineage = rule_lineage_mode(rule, self.provenance);
+        let lineage_prob_column = (lineage != LineageMode::None)
             .then(|| prefold_prob_column(rule))
             .flatten();
         let mut clauses = Vec::with_capacity(rule.clauses.len());
@@ -2108,6 +2241,8 @@ impl<'a> LocyPlanBuilder<'a> {
                     clause_index,
                     prob_slots: &prob_slots,
                     lineage_prob_column: lineage_prob_column.as_deref(),
+                    transient_lineage: lineage == LineageMode::Transient,
+                    support_slots: &support_slots,
                 },
                 classifiers,
             )?);
@@ -2902,6 +3037,7 @@ impl<'a> LocyPlanBuilder<'a> {
                     .collect(),
                 prob_ref: None,
                 negated_lineage: None,
+                support_ref: None,
             });
         }
         // Filled in once the projection is built (the classification reads
@@ -3276,7 +3412,7 @@ impl<'a> LocyPlanBuilder<'a> {
                 r,
                 PositiveProbRef {
                     prob_column: slot.prob_column(),
-                    key_column: slot.keeps_lineage.then(|| slot.key_column()),
+                    key_column: slot.keeps_lineage().then(|| slot.key_column()),
                     into_column: slot.into_column.clone(),
                     read,
                 },
@@ -3299,7 +3435,12 @@ impl<'a> LocyPlanBuilder<'a> {
                     })
                 })
                 .unwrap_or(Expr::Literal(CypherLiteral::Null));
-            projections.push((event, Some(DERIV_EVENT_COL.to_string())));
+            let event_column = if ctx.transient_lineage {
+                LIN_EVENT_COL
+            } else {
+                DERIV_EVENT_COL
+            };
+            projections.push((event, Some(event_column.to_string())));
             target_types.push(crate::query::df_graph::locy_row_hash::row_hash_type());
         }
         let mut transient_prob_projections: Vec<(Expr, String)> = Vec::new();
@@ -3329,7 +3470,7 @@ impl<'a> LocyPlanBuilder<'a> {
                 target_types.push(DataType::Binary);
                 continue;
             }
-            if slot.keeps_lineage {
+            if slot.keeps_lineage() {
                 let (key_expr, prob_expr) = match own {
                     Some(r) => {
                         let (prob, keys) = ref_prob_columns(r)?;
@@ -3356,6 +3497,60 @@ impl<'a> LocyPlanBuilder<'a> {
             } else if let Some(r) = own {
                 let (prob, _) = ref_prob_columns(r)?;
                 transient_prob_projections.push((Expr::Variable(prob), slot.prob_column()));
+            }
+        }
+        // The provenance-only columns of the references no slot above names
+        // a fact for (see `SupportSlot`), typed NULL outside their own clause
+        // so the clauses stay union-compatible.
+        let mut support_refs_by_ref: HashMap<usize, SupportRef> = HashMap::new();
+        for slot in ctx.support_slots {
+            let own = (slot.clause_index == ctx.clause_index)
+                .then(|| positive_refs_in_text_order.get(slot.occurrence).copied())
+                .flatten();
+            let (key_expr, prob_expr) = match own {
+                Some(r) => {
+                    let ref_binding = &binding.refs[r];
+                    let target = rule_catalog.get(&ref_binding.rule).with_context(|| {
+                        format!("IS-reference to unknown rule '{}'", ref_binding.rule)
+                    })?;
+                    let keys: Vec<Expr> = target
+                        .yield_schema
+                        .iter()
+                        .filter(|c| c.is_key)
+                        .map(|c| Expr::Variable(format!("{}{}", ref_binding.prefix, c.name)))
+                        .collect();
+                    let prob = target
+                        .yield_schema
+                        .iter()
+                        .find(|c| c.is_prob)
+                        .map(|c| Expr::Variable(format!("{}{}", ref_binding.prefix, c.name)));
+                    support_refs_by_ref.insert(
+                        r,
+                        SupportRef {
+                            key_column: slot.key_column(),
+                            prob_column: slot.target_has_prob.then(|| slot.prob_column()),
+                        },
+                    );
+                    (
+                        Expr::FunctionCall {
+                            name: crate::query::df_graph::locy_row_hash::ROW_HASH_FN.to_string(),
+                            args: keys,
+                            distinct: false,
+                            window_spec: None,
+                        },
+                        prob.unwrap_or(Expr::Literal(CypherLiteral::Null)),
+                    )
+                }
+                None => (
+                    Expr::Literal(CypherLiteral::Null),
+                    Expr::Literal(CypherLiteral::Null),
+                ),
+            };
+            projections.push((key_expr, Some(slot.key_column())));
+            target_types.push(crate::query::df_graph::locy_row_hash::row_hash_type());
+            if slot.target_has_prob {
+                projections.push((prob_expr, Some(slot.prob_column())));
+                target_types.push(DataType::Float64);
             }
         }
         // Hidden YIELD items emitted by `extract_model_invocations` for
@@ -3583,6 +3778,11 @@ impl<'a> LocyPlanBuilder<'a> {
         for (index, lineage) in negated_lineage_by_ref {
             if let Some(is_ref) = is_refs.get_mut(index) {
                 is_ref.negated_lineage = Some(lineage);
+            }
+        }
+        for (index, support) in support_refs_by_ref {
+            if let Some(is_ref) = is_refs.get_mut(index) {
+                is_ref.support_ref = Some(support);
             }
         }
 
@@ -4418,6 +4618,7 @@ mod tests {
             indexes: vec![],
             constraints: vec![],
             schemaless_registry: Default::default(),
+            ..Default::default()
         })
     }
 
@@ -4534,6 +4735,7 @@ mod tests {
             clauses: vec![simple_clause(node_pattern("n"), &[])],
             yield_schema: yield_cols.to_vec(),
             priority: None,
+            parameters: Vec::new(),
         }
     }
 
@@ -4610,6 +4812,7 @@ mod tests {
             clauses,
             yield_schema,
             priority: None,
+            parameters: Vec::new(),
         }
     }
 
@@ -5149,6 +5352,8 @@ mod tests {
                     clause_index: 0,
                     prob_slots: &[],
                     lineage_prob_column: None,
+                    transient_lineage: false,
+                    support_slots: &[],
                 },
                 &test_classifier_ctx(),
             )
@@ -5221,6 +5426,8 @@ mod tests {
                     clause_index: 0,
                     prob_slots: &[],
                     lineage_prob_column: None,
+                    transient_lineage: false,
+                    support_slots: &[],
                 },
                 &test_classifier_ctx(),
             )
@@ -5290,6 +5497,8 @@ mod tests {
                     clause_index: 0,
                     prob_slots: &[],
                     lineage_prob_column: None,
+                    transient_lineage: false,
+                    support_slots: &[],
                 },
                 &test_classifier_ctx(),
             )
@@ -5354,6 +5563,8 @@ mod tests {
                     clause_index: 0,
                     prob_slots: &[],
                     lineage_prob_column: None,
+                    transient_lineage: false,
+                    support_slots: &[],
                 },
                 &test_classifier_ctx(),
             )
@@ -5428,6 +5639,8 @@ mod tests {
                     clause_index: 0,
                     prob_slots: &[],
                     lineage_prob_column: None,
+                    transient_lineage: false,
+                    support_slots: &[],
                 },
                 &test_classifier_ctx(),
             )
@@ -5490,6 +5703,8 @@ mod tests {
                     clause_index: 0,
                     prob_slots: &[],
                     lineage_prob_column: None,
+                    transient_lineage: false,
+                    support_slots: &[],
                 },
                 &test_classifier_ctx(),
             )
@@ -5574,6 +5789,8 @@ mod tests {
                     clause_index: 0,
                     prob_slots: &[],
                     lineage_prob_column: None,
+                    transient_lineage: false,
+                    support_slots: &[],
                 },
                 &test_classifier_ctx(),
             )
@@ -5803,6 +6020,8 @@ mod tests {
                     clause_index: 0,
                     prob_slots: &[],
                     lineage_prob_column: None,
+                    transient_lineage: false,
+                    support_slots: &[],
                 },
                 &test_classifier_ctx(),
             )
@@ -5870,6 +6089,8 @@ mod tests {
                     clause_index: 0,
                     prob_slots: &[],
                     lineage_prob_column: None,
+                    transient_lineage: false,
+                    support_slots: &[],
                 },
                 &test_classifier_ctx(),
             )
@@ -5935,6 +6156,8 @@ mod tests {
                     clause_index: 0,
                     prob_slots: &[],
                     lineage_prob_column: None,
+                    transient_lineage: false,
+                    support_slots: &[],
                 },
                 &test_classifier_ctx(),
             )
@@ -6007,6 +6230,8 @@ mod tests {
                     clause_index: 0,
                     prob_slots: &[],
                     lineage_prob_column: None,
+                    transient_lineage: false,
+                    support_slots: &[],
                 },
                 &test_classifier_ctx(),
             )
@@ -6052,6 +6277,8 @@ mod tests {
                     clause_index: 0,
                     prob_slots: &[],
                     lineage_prob_column: None,
+                    transient_lineage: false,
+                    support_slots: &[],
                 },
                 &test_classifier_ctx(),
             )
@@ -6140,6 +6367,8 @@ mod tests {
                     clause_index: 0,
                     prob_slots: &[],
                     lineage_prob_column: None,
+                    transient_lineage: false,
+                    support_slots: &[],
                 },
                 &test_classifier_ctx(),
             )
@@ -6914,6 +7143,8 @@ mod tests {
                 clause_index: 0,
                 prob_slots: &[],
                 lineage_prob_column: None,
+                transient_lineage: false,
+                support_slots: &[],
             },
             &test_classifier_ctx(),
         );
@@ -6971,6 +7202,8 @@ mod tests {
                 clause_index: 0,
                 prob_slots: &[],
                 lineage_prob_column: None,
+                transient_lineage: false,
+                support_slots: &[],
             },
             &test_classifier_ctx(),
         );
@@ -7031,6 +7264,8 @@ mod tests {
                 clause_index: 0,
                 prob_slots: &[],
                 lineage_prob_column: None,
+                transient_lineage: false,
+                support_slots: &[],
             },
             &test_classifier_ctx(),
         );
@@ -7085,6 +7320,8 @@ mod tests {
                 clause_index: 0,
                 prob_slots: &[],
                 lineage_prob_column: None,
+                transient_lineage: false,
+                support_slots: &[],
             },
             &test_classifier_ctx(),
         );
@@ -7146,6 +7383,8 @@ mod tests {
                     clause_index: 0,
                     prob_slots: &[],
                     lineage_prob_column: None,
+                    transient_lineage: false,
+                    support_slots: &[],
                 },
                 &test_classifier_ctx(),
             );
@@ -7208,6 +7447,8 @@ mod tests {
                 clause_index: 0,
                 prob_slots: &[],
                 lineage_prob_column: None,
+                transient_lineage: false,
+                support_slots: &[],
             },
             &test_classifier_ctx(),
         );

@@ -150,6 +150,41 @@ pub fn parse(input: &str) -> Result<Query, ParseError> {
     walker::build_query(pairs)
 }
 
+/// Parse `input` like [`parse`], and also return the name of every parameter
+/// it references, in order of first appearance and without repeats.
+///
+/// Read from the parse tree, so a parameter anywhere in the statement counts
+/// (subqueries, `SKIP`/`LIMIT`, procedure arguments, property maps), and text
+/// that only looks like one (inside a string literal or a comment) does not.
+/// openCypher reports missing parameters before execution, all at once.
+///
+/// # Errors
+///
+/// As [`parse`].
+///
+/// # Examples
+/// ```
+/// let (_, names) = uni_cypher::parse_with_parameters(
+///     "MATCH (n) WHERE n.x = $b RETURN $a, '$c', $b",
+/// )
+/// .unwrap();
+/// assert_eq!(names, ["b", "a"]);
+/// ```
+pub fn parse_with_parameters(input: &str) -> Result<(Query, Vec<String>), ParseError> {
+    check_nesting_depth(input)?;
+    let pairs = CypherParser::parse(Rule::query, input).map_err(|e| map_pest_error(input, e))?;
+    let mut names: Vec<String> = Vec::new();
+    for pair in pairs.clone().flatten() {
+        if pair.as_rule() == Rule::parameter {
+            let name = walker::parameter_name(&pair);
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    Ok((walker::build_query(pairs)?, names))
+}
+
 pub fn parse_expression(input: &str) -> Result<Expr, ParseError> {
     check_nesting_depth(input)?;
     // Parse via the SOI/EOI-anchored `standalone_expression` so the entire input
@@ -175,6 +210,41 @@ pub fn parse_locy(input: &str) -> Result<LocyProgram, ParseError> {
         .map_err(|e| map_locy_pest_error(input, e))?;
 
     locy_walker::build_program(pairs.into_iter().next().unwrap())
+}
+
+/// Parse a Locy program like [`parse_locy`], and also return the name of every
+/// parameter it references, in order of first appearance and without repeats.
+///
+/// # Errors
+///
+/// As [`parse_locy`].
+///
+/// # Examples
+/// ```
+/// let (_, names) = uni_cypher::parse_locy_with_parameters(
+///     "CREATE RULE r AS MATCH (n) WHERE n.k = $x YIELD KEY n QUERY r WHERE n.v = $y RETURN n",
+/// )
+/// .unwrap();
+/// assert_eq!(names, ["x", "y"]);
+/// ```
+pub fn parse_locy_with_parameters(input: &str) -> Result<(LocyProgram, Vec<String>), ParseError> {
+    use locy_parser::LocyParser;
+    use locy_parser::Rule as LocyRule;
+
+    check_nesting_depth(input)?;
+    let pairs = LocyParser::parse(LocyRule::locy_query, input)
+        .map_err(|e| map_locy_pest_error(input, e))?;
+    let mut names: Vec<String> = Vec::new();
+    for pair in pairs.clone().flatten() {
+        if pair.as_rule() == LocyRule::parameter {
+            let name = walker::normalize_identifier(&pair.as_str()[1..]);
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    let program = locy_walker::build_program(pairs.into_iter().next().unwrap())?;
+    Ok((program, names))
 }
 
 /// Returns true if the pest error expects an identifier-like rule at the error position.

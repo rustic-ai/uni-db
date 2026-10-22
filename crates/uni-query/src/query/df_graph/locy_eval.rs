@@ -108,7 +108,14 @@ pub fn eval_expr(expr: &Expr, bindings: &FactRow) -> Result<Value, LocyError> {
             }
             eval_function(name, &evaluated_args)
         }
-        Expr::Parameter(name) => Ok(bindings.get(name).cloned().unwrap_or(Value::Null)),
+        Expr::Parameter(name) => {
+            bindings
+                .get(name)
+                .cloned()
+                .ok_or_else(|| LocyError::EvaluationError {
+                    message: uni_common::UniError::parameter_missing_message([name]),
+                })
+        }
         Expr::IsNull(inner) => {
             let v = eval_expr(inner, bindings)?;
             Ok(Value::Bool(v.is_null()))

@@ -9,6 +9,179 @@ the version it ships in.
 
 ### Results that change
 
+**Versioned reads return the state as of their version.** A snapshot taken
+before a `DETACH DELETE` lost the deleted vertex once the delete was flushed
+(`MATCH (x) RETURN x.v` gave `[1, 3, 4, 5]` for `[1..5]`), and so did a
+transaction begun before it: a flushed vertex delete rewrote the vertex's
+stored rows in place. It now appends a tombstone row, as edge deletes always
+did. Also fixed, for sessions pinned with `pin_to_version` / `VERSION AS OF`:
+a later compaction pass no longer changes what an explicit snapshot reads (it
+now reads the table versions its restore point tagged); a traversal's
+target-label filter uses the labels the vertices had at the snapshot; and a
+schemaless relationship type is read under the snapshot's ceiling (edges
+deleted after the snapshot were missing, edges created after it were shown).
+A transaction's vertex reads, and a session pinned to a flush manifest, also
+survive a compaction pass: compaction keeps the rows any open pin reads. A
+session pinned *after* a compaction pass to a flush manifest older than the
+history that pass merged is refused with `InvalidArgument`; explicit
+snapshots (`create_snapshot`) are never refused.
+
+**A `SET` on stored relationships counts its identity checks toward the
+transaction's memory limit.** The per-hub identities a `SET` reads to check
+that it does not move an edge are now charged to the transaction buffer, so a
+`SET` over a hub with many stored relationships can reach
+`max_transaction_memory` sooner (about 40 bytes per relationship of each hub
+touched).
+
+**Commits no longer read flushed vertices for triggers that cannot fire.** The
+commit-time pre-image read for vertices ran for every written vertex whenever
+any trigger was registered, the default label-scoped audit trigger included.
+It now runs only for vertices a registered node trigger or CDC can receive,
+and never for vertices the transaction created: a 1M-vertex commit beside 1M
+stored ones went from 67.5 s to 13.3 s (debug build) with no user trigger.
+
+**A bulk load is invisible to every reader that started before it
+committed.** A load reserves its version when it starts staging. A
+transaction begun while it was staged saw it appear part way through once it
+committed (2 rows, then 22), a session pinned to a flush made meanwhile saw it,
+and a snapshot taken while its tables were being published held half of it
+(its vertices without its edges), including after a restore. Each now keeps
+excluding the load; restoring such a snapshot deletes the load's rows.
+
+**Locy exact probabilities read a PROB rule without a fold as its own
+formula.** In `exact_probability` mode, a fact of a PROB rule without a FOLD
+(`YIELD KEY a, KEY b, e.p AS p PROB`) that another rule references (`IS` or
+`IS NOT`) was one independent variable. Its dependence on the edges and facts
+it rests on was lost. On the diamond `s -0.7-> t`, `s -0.3-> m -0.5-> t`,
+`reach(s, t) AND NOT edge(s, t)` gave 0.2235, where the possible-worlds value
+is 0.045. Exact mode now composes the fact's own lineage: its row's event, the
+facts it references, and the negation of the facts it negates. The fact's own
+value is exact too. `MATCH (a)-[e]->(b) WHERE a IS reach TO b YIELD KEY a,
+KEY b, e.p AS p PROB` gave `0.7 × 0.745` for `(s, t)` and now gives 0.7. A row
+derived several ways, or one reading shared evidence, raises
+`SharedProbabilisticDependency` in default mode. Default mode is
+unchanged. It still reports `SharedProbabilisticDependency` where the
+independence approximation is not exact.
+
+**EXPLAIN RULE lists every referenced fact.** A derivation's children used to
+be only its probabilistic references (to a PROB rule, from an `MNOR`/`MPROD`
+rule). A reference to a rule without a PROB column, or from a PROB rule without
+a FOLD, showed no child, so a transitive closure's tree was flat. Every
+positive reference is now a child. A fact of a rule without a PROB column is
+certain: its derivations have `proof_probability` 1.0 (it was `None`), and a
+derivation of such a rule that references PROB facts weighs the product of
+their probabilities.
+
+**ABDUCE explains the clause and row a fact came from.** The tree ABDUCE
+builds (EXPLAIN's Mode B) took the first clause, in text order, with a body row
+sharing the fact's KEY. For a PRIORITY rule or a BEST BY rule it therefore
+explained another clause's or another row's derivation, and `ABDUCE NOT`
+proposed edits that left the fact in place. It now tries clauses highest
+PRIORITY first and matches the fact's non-KEY yielded values too. A removal
+under `[e:E|G]` names the type of the edge that was read (it named `E`, and
+never validated).
+
+**`ParameterMissing` names a registered rule's parameters up front.** A
+parameter read only by a rule registered earlier (`db.rules().register(..)`)
+was reported when its clause first evaluated it, naming that one parameter. A
+prepared Locy program checked no parameter up front. Both now refuse before
+evaluation, naming every missing parameter: the program's own, then those of
+each registered rule it runs.
+
+**Locy budget: an in-memory QUERY stops at the deadline, and a late answer is
+reported.** A QUERY over the derived facts checks the program's deadline and
+cancellation every 1024 rows. With `allow_partial`, a command that finished
+past the deadline used to be returned with `incomplete` unset. It now keeps its
+answer but reports a `timeout` `incomplete`, and no later command runs.
+Without `allow_partial`, converting and hydrating the facts stop at the
+deadline, and the `Timeout` comes sooner. With `allow_partial` they still run
+to completion, possibly past the deadline. The result promises complete,
+hydrated facts, and a deadline-cut run starts this work after its deadline.
+The overrun is reported.
+
+**Mutating built-in procedures are refused in read-only contexts and authorized
+as `dbms` / `schema`.** The built-in `uni.admin.compact`,
+`uni.admin.snapshot.create`, `uni.admin.snapshot.restore`,
+`uni.admin.verifyEdgeEndpoints` and the DDL procedures
+`uni.schema.create{Label,EdgeType,Index,Constraint}` /
+`uni.schema.drop{Label,EdgeType,Index,Constraint}` are dispatched by name, not
+through the plugin registry, and the read-only check asked only the registry
+for a procedure's mode, so it took every one of them for a read. Measured
+before the fix: `session.query()`, `query_with().fetch_all()` and a session
+`prepare()` ran all of them (a restore rewound the store); a session pinned with
+`pin_to_version` and a handle opened with `.read_only()` ran `compact()` and the
+DDL procedures and wrote the catalog on disk (`Person` dropped, `Probe`
+created); `VERSION AS OF` statements ran `compact()`, `createLabel` and
+`dropLabel`; a `session.locy()` program ran `compact()`, `snapshot.create()` and
+the DDL procedures at once; and an `AuthzPolicy` saw the action `read` for all
+of them in `session.query`, `session.run` and `tx.query` (`write` in
+`tx.execute`). Now:
+
+- Each built-in's mode lives in one table, `uni_query::BUILTIN_PROCEDURE_MODES`
+  (`Dbms`: compact, snapshot.create/restore, verifyEdgeEndpoints; `Schema`: the
+  DDL procedures; `Read`: `compactionStatus`, `snapshot.list`). The read-only
+  check, the authorization verb and dispatch all read it; a built-in without an
+  entry is not callable.
+- `session.query()`, its builder, session `prepare()`, pinned sessions,
+  read-only handles and time-travel statements refuse them with the read-only
+  `UniError::Query`. `compactionStatus()` and `snapshot.list()` still run there.
+- **Run them with `session.run()`** (new in Python: `Session.run` /
+  `AsyncSession.run`). An administrative (`Dbms`) statement runs outside any
+  transaction — `snapshot.restore()` and `verifyEdgeEndpoints()` refuse to run
+  inside one — authorized as `dbms`; on a pinned session or a read-only handle it
+  fails with `UniError::ReadOnly`. A DDL procedure runs in an auto-commit
+  transaction, authorized as `schema`. `uni query` (the CLI) already used
+  `session.run()`.
+- In a transaction, `tx.query` / `tx.execute` / `tx.prepare` authorize a
+  statement calling a `Dbms` procedure as `dbms` and one calling a `Schema`
+  procedure as `schema`, for registered plugin procedures as for built-ins.
+- A session-level Locy program, and any `ASSUME` body, refuses a Cypher command
+  calling a `Schema` or `Dbms` procedure: its effect is immediate and cannot be
+  collected for `tx.apply` or discarded.
+- A session `prepare()` now refuses a registered `WRITE`/`SCHEMA`/`DBMS` plugin
+  procedure, as `session.query()` does. It used the registry-blind check, so a
+  prepared `CALL t.mark()` (a declared `WRITE` procedure) executed and wrote.
+
+**A Locy program's commands run in sequence.** A command now reads the state
+every earlier command of the same program left. A `DERIVE` or a Cypher write
+changes the graph, and every later command — `QUERY`, another `DERIVE`,
+`EXPLAIN RULE`, `ABDUCE`, `ASSUME`, `VALIDATE`, a Cypher read — reads the
+changed graph *and the rule facts derived from it*. Before, every command read
+the facts derived before the first command ran: `DERIVE link` followed by
+`QUERY linked` returned the `affected` count and no `QUERY` rows, through both
+`session.locy` and `tx.locy`, while a Cypher read after the `DERIVE` saw the
+edges. A program now behaves exactly like its commands run one by one, each as
+its own `tx.locy`, in one transaction — the same contract ASSUME bodies got
+above. After a write, only the strata it can affect are derived again, and only
+when a later command reads facts; a program without a write command derives
+nothing again, and nothing is derived after a program's last write.
+`LocyStats::sequenced_strata_evaluated` / `sequenced_strata_reused` (Python:
+`stats.sequenced_strata_evaluated` / `sequenced_strata_reused`) count it.
+
+- A Cypher write as a top-level Locy command works. Ahead of the program's
+  first `DERIVE` it failed with "Mutation context not set". In `tx.locy` it
+  writes into the transaction. In `session.locy` it writes nothing to the
+  database: it lands in the program's overlay, which later commands read, and is
+  returned in `derived_fact_set` next to the `DERIVE` output, in program order,
+  so `tx.apply` replays the whole program in one transaction.
+  `DerivedFactSet::is_empty()` (and Python's `is_empty()`) is now false for a
+  set holding only such a write.
+- A session-level `DERIVE` that connects a node an earlier command of the same
+  program created (`DERIVE (NEW ...)`, a Cypher `CREATE`) fails with an
+  evaluation error. `tx.apply` would re-create that node under a new id and the
+  `DERIVE` statement, which finds its endpoints by id, would silently match
+  nothing. Use `tx.locy` for such programs.
+- `LocyResult::derived` still holds the facts the program derived before its
+  first command.
+- A prepared Locy program (`session.prepare_locy` / `tx.prepare_locy`) now runs
+  against an overlay like `session.locy`. Its `DERIVE` was invisible to its
+  later commands, its `ASSUME` failed with "no active Locy L0 to fork", and a
+  Cypher write in it went straight to the shared graph, outside any
+  transaction.
+- Re-derivation after a write, inside ASSUME bodies too, now plans
+  model-invoking rules with the classifier registry, as the program's own run
+  does.
+
 **Edge triggers see the edge's old properties after a flush, and delete
 triggers match their edge type.** An edge already flushed to storage was
 reported to triggers and CDC as `EDGE_CREATE` with no `old_value` when it was
@@ -34,6 +207,105 @@ Cypher writes were not affected: the transaction commit already stored edges
 as full rows. Measured on 1,000 edge updates, a flush took 28-33 ms as full
 rows against 37-43 ms as `MergeInsert`.
 
+**`partial_lance_writes` no longer applies to vertices either; the flag is
+inert.** With the flag on, a vertex update written through the writer's
+non-transactional API (`Writer::insert_vertex_partial_full` /
+`insert_vertex_partial`) flushed as a Lance `MergeInsert` of the touched
+columns, keyed on the vertex id, into a table that holds one row per flushed
+version of the vertex. Properties removed earlier in the same flush window
+came back after the flush; a property removed in an earlier flushed row came
+back after compaction; and a vertex created and updated in one flush window
+was gone after the flush. Every vertex write is now stored as a full row.
+Cypher writes were not affected (the transaction commit never carried the
+partial classification). `uni_partial_writes_total`, which counted calls that
+then wrote full rows anyway, is no longer emitted.
+`UniConfig::partial_lance_writes` and `WriterConfig::partial_lance_writes` are
+now `#[deprecated]` no-ops: they still compile and are accepted, and setting
+`partial_lance_writes = true` logs one warning per process when a database
+opens. The flag was never reachable from Python (`config()` rejects the key).
+
+**An entity re-emitted by a writing subquery keeps its identity.** After
+`MATCH (n) CALL { WITH n SET ... } RETURN ...`, `properties(n)` and
+`collect(n)` returned `null` and `n.name` could read `null`, for any entity.
+A flattened entity map (from that subquery, or a parameter carrying `_vid` and
+`_labels`) whose map-valued property is named `properties` no longer has that
+map read as its whole property set: the other properties were dropped, or the
+nested keys appeared as properties.
+
+**`uni.schema.labels` `nodeCount` counts what the caller sees.** It was the
+row count of the label's storage table: unflushed nodes and a transaction's
+own writes were missing, deleted and superseded versions were counted, and on
+a fork it read whichever table the branch resolved to. It now counts the
+label's live nodes in the calling query's view (one count per label per call).
+
+**`ExecuteResult` counters report what the statement changed.** Every update
+reported itself as a create: `MATCH (n) SET n.v = 7` returned
+`nodes_created = 1`, `labels_added = 1`, `properties_set = 3`;
+`MERGE … ON CREATE SET` returned `nodes_created = 2`; `REMOVE n.k` returned
+`nodes_created = 1`, `labels_added = 2`; and `SET n:L` / `REMOVE n:L` counted no
+labels. The counters now follow the openCypher TCK's side effects: a property
+added counts in `properties_set`, a property removed (or set to null) in the
+new `properties_removed`, an overwrite with a different value in both, and
+assigning the value a property already has in neither. Labels count per node
+whose label set changes. A node or edge created and changed in the same
+statement reports only its final state. `properties_removed` counts explicit
+`REMOVE` / `SET ... = null` (and overwrites) only; a deleted entity's
+properties are not counted, and labels count per node, as in Neo4j's query
+statistics. (The openCypher TCK's side effects are a graph diff its harness
+takes, not execution counters.) A node or relationship named twice in one
+`DELETE` is now counted once: `DETACH DELETE n, m` with `m = n` reported
+`nodes_deleted = 2`. Python: `ExecuteResult.properties_removed`.
+
+**Declared edge endpoints are enforced on write.** An edge type declared with
+source or target labels (`edge_type("R", &["A"], &["B"])`) now refuses an edge
+whose source or target carries none of them, on `CREATE`, `MERGE`,
+`bulk_insert_edges`, `COPY … FROM` and fork promote, with the new
+`UniError::EdgeEndpointViolation { edge_type, endpoint, labels, allowed }`
+(Python: `UniEdgeEndpointError`, a `UniConstraintError`). A `REMOVE n:L` that
+would leave one of the node's existing edges outside its declaration is
+refused with the same error. Until now nothing checked, while the planner
+narrows patterns by the declaration; stores written before this release may
+hold violating edges, and they stay readable. An edge type declared with no
+endpoint labels, or not declared, accepts any endpoint.
+
+**`COPY … FROM` inside a transaction is part of the transaction.** It wrote
+straight to the shared buffer and flushed to disk: the transaction did not see
+its own imported rows, other sessions saw them before the commit, and a
+rollback left them in place. The rows now go to the transaction: visible only
+to it, discarded on rollback, durable on commit, and an import larger than
+`max_transaction_memory` fails with the transaction memory error.
+
+**Declared `VECTOR` and float properties read the same before and after a
+flush.** A list literal written to a `VECTOR` column and an integer written to
+a `FLOAT` column were held as written until the next flush, so `RETURN n` and
+`properties(n)` showed `List[Int]` / `Int` before it and `Vector` / `Float`
+after. They are now converted when written. `n.e[0]` on a vector property
+returns the element instead of failing with "cannot index into Vector", and
+`n.e[1..3]` returns the slice as a list of floats instead of failing with
+"first argument must be a list" / "Cannot slice Vector" -- in a read and in a
+write expression such as `SET n.x = n.e[0]`, which failed on both.
+
+**The write throttle is charged once per statement or batch.** In the soft
+band every written row paid the throttle budget: with a 1 s budget a four-row
+`UNWIND … CREATE` waited 4 s, a two-node one-edge `CREATE` 3 s, and
+`bulk_insert_edges` of three edges 3 s. Each now waits once. A direct
+`Writer` call outside a transaction still pays per call.
+
+**Bulk inserts honour the statement timeout.** `Transaction::bulk_insert_vertices`,
+`bulk_insert_vertices_labeled`, `bulk_insert_edges`, and the promote helpers
+`update_vertex_properties` / `delete_vertex_by_vid` are bounded by
+`query_timeout` like a Cypher write; at the throttle's hard limit they used to
+block until compaction ran. A batch cut short leaves the transaction
+rollback-only.
+
+**With compaction disabled, writes at the hard limit fail at once.** With
+`compaction.enabled = false`, a write at `throttle.hard_limit` used to wait
+until its deadline and fail with `Timeout`, and soft-band writes waited for a
+compaction that never came. A write at the hard limit now fails immediately
+with the new `UniError::WriteStalled { l1_runs, hard_limit }` (Python:
+`UniWriteStalledError`), whose message names `CALL uni.admin.compact()`, and
+the soft band does not wait.
+
 **Updating a flushed edge no longer drops or restores properties.** A `SET` on
 an edge that had been flushed lost the edge's undeclared properties once the
 result was flushed again, and a property removed with `REMOVE` (then flushed)
@@ -41,19 +313,77 @@ came back on the edge's next `SET`. The read that seeds an edge update now
 includes the undeclared properties and takes the newest stored row as the
 edge's state instead of merging older rows into it key by key.
 
-**A crash during a bulk load's `commit()` no longer loses other sessions'
-writes.** Reopening after a crash (or a failed `commit()`) part way through
-making a bulk load visible restored every table the load touched to its
-version from before the commit. That also discarded whatever other sessions
-had committed and flushed to those tables in the meantime: a vertex and an
-edge committed during the commit, or at any time after a failed one, were gone
-after reopen. Recovery now completes the interrupted load instead, publishing
-each table it had not reached exactly once onto the current version, so the
-load is present in full after reopen and nothing else is lost. Each load
+**A bulk load's `commit()` now says whether the load was applied, and a crash
+during it no longer loses other sessions' writes.** A load is decided by one
+durable write inside `commit()`, its commit point (the recovery marker that
+records every staged row):
+
+- Before it, a failure returns a plain error, and the load is not applied:
+  nothing is visible, now or after a reopen, and its staged files are deleted.
+- After it, `commit()` finishes the publish in-process, retrying a failed table
+  through the same exactly-once path recovery uses, and returns `Ok`. Later
+  steps that do not decide the load (index builds, the snapshot manifest and
+  latest pointer, the index-status schema save, the marker delete) no longer
+  fail it; they are listed in the new `BulkStats::warnings` and completed by
+  the next open or the index rebuild worker.
+- If the publish still cannot be finished, `commit()` returns the new
+  `UniError::BulkCommitIncomplete { load_id, .. }` (Python
+  `UniBulkCommitIncompleteError`): committed, completed exactly once on the
+  next open, **do not retry**.
+- If writing the marker fails in a way that may still have written it and
+  reading it back does not settle it, `commit()` returns the new
+  `UniError::BulkCommitOutcomeUnknown { load_id, .. }` (Python
+  `UniBulkCommitOutcomeUnknownError`).
+
+Before, every one of about fifteen steps after the commit point returned a
+plain error although the next open always completed the load. Measured: a
+failure part way through the publish, followed by the retry such an error
+invites, left 40 vertices and 60 edges after reopen for a 20-vertex, 30-edge
+load; a failure after the whole load was published left it doubled at once;
+and after a mid-publish failure live readers saw the vertices under
+`MATCH (n:Label)` (20) but not under `MATCH (n)` (0) until the next open. The
+`uni-pydantic` OGM wrapped every such error in `BulkLoadError`, and
+`bulk_add` committed one load per label, so a failure on the second label left
+the first applied behind that retry-inviting error. `bulk_add` now commits all
+labels as one load and lets the two new exceptions propagate unchanged.
+
+The load's id is exposed as `BulkWriter::load_id()`, `BulkStats::load_id`, and
+`writer.load_id` / `stats.load_id` in Python, and the new
+`Uni::bulk_load_applied(load_id)` (Python `Uni.bulk_load_applied`,
+`AsyncUni.bulk_load_applied`) says whether a load reached its commit point,
+before or after a reopen. It reads the load's marker and, once that is gone, a
+small receipt written per load under `catalog/bulk_loads_applied/`.
+
+Recovery completes an interrupted load instead of restoring each table's
+pre-load version, which also discarded what other sessions had committed and
+flushed to those tables meanwhile (measured: a vertex and an edge committed
+during the commit, or after a failed one, were gone after reopen). Each load
 keeps its own recovery marker: with one marker per database, a second load
 overwrote or deleted the first's, which then stayed half-visible (vertices and
 one edge direction) for good. A crash during recovery is completed by the next
 open.
+
+Staged files of a load that is still open, or committed but left to the next
+open, are now held against version cleanup in the process. Lance deletes a
+data file no version references once it is 7 days old; a compaction pass in a
+long-running process could delete them, and recovery then read "every staged
+file gone" as "already published" and skipped the tables silently (measured
+with aged files: all 30 edges of a committed load missing after reopen).
+
+**A storage backend that cannot stage is refused a bulk load.**
+`BulkWriterBuilder::build` returns the new `UniError::BulkLoadUnsupported`
+(Python: the base `UniError`) before anything is written, instead of writing
+visibly and undoing an abort or a crash by rolling each table back to an older
+version, which also discarded other writers' commits. Every Lance-backed
+database and fork stages, so only custom `StorageBackend` implementations are
+affected. `BulkWriter`'s futures are now `Send` (the progress callback is kept
+behind a mutex), so a load can run on a spawned task. New:
+`uni_bulk::check_recovered_bulk_endpoints`, called at open after WAL replay.
+
+`BulkStats` gained two public fields (`load_id`, `warnings`); code that builds
+it with a struct literal needs `..Default::default()`. A schema installed with
+`load_schema` (in memory only) is now saved before the commit point rather than
+after the publish, so a load's labels cannot be lost while its rows are kept.
 
 **`=~` matches the whole string, as in Neo4j.** The regex operator was a
 partial ("find anywhere") match, so `'abc' =~ 'b'` was true. It now follows
@@ -85,14 +415,51 @@ read with the Rust `regex` crate's syntax and defaults. They now follow
 - `\p{..}` names resolve as in Java: `\p{Greek}` and `\p{Alphabetic}` are now
   errors (write `\p{IsGreek}`, `\p{IsAlphabetic}`).
 
-Java syntax that cannot be evaluated exactly is now an invalid-pattern error
-rather than a different answer: possessive quantifiers (`a*+` was read as
-`(a*)+`), lookaround, backreferences, atomic groups, `\Q…\E`, Unicode blocks
-and a few escapes (`\h`, `\R`, `\Z`, …). Rust-only syntax is also rejected
-(`(?P<name>…)`, `\u{..}`, `[a--b]`, `a{,3}`, `(?R)`). A handful of patterns
-are refused with an "Unsupported regex input" error only for specific input
-(for example `$` followed by more pattern over a string with an inner line
-break); see the Cypher querying guide.
+Java constructs are now evaluated with Java's meaning rather than rejected:
+look-ahead and look-behind, backreferences, atomic groups and possessive
+quantifiers (`a*+` was read as `(a*)+`) run on a backtracking matcher, and
+`\Q…\E`, `\h`, `\R`, `\Z`, `\G`, `\e`, `\cX`, octal escapes, `(?d)`, `(?i-i)`
+and stacked quantifiers (`x{1}{2}`) parse as Java parses them. Patterns
+without those constructs, `\b` or anchors inside the pattern or under `(?m)`
+run on a linear-time automaton; the choice is made per pattern, so no input
+is refused. Rust-only syntax is
+rejected (`(?P<name>…)`, `\u{..}`, `[a--b]`, `a{,3}`, `(?R)`).
+
+A match that needs more than `UniConfig::regex_backtrack_limit` backtracking
+steps (default 10,000,000) fails with the new `UniError::RegexBacktrackLimit`
+(`UniRegexBacktrackLimitError` in Python, carrying `pattern` and `limit`), and
+a long scan of `=~` rows now honours the query timeout. Every pattern Java
+accepts is accepted and answered as Java 21 answers it: patterns with
+look-around, backreferences, atomic groups, possessive quantifiers, `\X`,
+`\b{g}` or `(?c)` run on a backtracking matcher over the string's UTF-16
+units that follows Java's semantics, so case-insensitive
+backreferences (`'kK' =~ '(?i)(k)\1'` is `true`), backreferences inside the
+group they name or into a loop that can match empty, captures kept after
+backtracking past a look-ahead, Java's end-at-the-first-empty-iteration loop
+rule (`'a' =~ '(?:a|\G){2}'` is `false`), and look-behinds with word
+boundaries, look-arounds or supplementary characters all give Java's answer.
+Unicode blocks (`\p{InGreek}`), `\p{java…}`, `\N{…}`, `\X` (grapheme
+clusters), `\b{g}` and `(?c)` (canonical equivalence) are supported. Where
+Java's matcher itself throws on an input (`'ab' =~ '(?=ab)a\b{g}b'` reads past
+the end of the string), the query fails with an error naming that exception,
+as it does in Neo4j. Java throws `StackOverflowError` on a backtracking loop
+over a long string (`(?:a|b)*` past about 1,500 characters on a default
+thread stack); uni-db answers such inputs and fails with "Regex recursion
+limit exceeded" only when its backtrack stack outgrows a 64 MB budget (a
+2,000,000-character `(?:a|b)*` match is answered). A pattern nested
+more than 2,000 groups deep is rejected with Java's "Stack overflow during
+pattern compilation". See the Cypher querying guide.
+
+The regex semantics are pinned to Java 21 (Unicode 15.0), the minimum JVM the
+current Neo4j release supports: character classes, properties, scripts and
+`(?iu)` case folding use tables generated from JDK 21, no longer the Rust
+toolchain's (Unicode 17.0) or `regex-syntax`'s (Unicode 16.0). Characters
+assigned in Unicode 16.0 or later are unassigned (`'\u{1C8A}' =~ '\p{L}'` is
+`false`), their case pairs no longer fold (`'\u{A7CF}' =~ '(?iu)\u{A7CE}'` is
+`false`), and the scripts added in 16.0 (`\p{IsGaray}`, `\p{IsTodhri}`, …)
+are invalid names, as in Java 21. A pattern with a backreference inside its
+own group could panic the backtracking matcher (`(?:x(\1?a))+`); it is now
+answered as Java answers it.
 
 **Integers and floats compare exactly; `1` and `1.0` are one value.** An
 integer compared with a float was widened to `f64`, which rounds above 2^53:
@@ -260,7 +627,12 @@ Each candidate now carries the identity of the one entity it edits —
 `RemoveEdge.eid` / `source_vid` / `target_vid` and `ChangeProperty.vid` / `eid`
 (new fields; also in the Python dicts) — and validation applies only that edit.
 A relationship with neither a bound variable nor bound endpoints is no longer
-proposed. Property candidates are no longer repeated under helper names such as
+proposed. Anonymous nodes and relationships in the rule body still identify
+their edge: ABDUCE binds them internally while building its derivation tree
+(the first version of this change proposed no edge at all for a body such as
+`(l:Lot)-[:OBSERVED]->(:Feature)-[:ON]->(t:Tool)`, which emptied the
+semiconductor flagship notebook's ABDUCE). Such a removal reports the anonymous
+element's variable as empty and carries its `eid` / vids. Property candidates are no longer repeated under helper names such as
 `a._all_props`. `source_var` / `target_var` of a removal now follow the edge's
 direction, so `(b)<-[:R]-(a)` reports `a` as the source.
 
@@ -640,10 +1012,14 @@ a Cypher read in the same body saw them. The body now behaves exactly like its
 commands run one by one in a transaction that is rolled back. After a write,
 only the strata it can affect are derived again.
 
-- An ASSUME's rows now include a `DERIVE`'s result, as one `{affected: n}`
-  row, and a nested ASSUME's rows. Both used to be dropped, so a body whose only
-  command was `DERIVE` returned no rows. A body that mixes `DERIVE` and
-  `QUERY` now has the `affected` row among the `QUERY` rows.
+- An ASSUME now returns one result per body command (see *API changes*), so a
+  `DERIVE`'s `affected` count and a nested ASSUME's results are reported in
+  their own entries. Both used to be dropped, so a body whose only command was
+  `DERIVE` returned no rows.
+- A body that only defines rules (no commands) returned every fact its rules
+  derived, flattened into the ASSUME's rows. It now has no results; the facts
+  are in the result's `derived` map, keyed by rule. `LocyResult::rows()` and
+  Python `LocyResult.rows()` skip such an ASSUME.
 
 **`COPY ... TO` exports the user-visible properties.** A CSV export wrote the
 label's storage table — its declared columns and the raw `overflow_json` blob —
@@ -687,7 +1063,406 @@ Which keys are properties is now decided only by the reserved-name rule and the
 entity's property container. Plain `RETURN n`, `properties()`, `keys()`, map
 projection and paths were not affected.
 
+**Soft write throttling no longer outlasts the statement timeout.** Between
+`throttle.soft_limit` (16) and `throttle.hard_limit` (32) uncompacted flush
+generations, each write slept `base_delay × 2^(runs − soft_limit)` in one
+uninterruptible sleep: 40.96 s at 28 runs, 81.92 s at 29. It did not end when
+compaction reset the count, so a one-row `CREATE` failed with
+`Timeout { 30000 }` behind a compaction that had already finished. The wait is
+now re-checked every 100 ms, ends within one check of the count falling below
+`soft_limit`, and is capped at `100 ms × (hard_limit − soft_limit)` (1.6 s at
+the defaults). Below the cap the curve is unchanged (up to 1.28 s at 23 runs).
+The backoff also saturates instead of panicking with "overflow when multiplying
+duration" for a `base_delay` above about 8.6e9 s. The hard limit is unchanged:
+writes stop until compaction catches up.
+
+**A search procedure's `YIELD node` is a full node.** `uni.fts.query`,
+`uni.vector.query` and `uni.search` yielded a node with no properties when it
+was used whole: `RETURN node` and `node {.*}` were empty, `properties(node)`
+was `NULL`, `keys(node)` was `[]` and `labels(node)` failed. Only a property
+the query named (`node.id`) was fetched. The node now carries every property,
+declared or not, before and after a flush.
+
+**`[r:R|Q]` mixing a declared and an undeclared relationship type matches
+either type**, in a plain pattern, a variable-length pattern and a Locy rule
+body. It failed with "Mixed known and unknown edge types not yet supported".
+A Locy rule-planning error now also carries its cause instead of only
+"LocyPlanBuildError: planning MATCH pattern".
+
+**`SET` inside `CALL { }` works for every declared property type.** A declared
+`MAP`, `LIST<INT>`, `VECTOR`, temporal or `FLOAT32` property set inside a unit
+subquery panicked in debug builds and failed in release with a column-type
+mismatch.
+
+**Edges that violate their type's declared endpoints are matched.** With `R`
+declared `A -> F`, a store holding `(:A)-[:R]->(:S)` dropped that edge from
+`MATCH (a:A)-[:R]->(b)` and from `MATCH ()-[r:R]->() RETURN count(r)`: the
+planner narrowed an endpoint the pattern did not label to the declared label.
+Writes now enforce declared endpoints, but a store written before can hold such
+edges; a pattern that names no label no longer filters by one.
+
+**Declared endpoints narrow reads again, where that is sound.** Each edge type
+in the catalog now records whether its stored edges are known to conform to
+its declaration (`EdgeTypeMeta::endpoint_conformance`): `enforced` for a type
+created under write-time enforcement, `verified` after a check, `unverified`
+otherwise -- including every type in a catalog written by an earlier release,
+and a type declared over a name that already labels schemaless edges. The
+planner narrows an unlabelled endpoint of a typed relationship (an anonymous
+source to a label scan, an unlabelled target to the declared label) only when
+every type in the pattern conforms; otherwise it reads every vertex and matches
+violating edges, as above. LDBC SF1, `MATCH ()-[w:WORK_AT]->() RETURN
+max(w.workFrom)`, process peak RSS: 5.7-6.7 s and 1.25-1.47 GB unverified,
+0.26-0.42 s and 0.81-0.85 GB once verified (the narrowed plan of the previous
+release measured 0.23-0.28 s and 0.83 GB).
+
+**`CALL uni.admin.verifyEdgeEndpoints([edgeType])`** checks the live edges of
+each unverified declared type (or of the one named) against their declared
+labels -- after flushing, as of one version -- and records the clean ones
+`verified`. It yields `edge_type`, `edges_checked`, `source_violations`,
+`target_violations` and `conformance` per type; a type with violations stays
+unverified and its edges stay readable. Each type's result is saved as it
+completes. Measured on the LDBC SF1 store: all 15 types in 12.3 s (1.7 GB peak
+RSS, outside the query pool), `HAS_CREATOR`'s 3.06M edges in 2.8 s. It refuses
+to run inside a transaction, and waits up to 10 s for transactions whose
+snapshot predates its read (they could still see an edge deleted before it),
+then fails naming them. A verification never covers a view fixed before it: a
+fork created earlier keeps the type un-narrowed (a nested fork trusts no
+verification), as does a read pinned to an earlier snapshot, and
+`restore_snapshot` / `uni.admin.snapshot.restore` withdraw it from the catalog.
+Types enforced since creation narrow everywhere. The procedure is refused on a
+fork.
+
+**The bulk loader enforces declared endpoints.** `BulkWriter::insert_edges`
+writes straight to storage and checked nothing; it now refuses an edge whose
+endpoint, among the load's own vertices or the database's, carries none of the
+declared labels, with `UniError::EdgeEndpointViolation`.
+
+**A property write cannot move a relationship.** `SET` / `REMOVE` on a map
+carrying `_eid`, `_src`, `_dst` and `_type` (which the write path treats as a
+relationship) stored whatever endpoints and type the map named for that edge
+id: `WITH {_eid: e, _src: s, _dst: f, _type: 'R'} AS m SET m.w = 1` moved an
+existing `R` edge to new endpoints, or to another type, with no
+declared-endpoint check. It is now refused with the new
+`UniError::EdgeIdentityChange { eid, stored, requested }` (Python:
+`UniEdgeIdentityError`, a `UniConstraintError`); a map naming an edge id that
+does not exist is held to the declared endpoints like a create. The check
+reads each edge's stored identity from the write buffers, then the source's
+outgoing adjacency (once per source and type, so a `SET` over a hub's edges
+stays linear), then storage.
+
+**Writes by an older binary void endpoint conformance.** An older binary does
+not check declared endpoints, so edges it writes after a type was marked
+`enforced` or `verified` can violate the declaration the planner narrows on.
+Every catalog save, snapshot manifest and WAL segment now records the writer's
+features (`endpoint_enforcement`). On open, a replayed WAL segment without
+them, or a latest manifest without them that is not the pre-existing one an
+enforcing binary already accepted, sets every `enforced` / `verified` type to
+`unverified` (saved, with a warning naming them); run
+`CALL uni.admin.verifyEdgeEndpoints()` to restore narrowing. A read-only open
+downgrades its in-memory view only. A store first opened by this release whose
+last flush was by an older one keeps types declared afterwards `enforced`.
+
+**A commit made after a reopen survives a crash.** A flush deletes the WAL
+segments its manifest covers, so a cleanly closed store had none, and the
+reopened log numbered its segments from 1 again while the manifest's WAL mark
+was higher; recovery replays only segments above the mark, so every commit
+between the reopen and the next flush was lost in a crash (three flushed
+commits, close, reopen, commit, crash: the fourth row was gone). The log now
+numbers above the manifest's mark.
+
+**Commits no longer read every written edge back from storage.** The
+built-in `:_AuditMe` node trigger is registered by default, so every commit
+ran the trigger pre-image probe, which reads the committed state of every edge
+the commit writes in one batched storage lookup. It now runs only when a CDC
+output or a trigger subscribed to edge events is registered, and never for
+edges the commit created (their ids are fresh). Probe time, debug build: 1M
+edges `SET` after a flush 15.0 s per commit, 1M new edges beside 1M flushed
+ones 3.9-7.1 s, now 0 s; a required edge pre-image read is unchanged.
+
+**A missing parameter is an error, in writes as in reads.** `CREATE {v: $x}`,
+`SET n.v = $x`, `MERGE`, `ON CREATE`/`ON MATCH SET`, `UNWIND .. CREATE` and
+`FOREACH` stored `NULL` when `x` was not supplied -- `SET` erased an existing
+value. They now fail with the new `UniError::ParameterMissing { names }`
+(openCypher `ParameterMissing`, Neo4j `Statement.ParameterMissing`) before
+writing anything. Reads, which failed with an untyped "Unresolved parameter",
+and Locy rules raise the same error. A NOT NULL key fed from a missing
+parameter names the parameter instead of reporting "cannot be null". A
+parameter supplied as `null` is still a value.
+
+**`ParameterMissing` names every missing parameter.** `RETURN $a, $b` with no
+parameters reported `names == ["a"]`: the check ran when an expression was
+first evaluated, so it named whichever parameter it reached first, and none at
+all for one in a branch no row reached (`MATCH (n:T) WHERE n.k = -1 AND n.v =
+$x` returned no rows). A statement is now checked against its parameters before
+it runs, as openCypher specifies (`ParameterMissing` at compile time) and Neo4j
+reports (`Expected parameter(s): a, b`): `names` lists every parameter the
+statement references and the caller did not supply, once each, in order of first
+appearance (Python: `UniParameterMissingError.names`). This covers session and
+transaction statements, plan-cache hits, cursors, `PROFILE`, prepared queries
+and Locy programs (`session.locy`, `tx.locy`); `EXPLAIN` still plans without
+parameters, as in Neo4j. Text that only looks like a parameter, inside a string
+literal or a comment, is not one. A parameter referenced only by a rule
+registered earlier is still reported when the rule is evaluated.
+
+**`restore_snapshot` restores the database.** `Uni::restore_snapshot` and
+`CALL uni.admin.snapshot.restore` only moved the `latest` manifest pointer:
+readers read every table at its newest version, so after a restore -- in the
+same handle and after a reopen -- the store kept everything written after the
+snapshot (measured: vertices `Alice(31), Carol(99), Dave, Eve` where the
+snapshot held `Alice(30), Bob, Carol(50)`). A shutdown flush then overwrote the
+pointer as well. Now a restore rewinds every table and index dataset to its
+version at the snapshot and takes effect at once: in the same handle and after
+a reopen, reads see the snapshot's vertices, edges, labels and property values
+and nothing written after it, flushed or still in memory. Writes after the
+restore build on the restored state. To make this possible an explicit snapshot
+(`create_snapshot`, `uni.admin.snapshot.create`) now records the version of
+every table and pins it with a storage tag, so compaction's version cleanup
+keeps it; those versions are retained for as long as the snapshot exists.
+Limits:
+
+- Only an explicit snapshot can be restored. A manifest written by an ordinary
+  flush (listed by `uni.admin.snapshot.list` too), or a snapshot taken by an
+  earlier version, is refused with an error saying it has no restore point.
+- A restore is refused while a transaction is open, inside a transaction
+  (`uni.admin.snapshot.restore` in `tx.execute`; a rollback could not undo it),
+  while a bulk load is publishing, and on a fork. A transaction begun during a
+  restore cannot commit after it (it is aborted as a conflict).
+- The schema catalog is restored with the data: labels, edge types,
+  properties, indexes and constraints declared after the snapshot are gone,
+  ones dropped since are back, and a property renamed or redeclared with
+  another type since has its old name and type. Tables created after the
+  snapshot are dropped rather than emptied, so a later column type cannot
+  outlive the restore. A snapshot whose restore point predates catalog
+  recording is refused with an error saying so.
+- Background index builds are paused for the restore: a build under way
+  finishes first, and queued builds run afterwards against the restored data.
+  Before, a build that read the store before the rewind could record its
+  index `Online` after it, over a table the rewind had rolled back.
+- A restore is refused while the database has forks, with the new
+  `UniError::RestoreBlockedByForks { forks }` (Python
+  `UniRestoreBlockedByForksError`, attribute `forks`), naming every fork the
+  registry holds, whether active, being created or being dropped. A restore
+  rewinds primary storage and the UID index that primary and the forks share,
+  but not fork branches: a fork would keep data cut from the pre-restore
+  primary and lose the UID entries it registered after the snapshot. Drop the
+  forks first (`drop_fork`, or `drop_fork_cascade` for a fork with children).
+  A fork whose creation races a restore is rolled back with
+  `UniError::ForkLifecycle { stage: "restore_race" }` and can be retried.
+  Restore applies to the primary database only.
+- A crash during a restore is completed when the database is next opened.
+
+**Snapshots can be deleted.** A restorable snapshot pins every storage version
+it records with a tag, so compaction never reclaimed them. `Uni::delete_snapshot`,
+`CALL uni.admin.snapshot.delete(id)` (mode `Dbms`: through `session.run`, not
+inside a transaction) and Python `delete_snapshot` (sync and async) remove the
+snapshot's tags, restore point, names and manifest; the next compaction then
+reclaims the versions no other snapshot pins, and other snapshots still restore.
+An unknown id is `UniError::SnapshotNotFound` (Python `UniSnapshotNotFoundError`,
+now with a `snapshot_id` attribute; also recovered on the procedure path, and
+now returned by `restore_snapshot` for an unknown id). Refused while a restore
+runs or is incomplete and while a fork was created from the snapshot. Deleting
+the snapshot `latest` names republishes it under a fresh id first, so the store
+still opens.
+
+**`uni.graph.project` inside a transaction with uncommitted writes is
+refused** with the new `UniError::UncommittedWritesInTransaction`. The
+projection catalog is shared by every session and not undone by a rollback (as
+in Neo4j GDS), so such a projection published the transaction's writes before
+commit and kept them after a rollback. A transaction without writes builds the
+projection from its own snapshot.
+
+**A bulk load becomes visible all at once.** A load is published table by
+table, and a reader between two of those commits saw part of it: measured with
+a pause before each table (20 vertices, 30 edges), `MATCH (n:P)` returned the
+20 vertices while `MATCH (n)` returned none, then every vertex appeared with
+none of its edges (a warm adjacency cache), or the edges appeared in one
+direction only (30 forward, 0 backward). Readers of the database handle the
+load runs on -- its sessions, transactions and pinned snapshots -- now see none
+of a load until its last table is published, and then all of it. Another
+process, or a second handle opened on the same path, is not covered and can
+still see a load part way. Semantic compaction no longer runs while a load is
+being published (a background pass skips that tick; `uni.admin.compact()`
+waits).
+
+**A load left incomplete is completed in the background.** After
+`BulkCommitIncomplete`, nothing completed the load until the next open, and
+readers saw the part already published (20 vertices by label, nothing else).
+A background task now retries the publish with backoff (200 ms doubling to
+30 s), keeps the load hidden until it completes, and then finishes it as the
+next open would; it stops when the database shuts down, and the next open
+completes the load then. The error message says so.
+
+**Fork bulk loads have the primary's outcomes.** A fork load kept no recovery
+marker: `bulk_load_applied` answered `false` after a successful fork load, and
+a failure part way through publishing returned `Internal` with the per-label
+table published and the main table not, through reopen. A fork's marker and
+receipt now live in the fork's namespace (`catalog/forks/{fork_id}/`); its load
+is completed in-process, in the background, or when the fork is next opened,
+and returns `Ok`, `BulkCommitIncomplete` or `BulkCommitOutcomeUnknown` like a
+primary load. Ask about it with the new `Session::bulk_load_applied` on a
+session of that fork; `Uni::bulk_load_applied` answers only for primary loads.
+
+**Snapshots and bulk loads.** The snapshot a bulk commit records now covers
+the load: pinned to it, a session saw none of the load (its version ceiling
+was the previous manifest's, 0 on a fresh database), and the next open
+restarted the version counter below the load's version. And a session pinned
+to a snapshot taken *before* a bulk load no longer sees the load through a
+label-less `MATCH (n)`: the load's rows in the shared vertex table carried
+`_version = 1` (measured: 21 vertices where the snapshot held 1).
+
+**A fork is never cut part way through a bulk publish.** A fork created while
+a load was being published branched off the tables published so far and kept
+that part for good (measured: the load's 20 vertices, none of its 30 edges).
+Fork creation now waits for the publish to finish (up to 30 s) and branches
+off all of it. While a load stays incomplete past that wait (its background
+re-drive keeps failing) fork creation fails with
+`UniError::ForkLifecycle { stage: "bulk_publish", .. }`, creates nothing, and
+can be retried.
+
+**A bulk load's snapshot no longer changes after it is taken.** A vertex
+committed before a load but not yet flushed was missing from the snapshot the
+load's commit records, then appeared in it once flushed (measured: 20 rows,
+then 21). The commit now flushes such rows first, so they are in the snapshot
+from the start.
+
+**Published bulk edges are checked against their type's declared endpoints
+again.** An endpoint that existed before the load could lose its label (or be
+deleted) while the load's edge was still invisible, so the label-removal check
+let it through; the type stayed enforced and `MATCH ()-[r:E]->()` silently
+missed the edge (0 rows instead of 1), live and after a reopen. The same held
+for a load completed by the background re-drive or by recovery at the next
+open. The load is applied either way; a type with such an endpoint is now
+recorded unverified (reported in `BulkStats::warnings` or the log), so the
+edge is found. Run `CALL uni.admin.verifyEdgeEndpoints()` once the endpoints
+are fixed. Recovery checks after the write-ahead log is replayed, so a label
+removal that was not yet flushed counts.
+
+**A manual full compaction relieves write throttling.** `CALL
+uni.admin.compact()` (Rust `StorageManager::compact`) optimised tables but
+left the flush-generation count that drives the write throttle unchanged, so a
+writer at `throttle.hard_limit` stayed stalled (measured: the count stayed at
+3 and the next `CREATE` timed out). It now runs the same full pass as
+background compaction, including folding the L1 deltas, under the same guard
+and directory lock -- it waits for a running pass instead of overlapping it
+(two overlapping manual passes failed with a Lance commit conflict) -- and
+lowers the count. `db.compaction().compact(label_or_edge_type)` still only
+optimises that table's files and leaves the count alone. A compaction pass,
+manual or background, now subtracts the runs it saw when it started instead of
+resetting the count to 0, which erased flushes that landed during the pass.
+
+**Locy `EXPLAIN RULE` reports each derivation's weight, and `top_k_proofs`
+keeps the heaviest.** A recorded derivation's `proof_probability` was always
+`None`, so `top_k_proofs` kept an arbitrary set, and it kept every derivation of
+a fact anyway because it counted per derivation rather than per fact. A
+derivation now weighs its own PROB value (its local weight times every
+probability it referenced; a leaf weighs exactly its own value), and
+`top_k_proofs = k` keeps the `k` heaviest derivations of each fact:
+`reach(A, C)` over `A -0.5-> B -0.8-> C` and `A -0.3-> C` keeps the 0.4
+derivation at `k = 1`, not the 0.3 one recorded first. The
+`TopKPruningCrossedDependency` analysis runs on these weights. `proof_probability`
+is set whatever `top_k_proofs` is.
+
+**A Locy program prepared in a transaction runs as `tx.locy` does.**
+`tx.prepare_locy(program)` built a session-style program: it did not read the
+transaction's uncommitted writes (`tx.locy` returned `[7]` where the prepared
+program returned `[]`), ignored its snapshot and cancellation, and collected its
+writes instead of writing them into the transaction. Its reads and writes now go
+through the transaction, under its snapshot and cancellation scope. A
+session-prepared program is unchanged.
+
+**A Locy program's `$params` reach every command and the `tx.apply` replay.**
+A Cypher command after the program's first write ran with no parameters: a
+`$param` read failed with "Unresolved parameter" and a `$param` write stored
+NULL. And `tx.apply` replayed a session program's Cypher writes without
+parameters, storing NULL. Both now use the program's parameters.
+
+**A Locy program's `timeout` covers the whole program.** Each evaluation a
+program runs again (after a write, for an ASSUME body or an ABDUCE candidate)
+got the full timeout afresh, and converting, hydrating and answering commands
+after the program's own evaluation was not bounded at all: eight writes each
+followed by a `QUERY` ran three timeouts long and returned `Ok`, and a
+1200-item cross join ran 2.85 s against a 300 ms timeout (debug build). Every evaluation now
+gets what remains of the program's budget, and the budget is checked after the
+evaluation, before each command and after the last. A program past it fails
+with `Timeout` (or `LocyIncomplete` when an evaluation was cut short).
+
+**`allow_partial` reports every cut.** Under `allow_partial`:
+- an evaluation run again after a write, or in an ASSUME body, that stopped at
+  `max_iterations` or the budget returned its partial facts as complete
+  (`max_iterations = 100`: 100 of 239 rows, `incomplete` unset). It is now
+  reported in `incomplete`, naming its rules, and the commands stop there. The
+  command that needed the cut-short facts is not answered from them. Without
+  `allow_partial` the cut is a `LocyIncomplete` error; it was a generic runtime
+  error with the message inside;
+- an operator's deadline raised `Timeout` instead of being reported like the
+  checks between strata and iterations; it is now an `incomplete` with reason
+  `timeout`;
+- a budget that runs out after the facts are complete skips the commands and
+  reports an `incomplete` with reason `timeout` and no rule listed.
+
 ### API changes
+
+**Snapshot restore** (`uni-store`). `StorageManager::restore_snapshot` is
+removed: it only moved the manifest pointer. `Writer::restore_snapshot` and
+`Writer::create_snapshot` replace it and `Writer::flush_to_l1` for snapshots;
+`Uni::restore_snapshot` returns `UniError::ReadOnly` on a read-only handle and
+the new `UniError::RestoreBlockedByForks` while forks exist (also recovered on
+the procedure path); `Writer::restore_epoch` is new.
+`StorageBackend::tag_table_version` is new (the default refuses), and so is
+`StorageBackend::delete_table_tag` (idempotent; the default succeeds).
+`Writer::delete_snapshot`, `Uni::delete_snapshot`,
+`StorageManager::pause_index_builds` / `index_build_permit`,
+`restore::release_restore_point`, `RestorePoint::catalog`, and
+`SnapshotManager::{delete_restore_point, delete_snapshot_manifest,
+snapshot_exists, latest_snapshot_id, remove_snapshot_names}` are new;
+`restore::rewind_storage` takes the snapshot's creation time.
+`UniError::SnapshotNotFound`'s display now starts with the
+`SnapshotNotFound: "<id>": ` tag (`UniError::snapshot_not_found_from_message`).
+`SnapshotManager` gains `save_restore_point` / `load_restore_point` and the
+restore-intent methods; `RestorePoint`, `RestoreIntent` and the
+`uni_store::snapshot::restore` module are new. `AdjacencyManager::reset`,
+`StorageManager::reload_vid_labels_index` and
+`StorageManager::pause_compaction` are new. Lance version cleanup no longer
+fails on a tagged old version (`error_if_tagged_old_versions: false`).
+
+**Parameter discovery** (`uni-cypher`). `parse_with_parameters` and
+`parse_locy_with_parameters` return the parsed statement and the names of the
+parameters it references.
+
+**Locy internals for Wave P1** (`uni-locy`, `uni-query`).
+`DerivedFactSet::mutation_params` (hidden, like `mutation_queries`) holds the
+program's parameters for the replay. `LocyError::Incomplete { detail }` maps to
+`UniError::LocyIncomplete`. `LocyCompileError::AssumeBodyCommandNotAllowed` is
+removed. `ProofTerm` gains `prob`; `ProvenanceAnnotation` gains `derivation`;
+`compute_proof_probability(own, support)` replaces the map-based version and
+`ProvenanceStore::base_fact_probs` is removed; `top_k_fact_hash` is new;
+`ProvenanceStore::all_entries` returns every retained derivation.
+`ReEvaluation` gains `tracker` and `approximate`; `CommandFacts` gains
+`tracker()` and `approximate()`; `LocyExecutionContext::is_cut_short` is new
+(default `false`); `locy_abduce::evaluate_abduce_with` validates against
+`SequencePrograms`; `LocyProgramExec::set_allow_partial` is new.
+
+**Bulk visibility and fork bulk markers** (`uni-store`, `uni-bulk`, `uni-db`).
+`StorageManager::compact` takes `self: &Arc<Self>`. The `MainVertexDataset` /
+`MainEdgeDataset` readers take `version: impl IntoRowVisibility` (an
+`Option<u64>` still works). New: `uni_store::storage::bulk_gate`
+(`BulkVisibilityGate`, `GateHold`, `RowVisibility`), `StorageManager::bulk_gate`,
+`row_visibility`, `edge_row_visibility`, `visibility_at`, and
+`MainEdgeDataset::find_visible_edges_by_type_names_counted`. `BulkBackend` gains
+`track_task` (a struct literal must set it). `ForkBranching` gains
+`staged_record_on_branch` and `publish_staged_record_on_branch` (with failing
+defaults). New `Session::bulk_load_applied` (Python `Session.bulk_load_applied`,
+`AsyncSession.bulk_load_applied`). Failpoint seam `bulk::redrive::attempt`.
+
+
+**Locy command sequencing** (`uni-locy`, `uni-query`). `LocyStats` gains
+`sequenced_strata_evaluated` and `sequenced_strata_reused` (a struct literal
+without `..Default::default()` stops compiling). `LocyExecutionContext` gains
+`re_evaluate_sequenced` and `base_state_token`, both with defaults.
+`CollectedDeriveOutput` gains `bound_vids`. `uni_locy::incremental` gains
+`query_may_write` and `command_write_footprint`. The ASSUME body helpers moved
+to the new `uni_query::query::df_graph::locy_sequence` module, which both the
+top-level dispatch and ASSUME bodies use.
 
 **`LogicalPlan::Copy` is removed** (`uni-query`). The planner never built
 it; `COPY` plans as `CopyTo` / `CopyFrom`. The executor code behind it, a
@@ -700,16 +1475,44 @@ releases carrying the fixes for RUSTSEC-2026-0352, -0359, -0362 and -0363;
 wasmtime 49 declares `rust-version = "1.96.0"`. rustls moves to 0.23.46
 (RUSTSEC-2026-0346 to -0349). Run `rustup update stable` before building.
 
-**`ABDUCE` and `EXPLAIN RULE` inside a Locy `ASSUME … THEN` body are compile
-errors.** An ASSUME returns the rows of its body's `QUERY` and Cypher commands;
-an `ABDUCE` or `EXPLAIN RULE` in the body (or in a nested ASSUME's body) was
-evaluated and its result silently dropped, so the program succeeded with no
-abduction or explanation to show. Such a program now fails to compile with
-`LocyCompileError::AssumeBodyCommandNotAllowed`. Run the command at the top
-level after the ASSUME, or apply the hypothetical change in a transaction and
-roll it back (`tx()`, mutate, run the command, `rollback()`), or in a scratch
-transaction, whose writes are always discarded. Rules, `QUERY`, Cypher,
-`DERIVE` and nested `ASSUME` remain allowed in a body.
+**A Locy `ASSUME … THEN` returns one result per body command.**
+`CommandResult::Assume(Vec<FactRow>)`, the body commands' rows concatenated,
+is now `CommandResult::Assume { results: Vec<CommandResult>, derived:
+HashMap<String, Vec<FactRow>> }`. `results` holds, in order, the result each
+body command gives at the top level: `Query(rows)`, `Derive { affected }`,
+`Cypher(rows)`, a nested ASSUME's own `Assume { .. }`. A `QUERY; DERIVE;
+QUERY` body used to return one list in which the first QUERY's rows, the
+`{affected: n}` row and the second QUERY's rows could not be told apart.
+`derived` is every rule's facts (the program's and the body's) in the
+hypothetical state the body's first command reads, after the ASSUME's
+mutations: the point the top-level `LocyResult::derived` is taken at.
+`CommandResult::as_assume()` returns both; `CommandResult::rows()` returns the
+first row-producing result, searching an ASSUME depth first. Migration: replace
+`CommandResult::Assume(rows)` with `CommandResult::Assume { results, .. }` and
+pick the command (`results[i]`), or call `.rows()` for a single-command body.
+Python: `AssumeCommandResult` gains `.results` and `.derived`; `.rows` is the
+first row-producing body result's rows (depth first), or `[]`, so a
+single-command body reads as before.
+
+**`ABDUCE` and `EXPLAIN RULE` inside a Locy `ASSUME … THEN` body run in the
+hypothetical state.** An `ABDUCE` or `EXPLAIN RULE` in the body (or in a nested
+ASSUME's body) used to be evaluated and its result silently dropped. Each now
+returns its result among the ASSUME's `results`, the same result the command
+gives at the top level of a program run in a transaction that applied the
+ASSUME's mutations and is rolled back. `EXPLAIN RULE` explains the hypothetical
+facts from the derivations recorded while deriving them, and `ABDUCE` validates
+each candidate on top of the hypothetical state against every rule the body
+reads, the body's own rules included. (An intermediate 4.2-unreleased state
+rejected both with `LocyCompileError::AssumeBodyCommandNotAllowed`; that variant
+is gone.)
+
+**A Locy `QUERY` inside an `ASSUME` body reads exact probabilities under
+`exact_probability`.** The shared-proof correction runs only when the program
+records provenance, and an ASSUME body's evaluation recorded none, so a body
+`QUERY` read the independence approximation of a value the same `QUERY` read
+exactly at the top level: 0.484375 against 0.46875 for reachability over a
+five-edge diamond with every edge 0.5, with no error. Every evaluation of a
+program that records provenance now records it.
 
 **The in-memory CDC provider is no longer registered by default.** Every
 database registered `MemoryCdcOutputProvider`, which kept every committed batch
@@ -734,9 +1537,9 @@ provider that started the stream) instead of `Vec<CdcBatch>`.
 **Rust `LocyResult::rows()` returns the first row-producing result.** It
 returned the first `QUERY` result only, so a program whose first row-producing
 command was an `ASSUME … THEN { … }` or a Cypher statement returned that later
-`QUERY`'s rows, or `None`. It now takes the first `QUERY`, `ASSUME` or Cypher
-result in program order, as the Python binding's `rows` already did. Use
-`command_results()` to reach a specific command.
+`QUERY`'s rows, or `None`. It now takes the first `QUERY` or Cypher result in
+program order, searching an `ASSUME`'s body results depth first, as the Python
+binding's `rows` does. Use `command_results()` to reach a specific command.
 
 **A writable open waits for a compaction still running on the same local
 path.** Dropping a `Uni` handle did not stop an in-flight background compaction,
@@ -749,11 +1552,52 @@ unaffected. A cancelled pass reports `CompactionCancelled`.
 
 ### New
 
+**`MATCH ()-[r:R]->()` reads its sources from the edge type.** An
+unconstrained source that the planner cannot narrow to one declared label (an
+unverified legacy type, a type with several source labels, `[:R|S]`, or any
+type) was a scan of every vertex followed by a traversal from each. The source
+scan is now restricted at run time to the vertices that hold an edge of the
+pattern's types in its direction, read from the adjacency the traversal itself
+reads (new `EdgeSourceScanExec`), so the rows are unchanged: direction,
+undirected patterns (each edge twice), self-loops, deletes, unflushed and
+transaction-local edges, forks, pinned snapshots and in-flight bulk loads were
+compared against the old plan. LDBC SF1, `ldbcdb8`, unverified `WORK_AT`,
+release CLI: `RETURN max(w.workFrom)` 5.6–6.9 s → 0.33–0.62 s, `count(w)`
+5.6–7.6 s → 0.11–0.13 s, process peak RSS 1.24–1.63 GB → 0.82–0.91 GB. Inside
+a read-write transaction with SSI, and when the sources are a quarter or more
+of all vertices, the whole table is still read. Variable-length and `OPTIONAL`
+hops are unchanged.
+
+**Python: `UniParameterMissingError` and `UniUncommittedWritesError`.** The
+typed `UniError::ParameterMissing` and `UniError::UncommittedWritesInTransaction`
+reached Python as the base `UniError`. They now raise
+`UniParameterMissingError` (a `UniQueryError`, with `names`) and
+`UniUncommittedWritesError` (a `UniTransactionError`, with `operation` and
+`reason`).
+
+**Python: compaction and write-throttle settings.** `config({...})` accepts
+`"compaction"` and `"throttle"` as nested dicts with every field of
+`CompactionConfig` and `WriteThrottleConfig` (durations in seconds or as a
+`timedelta`); only the keys given change, an unknown key is a `ValueError`, and
+`Uni.config()` reports both. `compaction.enabled = False` with a low
+`throttle.hard_limit` is how `UniWriteStalledError` is reached from Python.
+
+**Write-throttle metrics.** `DatabaseMetrics::write_throttle_pressure` was
+always 0; it now reads 0 below `throttle.soft_limit`, rises through the soft
+band, and is 1 at `hard_limit`. New `write_throttle_waits`,
+`write_throttle_wait_time` and `writes_stalled` count the writes that waited,
+the time they waited, and the writes refused with `WriteStalled` (Python:
+`write_throttle_waits`, `write_throttle_wait_time_secs`, `writes_stalled`).
+Prometheus: `uni_write_throttle_waits_total`, `uni_write_throttle_wait_seconds`,
+`uni_write_stalled_total`. `l1_run_count` is documented as what it is: the
+uncompacted flush generations, not completed compaction runs.
+
 **`CompiledProgram::needs_provenance_tracker()`.** Reports whether running a
 compiled Locy program attaches a provenance tracker (an `EXPLAIN RULE` command,
-or an `MNOR` / `MPROD` fold). The runtime now uses this method to decide, and
-when it holds `ASSUME` / `ABDUCE` do not reuse the program's top-level strata,
-so `LocyStats::hypothetical_strata_reused` stays zero for such programs.
+or an `MNOR` / `MPROD` fold, anywhere in the program, ASSUME bodies included).
+The runtime now uses this method to decide, and when it holds every evaluation
+of the program records provenance and `ASSUME` / `ABDUCE` reuse no strata, so
+`LocyStats::hypothetical_strata_reused` stays zero for such programs.
 
 **Python: `Session.scratch()` and `AsyncSession.scratch()`.** They expose
 Rust's `Session::scratch()`: a transaction with read-your-writes over a pinned

@@ -38,4 +38,14 @@ pub enum LocyError {
 
     #[error("abduction error: {message}")]
     AbductionError { message: String },
+
+    /// An evaluation the program needed was cut short (its budget ran out,
+    /// or a recursive stratum hit `max_iterations`) and partial results
+    /// were not allowed: a re-derivation after a write, or a hypothetical
+    /// state's. Surfaces as `UniError::LocyIncomplete`, as the program's own
+    /// cut-short run does.
+    #[error("Locy evaluation incomplete: {detail}")]
+    Incomplete {
+        detail: Box<uni_common::LocyIncomplete>,
+    },
 }

@@ -10,7 +10,7 @@
 //! - **execute mode** (`derive_command`): immediately applies mutations via `ctx.execute_mutation()`
 //! - **collect mode** (`collect_derive_facts`): collects Cypher ASTs + vertex/edge data for deferred application
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use uni_common::Properties;
 use uni_cypher::ast::Query;
@@ -31,6 +31,10 @@ pub struct CollectedDeriveOutput {
     pub vertices: HashMap<String, Vec<Properties>>,
     pub edges: Vec<DerivedEdge>,
     pub affected: usize,
+    /// The ids of the existing nodes the queries name (a DERIVE head's
+    /// bound endpoints). A replay finds each by this id, so each must exist
+    /// where the queries are replayed.
+    pub bound_vids: BTreeSet<u64>,
 }
 
 /// Execute a top-level DERIVE command (auto-apply mode).
@@ -124,13 +128,21 @@ async fn collect_derive_facts_inner(
     let mut all_vertices: HashMap<String, Vec<Properties>> = HashMap::new();
     let mut all_edges = Vec::new();
     let mut affected = 0;
+    let mut bound_vids = BTreeSet::new();
 
     for clause in &rule.clauses {
         if let RuleOutput::Derive(derive_clause) = &clause.output {
+            let head = derive_head_variables(derive_clause);
             for row in &filtered {
                 for row in expand_group_bindings(derive_clause, row) {
                     let queries = build_derive_create(derive_clause, &row)?;
                     affected += queries.len();
+                    if !queries.is_empty() {
+                        bound_vids.extend(head.iter().filter_map(|var| match row.get(var) {
+                            Some(uni_common::Value::Node(n)) => Some(n.vid.as_u64()),
+                            _ => None,
+                        }));
+                    }
 
                     // Extract vertex/edge data for inspection
                     extract_vertex_edge_data(
@@ -151,6 +163,7 @@ async fn collect_derive_facts_inner(
         vertices: all_vertices,
         edges: all_edges,
         affected,
+        bound_vids,
     })
 }
 

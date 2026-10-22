@@ -68,7 +68,7 @@ async fn test_merge_composite_key_coverage() -> Result<()> {
     // We must use procedures/DDL or manually add constraint as SchemaBuilder doesn't support composite constraints directly yet in high-level API?
     // Let's use the DDL procedure which we know works.
     db.session()
-        .query(
+        .run(
             r#"
         CALL uni.schema.createLabel('User', {
             "properties": {

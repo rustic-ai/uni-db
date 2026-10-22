@@ -285,21 +285,6 @@ pub enum LocyCompileError {
         available: String,
     },
 
-    /// An `ASSUME ... THEN` body contains an ABDUCE or EXPLAIN RULE command.
-    ///
-    /// An ASSUME command returns rows: those of the QUERY and Cypher commands
-    /// in its body. An ABDUCE or EXPLAIN result is a tree of modifications or
-    /// derivations, not rows, so it used to be computed and then silently
-    /// discarded. Rejected anywhere in an ASSUME body, nested ones included.
-    #[error(
-        "{command} is not allowed inside an ASSUME ... THEN body: an ASSUME returns only the \
-         rows of its QUERY and Cypher commands, so the {command} result would be discarded. \
-         Instead, run {command} at the top level after the ASSUME, or apply the hypothetical \
-         changes in a transaction (`tx()`, mutate, run {command}, `rollback()`), or in a \
-         scratch transaction (`Session::scratch()`), which is always discarded"
-    )]
-    AssumeBodyCommandNotAllowed { command: String },
-
     #[error("rule '{rule}' has {count} PROB columns; at most 1 is allowed")]
     MultipleProbColumns { rule: String, count: usize },
 

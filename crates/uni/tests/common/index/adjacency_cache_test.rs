@@ -50,6 +50,13 @@ async fn test_adjacency_manager_lifecycle() -> anyhow::Result<()> {
     let vid1 = Vid::new(1);
     let eid01 = Eid::new(0);
 
+    // KNOWS declares Person at both ends, and writes enforce that, so the
+    // endpoints exist as Person vertices first.
+    for vid in [vid0, vid1] {
+        writer
+            .insert_vertex_with_labels(vid, HashMap::new(), &["Person".to_string()], None)
+            .await?;
+    }
     writer
         .insert_edge(vid0, vid1, knows_type, eid01, HashMap::new(), None, None)
         .await?;
@@ -70,6 +77,9 @@ async fn test_adjacency_manager_lifecycle() -> anyhow::Result<()> {
     // 5. Insert another edge
     let vid2 = Vid::new(2);
     let eid02 = Eid::new(1);
+    writer
+        .insert_vertex_with_labels(vid2, HashMap::new(), &["Person".to_string()], None)
+        .await?;
 
     writer
         .insert_edge(vid0, vid2, knows_type, eid02, HashMap::new(), None, None)

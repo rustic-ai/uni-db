@@ -129,12 +129,104 @@ impl MutationStats {
     }
 }
 
+/// The entity a property side effect belongs to; see
+/// [`L0Buffer::record_property_effect`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StatEntity {
+    /// A vertex.
+    Vertex(Vid),
+    /// An edge.
+    Edge(Eid),
+}
+
+/// A statement (or bulk batch) running against a transaction's L0 buffer.
+///
+/// Opens a scope on creation and closes it on drop, including when the
+/// statement's future is dropped by a timeout or a cancellation. Within it
+/// the write throttle is charged once, by the first write
+/// (`Writer::check_write_pressure`), rather than once per row, and the
+/// entities the statement creates are remembered for its side-effect counts.
+#[must_use = "the scope closes when this guard drops"]
+pub struct StatementScope {
+    l0: Arc<parking_lot::RwLock<L0Buffer>>,
+}
+
+impl StatementScope {
+    /// Opens a statement scope on `l0`: one throttle charge, and the
+    /// entities the statement creates are remembered for its side effects.
+    pub fn begin(l0: Arc<parking_lot::RwLock<L0Buffer>>) -> Self {
+        l0.write().begin_statement(true);
+        Self { l0 }
+    }
+
+    /// Opens a bulk-batch scope on `l0`: one throttle charge for the batch.
+    /// A batch reports no side effects, so it does not track what it creates.
+    pub fn begin_batch(l0: Arc<parking_lot::RwLock<L0Buffer>>) -> Self {
+        l0.write().begin_statement(false);
+        Self { l0 }
+    }
+}
+
+impl Drop for StatementScope {
+    fn drop(&mut self) {
+        self.l0.write().end_statement();
+    }
+}
+
+impl std::fmt::Debug for StatementScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StatementScope").finish_non_exhaustive()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TombstoneEntry {
     pub eid: Eid,
     pub src_vid: Vid,
     pub dst_vid: Vid,
     pub edge_type: u32,
+}
+
+/// Edge identities already resolved for `Writer::update_edge`'s check that
+/// a property write does not move an edge.
+///
+/// An edge id is never reused and an edge's endpoints and type never change,
+/// so an identity once read stays true. Reading one from the adjacency
+/// returns every edge of a `(source, type)` at once; memoizing them all makes
+/// a `SET` over a hub's edges one adjacency read rather than one per edge,
+/// which was quadratic in the hub's degree.
+#[derive(Debug, Default, Clone)]
+pub struct EdgeIdentityMemo {
+    /// `eid -> (src, dst, type id)`.
+    pub identities: HashMap<Eid, (Vid, Vid, u32)>,
+    /// `(src, type id)` pairs whose outgoing adjacency is in `identities`.
+    pub scanned: HashSet<(Vid, u32)>,
+    /// Per type id, how many identities had to be read from storage because
+    /// the type's adjacency was not loaded.
+    pub storage_reads: HashMap<u32, usize>,
+    /// Bytes of the memo charged to the owning buffer's `estimated_size`
+    /// ([`Self::charge`]). The memo is never merged or copied with its
+    /// buffer, so a merge or a fork leaves this share out.
+    pub charged_bytes: usize,
+}
+
+impl EdgeIdentityMemo {
+    /// Estimated bytes per memoized identity: the `Eid` key, the
+    /// `(Vid, Vid, u32)` value and the map's per-entry overhead.
+    pub const IDENTITY_BYTES: usize = 40;
+    /// Estimated bytes per scanned `(Vid, u32)` pair, overhead included.
+    pub const SCANNED_BYTES: usize = 24;
+
+    /// The estimated bytes that growing the memo from `identities` and
+    /// `scanned` entries to its current size added; recorded in
+    /// [`Self::charged_bytes`]. The caller adds it to the buffer's
+    /// `estimated_size`.
+    pub fn charge(&mut self, identities: usize, scanned: usize) -> usize {
+        let added = self.identities.len().saturating_sub(identities) * Self::IDENTITY_BYTES
+            + self.scanned.len().saturating_sub(scanned) * Self::SCANNED_BYTES;
+        self.charged_bytes += added;
+        added
+    }
 }
 
 pub struct L0Buffer {
@@ -200,6 +292,11 @@ pub struct L0Buffer {
     /// pending buffer's own not-yet-flushed entries (lost-commit on a graceful
     /// close after a failed flush).
     pub wal_lsn_at_start: u64,
+    /// Bulk-load versions at or below `current_version` that were not
+    /// visible when this buffer was rotated for flush. The flush's manifest
+    /// records them, so a reader pinned to it never sees those loads
+    /// ([`crate::runtime::l0_manager::L0Manager::reserve_bulk_version`]).
+    pub unpublished_bulk_at_rotation: Vec<u64>,
     /// Vertex creation timestamps (nanoseconds since epoch)
     pub vertex_created_at: HashMap<Vid, i64>,
     /// Vertex update timestamps (nanoseconds since epoch)
@@ -245,12 +342,32 @@ pub struct L0Buffer {
     /// `apply_vertex_deletion`, so merge and WAL replay keep it consistent
     /// for free.
     pub extid_index: HashMap<String, Vid>,
-    /// Per-VID set of property keys that should land via Lance MergeInsert
-    /// (partial-column update) at flush time. Populated by
-    /// `insert_vertex_partial`; cleared by full-row inserts and deletes.
-    /// A VID present here at flush time is emitted to the partial batch;
-    /// absent VIDs flush via the existing full-row Append.
-    pub vertex_partial_keys: HashMap<Vid, HashSet<String>>,
+    /// Nesting depth of the statements (or bulk batches) running against
+    /// this buffer; zero outside one. See [`StatementScope`].
+    statement_depth: usize,
+    /// Whether the running statement has already paid the write throttle,
+    /// so its later writes do not pay it again.
+    statement_write_admitted: bool,
+    /// Vertices the running statement created, for its side-effect counts.
+    statement_created_vertices: HashSet<Vid>,
+    /// Edges the running statement created, for its side-effect counts.
+    statement_created_edges: HashSet<Eid>,
+    /// Whether the running scope records what it creates (a statement does;
+    /// a bulk batch, which reports no side effects, does not).
+    statement_tracks_created: bool,
+    /// Edges created in this buffer through [`Self::insert_edge`]: each got
+    /// a fresh id from the allocator, so none has committed state anywhere
+    /// else. Lets the commit-time trigger/CDC pre-image probe skip them.
+    pub created_edges: HashSet<Eid>,
+    /// Vertices created in this buffer through
+    /// [`Self::insert_vertex_with_labels`]: each got a fresh id from the
+    /// allocator, so none has committed state anywhere else. Lets the
+    /// commit-time trigger/CDC pre-image probe skip them, as for
+    /// `created_edges`.
+    pub created_vertices: HashSet<Vid>,
+    /// Stored edge identities `Writer::update_edge` has already confirmed
+    /// for writes into this buffer; transient, never merged or logged.
+    pub edge_identity_memo: EdgeIdentityMemo,
     /// Phase B (UniConfig::defer_embeddings): VIDs whose auto-embedding
     /// was skipped at insert time and is owed at flush. Value = primary
     /// label name (the rest of the embedding config is looked up from the
@@ -318,17 +435,29 @@ impl Clone for L0Buffer {
             wal: None, // Forked L0s don't share the WAL
             wal_lsn_at_flush: self.wal_lsn_at_flush,
             wal_lsn_at_start: self.wal_lsn_at_start,
+            unpublished_bulk_at_rotation: self.unpublished_bulk_at_rotation.clone(),
             vertex_created_at: self.vertex_created_at.clone(),
             vertex_updated_at: self.vertex_updated_at.clone(),
             edge_created_at: self.edge_created_at.clone(),
             edge_updated_at: self.edge_updated_at.clone(),
-            estimated_size: self.estimated_size,
+            // The memo is not copied (below), so neither is its charge.
+            estimated_size: self
+                .estimated_size
+                .saturating_sub(self.edge_identity_memo.charged_bytes),
             constraint_index: self.constraint_index.clone(),
             constraint_keys_by_vid: self.constraint_keys_by_vid.clone(),
             edge_constraint_index: self.edge_constraint_index.clone(),
             merge_guard_index: self.merge_guard_index.clone(),
             extid_index: self.extid_index.clone(),
-            vertex_partial_keys: self.vertex_partial_keys.clone(),
+            // A statement scope belongs to the buffer it was opened on.
+            statement_depth: 0,
+            statement_write_admitted: false,
+            statement_created_vertices: HashSet::new(),
+            statement_created_edges: HashSet::new(),
+            statement_tracks_created: false,
+            created_edges: self.created_edges.clone(),
+            created_vertices: self.created_vertices.clone(),
+            edge_identity_memo: EdgeIdentityMemo::default(),
             pending_embeddings: self.pending_embeddings.clone(),
             occ_read_seq: self.occ_read_seq,
             // Forked L0s (ASSUME/ABDUCE) do not participate in OCC tracking.
@@ -508,7 +637,7 @@ impl L0Buffer {
                             //
                             // Still last-writer-wins. Propagating would make
                             // `merge_crdt_properties`, `apply_vertex_write`,
-                            // `insert_vertex_with_labels_impl`, `_partial_impl` and
+                            // `insert_vertex_with_labels_impl` and
                             // the three public inserts above them fallible, which is
                             // 52 non-test call sites across five crates — for a
                             // value that was deserialized as a `Crdt` moments
@@ -613,6 +742,10 @@ impl L0Buffer {
         total += self.edge_created_at.len() * 16;
         total += self.edge_updated_at.len() * 16;
 
+        // Edge identity memo (see `EdgeIdentityMemo::charge`)
+        total += self.edge_identity_memo.identities.len() * EdgeIdentityMemo::IDENTITY_BYTES;
+        total += self.edge_identity_memo.scanned.len() * EdgeIdentityMemo::SCANNED_BYTES;
+
         total
     }
 
@@ -637,6 +770,7 @@ impl L0Buffer {
             wal,
             wal_lsn_at_flush: 0,
             wal_lsn_at_start: 0,
+            unpublished_bulk_at_rotation: Vec::new(),
             vertex_created_at: HashMap::new(),
             vertex_updated_at: HashMap::new(),
             edge_created_at: HashMap::new(),
@@ -647,7 +781,14 @@ impl L0Buffer {
             edge_constraint_index: HashMap::new(),
             merge_guard_index: HashMap::new(),
             extid_index: HashMap::new(),
-            vertex_partial_keys: HashMap::new(),
+            statement_depth: 0,
+            statement_write_admitted: false,
+            statement_created_vertices: HashSet::new(),
+            statement_created_edges: HashSet::new(),
+            statement_tracks_created: false,
+            created_edges: HashSet::new(),
+            created_vertices: HashSet::new(),
+            edge_identity_memo: EdgeIdentityMemo::default(),
             pending_embeddings: HashMap::new(),
             occ_read_seq: 0,
             occ_read_set: None,
@@ -669,8 +810,38 @@ impl L0Buffer {
         self.insert_vertex_with_labels(vid, properties, &[]);
     }
 
-    /// Insert a vertex with associated labels.
+    /// Insert a newly created vertex with associated labels.
+    ///
+    /// Counts as a create in [`MutationStats`]: one node, its labels, and its
+    /// non-null properties. Use [`Self::update_vertex_with_labels`] to rewrite
+    /// an existing vertex's row.
     pub fn insert_vertex_with_labels(
+        &mut self,
+        vid: Vid,
+        properties: Properties,
+        labels: &[String],
+    ) {
+        let props_count = properties.values().filter(|v| !v.is_null()).count();
+        self.insert_vertex_with_labels_impl(vid, properties, labels, false);
+        self.mutation_stats.nodes_created += 1;
+        self.mutation_stats.labels_added += labels.len();
+        self.mutation_stats.properties_set += props_count;
+        if self.created_vertices.insert(vid) {
+            self.estimated_size += 16;
+        }
+        if self.statement_depth > 0 && self.statement_tracks_created {
+            self.statement_created_vertices.insert(vid);
+        }
+    }
+
+    /// Rewrite an existing vertex's full row (a `SET` / `REMOVE` / `MERGE`
+    /// action, or a promote upsert).
+    ///
+    /// Same storage effect as [`Self::insert_vertex_with_labels`], but it is
+    /// not a create: the caller records the statement's property side
+    /// effects itself ([`Self::record_property_effect`]), since only it knows
+    /// which values changed.
+    pub fn update_vertex_with_labels(
         &mut self,
         vid: Vid,
         properties: Properties,
@@ -705,133 +876,14 @@ impl L0Buffer {
             });
         }
 
-        // Full-row insert supersedes any pending partial-update state for
-        // this VID.
-        self.vertex_partial_keys.remove(&vid);
-
-        self.apply_vertex_write(vid, properties, labels, version, now);
-        self.mutation_stats.nodes_created += 1;
-    }
-
-    /// Insert a vertex's FULL property row, tagging `touched_keys` so the
-    /// flush emits exactly those columns via Lance `MergeInsertBuilder`
-    /// instead of a full-row Append.
-    ///
-    /// `props` MUST be the fully-merged property map (storage union
-    /// in-flight L0 union the new touched values, per
-    /// `PropertyManager::get_all_vertex_props_with_ctx`). The caller is
-    /// responsible for the union; L0 here just stores it so scans see
-    /// the complete row without per-key reconciliation.
-    ///
-    /// `touched_keys` lists the property keys this SET statement
-    /// actually assigned — the union of those across all coalesced
-    /// SetItems on this VID. Lance MergeInsert sends a source batch
-    /// with `_vid`, `_deleted`, `_version`, `_updated_at`, and those
-    /// touched columns; non-touched columns retain their pre-merge
-    /// values on the Lance side, skipping the wide-row write.
-    ///
-    /// A subsequent full-row `insert_vertex_with_labels` or
-    /// `delete_vertex` on the same VID clears the partial-keys entry
-    /// so partial state never outlives a stronger write.
-    pub fn insert_vertex_partial_full(
-        &mut self,
-        vid: Vid,
-        props: Properties,
-        touched_keys: HashSet<String>,
-        labels: &[String],
-    ) {
-        // Stage the full row through the existing partial-impl (same
-        // CRDT merge / version bump / timestamps), preserving the
-        // partial-keys entry so we can extend it below.
-        self.insert_vertex_with_labels_partial_impl(vid, props, labels, false);
-        self.vertex_partial_keys
-            .entry(vid)
-            .or_default()
-            .extend(touched_keys);
-    }
-
-    /// Legacy partial-only variant used by some uni-store paths. Kept
-    /// for source-compatibility but new uni-query callers should use
-    /// `insert_vertex_partial_full` to preserve scan-side L0 visibility.
-    pub fn insert_vertex_partial(&mut self, vid: Vid, touched: Properties, labels: &[String]) {
-        // Record dirty keys BEFORE the full-row impl runs (which would
-        // clear them). The keys come from the touched set; the values
-        // are merged into L0 by the shared CRDT path below.
-        let touched_keys: Vec<String> = touched.keys().cloned().collect();
-
-        // If the VID already has a full-row pending insert (e.g., CREATE
-        // earlier in the same tx), we must NOT downgrade it to partial.
-        // Detected by: VID is in vertex_properties WITH a version stamp
-        // AND not currently in vertex_partial_keys → it was written as
-        // a full row recently. The conservative rule: only enable the
-        // partial path when there's no full-row pending insert. We
-        // approximate "no full-row pending" by checking that the VID's
-        // current entry in vertex_partial_keys is non-empty OR the VID
-        // is not in vertex_properties (fresh row, but caller asked
-        // partial — let it through and the post-flush union covers it).
-        let already_full = self.vertex_properties.contains_key(&vid)
-            && !self.vertex_partial_keys.contains_key(&vid);
-
-        // Stage the CRDT merge through the existing path. We bypass the
-        // full-row `insert_vertex_with_labels_impl` clearing of
-        // partial_keys by inlining the work, then restoring/extending
-        // the partial-key set.
-        self.insert_vertex_with_labels_partial_impl(vid, touched, labels, false);
-
-        if !already_full {
-            self.vertex_partial_keys
-                .entry(vid)
-                .or_default()
-                .extend(touched_keys);
-        }
-    }
-
-    /// Core partial-insert: same as `insert_vertex_with_labels_impl` but
-    /// preserves any existing `vertex_partial_keys[vid]` entry so the
-    /// caller can extend it after the merge.
-    fn insert_vertex_with_labels_partial_impl(
-        &mut self,
-        vid: Vid,
-        properties: Properties,
-        labels: &[String],
-        skip_wal: bool,
-    ) {
-        self.current_version += 1;
-        let version = self.current_version;
-        let now = now_nanos();
-
-        if !skip_wal && let Some(wal) = &self.wal {
-            // WAL records the partial as a full-row InsertVertex; on replay
-            // the full-row path runs (which clears partial_keys). This is
-            // semantically correct — L0 in memory always holds the union of
-            // partial deltas via merge_crdt_properties; recovery doesn't
-            // need to preserve partial-vs-full distinction.
-            let _ = wal.append(Mutation::InsertVertex {
-                vid,
-                properties: properties.clone(),
-                labels: labels.to_vec(),
-                // Both stamped with this write's `now`; replay applies
-                // `or_insert` to `created_at`, reproducing the live
-                // "oldest wins" rule in `apply_vertex_write`.
-                created_at: Some(now),
-                updated_at: Some(now),
-            });
-        }
-
-        // NOTE: deliberately DOES NOT remove from vertex_partial_keys.
-        // The caller (`insert_vertex_partial`) extends that set after.
-        // Partial writes also don't bump `nodes_created` — they update
-        // existing nodes; `properties_set` is the correct counter.
         self.apply_vertex_write(vid, properties, labels, version, now);
     }
 
-    /// Shared body of the full-row and partial vertex-write paths: clear the
-    /// tombstone, CRDT-merge the properties (keeping the `ext_id` index in
-    /// sync), stamp version/timestamps, append the labels, and update the
-    /// mutation counters and size estimate.
-    ///
-    /// Reads nothing from `vertex_partial_keys`, so the two callers are free
-    /// to clear or preserve that entry around this call.
+    /// Shared body of the vertex-write paths: clear the tombstone,
+    /// CRDT-merge the properties (keeping the `ext_id` index in sync), stamp
+    /// version/timestamps, append the labels, and update the mutation count
+    /// and size estimate. Side-effect counters ([`MutationStats`]) are left
+    /// to the callers, which know whether the write is a create.
     fn apply_vertex_write(
         &mut self,
         vid: Vid,
@@ -845,7 +897,6 @@ impl L0Buffer {
         // Size/count computed up front so `properties` can be moved into the
         // CRDT merge below instead of deep-cloned.
         let props_size = Self::estimate_properties_size(&properties);
-        let props_count = properties.len();
         let tracks_extid = properties.contains_key("ext_id");
 
         let entry = self.vertex_properties.entry(vid).or_default();
@@ -875,10 +926,105 @@ impl L0Buffer {
 
         self.graph.add_vertex(vid);
         self.mutation_count += 1;
-        self.mutation_stats.properties_set += props_count;
-        self.mutation_stats.labels_added += labels.len();
 
         self.estimated_size += 8 + props_size + 16 + labels_size + 32;
+    }
+
+    /// Opens a statement scope on this buffer (nesting allowed).
+    ///
+    /// While a scope is open the buffer remembers whether the statement paid
+    /// the write throttle and, when `track_created`, which entities it
+    /// created. The outermost scope decides `track_created`. Prefer
+    /// [`StatementScope`], which closes the scope on drop.
+    pub fn begin_statement(&mut self, track_created: bool) {
+        if self.statement_depth == 0 {
+            self.statement_write_admitted = false;
+            self.statement_tracks_created = track_created;
+            self.statement_created_vertices.clear();
+            self.statement_created_edges.clear();
+        }
+        self.statement_depth += 1;
+    }
+
+    /// Closes a scope opened by [`Self::begin_statement`].
+    pub fn end_statement(&mut self) {
+        self.statement_depth = self.statement_depth.saturating_sub(1);
+        if self.statement_depth == 0 {
+            self.statement_write_admitted = false;
+            self.statement_tracks_created = false;
+            self.statement_created_vertices = HashSet::new();
+            self.statement_created_edges = HashSet::new();
+        }
+    }
+
+    /// Whether the running statement has already paid the write throttle.
+    /// Always `false` outside a statement scope.
+    pub fn write_admitted(&self) -> bool {
+        self.statement_depth > 0 && self.statement_write_admitted
+    }
+
+    /// Records that the running statement paid the write throttle. No-op
+    /// outside a statement scope, so unscoped writes pay it every time.
+    pub fn note_write_admitted(&mut self) {
+        if self.statement_depth > 0 {
+            self.statement_write_admitted = true;
+        }
+    }
+
+    /// Records the side effect of one property changing from `old` to `new`
+    /// on `entity` (`None` = absent), in the openCypher sense: a property is
+    /// the triple (entity, key, value), so an addition is `+1` set, a removal
+    /// `+1` removed, an overwrite with a different value both, and an equal
+    /// value nothing.
+    ///
+    /// An entity the running statement created had no properties before the
+    /// statement, and its create already counted the values it was created
+    /// with: a change to it moves only `properties_set` (up for a key gained,
+    /// down for a key lost), so the statement reports its net effect.
+    pub fn record_property_effect(
+        &mut self,
+        entity: StatEntity,
+        old: Option<&Value>,
+        new: Option<&Value>,
+    ) {
+        let old = old.filter(|v| !v.is_null());
+        let new = new.filter(|v| !v.is_null());
+        if old == new {
+            return;
+        }
+        let created = match entity {
+            StatEntity::Vertex(vid) => self.statement_created_vertices.contains(&vid),
+            StatEntity::Edge(eid) => self.statement_created_edges.contains(&eid),
+        };
+        let stats = &mut self.mutation_stats;
+        match (old.is_some(), new.is_some(), created) {
+            (_, true, true) if old.is_some() => {}
+            (false, true, _) => stats.properties_set += 1,
+            (true, false, true) => {
+                stats.properties_set = stats.properties_set.saturating_sub(1);
+            }
+            (true, false, false) => stats.properties_removed += 1,
+            (true, true, false) => {
+                stats.properties_set += 1;
+                stats.properties_removed += 1;
+            }
+            _ => {}
+        }
+    }
+
+    /// Records `n` labels newly added to `vid`.
+    pub fn record_labels_added(&mut self, _vid: Vid, n: usize) {
+        self.mutation_stats.labels_added += n;
+    }
+
+    /// Records `n` labels removed from `vid`. On a vertex the running
+    /// statement created, the removal cancels the create's count instead.
+    pub fn record_labels_removed(&mut self, vid: Vid, n: usize) {
+        if self.statement_created_vertices.contains(&vid) {
+            self.mutation_stats.labels_added = self.mutation_stats.labels_added.saturating_sub(n);
+        } else {
+            self.mutation_stats.labels_removed += n;
+        }
     }
 
     /// Add labels to an existing vertex.
@@ -985,7 +1131,9 @@ impl L0Buffer {
         }
 
         self.remove_vid_from_label_index(vid);
-        self.vertex_tombstones.insert(vid);
+        // As for edges: deleting a vertex this buffer already tombstoned
+        // counts once.
+        let newly_deleted = self.vertex_tombstones.insert(vid);
         // Drop the vid's ext_id index entry (O(1) via its current property
         // value, read before the property map entry is removed below).
         if let Some(props) = self.vertex_properties.get(&vid)
@@ -996,11 +1144,12 @@ impl L0Buffer {
         }
         self.vertex_properties.remove(&vid);
         // Deletion supersedes any pending partial-update state.
-        self.vertex_partial_keys.remove(&vid);
         self.vertex_versions.insert(vid, version);
         self.graph.remove_vertex(vid);
         self.mutation_count += 1;
-        self.mutation_stats.nodes_deleted += 1;
+        if newly_deleted {
+            self.mutation_stats.nodes_deleted += 1;
+        }
 
         // Remove constraint index entries for this vertex
         self.constraint_index.retain(|_, v| *v != vid);
@@ -1015,7 +1164,46 @@ impl L0Buffer {
         cascaded
     }
 
+    /// Insert a newly created edge.
+    ///
+    /// Counts as a create in [`MutationStats`]: one relationship and its
+    /// non-null properties. Use [`Self::update_edge`] to rewrite an existing
+    /// edge's row.
     pub fn insert_edge(
+        &mut self,
+        src_vid: Vid,
+        dst_vid: Vid,
+        edge_type: u32,
+        eid: Eid,
+        properties: Properties,
+        edge_type_name: Option<String>,
+    ) -> Result<()> {
+        let props_count = properties.values().filter(|v| !v.is_null()).count();
+        self.insert_edge_impl(
+            src_vid,
+            dst_vid,
+            edge_type,
+            eid,
+            properties,
+            edge_type_name,
+            false,
+        )?;
+        self.mutation_stats.relationships_created += 1;
+        self.mutation_stats.properties_set += props_count;
+        if self.created_edges.insert(eid) {
+            self.estimated_size += 16;
+        }
+        if self.statement_depth > 0 && self.statement_tracks_created {
+            self.statement_created_edges.insert(eid);
+        }
+        Ok(())
+    }
+
+    /// Rewrite an existing edge's full row (a `SET` / `REMOVE` on it).
+    ///
+    /// Not a create; the caller records the property side effects
+    /// ([`Self::record_property_effect`]).
+    pub fn update_edge(
         &mut self,
         src_vid: Vid,
         dst_vid: Vid,
@@ -1133,7 +1321,6 @@ impl L0Buffer {
 
         // Store metadata with CRDT merge logic
         let props_size = Self::estimate_properties_size(&properties);
-        let props_count = properties.len();
         if !properties.is_empty() {
             let entry = self.edge_properties.entry(eid).or_default();
             Self::merge_crdt_properties(entry, properties, self.plugin_registry.as_ref());
@@ -1144,8 +1331,6 @@ impl L0Buffer {
             .insert(eid, (src_vid, dst_vid, edge_type));
         self.tombstones.remove(&eid);
         self.mutation_count += 1;
-        self.mutation_stats.relationships_created += 1;
-        self.mutation_stats.properties_set += props_count;
 
         // 24 edge + props + 16 version + 28 endpoints + 32 timestamps
         self.estimated_size += 24 + props_size + 16 + 28 + 32;
@@ -1200,22 +1385,30 @@ impl L0Buffer {
     fn apply_edge_deletion(&mut self, eid: Eid, src_vid: Vid, dst_vid: Vid, edge_type: u32) {
         let version = self.current_version;
 
-        self.tombstones.insert(
-            eid,
-            TombstoneEntry {
+        // A second delete of an edge this buffer already tombstoned (named
+        // twice in one `DELETE`, or by name and again by `DETACH DELETE`) is
+        // a no-op for the side-effect counters.
+        let newly_deleted = self
+            .tombstones
+            .insert(
                 eid,
-                src_vid,
-                dst_vid,
-                edge_type,
-            },
-        );
+                TombstoneEntry {
+                    eid,
+                    src_vid,
+                    dst_vid,
+                    edge_type,
+                },
+            )
+            .is_none();
         self.edge_versions.insert(eid, version);
         // Drop any unique-constraint keys this edge owned so a later edge may
         // reuse the value (mirrors `apply_vertex_deletion`).
         self.edge_constraint_index.retain(|_, e| *e != eid);
         self.graph.remove_edge(eid);
         self.mutation_count += 1;
-        self.mutation_stats.relationships_deleted += 1;
+        if newly_deleted {
+            self.mutation_stats.relationships_deleted += 1;
+        }
 
         // 64 bytes tombstone + 16 bytes version
         self.estimated_size += 80;
@@ -1601,8 +1794,11 @@ impl L0Buffer {
         }
 
         // Conservatively add other's estimated size (may overcount due to
-        // deduplication, but that's safe for a memory limit).
-        self.estimated_size += other.estimated_size;
+        // deduplication, but that's safe for a memory limit). Not its identity
+        // memo, which is not merged.
+        self.estimated_size += other
+            .estimated_size
+            .saturating_sub(other.edge_identity_memo.charged_bytes);
 
         // Merge constraint index
         for (key, vid) in &other.constraint_index {
@@ -1809,6 +2005,30 @@ impl L0Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A transaction buffer's identity memo is neither merged into the main
+    /// buffer nor copied by a fork, so neither carries its charge.
+    #[test]
+    fn merge_and_clone_leave_the_identity_memo_charge_out() {
+        let mut tx = L0Buffer::new(0, None);
+        for i in 0..100u64 {
+            tx.edge_identity_memo
+                .identities
+                .insert(Eid::new(i), (Vid::new(1), Vid::new(i + 2), 0));
+        }
+        tx.edge_identity_memo.scanned.insert((Vid::new(1), 0));
+        let added = tx.edge_identity_memo.charge(0, 0);
+        tx.estimated_size += added;
+        assert_eq!(
+            added,
+            100 * EdgeIdentityMemo::IDENTITY_BYTES + EdgeIdentityMemo::SCANNED_BYTES
+        );
+
+        let mut main = L0Buffer::new(0, None);
+        main.merge(&tx).unwrap();
+        assert_eq!(main.estimated_size, 0, "a merge carries no memo bytes");
+        assert_eq!(tx.clone().estimated_size, 0, "a fork carries no memo bytes");
+    }
 
     /// The `InsertVertex` replay arm is a hand-written twin of
     /// `apply_vertex_write` rather than a call to it, so it can drift — and it

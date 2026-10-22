@@ -86,7 +86,14 @@ class LazyLoadError(RelationshipError):
 
 
 class BulkLoadError(UniPydanticError):
-    """Error during bulk loading operations."""
+    """A bulk load failed before its commit point: nothing of it was applied.
+
+    Retrying the load is safe. A load that *did* reach its commit point is never
+    reported as this error: ``uni_db.UniBulkCommitIncompleteError`` (committed,
+    completed on the next open -- do not retry) and
+    ``uni_db.UniBulkCommitOutcomeUnknownError`` (check
+    ``bulk_load_applied(load_id)`` before retrying) propagate unchanged.
+    """
 
 
 class CypherInjectionError(QueryError):

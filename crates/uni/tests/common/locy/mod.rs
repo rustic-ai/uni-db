@@ -33,6 +33,7 @@ pub mod locy_rule_durability;
 pub mod locy_snapshot_context_independence;
 pub mod locy_ssi_read_set;
 pub mod locy_timeout_partial;
+pub mod locy_toplevel_sequencing;
 pub mod locy_type_projection_matrix;
 pub mod repro_locy_runtime_abduce_target_var;
 pub mod repro_locy_runtime_topk_mnor_mixed_support;
@@ -117,3 +118,18 @@ pub mod locy_numeric_exact;
 // An ASSUME body's commands run in sequence: a QUERY after a DERIVE or a
 // Cypher write in the same body reads the state that write left.
 pub mod locy_assume_body_sequencing;
+// Wave P1 (WP3): proof weights and top-k retention (c), tx-prepared programs
+// and `$params` in commands and replays (L1, L2), EXPLAIN / ABDUCE and exact
+// probabilities in ASSUME bodies and CALIBRATE after a write (L3, L5), and the
+// re-derivation budget (L4).
+pub mod locy_assume_explain_abduce;
+pub mod locy_proof_probability;
+pub mod locy_rederivation_budget;
+pub mod locy_tx_prepared_and_params;
+// Wave Q (Q1): a registered rule's parameters are checked before evaluation.
+pub mod locy_registered_rule_parameters;
+// Wave Q (Q1): EXPLAIN children for every positive reference (Mode A), and
+// Mode B probed over the same programs.
+pub mod locy_explain_children;
+// Wave Q (Q1): a command finishing past the deadline is reported (failpoints).
+pub mod locy_budget_resilience;

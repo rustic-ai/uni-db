@@ -1,8 +1,6 @@
 # Cases for Cypher `=~` against Java's `Pattern.compile(p).matcher(s).matches()`.
-# Columns: pattern <TAB> subject [<TAB> reject]. Escapes: \\ \t \n \r \x{HEX}.
-# `reject` marks a valid Java pattern uni-db refuses because the regex crate
-# cannot evaluate it exactly. Regenerate the answers with
-# scripts/java_regex_oracle/regenerate.sh.
+# Columns: pattern <TAB> subject. Escapes: \\ \t \n \r \x{HEX}.
+# Regenerate the answers with scripts/java_regex_oracle/regenerate.sh.
 #
 # Whole-string matching
 b	abc	false
@@ -80,7 +78,7 @@ a(?i)b|c	C	true
 (?iu)\\x{10400}	\x{10428}	true
 (?u)\x{e9}	\x{c9}	false
 (?U)(?i)\x{e9}	\x{c9}	true
-(?iU-U)\x{e9}	\x{c9}	false	reject
+(?iU-U)\x{e9}	\x{c9}	false
 # Predefined classes: ASCII by default
 \\w	\x{e9}	false
 \\w	_	true
@@ -108,8 +106,8 @@ a\\Bb	ab	true
 \x{e9}\\b	\x{e9}	false
 (?U)\\b\x{e9}	\x{e9}	true
 (?U)\x{e9}\\b	\x{e9}	true
-e\\x{301}\\b	e\x{301}	true	reject
-e\\b\\x{301}	e\x{301}	false	reject
+e\\x{301}\\b	e\x{301}	true
+e\\b\\x{301}	e\x{301}	false
 !\\x{301}\\b	!\x{301}	false
 e\\x{301}	e\x{301}	true
 (?U)e\\x{301}\\b	e\x{301}	true
@@ -151,8 +149,8 @@ a$\n	a\r\n	false
 a$\r\n	a\n	false
 a$.	a\r	false
 a$..	a\r\n	false
-a$\nb	a\nb	false	reject
-a$\x{85}	a\x{85}	true	reject
+a$\nb	a\nb	false
+a$\x{85}	a\x{85}	true
 x|a$\n	a\n	true
 (?:a$)+\n	a\n	true
 a$|b	a	true
@@ -172,35 +170,35 @@ a$|b	b	true
 (?m)a\r\n^b	a\r\nb	true
 (?m)a\r^\nb	a\r\nb	false
 (?m)a\n^b	a\nb	true
-(?m)a$\x{2028}b	a\x{2028}b	true	reject
-(?m)a$\x{85}	a\x{85}	true	reject
-(?m)a\x{2028}^b	a\x{2028}b	true	reject
+(?m)a$\x{2028}b	a\x{2028}b	true
+(?m)a$\x{85}	a\x{85}	true
+(?m)a\x{2028}^b	a\x{2028}b	true
 (?m)^		false
 (?m)^$		false
 (?m)^$	a	false
 (?m)^.*$	abc	true
-(?m)^.*$	abc\n	false	reject
-(?m)^.*		false	reject
+(?m)^.*$	abc\n	false
+(?m)^.*		false
 (?m)^a	a	true
 (?m)^a$	a	true
 (?m)a\n^	a\n	false
-(?m)a\n^b*	a\n	false	reject
+(?m)a\n^b*	a\n	false
 (?m)^\\w+$\n^\\w+$	ab\ncd	true
-(?m)^\\w+$\n^\\w+$	ab\n\x{2028}d	false	reject
+(?m)^\\w+$\n^\\w+$	ab\n\x{2028}d	false
 (?m)(?s)^.*$	a\nb	true
 (?m)(?s).*^.*$	a\nb	true
-(?m)(?s).*^.*$	a\nb\n	true	reject
+(?m)(?s).*^.*$	a\nb\n	true
 \\A		true
 \\Aa\\z	a	true
-\\Za	a	false	reject
-\\Ga	a	true	reject
-a\\Z	a\n	false	reject
+\\Za	a	false
+\\Ga	a	true
+a\\Z	a\n	false
 # Quantifiers
-a*+a	aa	false	reject
-a++	aa	true	reject
-a?+	a	true	reject
-a{2}+	aa	true	reject
-a{1,3}+b	aab	true	reject
+a*+a	aa	false
+a++	aa	true
+a?+	a	true
+a{2}+	aa	true
+a{1,3}+b	aab	true
 a**	a	error
 a*?	aa	true
 a+?	aa	true
@@ -208,7 +206,7 @@ a{2}	aa	true
 a{2,}	aaa	true
 a{2,3}	aaaa	false
 a{,3}	a	error
-x{1}{2}	xx	false	reject
+x{1}{2}	xx	false
 (a*)+	aa	true
 (?:a{2})?		true
 (?:a{2})?	a	false
@@ -237,7 +235,7 @@ a}	a}	true
 [^a[b]]	b	false
 [a[b]]	b	true
 [a--b]	a	error
-[a~~b]	a	true	reject
+[a~~b]	a	true
 [a&&]	a	true
 [&&a]	a	true
 [a&&]	b	false
@@ -301,8 +299,8 @@ a}	a}	true
 \\p{Greek}	\x{3b1}	error
 \\p{IsGreek}	\x{3b1}	true
 \\p{Isgreek}	\x{3b1}	true
-\\p{InGreek}	\x{3b1}	true	reject
-\\p{block=Greek}	\x{3b1}	true	reject
+\\p{InGreek}	\x{3b1}	true
+\\p{block=Greek}	\x{3b1}	true
 \\p{IsAlphabetic}	\x{e9}	true
 \\p{Alphabetic}	\x{e9}	error
 \\p{isalphabetic}	\x{e9}	error
@@ -344,16 +342,16 @@ a}	a}	true
 \\p{Cs}	a	false
 \\P{Cn}	\x{378}	false
 \\P{L}	1	true
-\\p{javaLowerCase}	a	true	reject
+\\p{javaLowerCase}	a	true
 # Escapes and literals
 \\x{e9}	\x{e9}	true
 \\u00e9	\x{e9}	true
 (?i)\\u00e9	\x{c9}	false
 \\u{e9}	\x{e9}	error
 \\U000000e9	\x{e9}	error
-\\0101	A	true	reject
-\\cA	\x{1}	true	reject
-\\e	\x{1b}	true	reject
+\\0101	A	true
+\\cA	\x{1}	true
+\\e	\x{1b}	true
 \\a	\x{7}	true
 \\f	\x{c}	true
 \\t	\t	true
@@ -367,13 +365,13 @@ a}	a}	true
 \\>	>	true
 \\<a\\>	<a>	true
 \\y	y	error
-\\h	\x{20}	true	reject
-\\R	\r\n	true	reject
-\\X	a	true	reject
-\\N{LATIN SMALL LETTER A}	a	true	reject
-\\Qa*\\E	a*	true	reject
+\\h	\x{20}	true
+\\R	\r\n	true
+\\X	a	true
+\\N{LATIN SMALL LETTER A}	a	true
+\\Qa*\\E	a*	true
 \\b{start}a	a	error
-\\b{g}		true	reject
+\\b{g}		true
 # Groups, flags, unsupported constructs
 (?<n1>a)	a	true
 (?<1n>a)	a	error
@@ -382,17 +380,335 @@ a}	a}	true
 (?<n>a)(?<n>b)	ab	error
 (?:a)	a	true
 ()		true
-(?)a	a	true	reject
-(?i-i)a	a	true	reject
+(?)a	a	true
+(?i-i)a	a	true
 (?R)a	a	error
-(?d).	\r	true	reject
+(?d).	\r	true
 (?U)a*?	a	true
-(?=a)a	a	true	reject
-(?!b)a	a	true	reject
-(?<=a)b	ab	false	reject
-(?>a)	a	true	reject
-(a)\\1	aa	true	reject
-\\1	a	false	reject
+(?=a)a	a	true
+(?!b)a	a	true
+(?<=a)b	ab	false
+(?>a)	a	true
+(a)\\1	aa	true
+\\1	a	false
 \\k<n>	a	error
 a)|(b	a	error
 [a	a	error
+# Hand cases from the hybrid-routing prototype.
+a$\\n	a\n	true
+a$\\n	x\ny	false
+a$\\n	a\nb	false
+.*a$\\n	b\na\n	false
+a$\nb	a\nb	false
+a$\n	a\n	true
+a$\r\n	a\r\n	true
+a$\r	a\r	true
+a$\x{85}	a\x{85}	true
+a$\x{2028}	a\x{2028}	true
+a$.*	a\n	false
+a$.*	a\nb	false
+a$(?s).*	a\n	true
+a$(?s).*	a\nb	false
+a$(?s).*	a\r\n	true
+a\r$\n	a\r\n	false
+(?m)a\r$\n	a\r\n	false
+(?m)a$\n^b	a\nb	true
+(?m)a$\r\n^b	a\r\nb	true
+(?m)a\r^\nb	a\r\nb	false
+(?m)a$\x{85}^b	a\x{85}b	true
+(?m)a$\x{2029}^b	a\x{2029}b	true
+(?m)^		false
+(?m).*\n^	a\n	false
+(?m)(?s).*^	a\n	false
+(?m)(?s).*^.*	a\nb	true
+(?m)(?s)^.*	\n	true
+(?m)(?s).*^.*$	\x{2028}b	true
+(?m)a$(?s).*	a\x{2028}b	true
+\\b		false
+e\\x{301}\\b	e\x{301}	true
+e\\b\\x{301}	e\x{301}	false
+\x{e9}\\x{301}\\b	\x{e9}\x{301}	true
+\x{e9}\\b\\x{301}	\x{e9}\x{301}	true
+\\x{301}\\b	\x{301}	false
+\\b\\x{301}	\x{301}	false
+.\\x{301}\\x{302}\\b	e\x{301}\x{302}	true
+.\\x{301}\\b\\x{302}	e\x{301}\x{302}	false
+.\\b\\x{301}	\x{1d400}\x{301}	false
+..\\b	\x{1d400}\x{301}	false
+.\\b.	e\x{1d167}	false
+..\\b	e\x{1d167}	false
+.\\B.	e\x{1d167}	true
+..\\b	1\x{301}	true
+..\\b	\x{663}\x{301}	true
+..\\b	 \x{301}	false
+..\\B	 \x{301}	true
+.\\B.	a\x{301}	true
+\\B		true
+(?U)..\\b	e\x{301}	true
+(?U).\\b.	e\x{301}	false
+(?=a)a	a	true
+(?=a)b	b	false
+(?!b)a	a	true
+(?<=a)b	ab	false
+a(?<=a)b	ab	true
+a(?<!a)b	ab	false
+(?<=a+)b	ab	false
+(?<=a*)b	ab	false
+a(?<=a{1,3})b	ab	true
+a(?<=^a)b	ab	true
+a(?<=\\ba)b	ab	true
+a(?=b$)b	ab	true
+a(?=b$)b\n	ab\n	true
+(?>a|ab)c	abc	false
+(?>a|ab)c	ac	true
+(?>a*)a	aa	false
+a*+a	aa	false
+a++	aa	true
+a?+a	a	false
+a{1,3}+b	aab	true
+a{1,3}+a	aaa	false
+(?:ab)*+ab	abab	false
+[ab]*+b	ab	false
+a*?+	a	error
+(a)\\1	aa	true
+(a)\\1	ab	false
+(a)(b)\\2\\1	abba	true
+(a)\\11	aa1	true
+(a)\\2	a	false
+\\1(a)	a	false
+(a\\1)	a	false
+(a|b)+\\1	abb	true
+(a|b)+\\1	aba	false
+(?:(a)|b)+\\1	aba	true
+(?:(a)|b)+\\1	ab	false
+(a)|b\\1	b	false
+(a?)*\\1	aa	true
+(a*)*b\\1	aab	true
+(?<n>a)\\k<n>	aa	true
+(?<n>a)\\k<m>	aa	error
+(?i)(a)\\1	aA	true
+(?i)(\x{e9})\\1	\x{e9}\x{c9}	false
+(?iu)(\x{e9})\\1	\x{e9}\x{c9}	true
+(?i)(k)\\1	k\x{212a}	false
+(?iu)(k)\\1	k\x{212a}	true
+(?iu)(\x{df})\\1	\x{df}\x{1e9e}	true
+(?iu)(s)\\1	s\x{17f}	true
+(?i)(a)(?-i)\\1	aA	false
+(?=(a+))a*b\\1	aaba	false
+(?=(a+))a*b\\1	aabaa	true
+\\Ga	a	true
+a\\Ga	aa	false
+a\\Z	a\n	false
+a\\Z	a	true
+a\\Z\\n	a\n	true
+a\\Z.	ab	false
+(?m)a\\Z\\n	a\n	true
+\\R	\r\n	true
+\\R	\n	true
+\\R\\n	\r\n	true
+\\R\\R	\r\n	true
+\\R	\x{2028}	true
+\\R	\x{b}	true
+\\h	\x{20}	true
+\\h	\x{a0}	true
+\\h	\x{200b}	false
+[\\h]	\x{3000}	true
+\\H	a	true
+\\H	\t	false
+\\e	\x{1b}	true
+\\cA	\x{1}	true
+\\c?	\x{7f}	true
+\\0101	A	true
+\\0101	\x{8}1	false
+\\0400	 0	true
+\\0377	\x{ff}	true
+\\08	x	error
+\\Qa*\\E	a*	true
+\\Qa*\\Eb+	a*bb	true
+\\Qa*	a*	true
+[\\Q]\\E]	]	true
+(?i)\\Qab\\E	AB	true
+a\\E	a	error
+a(?<=a+)b	ab	true
+aa(?<=a+)b	aab	true
+a(?<=a*)b	ab	true
+a(?<=^a+)b	ab	true
+ba(?<=ba+)b	bab	true
+ba(?<=b(?:a|xx)+)b	bab	error
+ba(?<=b.*)b	bab	true
+a(?<=(a)\\1?)b	ab	error
+a\x{1f600}(?<=a.)	a😀	false
+\x{1f600}(?<=.)	😀	true
+a(?<=a+b+)	a	false
+a(?<=a+b)	a	false
+a(?<=(?:ab)+)	a	error
+.(?<=\\b.)	a	true
+# Hybrid routing: new syntax and routes.
+(?i)(a)\\1	aa	true
+(?iu)(a)\\k<n>	aa	error
+(?i)(?<n>a)\\k<n>	aA	true
+(?c)[a]	a	true
+(?c)a	a	true
+(?<=\\p{L})b	ab	false
+(?<=.)b	\x{1f600}b	false
+(?<!\\S)b	\x{1d400}b	false
+(?<=[a-z])b	\x{1f600}b	false
+(?<=\x{1f600})b	\x{1f600}b	false
+(?<=a{0,3})b	aab	false
+(?<=a+)b	aab	false
+(?<=a*b)c	abc	false
+(?<=\\w{1,3})c	abc	false
+(?<=(?=a)a)b	ab	false
+(?<=(?:a|bc)d)e	bcde	false
+\\R?\n	\r\n	false
+(\\R)?\n	\r\n	true
+\\R{2}	\r\n	false
+(\\R)*\n	\r\n\n	true
+(?:\\R|x)*\n	\r\n	true
+\\R++	\r\n\n	true
+(?x) a b # c\n c	abc	true
+(?x)[a b]+	ab	true
+(?x)a#c\x{2028}b	a\x{2028}b	true
+[a&&[b]&c]	&	true
+[a&&[b]&c]	a	true
+[[a]b&&]	a	error
+[&&a]	a	true
+[&&]	a	error
+[a-\\d]	a	error
+[\\v-z]	x	true
+a{2,1}	aa	error
+a{,2}	aa	error
+{2}		true	
+a{	a{	error
+}	}	true
+]	]	true
+(?<n>a)(?<n>b)	ab	error
+(?P<n>a)	a	error
+(?#x)a	a	error
+\\8	8	false
+(a)\\11	a1	false
+(a)\\10	aa0	true
+\\x{110000}	a	error
+\\uD83D\\uDE00	\x{1f600}	true
+\\x{D83D}\\x{DE00}	\x{1f600}	false
+[\\uD800-\\uDFFF]	\x{1f600}	false
+.\\uDE00	\x{1f600}	false
+(?d)a$\nb	a\nb	false
+(?d)a$\n	a\n	true
+(?d)(?m)^b	a\rb	false
+(?d)\\Z	\r	false
+(?U)\\bé\\b	é	true
+(?U)\\w+	\x{1d400}	true
+\\p{IsUnknown}	\x{378}	true
+\\p{sc=Zzzz}	\x{378}	true
+\\p{IsLatn}	a	true
+\\p{IsOldItalic}	\x{10300}	error
+\\p{IsOld_Italic}	\x{10300}	true
+\\p{gc=Alpha}	a	true
+((a+)+)+b	aaaaaaaaaaaaaaaaaaaaaaaaaaaaab	true
+# Wave P1: Unicode data pinned to Java 21 (Unicode 15.0).
+(?iu)\x{a7ce}	\x{a7cf}	false
+(?iu)\\x{19b}	\x{a7dc}	false
+\\p{Cn}	\x{897}	true
+(?U)\\w	\x{897}	false
+(?U).*\\bx	\x{897}x	true
+\\p{IsGaray}	a	error
+\\p{IsKawi}	\x{11f00}	true
+# Wave P1: backreferences inside their own group.
+(?s)(\\1{0,2}\\p{L}){0,2}	aa\x{10428}	true
+(?:x(\\1?a))+	xaxaa	true
+# Wave P1: bounded look-behinds over supplementary characters.
+(?s).*(?<=\\p{L})a	\x{10428}a	false
+(?s).*(?<=\\p{L}{1,2})a	\x{10428}a	true
+(?s).*(?<=[^a]{2})b	x\x{1f600}b	false
+(?s).*(?<=[^a]b?)c	\x{1f600}bc	true
+(?s).*(?<!\\p{L}|\\d{2})a	1\x{10428}a	false
+# Wave Q: \p{java…}, blocks, \N{…}, \X, \b{g}, (?c), case-insensitive backreferences,
+# Java's backtracking state, look-behinds with \b or look-around, and a Java exception.
+(?s)(\\1{0,2}\\p{L}){0,2}	aa\x{10428}	true
+(?:x(\\1?a))+	xaxaa	true
+\\A(\\1?a){2}\\z	aaa	true
+(a\\1)	a	false
+(?<n>a\\k<n>?)+	aa	true
+(?<n>a\\k<n>?)+	aaa	true
+((\\2|b)a)+	baba	true
+((\\2|b)a)+	bababa	true
+(?ms)\x{10428}+?^x{1}{2}|(?<g1>\t{0,1}+(?i:\\0101\\x41{1,2}+\\A\x{10428}|[^a[b]]\\p{L}*+)(\\d?\\p{IsAlphabetic}\\p{IsAlphabetic}{1,2}\\R|\\2??\\>)+?){2}	\tAAA\x{10428}	false
+(?:(?=(.))x|\\1a+)	xa	true
+(?:(?=(.))x|\\1a+)	aa	true
+(?:(?=(.))x|\\1a+)	xaa	true
+(?:(?>(.))x|\\1a+)	aa	true
+(?:(?>(.))x|\\1a+)	ba	true
+(?:(.)?+x|\\1a+)	aa	true
+(?:(.)?+x|\\1a+)	ba	true
+(|((a+){0,2}+)?\\3)?	aa	true
+(|((a+){0,2}+)?\\3)?	a	true
+(?:a|\\G){2}	a	false
+(?:a|\\G){2}	aa	true
+(?:\\R|\\G){2}	\n	false
+(?ms)[\x{e9}-\x{ff}]{0,2}(?i:[a~~b]|(?<!\\G\\p{Punct}{1,2}?)){2}	\x{e9}a	true
+(?:a|){2}	a	true
+(?<=\\b\\p{L})a	\x{10428}a	false
+.(?<=\\b\\p{L})a	\x{10428}a	false
+.*(?<=\\b\\p{L})a	\x{10428}a	false
+.*(?<=\\b\\p{L})a	ba	true
+.*(?<=(?=a)\\p{L})a	aa	true
+.*(?<=(?=a)\\p{L})a	ba	false
+.(?<=\\b.)	a	true
+(?i)(a)\\1	aA	true
+(?i)(a)\\1	aa	true
+(?i)(k)\\1	k\x{212a}	false
+(?iu)(k)\\1	k\x{212a}	true
+(?iu)(\x{df})\\1	\x{df}\x{1e9e}	true
+(?iu)(s)\\1	s\x{17f}	true
+(?iu)(\x{10400})\\1	\x{10400}\x{10428}	true
+(?i)(\x{10400})\\1	\x{10400}\x{10428}	false
+(?i)(?<n>a)\\k<n>	aA	true
+(?=ab)a\\b{g}b	ab	exception:java.lang.StringIndexOutOfBoundsException
+a\\b{g}b	ab	true
+e\\b{g}\x{301}	e\x{301}	false
+ab\\b{g}\x{301}	ab\x{301}	true
+\\X	e\x{301}	true
+\\X	\r\n	true
+\\X\\X	\r\n	false
+\\X	\x{1F468}\x{200D}\x{1F469}	true
+\\X	\x{1F1FA}\x{1F1F8}	true
+\\X{2}	\x{1F1FA}\x{1F1F8}\x{1F1EB}	true
+\\X	\x{1100}\x{1161}\x{11A8}	true
+.*(?<=\\X)a	e\x{301}a	false
+(?c)[\x{e9}]	e\x{301}	true
+(?c)[e]\x{301}	e\x{301}	false
+(?c)\\p{L}	e\x{301}	true
+(?c)[\x{c5}]	\x{212b}	false
+(?c)[\x{c5}]	A\x{30a}	true
+(?c)[\x{ac00}]	\x{1100}\x{1161}	true
+(?c)[\x{e9}]x	e\x{301}x	true
+(?c).	e\x{301}	false
+(?c)[^a]	e\x{301}	true
+\\N{LATIN SMALL LETTER A}	a	true
+\\N{latin small letter a}	a	true
+\\N{ LATIN SMALL LETTER A }	a	true
+\\N{LATIN SMALL LETTER}	a	error
+\\N{CJK UNIFIED IDEOGRAPHS 4E00}	\x{4e00}	true
+[\\N{LATIN SMALL LETTER A}-\\N{LATIN SMALL LETTER C}]+	abc	true
+\\N{LINE FEED (LF)}	\n	true
+\\N{LATIN SMALL LETTER A	a	error
+\\N	a	error
+\\p{InGreek}	\x{3b1}	true
+\\p{InGreek_and_Coptic}	\x{3b1}	error
+\\p{block=Greek}	\x{3b1}	true
+\\p{blk=greek and coptic}	\x{3b1}	true
+\\p{InBasicLatin}	a	true
+\\p{InBASIC LATIN}	a	true
+\\p{InSurrogates_Area}	a	false
+\\p{InNoSuchBlock}	a	error
+\\p{javaLowerCase}	a	true
+\\p{javaLowerCase}	A	false
+(?i)\\p{javaLowerCase}	A	true
+\\p{javaMirrored}	(	true
+\\p{IsjavaDigit}	1	true
+\\p{gc=javaLetter}	a	true
+a(?<=a+b+)	a	false
+a(?<=a{2147483647}b{2147483647})	a	error
+(?<=a{1073741824}a{1073741824})a	a	error
+(?<=\\b{1073741824}a{1073741824}a{1073741824})a	a	error

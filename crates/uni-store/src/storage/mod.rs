@@ -5,6 +5,7 @@ pub mod adjacency;
 pub mod adjacency_manager;
 pub mod adjacency_overlay;
 pub mod arrow_convert;
+pub mod bulk_gate;
 pub mod cardinality;
 pub mod compaction;
 pub mod csr;
@@ -76,11 +77,14 @@ pub fn record_default_index_failure(table: &str, column: &str, err: &dyn std::fm
 /// `main_vertex` alone while the edge side had no bound at all, which is how
 /// the two drifted: L0 and the delta tier gated edge reads by version, the L1
 /// main-table fallback did not.
-pub(crate) fn with_version_bound(filter: FilterExpr, version: Option<u64>) -> FilterExpr {
-    match version {
-        Some(hwm) => FilterExpr::all([filter, FilterExpr::version_at_most(hwm)]),
-        None => filter,
-    }
+///
+/// Also excludes the versions of bulk loads whose publish is in flight (see
+/// [`bulk_gate`]), which `version` carries alongside the ceiling.
+pub(crate) fn with_version_bound(
+    filter: FilterExpr,
+    version: &bulk_gate::RowVisibility,
+) -> FilterExpr {
+    version.bound(filter)
 }
 
 pub use adjacency::AdjacencyDataset;

@@ -300,16 +300,104 @@ bulk.abort().await?;
 // No data is persisted
 ```
 
+### What `commit()` Returning Means
+
+A bulk load is decided by one durable write inside `commit()`, its **commit
+point**: the recovery marker that records every staged row. Nothing a load
+writes is visible before it. The result of `commit()` says which side of the
+commit point the load ended on, so it always tells you whether to retry:
+
+| Result | Applied? | What to do |
+|--------|----------|------------|
+| `Ok(stats)` | Yes, every row visible | Nothing. `stats.warnings` lists later steps that failed without affecting the load (index builds, snapshot manifest, schema save, marker delete); each is completed by the next open or the index rebuild worker. |
+| `Err(UniError::BulkCommitIncomplete { load_id, .. })` | Yes (committed) | **Do not retry.** Publishing could not be finished by `commit()` after bounded retries. A background task keeps retrying it, with backoff, until it completes or the database shuts down; otherwise the next open completes it. Each row lands exactly once, and until then none of the load is visible to readers of this database handle. |
+| `Err(UniError::BulkCommitOutcomeUnknown { load_id, .. })` | Unknown | Writing the commit marker failed in a way that may still have written it. Reopen, then call `db.bulk_load_applied(load_id)` and retry only if it is `false`. |
+| any other `Err` | No | Nothing of the load is visible, now or after a reopen, and its staged files are deleted. Retrying is safe. |
+
+The typed errors arrive inside `commit()`'s `anyhow::Error`: match with
+`err.downcast_ref::<UniError>()`. In Python they are
+`UniBulkCommitIncompleteError` and `UniBulkCommitOutcomeUnknownError`, each with
+`load_id` and `reason` attributes.
+
+A failure in the publish step itself (after the commit point) is retried
+in-process through the same exactly-once path recovery uses, so a transient
+error there returns `Ok` with a warning rather than a half-visible load.
+
+**Readers never see part of a load.** A load is published table by table
+(the per-label tables, the shared vertex table, the edge table, then each
+edge type's two direction tables). While that runs -- in a successful
+`commit()`, or in the background after `BulkCommitIncomplete` -- every row of
+the load is hidden from the database handle's readers, and it appears all at
+once when the last table is published: a label scan and a label-less scan
+agree, and no vertex appears without its edges or an edge in one direction
+only. The guarantee covers the handle the load ran on (its sessions,
+transactions and pinned snapshots). Another process, or a second handle
+opened on the same path, reads the tables directly and can still see a load
+part way through its publish.
+
+A fork created while a load is being published waits for the publish to
+finish (up to 30 seconds) and then includes all of the load. If the load stays
+incomplete past that (its background re-drive keeps failing), creating the
+fork fails with `UniError::ForkLifecycle` (stage `bulk_publish`) and creates
+nothing; retry it.
+
+**Declared edge endpoints.** `insert_edges` refuses an edge whose endpoint
+lacks its type's declared label. An endpoint that existed before the load can
+still lose that label (or be deleted) before the load is published, since the
+load's edges are invisible until then. The load is applied regardless; the
+edge type is then recorded unverified, so queries stop assuming its endpoints'
+labels, and `stats.warnings` (or the log, for a load completed in the
+background or at the next open) names it. Fix the endpoints and run
+`CALL uni.admin.verifyEdgeEndpoints()` to restore it.
+
+Bulk loading needs a storage backend that stages rows invisibly until
+`commit()`, as the built-in Lance storage does; any other backend is refused
+with `UniError::BulkLoadUnsupported` when the writer is built.
+
+```rust
+let mut bulk = tx.bulk_writer().build()?;
+let load_id = bulk.load_id().to_string();   // also in BulkStats::load_id
+bulk.insert_vertices("Paper", vertices).await?;
+match bulk.commit().await {
+    Ok(stats) => for w in &stats.warnings { tracing::warn!(%w) },
+    Err(e) => match e.downcast_ref::<UniError>() {
+        Some(UniError::BulkCommitIncomplete { .. }) => { /* committed: do not retry */ }
+        Some(UniError::BulkCommitOutcomeUnknown { .. }) => {
+            // after reopening: retry only if !db.bulk_load_applied(&load_id).await?
+        }
+        _ => { /* not applied: safe to retry */ }
+    },
+}
+```
+
+`Uni::bulk_load_applied(load_id)` answers from the load's marker while it
+exists and from a small receipt (`catalog/bulk_loads_applied/{load_id}.json`,
+one per load) afterwards.
+
+A load on a fork behaves the same way and returns the same results. Its marker
+and receipt live in the fork's own namespace (`catalog/forks/{fork_id}/`), a
+load left incomplete is completed when the fork is next opened, and you ask
+about it on a session of that fork: `fork.bulk_load_applied(load_id)`
+(`Session.bulk_load_applied` / `AsyncSession.bulk_load_applied` in Python).
+`Uni::bulk_load_applied` answers only for primary loads. Dropping the fork
+removes its markers and receipts.
+
 ### Crashes During `commit()`
 
-A bulk load is all-or-nothing across a crash. Nothing it writes is visible
-before `commit()`. Once `commit()` starts making the load visible, a crash (or a
-failed `commit()`) is completed the next time the database is opened: every
-table the interrupted commit did not reach is published then, each row exactly
-once. Recovery never restores an older table version, so writes other sessions
-committed meanwhile, including another bulk load, are kept. Several loads
-interrupted at once are each completed. User indexes on the load's labels are
-marked `Stale` and rebuilt by the background index rebuild.
+A crash before the commit point leaves nothing visible. A crash after it is
+completed the next time the database is opened: every table the interrupted
+commit did not reach is published then, each row exactly once. Recovery never
+restores an older table version, so writes other sessions committed meanwhile,
+including another bulk load, are kept. Several loads interrupted at once are
+each completed. User indexes on the load's labels are marked `Stale` and rebuilt
+by the background index rebuild.
+
+A successful `commit()` publishes one table at a time (one Lance commit each).
+While it runs, a concurrent reader can see the load in some tables and not yet
+in others: measured, a label scan (`MATCH (n:Label)`) seeing the new vertices
+while a label-less scan (`MATCH (n)`) did not, and edges traversable from the
+source side before the destination side. Reads are consistent again once
+`commit()` returns.
 
 ### Performance Guidelines
 
@@ -507,6 +595,13 @@ edge's endpoints are read from `_src`/`_dst` (or `src`/`dst` when the file has
 no `_src`/`_dst`; override with `src_col`/`dst_col`), so an edge file imports
 into the database whose vertices it references. An empty CSV cell is an absent
 property.
+
+**Transactions.** Inside a transaction (`tx.execute`, `session.run`'s
+auto-commit) `COPY FROM` writes into the transaction like any other write: the
+rows are visible to that transaction only until it commits, a rollback
+discards them, and an import larger than `max_transaction_memory` fails with
+the transaction memory error. Edges are checked against their type's declared
+endpoint labels.
 
 **Types.** Parquet keeps them: a declared property keeps its declared type, and
 an undeclared column gets its values' shared type, or a tagged encoding the

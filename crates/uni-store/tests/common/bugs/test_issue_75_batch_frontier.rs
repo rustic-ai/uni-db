@@ -44,21 +44,21 @@ async fn test_batch_insert_and_flush() {
         .await
         .unwrap();
 
-    // Insert 3 vertices
+    // Insert 3 vertices, labelled `Person`: `KNOWS` is declared Person -> Person.
     let v1 = writer.next_vid().await.unwrap();
     let v2 = writer.next_vid().await.unwrap();
     let v3 = writer.next_vid().await.unwrap();
 
     writer
-        .insert_vertex(v1, HashMap::new(), None)
+        .insert_vertex_with_labels(v1, HashMap::new(), &["Person".to_string()], None)
         .await
         .unwrap();
     writer
-        .insert_vertex(v2, HashMap::new(), None)
+        .insert_vertex_with_labels(v2, HashMap::new(), &["Person".to_string()], None)
         .await
         .unwrap();
     writer
-        .insert_vertex(v3, HashMap::new(), None)
+        .insert_vertex_with_labels(v3, HashMap::new(), &["Person".to_string()], None)
         .await
         .unwrap();
 

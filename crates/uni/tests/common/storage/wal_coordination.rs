@@ -44,6 +44,12 @@ async fn test_wal_preservation_after_flush() -> anyhow::Result<()> {
     let vid_a = Vid::new(1);
     let vid_b = Vid::new(2);
     let eid = Eid::new(100);
+    // `knows` is declared Person -> Person, which the writer enforces.
+    for vid in [vid_a, vid_b] {
+        writer
+            .insert_vertex_with_labels(vid, HashMap::new(), &["Person".to_string()], None)
+            .await?;
+    }
     writer
         .insert_edge(vid_a, vid_b, 1, eid, HashMap::new(), None, None)
         .await?;

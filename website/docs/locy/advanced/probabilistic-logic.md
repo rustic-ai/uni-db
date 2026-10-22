@@ -208,6 +208,18 @@ With negation: over `s -0.7-> t`, `s -0.3-> m -0.5-> t`, a rule
 exact mode gives `0.7 × 0.5 = 0.35`, default mode `0.745 × (1 - 0.5) = 0.3725` with a
 `SharedProbabilisticDependency` warning.
 
+A fact of a PROB rule without a FOLD (`YIELD KEY a, KEY b, e.p AS p PROB`) is, in exact mode, the
+formula of its own row: the row's event, the facts it references and the negation of the facts it
+negates (facts sharing a KEY are alternatives). A rule referencing it, positively or with `IS NOT`,
+composes that formula; it does not read the fact as an independent variable. The fact's own
+`PROB` value, queried directly, is that formula's probability in exact mode: a row derived
+more than one way, or whose referenced facts share evidence with it, is recomputed, and
+`SharedProbabilisticDependency` reports it in default mode. For example, `MATCH (a)-[e]->(b) WHERE
+a IS reach TO b YIELD KEY a, KEY b, e.p AS p PROB` is `e.p` (the edge implies the reachability),
+not `e.p × reach(a, b)`. Over the same graph,
+with `edge(a, b)` such a rule, `reach(s, t) AND NOT edge(s, t)` is
+`(X ∨ (Y ∧ Z)) ∧ ¬X = 0.3 × 0.3 × 0.5 = 0.045`.
+
 Two important fallbacks remain:
 
 - `BddLimitExceeded`: the group exceeded `max_bdd_variables`, so Locy falls back to the independence result for that key group.
@@ -225,8 +237,11 @@ Rows from approximate groups are marked with `_approximate = true`, and Rust `Lo
     yield it (`mid IS reach TO b`) dropped. The hub example above gave 0.7, and `reach(A, D)` gave
     the independence value 0.2784.
 
-`EXPLAIN RULE` shows, under each derivation, the facts it references — the same references exact
-mode and `TopKProofs` evaluate.
+`EXPLAIN RULE` shows, under each derivation, the facts it references: every positive reference,
+including references to rules without a `PROB` column and references from PROB rules without a
+FOLD. A fact of a rule without a `PROB` column is certain, so its derivations show
+`proof_probability` 1.0. A derivation of such a rule that references PROB facts weighs the product
+of their probabilities.
 
 ### MaxMinProb Semiring (Viterbi / Fuzzy)
 

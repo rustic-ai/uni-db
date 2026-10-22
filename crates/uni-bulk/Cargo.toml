@@ -27,3 +27,9 @@ bytes = { workspace = true }
 futures = { workspace = true }
 # Test seams (`fail_point!`): inert unless a dependent enables `fail/failpoints`.
 fail = "0.5"
+
+[dev-dependencies]
+arrow-schema = { workspace = true }
+async-trait = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }

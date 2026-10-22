@@ -702,6 +702,85 @@ pub async fn publish_on_branch(
     Ok(())
 }
 
+/// Publish `fragments` staged by [`stage_on_branch`] on `branch` unless a
+/// retained version of the branch already references their files.
+///
+/// Exactly once, by the rule `LanceDbBackend::publish_staged_record` applies
+/// to a table: a file referenced by the branch's current manifest, or by the
+/// Append transaction of any retained branch version, was published; no
+/// version referencing it, all files present, it was not; all files gone, it
+/// was published and since rewritten; some gone, neither is exact.
+///
+/// # Errors
+///
+/// Returns an error if the branch cannot be opened, the commit fails, or only
+/// part of the recorded files is present.
+pub async fn publish_recorded_on_branch(
+    uri: &str,
+    branch: &str,
+    fragments: Vec<lance::table::format::Fragment>,
+) -> Result<crate::backend::traits::RecordedPublish> {
+    use crate::backend::traits::RecordedPublish;
+
+    let paths: std::collections::HashSet<&str> = fragments
+        .iter()
+        .flat_map(|f| f.files.iter().map(|file| file.path.as_str()))
+        .collect();
+    if paths.is_empty() {
+        return Ok(RecordedPublish::AlreadyPublished);
+    }
+    let on_branch = open_branch(uri, branch)
+        .await
+        .with_context(|| format!("open branch {branch} on {uri} to complete a publish"))?;
+    // The branch's own history, from its first version: the bound a primary
+    // table records is a primary version and means nothing on a branch.
+    if crate::backend::lance::staged_append_committed(&on_branch, &paths, None).await {
+        return Ok(RecordedPublish::AlreadyPublished);
+    }
+    let data_dir = on_branch.data_dir();
+    let mut missing = 0usize;
+    let mut total = 0usize;
+    for fragment in &fragments {
+        for file in &fragment.files {
+            total += 1;
+            let store = on_branch
+                .object_store(file.base_id)
+                .await
+                .with_context(|| format!("open the store of branch {branch} on {uri}"))?;
+            let present = store
+                .exists(&data_dir.clone().join(file.path.as_str()))
+                .await
+                .with_context(|| {
+                    format!(
+                        "check staged file '{}' of branch {branch} on {uri}",
+                        file.path
+                    )
+                })?;
+            if !present {
+                missing += 1;
+            }
+        }
+    }
+    if missing == total {
+        tracing::warn!(
+            uri,
+            branch,
+            files = total,
+            "recorded staged rows are in no retained branch version and their files are \
+             gone; treating them as published and since rewritten"
+        );
+        return Ok(RecordedPublish::AlreadyPublished);
+    }
+    if missing > 0 {
+        anyhow::bail!(
+            "cannot complete the recorded publish to branch {branch} on {uri}: {missing} of \
+             {total} staged files are missing and no retained version references them"
+        );
+    }
+    publish_on_branch(uri, branch, fragments).await?;
+    Ok(RecordedPublish::Published)
+}
+
 /// Delete the files of `fragments` staged by [`stage_on_branch`].
 ///
 /// # Errors
@@ -1177,6 +1256,44 @@ impl ForkBranching for LanceBranching {
     ) -> Result<()> {
         let fragments = branch_staged_fragments(table, staged)?;
         discard_on_branch(&self.dataset_uri(table), branch, fragments).await
+    }
+
+    fn staged_record_on_branch(
+        &self,
+        table: &str,
+        branch: &str,
+        staged: &[&(dyn std::any::Any + Send + Sync)],
+    ) -> Result<Option<serde_json::Value>> {
+        let mut fragments: Vec<&lance::table::format::Fragment> = Vec::new();
+        for payload in staged {
+            let BranchStagedFragments(f) = payload
+                .downcast_ref::<BranchStagedFragments>()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "rows staged for '{table}' on branch {branch} were not staged on a branch"
+                    )
+                })?;
+            fragments.extend(f);
+        }
+        if fragments.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::to_value(&fragments).with_context(
+            || format!("record staged rows of '{table}' on branch {branch}"),
+        )?))
+    }
+
+    async fn publish_staged_record_on_branch(
+        &self,
+        table: &str,
+        branch: &str,
+        record: &serde_json::Value,
+    ) -> Result<crate::backend::traits::RecordedPublish> {
+        let fragments: Vec<lance::table::format::Fragment> = serde_json::from_value(record.clone())
+            .with_context(|| {
+                format!("read the recorded staged rows of '{table}' on branch {branch}")
+            })?;
+        publish_recorded_on_branch(&self.dataset_uri(table), branch, fragments).await
     }
 
     async fn evolve_branch_schema(

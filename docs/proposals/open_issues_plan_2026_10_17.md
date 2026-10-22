@@ -3585,3 +3585,773 @@ uncommitted.**
   (eligible 0 / 5,901); file restored byte-identically (md5).
 - **Open.** The tracked-reuse-is-0 assertion was not exercised in a failing
   state.
+
+## Decisions follow-up (2026-10-19)
+
+### Top-level Locy commands run in sequence
+
+- **Decision.** A program's top-level commands run in sequence, as ASSUME
+  bodies already did (`ef0e8f68c`): a command reads the state every earlier
+  command of the same program left.
+- **Repro (before).** Matrix of 12 cases × 7 entry points (`session.locy`,
+  `locy_with`, session profile, `session.prepare_locy`, `tx.locy`,
+  `tx.locy_with`, tx profile) × {L0, flushed}, against the oracle (each
+  command its own `tx.locy` in one rolled-back transaction):
+  - DERIVE→QUERY, QUERY→DERIVE→QUERY, DERIVE→DERIVE (reads LINK),
+    DERIVE→ABDUCE, DERIVE→EXPLAIN, DERIVE→recursive rule: every entry point
+    returned the pre-DERIVE facts.
+  - Cypher write→QUERY: "Mutation context not set" on every entry point.
+  - Prepared program: DERIVE invisible to a later Cypher read (`n=0`), the
+    second DERIVE affected 0, ASSUME "no active Locy L0 to fork", and a
+    Cypher write went straight to the shared graph.
+  - DERIVE with 0 rows, DERIVE→ASSUME and the independent-rule case already
+    matched.
+- **After.** 168/168 match the oracle; every oracle matches a hard-coded
+  answer.
+- **Root causes.**
+  1. The dispatch loop gave every command the store derived before the
+     first command.
+  2. `run_program` ran Cypher commands ahead of the first DERIVE inline,
+     through `execute_subplan` with no `MutationContext`; a write there fails.
+  3. `PreparedLocy` / `InnerLocyBuilder` evaluated with no ephemeral L0.
+- **Fix.**
+  - New `uni-query/src/query/df_graph/locy_sequence.rs` (`CommandSequence`,
+    `CommandFacts`, `derive_command_facts`, `reuse_plan`), used by both the
+    top-level dispatch (`impl_locy.rs`) and `locy_assume.rs`.
+  - Re-derivation is lazy (on the next fact-reading command), incremental
+    (`affected_strata`), and skips reuse when the base-state token moved.
+  - The inline loop stops at the first write command; VALIDATE and CALIBRATE
+    after it are dispatched.
+  - Every collecting evaluation gets an overlay L0.
+  - Tracker programs re-derive with a fresh `ProvenanceStore`.
+  - `run_strata_native` plans with the classifier registry.
+- **Commit scope.** `tx.locy`: writes land in the transaction; the caller
+  commits. `session.locy`: nothing commits (unchanged contract). Every write,
+  Cypher writes included, is collected in program order into one
+  `DerivedFactSet`; `tx.apply` replays it in one transaction, so the whole
+  program is atomic. A session DERIVE over a node the program created is
+  refused, since the replay re-ids it.
+- **`derived`.** Stays the pre-command fixpoint, so that trailing writes
+  cost nothing. The TCK parity check compares only QUERYs ahead of the first
+  write.
+- **Tests.**
+  - `locy::locy_toplevel_sequencing` (18).
+  - TCK `derive/CommandSequencing.feature` (5, plus a sidecar schema).
+  - Python sync (4 params) and async (2).
+  - `locy_assume_incremental::a_write_before_the_assume_disables_reuse` now
+    asserts the post-DERIVE reuse (`sequenced` 2/0, `hypothetical` 1/1). Its
+    8-row assertion is what excludes stale reuse.
+- **Revert check.** 6 core files restored to HEAD → 15/18 fail (the 3
+  no-write / trailing-write counter guards pass by construction). Restored
+  byte-identically (md5).
+- **Perf** (debug build, tx, 200 nodes, median of 3):
+
+  | Program | Before | After |
+  |---|---|---|
+  | No-write | 59.9 ms | 58.2 ms |
+  | Three DERIVEs | 3689 ms | 3207 ms |
+  | Three DERIVEs + QUERY | 3526 ms | 3633 ms |
+
+  Writes dominate both multi-DERIVE programs; the differences are within
+  run-to-run noise.
+- **Open.**
+  - `tx.prepare_locy` ignores the transaction's L0, so it does not see the
+    transaction's writes (separate gap).
+  - Locy Cypher commands and `tx.apply` replays get no `$params`.
+  - CALIBRATE after a write is untested.
+  - Re-derivations each get the full program timeout, and partial
+    (`allow_partial`) re-derivation does not surface `incomplete`.
+
+### Bulk commit point and honest `commit()` outcome
+
+- **Repro (before → after).** H1, a publish failing after `vertices_P`
+  followed by the retry a plain `Err` invites: 40 vertices and 60 edges after
+  reopen for a 20/30 load → `Ok` with a warning, 20/30 live and after reopen.
+  H2, a snapshot-manifest failure after the full publish: doubled live and
+  after reopen → `Ok` with a warning, one copy. H3, live readers after a
+  mid-publish `Err`: `MATCH (n:P)`=20, `MATCH (n)`=0 until reopen → 20/20 when
+  `commit()` returns. All three fail on HEAD plus the two new seams, pass after.
+- **Design as built** (`crates/uni-bulk/src/bulk.rs`). The `Active` publish
+  marker is the commit point. Before it, `prepare_commit` flushes, saves the
+  schema and records the publish plan; any failure runs `discard_load`
+  (staged files deleted) and returns a plain error = not applied. A failed
+  marker PUT is read back: present → committed; absent after a terminal store
+  error → not applied; otherwise `UniError::BulkCommitOutcomeUnknown`, staged
+  files kept. After it, the publish is essential: the first attempt uses the
+  staging handles, then up to 3 retries go through
+  `flush_intent::publish_records`, the exactly-once path recovery uses. Still
+  failing → `UniError::BulkCommitIncomplete` (do not retry). Best-effort, so
+  reported in `BulkStats::warnings`: default indexes; user index rebuild (a
+  failed sync rebuild marks the indexes `Stale` in memory); snapshot manifest
+  (its only reader is the growth trigger's count); the `Committed` marker
+  rewrite; the pointer flip; the index-status schema save; receipt and marker
+  delete. The marker is kept for the next open when the flip or schema save
+  failed. The schema save before the commit point is essential: `load_schema`
+  is in-memory only, so a lost save left rows under labels the stored schema
+  lacks.
+- **API.** `BulkWriter::load_id()`, `BulkStats::{load_id, warnings}`,
+  `Uni::bulk_load_applied(load_id)` (marker, then a per-load receipt under
+  `catalog/bulk_loads_applied/`, written before the marker is deleted), two
+  `UniError` variants; Python `writer.load_id`, `stats.load_id/warnings`,
+  `Uni`/`AsyncUni.bulk_load_applied`, `UniBulkCommitIncompleteError`,
+  `UniBulkCommitOutcomeUnknownError` (`load_id`, `reason`). OGM `bulk_add`
+  commits every label as one load and re-raises the two exceptions. Before, it
+  committed one load per label, so a failure on label 2 left label 1 applied
+  behind a `BulkLoadError`.
+- **7-day grace window: closed.** Lance's `cleanup_old_versions` deletes
+  unreferenced files older than 7 days. In-process completion removes the
+  window for the common case, but not for a load left `Incomplete` or
+  `Unknown`, or a writer open for a week. `StorageBackend::hold_staged_files`
+  now makes `LanceDbBackend::optimize_table` skip cleanup on held tables.
+  Revert check, holds disabled, files aged 8 days: 0 of 30 edges after reopen,
+  a silent skip. Across a restart there is no window, because `Uni::open`
+  fails unless recovery succeeds.
+- **Found on the way, fixed.** A fork's bulk commit called
+  `SchemaManager::save`, writing the fork's merged schema over primary's.
+  Measured: a fork-local label existed on primary after reopen. Now skipped on
+  a fork (`fork_bulk_load_does_not_leak_fork_schema_to_primary`).
+- **Open.** Success-path visibility. Publishing is one Lance commit per table,
+  so a reader during a successful commit sees a partial load. Measured with a
+  pause before each table (20 vertices / 30 edges): after `vertices_P`,
+  `(n:P)`=20 and `(n)`=0; after the fwd delta, fwd=30 and bwd=0; never
+  dangling. There is no small sound fix: readers would have to resolve every
+  table at one cut. `BulkCommitIncomplete` keeps the partial live view until
+  reopen; no in-process re-drive exists. A fork load that fails mid-publish
+  returns `Internal`, because there is no record to complete from.
+
+### `=~` hybrid routing (decision implemented)
+
+- **Built.** `java_regex` is now a port of JDK 25 `Pattern`'s parser, which
+  accepts exactly the patterns Java accepts. A pattern without look-around,
+  backreferences, atomic groups or possessive quantifiers runs on the
+  `regex-automata` automaton. Inputs that trip an anchor guard (an inner
+  terminator under `$`, U+0085/U+2028/U+2029, a combining mark next to
+  `\b`, `(?d)` inner `\n`) are answered by a lazily built `fancy-regex`
+  translation. Every other pattern runs on `fancy-regex` with a step limit.
+  The "Unsupported regex input" refusal is gone.
+  - **Corrected (Wave Q, 2026-10-21):** "a port of JDK 25 `Pattern`'s parser" no longer describes the code: the module was replaced by a clean-room implementation (see the note at the end of Q6).
+- **Still rejected at compile time:**
+  - case-insensitive backreferences;
+  - backreferences into a repetition that can match empty;
+  - look-behinds whose Java `int` window overflows, or that read
+    supplementary characters under Java's UTF-16 stepping. Admitted
+    exceptions: a BMP-only body, a single uniform class in a one-unit
+    window, or an unbounded window with uniform sets and no `\b` or
+    look-around;
+  - variable-length look-behinds containing fancy constructs;
+  - blocks, `\p{java…}`, `\N{}`, `\X`, `\b{g}`, and `(?c)` on a class or
+    property.
+- **Agreement with JDK 25:** 812,148 cases, 0 wrong answers.
+  - **Retracted (Wave P1, 2026-10-20):** the 0 was wrong. A rerun found 2 wrong answers vs JDK 25 (`"aa𐐨" =~ "(?s)(\1{0,2}\p{L}){0,2}"`: Java true, uni false; a zero-length loop iteration case) and a `fancy-regex` panic; see the Wave P1 block.
+
+  | Source | Cases |
+  |---|---|
+  | `gen_cases.py`, `all` profile, 2 seeds | 480,000 |
+  | `gen_cases.py`, `anchors` profile | 100,000 |
+  | Prototype case files | 232,148 |
+
+  Every disagreement is a documented rejection. Neo4j runs Java 21
+  (Unicode 15.0), the oracle runs JDK 25 (Unicode 16.0), and case mappings
+  use Unicode 17.0.
+- **Throughput.** 1M strings, release build, before and after:
+
+  | Pattern | Before | After |
+  |---|---|---|
+  | `abc.*` | 13.6 ms | 14.5 ms |
+  | `.*foo.*` | 29.6 ms | 30.5 ms |
+  | `(?i)(foo\|bar\|baz).*` | 17.1 ms | 17.8 ms |
+  | `.*graph$` | 24.0 ms | 24.7 ms |
+  | `(?m)^alpha.*` | 14.0 ms | 14.2 ms |
+  | `.*\bfoo\b.*` | 50.3 ms | 51.6 ms |
+
+  - `.*\bfoo\b.*` stays on the automaton for inputs that do not trip its
+    guard.
+  - When every input trips a guard it costs 3.3 s per 1M; the old code
+    refused those inputs.
+  - A look-ahead pattern costs about 0.7–0.9 s per 1M.
+- **Limits.**
+  - `UniError::RegexBacktrackLimit { pattern, limit }`, with
+    `UniConfig::regex_backtrack_limit` defaulting to 1M.
+  - Python: `UniRegexBacktrackLimitError` and the `regex_backtrack_limit`
+    config key.
+  - The deadline is checked between rows. The vectorized UDF is registered
+    per query because DataFusion's spawned partitions do not see a
+    task-local; the row evaluator uses the `REGEX_RUNTIME` task-local.
+
+### D3: ASSUME returns one result per body command
+
+- **Decision (D3).** `CommandResult::Assume(Vec<FactRow>)` becomes
+  `CommandResult::Assume { results: Vec<CommandResult>, derived: RuleFacts }`
+  (`RuleFacts = HashMap<String, Vec<FactRow>>`, new alias). Breaking; 4.2.0 is
+  unreleased.
+- **Repro (before).** `ASSUME { CREATE (:Marker) } THEN { QUERY linked; DERIVE
+  link; QUERY linked }` over `A->B->C->D`: one result holding 4 flat rows
+  (`affected=3`, `A-B`, `B-C`, `C-D`). The empty first QUERY and the DERIVE
+  could not be told apart from the second QUERY.
+- **After.** Three results: `Query([])`, `Derive { affected: 3 }`,
+  `Query([A-B, B-C, C-D])`.
+- **`derived`.** Taken at the state the first body command reads: after the
+  mutations, before any body command. This is where the top-level
+  `LocyResult::derived` is taken (before the first command). The post-body
+  state is not reported because re-derivation is lazy and a body ending in a
+  write never derives it. `CommandFacts::shared_store` holds the handle;
+  `Arc::try_unwrap` after `CommandSequence::finish` avoids a copy (from reading
+  the code, not measured). A rules-only body has no results; its facts are in
+  `derived`. It used to return every fact flattened as rows.
+- **Rows helpers.** `CommandResult::rows()` and `as_assume()` are new.
+  `LocyResult::rows()` searches depth first and skips an ASSUME with no
+  row-producing body result. Python `AssumeCommandResult` has `.results`,
+  `.derived`, and `.rows`: the first row-producing result's rows, or `[]`.
+  `LocyResult.rows()` skips via `has_rows`.
+- **ABDUCE / EXPLAIN ban.** The ban stays. The old reason ("results would be
+  discarded") stopped being true, so the text now says "not yet supported".
+  The real gaps, from reading the code:
+  - `re_evaluate_strata_reusing` runs without a `ProvenanceStore`, so EXPLAIN
+    would always use Mode B.
+  - `evaluate_abduce` validates candidates by re-evaluating the parent's
+    strata, so the body's rules are left out.
+  - The message changed, so `AssumeNestedAbduce.feature`,
+    `locy_command_noninterference`, and `test_session_scratch.py` changed with
+    it.
+- **Tests.**
+  - `locy_assume_body_sequencing`: now compares each body result, kind and
+    rows, with the same command run alone in a tx + rollback oracle, plus
+    hand-computed rows per command. New:
+    `derived_is_the_state_the_first_body_command_reads`.
+  - `locy_assume_incremental::nested_assume_reuses_the_outer_hypothetical_state`:
+    the comment claimed nested rows were excluded, but they were concatenated.
+    The test now asserts the exact shape `[Assume[Query], Query]` and both
+    answers `{acme, mid, outer}` (3 rows each). The old check was
+    `contains("outer")`.
+  - TCK `assume/AssumeBodyResults.feature` (3 scenarios, sidecar schema), with
+    path-addressed steps `the result at path i.j... should be ...`. The legacy
+    "Assume with N rows" steps now require exactly one row-producing body
+    command.
+  - `result.rs` unit test; 2 Python tests in `test_e2e_locy.py`.
+  - The other ~12 sites in 8 files (including `uni-locy-oracle` `assume.rs`)
+    now address the body's single QUERY exactly, or panic.
+- **Revert check.** Flattening the results back into one `Query` failed 12/13
+  targeted tests. `derive_then_assume_body_reads_the_derived_edges` passes by
+  construction: it has one QUERY and both arms render the same. Restored
+  byte-identically (cmp, md5 `8352353478b539d1`).
+- **Suites.**
+  - uni-db `--test integration` `/locy/`: 468/468.
+  - uni-locy: 232/232.
+  - uni-locy-oracle: 48 passed, 5 skipped (ignored).
+  - uni-query lib: 512/512.
+  - Locy TCK: 547/547 schemaless and 547/547 sidecar.
+  - pytest: 1063 passed, 15 skipped.
+  - stubtest: clean.
+  - Checks: ruff, `gen_python_api_reference --check` (regenerated; the regex
+    agent's stub was included too), `check_doc_symbols`,
+    `check_rust_python_parity`, and `check_documented_counts` all pass.
+    Counts are now 74 files / 547 scenarios; I also added the missing
+    `CommandSequencing` row.
+- **Clippy.** `-D warnings` is clean on uni-locy, uni-query, uni-locy-tck,
+  uni-db (`--lib --test integration`), and uni-python.
+
+### Soft write throttle: bounded, re-checking wait
+
+- **Decision.** The soft band (`soft_limit ≤ l1_runs < hard_limit`) waits in
+  steps of at most 100 ms (the hard limit's poll period), re-reads `l1_runs`
+  before each step, and stops once the count is below `soft_limit` or the
+  budget `min(base_delay × 2^(runs − soft_limit), 100 ms × (hard_limit −
+  soft_limit))` is spent. That is 1.6 s at the defaults. No config knob was
+  added: the cap comes from the existing limits. The exponent and the
+  multiplication saturate. The hard band is unchanged (100 ms poll, no time
+  bound).
+- **Repro (before).** Five uni-store tests on a paused clock, with
+  `l1_runs` set directly (`storage::background_compaction_test::soft_throttle_*`,
+  `hard_limit_stalls_until_pressure_drops`):
+  - relief at 250 ms while the count is 28: the write waited 40.96 s;
+  - the count held at 29: the write waited 81.92 s (budget 1.6 s);
+  - `base_delay` = 2^40 s: panic "overflow when multiplying duration by
+    scalar".
+  Two uni-db tests (`storage::write_backpressure_test`): with soft_limit 1,
+  hard_limit 11 and base_delay 10 s, an untimed `CREATE` waited 10.0 s
+  (budget 1 s).
+- **Root cause.** `Writer::check_write_pressure` slept the whole curve in
+  one `tokio::time::sleep`. It never re-read the count and had no cap.
+- **Fix.** `crates/uni-store/src/runtime/writer.rs`: a `write_pressure_step`
+  pure function plus a loop in `check_write_pressure`.
+- **Deadline.** The writer has no deadline. The executor races the statement
+  future against `query_timeout` and drops it, which already ended the old
+  sleep at the deadline: `statement_deadline_ends_a_soft_throttle_wait` passes
+  on both arms. It stays as a guard. Each step is now ≤ 100 ms, so either
+  band ends at the next poll after a drop.
+- **Revert check.** With the fix reverted, uni-store failed 3/5
+  (`ends_when_compaction_relieves_pressure`, `wait_is_bounded_under_sustained_pressure`,
+  `backoff_saturates_instead_of_overflowing`) and uni-db failed 1/2
+  (`soft_band_write_waits_the_budget_not_the_curve`). Restored
+  byte-identically (md5).
+- **Target test.** `fork_point_atomic_under_concurrent_parent_writes_async_flush`,
+  16 parallel copies × 4 rounds:
+  - before: 8, 4, 9, 7 / 16 passed; every failure was a `Timeout`;
+  - after: 16, 16, 16, 16 / 16.
+  The test-site comment, which blamed worker scheduling and suggested `-j1`,
+  now gives the throttle cause.
+- **Suites.**
+  - uni-store `--lib --tests`: 783/783 (6 skipped), and 797/797 with
+    failpoints.
+  - uni-db `--test integration` `/fork|flush|compaction|throttle|pressure|write/`:
+    728/728.
+  - uni-db failpoints `/resilience|recovery|durability|crash|flush/`: 366/366.
+  - Clippy `-D warnings`: clean on uni-store (± failpoints) and uni-db.
+- **Open (from reading the code, not run).**
+  - The throttle is charged per row, so a multi-row statement in the soft
+    band pays the budget once per row.
+  - Only a background `execute_compaction` resets `l1_runs`. The manual
+    `compact` / `compact_label` / `compact_edge_type` do not, so compacting by
+    hand does not relieve a throttled writer.
+  - `execute_compaction` sets the count to 0 when it finishes, which also
+    erases flushes that landed while it was running.
+  - With `compaction.enabled = false`, every write stalls after `hard_limit`
+    flushes.
+  - `DatabaseMetrics::write_throttle_pressure` is hard-coded to 0. There are
+    no throttle metrics or counters to update.
+
+## Wave P1 (2026-10-20)
+
+### WP1 — Cypher planning and procedures (a, b, d, G2 read side, h, e)
+
+- **a. Search-procedure `YIELD node`.** Before: `RETURN node`/`node {.*}`
+  empty, `properties()` NULL, `keys()` `[]`, `labels()` an error, for
+  `uni.fts.query`/`uni.vector.query`/`uni.search`, L0 and flushed. Root:
+  `plan_procedure_call` dropped `"*"`, and the yield stayed a VID-string
+  placeholder inside the query. Fix: `"*"` adds `_all_props` (full fetch) and
+  the placeholder is replaced by the scan's node struct (`df_planner.rs`,
+  `search_procedures.rs`).
+- **b. `[r:R|Q]`, declared + undeclared.** Before: "Mixed known and unknown
+  edge types not yet supported" in Cypher, VLP and Locy. Fix: one
+  `TraverseMainByType` over all names (`planner.rs`); Locy plan errors print
+  the cause chain (`impl_locy.rs` `{e:#}`).
+- **d. `SET` in `CALL {}` for declared types.** Before: debug panic in
+  `value_to_single_row_array` for MAP. Root: the fallback wrote display text
+  into a `Utf8` column; temporal structs were also taken for entities. Fix:
+  every unhandled type goes through `build_property_column_static`, checked
+  for the exact type (`apply.rs`). Covered: MAP, LIST<INT/FLOAT/STRING>,
+  VECTOR, DATETIME, DATE, TIME, DURATION, FLOAT32, INT32, BOOL, STRING.
+- **G2 read side.** Before: with `R2` declared `A -> F`, `count(r)` 1 of 3,
+  violating targets/sources dropped. Root: planner narrowed the anonymous
+  source (label scan) and the unlabelled target (inferred label check). The
+  CSR load in `adjacency_manager.rs` did **not** need a change: the
+  compacted + reopened store passes without it, because `compact_adjacency`
+  files every delta under each declared label. Fix: both narrowings removed
+  (`planner.rs`); the planner shape tests in `pattern_anchor_test.rs` now pin
+  the fail-open plan. Cost: `()-[r:R]->()` is `ScanAll` again (LDBC SF1
+  WORK_AT was measured 5.2 s / 2278 MB unnarrowed vs 0.13 s / 30 MB narrowed;
+  not re-measured).
+- **h. Missing `$param`.** Before: writes stored NULL (`SET` erased 42); NOT
+  NULL key said "cannot be null". Root: `unwrap_or(Null)` in
+  `executor/read.rs` and `locy_eval.rs`. Fix: an error at each evaluation
+  site, typed as `UniError::ParameterMissing { names }` at the API layer
+  (`impl_query.rs`, Locy `map_native_df_error`); reads use the same message.
+  The check runs at first evaluation, before any write; a single
+  pre-execution check listing every missing name was not built (eight parse
+  call sites plus the plan cache, which skips parsing).
+- **e. `uni.graph.project` in a tx.** Before: dirty-tx projection visible to
+  others, survived rollback. Fix: refused with
+  `UniError::UncommittedWritesInTransaction` when the tx L0 has mutations
+  (`procedures_plugin/graph.rs`). A clean tx already built from its snapshot
+  (test passed before the fix).
+- **Tests.** `bugs::{search_yield_node_is_full_entity,
+  mixed_declared_undeclared_edge_types, call_subquery_set_declared_types,
+  declared_endpoint_violation_reads, unbound_parameter_in_write,
+  graph_project_in_transaction}` (16 tests). Revert check: all fixes reverted
+  together, 14/16 failed (the 2 controls pass by design); restored, 8 files
+  md5-identical, `impl_locy.rs` re-applied hunk by hunk (WP3 edited it in
+  between).
+
+
+### WP4: Java regex (R1–R4)
+
+- **R1, Unicode version.** Neo4j 2026.09 (current) requires "Java SE 21 and
+  Java SE 25 Platform Specification"
+  (https://neo4j.com/docs/operations-manual/current/installation/requirements/),
+  so the minimum, Java 21 (Unicode 15.0), is the pin.
+  - `java_regex/ucd_tables.rs` is generated from Temurin 21.0.9 by
+    `scripts/java_regex_oracle/regenerate_ucd_tables.sh`
+    (`GenUcdTables.java`): general category, script, script names and
+    aliases, the binary properties `CharPredicates` reads, and
+    `toUpperCase`/`toLowerCase`, for every code point.
+  - Taking the data from JDK 21 is the exact form of filtering by `Age=15.0`.
+    It also keeps the case mappings and properties that 16.0 changed for
+    existing characters.
+  - `regex-syntax` and Rust `char` no longer supply any class or case data.
+    Unicode `\b` uses the pinned word set. The automaton's own Unicode word
+    boundary is guarded by the characters its tables disagree on.
+  - The seven 16.0 scripts are unknown names again.
+  - A test checks 363 property spellings against fingerprints of what JDK
+    21's `Pattern` matches, over all 0x110000 code points.
+- **R2, look-behinds over supplementary characters.** Bounded windows over
+  bodies made of sets, groups, alternations and bounded repetitions are
+  rewritten into the code-point sequences Java's UTF-16 window admits. This
+  covers stages 1–2, fixed and bounded windows. `\b` and look-around bodies
+  stay rejected.
+  - On the `all` profile, the cases rejected for this reason fell from 12,096
+    to 8,448.
+  - On the new `lookbehind` profile they fell from 199,584 to 76,944.
+- **R3, fancy-regex panic.** The fault is in the crate, shown with a
+  standalone repro against fancy-regex 0.17.0:
+  `\A(?:x(\1?a))+\z` on `"xaxaa"` panics at `vm.rs:837`. With contiguous
+  iterations, `\A(\1?a){2}\z` on `"aaa"` returns false where Java returns
+  true.
+  - fancy-regex writes a group's new start into its capture slot on entry.
+    A backreference inside that group then reads `(new start, old end)`.
+    Java reads the previous iteration's capture.
+  - Fix: a backreference inside the group it names is rejected at compile
+    time.
+  - `is_match_backtracking` also runs under `catch_unwind` (defence in
+    depth). A panic there becomes `RegexMatchError::Other`.
+- **R4, wrong answers vs JDK 25.** One was the R3 class. The other,
+  `(?i:[a~~b]|(?<!\G…)){2}`, is Java's `Loop` ending at its first
+  zero-length iteration even below `cmin`.
+  - The new `backref` profile then found a third class: Java keeps captures
+    made inside atomic groups, possessive quantifiers and look-arounds after
+    backtracking past them.
+  - Both new classes are rejected. The exception is the `(?=(a+))a*b\1`
+    idiom, a top-level positive look-around or atomic group whose
+    always-set group is named only after it.
+  - Two seeds of `backref` and of `all` now show 0 differences.
+- **Cost on `all` (seed 11, 271,080 Java-valid cases).** 30,160 cases were
+  rejected before and 30,248 after. The newly rejected cases are:
+  - 3,128 self-referencing backreferences;
+  - 464 stale-capture backreferences;
+  - 632 position-dependent empty loops.
+  The R2 rewrite recovers 3,648 cases. On `df777cb3e`, the self-referencing
+  cases were answered by luck: an empty or reversed capture.
+- **Gate.** 0 wrong answers against Java 21 on every profile:
+
+  | Profile | Cases |
+  |---|---|
+  | `all` | 2 × 300,000 |
+  | `anchors` | 300,000 |
+  | `unicode` | 468,468 |
+  | `lookbehind` | 300,000 |
+  | `backref` | 2 × 300,000 |
+  | targeted Unicode | 14,710 |
+  | `testdata` | 605 |
+
+  - Against JDK 25 there are also 0 differences, except on the cases where
+    JDK 21 and JDK 25 themselves differ (Unicode 16.0 data). Those are
+    36,939 `unicode` cases and 6,711 targeted cases, and uni-db answers
+    them as Java 21 does. Running only the cases where the two JDKs agree
+    gives 0 wrong answers.
+  - The oracle now records `timeout` for a case Java itself does not finish
+    in 2 s. 9 `backref` cases timed out.
+- **Throughput** (1M strings, release; the machine was shared, so noise is
+  about ±30%). `abc.*`, `.*foo.*`, `(?i)(foo|bar|baz).*`, `.*graph$` and
+  `(?m)^alpha.*` stay within noise.
+  - `.*\bfoo\b.*` went from 61–90 ms to 43–63 ms, because ASCII inputs skip
+    the combining-mark guard.
+  - `(?U).*\bfoo\b.*` went from 32–69 ms to 38–83 ms.
+- **Suites.**
+  - uni-query-functions lib: 328/328.
+  - uni-query-functions integration: 21/21.
+  - uni-db `test(/regex/)`: 9/9.
+  - openCypher TCK: schemaless 3925/3925 and sidecar 3925/3925.
+  - clippy `-D warnings` on uni-query-functions (`--no-deps`, because
+    uni-store from another package failed clippy at the time): clean.
+  - Revert check: case tables back on Rust `char`, `\p{IsLetter}` back on
+    `regex-syntax`, and the self-reference, stale-capture, empty-loop and R2
+    rewrites disabled. Five new tests and the oracle test failed. The
+    restore is byte-identical (md5).
+
+### WP3: Locy (c, L1, L2, L3 + L3b, L4, L5, L6)
+
+- **c. Proof weights and top-k retention.**
+  - Before: every `proof_probability` was `None`, and `top_k_proofs = 1` kept both derivations of a fact.
+  - Root cause: weights came from `base_fact_probs`, keyed by row provenance hash under a literal `"PROB"` column, and were looked up by the support terms' KEY hash, so the keys never matched. Retention was keyed per derivation, not per fact.
+  - Fix:
+    - a derivation weighs its own pre-fold PROB value (the fold input, else the PROB column);
+    - `ProofTerm::prob` carries `RefTerm.prob`;
+    - `record_top_k` keys by fact (`top_k_fact_hash`), replaces a re-recorded derivation, and keeps the `k` heaviest;
+    - the accumulator for `TopKPruningCrossedDependency` groups by fact.
+  - After: hand-computed 0.9, and 0.4 kept over 0.3 at `k = 1`.
+- **L1. A transaction-prepared program runs as `tx.locy` does.**
+  - Before: `tx.prepare_locy` returned `[]` where `tx.locy` returned `[7]`. It also ignored the snapshot and cancellation, and collected its writes.
+  - Fix: `PreparedLocy::new_tx_bound` with `PreparedTxBinding` and the transaction's cancel scope.
+- **L2. `$params` reach every command and the replay.**
+  - Fix: `execute_cypher_read` passes the params, and every branch uses the program's cancel scope.
+  - The params are stored on `DerivedFactSet::mutation_params`, and `replay_facts` passes them.
+  - Before: NULL writes, "Unresolved parameter" on a read after a write, and NULL after `tx.apply`.
+- **L3 + L3b. ABDUCE and EXPLAIN RULE in ASSUME bodies.** The ban and `AssumeBodyCommandNotAllowed` are gone.
+  - `needs_provenance_tracker` recurses into ASSUME bodies.
+  - A hypothetical re-evaluation gets a fresh tracker, with no reuse, when the program records provenance. `ReEvaluation` and `CommandFacts` carry the tracker and approximations to a body EXPLAIN.
+  - `evaluate_abduce_with` validates against the body's programs.
+  - Found on the way: `lookup_ctx` read the fixpoint context's L0, not the hypothetical overlay, so a body EXPLAIN naming a created node fell back to Mode B. Every read of the current state now goes through `state_ctx`.
+  - L3b before → after, exact five-edge diamond (hand-computed): the body returned 0.484375 → 0.46875, the same as the top level.
+  - Without the ban fixes, ABDUCE over a body rule found it empty in every candidate state, so every removal "validated".
+- **L4. One budget per program, and every cut reported.**
+  - Re-evaluations run with `deadline - now`.
+  - Where the time went (debug, 1200 items, 287k facts, 300 ms timeout): clause body 289 ms, dedup 525 ms, run 781 ms, row-store conversion 1.08 s, hydration 2.08 s, QUERY 2.85 s, then `Ok`.
+  - Now checked:
+    - after each clause body and before the post-fixpoint chain (`run_program`);
+    - after the run (fails before conversion and hydration);
+    - before each command and after the last.
+  - `allow_partial`:
+    - a cut re-evaluation records `LocyIncomplete` (merged into the result's), and `is_cut_short` stops the commands;
+    - an operator deadline is an interruption (`cut_by_deadline`);
+    - without `allow_partial`, the cut is the typed `LocyIncomplete`, not a string.
+  - Before → after: 8 write+QUERY rounds against a 3-derivation timeout went from `Ok` to a timeout error. A `max_iterations` cut went from 100 of 239 rows with `incomplete=None` to `incomplete` naming `reach`.
+  - Left open: under `allow_partial`, converting and hydrating the facts returned is not bounded by the deadline. An in-memory QUERY over the facts is not interruptible, so a command can overrun by its own duration; the program then fails with `Timeout`.
+- **L5.** CALIBRATE after a write: regression test (20 seeded + 20 written = 40 collected, session and tx; CALIBRATE alone collects 20) and TCK `neural/Calibrate.feature` (40, then 80 after the write). It passed before the change too; it was not a bug.
+- **L6.** `debug_assert_eq!(Arc::strong_count(&derived_store), 1)` before the unwrap in `evaluate_assume`. It held across the whole Locy suite in debug.
+- **Tests.**
+  - uni-db `locy::{locy_proof_probability (4), locy_tx_prepared_and_params (8), locy_assume_explain_abduce (7), locy_rederivation_budget (5)}`.
+  - `locy_command_noninterference::command_noninterference_inside_assume`, now that the body commands run.
+  - uni-locy `assume_body_explain_abduce` (5), which replaces `assume_body_command_not_allowed`.
+  - uni-query unit tests for `cut_by_deadline`, `record_top_k` replacement, and the weight rule.
+  - TCK, +6 scenarios:
+    - `AssumeNestedAbduce.feature` rewritten to check results;
+    - `TopKProofs` +2, plus the existing EXPLAIN scenario now asserts 0.9;
+    - `ErrorConditions` +2;
+    - `Calibrate` +1.
+  - Python `test_session_scratch.py`: body ABDUCE matches scratch.
+- **Revert check.** The 15 source files were restored to HEAD (keeping WP1's two format strings and WP2's transaction hunks) and the test binary was built and copied.
+  - 23 of 24 new or changed uni-db tests failed. The CALIBRATE test passed by construction.
+  - The restore is byte-identical (md5 of all 15 files).
+- **Suites.**
+  - uni-db `/locy/`: 493/493.
+  - uni-locy: 231/231.
+  - uni-locy-oracle: 48 passed, 5 skipped.
+  - uni-query lib: 514/514.
+  - Locy TCK: 553/553 schemaless and 553/553 sidecar.
+  - pytest Locy/scratch: 133 + 31 passed.
+  - stubtest: clean.
+  - `check_documented_counts`: OK (553).
+  - `gen_python_api_reference`: regenerated.
+  - `check_rust_python_parity`: fails on `ParameterMissing`, `UncommittedWritesInTransaction` and `DatabaseMetrics.write_throttle_wait_time`. None of them is this package's addition.
+- **Clippy** `-D warnings`: clean on uni-locy, uni-query, uni-locy-tck, and uni-db (`--lib --test integration`).
+
+### WP5: bulk visibility and compaction accounting (B1, B2, B3, B-side, T1, T2)
+
+- **B1, one load becomes visible at once.** Measured on df777cb3e with a pause before each table publish: with a warm CSR, `(n:P)` = 20 and `(n)` = 0, then vertices with no edges; with a cold CSR, fwd 30 and bwd 0.
+  - Fix: a per-load `_version` gate, `uni-store/src/storage/bulk_gate.rs`. `commit` hides the load's version before the first publish and releases it after the last one. The CSRs of the load's edge types are invalidated under the gate's lock.
+  - The gate is applied through `RowVisibility` everywhere in the `StorageManager` read tree: the vertex, delta and main-table scans, the property manager, the columnar scan, and vector, FTS and sparse search.
+  - `AdjacencyManager::warm` installs a CSR only if the gate's epoch is unchanged.
+  - Semantic compaction excludes holds. A background pass skips the tick; a manual pass polls.
+  - Limit (documented): other processes, other handles on the same path, and a fork created mid-publish are not gated.
+- **Found along the way: `vertices` rows of a bulk load carried `_version = 1`.** This was left over from before #266. Consequences:
+  - the gate could not hide them; the label-less view showed 20 while hidden;
+  - a session pinned to a snapshot taken before a load saw the load through `MATCH (n)`: 21 rows where the snapshot held 1.
+  Fixed: they now carry the load's version.
+- **B2, re-drive.** After `BulkCommitIncomplete` the load is handed to a tracked background task, `Redrive` in `bulk.rs`.
+  - It retries `publish_records` with 200 ms → 30 s backoff and keeps the load hidden meanwhile.
+  - Then it finishes as recovery would: shows the load, registers `VidLabelsIndex`, marks indexes Stale, raises the hwm, and writes the receipt before deleting the marker.
+  - It stops on the shutdown signal or the cancel token. The test shows no task left after `shutdown_in_place`, the marker intact after shutdown, and the next open completing the load.
+- **B3, fork markers.** A staging fork keeps its marker and receipt under `catalog/forks/{id}/` (`flush_intent::Markers`).
+  - `BranchedBackend` gains `staged_record` and `publish_staged_record`. They are exactly-once on the branch (`lance_branch::publish_recorded_on_branch`), ignoring the primary-version bound.
+  - `UniInner::at_fork` runs recovery on the fork's storage.
+  - New `Session::bulk_load_applied`, with Python sync and async versions and stubs.
+  - A fork's `mark_indexes_stale` does not save the schema.
+  - `fork_bulk_load_failed_publish_*` pinned the old residual (22 by label, 0 label-less, `Internal`). It now asserts that the load completes in-process: `Ok` with a warning, 22 by label, 20 label-less, applied.
+- **B-side: real.** On a fresh DB, pinning the bulk snapshot showed 0 of 20 (hwm 0).
+  - Fix: the manifest takes `max(hwm, write_version)`. Markers carry the version, so recovery and the re-drive raise the hwm (`raise_snapshot_hwm`) when the commit saved no snapshot.
+  - Residual (documented): L0 rows with a lower version join that snapshot once flushed.
+- **T1 / T2.** `StorageManager::compact` (and so `uni.admin.compact()` and the plugin scheduler) is now the background pass (`run_full_pass`): Tier 2 and Tier 3, under `CompactionGuard` and the directory lock, waiting rather than overlapping.
+  - Every full pass subtracts the `l1_runs` it saw at its start.
+  - Scoped compactions leave the count alone.
+- **Tests added.**
+  - `storage::manual_compaction_l1_runs` (2 tests): a throttled writer is unblocked; concurrent passes serialize.
+  - `storage::bulk_snapshot_hwm` (2 tests).
+  - `bulk_isolation_resilience` (failpoints, 5 tests): B1 warm and cold with background compaction ticking, B2 completion, B2 stop, T2, B3 incomplete with fork reopen.
+  - `fork::fork_bulk_load`: 2 tests extended.
+  - Python: 2 fork `bulk_load_applied` tests.
+  - Unit tests in `bulk_gate`.
+- **Revert checks** (two batches, files restored and `cmp`-identical): every new or changed test failed with its fix reverted, except one. `bulk_redrive_stops` passes trivially when no re-drive exists. It was made discriminating (`background_task_count == baseline + 1`) and checked against a re-drive that ignores shutdown: shutdown then waited 30 s.
+- **Suites** (separate target dir).
+  - uni-store `--lib --tests`: 790/790. An earlier run failed WP2's in-flight `compaction_disabled_soft_band_proceeds_and_hard_limit_refuses` mid-edit; it passed on re-run.
+  - uni-store with failpoints: 804/804.
+  - uni-db failpoints filter: 405/405.
+  - uni-db non-failpoint filter: 335/335.
+  - uni-bulk has no tests.
+  - pytest bulk and fork files: 106 passed.
+  - stubtest: 1 error, `DatabaseMetrics.write_throttle_wait_secs` (WP2).
+  - parity: `ParameterMissing` and `UncommittedWritesInTransaction` (WP1).
+  - Clippy `-D warnings`: clean on uni-bulk, uni-store (± failpoints), uni-db (± failpoints).
+
+### WP2 — write path: counters, VEC, COPY in a transaction, vertex partial path, throttle, endpoints
+
+- **CNT — `ExecuteResult` counters.** Repro (df777cb3e, `cypher_write::execute_counters_matrix`, 25 statements × {schema, schemaless} × {`execute`, `execute_with`} and over stored rows): `SET n.v = 7` reported `+nodes 1 +labels 1 +properties 3`, `MERGE … ON CREATE SET` `+nodes 2`, `REMOVE n.k` `+nodes 1 +labels 2`, `SET n:L` / `REMOVE n:L` nothing. Root cause: every row rewrite went through the create path (`L0Buffer::insert_vertex_with_labels` / `insert_edge` count a create), and the label writes counted nothing. Fix: create vs update split (`Writer` / `L0Buffer::update_vertex_with_labels`, `update_edge`); the executor records property effects from the old row it already holds (`Writer::record_property_effects`) with the TCK triple rule (add `+1`, remove `-1`, different value both, same value nothing), label effects where it writes the label set, and an entity created in the same statement reports its net state (`StatementScope` remembers what the statement created). New `ExecuteResult::properties_removed` (Python too). Deliberate differences from the TCK's graph-diff metric: `labels` counts per node (Neo4j's `labelsAdded`), not distinct labels in the graph; properties of deleted entities are not counted. Files: `l0.rs`, `writer.rs`, `write.rs`, `types.rs`, `transaction.rs`, `impl_query.rs` (scope), bindings.
+- **VEC — declared values in L0.** Repro (`cypher_write::declared_value_coercion_l0`): before a flush `RETURN n` / `properties(n)` gave `e: List[Int]`, `f: Int(1)`; after, `Vector` / `Float`. `n.e[0]` failed "cannot index into Vector". Root cause: `coerce_and_validate_property_value` returned the value unchanged once `accepts()` held. Fix: `to_declared_form` (Int→Float for float columns, numeric List→Vector for `VECTOR` and per token for multi-vector columns); `index` UDF indexes `Value::Vector`. Files: `write.rs`, `df_udfs.rs`. Open: the row evaluator's `Expr::ArrayIndex` in `executor/read.rs` (WP1's file) has no `Vector` arm; `SET x.y = n.e[0]` there still fails. Slicing (`n.e[0..1]`) not covered.
+- **f — COPY FROM in a transaction.** Repro (`cypher_write::copy_from_transaction`): the tx saw 0 of 2 rows, another session saw 2 before commit, 2 rows on disk before commit, 2 after rollback. Fix: `execute_copy_from` writes through `transaction_l0_override`; `flush_to_l1` only without a transaction. Over-limit import fails with the transaction memory error (test with 4 KiB limit). File: `copy.rs`.
+- **VPK — vertex partial path.** Evidence first, on unmodified df777cb3e store code (`cypher_write::partial_lance_vertex_state`, the edge A–D scenarios against vertices): Cypher arms (flag off/on × primary/fork) 4/4 pass — the path is unreachable from a transaction. Writer arms with the flag on: A (full-row REMOVE then partial SET in one window) → `p`, `x` resurrected after the flush; B (partial SET over a flushed row that dropped `p`) → `p` resurrected after compaction; C (create + partial SET in one window) → vertex absent after the flush; shape guard → 1 row (MergeInsert). Removed: `vertex_partial_keys`, the L0 partial inserts, the flush's per-label partial batch, `VertexDataset::build_partial_record_batch` / `merge_insert_batch`, the partial validator, `touched_needs_full_read`, `has_partial_vertex_keys` and its storage-underneath read. `insert_vertex_partial[_full]` stay as full-row updates (`insert_vertex_partial` now merges over the row read with the transaction's context, not storage only). `uni_partial_writes_total` is no longer emitted; `partial_lance_writes` is inert. After: 8/8.
+- **T3 — throttle per statement.** Repro: 1 row 1.0 s, 4-row UNWIND 4.0 s, 2 nodes + 1 edge 3.0 s, `bulk_insert_edges` ×3 3.0 s. Fix: `l0::StatementScope` opened per statement (`execute_internal_with_tx_l0`, profile, AST variants) and per bulk batch (`begin_batch`, no create tracking); `check_write_pressure(tx_l0)` charges the first write and marks the buffer admitted. After: each ≈1.0 s (`storage::write_backpressure_test::soft_band_charges_once_per_statement_or_batch`).
+- **T4.** `write_throttle_pressure` computed (`writer::write_throttle_pressure`); new `write_throttle_waits`, `write_throttle_wait_time`, `writes_stalled` (drop-guard recorded, so a wait cut by a deadline counts); Prometheus `uni_write_throttle_waits_total`, `uni_write_throttle_wait_seconds`, `uni_write_stalled_total`; `l1_run_count` doc corrected.
+- **T5.** `Transaction::bounded_write` bounds `bulk_insert_*`, `update_vertex_properties`, `delete_vertex_by_vid` by `query_timeout` (type-erased: the nested future overflowed the auto-trait recursion limit under `async_trait`). Hard band: bulk insert now `Timeout` at ≈1 s (was still blocked at 4 s).
+- **T6.** `compaction.enabled = false`: soft band does not wait; hard limit → `UniError::WriteStalled { l1_runs, hard_limit }` immediately (message names `CALL uni.admin.compact()`), recovered across the executor string boundary; Python `UniWriteStalledError`. Was: wait, then `Timeout`.
+- **G2 write side.** `Writer::insert_edge` checks declared endpoints (tx buffer → committed buffers → `VidLabelsIndex` → storage); covers CREATE, MERGE (both fast paths), bulk insert, COPY FROM, fork promote. `update_edge` does not re-check. `REMOVE n:L` that would orphan an existing edge is refused (`check_label_removal_keeps_edges_declared`, CSR + L0 overlay). Typed `UniError::EdgeEndpointViolation` (Python `UniEdgeEndpointError`, a `UniConstraintError`). Tests changed to the new rule: `cypher_remove::test_cypher_remove` (now asserts the refusal, deletes the edge, then removes the label), and five writer-level tests that wrote edges between unlabelled or nonexistent vertices under a declared type (`compaction_test::test_compaction_l1_to_l2`, `wal_coordination::test_wal_preservation_after_flush`, uni-store `test_issue_75_batch_frontier`, `writer::tests::vertex_delete_cascade_retracts_edges_from_the_adjacency_overlay`) now label the endpoints.
+- **M1.** RC3 test asserts the path: `physical_plans` of the batched MERGE (1) against a general-path control forced by `ON MATCH SET` (151 for M = 150), and puts the full timing + plan-count line in every failure message. The 8× bar is unchanged. One run: merge/create 1.1×, plans 1 vs 151.
+- **Revert checks.** Group 1 (CNT, VEC, COPY, T3, T5, G2 reverted together) → 13/14 new tests failed; the one pass (`set_stores_the_declared_form`, which only read `n.e`/`n.f`, which the projection casts) was strengthened to compare `properties(n)` and failed in group 2 (VEC write path + T6 reverted: 2/3 failed, T4's test passed as expected); group 3 (T4) → 1/1 failed. Restored; all 7 files md5-identical. VPK's revert check is the evidence run above (unmodified store code).
+- **Suites.** uni-store `--lib --tests` 790/790, with failpoints 804/804. uni-db `/cypher_write|storage|session_tx|ssi|trigger|fork|bugs|flush|compaction|throttle|pressure|copy|bulk/` 1647/1647. uni-db failpoints `/resilience|recovery|durability|crash|flush/` 382/382. openCypher TCK schemaless 3925/3925 (1 skipped), sidecar 3925/3925 (1 skipped). Clippy `-D warnings`: clean on uni-store (± failpoints), uni-query, uni-db (`--lib --test integration`), uni-common, uni-query-functions. pytest (`maturin develop`, `-n auto`) 1068 passed, 15 skipped; stubtest clean. `check_rust_python_parity`: my items bound; it fails on `ParameterMissing` and `UncommittedWritesInTransaction` (WP1's variants, not bound in Python yet).
+
+### P1 follow-up — G2 sound endpoint narrowing, Python mappings, vector index/slice, nested Python config
+
+- **Measured first (LDBC SF1 `ldbcdb8`, reflink copies, release `uni` CLI, process peak RSS).** `MATCH ()-[w:WORK_AT]->() RETURN max(w.workFrom)`: df777cb3e (built from `git archive` in a separate target dir) 0.23–0.28 s, 0.83 GB; WP tree 6.0 s, 1.47 GB; `count(r)` 0.07–0.09 s vs 5.3 s, 1.39 GB. The query was **not** refused by the 1 GiB pool, contrary to the old comment's prediction. The labelled form `(:Person)-[w:WORK_AT]->()` took 0.23 s on the WP tree.
+- **Design implemented.** `EdgeTypeMeta::endpoint_conformance` (`Unverified` = serde default for legacy catalogs; `Enforced` set at creation unless the name is already in the schemaless registry; `Verified { at }`). The planner restores source narrowing (single label only, as measured before) and target inference, both gated per side by `QueryPlanner::narrowing_side`: every type in the pattern must conform and declare that side. A declaration cannot change in place (re-declaration with other endpoints refused, drop tombstones the name), so nothing resets it on change; the test pins the refusal.
+- **`CALL uni.admin.verifyEdgeEndpoints([type])`.** Flush, read version `V`, read each unverified type's live `(src, dst)` at `V` (projected, newest row wins, bulk-hidden rows included), check labels in bulk against `VidLabelsIndex`, wait (10 s) for transaction pins older than `V`, then record `Verified { at: now }` and save per type. Refused on a fork and inside a transaction. Older views distrust later verifications: fork merge (`created_at`, nested forks trust none), `at_snapshot` (private schema copy), `restore_snapshot` (persisted, catalog before pointer). A first version that verified every row incl. tombstones was dropped: compaction keeps deleted rows in the main edges table, so a store that ever held a violating edge could never verify.
+- **Bypass paths.** `BulkWriter::insert_edges` wrote straight to Lance unchecked: now enforces (load's own vertices via a VID-run map, then the database). Fork promote, COPY, CREATE/MERGE, tx bulk insert go through `Writer::insert_edge` (WP2). WAL replay can only replay pre-enforcement records for legacy (unverified) types. Not covered: an older binary writing edges without saving the catalog; a pre-upgrade staged bulk load published later by re-drive.
+- **After.** WP-tree-plus-fix binary on a fresh copy: unverified 5.7 s / 1.25 GB (fails open, correct); whole-store verification 12.3 s, 1.7 GB peak, all 15 types clean; verified 0.26–0.42 s / 0.81–0.85 GB, `count(r)` 0.07–0.21 s.
+- **Task 3 (edge-table-driven `()-[r:R]->()`) not done.** It needs a new logical/physical operator that emits `(src, r, dst)` from the type's adjacency or main edge rows with no source scan, carrying the source/target VID and label columns, edge property hydration, MVCC/L0/fork visibility and the bulk gate the traverse already handles — a new scan operator, not a rewrite. With verified or enforced types the narrowed plan already brings WORK_AT back to the pre-WP1 0.26 s, so the remaining gain is for multi-source-label and unverified types.
+- **Python.** `UniParameterMissingError(UniQueryError)` with `names`, `UniUncommittedWritesError(UniTransactionError)` with `operation`, `reason`; `.pyi`, stub-drift allowlist, `python-api-symbols.md` regenerated. Nested `config({"compaction": {...}, "throttle": {...}})` binds every field (durations as seconds or `timedelta`, unknown nested key → `ValueError`, `Uni.config()` reports both); `check_rust_python_parity` gained a nested-struct axis with no allowlist (it caught `version_retention` on the first run). `UniWriteStalledError` now raised end to end in pytest. Finding: a query missing several parameters reports only the first in `names` (`RETURN $a, $b` → `['a']`, read and write paths); left as found.
+- **Vector index/slice.** Row evaluator `Expr::ArrayIndex` gains a `Vector` arm; `Expr::ArraySlice` and `_cypher_list_slice` slice a `Vector` into a list of floats. Repro `vector_search::vector_index_slice` failed on both paths ("first argument must be a list", "cannot index into Vector", "Cannot slice Vector").
+- **Docs.** `website/docs/reference/configuration.md` (manual/background compaction both lower `l1_runs` by the count at pass start, scoped compaction does not; `WriteStalled` way out; Python nested config), release notes, Black Book, `features/` and `guides/cypher-querying.md`.
+- **Tests.** `bugs::declared_endpoint_narrowing` (8: enforced narrows across flush/reopen; clean legacy verifies then narrows; violations reported and edges visible; re-declaration keeps the record; declaring over schemaless edges stays unverified; forks; bulk loader; snapshots/restore/open transaction). `declared_endpoint_violation_reads`' helper now removes the record (a real legacy catalog lacks it). uni-query `pattern_anchor_test` endpoint section rewritten for enforced/unverified/verified/disjunction. Two WP2 casualties fixed (`index::adjacency_cache_test::test_adjacency_manager_lifecycle`, `adjacency_cache_edge_cases::test_overlay_neighbors_via_writer` wrote edges between unlabelled vids). 4 pytests.
+- **Revert checks** (each restored `cmp`-identical): planner gate → 6/11 fail; fork distrust → fail once the test reopens the old fork (first version passed for free: the open session's schema was frozen; test strengthened); schemaless-registry check, bulk enforcement, at_snapshot distrust, restore distrust, pin wait, in-tx refusal, three vector arms → each fails its test; Python exception arms + nested config → 4/7 fail.
+- **Suites.** uni-query + uni-common + uni-bulk + uni-store + uni-query-functions 2239/2239; uni-db `/cypher_read|cypher_write|cypher_path|plan_shape|index|bugs|fork|schema|vector/` 2312/2312; TCK schemaless 3925/3925, sidecar 3925/3925 (1 skipped each); pytest 1072 passed, 15 skipped; stubtest clean; ruff clean; `check_rust_python_parity` OK; clippy `-D warnings` clean on uni-common, uni-store, uni-query-functions, uni-query, uni-bulk, uni-db (`--lib --test integration`), uni-python.
+- **Open.** `restore_snapshot` does not rewind table data after a reopen (the restored store kept the post-snapshot edge count, 1 not 3); its only test never reads after restoring. Not fixed here.
+
+### P1 follow-up — `restore_snapshot` rewinds data; `ParameterMissing` names every parameter
+
+- **Restore repro** (`storage::snapshot_restore_rewinds`, on-disk store; snapshot `Alice(30)->Bob(40)->Carol:VIP(50)`, then flushed `DETACH DELETE Bob`, `SET Alice.age=31`, `+Dave`, 2 edges, and unflushed `SET Carol.age=99`, `+Eve`, 1 edge, `REMOVE Carol:VIP`). Before, same handle and after reopen alike: `[Alice(31), Carol(99), Dave(60), Eve(70)]` — the store kept every post-snapshot write, unflushed ones included (the shutdown flush moved `latest` off the restored snapshot). After: snapshot state in the same handle, after reopen, and with later writes on top, for `Uni::restore_snapshot` and `uni.admin.snapshot.restore`.
+- **Root cause.** Restore only moved `catalog/latest`. Readers resolve every table at its newest Lance version; MVCC `_version` filtering (what time travel uses) cannot rewind either, because a vertex delete is a `MergeInsert` that rewrites the snapshot's row in place. Reopen also restarted the version counter below versions already in storage.
+- **Fix.** Explicit snapshots record a `RestorePoint` (every table and `indexes/` dataset version, Lance-tagged `uni_snapshot_{id}`, plus catalog index definitions). `Writer::restore_snapshot`: paused compaction + `flush_lock`, flush, withdraw later verifications (kept), fsynced new manifest + `restore_intent.json`, rewind (rollback / empty tables created since / restore or delete index datasets, re-widen declared properties), publish, reset adjacency (overlay included), reload VID labels, clear caches, OCC fence, rebuild indexes whose definitions changed since; open-time `recover_interrupted_restore`. Side fixes: `LanceDbBackend::rollback_table` now drops its cached schema (stale schema → `No field named email` after restore); `optimize_table` sets `error_if_tagged_old_versions: false` (Lance's default fails cleanup on an old tagged version). Refused: non-explicit/legacy snapshot, open transaction, inside a transaction, bulk publish, fork. Files: `uni-store` `snapshot/{manager,restore}.rs`, `runtime/{writer,occ}.rs`, `storage/{manager,adjacency_manager,shadow_csr}.rs`, `backend/{traits,lance}.rs`; `uni` `api/mod.rs`; `uni-query` `executor/procedure.rs`. `StorageManager::restore_snapshot` removed.
+- **ParameterMissing.** Before: `RETURN $a, $b` → `names == ['a']` (first evaluated). Fix: `uni_cypher::parse_with_parameters` / `parse_locy_with_parameters` collect every `parameter` pest pair; `UniInner::check_statement_parameters` refuses with all missing names (first-appearance order) at every execute/cursor/profile parse site, on session and `UniInner` plan-cache hits (`PlanCacheEntry::parameters`), prepared queries and both Locy entries; not `EXPLAIN`. A semantic planning error wins over a missing parameter (first version broke TCK `Match1[6]`, `Match2[8]`, `Merge1[16]`, `Merge5[27]`: `InvalidParameterUse` expected; fixed). Locy checks after compile. Files: `uni-cypher` `grammar/{mod,walker}.rs`, `lib.rs`; `uni` `api/{impl_query,session,prepared,impl_locy}.rs`.
+- **Tests.** `storage::snapshot_restore_rewinds` (6: API/procedure rewind, compaction past zero retention, later schema/FTS/UNIQUE, refusals, abort-mid-rewind child under failpoints); `snapshot_test` now asserts the in-transaction refusal and a real rewind; `bugs::unbound_parameter_in_write::…names_every_missing_parameter`; `occ` fence unit test; restore-module unit tests; pytest `test_restore_snapshot_rewinds_data`, `test_parameter_missing_names_every_parameter`.
+- **Revert checks** (each `cmp`-identical after): no rewind → 5/5 fail; no tag → compaction test fails; tagged-cleanup error → fails (only after the test also called scoped `compact`, the full pass swallows optimize errors); no schema-cache drop → schema test fails; no index rebuild → schema test fails; no adjacency reset → 5/5; no VID-labels reload → 5/5 (first version passed for free; added label-predicate and VLP `:VIP` assertions); no open-time recovery → crash test fails; no-op parameter check → `['a']`; no session cache-hit check → `['p']`; no tx cache-hit check → `['k']`.
+- **Suites.** uni-cypher 140/140 + doctests; uni-store 793/793; uni-query 905/905; uni-db `/snapshot|restore|bugs|cypher_read|cypher_write|admin|fork|locy|prepared|session/` 2223/2223; uni-db failpoints `/restore|snapshot|resilience|recovery|crash/` 132/132; TCK schemaless 3925/3925, sidecar 3925/3925 (1 skipped each); Locy TCK 553/553 both modes; pytest 1074 passed, 15 skipped; stubtest, ruff clean; clippy `-D warnings` clean on uni-cypher, uni-store, uni-query, uni-db (± failpoints).
+- **Open.** No snapshot deletion, so pinned versions are never reclaimed. Catalog not rewound (renames/type changes after a snapshot not reconciled). Forks not rewound; the shared UID index is rewound, dropping UIDs forks registered since. A parameter used only by a previously registered Locy rule is still reported at evaluation, first name only. Background index builds are not paused during a restore (data-consistent but unmeasured).
+
+### P1 follow-up — restore refused while forks exist
+
+- **Defect.** `restore_snapshot` rewinds primary tables and the shared `UidIndex` but not fork branches, so after a restore a fork kept rows cut from the pre-restore primary and lost the UIDs it registered after the snapshot. Decision: refuse.
+- **Fix.** New `UniError::RestoreBlockedByForks { forks }` (tagged display, JSON-encoded names so a name with `,` or `: ` round-trips; `restore_blocked_by_forks_from_message` recovers it on the `uni.admin.snapshot.restore` path). `Writer::restore_snapshot` refuses while the registry holds any entry, any status. Race: fork creation captures its fork point under `flush_lock` and registers its Pending entry afterwards, so a registry check alone had a window. `Writer::restore_epoch`: the restore bumps it under `flush_lock` and re-checks the registry; `create_fork_2pc` reads it before the capture and after `begin_create`, rolling back with `ForkLifecycle { stage: "restore_race" }` on a change. New seam `fork::create-before-begin`. Python `UniRestoreBlockedByForksError` (`forks`), `.pyi`, stub-drift entry. `Uni::restore_snapshot` now keeps typed writer errors instead of wrapping them in `Internal`. Files: `uni-common` `api/error.rs`; `uni-store` `runtime/writer.rs`; `uni` `api/{mod,fork,impl_query}.rs`; `bindings/uni-db` `src/exceptions.rs`, `uni_db/__init__.pyi`, `tests/test_stub_drift.py`.
+- **Tests.** `storage::snapshot_restore_rewinds::forks::restore_refused_while_forks_exist` (outer + nested inner fork; API and procedure both typed, data untouched, restore runs after `drop_fork_cascade`); `…::resilience::fork_created_across_a_restore_is_rolled_back` (failpoints: fork held at the seam across a full restore, then rolled back, not registered, retry sees the restored 3 people); pytest `test_restore_snapshot_refused_while_forks_exist`. The two existing failpoint restore tests moved into `mod resilience`: their old path matched none of the failpoint lane's `resilience|recovery|durability|crash_harness` filter, so CI never ran the crash-completion test.
+- **Revert check.** Refusal calls removed and epoch comparison disabled: both new Rust tests fail (restore succeeded with forks; the racing fork was created); restored, `md5sum -c` OK.
+
+### P1 follow-up — full local CI run (findings fixed)
+
+- **ABDUCE NOT proposed nothing through an anonymous node** (found by the flagship-notebook lane: `locy_semiconductor_yield_excursion` asserted ABDUCE candidates, got 0). Repro: `(l:L)-[:OBSERVED]->(:F)-[:ON]->(t:T)`, `ABDUCE NOT q` → 0 candidates; same body with `(f:F)` → 2. Root cause: Wave C's identity rule (`6ee8dc3a5`, "a hop identified neither way is not proposed") is right, but the derivation's evidence row binds only named elements, so every hop touching an anonymous node was unidentifiable. Fix: `locy_abduce::name_anonymous_elements` builds the derivation tree over a program copy whose body paths name anonymous nodes and relationships (`abduce_anon_{n}`, checked against the clause text); generated names are reported as empty variables and are not property candidates. Tests `locy_abduce_identity::abduce_through_anonymous_middle_node_proposes_both_edges`, `…::abduce_remove_edge_into_anonymous_node_removes_only_that_edge`; revert (naming disabled): both fail; notebook passes after.
+- **`cargo deny`**: RUSTSEC-2026-0378/0379 (wasmtime 49.0.3) → wasmtime family 49.0.4 (lockfile + `uni-plugin-wasm` floor).
+- **rustdoc**: `uni-bulk` `flush_intent` module doc linked private `publish_records` → plain code span.
+- **fmt**: `tests/common/{bugs,vector_search}/mod.rs` unsorted; in `vector_search` the insertion of `vector_index_slice` had taken the `#[allow(clippy::module_inception)]` meant for `vector_search`.
+- **uni-db**: `perf::stress_test::test_stress_concurrent_read_write` wrote `LINK` edges between vertices that were never created, which the declared-endpoint enforcement (G2) now refuses; the test creates its `:Node` vertices first. `teeth::every_revert_patch_still_applies`: the restore-race edit moved `issue_097.patch`'s context; regenerated, and the control test `fork_inherits_unflushed_single_node` fails under it.
+- **Docs build**: 3 broken links fixed (`features/forks.md` anchor, `locy/troubleshooting.md` path, `plugins/graph-algorithms.md` anchor); the remaining 20 warnings are notebook pages produced only by `convert_notebooks.py` in the deploy job.
+
+### P1 follow-up — mutating built-in procedures ran in read-only contexts and authorized as `read`
+
+- **Claim** (automated security review, unverified): `uni.admin.snapshot.restore` / `verifyEdgeEndpoints` (and possibly other `uni.admin.*`) pass the read-only oracle and are authorized as `read`. **Confirmed, and wider.** The executor built-ins (`uni.admin.*`, `uni.schema.create*`/`drop*`) are dispatched by name in `Executor::execute_procedure`, not registered; `validate_read_only_with`'s predicate asked only the plugin registry, so every built-in was a read.
+- **Measured before** (`bugs::admin_procedure_read_only`, 7 tests, all red; log `sec_admin_ro/repro_before_final.log`): `session.query`, `query_with().fetch_all()` and session `prepare()` ran `compact`, `snapshot.create`, `snapshot.restore` (rewound the store), `verifyEdgeEndpoints`, `createLabel`, `dropLabel`; a pinned session and a `.read_only()` handle ran `compact` and the DDL procedures and wrote the on-disk catalog (`Person` dropped, `Probe` created; `snapshot.*`/`verify` failed there only on the missing writer); `… VERSION AS OF` ran `compact`, `createLabel`, `dropLabel`; `session.locy` ran `compact`, `snapshot.create` and the DDL procedures for real; an `AuthzPolicy` saw `read` from `session.query`, `session.run`, `tx.query` (`write` from `tx.execute`). Separately, session `prepare()` used the registry-blind `validate_read_only`, so a declared `WRITE` procedure prepared and wrote a node.
+- **Fix.** One table, `uni_query::BUILTIN_PROCEDURE_MODES` (`Dbms`: compact, snapshot.create/restore, verifyEdgeEndpoints; `Schema`: the 8 DDL procedures; `Read`: compactionStatus, snapshot.list). `validate_read_only_with` consults it before the predicate (covers `validate_read_only`, time travel, prepared, pinned, read-only handle). Dispatch reaches built-in arms only for a classified name (unclassified = not callable); a unit test scans the dispatch `match` both ways. `strongest_procedure_mode` / `is_admin_statement` (uni-query) feed `transaction::statement_verb` (`dbms`/`schema`, else `classify_verb`) used by `tx.query`/`execute`/`prepare`/builders, and `Session::run`, which runs an admin statement outside any transaction (`run_admin_statement`, `dbms` verb, `ReadOnly` when pinned or writer-less) and DDL in an auto-commit tx (`schema`). Session prepared queries get `Session::procedure_is_write`. Session-level Locy programs and ASSUME bodies refuse `Schema`/`Dbms` procedures (`refuse_undeferrable_procedures`). Python `Session.run` / `AsyncSession.run` + stubs (no Cypher route to `restore`/`verify` remained otherwise). Neo4j check: its modes are `READ/WRITE/SCHEMA/DBMS` and `DBMS` procedures (`dbms.info`, `tx.getMetaData`) *do* run in read transactions there; admin rights are the separate `@Admin` privilege, and restore is not a procedure at all. uni's own contract already refused registered `Dbms` procedures in `Session::query` (`procedure_is_write` = mode ≠ `Read`), so the built-ins now follow uni's rule, with `dbms` as the privilege verb. Files: `uni-query` `lib.rs`, `query/executor/procedure.rs`; `uni` `api/{session,transaction,prepared,impl_locy}.rs`; `bindings/uni-db` `src/{builders,async_api}.rs`, `uni_db/__init__.pyi`. 29 existing test call sites moved from `session.query` to `session.run` (+2 via a variable); Python throttle test likewise.
+- **Revert check.** Five components reverted at once (oracle ignores table, prepared registry-blind, Locy refusal off, verbs back to `classify_verb`, no admin routing): 7/7 tests fail, each on its own surface; restored, `cmp` identical.
+- **Suites.** uni-query 909/909; uni-db `--test integration` full 3682/3682 (109 skipped), `--lib` 18/18; TCK schemaless 3925/3925, sidecar 3925/3925 (1 skipped each); Locy TCK 553/553 both modes; pytest 1077 passed, 15 skipped (2 new); stubtest, ruff, `check_rust_python_parity` clean; clippy `-D warnings` clean on uni-query, uni-db (`--lib --tests`), uni-python.
+- **Open.** `uni.create.vNode`/`vEdge` and `graph.rs` procedures are registered `Read` with in-memory store mutation (unchanged, by design per their comments). `Session::run`'s admin path does not use the plan cache. A `tx.locy` program (not session-level) may still call a `Dbms` procedure at top level, as `tx.query` may; `restore`/`verify` refuse inside a transaction themselves, `compact`/`snapshot.create` run.
+
+
+## Wave Q (2026-10-21)
+
+### Q6 — Java regex: no valid pattern rejected
+
+- **Before.** On `7b5856437`, valid Java patterns were refused as "unsupported Java construct": case-insensitive backreferences, backreferences inside their own group or into an empty-matching loop, captures kept past atomic/possessive/look-around bodies, position-dependent empty loops (`(?:a|\G){2}`), look-behinds with `\b`, look-arounds or overflowing windows, blocks, `\p{java…}`, `\N{…}`, `\X`, `\b{g}`, `(?c)`. On the new profiles the old code rejects 236,440 of 236,440 Java-valid `javaprops` cases, 193,417/193,417 `names`, 224,816/300,000 `grapheme`, 241,264/300,000 `canon`, 151,432/300,000 `cibackref`, 106,432/278,264 `emptyloop`; on the Wave P1 gate files it rejected 29,328 (`all2`), 30,248 (`all`), 58,592 (`backref`), 58,871 (`backref2`), 102,264 (`lookbehind`).
+- **Root cause.** Java's answers in those cases follow from its matcher's state handling (captures never restored past a node that matched on its own, `Loop`'s zero-length stop, UTF-16 look-behind stepping, `CIBackRef`'s unit counting, `GraphemeBound` reading `matcher.last`), which a translation to `fancy-regex` cannot express, and the missing constructs had no data (names, blocks, `Character` predicates, normalization, grapheme rules).
+- **Fix.** `java_regex::engine` is a port of the JDK 21 matcher (node graph + `match` of every node + Java's `Matcher` state, `localsPos` memo included) over UTF-16; it replaces `fancy-regex` (dependency removed; `stacker` added). New: `grapheme.rs` (JDK 21 `Grapheme`), `nfc.rs` (`NFC(s)` single code point via NFD lookup), `names.rs` (`Character.codePointOf`). `GenUcdTables.java` now also emits the `Character.isXxx` tables, blocks (`UnicodeBlock.of` + every `forName` key by reflection), combining classes, decompositions, case-to-ASCII tables and `ucd_names.bin` (34,887 names, 0.5 MB). Parser: `\N{}`, `\X`, `\b{g}`, `(?c)` → `NfcChar`, `CIBackRef` modes, `hasGroupRef`; Rust-version `to_uppercase` replaced by the JDK's mappings for name lookups. Routing: position-dependent empty loops now go to the port (they were rejected, the automaton would answer them wrongly). The backtrack limit counts backtracks at choice points (as fancy-regex counted pops); recursion is capped at 2^17 levels (~45 MB, `RecursionLimit`; Java 21 overflows a 1 MB stack after <2,000 `(?:a|b)*` iterations, the port allows ~30,000); a minimum count whose empty iteration left the state unchanged skips the identical rest (`\b{1073741824}`). Inputs where Java throws (`(?=ab)a\b{g}b` on `"ab"`) fail with `RegexMatchError::JavaException` naming the exception. Item 5: `(?c)` is Java's inline `CANON_EQ` flag (affects classes and properties: `NFCCharProperty`), now implemented. Files: `crates/uni-query-functions/src/java_regex/{engine,grapheme,nfc,names}.rs` (new), `{mod,parse,sets,study,emit,tests}.rs`, `ucd_tables.rs`, `ucd_names.bin`, `expr_eval.rs` (test), `Cargo.toml`; `scripts/java_regex_oracle/{GenUcdTables.java,JavaRegexOracle.java,gen_cases.py,regenerate_ucd_tables.sh}`; testdata (+87 cases, `reject` marks dropped).
+  - **Corrected (Wave Q, 2026-10-21):** `engine`, `nfc`, `sets`, `study` and `emit` no longer exist and nothing in `java_regex` is a port of JDK code: the module was replaced by a clean-room implementation (see the note at the end of Q6).
+- **Oracle.** `JavaRegexOracle` records `exception:<class>` and `stackoverflow`, and takes `-Doracle.timeout.ms`. New `gen_cases.py` profiles: `javaprops`, `names`, `grapheme`, `canon`, `cibackref`, `emptyloop`, `lookaround`. The 9 `backref2` cases that timed out at 2 s were re-run with a 30-minute limit on JDK 21 and 25: all `false` on both (one comparable `backref` case takes JDK 21 76 s); the port agrees on all 9: 7 with the limit raised to 10^9, the other 2 unlimited in release (`false`, about 13 min each). They stay out of the curated testdata (they need minutes).
+- **Gate (final binary), wrong answers vs JDK 21 / JDK 25.** `all` 300,000: 0/0; `all2` 300,000: 0/0; `anchors` 300,000: 0/0; `unicode` 468,468: 0/36,939; `lookbehind` 300,000: 0/0; `backref` 300,000: 0/0 (16 stopped by the default limit); `backref2` 300,000: 0/0 (17 limit, 9 Java timeouts); targeted 14,710: 0/6,711; `javaprops` 300,000: 0/37; `names` 300,300: 0/0; `grapheme` 300,000: 0/1; `canon` 300,000: 0/0; `cibackref` 300,000: 0/0; `emptyloop` 300,000: 0/0; `lookaround` 300,000: 0/0; testdata 692: 0. Total 4,383,170 + 692. Every JDK 25 difference is a case where JDK 21 and 25 themselves differ (counts equal, uni-db = JDK 21 there). Java exceptions reproduced with the same class: 1,102 `grapheme`, 2,391 `lookaround`, 5 `emptyloop`, 1 testdata. Rejections of Java-valid patterns: 0 on every file. The limit cases agree with Java when the limit is raised: measured on an earlier build that counted every failed node (55 cases then; same matcher), 54 at 10^9 and one at 10^11 (119 s release; JDK 21 takes 76 s).
+- **Throughput** (1M strings, release, shared machine). Automaton patterns unchanged (`abc.*` 16.7→17.2 ms, `.*foo.*` 34.3→34.3, `.*\bfoo\b.*` 38.5→38.6). Backtracking route faster than fancy-regex: `.*(?=foo).*` 744→486 ms, `(\w+) \1.*` 229→140, `(?:(?!foo).)*` 603→510, `(?s).*(?<=\p{L})foo.*` 1021→750; every input tripping a guard: `.*\bfoo\b.*` 3434→692 ms. Exponential backref patterns run ~2–4× slower per backtrack than fancy-regex.
+- **Tests.** Unit: `java_only_constructs_answer_as_java_21`, `case_insensitive_backreferences_answer_as_java_21`, `java_backtracking_state_is_reproduced`, `java_matcher_exceptions_are_reproduced`, `deep_recursion_fails_with_the_typed_error`, look-behind cases with `\b`/look-around/`\X`, `names`/`grapheme`/`nfc` module tests, 727 property fingerprints (all `\p{java…}` ±`(?i)`, every block); the four rejection tests replaced by Java-verified answers. Integration (`cypher_read::regex_full_match_test`): 14 new `CASES` on every evaluator path, `regex_java_exceptions_and_recursion_limit_are_errors`; the timeout test's pattern now has a backreference (Java's loop memo makes `(?:a|aa)*c` fast, so it no longer timed out).
+- **Revert check.** CIBackRef folding off, `GraphemeBound` from the position instead of `matcher.last`, `Loop` without the zero-length stop, `\N` table ignored: 8/23 `java_regex` tests fail; restored, md5 identical.
+- **Suites.** uni-query-functions lib + integration 356/356; uni-db `--test integration` `test(/regex/)` 10/10; TCK schemaless 3925/3925 and sidecar 3925/3925 (1 skipped each); clippy `-D warnings` clean on uni-query-functions (`--lib --tests`) and uni-db (`--lib --test integration --no-deps`: uni-query from another package failed `type_complexity` at the time).
+- **Open.** Inputs past the recursion cap error where Java with a large stack answers. The default backtrack limit stops 33 gate cases Java answers (`false`) in up to ~76 s. JDK 25's grapheme rules (Unicode 15.1+ GB9c) are not followed (Java 21 is the pin).
+- **Replaced by a clean-room implementation (2026-10-21).** The module described above was deleted and rewritten from `docs/specs/java_regex_behaviour.md`, public JDK documentation, Unicode 15.0 data and black-box probes of JDK 21/25 (sources and probe findings: `crates/uni-query-functions/src/java_regex/PROVENANCE.md`). New layout: `parse` → AST with code-point sets → `analyze` (loop strategy, look-behind arithmetic) → `linear` (`regex-automata`, chosen per pattern) or `backtrack` (UTF-16 VM with an explicit stack: backtrack limit 1,000,000 steps, 100,000 pending choice points, 4,000,000 stack records; nesting over 2,000 refused). The gate counts above were measured on the replaced module; architecture: `docs/UNI_BLACK_BOOK.md`, "`=~` is Java's `Pattern.matches`".
+
+### Q5 — bulk loads (fork mid-publish, publish-time endpoints, bulk snapshot, non-staging refusal, uni-bulk tests)
+
+- **Fork created mid-publish.** Before (7b5856437, publish parked before `main_edges`): the fork saw the load's 20 vertices by label and 0 of its 30 edges, for good. Fix: `create_fork_2pc` waits for the parent's gate (`BulkVisibilityGate::wait_open`, new, Notify-based; 30 s bound) and re-reads `BulkVisibilityGate::epoch` after `flush_and_capture_fork_point`, retrying the capture when it moved. Past the bound: `ForkLifecycle { stage: "bulk_publish" }`, nothing registered. Seams `fork::create-before-capture`, `fork::create-bulk-publish-wait`. After: 20/30/30/30.
+- **Publish-time endpoint re-check.** Broader than the brief's pre-upgrade case. A pre-upgrade catalog reads `Unverified` anyway, but an endpoint older than the load can lose its label (or be deleted) while the load's edge is still hidden. The label-removal guard sees no edge. Before: `E` stayed `enforced` and `MATCH ()-[r:E]->()` returned 0 of 1, live and after reopen. Fix (`uni-bulk/src/endpoint_check.rs`): `commit` and the re-drive re-check the endpoints `insert_edges` found outside the load (L0 first, then storage, not `VidLabelsIndex`), and on a violation record the type `Unverified`. The record is saved on the primary; a fork keeps it in `catalog/forks/{id}/bulk_endpoints_unverified.json`, applied at every fork open. The violation is reported in `BulkStats::warnings` or the log. Recovery at open runs before WAL replay, so a completed marker becomes `Committed` without `endpoints_checked`, and the new `check_recovered_bulk_endpoints` runs after replay (primary and fork opens): it reads the load's edges by `_version` (all of the type's edges if the marker predates `version`), checks them, then writes the receipt and deletes the marker.
+- **Bulk snapshot gained older L0 rows.** Before: pinned to the load's snapshot, 20 rows; after a flush, 21. Root cause: the ceiling is the load's version, reserved at first write, while rows committed before it can still sit in L0, which pinned reads skip. Fix: `finalize` and the re-drive flush L0 first when it holds rows (`flush_l0_if_buffered`). A failed flush or manifest now keeps the marker, so the next open raises the ceiling. Recovery at open needs no flush: L0 is empty, and WAL replay assigns versions above the ceiling. After: 21/21.
+- **Non-staging backend.** `BulkWriterBuilder::build` returns the new `UniError::BulkLoadUnsupported`. Removed: visible writes, `write_active`, `persist_active_intent`, the version-rollback abort, and the non-staging `Committed` commit point. Recovery rolls back only the legacy single marker. A per-load marker without publish records is refused and kept. Python routes the error to base `UniError`, with a parity exemption.
+- **Found on the way.** `BulkWriter` was `!Sync` (the progress callback was `Box<dyn Fn + Send>`), so every future it returned was `!Send` and a load could not run on a spawned task. The callback is now behind a `Mutex`; the public bound is unchanged.
+- **Tests.** uni-bulk unit tests (new, 14). `bulk_gate` 4 new. `bulk_isolation_resilience` 5 new: fork waits, capture retried, fork refused while incomplete, re-drive re-check, recovery re-check after WAL replay. `storage::bulk_endpoint_recheck` 2 new. `storage::bulk_snapshot_hwm` 1 new.
+- **Revert checks.** Batch 1 (fork.rs original, no flush, no downgrade, no staging refusal): 7/8 new integration tests and 3 unit tests fail. The 8th, `a_conforming_load_keeps_the_types_record`, guards against false positives. Batch 2 (epoch re-check off, recovered check without the writer's L0, commit re-check off): the capture-race, recovery and commit tests fail (0 of 1 edges found). Restored, md5 identical.
+- **Suites.** uni-bulk + uni-store 812/812; uni-store with failpoints 812/812; uni-db `/bulk|fork|storage|snapshot/` 425/429 then 13/13 on rerun. The 4 that failed (`snapshot_restore_rewinds` ×3, `procedure_reads_in_transaction_on_fork`) touch no bulk path. They passed on a rebuild with my sources unchanged, while other packages' files were changing; cause not established. uni-db failpoints `/bulk|resilience|recovery|crash/` 179/179. pytest bulk + fork files 106 passed; `check_rust_python_parity` OK. Clippy: no warnings in uni-bulk, uni-store or uni-db. `-D warnings` was blocked by other packages' in-flight uni-query / uni-query-functions lints.
+- **Open.**
+  - A label removal can still slip past the re-check when its own guard runs before the publish and it commits after the re-check has read the labels (unmeasured).
+  - A non-`DETACH` delete of an endpoint while the edge is hidden leaves a dangling edge. The re-check downgrades the type but does not remove the edge.
+  - The load's version is reserved at its first write, not at commit. So a snapshot or flush manifest taken while a load is staged has a ceiling covering the load, and a transaction begun in that window can see the load appear mid-transaction once it publishes (from the code; unmeasured). Fixing that needs per-pin hidden-version capture and manifest exclusions (snapshot/restore territory).
+
+### Q8 — edge-driven source for `()-[r:R]->()` (G2 Task 3)
+
+- **Measured (LDBC SF1 `ldbcdb8`, reflink copies, release `uni` CLI, query time / process peak RSS, 3 runs each, host load average 9–18).** Unverified `WORK_AT`: `RETURN max(w.workFrom)` 5.6–6.9 s / 1.24–1.61 GB → 0.33–0.62 s / 0.82–0.89 GB; `count(w)` 5.6–7.6 s / 1.59–1.63 GB → 0.11–0.13 s / 0.90–0.91 GB. Verified (label-narrowed `Scan`, a path this change does not touch): 0.30–0.52 s → 0.32–0.43 s and 0.10–0.34 s → 0.10–0.22 s, within noise. "Before" is the same tree with the planner hook disabled.
+- **Design.** It is not a separate `(src, r, dst)` edge-table scan. `EdgeSourceScanExec` sits directly over the unchanged all-vertex `GraphScanExec`. At execute time it warms the CSRs and collects every vid that the layers `get_neighbors` reads hold an entry for (Main CSR, frozen and active overlays, the shadow CSR on a versioned read, and the transaction L0 on a live read; `AdjacencyManager::collect_source_vids`, `GraphExecutionContext::edge_source_candidates`). It then publishes those vids as `_vid IN` chunks into the scan's `DynamicVidFilter`. The traversal above is unchanged. Rows match the old plan by construction: same scan and visibility, filtered only by vid; the candidates are a superset of the vertices that have a neighbor; and the traversal drops sources with no neighbor. A full scan is kept in an SSI read-write transaction, so the read set is unchanged (Locy always runs with one), and when `vertex_scan_beats_lookup` fires. The planner (`plan_edge_driven_source`) emits it only over an unfiltered, non-optional `ScanAll` source feeding a fixed-length, non-optional hop over native types. A separate edge-row operator would have had to reimplement the visibility the traversal already has, and gave no further benefit here.
+- **Tests.** `cypher_read::edge_source_scan_test` (9): 16 query pairs (as written vs `WHERE id(x) >= 0`, which keeps the all-vertex scan), covering directed, incoming, undirected, `[:R|S]`, all types, self-loops, bound target, and entity structs. Both plans are asserted per pair. 200 edge-less vertices are added so that the restriction actually happens: the source operator's row count is asserted below 200, or above it in an SSI transaction. Scenarios: L0, flushed, mixed, deletes (edge and DETACH), reopen, fork (unflushed and flushed) and primary beside it, in-flight bulk load then commit, transaction with SSI on and off, pinned snapshot, unverified and verified catalogs (incl. a label-narrowed type). Also `edge_source_scan_plan_shape` (uses/avoids) and an SSI commit-outcome equivalence test. Registry row `EdgeSourceScanExec` is `Proven`.
+- **Revert checks** (each restored `md5sum -c` OK). Planner hook off → 8/9 fail. Overlay layers off → 4 fail (L0, mixed, fork, pinned live). Transaction-L0 candidates off → `in_transaction` ssi=false fails (missing rows). SSI fallback off → `in_transaction` ssi=true fails, and the commit-outcome test fails (`SET` on an edge-less vertex conflicts on the old plan and committed on the new one). Shadow-CSR candidates off → no test failed. It is kept because it mirrors `get_neighbors_at_version`. No fixture where it changes the answer was found. A pinned view's fresh CSR is warmed at the pinned version, so a deleted edge is already in its Main CSR.
+- **Finding (not fixed, outside Q8).** `pin_to_version` to a snapshot taken before a `DETACH DELETE` does not see the deleted vertex or its edges, on either plan. Repro: seed, flush, `create_snapshot`, `MATCH (a:A {v: 2}) DETACH DELETE a`, flush, pin. `MATCH (x) RETURN x.v` lacks 2, and R count is 4 instead of 5. Same mechanism as the restore notes: a vertex delete rewrites the snapshot's row in place. The pinned test deletes an edge instead.
+- **Suites.** uni-query 911/911; uni-store lib 420/420; uni-db `/cypher_read|cypher_path|plan_shape|fork|bulk|bugs/` 1759/1759; TCK schemaless 3925/3925 and sidecar 3925/3925 (1 skipped each).
+- **Clippy** `-D warnings` clean: uni-store, uni-query (`--lib --tests`), uni-db (`--lib --test integration`).
+- **Open.** Variable-length (min ≥ 1) and `TraverseMainByType` (schemaless types) sources are not restricted. Locy bodies always have a read set, so they never restrict.
+
+### Q2 — declared endpoints and the writer (`update_edge`, older binaries, trigger probe)
+
+- **`update_edge` can move an edge (repro, before → after).** `WITH {_eid: e, _src: s, _dst: f, _type: 'R'} AS m SET m.w = 7` on an existing `A -[R]-> F` edge: stored the new source `S` (violating `R`), a new type `Q`, or the reversed direction, buffered, flushed and after a reopen → refused with new `UniError::EdgeIdentityChange { eid, stored, requested }` (Python `UniEdgeIdentityError(UniConstraintError)`); the edge's own identity still updates. A forged map naming a nonexistent eid with an `S` source wrote an unchecked edge → `EdgeEndpointViolation`. Cause: `Writer::update_edge` trusted the row binding's `(src, dst, type)`, and a map with `_eid/_src/_dst/_type` is such a binding. Fix: `Writer::check_edge_identity` (tx/current/pending L0 `edge_endpoints`, then `L0Buffer::edge_identity_memo` filled from the source's outgoing adjacency once per `(src, type)`, then `lookup_edges_by_eids`; unknown eid → `check_edge_endpoints`). A first version read the adjacency per edge: `SET` over 100k edges of one hub did not finish in ~10 min (debug, killed); with the memo the 100k SET executes in 8.6–15.2 s, against 9.4–19.4 s for a build without the check (same harness, shared machine).
+- **Older binary writes edges.** Every catalog save (`Schema::writer_features`), manifest (`SnapshotManager::save_snapshot` stamps `SnapshotManifest::writer_features`) and WAL segment (`WalSegment::writer_features`) records `endpoint_enforcement`. On open, after WAL replay, `Writer::distrust_conformance_after_unmarked_writes` downgrades every `enforced`/`verified` type to `unverified` (warn + save; in memory only for read-only opens and forks) when a replayed segment is unmarked or the latest manifest is unmarked and is not `Schema::trusted_unmarked_manifest`. An unmarked latest manifest found at open becomes that floor, so a store whose last flush predates the upgrade does not downgrade types declared after it. Older binary simulated by `WriteAheadLog::without_writer_features` and by publishing a stripped copy of the latest manifest. Not covered: a bulk load staged by an older binary and published by a later re-drive (Q5), Lance writes by an older binary with WAL disabled that crash before their manifest.
+- **Found on the way: commits after a reopen were lost in a crash.** Three flushed commits, clean close, reopen, commit, crash image → `[1,2,3]` (row 4 lost) → `[1,2,3,4]`. Measured: the reopened WAL wrote segment LSN 1 under a manifest `wal_high_water_mark` of 3, and `replay_since(3)` skipped it. Cause: `WriteAheadLog::initialize` resumes after the highest LSN on disk, and a flush truncates every segment ≤ its mark. Fix: `WriteAheadLog::ensure_lsn_above(hwm)` in `Writer::replay_wal` (also raises `flushed_lsn`).
+- **Trigger/CDC edge probe cost.** Measured that the probe ran on every commit of every database: the built-in node-only `:_AuditMe` trigger is registered by default, so `need_events` is always true. Probe's own time (`uni::trigger_probe` debug event; debug build, loaded 22-core box), before → after:
+
+  | n | arm | no user trigger | edge trigger |
+  |---|---|---|---|
+  | 100k | create (empty L1) | 23–39 ms → not run | 21–24 ms → skipped |
+  | 100k | create beside 100k flushed | 345–412 ms → not run | 457–936 ms → skipped |
+  | 100k | SET 100k flushed | 1.03–1.30 s → not run | 1.11–1.25 s → 1.33–1.45 s (needed) |
+  | 1M | create (empty L1) | 0.32 s → not run | 0.20 s → skipped |
+  | 1M | create beside 1M flushed | 3.9 s → not run | 7.1 s → skipped |
+  | 1M | SET 1M flushed | 15.0 s → not run | 12.0 s → 10.3 s (needed) |
+
+  Commit wall time, 1M SET without a user trigger: 46.1 s → 15.7 s; 1M create beside flushed with an edge trigger: 41.5 s → 15.7 s (wall times are noisy under the shared load; the probe column is the isolating measurement). Fix: `TriggerRouter::wants_edge_events` gates the edge read (CDC or a trigger with an edge or `PROPERTY_CHANGE` bit); `L0Buffer::created_edges` (allocator-fresh ids from `L0Buffer::insert_edge`) are left out of `pending_edge_candidates`. A required pre-image read (SET on flushed edges with an edge trigger) is one batched read already; not changed.
+- **Open.** The vertex half of the probe (`extend_with_l1`) still runs for every vertex on every commit because of the default node trigger (not measured here). The identity memo holds one entry per neighbour of each hub touched, until the buffer rotates or the transaction ends (not charged to `estimated_size`).
+
+### Q4 — snapshots: deletion, catalog rewind, index builds paused during restore
+
+- **Repro (before).** No way to delete a snapshot: its `uni_snapshot_{id}` tags pinned its versions forever. After a restore the catalog kept every post-snapshot change. Measured by the new tests with the fixes reverted: a property renamed after the snapshot read `age = None` for every restored row, and a table created after it was only emptied, so its columns kept their later types. A background build held between its physical commit and its catalog record let the restore finish first (`waited = false`). The restored catalog then held `person_age`, declared after the snapshot and `Online`, and `person_name`'s `last_built_at` had moved to the post-snapshot build.
+- **Fix.** (1) `Writer::delete_snapshot` / `Uni::delete_snapshot` / `CALL uni.admin.snapshot.delete(id)` (`Dbms` in `BUILTIN_PROCEDURE_MODES`, refused inside a transaction) / Python `delete_snapshot` sync and async. Under `flush_lock` it runs unpin (`StorageBackend::delete_table_tag`, index datasets via `restore::release_restore_point`), then deletes the restore point, the names and the manifest. When `latest` names the manifest, it republishes a copy under a fresh id first. Refused while a restore runs (flag checked before the lock, so it refuses instead of queueing), while a restore intent is on disk, and while a fork's `parent_snapshot_id` is the snapshot. An unknown id is a typed `SnapshotNotFound`: it now has a tagged display plus `snapshot_not_found_from_message` on the procedure path, and Python's `UniSnapshotNotFoundError` carries `snapshot_id`. `restore_snapshot` also returns this error for an unknown id. (2) `RestorePoint::catalog` is the whole `Schema`, captured before the table versions. `rewind_storage` now drops tables created after the snapshot instead of emptying them; forks are refused, so no branch lives in one. After every table is rewound it runs `install_catalog`, which sets `schema_version = max(live, snap) + 1`, keeps the live `writer_features` / `trusted_unmarked_manifest`, withdraws verifications after the snapshot, re-widens storage, saves, then fsyncs via the new `SchemaManager::set_local_file` / `local_file`. Decision on old points: a restore point without a catalog is refused with a clear error. It was written only by unreleased P1 builds and stores index definitions only; restoring its data under today's catalog is the half-restore this item removes. An interrupted legacy restore found at open is still completed the old way. Recovery at open now pauses compaction. (3) `StorageManager::pause_index_builds` / `index_build_permit` (a shared `tokio::sync::RwLock`). The rebuild worker holds the permit from claiming a task until it has saved the catalog, and `Indexes::rebuild(_, false)` holds it too. `create_snapshot` and `restore_snapshot` take the exclusive side first (builds, then compaction, then `flush_lock`). New seam `index_manager::scalar-built`.
+- **Files.** `uni-store`: `snapshot/{manager,restore}.rs`, `runtime/writer.rs`, `storage/{manager,index_rebuild,index_manager}.rs`, `backend/{traits,lance}.rs`. `uni-common`: `api/error.rs`, `core/schema.rs` (`local_file`). `uni-query`: `executor/procedure.rs`, `lib.rs` (oracle test line). `uni`: `api/{mod,indexes,impl_query}.rs`. Bindings: `src/{core,sync_api,async_api,exceptions}.rs`, `.pyi`, `tests/test_stub_drift.py`, `tests/test_e2e_persistence.py`. Docs: Black Book, release notes, the website snapshot/Cypher/Python/Rust pages, and the regenerated `python-api-symbols.md` (which also picked up other agents' stub additions).
+- **Tests.** `storage::snapshot_restore_rewinds`: `restore_rewinds_the_catalog` and `restore_procedure_rewinds_the_catalog` (they replace `restore_keeps_later_schema_usable`, which asserted the old semantics), `restore_refuses_a_restore_point_without_a_catalog`, `deletion::{deleted_snapshot_versions_are_reclaimed_and_others_still_restore, delete_procedure_and_refusals}`, and under failpoints `resilience::{index_build_racing_a_restore_cannot_outlive_the_rewind, delete_refused_while_a_restore_runs}`. The reclaim test shows that the `_versions` manifests only the deleted snapshot pinned survive compaction (retention 0) before the delete and are removed after it, while the other snapshot keeps its tags and restores. Three pytests and a doctest were added.
+- **Revert check.** Catalog install, drop-not-empty, tag release, both gate sides and the refusal flag were reverted together. All 5 discriminating Rust tests failed, each on its own assertion (see Repro). The files were restored and `md5sum -c` passed.
+- **Suites.** uni-store 798/798 and with failpoints 812/812. uni-db integration `/snapshot|restore|index|schema|admin|fork/` 700/700. Failpoints `/restore|snapshot|resilience|recovery|crash/` 148/148. `/declared_endpoint|snapshot_restore_rewinds/` 23/23 (an earlier run failed `declared_endpoint_narrowing_enforced_type_narrows` at its L0 phase, before any snapshot code ran; it passed on rerun after the other agents' planner edits settled). uni-query mode/oracle unit tests 4/4. pytest 1080 passed, 15 skipped. ruff and stubtest clean. Clippy `-D warnings` is clean on uni-store (± failpoints), uni-common, uni-db (± failpoints) and uni-python. uni-query's only finding is `type_complexity` in `locy_lineage.rs`, outside this package.
+- **Open.** DDL is not serialized with a restore: an `ALTER`/`CREATE INDEX` running concurrently can interleave with the catalog swap. Builds that the flush path and DDL trigger are not gated (the flush path is serialized by `flush_lock`). Restore and delete take ids, not snapshot names. No `uni snapshot delete` CLI subcommand.
+
+### Q7 — cleanup (props (d), proctx on forks, triggers page, `partial_lance_writes`, counters, docs build)
+
+- **props (d) — reachable, fixed.** Before: a writing unit subquery over `LABEL M (name STRING, properties MAP)` re-emitted `n` with the nested map taken as the container — `RETURN n` gained an `inner` property, `n.properties` read `NULL`; a parameter `{_vid, _labels, name, properties: {inner: 1}}` came back as a node with only `{inner: 1}`, `keys($m) = [inner]`. Root cause: `entity_property_container` took any map-valued `properties` on an entity map as the serialised container. Fix: `value::is_serialised_entity_map` — the container only when every other key is a system field or id spelling; `canonical_entity`, the `index()` UDF and the legacy property read go through it. Ambiguous shape left: a flattened entity whose *only* user property is a map named `properties` reads as serialised (documented on the function).
+- **Found alongside, fixed:** after `CALL { WITH n SET ... }`, `properties(n)` and `collect(n)` returned `NULL` for any entity (plain `{name, w}` too) and `n.name` read `NULL` when the entity column was a struct: `apply.rs::value_to_single_row_array` filled a native `Node`/`Edge` struct from its property map only, so `_vid`/`_labels` were null and the struct read as a null entity. Now system fields come from `entity_property` and `_all_props` from the property map.
+- **proctx on forks.** New `bugs::procedure_reads_in_transaction_on_fork` (3 tests; {primary, fork} × 4 flush combinations; fork with committed fork data, later primary commits, own uncommitted write). Declared READ/WRITE procedures, wcc, reachability, vector and FTS all matched the transaction's `MATCH` oracle before any change; `uni.graph.project` projected the fork's committed graph and refused after a write; `uni.schema.labels` listed the fork's merged labels. One violation: `uni.schema.labels` `nodeCount` was the storage table's row count (fork: 2 or 3 vs 4; primary: 2 vs 5 unflushed) — no L0, no transaction writes, every stored version. Now an inner `MATCH (n:L) RETURN count(n)` per label through the caller's view (cost: one count query per label per call, was metadata).
+- **Triggers/CDC page** `website/docs/features/triggers-cdc.md`, in the nav under Features. `reference/rust-api.md`'s CDC paragraph no longer claims host redelivery (the host delivers only commits after `start`; replay is the provider's).
+- **`partial_lance_writes`.** `#[deprecated]` on `UniConfig` and `WriterConfig`; `UniConfig::warn_deprecated_options` (one warning per process, called from `UniBuilder::build`); config reference and parity allowlist say no-op; never Python-bound (`config()` rejects the key), so no stub change. `uni_partial_writes_total` appears in no doc or dashboard.
+- **Counters vs TCK — rule: Neo4j's `QueryStatistics`.** The TCK feature files do expect `-properties` for deleted entities (`Delete2` [3], `Delete6`, `Merge1` [14]) and graph-level `+labels` (`Create1` [4], `Merge1` [5]), but `uni-tck` computes those side effects by diffing graph state (`crates/uni-tck/src/world.rs`, `capture_before` / `capture_after`), never from `ExecuteResult` — which is why the TCK passed before. openCypher specifies no execution counters, so they follow Neo4j: `properties_removed` counts explicit `REMOVE` / `SET ... = null` (and overwrites) only, a deleted entity's properties are not counted, `labels_added` is per node. A deleted-property count was implemented and measured (debug, 20k flushed nodes with 3 properties and an edge: `DETACH DELETE` 1.7–2.5 s vs 1.0–1.1 s), then reverted by decision. Kept: `L0Buffer` counts a tombstone once (`DETACH DELETE n, m` with `m = n` reported `nodes_deleted 2`). Documented in the Cypher guide (*Write Counters*), Rust/Python API pages, rustdoc, Black Book.
+- **Docs build:** 20 → 0 warnings (`zensical build --strict` after `convert_notebooks.py --no-execute`; CI `docs` job and runbook run the same).
+- **Tests.** `bugs::entity_field_name_collision::{flattened_entity_with_a_map_valued_properties_property, unit_subquery_reemits_the_entity_with_its_identity}`, `value::tests::property_container` (3), `bugs::procedure_reads_in_transaction_on_fork` (3), `cypher_write::execute_counters_matrix::deleting_counts_entities_not_their_properties` (incl. the counted-once case); `union_entity_test::a_non_entity_type_conflict_keeps_each_rows_value` now checks the ints are the P ids and the nodes the P nodes. Revert check (all fixes undone together, before the counter decision): every new test failed, including the unit test for flattened maps; restored, md5-identical.
+- **Suites.** uni-db integration `/bugs|fork|cypher_read|cypher_write|procedure|vector|search/` 1941/1942; the failure, `constant_in_list_cost_is_linear`, asserts a wall-clock ratio and its own linear control grew 0.7x for 4x input in that run (machine load); it passed 3/3 alone. Item tests after the union change 13/13. uni-common `property_container` 3/3. openCypher TCK schemaless 3925/3925 and sidecar 3925/3925 (1 skipped each). pytest 1080 passed, 15 skipped. Docs `zensical build --strict`: no issues. Clippy `-D warnings` clean on uni-common, uni-store, uni-query-functions; uni-query's only finding is `type_complexity` in `locy_lineage.rs` (Q1's); uni-db `--lib --test integration` clean with that one lint allowed.
+- **Open.** `properties(m)` on a variable bound to a map (`WITH {a: 1} AS m RETURN properties(m)`) is refused at plan time ("requires a node, relationship, or map"; `planner.rs::validate_function_call` rejects `VariableType::Scalar`, which may hold a map) — Graph9 [4] only uses a literal; not fixed (planner.rs outside this package's allowed hunk). `Node`/`Edge::try_from(&Value::Map)` still takes any `properties` key as the property map. CDC module docs (`cdc_runtime.rs`) still say "redelivered after a restart" (unverified by test). `uni.plugin.dropDeclared` may leave a declared trigger firing until restart (from reading `registry.remove_named_unique`, unverified).
+
+### Q1 — Locy: non-fold PROB lineage, EXPLAIN children and Mode B, reuse pin, QUERY budget, registered-rule parameters
+
+- **1. Negated (and positive) fact of a PROB rule without a fold, exact mode.** Repro on the diamond: `reach(s,t) AND NOT edge(s,t)`, where `edge` is a PROB rule without a fold. Exact mode gave 0.2235 against a possible-worlds value of 0.045. Root cause: such a rule kept no lineage, so a referenced fact became one fresh `Var::Base`. Fix: when provenance is recorded (`LocyPlanBuilder::with_provenance`), a PROB rule without a fold projects transient lineage columns (`__lin_*`). `LineageStore::record_rows` accumulates its distinct derivations before deduplication, and `publish_rows` keeps those of its published facts, ORed per KEY. A recursive stratum finishes its rules without a fold before correcting the others. Positive references are covered by the same mechanism. Files: `locy_planner.rs`, `planner_locy_types.rs`, `locy_lineage.rs`, `locy_fixpoint.rs`, `locy_program.rs`, `impl_locy.rs`. Default and independence modes are unchanged; the property test checks that default equals possible worlds wherever no warning is raised.
+- **2. EXPLAIN Mode A children** for references to non-PROB rules and from PROB rules without a fold. These now carry a `SupportRef` (`__lin_sup_*`, plus `__lin_supp_*` when the target is a PROB rule), read through `RefScope`. The recursive path reads them from the candidates (`transient_support`). A non-PROB fact is certain: `compute_proof_probability(has_prob, …)` gives 1.0, and a non-PROB rule referencing PROB facts gets the product of their probabilities. This matches `probabilistic-logic.md`, which says a referenced fact of a rule without PROB is certain. `locy_assume_explain_abduce::explain_in_an_assume_body…` pinned the old flat tree; its hand-checked shape is now the chain `A→B→D→X`, and body equals top level as before.
+- **3. EXPLAIN Mode B (ABDUCE's tree), probed** over recursion, Boolean negation, FOLD COUNT, probabilistic negation, PRIORITY and BEST BY. The first four were correct. Two cases were wrong. PRIORITY: Mode B took the first clause in text order that derives the KEY, so ABDUCE NOT proposed removing `E` (not validated) and never `F`. BEST BY: Mode B matched on KEY alone and explained the 5-weight row instead of the kept 1-weight row. Fix: try clauses highest PRIORITY first, and require the evidence row to match the fact's non-KEY yielded values (`yields_match`). A third defect showed up along the way: a removal under `[e:E|G]` named type `E` for a `G` edge and never validated. Removals now use the bound edge's type (`locy_abduce.rs`). Mode B still re-runs a probabilistic `IS NOT` as a Boolean anti-join (`calling_rule_prob_col: None`). The probe passed anyway (ABDUCE validated the edge), so the defect is not reproduced and is left open.
+- **4. ASSUME reuse floor teeth.** Reverting only `offer_baseline` (impl_locy) leaves tracked reuse at 0, as does reverting only the provenance guard in `re_evaluate_strata_reusing`: each guard alone keeps reuse at 0. Reverting both gives tracked reuse 8149 / 17743 with seed 1792452210422130158, and the pin fires; 0 divergences were found. The test now evaluates every check and reports all failures together, so a divergence cannot hide the pin. It also refuses a vacuous pin (no tracked case). impl_locy was restored, md5 OK.
+- **5. `allow_partial` deadline.** An in-memory QUERY now checks the deadline and cancellation every 1024 evaluated rows (`check_interrupt`). A `Timeout` from a command is a cut under `allow_partial`. A command that finishes late keeps its answer, but the overrun is reported. The final check uses the instant that `evaluation_time` ends on. Without `allow_partial`, conversion and hydration stop at the deadline (`DeadlinePassed` → `Timeout`). **Stopped (decision conflicts with evidence):** bounding conversion and hydration under `allow_partial`. The documented contract (`troubleshooting.md`: "its result has the complete facts", `LocyConfig::allow_partial`) and the `VID_HYDRATION_MIN_BUDGET` invariant (encoding independent of timing) both oppose it. A deadline-cut run would then always return no facts, or unhydrated ones, because conversion starts after the deadline. Tests: two deterministic `locy_query` unit tests count the checks. A timing-sweep integration test (engine-clock invariant) did not fail under the revert in two runs and took about 100 s, so it was not kept. The late-overrun reporting has no discriminating test.
+- **6. Registered-rule parameters.** `RuleDefinition::parameters` (from the pest pairs) → `CompiledRule::parameters`; `check_program_parameters` runs after `merge_registered_rules` (session, `LocyEngine`, and now `PreparedLocy`, which checked nothing up front). Before: `["c"]` then an evaluation error; after: `["c","a","b","d"]`.
+- **Revert check** (5 files, one build, restored md5 OK): the item-1 diamond and property tests, the 4 Mode A child tests, the PRIORITY and BEST BY probes, the parameter test and the 2 QUERY unit tests all failed. The probes for recursion, negation, FOLD and probabilistic negation passed (they are controls).
+- **Suites.** uni-db `/locy/` 507/507; Locy TCK 553/553 schemaless and 553/553 sidecar; uni-locy + uni-query (lib+tests) 1142/1142; uni-locy-oracle 48 passed / 5 skipped; uni-cypher 138/140, where the 2 failures are `docs_snippets` over gitignored generated `website/docs/examples/python/*.md` and the untracked `features/triggers-cdc.md` (not Q1 files). Clippy `-D warnings` is clean on uni-cypher, uni-locy, uni-query, uni-locy-oracle and uni-db (`--lib --test integration`).
+- **Follow-up (coordinator decisions).**
+  - (a) Under `allow_partial`, conversion and hydration may run past the deadline, as decided. The docs (troubleshooting, release notes, Black Book) now say so and explain why.
+  - (b) A non-fold PROB fact's own value is now exact. Repro: `twice(a,b) :- (a)-[e]->(b), a IS reach TO b, PROB e.p` on the diamond, queried directly in exact mode, gave 0.5215; possible worlds give 0.7. After the fix it is 0.7. In the random graphs, `hop(n1,n1,n1)` gave 0.81 against possible worlds 0.9. Fix: `LineageStore::publish_rows` now returns the facts after `correct_rows`. A row derived more than one way, or whose row formula is not read-once, raises `SharedProbabilisticDependency`; in exact mode and `TopKProofs` it is recomputed as the OR of its derivations. The property test now runs 32 graphs over 4 programs (adding `twice`) and also asserts the non-fold rule's directly queried values, exact against possible worlds and default against possible worlds where no warning is raised.
+  - (c) The late overrun now has a deterministic test. A `locy::after-command` failpoint seam sleeps past the deadline after a command completes. `locy::locy_budget_resilience` (failpoint lane) asserts that `incomplete` is set, with the answer kept, under `allow_partial`, and that the program fails with `Timeout` without it; a control run without the seam is complete.
+  - Revert check: removing both late-overrun checks and the exact recomputation in `correct_rows` makes all 3 new tests fail (`incomplete` unset; 0.5215; 0.81). Restored, md5 OK.
+- **Open.** Mode B still treats a probabilistic `IS NOT` as Boolean (not reproduced).
+
+### Q9 — storage isolation (versioned reads after deletes, bulk version reservation, Q2 follow-ups)
+
+- **Versioned reads after a delete (Q8 finding).** Repro (`storage::versioned_read_after_delete`, declared and schemaless): seed `v = 1..5`, flush, snapshot, `DETACH DELETE v = 2` + relabel + create, flush. Before: pinned and `VERSION AS OF` read `[1, 3, 4, 5]`; a transaction begun before the delete read the same; a label removed after the snapshot made `(a:A)-[:R]->(b:B)` return nothing; schemaless `R` lost deleted edges and showed new ones on a flush-manifest pin. Forks were already correct. Root causes, each confirmed by its own revert: (1) the flush wrote vertex tombstones as a `MergeInsert` on `_vid`, restamping every stored row of the vertex with the delete's version; tombstones are now appended full rows (main and label tables) and the partial-tombstone helpers are deleted; `load_vid_labels_index` now ranks rows by version instead of `_deleted = false` + last row. (2) A pinned view copied the live VID-to-labels index; `rewind_vid_labels_index_to_pin` re-reads the vertices changed above the pin. (3) `find_edges_by_type_names` applied no snapshot ceiling; it uses `edge_row_visibility`. Found on the way, measured: (4) semantic compaction collapsed history under every pinned reader (declared label read `[1, 3, 5]` after `uni.admin.compact()`; a transaction too), contrary to the Black Book; explicit snapshots now read their restore point's tagged table versions (`StorageBackend::at_table_versions`), compaction merges no vertex row above the oldest pin and folds no delta above the oldest snapshot-view pin (`PinnedVersions::begin_merge`), and records a horizon (`catalog/compaction_horizon.json`) below which a flush-manifest pin made later is refused (`InvalidArgument`). (5) The CSR warm filtered L2 adjacency by `_version`, a column it does not have: any pinned read after a compaction failed with a schema error. (6) Appended tombstones hit `NOT NULL` list/sparse/multivector columns whose builders write null for a deleted row (`fork_index_sparse`, `fork_index_multivector` failed); `fill_deleted_nulls` gives deleted rows a zero value, live nulls still refused. Also updated: `compaction_property_fidelity::a_truncated_delete_still_tombstones_every_label` now checks each vid's newest row (it read the first row, i.e. assumed in-place tombstones).
+- **Bulk version reserved at first write (Q5 finding).** Repro without failpoints (`storage::bulk_snapshot_hwm::ceilings_captured_while_a_load_is_staged_exclude_it`), measured with the exclusion disabled: a transaction begun while the load was staged read 2 then 22 rows; a flush manifest cut then read 22 (in-process and after reopen); the explicit snapshot read 2 (restore-point read). With failpoints (`bulk_isolation_resilience::ceilings_captured_mid_publish_exclude_the_load_resilience`, publish parked after `main_edges`): the mid-publish snapshot read `(30, 1, 20, 0)` (load vertices, no load edges) and restoring it kept them. Fix: `L0Manager::reserve_bulk_version` reserves and records the version under the buffer lock every ceiling capture reads; `SnapshotView::unpublished_bulk` and `SnapshotManifest::unpublished_bulk_versions` carry the versions to exclude for good (`pinned_at_version_excluding`, `visibility_at`, CSR warm); the load's own manifest and `raise_snapshot_hwm` recompute/clear it; restore deletes rows above the ceiling or of unpublished versions (`drop_rows_outside_the_snapshot`). Rotation no longer reuses a version reserved across it (by construction; not reproduced). Q5's gate, re-drive and recovery suites pass unchanged.
+- **(a) Identity memo charged.** `EdgeIdentityMemo::charge` adds 40 B/identity + 24 B/scanned pair to `estimated_size` and `size_bytes`; merge and fork leave the charge out. Tests: `identity_memo_is_charged_to_its_buffer` (the memo-filling update grew 133 B before, 8157 B after), `merge_and_clone_leave_the_identity_memo_charge_out`.
+- **(b) Vertex probe measured and gated.** `triggers::trigger_vertex_probe_cost` (ignored harness; probe time from the `uni::trigger_probe` debug event, debug build). Before, no user trigger: 100k `SET` flushed 0.73–1.04 s, create beside flushed 1.0–1.07 s; 1M 18.0 s and 53.9 s (commit 67.5 s). Wasted: the only trigger was `:_AuditMe`. Fix: candidates filtered by `TriggerRouter::wants_node_events_for` (unless CDC) and `L0Buffer::created_vertices` skipped. After: not run in those arms (1M create-beside commit 13.3 s); with a node trigger on the label, `SET` still reads (18.2 → 18.1 s at 1M) and create-beside (34.4 s) is skipped. The transaction-level gate is covered by this measurement only; the router predicate and created-vertex skip have unit tests.
+- **Revert checks.** One mechanism at a time, each restored with `md5sum -c` OK: append tombstones → 4 tests fail; restore-point reads → 2; label rewind → 5; schemaless ceiling → 2; compaction floor → 2; L2 filter → 2; null fill → 2 (the fork tests); label-index load → 1; bulk reservation → staged-window test (tx 22 ≠ 2) and mid-publish test; restore deletion → mid-publish test (`restored`); memo charge, memo merge, created-vertex skip → their tests.
+- **Suites.** uni-store + uni-bulk + uni-plugin-host + uni-common 1102/1102; uni-store + uni-bulk with failpoints 829/829; uni-db `/snapshot|restore|fork|bulk|storage|cypher_read|edge_source|trigger|compaction|vacuum|time_travel|update_edge_identity/` 1158/1158; uni-db failpoints `/bulk|resilience|recovery|crash|snapshot|compaction/` 255/255; TCK schemaless 3925/3925, sidecar 3925/3925 (1 skipped each). Clippy `-D warnings` clean: uni-common, uni-store (± failpoints), uni-bulk, uni-plugin-host, uni-db (± failpoints).
+- **Open.**
+  - A transaction's edge tier is still unpinned (live CSR): its traversals see edges committed after it began, a bulk load's included.
+  - A flush-manifest pin is refused after compaction merged its history; only explicit snapshots are durable time-travel points. A session pinned to a flush manifest holds compaction back for as long as it lives.
+  - `get_vertex_ext_ids` still filters `_deleted = false` with no version ranking; with appended tombstones a deleted vid keeps its entry (only consulted for vids taken from query rows; unmeasured).
+  - Each transaction begin deep-copies the VID-to-labels index (`pinned_at_version`), O(vertices) per transaction (from the code; unmeasured).
+  - The built-in audit trigger's label filter is `":_AuditMe"` while event rows carry `_AuditMe`, so it likely never fires (from the code; unverified).

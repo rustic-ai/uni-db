@@ -28,6 +28,7 @@ arrow-row = { workspace = true }
 regex = { workspace = true }
 regex-syntax = { workspace = true }
 regex-automata = { workspace = true }
+stacker = "0.1"
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 rand = { workspace = true }
@@ -37,9 +38,9 @@ futures = { workspace = true }
 parking_lot = { workspace = true }
 async-trait = { workspace = true }
 base64 = "0.22"
+tokio = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
 
 [features]
 default = []

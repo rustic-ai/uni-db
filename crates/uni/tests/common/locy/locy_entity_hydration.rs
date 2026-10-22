@@ -369,6 +369,36 @@ const RICH_KEYS: &[(&str, &[&str])] = &[
     ("reach", &["a", "b"]),
 ];
 
+/// The rows of a program's one ASSUME, whose body's only command is a QUERY.
+fn assume_query_rows(result: &uni_db::locy::LocyResult) -> Result<Vec<HashMap<String, Value>>> {
+    let results = result
+        .command_results
+        .iter()
+        .find_map(|c| c.as_assume().map(|(results, _)| results))
+        .ok_or_else(|| anyhow::anyhow!("no ASSUME result"))?;
+    match results {
+        [CommandResult::Query(rows)] => Ok(rows.clone()),
+        other => bail!("expected the ASSUME body's one QUERY result, got {other:?}"),
+    }
+}
+
+/// The entities in one command result, an ASSUME's body results included.
+///
+/// An ASSUME's `derived` facts are left out: they name the hypothetical
+/// state, which Cypher cannot read once the ASSUME restored it.
+fn command_entities(cr: &CommandResult, entities: &mut Vec<Value>) {
+    match cr {
+        CommandResult::Query(rows) | CommandResult::Cypher(rows) => rows_entities(rows, entities),
+        CommandResult::Assume { results, .. } => {
+            for r in results {
+                command_entities(r, entities);
+            }
+        }
+        CommandResult::Explain(node) => explain_entities(node, entities),
+        _ => {}
+    }
+}
+
 /// Every entity in `result` — derived facts and command results alike — equals
 /// Cypher's read of it on `session`. Returns how many were checked.
 async fn assert_result_matches_cypher(
@@ -381,13 +411,7 @@ async fn assert_result_matches_cypher(
         rows_entities(rows, &mut entities);
     }
     for cr in &result.command_results {
-        match cr {
-            CommandResult::Query(rows)
-            | CommandResult::Assume(rows)
-            | CommandResult::Cypher(rows) => rows_entities(rows, &mut entities),
-            CommandResult::Explain(node) => explain_entities(node, &mut entities),
-            _ => {}
-        }
+        command_entities(cr, &mut entities);
     }
     for e in &entities {
         assert_matches_cypher(session, e, context).await?;
@@ -556,14 +580,7 @@ async fn locy_entity_hydration_commands_keep_hydrated_values() -> Result<()> {
         .run()
         .await?;
     assert_keys_hydrated(&result, RICH_KEYS)?;
-    let rows = result
-        .command_results
-        .iter()
-        .find_map(|c| match c {
-            CommandResult::Assume(rows) => Some(rows.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| anyhow::anyhow!("no ASSUME result"))?;
+    let rows = assume_query_rows(&result)?;
     let mut hyp = None;
     for row in &rows {
         match (row.get("a"), row.get("b")) {
@@ -1031,14 +1048,7 @@ async fn locy_entity_hydration_edges_match_cypher() -> Result<()> {
         .with_config(config())
         .run()
         .await?;
-    let rows = result
-        .command_results
-        .iter()
-        .find_map(|c| match c {
-            CommandResult::Assume(rows) => Some(rows.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| anyhow::anyhow!("no ASSUME result"))?;
+    let rows = assume_query_rows(&result)?;
     let mut hyp = Vec::new();
     for row in &rows {
         match row.get("r") {
@@ -1141,19 +1151,20 @@ async fn locy_entity_hydration_derive_inside_assume_reads_the_overlay() -> Resul
             .with_config(config())
             .run()
             .await?;
-        let assume_rows = assumed
-            .command_results
-            .iter()
-            .find_map(|c| match c {
-                CommandResult::Assume(rows) => Some(rows.clone()),
-                _ => None,
-            })
-            .ok_or_else(|| anyhow::anyhow!("{rel}: no ASSUME result"))?;
-        // The body's DERIVE contributes one `{affected: n}` row, ahead of the
-        // Cypher read's rows.
-        let (derive_rows, read_rows): (Vec<_>, Vec<_>) = assume_rows
-            .into_iter()
-            .partition(|row| row.contains_key("affected"));
+        // The body's two commands each return their own result: the
+        // DERIVE's affected count, then the Cypher read's rows.
+        let (hypothetical_affected, read_rows) = match assumed.command_results.as_slice() {
+            [CommandResult::Assume { results, .. }] => match results.as_slice() {
+                [
+                    CommandResult::Derive { affected },
+                    CommandResult::Cypher(rows),
+                ] => (*affected as i64, rows.clone()),
+                other => {
+                    bail!("{rel}: expected the body's DERIVE and Cypher results, got {other:?}")
+                }
+            },
+            other => bail!("{rel}: expected one ASSUME result, got {other:?}"),
+        };
         let hypothetical = pairs(&read_rows);
 
         let tx = db.session().tx().await?;
@@ -1175,12 +1186,8 @@ async fn locy_entity_hydration_derive_inside_assume_reads_the_overlay() -> Resul
                 _ => None,
             })
             .ok_or_else(|| anyhow::anyhow!("{rel}: no Cypher result"))?;
-        let hypothetical_affected: Vec<_> = derive_rows
-            .iter()
-            .map(|row| row.get("affected").cloned())
-            .collect();
         ensure!(
-            hypothetical_affected == vec![real_affected.map(Value::Int)],
+            Some(hypothetical_affected) == real_affected,
             "{rel}: DERIVE inside ASSUME reported {hypothetical_affected:?}, the real \
              DERIVE {real_affected:?}"
         );

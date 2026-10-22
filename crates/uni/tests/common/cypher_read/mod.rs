@@ -80,3 +80,5 @@ pub mod range_null_test;
 pub mod regex_full_match_test;
 // COPY TO writes exactly the user-visible properties; COPY FROM reads them back.
 pub mod copy_user_properties;
+// Unconstrained traversal sources read from the edge type's adjacency.
+pub mod edge_source_scan_test;

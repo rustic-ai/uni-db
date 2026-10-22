@@ -436,6 +436,12 @@ impl IndexRebuildManager {
     /// one pending task as in-progress, executes the rebuild, updates task
     /// status and index metadata, and persists state.
     async fn process_next_pending_task(self: &Arc<Self>) {
+        // Held from the claim until the outcome is in the catalog, so a
+        // snapshot restore (which pauses builds) never interleaves with a
+        // build: one that read the store before the rewind cannot record or
+        // commit anything after it. While a restore runs this waits, and the
+        // queued tasks run afterwards against the restored store.
+        let _permit = self.storage.index_build_permit().await;
         // Find and claim a pending task
         let task_to_process = {
             let mut tasks = self.tasks.write();

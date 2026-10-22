@@ -589,6 +589,8 @@ fn rewrite_goal(
     let (answered_by, goal_magic) = interner.intern(rule, &adornment);
     let mut copies: Vec<CompiledRule> = Vec::new();
     let mut magic: BTreeMap<String, (Vec<YieldColumn>, Vec<CompiledClause>)> = BTreeMap::new();
+    // The parameters of the rules each magic rule's clauses come from.
+    let mut magic_parameters: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut adorned = Vec::new();
     let mut adorned_originals = BTreeSet::new();
 
@@ -622,6 +624,12 @@ fn rewrite_goal(
             )?;
             clauses.push(copy);
             for (target, schema, propagation) in propagations {
+                let inherited = magic_parameters.entry(target.clone()).or_default();
+                for p in &original.parameters {
+                    if !inherited.contains(p) {
+                        inherited.push(p.clone());
+                    }
+                }
                 magic
                     .entry(target)
                     .or_insert_with(|| (schema, Vec::new()))
@@ -636,6 +644,7 @@ fn rewrite_goal(
             clauses,
             yield_schema: original.yield_schema.clone(),
             priority: original.priority,
+            parameters: original.parameters.clone(),
         });
     }
 
@@ -646,6 +655,7 @@ fn rewrite_goal(
     let mut rules = copies;
     for (name, (yield_schema, clauses)) in magic {
         rules.push(CompiledRule {
+            parameters: magic_parameters.remove(&name).unwrap_or_default(),
             name,
             clauses,
             yield_schema,

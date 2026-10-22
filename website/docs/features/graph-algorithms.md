@@ -43,6 +43,17 @@ Uni includes a built-in graph algorithm library exposed through Cypher procedure
     print(rows)
     ```
 
+## Named Projections and Transactions
+
+`uni.graph.project(name, graphRef, config)` registers a named projection in a
+catalog shared by every session of the database. Like Neo4j GDS's graph
+catalog, it is not transactional: a projection is visible to all sessions once
+built and is not removed by a rollback. Inside a transaction it is built from
+the transaction's snapshot -- but a transaction that holds uncommitted writes
+cannot build one (`UniError::UncommittedWritesInTransaction`), since the
+projection would publish those writes. Commit or roll back first, or project
+outside the transaction.
+
 ## Use Cases
 
 - Identify important nodes in a graph.

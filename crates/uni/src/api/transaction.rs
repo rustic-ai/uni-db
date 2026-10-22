@@ -234,6 +234,33 @@ fn classify_verb(cypher: &str) -> &'static str {
     "write"
 }
 
+/// Authorization verb for a statement that is not a pure read.
+///
+/// A statement calling a `Dbms`-mode procedure (`uni.admin.snapshot.restore`,
+/// `uni.admin.compact`, …) authorizes as `"dbms"`, one calling a `Schema`-mode
+/// procedure (`uni.schema.createLabel`, …) as `"schema"`; anything else falls
+/// back to [`classify_verb`]. `classify_verb` reads only the leading keyword,
+/// so it called every `CALL` a `"write"`, whatever the procedure did.
+/// `registered_mode` resolves procedures the executor does not build in.
+pub(crate) fn statement_verb(
+    cypher: &str,
+    registered_mode: &dyn Fn(&str) -> Option<uni_plugin::traits::procedure::ProcedureMode>,
+) -> &'static str {
+    use uni_plugin::traits::procedure::ProcedureMode;
+    let strongest = uni_cypher::parse(cypher)
+        .ok()
+        .and_then(|ast| uni_query::strongest_procedure_mode(&ast, registered_mode));
+    match strongest {
+        Some(ProcedureMode::Read | ProcedureMode::Write) | None => classify_verb(cypher),
+        Some(ProcedureMode::Schema) => match classify_verb(cypher) {
+            "dbms" => "dbms",
+            _ => "schema",
+        },
+        // `Dbms` and any mode added later.
+        Some(_) => "dbms",
+    }
+}
+
 /// Map a writer error into a `UniError`, keeping a typed error the writer
 /// raised (e.g. a reserved property name) instead of wrapping it in
 /// `Internal`.
@@ -245,6 +272,21 @@ fn writer_error(e: anyhow::Error) -> UniError {
 }
 
 impl Transaction {
+    /// A writer call bounded by the statement timeout, like a Cypher write on
+    /// this transaction: without it the write throttle's hard band stalls a
+    /// bulk call indefinitely. Type-erased so the deep writer future does
+    /// not nest inside every caller's future type (it overflowed the
+    /// compiler's auto-trait recursion limit under `async_trait`).
+    fn bounded_write<'a, T: Send + 'a>(
+        &'a self,
+        fut: impl std::future::Future<Output = Result<T>> + Send + 'a,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'a>> {
+        Box::pin(with_optional_timeout(
+            Some(self.db.config.query_timeout),
+            fut,
+        ))
+    }
+
     pub(crate) async fn new(session: &Session) -> Result<Self> {
         Self::new_with_options(session, None, IsolationLevel::default(), false).await
     }
@@ -344,7 +386,8 @@ impl Transaction {
             let writer: &uni_store::Writer = writer_lock.as_ref();
             let mut snap = writer.l0_manager.pin_snapshot();
             snap.pinned_storage = Some(Arc::new(
-                db.storage.pinned_at_version(snap.started_at_version),
+                db.storage
+                    .pinned_at_version_excluding(snap.started_at_version, &snap.unpublished_bulk),
             ));
             Arc::new(parking_lot::Mutex::new(Some(snap)))
         } else {
@@ -545,9 +588,11 @@ impl Transaction {
                 // baseline alongside the L0 pin.
                 self.tx_l0.write().occ_read_seq = writer.current_commit_sequence();
                 let mut snap = writer.l0_manager.pin_snapshot();
-                snap.pinned_storage = Some(Arc::new(
-                    self.db.storage.pinned_at_version(snap.started_at_version),
-                ));
+                snap.pinned_storage =
+                    Some(Arc::new(self.db.storage.pinned_at_version_excluding(
+                        snap.started_at_version,
+                        &snap.unpublished_bulk,
+                    )));
                 *self.snapshot.lock() = Some(snap);
             }
         }
@@ -580,7 +625,7 @@ impl Transaction {
     /// poisons the transaction (bug #15).
     async fn execute_inner(&self, cypher: &str) -> Result<ExecuteResult> {
         self.check_completed()?;
-        self.authorize(cypher, classify_verb(cypher))?;
+        self.authorize(cypher, self.write_verb(cypher))?;
         let before = self.snapshot_l0();
         let result = self.query_inner(cypher).await?;
         let after = self.snapshot_l0();
@@ -600,23 +645,39 @@ impl Transaction {
     /// [`Self::query_inner`].
     ///
     /// A statement with no write/schema/dbms clause authorizes under `"read"`;
-    /// otherwise it uses [`classify_verb`]. Mirrors `Session::run`'s read-only
+    /// otherwise it uses [`statement_verb`]. Mirrors `Session::run`'s read-only
     /// oracle (consulting the db-level plugin registry for procedure modes — a
     /// transaction has no session-scoped registry) so a write executed through
     /// `tx.query` is authorized under the correct verb rather than mis-denying a
     /// read as a write.
     fn authz_verb(&self, cypher: &str) -> &'static str {
+        use uni_plugin::traits::procedure::ProcedureMode;
         let proc_is_write = |name: &str| {
-            use uni_plugin::traits::procedure::ProcedureMode;
-            uni_plugin::QName::parse(name)
-                .ok()
-                .and_then(|q| self.db.plugin_registry.procedure(&q))
-                .is_some_and(|e| !matches!(e.signature.mode, ProcedureMode::Read))
+            self.registered_procedure_mode(name)
+                .is_some_and(|mode| !matches!(mode, ProcedureMode::Read))
         };
         match uni_cypher::parse(cypher) {
             Ok(ast) if uni_query::validate_read_only_with(&ast, &proc_is_write).is_ok() => "read",
-            _ => classify_verb(cypher),
+            _ => self.write_verb(cypher),
         }
+    }
+
+    /// Mode of a registered (non-built-in) procedure, from the db-level
+    /// plugin registry — a transaction has no session-scoped registry.
+    fn registered_procedure_mode(
+        &self,
+        name: &str,
+    ) -> Option<uni_plugin::traits::procedure::ProcedureMode> {
+        uni_plugin::QName::parse(name)
+            .ok()
+            .and_then(|q| self.db.plugin_registry.procedure(&q))
+            .map(|e| e.signature.mode)
+    }
+
+    /// Authorization verb for a statement run as a write: [`statement_verb`]
+    /// over this transaction's procedure modes.
+    fn write_verb(&self, cypher: &str) -> &'static str {
+        statement_verb(cypher, &|name| self.registered_procedure_mode(name))
     }
 
     /// Per-statement guards shared by the typed `execute`/`query` entry points
@@ -633,7 +694,7 @@ impl Transaction {
     /// Returns an authorization error, or [`UniError::LockTimeout`] if a
     /// `FOR UPDATE` lock cannot be acquired.
     async fn run_exec_guards(&self, cypher: &str, params: &HashMap<String, Value>) -> Result<()> {
-        self.authorize(cypher, classify_verb(cypher))?;
+        self.authorize(cypher, self.write_verb(cypher))?;
         if self.db.config.ssi_enabled {
             self.acquire_for_update_locks(cypher, params).await?;
         } else if cypher.to_ascii_lowercase().contains("for update") {
@@ -753,11 +814,14 @@ impl Transaction {
         cancel: crate::api::impl_query::CancelScope,
     ) -> Result<ApplyResult> {
         let mut facts_applied = 0;
+        // Each statement runs with the parameters the program was evaluated
+        // with: a Cypher write command reading `$param` stored NULL when
+        // replayed without them.
         for query in derived.mutation_queries {
             db.execute_ast_internal_with_tx_l0(
                 query,
                 "<locy-apply>",
-                HashMap::new(),
+                derived.mutation_params.clone(),
                 db.config.clone(),
                 tx_l0.clone(),
                 cancel.clone(),
@@ -842,16 +906,24 @@ impl Transaction {
             .allocate_vids(properties_list.len())
             .await
             .map_err(UniError::Internal)?;
-        // Route mutations through the transaction's private L0.
-        let result = writer
-            .insert_vertices_batch(
-                vids.clone(),
-                properties_list,
-                labels.iter().map(|l| (*l).to_string()).collect(),
-                Some(&self.tx_l0),
-            )
-            .await
-            .map_err(writer_error);
+        // Route mutations through the transaction's private L0, bounded by
+        // the statement timeout like a Cypher write on this transaction: the
+        // write throttle's hard band otherwise stalls a batch indefinitely.
+        // One batch is one statement for the write throttle: it pays once.
+        let _scope = uni_store::runtime::l0::StatementScope::begin_batch(self.tx_l0.clone());
+        let result = self
+            .bounded_write(async {
+                writer
+                    .insert_vertices_batch(
+                        vids.clone(),
+                        properties_list,
+                        labels.iter().map(|l| (*l).to_string()).collect(),
+                        Some(&self.tx_l0),
+                    )
+                    .await
+                    .map_err(writer_error)
+            })
+            .await;
         // A partially-applied batch leaves rows in `tx_l0`; poison the tx so it
         // cannot commit (bug #15).
         self.mark_on_err(result)?;
@@ -874,11 +946,15 @@ impl Transaction {
             operation: "update_vertex_properties".to_string(),
         })?;
         let writer: &uni_store::Writer = writer_lock.as_ref();
-        let result = writer
-            .insert_vertex_with_labels(vid, props, &[label.to_string()], Some(&self.tx_l0))
-            .await
-            .map(|_| ())
-            .map_err(UniError::Internal);
+        let result = self
+            .bounded_write(async {
+                writer
+                    .update_vertex_with_labels(vid, props, &[label.to_string()], Some(&self.tx_l0))
+                    .await
+                    .map(|_| ())
+                    .map_err(writer_error)
+            })
+            .await;
         self.mark_on_err(result)
     }
 
@@ -897,10 +973,14 @@ impl Transaction {
             operation: "delete_vertex_by_vid".to_string(),
         })?;
         let writer: &uni_store::Writer = writer_lock.as_ref();
-        let result = writer
-            .delete_vertex(vid, Some(vec![label.to_string()]), Some(&self.tx_l0))
-            .await
-            .map_err(UniError::Internal);
+        let result = self
+            .bounded_write(async {
+                writer
+                    .delete_vertex(vid, Some(vec![label.to_string()]), Some(&self.tx_l0))
+                    .await
+                    .map_err(writer_error)
+            })
+            .await;
         self.mark_on_err(result)
     }
 
@@ -937,25 +1017,29 @@ impl Transaction {
             .allocate_eids(edges.len())
             .await
             .map_err(UniError::Internal)?;
-        // Route mutations through the transaction's private L0.
-        let result: Result<()> = async {
-            for ((src_vid, dst_vid, props), eid) in edges.into_iter().zip(eids) {
-                writer
-                    .insert_edge(
-                        src_vid,
-                        dst_vid,
-                        type_id,
-                        eid,
-                        props,
-                        Some(edge_type.to_string()),
-                        Some(&self.tx_l0),
-                    )
-                    .await
-                    .map_err(writer_error)?;
-            }
-            Ok(())
-        }
-        .await;
+        // Route mutations through the transaction's private L0, bounded by
+        // the statement timeout (see `bulk_insert_vertices_labeled`). One
+        // batch is one statement for the write throttle: it pays once.
+        let _scope = uni_store::runtime::l0::StatementScope::begin_batch(self.tx_l0.clone());
+        let result: Result<()> = self
+            .bounded_write(async {
+                for ((src_vid, dst_vid, props), eid) in edges.into_iter().zip(eids) {
+                    writer
+                        .insert_edge(
+                            src_vid,
+                            dst_vid,
+                            type_id,
+                            eid,
+                            props,
+                            Some(edge_type.to_string()),
+                            Some(&self.tx_l0),
+                        )
+                        .await
+                        .map_err(writer_error)?;
+                }
+                Ok(())
+            })
+            .await;
         // A partially-applied batch leaves rows in `tx_l0`; poison the tx so it
         // cannot commit (bug #15).
         self.mark_on_err(result)
@@ -1032,7 +1116,7 @@ impl Transaction {
             self.principal.clone(),
             self.hooks.clone(),
             self.session_id.clone(),
-            classify_verb(cypher).to_string(),
+            self.write_verb(cypher).to_string(),
         );
         crate::api::prepared::PreparedQuery::new_tx_bound(
             self.db.clone(),
@@ -1045,13 +1129,25 @@ impl Transaction {
     }
 
     /// Prepare a Locy program for repeated evaluation within this transaction.
+    ///
+    /// Each execution runs as [`Self::locy`] does: it reads the
+    /// transaction's uncommitted writes and pinned snapshot, its DERIVE and
+    /// Cypher writes land in the transaction (kept on commit, discarded on
+    /// rollback), and it runs under the transaction's cancellation scope.
     #[instrument(skip(self), fields(transaction_id = %self.id))]
     pub async fn prepare_locy(&self, program: &str) -> Result<crate::api::prepared::PreparedLocy> {
         self.check_completed()?;
-        crate::api::prepared::PreparedLocy::new(
+        let binding = crate::api::prepared::PreparedTxBinding {
+            tx_l0: self.tx_l0.clone(),
+            id_reservoir: self.id_reservoir.clone(),
+            snapshot: self.snapshot.clone(),
+        };
+        crate::api::prepared::PreparedLocy::new_tx_bound(
             self.db.clone(),
             self.rule_registry.clone(),
             program,
+            binding,
+            self.cancel_scope(None),
         )
     }
 
@@ -1190,23 +1286,53 @@ impl Transaction {
         // gets its committed state (L0 chain over L1) read in one batched
         // lookup, which both detects pre-existence for edges already flushed
         // and supplies their whole pre-image.
+        //
+        // The edge read runs only when an edge event can be delivered: a CDC
+        // output, or a trigger subscribed to edge events. Node-only triggers
+        // (the default `:_AuditMe` audit trigger among them) never read an
+        // edge's pre-image.
+        let wants_edge_pre_images = cdc_active || trigger_router.wants_edge_events();
         if let Some(ref mut probe) = probe_opt {
             let schema_manager = self.db.storage.schema_manager();
             let (candidates, edge_candidates) = {
                 let l0 = self.tx_l0.read();
                 let resolve = |type_id: u32| schema_manager.edge_type_name_by_id_unified(type_id);
+                let mut candidates = probe.pending_l1_candidates(&l0);
+                // A vertex's pre-image feeds only its node event rows, which
+                // are emitted under its labels in this transaction; read it
+                // only when CDC or a trigger can receive one of them.
+                if !cdc_active {
+                    candidates.retain(|(vid, _)| {
+                        let labels = l0.vertex_labels.get(vid).map_or(&[][..], Vec::as_slice);
+                        trigger_router.wants_node_events_for(labels)
+                    });
+                }
                 (
-                    probe.pending_l1_candidates(&l0),
-                    probe.pending_edge_candidates(&l0, &resolve),
+                    candidates,
+                    if wants_edge_pre_images {
+                        probe.pending_edge_candidates(&l0, &resolve)
+                    } else {
+                        Vec::new()
+                    },
                 )
             };
             if !candidates.is_empty() {
+                let started = std::time::Instant::now();
+                let vertices = candidates.len();
                 probe.extend_with_l1(candidates, &self.db.storage).await;
+                tracing::debug!(
+                    target: "uni::trigger_probe",
+                    vertices,
+                    elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                    "vertex pre-image probe"
+                );
             }
             if !edge_candidates.is_empty()
                 && let Some(l0m) = l0_manager_for_probe.as_ref()
             {
                 let schema = schema_manager.schema();
+                let started = std::time::Instant::now();
+                let edges = edge_candidates.len();
                 probe
                     .extend_edges_with_committed_state(
                         edge_candidates,
@@ -1215,6 +1341,12 @@ impl Transaction {
                         &schema,
                     )
                     .await;
+                tracing::debug!(
+                    target: "uni::trigger_probe",
+                    edges,
+                    elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                    "edge pre-image probe"
+                );
             }
         }
 

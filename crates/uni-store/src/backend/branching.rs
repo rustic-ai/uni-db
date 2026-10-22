@@ -197,6 +197,46 @@ pub trait ForkBranching: Send + Sync + 'static {
         Ok(())
     }
 
+    /// A durable description of payloads from [`Self::stage_on_branch`], from
+    /// which [`Self::publish_staged_record_on_branch`] can publish them in a
+    /// later process; `None` when they hold no rows.
+    ///
+    /// The branch counterpart of `StorageBackend::staged_record`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a payload was not staged by this implementation,
+    /// or the implementation cannot stage.
+    fn staged_record_on_branch(
+        &self,
+        table: &str,
+        branch: &str,
+        staged: &[&(dyn std::any::Any + Send + Sync)],
+    ) -> Result<Option<serde_json::Value>> {
+        let _ = staged;
+        anyhow::bail!("staged_record_on_branch('{table}', '{branch}'): this backend cannot stage")
+    }
+
+    /// Publish the rows `record` describes on `branch`, unless an earlier
+    /// attempt already did -- exactly once, as
+    /// `StorageBackend::publish_staged_record` does for a table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the commit fails, if `record` was not written by
+    /// this implementation, or if only part of the recorded files is present.
+    async fn publish_staged_record_on_branch(
+        &self,
+        table: &str,
+        branch: &str,
+        record: &serde_json::Value,
+    ) -> Result<crate::backend::traits::RecordedPublish> {
+        let _ = record;
+        anyhow::bail!(
+            "publish_staged_record_on_branch('{table}', '{branch}'): this backend cannot stage"
+        )
+    }
+
     /// Widen `branch`'s stored schema: add all-null nullable columns, and/or
     /// relax `NOT NULL` on existing ones.
     ///

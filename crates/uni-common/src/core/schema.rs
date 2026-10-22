@@ -863,6 +863,83 @@ pub struct EdgeTypeMeta {
     pub state: SchemaElementState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Whether every stored edge of this type is known to carry endpoints its
+    /// declaration accepts. Absent in a catalog written before declared
+    /// endpoints were enforced, which reads as [`EndpointConformance::Unverified`].
+    #[serde(default)]
+    pub endpoint_conformance: EndpointConformance,
+}
+
+/// What is known about stored edges conforming to their type's declared endpoints.
+///
+/// The planner narrows an unlabelled endpoint of a typed pattern to the
+/// declared labels only when this says no stored edge can violate the
+/// declaration; narrowing over a violating edge would silently drop it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum EndpointConformance {
+    /// Nothing is known: a legacy catalog, an edge type whose name may already
+    /// label stored edges, or a verification that found violations.
+    #[default]
+    Unverified,
+    /// The edge type was created while writes enforced its declaration, so no
+    /// edge of it could ever be written with a violating endpoint.
+    Enforced,
+    /// A verification pass read every stored edge of the type as of `at` and
+    /// found none violating; every write since is enforced.
+    Verified {
+        /// Start of the verified read; a fork created earlier may hold edges
+        /// the pass never saw.
+        at: DateTime<Utc>,
+    },
+}
+
+/// Writer feature: every edge write is checked against its type's declared
+/// endpoints, and every label removal that would orphan an edge is refused.
+///
+/// A binary that enforces endpoints records this in each catalog save
+/// ([`Schema::writer_features`]), each snapshot manifest and each WAL segment
+/// it writes. A manifest or segment without it may come from an older binary
+/// that wrote edges unchecked, so on open the
+/// [`EndpointConformance::Enforced`] / [`EndpointConformance::Verified`]
+/// records no longer hold (see [`SchemaManager::distrust_all_conformance`]).
+pub const WRITER_FEATURE_ENDPOINT_ENFORCEMENT: &str = "endpoint_enforcement";
+
+/// The writer features this binary records on what it writes.
+pub const WRITER_FEATURES: &[&str] = &[WRITER_FEATURE_ENDPOINT_ENFORCEMENT];
+
+/// The writer features this binary records, as owned strings.
+#[must_use]
+pub fn current_writer_features() -> Vec<String> {
+    WRITER_FEATURES.iter().map(|f| (*f).to_string()).collect()
+}
+
+/// `true` when `features` (read from a catalog, manifest or WAL segment)
+/// says its writer enforced declared edge endpoints.
+#[must_use]
+pub fn writer_enforces_endpoints(features: &[String]) -> bool {
+    features
+        .iter()
+        .any(|f| f == WRITER_FEATURE_ENDPOINT_ENFORCEMENT)
+}
+
+impl EndpointConformance {
+    /// `true` when no stored edge of the type can violate its declaration.
+    #[must_use]
+    pub fn is_conforming(&self) -> bool {
+        !matches!(self, Self::Unverified)
+    }
+
+    /// Short name for display: `unverified`, `enforced` or `verified`.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unverified => "unverified",
+            Self::Enforced => "enforced",
+            Self::Verified { .. } => "verified",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -1040,6 +1117,18 @@ pub struct Schema {
     /// Registry for schemaless edge types (dynamically assigned IDs)
     #[serde(default)]
     pub schemaless_registry: SchemalessEdgeTypeRegistry,
+    /// Writer features of the binary that saved this catalog (see
+    /// [`WRITER_FEATURES`]). Empty in a catalog saved by an older binary.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writer_features: Vec<String>,
+    /// Id of a snapshot manifest without writer features that an enforcing
+    /// binary found as the latest one on open and accepted as predating it.
+    ///
+    /// Manifests this binary writes carry [`WRITER_FEATURES`]; one without
+    /// them is either this accepted pre-existing state, or an older binary
+    /// flushed after it (see [`SchemaManager::distrust_all_conformance`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_unmarked_manifest: Option<String>,
 }
 
 impl Default for Schema {
@@ -1052,6 +1141,8 @@ impl Default for Schema {
             indexes: Vec::new(),
             constraints: Vec::new(),
             schemaless_registry: SchemalessEdgeTypeRegistry::new(),
+            writer_features: current_writer_features(),
+            trusted_unmarked_manifest: None,
         }
     }
 }
@@ -1357,6 +1448,13 @@ pub struct SchemaManager {
     /// [`SchemaManager::save_if_dirty`] tests, so a mint that happens on a
     /// synchronous path can still be persisted later by an asynchronous one.
     persisted_version: AtomicU32,
+    /// [`Schema::writer_features`] as the catalog on disk held it when this
+    /// manager loaded it; the in-memory schema carries this binary's own
+    /// features so every save records them.
+    loaded_writer_features: Vec<String>,
+    /// The catalog file on the local filesystem, when the store is local;
+    /// see [`SchemaManager::set_local_file`].
+    local_file: std::sync::OnceLock<std::path::PathBuf>,
 }
 
 impl SchemaManager {
@@ -1415,11 +1513,15 @@ impl SchemaManager {
                     }
                 }
                 let loaded_version = schema.schema_version;
+                let loaded_writer_features =
+                    std::mem::replace(&mut schema.writer_features, current_writer_features());
                 Ok(Self {
                     store,
                     path: path.clone(),
                     schema: RwLock::new(Arc::new(schema)),
                     persisted_version: AtomicU32::new(loaded_version),
+                    loaded_writer_features,
+                    local_file: std::sync::OnceLock::new(),
                 })
             }
             Err(object_store::Error::NotFound { .. }) => Ok(Self {
@@ -1429,6 +1531,8 @@ impl SchemaManager {
                 // Nothing on disk yet, so the default schema counts as
                 // unwritten: the first `save_if_dirty` must actually write.
                 persisted_version: AtomicU32::new(0),
+                loaded_writer_features: current_writer_features(),
+                local_file: std::sync::OnceLock::new(),
             }),
             Err(e) => Err(anyhow::Error::from(e)),
         }
@@ -1478,6 +1582,21 @@ impl SchemaManager {
 
     pub fn path(&self) -> &ObjectStorePath {
         &self.path
+    }
+
+    /// Record where the catalog file lives on the local filesystem, so a
+    /// caller that must make a save durable can sync it
+    /// ([`SchemaManager::local_file`]). Set once, by the opener of a local
+    /// store; later calls are ignored.
+    pub fn set_local_file(&self, file: std::path::PathBuf) {
+        let _ = self.local_file.set(file);
+    }
+
+    /// The catalog file on the local filesystem, or `None` for a remote
+    /// store (whose `put` is durable) or a manager no opener described.
+    #[must_use]
+    pub fn local_file(&self) -> Option<&std::path::Path> {
+        self.local_file.get().map(std::path::PathBuf::as_path)
     }
 
     pub fn schema(&self) -> Arc<Schema> {
@@ -1611,6 +1730,9 @@ impl SchemaManager {
             // nothing; the commit path guards the rest by refusing to call it
             // at all for a forked session.
             persisted_version: AtomicU32::new(merged_version),
+            loaded_writer_features: self.loaded_writer_features.clone(),
+            // Never saved, so never synced.
+            local_file: std::sync::OnceLock::new(),
         })
     }
 
@@ -1748,6 +1870,14 @@ impl SchemaManager {
             ));
         }
 
+        // A new type's edges are all written under enforcement -- unless the
+        // name already labels schemaless edges, which were written unchecked
+        // and which the declared type reads by name.
+        let endpoint_conformance = if schema.schemaless_registry.id_by_name(name).is_some() {
+            EndpointConformance::Unverified
+        } else {
+            EndpointConformance::Enforced
+        };
         schema.edge_types.insert(
             name.to_string(),
             EdgeTypeMeta {
@@ -1756,10 +1886,137 @@ impl SchemaManager {
                 dst_labels,
                 state: SchemaElementState::Active,
                 description,
+                endpoint_conformance,
             },
         );
         schema.bump_version();
         Ok(id)
+    }
+
+    /// Record what is known about `name`'s stored edges conforming to its
+    /// declared endpoints.
+    ///
+    /// Bumps the schema version so plans built under the previous state are
+    /// not reused.
+    ///
+    /// # Errors
+    /// When `name` is not a declared edge type, or the schema lock is poisoned.
+    pub fn set_endpoint_conformance(
+        &self,
+        name: &str,
+        conformance: EndpointConformance,
+    ) -> Result<()> {
+        let mut guard = acquire_write(&self.schema, "schema")?;
+        let schema = Arc::make_mut(&mut *guard);
+        let meta = schema
+            .edge_types
+            .get_mut(name)
+            .ok_or_else(|| anyhow!("Edge type '{}' not found", name))?;
+        if meta.endpoint_conformance != conformance {
+            meta.endpoint_conformance = conformance;
+            schema.bump_version();
+        }
+        Ok(())
+    }
+
+    /// Distrust every verification that started after `fork_created_at`.
+    ///
+    /// A fork branches from the parent's data as of its creation. A
+    /// verification that started later read the parent, not the fork's base,
+    /// so it says nothing about edges the fork inherited or wrote before it --
+    /// those fall back to [`EndpointConformance::Unverified`] in the fork's
+    /// view. [`EndpointConformance::Enforced`] holds in every branch, since no
+    /// edge of such a type was ever written unchecked.
+    ///
+    /// Returns whether any record changed. The schema version is not bumped,
+    /// so a fork's merged view stays clean; a caller persisting the change
+    /// saves explicitly.
+    ///
+    /// # Errors
+    /// When the schema lock is poisoned.
+    pub fn distrust_verifications_after(&self, fork_created_at: DateTime<Utc>) -> Result<bool> {
+        let mut guard = acquire_write(&self.schema, "schema")?;
+        let stale = guard.edge_types.values().any(|m| {
+            matches!(m.endpoint_conformance, EndpointConformance::Verified { at } if at > fork_created_at)
+        });
+        if !stale {
+            return Ok(false);
+        }
+        let schema = Arc::make_mut(&mut *guard);
+        for meta in schema.edge_types.values_mut() {
+            if matches!(meta.endpoint_conformance, EndpointConformance::Verified { at } if at > fork_created_at)
+            {
+                meta.endpoint_conformance = EndpointConformance::Unverified;
+            }
+        }
+        Ok(true)
+    }
+
+    /// [`Schema::writer_features`] of the catalog as loaded from storage.
+    #[must_use]
+    pub fn loaded_writer_features(&self) -> &[String] {
+        &self.loaded_writer_features
+    }
+
+    /// The accepted pre-existing unmarked manifest, when the catalog on disk
+    /// was saved by an enforcing binary (an older binary's save drops it).
+    ///
+    /// # Errors
+    /// When the schema lock is poisoned.
+    pub fn trusted_unmarked_manifest(&self) -> Result<Option<String>> {
+        if !writer_enforces_endpoints(&self.loaded_writer_features) {
+            return Ok(None);
+        }
+        Ok(acquire_read(&self.schema, "schema")?
+            .trusted_unmarked_manifest
+            .clone())
+    }
+
+    /// Record `id` as the accepted pre-existing unmarked manifest. Persisted
+    /// by the next save; the schema version is not bumped.
+    ///
+    /// # Errors
+    /// When the schema lock is poisoned.
+    pub fn set_trusted_unmarked_manifest(&self, id: Option<String>) -> Result<()> {
+        let mut guard = acquire_write(&self.schema, "schema")?;
+        if guard.trusted_unmarked_manifest != id {
+            Arc::make_mut(&mut *guard).trusted_unmarked_manifest = id;
+        }
+        Ok(())
+    }
+
+    /// Set every [`EndpointConformance::Enforced`] and
+    /// [`EndpointConformance::Verified`] record to
+    /// [`EndpointConformance::Unverified`].
+    ///
+    /// For storage written by a binary that may not have enforced declared
+    /// endpoints: a snapshot manifest or WAL segment without
+    /// [`WRITER_FEATURE_ENDPOINT_ENFORCEMENT`]. Returns the edge types that
+    /// changed, sorted. The schema version is not bumped (this runs at open,
+    /// before any plan exists); a caller persisting the change saves
+    /// explicitly.
+    ///
+    /// # Errors
+    /// When the schema lock is poisoned.
+    pub fn distrust_all_conformance(&self) -> Result<Vec<String>> {
+        let mut guard = acquire_write(&self.schema, "schema")?;
+        let mut changed: Vec<String> = guard
+            .edge_types
+            .iter()
+            .filter(|(_, m)| m.endpoint_conformance.is_conforming())
+            .map(|(n, _)| n.clone())
+            .collect();
+        if changed.is_empty() {
+            return Ok(changed);
+        }
+        changed.sort();
+        let schema = Arc::make_mut(&mut *guard);
+        for name in &changed {
+            if let Some(meta) = schema.edge_types.get_mut(name) {
+                meta.endpoint_conformance = EndpointConformance::Unverified;
+            }
+        }
+        Ok(changed)
     }
 
     /// Delegates to [`Schema::get_or_assign_edge_type_id`].
@@ -3301,6 +3558,7 @@ mod tests {
             dst_labels: vec!["NewLabel".into()],
             state: SchemaElementState::Active,
             description: None,
+            endpoint_conformance: Default::default(),
         };
         let delta = SchemaDelta {
             added_labels: vec![("NewLabel".to_string(), label_meta)],

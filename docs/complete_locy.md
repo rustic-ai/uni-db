@@ -88,7 +88,7 @@ Locy compiles rules into execution plans that run inside Uni's DataFusion-based 
 - **FOLD** aggregates across rows per KEY group: `FOLD total = SUM(amount)`. Monotonic variants (MSUM, MNOR, MPROD) are safe in recursion.
 - **ALONG** accumulates values along recursive paths: `ALONG cost = prev.cost + e.weight`.
 - **BEST BY** selects the optimal derivation per KEY group: `BEST BY cost ASC`.
-- **Commands** operate on rules after strata converge: QUERY (goal lookup), DERIVE (materialize to graph), ASSUME (what-if), ABDUCE (why/why-not), EXPLAIN RULE (proof trace).
+- **Commands** run after strata converge, in sequence: QUERY (goal lookup), DERIVE (materialize to graph), ASSUME (what-if), ABDUCE (why/why-not), EXPLAIN RULE (proof trace). A command reads the state every earlier command of the program left, so a QUERY after a DERIVE sees the derived edges (§13.1).
 
 ```mermaid
 graph LR
@@ -307,7 +307,7 @@ MATCH (n:Person) RETURN n.name   -- This is a plain Cypher query
 QUERY r RETURN *
 ```
 
-Cypher statements are executed as commands after strata converge. They return `CommandResult::Cypher(Vec<FactRow>)`.
+Cypher statements are executed as commands after strata converge, in program order with the other commands. They return `CommandResult::Cypher(Vec<FactRow>)`. A Cypher write (`CREATE`, `MERGE`, `SET`, `DELETE`, ...) is a command like `DERIVE`: every later command reads the graph it left (§13.1). At the transaction level it lands in the transaction; at the session level it is returned in the `DerivedFactSet` (§10.5).
 
 ## 3.4 Union Queries
 
@@ -902,7 +902,7 @@ A top-level command that triggers bottom-up evaluation of the named rule and app
 
 ## 10.5 DerivedFactSet and tx.apply()
 
-When Locy runs at **session level** (read-only), DERIVE mutations are collected into a `DerivedFactSet` rather than applied immediately:
+When Locy runs at **session level**, nothing is written to the database. The program's writes — DERIVE mutations and Cypher write commands, in program order — land in an ephemeral overlay that later commands of the same program read (§13.1) and that is discarded on return. They are collected into one `DerivedFactSet` rather than applied:
 
 ```rust
 // Session level: collect derived facts
@@ -915,7 +915,11 @@ tx.apply(derived).await?;
 tx.commit().await?;
 ```
 
-When Locy runs at **transaction level**, DERIVE mutations are applied immediately to the transaction's private L0 buffer:
+Applying it replays every write of the program in one transaction, so a session-level program's writes take effect together or not at all.
+
+One program shape cannot be replayed: a DERIVE that connects a node an earlier command of the same session-level program created (a `DERIVE (NEW ...)`, a Cypher `CREATE`). The replay finds a DERIVE's endpoints by node id, and the created node gets a new id when the replay creates it again, so such a DERIVE fails with an evaluation error naming the node instead of losing its edge. Run the program with `tx.locy()` instead.
+
+When Locy runs at **transaction level**, DERIVE mutations and Cypher writes are applied immediately to the transaction's private L0 buffer, and commit or roll back with the transaction:
 
 ```rust
 let tx = session.tx().await?;
@@ -1108,7 +1112,7 @@ graph TD
 
 # 13. Commands
 
-Commands execute in **Phase 2** (row-level dispatch) after all strata have converged in Phase 1. They operate on the converged derived relations.
+Commands execute in **Phase 2** (row-level dispatch) after all strata have converged in Phase 1, one after another in program order. The first command reads the converged derived relations; each later one reads the state the commands before it left (§13.1.1).
 
 ## 13.1 Two-Phase Execution
 
@@ -1134,6 +1138,18 @@ graph TB
 **Phase 1** runs entirely within DataFusion. Rules compile to `LogicalPlan` nodes, physical planning creates DataFusion operators (`FixpointExec`, `FoldExec`, etc.), and fixpoint iteration runs via semi-naive evaluation.
 
 **Phase 2** operates on converged facts. Commands are not queries — they perform mutations (DERIVE), hypothetical reasoning (ASSUME/ABDUCE), or introspection (EXPLAIN/QUERY).
+
+### 13.1.1 Commands run in sequence
+
+A program's commands behave exactly like the same commands run one after another, each as its own `tx.locy` call, in one transaction. A command that writes — a `DERIVE` that derived something, or a Cypher write — changes the graph, and every later command reads the changed graph and the facts derived from it: a `QUERY`, a second `DERIVE`, `EXPLAIN RULE`, `ABDUCE`, an `ASSUME` (its hypothetical state starts from the written one), `VALIDATE`, and a Cypher read.
+
+After a write, the facts are derived again when the next command that reads them runs, incrementally: a stratum the writes cannot affect keeps its facts, the rest are derived from scratch (the criterion is the one ASSUME uses, §13.4). Consecutive writes are folded into one re-derivation, and nothing is derived after the last write, so a program ending in `DERIVE` pays nothing extra. A program without a write command derives nothing again. `LocyStats::sequenced_strata_evaluated` / `sequenced_strata_reused` show the split. A program that records provenance (an `EXPLAIN RULE`, or shared-proof probability tracking) derives every stratum again after a write, recording provenance for the new state, so EXPLAIN explains the facts it reads.
+
+`ASSUME` and `ABDUCE` write only to a hypothetical state they discard, so they change nothing a later command reads. The same machinery runs an ASSUME body's commands (§13.4).
+
+`LocyResult::derived` holds the facts the program derived before its first command (hydrated in the state the program leaves), not the facts of a later state; read a later state with a `QUERY` after the write.
+
+Before this, every command read the facts derived before the first command ran: a `QUERY` after a `DERIVE` in the same program answered without the derived edges, while a Cypher read after it saw them, and a Cypher write ahead of the program's first `DERIVE` failed with "Mutation context not set".
 
 > **Expression limitation:** WHERE filters in commands use `eval_expr()` (a lightweight row-level evaluator), not DataFusion. Expression functions like `similar_to()` are limited to pure vector cosine — no auto-embed, FTS, or multi-source fusion. Rule WHERE clauses (Phase 1) have full DataFusion expression support.
 
@@ -1199,13 +1215,15 @@ The database is never permanently modified. ASSUME blocks can be nested (stacked
 
 **Incremental re-evaluation.** A stratum is recomputed when one of its rules matches a label whose membership the mutations change (a created node's labels, an added or removed label, every label when a node is deleted), matches a relationship type that gains or loses a relationship, reads a property the mutations `SET` or `REMOVE`, references (`IS` / `IS NOT`) a recomputed rule, or uses a construct whose inputs cannot be read from the syntax (subqueries, `EXISTS`, generators, neural models, plugin or retrieval functions, `rand()`, `timestamp()`). Every other stratum is reused. Recomputed strata are evaluated from scratch. Answers are the same as evaluating the program on the mutated graph; `LocyStats::hypothetical_strata_evaluated` / `hypothetical_strata_reused` show the split. A hypothetical evaluation cut short by the timeout or iteration limit is an error unless `allow_partial` is set.
 
-**Body commands run in sequence.** The body behaves exactly like its commands run one after another in a transaction that is rolled back: a `DERIVE` or a Cypher write changes the hypothetical graph, and every later command in the body (`QUERY`, another `DERIVE`, Cypher, a nested ASSUME) reads the changed graph and the facts derived from it. After each command that writes, the parent's strata are re-derived incrementally against the write's footprint (the same criterion as above; a `DERIVE`'s footprint is that of the edge or node writes it ran, and a `DERIVE` that derived nothing writes nothing), and the body's own rules are derived again on top. Before, the body's facts were derived once, before its first command, so a `QUERY` after a `DERIVE` in the same body answered from the graph without the derived edges while a Cypher read saw them.
+**Body commands run in sequence**, with the same machinery as a program's top-level commands (§13.1.1). The body behaves exactly like its commands run one after another in a transaction that is rolled back: a `DERIVE` or a Cypher write changes the hypothetical graph, and every later command in the body (`QUERY`, another `DERIVE`, Cypher, a nested ASSUME) reads the changed graph and the facts derived from it. After a command that writes, the parent's strata are re-derived incrementally against the write's footprint when a later body command reads facts (the same criterion as above; a `DERIVE`'s footprint is that of the edge or node writes it ran, and a `DERIVE` that derived nothing writes nothing), and the body's own rules are derived again on top. Before, the body's facts were derived once, before its first command, so a `QUERY` after a `DERIVE` in the same body answered from the graph without the derived edges while a Cypher read saw them.
 
-The ASSUME's result is the body commands' rows, concatenated in order: a `QUERY` or Cypher command contributes its rows, a `DERIVE` one `{affected: n}` row (the count a top-level `DERIVE` reports as `CommandResult::Derive { affected }`), and a nested ASSUME its result rows. A body with no commands returns every fact its rules derived. (A `DERIVE` and a nested ASSUME used to contribute nothing, so a body whose only command was `DERIVE` returned no rows.)
+The ASSUME's result holds one result per body command, in order, each the result the same command gives at the top level: `Query(rows)` for a `QUERY`, `Derive { affected }` for a `DERIVE`, `Cypher(rows)` for a Cypher command, and a nested ASSUME's own `Assume { .. }`. With them it carries `derived`: every rule's facts, the program's and the body's own, in the hypothetical state the body's first command reads (after the ASSUME's mutations, before any body command). That is the point a program's own `LocyResult::derived` is taken at, before its first command; the state after the last body command is not reported, because re-derivation is lazy and a body ending in a write never derives it. A body that only defines rules has no results; its facts are in `derived`. (Until 4.2 the result was the body commands' rows concatenated into one list, with a `DERIVE` contributing an `{affected: n}` row and a rules-only body returning every derived fact as rows.)
 
-`ABDUCE` and `EXPLAIN RULE` are compile errors inside an ASSUME body, at any nesting depth (`LocyCompileError::AssumeBodyCommandNotAllowed`). Their results are not rows, so the ASSUME used to compute them and drop them. To combine them with a hypothetical change, run the `ABDUCE` / `EXPLAIN RULE` at the top level after the ASSUME, or apply the change in a transaction (`tx()`, mutate, run the command, `rollback()`), or in a scratch transaction (`Session::scratch()`, Python `session.scratch()`), whose writes are always discarded. A `DERIVE` in the body is allowed: its edges land in the hypothetical graph, where every later command in the same body reads them, and are rolled back with it.
+`CommandResult::rows()` and `LocyResult::rows()` search depth first: an ASSUME's rows are those of the first body result that produces rows (a `QUERY` or Cypher command, descending into a nested ASSUME), and an ASSUME whose body produced none is skipped. The Python `AssumeCommandResult` has `.results`, `.derived`, and `.rows` (the same depth-first rows, or `[]`). The Locy TCK addresses a nested result by path: `the result at path 0.2 should be a Query with 3 rows` is body command 2 of top-level command 0 (`assume/AssumeBodyResults.feature`).
 
-Returns `CommandResult::Assume(Vec<FactRow>)`.
+`ABDUCE` and `EXPLAIN RULE` run inside an ASSUME body, at any nesting depth, against the hypothetical state, and their results are body results (`CommandResult::Abduce`, `CommandResult::Explain`). `EXPLAIN RULE` explains the hypothetical facts from the provenance recorded while deriving them; `ABDUCE` applies each candidate on top of the hypothetical state and validates it against the parent's rules and the body's own. Each gives the answer the same command gives at the top level of a program run in a transaction that applied the mutations and is rolled back. A program that records provenance (an `EXPLAIN RULE` or an `MNOR` / `MPROD` fold anywhere, ASSUME bodies included) records it in every hypothetical evaluation too, so under `exact_probability` a body `QUERY` reads the exact probability, as a top-level one does. (Until 4.2 both were compile errors, `LocyCompileError::AssumeBodyCommandNotAllowed`, and before that the ASSUME computed them and dropped their results.) A `DERIVE` in the body is allowed: its edges land in the hypothetical graph, where every later command in the same body reads them, and are rolled back with it.
+
+Returns `CommandResult::Assume { results: Vec<CommandResult>, derived: HashMap<String, Vec<FactRow>> }`.
 
 ```
 -- "What if Alice knew Carol?"
@@ -1433,7 +1451,7 @@ Non-rule statements are extracted as `CompiledCommand`:
 
 **Phase 1 (DataFusion):** Bottom-up stratum evaluation via `LocyProgramExec`. Rules compile to DataFusion `LogicalPlan` nodes. Physical planning uses `CypherPhysicalExprCompiler` for expressions. Fixpoint iteration runs via `FixpointExec`.
 
-**Phase 2 (Row-Level):** Command dispatch via `NativeExecutionAdapter`. Commands receive converged facts as `Vec<FactRow>` and perform mutations (DERIVE), hypothetical reasoning (ASSUME/ABDUCE), or introspection (EXPLAIN/QUERY).
+**Phase 2 (Row-Level):** Command dispatch via `NativeExecutionAdapter`, in program order. Commands receive the facts of the current state as `Vec<FactRow>` — the converged facts, derived again after a command writes (§13.1.1) — and perform mutations (DERIVE, Cypher writes), hypothetical reasoning (ASSUME/ABDUCE), or introspection (EXPLAIN/QUERY).
 
 ## 15.2 Stratum Evaluation Order
 
@@ -1520,7 +1538,7 @@ Accumulates converged facts from each stratum. Later strata see results from all
 
 ## 15.7 One Evaluator
 
-Every command reads the facts the fixpoint published (Appendix B2 of the Black Book, C-NONINTERFERENCE):
+Every command reads the facts the fixpoint published for the state it runs in — the program's own, or the facts derived again after an earlier command wrote (§13.1.1). A command that does not write never changes what a later command reads (Appendix B2 of the Black Book, C-NONINTERFERENCE):
 
 - **QUERY** filters and projects the rule's relation.
 - **EXPLAIN** reads the provenance the fixpoint recorded (Mode A) or, without it, rebuilds the tree from the published facts by re-running each clause's MATCH (Mode B). It does not re-derive the rule.
@@ -1716,14 +1734,14 @@ LocyResult {
 - `result.stats` — execution statistics
 - `result.command_results` — ordered command outputs
 - `result.warnings` / `result.has_warning(code)` — runtime warning inspection
-- `result.derived_fact_set` — collected DERIVE mutations (session-level only)
+- `result.derived_fact_set` — the program's collected writes, DERIVE mutations and Cypher writes in program order (session-level only)
 
 ### CommandResult
 
 ```rust
 enum CommandResult {
     Query(Vec<FactRow>),
-    Assume(Vec<FactRow>),
+    Assume { results: Vec<CommandResult>, derived: HashMap<String, Vec<FactRow>> },
     Explain(DerivationNode),
     Abduce(AbductionResult),
     Derive { affected: usize },
@@ -2421,7 +2439,7 @@ struct ExplainRule { rule_name: QualifiedName, where_expr: Option<Expr>, return_
 
 ## Appendix D: TCK Coverage Map
 
-**72 feature files, 539 scenarios** covering all Locy features.
+**74 feature files, 553 scenarios** covering all Locy features.
 
 ### Core Evaluation
 
@@ -2432,7 +2450,7 @@ struct ExplainRule { rule_name: QualifiedName, where_expr: Option<Expr>, return_
 | `evaluate/MultiStratum.feature` | 3 | Cross-stratum fact injection |
 | `evaluate/YieldValueColumns.feature` | 7 | YIELD schema, value columns |
 | `evaluate/ParameterBinding.feature` | 5 | `$param` references in rules |
-| `evaluate/ErrorConditions.feature` | 6 | Compilation/runtime error cases |
+| `evaluate/ErrorConditions.feature` | 8 | Compilation/runtime error cases |
 | `evaluate/AlongWithIsRef.feature` | 3 | ALONG + IS-ref combinations |
 | `evaluate/CypherFunctions.feature` | 9 | Built-in function evaluation |
 | `rules/BasicRules.feature` | 6 | Base + recursive rules |
@@ -2456,7 +2474,7 @@ struct ExplainRule { rule_name: QualifiedName, where_expr: Option<Expr>, return_
 | `monotonic/SharedProofDetection.feature` | 6 | Shared-proof dependency warnings |
 | `monotonic/ExactProbability.feature` | 17 | BDD-based exact probability |
 | `monotonic/ProbabilisticStress.feature` | 10 | Large-scale probabilistic correctness |
-| `monotonic/TopKProofs.feature` | 4 | Top-K proof filtering |
+| `monotonic/TopKProofs.feature` | 6 | Top-K proof filtering |
 
 ### Commands
 
@@ -2465,6 +2483,7 @@ struct ExplainRule { rule_name: QualifiedName, where_expr: Option<Expr>, return_
 | `query/GoalDirected.feature` | 9 | QUERY command execution |
 | `explain/ProofTraces.feature` | 3 | EXPLAIN with proof tree derivations |
 | `assume/Hypothetical.feature` | 6 | ASSUME fork/restore semantics |
+| `assume/AssumeBodyResults.feature` | 3 | One result per body command, nested ASSUME results, `derived` |
 | `abduce/AbductiveReasoning.feature` | 4 | ABDUCE with explanations |
 
 ### Mutation & Visibility
@@ -2473,6 +2492,7 @@ struct ExplainRule { rule_name: QualifiedName, where_expr: Option<Expr>, return_
 |-------------|-----------|----------|
 | `derive/DeriveEdges.feature` | 9 | DERIVE edge creation |
 | `derive/DeriveVisibility.feature` | 7 | DERIVE visibility to trailing Cypher |
+| `derive/CommandSequencing.feature` | 5 | Top-level commands read the state earlier commands left |
 
 ### Negation & Stratification
 

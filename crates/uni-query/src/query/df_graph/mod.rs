@@ -43,6 +43,7 @@ pub mod catalog_scan;
 pub mod common;
 pub mod comprehension;
 pub mod deadline_guard;
+pub mod edge_source_scan;
 pub mod endpoint_hydrate;
 mod exists_decorrelate;
 pub mod expr_compiler;
@@ -70,6 +71,7 @@ pub mod locy_profile;
 pub mod locy_program;
 pub mod locy_query;
 pub mod locy_row_hash;
+pub mod locy_sequence;
 pub mod locy_traits;
 pub mod locy_validate;
 pub mod mutation_common;
@@ -120,6 +122,7 @@ use crate::types::QueryWarning;
 use uni_common::cypher_value_codec::handle::HandleScope;
 
 pub use apply::GraphApplyExec;
+pub use edge_source_scan::EdgeSourceScanExec;
 pub use ext_id_lookup::GraphExtIdLookupExec;
 // CREATE and MERGE both execute through `MutationExec`; these aliases and
 // the `new_*_exec` builders are re-exported here so the planner can refer to
@@ -824,6 +827,65 @@ impl GraphExecutionContext {
                 .await
                 .map_err(common::exec_err)
         })
+    }
+
+    /// Every vertex [`Self::get_neighbors`] can return a neighbor for, for any
+    /// of `edge_type_ids` along `direction` — a superset of it.
+    ///
+    /// Reads the layers `get_neighbors` reads and no others: the adjacency
+    /// manager (with the shadow CSR when this is a versioned read) and, for a
+    /// live read, the transaction L0's edges. A vertex whose edges are all
+    /// tombstoned may be reported; a vertex with a visible edge is never
+    /// missed. Warm the types first ([`Self::ensure_adjacency_warmed`]), as
+    /// a traversal does, or the Main CSR is not there to enumerate.
+    pub fn edge_source_candidates(
+        &self,
+        edge_type_ids: &[u32],
+        direction: Direction,
+    ) -> std::collections::HashSet<Vid> {
+        let version_hwm = self.storage.snapshot_version_hwm();
+        let am = self.adjacency_manager();
+        let mut out = std::collections::HashSet::new();
+        for &edge_type in edge_type_ids {
+            am.collect_source_vids(edge_type, direction, version_hwm.is_some(), &mut out);
+        }
+        // `neighbors_for_vid` overlays the transaction L0 only on a live read.
+        if version_hwm.is_none()
+            && let Some(tx_l0) = &self.l0_context.transaction_l0
+        {
+            let guard = tx_l0.read();
+            for edge in guard.graph.edges() {
+                if !edge_type_ids.contains(&edge.edge_type) {
+                    continue;
+                }
+                match direction {
+                    Direction::Outgoing => {
+                        out.insert(edge.src_vid);
+                    }
+                    Direction::Incoming => {
+                        out.insert(edge.dst_vid);
+                    }
+                    Direction::Both => {
+                        out.insert(edge.src_vid);
+                        out.insert(edge.dst_vid);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether this query records what it reads into a transaction read set.
+    ///
+    /// True only inside a read-write transaction with SSI on. An operator that
+    /// would skip rows the pattern logically depends on — a vertex with no
+    /// edge of a type yet is still a read a concurrent insert must conflict
+    /// with — has to read them all when this holds.
+    pub fn records_read_set(&self) -> bool {
+        self.l0_context
+            .transaction_l0
+            .as_ref()
+            .is_some_and(|l0| l0.read().occ_read_set.is_some())
     }
 
     /// Get neighbors for a vertex, merging CSR and all L0 buffers.

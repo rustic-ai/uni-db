@@ -8,6 +8,19 @@
 use anyhow::Result;
 use uni_db::Uni;
 
+/// The rows of an ASSUME whose body's only command is a QUERY.
+fn assume_query_rows(
+    result: &uni_db::locy::CommandResult,
+) -> &Vec<std::collections::HashMap<String, uni_db::Value>> {
+    match result {
+        uni_db::locy::CommandResult::Assume { results, .. } => match results.as_slice() {
+            [uni_db::locy::CommandResult::Query(rows)] => rows,
+            other => panic!("expected the ASSUME body's one QUERY result, got: {other:?}"),
+        },
+        other => panic!("expected an Assume result, got: {other:?}"),
+    }
+}
+
 /// Parameters bound via `.param()` must be available inside ASSUME mutations.
 #[tokio::test]
 async fn test_assume_mutation_uses_params() -> Result<()> {
@@ -35,12 +48,7 @@ async fn test_assume_mutation_uses_params() -> Result<()> {
 
     // In the hypothetical state, alice has score=99 so she should appear
     // alongside bob (who already has score=20).
-    let rows = match &result.command_results[0] {
-        uni_db::locy::CommandResult::Assume(rows) | uni_db::locy::CommandResult::Query(rows) => {
-            rows
-        }
-        other => panic!("expected Assume/Query result, got: {other:?}"),
-    };
+    let rows = assume_query_rows(&result.command_results[0]);
 
     let names: Vec<String> = rows
         .iter()
@@ -92,12 +100,7 @@ async fn test_assume_rule_reevaluation_uses_params() -> Result<()> {
         .run()
         .await?;
 
-    let rows = match &result.command_results[0] {
-        uni_db::locy::CommandResult::Assume(rows) | uni_db::locy::CommandResult::Query(rows) => {
-            rows
-        }
-        other => panic!("expected Assume/Query result, got: {other:?}"),
-    };
+    let rows = assume_query_rows(&result.command_results[0]);
 
     // Alice had 2 episodes. After ASSUME, 'deploy' became 'rollback'.
     let actions: Vec<String> = rows

@@ -23,21 +23,52 @@ use super::locy_delta::RowStore;
 use super::locy_eval::{eval_condition, eval_expr, value_cmp};
 use uni_query_functions::df_udfs::canonical_cypher_value;
 
+/// How many rows an in-memory QUERY evaluates between two checks of whether
+/// it must stop (its program's deadline, a cancellation).
+pub const QUERY_CHECK_INTERVAL: usize = 1024;
+
+/// Calls `interrupt` before the first row and then every
+/// [`QUERY_CHECK_INTERVAL`] rows an in-memory QUERY evaluates, over all its
+/// passes: it runs inside no operator, so nothing else checks it.
+struct Checkpoint<'a> {
+    interrupt: &'a dyn Fn() -> Result<(), LocyError>,
+    rows: usize,
+}
+
+impl Checkpoint<'_> {
+    /// Counts one row, failing with `interrupt`'s error when it is time to
+    /// check and the QUERY must stop.
+    fn row(&mut self) -> Result<(), LocyError> {
+        if self.rows.is_multiple_of(QUERY_CHECK_INTERVAL) {
+            (self.interrupt)()?;
+        }
+        self.rows += 1;
+        Ok(())
+    }
+}
+
 /// Entry point for goal-directed QUERY evaluation.
 ///
 /// Reads the rule's facts from `derived_store`, the facts the fixpoint
 /// published, then applies the WHERE filter and RETURN clause.
 ///
+/// The evaluation is in memory, inside no operator, so nothing else bounds
+/// it: `interrupt` is called every [`QUERY_CHECK_INTERVAL`] rows its passes
+/// (filter, grouping, projection) evaluate, and its error ends the QUERY. The caller
+/// passes the program's deadline and cancellation check.
+///
 /// # Errors
 ///
-/// Returns an error if the rule is unknown or has no published relation, or if
-/// WHERE or RETURN cannot be evaluated.
+/// Returns an error if the rule is unknown or has no published relation, if
+/// WHERE or RETURN cannot be evaluated, or `interrupt`'s error.
 pub fn evaluate_query(
     query: &GoalQuery,
     program: &CompiledProgram,
     config: &LocyConfig,
     derived_store: &RowStore,
+    interrupt: &dyn Fn() -> Result<(), LocyError>,
 ) -> Result<Vec<FactRow>, LocyError> {
+    let mut check = Checkpoint { interrupt, rows: 0 };
     // `QUERY adult` inside `MODULE m` names the rule bare, but the catalog keys
     // it as `m.adult`. The compiler validates the reference module-aware, so a
     // plain lookup here accepts the program at compile time and then fails at
@@ -78,8 +109,8 @@ pub fn evaluate_query(
             .map(str::to_string);
     if let Some(relation) = store_key.and_then(|k| derived_store.get(&k)) {
         let rows = relation.rows.clone();
-        let filtered = filter_where(rows, query.where_expr.as_ref(), &config.params)?;
-        return apply_return_clause(filtered, &query.return_clause, &config.params);
+        let filtered = filter_where(rows, query.where_expr.as_ref(), &config.params, &mut check)?;
+        return apply_return_clause(filtered, &query.return_clause, &config.params, &mut check);
     }
 
     // Every rule the program defines has a published relation, empty when it
@@ -95,10 +126,11 @@ pub fn evaluate_query(
 }
 
 /// Apply a RETURN clause (projection, ordering, skip, limit) to results.
-pub(super) fn apply_return_clause(
+fn apply_return_clause(
     rows: Vec<FactRow>,
     return_clause: &Option<uni_cypher::ast::ReturnClause>,
     params: &HashMap<String, Value>,
+    check: &mut Checkpoint<'_>,
 ) -> Result<Vec<FactRow>, LocyError> {
     let rc = match return_clause {
         Some(rc) => rc,
@@ -106,7 +138,7 @@ pub(super) fn apply_return_clause(
     };
     // Aggregating RETURN: fold each group to one row, then project as usual.
     let aggregated;
-    let (rows, rc) = match aggregate_return(rows, rc, params)? {
+    let (rows, rc) = match aggregate_return(rows, rc, params, check)? {
         Aggregation::None(rows) => (rows, rc),
         Aggregation::Grouped(rows, rewritten) => {
             aggregated = *rewritten;
@@ -126,6 +158,7 @@ pub(super) fn apply_return_clause(
     let mut entries: Vec<(FactRow, Vec<Value>)> = rows
         .into_iter()
         .map(|row| {
+            check.row()?;
             let merged = merge_params(&row, params);
             let mut new_row = FactRow::new();
             for item in &rc.items {
@@ -242,6 +275,7 @@ fn aggregate_return(
     rows: Vec<FactRow>,
     rc: &uni_cypher::ast::ReturnClause,
     params: &HashMap<String, Value>,
+    check: &mut Checkpoint<'_>,
 ) -> Result<Aggregation, LocyError> {
     let item_exprs = rc.items.iter().filter_map(|item| match item {
         ReturnItem::Expr { expr, .. } => Some(expr),
@@ -294,6 +328,7 @@ fn aggregate_return(
     let mut index: HashMap<Vec<Value>, usize> = HashMap::new();
     let mut groups: Vec<Vec<FactRow>> = Vec::new();
     for row in rows {
+        check.row()?;
         let merged = merge_params(&row, params);
         let key = keys
             .iter()
@@ -311,6 +346,7 @@ fn aggregate_return(
 
     let mut out = Vec::with_capacity(groups.len());
     for group in groups {
+        check.row()?;
         let mut row = group.first().cloned().unwrap_or_default();
         for (i, agg) in aggregates.iter().enumerate() {
             row.insert(format!("{AGG_PLACEHOLDER}{i}"), aggregate(agg, &group)?);
@@ -450,16 +486,18 @@ pub(super) fn merge_params(row: &FactRow, params: &HashMap<String, Value>) -> Fa
 /// # Errors
 ///
 /// [`LocyError`] when the condition fails to evaluate or is not boolean.
-pub(super) fn filter_where(
+fn filter_where(
     rows: Vec<FactRow>,
     where_expr: Option<&Expr>,
     params: &HashMap<String, Value>,
+    check: &mut Checkpoint<'_>,
 ) -> Result<Vec<FactRow>, LocyError> {
     let Some(expr) = where_expr else {
         return Ok(rows);
     };
     let mut kept = Vec::with_capacity(rows.len());
     for row in rows {
+        check.row()?;
         let merged = merge_params(&row, params);
         if eval_condition(expr, &merged, "QUERY WHERE")? {
             kept.push(row);
@@ -478,5 +516,82 @@ fn return_item_name(expr: &Expr) -> String {
         Expr::Variable(v) => v.clone(),
         Expr::Property(base, prop) => format!("{}.{}", return_item_name(base), prop),
         _ => format!("{expr:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use uni_locy::CompiledCommand;
+
+    use super::super::locy_delta::RowRelation;
+    use super::*;
+
+    /// `QUERY r WHERE x >= 0 RETURN x` over `n` facts of `r`.
+    fn query_over(n: i64) -> (GoalQuery, CompiledProgram, RowStore) {
+        let ast = uni_cypher::parse_locy(
+            "CREATE RULE r AS MATCH (n:N) YIELD KEY n, n.x AS x\nQUERY r WHERE x >= 0 RETURN x",
+        )
+        .expect("parses");
+        let program = uni_locy::compile(&ast).expect("compiles");
+        let query = match program.commands.first() {
+            Some(CompiledCommand::GoalQuery(q)) => q.clone(),
+            other => panic!("expected the QUERY, got {other:?}"),
+        };
+        let rows = (0..n)
+            .map(|i| {
+                FactRow::from([
+                    ("n".to_string(), Value::Int(i)),
+                    ("x".to_string(), Value::Int(i)),
+                ])
+            })
+            .collect();
+        let store = RowStore::from([(
+            "r".to_string(),
+            RowRelation::new(vec!["n".into(), "x".into()], rows),
+        )]);
+        (query, program, store)
+    }
+
+    /// The QUERY checks before its first row and every
+    /// `QUERY_CHECK_INTERVAL` rows, and stops at the first check that
+    /// fails: with the third check failing it has evaluated two intervals
+    /// of the filter and no more.
+    #[test]
+    fn an_in_memory_query_stops_at_the_check_that_fails() {
+        let (query, program, store) = query_over(10 * QUERY_CHECK_INTERVAL as i64);
+        let checks = Cell::new(0usize);
+        let interrupt = || {
+            checks.set(checks.get() + 1);
+            if checks.get() == 3 {
+                Err(LocyError::Timeout {
+                    elapsed: std::time::Duration::from_millis(2),
+                    limit: std::time::Duration::from_millis(1),
+                })
+            } else {
+                Ok(())
+            }
+        };
+        let err = evaluate_query(&query, &program, &LocyConfig::default(), &store, &interrupt)
+            .expect_err("the third check stops the QUERY");
+        assert!(matches!(err, LocyError::Timeout { .. }), "{err:?}");
+        assert_eq!(checks.get(), 3, "no check after the one that failed");
+    }
+
+    /// Unbounded, it checks once per interval of the rows its passes (the
+    /// filter, then the projection) evaluate between them.
+    #[test]
+    fn an_in_memory_query_checks_once_per_interval_of_each_pass() {
+        let n = 3 * QUERY_CHECK_INTERVAL + 1;
+        let (query, program, store) = query_over(n as i64);
+        let checks = Cell::new(0usize);
+        let rows = evaluate_query(&query, &program, &LocyConfig::default(), &store, &|| {
+            checks.set(checks.get() + 1);
+            Ok(())
+        })
+        .expect("runs");
+        assert_eq!(rows.len(), n);
+        assert_eq!(checks.get(), (2 * n).div_ceil(QUERY_CHECK_INTERVAL));
     }
 }

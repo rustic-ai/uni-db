@@ -113,12 +113,62 @@ impl<'a> PropertyColumnBuilder<'a> {
                 let extractor = PropertyExtractor::new(name, &meta.r#type);
                 let column =
                     extractor.build_column(self.len, deleted, |i| get_row_props(i).get(name))?;
+                let column = if meta.nullable {
+                    column
+                } else {
+                    fill_deleted_nulls(column, deleted)?
+                };
                 columns.push(column);
             }
         }
 
         Ok(columns)
     }
+}
+
+/// `column` with the nulls of deleted rows replaced by an all-zero value of
+/// its type (0, empty string, empty list, a struct of such).
+///
+/// A tombstone row carries no properties, but a declared `NOT NULL` column
+/// must still hold a value in it: the table refuses a null there. Several
+/// builders write a typed placeholder for a deleted row; list, map and
+/// sparse-vector columns write a null, so a delete of a vertex or edge with
+/// such a column failed to flush. Nulls in live rows are kept, so a missing
+/// `NOT NULL` value is still refused.
+fn fill_deleted_nulls(column: ArrayRef, deleted: &[bool]) -> Result<ArrayRef> {
+    use arrow_array::{Array, BooleanArray};
+    if column.null_count() == 0 {
+        return Ok(column);
+    }
+    let keep: BooleanArray = (0..column.len())
+        .map(|i| Some(!(deleted.get(i).copied().unwrap_or(false) && column.is_null(i))))
+        .collect();
+    if keep.true_count() == column.len() {
+        return Ok(column);
+    }
+    let zeroed = arrow_array::make_array(zeroed_data(column.data_type(), column.len())?);
+    Ok(arrow::compute::kernels::zip::zip(&keep, &column, &zeroed)?)
+}
+
+/// `len` all-zero, non-null values of `data_type`: [`ArrayData::new_null`]'s
+/// zeroed buffers with every validity bitmap dropped, recursively.
+///
+/// [`ArrayData::new_null`]: arrow::array::ArrayData::new_null
+fn zeroed_data(data_type: &arrow_schema::DataType, len: usize) -> Result<arrow::array::ArrayData> {
+    fn strip(data: arrow::array::ArrayData) -> Result<arrow::array::ArrayData> {
+        let children = data
+            .child_data()
+            .iter()
+            .cloned()
+            .map(strip)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(data
+            .into_builder()
+            .nulls(None)
+            .child_data(children)
+            .build()?)
+    }
+    strip(arrow::array::ArrayData::new_null(data_type, len))
 }
 
 /// Builds an `overflow_json` column (LargeBinary) for properties not defined in the schema.
@@ -179,6 +229,39 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deleted row of a `NOT NULL` list, map, sparse-vector or
+    /// multi-vector column gets a non-null zero value; a live row's null is
+    /// kept, so a missing value is still refused.
+    #[test]
+    fn deleted_rows_fill_not_null_columns_and_live_nulls_stay() {
+        use arrow_array::{Array, RecordBatch};
+        use uni_common::core::schema::DataType;
+
+        let types = [
+            DataType::List(Box::new(DataType::Vector { dimensions: 2 })),
+            DataType::SparseVector { dimensions: 8 },
+            DataType::List(Box::new(DataType::String)),
+            DataType::Map(Box::new(DataType::String), Box::new(DataType::Int64)),
+            DataType::Bytes,
+            DataType::Vector { dimensions: 2 },
+        ];
+        for dt in types {
+            let column = PropertyExtractor::new("p", &dt)
+                .build_column(2, &[false, true], |_| None)
+                .unwrap();
+            let filled = fill_deleted_nulls(column, &[false, true]).unwrap();
+            assert!(filled.is_null(0), "{dt:?}: a live row's null is kept");
+            assert!(filled.is_valid(1), "{dt:?}: a deleted row gets a value");
+            let tombstone = filled.slice(1, 1);
+            let field = arrow_schema::Field::new("p", tombstone.data_type().clone(), false);
+            RecordBatch::try_new(
+                Arc::new(arrow_schema::Schema::new(vec![field])),
+                vec![tombstone],
+            )
+            .unwrap_or_else(|e| panic!("{dt:?}: tombstone row is not a valid NOT NULL value: {e}"));
+        }
+    }
 
     /// The declared column wins a key collision; schemaless keys still merge.
     ///

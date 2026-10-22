@@ -37,6 +37,12 @@ async fn test_compaction_l1_to_l2() -> anyhow::Result<()> {
     let vid_a = Vid::new(1);
     let vid_b = Vid::new(2);
     let vid_c = Vid::new(3);
+    // `knows` is declared Person -> Person, which the writer enforces.
+    for vid in [vid_a, vid_b, vid_c] {
+        writer
+            .insert_vertex_with_labels(vid, HashMap::new(), &["Person".to_string()], None)
+            .await?;
+    }
 
     // Insert A -> B
     let eid1 = writer.next_eid(1).await?;

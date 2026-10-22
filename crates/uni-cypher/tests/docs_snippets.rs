@@ -291,6 +291,12 @@ const CYPHER_KEYWORDS: &[&str] = &[
 /// a *runtime* failure when wrong — the doc block renders fine and the query
 /// blows up at `execute()` — which is why it is worth checking separately from
 /// the fenced snippets.
+///
+/// A Python f-string (`f"..."`) is a template, not the query: `{{` and `}}`
+/// are literal braces and each `{expr}` is replaced at runtime. It is checked
+/// after the same substitution, with every replacement field standing in as
+/// the identifier `x`, which parses wherever an interpolated value, label or
+/// property name can appear.
 fn embedded_cypher(body: &str) -> Vec<String> {
     let mut found = Vec::new();
     let bytes: Vec<char> = body.chars().collect();
@@ -300,6 +306,7 @@ fn embedded_cypher(body: &str) -> Vec<String> {
             i += 1;
             continue;
         }
+        let mut is_fstring = is_fstring_prefix(&bytes, i);
         // Python triple-quoted block.
         let triple = bytes[i..].starts_with(&['"', '"', '"']);
         let delim_len = if triple { 3 } else { 1 };
@@ -327,6 +334,9 @@ fn embedded_cypher(body: &str) -> Vec<String> {
             j += 1;
         }
         i = j + delim_len;
+        if is_fstring {
+            lit = fill_fstring(&lit);
+        }
 
         // Python/C-style adjacent string concatenation: `"CALL ... " "YIELD ..."`
         // is one query split across literals. Absorb following literals that are
@@ -338,6 +348,12 @@ fn embedded_cypher(body: &str) -> Vec<String> {
                 && (bytes[k] == ' ' || bytes[k] == '\n' || bytes[k] == '\t' || bytes[k] == '\r')
             {
                 k += 1;
+            }
+            if k + 1 < bytes.len() && matches!(bytes[k], 'f' | 'F') && bytes[k + 1] == '"' {
+                k += 1;
+                is_fstring = true;
+            } else {
+                is_fstring = false;
             }
             if k >= bytes.len() || bytes[k] != '"' {
                 break;
@@ -363,6 +379,9 @@ fn embedded_cypher(body: &str) -> Vec<String> {
                 next.push(bytes[m]);
                 m += 1;
             }
+            if is_fstring {
+                next = fill_fstring(&next);
+            }
             lit.push_str(&next);
             i = m + d2;
         }
@@ -372,6 +391,75 @@ fn embedded_cypher(body: &str) -> Vec<String> {
         }
     }
     found
+}
+
+/// Whether the `"` at `quote` opens a Python f-string: it is preceded by a
+/// string prefix (`f`, `rf`, `fr`, any case) that is not the tail of an
+/// identifier.
+fn is_fstring_prefix(chars: &[char], quote: usize) -> bool {
+    let mut start = quote;
+    while start > 0 && quote - start < 2 && matches!(chars[start - 1], 'f' | 'F' | 'r' | 'R') {
+        start -= 1;
+    }
+    let prefix = &chars[start..quote];
+    let standalone = start == 0 || !(chars[start - 1].is_alphanumeric() || chars[start - 1] == '_');
+    standalone && prefix.iter().any(|c| matches!(c, 'f' | 'F'))
+}
+
+/// Render an f-string template as its runtime text: `{{`/`}}` become braces
+/// and each replacement field `{...}` (nesting counted) becomes `x`.
+fn fill_fstring(template: &str) -> String {
+    let chars: Vec<char> = template.chars().collect();
+    let mut out = String::with_capacity(template.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '{' if chars.get(i + 1) == Some(&'{') => {
+                out.push('{');
+                i += 2;
+            }
+            '}' if chars.get(i + 1) == Some(&'}') => {
+                out.push('}');
+                i += 2;
+            }
+            '{' => {
+                let mut depth = 0usize;
+                while i < chars.len() {
+                    match chars[i] {
+                        '{' => depth += 1,
+                        '}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                out.push('x');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn fstring_templates_are_filled_before_parsing() {
+    let body = r#"q = f"CREATE (:Drug {{id: '{c['id']}', n: {len(xs)}}})""#;
+    assert_eq!(
+        embedded_cypher(body),
+        vec!["CREATE (:Drug {id: 'x', n: x})"]
+    );
+    // A plain literal keeps its braces, and an identifier ending in `f` is not
+    // a prefix.
+    let plain = r#"elf"MATCH (n {id: 1}) RETURN n""#;
+    assert_eq!(embedded_cypher(plain), vec!["MATCH (n {id: 1}) RETURN n"]);
 }
 
 #[test]

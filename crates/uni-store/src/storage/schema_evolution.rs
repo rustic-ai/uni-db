@@ -46,7 +46,7 @@ use crate::backend::StorageBackend;
 /// This is the difference between an `Append` — built from the full declared
 /// schema, so a column absent from it really was dropped — and a
 /// `MergeInsert` source, which deliberately carries only the touched columns
-/// (`build_partial_record_batch`). Relaxing nullability on the strength of a
+/// (a tombstone batch). Relaxing nullability on the strength of a
 /// partial batch would silently drop `NOT NULL` from every untouched column in
 /// the table on the first `SET`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -48,6 +48,19 @@ impl Compactor {
     /// [`Self::compact_all`] for a caller that already holds the directory's
     /// compaction lock.
     pub(crate) async fn compact_all_locked(&self) -> Result<SemanticCompactionReport> {
+        // Never while a bulk load is being published: its rows are hidden
+        // from readers by `_version`, and folding its deltas into L2 adjacency
+        // (whose rows carry this pass's version) would expose them part way.
+        // Bulk publishes wait for this pass in turn. Polled rather than
+        // queued: a queued writer on the lock would hold up every new bulk
+        // publish behind a load whose background re-drive keeps failing.
+        let _bulk_exclusion = loop {
+            if let Some(guard) = self.storage.bulk_gate().try_exclusive() {
+                break guard;
+            }
+            self.safe_point("compaction::safe-point::waiting-for-bulk-publish")?;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
         let start = std::time::Instant::now();
         let schema = self.storage.schema_manager().schema();
         let mut report = SemanticCompactionReport::default();
@@ -207,7 +220,17 @@ impl Compactor {
         let _write_guard = backend.lock_table_for_write(&table_name).await;
 
         use crate::backend::types::ScanRequest;
-        let batches: Vec<RecordBatch> = backend.scan(ScanRequest::all(&table_name)).await?;
+        let scanned: Vec<RecordBatch> = backend.scan(ScanRequest::all(&table_name)).await?;
+        // Rows above the oldest version an in-flight reader is pinned at are
+        // kept as they are; only the rows at or below it are merged. A reader
+        // pinned at `p` needs each vertex's newest row at or below `p`, which
+        // the merge would otherwise have replaced by the newest row overall,
+        // stamped above `p` (or dropped, for a vertex deleted since).
+        let mut merge = self.storage.begin_compaction_merge(false);
+        let (batches, kept) = split_at_floor(scanned, merge.floor())?;
+        // Rows merged per vertex: a vertex with one merged row loses no
+        // history, so only those with more set the merge's horizon.
+        let mut merged_rows: HashMap<Vid, usize> = HashMap::new();
 
         // Vid -> (Properties, Deleted)
         let mut vertex_state: HashMap<Vid, (Properties, bool)> = HashMap::new();
@@ -266,6 +289,7 @@ impl Compactor {
                 let vid = Vid::from(vid_col.value(i));
                 let version = ver_col.value(i);
                 let deleted = del_col.value(i);
+                *merged_rows.entry(vid).or_insert(0) += 1;
 
                 // Extract labels from the _labels column (keep latest version's labels)
                 if let Some(list_arr) = labels_col
@@ -378,8 +402,9 @@ impl Compactor {
             }
         }
 
-        if !valid_vertices.is_empty() {
-            let batch = dataset.build_record_batch_with_timestamps(
+        let kept_rows: usize = kept.iter().map(RecordBatch::num_rows).sum();
+        if !valid_vertices.is_empty() || kept_rows > 0 {
+            let merged = dataset.build_record_batch_with_timestamps(
                 &valid_vertices,
                 &valid_deleted,
                 &valid_versions,
@@ -387,6 +412,16 @@ impl Compactor {
                 Some(&created_at),
                 Some(&updated_at),
             )?;
+            let batch = append_kept_rows(merged, &kept)?;
+            let merged_through = merged_rows
+                .iter()
+                .filter(|(_, rows)| **rows > 1)
+                .filter_map(|(vid, _)| vertex_versions.get(vid).copied())
+                .max()
+                .unwrap_or(0);
+            merge
+                .record(self.storage.snapshot_manager(), merged_through)
+                .await?;
             // Safe point: nothing has been written yet, so a cancelled pass
             // leaves the table exactly as it was.
             self.safe_point("compaction::safe-point::before-vertex-replace")?;
@@ -571,9 +606,17 @@ impl Compactor {
 
         // 1. Load all L1 Deltas sorted by key
         let delta_ds = self.storage.delta_dataset(edge_type, direction)?;
-        let deltas = delta_ds
+        let mut deltas = delta_ds
             .scan_all_backend(self.storage.backend(), &schema)
             .await?;
+        // Fold only the deltas at or below the oldest version an in-flight
+        // reader with a versioned edge tier is pinned at. L2 rows carry no version, so everything folded
+        // into L2 is visible at every pin; a delta above the floor stays a
+        // delta, read by each pin under its own ceiling.
+        let mut merge = self.storage.begin_compaction_merge(true);
+        if let Some(floor) = merge.floor() {
+            deltas.retain(|entry| entry.version <= floor);
+        }
 
         let delta_count = deltas.len();
         tracing::Span::current().record("delta_count", delta_count);
@@ -738,6 +781,11 @@ impl Compactor {
             // Safe point: L2 and the deltas are both untouched, so a cancelled
             // pass leaves the deltas authoritative over the old L2.
             self.safe_point("compaction::safe-point::before-adj-replace")?;
+            // Every folded delta is visible at every version from here on.
+            let folded_through = deltas.iter().map(|e| e.version).max().unwrap_or(0);
+            merge
+                .record(self.storage.snapshot_manager(), folded_through)
+                .await?;
             adj_ds.replace(self.storage.backend(), batch).await?;
         }
 
@@ -933,6 +981,68 @@ impl CompactionDirLock {
 }
 
 /// Apply delta operations to an edge map, returning the resolved neighbor for the direction.
+/// Splits scanned vertex rows into those at or below `floor` (merged by
+/// compaction) and those above it (kept as they are). No floor merges every
+/// row.
+fn split_at_floor(
+    batches: Vec<RecordBatch>,
+    floor: Option<u64>,
+) -> Result<(Vec<RecordBatch>, Vec<RecordBatch>)> {
+    let Some(floor) = floor else {
+        return Ok((batches, Vec::new()));
+    };
+    let mut merged = Vec::with_capacity(batches.len());
+    let mut kept = Vec::new();
+    for batch in batches {
+        let versions = batch
+            .column_by_name("_version")
+            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+            .ok_or_else(|| anyhow!("vertex compaction: missing _version column"))?;
+        let at_or_below: arrow_array::BooleanArray = versions
+            .iter()
+            .map(|v| Some(v.unwrap_or(0) <= floor))
+            .collect();
+        let above = arrow::compute::not(&at_or_below)?;
+        merged.push(arrow::compute::filter_record_batch(&batch, &at_or_below)?);
+        let above = arrow::compute::filter_record_batch(&batch, &above)?;
+        if above.num_rows() > 0 {
+            kept.push(above);
+        }
+    }
+    Ok((merged, kept))
+}
+
+/// `merged` followed by the `kept` rows, each projected by column name onto
+/// `merged`'s schema (the table's schema as the catalog declares it).
+fn append_kept_rows(merged: RecordBatch, kept: &[RecordBatch]) -> Result<RecordBatch> {
+    if kept.is_empty() {
+        return Ok(merged);
+    }
+    let schema = merged.schema();
+    let mut parts = vec![merged];
+    for batch in kept {
+        let columns = schema
+            .fields()
+            .iter()
+            .map(|field| {
+                let column = batch.column_by_name(field.name()).ok_or_else(|| {
+                    anyhow!(
+                        "vertex compaction: kept row lacks column '{}'",
+                        field.name()
+                    )
+                })?;
+                if column.data_type() == field.data_type() {
+                    Ok(Arc::clone(column))
+                } else {
+                    Ok(arrow::compute::cast(column, field.data_type())?)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        parts.push(RecordBatch::try_new(Arc::clone(&schema), columns)?);
+    }
+    Ok(arrow::compute::concat_batches(&schema, &parts)?)
+}
+
 fn apply_deltas_to_edges(current_edges: &mut HashMap<Eid, Vid>, ops: &[L1Entry], direction: &str) {
     for op in ops {
         match op.op {

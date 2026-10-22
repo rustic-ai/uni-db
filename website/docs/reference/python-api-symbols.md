@@ -8,7 +8,7 @@ Complete symbol surface of the `uni_db` Python bindings, **generated from `bindi
 
 This page is exhaustive and always in sync with the type stubs — it is regenerated in CI. For narrative documentation, worked examples and the recommended patterns, start at the [Python API guide](python-api.md).
 
-**186 classes.**
+**195 classes.**
 
 ---
 
@@ -57,6 +57,8 @@ Result from a Locy ASSUME command.
 | Signature | Description |
 |---|---|
 | `command_type() -> str` *(property)* | — |
+| `results() -> list[QueryCommandResult | AssumeCommandResult | ExplainCommandResult | AbduceCommandResult | DeriveCommandResult | CypherCommandResult]` *(property)* | — |
+| `derived() -> dict[str, list[dict[str, Any]]]` *(property)* | — |
 | `rows() -> list[dict[str, Any]]` *(property)* | — |
 | `__getitem__(key: str) -> Any` | — |
 
@@ -81,6 +83,7 @@ Async bulk writer for high-throughput data ingestion.
 
 | Signature | Description |
 |---|---|
+| `load_id() -> str` *(property)* | The load's id; still readable after ``commit`` or ``abort``. |
 | `async insert_vertices(label: str, vertices: list[dict[str, Any]]) -> list[int]` | — |
 | `async insert_edges(edge_type: str, edges: list[tuple[int, int, dict[str, Any]]]) -> None` | — |
 | `stats() -> BulkStats` | — |
@@ -229,6 +232,7 @@ An async query session with scoped variables.
 | `params() -> Params` | — |
 | `async query(cypher: str, params: dict[str, Any] | None=None) -> QueryResult` | — |
 | `query_with(cypher: str) -> AsyncSessionQueryBuilder` | — |
+| `async run(cypher: str) -> QueryResult` | — |
 | `async locy(program: str, params: dict[str, Any] | None=None) -> LocyResult` | — |
 | `locy_with(program: str) -> AsyncSessionLocyBuilder` | — |
 | `rules() -> RuleRegistry` | — |
@@ -242,6 +246,7 @@ An async query session with scoped variables.
 | `fork_schema() -> AsyncForkSchemaBuilder` | — |
 | `async is_forked() -> bool` | — |
 | `async flush() -> None` | — |
+| `async bulk_load_applied(load_id: str) -> bool` | Whether the bulk load ``load_id``, run through this session, reached its |
 | `async pin_to_version(snapshot_id: str) -> None` | — |
 | `async pin_to_timestamp(epoch_secs: float) -> None` | — |
 | `async refresh() -> None` | — |
@@ -491,6 +496,7 @@ The main asynchronous Uni database interface.
 | `async get_edge_type_info(name: str) -> EdgeTypeInfo | None` | — |
 | `async load_schema(path: str) -> None` | — |
 | `async save_schema(path: str) -> None` | — |
+| `async bulk_load_applied(load_id: str) -> bool` | Whether the bulk load ``load_id`` reached its commit point. |
 | `rules() -> AsyncRuleRegistry` | — |
 | `xervo() -> AsyncXervo` | — |
 | `compaction() -> AsyncCompaction` | — |
@@ -500,6 +506,7 @@ The main asynchronous Uni database interface.
 | `async create_snapshot(name: str) -> str` | — |
 | `async list_snapshots() -> list[SnapshotInfo]` | — |
 | `async restore_snapshot(snapshot_id: str) -> None` | — |
+| `async delete_snapshot(snapshot_id: str) -> None` | — |
 | `async list_forks() -> list[ForkInfo]` | — |
 | `async fork_info(name: str) -> ForkInfo | None` | — |
 | `async drop_fork(name: str) -> None` | — |
@@ -631,6 +638,8 @@ Statistics from a bulk loading operation.
 | `index_build_duration_secs` | `float` |
 | `index_task_ids` | `list[str]` |
 | `indexes_pending` | `bool` |
+| `load_id` | `str` |
+| `warnings` | `list[str]` |
 
 ---
 
@@ -640,6 +649,7 @@ High-performance bulk data loader.
 
 | Signature | Description |
 |---|---|
+| `load_id() -> str` *(property)* | The load's id; still readable after ``commit`` or ``abort``. |
 | `insert_vertices(label: str, vertices: list[dict[str, Any]]) -> list[int]` | — |
 | `insert_edges(edge_type: str, edges: list[tuple[int, int, dict[str, Any]]]) -> None` | — |
 | `stats() -> BulkStats` | — |
@@ -880,6 +890,9 @@ Database-wide metrics snapshot.
 | `active_sessions` | `int` |
 | `l1_run_count` | `int` |
 | `write_throttle_pressure` | `float` |
+| `write_throttle_waits` | `int` |
+| `write_throttle_wait_time_secs` | `float` |
+| `writes_stalled` | `int` |
 | `compaction_in_progress` | `bool` |
 | `wal_size_bytes` | `int` |
 | `wal_lsn` | `int` |
@@ -1064,6 +1077,7 @@ Result of a ``transaction.execute()`` call.
 | `relationships_created` | `int` |
 | `relationships_deleted` | `int` |
 | `properties_set` | `int` |
+| `properties_removed` | `int` |
 | `labels_added` | `int` |
 | `labels_removed` | `int` |
 | `metrics` | `dict[str, Any]` |
@@ -1406,6 +1420,8 @@ Statistics from a Locy program evaluation.
 | `hypothetical_strata_evaluated` | `int` |
 | `hypothetical_strata_reused` | `int` |
 | `hypothetical_facts_derived` | `int` |
+| `sequenced_strata_evaluated` | `int` |
+| `sequenced_strata_reused` | `int` |
 
 ---
 
@@ -1841,6 +1857,7 @@ A query session with scoped variables.
 | `params() -> Params` | — |
 | `query(cypher: str, params: dict[str, Any] | None=None) -> QueryResult` | — |
 | `query_with(cypher: str) -> SessionQueryBuilder` | — |
+| `run(cypher: str) -> QueryResult` | — |
 | `locy(program: str, params: dict[str, Any] | None=None) -> LocyResult` | — |
 | `locy_with(program: str) -> SessionLocyBuilder` | — |
 | `rules() -> RuleRegistry` | — |
@@ -1854,6 +1871,7 @@ A query session with scoped variables.
 | `fork_schema() -> ForkSchemaBuilder` | — |
 | `is_forked() -> bool` | — |
 | `flush() -> None` | — |
+| `bulk_load_applied(load_id: str) -> bool` | Whether the bulk load ``load_id``, run through this session, reached its |
 | `pin_to_version(snapshot_id: str) -> None` | — |
 | `pin_to_timestamp(epoch_secs: float) -> None` | — |
 | `refresh() -> None` | — |
@@ -2187,6 +2205,7 @@ The main synchronous Uni database interface.
 | `get_edge_type_info(name: str) -> EdgeTypeInfo | None` | — |
 | `load_schema(path: str) -> None` | — |
 | `save_schema(path: str) -> None` | — |
+| `bulk_load_applied(load_id: str) -> bool` | Whether the bulk load ``load_id`` reached its commit point. |
 | `rules() -> RuleRegistry` | — |
 | `xervo() -> Xervo` | — |
 | `compaction() -> Compaction` | — |
@@ -2196,6 +2215,7 @@ The main synchronous Uni database interface.
 | `create_snapshot(name: str) -> str` | — |
 | `list_snapshots() -> list[SnapshotInfo]` | — |
 | `restore_snapshot(snapshot_id: str) -> None` | — |
+| `delete_snapshot(snapshot_id: str) -> None` | — |
 | `list_forks() -> list[ForkInfo]` | — |
 | `fork_info(name: str) -> ForkInfo | None` | — |
 | `drop_fork(name: str) -> None` | — |
@@ -2253,6 +2273,32 @@ Builder for creating or opening a Uni database.
 
 ---
 
+## `UniBulkCommitIncompleteError` — extends `UniError`
+
+A bulk load is committed, but its publish could not be finished by the commit.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `load_id` | `str` |
+| `reason` | `str` |
+
+---
+
+## `UniBulkCommitOutcomeUnknownError` — extends `UniError`
+
+Whether a bulk load committed is unknown.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `load_id` | `str` |
+| `reason` | `str` |
+
+---
+
 ## `UniCancelledError` — extends `UniError`
 
 Operation was cancelled.
@@ -2280,6 +2326,35 @@ Constraint violation.
 ## `UniDatabaseLockedError` — extends `UniError`
 
 Database is locked by another process.
+
+---
+
+## `UniEdgeEndpointError` — extends `UniConstraintError`
+
+A relationship's endpoint lacks every label its declared edge type allows.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `edge_type` | `str` |
+| `endpoint` | `str` |
+| `labels` | `list[str]` |
+| `allowed` | `list[str]` |
+
+---
+
+## `UniEdgeIdentityError` — extends `UniConstraintError`
+
+A ``SET`` / ``REMOVE`` on a relationship named other endpoints or another type.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `eid` | `int` |
+| `stored` | `str` |
+| `requested` | `str` |
 
 ---
 
@@ -2516,6 +2591,18 @@ Database path does not exist.
 
 ---
 
+## `UniParameterMissingError` — extends `UniQueryError`
+
+A query refers to a ``$parameter`` the call did not supply.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `names` | `list[str]` |
+
+---
+
 ## `UniParseError` — extends `UniError`
 
 Cypher or Locy parse error.
@@ -2546,6 +2633,31 @@ Operation not supported on read-only database.
 
 ---
 
+## `UniRegexBacktrackLimitError` — extends `UniError`
+
+A `=~` match needed more backtracking steps than allowed.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `pattern` | `str` |
+| `limit` | `int` |
+
+---
+
+## `UniRestoreBlockedByForksError` — extends `UniError`
+
+`restore_snapshot` refused because the database has forks.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `forks` | `list[str]` |
+
+---
+
 ## `UniRuleConflictError` — extends `UniError`
 
 Locy rule conflict during promotion.
@@ -2560,7 +2672,13 @@ Schema definition or migration error.
 
 ## `UniSnapshotNotFoundError` — extends `UniError`
 
-Snapshot not found.
+Snapshot not found (restore_snapshot, delete_snapshot).
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `snapshot_id` | `str` |
 
 ---
 
@@ -2612,9 +2730,35 @@ Type mismatch error.
 
 ---
 
+## `UniUncommittedWritesError` — extends `UniTransactionError`
+
+The operation cannot run in a transaction holding uncommitted writes.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `operation` | `str` |
+| `reason` | `str` |
+
+---
+
 ## `UniWriteContextAlreadyActiveError` — extends `UniError`
 
 A write context is already active on the session.
+
+---
+
+## `UniWriteStalledError` — extends `UniError`
+
+Writes are stopped at the write throttle's hard limit with compaction disabled.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `l1_runs` | `int` |
+| `hard_limit` | `int` |
 
 ---
 

@@ -330,3 +330,175 @@ async fn flattened_entity_maps_keep_colliding_properties() -> anyhow::Result<()>
     );
     Ok(())
 }
+
+/// A writing unit subquery re-emits its entity with its identity: before,
+/// `properties(n)` and `collect(n)` after `CALL { WITH n SET ... }` read null
+/// (the re-emitted struct carried a null `_vid`), whatever the properties.
+#[tokio::test]
+async fn unit_subquery_reemits_the_entity_with_its_identity() -> anyhow::Result<()> {
+    let db = Uni::temporary().build().await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:P {name: 'p', w: 1})-[:PR {k: 1}]->(:P {name: 'q'})")
+        .await?;
+    tx.commit().await?;
+    let want_n: HashMap<String, Value> = HashMap::from([
+        ("name".to_string(), Value::String("p".into())),
+        ("w".to_string(), Value::Int(2)),
+    ]);
+    let want_r: HashMap<String, Value> = HashMap::from([("k".to_string(), Value::Int(2))]);
+    let mut defects = Vec::new();
+    for state in ["L0", "flushed"] {
+        if state == "flushed" {
+            db.flush().await?;
+        }
+        for (q, want) in [
+            (
+                "MATCH (n:P {name: 'p'}) CALL { WITH n SET n.w = 2 } RETURN properties(n)",
+                &want_n,
+            ),
+            (
+                "MATCH (n:P {name: 'p'}) CALL { WITH n SET n.w = 2 } RETURN collect(n)[0]",
+                &want_n,
+            ),
+            (
+                "MATCH (n:P {name: 'p'}) CALL { WITH n SET n.w = 2 } RETURN n",
+                &want_n,
+            ),
+            (
+                "MATCH ()-[r:PR]->() CALL { WITH r SET r.k = 2 } RETURN properties(r)",
+                &want_r,
+            ),
+            (
+                "MATCH ()-[r:PR]->() CALL { WITH r SET r.k = 2 } RETURN r",
+                &want_r,
+            ),
+        ] {
+            let tx = db.session().tx().await?;
+            let got = tx.query(q).await?.rows()[0].values()[0].clone();
+            tx.rollback();
+            if map_of(&got).as_ref() != Some(want) {
+                defects.push(format!("[{state}] {q}: got {got:?}"));
+            }
+        }
+    }
+    assert!(
+        defects.is_empty(),
+        "{} defect(s):\n{}",
+        defects.len(),
+        defects.join("\n")
+    );
+    Ok(())
+}
+
+/// A flattened entity map — user properties as top-level keys, no
+/// `_all_props` — whose map-valued user property is named `properties`.
+///
+/// Two user-reachable producers make one: a writing unit subquery
+/// re-emitting its entity, and a parameter (or `UNWIND`ed map) spelling an
+/// entity with `_vid` and `_labels`. The `properties` map was taken for the
+/// serialised entity's property container, so every other property vanished
+/// (`$m` came back as a node with only the nested map's keys) or the nested
+/// keys leaked in as properties (`RETURN n` gained `inner`), and `n.properties`
+/// read `NULL`.
+#[tokio::test]
+async fn flattened_entity_with_a_map_valued_properties_property() -> anyhow::Result<()> {
+    let db = Uni::temporary().build().await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE LABEL M (name STRING, properties MAP<STRING, INT64>)")
+        .await?;
+    tx.commit().await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:M {name: 'x', properties: {inner: 1}})")
+        .await?;
+    tx.commit().await?;
+
+    let inner = Value::Map(HashMap::from([("inner".to_string(), Value::Int(1))]));
+    let want: HashMap<String, Value> = HashMap::from([
+        ("name".to_string(), Value::String("x".into())),
+        ("properties".to_string(), inner.clone()),
+    ]);
+    let want_keys = Value::List(vec![
+        Value::String("name".into()),
+        Value::String("properties".into()),
+    ]);
+    let mut defects = Vec::new();
+    let mut identity_defects = Vec::new();
+    let mut check = |what: String, got: Vec<Value>| {
+        let ok = got.len() == 5
+            && got[0] == Value::String("x".into())
+            && got[1] == inner
+            && got[2] == want_keys
+            && map_of(&got[3]).as_ref() == Some(&want)
+            && got[4].is_null();
+        if !ok {
+            defects.push(format!("{what}: got {got:?}"));
+        }
+    };
+
+    for state in ["L0", "flushed"] {
+        if state == "flushed" {
+            db.flush().await?;
+        }
+        let tx = db.session().tx().await?;
+        let res = tx
+            .query(
+                "MATCH (n:M) CALL { WITH n SET n.name = 'x' } \
+                 RETURN n.name, n.properties, keys(n), n, n.inner",
+            )
+            .await?;
+        tx.rollback();
+        check(
+            format!("[{state}] unit subquery"),
+            res.rows()[0].values().to_vec(),
+        );
+
+        // The re-emitted entity keeps its identity: `properties(n)` and
+        // `collect(n)` read it as an entity, not as a null one.
+        for q in [
+            "MATCH (n:M) CALL { WITH n SET n.name = 'x' } RETURN properties(n)",
+            "MATCH (n:M) CALL { WITH n SET n.name = 'x' } RETURN collect(n)[0]",
+        ] {
+            let tx = db.session().tx().await?;
+            let got = tx.query(q).await?.rows()[0].values()[0].clone();
+            tx.rollback();
+            if map_of(&got).as_ref() != Some(&want) {
+                identity_defects.push(format!("[{state}] {q}: got {got:?}"));
+            }
+        }
+    }
+
+    let lit = "{_vid: 0, _labels: ['A'], name: 'x', properties: {inner: 1}}";
+    let res = db
+        .session()
+        .query(&format!(
+            "UNWIND [{lit}] AS m RETURN m.name, m.properties, keys(m), m, m.inner"
+        ))
+        .await?;
+    check(
+        "UNWIND of a map literal".into(),
+        res.rows()[0].values().to_vec(),
+    );
+
+    let mut param = want.clone();
+    param.insert("_vid".to_string(), Value::Int(0));
+    param.insert(
+        "_labels".to_string(),
+        Value::List(vec![Value::String("A".into())]),
+    );
+    let res = db
+        .session()
+        .query_with("RETURN $m.name, $m.properties, keys($m), $m, $m.inner")
+        .param("m", Value::Map(param))
+        .fetch_all()
+        .await?;
+    check("parameter".into(), res.rows()[0].values().to_vec());
+    defects.extend(identity_defects);
+
+    assert!(
+        defects.is_empty(),
+        "{} defect(s):\n{}",
+        defects.len(),
+        defects.join("\n")
+    );
+    Ok(())
+}

@@ -339,10 +339,23 @@ pub struct DatabaseMetrics {
     pub uptime: Duration,
     /// Number of currently active sessions.
     pub active_sessions: usize,
-    /// Number of L1 compaction runs completed (0 until storage instrumentation).
+    /// Uncompacted flush generations: L0 flushes to L1 since the last
+    /// compaction. The count the write throttle compares against
+    /// `UniConfig::throttle`'s soft and hard limits.
     pub l1_run_count: usize,
-    /// Write throttle pressure (0.0–1.0, 0 until instrumentation).
+    /// How hard the write throttle is pushing back, from `l1_run_count`:
+    /// `0.0` below the soft limit, rising through the soft band, `1.0` at the
+    /// hard limit (writes stall, or with compaction disabled are refused).
+    /// `0.0` without a writer.
     pub write_throttle_pressure: ThrottlePressure,
+    /// Writes (statements, batches, or unscoped writer calls) that waited on
+    /// the write throttle since this database was opened.
+    pub write_throttle_waits: u64,
+    /// Total time those writes spent waiting.
+    pub write_throttle_wait_time: Duration,
+    /// Writes refused with [`UniError::WriteStalled`] since this database
+    /// was opened.
+    pub writes_stalled: u64,
     /// Current compaction status.
     pub compaction_status: uni_store::CompactionStatus,
     /// WAL size in bytes (0 until storage instrumentation).
@@ -484,6 +497,15 @@ impl UniInner {
                     })
                 })
             }),
+            // A re-drive publishes into the database directory, so it holds
+            // the scratch-directory claim, as every tracked writer does.
+            track_task: Some({
+                let shutdown = Arc::clone(&self.shutdown_handle);
+                let scratch = self._temp_dir.clone();
+                Arc::new(move |handle| {
+                    track_task_with_scratch_claim(&shutdown, scratch.as_ref(), handle);
+                })
+            }),
         }
     }
 
@@ -577,11 +599,53 @@ impl UniInner {
             .await
             .map_err(UniError::Internal)?;
 
-        let pinned_storage = Arc::new(self.storage.pinned(manifest));
+        // The snapshot's tables may hold edge rows a later endpoint
+        // verification never read (compaction can drop them from the live
+        // tables), so plans over it distrust verifications newer than it. A
+        // private copy of the schema: this view is read-only.
+        let schema = self
+            .schema
+            .with_overlay(&uni_common::core::fork::SchemaDelta::empty());
+        schema
+            .distrust_verifications_after(manifest.created_at)
+            .map_err(UniError::Internal)?;
+        // An explicit snapshot reads its tables at the versions its restore
+        // point tagged; a flush manifest has none and reads the live tables
+        // under its version ceiling.
+        let restore_point = self
+            .storage
+            .snapshot_manager()
+            .load_restore_point(snapshot_id)
+            .await
+            .map_err(UniError::Internal)?;
+        let pinned_storage = Arc::new(match &restore_point {
+            Some(point) => self
+                .storage
+                .pinned_at_restore_point(manifest, &point.tables),
+            None => self.storage.pinned(manifest),
+        });
+        if !pinned_storage.history_is_whole() {
+            // A flush manifest is read from the live tables, and semantic
+            // compaction has since merged the rows it would read.
+            return Err(UniError::InvalidArgument {
+                arg: "snapshot_id".to_string(),
+                message: format!(
+                    "snapshot '{snapshot_id}' was written by a flush, not taken with \
+                     create_snapshot, and compaction has since merged the history it \
+                     needs; only explicit snapshots stay readable after compaction"
+                ),
+            });
+        }
+        // The copied VID-to-labels index holds the live labels; traversals
+        // filter target labels through it.
+        pinned_storage
+            .rewind_vid_labels_index_to_pin(&self.storage)
+            .await
+            .map_err(UniError::Internal)?;
 
         let prop_manager = Arc::new(PropertyManager::with_plugin_registry(
             pinned_storage.clone(),
-            self.schema.clone(),
+            schema.clone(),
             self.properties.cache_size(),
             self.plugin_registry.clone(),
         ));
@@ -603,7 +667,7 @@ impl UniInner {
         );
         Ok(self.derived_clone(
             pinned_storage,
-            self.schema.clone(),
+            schema,
             prop_manager,
             None,
             None,
@@ -641,10 +705,32 @@ impl UniInner {
         // construction, which matches the spec's fork-point snapshot
         // isolation.
         let merged_schema = self.schema.with_overlay(&scope.overlay());
+        // A verification of declared endpoints that started after this fork
+        // was created never read the fork's base data, so it must not narrow
+        // the fork's plans. A nested fork inherits its ancestors' bases too,
+        // which were created earlier still, so it trusts no verification at
+        // all -- only types enforced since creation.
+        let fork_info = scope.fork_info();
+        let trusted_since = if fork_info.parent_fork_id.is_some() {
+            chrono::DateTime::<chrono::Utc>::MIN_UTC
+        } else {
+            fork_info.created_at
+        };
+        merged_schema
+            .distrust_verifications_after(trusted_since)
+            .map_err(UniError::Internal)?;
         let forked_storage = Arc::new(
             self.storage
                 .at_fork_with_schema(scope.clone(), merged_schema.clone()),
         );
+
+        // Complete a bulk load on this fork that passed its commit point but
+        // whose publish was interrupted, before anything reads the fork: its
+        // marker lives in the fork's catalog namespace, which the primary's
+        // open never looks at. A no-op when no marker is present.
+        uni_bulk::recover_interrupted_bulk_load(&forked_storage)
+            .await
+            .map_err(UniError::Internal)?;
 
         let prop_manager = Arc::new(PropertyManager::with_plugin_registry(
             forked_storage.clone(),
@@ -705,6 +791,16 @@ impl UniInner {
             .unwrap_or(0);
         let replayed = forked_writer
             .replay_wal(fork_wal_hwm)
+            .await
+            .map_err(UniError::Internal)?;
+        // The fork's catalog view is never saved, so a downgrade stays in it.
+        forked_writer
+            .distrust_conformance_after_unmarked_writes(false)
+            .await
+            .map_err(UniError::Internal)?;
+        // As on the primary: a fork load completed by recovery above has its
+        // edges' declared endpoints checked once the fork's WAL is replayed.
+        uni_bulk::check_recovered_bulk_endpoints(&forked_storage, &forked_writer, true)
             .await
             .map_err(UniError::Internal)?;
         if replayed > 0 {
@@ -982,6 +1078,12 @@ impl Uni {
     pub fn metrics(&self) -> DatabaseMetrics {
         let schema_version = self.inner.schema.schema().schema_version as u64;
         let compaction_status = self.inner.storage.compaction_status().unwrap_or_default();
+        let throttle = self
+            .inner
+            .writer
+            .as_ref()
+            .map(|w| w.write_throttle_stats())
+            .unwrap_or_default();
         let cache_usage = self
             .inner
             .storage
@@ -995,7 +1097,18 @@ impl Uni {
             uptime: self.inner.start_time.elapsed(),
             active_sessions: self.inner.active_session_count.load(Ordering::Relaxed),
             l1_run_count: compaction_status.l1_runs,
-            write_throttle_pressure: ThrottlePressure::default(),
+            write_throttle_pressure: ThrottlePressure::new(if self.inner.writer.is_some() {
+                uni_store::runtime::writer::write_throttle_pressure(
+                    &self.inner.config.throttle,
+                    self.inner.config.compaction.enabled,
+                    compaction_status.l1_runs,
+                )
+            } else {
+                0.0
+            }),
+            write_throttle_waits: throttle.waits,
+            write_throttle_wait_time: throttle.wait_time,
+            writes_stalled: throttle.stalled,
             compaction_status,
             wal_size_bytes: 0u64,
             wal_lsn: self.inner.cached_wal_lsn.load(Ordering::Relaxed),
@@ -1067,6 +1180,40 @@ impl Uni {
         self.inner.storage.clone()
     }
 
+    /// Whether the bulk load `load_id` is applied.
+    ///
+    /// `true` once the load passed its commit point: its rows are visible, or
+    /// -- after a crash or a `BulkCommitIncomplete` -- the next open completes
+    /// it. `false` when it never reached the commit point, so nothing of it is
+    /// or will be visible and retrying it is safe. This is how a caller
+    /// settles a `BulkCommitOutcomeUnknown`, or a crash in the middle of
+    /// `BulkWriter::commit`, without risking a double load. `load_id` comes
+    /// from `BulkWriter::load_id`, `BulkStats::load_id`, or the error.
+    ///
+    /// Answered from the load's commit marker while it exists and from a
+    /// small receipt (`catalog/bulk_loads_applied/{load_id}.json`) written
+    /// before the marker is deleted. A load on a fork keeps its marker and
+    /// receipt under the fork's catalog namespace and is answered by
+    /// `Session::bulk_load_applied` on a session of that fork; here it answers
+    /// `false`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UniError::InvalidArgument`] if `load_id` is not a load id (a
+    /// UUID), and [`UniError::Internal`] if the store cannot be read: an
+    /// unreadable answer is never reported as `false`.
+    pub async fn bulk_load_applied(&self, load_id: &str) -> Result<bool> {
+        if uuid::Uuid::parse_str(load_id).is_err() {
+            return Err(UniError::InvalidArgument {
+                arg: "load_id".to_string(),
+                message: format!("'{load_id}' is not a bulk load id"),
+            });
+        }
+        uni_bulk::flush_intent::bulk_load_applied(&self.inner.storage, load_id)
+            .await
+            .map_err(UniError::Internal)
+    }
+
     /// Flush all uncommitted changes to persistent storage (L1).
     ///
     /// This forces a write of the current in-memory buffer (L0) to columnar files.
@@ -1099,7 +1246,7 @@ impl Uni {
 
         let snapshot_id = if let Some(writer) = &self.inner.writer {
             writer
-                .flush_to_l1(Some(name.to_string()))
+                .create_snapshot(Some(name.to_string()))
                 .await
                 .map_err(UniError::Internal)?
         } else {
@@ -1131,17 +1278,78 @@ impl Uni {
         Ok(manifests)
     }
 
-    /// Restore the database to a specific snapshot.
+    /// Restore the database to a snapshot taken with [`Self::create_snapshot`]
+    /// (or `CALL uni.admin.snapshot.create`).
     ///
-    /// **Note**: This currently requires a restart or re-opening of Uni to fully take effect
-    /// as it only updates the latest pointer.
+    /// Takes effect at once, in this handle and on disk: every later read sees
+    /// the snapshot's vertices, edges and property values and nothing written
+    /// after it, whether those writes were flushed or not. Writes after the
+    /// restore build on the restored state. The schema catalog is restored
+    /// too: labels, edge types, properties, indexes and constraints declared,
+    /// dropped, renamed or retyped after the snapshot are back as they were.
+    /// Background index builds wait for the restore and then run against the
+    /// restored store.
+    ///
+    /// # Errors
+    ///
+    /// [`UniError::ReadOnly`] on a read-only handle;
+    /// [`UniError::SnapshotNotFound`] for an unknown id;
+    /// [`UniError::RestoreBlockedByForks`] while the database has forks (a
+    /// restore does not rewind fork branches, so drop them first);
+    /// [`UniError::Internal`] when the snapshot was not taken by
+    /// `create_snapshot` (a manifest written by an ordinary flush has no
+    /// restore point) or was taken before restore points recorded the
+    /// catalog, while a transaction is open or a bulk load is publishing, or
+    /// when a step fails. A failure after the rewind started is completed by
+    /// the next open.
     pub async fn restore_snapshot(&self, snapshot_id: &str) -> Result<()> {
-        self.inner
-            .storage
-            .snapshot_manager()
-            .set_latest_snapshot(snapshot_id)
+        let writer = self
+            .inner
+            .writer
+            .as_ref()
+            .ok_or_else(|| UniError::ReadOnly {
+                operation: "restore_snapshot".to_string(),
+            })?;
+        writer
+            .restore_snapshot(snapshot_id)
             .await
-            .map_err(UniError::Internal)
+            .map_err(|e| match e.downcast::<UniError>() {
+                Ok(typed) => typed,
+                Err(other) => UniError::Internal(other),
+            })
+    }
+
+    /// Delete a snapshot: its restore point, its names, its manifest, and the
+    /// tags pinning the storage versions it recorded.
+    ///
+    /// A restorable snapshot keeps every version it recorded for as long as
+    /// it exists, whatever `compaction.version_retention` says. Once deleted,
+    /// the next compaction's version cleanup reclaims the versions no other
+    /// snapshot pins. Other snapshots are unaffected and stay restorable.
+    /// Also `CALL uni.admin.snapshot.delete(id)`.
+    ///
+    /// # Errors
+    ///
+    /// [`UniError::ReadOnly`] on a read-only handle;
+    /// [`UniError::SnapshotNotFound`] for an unknown id;
+    /// [`UniError::Internal`] while a restore is incomplete (reopen to
+    /// complete it), while a fork was created from the snapshot, or when a
+    /// step fails. A failed deletion can be run again.
+    pub async fn delete_snapshot(&self, snapshot_id: &str) -> Result<()> {
+        let writer = self
+            .inner
+            .writer
+            .as_ref()
+            .ok_or_else(|| UniError::ReadOnly {
+                operation: "delete_snapshot".to_string(),
+            })?;
+        writer
+            .delete_snapshot(snapshot_id)
+            .await
+            .map_err(|e| match e.downcast::<UniError>() {
+                Ok(typed) => typed,
+                Err(other) => UniError::Internal(other),
+            })
     }
 
     // ── Compaction ──────────────────────────────────────────────────────
@@ -1619,6 +1827,7 @@ impl UniBuilder {
 
     /// Open the database (async).
     pub async fn build(mut self) -> Result<Uni> {
+        self.config.warn_deprecated_options();
         let uri = self.uri.clone();
         // Share one guard between `UniInner` and every background task that can
         // write into the scratch directory, so removal is ordered after the
@@ -1773,6 +1982,11 @@ impl UniBuilder {
                 .await
                 .map_err(UniError::Internal)?,
         );
+        // A local-only store keeps the catalog under the database directory;
+        // a restore syncs it there before clearing its intent.
+        if !is_hybrid && !is_remote_uri {
+            schema_manager.set_local_file(PathBuf::from(&uri).join(schema_obj_path.as_ref()));
+        }
 
         // Hoisted above the persisted-Locy-rule load below, which needs the
         // registry to compile rules against a registry-backed monotonicity
@@ -1909,6 +2123,12 @@ impl UniBuilder {
         // a committed-but-unfinalized one forward (it may flip the latest pointer,
         // so it must run first). A no-op when no marker is present (H9).
         uni_bulk::recover_interrupted_bulk_load(&storage)
+            .await
+            .map_err(UniError::Internal)?;
+        // A snapshot restore cut short rewinds the rest of the store and
+        // publishes its manifest, so it too runs before the latest snapshot is
+        // read.
+        uni_store::snapshot::restore::recover_interrupted_restore(&storage)
             .await
             .map_err(UniError::Internal)?;
 
@@ -2149,6 +2369,19 @@ impl UniBuilder {
                 info!("WAL recovery: replayed {} mutations", replayed);
             }
         }
+        // A WAL segment or latest manifest written by a binary that does not
+        // enforce declared edge endpoints voids the catalog's conformance
+        // records; a read-only open downgrades its in-memory view only.
+        writer
+            .distrust_conformance_after_unmarked_writes(!self.read_only)
+            .await
+            .map_err(UniError::Internal)?;
+        // A bulk load completed by recovery above, before the WAL was
+        // replayed, has its edges' declared endpoints checked now, when a
+        // label removal still in the WAL is visible.
+        uni_bulk::check_recovered_bulk_endpoints(&storage, &writer, !self.read_only)
+            .await
+            .map_err(UniError::Internal)?;
 
         // Wire up IndexRebuildManager for post-flush automatic rebuild scheduling
         let mut auto_rebuild_manager = None;

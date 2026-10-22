@@ -1,0 +1,17 @@
+{
+  "edge_types": {
+    "CLOSE": { "id": 1, "src_labels": [], "dst_labels": [] },
+    "FRIEND": { "id": 2, "src_labels": [], "dst_labels": [] },
+    "KNOWS": { "id": 3, "src_labels": [], "dst_labels": [] }
+  },
+  "indexes": [],
+  "labels": {
+    "Person": { "id": 1 }
+  },
+  "properties": {
+    "Person": {
+      "name": { "type": "String", "nullable": true }
+    }
+  },
+  "schema_version": 1
+}

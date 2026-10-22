@@ -111,14 +111,12 @@ CONFIG_NOT_BOUND = {
     "auto_flush_min_mutations": "flush tuning, Rust-embedder concern",
     "commit_channel_capacity": "internal channel sizing",
     "commit_timeout": "not bound yet; reachable need, no binding written",
-    "compaction": "nested struct; needs a Python dataclass to bind well",
-    "throttle": "nested struct; needs a Python dataclass to bind well",
     "file_sandbox": "nested struct; security policy set by the embedder",
     "object_store": "nested struct; Python uses cloud_config() instead",
     "index_rebuild": "nested struct; needs a Python dataclass to bind well",
     "max_compaction_rows": "compaction OOM guard, Rust-embedder concern",
     "max_recursive_cte_iterations": "not bound yet",
-    "partial_lance_writes": "storage-internal toggle",
+    "partial_lance_writes": "deprecated no-op; never bound, so Python rejects the key",
     "defer_embeddings": "not bound yet",
     "fork_fragment_warn_threshold": "operational warning threshold",
     "tx_id_reservoir_batch": "internal id allocation",
@@ -145,6 +143,7 @@ ERROR_NO_DEDICATED_EXCEPTION = {
     "ForkNameInvalid": "collapses to UniError; message carries the reason",
     "PendingFlushTimeout": "not bound yet; the only fork-lifecycle variant without one",
     "ForkWritesNotYetSupported": "explicitly routed to base UniError",
+    "BulkLoadUnsupported": "only a backend that cannot stage raises it; none is reachable from Python",
 }
 
 
@@ -220,6 +219,24 @@ def python_config_keys() -> list[str]:
     m = re.search(r"pub const UNI_CONFIG_KEYS: &\[&str\] = &\[(.*?)\];", src, re.S)
     if not m:
         fail(["could not locate `UNI_CONFIG_KEYS` in %s" % CONVERT_RS])
+    return re.findall(r'"([a-z_0-9]+)"', m.group(1))
+
+
+# Nested config structs bound as dicts under one `config({...})` key, and the
+# const in convert.rs listing the keys that dict accepts. Every field must be
+# bound: these are small, user-facing, and have no allowlist.
+NESTED_CONFIG = {
+    "CompactionConfig": "COMPACTION_CONFIG_KEYS",
+    "WriteThrottleConfig": "THROTTLE_CONFIG_KEYS",
+}
+
+
+def const_str_list(name: str) -> list[str]:
+    """String entries of `pub const <name>: &[&str] = &[...]` in convert.rs."""
+    src = CONVERT_RS.read_text()
+    m = re.search(rf"pub const {name}: &\[&str\] = &\[(.*?)\];", src, re.S)
+    if not m:
+        fail([f"could not locate `{name}` in {CONVERT_RS}"])
     return re.findall(r'"([a-z_0-9]+)"', m.group(1))
 
 
@@ -576,6 +593,22 @@ def main() -> int:
                 + "".join(f"    - {k}\n" for k in unknown)
             )
         problems += check(kind, locy_fields, bound, allowlist)
+
+    # Sixth axis: nested config structs bound as dicts.
+    for struct, const in NESTED_CONFIG.items():
+        struct_fields = [f for f, _ in rust_struct_fields(CONFIG_RS, struct)]
+        accepted_keys = const_str_list(const)
+        if len(struct_fields) < 3:
+            fail([f"parity check parsed {len(struct_fields)} {struct} field(s); "
+                  "it would pass vacuously. Fix the parser."])
+        if set(struct_fields) != set(accepted_keys):
+            problems.append(
+                f"nested config: `{const}` and `{struct}` disagree:\n"
+                + "".join(f"    - field not accepted: {f}\n"
+                          for f in sorted(set(struct_fields) - set(accepted_keys)))
+                + "".join(f"    - key with no field: {k}\n"
+                          for k in sorted(set(accepted_keys) - set(struct_fields)))
+            )
 
     if problems:
         fail(["Rust <-> Python parity drift:", ""] + problems)

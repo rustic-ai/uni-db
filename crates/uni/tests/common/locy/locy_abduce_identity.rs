@@ -257,3 +257,56 @@ async fn abduce_add_edge_proposes_concrete_endpoints() -> Result<()> {
     }
     Ok(())
 }
+
+/// An anonymous endpoint node still identifies the edge, by the endpoints'
+/// vids: the removal is proposed, and pinned to that one edge.
+#[tokio::test]
+async fn abduce_remove_edge_into_anonymous_node_removes_only_that_edge() -> Result<()> {
+    assert_no_single_removal_validates("(a:N)-[:R]->(:N)").await
+}
+
+/// A body whose middle node is anonymous proposes the edges on both sides of
+/// it. The derivation's evidence row bound only named elements, so neither
+/// hop could be identified and ABDUCE NOT returned no candidate at all.
+#[tokio::test]
+async fn abduce_through_anonymous_middle_node_proposes_both_edges() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    seed(
+        &db,
+        "CREATE (:L {id: 'l1'})-[:OBSERVED]->(:F {id: 'f1'})-[:ON]->(:T {id: 't1'})",
+    )
+    .await?;
+    let ab = abduce(
+        &db,
+        "CREATE RULE q AS MATCH (l:L)-[:OBSERVED]->(:F)-[:ON]->(t:T) YIELD KEY l \n\
+         ABDUCE NOT q WHERE l.id = 'l1'",
+    )
+    .await?;
+    let mut removed = Vec::new();
+    for m in &ab.modifications {
+        let Modification::RemoveEdge {
+            edge_type,
+            source_var,
+            target_var,
+            edge_var,
+            ..
+        } = &m.modification
+        else {
+            continue;
+        };
+        for var in [source_var, target_var, edge_var] {
+            if var.starts_with("abduce_anon_") {
+                bail!("a generated variable leaked into {:?}", m.modification);
+            }
+        }
+        if !m.validated {
+            bail!("removing {edge_type} breaks q(l1), yet it did not validate");
+        }
+        removed.push(edge_type.clone());
+    }
+    removed.sort();
+    if removed != ["OBSERVED", "ON"] {
+        bail!("expected both hops proposed, got {:?}", ab.modifications);
+    }
+    Ok(())
+}

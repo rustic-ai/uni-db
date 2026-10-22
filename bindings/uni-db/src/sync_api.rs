@@ -539,8 +539,10 @@ impl TxBulkWriterBuilder {
         let real_writer = builder
             .build()
             .map_err(crate::exceptions::anyhow_to_pyerr)?;
+        let load_id = real_writer.load_id().to_string();
         Ok(crate::builders::BulkWriter {
             inner: std::sync::Mutex::new(crate::builders::BulkWriterState::new(real_writer)),
+            load_id,
         })
     }
 }
@@ -846,6 +848,20 @@ impl Database {
         .map_err(crate::exceptions::uni_error_to_pyerr)
     }
 
+    /// Whether the bulk load `load_id` was applied (reached its commit point).
+    ///
+    /// `True`: its rows are visible, or the next open completes it -- do not
+    /// retry it. `False`: nothing of it is or will be visible; retrying is
+    /// safe. Raises `UniInvalidArgumentError` for a string that is not a load
+    /// id.
+    fn bulk_load_applied(&self, py: Python<'_>, load_id: &str) -> PyResult<bool> {
+        py.detach(|| {
+            pyo3_async_runtimes::tokio::get_runtime()
+                .block_on(self.inner.bulk_load_applied(load_id))
+        })
+        .map_err(crate::exceptions::uni_error_to_pyerr)
+    }
+
     // ========================================================================
     // Plugin Methods
     // ========================================================================
@@ -1055,6 +1071,16 @@ impl Database {
         py.detach(|| {
             pyo3_async_runtimes::tokio::get_runtime()
                 .block_on(core::restore_snapshot_core(&self.inner, snapshot_id))
+        })
+        .map_err(crate::exceptions::uni_error_to_pyerr)
+    }
+
+    /// Delete a snapshot: its restore point, names and manifest, and the
+    /// pins on its storage versions, which compaction then reclaims.
+    fn delete_snapshot(&self, py: Python<'_>, snapshot_id: &str) -> PyResult<()> {
+        py.detach(|| {
+            pyo3_async_runtimes::tokio::get_runtime()
+                .block_on(core::delete_snapshot_core(&self.inner, snapshot_id))
         })
         .map_err(crate::exceptions::uni_error_to_pyerr)
     }

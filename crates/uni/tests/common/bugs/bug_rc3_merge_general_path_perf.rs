@@ -84,15 +84,18 @@ async fn relationship_merge_should_match_bulk_create_fastpath() -> Result<()> {
     let session = db.session();
     let tx = session.tx().await?;
     let start = Instant::now();
-    tx.execute_with(
-        "UNWIND range(0, $hi) AS k \
-         MATCH (a:S {k: k}), (b:T {k: k}) MERGE (a)-[:REL]->(b)",
-    )
-    .param("hi", Value::Int(M - 1))
-    .run()
-    .await?;
+    let merged = tx
+        .execute_with(
+            "UNWIND range(0, $hi) AS k \
+             MATCH (a:S {k: k}), (b:T {k: k}) MERGE (a)-[:REL]->(b)",
+        )
+        .param("hi", Value::Int(M - 1))
+        .run()
+        .await?;
     tx.commit().await?;
     let batched_rel_us = start.elapsed().as_micros() / M as u128;
+    let merge_plans = merged.metrics().physical_plans;
+    assert_eq!(merged.relationships_created(), M as usize);
 
     // ── (C) one batched relationship CREATE (the edge bulk fast-path) ───────
     // Identical edge writes to (B), but CREATE has a bulk fast-path while MERGE
@@ -112,11 +115,45 @@ async fn relationship_merge_should_match_bulk_create_fastpath() -> Result<()> {
     tx.commit().await?;
     let batched_create_us = start.elapsed().as_micros() / M as u128;
 
-    eprintln!(
+    // ── (D) control: the same batch forced onto the general path ────────────
+    // `ON MATCH SET` is outside the fast path's shape, so every row plans its
+    // own existence check. This is what the plan count below must tell apart
+    // from (B); without it a count that never moves would pass for free.
+    let db = endpoints_db(M).await?;
+    let session = db.session();
+    let tx = session.tx().await?;
+    let general = tx
+        .execute_with(
+            "UNWIND range(0, $hi) AS k \
+             MATCH (a:S {k: k}), (b:T {k: k}) \
+             MERGE (a)-[r:REL]->(b) ON MATCH SET r.seen = true",
+        )
+        .param("hi", Value::Int(M - 1))
+        .run()
+        .await?;
+    tx.commit().await?;
+    let general_plans = general.metrics().physical_plans;
+
+    let timing = format!(
         "RC3 edge-write per-row: merge-per-statement={per_stmt_us}us, \
          merge-batched={batched_rel_us}us, create-batched-fastpath={batched_create_us}us, \
-         merge/create={:.1}x",
+         merge/create={:.1}x; physical plans: merge-batched={merge_plans}, \
+         general-path control={general_plans} (M={M})",
         batched_rel_us as f64 / batched_create_us.max(1) as f64
+    );
+    eprintln!("{timing}");
+
+    // The path taken, independent of timing: the general path builds a plan
+    // per row, the fast path builds none per row.
+    assert!(
+        general_plans >= M as u64,
+        "control: the general path must plan per row, or the plan count cannot \
+         discriminate the paths\n{timing}"
+    );
+    assert!(
+        merge_plans < (M as u64) / 4,
+        "the batched relationship MERGE planned per row: it took the general path, \
+         not the RC3 fast path\n{timing}"
     );
 
     // A batched relationship MERGE should be within a small factor of the same
@@ -126,7 +163,7 @@ async fn relationship_merge_should_match_bulk_create_fastpath() -> Result<()> {
         batched_rel_us < batched_create_us * 8,
         "batched relationship MERGE ({batched_rel_us}us/row) is >8x the bulk-fast-path \
          CREATE of the same edges ({batched_create_us}us/row) — relationship MERGE \
-         fast path appears to have regressed to per-row planning (RC3)"
+         fast path appears to have regressed to per-row planning (RC3)\n{timing}"
     );
     Ok(())
 }

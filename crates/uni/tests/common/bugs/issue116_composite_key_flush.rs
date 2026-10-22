@@ -23,7 +23,7 @@ use uni_db::Uni;
 async fn make_db_with_composite_unique() -> Result<Uni> {
     let db = Uni::temporary().build().await?;
     db.session()
-        .query(
+        .run(
             r#"
         CALL uni.schema.createLabel('User', {
             "properties": {

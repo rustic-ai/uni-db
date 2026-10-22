@@ -42,8 +42,8 @@ use std::fmt;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use uni_common::Value;
 use uni_common::core::schema::Schema as UniSchema;
+use uni_common::{Edge, Node, Value};
 use uni_cypher::ast::{Expr, UnaryOp};
 use uni_store::storage::manager::StorageManager;
 
@@ -719,6 +719,32 @@ where
     builder.finish_to_array()
 }
 
+/// Build a one-row column of `data_type` holding `val`, through the scan's
+/// property-column builder.
+///
+/// Errors when the builder cannot produce exactly `data_type`: a column of
+/// another type would only fail later, at batch construction, with less
+/// context.
+fn single_row_typed_column(val: &Value, data_type: &DataType) -> DFResult<ArrayRef> {
+    const SLOT: &str = "value";
+    let vid = uni_common::core::id::Vid::new(0);
+    let props = HashMap::from([(vid, HashMap::from([(SLOT.to_string(), val.clone())]))]);
+    let column = uni_store::runtime::columnar_scan::build_property_column_static(
+        &[vid],
+        &props,
+        SLOT,
+        data_type,
+    )
+    .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?;
+    if column.data_type() != data_type {
+        return Err(datafusion::error::DataFusionError::Internal(format!(
+            "value_to_single_row_array: built {:?} for declared {data_type:?}",
+            column.data_type()
+        )));
+    }
+    Ok(column)
+}
+
 /// Convert a single Value to a single-row Arrow array of the given type.
 fn value_to_single_row_array(val: &Value, data_type: &DataType) -> DFResult<ArrayRef> {
     Ok(match data_type {
@@ -774,7 +800,13 @@ fn value_to_single_row_array(val: &Value, data_type: &DataType) -> DFResult<Arra
             }
             Arc::new(b.finish()) as ArrayRef
         }
-        DataType::Struct(fields) => {
+        // A struct that encodes a *value* -- a DateTime, a Time, a sparse
+        // vector -- is not an entity; it goes to the typed builder below.
+        DataType::Struct(fields)
+            if !uni_common::core::schema::is_datetime_struct(data_type)
+                && !uni_common::core::schema::is_time_struct(data_type)
+                && !uni_common::core::schema::is_sparse_vector_struct(data_type) =>
+        {
             // Encode a graph entity (`Value::Map` / `Value::Node` / `Value::Edge`)
             // into a single-row StructArray matching the declared field
             // layout. Used by the unit-subquery refresh path so the bare
@@ -782,18 +814,28 @@ fn value_to_single_row_array(val: &Value, data_type: &DataType) -> DFResult<Arra
             // (expr_compiler.rs) tries struct-field extraction before flat
             // columns, so a stale Struct would shadow our refreshed dotted
             // columns.
-            let map_view: Option<&HashMap<String, Value>> = match val {
-                Value::Map(m) => Some(m),
-                Value::Node(n) => Some(&n.properties),
-                Value::Edge(e) => Some(&e.properties),
-                _ => None,
-            };
+            //
+            // A native entity answers its system fields (`_vid`, `_labels`,
+            // `_eid`, ...) through `entity_property`, and its whole property
+            // map is the `_all_props` container. Reading only its property
+            // map left `_vid` null, and a struct with a null identity reads
+            // as a null entity: after `CALL { WITH n SET ... }`,
+            // `properties(n)` and `collect(n)` returned null and `n.name`
+            // read null (the #234 asymmetry `append_cross_join_row` fixed for
+            // dotted columns).
             let mut child_arrays: Vec<ArrayRef> = Vec::with_capacity(fields.len());
             for child_field in fields.iter() {
-                let child_val = map_view
-                    .and_then(|m| m.get(child_field.name()))
-                    .cloned()
-                    .unwrap_or(Value::Null);
+                let name = child_field.name().as_str();
+                let child_val = match val {
+                    Value::Map(m) => m.get(name).cloned().unwrap_or(Value::Null),
+                    Value::Node(Node { properties, .. }) | Value::Edge(Edge { properties, .. })
+                        if name == "_all_props" =>
+                    {
+                        Value::Map(properties.clone())
+                    }
+                    Value::Node(_) | Value::Edge(_) => val.entity_property(name),
+                    _ => Value::Null,
+                };
                 child_arrays.push(value_to_single_row_array(
                     &child_val,
                     child_field.data_type(),
@@ -803,20 +845,13 @@ fn value_to_single_row_array(val: &Value, data_type: &DataType) -> DFResult<Arra
                 fields.iter().cloned().zip(child_arrays).collect();
             Arc::new(arrow_array::StructArray::from(pairs)) as ArrayRef
         }
-        _ => {
-            debug_assert!(
-                false,
-                "value_to_single_row_array: unhandled DataType {:?} — add an arm for it",
-                data_type
-            );
-            let mut b = StringBuilder::with_capacity(1, 64);
-            match val {
-                Value::Null => b.append_null(),
-                Value::String(s) => b.append_value(s),
-                other => b.append_value(format!("{other}")),
-            }
-            Arc::new(b.finish()) as ArrayRef
-        }
+        // Every other type -- a declared property's `Map` (`List<Struct>`),
+        // typed lists, vectors, temporals, `Float32`, ... -- is built by the
+        // scan's property-column builder, which covers every type a declared
+        // property can have. Writing the value's display text into a `Utf8`
+        // column instead produced a column of the wrong type, which failed
+        // the batch ("column types must match").
+        _ => single_row_typed_column(val, data_type)?,
     })
 }
 

@@ -65,6 +65,57 @@ pub struct LanceDbBackend {
     /// dataset open + schema conversion for every Cypher query that
     /// scans a label or edge type. See issue #55.
     schema_cache: DashMap<String, Arc<ArrowSchema>>,
+    /// Tables whose staged files are held against version cleanup, with the
+    /// number of holds on each (see [`StorageBackend::hold_staged_files`]).
+    ///
+    /// Lance's cleanup deletes a data file no version references once it is
+    /// 7 days old. A staged file is exactly that until it is published, so a
+    /// load that staged long ago -- or a committed load whose publish is left
+    /// to the next open -- would lose rows to an ordinary compaction pass, and
+    /// recovery would then read "every staged file gone" as "published and
+    /// since rewritten" and skip it silently.
+    staged_holds: Arc<DashMap<String, usize>>,
+    /// The table versions a snapshot view reads at; `None` for a live
+    /// backend. See [`StorageBackend::at_table_versions`].
+    read_versions: Option<Arc<HashMap<String, u64>>>,
+}
+
+/// Opens `table` for a read: at its version in `versions` when that is set
+/// (a table missing from it did not exist at the snapshot), at its newest
+/// version otherwise.
+async fn open_for_read(
+    directory: &LanceDirectory,
+    versions: Option<&HashMap<String, u64>>,
+    table: &str,
+) -> Result<lance::Dataset> {
+    match versions {
+        None => directory.open(table).await,
+        Some(versions) => match versions.get(table) {
+            Some(&version) => directory.open_at_version(table, version).await,
+            None => Err(anyhow!("table '{table}' did not exist at this snapshot")),
+        },
+    }
+}
+
+/// One hold on a table's staged files; released on drop.
+struct StagedHoldGuard {
+    holds: Arc<DashMap<String, usize>>,
+    table: String,
+}
+
+impl Drop for StagedHoldGuard {
+    fn drop(&mut self) {
+        let emptied = match self.holds.get_mut(&self.table) {
+            Some(mut count) => {
+                *count = count.saturating_sub(1);
+                *count == 0
+            }
+            None => false,
+        };
+        if emptied {
+            self.holds.remove_if(&self.table, |_, count| *count == 0);
+        }
+    }
 }
 
 /// Map uni's backend-neutral metric onto Lance's.
@@ -109,7 +160,22 @@ impl LanceDbBackend {
             table_write_locks: DashMap::new(),
             existence_cache: DashMap::new(),
             schema_cache: DashMap::new(),
+            staged_holds: Arc::new(DashMap::new()),
+            read_versions: None,
         })
+    }
+
+    /// Opens `table` for a read; see [`open_for_read`].
+    async fn open_read(&self, table: &str) -> Result<lance::Dataset> {
+        open_for_read(&self.directory, self.read_versions.as_deref(), table).await
+    }
+
+    /// Refuses a write through a snapshot view.
+    fn ensure_writable(&self, table: &str) -> Result<()> {
+        if self.read_versions.is_some() {
+            anyhow::bail!("write to '{table}' through a read-only snapshot view");
+        }
+        Ok(())
     }
 
     /// Get or insert the per-table write mutex used to serialize
@@ -160,7 +226,7 @@ impl LanceDbBackend {
     /// so it keeps the acceleration. The two paths therefore differ in plan,
     /// never in result set.
     async fn execute_primary_scan(&self, request: &ScanRequest) -> Result<RecordBatchStream> {
-        let dataset = self.directory.open(&request.table_name).await?;
+        let dataset = self.open_read(&request.table_name).await?;
         let mut scanner = dataset.scan();
 
         if let ColumnProjection::Columns(cols) = &request.columns {
@@ -350,7 +416,7 @@ impl LanceDbBackend {
 /// references a data file in `paths`: the current manifest, or the Append
 /// transaction that first committed them (which survives a later rewrite of
 /// those fragments for as long as its version is retained).
-async fn staged_append_committed(
+pub(crate) async fn staged_append_committed(
     dataset: &lance::Dataset,
     paths: &HashSet<&str>,
     published_after: Option<u64>,
@@ -389,6 +455,9 @@ impl StorageBackend for LanceDbBackend {
     // ========================
 
     async fn table_names(&self) -> Result<Vec<String>> {
+        if let Some(versions) = &self.read_versions {
+            return Ok(versions.keys().cloned().collect());
+        }
         self.directory
             .table_names()
             .await
@@ -396,6 +465,9 @@ impl StorageBackend for LanceDbBackend {
     }
 
     async fn table_exists(&self, name: &str) -> Result<bool> {
+        if let Some(versions) = &self.read_versions {
+            return Ok(versions.contains_key(name));
+        }
         if let Some(entry) = self.existence_cache.get(name) {
             return Ok(*entry);
         }
@@ -413,6 +485,7 @@ impl StorageBackend for LanceDbBackend {
     }
 
     async fn create_table(&self, name: &str, batches: Vec<RecordBatch>) -> Result<()> {
+        self.ensure_writable(name)?;
         // L6: reject names unsafe for the dataset path / Lance branch names
         // (a schemaless bad label/edge-type would otherwise panic Lance).
         crate::backend::table_names::validate_table_name(name)?;
@@ -449,6 +522,7 @@ impl StorageBackend for LanceDbBackend {
     }
 
     async fn create_empty_table(&self, name: &str, schema: Arc<ArrowSchema>) -> Result<()> {
+        self.ensure_writable(name)?;
         // L6: reject unsafe names before they reach Lance.
         crate::backend::table_names::validate_table_name(name)?;
         self.write_batches(name, Vec::new(), schema, lance::dataset::WriteMode::Create)
@@ -459,6 +533,7 @@ impl StorageBackend for LanceDbBackend {
     }
 
     async fn open_or_create_table(&self, name: &str, schema: Arc<ArrowSchema>) -> Result<()> {
+        self.ensure_writable(name)?;
         if self.table_exists(name).await? {
             // Just verify it can be opened
             self.directory.open(name).await?;
@@ -469,6 +544,7 @@ impl StorageBackend for LanceDbBackend {
     }
 
     async fn drop_table(&self, name: &str) -> Result<()> {
+        self.ensure_writable(name)?;
         self.schema_cache.remove(name);
         self.directory
             .remove_table(name)
@@ -550,7 +626,7 @@ impl StorageBackend for LanceDbBackend {
         if let Some(entry) = self.schema_cache.get(name) {
             return Ok(Some(entry.clone()));
         }
-        match self.directory.open(name).await {
+        match self.open_read(name).await {
             Ok(dataset) => {
                 // `Dataset::schema()` is Lance's own schema type; the trait
                 // hands out Arrow. The conversion is what lancedb's
@@ -566,7 +642,7 @@ impl StorageBackend for LanceDbBackend {
     }
 
     async fn count_rows(&self, table_name: &str, filter: Option<&FilterExpr>) -> Result<usize> {
-        let dataset = self.directory.open(table_name).await?;
+        let dataset = self.open_read(table_name).await?;
         let predicate = filter.map(FilterExpr::to_sql).transpose()?;
         dataset
             .count_rows(predicate)
@@ -584,6 +660,7 @@ impl StorageBackend for LanceDbBackend {
         batches: Vec<RecordBatch>,
         mode: WriteMode,
     ) -> Result<()> {
+        self.ensure_writable(table_name)?;
         if batches.is_empty() {
             return Ok(());
         }
@@ -618,6 +695,7 @@ impl StorageBackend for LanceDbBackend {
         on: &[&str],
         batches: Vec<RecordBatch>,
     ) -> Result<()> {
+        self.ensure_writable(table_name)?;
         if batches.is_empty() {
             return Ok(());
         }
@@ -656,6 +734,7 @@ impl StorageBackend for LanceDbBackend {
     }
 
     async fn delete_rows(&self, table_name: &str, filter: &FilterExpr) -> Result<()> {
+        self.ensure_writable(table_name)?;
         let mut dataset = self.directory.open(table_name).await?;
         dataset
             .delete(&filter.to_sql()?)
@@ -670,6 +749,7 @@ impl StorageBackend for LanceDbBackend {
         batches: Vec<RecordBatch>,
         schema: Arc<ArrowSchema>,
     ) -> Result<()> {
+        self.ensure_writable(name)?;
         // Clean up leftover staging table
         let staging_name = format!("{}_staging", name);
         if self.table_exists(&staging_name).await? {
@@ -713,6 +793,7 @@ impl StorageBackend for LanceDbBackend {
         add: &[arrow_schema::Field],
         relax_nullable: &[String],
     ) -> Result<()> {
+        self.ensure_writable(table_name)?;
         use lance::dataset::{ColumnAlteration, NewColumnTransform};
 
         if add.is_empty() && relax_nullable.is_empty() {
@@ -836,6 +917,7 @@ impl StorageBackend for LanceDbBackend {
         table_name: &str,
         batches: Vec<RecordBatch>,
     ) -> Result<crate::backend::traits::StagedAppend> {
+        self.ensure_writable(table_name)?;
         use lance::dataset::transaction::Operation;
 
         let rows: usize = batches.iter().map(RecordBatch::num_rows).sum();
@@ -872,6 +954,7 @@ impl StorageBackend for LanceDbBackend {
         table_name: &str,
         staged: Vec<crate::backend::traits::StagedAppend>,
     ) -> Result<()> {
+        self.ensure_writable(table_name)?;
         let fragments = staged_fragments(table_name, staged)?;
         if fragments.is_empty() {
             return Ok(());
@@ -883,6 +966,14 @@ impl StorageBackend for LanceDbBackend {
         let dataset = Arc::new(self.directory.open(table_name).await?);
         self.commit_staged_append(table_name, dataset, fragments)
             .await
+    }
+
+    fn hold_staged_files(&self, table_name: &str) -> crate::backend::traits::StagedFilesHold {
+        *self.staged_holds.entry(table_name.to_string()).or_insert(0) += 1;
+        crate::backend::traits::StagedFilesHold::new(Box::new(StagedHoldGuard {
+            holds: Arc::clone(&self.staged_holds),
+            table: table_name.to_string(),
+        }))
     }
 
     fn staged_record(
@@ -917,6 +1008,7 @@ impl StorageBackend for LanceDbBackend {
         record: &serde_json::Value,
         published_after: Option<u64>,
     ) -> Result<crate::backend::traits::RecordedPublish> {
+        self.ensure_writable(table_name)?;
         use crate::backend::traits::RecordedPublish;
 
         let fragments: Vec<lance::table::format::Fragment> = serde_json::from_value(record.clone())
@@ -1034,6 +1126,9 @@ impl StorageBackend for LanceDbBackend {
     // ========================
 
     async fn get_table_version(&self, table_name: &str) -> Result<Option<u64>> {
+        if let Some(versions) = &self.read_versions {
+            return Ok(versions.get(table_name).copied());
+        }
         if !self.table_exists(table_name).await? {
             return Ok(None);
         }
@@ -1042,6 +1137,7 @@ impl StorageBackend for LanceDbBackend {
     }
 
     async fn rollback_table(&self, table_name: &str, target_version: u64) -> Result<()> {
+        self.ensure_writable(table_name)?;
         // lancedb's protocol was `checkout(v)` then `restore()`: pin the handle
         // to the target version, then commit that as a new version. Opening
         // directly at the version is the same first step, and `restore` is
@@ -1066,7 +1162,41 @@ impl StorageBackend for LanceDbBackend {
                 e
             )
         })?;
+        // The restored version carries its own schema: a column added after
+        // it is gone, and a cached schema that still lists it would make every
+        // projection of that column fail in Lance.
+        self.schema_cache.remove(table_name);
         Ok(())
+    }
+
+    async fn tag_table_version(&self, table_name: &str, tag: &str, version: u64) -> Result<()> {
+        self.ensure_writable(table_name)?;
+        let dataset = self.directory.open(table_name).await?;
+        dataset.tags().create(tag, version).await.map_err(|e| {
+            anyhow!(
+                "Failed to tag '{}' v{} as '{}': {}",
+                table_name,
+                version,
+                tag,
+                e
+            )
+        })
+    }
+
+    async fn delete_table_tag(&self, table_name: &str, tag: &str) -> Result<()> {
+        if !self.table_exists(table_name).await? {
+            return Ok(());
+        }
+        let dataset = self.directory.open(table_name).await?;
+        match dataset.tags().delete(tag).await {
+            Ok(()) | Err(lance::Error::RefNotFound { .. }) => Ok(()),
+            Err(e) => Err(anyhow!(
+                "Failed to remove tag '{}' from '{}': {}",
+                tag,
+                table_name,
+                e
+            )),
+        }
     }
 
     // ========================
@@ -1078,6 +1208,7 @@ impl StorageBackend for LanceDbBackend {
         table_name: &str,
         version_retention: std::time::Duration,
     ) -> Result<OptimizeReport> {
+        self.ensure_writable(table_name)?;
         let mut dataset = self.directory.open(table_name).await?;
 
         // The three steps lancedb's `OptimizeAction::All` performed, in order
@@ -1116,17 +1247,40 @@ impl StorageBackend for LanceDbBackend {
         // `retain_branch_lineage_files()`, and `clean_referenced_branches`
         // defaults to false, so versions a live fork branch still needs are
         // retained regardless of age (`lance/src/dataset/cleanup.rs:146,181,930`).
-        let policy = lance::dataset::cleanup::CleanupPolicy {
-            before_timestamp: Some(
-                chrono::Utc::now()
-                    - chrono::Duration::from_std(version_retention)
-                        .unwrap_or_else(|_| chrono::Duration::days(7)),
-            ),
-            ..Default::default()
+        //
+        // Skipped while staged files of this table are held: the pass would
+        // also delete every unreferenced data file older than Lance's 7-day
+        // grace period, and a held staged file is unreferenced until it is
+        // published. Skipping only defers reclaiming space to a later pass.
+        let held = self
+            .staged_holds
+            .get(table_name)
+            .is_some_and(|count| *count > 0);
+        let removal = if held {
+            tracing::info!(
+                table = %table_name,
+                "skipping version cleanup: a bulk load holds staged files of this table"
+            );
+            lance::dataset::cleanup::RemovalStats::default()
+        } else {
+            let policy = lance::dataset::cleanup::CleanupPolicy {
+                before_timestamp: Some(
+                    chrono::Utc::now()
+                        - chrono::Duration::from_std(version_retention)
+                            .unwrap_or_else(|_| chrono::Duration::days(7)),
+                ),
+                // A tagged version is kept on purpose: a restorable snapshot
+                // pins every table's version with a tag. Lance's default turns
+                // an old tagged version into an error, which would fail every
+                // compaction of a table once its snapshot outlived the
+                // retention window. Tagged versions are kept either way.
+                error_if_tagged_old_versions: false,
+                ..Default::default()
+            };
+            lance::dataset::cleanup::cleanup_old_versions(&dataset, policy)
+                .await
+                .map_err(|e| anyhow!("Failed to prune old versions of '{}': {}", table_name, e))?
         };
-        let removal = lance::dataset::cleanup::cleanup_old_versions(&dataset, policy)
-            .await
-            .map_err(|e| anyhow!("Failed to prune old versions of '{}': {}", table_name, e))?;
 
         // `optimize_indices` reports nothing, so there is nothing to harvest here.
         lance::index::DatasetIndexExt::optimize_indices(
@@ -1221,6 +1375,24 @@ impl StorageBackend for LanceDbBackend {
         &self.base_uri
     }
 
+    fn at_table_versions(
+        &self,
+        versions: &std::collections::BTreeMap<String, u64>,
+    ) -> Option<Arc<dyn StorageBackend>> {
+        Some(Arc::new(Self {
+            directory: self.directory.clone(),
+            base_uri: self.base_uri.clone(),
+            table_write_locks: DashMap::new(),
+            existence_cache: DashMap::new(),
+            // Per view: a table's schema at an older version can be narrower.
+            schema_cache: DashMap::new(),
+            staged_holds: Arc::clone(&self.staged_holds),
+            read_versions: Some(Arc::new(
+                versions.iter().map(|(t, v)| (t.clone(), *v)).collect(),
+            )),
+        }))
+    }
+
     fn branching(&self) -> Option<Arc<dyn crate::backend::branching::ForkBranching>> {
         Some(Arc::new(super::lance_branch::LanceBranching::new(
             self.base_uri.clone(),
@@ -1261,7 +1433,7 @@ impl StorageBackend for LanceDbBackend {
         opts: VectorQueryOpts,
         counters: Option<Arc<QueryCounters>>,
     ) -> Result<Vec<RecordBatch>> {
-        let dataset = self.directory.open(table).await?;
+        let dataset = self.open_read(table).await?;
         let key = arrow_array::Float32Array::from(query.to_vec());
         let mut scanner = dataset.scan();
         scanner
@@ -1326,7 +1498,7 @@ impl StorageBackend for LanceDbBackend {
         if query.is_empty() {
             return Err(anyhow!("multivector_search on '{}': empty query", table));
         }
-        let dataset = self.directory.open(table).await?;
+        let dataset = self.open_read(table).await?;
 
         // Late-interaction (MaxSim) query. lancedb expressed this as
         // `vector_search(first)` then `add_query_vector(..)` per remaining
@@ -1401,6 +1573,7 @@ impl StorageBackend for LanceDbBackend {
         };
         let exists = self.table_exists(table).await?;
         let directory = self.directory.clone();
+        let versions = self.read_versions.clone();
         let table = table.to_string();
         let column = column.to_string();
         let query = query.to_string();
@@ -1409,7 +1582,7 @@ impl StorageBackend for LanceDbBackend {
         // that first loads it.
         crate::runtime::io_runtime::run_on_io_runtime(async move {
             let dataset = if exists {
-                Some(directory.open(&table).await?)
+                Some(open_for_read(&directory, versions.as_deref(), &table).await?)
             } else {
                 None
             };
@@ -1442,6 +1615,7 @@ impl StorageBackend for LanceDbBackend {
             Some(filter.to_sql()?)
         };
         let directory = self.directory.clone();
+        let versions = self.read_versions.clone();
         let table = table.to_string();
         let column = column.to_string();
         let query = query.to_string();
@@ -1453,7 +1627,7 @@ impl StorageBackend for LanceDbBackend {
         // loads it — a caller's runtime, or a query engine bridge — every later
         // query for an uncached term waits on a loop that no longer exists.
         crate::runtime::io_runtime::run_on_io_runtime(async move {
-            let dataset = directory.open(&table).await?;
+            let dataset = open_for_read(&directory, versions.as_deref(), &table).await?;
             let mut scanner = dataset.scan();
             super::lance_fts::configure_search(&mut scanner, &column, &query, k, sql.as_deref())
                 .map_err(|e| anyhow!("{e} (table '{table}')"))?;
@@ -1477,6 +1651,7 @@ impl StorageBackend for LanceDbBackend {
         name: &str,
         params: VectorIndexParams,
     ) -> Result<()> {
+        self.ensure_writable(table)?;
         use lance::index::vector::VectorIndexParams as LanceVectorParams;
         use lance_index::vector::hnsw::builder::HnswBuildParams;
         use lance_index::vector::ivf::IvfBuildParams;
@@ -1605,6 +1780,7 @@ impl StorageBackend for LanceDbBackend {
         index_type: ScalarIndexType,
         name: Option<&str>,
     ) -> Result<()> {
+        self.ensure_writable(table)?;
         // Lance discriminates the three scalar flavors by `BuiltinIndexType`
         // inside `ScalarIndexParams`, where lancedb used three distinct
         // `Index::*` variants.
@@ -1646,6 +1822,7 @@ impl StorageBackend for LanceDbBackend {
         tokenizer: &TokenizerConfig,
         with_positions: bool,
     ) -> Result<()> {
+        self.ensure_writable(table)?;
         // Translate the requested analyzer pipeline into Lance params. A
         // config error (bad ngram bounds, unsupported stop-word language) is
         // surfaced here before we touch the table.
@@ -1706,6 +1883,7 @@ impl StorageBackend for LanceDbBackend {
     }
 
     async fn drop_index(&self, table: &str, index_name: &str) -> Result<()> {
+        self.ensure_writable(table)?;
         let mut dataset = self.directory.open(table).await?;
         lance::index::DatasetIndexExt::drop_index(&mut dataset, index_name)
             .await
@@ -1720,7 +1898,7 @@ impl StorageBackend for LanceDbBackend {
     }
 
     async fn list_indexes(&self, table: &str) -> Result<Vec<IndexInfo>> {
-        let dataset = self.directory.open(table).await?;
+        let dataset = self.open_read(table).await?;
         let indices = lance::index::DatasetIndexExt::load_indices(&dataset)
             .await
             .map_err(|e| anyhow!("Failed to list indexes on '{}': {}", table, e))?;
@@ -2022,6 +2200,98 @@ mod tests {
             "a partly missing record must be refused, got {refused:?}"
         );
         assert_eq!(backend.count_rows("t", None).await.unwrap(), 5);
+    }
+
+    /// Staged files older than Lance's 7-day grace period survive version
+    /// cleanup while a hold is on their table -- dropped or kept until exit --
+    /// and are reclaimed once the last hold is released.
+    #[tokio::test]
+    async fn held_staged_files_survive_cleanup() {
+        let (dir, backend) = create_test_backend().await;
+        backend
+            .create_table("t", vec![test_batch(vec![1], vec![1])])
+            .await
+            .unwrap();
+        let staged = backend
+            .stage_append("t", vec![test_batch(vec![2], vec![2])])
+            .await
+            .unwrap();
+        let record = backend
+            .staged_record("t", std::slice::from_ref(&staged))
+            .unwrap()
+            .unwrap();
+        let fragments: Vec<lance::table::format::Fragment> =
+            serde_json::from_value(record).unwrap();
+        let file = dir
+            .path()
+            .join("t.lance")
+            .join("data")
+            .join(&fragments[0].files[0].path);
+        let aged = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 3600);
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(aged)
+            .unwrap();
+
+        let first = backend.hold_staged_files("t");
+        let second = backend.hold_staged_files("t");
+        backend
+            .optimize_table("t", std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(file.exists(), "held: cleanup must keep the staged file");
+
+        drop(first);
+        second.keep_until_exit();
+        backend
+            .optimize_table("t", std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(
+            file.exists(),
+            "kept until exit: cleanup must keep the staged file"
+        );
+
+        // A table no hold names is cleaned as before: the premise that an aged
+        // unreferenced file is otherwise deleted.
+        backend
+            .create_table("u", vec![test_batch(vec![1], vec![1])])
+            .await
+            .unwrap();
+        let staged_u = backend
+            .stage_append("u", vec![test_batch(vec![2], vec![2])])
+            .await
+            .unwrap();
+        let record_u = backend
+            .staged_record("u", std::slice::from_ref(&staged_u))
+            .unwrap()
+            .unwrap();
+        let fragments_u: Vec<lance::table::format::Fragment> =
+            serde_json::from_value(record_u).unwrap();
+        let file_u = dir
+            .path()
+            .join("u.lance")
+            .join("data")
+            .join(&fragments_u[0].files[0].path);
+        std::fs::File::options()
+            .write(true)
+            .open(&file_u)
+            .unwrap()
+            .set_modified(aged)
+            .unwrap();
+        let hold_u = backend.hold_staged_files("u");
+        drop(hold_u);
+        backend
+            .optimize_table("u", std::time::Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(
+            !file_u.exists(),
+            "released: cleanup must delete an aged unreferenced file"
+        );
+        drop((staged, staged_u));
     }
 
     /// **Phase 4B probe — does any per-query I/O count move across a compaction?**

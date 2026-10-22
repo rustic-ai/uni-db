@@ -1814,7 +1814,7 @@ pub async fn label_only_l0_base_props(
     let props = crate::storage::main_vertex::MainVertexDataset::find_batch_props_by_vids_counted(
         storage.backend(),
         &vids,
-        storage.version_high_water_mark(),
+        storage.row_visibility(),
         counters,
     )
     .await?;

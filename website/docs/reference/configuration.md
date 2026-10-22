@@ -95,6 +95,9 @@ pub struct UniConfig {
     /// Default maximum memory per query (default: 1GB)
     pub max_query_memory: usize,
 
+    /// Backtracking steps one `=~` match may take (default: 10,000,000)
+    pub regex_backtrack_limit: usize,
+
     /// Maximum transaction buffer memory in bytes (default: 1GB)
     pub max_transaction_memory: usize,
 
@@ -123,7 +126,8 @@ pub struct UniConfig {
     /// When true, reject writes with undeclared labels or edge types (default: false).
     pub strict_schema: bool,
 
-    /// Enable Lance `MergeInsert` for SET-only flushes (default: false).
+    /// Deprecated no-op (default: false); see the table below.
+    #[deprecated]
     pub partial_lance_writes: bool,
 
     /// Defer per-row auto-embedding to the next L1 flush, where the whole
@@ -199,6 +203,7 @@ pub struct UniConfig {
 | `query_timeout` | duration | 30s | Default query execution timeout. An exact (`Flat`) scan over ~1M vectors runs past this — raise it for brute-force vector work |
 | `commit_timeout` | duration | 5s | Max wall time a commit may take before `CommitTimeout` abort |
 | `max_query_memory` | bytes | 1 GB | Maximum memory per query |
+| `regex_backtrack_limit` | steps | 10,000,000 | Backtracking steps one `=~` match may take on the backtracking matcher (patterns with look-around, backreferences, atomic groups, possessive quantifiers, `\b`, `\X`, `\b{g}`, `(?c)`, a quantified `\R` or an anchor away from the pattern's ends or under `(?m)`). Past it the query fails with `UniError::RegexBacktrackLimit`. Also settable from Python: `config({"regex_backtrack_limit": 5_000_000})` |
 | `max_transaction_memory` | bytes | 1 GB | Maximum memory per transaction |
 | `max_compaction_rows` | rows | 5,000,000 | OOM guard for in-memory compaction |
 | `max_recursive_cte_iterations` | count | 1,000 | Maximum iterations for recursive CTE evaluation |
@@ -207,7 +212,7 @@ pub struct UniConfig {
 | `lance_index_cache_bytes` | bytes | `None` (Lance: 6 GiB) | Capacity of the storage engine's index cache (opened scalar, vector and full-text index structures). Keep it above a vector index's size if ANN latency matters: a vector index evicted from it is re-read and re-decoded on each search. Python: `config({"lance_index_cache_bytes": 512 << 20})` |
 | `strict_schema` | bool | false | Reject writes with undeclared labels or edge types |
 | `ssi_enabled` | bool | true | Serializable Snapshot Isolation / OCC (false = last-writer-wins) |
-| `partial_lance_writes` | bool | false | Use Lance `MergeInsert` for SET-only vertex flushes (edge writes are always stored as full rows) |
+| `partial_lance_writes` | bool | false | **Deprecated, no-op.** Accepted so existing Rust configurations still build; setting it to `true` logs one warning per process when a database opens. Every vertex and edge write is stored as a full row; the partial `MergeInsert` path lost or resurrected properties and was removed. Not available from Python (`config()` rejects the key). |
 | `defer_embeddings` | bool | false | Defer per-row auto-embedding to the next L1 flush |
 | `fork_fragment_warn_threshold` | count | 256 | Per-fork L1 fragment count that triggers a warning |
 | `tx_id_reservoir_batch` | count | 16 | Per-transaction VID/EID reservoir refill size |
@@ -289,6 +294,43 @@ pub struct WriteThrottleConfig {
     pub base_delay: Duration,
 }
 ```
+
+Between `soft_limit` and `hard_limit` a write waits up to
+`min(base_delay × 2^(runs − soft_limit), 100 ms × (hard_limit − soft_limit))`
+(1.6 s at the defaults), re-checking every 100 ms and resuming as soon as
+compaction brings the count below `soft_limit`. At `hard_limit` and above,
+writes stop until a compaction lowers the count. Background compaction and a
+full manual compaction (`CALL uni.admin.compact()` or `Uni::compact`) both
+lower it the same way: by the number of generations counted when the pass
+*started*, so generations flushed while it ran stay counted. A scoped
+`compact_label` / `compact_edge_type` does not change the count, because it
+does not fold every generation. A statement's `timeout` ends either
+wait with a `Timeout` error; the transaction's bulk inserts
+(`bulk_insert_vertices`, `bulk_insert_edges`) are bounded by
+`query_timeout` the same way. The wait is charged once per statement or bulk
+batch, however many rows it writes (a direct `Writer` call outside a
+transaction pays per call).
+
+With `compaction.enabled = false` nothing lowers the count, so the soft band
+does not wait at all and a write at `hard_limit` fails at once with
+`UniError::WriteStalled { l1_runs, hard_limit }` (Python:
+`UniWriteStalledError`, with `l1_runs` and `hard_limit` attributes). The
+error is not retriable as is: run `CALL uni.admin.compact()` through
+`session.run()` (or `Uni::compact`), which lowers the count and resumes writes, or re-enable
+compaction.
+
+From Python both nested configs are set through the `config()` dict, as
+nested dicts; only the keys given change, and an unknown key is a
+`ValueError`. Durations take seconds (a number) or a `datetime.timedelta`:
+
+```python
+db = (uni_db.UniBuilder.temporary()
+      .config({"compaction": {"enabled": False},
+               "throttle": {"soft_limit": 2, "hard_limit": 4}})
+      .build())
+```
+`DatabaseMetrics` reports `write_throttle_pressure`, `write_throttle_waits`,
+`write_throttle_wait_time` and `writes_stalled`.
 
 ### FileSandboxConfig (Security-Critical)
 

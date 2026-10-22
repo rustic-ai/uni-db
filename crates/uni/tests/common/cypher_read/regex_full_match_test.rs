@@ -13,8 +13,15 @@
 //!
 //! Patterns use Java's dialect and defaults: ASCII `\w`/`\b`, ASCII-only
 //! `(?i)` unless `(?u)`, `.` excluding Java's line terminators, `\<` as a
-//! literal; possessive quantifiers are rejected; and input the translation
-//! cannot answer exactly is refused ("Unsupported regex input").
+//! literal. Look-around, backreferences (case-insensitive ones too), atomic
+//! groups, possessive quantifiers, `\X`, `\b{g}`, `(?c)`, `\b` and anchors
+//! away from the pattern's ends or under `(?m)` run on a backtracking matcher that follows
+//! Java's semantics, the rest on a linear-time automaton; no valid pattern
+//! is refused. A match that
+//! backtracks past `UniConfig::regex_backtrack_limit` fails with
+//! `UniError::RegexBacktrackLimit`, a match on which Java's own matcher
+//! throws fails with that exception named, and a long scan of regex rows
+//! honours the query timeout.
 //!
 //! `=~` has several evaluators and each one is driven here: the DataFusion
 //! expression path over literals, parameters, typed and schemaless columns
@@ -67,6 +74,39 @@ const CASES: &[(&str, &str, bool)] = &[
     ("a\u{85}", "(?s)a.", true),
     ("ab", r"a\b", false),
     ("<a>", r"\<a\>", true),
+    // Inputs the automaton cannot answer exactly, answered by the
+    // backtracking matcher instead of refused.
+    ("a\nb", "a$\nb", false),
+    ("a\n", "a$\n", true),
+    ("a\u{85}", "a$\u{85}", true),
+    ("e\u{301}", r"e\x{301}\b", true),
+    // Constructs only the backtracking matcher evaluates.
+    ("aa", "a*+a", false),
+    ("aa", "a++", true),
+    ("ab", "a(?<=a)b", true),
+    ("b", "(?<!a)b", true),
+    ("aa", r"(a)\1", true),
+    ("abc", "(?>a|ab)c", false),
+    ("\r\n", r"\R?\n", false),
+    // Java-only syntax.
+    ("a.b", r"\Qa.b\E", true),
+    ("xx", "x{1}{2}", false),
+    ("\r\n", r"\R", true),
+    // Once rejected as unsupported, now answered as Java 21 answers.
+    ("aA", r"(?i)(a)\1", true),
+    ("k\u{212a}", r"(?iu)(k)\1", true),
+    ("k\u{212a}", r"(?i)(k)\1", false),
+    ("\u{3b1}", r"\p{InGreek}", true),
+    ("A", r"\p{javaLowerCase}", false),
+    ("A", r"(?i)\p{javaLowerCase}", true),
+    ("a", r"\N{LATIN SMALL LETTER A}", true),
+    ("e\u{301}", r"\X", true),
+    ("\r\n", r"\X\X", false),
+    ("e\u{301}", r"e\b{g}\x{301}", false),
+    ("e\u{301}", r"(?c)[\x{e9}]", true),
+    ("a", r"(?:a|\G){2}", false),
+    ("xa", r"(?:(?=(.))x|\1a+)", true),
+    ("\u{10428}a", r".*(?<=\b\p{L})a", false),
 ];
 
 /// Renders `s` as a Cypher string literal.
@@ -327,9 +367,11 @@ async fn regex_full_match_null_and_invalid_pattern() -> Result<()> {
         "RETURN 'a' =~ '[a' AS r",
         "RETURN 'a' =~ 'a)|(b' AS r",
         "WITH '[a' AS p RETURN 'a' =~ p AS r",
-        // Possessive quantifiers are rejected, never read as `(a*)+`.
-        "RETURN 'aa' =~ 'a*+a' AS r",
-        "WITH 'a++' AS p RETURN 'aa' =~ p AS r",
+        // Java rejects these; so does uni-db.
+        "RETURN 'aa' =~ 'a**' AS r",
+        "WITH 'a{,2}' AS p RETURN 'aa' =~ p AS r",
+        "RETURN 'a' =~ '\\N{NO SUCH CHARACTER}' AS r",
+        "RETURN 'a' =~ '\\p{InNoSuchBlock}' AS r",
     ] {
         let err = db
             .session()
@@ -345,58 +387,193 @@ async fn regex_full_match_null_and_invalid_pattern() -> Result<()> {
     Ok(())
 }
 
-/// A pattern whose Java answer depends on input the translation cannot
-/// evaluate exactly is refused for that input on every path: here `$` before
-/// more pattern over an input with an inner newline.
+/// A pattern that backtracks catastrophically on the backtracking matcher.
+const CATASTROPHIC: &str = "(?:(a+)+)+b(?=)";
+
+fn is_backtrack_limit(err: &uni_db::UniError, limit: usize) -> bool {
+    matches!(
+        err,
+        uni_db::UniError::RegexBacktrackLimit { pattern, limit: l }
+            if pattern == CATASTROPHIC && *l == limit
+    )
+}
+
+/// A match past the backtrack limit fails with the typed error on every
+/// path: literals, a stored column, the fallback executor, a transaction and
+/// Locy.
 #[tokio::test]
-async fn regex_full_match_refuses_inexact_input() -> Result<()> {
+async fn regex_backtrack_limit_is_a_typed_error() -> Result<()> {
+    let subject = "a".repeat(40);
     let db = Uni::in_memory().build().await?;
     let session = db.session();
+    let default_limit = uni_db::UniConfig::default().regex_backtrack_limit;
     for q in [
-        r"RETURN 'a\nb' =~ 'a$\\nb' AS r",
-        r"WITH 'a\nb' AS s RETURN s =~ 'a$\\nb' AS r",
-        r"UNWIND ['a\nb'] AS s RETURN s =~ 'a$\\nb' AS r",
+        format!("RETURN '{subject}' =~ '{CATASTROPHIC}' AS r"),
+        format!("WITH '{subject}' AS s RETURN s =~ '{CATASTROPHIC}' AS r"),
+        format!("UNWIND ['{subject}'] AS s RETURN s =~ $p AS r"),
     ] {
         let err = session
-            .query(q)
+            .query_with(&q)
+            .param("p", Value::String(CATASTROPHIC.to_string()))
+            .fetch_all()
             .await
             .err()
             .unwrap_or_else(|| panic!("{q}: expected an error"));
-        assert!(
-            err.to_string().contains("Unsupported regex input"),
-            "{q}: {err}"
-        );
+        assert!(is_backtrack_limit(&err, default_limit), "{q}: {err:?}");
     }
-    // Fallback executor: the per-row values include "a\nb".
-    register_case_procedure(&db);
+
+    // Stored column, read in a transaction. The failed statement leaves the
+    // transaction rollback-only, so the node is committed beforehand.
+    let tx = session.tx().await?;
+    tx.execute_with("CREATE (:R {s: $s})")
+        .param("s", Value::String(subject.clone()))
+        .run()
+        .await?;
+    tx.commit().await?;
+    let tx = session.tx().await?;
+    let err = tx
+        .query(&format!("MATCH (n:R) RETURN n.s =~ '{CATASTROPHIC}' AS r"))
+        .await
+        .err()
+        .expect("tx: expected an error");
+    assert!(is_backtrack_limit(&err, default_limit), "tx: {err:?}");
+    tx.rollback();
+
+    // Fallback executor.
+    db.procedure_registry().register(RegisteredProcedure {
+        name: "test.long_a".to_string(),
+        params: Vec::new(),
+        outputs: vec![ProcedureOutput {
+            name: "s".to_string(),
+            output_type: ProcedureValueType::String,
+        }],
+        data: vec![HashMap::from([(
+            "s".to_string(),
+            Value::String(subject.clone()),
+        )])],
+    });
     let err = session
-        .query(r"CALL test.regex_rows() YIELD s RETURN s =~ 'a$\\nb' AS r")
+        .query(&format!(
+            "CALL test.long_a() YIELD s RETURN s =~ '{CATASTROPHIC}' AS r"
+        ))
         .await
         .err()
         .expect("fallback: expected an error");
-    assert!(
-        err.to_string().contains("Unsupported regex input"),
-        "fallback: {err}"
-    );
-    // Locy: a stored subject "a\nb".
-    let db2 = setup(false, false).await?;
-    let err = db2
-        .session()
-        .locy(
-            r"CREATE RULE all AS MATCH (n:T) YIELD KEY n.k AS k, n.s AS s
-              QUERY all RETURN k, s =~ 'a$\\nb' AS r",
-        )
+    assert!(is_backtrack_limit(&err, default_limit), "fallback: {err:?}");
+
+    // Locy, over the stored node.
+    let err = session
+        .locy(&format!(
+            "CREATE RULE hit AS MATCH (n:R) WHERE n.s =~ '{CATASTROPHIC}' YIELD KEY n.s AS s"
+        ))
         .await
         .err()
         .expect("Locy: expected an error");
-    assert!(
-        err.to_string().contains("Unsupported regex input"),
-        "Locy: {err}"
-    );
-    // The same pattern over a single-line input with a final newline answers.
+    assert!(is_backtrack_limit(&err, default_limit), "Locy: {err:?}");
+    Ok(())
+}
+
+/// `UniConfig::regex_backtrack_limit` sets the limit: a small one refuses a
+/// match the default answers, and the error reports it.
+#[tokio::test]
+async fn regex_backtrack_limit_follows_the_config() -> Result<()> {
+    let subject = "a".repeat(12);
+    let q = format!("RETURN '{subject}' =~ '{CATASTROPHIC}' AS r");
+    let db = Uni::in_memory().build().await?;
+    assert_eq!(single(&db, &q).await?, Value::Bool(false));
+
+    let config = uni_db::UniConfig {
+        regex_backtrack_limit: 50,
+        ..Default::default()
+    };
+    let small = Uni::in_memory().config(config).build().await?;
+    let err = small
+        .session()
+        .query(&q)
+        .await
+        .err()
+        .expect("small limit: expected an error");
+    assert!(is_backtrack_limit(&err, 50), "{err:?}");
+    // A pattern on the automaton is not subject to the limit.
     assert_eq!(
-        single(&db, r"RETURN 'a\n' =~ 'a$\\n' AS r").await?,
-        Value::Bool(true)
+        single(&small, &format!("RETURN '{subject}' =~ '((a+)+)+b' AS r")).await?,
+        Value::Bool(false)
     );
+    Ok(())
+}
+
+/// A long run of regex rows honours the query timeout: the deadline is
+/// checked between rows, not only between batches. Each row here takes
+/// milliseconds on the backtracking matcher, and all of them sit in one
+/// batch. The backreference matters: without one, Java's matcher (and its
+/// port) remembers the positions where a loop iteration failed, and
+/// `(?:a|aa)*c` is no longer exponential.
+#[tokio::test]
+async fn regex_scan_honours_the_query_timeout() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    let q = "UNWIND range(1, 6000) AS i \
+             WITH substring('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 0, 24 + i % 2) AS s \
+             WHERE s =~ '(a|aa)*c\\\\1' RETURN count(*) AS c";
+    let budget = std::time::Duration::from_millis(300);
+    let start = std::time::Instant::now();
+    let err = db
+        .session()
+        .query_with(q)
+        .timeout(budget)
+        .fetch_all()
+        .await
+        .err()
+        .expect("expected a timeout");
+    let elapsed = start.elapsed();
+    assert!(matches!(err, uni_db::UniError::Timeout { .. }), "{err:?}");
+    assert!(
+        elapsed < std::time::Duration::from_millis(1500),
+        "timed out only after {elapsed:?}"
+    );
+    Ok(())
+}
+
+/// Where Java's own matcher throws on an input, the match fails with an
+/// error naming the exception, as the query does in Neo4j: `\b{g}` reads
+/// the character at a hidden position `last`, which the look-ahead left at
+/// the end of the input (`StringIndexOutOfBoundsException` on Java 21 and 25). An input
+/// whose backtrack stack outgrows the matcher's memory budget (about 64 MB;
+/// Java overflows its default stack on far shorter ones) fails with a
+/// recursion-limit error.
+#[tokio::test]
+async fn regex_java_exceptions_and_recursion_limit_are_errors() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    let err = db
+        .session()
+        .query(r"RETURN 'ab' =~ '(?=ab)a\\b{g}b' AS r")
+        .await
+        .err()
+        .expect("Java throws: expected an error");
+    assert!(
+        err.to_string()
+            .contains("java.lang.StringIndexOutOfBoundsException"),
+        "{err}"
+    );
+    let err = db
+        .session()
+        .query_with("RETURN $s =~ '(?:a|b)*(?=)' AS r")
+        .param("s", Value::String("ab".repeat(1_200_000)))
+        .fetch_all()
+        .await
+        .err()
+        .expect("deep recursion: expected an error");
+    assert!(
+        err.to_string().contains("Regex recursion limit exceeded"),
+        "{err}"
+    );
+    // A shorter one is answered, though Java's default stack overflows on
+    // it.
+    let rows = db
+        .session()
+        .query_with("RETURN $s =~ '(?:a|b)*(?=)' AS r")
+        .param("s", Value::String("ab".repeat(100_000)))
+        .fetch_all()
+        .await?;
+    assert_eq!(rows.rows()[0].value("r"), Some(&Value::Bool(true)));
     Ok(())
 }

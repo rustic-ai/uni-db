@@ -240,3 +240,72 @@ def test_session_derive_without_apply_does_not_persist(graph_db):
     # No tx.apply — edges should NOT be in graph
     check = session.query("MATCH ()-[:LINKED]->() RETURN count(*) AS cnt")
     assert check[0]["cnt"] == 0, "DERIVE without apply should not persist edges"
+
+
+# ---------------------------------------------------------------------------
+# Group 5: Top-level commands run in sequence
+# ---------------------------------------------------------------------------
+
+LINKED_RULES = """
+CREATE RULE link AS
+  MATCH (a:X)-[:R]->(b:X)
+  DERIVE (a)-[:LINKED]->(b)
+CREATE RULE linked AS
+  MATCH (a:X)-[:LINKED]->(b:X)
+  YIELD KEY a, KEY b
+"""
+
+WRITE_LINKED = "MATCH (a:X {name: 'A'}), (b:X {name: 'B'}) CREATE (a)-[:LINKED]->(b)"
+
+
+def _query_names(cmd):
+    return sorted((r["src"], r["dst"]) for r in cmd.rows)
+
+
+@pytest.mark.parametrize("level", ["session", "tx"])
+def test_query_after_derive_reads_the_derived_edges(graph_db, level):
+    """A QUERY after a DERIVE in the same program sees the derived edges."""
+    session = graph_db.session()
+    program = (
+        LINKED_RULES
+        + "QUERY linked RETURN a.name AS src, b.name AS dst\n"
+        + "DERIVE link\n"
+        + "QUERY linked RETURN a.name AS src, b.name AS dst\n"
+    )
+    runner = session if level == "session" else session.tx()
+    result = runner.locy(program)
+    before, derive, after = result.command_results
+    assert _query_names(before) == []
+    assert derive.affected == 1
+    assert _query_names(after) == [("A", "B")]
+    assert result.stats.sequenced_strata_evaluated > 0
+
+
+@pytest.mark.parametrize("level", ["session", "tx"])
+def test_cypher_write_command_then_query(graph_db, level):
+    """A Cypher write is a command: it works, and a later QUERY reads it.
+
+    It used to fail with "Mutation context not set". At the session level the
+    write is returned in the DerivedFactSet; in a transaction it lands there.
+    """
+    session = graph_db.session()
+    program = (
+        LINKED_RULES
+        + WRITE_LINKED
+        + "\nQUERY linked RETURN a.name AS src, b.name AS dst\n"
+    )
+    if level == "tx":
+        tx = session.tx()
+        result = tx.locy(program)
+        tx.commit()
+    else:
+        result = session.locy(program)
+        assert (
+            session.query("MATCH ()-[r:LINKED]->() RETURN count(r) AS n")[0]["n"] == 0
+        )
+        assert not result.derived_fact_set.is_empty()
+        tx = session.tx()
+        tx.apply(result.derived_fact_set)
+        tx.commit()
+    assert _query_names(result.command_results[1]) == [("A", "B")]
+    assert session.query("MATCH ()-[r:LINKED]->() RETURN count(r) AS n")[0]["n"] == 1

@@ -21,7 +21,7 @@ Cancelling the token attached to an evaluation aborts it with `UniError::Cancell
 ## Operational Limits (via `LocyConfig`)
 
 - `max_iterations`: recursion cap per recursive stratum.
-- `timeout`: overall evaluation budget. When set, it also replaces the database `query_timeout` for the program's operators, whether above or below it.
+- `timeout`: overall evaluation budget. When set, it also replaces the database `query_timeout` for the program's operators, whether above or below it. It covers the whole program: the evaluations it runs again after a write, ASSUME bodies and ABDUCE candidates share what remains of it, and every command runs within it.
 - `max_derived_bytes`: derived fact memory bound.
 - `max_explain_depth`: derivation tree depth bound.
 - `max_slg_depth`: deprecated, no effect (QUERY reads the fixpoint's facts); setting it warns, and it will be removed.
@@ -32,7 +32,7 @@ Cancelling the token attached to an evaluation aborts it with `UniError::Cancell
 - `probability_epsilon`: MPROD threshold for switching to log-space accumulation.
 - `exact_probability`: enable BDD-based exact evaluation for shared-proof aggregate groups.
 - `max_bdd_variables`: cap per-group BDD complexity before fallback.
-- `top_k_proofs`: limit proof enumeration per aggregate group (controls memory/CPU for large proof spaces).
+- `top_k_proofs`: keep at most `k` recorded derivations per derived fact for `EXPLAIN RULE`, the heaviest first (0 keeps all). A derivation's weight, its `proof_probability`, is its own PROB value: its local weight times every probability it referenced.
 
 ## Warning Codes
 

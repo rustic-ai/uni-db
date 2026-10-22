@@ -8,6 +8,9 @@ use crate::types::{RuntimeWarning, RuntimeWarningCode};
 /// A single row of bindings from a Locy evaluation result.
 pub type FactRow = HashMap<String, Value>;
 
+/// Every rule's facts, keyed by rule name.
+pub type RuleFacts = HashMap<String, Vec<FactRow>>;
+
 /// The result of evaluating a compiled Locy program.
 #[derive(Debug, Clone)]
 pub struct LocyResult {
@@ -44,7 +47,19 @@ pub struct LocyResult {
 #[derive(Debug, Clone)]
 pub enum CommandResult {
     Query(Vec<FactRow>),
-    Assume(Vec<FactRow>),
+    /// Result of an `ASSUME { ... } THEN { ... }` block.
+    Assume {
+        /// One result per body command, in program order: a `QUERY`'s rows,
+        /// a `DERIVE`'s affected count, a Cypher command's rows, a nested
+        /// `ASSUME`'s own result. Empty when the body defines rules only.
+        results: Vec<CommandResult>,
+        /// Every rule's facts in the hypothetical state the body's first
+        /// command reads: after the block's mutations, before any body
+        /// command, the parent program's rules and the body's own. The same
+        /// point the program's [`LocyResult::derived`] is taken at, before
+        /// its first command.
+        derived: RuleFacts,
+    },
     Explain(DerivationNode),
     Abduce(AbductionResult),
     Derive {
@@ -313,6 +328,11 @@ pub struct DerivedFactSet {
     /// Internal: Cypher ASTs for faithful replay during `tx.apply()`.
     #[doc(hidden)]
     pub mutation_queries: Vec<uni_cypher::ast::Query>,
+    /// Internal: the program's parameters, which `tx.apply()` replays
+    /// `mutation_queries` with, so a write command reading `$param` stores
+    /// the value it was evaluated with.
+    #[doc(hidden)]
+    pub mutation_params: HashMap<String, Value>,
 }
 
 impl DerivedFactSet {
@@ -321,9 +341,11 @@ impl DerivedFactSet {
         self.vertices.values().map(|v| v.len()).sum::<usize>() + self.edges.len()
     }
 
-    /// True when no facts were derived.
+    /// True when there is nothing to apply: no facts were derived and the
+    /// program issued no other write (a Cypher write command's statement is
+    /// replayed too).
     pub fn is_empty(&self) -> bool {
-        self.vertices.is_empty() && self.edges.is_empty()
+        self.vertices.is_empty() && self.edges.is_empty() && self.mutation_queries.is_empty()
     }
 }
 
@@ -349,6 +371,14 @@ pub struct LocyStats {
     /// Facts the derived (not reused) strata of hypothetical re-evaluations
     /// produced, summed over every re-evaluation.
     pub hypothetical_facts_derived: usize,
+    /// Strata derived again because an earlier top-level command wrote (a
+    /// `DERIVE`, a Cypher write) and a later command read the facts, summed
+    /// over every such re-derivation.
+    pub sequenced_strata_evaluated: usize,
+    /// Strata such a re-derivation copied from the state before the write
+    /// instead of deriving, because the write could not affect them. Summed
+    /// over every re-derivation.
+    pub sequenced_strata_reused: usize,
 }
 
 impl LocyResult {
@@ -359,16 +389,13 @@ impl LocyResult {
 
     /// Get rows from the first row-producing command result.
     ///
-    /// Row-producing commands are `QUERY`, `ASSUME … THEN { … }` and Cypher
-    /// statements, taken in program order. The Python binding's `rows` follows
-    /// the same rule. Use [`Self::command_results`] to reach a specific command.
+    /// Row-producing results are `QUERY` and Cypher statements, taken in
+    /// program order; an `ASSUME … THEN { … }` is searched depth first, so its
+    /// body's first row-producing result counts in the ASSUME's place (see
+    /// [`CommandResult::rows`]). The Python binding's `rows` follows the same
+    /// rule. Use [`Self::command_results`] to reach a specific command.
     pub fn rows(&self) -> Option<&Vec<FactRow>> {
-        self.command_results.iter().find_map(|cr| match cr {
-            CommandResult::Query(rows)
-            | CommandResult::Assume(rows)
-            | CommandResult::Cypher(rows) => Some(rows),
-            _ => None,
-        })
+        self.command_results.iter().find_map(CommandResult::rows)
     }
 
     /// Get column names from the first row-producing command result's first row.
@@ -456,6 +483,29 @@ impl CommandResult {
             _ => None,
         }
     }
+
+    /// If this is an Assume result, return its per-command results and its
+    /// derived facts.
+    pub fn as_assume(&self) -> Option<(&[CommandResult], &RuleFacts)> {
+        match self {
+            CommandResult::Assume { results, derived } => Some((results, derived)),
+            _ => None,
+        }
+    }
+
+    /// The rows this result produced, searching an Assume depth first.
+    ///
+    /// A `Query` or `Cypher` result is its own rows; an `Assume` result is the
+    /// rows of the first row-producing result among its body's results,
+    /// descending into nested ASSUMEs in order; any other result (and an
+    /// Assume whose body produced no rows) has none.
+    pub fn rows(&self) -> Option<&Vec<FactRow>> {
+        match self {
+            CommandResult::Query(rows) | CommandResult::Cypher(rows) => Some(rows),
+            CommandResult::Assume { results, .. } => results.iter().find_map(CommandResult::rows),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -493,6 +543,60 @@ mod tests {
             cols,
             vec!["alpha".to_owned(), "mu".to_owned(), "zeta".to_owned()]
         );
+    }
+
+    fn row(col: &str, v: i64) -> FactRow {
+        [(col.to_string(), Value::Int(v))].into()
+    }
+
+    fn result_of(command_results: Vec<CommandResult>) -> LocyResult {
+        LocyResult {
+            derived: HashMap::new(),
+            stats: LocyStats::default(),
+            command_results,
+            warnings: Vec::new(),
+            compile_warnings: Vec::new(),
+            approximate_groups: HashMap::new(),
+            derived_fact_set: None,
+            incomplete: None,
+        }
+    }
+
+    /// `rows()` descends depth first into ASSUME results: a DERIVE is not
+    /// row-producing, a nested ASSUME's first row-producing result comes
+    /// before a later sibling's, and an ASSUME with none is skipped.
+    #[test]
+    fn rows_descends_depth_first_into_assume() {
+        let empty_assume = CommandResult::Assume {
+            results: vec![CommandResult::Derive { affected: 2 }],
+            derived: HashMap::new(),
+        };
+        let nested = CommandResult::Assume {
+            results: vec![
+                CommandResult::Derive { affected: 1 },
+                CommandResult::Assume {
+                    results: vec![CommandResult::Query(vec![row("inner", 1)])],
+                    derived: HashMap::new(),
+                },
+                CommandResult::Query(vec![row("outer", 2)]),
+            ],
+            derived: HashMap::from([("r".to_string(), vec![row("d", 3)])]),
+        };
+        let result = result_of(vec![
+            empty_assume,
+            nested,
+            CommandResult::Query(vec![row("top", 4)]),
+        ]);
+        assert_eq!(result.rows(), Some(&vec![row("inner", 1)]));
+        assert_eq!(result.columns(), Some(vec!["inner".to_string()]));
+
+        let (results, derived) = result.command_results[1]
+            .as_assume()
+            .expect("an Assume result");
+        assert_eq!(results.len(), 3);
+        assert_eq!(derived.get("r"), Some(&vec![row("d", 3)]));
+        assert!(result.command_results[2].as_assume().is_none());
+        assert_eq!(result.command_results[0].rows(), None);
     }
 
     #[test]

@@ -249,6 +249,23 @@ fn assert_query_derived_parity(program: &str, result: &uni_locy::LocyResult) {
         })
         .collect();
 
+    // Commands run in sequence, and `derived` holds the facts before the
+    // first command. A QUERY after a command that writes (a DERIVE, a Cypher
+    // write) reads facts derived again in the state that write left, which
+    // `derived` does not describe; only the QUERYs ahead of the first write
+    // read the same state, so only they are compared. The QUERYs after it
+    // are covered by `locy_toplevel_sequencing`'s oracle.
+    let comparable = ast
+        .statements
+        .iter()
+        .take_while(|s| match s {
+            LocyStatement::DeriveCommand(_) => false,
+            LocyStatement::Cypher(q) => !uni_locy::incremental::query_may_write(q),
+            _ => true,
+        })
+        .filter(|s| matches!(s, LocyStatement::GoalQuery(_)))
+        .count();
+
     let query_rows: Vec<_> = result
         .command_results
         .iter()
@@ -267,7 +284,7 @@ fn assert_query_derived_parity(program: &str, result: &uni_locy::LocyResult) {
 
     let key_columns = key_columns_by_rule(&ast);
 
-    for (gq, rows) in goal_queries.iter().zip(query_rows) {
+    for (gq, rows) in goal_queries.iter().zip(query_rows).take(comparable) {
         // A real WHERE, a LIMIT or a SKIP can legitimately empty or shrink the
         // result; a self-comparison tautology cannot.
         if gq

@@ -93,6 +93,14 @@ async fn test_overlay_neighbors_via_writer() -> anyhow::Result<()> {
     let dst = Vid::new(1);
     let eid = Eid::new(0);
 
+    // REL declares Node at both ends, and writes enforce that, so the
+    // endpoints exist as Node vertices first.
+    for vid in [src, dst] {
+        writer
+            .insert_vertex_with_labels(vid, HashMap::new(), &["Node".to_string()], None)
+            .await?;
+    }
+
     // Insert via Writer (dual-writes to L0 data + AM overlay)
     writer
         .insert_edge(src, dst, type_id, eid, HashMap::new(), None, None)

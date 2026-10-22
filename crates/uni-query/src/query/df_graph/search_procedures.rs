@@ -1016,7 +1016,8 @@ pub(super) struct BatchBuildCtx<'a> {
 /// `build_node_yield_columns` emits exactly these props, so restricting the
 /// property fetch to this set is lossless while skipping unread heavy columns
 /// (issue #134). Returns `Some(empty)` when no node yield narrows to any prop
-/// (nothing is emitted, so nothing need be fetched).
+/// (nothing is emitted, so nothing need be fetched), and `None` -- fetch every
+/// property -- when a yield is used as a whole entity (`_all_props`).
 fn node_yield_requested_props(batch_ctx: &BatchBuildCtx<'_>) -> Option<Vec<String>> {
     let mut requested: Vec<String> = Vec::new();
     for (name, alias) in batch_ctx.yield_items {
@@ -1025,6 +1026,10 @@ fn node_yield_requested_props(batch_ctx: &BatchBuildCtx<'_>) -> Option<Vec<Strin
         }
         let output_name = alias.as_ref().unwrap_or(name);
         if let Some(props) = batch_ctx.target_properties.get(output_name) {
+            // `_all_props` is every property: no projection narrows it.
+            if props.iter().any(|p| p == "_all_props") {
+                return None;
+            }
             for p in props {
                 if !requested.contains(p) {
                     requested.push(p.clone());

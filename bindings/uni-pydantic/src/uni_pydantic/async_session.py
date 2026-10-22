@@ -404,7 +404,11 @@ class AsyncUniSession:
         return cast(int, results[0]["count"]) if results else 0
 
     async def bulk_add(self, entities: Sequence[UniNode]) -> list[int]:
-        """Bulk-add entities using bulk_writer."""
+        """Bulk-add entities using bulk_writer.
+
+        One bulk load and one commit for every label; see the sync
+        ``UniSession.bulk_add`` for the error contract.
+        """
         if not entities:
             return []
 
@@ -415,26 +419,38 @@ class AsyncUniSession:
                 by_label[label] = []
             by_label[label].append(entity)
 
-        all_vids: list[int] = []
+        import uni_db
+
+        assigned: list[tuple[str, list[UniNode], list[int]]] = []
         try:
-            for label, group in by_label.items():
-                for entity in group:
-                    run_hooks(entity, _BEFORE_CREATE)
-                prop_dicts = [e.to_properties() for e in group]
-                tx = await self._db_session.tx()
-                async with await tx.bulk_writer().build() as bw:
+            tx = await self._db_session.tx()
+            async with await tx.bulk_writer().build() as bw:
+                for label, group in by_label.items():
+                    for entity in group:
+                        run_hooks(entity, _BEFORE_CREATE)
+                    prop_dicts = [e.to_properties() for e in group]
                     vids = await bw.insert_vertices(label, prop_dicts)
-                    await bw.commit()
-                await tx.commit()
-                for entity, vid in zip(group, vids):
-                    entity._attach_session(self, vid)
-                    self._identity_map[(label, vid)] = entity
-                    run_hooks(entity, _AFTER_CREATE)
-                    entity._mark_clean()
-                all_vids.extend(vids)
+                    assigned.append((label, group, vids))
+                await bw.commit()
+            await tx.commit()
+        except (
+            uni_db.UniBulkCommitIncompleteError,
+            uni_db.UniBulkCommitOutcomeUnknownError,
+        ):
+            # Committed, or possibly committed: never a retry-inviting
+            # BulkLoadError.
+            raise
         except Exception as e:
             raise BulkLoadError(f"Bulk insert failed: {e}") from e
 
+        all_vids: list[int] = []
+        for label, group, vids in assigned:
+            for entity, vid in zip(group, vids):
+                entity._attach_session(self, vid)
+                self._identity_map[(label, vid)] = entity
+                run_hooks(entity, _AFTER_CREATE)
+                entity._mark_clean()
+            all_vids.extend(vids)
         return all_vids
 
     async def explain(self, cypher: str) -> Any:

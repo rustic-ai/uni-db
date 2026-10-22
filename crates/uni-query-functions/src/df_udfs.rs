@@ -1031,16 +1031,35 @@ impl ScalarUDFImpl for IndexUdf {
                         )));
                     }
                 }
+                // A declared `VECTOR` column reads back as `Value::Vector`;
+                // it indexes like the list it was written as.
+                Value::Vector(vec) => {
+                    if let Some(i) = index_as_int {
+                        let idx = if i < 0 { vec.len() as i64 + i } else { i };
+                        if idx >= 0 && (idx as usize) < vec.len() {
+                            Value::Float(f64::from(vec[idx as usize]))
+                        } else {
+                            Value::Null
+                        }
+                    } else if index.is_null() {
+                        Value::Null
+                    } else {
+                        return Err(datafusion::error::DataFusionError::Execution(format!(
+                            "TypeError: InvalidArgumentType - list index must be an integer, got: {:?}",
+                            index
+                        )));
+                    }
+                }
                 Value::Map(map) => {
                     if let Some(key) = index.as_str() {
                         // Check top-level first
                         if let Some(val) = map.get(key) {
                             val.clone()
-                        } else if let Some(Value::Map(all_props)) = map.get("_all_props") {
-                            // Schemaless entities store user properties under _all_props.
-                            all_props.get(key).cloned().unwrap_or(Value::Null)
-                        } else if let Some(Value::Map(props)) = map.get("properties") {
-                            // Serialized Node/Edge: properties are nested under "properties"
+                        } else if let Some(props) =
+                            uni_common::value::entity_property_container(map)
+                        {
+                            // A schemaless entity's `_all_props`, or a
+                            // serialised one's `properties`.
                             props.get(key).cloned().unwrap_or(Value::Null)
                         } else {
                             Value::Null
@@ -4533,9 +4552,23 @@ pub fn create_cypher_or_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(CypherBooleanOpUdf::new("_cypher_or", BinaryOp::Or))
 }
 
-/// `=~` over operands of any type: NULL for a NULL operand.
+/// `=~` over operands of any type: NULL for a NULL operand. Evaluates under
+/// the runtime installed on the calling task, or the defaults.
 pub fn create_cypher_regex_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(CypherBooleanOpUdf::new("_cypher_regex", BinaryOp::Regex))
+}
+
+/// `=~` evaluated under `runtime`: its backtrack limit, and its deadline and
+/// cancellation checked as rows are matched.
+///
+/// A query registers its own instance, because DataFusion evaluates
+/// partitions on spawned tasks that a task-local does not reach.
+pub fn create_cypher_regex_udf_with_runtime(
+    runtime: Arc<crate::expr_eval::RegexRuntime>,
+) -> ScalarUDF {
+    let mut udf = CypherBooleanOpUdf::new("_cypher_regex", BinaryOp::Regex);
+    udf.regex_runtime = Some(runtime);
+    ScalarUDF::new_from_impl(udf)
 }
 
 /// A boolean-valued binary operator evaluated per row by
@@ -4548,6 +4581,8 @@ struct CypherBooleanOpUdf {
     name: &'static str,
     op: BinaryOp,
     signature: Signature,
+    /// For `=~`: the query's runtime, when the query registered one.
+    regex_runtime: Option<Arc<crate::expr_eval::RegexRuntime>>,
 }
 
 impl CypherBooleanOpUdf {
@@ -4556,7 +4591,14 @@ impl CypherBooleanOpUdf {
             name,
             op,
             signature: Signature::any(2, Volatility::Immutable),
+            regex_runtime: None,
         }
+    }
+
+    fn runtime(&self) -> Arc<crate::expr_eval::RegexRuntime> {
+        self.regex_runtime
+            .clone()
+            .unwrap_or_else(crate::expr_eval::current_regex_runtime)
     }
 }
 
@@ -4627,9 +4669,15 @@ impl ScalarUDFImpl for CypherBooleanOpUdf {
                 )
             })
         {
-            return regex_match_strings(&args.args[0], &args.args[1], args.number_rows);
+            return regex_match_strings(
+                &args.args[0],
+                &args.args[1],
+                args.number_rows,
+                &self.runtime(),
+            );
         }
         let op = self.op;
+        let runtime = (op == BinaryOp::Regex).then(|| self.runtime());
         invoke_cypher_udf(args, &DataType::Boolean, |val_args| {
             // A logical operator reads a string-encoded boolean (UNWIND over
             // a Utf8 column) as the boolean, as the logical path's cast does.
@@ -4642,8 +4690,12 @@ impl ScalarUDFImpl for CypherBooleanOpUdf {
             };
             let left = coerce_bool(&val_args[0]);
             let right = coerce_bool(&val_args[1]);
-            crate::expr_eval::eval_binary_op(&left, &op, &right)
-                .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
+            let eval = || crate::expr_eval::eval_binary_op(&left, &op, &right);
+            match &runtime {
+                Some(rt) => crate::expr_eval::REGEX_RUNTIME.sync_scope(rt.clone(), eval),
+                None => eval(),
+            }
+            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
         })
     }
 }
@@ -4655,6 +4707,7 @@ fn regex_match_strings(
     subject: &ColumnarValue,
     pattern: &ColumnarValue,
     rows: usize,
+    runtime: &crate::expr_eval::RegexRuntime,
 ) -> DFResult<ColumnarValue> {
     let as_large_strings = |v: &ColumnarValue| -> DFResult<LargeStringArray> {
         let array = arrow::compute::cast(&v.clone().into_array(rows)?, &DataType::LargeUtf8)?;
@@ -4672,18 +4725,29 @@ fn regex_match_strings(
     let result: BooleanArray = match pattern {
         ColumnarValue::Scalar(scalar) => match scalar_to_string(scalar)? {
             None => BooleanArray::new_null(subjects.len()),
-            Some(p) => crate::expr_eval::with_cached_regex(&p, |re| {
+            Some(p) => crate::expr_eval::with_cached_regex(&p, runtime.backtrack_limit(), |re| {
+                // The deadline is checked before every row a backtracking
+                // match answers (each can take up to the backtrack limit),
+                // and every 64 rows of linear-time matching.
+                let every = if re.route() == crate::java_regex::Route::Backtracking {
+                    1
+                } else {
+                    64
+                };
                 subjects
                     .iter()
-                    .map(|s| s.map(|s| re.is_match(s)).transpose())
-                    .collect::<Result<BooleanArray, String>>()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        if i % every == 0 {
+                            runtime.check()?;
+                        }
+                        s.map(|s| re.is_match(s).map_err(|e| anyhow::anyhow!("{e}")))
+                            .transpose()
+                    })
+                    .collect::<anyhow::Result<BooleanArray>>()
             })
             .map_err(to_datafusion_err)?
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Unsupported regex input: {e}"
-                ))
-            })?,
+            .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))?,
         },
         ColumnarValue::Array(_) => {
             let patterns = as_large_strings(pattern)?;
@@ -4691,7 +4755,9 @@ fn regex_match_strings(
                 .iter()
                 .zip(patterns.iter())
                 .map(|(s, p)| match (s, p) {
-                    (Some(s), Some(p)) => crate::expr_eval::cypher_regex_is_match(s, p).map(Some),
+                    (Some(s), Some(p)) => {
+                        crate::expr_eval::cypher_regex_is_match_in(runtime, s, p).map(Some)
+                    }
                     _ => Ok(None),
                 })
                 .collect::<anyhow::Result<BooleanArray>>()
@@ -5497,8 +5563,15 @@ cypher_scalar_udf! {
         if vals[0].is_null() {
             return Ok(Value::Null);
         }
+        // A declared `VECTOR` reads back as `Value::Vector`; it slices like the
+        // list of floats it was written as, into a list.
+        let as_list;
         let list = match &vals[0] {
             Value::List(l) => l,
+            Value::Vector(v) => {
+                as_list = v.iter().map(|f| Value::Float(f64::from(*f))).collect::<Vec<_>>();
+                &as_list
+            }
             _ => {
                 return Err(datafusion::error::DataFusionError::Execution(format!(
                     "_cypher_list_slice(): first argument must be a list, got {:?}",

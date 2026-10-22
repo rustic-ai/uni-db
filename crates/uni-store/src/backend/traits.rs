@@ -113,6 +113,49 @@ impl StagedAppend {
     }
 }
 
+/// Keeps a table's staged files from being reclaimed while it is held.
+///
+/// Returned by [`StorageBackend::hold_staged_files`]. Staged files are
+/// referenced by no table version until published, and a backend's version
+/// cleanup may treat an unreferenced file past some age as abandoned and delete
+/// it (Lance: 7 days). A bulk load holds the tables it stages into until every
+/// staged file is published -- or, if the load is committed but its publish
+/// could not be finished, until the process exits (see
+/// [`Self::keep_until_exit`]), since the next open completes it from those
+/// files. Dropping the hold releases it.
+#[must_use = "dropping the hold releases it immediately"]
+pub struct StagedFilesHold(Option<Box<dyn std::any::Any + Send + Sync>>);
+
+impl StagedFilesHold {
+    /// A hold that protects nothing, for a backend whose cleanup never deletes
+    /// unreferenced files.
+    pub fn none() -> Self {
+        Self(None)
+    }
+
+    /// A hold released when `guard` is dropped.
+    pub fn new(guard: Box<dyn std::any::Any + Send + Sync>) -> Self {
+        Self(Some(guard))
+    }
+
+    /// Keep holding for the rest of the process.
+    ///
+    /// For staged files a committed load still needs at the next open: the
+    /// files must survive any cleanup this process runs before then. The hold
+    /// is leaked deliberately; it is a few bytes, once per incomplete load.
+    pub fn keep_until_exit(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl std::fmt::Debug for StagedFilesHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("StagedFilesHold")
+            .field(&self.0.is_some())
+            .finish()
+    }
+}
+
 /// What [`StorageBackend::publish_staged_record`] found and did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordedPublish {
@@ -362,6 +405,16 @@ pub trait StorageBackend: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Hold `table_name`'s staged files against version cleanup until the
+    /// returned [`StagedFilesHold`] is dropped.
+    ///
+    /// The default protects nothing, which is right for a backend whose
+    /// cleanup never deletes files no version references.
+    fn hold_staged_files(&self, table_name: &str) -> StagedFilesHold {
+        let _ = table_name;
+        StagedFilesHold::none()
+    }
+
     /// A durable, backend-private description of the rows in `staged`.
     ///
     /// Written into a crash-recovery record before `staged` is published, so a
@@ -439,6 +492,37 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// Roll back a table to a specific version.
     async fn rollback_table(&self, table_name: &str, target_version: u64) -> Result<()>;
 
+    /// Pin `version` of `table_name` under `tag`, so version cleanup keeps it.
+    ///
+    /// A snapshot restore rolls tables back to versions recorded when the
+    /// snapshot was taken; an unpinned version older than the compaction
+    /// retention window is deleted, after which the restore cannot run.
+    ///
+    /// # Errors
+    ///
+    /// The default refuses: a backend without versioned tables cannot keep a
+    /// snapshot restorable.
+    async fn tag_table_version(&self, table_name: &str, tag: &str, version: u64) -> Result<()> {
+        let _ = (tag, version);
+        anyhow::bail!("backend cannot pin versions of '{table_name}' for a snapshot restore")
+    }
+
+    /// Remove the pin `tag` from `table_name`, so version cleanup may delete
+    /// the version it held.
+    ///
+    /// Idempotent: a tag or table that does not exist is not an error, so a
+    /// snapshot deletion cut short converges when run again.
+    ///
+    /// # Errors
+    ///
+    /// When the tag exists and cannot be removed. The default succeeds: a
+    /// backend that keeps the default [`Self::tag_table_version`] never pins
+    /// anything.
+    async fn delete_table_tag(&self, table_name: &str, tag: &str) -> Result<()> {
+        let _ = (table_name, tag);
+        Ok(())
+    }
+
     // ========================
     // Maintenance
     // ========================
@@ -494,6 +578,23 @@ pub trait StorageBackend: Send + Sync + 'static {
     /// default so that a new backend cannot accidentally claim fork support it
     /// has not implemented.
     fn branching(&self) -> Option<Arc<dyn ForkBranching>> {
+        None
+    }
+
+    /// A read-only view of this backend that reads every table in `versions`
+    /// at the version given and treats every other table as absent.
+    ///
+    /// What an explicit snapshot's reads go through: its restore point
+    /// records each table's version and tags it against cleanup, so reading
+    /// those versions returns the snapshot's rows whatever compaction or later
+    /// writes did to the live tables. `None` (the default) when the backend
+    /// cannot read an older version; such a snapshot reads the live tables
+    /// under its version ceiling instead.
+    fn at_table_versions(
+        &self,
+        versions: &std::collections::BTreeMap<String, u64>,
+    ) -> Option<Arc<dyn StorageBackend>> {
+        let _ = versions;
         None
     }
 

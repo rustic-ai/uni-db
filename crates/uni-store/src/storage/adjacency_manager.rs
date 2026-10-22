@@ -45,47 +45,132 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use uni_common::core::id::{Eid, Vid};
 
-/// Versions currently pinned by in-flight snapshot readers.
+/// Versions currently pinned by in-flight readers, and how far semantic
+/// compaction has merged history.
 ///
-/// Exists so shadow-CSR entries can be reclaimed without dropping any a live
-/// reader still resolves. The bound is subtle and worth stating once:
+/// Two users:
 ///
-/// * `StorageManager::pinned()` and `at_fork` each build a **fresh**
-///   [`AdjacencyManager`] with its own empty `ShadowCsr`, so those readers
-///   never consult the live instance.
-/// * `StorageManager::pinned_at_version` **shares** the live manager, and is
-///   the path every read-write transaction takes.
+/// * Shadow-CSR GC reclaims no entry a live reader still resolves. The
+///   readers of the live shadow are the `StorageManager::pinned_at_version`
+///   views every read-write transaction takes, and the safe floor is the
+///   minimum version among them.
+/// * Semantic compaction merges no vertex row above the oldest pin, and folds
+///   no edge delta above the oldest pin of a reader whose edge tier is
+///   versioned ([`Self::begin_merge`]), so every registered reader still finds
+///   its rows. A transaction's edge tier reads the live adjacency, so only
+///   `StorageManager::pinned` views (a session pinned to a snapshot that reads
+///   the live tables, registered with [`Self::pin_checked`]) hold edge deltas.
 ///
-/// So the only readers of the live shadow are in-flight `pinned_at_version`
-/// views, and the safe floor is the minimum version among them.
-/// `SnapshotManager` cannot supply this — it is a manifest reader-writer and
-/// tracks no live readers.
+/// A merge also raises the *horizon*: the version below which merged history
+/// is gone. A reader pinned below it, registered afterwards, would read a
+/// merged row in place of the rows it should see, so [`Self::pin_checked`]
+/// says whether a new pin is still readable. Registration and the floor read
+/// share one lock, so a pin either constrains a merge or sees its bound.
 ///
 /// Refcounted rather than a set: several transactions routinely pin the same
 /// version, and the floor must not rise until the last of them is gone.
 #[derive(Debug, Default)]
 pub struct PinnedVersions {
-    counts: parking_lot::Mutex<std::collections::BTreeMap<u64, usize>>,
+    state: parking_lot::Mutex<PinState>,
 }
 
+#[derive(Debug, Default)]
+struct PinState {
+    counts: std::collections::BTreeMap<u64, usize>,
+    /// The subset of `counts` whose edge tier is versioned too.
+    edge_counts: std::collections::BTreeMap<u64, usize>,
+    /// Merged history ends below this version.
+    horizon: u64,
+    /// Bounds of the merges in flight, by token: each merges nothing above its
+    /// bound (`u64::MAX` when nothing was pinned when it started).
+    in_flight: HashMap<u64, u64>,
+    next_token: u64,
+}
+
+/// One merge registered by [`PinnedVersions::begin_merge`].
+#[derive(Debug)]
+#[must_use = "end the merge with `PinnedVersions::end_merge`"]
+pub struct MergeToken(u64);
+
 impl PinnedVersions {
-    /// Register `version` as pinned until the returned guard drops.
+    /// Register `version` as pinned until the returned guard drops, for a
+    /// reader whose edge tier is live (a transaction).
     pub fn pin(self: &Arc<Self>, version: u64) -> PinGuard {
-        *self.counts.lock().entry(version).or_insert(0) += 1;
+        let mut state = self.state.lock();
+        *state.counts.entry(version).or_insert(0) += 1;
         PinGuard {
             versions: Arc::clone(self),
             version,
+            edge_tier: false,
         }
+    }
+
+    /// Register `version` as pinned for a reader whose vertex and edge tiers
+    /// are both read at it, and say whether history at `version` is still
+    /// whole: no finished or running merge reaches above it.
+    pub fn pin_checked(self: &Arc<Self>, version: u64) -> (PinGuard, bool) {
+        let mut state = self.state.lock();
+        *state.counts.entry(version).or_insert(0) += 1;
+        *state.edge_counts.entry(version).or_insert(0) += 1;
+        let readable =
+            version >= state.horizon && state.in_flight.values().all(|bound| version >= *bound);
+        (
+            PinGuard {
+                versions: Arc::clone(self),
+                version,
+                edge_tier: true,
+            },
+            readable,
+        )
     }
 
     /// The lowest version any in-flight reader is pinned at.
     pub fn min_pinned(&self) -> Option<u64> {
-        self.counts.lock().keys().next().copied()
+        self.state.lock().counts.keys().next().copied()
     }
 
     /// Number of distinct pinned versions; for tests and diagnostics.
     pub fn distinct_pinned(&self) -> usize {
-        self.counts.lock().len()
+        self.state.lock().counts.len()
+    }
+
+    /// Starts a merge: returns the oldest pinned version, above which the
+    /// merge must keep every row as it is, and registers the merge so a pin
+    /// registered meanwhile below its bound is reported unreadable. An
+    /// `edge_tier` merge (edge deltas) considers only the pins of readers
+    /// whose edge tier is versioned.
+    pub fn begin_merge(&self, edge_tier: bool) -> (Option<u64>, MergeToken) {
+        let mut state = self.state.lock();
+        let pins = if edge_tier {
+            &state.edge_counts
+        } else {
+            &state.counts
+        };
+        let floor = pins.keys().next().copied();
+        let token = state.next_token;
+        state.next_token += 1;
+        state.in_flight.insert(token, floor.unwrap_or(u64::MAX));
+        (floor, MergeToken(token))
+    }
+
+    /// Ends a merge that lost the history below `merged_through` (0 when it
+    /// lost none), raising the horizon to it.
+    pub fn end_merge(&self, token: MergeToken, merged_through: u64) {
+        let mut state = self.state.lock();
+        state.in_flight.remove(&token.0);
+        state.horizon = state.horizon.max(merged_through);
+    }
+
+    /// Raises the horizon to at least `version` (one recorded by an earlier
+    /// process).
+    pub fn raise_horizon(&self, version: u64) {
+        let mut state = self.state.lock();
+        state.horizon = state.horizon.max(version);
+    }
+
+    /// The version below which merged history is gone.
+    pub fn horizon(&self) -> u64 {
+        self.state.lock().horizon
     }
 }
 
@@ -94,16 +179,23 @@ impl PinnedVersions {
 pub struct PinGuard {
     versions: Arc<PinnedVersions>,
     version: u64,
+    edge_tier: bool,
 }
 
 impl Drop for PinGuard {
     fn drop(&mut self) {
-        let mut counts = self.versions.counts.lock();
-        if let Some(n) = counts.get_mut(&self.version) {
-            *n -= 1;
-            if *n == 0 {
-                counts.remove(&self.version);
+        fn release(counts: &mut std::collections::BTreeMap<u64, usize>, version: u64) {
+            if let Some(n) = counts.get_mut(&version) {
+                *n -= 1;
+                if *n == 0 {
+                    counts.remove(&version);
+                }
             }
+        }
+        let mut state = self.versions.state.lock();
+        release(&mut state.counts, self.version);
+        if self.edge_tier {
+            release(&mut state.edge_counts, self.version);
         }
     }
 }
@@ -400,6 +492,45 @@ impl AdjacencyManager {
         result
     }
 
+    /// Adds to `out` every vertex that [`Self::get_neighbors`] (or, with
+    /// `include_shadow`, [`Self::get_neighbors_at_version`]) can return a
+    /// neighbor for, for `edge_type` along `direction`.
+    ///
+    /// A superset, not the exact set: a vertex whose every edge is tombstoned
+    /// is still reported. That is what makes it safe to drive a scan with —
+    /// a caller that keeps only these vertices as traversal sources loses no
+    /// row the traversal could produce, because the traversal itself drops a
+    /// source with no live neighbor. Reads the same layers the two neighbor
+    /// reads do (Main CSR, frozen and active overlays, and the shadow CSR for
+    /// versioned reads), so a layer cannot be read by one and missed here.
+    pub fn collect_source_vids(
+        &self,
+        edge_type: u32,
+        direction: Direction,
+        include_shadow: bool,
+        out: &mut HashSet<Vid>,
+    ) {
+        for &dir in direction.expand() {
+            if let Some(csr) = self.main_csr.get(&(edge_type, dir)) {
+                out.extend(csr.vids_with_entries());
+            }
+            for segment in self.frozen_segments.read().iter() {
+                if let Some(adj) = segment.inserts.get(&(edge_type, dir)) {
+                    out.extend(adj.keys().copied());
+                }
+            }
+            {
+                let active = self.active_overlay.read();
+                if let Some(adj) = active.inserts.get(&(edge_type, dir)) {
+                    out.extend(adj.keys().copied());
+                }
+            }
+            if include_shadow {
+                self.shadow.collect_vids(edge_type, dir, out);
+            }
+        }
+    }
+
     /// Records an edge insertion into the L0-csr overlay (both directions).
     pub fn insert_edge(&self, src: Vid, dst: Vid, eid: Eid, edge_type: u32, version: u64) {
         let active = self.active_overlay.read();
@@ -466,6 +597,25 @@ impl AdjacencyManager {
     pub fn invalidate_all_csr(&self) {
         self.main_csr.clear();
         self.csr_source_stamp.clear();
+    }
+
+    /// Forgets every edge this manager holds: Main CSRs, the overlay and its
+    /// frozen segments, and the shadow CSR.
+    ///
+    /// For a snapshot restore, which rewinds the tables underneath. Flushed
+    /// edges stay in the overlay until a compaction folds them into a Main CSR,
+    /// so dropping the Main CSRs alone would keep serving edges the restore
+    /// removed. The caller must hold off writers and must have no reader
+    /// pinned to a version, since the shadow CSR is what such a reader needs.
+    pub fn reset(&self) {
+        let _compact_guard = self.compact_lock.lock();
+        *self.active_overlay.write() = L0CsrSegment::new();
+        self.frozen_segments.write().clear();
+        self.main_csr.clear();
+        self.csr_source_stamp.clear();
+        self.warm_guards.clear();
+        self.shadow.clear();
+        self.current_bytes.store(0, Ordering::Relaxed);
     }
 
     /// Drops the cached Main CSR so the next warm re-reads from storage.
@@ -759,6 +909,12 @@ impl AdjacencyManager {
     /// builds a [`MainCsr`] with version metadata, and populates the
     /// [`ShadowCsr`] with L1 tombstones. Called once at startup or
     /// lazily on first access per edge type.
+    ///
+    /// Reads under the storage manager's bulk visibility gate, and installs
+    /// the result only if the gate did not change while it was read: a CSR
+    /// read while a bulk load was hidden must not outlive the load's release,
+    /// and one read while it was half published must not be installed after
+    /// it was hidden. On a change the read is repeated under the new state.
     pub async fn warm(
         &self,
         storage: &StorageManager,
@@ -766,6 +922,31 @@ impl AdjacencyManager {
         direction: Direction,
         version: Option<u64>,
     ) -> anyhow::Result<()> {
+        loop {
+            let (epoch, hidden) = storage.bulk_gate().snapshot();
+            let visibility = crate::storage::bulk_gate::RowVisibility::new(
+                version,
+                storage.with_excluded_versions(hidden),
+            );
+            if self
+                .warm_once(storage, edge_type_id, direction, &visibility, epoch)
+                .await?
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    /// One read of the CSR under `visibility`; returns whether it was
+    /// installed (the gate was still at `epoch`).
+    async fn warm_once(
+        &self,
+        storage: &StorageManager,
+        edge_type_id: u32,
+        direction: Direction,
+        visibility: &crate::storage::bulk_gate::RowVisibility,
+        epoch: u64,
+    ) -> anyhow::Result<bool> {
         // Stamp *before* reading. A write landing mid-warm then leaves the CSR
         // looking stale and it is re-read on the next query; stamping after the
         // read would record the post-write version against a pre-write CSR and
@@ -813,12 +994,13 @@ impl AdjacencyManager {
                     let adj_exists = backend.table_exists(&adj_table_name).await.unwrap_or(false);
 
                     if adj_exists {
-                        let mut request = crate::backend::types::ScanRequest::all(&adj_table_name);
-                        if let Some(hwm) = version {
-                            request = request.with_filter(
-                                crate::backend::types::FilterExpr::version_at_most(hwm),
-                            );
-                        }
+                        // Unfiltered: L2 rows carry no `_version`, and a
+                        // version filter on them is a schema error. Semantic
+                        // compaction folds no delta above the oldest pinned
+                        // version (`StorageManager::begin_compaction_merge`) and
+                        // never runs while a bulk load is hidden, so every
+                        // edge in L2 is visible to every reader of it.
+                        let request = crate::backend::types::ScanRequest::all(&adj_table_name);
 
                         // Fail closed: a transient scan error must abort the warm,
                         // not `unwrap_or_default()` into an empty L2 read that then
@@ -861,10 +1043,10 @@ impl AdjacencyManager {
 
                                 for j in 0..neighbors.len() {
                                     // L2 adjacency rows don't carry per-edge _version.
-                                    // Version 0 means "from base storage" — the `_version <= hwm` filter on
-                                    // the query already ensures we only load rows within the snapshot window.
-                                    // At query time, get_neighbors_at_version() uses created_version to filter,
-                                    // so version=0 edges are always visible (which is correct for compacted L2 data).
+                                    // Version 0 means "from base storage": visible at
+                                    // every version, which holds because compaction
+                                    // folds nothing above the oldest pin (see the scan
+                                    // above).
                                     entries.push((
                                         src_offset,
                                         Vid::from(neighbors.value(j)),
@@ -889,9 +1071,8 @@ impl AdjacencyManager {
                 .unwrap_or(false)
             {
                 let mut request = crate::backend::types::ScanRequest::all(&delta_table_name);
-                if let Some(hwm) = version {
-                    request = request
-                        .with_filter(crate::backend::types::FilterExpr::version_at_most(hwm));
+                if let Some(filter) = visibility.filter() {
+                    request = request.with_filter(filter);
                 }
 
                 // Fail closed: propagate a delta scan error rather than silently
@@ -978,19 +1159,21 @@ impl AdjacencyManager {
         // Build MainCsr
         let max_offset = entries.iter().map(|(o, _, _, _)| *o).max().unwrap_or(0);
         let csr = MainCsr::from_edge_entries(max_offset as usize, entries);
-        self.set_main_csr(edge_type_id, direction, csr);
-        match source_stamp {
-            Some(v) => {
-                self.csr_source_stamp.insert((edge_type_id, direction), v);
+        let installed = storage.bulk_gate().install_if_current(epoch, || {
+            self.set_main_csr(edge_type_id, direction, csr);
+            match source_stamp {
+                Some(v) => {
+                    self.csr_source_stamp.insert((edge_type_id, direction), v);
+                }
+                // No stamp means no freshness claim: leave the entry absent so
+                // `csr_is_fresh` reports stale and the next query re-warms.
+                None => {
+                    self.csr_source_stamp.remove(&(edge_type_id, direction));
+                }
             }
-            // No stamp means no freshness claim: leave the entry absent so
-            // `csr_is_fresh` reports stale and the next query re-warms.
-            None => {
-                self.csr_source_stamp.remove(&(edge_type_id, direction));
-            }
-        }
+        });
 
-        Ok(())
+        Ok(installed.is_some())
     }
 
     /// Coalesced warm() operation to prevent cache stampede (Issue #13).

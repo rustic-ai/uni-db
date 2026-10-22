@@ -130,13 +130,20 @@ impl StreamingAppender {
     /// Flush all buffered rows and commit the bulk writer.
     ///
     /// Consumes the appender. Returns statistics about the loading operation.
+    ///
+    /// # Errors
+    ///
+    /// As [`BulkWriter::commit`]: `UniError::BulkCommitIncomplete` and
+    /// `UniError::BulkCommitOutcomeUnknown` keep their type -- they mean the
+    /// load must not simply be retried -- and any other error means it was not
+    /// applied.
     pub async fn finish(mut self) -> Result<BulkStats> {
         self.flush_buffer().await?;
         let writer = self
             .writer
             .take()
             .ok_or_else(|| UniError::Internal(anyhow::anyhow!("Appender already finished")))?;
-        let stats = writer.commit().await.map_err(UniError::Internal)?;
+        let stats = writer.commit().await.map_err(typed_or_internal)?;
         Ok(stats)
     }
 
@@ -178,10 +185,15 @@ impl StreamingAppender {
         writer
             .insert_vertices(&self.label, rows)
             .await
-            .map_err(|e| match e.downcast::<UniError>() {
-                Ok(typed) => typed,
-                Err(other) => UniError::Internal(other),
-            })?;
+            .map_err(typed_or_internal)?;
         Ok(())
+    }
+}
+
+/// Keep a typed [`UniError`] carried in an `anyhow::Error` typed.
+fn typed_or_internal(e: anyhow::Error) -> UniError {
+    match e.downcast::<UniError>() {
+        Ok(typed) => typed,
+        Err(other) => UniError::Internal(other),
     }
 }

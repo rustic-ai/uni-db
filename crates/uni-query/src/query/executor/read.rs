@@ -402,7 +402,15 @@ impl Executor {
                         .build();
                     SessionContext::new_with_state(state)
                 }
-                None => (**tmpl).clone(),
+                // A fresh state, not a clone of the template's handle: the
+                // query registers its own `_cypher_regex` below, which must
+                // not reach the shared template.
+                None => SessionContext::new_with_state(
+                    datafusion::execution::session_state::SessionStateBuilder::new_from_existing(
+                        tmpl.state(),
+                    )
+                    .build(),
+                ),
             }
         } else {
             // Cold path: build a fresh session, optionally with any
@@ -556,6 +564,21 @@ impl Executor {
         if let Some(writer) = &self.writer {
             planner = planner.with_writer(Arc::clone(writer));
         }
+
+        // `=~` evaluates under this query's backtrack limit and budget. The
+        // UDF instance carries them because DataFusion runs partitions on
+        // spawned tasks, which no task-local reaches.
+        let budget = planner.graph_ctx().budget();
+        let interrupt: uni_query_functions::expr_eval::RegexInterrupt =
+            Arc::new(move || budget.check().err().map(|e| e.to_string()));
+        session_ctx.read().register_udf(
+            uni_query_functions::df_udfs::create_cypher_regex_udf_with_runtime(Arc::new(
+                uni_query_functions::expr_eval::RegexRuntime::new(
+                    self.config.regex_backtrack_limit,
+                    Some(interrupt),
+                ),
+            )),
+        );
 
         Ok((session_ctx, planner, prop_manager_arc))
     }
@@ -1787,7 +1810,11 @@ impl Executor {
                         Ok(params.get(name).cloned().unwrap_or(Value::Null))
                     }
                 }
-                Expr::Parameter(name) => Ok(params.get(name).cloned().unwrap_or(Value::Null)),
+                // A parameter the caller did not supply is an error, never a
+                // NULL: a write would store or overwrite with that NULL.
+                Expr::Parameter(name) => params.get(name).cloned().ok_or_else(|| {
+                    anyhow!(uni_common::UniError::parameter_missing_message([name]))
+                }),
                 Expr::Property(var_expr, prop_name) => {
                     // Fast path: if the base is a Variable, try flat-key lookup first.
                     // DataFusion scan results use flat keys like "d.embedding" rather than
@@ -1872,8 +1899,9 @@ impl Executor {
                         if let Some(val) = map.get(prop_name.as_str()) {
                             return Ok(val.clone());
                         }
-                        // Then check inside "properties" object (for user properties)
-                        if let Some(Value::Map(props)) = map.get("properties")
+                        // Then the entity's property container (`_all_props`, or a
+                        // serialised entity's `properties`)
+                        if let Some(props) = uni_common::value::entity_property_container(map)
                             && let Some(val) = props.get(prop_name.as_str())
                         {
                             return Ok(val.clone());
@@ -1991,6 +2019,23 @@ impl Executor {
                             ));
                         }
                     }
+                    // A declared `VECTOR` reads back as `Value::Vector`; it
+                    // indexes like the list of floats it was written as.
+                    if let Value::Vector(vec) = &arr_val {
+                        if let Some(i) = idx_val.as_i64() {
+                            let idx = if i < 0 { vec.len() as i64 + i } else { i };
+                            return Ok(usize::try_from(idx)
+                                .ok()
+                                .and_then(|i| vec.get(i))
+                                .map_or(Value::Null, |f| Value::Float(f64::from(*f))));
+                        } else if idx_val.is_null() {
+                            return Ok(Value::Null);
+                        }
+                        return Err(anyhow::anyhow!(
+                            "TypeError: InvalidArgumentType - list index must be an integer, got: {:?}",
+                            idx_val
+                        ));
+                    }
                     if let Value::Map(map) = &arr_val {
                         if let Some(key) = idx_val.as_str() {
                             return Ok(map.get(key).cloned().unwrap_or(Value::Null));
@@ -2061,9 +2106,14 @@ impl Executor {
                     ))
                 }
                 Expr::ArraySlice { array, start, end } => {
-                    let arr_val = this
+                    let mut arr_val = this
                         .evaluate_expr(array, row, prop_manager, params, ctx)
                         .await?;
+                    // A `VECTOR` slices like its list of floats, into a list.
+                    if let Value::Vector(vec) = &arr_val {
+                        arr_val =
+                            Value::List(vec.iter().map(|f| Value::Float(f64::from(*f))).collect());
+                    }
 
                     if let Value::List(arr) = &arr_val {
                         let len = arr.len();
@@ -2331,6 +2381,34 @@ impl Executor {
                                 .evaluate_expr(right, row, prop_manager, params, ctx)
                                 .await?;
                             eval_binary_op(&l_val, op, &r_val)
+                        }
+                        BinaryOp::Regex => {
+                            let l_val = this
+                                .evaluate_expr(left, row, prop_manager, params, ctx)
+                                .await?;
+                            let r_val = this
+                                .evaluate_expr(right, row, prop_manager, params, ctx)
+                                .await?;
+                            // `=~` under this query's backtrack limit, deadline
+                            // and cancellation.
+                            let deadline = ctx.and_then(|c| c.deadline);
+                            let token = ctx.and_then(|c| c.cancellation_token.clone());
+                            let interrupt: uni_query_functions::expr_eval::RegexInterrupt =
+                                Arc::new(move || {
+                                    crate::query::df_graph::common::check_deadline(
+                                        token.as_ref(),
+                                        deadline,
+                                    )
+                                    .err()
+                                    .map(|e| e.to_string())
+                                });
+                            let runtime =
+                                Arc::new(uni_query_functions::expr_eval::RegexRuntime::new(
+                                    this.config.regex_backtrack_limit,
+                                    Some(interrupt),
+                                ));
+                            uni_query_functions::expr_eval::REGEX_RUNTIME
+                                .sync_scope(runtime, || eval_binary_op(&l_val, op, &r_val))
                         }
                         _ => {
                             // For all other operators, evaluate both sides

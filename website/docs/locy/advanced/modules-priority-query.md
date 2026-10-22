@@ -28,7 +28,10 @@ CREATE RULE classify PRIORITY 2 AS MATCH (n) YIELD KEY n, 'normal' AS level
 ## QUERY
 
 `QUERY` reads a rule's facts as the fixpoint derived them, then filters and
-projects them; it returns exactly what `.derived` holds for that rule.
+projects them. Ahead of the program's first write command it returns exactly
+what `.derived` holds for that rule; after a `DERIVE` or a Cypher write it reads
+the facts derived again in the state that write left (see
+[Commands run in sequence](../rule-semantics.md#commands-run-in-sequence)).
 
 ```locy
 QUERY classify WHERE n.name = 'service-a' RETURN level
@@ -36,8 +39,8 @@ QUERY classify WHERE n.name = 'service-a' RETURN level
 
 ## Evaluation
 
-Locy evaluates bottom-up: every rule is derived to its fixpoint before any
-command runs. By default a `QUERY ... WHERE` filters the derived facts; it does not
+Locy evaluates bottom-up: every rule is derived to its fixpoint before the
+first command runs (and again, incrementally, after a command writes). By default a `QUERY ... WHERE` filters the derived facts; it does not
 narrow what is derived. To derive less, constrain the rule itself (a `WHERE`
 in its body, or a `REQUIRE`), or turn on goal-directed evaluation.
 

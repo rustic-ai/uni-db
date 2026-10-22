@@ -271,6 +271,7 @@ mod delta_tests {
                 dst_labels: vec!["Person".to_string()],
                 state: SchemaElementState::Active,
                 description: None,
+                endpoint_conformance: Default::default(),
             },
         );
 

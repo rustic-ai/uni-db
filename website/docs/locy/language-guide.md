@@ -162,7 +162,7 @@ Register a Python callable (or Rust `NeuralClassifier` impl) under the model nam
 See [Neural Predicates](advanced/neural-predicates.md) for the full reference (every FEATURES source, every calibration method, every warning).
 
 !!! note "Rule vs command expressions"
-    In rule bodies (`WHERE`, `YIELD`, `ALONG`, `FOLD`), `similar_to()` runs inside DataFusion with full capability — metric-aware vector scoring, auto-embedding, FTS, and multi-source fusion. In command WHERE clauses (`DERIVE ... WHERE`, `ABDUCE ... WHERE`), only basic vector similarity (cosine) is available because commands execute on materialized rows after strata converge without schema context.
+    In rule bodies (`WHERE`, `YIELD`, `ALONG`, `FOLD`), `similar_to()` runs inside DataFusion with full capability — metric-aware vector scoring, auto-embedding, FTS, and multi-source fusion. In command WHERE clauses (`DERIVE ... WHERE`, `ABDUCE ... WHERE`), only basic vector similarity (cosine) is available because commands execute on materialized rows after strata converge without schema context. Commands run in program order, and a command reads what earlier commands wrote (see [Commands run in sequence](rule-semantics.md#commands-run-in-sequence)).
 
 ## Goal Query
 

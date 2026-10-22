@@ -32,6 +32,7 @@ enum Target {
 
 fn config(partial: bool) -> UniConfig {
     UniConfig {
+        #[expect(deprecated, reason = "exercises the deprecated no-op flag")]
         partial_lance_writes: partial,
         async_flush_enabled: false,
         ..UniConfig::default()

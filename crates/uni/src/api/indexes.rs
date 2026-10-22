@@ -46,6 +46,9 @@ impl Indexes<'_> {
 
             Ok(task_ids.into_iter().next())
         } else {
+            // Like a background build, it must not straddle a snapshot
+            // restore, which waits for it and then rewinds.
+            let _permit = self.inner.storage.index_build_permit().await;
             let idx_mgr = uni_store::storage::IndexManager::new(
                 self.inner.storage.base_path(),
                 self.inner.schema.clone(),

@@ -25,15 +25,21 @@ MATCH (a)-[r]->(b)
 DERIVE MERGE a, b
 ```
 
-These run during Phase 2 command dispatch on converged derived facts.
+These run during Phase 2 command dispatch, in program order, on the derived facts of the current state.
 
 ### DERIVE as a command
 
-Iterates over converged facts from a named rule, applies an optional WHERE filter, and executes the mutations:
+Iterates over a named rule's facts in the current state, applies an optional WHERE filter, and executes the mutations:
 
 ```locy
 DERIVE risk_propagation WHERE threshold > 0.5
 ```
+
+Commands run in sequence, so every later command of the program — a `QUERY`,
+a second `DERIVE`, `EXPLAIN RULE`, `ABDUCE`, an `ASSUME`, a Cypher read —
+sees what the `DERIVE` wrote. A Cypher write command (`CREATE`, `MERGE`,
+`SET`, ...) works the same way. See
+[Commands run in sequence](../rule-semantics.md#commands-run-in-sequence).
 
 ## ASSUME
 
@@ -50,7 +56,7 @@ ASSUME {
 Think of this as savepoint-scoped what-if execution.
 
 A body may also define rules, `DERIVE`, write with Cypher, and nest another
-`ASSUME`. Its commands run in sequence, exactly as they would one after another
+`ASSUME`. Its commands run in sequence, as a program's top-level commands do, exactly as they would one after another
 in a transaction that is rolled back at the end: a `DERIVE` or Cypher write
 changes the hypothetical graph, and every later command in the body — `QUERY`,
 another `DERIVE`, a Cypher read, a nested `ASSUME` — reads the changed graph
@@ -61,41 +67,65 @@ CREATE RULE link AS MATCH (a:Person)-[:KNOWS]->(b:Person) DERIVE (a)-[:LINK]->(b
 CREATE RULE linked AS MATCH (a:Person)-[:LINK]->(b:Person) YIELD KEY a, KEY b
 
 ASSUME { CREATE (:Marker) } THEN {
-  QUERY linked RETURN a.name AS a, b.name AS b   // no LINK edges yet: no rows
-  DERIVE link                                    // one row: {affected: 3}
-  QUERY linked RETURN a.name AS a, b.name AS b   // the three derived edges
+  QUERY linked RETURN a.name AS a, b.name AS b   // result 0: no LINK edges yet, no rows
+  DERIVE link                                    // result 1: Derive { affected: 3 }
+  QUERY linked RETURN a.name AS a, b.name AS b   // result 2: the three derived edges
 }
 ```
 
 After a write, only the strata the write can affect are derived again; the
 rest keep their facts (see *Incremental re-evaluation* in the Locy reference).
 
-The ASSUME command's result is the concatenated rows of its body's commands, in
-order: a `QUERY` or Cypher command contributes its rows, a `DERIVE` one
-`{affected: n}` row (the count a top-level `DERIVE` reports as
-`CommandResult::Derive { affected }`), and a nested `ASSUME` its own rows. A body
-with no commands returns every fact its rules derived.
+The ASSUME command's result holds **one result per body command**, in order,
+each the result the same command gives at the top level: a `QUERY`'s rows, a
+`DERIVE`'s `Derive { affected }` count, a Cypher command's rows, and a nested
+`ASSUME`'s own ASSUME result. Alongside them it carries `derived`: every rule's
+facts (the program's and the body's own) in the hypothetical state the body's
+first command reads, after the ASSUME's mutations and before any body command —
+the same point a program's top-level `derived` is taken at, before its first
+command. A body that only defines rules has no results; its facts are in
+`derived`.
 
-`ABDUCE` and `EXPLAIN RULE` are **not allowed** in an ASSUME body, at any
-nesting depth: the program fails to compile with
-`LocyCompileError::AssumeBodyCommandNotAllowed`. Their results are not rows, so
-an ASSUME has nowhere to put them. To combine either with a hypothetical change:
+| | Rust (`CommandResult::Assume { results, derived }`) | Python (`AssumeCommandResult`) |
+|---|---|---|
+| Per-command results | `results: Vec<CommandResult>` | `.results` |
+| Hypothetical facts | `derived: HashMap<String, Vec<FactRow>>` | `.derived` |
+| Rows | `CommandResult::rows()` | `.rows` |
 
-- run it at the top level after the ASSUME, against the stored graph;
-- apply the change in a transaction and roll it back: `tx = session.tx()`,
-  mutate, `tx.locy("ABDUCE ...")`, `tx.rollback()`;
-- or use a scratch transaction (`session.scratch()` in Python,
-  `Session::scratch()` in Rust), which behaves like `tx()` but refuses
-  `commit()`, so its writes are always discarded.
+The rows accessors search depth first: an ASSUME's rows are those of the first
+body result that produces rows (a `QUERY` or Cypher command, descending into a
+nested ASSUME), and `LocyResult::rows()` / Python `LocyResult.rows()` skip an
+ASSUME whose body produced none. A single-command body therefore reads exactly
+as before; for more than one command, address `results` by index.
+
+`ABDUCE` and `EXPLAIN RULE` run in an ASSUME body, at any nesting depth, against
+the hypothetical state: they give the answer the same command gives at the top
+level of a program run in a transaction that applied the ASSUME's mutations and
+is rolled back afterwards. `EXPLAIN RULE` explains the hypothetical facts from
+the derivations recorded while deriving them. `ABDUCE` applies each candidate
+on top of the hypothetical state and validates it against every rule the body
+reads, the body's own rules included. Both results appear in the ASSUME's
+`results` (Python `ExplainCommandResult` / `AbduceCommandResult`).
 
 ```locy
-// Rejected: ABDUCE inside the ASSUME body
+// What would break reachable(B, X) if B -> X existed?
 ASSUME {
-  CREATE (:Node {name: 'X'})-[:EDGE]->(:Node {name: 'Y'})
+  MATCH (b:Node {name: 'B'}) CREATE (b)-[:EDGE]->(:Node {name: 'X'})
 } THEN {
-  ABDUCE NOT reachable WHERE a.name = 'A'
+  EXPLAIN RULE reachable WHERE a.name = 'B'
+  ABDUCE NOT reachable WHERE a.name = 'B'
 }
 ```
+
+A program with an `EXPLAIN RULE` or an `MNOR` / `MPROD` fold anywhere, in an
+ASSUME body included, records provenance in every evaluation, the hypothetical
+ones too. That is also what makes `exact_probability` hold in a body: a body
+`QUERY` reads the same exact probability a top-level `QUERY` reads in the same
+state. Before, it read the independence approximation.
+
+A scratch transaction (`session.scratch()` in Python, `Session::scratch()` in
+Rust) remains another way to run any command against a hypothetical change: it
+behaves like `tx()` but refuses `commit()`, so its writes are always discarded.
 
 ## ABDUCE
 

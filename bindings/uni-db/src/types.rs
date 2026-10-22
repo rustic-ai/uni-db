@@ -1020,14 +1020,41 @@ pub struct BulkStats {
     pub index_task_ids: Vec<String>,
     /// Whether indexes are still building in background.
     pub indexes_pending: bool,
+    /// The load's id; pass it to `bulk_load_applied` to ask whether the load
+    /// was applied.
+    pub load_id: String,
+    /// Steps after the commit point that failed without affecting the load
+    /// (index builds, snapshot manifest, schema save, marker delete). The load
+    /// is applied regardless; each is completed later.
+    pub warnings: Vec<String>,
+}
+
+impl From<&::uni_db::api::bulk::BulkStats> for BulkStats {
+    fn from(s: &::uni_db::api::bulk::BulkStats) -> Self {
+        Self {
+            vertices_inserted: s.vertices_inserted,
+            edges_inserted: s.edges_inserted,
+            indexes_rebuilt: s.indexes_rebuilt,
+            duration_secs: s.duration.as_secs_f64(),
+            index_build_duration_secs: s.index_build_duration.as_secs_f64(),
+            index_task_ids: s.index_task_ids.clone(),
+            indexes_pending: s.indexes_pending,
+            load_id: s.load_id.clone(),
+            warnings: s.warnings.clone(),
+        }
+    }
 }
 
 #[pymethods]
 impl BulkStats {
     fn __repr__(&self) -> String {
         format!(
-            "BulkStats(vertices={}, edges={}, duration={:.2}s)",
-            self.vertices_inserted, self.edges_inserted, self.duration_secs
+            "BulkStats(vertices={}, edges={}, duration={:.2}s, load_id='{}', warnings={})",
+            self.vertices_inserted,
+            self.edges_inserted,
+            self.duration_secs,
+            self.load_id,
+            self.warnings.len()
         )
     }
 }
@@ -1086,6 +1113,12 @@ pub struct LocyStats {
     pub hypothetical_strata_reused: usize,
     /// Facts the derived (not reused) hypothetical strata produced.
     pub hypothetical_facts_derived: usize,
+    /// Strata derived again because an earlier top-level command wrote and
+    /// a later command read the facts, summed over every re-derivation.
+    pub sequenced_strata_evaluated: usize,
+    /// Strata those re-derivations reused because the write could not
+    /// affect them.
+    pub sequenced_strata_reused: usize,
 }
 
 #[pymethods]
@@ -1197,12 +1230,23 @@ impl PyLocyResult {
         }
     }
 
-    /// Get rows from the first Query/Assume/Cypher command result, if any.
+    /// Get rows from the first row-producing command result, if any.
+    ///
+    /// Row-producing results are QUERY and Cypher commands, and an ASSUME
+    /// whose body (searched depth first) has one; the same rule as Rust's
+    /// `LocyResult::rows`.
     fn rows(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let list = self.command_results.bind(py);
         for i in 0..list.len()? {
             let item = list.get_item(i)?;
-            // Command results are dicts; Query/Assume/Cypher variants have a "rows" key.
+            if let Ok(assume) = item.cast::<PyAssumeCommandResult>() {
+                let assume = assume.get();
+                if assume.has_rows {
+                    return Ok(Some(assume.rows.clone_ref(py)));
+                }
+                continue;
+            }
+            // QUERY and Cypher results have a "rows" key.
             if let Ok(rows) = item.get_item("rows") {
                 return Ok(Some(rows.unbind()));
             }
@@ -1758,6 +1802,7 @@ pub struct PyExecuteResult {
     pub relationships_created: usize,
     pub relationships_deleted: usize,
     pub properties_set: usize,
+    pub properties_removed: usize,
     pub labels_added: usize,
     pub labels_removed: usize,
     pub metrics: Py<pyo3::types::PyDict>,
@@ -1847,14 +1892,13 @@ impl PyDerivedFactSet {
         })
     }
 
-    /// Check if no facts were derived.
+    /// Check if there is nothing to apply: no facts were derived and the
+    /// program issued no other write (a Cypher write command is replayed
+    /// too). Same as the Rust `DerivedFactSet::is_empty`.
     fn is_empty(&self) -> PyResult<bool> {
-        self.inner
-            .as_ref()
-            .map(|d| d.fact_count() == 0)
-            .ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("DerivedFactSet already consumed")
-            })
+        self.inner.as_ref().map(|d| d.is_empty()).ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("DerivedFactSet already consumed")
+        })
     }
 
     /// Derived vertices grouped by label.
@@ -2227,6 +2271,9 @@ pub struct PyDatabaseMetrics {
     pub active_sessions: usize,
     pub l1_run_count: usize,
     pub write_throttle_pressure: f64,
+    pub write_throttle_waits: u64,
+    pub write_throttle_wait_time_secs: f64,
+    pub writes_stalled: u64,
     pub compaction_in_progress: bool,
     pub wal_size_bytes: u64,
     pub wal_lsn: u64,
@@ -3559,9 +3606,20 @@ impl PyQueryCommandResult {
 }
 
 /// A Locy ASSUME command result.
+///
+/// `results` holds one result per body command, in order (a nested ASSUME's
+/// own `AssumeCommandResult` among them); `derived` maps each rule to its facts
+/// in the hypothetical state the body's first command reads, after the
+/// ASSUME's mutations. `rows` is the first row-producing body result's rows,
+/// searched depth first, or an empty list.
 #[pyclass(name = "AssumeCommandResult", frozen)]
 pub struct PyAssumeCommandResult {
+    pub(crate) results: Py<PyAny>,
+    pub(crate) derived: Py<PyAny>,
     pub(crate) rows: Py<PyAny>,
+    /// Whether some body command produced rows, so `rows` is a result's
+    /// rows rather than the empty fallback.
+    pub(crate) has_rows: bool,
 }
 
 #[pymethods]
@@ -3571,15 +3629,26 @@ impl PyAssumeCommandResult {
         "assume"
     }
     #[getter]
+    fn results(&self, py: Python<'_>) -> Py<PyAny> {
+        self.results.clone_ref(py)
+    }
+    #[getter]
+    fn derived(&self, py: Python<'_>) -> Py<PyAny> {
+        self.derived.clone_ref(py)
+    }
+    #[getter]
     fn rows(&self, py: Python<'_>) -> Py<PyAny> {
         self.rows.clone_ref(py)
     }
-    fn __repr__(&self) -> String {
-        "AssumeCommandResult(...)".to_string()
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let n = self.results.bind(py).len()?;
+        Ok(format!("AssumeCommandResult(results={n})"))
     }
     fn __getitem__(&self, py: Python<'_>, key: &str) -> PyResult<Py<PyAny>> {
         match key {
             "type" => Ok("assume".into_pyobject(py)?.into_any().unbind()),
+            "results" => Ok(self.results.clone_ref(py)),
+            "derived" => Ok(self.derived.clone_ref(py)),
             "rows" => Ok(self.rows.clone_ref(py)),
             _ => Err(pyo3::exceptions::PyKeyError::new_err(key.to_string())),
         }

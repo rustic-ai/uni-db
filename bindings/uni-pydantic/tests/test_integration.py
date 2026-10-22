@@ -9,6 +9,7 @@ import pytest
 from pydantic import field_validator
 
 from uni_pydantic import (
+    BulkLoadError,
     Field,
     Relationship,
     UniEdge,
@@ -255,6 +256,129 @@ class TestBulkAdd:
         """Test bulk add with empty list."""
         vids = session.bulk_add([])
         assert vids == []
+
+    def test_bulk_add_is_one_load(self, session):
+        """Every label goes into one load and one commit, so a failure can
+        never leave an earlier label applied behind a retry-inviting error."""
+        session.register(Person, Company)
+        session.sync_schema()
+        recorder = _RecordingDbSession(session._db_session)
+        session._db_session = recorder
+        entities = [Person(name=f"P{i}", email=f"p{i}@test.com") for i in range(3)]
+        entities += [Company(name=f"C{i}") for i in range(2)]
+        vids = session.bulk_add(entities)
+        assert len(vids) == 5
+        assert recorder.commits == 1
+        assert all(e.is_persisted for e in entities)
+
+    @pytest.mark.parametrize(
+        "exc_name",
+        ["UniBulkCommitIncompleteError", "UniBulkCommitOutcomeUnknownError"],
+    )
+    def test_bulk_add_propagates_committed_outcomes(self, session, exc_name):
+        """A load that reached (or may have reached) its commit point must not
+        surface as BulkLoadError, which tells the caller to retry."""
+        import uni_db
+
+        exc = getattr(uni_db, exc_name)
+        session.register(Person)
+        session.sync_schema()
+        session._db_session = _FailingDbSession(exc("committed; do not retry"))
+        people = [Person(name="A", email="a@test.com")]
+        with pytest.raises(exc):
+            session.bulk_add(people)
+        assert not people[0].is_persisted
+
+    def test_bulk_add_failure_before_commit_point_is_bulk_load_error(self, session):
+        """Any other failure means "not applied": BulkLoadError."""
+        session.register(Person)
+        session.sync_schema()
+        session._db_session = _FailingDbSession(RuntimeError("disk full"))
+        with pytest.raises(BulkLoadError):
+            session.bulk_add([Person(name="A", email="a@test.com")])
+
+
+class _RecordingWriter:
+    def __init__(self, writer, owner):
+        self._writer = writer
+        self._owner = owner
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return self._writer.__exit__(*exc)
+
+    def insert_vertices(self, label, rows):
+        return self._writer.insert_vertices(label, rows)
+
+    def commit(self):
+        self._owner.commits += 1
+        return self._writer.commit()
+
+
+class _RecordingDbSession:
+    """Wraps a real session, counting bulk-writer commits."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.commits = 0
+
+    def tx(self):
+        tx = self._inner.tx()
+        owner = self
+
+        class _Builder:
+            def __init__(self, builder):
+                self._builder = builder
+
+            def build(self):
+                return _RecordingWriter(self._builder.build(), owner)
+
+        class _Tx:
+            def bulk_writer(self):
+                return _Builder(tx.bulk_writer())
+
+            def commit(self):
+                return tx.commit()
+
+        return _Tx()
+
+
+class _FailingDbSession:
+    """A session whose bulk writer's commit raises `error`."""
+
+    def __init__(self, error):
+        self._error = error
+
+    def tx(self):
+        error = self._error
+
+        class _Writer:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def insert_vertices(self, label, rows):
+                return list(range(len(rows)))
+
+            def commit(self):
+                raise error
+
+        class _Tx:
+            def bulk_writer(self):
+                class _B:
+                    def build(self):
+                        return _Writer()
+
+                return _B()
+
+            def commit(self):
+                return None
+
+        return _Tx()
 
 
 class TestQueryBuilder:

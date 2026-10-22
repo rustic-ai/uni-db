@@ -4,19 +4,30 @@ Documentation site for Uni, the embedded multi-model graph database.
 
 ## Setup
 
-```bash
-# Install dependencies
-poetry install
+Run these from `website/`. The tools come from PyPI through `uv`; no
+project virtualenv is needed.
 
-# Convert Jupyter notebooks to Markdown (required before build/serve)
-poetry run python scripts/convert_notebooks.py
+```bash
+# Generate the notebook pages (gitignored *.md next to each .ipynb).
+# Nav entries and *_overview.md pages link to them, so skipping this step
+# makes the build report every such link as a missing page.
+uv run --no-project --with nbconvert python scripts/convert_notebooks.py --no-execute
+
+# Build the static site; --strict fails the build on any warning
+# (broken links included)
+uv run --no-project --with zensical --with pymdown-extensions zensical build --strict
 
 # Serve locally with hot reload
-poetry run zensical serve
-
-# Build static site
-poetry run zensical build
+uv run --no-project --with zensical --with pymdown-extensions zensical serve
 ```
+
+`--no-execute` converts the committed notebooks as-is (they carry no cell
+outputs). It needs neither a built `uni_db` wheel nor a Jupyter kernel and
+leaves the tracked `.ipynb` files unchanged. To render pages with executed
+outputs, as the published site does, drop `--no-execute`. That mode runs
+each Python notebook in a `python3` kernel, so `uni_db`, `uni_pydantic`,
+`nbclient` and `ipykernel` must be importable, and it writes the outputs
+back into the `.ipynb` files. Do not commit those output changes.
 
 ## Structure
 
@@ -42,10 +53,10 @@ The site uses [Zensical](https://zensical.org/) (from the creators of Material f
 ### Local Preview
 
 ```bash
-# Convert notebooks first (only needed after notebook changes)
-poetry run python scripts/convert_notebooks.py
+# Re-run after adding or changing a notebook
+uv run --no-project --with nbconvert python scripts/convert_notebooks.py --no-execute
 
-poetry run zensical serve
+uv run --no-project --with zensical --with pymdown-extensions zensical serve
 ```
 
 Visit http://localhost:8000
@@ -53,11 +64,12 @@ Visit http://localhost:8000
 ### Building
 
 ```bash
-poetry run python scripts/convert_notebooks.py
-poetry run zensical build
+uv run --no-project --with nbconvert python scripts/convert_notebooks.py --no-execute
+uv run --no-project --with zensical --with pymdown-extensions zensical build --strict
 ```
 
-Output goes to `site/` directory.
+Output goes to `site/` directory (gitignored). A clean build reports
+`No issues found`.
 
 ### Locy Notebook Generation
 

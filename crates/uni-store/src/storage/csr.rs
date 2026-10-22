@@ -392,6 +392,20 @@ impl MainCsr {
             self.offsets.len() - 1
         }
     }
+
+    /// The vertices with at least one entry, any version, in ascending order.
+    ///
+    /// Exactly the vids for which [`Self::get_entries`] is non-empty, so a
+    /// caller that wants every vertex a read of this CSR can return neighbors
+    /// for may enumerate them here instead of probing every vid.
+    pub fn vids_with_entries(&self) -> impl Iterator<Item = Vid> + '_ {
+        let len = self.entries.len();
+        self.offsets
+            .windows(2)
+            .enumerate()
+            .filter(move |(_, w)| w[1] > w[0] && (w[1] as usize) <= len)
+            .map(|(i, _)| Vid::from(i as u64))
+    }
 }
 
 #[cfg(test)]

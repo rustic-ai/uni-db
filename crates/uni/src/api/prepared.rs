@@ -120,6 +120,8 @@ pub struct PreparedQuery {
     cancel: crate::api::impl_query::CancelScope,
     /// Authorization + before-query-hook context, replayed on every execution.
     guards: PreparedGuards,
+    /// Every parameter the query references, checked on each execution.
+    parameters: Vec<String>,
     inner: std::sync::RwLock<PreparedQueryInner>,
 }
 
@@ -144,16 +146,22 @@ impl PreparedQuery {
         cypher: &str,
         guards: PreparedGuards,
         cancel: crate::api::impl_query::CancelScope,
+        is_write_procedure: &(dyn Fn(&str) -> bool + Sync),
     ) -> Result<Self> {
-        let ast = parse_cypher(cypher)?;
-        // Session-prepared queries must be read-only, mirroring `Session::query`.
-        uni_query::validate_read_only(&ast).map_err(|_| UniError::Query {
-            message: "Prepared session query is read-only. Mutation clauses (CREATE, MERGE, \
-                 DELETE, SET, REMOVE) require a transaction. Use session.tx().prepare()."
-                .to_string(),
-            query: Some(cypher.to_string()),
+        let (ast, parameters) = parse_cypher_with_parameters(cypher)?;
+        // Session-prepared queries must be read-only, mirroring `Session::query`
+        // — including its procedure classification, so a registered write
+        // procedure is refused here as it is there.
+        uni_query::validate_read_only_with(&ast, is_write_procedure).map_err(|_| {
+            UniError::Query {
+                message: "Prepared session query is read-only. Mutation clauses (CREATE, MERGE, \
+                 DELETE, SET, REMOVE) and mutating procedures require a transaction. Use \
+                 session.tx().prepare()."
+                    .to_string(),
+                query: Some(cypher.to_string()),
+            }
         })?;
-        Self::build(db, cypher, ast, None, guards, cancel)
+        Self::build(db, cypher, (ast, parameters), None, guards, cancel)
     }
 
     /// Create a transaction-bound prepared query (mutations allowed, routed to
@@ -165,15 +173,15 @@ impl PreparedQuery {
         guards: PreparedGuards,
         cancel: crate::api::impl_query::CancelScope,
     ) -> Result<Self> {
-        let ast = parse_cypher(cypher)?;
-        Self::build(db, cypher, ast, Some(binding), guards, cancel)
+        let parsed = parse_cypher_with_parameters(cypher)?;
+        Self::build(db, cypher, parsed, Some(binding), guards, cancel)
     }
 
     /// Plan `ast` and assemble the prepared query.
     fn build(
         db: Arc<UniInner>,
         cypher: &str,
-        ast: uni_query::CypherQuery,
+        (ast, parameters): (uni_query::CypherQuery, Vec<String>),
         tx: Option<PreparedTxBinding>,
         guards: PreparedGuards,
         cancel: crate::api::impl_query::CancelScope,
@@ -191,6 +199,7 @@ impl PreparedQuery {
             tx,
             guards,
             cancel,
+            parameters,
             inner: std::sync::RwLock::new(PreparedQueryInner {
                 ast,
                 plan,
@@ -221,6 +230,7 @@ impl PreparedQuery {
         // the live `Session::query` / `Transaction::execute` paths — a cached
         // prepared handle must not bypass an `AuthzPolicy` or hook (review #5b).
         self.guards.run(&self.db, &self.query_text, &params)?;
+        crate::api::impl_query::check_parameters(&self.parameters, &params)?;
 
         if let Some(tx) = &self.tx {
             // Read the live snapshot, dropping the (non-Send) guard before the
@@ -319,9 +329,10 @@ impl<'a> PreparedQueryBinder<'a> {
     }
 }
 
-/// Parse Cypher into an AST, mapping the error into a [`UniError::Parse`].
-fn parse_cypher(cypher: &str) -> Result<uni_query::CypherQuery> {
-    uni_cypher::parse(cypher).map_err(|e| UniError::Parse {
+/// Parse Cypher into an AST and the parameters it references, mapping the
+/// error into a [`UniError::Parse`].
+fn parse_cypher_with_parameters(cypher: &str) -> Result<(uni_query::CypherQuery, Vec<String>)> {
+    uni_cypher::parse_with_parameters(cypher).map_err(|e| UniError::Parse {
         message: e.to_string(),
         position: None,
         line: None,
@@ -335,14 +346,24 @@ fn parse_cypher(cypher: &str) -> Result<uni_query::CypherQuery> {
 /// Interior state for schema-staleness detection.
 struct PreparedLocyInner {
     compiled: uni_locy::CompiledProgram,
+    /// Every parameter the program's text references, in order of first
+    /// appearance.
+    parameters: Vec<String>,
     schema_version: u32,
 }
 
 /// A prepared Locy program with a cached compiled program.
 ///
-/// Created via [`Session::prepare_locy()`](crate::api::session::Session::prepare_locy).
+/// Created via [`Session::prepare_locy()`](crate::api::session::Session::prepare_locy)
+/// or [`Transaction::prepare_locy()`](crate::api::transaction::Transaction::prepare_locy).
 /// The compiled program is cached and reused across executions. If the database
 /// schema changes, the program is automatically recompiled.
+///
+/// A session-prepared program runs as `session.locy` does: it reads the
+/// shared graph and returns its writes as a `DerivedFactSet`. A
+/// transaction-prepared program runs as `tx.locy` does: it reads the
+/// transaction's uncommitted writes and pinned snapshot, its writes land in
+/// the transaction, and it runs under the transaction's cancellation scope.
 ///
 /// All methods take `&self`, so a `PreparedLocy` can be shared across
 /// threads via `Arc<PreparedLocy>`.
@@ -350,6 +371,12 @@ pub struct PreparedLocy {
     db: Arc<UniInner>,
     rule_registry: Arc<std::sync::RwLock<LocyRuleRegistry>>,
     program_text: String,
+    /// `Some` for a transaction-prepared program: the transaction's private
+    /// L0 and live snapshot slot.
+    tx: Option<PreparedTxBinding>,
+    /// The scope every execution runs under: the transaction's for a
+    /// transaction-prepared program.
+    cancel: crate::api::impl_query::CancelScope,
     inner: std::sync::RwLock<PreparedLocyInner>,
 }
 
@@ -360,15 +387,48 @@ impl PreparedLocy {
         rule_registry: Arc<std::sync::RwLock<LocyRuleRegistry>>,
         program: &str,
     ) -> Result<Self> {
-        let compiled = compile_locy_with_registry(program, &rule_registry)?;
+        Self::build(
+            db,
+            rule_registry,
+            program,
+            None,
+            // A session-prepared program is owned by the instance, not a
+            // session, so it has no enclosing scope to inherit.
+            crate::api::impl_query::CancelScope::default(),
+        )
+    }
+
+    /// Create a Locy program prepared in a transaction: every execution
+    /// reads and writes through `binding` and runs under `cancel`.
+    pub(crate) fn new_tx_bound(
+        db: Arc<UniInner>,
+        rule_registry: Arc<std::sync::RwLock<LocyRuleRegistry>>,
+        program: &str,
+        binding: PreparedTxBinding,
+        cancel: crate::api::impl_query::CancelScope,
+    ) -> Result<Self> {
+        Self::build(db, rule_registry, program, Some(binding), cancel)
+    }
+
+    fn build(
+        db: Arc<UniInner>,
+        rule_registry: Arc<std::sync::RwLock<LocyRuleRegistry>>,
+        program: &str,
+        tx: Option<PreparedTxBinding>,
+        cancel: crate::api::impl_query::CancelScope,
+    ) -> Result<Self> {
+        let (compiled, parameters) = compile_locy_with_registry(program, &rule_registry)?;
         let schema_version = db.schema.schema().schema_version;
 
         Ok(Self {
             db,
             rule_registry,
             program_text: program.to_string(),
+            tx,
+            cancel,
             inner: std::sync::RwLock::new(PreparedLocyInner {
                 compiled,
+                parameters,
                 schema_version,
             }),
         })
@@ -404,14 +464,17 @@ impl PreparedLocy {
         self.ensure_compiled_fresh()?;
 
         // Clone the compiled program and merge rules
-        let mut compiled = {
+        let (mut compiled, parameters) = {
             let inner = self.inner.read().unwrap();
-            inner.compiled.clone()
+            (inner.compiled.clone(), inner.parameters.clone())
         };
 
         // Merge registered rules (same logic as evaluate_with_config)
         merge_registered_rules(&mut compiled, &self.rule_registry.read().unwrap())
             .map_err(map_compile_error)?;
+        // Before evaluation, every missing name at once, the merged rules'
+        // included (as `evaluate_with_config` does).
+        crate::api::impl_locy::check_program_parameters(&parameters, &compiled, &params)?;
 
         // Build config with params and session-level semantics
         let config = LocyConfig {
@@ -419,17 +482,22 @@ impl PreparedLocy {
             ..LocyConfig::default()
         };
 
+        // A transaction-prepared program is `tx.locy`: reads and writes go
+        // through the transaction's L0, under its current snapshot (read
+        // live, as `PreparedQuery` does: it is pinned at the transaction's
+        // first read and released at commit or rollback).
+        let (tx_l0, read_snapshot) = match &self.tx {
+            Some(tx) => (Some(tx.tx_l0.clone()), tx.snapshot.lock().clone()),
+            None => (None, None),
+        };
         let engine = crate::api::impl_locy::LocyEngine {
             counters: std::sync::Arc::new(uni_store::QueryCounters::new()),
             db: &self.db,
-            tx_l0_override: None,
-            locy_l0: None,
-            collect_derive: true,
-            read_snapshot: None,
-            // `PreparedLocy` is owned by the instance, not a session, so it
-            // has no enclosing scope to inherit; `PreparedLocyBinder` is where
-            // a per-execution token would attach.
-            cancel: crate::api::impl_query::CancelScope::default(),
+            tx_l0_override: tx_l0.clone(),
+            locy_l0: tx_l0,
+            collect_derive: self.tx.is_none(),
+            read_snapshot,
+            cancel: self.cancel.clone(),
             // No per-call override on this path; the database
             // setting applies.
             max_memory: None,
@@ -457,29 +525,32 @@ impl PreparedLocy {
             return Ok(());
         }
 
-        inner.compiled = compile_locy_with_registry(&self.program_text, &self.rule_registry)?;
+        (inner.compiled, inner.parameters) =
+            compile_locy_with_registry(&self.program_text, &self.rule_registry)?;
         inner.schema_version = current_version;
         Ok(())
     }
 }
 
-/// Parse and compile a Locy program using the given rule registry.
+/// Parse and compile a Locy program using the given rule registry, also
+/// returning every parameter its text references.
 ///
 /// Shared between `PreparedLocy::new()` and `PreparedLocy::ensure_compiled_fresh()`.
 fn compile_locy_with_registry(
     program: &str,
     rule_registry: &std::sync::RwLock<LocyRuleRegistry>,
-) -> Result<uni_locy::CompiledProgram> {
-    let ast = uni_cypher::parse_locy(program).map_err(|e| UniError::Parse {
-        message: format!("LocyParseError: {e}"),
-        position: None,
-        line: None,
-        column: None,
-        context: None,
-    })?;
+) -> Result<(uni_locy::CompiledProgram, Vec<String>)> {
+    let (ast, parameters) =
+        uni_cypher::parse_locy_with_parameters(program).map_err(|e| UniError::Parse {
+            message: format!("LocyParseError: {e}"),
+            position: None,
+            line: None,
+            column: None,
+            context: None,
+        })?;
 
     let registry = rule_registry.read().unwrap();
-    if registry.rules.is_empty() {
+    let compiled = if registry.rules.is_empty() {
         drop(registry);
         uni_locy::compile(&ast).map_err(|e| UniError::Query {
             message: format!("LocyCompileError: {e}"),
@@ -492,7 +563,8 @@ fn compile_locy_with_registry(
             message: format!("LocyCompileError: {e}"),
             query: None,
         })
-    }
+    }?;
+    Ok((compiled, parameters))
 }
 
 /// Fluent parameter builder for executing a [`PreparedLocy`].

@@ -82,6 +82,22 @@ create_exception!(
 );
 create_exception!(
     _uni_db,
+    UniEdgeEndpointError,
+    UniConstraintError,
+    "A relationship's endpoint does not carry a label its declared edge type \
+     allows. Carries `edge_type`, `endpoint` ('source' or 'target'), `labels` \
+     and `allowed`."
+);
+create_exception!(
+    _uni_db,
+    UniEdgeIdentityError,
+    UniConstraintError,
+    "A property write (SET / REMOVE) on a relationship named endpoints or a \
+     type other than the stored ones. Carries `eid`, `stored` and `requested` \
+     (each `(src)-[:TYPE]->(dst)`)."
+);
+create_exception!(
+    _uni_db,
     UniInvalidIdentifierError,
     UniError,
     "Invalid identifier name."
@@ -95,10 +111,24 @@ create_exception!(
     "Cypher or Locy parse error."
 );
 create_exception!(_uni_db, UniQueryError, UniError, "Query execution error.");
+create_exception!(
+    _uni_db,
+    UniParameterMissingError,
+    UniQueryError,
+    "A query refers to a `$parameter` the call did not supply. Carries \
+     `names`, the missing parameters without the `$`."
+);
 create_exception!(_uni_db, UniTypeError, UniError, "Type mismatch error.");
 
 // Transaction errors
 create_exception!(_uni_db, UniTransactionError, UniError, "Transaction error.");
+create_exception!(
+    _uni_db,
+    UniUncommittedWritesError,
+    UniTransactionError,
+    "The operation cannot run in a transaction that holds uncommitted writes, \
+     because its effect is not transactional. Carries `operation` and `reason`."
+);
 create_exception!(
     _uni_db,
     UniTransactionConflictError,
@@ -146,6 +176,21 @@ create_exception!(
     "Query exceeded its memory limit."
 );
 create_exception!(_uni_db, UniTimeoutError, UniError, "Operation timed out.");
+create_exception!(
+    _uni_db,
+    UniWriteStalledError,
+    UniError,
+    "Writes are stopped: the uncompacted flush generations reached the write \
+     throttle's hard limit and background compaction is disabled. Run \
+     `CALL uni.admin.compact()` to resume. Carries `l1_runs` and `hard_limit`."
+);
+create_exception!(
+    _uni_db,
+    UniRegexBacktrackLimitError,
+    UniError,
+    "A `=~` match needed more backtracking steps than `regex_backtrack_limit` \
+     allows. Carries `pattern` and `limit`."
+);
 create_exception!(
     _uni_db,
     UniLocyIncompleteError,
@@ -258,6 +303,13 @@ create_exception!(
 );
 create_exception!(
     _uni_db,
+    UniRestoreBlockedByForksError,
+    UniError,
+    "restore_snapshot refused because the database has forks: a restore does \
+     not rewind fork branches. Drop them first. Carries `forks: list[str]`."
+);
+create_exception!(
+    _uni_db,
     UniForkHasChildrenError,
     UniError,
     "drop_fork refused because nested children exist. Use drop_fork_cascade. \
@@ -296,6 +348,24 @@ create_exception!(
     "Locy program runtime error."
 );
 
+create_exception!(
+    _uni_db,
+    UniBulkCommitIncompleteError,
+    UniError,
+    "A bulk load is COMMITTED but its publish could not be finished by the commit. It stays \
+     hidden while a background task completes it, or the next open does, exactly once. Do NOT \
+     retry the load. Carries `load_id: str` and `reason: str` attributes."
+);
+
+create_exception!(
+    _uni_db,
+    UniBulkCommitOutcomeUnknownError,
+    UniError,
+    "Whether a bulk load committed is unknown: writing its commit marker failed and reading \
+     it back did not decide. Reopen the database, then call `bulk_load_applied(load_id)` \
+     before retrying. Carries `load_id: str` and `reason: str` attributes."
+);
+
 // ============================================================================
 // Error conversion
 // ============================================================================
@@ -323,8 +393,20 @@ pub fn uni_error_to_pyerr(e: uni_common::UniError) -> PyErr {
         EdgeTypeNotFound { .. } => UniEdgeTypeNotFoundError::new_err(msg),
         PropertyNotFound { .. } => UniPropertyNotFoundError::new_err(msg),
         IndexNotFound { .. } => UniIndexNotFoundError::new_err(msg),
-        SnapshotNotFound { .. } => UniSnapshotNotFoundError::new_err(msg),
+        SnapshotNotFound { snapshot_id } => {
+            fork_err_with(UniSnapshotNotFoundError::new_err(msg), |_py, val| {
+                val.setattr("snapshot_id", snapshot_id.as_str())?;
+                Ok(())
+            })
+        }
         MemoryLimitExceeded { .. } => UniMemoryLimitExceededError::new_err(msg),
+        RegexBacktrackLimit { pattern, limit } => {
+            fork_err_with(UniRegexBacktrackLimitError::new_err(msg), |_py, val| {
+                val.setattr("pattern", pattern)?;
+                val.setattr("limit", limit)?;
+                Ok(())
+            })
+        }
         DatabaseLocked => UniDatabaseLockedError::new_err(msg),
         Timeout { .. } => UniTimeoutError::new_err(msg),
         LocyIncomplete { detail } => {
@@ -394,6 +476,12 @@ pub fn uni_error_to_pyerr(e: uni_common::UniError) -> PyErr {
                 Ok(())
             })
         }
+        RestoreBlockedByForks { forks } => {
+            fork_err_with(UniRestoreBlockedByForksError::new_err(msg), |py, val| {
+                val.setattr("forks", pyo3::types::PyList::new(py, &forks)?)?;
+                Ok(())
+            })
+        }
         ForkSubtreeInUse { blockers } => {
             fork_err_with(UniForkSubtreeInUseError::new_err(msg), |py, val| {
                 val.setattr("blockers", pyo3::types::PyList::new(py, &blockers)?)?;
@@ -416,6 +504,67 @@ pub fn uni_error_to_pyerr(e: uni_common::UniError) -> PyErr {
             })
         }
         ForkWritesNotYetSupported => UniError::new_err(msg),
+        // Only a storage backend that cannot stage refuses a bulk load, and every
+        // backend a Python database opens stages.
+        BulkLoadUnsupported { .. } => UniError::new_err(msg),
+        BulkCommitIncomplete { load_id, message } => {
+            fork_err_with(UniBulkCommitIncompleteError::new_err(msg), |_py, val| {
+                val.setattr("load_id", load_id)?;
+                val.setattr("reason", message)?;
+                Ok(())
+            })
+        }
+        BulkCommitOutcomeUnknown { load_id, message } => fork_err_with(
+            UniBulkCommitOutcomeUnknownError::new_err(msg),
+            |_py, val| {
+                val.setattr("load_id", load_id)?;
+                val.setattr("reason", message)?;
+                Ok(())
+            },
+        ),
+        WriteStalled {
+            l1_runs,
+            hard_limit,
+        } => fork_err_with(UniWriteStalledError::new_err(msg), |_py, val| {
+            val.setattr("l1_runs", l1_runs)?;
+            val.setattr("hard_limit", hard_limit)?;
+            Ok(())
+        }),
+        EdgeEndpointViolation {
+            edge_type,
+            endpoint,
+            labels,
+            allowed,
+        } => fork_err_with(UniEdgeEndpointError::new_err(msg), |py, val| {
+            val.setattr("edge_type", edge_type)?;
+            val.setattr("endpoint", endpoint)?;
+            val.setattr("labels", pyo3::types::PyList::new(py, &labels)?)?;
+            val.setattr("allowed", pyo3::types::PyList::new(py, &allowed)?)?;
+            Ok(())
+        }),
+        EdgeIdentityChange {
+            eid,
+            stored,
+            requested,
+        } => fork_err_with(UniEdgeIdentityError::new_err(msg), |_py, val| {
+            val.setattr("eid", eid)?;
+            val.setattr("stored", stored)?;
+            val.setattr("requested", requested)?;
+            Ok(())
+        }),
+        ParameterMissing { names } => {
+            fork_err_with(UniParameterMissingError::new_err(msg), |py, val| {
+                val.setattr("names", pyo3::types::PyList::new(py, &names)?)?;
+                Ok(())
+            })
+        }
+        UncommittedWritesInTransaction { operation, reason } => {
+            fork_err_with(UniUncommittedWritesError::new_err(msg), |_py, val| {
+                val.setattr("operation", operation)?;
+                val.setattr("reason", reason)?;
+                Ok(())
+            })
+        }
         // Catch-all for future variants (non_exhaustive)
         _ => UniError::new_err(msg),
     }
@@ -498,13 +647,17 @@ pub fn register_exceptions(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> 
         UniLabelAlreadyExistsError,
         UniEdgeTypeAlreadyExistsError,
         UniConstraintError,
+        UniEdgeEndpointError,
+        UniEdgeIdentityError,
         UniInvalidIdentifierError,
         // Query & parse
         UniParseError,
         UniQueryError,
+        UniParameterMissingError,
         UniTypeError,
         // Transaction
         UniTransactionError,
+        UniUncommittedWritesError,
         UniTransactionConflictError,
         UniTransactionAlreadyCompletedError,
         UniTransactionExpiredError,
@@ -514,6 +667,8 @@ pub fn register_exceptions(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> 
         // Resource limits
         UniMemoryLimitExceededError,
         UniTimeoutError,
+        UniWriteStalledError,
+        UniRegexBacktrackLimitError,
         UniLocyIncompleteError,
         // Access control
         UniReadOnlyError,
@@ -542,9 +697,13 @@ pub fn register_exceptions(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> 
         UniForkInflightTxError,
         UniForkHasChildrenError,
         UniForkSubtreeInUseError,
+        UniRestoreBlockedByForksError,
         UniForkBudgetExceededError,
         UniForkCorruptRegistryError,
         UniForkLifecycleError,
+        // Bulk load commit outcomes
+        UniBulkCommitIncompleteError,
+        UniBulkCommitOutcomeUnknownError,
     );
 
     Ok(())

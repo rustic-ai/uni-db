@@ -7,6 +7,8 @@ Tests that data, schema, and indexes persist across database close/reopen cycles
 Uses on-disk databases with tmp_path fixture.
 """
 
+import pytest
+
 import uni_db
 
 
@@ -404,3 +406,195 @@ def test_empty_database_persists(tmp_path):
     results2 = session2.query("MATCH (n:Node) RETURN n.value as value")
     assert len(results2) == 1
     assert results2[0]["value"] == 42
+
+
+def test_restore_snapshot_rewinds_data(tmp_path):
+    """restore_snapshot rewinds flushed and unflushed writes, now and on reopen."""
+    db_path = str(tmp_path / "restore_db")
+    db = uni_db.UniBuilder.open(db_path).build()
+    (
+        db.schema()
+        .label("Person")
+        .property("name", "string")
+        .done()
+        .edge_type("KNOWS", ["Person"], ["Person"])
+        .apply()
+    )
+    s = db.session()
+    tx = s.tx()
+    tx.execute("CREATE (:Person {name: 'A'})-[:KNOWS]->(:Person {name: 'B'})")
+    tx.commit()
+    snap = db.create_snapshot("two")
+
+    tx = s.tx()
+    tx.execute("MATCH (b:Person {name: 'B'}) DETACH DELETE b")
+    tx.execute("CREATE (:Person {name: 'C'})")
+    tx.commit()
+    db.flush()
+    tx = s.tx()
+    tx.execute(
+        "MATCH (a:Person {name: 'A'}) CREATE (a)-[:KNOWS]->(:Person {name: 'D'})"
+    )
+    tx.commit()
+
+    def state(database):
+        rows = database.session().query(
+            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS a, b.name AS b"
+        )
+        people = database.session().query("MATCH (p:Person) RETURN count(p) AS c")
+        return [(r["a"], r["b"]) for r in rows], people[0]["c"]
+
+    db.restore_snapshot(snap)
+    assert state(db) == ([("A", "B")], 2)
+    db.shutdown()
+
+    db = uni_db.UniBuilder.open(db_path).build()
+    assert state(db) == ([("A", "B")], 2)
+    db.shutdown()
+
+
+def test_restore_snapshot_refused_while_forks_exist(tmp_path):
+    """restore_snapshot raises UniRestoreBlockedByForksError naming the forks."""
+    db_path = str(tmp_path / "restore_forks_db")
+    db = uni_db.UniBuilder.open(db_path).disable_fork_sweeper(True).build()
+    db.schema().label("Person").property("name", "string").apply()
+    s = db.session()
+    tx = s.tx()
+    tx.execute("CREATE (:Person {name: 'A'})")
+    tx.commit()
+    snap = db.create_snapshot("one")
+    tx = s.tx()
+    tx.execute("CREATE (:Person {name: 'B'})")
+    tx.commit()
+
+    fork = s.fork("what_if").build()
+    del fork
+
+    with pytest.raises(uni_db.UniRestoreBlockedByForksError) as excinfo:
+        db.restore_snapshot(snap)
+    assert excinfo.value.forks == ["what_if"]
+    assert s.query("MATCH (p:Person) RETURN count(p) AS c")[0]["c"] == 2
+
+    db.drop_fork("what_if")
+    db.restore_snapshot(snap)
+    assert s.query("MATCH (p:Person) RETURN count(p) AS c")[0]["c"] == 1
+    db.shutdown()
+
+
+def _store_with_snapshot(db_path):
+    """A store holding A, a snapshot of it, then B."""
+    db = uni_db.UniBuilder.open(db_path).build()
+    db.schema().label("Person").property("name", "string").apply()
+    s = db.session()
+    tx = s.tx()
+    tx.execute("CREATE (:Person {name: 'A'})")
+    tx.commit()
+    snap = db.create_snapshot("a-only")
+    tx = s.tx()
+    tx.execute("CREATE (:Person {name: 'B'})")
+    tx.commit()
+    return db, snap
+
+
+def test_admin_procedures_refused_by_query_run_by_run(tmp_path):
+    """session.query is read-only: it refuses a mutating admin procedure;
+    session.run runs it outside a transaction."""
+    db, snap = _store_with_snapshot(str(tmp_path / "admin_db"))
+    s = db.session()
+    restore = f"CALL uni.admin.snapshot.restore('{snap}')"
+    for stmt in (
+        restore,
+        "CALL uni.admin.compact()",
+        "CALL uni.admin.snapshot.create('x')",
+        "CALL uni.schema.dropLabel('Person')",
+    ):
+        with pytest.raises(uni_db.UniQueryError, match="read-only"):
+            s.query(stmt)
+    assert s.query("MATCH (p:Person) RETURN count(p) AS c")[0]["c"] == 2
+    s.query("CALL uni.admin.compactionStatus() YIELD l1_runs RETURN l1_runs")
+
+    s.run(restore)
+    assert s.query("MATCH (p:Person) RETURN count(p) AS c")[0]["c"] == 1
+    s.run("CALL uni.admin.compact() YIELD tables_optimized RETURN tables_optimized")
+    assert s.run("MATCH (p:Person) RETURN p.name AS n")[0]["n"] == "A"
+    db.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_async_session_run_restores(tmp_path):
+    """AsyncSession.run runs an administrative procedure."""
+    db_path = str(tmp_path / "async_admin_db")
+    db, snap = _store_with_snapshot(db_path)
+    db.shutdown()
+    adb = await uni_db.AsyncUni.open(db_path)
+    s = adb.session()
+    with pytest.raises(uni_db.UniQueryError, match="read-only"):
+        await s.query(f"CALL uni.admin.snapshot.restore('{snap}')")
+    await s.run(f"CALL uni.admin.snapshot.restore('{snap}')")
+    rows = await s.query("MATCH (p:Person) RETURN count(p) AS c")
+    assert rows[0]["c"] == 1
+
+
+def test_delete_snapshot_releases_and_keeps_others(tmp_path):
+    """delete_snapshot removes one snapshot; another still restores."""
+    db_path = str(tmp_path / "delete_snapshot_db")
+    db, first = _store_with_snapshot(db_path)
+    second = db.create_snapshot("two")
+    s = db.session()
+    tx = s.tx()
+    tx.execute("CREATE (:Person {name: 'C'})")
+    tx.commit()
+
+    db.delete_snapshot(first)
+    assert first not in {m.snapshot_id for m in db.list_snapshots()}
+    with pytest.raises(uni_db.UniSnapshotNotFoundError) as excinfo:
+        db.restore_snapshot(first)
+    assert excinfo.value.snapshot_id == first
+    with pytest.raises(uni_db.UniSnapshotNotFoundError) as excinfo:
+        db.delete_snapshot(first)
+    assert excinfo.value.snapshot_id == first
+
+    db.restore_snapshot(second)
+    names = s.query("MATCH (p:Person) RETURN p.name AS n ORDER BY n")
+    assert [r["n"] for r in names] == ["A", "B"]
+
+    s.run(f"CALL uni.admin.snapshot.delete('{second}')")
+    with pytest.raises(uni_db.UniSnapshotNotFoundError):
+        s.run(f"CALL uni.admin.snapshot.delete('{second}')")
+    db.shutdown()
+
+
+def test_restore_snapshot_rewinds_the_schema(tmp_path):
+    """A label declared after the snapshot is gone after the restore."""
+    db_path = str(tmp_path / "restore_schema_db")
+    db, snap = _store_with_snapshot(db_path)
+    db.schema().label("Pet").property("age", "string").apply()
+    s = db.session()
+    tx = s.tx()
+    tx.execute("CREATE (:Pet {age: 'old'})")
+    tx.commit()
+    assert db.label_exists("Pet")
+
+    db.restore_snapshot(snap)
+    assert not db.label_exists("Pet")
+    db.schema().label("Pet").property("age", "int").apply()
+    tx = s.tx()
+    tx.execute("CREATE (:Pet {age: 4})")
+    tx.commit()
+    db.flush()
+    assert s.query("MATCH (p:Pet) RETURN p.age AS a")[0]["a"] == 4
+    db.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_async_delete_snapshot(tmp_path):
+    """AsyncUni.delete_snapshot deletes, and raises the typed not-found."""
+    db_path = str(tmp_path / "async_delete_db")
+    db, snap = _store_with_snapshot(db_path)
+    db.shutdown()
+    adb = await uni_db.AsyncUni.open(db_path)
+    await adb.delete_snapshot(snap)
+    assert snap not in {m.snapshot_id for m in await adb.list_snapshots()}
+    with pytest.raises(uni_db.UniSnapshotNotFoundError) as excinfo:
+        await adb.delete_snapshot(snap)
+    assert excinfo.value.snapshot_id == snap

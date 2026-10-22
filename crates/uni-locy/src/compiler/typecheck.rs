@@ -298,6 +298,12 @@ pub fn check(
         }
 
         let priority = definitions.first().and_then(|d| d.priority);
+        let mut parameters: Vec<String> = Vec::new();
+        for name in definitions.iter().flat_map(|d| &d.parameters) {
+            if !parameters.contains(name) {
+                parameters.push(name.clone());
+            }
+        }
 
         compiled_rules.insert(
             rule_name.clone(),
@@ -306,6 +312,7 @@ pub fn check(
                 clauses,
                 yield_schema,
                 priority,
+                parameters,
             },
         );
     }

@@ -266,13 +266,12 @@ fn collect_embed_groups(
     groups
 }
 
-/// On a partial / `SET` write, when the write touches a *source* property of an
+/// On a `SET` write, when the write touches a *source* property of an
 /// auto-embed group, drop that group's target columns from `props` so the
 /// `!contains_key` guard in `process_embeddings_*` re-embeds them (otherwise the
 /// re-read old embedding is preserved → stale), and add the targets to
-/// `touched_keys` so the partial Lance write persists the refresh. Mirrors the
-/// MUVERA derived-column touched-keys handling. A target the caller set
-/// explicitly in the SAME write (already in `touched_keys`) is left intact.
+/// `touched_keys`. A target the caller set explicitly in the SAME write (already
+/// in `touched_keys`) is left intact.
 fn refresh_touched_embed_targets(
     schema: &uni_common::core::schema::Schema,
     props: &mut Properties,
@@ -310,22 +309,18 @@ fn refresh_touched_embed_targets(
 
 pub struct WriterConfig {
     pub max_mutations: usize,
-    /// Enable the partial-column MergeInsert path for SET-only flushes.
+    /// Inert; kept so existing configurations still build.
     ///
-    /// When `true`, `Writer::insert_vertex_partial` records the touched
-    /// property keys into `L0Buffer::vertex_partial_keys` and the flush
-    /// routes those VIDs through Lance `MergeInsertBuilder` with a
-    /// subset-of-schema source, skipping the read of (and write of)
-    /// the unchanged columns — including wide ones like embeddings.
-    ///
-    /// When `false`, `insert_vertex_partial` falls back to the
-    /// read-modify-write `insert_vertex_with_labels` path (preserving
-    /// bit-for-bit equivalence with prior releases). Default `false`
-    /// for the first release; flip to `true` after telemetry on the
-    /// issue #72 ingest workload confirms the win.
-    ///
-    /// See the soundness probe at
-    /// `crates/uni-store/tests/common/storage/lance_merge_insert_probe.rs`.
+    /// It used to route a `SET` of vertices and edges through a Lance
+    /// `MergeInsert` of the touched columns at flush. Vertex and edge tables
+    /// hold one row per flushed version until compaction, which a key-matched
+    /// merge cannot address: removed properties came back after a flush or a
+    /// compaction, and a row created and updated in one flush window was
+    /// lost. Every write now stores a full row.
+    #[deprecated(
+        since = "4.2.0",
+        note = "no-op: every write is stored as a full row; the partial MergeInsert path was removed"
+    )]
     pub partial_lance_writes: bool,
 }
 
@@ -333,6 +328,10 @@ impl Default for WriterConfig {
     fn default() -> Self {
         Self {
             max_mutations: 10_000,
+            #[expect(
+                deprecated,
+                reason = "the default must still name the deprecated field"
+            )]
             partial_lance_writes: false,
         }
     }
@@ -399,19 +398,6 @@ struct RotateOutput {
     flush_in_progress_guard: FlushInProgressGuard,
 }
 
-/// Project a property map to a subset selected by `keys`. Used to
-/// run `touched_needs_full_read` against just the SET-touched keys
-/// when the caller passes a fully-merged `props` map.
-fn props_subset(props: &Properties, keys: &HashSet<String>) -> Properties {
-    let mut out = Properties::new();
-    for k in keys {
-        if let Some(v) = props.get(k) {
-            out.insert(k.clone(), v.clone());
-        }
-    }
-    out
-}
-
 /// Reject a write whose property map is keyed by a storage column name
 /// (`uni_common::core::schema::RESERVED_PROPERTY_NAMES`). Every vertex
 /// and edge insert path runs this, so CREATE, SET, MERGE and the batch
@@ -435,6 +421,9 @@ struct FlushOutcome {
 }
 
 pub struct Writer {
+    /// Write-throttle counters since this writer was constructed; see
+    /// [`Writer::write_throttle_stats`].
+    throttle_stats: Arc<WriteThrottleStats>,
     pub l0_manager: Arc<L0Manager>,
     pub storage: Arc<StorageManager>,
     pub schema_manager: Arc<uni_common::core::schema::SchemaManager>,
@@ -495,6 +484,10 @@ pub struct Writer {
     /// configured threshold. One-shot per writer lifetime. `Relaxed` is
     /// sufficient — observational only.
     fork_fragment_warn_fired: Arc<AtomicBool>,
+    /// WAL segments [`Self::replay_wal`] recovered that carry no writer
+    /// features (written by a binary that may not enforce declared edge
+    /// endpoints); read by [`Self::distrust_conformance_after_unmarked_writes`].
+    unmarked_wal_segments: std::sync::atomic::AtomicUsize,
     /// Dedicated lock for the genuinely-exclusive flush path. Acquired by
     /// the [`Writer::flush_to_l1`] entry and by `commit_transaction_l0`
     /// across its WAL-append + L0-merge window. Replaces the outer
@@ -537,12 +530,156 @@ pub struct Writer {
     ///
     /// Always allocated; populated only when `config.ssi_enabled` is `true`.
     for_update_locks: Arc<dashmap::DashMap<Vec<u8>, Arc<tokio::sync::Mutex<()>>>>,
+    /// Bumped by [`Writer::restore_snapshot`] before it rewinds anything; see
+    /// [`Writer::restore_epoch`].
+    restore_epoch: std::sync::atomic::AtomicU64,
+    /// Set while [`Writer::restore_snapshot`] runs; a snapshot deletion
+    /// refuses meanwhile.
+    restore_in_progress: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Raises [`Writer`]'s `restore_in_progress` flag for its lifetime.
+struct RestoreInProgress(Arc<std::sync::atomic::AtomicBool>);
+
+impl RestoreInProgress {
+    fn set(flag: &Arc<std::sync::atomic::AtomicBool>) -> Self {
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        Self(Arc::clone(flag))
+    }
+}
+
+impl Drop for RestoreInProgress {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Number of recent commits retained for OCC conflict detection. Large enough
 /// that under-run — and the resulting conservative abort — is rare in practice;
 /// each entry is a small set of touched ids.
 const OCC_REGISTRY_CAPACITY: usize = 4096;
+
+/// How often a throttled write re-reads the flush-generation count.
+///
+/// The hard-limit stall has always polled at this period; the soft band uses
+/// it as the ceiling on each sleep, so neither band notices relief later
+/// than the other.
+const WRITE_PRESSURE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The next backpressure sleep for a write that has waited `waited` so far
+/// with `l1_runs` uncompacted flush generations, or `None` to proceed.
+///
+/// - `l1_runs >= hard_limit`: stall, polling every [`WRITE_PRESSURE_POLL`],
+///   until compaction brings the count down. No time bound: the hard limit
+///   is the stop-writes guarantee.
+/// - `soft_limit <= l1_runs < hard_limit`: wait up to
+///   `min(base_delay × 2^(l1_runs − soft_limit), WRITE_PRESSURE_POLL ×
+///   (hard_limit − soft_limit))`, in sleeps of at most
+///   [`WRITE_PRESSURE_POLL`]. The budget is recomputed from the current count
+///   each step, so falling pressure shortens it and dropping below
+///   `soft_limit` ends it.
+/// - otherwise: proceed.
+///
+/// The soft budget's cap is one hard-limit poll period per run of the soft
+/// band (1.6 s at the 16/32 defaults). Without it the curve reached 40.96 s
+/// at 28 runs and 81.92 s at 29, a single sleep longer than the default 30 s
+/// statement timeout, so a write failed with `Timeout` even when
+/// compaction had already reset the count. The exponent and the multiplication
+/// saturate, so no `base_delay` or run count can overflow.
+fn write_pressure_step(
+    throttle: &uni_common::config::WriteThrottleConfig,
+    l1_runs: usize,
+    waited: std::time::Duration,
+) -> Option<std::time::Duration> {
+    if l1_runs >= throttle.hard_limit {
+        return Some(WRITE_PRESSURE_POLL);
+    }
+    if l1_runs < throttle.soft_limit {
+        return None;
+    }
+    let excess = u32::try_from(l1_runs - throttle.soft_limit).unwrap_or(u32::MAX);
+    let curve = throttle
+        .base_delay
+        .saturating_mul(2_u32.saturating_pow(excess));
+    let band = u32::try_from(throttle.hard_limit - throttle.soft_limit).unwrap_or(u32::MAX);
+    let budget = curve.min(WRITE_PRESSURE_POLL.saturating_mul(band));
+    let remaining = budget.saturating_sub(waited);
+    if remaining.is_zero() {
+        None
+    } else {
+        Some(remaining.min(WRITE_PRESSURE_POLL))
+    }
+}
+
+/// Running totals of the write throttle's effect; see
+/// [`Writer::write_throttle_stats`].
+#[derive(Debug, Default)]
+struct WriteThrottleStats {
+    waits: std::sync::atomic::AtomicU64,
+    wait_nanos: std::sync::atomic::AtomicU64,
+    stalled: std::sync::atomic::AtomicU64,
+}
+
+/// A snapshot of the write throttle's counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteThrottleSnapshot {
+    /// Writes (statements, batches, or unscoped writer calls) that waited in
+    /// the soft or the hard band before proceeding or giving up.
+    pub waits: u64,
+    /// Total time those writes spent waiting.
+    pub wait_time: std::time::Duration,
+    /// Writes refused with `UniError::WriteStalled` (hard limit reached with
+    /// background compaction disabled).
+    pub stalled: u64,
+}
+
+/// Records one throttled wait when dropped, so a wait cut short by a
+/// timeout or a cancellation (which drops the waiting future) still counts.
+struct ThrottleWaitRecorder<'a> {
+    stats: &'a WriteThrottleStats,
+    started: tokio::time::Instant,
+    waited: bool,
+}
+
+impl Drop for ThrottleWaitRecorder<'_> {
+    fn drop(&mut self) {
+        if !self.waited {
+            return;
+        }
+        use std::sync::atomic::Ordering;
+        let elapsed = self.started.elapsed();
+        self.stats.waits.fetch_add(1, Ordering::Relaxed);
+        self.stats.wait_nanos.fetch_add(
+            u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+        metrics::counter!("uni_write_throttle_waits_total").increment(1);
+        metrics::histogram!("uni_write_throttle_wait_seconds").record(elapsed.as_secs_f64());
+    }
+}
+
+/// How hard the write throttle is pushing back, in `0.0..=1.0`, at
+/// `l1_runs` uncompacted flush generations.
+///
+/// `0.0` below the soft limit; in the soft band the run's position,
+/// `(l1_runs − soft_limit + 1) / (hard_limit − soft_limit + 1)`, so the first
+/// throttled run reads above zero; `1.0` at or past the hard limit, where
+/// writes stall (or, with compaction disabled, are refused). With background
+/// compaction disabled the soft band does not wait, so it reads `0.0`.
+pub fn write_throttle_pressure(
+    throttle: &uni_common::config::WriteThrottleConfig,
+    compaction_enabled: bool,
+    l1_runs: usize,
+) -> f64 {
+    if l1_runs >= throttle.hard_limit {
+        return 1.0;
+    }
+    if l1_runs < throttle.soft_limit || !compaction_enabled {
+        return 0.0;
+    }
+    let band = (throttle.hard_limit - throttle.soft_limit + 1) as f64;
+    ((l1_runs - throttle.soft_limit + 1) as f64 / band).clamp(0.0, 1.0)
+}
 
 impl Writer {
     pub async fn new(
@@ -687,6 +824,10 @@ impl Writer {
             commit_sequence,
             committed_writes,
             for_update_locks,
+            throttle_stats: Arc::new(WriteThrottleStats::default()),
+            restore_epoch: std::sync::atomic::AtomicU64::new(0),
+            restore_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            unmarked_wal_segments: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -877,7 +1018,16 @@ impl Writer {
 
         if let Some(wal) = wal {
             wal.initialize().await?;
-            let mutations = wal.replay_since(wal_high_water_mark).await?;
+            // Segments at or below the manifest's mark were truncated by the
+            // flush that published it; new ones must number above it, or the
+            // next recovery skips them.
+            wal.ensure_lsn_above(wal_high_water_mark)?;
+            let replay = wal
+                .replay_since_with_provenance(wal_high_water_mark)
+                .await?;
+            self.unmarked_wal_segments
+                .store(replay.unmarked_segments, Ordering::Release);
+            let mutations = replay.mutations;
             let count = mutations.len();
 
             if count > 0 {
@@ -920,6 +1070,71 @@ impl Writer {
         } else {
             Ok(0)
         }
+    }
+
+    /// Withdraw every `enforced` / `verified` endpoint-conformance record when
+    /// storage holds writes by a binary that may not have enforced declared
+    /// endpoints. Call once at open, after [`Self::replay_wal`].
+    ///
+    /// The signal is the writer features each enforcing binary stamps on what
+    /// it writes (`WRITER_FEATURES`): a replayed WAL segment without them, or a
+    /// latest snapshot manifest without them that is not the pre-existing one
+    /// an enforcing binary already accepted
+    /// (`Schema::trusted_unmarked_manifest`). Either means an older binary
+    /// wrote after the records were made -- edges it never checked, or a label
+    /// removal it never refused -- so the planner must stop narrowing on them.
+    /// A latest manifest without features is accepted as the new floor either
+    /// way: after this call every record that could predate it is unverified.
+    ///
+    /// With `persist`, a downgrade is saved to the catalog (not on a fork,
+    /// whose catalog view is never saved; the fork's in-memory view is
+    /// downgraded alone). Returns the edge types downgraded.
+    ///
+    /// # Errors
+    /// Reading the latest manifest or saving the catalog failed.
+    pub async fn distrust_conformance_after_unmarked_writes(
+        &self,
+        persist: bool,
+    ) -> Result<Vec<String>> {
+        let latest = self
+            .storage
+            .snapshot_manager()
+            .load_latest_snapshot()
+            .await?;
+        let unmarked_manifest = latest
+            .as_ref()
+            .filter(|m| !uni_common::core::schema::writer_enforces_endpoints(&m.writer_features))
+            .map(|m| m.snapshot_id.clone());
+        let trusted = self.schema_manager.trusted_unmarked_manifest()?;
+        let foreign_manifest = unmarked_manifest
+            .as_ref()
+            .is_some_and(|id| trusted.as_ref() != Some(id));
+        let unmarked_wal = self.unmarked_wal_segments.load(Ordering::Acquire);
+
+        let downgraded = if foreign_manifest || unmarked_wal > 0 {
+            self.schema_manager.distrust_all_conformance()?
+        } else {
+            Vec::new()
+        };
+        if unmarked_manifest.is_some() {
+            self.schema_manager
+                .set_trusted_unmarked_manifest(unmarked_manifest.clone())?;
+        }
+        if !downgraded.is_empty() {
+            tracing::warn!(
+                edge_types = ?downgraded,
+                latest_manifest = ?unmarked_manifest,
+                unmarked_wal_segments = unmarked_wal,
+                "storage holds writes by a binary that does not enforce declared edge \
+                 endpoints; endpoint conformance of these edge types is now unverified \
+                 (run CALL uni.admin.verifyEdgeEndpoints() to restore it)"
+            );
+            let forked = self.fork_id.is_some() || self.storage.fork_scope().is_some();
+            if persist && !forked {
+                self.schema_manager.save().await?;
+            }
+        }
+        Ok(downgraded)
     }
 
     /// Nulls wrong-dimension vector values in a recovered L0 buffer (issue #137).
@@ -1872,24 +2087,7 @@ impl Writer {
         label: &str,
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
     ) -> Result<()> {
-        self.validate_vertex_constraints_for_label_impl(vid, properties, label, tx_l0, false)
-            .await
-    }
-
-    /// Partial-update sibling: validates only constraints touching keys
-    /// present in `properties` (the touched set). NOT NULL is checked
-    /// only for touched keys; multi-key UNIQUE / CHECK / EXISTS are
-    /// skipped when any referenced key is absent (the caller is
-    /// expected to have routed to the full-row path in that case via
-    /// `touched_needs_full_read`).
-    async fn validate_vertex_constraints_for_label_partial(
-        &self,
-        vid: Vid,
-        properties: &Properties,
-        label: &str,
-        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
-    ) -> Result<()> {
-        self.validate_vertex_constraints_for_label_impl(vid, properties, label, tx_l0, true)
+        self.validate_vertex_constraints_for_label_impl(vid, properties, label, tx_l0)
             .await
     }
 
@@ -1899,15 +2097,11 @@ impl Writer {
         properties: &Properties,
         label: &str,
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
-        partial: bool,
     ) -> Result<()> {
         let schema = self.schema_manager.schema();
 
         {
             // 1. Check NOT NULL constraints (from Property definitions).
-            //    Under partial-update mode, skip properties NOT in
-            //    `properties` — they retain their previous (already-
-            //    validated) value.
             if let Some(props_meta) = schema.properties.get(label) {
                 for (prop_name, meta) in props_meta {
                     let present = properties.get(prop_name);
@@ -1927,21 +2121,16 @@ impl Writer {
                         ));
                     }
 
-                    if !meta.nullable {
-                        if partial && present.is_none() {
-                            continue;
-                        }
-                        if present.is_none_or(|v| v.is_null()) {
-                            log::warn!(
-                                "Constraint violation: Property '{}' cannot be null for label '{}'",
-                                prop_name,
-                                label
-                            );
-                            return Err(anyhow!(
-                                "Constraint violation: Property '{}' cannot be null",
-                                prop_name
-                            ));
-                        }
+                    if !meta.nullable && present.is_none_or(|v| v.is_null()) {
+                        log::warn!(
+                            "Constraint violation: Property '{}' cannot be null for label '{}'",
+                            prop_name,
+                            label
+                        );
+                        return Err(anyhow!(
+                            "Constraint violation: Property '{}' cannot be null",
+                            prop_name
+                        ));
                     }
                 }
             }
@@ -2068,32 +2257,6 @@ impl Writer {
             self.check_extid_globally_unique(ext_id, vid, tx_l0).await?;
         }
 
-        Ok(())
-    }
-
-    /// Partial sibling of `validate_vertex_constraints` — validates only
-    /// constraints touching keys present in `properties`. Used by
-    /// `insert_vertex_partial`'s fast path; the caller pre-screens for
-    /// multi-key UNIQUE constraints via `touched_needs_full_read`.
-    async fn validate_vertex_constraints_partial(
-        &self,
-        vid: Vid,
-        touched: &Properties,
-        labels: &[String],
-        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
-    ) -> Result<()> {
-        check_property_names(touched, &self.schema_manager.schema())?;
-        let schema = self.schema_manager.schema();
-        for label in labels {
-            if schema.get_label_case_insensitive(label).is_none() {
-                continue;
-            }
-            self.validate_vertex_constraints_for_label_partial(vid, touched, label, tx_l0)
-                .await?;
-        }
-        if let Some(ext_id) = touched.get("ext_id").and_then(|v| v.as_str()) {
-            self.check_extid_globally_unique(ext_id, vid, tx_l0).await?;
-        }
         Ok(())
     }
 
@@ -2253,31 +2416,21 @@ impl Writer {
         // counts: a pending buffer still holding a vid's old `ext_id` or key
         // after a newer buffer changed or deleted it must not refuse a write
         // that reuses the freed value. Pass one finds the buffer that decides
-        // each vid; pass two collects keys from those versions alone. A
-        // partial row (`partial_lance_writes`) decides nothing, since it omits
-        // the keys it did not touch, so it is collected and the walk goes on
-        // to older versions -- a superset, which can refuse but never admit.
-        // One buffer lock is held at a time, as before.
+        // each vid; pass two collects keys from those versions alone. One
+        // buffer lock is held at a time, as before.
         let mut existing_keys: HashMap<String, HashSet<String>> = HashMap::new();
         let mut existing_extids: HashSet<String> = HashSet::new();
         let l0_buffers = self.l0_buffers_newest_first(tx_l0);
         // vid -> index of the buffer whose version of it is newest; `None`
         // for a tombstone.
         let mut decided_by: HashMap<Vid, Option<usize>> = HashMap::new();
-        let mut partial_rows: HashSet<(Vid, usize)> = HashSet::new();
         for (i, l0) in l0_buffers.iter().enumerate() {
             let guard = l0.read();
             for vid in &guard.vertex_tombstones {
                 decided_by.entry(*vid).or_insert(None);
             }
             for vid in guard.vertex_properties.keys() {
-                if guard.vertex_partial_keys.contains_key(vid) {
-                    if !decided_by.contains_key(vid) {
-                        partial_rows.insert((*vid, i));
-                    }
-                } else {
-                    decided_by.entry(*vid).or_insert(Some(i));
-                }
+                decided_by.entry(*vid).or_insert(Some(i));
             }
         }
         for (i, l0) in l0_buffers.iter().enumerate() {
@@ -2286,9 +2439,7 @@ impl Writer {
                 guard
                     .vertex_properties
                     .iter()
-                    .filter(|(vid, _)| {
-                        decided_by.get(*vid) == Some(&Some(i)) || partial_rows.contains(&(**vid, i))
-                    })
+                    .filter(|(vid, _)| decided_by.get(*vid) == Some(&Some(i)))
                     .map(|(_, props)| props),
                 label,
                 &schema.constraints,
@@ -2613,9 +2764,7 @@ impl Writer {
     /// answer stands.
     ///
     /// A tombstone answers `false`. A complete property map answers whether
-    /// its `ext_id` is that string. A partial map (`partial_lance_writes`)
-    /// that leaves `ext_id` untouched says nothing about it, so the walk goes
-    /// on to older buffers.
+    /// its `ext_id` is that string.
     fn l0_ext_id_verdict(
         buffers_newest_first: &[Arc<RwLock<L0Buffer>>],
         vid: Vid,
@@ -2631,7 +2780,6 @@ impl Writer {
             };
             match props.get("ext_id") {
                 Some(v) => return Some(v.as_str() == Some(ext_id)),
-                None if guard.vertex_partial_keys.contains_key(&vid) => continue,
                 None => return Some(false),
             }
         }
@@ -3157,35 +3305,112 @@ impl Writer {
         Ok(false)
     }
 
-    async fn check_write_pressure(&self) -> Result<()> {
-        let status = self
-            .storage
-            .compaction_status()
-            .map_err(|e| anyhow::anyhow!("Failed to get compaction status: {}", e))?;
-        let l1_runs = status.l1_runs;
-        let throttle = &self.config.throttle;
+    /// Apply write backpressure from the flush-generation count (`l1_runs`).
+    ///
+    /// Re-reads the count before every sleep, so a write resumes within one
+    /// [`WRITE_PRESSURE_POLL`] of compaction relieving the pressure, whichever
+    /// band it was waiting in; see [`write_pressure_step`] for the bands.
+    ///
+    /// The writer holds no statement deadline. Every wait here is an ordinary
+    /// `tokio` sleep, so a caller's deadline or cancellation, which the
+    /// executor applies by racing and dropping the statement future, ends
+    /// the wait at the next poll of that future.
+    ///
+    /// A write into a transaction buffer with an open statement scope
+    /// ([`crate::runtime::l0::StatementScope`]) pays once per statement or
+    /// batch: the first write waits, the rest of the statement's writes see
+    /// the buffer marked admitted and go straight through. Outside a scope
+    /// every call is charged.
+    ///
+    /// With background compaction disabled nothing will lower the count, so
+    /// the soft band does not wait at all and the hard limit refuses the
+    /// write at once with `UniError::WriteStalled` instead of polling until
+    /// a deadline.
+    async fn check_write_pressure(&self, tx_l0: Option<&Arc<RwLock<L0Buffer>>>) -> Result<()> {
+        if let Some(l0) = tx_l0
+            && l0.read().write_admitted()
+        {
+            return Ok(());
+        }
+        self.wait_for_write_pressure().await?;
+        if let Some(l0) = tx_l0 {
+            l0.write().note_write_admitted();
+        }
+        Ok(())
+    }
 
-        if l1_runs >= throttle.hard_limit {
-            log::warn!("Write stalled: L1 runs ({}) at hard limit", l1_runs);
-            // Simple polling for now
-            while self
+    /// The throttle wait itself; see [`Self::check_write_pressure`].
+    async fn wait_for_write_pressure(&self) -> Result<()> {
+        let throttle = self.config.throttle;
+        let compaction_enabled = self.config.compaction.enabled;
+        let mut recorder = ThrottleWaitRecorder {
+            stats: &self.throttle_stats,
+            started: tokio::time::Instant::now(),
+            waited: false,
+        };
+        let mut stall_logged = false;
+        loop {
+            let l1_runs = self
                 .storage
                 .compaction_status()
                 .map_err(|e| anyhow::anyhow!("Failed to get compaction status: {}", e))?
-                .l1_runs
-                >= throttle.hard_limit
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                .l1_runs;
+            if !compaction_enabled {
+                if l1_runs >= throttle.hard_limit {
+                    self.throttle_stats
+                        .stalled
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    metrics::counter!("uni_write_stalled_total").increment(1);
+                    return Err(anyhow::Error::new(uni_common::UniError::WriteStalled {
+                        l1_runs,
+                        hard_limit: throttle.hard_limit,
+                    }));
+                }
+                return Ok(());
             }
-        } else if l1_runs >= throttle.soft_limit {
-            let excess = l1_runs - throttle.soft_limit;
-            // Cap multiplier to avoid overflow
-            let excess = std::cmp::min(excess, 31);
-            let multiplier = 2_u32.pow(excess as u32);
-            let delay = throttle.base_delay * multiplier;
-            tokio::time::sleep(delay).await;
+            let Some(step) = write_pressure_step(&throttle, l1_runs, recorder.started.elapsed())
+            else {
+                return Ok(());
+            };
+            if l1_runs >= throttle.hard_limit && !stall_logged {
+                log::warn!("Write stalled: L1 runs ({}) at hard limit", l1_runs);
+                stall_logged = true;
+            }
+            recorder.waited = true;
+            tokio::time::sleep(step).await;
         }
-        Ok(())
+    }
+
+    /// The write throttle's counters since this writer was constructed.
+    pub fn write_throttle_stats(&self) -> WriteThrottleSnapshot {
+        use std::sync::atomic::Ordering;
+        WriteThrottleSnapshot {
+            waits: self.throttle_stats.waits.load(Ordering::Relaxed),
+            wait_time: std::time::Duration::from_nanos(
+                self.throttle_stats.wait_nanos.load(Ordering::Relaxed),
+            ),
+            stalled: self.throttle_stats.stalled.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Record a statement's property side effects on `entity`: each pair is
+    /// a property's value before and after (`None` = absent). See
+    /// [`L0Buffer::record_property_effect`] for the counting rules. Routes to
+    /// the transaction buffer if given, otherwise to the main buffer.
+    pub fn record_property_effects(
+        &self,
+        entity: crate::runtime::l0::StatEntity,
+        effects: &[(Option<Value>, Option<Value>)],
+        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+    ) {
+        if effects.is_empty() {
+            return;
+        }
+        let l0 = self.resolve_l0(tx_l0);
+        let mut guard = l0.write();
+        for (old, new) in effects {
+            guard.record_property_effect(entity, old.as_ref(), new.as_ref());
+        }
     }
 
     /// Check transaction memory limit to prevent OOM.
@@ -3411,16 +3636,56 @@ impl Writer {
         }
     }
 
+    /// Insert a newly created vertex.
+    ///
+    /// Counted as a create in the buffer's `MutationStats`. To rewrite an
+    /// existing vertex's row use [`Self::update_vertex_with_labels`].
     #[instrument(skip(self, properties, labels), level = "trace")]
     pub async fn insert_vertex_with_labels(
+        &self,
+        vid: Vid,
+        properties: Properties,
+        labels: &[String],
+        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+    ) -> Result<Properties> {
+        // Boxed: the row write is a deep future, and callers nest it in
+        // their own (`async_trait`, timeouts), which overflowed the
+        // compiler's auto-trait recursion limit.
+        Box::pin(self.write_vertex_row(vid, properties, labels, tx_l0, true)).await
+    }
+
+    /// Rewrite an existing vertex's full row (`SET`, `REMOVE`, a `MERGE`
+    /// action, a promote upsert).
+    ///
+    /// The same write as [`Self::insert_vertex_with_labels`], but not a
+    /// create: the caller records the statement's property side effects with
+    /// [`Self::record_property_effects`], since only it knows the old values.
+    #[instrument(skip(self, properties, labels), level = "trace")]
+    pub async fn update_vertex_with_labels(
+        &self,
+        vid: Vid,
+        properties: Properties,
+        labels: &[String],
+        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+    ) -> Result<Properties> {
+        // Boxed: the row write is a deep future, and callers nest it in
+        // their own (`async_trait`, timeouts), which overflowed the
+        // compiler's auto-trait recursion limit.
+        Box::pin(self.write_vertex_row(vid, properties, labels, tx_l0, false)).await
+    }
+
+    /// Body of [`Self::insert_vertex_with_labels`] (`create`) and
+    /// [`Self::update_vertex_with_labels`].
+    async fn write_vertex_row(
         &self,
         vid: Vid,
         mut properties: Properties,
         labels: &[String],
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+        create: bool,
     ) -> Result<Properties> {
         let start = std::time::Instant::now();
-        self.check_write_pressure().await?;
+        self.check_write_pressure(tx_l0).await?;
         self.check_transaction_memory(tx_l0)?;
 
         // Component C1 (G4): a non-transactional write (`tx_l0 == None`, e.g. bulk
@@ -3472,7 +3737,11 @@ impl Writer {
                     Self::seed_crdt_props(&pending, vid, &properties, &mut l0_guard);
                 }
             }
-            l0_guard.insert_vertex_with_labels(vid, properties, labels);
+            if create {
+                l0_guard.insert_vertex_with_labels(vid, properties, labels);
+            } else {
+                l0_guard.update_vertex_with_labels(vid, properties, labels);
+            }
 
             // Populate constraint index for O(1) duplicate detection
             let schema = self.schema_manager.schema();
@@ -3536,66 +3805,11 @@ impl Writer {
         Ok(properties_copy)
     }
 
-    /// True iff routing this partial write through MergeInsert would
-    /// miss a constraint check. Specifically: a multi-key UNIQUE
-    /// constraint where the touched-set doesn't cover all member keys
-    /// requires the unchanged keys from the existing row to compute
-    /// the composite. Conservative: also returns true if any touched
-    /// key is `ext_id` (uniqueness checked globally — handled in the
-    /// full-row path).
-    fn touched_needs_full_read(&self, touched: &Properties, labels: &[String]) -> bool {
-        if touched.contains_key("ext_id") {
-            return true;
-        }
-        let schema = self.schema_manager.schema();
-        for label in labels {
-            if schema.get_label_case_insensitive(label).is_none() {
-                continue;
-            }
-            for constraint in &schema.constraints {
-                if !constraint.enabled {
-                    continue;
-                }
-                if let ConstraintTarget::Label(l) = &constraint.target {
-                    if !l.eq_ignore_ascii_case(label) {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-                if let ConstraintType::Unique {
-                    properties: unique_props,
-                } = &constraint.constraint_type
-                {
-                    if unique_props.len() < 2 {
-                        continue; // single-key UNIQUE — partial path sees the key
-                    }
-                    if unique_props.iter().any(|p| touched.contains_key(p)) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    /// Insert a vertex's FULL property row plus a touched-keys hint so
-    /// the flush emits ONLY those columns via Lance MergeInsert.
-    ///
-    /// Caller must have read the full row (via PropertyManager) and
-    /// applied SET-touched values on top before calling — same input
-    /// shape as `insert_vertex_with_labels`. The new arg `touched_keys`
-    /// is the set of property keys this SET statement actually
-    /// assigned; L0 records it in `vertex_partial_keys[vid]` and the
-    /// flush filters the MergeInsert source schema down to those keys.
-    /// When `UniConfig::partial_lance_writes == false`, falls through
-    /// to `insert_vertex_with_labels` (Append) — preserving bit-for-bit
-    /// equivalence with prior releases.
-    /// Refresh auto-embed targets for a partial / `SET` write whose `touched_keys`
+    /// Refresh auto-embed targets for a `SET` write whose `touched_keys`
     /// include an embed *source* column: drop stale target embeddings from `props`
     /// (so they re-embed) and add them to `touched_keys`. Public so the query
-    /// executor can apply it on the coalesced write **before** the partial-vs-full
-    /// branch — both branches need it. No-op for non-SET writes / non-embed labels.
+    /// executor can apply it on the coalesced write before storing it. No-op for
+    /// non-SET writes / non-embed labels.
     pub fn refresh_embed_targets(
         &self,
         props: &mut Properties,
@@ -3605,62 +3819,35 @@ impl Writer {
         refresh_touched_embed_targets(&self.schema_manager.schema(), props, touched_keys, labels);
     }
 
-    #[instrument(skip(self, props, touched_keys, labels), level = "trace")]
+    /// Write a vertex `SET`: `props` is the vertex's full merged property
+    /// row and `touched_keys` the keys the statement assigned.
+    ///
+    /// Always stored as a full row, whatever `partial_lance_writes` says. A
+    /// vertex table holds one row per flushed version of a vertex until
+    /// compaction, so a flush-time `MergeInsert` of the touched columns keyed
+    /// on `_vid` updated every stored version of the vertex: a removed
+    /// property came back after a flush or a compaction, and a vertex
+    /// created and updated in one flush window had no row to match and was
+    /// lost. `touched_keys` is accepted for source compatibility and
+    /// otherwise unused. Not a create: the caller records side effects.
+    #[instrument(skip(self, props, _touched_keys, labels), level = "trace")]
     pub async fn insert_vertex_partial_full(
         &self,
         vid: Vid,
-        mut props: Properties,
-        touched_keys: HashSet<String>,
+        props: Properties,
+        _touched_keys: HashSet<String>,
         labels: &[String],
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
     ) -> Result<()> {
-        if !self.config.partial_lance_writes
-            || self.touched_needs_full_read(&props_subset(&props, &touched_keys), labels)
-        {
-            self.insert_vertex_with_labels(vid, props, labels, tx_l0)
-                .await?;
-            return Ok(());
-        }
-
-        self.check_write_pressure().await?;
-        self.check_transaction_memory(tx_l0)?;
-        if !self.try_defer_embedding(labels, &props, vid, tx_l0) {
-            self.process_embeddings_for_labels(labels, &mut props)
-                .await?;
-        }
-        // Full-row validation runs because we have the complete map;
-        // no need for the partial-only validator.
-        self.validate_vertex_constraints(vid, &props, labels, tx_l0)
-            .await?;
-        {
-            let l0 = self.resolve_l0(tx_l0);
-            let mut l0_guard = l0.write();
-            l0_guard.insert_vertex_partial_full(vid, props, touched_keys, labels);
-        }
-        metrics::counter!("uni_l0_buffer_mutations_total").increment(1);
-        metrics::counter!("uni_partial_writes_total").increment(1);
-        self.update_metrics();
-        if tx_l0.is_none() {
-            self.check_flush().await?;
-        }
-        Ok(())
+        self.update_vertex_with_labels(vid, props, labels, tx_l0)
+            .await
+            .map(|_| ())
     }
 
-    /// Insert a vertex's *partial* property set without first reading the
-    /// full row.
-    ///
-    /// When `WriterConfig::partial_lance_writes` is `true`, the touched
-    /// keys flow into `L0Buffer::vertex_partial_keys` so the next flush
-    /// emits them via Lance `MergeInsertBuilder` against a subset-of-
-    /// schema source — preserving untouched columns (e.g., embeddings)
-    /// byte-equal in Lance with no read at the caller and no write of
-    /// those columns.
-    ///
-    /// When the flag is `false`, this falls back to the existing
-    /// `insert_vertex_with_labels` path after merging `touched` with
-    /// the current properties from L0/storage. The caller can therefore
-    /// use this entry point unconditionally; the optimization activates
-    /// only when the flag is on.
+    /// Merge `touched` over the vertex's current properties (L0 and storage)
+    /// and store the result as a full row; see
+    /// [`Self::insert_vertex_partial_full`] for why it is never a partial
+    /// row. Not a create.
     #[instrument(skip(self, touched, labels), level = "trace")]
     pub async fn insert_vertex_partial(
         &self,
@@ -3669,60 +3856,23 @@ impl Writer {
         labels: &[String],
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
     ) -> Result<()> {
-        let needs_full_read =
-            !self.config.partial_lance_writes || self.touched_needs_full_read(&touched, labels);
-        if needs_full_read {
-            // Flag-off fallback (or constraint-driven fallback): merge
-            // `touched` with the current full property snapshot from
-            // L0/storage and route through the existing path. Preserves
-            // bit-for-bit equivalence with the pre-Round-11 release.
-            let existing = if let Some(pm) = &self.property_manager {
-                pm.get_all_vertex_props_with_ctx(vid, None)
-                    .await
-                    .unwrap_or_default()
-                    .unwrap_or_default()
-            } else {
-                Properties::new()
-            };
-            let mut merged = existing;
-            for (k, v) in touched {
-                merged.insert(k, v);
+        // The current row as this write sees it: its transaction buffer, the
+        // committed buffers, then storage.
+        let ctx = self.get_query_context(tx_l0).await;
+        let existing = match &self.property_manager {
+            Some(pm) => pm.get_all_vertex_props_with_ctx(vid, ctx.as_ref()).await?,
+            None => {
+                PropertyManager::new(self.storage.clone(), self.schema_manager.clone(), 0)
+                    .get_all_vertex_props_with_ctx(vid, ctx.as_ref())
+                    .await?
             }
-            self.insert_vertex_with_labels(vid, merged, labels, tx_l0)
-                .await?;
-            return Ok(());
         }
-
-        // Flag-on fast path: stage the partial update directly. Pressure
-        // checks, embedding generation, constraint validation all still
-        // run — but the validator is the partial-aware variant that
-        // skips NOT NULL / multi-key UNIQUE / CHECK / EXISTS for
-        // properties not present in `touched`. Multi-key UNIQUE that
-        // overlaps the touched set forces a fallback above via
-        // `touched_needs_full_read`.
-        let mut touched = touched;
-        self.check_write_pressure().await?;
-        self.check_transaction_memory(tx_l0)?;
-        if !self.try_defer_embedding(labels, &touched, vid, tx_l0) {
-            self.process_embeddings_for_labels(labels, &mut touched)
-                .await?;
-        }
-        self.validate_vertex_constraints_partial(vid, &touched, labels, tx_l0)
-            .await?;
-
-        {
-            let l0 = self.resolve_l0(tx_l0);
-            let mut l0_guard = l0.write();
-            l0_guard.insert_vertex_partial(vid, touched, labels);
-        }
-
-        metrics::counter!("uni_l0_buffer_mutations_total").increment(1);
-        metrics::counter!("uni_partial_writes_total").increment(1);
-        self.update_metrics();
-        if tx_l0.is_none() {
-            self.check_flush().await?;
-        }
-        Ok(())
+        .unwrap_or_default();
+        let mut merged = existing;
+        merged.extend(touched);
+        self.update_vertex_with_labels(vid, merged, labels, tx_l0)
+            .await
+            .map(|_| ())
     }
 
     /// Insert multiple vertices with batched operations.
@@ -3775,7 +3925,7 @@ impl Writer {
         // Batch operations — writes go directly to the resolved L0.
         // Atomicity is guaranteed by the caller holding the writer lock.
         let result = async {
-            self.check_write_pressure().await?;
+            self.check_write_pressure(tx_l0).await?;
             self.check_transaction_memory(tx_l0)?;
 
             // Component C1 (G4): batch bulk-import is the canonical non-tx write —
@@ -3966,7 +4116,7 @@ impl Writer {
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
     ) -> Result<()> {
         let start = std::time::Instant::now();
-        self.check_write_pressure().await?;
+        self.check_write_pressure(tx_l0).await?;
         self.check_transaction_memory(tx_l0)?;
         self.freeze_for_non_tx_write_if_pinned(tx_l0).await; // C1 (G4)
 
@@ -4150,7 +4300,7 @@ impl Writer {
         _touched_keys: HashSet<String>,
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
     ) -> Result<()> {
-        self.insert_edge(
+        self.update_edge(
             src_vid,
             dst_vid,
             edge_type,
@@ -4162,8 +4312,355 @@ impl Writer {
         .await
     }
 
+    /// Insert a newly created edge.
+    ///
+    /// Refused with `UniError::EdgeEndpointViolation` when the edge type
+    /// declares source or target labels and the endpoint carries none of
+    /// them. Counted as a create in the buffer's `MutationStats`. To rewrite
+    /// an existing edge's row use [`Self::update_edge`].
     #[expect(clippy::too_many_arguments)]
     pub async fn insert_edge(
+        &self,
+        src_vid: Vid,
+        dst_vid: Vid,
+        edge_type: u32,
+        eid: Eid,
+        properties: Properties,
+        edge_type_name: Option<String>,
+        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+    ) -> Result<()> {
+        self.check_edge_endpoints(
+            src_vid,
+            dst_vid,
+            edge_type,
+            edge_type_name.as_deref(),
+            tx_l0,
+        )
+        .await?;
+        Box::pin(self.write_edge_row(
+            src_vid,
+            dst_vid,
+            edge_type,
+            eid,
+            properties,
+            edge_type_name,
+            tx_l0,
+            true,
+        ))
+        .await
+    }
+
+    /// Rewrite an existing edge's full row (`SET` / `REMOVE` on it).
+    ///
+    /// Not a create. `(src_vid, dst_vid, edge_type)` must be the edge's stored
+    /// identity: a property write cannot move an edge or change its type, so
+    /// a disagreeing identity is refused with `UniError::EdgeIdentityChange`.
+    /// The caller's identity comes from the row binding, and a map carrying
+    /// `_eid` / `_src` / `_dst` / `_type` is such a binding, so it can name
+    /// anything. When `eid` resolves nowhere the write would create the edge,
+    /// and it is held to the declared endpoints like
+    /// [`Self::insert_edge`]. An edge that does resolve is not re-checked
+    /// against the declaration: it already exists, and a store may hold edges
+    /// written before the declaration was enforced.
+    ///
+    /// # Errors
+    /// `UniError::EdgeIdentityChange` as above, `UniError::EdgeEndpointViolation`
+    /// for an unknown `eid` that violates the declaration, or a storage read
+    /// error from the identity lookup.
+    #[expect(clippy::too_many_arguments)]
+    pub async fn update_edge(
+        &self,
+        src_vid: Vid,
+        dst_vid: Vid,
+        edge_type: u32,
+        eid: Eid,
+        properties: Properties,
+        edge_type_name: Option<String>,
+        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+    ) -> Result<()> {
+        self.check_edge_identity(
+            src_vid,
+            dst_vid,
+            edge_type,
+            eid,
+            edge_type_name.as_deref(),
+            tx_l0,
+        )
+        .await?;
+        Box::pin(self.write_edge_row(
+            src_vid,
+            dst_vid,
+            edge_type,
+            eid,
+            properties,
+            edge_type_name,
+            tx_l0,
+            false,
+        ))
+        .await
+    }
+
+    /// Refuse an [`Self::update_edge`] whose identity disagrees with the
+    /// stored edge `eid`.
+    ///
+    /// Looks the edge up newest layer first: the transaction's buffer, the
+    /// current and pending buffers (each keeps a deleted edge's endpoints),
+    /// then the buffer's identity memo, filled from the source's outgoing
+    /// adjacency once per `(source, type)` (see
+    /// [`Self::memoize_outgoing_identities`]), and finally the main edges
+    /// table. An `eid` found nowhere gets the declared-endpoint check of a
+    /// create.
+    async fn check_edge_identity(
+        &self,
+        src_vid: Vid,
+        dst_vid: Vid,
+        edge_type: u32,
+        eid: Eid,
+        edge_type_name: Option<&str>,
+        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+    ) -> Result<()> {
+        let schema = self.schema_manager.schema();
+        let type_label = |id: u32| {
+            schema
+                .edge_type_name_by_id_unified(id)
+                .unwrap_or_else(|| format!("#{id}"))
+        };
+        let requested_name = edge_type_name
+            .map(str::to_string)
+            .unwrap_or_else(|| type_label(edge_type));
+        let refuse = |src: Vid, dst: Vid, ty: String| {
+            anyhow::Error::new(uni_common::UniError::EdgeIdentityChange {
+                eid: eid.as_u64(),
+                stored: format!("({})-[:{ty}]->({})", src.as_u64(), dst.as_u64()),
+                requested: format!(
+                    "({})-[:{requested_name}]->({})",
+                    src_vid.as_u64(),
+                    dst_vid.as_u64()
+                ),
+            })
+        };
+
+        let buffered = tx_l0
+            .and_then(|l0| l0.read().get_edge_endpoint_full(eid))
+            .or_else(|| {
+                self.l0_manager
+                    .get_current()
+                    .read()
+                    .get_edge_endpoint_full(eid)
+            })
+            .or_else(|| {
+                // Newest pending buffer first: a later rewrite wins.
+                self.l0_manager
+                    .get_pending_flush()
+                    .iter()
+                    .rev()
+                    .find_map(|l0| l0.read().get_edge_endpoint_full(eid))
+            });
+        if let Some((src, dst, ty)) = buffered {
+            if (src, dst, ty) == (src_vid, dst_vid, edge_type) {
+                return Ok(());
+            }
+            return Err(refuse(src, dst, type_label(ty)));
+        }
+
+        let l0 = self.resolve_l0(tx_l0);
+        let memoized = l0.read().edge_identity_memo.identities.get(&eid).copied();
+        let memoized = match memoized {
+            Some(identity) => Some(identity),
+            None => {
+                self.memoize_outgoing_identities(&l0, src_vid, edge_type, eid)
+                    .await?
+            }
+        };
+        if let Some((src, dst, ty)) = memoized {
+            if (src, dst, ty) == (src_vid, dst_vid, edge_type) {
+                return Ok(());
+            }
+            return Err(refuse(src, dst, type_label(ty)));
+        }
+
+        let stored = self
+            .storage
+            .lookup_edges_by_eids(&[eid], None)
+            .await?
+            .remove(&eid);
+        *l0.write()
+            .edge_identity_memo
+            .storage_reads
+            .entry(edge_type)
+            .or_default() += 1;
+        match stored {
+            Some(stored) => {
+                if (stored.src_vid, stored.dst_vid) == (src_vid, dst_vid)
+                    && stored.edge_type == requested_name
+                {
+                    Ok(())
+                } else {
+                    Err(refuse(stored.src_vid, stored.dst_vid, stored.edge_type))
+                }
+            }
+            None => {
+                self.check_edge_endpoints(src_vid, dst_vid, edge_type, edge_type_name, tx_l0)
+                    .await
+            }
+        }
+    }
+
+    /// Storage reads per edge type after which [`Self::check_edge_identity`]
+    /// loads the type's outgoing adjacency instead of reading edges one by
+    /// one.
+    const IDENTITY_STORAGE_READS_BEFORE_WARM: usize = 64;
+
+    /// Read the outgoing `edge_type` adjacency of `src` once into `l0`'s
+    /// identity memo and return `eid`'s identity if it is there.
+    ///
+    /// The adjacency is loaded first when the type's has no CSR yet and
+    /// enough single-edge storage reads have been paid for it in this buffer
+    /// ([`Self::IDENTITY_STORAGE_READS_BEFORE_WARM`]); before that the caller
+    /// reads storage. An edge id is unique, so finding it under `src` and
+    /// `edge_type` gives its whole identity.
+    async fn memoize_outgoing_identities(
+        &self,
+        l0: &Arc<RwLock<L0Buffer>>,
+        src: Vid,
+        edge_type: u32,
+        eid: Eid,
+    ) -> Result<Option<(Vid, Vid, u32)>> {
+        use crate::storage::direction::Direction;
+        if l0
+            .read()
+            .edge_identity_memo
+            .scanned
+            .contains(&(src, edge_type))
+        {
+            return Ok(None);
+        }
+        if !self
+            .adjacency_manager
+            .has_csr(edge_type, Direction::Outgoing)
+        {
+            let reads = l0
+                .read()
+                .edge_identity_memo
+                .storage_reads
+                .get(&edge_type)
+                .copied()
+                .unwrap_or(0);
+            if reads < Self::IDENTITY_STORAGE_READS_BEFORE_WARM {
+                return Ok(None);
+            }
+            self.storage
+                .warm_adjacency_coalesced(
+                    edge_type,
+                    Direction::Outgoing,
+                    self.storage.snapshot_version_hwm(),
+                )
+                .await?;
+        }
+        let neighbors = self
+            .adjacency_manager
+            .get_neighbors(src, edge_type, Direction::Outgoing);
+        let mut guard = l0.write();
+        let memo = &mut guard.edge_identity_memo;
+        let (identities, scanned) = (memo.identities.len(), memo.scanned.len());
+        memo.scanned.insert((src, edge_type));
+        memo.identities.extend(
+            neighbors
+                .into_iter()
+                .map(|(dst, e)| (e, (src, dst, edge_type))),
+        );
+        // The memo lives as long as the buffer, so it counts toward the
+        // buffer's size: the flush trigger and a transaction's memory limit.
+        let added = memo.charge(identities, scanned);
+        let found = memo.identities.get(&eid).copied();
+        guard.estimated_size += added;
+        Ok(found)
+    }
+
+    /// Labels of an edge endpoint as the writing transaction sees them: its
+    /// own buffer first, then the committed buffers, then storage.
+    async fn endpoint_labels(
+        &self,
+        vid: Vid,
+        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+    ) -> Result<Vec<String>> {
+        if let Some(tx_l0) = tx_l0 {
+            let guard = tx_l0.read();
+            if let Some(labels) = guard.get_vertex_labels(vid) {
+                return Ok(labels.to_vec());
+            }
+        }
+        if let Some(labels) = self.get_vertex_labels_from_l0(vid) {
+            return Ok(labels);
+        }
+        for pending_l0 in self.l0_manager.get_pending_flush() {
+            let guard = pending_l0.read();
+            if let Some(labels) = guard.get_vertex_labels(vid) {
+                return Ok(labels.to_vec());
+            }
+        }
+        if let Some(labels) = self.storage.get_labels_from_index(vid) {
+            return Ok(labels);
+        }
+        Ok(self
+            .find_vertex_labels_in_storage(vid)
+            .await?
+            .unwrap_or_default())
+    }
+
+    /// Enforce the edge type's declared endpoint labels on a new edge.
+    ///
+    /// An endpoint passes when it carries at least one declared label; an
+    /// empty declaration accepts any endpoint, and an edge type the schema
+    /// does not declare (schemaless) is not checked.
+    ///
+    /// # Errors
+    /// `UniError::EdgeEndpointViolation` for the first endpoint that fails.
+    async fn check_edge_endpoints(
+        &self,
+        src_vid: Vid,
+        dst_vid: Vid,
+        edge_type: u32,
+        edge_type_name: Option<&str>,
+        tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+    ) -> Result<()> {
+        let schema = self.schema_manager.schema();
+        let meta = match edge_type_name {
+            Some(name) => schema.edge_types.get(name).map(|m| (name.to_string(), m)),
+            None => schema
+                .edge_types
+                .iter()
+                .find(|(_, m)| m.id == edge_type)
+                .map(|(n, m)| (n.clone(), m)),
+        };
+        let Some((name, meta)) = meta else {
+            return Ok(());
+        };
+        for (vid, allowed, endpoint) in [
+            (src_vid, &meta.src_labels, "source"),
+            (dst_vid, &meta.dst_labels, "target"),
+        ] {
+            if allowed.is_empty() {
+                continue;
+            }
+            let labels = self.endpoint_labels(vid, tx_l0).await?;
+            if !labels.iter().any(|l| allowed.contains(l)) {
+                return Err(anyhow::Error::new(
+                    uni_common::UniError::EdgeEndpointViolation {
+                        edge_type: name,
+                        endpoint: endpoint.to_string(),
+                        labels,
+                        allowed: allowed.clone(),
+                    },
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Body of [`Self::insert_edge`] (`create`) and [`Self::update_edge`].
+    #[expect(clippy::too_many_arguments)]
+    async fn write_edge_row(
         &self,
         src_vid: Vid,
         dst_vid: Vid,
@@ -4172,10 +4669,11 @@ impl Writer {
         mut properties: Properties,
         edge_type_name: Option<String>,
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
+        create: bool,
     ) -> Result<()> {
         let start = std::time::Instant::now();
         check_property_names(&properties, &self.schema_manager.schema())?;
-        self.check_write_pressure().await?;
+        self.check_write_pressure(tx_l0).await?;
         self.check_transaction_memory(tx_l0)?;
         self.freeze_for_non_tx_write_if_pinned(tx_l0).await; // C1 (G4)
         self.prepare_edge_upsert(eid, &mut properties, tx_l0)
@@ -4194,8 +4692,13 @@ impl Writer {
         if let Some(type_name) = edge_type_name.as_deref() {
             self.populate_edge_constraint_index(eid, type_name, &properties, &l0);
         }
-        l0.write()
-            .insert_edge(src_vid, dst_vid, edge_type, eid, properties, edge_type_name)?;
+        if create {
+            l0.write()
+                .insert_edge(src_vid, dst_vid, edge_type, eid, properties, edge_type_name)?;
+        } else {
+            l0.write()
+                .update_edge(src_vid, dst_vid, edge_type, eid, properties, edge_type_name)?;
+        }
 
         // Dual-write to AdjacencyManager overlay (survives flush).
         // Skip for transaction-local L0 -- transaction edges are overlaid separately.
@@ -4227,7 +4730,7 @@ impl Writer {
         tx_l0: Option<&Arc<RwLock<L0Buffer>>>,
     ) -> Result<()> {
         let start = std::time::Instant::now();
-        self.check_write_pressure().await?;
+        self.check_write_pressure(tx_l0).await?;
         self.check_transaction_memory(tx_l0)?;
         self.freeze_for_non_tx_write_if_pinned(tx_l0).await; // C1 (G4)
         let l0 = self.resolve_l0(tx_l0);
@@ -4457,9 +4960,8 @@ impl Writer {
     /// [`Self::drain_pending_embeddings`]: for each MUVERA index, compute the derived
     /// Fixed-Dimensional Encoding from each row's source multi-vector and inject it into
     /// that row's `vertex_properties` (so the normal column builder writes the
-    /// `__fde_*` column with no hot-path change). For partial-write rows that touched the
-    /// source column, the derived column is added to `vertex_partial_keys` so the partial
-    /// MergeInsert batch carries the recomputed FDE (avoids staleness on `SET`).
+    /// `__fde_*` column with no hot-path change). Every row flushes whole, so a `SET` of the
+    /// source column carries the recomputed FDE.
     ///
     /// No-op when the schema has no MUVERA index. Unlike auto-embed, the FDE is a pure,
     /// deterministic, in-process transform — no runtime/embedding service needed.
@@ -4526,11 +5028,6 @@ impl Writer {
                 };
                 if let Some(props) = guard.vertex_properties.get_mut(&vid) {
                     props.insert(spec.derived_col.clone(), Value::Vector(fde));
-                }
-                if let Some(touched) = guard.vertex_partial_keys.get_mut(&vid)
-                    && touched.contains(&spec.source_prop)
-                {
-                    touched.insert(spec.derived_col.clone());
                 }
             }
         }
@@ -4869,7 +5366,13 @@ impl Writer {
         }
         let _flush_lock_guard = self.flush_lock.lock().await;
         let manifest = self.flush_inline_under_lock(name).await?;
+        self.ensure_no_failed_flush()?;
+        Ok(manifest)
+    }
 
+    /// Fails when an async flush has failed and stranded its L0, so that a
+    /// caller relying on "every write is now in Lance" does not get `Ok`.
+    fn ensure_no_failed_flush(&self) -> Result<()> {
         // The barrier's contract is "all writes are now durably in Lance", so a
         // flush whose stream phase FAILED must not be reported as success.
         //
@@ -4904,7 +5407,394 @@ impl Writer {
                 ));
             }
         }
-        Ok(manifest)
+        Ok(())
+    }
+
+    /// Drain in-flight async flushes, so that the caller can take `flush_lock`
+    /// knowing no flush is still writing.
+    async fn drain_async_flushes(&self) -> Result<()> {
+        if let Some(coord) = self.flush_coordinator.as_ref() {
+            coord
+                .drain(self.config.flush_drain_timeout)
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "in-flight flushes did not drain: {e} (waited {:?})",
+                        self.config.flush_drain_timeout
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Sync primary catalog files (relative to `catalog/`) on a local store,
+    /// on the blocking pool.
+    async fn fsync_catalog(&self, files: Vec<String>) -> Result<()> {
+        let local_root = self.storage.local_fs_root();
+        tokio::task::spawn_blocking(move || {
+            crate::snapshot::manager::fsync_catalog_files(local_root.as_deref(), &files)
+        })
+        .await
+        .map_err(|e| anyhow!("fsync catalog files: task failed: {e}"))?
+        .map_err(|e| anyhow!("fsync catalog files: {e}"))
+    }
+
+    /// Take an explicit snapshot: flush L0 to L1 and record a restore point,
+    /// so that [`Self::restore_snapshot`] can later rewind the store to it.
+    ///
+    /// Returns the snapshot id. The flush manifest is the snapshot, as for
+    /// [`Self::flush_to_l1`]; the restore point adds the storage version of
+    /// every table and index dataset, pinned against version cleanup. Taken
+    /// with compaction paused and under `flush_lock`, so the versions are the
+    /// ones this flush produced. On a fork no restore point is recorded:
+    /// restore applies to the primary database.
+    ///
+    /// # Errors
+    ///
+    /// When the flush fails, an earlier async flush has failed, or a version
+    /// cannot be read or pinned.
+    pub async fn create_snapshot(&self, name: Option<String>) -> Result<String> {
+        if self.fork_id.is_some() {
+            return self.flush_to_l1(name).await;
+        }
+        self.drain_async_flushes().await?;
+        // Index builds first, compaction second, flush lock last: a build
+        // takes neither of the others, and compaction never takes
+        // `flush_lock`, so this order cannot deadlock. Builds are paused so
+        // the catalog and the artifacts recorded below agree.
+        let _builds = self.storage.pause_index_builds().await;
+        let _paused = self.storage.pause_compaction().await?;
+        let _flush_lock_guard = self.flush_lock.lock().await;
+        let snapshot_id = self.flush_inline_under_lock(name).await?;
+        self.ensure_no_failed_flush()?;
+        let point =
+            crate::snapshot::restore::capture_restore_point(&self.storage, &snapshot_id).await?;
+        self.storage
+            .snapshot_manager()
+            .save_restore_point(&point)
+            .await?;
+        self.fsync_catalog(vec![format!("restore_points/{snapshot_id}.json")])
+            .await?;
+        Ok(snapshot_id)
+    }
+
+    /// Restore the database to an explicit snapshot, in this handle and on
+    /// disk.
+    ///
+    /// Afterwards every read sees the snapshot's vertices, edges and property
+    /// values, and nothing written after it, flushed or not. Steps, all with
+    /// compaction paused and `flush_lock` held:
+    ///
+    /// 1. flush L0, so that nothing written after the snapshot is left in
+    ///    memory or in the WAL to be replayed;
+    /// 2. withdraw edge-endpoint verifications recorded after the snapshot
+    ///    (the rewound tables were never checked by them);
+    /// 3. persist a [`RestoreIntent`] and the manifest to publish, so that a
+    ///    crash from here on is completed by the next open;
+    /// 4. rewind every table and index dataset to the snapshot's restore
+    ///    point, then reinstate the snapshot's catalog
+    ///    ([`crate::snapshot::restore::rewind_storage`]);
+    /// 5. publish the manifest. It carries the snapshot's contents with the
+    ///    current version and WAL marks, so versions keep increasing and no
+    ///    later write can reuse one;
+    /// 6. drop every in-memory copy of the old state (adjacency, VID labels,
+    ///    property and backend caches, cardinalities) and fence optimistic
+    ///    concurrency, so a transaction that read before the restore cannot
+    ///    commit after it;
+    /// 7. rebuild the indexes whose artifacts no longer match their
+    ///    definitions, and clear the intent.
+    ///
+    /// The catalog is rewound with the data: labels, edge types, properties,
+    /// indexes and constraints declared, dropped, renamed or retyped after the
+    /// snapshot are as they were at it. Background index builds are paused
+    /// for the whole restore ([`StorageManager::pause_index_builds`]) and
+    /// queued builds run afterwards against the restored store.
+    ///
+    /// # Errors
+    ///
+    /// `UniError::SnapshotNotFound` for an unknown id. Refused on a fork,
+    /// while the database has forks (`UniError::RestoreBlockedByForks`),
+    /// while a transaction is open, while a bulk load is publishing, for a
+    /// snapshot without a restore point (one written by an ordinary flush),
+    /// and for one whose restore point predates catalog recording. Otherwise
+    /// any failing step; from step 3 on, reopening completes the restore.
+    ///
+    /// [`StorageManager::pause_index_builds`]: crate::storage::manager::StorageManager::pause_index_builds
+    ///
+    /// [`RestoreIntent`]: crate::snapshot::manager::RestoreIntent
+    pub async fn restore_snapshot(&self, snapshot_id: &str) -> Result<()> {
+        // Refuse up front too, before the flush below does any work.
+        self.refuse_restore_with_forks().await?;
+        use crate::snapshot::manager::RestoreIntent;
+        use crate::snapshot::restore;
+
+        if self.fork_id.is_some() || self.storage.fork_scope().is_some() {
+            anyhow::bail!("restore_snapshot applies to the primary database, not to a fork");
+        }
+        let sm = self.storage.snapshot_manager();
+        if !sm.snapshot_exists(snapshot_id).await? {
+            return Err(anyhow::Error::new(uni_common::UniError::SnapshotNotFound {
+                snapshot_id: snapshot_id.to_string(),
+            }));
+        }
+        let target = sm.load_snapshot(snapshot_id).await?;
+        let point = sm.load_restore_point(snapshot_id).await?.ok_or_else(|| {
+            anyhow!(
+                "snapshot {snapshot_id} cannot be restored: it has no restore point. Only a \
+                 snapshot taken with create_snapshot() or uni.admin.snapshot.create() by this \
+                 version records one; a manifest written by an ordinary flush does not"
+            )
+        })?;
+        let Some(catalog) = point.catalog.as_ref() else {
+            anyhow::bail!(
+                "snapshot {snapshot_id} cannot be restored: its restore point was recorded \
+                 before restore points included the catalog, so the schema it would return to \
+                 is unknown. Take a new snapshot; delete_snapshot() releases this one"
+            );
+        };
+
+        let _in_progress = RestoreInProgress::set(&self.restore_in_progress);
+        self.drain_async_flushes().await?;
+        // Same order as `create_snapshot`. Pausing index builds waits for a
+        // build under way to record its outcome, so none straddles the
+        // rewind.
+        let _builds = self.storage.pause_index_builds().await;
+        let _paused = self.storage.pause_compaction().await?;
+        let _flush_lock_guard = self.flush_lock.lock().await;
+
+        let open = self.adjacency_manager.pinned_versions().distinct_pinned();
+        if open > 0 {
+            anyhow::bail!(
+                "restore_snapshot refused: transactions are open (pinned at {open} version(s)); \
+                 commit or roll them back first"
+            );
+        }
+        if !self.storage.bulk_gate().hidden().is_empty() {
+            anyhow::bail!("restore_snapshot refused: a bulk load is publishing");
+        }
+        // A fork being created captured its fork point under `flush_lock`
+        // and registers itself only afterwards. Bumping the epoch before
+        // re-reading the registry means such a fork is either seen here
+        // (and the restore refuses) or sees the bump once registered (and
+        // abandons its pre-restore fork point); see `restore_epoch`.
+        self.restore_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.refuse_restore_with_forks().await?;
+        // 1.
+        self.flush_inline_under_lock(None).await?;
+        self.ensure_no_failed_flush()?;
+        if !self.l0_manager.get_pending_flush().is_empty() {
+            anyhow::bail!("restore_snapshot refused: an earlier flush left L0 unflushed");
+        }
+        // A CSR compaction folding overlay segments (the flush may just have
+        // started one) must not finish after the reset below and reinstall
+        // pre-restore edges.
+        let csr_compaction = self.compaction_handle.write().take();
+        if let Some(handle) = csr_compaction {
+            let _ = handle.await;
+        }
+
+        // 2. Catalog before data: should a later step fail, the catalog has
+        // only lost trust, which is safe.
+        let schema = self.storage.schema_manager();
+        if schema.distrust_verifications_after(target.created_at)? {
+            schema.save().await?;
+        }
+
+        // 3.
+        let current = self
+            .cached_manifest
+            .lock()
+            .clone()
+            .ok_or_else(|| anyhow!("no manifest after the restore's flush"))?;
+        let mut manifest = target.clone();
+        manifest.snapshot_id = Uuid::new_v4().to_string();
+        manifest.name = None;
+        manifest.created_at = Utc::now();
+        manifest.parent_snapshot = Some(current.snapshot_id.clone());
+        // The version `install_catalog` gives the restored catalog.
+        manifest.schema_version = schema
+            .schema()
+            .schema_version
+            .max(catalog.schema_version)
+            .wrapping_add(1);
+        manifest.version_high_water_mark = current.version_high_water_mark;
+        manifest.wal_high_water_mark = current.wal_high_water_mark;
+        sm.save_snapshot(&manifest).await?;
+        let intent = RestoreIntent {
+            snapshot_id: snapshot_id.to_string(),
+            manifest_id: manifest.snapshot_id.clone(),
+            rebuild_indexes_for: restore::indexes_needing_rebuild(&catalog.indexes, &point),
+        };
+        sm.save_restore_intent(&intent).await?;
+        // Durable before any table moves: a crash after the first rollback is
+        // completed only if reopening finds the intent and its manifest.
+        self.fsync_catalog(vec![
+            format!("manifests/{}.json", manifest.snapshot_id),
+            "restore_intent.json".to_string(),
+        ])
+        .await?;
+
+        // 4.
+        restore::rewind_storage(&self.storage, &point, &target).await?;
+
+        // 5.
+        sm.set_latest_snapshot(&manifest.snapshot_id).await?;
+        let local_root = self.storage.local_fs_root();
+        let barrier_id = manifest.snapshot_id.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::snapshot::manager::fsync_snapshot_pointer(
+                local_root.as_deref(),
+                None,
+                &barrier_id,
+            )
+        })
+        .await
+        .map_err(|e| anyhow!("fsync restored snapshot pointer: task failed: {e}"))??;
+        *self.cached_manifest.lock() = Some(manifest);
+
+        // 6.
+        self.adjacency_manager.reset();
+        self.storage.reload_vid_labels_index().await?;
+        if let Some(pm) = self.property_manager.as_ref() {
+            pm.clear_cache().await;
+        }
+        self.storage.backend().clear_cache();
+        self.storage.cardinality().invalidate_all();
+        self.committed_writes.lock().fence(&self.commit_sequence);
+
+        // 7.
+        restore::finish(&self.storage, &intent).await?;
+        info!(snapshot_id, "restored snapshot");
+        Ok(())
+    }
+
+    /// Delete a snapshot: its restore point, the tags pinning its versions,
+    /// its names and its manifest.
+    ///
+    /// Once its tags are gone, compaction's version cleanup reclaims the
+    /// versions only this snapshot kept, once they are older than
+    /// `compaction.version_retention`. Other snapshots keep their own tags
+    /// and stay restorable. The steps run under `flush_lock`, so no restore,
+    /// snapshot or flush interleaves, in an order that converges when run
+    /// again: unpin, then drop the restore point (from then on the snapshot
+    /// is not restorable), then the names, then the manifest. When the
+    /// manifest is the one `latest` names, a copy under a fresh id is
+    /// published as `latest` first, since opening the store reads it.
+    ///
+    /// # Errors
+    ///
+    /// `UniError::SnapshotNotFound` when neither a manifest nor a restore
+    /// point exists for `snapshot_id`. Refused on a fork, while a restore is
+    /// incomplete (its intent is on disk; reopening completes it), and while
+    /// a fork was created from the snapshot. Otherwise a failing step.
+    pub async fn delete_snapshot(&self, snapshot_id: &str) -> Result<()> {
+        if self.fork_id.is_some() || self.storage.fork_scope().is_some() {
+            anyhow::bail!("delete_snapshot applies to the primary database, not to a fork");
+        }
+        if self
+            .restore_in_progress
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("delete_snapshot refused: a snapshot restore is in progress");
+        }
+        let sm = self.storage.snapshot_manager();
+        self.drain_async_flushes().await?;
+        let _flush_lock_guard = self.flush_lock.lock().await;
+
+        if let Some(intent) = sm.load_restore_intent().await? {
+            anyhow::bail!(
+                "delete_snapshot refused: the restore of snapshot {} is incomplete; reopen the \
+                 database to complete it first",
+                intent.snapshot_id
+            );
+        }
+        let point = sm.load_restore_point(snapshot_id).await?;
+        let has_manifest = sm.snapshot_exists(snapshot_id).await?;
+        if point.is_none() && !has_manifest {
+            return Err(anyhow::Error::new(uni_common::UniError::SnapshotNotFound {
+                snapshot_id: snapshot_id.to_string(),
+            }));
+        }
+        if let Some(registry) = self.storage.fork_registry() {
+            let forks: Vec<String> = registry
+                .snapshot()
+                .await
+                .forks
+                .into_values()
+                .filter(|f| f.parent_snapshot_id == snapshot_id)
+                .map(|f| f.name)
+                .collect();
+            if !forks.is_empty() {
+                anyhow::bail!(
+                    "delete_snapshot refused: fork(s) {forks:?} were created from snapshot \
+                     {snapshot_id}; drop them first"
+                );
+            }
+        }
+
+        if let Some(point) = &point {
+            crate::snapshot::restore::release_restore_point(&self.storage, point).await?;
+            sm.delete_restore_point(snapshot_id).await?;
+        }
+        sm.remove_snapshot_names(snapshot_id).await?;
+        if has_manifest {
+            if sm.latest_snapshot_id().await?.as_deref() == Some(snapshot_id) {
+                let mut successor = sm.load_snapshot(snapshot_id).await?;
+                successor.snapshot_id = Uuid::new_v4().to_string();
+                successor.name = None;
+                sm.save_snapshot(&successor).await?;
+                sm.set_latest_snapshot(&successor.snapshot_id).await?;
+                let local_root = self.storage.local_fs_root();
+                let barrier_id = successor.snapshot_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::snapshot::manager::fsync_snapshot_pointer(
+                        local_root.as_deref(),
+                        None,
+                        &barrier_id,
+                    )
+                })
+                .await
+                .map_err(|e| anyhow!("fsync snapshot pointer: task failed: {e}"))??;
+                let mut cached = self.cached_manifest.lock();
+                if cached.as_ref().map(|m| m.snapshot_id.as_str()) == Some(snapshot_id) {
+                    *cached = Some(successor);
+                }
+            }
+            sm.delete_snapshot_manifest(snapshot_id).await?;
+        }
+        info!(snapshot_id, "deleted snapshot");
+        Ok(())
+    }
+
+    /// How many restores have started on this writer.
+    ///
+    /// A fork created from this writer's database reads it before capturing
+    /// its fork point and again once its registry entry is persisted; if it
+    /// moved, a [`Self::restore_snapshot`] ran in between, so the captured
+    /// dataset versions predate the restore and the fork must not be
+    /// created from them. A restore that then finds the fork registered
+    /// refuses instead, so one of the two always gives way.
+    #[must_use]
+    pub fn restore_epoch(&self) -> u64 {
+        self.restore_epoch.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Refuse a restore while the fork registry holds any fork, whatever its
+    /// state: a restore rewinds primary storage and the shared UID index, but
+    /// not fork branches.
+    async fn refuse_restore_with_forks(&self) -> Result<()> {
+        let Some(registry) = self.storage.fork_registry() else {
+            return Ok(());
+        };
+        // Keyed by name in a `BTreeMap`, so already sorted.
+        let forks: Vec<String> = registry.snapshot().await.forks.into_keys().collect();
+        if forks.is_empty() {
+            return Ok(());
+        }
+        Err(anyhow::Error::new(
+            uni_common::UniError::RestoreBlockedByForks { forks },
+        ))
     }
 
     /// Flush L0→L1 and capture the fork point under one held `flush_lock`.
@@ -5108,12 +5998,17 @@ impl Writer {
         {
             let mut old_l0_guard = old_l0_arc.write();
             current_version = old_l0_guard.current_version;
+            // Under the buffer's lock, like every reservation from it.
+            old_l0_guard.unpublished_bulk_at_rotation =
+                self.l0_manager.unpublished_bulk_at_most(current_version);
             old_l0_guard.wal_lsn_at_flush = wal_lsn;
             let wal = old_l0_guard.wal.take();
             let new_l0_arc = self.l0_manager.get_current();
             let mut new_l0_guard = new_l0_arc.write();
             new_l0_guard.wal = wal;
-            new_l0_guard.current_version = current_version;
+            // `max`: a bulk load may have reserved a version from the new
+            // buffer since the rotation (`L0Manager::reserve_bulk_version`).
+            new_l0_guard.current_version = new_l0_guard.current_version.max(current_version);
             // The new active buffer starts accumulating strictly above the
             // rotation point: everything <= `wal_lsn` is now owned by the old
             // (being-flushed) buffer or earlier. This start watermark is the
@@ -5186,19 +6081,11 @@ impl Writer {
         // (Vid, labels, properties, deleted, version)
         type VertexEntry = (Vid, Vec<String>, Properties, bool, u64);
         let mut vertices_by_label: HashMap<u16, Vec<VertexEntry>> = HashMap::new();
-        // Partial-column updates (Lance MergeInsert path). Per-VID tuple:
-        // (vid, full L0 properties map, version, set of keys to update).
-        // Only the keys in the HashSet are emitted to the partial source;
-        // the full props map is retained so the per-row column extractor
-        // can read each touched key's value.
-        type PartialEntry = (Vid, Properties, u64, std::collections::HashSet<String>);
-        let mut partial_by_label: HashMap<u16, Vec<PartialEntry>> = HashMap::new();
-        // DELETE-via-MergeInsert (Round-12 §B): tombstones flush as a
-        // partial source with just `_vid`, `_deleted=true`, `_version`,
-        // `_updated_at`. Skips the wide-row Append payload that adds
-        // nothing on a soft-delete.
+        // Vertex tombstones, `(vid, version)` per label table and
+        // `(vid, labels, version)` for the main table. Each is appended as a
+        // row of its own (`_deleted = true`, no properties).
         let mut tombstones_by_label: HashMap<u16, Vec<(Vid, u64)>> = HashMap::new();
-        let mut main_vertex_tombstones: Vec<(Vid, u64)> = Vec::new();
+        let mut main_vertex_tombstones: Vec<(Vid, Vec<String>, u64)> = Vec::new();
         // Collect vertex timestamps from L0 for flushing to storage
         let mut vertex_created_at: HashMap<Vid, i64> = HashMap::new();
         let mut vertex_updated_at: HashMap<Vid, i64> = HashMap::new();
@@ -5297,37 +6184,14 @@ impl Writer {
                     vertex_updated_at.insert(*vid, ts);
                 }
                 if let Some(labels) = old_l0.vertex_labels.get(vid) {
-                    // Partial-write routing: when this VID was last
-                    // touched via `insert_vertex_partial` AND the
-                    // partial_lance_writes flag is on, send only the
-                    // touched columns to a MergeInsert batch. Otherwise
-                    // (CREATE, MERGE-ON-CREATE, full-replace SET, DELETE
-                    // — or flag off) use the existing full-row Append.
-                    let is_partial = self.config.partial_lance_writes
-                        && old_l0.vertex_partial_keys.contains_key(vid);
-                    if is_partial {
-                        if let Some(touched) = old_l0.vertex_partial_keys.get(vid) {
-                            for label in labels {
-                                if let Some(label_id) = schema.label_id_by_name(label) {
-                                    partial_by_label.entry(label_id).or_default().push((
-                                        *vid,
-                                        props.clone(),
-                                        version,
-                                        touched.clone(),
-                                    ));
-                                }
-                            }
-                        }
-                    } else {
-                        push_vertex_to_labels(
-                            *vid,
-                            labels,
-                            props.clone(),
-                            false,
-                            version,
-                            &mut vertices_by_label,
-                        );
-                    }
+                    push_vertex_to_labels(
+                        *vid,
+                        labels,
+                        props.clone(),
+                        false,
+                        version,
+                        &mut vertices_by_label,
+                    );
                 }
             }
             for &vid in &old_l0.vertex_tombstones {
@@ -5350,7 +6214,9 @@ impl Writer {
                     // holds the pre-delete set at this point.
                     //
                     // Union is sound for TOMBSTONES ONLY. Writing a tombstone
-                    // into a table the vertex has already left is a no-op, so
+                    // into a table the vertex has already left adds a row no
+                    // read can return (the vertex's newest row there is
+                    // already a tombstone, or it never had one), so
                     // the index's known staleness and its rebuild row cap can
                     // only ever cost a missed extra tombstone, never a wrong
                     // one. Do NOT generalize this to SET/REMOVE, where the
@@ -5363,11 +6229,6 @@ impl Writer {
                         }
                     }
 
-                    // Round-12 §B: tombstones flush via Lance MergeInsert
-                    // (just `_vid`, `_deleted=true`, `_version`,
-                    // `_updated_at`) — skipping the wide-row Append.
-                    // Unconditional (no `partial_lance_writes` gating);
-                    // tombstone Append carries no useful payload.
                     for label in &labels {
                         if let Some(label_id) = schema.label_id_by_name(label) {
                             tombstones_by_label
@@ -5413,7 +6274,6 @@ impl Writer {
                 {
                     for label in &labels {
                         if let Some(label_id) = schema.label_id_by_name(label) {
-                            // Round-12 §B: route through partial tombstone too.
                             tombstones_by_label
                                 .entry(label_id)
                                 .or_default()
@@ -5452,6 +6312,9 @@ impl Writer {
         manifest.name = name;
         manifest.created_at = Utc::now();
         manifest.version_high_water_mark = current_version;
+        // Set, never inherited: a load hidden from the parent manifest may be
+        // visible by now.
+        manifest.unpublished_bulk_versions = old_l0_arc.read().unpublished_bulk_at_rotation.clone();
         // Cap the published WAL checkpoint at the floor of any OTHER pending
         // flush. A still-pending flush (notably one that FAILED and left its
         // buffer in `pending_flush`) holds committed WAL entries above its start
@@ -5534,22 +6397,26 @@ impl Writer {
             let mut vertices = Vec::new();
 
             // Live vertices: full-row Append on the main table (the
-            // props_json blob is required for global ID lookups). For
-            // partial-row VIDs (vertex_partial_keys non-empty), the
-            // main table still needs the full props for the
-            // ext_id-uniqueness path; we keep the Append here. The
-            // per-label Lance write IS partial via MergeInsert.
+            // props_json blob is required for global ID lookups).
             for (vid, props) in &old_l0.vertex_properties {
                 let version = old_l0.vertex_write_version(*vid);
                 let labels = old_l0.vertex_labels.get(vid).cloned().unwrap_or_default();
                 vertices.push((*vid, labels, props.clone(), false, version));
             }
 
-            // Tombstones: collected into `main_vertex_tombstones` for
-            // the MergeInsert path below; skipping the wide-row Append.
+            // Tombstones: appended below as rows of their own, after the
+            // relabels are added. They carry the labels the vertex had, so a
+            // label-filtered read of the main table meets the tombstone
+            // beside the vertex's older rows.
             for &vid in &old_l0.vertex_tombstones {
                 let version = old_l0.vertex_versions.get(&vid).copied().unwrap_or(0);
-                main_vertex_tombstones.push((vid, version));
+                let mut labels = old_l0.vertex_labels.get(&vid).cloned().unwrap_or_default();
+                for extra in self.storage.get_labels_from_index(vid).unwrap_or_default() {
+                    if !labels.contains(&extra) {
+                        labels.push(extra);
+                    }
+                }
+                main_vertex_tombstones.push((vid, labels, version));
             }
 
             vertices
@@ -5647,6 +6514,12 @@ impl Writer {
             }
         }
 
+        // Tombstones are appended, never written over the vertex's older
+        // rows; see the per-label write below for why.
+        let live_main_rows = main_vertices.len();
+        for (vid, labels, version) in &main_vertex_tombstones {
+            main_vertices.push((*vid, labels.clone(), Properties::new(), true, *version));
+        }
         if !main_vertices.is_empty() {
             let main_vertex_batch = MainVertexDataset::build_record_batch(
                 &main_vertices,
@@ -5654,20 +6527,9 @@ impl Writer {
                 Some(&vertex_updated_at),
             )?;
             MainVertexDataset::write_batch(self.storage.backend(), main_vertex_batch).await?;
-        }
-        // Round-12 §B: tombstones via MergeInsert on the main vertices
-        // table. Independent of `vertex_properties` length.
-        if !main_vertex_tombstones.is_empty() {
-            let tomb_batch = MainVertexDataset::build_tombstone_partial_batch(
-                &main_vertex_tombstones,
-                Some(&vertex_updated_at),
-            )?;
-            MainVertexDataset::merge_insert_tombstone_batch(self.storage.backend(), tomb_batch)
-                .await?;
-        }
-        if !main_vertices.is_empty() || !main_vertex_tombstones.is_empty() {
             MainVertexDataset::ensure_default_indexes(self.storage.backend()).await?;
         }
+        main_vertices.truncate(live_main_rows);
 
         // Keep the VidLabelsIndex current for every flushed vertex. This is the
         // single place that sees all vertices: the per-label fan-out below skips
@@ -5678,7 +6540,7 @@ impl Writer {
         for (vid, labels, _props, _deleted, _version) in &main_vertices {
             self.storage.update_vid_labels_index(*vid, labels.clone());
         }
-        for (vid, _version) in &main_vertex_tombstones {
+        for (vid, _labels, _version) in &main_vertex_tombstones {
             self.storage.remove_from_vid_labels_index(*vid);
         }
 
@@ -5736,12 +6598,10 @@ impl Writer {
         }
 
         // 4. Per-label vertex table writes
-        // Iterate all labels that have either full-row OR partial-write
-        // data pending. A label may appear in only one of the two maps
-        // (e.g., all updates on this label were partial-only).
+        // Iterate all labels that have either full-row data or tombstones
+        // pending. A label may appear in only one of the two maps.
         let all_label_ids: std::collections::HashSet<u16> = vertices_by_label
             .keys()
-            .chain(partial_by_label.keys())
             .chain(tombstones_by_label.keys())
             .copied()
             .collect();
@@ -5855,8 +6715,21 @@ impl Writer {
 
             let backend = self.storage.backend();
 
-            // Skip the full-row Append entirely if this label only has
-            // partial-write rows pending.
+            // Tombstones are appended as rows of their own, in the same
+            // append as the live rows: `_deleted = true` at the delete's
+            // version, no properties. The vertex's older rows stay as they
+            // were, so a read bounded below the delete (a pinned snapshot,
+            // `VERSION AS OF`, a transaction's L1 pin) still finds the
+            // vertex. Rewriting the older rows in place (a MergeInsert on
+            // `_vid`) restamped them with the delete's version and erased
+            // the vertex from every such read.
+            let tombstone_rows = tombstones_by_label.remove(&label_id).unwrap_or_default();
+            let live_rows = v_data.len();
+            for (vid, version) in &tombstone_rows {
+                v_data.push((*vid, vec![label_name.to_string()], Properties::new()));
+                d_data.push(true);
+                ver_data.push(*version);
+            }
             if !v_data.is_empty() {
                 let batch = ds.build_record_batch_with_timestamps(
                     &v_data,
@@ -5868,48 +6741,9 @@ impl Writer {
                 )?;
                 ds.write_batch(backend, batch, &schema).await?;
             }
-
-            // Partial-column batch (Lance MergeInsert path). The flag
-            // gates whether the routing classified any VIDs as partial;
-            // outside the flag this collection is always empty so the
-            // call below is a cheap no-op.
-            if let Some(partial_rows) = partial_by_label.remove(&label_id)
-                && !partial_rows.is_empty()
-            {
-                let touched_union: std::collections::HashSet<String> = partial_rows
-                    .iter()
-                    .flat_map(|(_, _, _, keys)| keys.iter().cloned())
-                    .collect();
-                let pairs: Vec<(Vid, Properties)> = partial_rows
-                    .iter()
-                    .map(|(vid, props, _, _)| (*vid, props.clone()))
-                    .collect();
-                let versions: Vec<u64> = partial_rows.iter().map(|(_, _, v, _)| *v).collect();
-                let partial_batch = ds.build_partial_record_batch(
-                    &pairs,
-                    &versions,
-                    &touched_union,
-                    &schema,
-                    Some(&vertex_updated_at),
-                )?;
-                if partial_batch.num_rows() > 0 {
-                    ds.merge_insert_batch(backend, partial_batch).await?;
-                }
-            }
-
-            // Tombstone batch (Round-12 §B): always MergeInsert with
-            // just `_vid`, `_deleted=true`, `_version`, `_updated_at`.
-            // No partial_lance_writes gating — tombstones never carry
-            // useful property payload to write. Captured tombstone vids
-            // also drive `remove_from_vid_labels_index` below.
-            let tombstone_rows = tombstones_by_label.remove(&label_id).unwrap_or_default();
-            if !tombstone_rows.is_empty() {
-                let tomb_batch =
-                    ds.build_tombstone_partial_batch(&tombstone_rows, Some(&vertex_updated_at))?;
-                if tomb_batch.num_rows() > 0 {
-                    ds.merge_insert_tombstone_batch(backend, tomb_batch).await?;
-                }
-            }
+            // The UID mappings and the manifest count below cover the rows
+            // written for live vertices only.
+            v_data.truncate(live_rows);
 
             ds.ensure_default_indexes(backend).await?;
 
@@ -6853,8 +7687,14 @@ mod tests {
         let writer = Writer::new(storage.clone(), schema_manager.clone(), 1).await?;
 
         let (src, dst, eid) = (Vid::new(1), Vid::new(2), Eid::new(10));
-        writer.insert_vertex(src, HashMap::new(), None).await?;
-        writer.insert_vertex(dst, HashMap::new(), None).await?;
+        // `LINK` is declared Test -> Test, which the writer enforces.
+        let test = ["Test".to_string()];
+        writer
+            .insert_vertex_with_labels(src, HashMap::new(), &test, None)
+            .await?;
+        writer
+            .insert_vertex_with_labels(dst, HashMap::new(), &test, None)
+            .await?;
         writer
             .insert_edge(src, dst, etype, eid, HashMap::new(), None, None)
             .await?;
@@ -6881,6 +7721,111 @@ mod tests {
              adjacency overlay, so a traversal would still return a \
              relationship whose endpoint is gone"
         );
+        Ok(())
+    }
+
+    /// The edge identity memo a `SET` on stored edges fills is charged to its
+    /// buffer's `estimated_size` (`l0::tests::merge_and_clone_leave_the_identity_memo_charge_out`
+    /// covers the merge).
+    #[tokio::test]
+    async fn identity_memo_is_charged_to_its_buffer() -> Result<()> {
+        use crate::runtime::l0::EdgeIdentityMemo;
+        use crate::storage::manager::StorageManager;
+        use object_store::local::LocalFileSystem;
+        use object_store::path::Path as ObjectStorePath;
+        use uni_common::core::schema::SchemaManager;
+
+        const DEGREE: usize = 200;
+        let dir = tempdir()?;
+        let path = dir.path().to_str().unwrap();
+        let store = Arc::new(LocalFileSystem::new_with_prefix(dir.path())?);
+        let schema_manager = Arc::new(
+            SchemaManager::load_from_store(store, &ObjectStorePath::from("schema.json")).await?,
+        );
+        schema_manager.add_label("N")?;
+        let rel = schema_manager.add_edge_type("R", vec!["N".into()], vec!["N".into()])?;
+        schema_manager.save().await?;
+        let storage = Arc::new(StorageManager::new(path, schema_manager.clone()).await?);
+        let writer = Arc::new(Writer::new(storage, schema_manager, 1).await?);
+
+        let hub = writer.next_vid().await?;
+        writer
+            .insert_vertex_with_labels(hub, HashMap::new(), &["N".to_string()], None)
+            .await?;
+        let mut edges = Vec::new();
+        for _ in 0..DEGREE {
+            let leaf = writer.next_vid().await?;
+            writer
+                .insert_vertex_with_labels(leaf, HashMap::new(), &["N".to_string()], None)
+                .await?;
+            let eid = writer.next_eid(rel).await?;
+            writer
+                .insert_edge(hub, leaf, rel, eid, HashMap::new(), None, None)
+                .await?;
+            edges.push((leaf, eid));
+        }
+        writer.flush_to_l1(None).await?;
+
+        let tx_l0 = writer.create_transaction_l0();
+        let update = |i: usize| {
+            let (leaf, eid) = edges[i];
+            let writer = Arc::clone(&writer);
+            let tx_l0 = Arc::clone(&tx_l0);
+            async move {
+                let props = HashMap::from([("w".to_string(), Value::Int(1))]);
+                writer
+                    .update_edge(hub, leaf, rel, eid, props, None, Some(&tx_l0))
+                    .await
+            }
+        };
+        // Single-edge storage reads until the hub's adjacency is memoized.
+        for i in 0..Writer::IDENTITY_STORAGE_READS_BEFORE_WARM {
+            update(i).await?;
+        }
+        assert!(
+            tx_l0.read().edge_identity_memo.identities.is_empty(),
+            "premise: nothing memoized yet"
+        );
+        let before = tx_l0.read().estimated_size;
+        let one_update = {
+            // An update of an edge whose identity is memoized already costs
+            // only its own row.
+            update(Writer::IDENTITY_STORAGE_READS_BEFORE_WARM).await?;
+            let after_memo = tx_l0.read().estimated_size;
+            update(Writer::IDENTITY_STORAGE_READS_BEFORE_WARM + 1).await?;
+            (
+                tx_l0.read().estimated_size - after_memo,
+                after_memo - before,
+            )
+        };
+        let (row_cost, memo_update_cost) = one_update;
+        let (memo_bytes, identities) = {
+            let guard = tx_l0.read();
+            (
+                guard.edge_identity_memo.charged_bytes,
+                guard.edge_identity_memo.identities.len(),
+            )
+        };
+        assert_eq!(
+            identities, DEGREE,
+            "premise: the hub's adjacency is memoized"
+        );
+        assert_eq!(
+            memo_bytes,
+            DEGREE * EdgeIdentityMemo::IDENTITY_BYTES + EdgeIdentityMemo::SCANNED_BYTES,
+            "the memo's charge"
+        );
+        assert_eq!(
+            memo_update_cost,
+            row_cost + memo_bytes,
+            "the update that filled the memo grew estimated_size by its row and the memo"
+        );
+        assert!(
+            tx_l0.read().size_bytes() >= memo_bytes,
+            "size_bytes counts the memo too"
+        );
+
+        writer.commit_transaction_l0(tx_l0).await?;
         Ok(())
     }
 

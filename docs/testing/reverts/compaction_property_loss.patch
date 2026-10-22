@@ -12,7 +12,7 @@ diff --git a/crates/uni-store/src/storage/compaction.rs b/crates/uni-store/src/s
  use metrics;
  use std::collections::{HashMap, HashSet};
  use std::sync::Arc;
-@@ -213,8 +211,6 @@
+@@ -236,8 +234,6 @@
          let mut vertex_state: HashMap<Vid, (Properties, bool)> = HashMap::new();
          let mut vertex_versions: HashMap<Vid, u64> = HashMap::new();
          let mut vertex_labels: HashMap<Vid, Vec<String>> = HashMap::new();
@@ -21,7 +21,7 @@ diff --git a/crates/uni-store/src/storage/compaction.rs b/crates/uni-store/src/s
  
          let mut rows_processed = 0;
  
-@@ -244,23 +240,6 @@
+@@ -267,23 +263,6 @@
                  .column_by_name("_labels")
                  .and_then(|c| c.as_any().downcast_ref::<arrow_array::ListArray>());
  
@@ -45,7 +45,7 @@ diff --git a/crates/uni-store/src/storage/compaction.rs b/crates/uni-store/src/s
  
              for i in 0..batch.num_rows() {
                  let vid = Vid::from(vid_col.value(i));
-@@ -318,38 +297,6 @@
+@@ -342,38 +321,6 @@
                      }
                  }
  
@@ -84,12 +84,12 @@ diff --git a/crates/uni-store/src/storage/compaction.rs b/crates/uni-store/src/s
                  crdt_merges += Self::merge_row_into_state(
                      row_props,
                      null_props,
-@@ -379,13 +326,11 @@
-         }
+@@ -404,13 +351,11 @@
  
-         if !valid_vertices.is_empty() {
--            let batch = dataset.build_record_batch_with_timestamps(
-+            let batch = dataset.build_record_batch(
+         let kept_rows: usize = kept.iter().map(RecordBatch::num_rows).sum();
+         if !valid_vertices.is_empty() || kept_rows > 0 {
+-            let merged = dataset.build_record_batch_with_timestamps(
++            let merged = dataset.build_record_batch(
                  &valid_vertices,
                  &valid_deleted,
                  &valid_versions,
@@ -97,5 +97,5 @@ diff --git a/crates/uni-store/src/storage/compaction.rs b/crates/uni-store/src/s
 -                Some(&created_at),
 -                Some(&updated_at),
              )?;
-             // Safe point: nothing has been written yet, so a cancelled pass
-             // leaves the table exactly as it was.
+             let batch = append_kept_rows(merged, &kept)?;
+             let merged_through = merged_rows

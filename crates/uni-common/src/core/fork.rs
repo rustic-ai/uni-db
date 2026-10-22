@@ -345,6 +345,7 @@ mod tests {
             dst_labels: vec!["A".into()],
             state: SchemaElementState::Active,
             description: None,
+            endpoint_conformance: Default::default(),
         }
     }
 

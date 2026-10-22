@@ -17,6 +17,19 @@ pub struct SnapshotManifest {
 
     pub vertices: HashMap<String, LabelSnapshot>,
     pub edges: HashMap<String, EdgeSnapshot>,
+    /// Writer features of the binary that saved this manifest
+    /// (`uni_common::core::schema::WRITER_FEATURES`); stamped by
+    /// `SnapshotManager::save_snapshot`. Empty in a manifest an older binary
+    /// wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writer_features: Vec<String>,
+    /// Bulk-load versions at or below `version_high_water_mark` that were
+    /// not visible when this manifest was cut. A bulk load reserves its
+    /// version when it starts staging and becomes visible only when it
+    /// commits, so a reader pinned to this manifest excludes these versions
+    /// for good. Empty in a manifest an older binary wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unpublished_bulk_versions: Vec<u64>,
 }
 
 /// Snapshot counters for one entity kind (a vertex label or an edge type).
@@ -49,6 +62,8 @@ impl SnapshotManifest {
             wal_high_water_mark: 0,
             vertices: HashMap::new(),
             edges: HashMap::new(),
+            writer_features: crate::core::schema::current_writer_features(),
+            unpublished_bulk_versions: Vec::new(),
         }
     }
 }

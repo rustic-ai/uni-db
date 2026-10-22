@@ -75,6 +75,27 @@ pub(crate) fn into_parse_error(e: impl std::fmt::Display) -> UniError {
     }
 }
 
+/// Refuse a statement that references parameters the caller did not supply,
+/// naming every one of them.
+///
+/// openCypher raises `ParameterMissing` at compile time, before any row is
+/// read, and Neo4j reports the whole set (`Expected parameter(s): a, b`).
+/// Checked from the statement text rather than at first evaluation, which
+/// would name only the first parameter it happened to reach, and none at all
+/// for one in a branch no row evaluated.
+pub(crate) fn check_parameters(names: &[String], params: &HashMap<String, ApiValue>) -> Result<()> {
+    let missing: Vec<String> = names
+        .iter()
+        .filter(|n| !params.contains_key(n.as_str()))
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(UniError::ParameterMissing { names: missing })
+    }
+}
+
 /// Convert a planner/compile-time error into the appropriate `UniError` type.
 ///
 /// Errors starting with "SyntaxError:" are treated as parse/syntax errors.
@@ -91,8 +112,20 @@ pub(crate) fn into_query_error(e: impl std::fmt::Display, cypher: &str) -> UniEr
             column: None,
             context: Some(cypher.to_string()),
         }
+    } else if let Some(missing) = UniError::parameter_missing_from_message(&msg) {
+        missing
     } else if let Some(reserved) = UniError::reserved_property_from_message(&msg) {
         reserved
+    } else if let Some(stalled) = UniError::write_stalled_from_message(&msg) {
+        stalled
+    } else if let Some(endpoint) = UniError::edge_endpoint_from_message(&msg) {
+        endpoint
+    } else if let Some(identity) = UniError::edge_identity_from_message(&msg) {
+        identity
+    } else if let Some(blocked) = UniError::restore_blocked_by_forks_from_message(&msg) {
+        blocked
+    } else if let Some(missing) = UniError::snapshot_not_found_from_message(&msg) {
+        missing
     } else {
         UniError::Query {
             message: msg,
@@ -120,6 +153,10 @@ fn into_execution_error(
         UniError::GraphComputeIncomplete {
             detail: Box::new(detail),
         }
+    } else if let Some(missing) = UniError::parameter_missing_from_message(&msg) {
+        missing
+    } else if let Some(refused) = UniError::uncommitted_writes_from_message(&msg) {
+        refused
     } else if let Some(refusal) = classify_limit_refusal(&msg, timeout, max_mem) {
         refusal
     } else if msg.contains("TypeError:") {
@@ -131,6 +168,16 @@ fn into_execution_error(
         UniError::Constraint { message: msg }
     } else if let Some(reserved) = UniError::reserved_property_from_message(&msg) {
         reserved
+    } else if let Some(stalled) = UniError::write_stalled_from_message(&msg) {
+        stalled
+    } else if let Some(endpoint) = UniError::edge_endpoint_from_message(&msg) {
+        endpoint
+    } else if let Some(identity) = UniError::edge_identity_from_message(&msg) {
+        identity
+    } else if let Some(blocked) = UniError::restore_blocked_by_forks_from_message(&msg) {
+        blocked
+    } else if let Some(missing) = UniError::snapshot_not_found_from_message(&msg) {
+        missing
     } else {
         UniError::Query {
             message: msg,
@@ -160,6 +207,10 @@ fn into_stream_error(
         UniError::GraphComputeIncomplete {
             detail: Box::new(detail),
         }
+    } else if let Some(missing) = UniError::parameter_missing_from_message(&msg) {
+        missing
+    } else if let Some(refused) = UniError::uncommitted_writes_from_message(&msg) {
+        refused
     } else if let Some(refusal) = classify_limit_refusal(&msg, timeout, max_mem) {
         // Reachable only since #207: before the deadline and token were plumbed
         // into `GraphExecutionContext`, no operator-level check could fire, so a
@@ -177,6 +228,16 @@ fn into_stream_error(
         UniError::Constraint { message: msg }
     } else if let Some(reserved) = UniError::reserved_property_from_message(&msg) {
         reserved
+    } else if let Some(stalled) = UniError::write_stalled_from_message(&msg) {
+        stalled
+    } else if let Some(endpoint) = UniError::edge_endpoint_from_message(&msg) {
+        endpoint
+    } else if let Some(identity) = UniError::edge_identity_from_message(&msg) {
+        identity
+    } else if let Some(blocked) = UniError::restore_blocked_by_forks_from_message(&msg) {
+        blocked
+    } else if let Some(missing) = UniError::snapshot_not_found_from_message(&msg) {
+        missing
     } else {
         UniError::Query {
             message: msg,
@@ -376,7 +437,8 @@ fn memory_limit_error(estimated_bytes: usize, max_mem: usize) -> UniError {
 ///
 /// The operators signal an elapsed deadline, a cancelled token and a refused
 /// memory-pool reservation as text — `anyhow!("Query timed out")`,
-/// `anyhow!("Query cancelled")`, DataFusion's `ResourcesExhausted` — and the
+/// `anyhow!("Query cancelled")`, DataFusion's `ResourcesExhausted`, a `=~`
+/// backtrack-limit message — and the
 /// layers between flatten them further, so text is all that arrives here. The
 /// budgets are reattached because the operator that tripped cannot know them.
 ///
@@ -390,7 +452,13 @@ pub(crate) fn classify_limit_refusal(
     timeout: std::time::Duration,
     max_mem: usize,
 ) -> Option<UniError> {
-    if msg.contains("Query cancelled") {
+    // The pattern and limit travel in the message, since the UDF that hit
+    // the limit is the only layer that knows them.
+    if let Some((pattern, limit)) =
+        uni_query_functions::java_regex::parse_backtrack_limit_message(msg)
+    {
+        Some(UniError::RegexBacktrackLimit { pattern, limit })
+    } else if msg.contains("Query cancelled") {
         Some(UniError::Cancelled)
     } else if msg.contains("Query timed out") {
         Some(query_timed_out_error(timeout))
@@ -479,6 +547,14 @@ impl CancelScope {
             (Some(token), None) | (None, Some(token)) => token.cancelled().await,
             (None, None) => std::future::pending().await,
         }
+    }
+
+    /// Whether any source is cancelled now: the check for work that cannot
+    /// `select!` on [`Self::cancelled`] because it never yields (an
+    /// in-memory Locy QUERY).
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.scope.as_ref().is_some_and(|t| t.is_cancelled())
+            || self.caller.as_ref().is_some_and(|t| t.is_cancelled())
     }
 
     /// Best-effort token for the executor's in-operator checks.
@@ -575,6 +651,47 @@ impl crate::api::UniInner {
             .with_cardinality(Arc::clone(self.storage.cardinality()))
     }
 
+    /// [`check_parameters`] for a parsed statement, letting a semantic error
+    /// win.
+    ///
+    /// openCypher reports a statement that is invalid regardless of parameter
+    /// values (`MATCH (n $param)`: `InvalidParameterUse`) with that error, not
+    /// with `ParameterMissing` (TCK `Match1` [6], `Merge1` [16]). So when a
+    /// parameter is missing the statement is planned first, and a planning
+    /// error other than a missing parameter is returned instead. Costs nothing
+    /// when every parameter is supplied.
+    pub(crate) fn check_statement_parameters(
+        &self,
+        ast: &uni_cypher::ast::Query,
+        names: &[String],
+        params: &HashMap<String, ApiValue>,
+        cypher: &str,
+    ) -> Result<()> {
+        let Err(missing) = check_parameters(names, params) else {
+            return Ok(());
+        };
+        let (ast, _) = split_time_travel(ast.clone());
+        match self.base_planner().with_params(params.clone()).plan(ast) {
+            Err(e) => match into_query_error(e, cypher) {
+                UniError::ParameterMissing { .. } => Err(missing),
+                semantic => Err(semantic),
+            },
+            Ok(_) => Err(missing),
+        }
+    }
+
+    /// Parse `cypher` and refuse it if it references a parameter `params`
+    /// lacks; see [`Self::check_statement_parameters`].
+    pub(crate) fn parse_checking_parameters(
+        &self,
+        cypher: &str,
+        params: &HashMap<String, ApiValue>,
+    ) -> Result<uni_cypher::ast::Query> {
+        let (ast, names) = uni_cypher::parse_with_parameters(cypher).map_err(into_parse_error)?;
+        self.check_statement_parameters(&ast, &names, params, cypher)?;
+        Ok(ast)
+    }
+
     /// Plan `ast`, then apply the two rewrites every call site must run.
     ///
     /// `rewrite_for_fork_fusion` is load-bearing: per CLAUDE.md's Phase-5a
@@ -656,7 +773,7 @@ impl crate::api::UniInner {
         params: HashMap<String, ApiValue>,
         max_memory: Option<usize>,
     ) -> Result<(QueryResult, ProfileOutput)> {
-        let ast = uni_cypher::parse(cypher).map_err(into_parse_error)?;
+        let ast = self.parse_checking_parameters(cypher, &params)?;
         let (ast, tt_spec) = split_time_travel(ast);
 
         if let Some(spec) = tt_spec {
@@ -739,7 +856,7 @@ impl crate::api::UniInner {
         config: UniConfig,
         cancel: CancelScope,
     ) -> Result<QueryCursor> {
-        let ast = uni_cypher::parse(cypher).map_err(into_parse_error)?;
+        let ast = self.parse_checking_parameters(cypher, &params)?;
         let (ast, tt_spec) = split_time_travel(ast);
 
         if let Some(spec) = tt_spec {
@@ -1022,11 +1139,12 @@ impl crate::api::UniInner {
             let key = cache.effective_key(text_key, &params);
             cache
                 .get(key, cypher, schema_version)
-                .map(|e| e.plan.clone())
+                .map(|e| (e.plan.clone(), Arc::clone(&e.parameters)))
         });
 
         let (logical_plan_raw, parse_time, plan_time, plan_cache_hit) =
-            if let Some(plan) = cached_plan {
+            if let Some((plan, parameters)) = cached_plan {
+                check_parameters(&parameters, &params)?;
                 (
                     plan,
                     std::time::Duration::ZERO,
@@ -1035,8 +1153,10 @@ impl crate::api::UniInner {
                 )
             } else {
                 let parse_start = Instant::now();
-                let ast = uni_cypher::parse(cypher).map_err(into_parse_error)?;
+                let (ast, parameters) =
+                    uni_cypher::parse_with_parameters(cypher).map_err(into_parse_error)?;
                 let parse_time = parse_start.elapsed();
+                self.check_statement_parameters(&ast, &parameters, &params, cypher)?;
 
                 let (ast, tt_spec) = split_time_travel(ast);
                 if tt_spec.is_some() {
@@ -1068,6 +1188,7 @@ impl crate::api::UniInner {
                         crate::api::session::PlanCacheEntry {
                             plan: Arc::clone(&lp),
                             query: cypher.to_string(),
+                            parameters: parameters.into(),
                             schema_version,
                             hit_count: 0,
                         },
@@ -1108,6 +1229,9 @@ impl crate::api::UniInner {
         {
             executor.set_custom_functions(Arc::new(reg.clone()));
         }
+        // The statement's scope on the transaction buffer: its writes pay the
+        // write throttle once, and its side-effect counts see what it created.
+        let _statement = uni_store::runtime::l0::StatementScope::begin(tx_l0.clone());
         executor.set_transaction_l0(tx_l0);
         executor.set_read_snapshot(read_snapshot);
         if let Some(r) = id_reservoir {
@@ -1199,7 +1323,7 @@ impl crate::api::UniInner {
         read_snapshot: Option<uni_store::runtime::SnapshotView>,
         max_memory: Option<usize>,
     ) -> Result<(QueryResult, ProfileOutput)> {
-        let ast = uni_cypher::parse(cypher).map_err(into_parse_error)?;
+        let ast = self.parse_checking_parameters(cypher, &params)?;
 
         let (ast, tt_spec) = split_time_travel(ast);
 
@@ -1229,6 +1353,9 @@ impl crate::api::UniInner {
             None => self.config.clone(),
         });
         self.apply_session_executor_state(&mut executor);
+        // The statement's scope on the transaction buffer: its writes pay the
+        // write throttle once, and its side-effect counts see what it created.
+        let _statement = uni_store::runtime::l0::StatementScope::begin(tx_l0.clone());
         executor.set_transaction_l0(tx_l0);
         executor.set_read_snapshot(read_snapshot);
         if let Some(r) = id_reservoir {
@@ -1273,7 +1400,7 @@ impl crate::api::UniInner {
         config: UniConfig,
         cancel: CancelScope,
     ) -> Result<QueryCursor> {
-        let ast = uni_cypher::parse(cypher).map_err(into_parse_error)?;
+        let ast = self.parse_checking_parameters(cypher, &params)?;
 
         let (ast, tt_spec) = split_time_travel(ast);
 
@@ -1307,7 +1434,7 @@ impl crate::api::UniInner {
 
         // Single parse: extract time-travel clause if present
         let parse_start = Instant::now();
-        let ast = uni_cypher::parse(cypher).map_err(into_parse_error)?;
+        let ast = self.parse_checking_parameters(cypher, &params)?;
         let parse_time = parse_start.elapsed();
 
         let (ast, tt_spec) = split_time_travel(ast);
@@ -1340,7 +1467,7 @@ impl crate::api::UniInner {
         let total_start = Instant::now();
 
         let parse_start = Instant::now();
-        let ast = uni_cypher::parse(cypher).map_err(into_parse_error)?;
+        let ast = self.parse_checking_parameters(cypher, &params)?;
         let parse_time = parse_start.elapsed();
 
         let (ast, tt_spec) = split_time_travel(ast);
@@ -1384,6 +1511,9 @@ impl crate::api::UniInner {
         let mut executor = uni_query::Executor::new(self.storage.clone());
         executor.set_config(config.clone());
         self.apply_session_executor_state(&mut executor);
+        // The statement's scope on the transaction buffer: its writes pay the
+        // write throttle once, and its side-effect counts see what it created.
+        let _statement = uni_store::runtime::l0::StatementScope::begin(tx_l0.clone());
         executor.set_transaction_l0(tx_l0);
         cancel.install(&mut executor);
 

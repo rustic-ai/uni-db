@@ -80,6 +80,30 @@ class UniConstraintError(UniError):
 
     ...
 
+class UniEdgeEndpointError(UniConstraintError):
+    """A relationship's endpoint lacks every label its declared edge type allows.
+
+    Raised when an edge is written (CREATE, MERGE, bulk insert, COPY FROM,
+    fork promote) and when a ``REMOVE`` of a label would leave an existing
+    edge outside its declaration.
+    """
+
+    edge_type: str
+    endpoint: str
+    labels: list[str]
+    allowed: list[str]
+
+class UniEdgeIdentityError(UniConstraintError):
+    """A ``SET`` / ``REMOVE`` on a relationship named other endpoints or another type.
+
+    A relationship's endpoints and type are fixed at creation; a property write
+    cannot move it. ``stored`` and ``requested`` read ``(src)-[:TYPE]->(dst)``.
+    """
+
+    eid: int
+    stored: str
+    requested: str
+
 class UniInvalidIdentifierError(UniError):
     """Invalid identifier name."""
 
@@ -96,6 +120,14 @@ class UniQueryError(UniError):
 
     ...
 
+class UniParameterMissingError(UniQueryError):
+    """A query refers to a ``$parameter`` the call did not supply.
+
+    Raised for reads and writes alike, before any row is written.
+    """
+
+    names: list[str]
+
 class UniTypeError(UniError):
     """Type mismatch error."""
 
@@ -106,6 +138,17 @@ class UniTransactionError(UniError):
     """Transaction error."""
 
     ...
+
+class UniUncommittedWritesError(UniTransactionError):
+    """The operation cannot run in a transaction holding uncommitted writes.
+
+    Raised by operations whose effect is not transactional, such as
+    ``uni.graph.project``, whose projection catalog is shared and is not
+    undone by a rollback. Commit or roll back first.
+    """
+
+    operation: str
+    reason: str
 
 class UniTransactionConflictError(UniError):
     """Transaction serialization conflict."""
@@ -199,6 +242,27 @@ class UniTimeoutError(UniError):
 
     ...
 
+class UniWriteStalledError(UniError):
+    """Writes are stopped at the write throttle's hard limit with compaction disabled.
+
+    Run ``CALL uni.admin.compact()`` to resume writes, or enable compaction.
+    """
+
+    l1_runs: int
+    hard_limit: int
+
+class UniRegexBacktrackLimitError(UniError):
+    """A `=~` match needed more backtracking steps than allowed.
+
+    Patterns with look-around, backreferences, atomic groups, possessive
+    quantifiers and a few other constructs (`\b`, `\X`, `\b{g}`, `(?c)`)
+    run on a backtracking matcher bounded by the
+    `regex_backtrack_limit` config key (default 10,000,000 steps).
+    """
+
+    pattern: str
+    limit: int
+
 # Access control
 class UniReadOnlyError(UniError):
     """Operation not supported on read-only database."""
@@ -228,9 +292,13 @@ class UniInternalError(UniError):
 
 # Snapshot
 class UniSnapshotNotFoundError(UniError):
-    """Snapshot not found."""
+    """Snapshot not found (restore_snapshot, delete_snapshot).
 
-    ...
+    Attributes:
+        snapshot_id: The id that names no snapshot.
+    """
+
+    snapshot_id: str
 
 # Arguments
 class UniInvalidArgumentError(UniError):
@@ -899,6 +967,10 @@ class BulkStats:
     index_build_duration_secs: float
     index_task_ids: list[str]
     indexes_pending: bool
+    load_id: str
+    """The load's id; pass it to ``bulk_load_applied``."""
+    warnings: list[str]
+    """Steps after the commit point that failed without affecting the load."""
 
 class BulkProgress:
     """Progress callback data during bulk loading."""
@@ -930,6 +1002,10 @@ class LocyStats:
     """Strata those re-evaluations reused because their mutation could not affect them."""
     hypothetical_facts_derived: int
     """Facts the derived (not reused) hypothetical strata produced."""
+    sequenced_strata_evaluated: int
+    """Strata derived again after a top-level command wrote and a later command read the facts."""
+    sequenced_strata_reused: int
+    """Strata those re-derivations reused because the write could not affect them."""
 
 class LocyResult:
     """Result of a Locy program evaluation."""
@@ -1019,6 +1095,9 @@ class DatabaseMetrics:
     active_sessions: int
     l1_run_count: int
     write_throttle_pressure: float
+    write_throttle_waits: int
+    write_throttle_wait_time_secs: float
+    writes_stalled: int
     compaction_in_progress: bool
     wal_size_bytes: int
     wal_lsn: int
@@ -1084,6 +1163,7 @@ class ExecuteResult:
     relationships_created: int
     relationships_deleted: int
     properties_set: int
+    properties_removed: int
     labels_added: int
     labels_removed: int
     metrics: dict[str, Any]
@@ -1449,6 +1529,10 @@ class ApplyBuilder:
 class BulkWriter:
     """High-performance bulk data loader."""
 
+    @property
+    def load_id(self) -> str:
+        """The load's id; still readable after ``commit`` or ``abort``."""
+        ...
     def insert_vertices(
         self, label: str, vertices: list[dict[str, Any]]
     ) -> list[int]: ...
@@ -1586,6 +1670,7 @@ class Session:
         self, cypher: str, params: dict[str, Any] | None = None
     ) -> QueryResult: ...
     def query_with(self, cypher: str) -> SessionQueryBuilder: ...
+    def run(self, cypher: str) -> QueryResult: ...
 
     # --- Locy ---
     def locy(
@@ -1614,6 +1699,12 @@ class Session:
 
     # --- Maintenance ---
     def flush(self) -> None: ...
+
+    # --- Bulk loads ---
+    def bulk_load_applied(self, load_id: str) -> bool:
+        """Whether the bulk load ``load_id``, run through this session, reached its
+        commit point. On a forked session it answers for loads on that fork."""
+        ...
 
     # --- Version Pinning ---
     def pin_to_version(self, snapshot_id: str) -> None: ...
@@ -1859,9 +1950,30 @@ class QueryCommandResult:
     def __getitem__(self, key: str) -> Any: ...
 
 class AssumeCommandResult:
-    """Result from a Locy ASSUME command."""
+    """Result from a Locy ASSUME command.
+
+    ``results`` holds one result per body command, in order (a nested
+    ASSUME's own ``AssumeCommandResult`` among them, and an EXPLAIN RULE's
+    or ABDUCE's result computed in the hypothetical state). ``derived`` maps each
+    rule to its facts in the hypothetical state the body's first command
+    reads, after the ASSUME's mutations. ``rows`` is the first row-producing
+    body result's rows, searched depth first, or an empty list.
+    """
     @property
     def command_type(self) -> str: ...
+    @property
+    def results(
+        self,
+    ) -> list[
+        QueryCommandResult
+        | AssumeCommandResult
+        | ExplainCommandResult
+        | AbduceCommandResult
+        | DeriveCommandResult
+        | CypherCommandResult
+    ]: ...
+    @property
+    def derived(self) -> dict[str, list[dict[str, Any]]]: ...
     @property
     def rows(self) -> list[dict[str, Any]]: ...
     def __getitem__(self, key: str) -> Any: ...
@@ -1972,6 +2084,9 @@ class Uni:
     def get_edge_type_info(self, name: str) -> EdgeTypeInfo | None: ...
     def load_schema(self, path: str) -> None: ...
     def save_schema(self, path: str) -> None: ...
+    def bulk_load_applied(self, load_id: str) -> bool:
+        """Whether the bulk load ``load_id`` reached its commit point."""
+        ...
 
     # Facades
     def rules(self) -> RuleRegistry: ...
@@ -1988,6 +2103,7 @@ class Uni:
     def create_snapshot(self, name: str) -> str: ...
     def list_snapshots(self) -> list[SnapshotInfo]: ...
     def restore_snapshot(self, snapshot_id: str) -> None: ...
+    def delete_snapshot(self, snapshot_id: str) -> None: ...
 
     # Fork Management & Diff/Promote
     def list_forks(self) -> list[ForkInfo]: ...
@@ -2128,6 +2244,9 @@ class AsyncUni:
     async def get_edge_type_info(self, name: str) -> EdgeTypeInfo | None: ...
     async def load_schema(self, path: str) -> None: ...
     async def save_schema(self, path: str) -> None: ...
+    async def bulk_load_applied(self, load_id: str) -> bool:
+        """Whether the bulk load ``load_id`` reached its commit point."""
+        ...
 
     # Facades
     def rules(self) -> AsyncRuleRegistry: ...
@@ -2145,6 +2264,7 @@ class AsyncUni:
     async def create_snapshot(self, name: str) -> str: ...
     async def list_snapshots(self) -> list[SnapshotInfo]: ...
     async def restore_snapshot(self, snapshot_id: str) -> None: ...
+    async def delete_snapshot(self, snapshot_id: str) -> None: ...
 
     # Fork Management & Diff/Promote
     async def list_forks(self) -> list[ForkInfo]: ...
@@ -2200,6 +2320,7 @@ class AsyncSession:
         self, cypher: str, params: dict[str, Any] | None = None
     ) -> QueryResult: ...
     def query_with(self, cypher: str) -> AsyncSessionQueryBuilder: ...
+    async def run(self, cypher: str) -> QueryResult: ...
 
     # --- Locy ---
     async def locy(
@@ -2228,6 +2349,12 @@ class AsyncSession:
 
     # --- Maintenance ---
     async def flush(self) -> None: ...
+
+    # --- Bulk loads ---
+    async def bulk_load_applied(self, load_id: str) -> bool:
+        """Whether the bulk load ``load_id``, run through this session, reached its
+        commit point. On a forked session it answers for loads on that fork."""
+        ...
 
     # --- Version Pinning ---
     async def pin_to_version(self, snapshot_id: str) -> None: ...
@@ -2478,6 +2605,10 @@ class AsyncApplyBuilder:
 class AsyncBulkWriter:
     """Async bulk writer for high-throughput data ingestion."""
 
+    @property
+    def load_id(self) -> str:
+        """The load's id; still readable after ``commit`` or ``abort``."""
+        ...
     async def insert_vertices(
         self, label: str, vertices: list[dict[str, Any]]
     ) -> list[int]: ...
@@ -2887,6 +3018,16 @@ class UniForkHasChildrenError(UniError):
     name: str
     children: list[str]
 
+class UniRestoreBlockedByForksError(UniError):
+    """`restore_snapshot` refused because the database has forks.
+
+    A restore rewinds primary storage but not fork branches. Drop every
+    listed fork (``drop_fork``, or ``drop_fork_cascade`` for one with
+    children), then retry.
+    """
+
+    forks: list[str]
+
 class UniForkSubtreeInUseError(UniError):
     """`drop_fork_cascade` refused because the subtree has live sessions / open tx."""
 
@@ -2906,3 +3047,22 @@ class UniForkLifecycleError(UniError):
 
     name: str
     stage: str
+
+class UniBulkCommitIncompleteError(UniError):
+    """A bulk load is committed, but its publish could not be finished by the commit.
+
+    It stays hidden while a background task completes it, or the next open does,
+    exactly once. Do NOT retry the load.
+    """
+
+    load_id: str
+    reason: str
+
+class UniBulkCommitOutcomeUnknownError(UniError):
+    """Whether a bulk load committed is unknown.
+
+    Reopen the database, then call ``bulk_load_applied(load_id)`` before retrying.
+    """
+
+    load_id: str
+    reason: str

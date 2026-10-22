@@ -87,7 +87,7 @@ async fn test_procedure_api_embedding_alias_config() -> Result<()> {
         .await?;
 
     db.session()
-        .query(
+        .run(
             r#"
         CALL uni.schema.createIndex('Article', 'embedding', {
             "type": "VECTOR",
@@ -667,7 +667,7 @@ async fn test_ddl_procedure_algorithm_ivf_sq() -> Result<()> {
         .await?;
 
     db.session()
-        .query(
+        .run(
             r#"CALL uni.schema.createIndex('Doc', 'emb', {
                 "type": "VECTOR",
                 "algorithm": "ivf_sq",
@@ -703,7 +703,7 @@ async fn test_ddl_procedure_algorithm_hnsw_pq() -> Result<()> {
         .await?;
 
     db.session()
-        .query(
+        .run(
             r#"CALL uni.schema.createIndex('Doc', 'emb', {
                 "type": "VECTOR",
                 "algorithm": "hnsw_pq",
@@ -754,7 +754,7 @@ async fn test_ddl_procedure_default_algorithm_is_ivf_pq() -> Result<()> {
         .await?;
 
     db.session()
-        .query(
+        .run(
             r#"CALL uni.schema.createIndex('Doc', 'emb', {
                 "type": "VECTOR"
             })"#,
@@ -854,7 +854,7 @@ async fn default_sub_vectors_is_dimension_aware_for_wide_embeddings() -> Result<
         .await?;
 
     db.session()
-        .query(
+        .run(
             r#"CALL uni.schema.createIndex('Wide', 'emb', {
                 "type": "VECTOR"
             })"#,

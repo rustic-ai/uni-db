@@ -3,9 +3,9 @@
 
 """Session.scratch(): a transaction whose writes are always discarded.
 
-Also the replacement for ABDUCE / EXPLAIN RULE inside an ASSUME body, which is
-now a compile error: apply the hypothetical change in a scratch transaction and
-run the command there.
+A scratch transaction is one way to run ABDUCE / EXPLAIN RULE against a
+hypothetical change; an ASSUME body is the other, and both give the same
+answer.
 """
 
 import pytest
@@ -17,8 +17,8 @@ SEED = "CREATE (:Node {name: 'A'})-[:EDGE]->(:Node {name: 'B'})"
 HYPOTHETICAL = "MATCH (a:Node {name: 'A'}) CREATE (a)-[:EDGE]->(:Node {name: 'C'})"
 ABDUCE_C = RULE + "ABDUCE NOT reachable WHERE b.name = 'C'"
 ASSUME_ABDUCE = (
-    RULE + "ASSUME { CREATE (:Node {name: 'X'}) } "
-    "THEN { ABDUCE NOT reachable WHERE a.name = 'A' }"
+    RULE + "ASSUME { " + HYPOTHETICAL + " } "
+    "THEN { ABDUCE NOT reachable WHERE b.name = 'C' }"
 )
 NAMES = "MATCH (n:Node) RETURN n.name AS name ORDER BY name"
 
@@ -27,6 +27,19 @@ def _abduce(result):
     abduces = [c for c in result.command_results if c.command_type == "abduce"]
     assert len(abduces) == 1, result.command_results
     return abduces[0].modifications
+
+
+def _assume_abduce(result):
+    """The modifications of the ABDUCE in the program's single ASSUME body."""
+    assumes = [c for c in result.command_results if c.command_type == "assume"]
+    assert len(assumes) == 1, result.command_results
+    abduces = [c for c in assumes[0].results if c.command_type == "abduce"]
+    assert len(abduces) == 1, assumes[0].results
+    return abduces[0].modifications
+
+
+def _validated(mods):
+    return sorted(m["validated"] for m in mods)
 
 
 # ── sync ──────────────────────────────────────────────────────────────────
@@ -72,10 +85,19 @@ def test_abduce_over_hypothetical_change_in_scratch():
     assert _abduce(session.locy(ABDUCE_C)) == []
 
 
-def test_abduce_inside_assume_body_is_a_compile_error():
+def test_abduce_inside_assume_body_matches_scratch():
     _db, session = _sync_db()
-    with pytest.raises(uni_db.UniError, match="not allowed inside an ASSUME"):
-        session.locy(ASSUME_ABDUCE)
+    in_body = _assume_abduce(session.locy(ASSUME_ABDUCE))
+    tx = session.scratch()
+    tx.execute(HYPOTHETICAL)
+    in_scratch = _abduce(tx.locy(ABDUCE_C))
+    tx.rollback()
+    # Removing the hypothetical edge is the one way to stop A reaching C.
+    assert _validated(in_body) == _validated(in_scratch) == [True], (
+        in_body,
+        in_scratch,
+    )
+    assert [r["name"] for r in session.query(NAMES)] == ["A", "B"]
 
 
 # ── async ─────────────────────────────────────────────────────────────────
@@ -126,7 +148,15 @@ async def test_async_abduce_over_hypothetical_change_in_scratch():
 
 
 @pytest.mark.asyncio
-async def test_async_abduce_inside_assume_body_is_a_compile_error():
+async def test_async_abduce_inside_assume_body_matches_scratch():
     _db, session = await _async_db()
-    with pytest.raises(uni_db.UniError, match="not allowed inside an ASSUME"):
-        await session.locy(ASSUME_ABDUCE)
+    in_body = _assume_abduce(await session.locy(ASSUME_ABDUCE))
+    tx = await session.scratch()
+    await tx.execute(HYPOTHETICAL)
+    in_scratch = _abduce(await tx.locy(ABDUCE_C))
+    await tx.rollback()
+    assert _validated(in_body) == _validated(in_scratch) == [True], (
+        in_body,
+        in_scratch,
+    )
+    assert await _names(session) == ["A", "B"]

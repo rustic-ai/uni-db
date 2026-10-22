@@ -147,40 +147,126 @@ const REGEX_CACHE_CAP: usize = 64;
 
 thread_local! {
     /// Per-thread cache of compiled `=~` patterns, keyed by the pattern as
-    /// written. Thread-local avoids any cross-query lock; per-query pattern
-    /// counts are tiny, so a full clear at capacity is simpler than LRU and
-    /// effectively never fires.
+    /// written and the backtrack limit it was compiled with. Thread-local
+    /// avoids any cross-query lock; per-query pattern counts are tiny, so a
+    /// full clear at capacity is simpler than LRU and effectively never fires.
     static REGEX_CACHE: std::cell::RefCell<
-        std::collections::HashMap<String, crate::java_regex::CypherRegex>,
+        std::collections::HashMap<(String, usize), crate::java_regex::CypherRegex>,
     > =
         std::cell::RefCell::new(std::collections::HashMap::new());
 }
 
+/// A check that fails once the running query must stop: it returns the
+/// error message (`"Query timed out"`, `"Query cancelled"`) when it should.
+pub type RegexInterrupt = std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>;
+
+/// What a query's `=~` evaluation runs under: the backtrack limit and the
+/// query's deadline and cancellation.
+#[derive(Clone)]
+pub struct RegexRuntime {
+    backtrack_limit: usize,
+    interrupt: Option<RegexInterrupt>,
+}
+
+impl std::fmt::Debug for RegexRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegexRuntime")
+            .field("backtrack_limit", &self.backtrack_limit)
+            .field("interrupt", &self.interrupt.is_some())
+            .finish()
+    }
+}
+
+impl Default for RegexRuntime {
+    fn default() -> Self {
+        Self::new(crate::java_regex::DEFAULT_BACKTRACK_LIMIT, None)
+    }
+}
+
+impl RegexRuntime {
+    /// A runtime with `backtrack_limit` steps per match and, when given, a
+    /// deadline/cancellation check consulted while rows are evaluated.
+    pub fn new(backtrack_limit: usize, interrupt: Option<RegexInterrupt>) -> Self {
+        Self {
+            backtrack_limit,
+            interrupt,
+        }
+    }
+
+    /// The backtrack limit for the backtracking VM.
+    pub fn backtrack_limit(&self) -> usize {
+        self.backtrack_limit
+    }
+
+    /// Fails when the query has timed out or been cancelled.
+    ///
+    /// # Errors
+    ///
+    /// Returns the query's timeout or cancellation error.
+    pub fn check(&self) -> Result<()> {
+        match self.interrupt.as_ref().and_then(|f| f()) {
+            Some(msg) => Err(anyhow!(msg)),
+            None => Ok(()),
+        }
+    }
+}
+
+tokio::task_local! {
+    /// The `=~` runtime of the query running on this task, for the
+    /// row-at-a-time evaluator. The vectorized `_cypher_regex` UDF carries
+    /// its own copy instead, because DataFusion runs partitions on spawned
+    /// tasks, which do not inherit task-locals.
+    pub static REGEX_RUNTIME: std::sync::Arc<RegexRuntime>;
+}
+
+/// The runtime installed on this task, or the defaults.
+pub fn current_regex_runtime() -> std::sync::Arc<RegexRuntime> {
+    REGEX_RUNTIME
+        .try_with(std::sync::Arc::clone)
+        .unwrap_or_else(|_| std::sync::Arc::new(RegexRuntime::default()))
+}
+
 /// Compiles `pattern` for Cypher's `=~`: Java (`java.util.regex`) syntax and
 /// defaults, matching the **whole** input, as `Pattern.matches` does in
-/// Neo4j. See [`crate::java_regex`] for what the translation covers and what
-/// it rejects.
+/// Neo4j. See [`crate::java_regex`] for the semantics and the limits.
 ///
 /// # Errors
 ///
 /// Returns an error naming the pattern when it is not a valid Java regular
-/// expression, or uses a Java construct that cannot be evaluated exactly.
+/// expression (the `PatternSyntaxException` Java would throw).
 pub fn compile_cypher_regex(pattern: &str) -> Result<crate::java_regex::CypherRegex> {
-    crate::java_regex::CypherRegex::new(pattern)
+    compile_cypher_regex_with_limit(pattern, crate::java_regex::DEFAULT_BACKTRACK_LIMIT)
+}
+
+fn compile_cypher_regex_with_limit(
+    pattern: &str,
+    limit: usize,
+) -> Result<crate::java_regex::CypherRegex> {
+    crate::java_regex::CypherRegex::with_backtrack_limit(pattern, limit)
         .map_err(|e| anyhow!("Invalid regex pattern '{pattern}': {e}"))
 }
 
-/// Whether `text` matches `pattern` in full under Cypher's `=~`; see
-/// [`compile_cypher_regex`]. The compiled pattern is cached per thread.
+/// Whether `text` matches `pattern` in full under Cypher's `=~`, under the
+/// runtime installed on this task; see [`compile_cypher_regex`].
 ///
 /// # Errors
 ///
-/// Returns an error when `pattern` is not a valid regular expression, or the
-/// answer depends on input the translation cannot evaluate exactly.
+/// Returns an error when `pattern` is not a valid regular expression, when a
+/// match exceeds the backtrack limit, or when the query has timed out or
+/// been cancelled.
 pub fn cypher_regex_is_match(text: &str, pattern: &str) -> Result<bool> {
-    with_cached_regex(pattern, |re| {
-        re.is_match(text)
-            .map_err(|e| anyhow!("Unsupported regex input: {e}"))
+    cypher_regex_is_match_in(&current_regex_runtime(), text, pattern)
+}
+
+/// [`cypher_regex_is_match`] under `runtime`.
+///
+/// # Errors
+///
+/// As [`cypher_regex_is_match`].
+pub fn cypher_regex_is_match_in(runtime: &RegexRuntime, text: &str, pattern: &str) -> Result<bool> {
+    runtime.check()?;
+    with_cached_regex(pattern, runtime.backtrack_limit(), |re| {
+        re.is_match(text).map_err(|e| anyhow!("{e}"))
     })?
 }
 
@@ -189,18 +275,20 @@ pub fn cypher_regex_is_match(text: &str, pattern: &str) -> Result<bool> {
 /// invalid pattern errors identically on every row.
 pub(crate) fn with_cached_regex<T>(
     pattern: &str,
+    limit: usize,
     f: impl FnOnce(&crate::java_regex::CypherRegex) -> T,
 ) -> Result<T> {
     REGEX_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if let Some(re) = cache.get(pattern) {
+        let key = (pattern.to_string(), limit);
+        if let Some(re) = cache.get(&key) {
             return Ok(f(re));
         }
-        let re = compile_cypher_regex(pattern)?;
+        let re = compile_cypher_regex_with_limit(pattern, limit)?;
         if cache.len() >= REGEX_CACHE_CAP {
             cache.clear();
         }
-        let re = cache.entry(pattern.to_string()).or_insert(re);
+        let re = cache.entry(key).or_insert(re);
         Ok(f(re))
     })
 }
@@ -3360,18 +3448,32 @@ mod tests {
                 .to_string();
             assert!(err.contains("Invalid regex"), "{pattern:?}: {err}");
         }
-        // Java constructs the regex engine cannot express are errors, never
-        // a different answer: lookahead, lookbehind, a backreference, an
-        // atomic group, `\Q…\E` quoting, and possessive quantifiers (which
-        // the parser would otherwise read as a nested repetition `(a*)+`).
-        for pattern in [
-            "(?=a)a", "(?<=a)a", "(a)\\1", "(?>a)", "\\Qa\\E", "a*+a", "a++", "a?+", "a{1,2}+",
+        // Java constructs beyond the automaton answer as Java does (Java's
+        // answers): look-around, a backreference, an atomic group, `\Q…\E`,
+        // and possessive quantifiers, never read as a nested `(a*)+`.
+        for (pattern, expected) in [
+            ("(?=a)a", false),
+            ("(?<=a)a", false),
+            ("(a)\\1", true),
+            ("(?>a)", false),
+            ("\\Qa\\E", false),
+            ("a*+a", false),
+            ("a++", true),
+            ("a?+", false),
+            ("a{1,2}+", true),
         ] {
-            let err = eval_binary_op(&s("aa"), &BinaryOp::Regex, &s(pattern))
-                .expect_err(pattern)
-                .to_string();
-            assert!(err.contains("Invalid regex"), "{pattern:?}: {err}");
+            assert_eq!(
+                eval_binary_op(&s("aa"), &BinaryOp::Regex, &s(pattern)).expect(pattern),
+                Value::Bool(expected),
+                "{pattern:?}"
+            );
         }
+        // A case-insensitive backreference answers as Java's `CIBackRef`
+        // (Java 21: true).
+        assert_eq!(
+            eval_binary_op(&s("aA"), &BinaryOp::Regex, &s("(?i)(a)\\1")).unwrap(),
+            Value::Bool(true)
+        );
         // `#)` is a comment in verbose mode, so this pattern is `a` alone.
         for (subject, expected) in [("a", true), ("ab", false)] {
             assert_eq!(

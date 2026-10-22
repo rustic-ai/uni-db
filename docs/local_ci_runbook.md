@@ -427,6 +427,13 @@ python3 website/scripts/generate_semiconductor_flagship_notebook.py --check
 python3 website/scripts/generate_pharma_flagship_notebook.py --check
 python3 website/scripts/generate_cyber_flagship_notebook.py --check
 
+# Site build, strict (fails on any warning, broken links included). The
+# notebook pages are gitignored outputs of convert_notebooks.py; without the
+# conversion every link to them is reported as a missing page.
+( cd website
+  uv run --no-project --with nbconvert python scripts/convert_notebooks.py --no-execute
+  uv run --no-project --with zensical --with pymdown-extensions zensical build --strict )
+
 # rustdoc gate
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace \
   --exclude uni-python --exclude uni-tck --exclude uni-python-onnx \

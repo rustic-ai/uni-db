@@ -437,18 +437,74 @@ WHERE p.email =~ '[\\w.-]+@[\\w.-]+\\.\\w+'
     `true`); `(?m)` makes `^`/`$` match at every line break.
   - `\v` is vertical whitespace, `\<`/`\>` are the literal characters, and
     `\p{..}` names follow Java (`\p{IsGreek}`, `\p{sc=Greek}`, `\p{Lu}`).
-- Java constructs the engine cannot evaluate exactly are rejected as an
-  invalid pattern rather than answered differently: possessive quantifiers
-  (`a*+`), lookahead/lookbehind, backreferences, atomic groups, `\Q…\E`,
-  `\h`, `\R`, `\X`, `\Z`, `\G`, octal and `\c` escapes, `\N{…}`, Unicode
-  blocks (`\p{InGreek}`), `\p{java…}`, the `(?d)` flag and repeated flags
-  (`(?i-i)`).
-- A few patterns are refused only for certain input, with an "Unsupported
-  regex input" error: `$` followed by more pattern over a string with a line
-  terminator before its last one; multi-line `^`/`$` over a string containing
-  U+0085, U+2028 or U+2029 (or, for a `^` that may match at the very end, an
-  empty string or one ending in a line terminator); and `\b`/`\B` over a string
-  with a combining mark right after a letter or digit.
+- Java syntax is accepted exactly as Java accepts it, and a pattern Java
+  rejects is an invalid-pattern error. That includes `\Q…\E`, `\h`/`\H`,
+  `\v`/`\V`, `\R`, `\Z`, `\z`, `\G` (the start, under `matches()`), `\e`,
+  `\cX`, octal (`\0101`), `\k<name>`, `(?d)` (UNIX_LINES: only `\n` ends a
+  line), flag groups such as `(?)` and `(?i-i)`, `(?x)` comments, class
+  intersections (`[a-z&&[^k]]`), and stacked quantifiers with Java's meaning
+  (`x{1}{2}` is `x` followed by an empty string repeated twice).
+- Every pattern Java accepts is accepted, with Java's meaning; no valid
+  pattern is refused. That includes look-ahead and look-behind (also with
+  `\b`, look-arounds or backreferences in the body, and over emoji and other
+  supplementary characters), backreferences (case-insensitive ones under
+  `(?i)` and `(?iu)` too, and backreferences inside the group they name),
+  atomic groups (`(?>…)`), possessive quantifiers (`a*+`), Unicode blocks
+  (`\p{InGreek}`, `\p{block=Greek}`), the `Character` predicates
+  (`\p{javaLowerCase}`, `\p{javaJavaIdentifierStart}`, …), named characters
+  (`\N{LATIN SMALL LETTER A}`), grapheme clusters (`\X`) and boundaries
+  (`\b{g}`), and `(?c)` (canonical equivalence for classes and properties:
+  `'e\u0301' =~ '(?c)[é]'` is `true`).
+  - Patterns with those constructs (and with `\b`, a multi-line or inner
+    `^`/`$`, or a quantified `\R`) run on a backtracking matcher over the
+    string's UTF-16 units, which follows Java's corner cases too: a capture
+    made in a look-ahead survives backtracking past it, a loop ends at its
+    first empty iteration (`'a' =~ '(?:a|\G){2}'` is `false`), a
+    look-behind can start inside a surrogate pair, and `(?i)` backreferences
+    fold case as Java does (`'kK' =~ '(?i)(k)\1'` is `true`, `'k\u212A' =~
+    '(?i)(k)\1'` is `false`, `true` under `(?iu)`). Every other pattern runs
+    on a linear-time automaton. The choice is made once per pattern.
+  - Where Java's matcher itself throws on an input (it can read past the end
+    of the string, as `\b{g}` does after a look-ahead that reached the end:
+    `'ab' =~ '(?=ab)a\b{g}b'`), the query fails with an error naming the
+    exception, as it does in Neo4j.
+- **Backtrack limit.** The backtracking matcher stops after
+  `regex_backtrack_limit` backtracking steps per match (default 10,000,000,
+  about 0.1–0.3 s for a refused match) and the query fails with `UniError::RegexBacktrackLimit`
+  (`UniRegexBacktrackLimitError` in Python, with `pattern` and `limit`).
+  Patterns like `(a+)+b` that backtrack exponentially in Java reach it on
+  long inputs; Java has no limit and would keep searching. Raise it with
+  `UniConfig { regex_backtrack_limit, .. }` or `config({"regex_backtrack_limit":
+  …})` in Python. A long scan of `=~` rows also honours the query timeout:
+  the deadline is checked between rows.
+- **Recursion limit.** Java's matcher runs out of stack on a backtracking
+  loop over a long string (`(?:a|b)*` past about 1,500 characters on a
+  default thread stack) and throws `StackOverflowError`. uni-db keeps its
+  backtracking state on an explicit stack and answers such inputs: a match
+  fails with a "Regex recursion limit exceeded" error only when its
+  backtrack stack outgrows a 64 MB budget (a 200,000-character
+  `(?:a|b)*(?=)` match is answered, a 2,400,000-character one is not). Loops Java runs without
+  recursion (`a*`, `(?:ab)*`) and patterns the automaton answers have no
+  such limit. A pattern nested more than 2,000 groups deep is rejected with
+  Java's "Stack overflow during pattern compilation".
+- **Reference JVM and Unicode version.** The semantics are pinned to Java 21,
+  the minimum JVM the current Neo4j release (2026.09) supports ("Java SE 21
+  and Java SE 25 Platform Specification", [Neo4j Operations Manual, system
+  requirements](https://neo4j.com/docs/operations-manual/current/installation/requirements/)).
+  Character classes, properties, scripts, blocks, character names, case
+  folding, grapheme clusters and canonical equivalence use Java 21's
+  Unicode 15.0 data, generated from that JDK, whatever the Rust toolchain:
+  a character assigned in Unicode 16.0 or later is unassigned (`\p{Cn}`),
+  and scripts added since (`\p{IsGaray}`, …) are unknown names, as on
+  Java 21.
+- Agreement with Java 21 is checked against answers recorded from the JDK
+  for generated and hand-written cases (constructs, anchors, Unicode
+  properties, blocks and `\p{java…}`, character names, grapheme clusters,
+  `(?c)`, case-insensitive backreferences, empty loop iterations,
+  look-arounds). Where Java 25 answers differently (Unicode 16.0 data and
+  Java 25's newer grapheme rules), uni-db answers as Java 21. Look-behinds
+  whose length arithmetic nears 2^31 (`{2147483647,}`, zero-width loops of
+  about 10^9 iterations) can still differ from Java.
 - NULL operands return NULL (Cypher semantics)
 - Invalid regex patterns return an error
 
@@ -875,6 +931,62 @@ CREATE (p:Paper {title: 'New Paper'})-[:AUTHORED_BY]->(a:Author {name: 'New Auth
 ```cypher
 CREATE (p:Paper {title: 'My Paper', year: 2024})
 RETURN p.title, p.year
+```
+
+### Write Counters
+
+`tx.execute(...)` returns an `ExecuteResult` whose counters describe what the
+statement changed. openCypher does not specify execution counters; these
+follow Neo4j's query statistics, with the TCK's (entity, key, value) rule for
+properties:
+
+| Counter | Counts |
+|---|---|
+| `nodes_created` / `nodes_deleted` | Nodes created or deleted. A `SET`, `REMOVE` or `MERGE ... ON MATCH` on an existing node creates nothing. |
+| `relationships_created` / `relationships_deleted` | The same for relationships, including those `DETACH DELETE` removes. |
+| `properties_set` | Properties added, or overwritten with a different value. Assigning the value a property already has counts nothing. |
+| `properties_removed` | Properties removed by an explicit `REMOVE` or `SET ... = null`, or overwritten with a different value. The properties of a deleted node or relationship are not counted, as in Neo4j. |
+| `labels_added` / `labels_removed` | Per node whose label set changes, like Neo4j's `labelsAdded` / `labelsRemoved`. Deleting a node does not count its labels. |
+
+An entity created and changed in one statement reports only its final state,
+and an entity named twice in one `DELETE` is counted once.
+
+The openCypher TCK's "side effects" (`+labels`, `-properties`, ...) are not
+these counters: the TCK harness diffs the graph before and after the
+statement. By that diff `CREATE (:Label), (:Label)` is `+labels 1` (one label
+newly in use) and deleting a node with two properties is `-properties 2`;
+here they report `labels_added = 2` and `properties_removed = 0`.
+
+```cypher
+CREATE (:Person {name: 'Alice', age: 30})-[:KNOWS {since: 2020}]->(:Person {name: 'Bob'})
+
+// nodes_deleted = 1, relationships_deleted = 1, properties_removed = 0
+MATCH (n:Person {name: 'Alice'}) DETACH DELETE n
+```
+
+---|---|---|
+| `nodes_created` / `nodes_deleted` | `+nodes` / `-nodes` | Nodes created or deleted. A `SET`, `REMOVE` or `MERGE ... ON MATCH` on an existing node creates nothing. |
+| `relationships_created` / `relationships_deleted` | `+relationships` / `-relationships` | The same for relationships, including those `DETACH DELETE` removes. |
+| `properties_set` | `+properties` | Properties added, or overwritten with a different value. Assigning the value a property already has counts nothing. |
+| `properties_removed` | `-properties` | Properties removed, set to `null`, or overwritten with a different value, and every property of a deleted node or relationship. |
+| `labels_added` / `labels_removed` | `+labels` / `-labels` | Per node whose label set changes. |
+
+An entity created and changed in one statement reports only its final state;
+one created and deleted in the same statement reports no property changes.
+
+The label counters follow Neo4j's `labelsAdded` / `labelsRemoved`, not the
+TCK. The TCK compares the set of labels in use across the whole graph before
+and after the statement: `CREATE (:Label), (:Label)` is `+labels 1`, and
+`CREATE (:Label)` when other `:Label` nodes already exist is no label change.
+Here the first reports `labels_added = 2` and the second `labels_added = 1`,
+and deleting a node does not count its labels as removed.
+
+```cypher
+CREATE (:Person {name: 'Alice', age: 30})-[:KNOWS {since: 2020}]->(:Person {name: 'Bob'})
+
+// nodes_deleted = 1, relationships_deleted = 1,
+// properties_removed = 3 (two on Alice, one on the relationship)
+MATCH (n:Person {name: 'Alice'}) DETACH DELETE n
 ```
 
 ---
@@ -2018,6 +2130,18 @@ Flush and compact all L1 runs into L2 for storage hygiene.
 VACUUM
 ```
 
+### Running administrative procedures
+
+`uni.admin.compact`, `uni.admin.snapshot.create`, `uni.admin.snapshot.restore`,
+`uni.admin.snapshot.delete` and `uni.admin.verifyEdgeEndpoints` change the database as a whole, so they are
+not reads: `session.query()`, a session prepared query, a pinned session, a
+read-only handle and a `VERSION AS OF` statement refuse them with the read-only
+error. Run them with `session.run()` (Rust `Session::run`, Python
+`session.run()`, the `uni query` CLI), which executes them outside any
+transaction — `snapshot.restore`, `snapshot.delete` and `verifyEdgeEndpoints`
+refuse to run inside one. An `AuthzPolicy` sees the action `dbms` for them. `compactionStatus()` and
+`snapshot.list()` are reads and run anywhere.
+
 ### Compaction
 
 ```cypher
@@ -2030,6 +2154,45 @@ CALL uni.admin.compactionStatus()
 YIELD l1_runs, l1_size_bytes, in_progress, pending
 ```
 
+### Edge endpoint verification
+
+A store written by an earlier release may hold edges whose endpoints violate
+their type's declared labels, so the planner does not narrow an unlabelled
+endpoint of those types until they are verified:
+
+```cypher
+// Every unverified declared edge type, or one by name
+CALL uni.admin.verifyEdgeEndpoints('WORK_AT')
+YIELD edge_type, edges_checked, source_violations, target_violations, conformance
+```
+
+A type with no violation is recorded `verified` and saved at once; one with
+violations stays `unverified` and its edges stay readable (delete them, then
+verify again). The whole LDBC SF1 store (15 types, 13M edges) verifies in about
+12 s. Run it outside a transaction: it waits up to 10 s for transactions opened
+before it to finish, then fails. A fork created, or a snapshot taken, before
+the verification does not use it, and restoring such a snapshot withdraws it.
+
+Verification is no longer what keeps `MATCH ()-[r:R]->()` fast. When the
+source cannot be narrowed to a label (an unverified type, a type with several
+declared source labels, `[:R|S]`, or no type), the query reads its sources
+from the relationship type's adjacency rather than scanning every vertex, with
+the same results. At LDBC SF1, `MATCH ()-[w:WORK_AT]->() RETURN count(w)` on an
+unverified store went from about 6 s to about 0.12 s. Inside a read-write
+transaction every vertex is still read, so that concurrent changes to them
+conflict as before.
+
+Opening a store that an earlier release wrote to after a type was `enforced`
+or `verified` (an unflushed WAL segment or a flush from that release) sets
+every such type back to `unverified`, logs a warning naming them, and saves
+that: the earlier release did not check endpoints. Verify again to restore
+narrowing.
+
+A `SET` or `REMOVE` cannot change a relationship's endpoints or type: a map
+carrying `_eid`, `_src`, `_dst` and `_type` that names other ones than the
+stored edge is refused with `EdgeIdentityChange` (Python
+`UniEdgeIdentityError`).
+
 ### Snapshots
 
 ```cypher
@@ -2041,8 +2204,12 @@ YIELD snapshot_id
 CALL uni.admin.snapshot.list()
 YIELD snapshot_id, name, created_at, version_hwm
 
-// Restore to a snapshot
-CALL uni.admin.snapshot.restore('before_migration')
+// Restore to a snapshot (data and schema), by id
+CALL uni.admin.snapshot.restore($snapshot_id)
+YIELD status
+
+// Delete a snapshot, releasing the storage versions it pins
+CALL uni.admin.snapshot.delete($snapshot_id)
 YIELD status
 ```
 
@@ -2082,7 +2249,10 @@ RETURN property, dataType
 
 ### Schema DDL Procedures
 
-Create and modify schema at runtime via procedures:
+Create and modify schema at runtime via procedures. They are schema writes,
+not reads: run them with `session.run()` (an auto-commit transaction) or in a
+transaction; `session.query()` refuses them. An `AuthzPolicy` sees the action
+`schema`.
 
 ```cypher
 // Create a new label

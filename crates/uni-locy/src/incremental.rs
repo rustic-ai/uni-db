@@ -195,6 +195,37 @@ pub fn query_footprint(query: &Query) -> MutationFootprint {
     }
 }
 
+/// Whether a Cypher command can write: anything but a read-only statement.
+///
+/// Syntactic: a statement made only of `MATCH`, `WITH`, `UNWIND` and
+/// `RETURN` clauses (or a `UNION` of such, or an `EXPLAIN`) reads; every
+/// other clause, `CALL` included, may write.
+#[must_use]
+pub fn query_may_write(query: &Query) -> bool {
+    match query {
+        Query::Single(statement) => statement.clauses.iter().any(|c| {
+            !matches!(
+                c,
+                Clause::Match(_) | Clause::With(_) | Clause::Unwind(_) | Clause::Return(_)
+            )
+        }),
+        Query::Union { left, right, .. } => query_may_write(left) || query_may_write(right),
+        Query::Explain(_) => false,
+        _ => true,
+    }
+}
+
+/// The footprint of a Cypher command run as a Locy command, when it may
+/// write; `None` for a read-only statement.
+///
+/// The facts a later command of the same program reads must be derived again
+/// in the state such a command leaves, for the strata the footprint can
+/// affect.
+#[must_use]
+pub fn command_write_footprint(query: &Query) -> Option<MutationFootprint> {
+    query_may_write(query).then(|| query_footprint(query))
+}
+
 /// Computes the footprint of a sequence of Cypher clauses.
 #[must_use]
 pub fn mutation_footprint(clauses: &[Clause]) -> MutationFootprint {

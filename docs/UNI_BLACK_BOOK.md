@@ -813,6 +813,8 @@ EdgeTypeMeta {
 }
 ```
 
+Declared endpoints are enforced on write (wave P1, G2). `Writer::insert_edge` — the create path behind `CREATE`, `MERGE`, `Transaction::bulk_insert_edges`, `COPY … FROM` and fork promote — calls `check_edge_endpoints`: an endpoint passes when it carries at least one declared label, read from the writing transaction's buffer first, then the committed buffers, the `VidLabelsIndex`, and storage. `Writer::update_edge` (a `SET` / `REMOVE` on an existing edge) does not re-check. A `REMOVE n:L` that would leave one of `n`'s existing edges outside its declaration is refused (`Executor::check_label_removal_keeps_edges_declared`, probing the CSR + L0 overlay with `get_neighbors`). Both raise `UniError::EdgeEndpointViolation { edge_type, endpoint, labels, allowed }`. Before, the writer checked nothing, while the planner narrows unlabelled endpoints by the declaration; stores written before the check may still hold violating edges, and the read side does not drop them.
+
 ### PropertyMeta
 
 ```rust
@@ -1811,6 +1813,108 @@ Invariants:
   discarded other sessions' commits made inside the window or afterwards
   (measured: a vertex and an edge committed and flushed during the publish, or
   after a failed one, were gone after reopen).
+- **The marker write is the commit point, and `commit()` reports which side
+  of it the load ended on.** `BulkWriter::commit` is `prepare_commit` (flush
+  buffers, save the schema, `plan_publish`) → `reach_commit_point` (the
+  `Active` marker with the publish records) → `complete_publish` →
+  `finalize`. A failure before the commit point runs `discard_load` (as
+  `abort`: staged files deleted, no table touched) and returns a plain error =
+  not applied.
+  A failed marker write is read back (`decide_marker_write`): present →
+  committed; absent after a *terminal* store error (`store_utils::is_terminal`)
+  → not applied; absent after a transport error or timeout, or an unreadable
+  read-back → `UniError::BulkCommitOutcomeUnknown`, staged files kept. After
+  the commit point the publish is essential: the first attempt uses the
+  in-memory staging handles; on failure, up to `COMPLETE_PUBLISH_ATTEMPTS` (3)
+  retries go through `flush_intent::publish_records` — the
+  `publish_staged_record` path recovery takes, which skips tables the failed
+  attempt already published. Still failing → `UniError::BulkCommitIncomplete`
+  (committed), and the load is handed to a background re-drive (`Redrive` in
+  `uni-bulk/src/bulk.rs`): it retries `publish_records` with exponential
+  backoff (200 ms doubling to 30 s), keeps the load hidden behind the
+  visibility gate (below) until every table is published, then shows it,
+  registers its vertices in `VidLabelsIndex`, re-checks declared endpoints
+  (below), marks the labels' user indexes `Stale`, flushes L0 if it holds rows
+  and raises the snapshot ceiling to the load's version, writes the receipt
+  and deletes the marker. It is tracked by the database's
+  `ShutdownHandle` (with the scratch-directory claim) and stops on the
+  shutdown signal or the storage manager's cancel token, leaving the load
+  hidden and its marker for the next open; `Uni::drop` / `shutdown` join it
+  under their bound. Seam: `bulk::redrive::attempt`. Every later step is best-effort and
+  lands in `BulkStats::warnings` with a `tracing::warn!`: default indexes, user
+  index rebuild (a failed sync rebuild marks the label's indexes `Stale` in
+  memory), the endpoint re-check, the L0 flush and snapshot manifest, the
+  `Committed` marker rewrite, the latest-pointer flip, the index-status schema
+  save, receipt and marker delete. The marker is kept (and the next open
+  finishes the job) when the endpoint re-check, the flush or manifest (the
+  ceiling would stay below the load's version), the pointer flip or the
+  schema save failed. Seams: `bulk::commit::{before-commit-point, marker-write,
+  marker-read, publish-table, complete-publish, save-snapshot, schema-save}`,
+  `bulk::receipt::write`.
+- **A load's snapshot covers the load** (wave P1, B-side). Every row of a
+  load carries the version `BulkWriter::write_version` reserved from the live
+  counter, but `save_load_snapshot` copied the previous manifest's
+  `version_high_water_mark`: a session pinned to the load's own snapshot
+  (`_version <= hwm`) saw none of it (measured on a fresh database: 0 of 20,
+  hwm 0), and the next open restarted the counter at `hwm + 1`, at or below
+  the load's version. The manifest now takes `max(hwm, write_version)`; the
+  markers record the version (`BulkFlushIntent::version`), and recovery and
+  the background re-drive call `flush_intent::raise_snapshot_hwm` when the
+  commit did not save the snapshot.
+- **A load's snapshot does not change after it is taken** (wave Q). The
+  load's version is reserved at its first write, so rows committed before
+  then carry lower versions; a pinned snapshot reads L1 only, and while they
+  sat in L0 they were missing from the load's snapshot, then joined it once a
+  flush stored them under its ceiling (measured on 7b5856437: 20 rows when
+  taken, 21 after a flush). `finalize` (and the re-drive) now flush L0 first
+  when it holds any row (`flush_older_writes`), so those rows are in the
+  snapshot from the start. Recovery at open needs no flush: L0 is empty then,
+  and WAL replay assigns versions above the raised ceiling.
+- **Ceilings captured before a load is visible exclude it** (wave Q). A load
+  reserves its version at its first staged write and is shown at commit, so a
+  ceiling captured in between covered it: a transaction begun then saw the
+  load appear part way (measured: 2 rows, then 22), a flush manifest cut then
+  read 22 once the load committed, and a snapshot taken while a publish was
+  parked read the load's 20 vertices without its edges and restored them.
+  `L0Manager::reserve_bulk_version` now advances the counter and records the
+  version as unpublished under the current buffer's lock (the lock every
+  ceiling capture reads the counter under); `BulkVersionReservation` releases
+  it once the load is shown (or discarded). Every ceiling records the
+  unpublished versions at or below it and excludes them for good:
+  `SnapshotView::unpublished_bulk` (transactions,
+  `pinned_at_version_excluding`), `SnapshotManifest::unpublished_bulk_versions`
+  (every flush manifest, set at rotation from
+  `L0Buffer::unpublished_bulk_at_rotation`; the load's own manifest and the
+  re-drive's recompute it), applied by `StorageManager::visibility_at` and the
+  CSR warm. A restore deletes rows above the snapshot's ceiling and rows of
+  its unpublished versions from every rewound table
+  (`restore::drop_rows_outside_the_snapshot`). A rotation now starts the new
+  buffer's counter at the old one's and copies it with `max`, so a version
+  reserved across a rotation is never reused. A transaction's edge tier is
+  still unpinned (live CSR), so its traversals see the load's edges once it
+  is shown, as they see any later commit's.
+- **The `vertices` copy of a bulk vertex carries the load's version.** The
+  dual write into the shared `vertices` table hard-coded `_version = 1` (left
+  over from before #266, which fixed only the per-label rows), so every
+  snapshot ceiling admitted it: a session pinned to a snapshot taken *before*
+  a load saw the load through a label-less scan (measured: 21 vertices where
+  the snapshot held 1), and the visibility gate, which matches by version,
+  could not hide it.
+- **The schema is saved before the commit point.** `load_schema` replaces the
+  schema in memory only; the bulk commit's save was what persisted it. Saved
+  after the publish (as before), a failed save left rows in tables whose
+  labels the stored schema lacks — unreadable after reopen — so it is
+  essential and runs in `prepare_commit`.
+- **"Applied" is answerable by load id.** `Uni::bulk_load_applied` reads the
+  load's marker first (applied when `Committed`, or `Active` with publish
+  records) and then `catalog/bulk_loads_applied/{load id}.json`, a receipt
+  written by `finalize`, by the re-drive or by recovery *before* the marker is
+  deleted. Reading in that order cannot miss both while a load is being
+  finalized. Markers and receipts are namespaced by `flush_intent::Markers`:
+  primary under `catalog/`, a fork under `catalog/forks/{fork_id}/`.
+  `Session::bulk_load_applied` answers through the session's storage, so on a
+  forked session it reads the fork's namespace; `Uni::bulk_load_applied`
+  reads the primary's and answers `false` for a fork's load.
 - **Markers are per load.** The single `catalog/bulk_flush_intent.json` let a
   second load's `Active` overwrite the first's and either load's `commit()` or
   `abort()` delete the other's (measured: load A left with its vertices and fwd
@@ -1827,9 +1931,21 @@ Invariants:
   the batch schema, after `ensure_table_accepts`) so staged files carry the field
   ids later appends use. An empty table is the only thing a reader can observe
   before `commit()`, and it survives an abort.
-- **Staged files are protected from cleanup by Lance's unverified-file rule**
-  (unreferenced files younger than 7 days are kept unless `delete_unverified` is
-  set, which uni never sets) — independent of `compaction.version_retention`.
+- **Staged files are held against version cleanup.** Lance's unverified-file
+  rule keeps an unreferenced file only while it is younger than 7 days (unless
+  `delete_unverified`, which uni never sets); older, `cleanup_old_versions`
+  deletes it whatever `compaction.version_retention` says. A staged file is
+  unreferenced until published, so a load open for a week, or a committed load
+  left to the next open (`BulkCommitIncomplete` / `OutcomeUnknown`) in a
+  process that keeps compacting, would lose rows, and recovery's "all files
+  gone ⇒ published and since rewritten" rule would skip the tables silently
+  (measured with aged files: 30 of 30 edges missing after reopen). The writer
+  takes `StorageBackend::hold_staged_files(table)` before its first stage into
+  each table; `LanceDbBackend::optimize_table` skips `cleanup_old_versions` for
+  a held table. Holds drop on publish, abort, or writer drop; for a committed
+  load whose publish is unfinished they are kept until process exit
+  (`StagedFilesHold::keep_until_exit`). Across a restart there is no window:
+  `Uni::open` fails unless recovery succeeds, so nothing compacts first.
 - **A fork stages on its own branches.** `BranchedBackend::stage_append` cuts
   the fork's branch of the table if it has none (empty of fork writes), then
   `ForkBranching::stage_on_branch` runs the same two-step write against the
@@ -1837,20 +1953,104 @@ Invariants:
   branch (`publish_on_branch`), `discard_staged` deletes them. A fork's load
   is therefore as invisible before `commit()` as primary's, and its abort
   touches no table.
-- **A fork writes no crash marker** (`BulkWriter::writes_crash_marker`). The
-  markers are the database's and recovery applies them to primary's tables, while
-  the versions a fork's backend reports are primary's
-  (`BranchedBackend::get_table_version` delegates). Before forks staged, every
-  fork flush wrote one, and reopening after an interrupted fork load rolled
-  primary back to those versions, losing primary commits made meanwhile, and
-  dropped primary tables the load had seen absent
-  (`fork::fork_bulk_load::*_leaves_primary_intact_at_reopen`). The residual: a
-  fork load that fails part-way through `commit()` can leave its per-label
-  tables published and its main table not, and nothing reconciles a fork.
-- **A backend that cannot stage keeps the old protocol** — visible writes, abort
-  and crash recovery by version restore, which discards other writers' commits
-  to the same tables. No in-tree backend is in that position any longer (only
-  test doubles).
+- **A staging fork keeps its own marker and receipt** (wave P1, B3), under
+  `catalog/forks/{fork_id}/bulk_flush_intents/` and `.../bulk_loads_applied/`.
+  `BranchedBackend::staged_record` wraps the branch's record
+  (`ForkBranching::staged_record_on_branch`, Lance fragments as for a table)
+  as `{branch, staged}`, and `publish_staged_record` completes it on that
+  branch exactly once (`lance_branch::publish_recorded_on_branch`, the same
+  "referenced by a retained version / all files gone / some gone" rule as a
+  table, searching the branch's whole history: the `published_after` bound in
+  the marker is a primary version, because `BranchedBackend::get_table_version`
+  delegates to primary, and is ignored). So a fork load has the primary's
+  outcomes: in-process completion, `BulkCommitIncomplete` plus the background
+  re-drive, and completion by `uni_bulk::recover_interrupted_bulk_load` on the
+  fork's storage, which `UniInner::at_fork` runs before anything reads the
+  fork. Recovery never touches primary tables for a fork (the marker is not
+  in primary's namespace, and the publish goes through the branch), which was
+  the hazard of the pre-staging protocol: every fork flush wrote the
+  *database's* marker with primary versions and reopen rolled primary back
+  (`fork::fork_bulk_load::*_leaves_primary_intact_at_reopen`). On a fork,
+  `mark_indexes_stale` marks in memory only: saving the fork's merged
+  `SchemaManager` would overwrite primary's schema. `delete_fork_artifacts`
+  removes the namespace with the fork. A fork whose backend cannot stage is
+  refused a bulk load like the primary.
+  Measured on df777cb3e: a successful fork load answered `bulk_load_applied`
+  `false`; a mid-publish failure returned `Internal` and left the per-label
+  table published and the main table not, through reopen.
+- **Publishing is atomic for this handle's readers: the bulk visibility
+  gate** (wave P1, B1; `uni-store/src/storage/bulk_gate.rs`). Each table is
+  its own Lance commit, and there is no read cut (`LanceDirectory::open` reads
+  the latest version, `ScanRequest` has no version, the snapshot manifest
+  lacks the main and delta tables and records `lance_version = 0`). Measured
+  on df777cb3e with a pause before each table (20 vertices, 30 edges): warm
+  CSR, `MATCH (n:P)`=20 with `MATCH (n)`=0, then every vertex with none of
+  its edges; cold CSR, fwd 30 with bwd 0. Every row of a load carries one
+  `_version` (`BulkWriter::write_version`, reserved from the live counter), so
+  `commit` hides it before the first table: `BulkVisibilityGate::hide`
+  returns a `GateHold`, and every L1 read in the `StorageManager` read tree
+  conjoins `NOT (_version IN hidden)` through `RowVisibility`
+  (`row_visibility` for the scan tier, `edge_row_visibility` for the edge
+  tier, `visibility_at(hwm)`; the main-table readers take
+  `impl IntoRowVisibility`, so write-side callers passing a bare
+  `Option<u64>` stay ungated). `AdjacencyManager::warm` reads under the same
+  filter and installs the CSR only if the gate's epoch did not change while
+  it read (`install_if_current`), else re-reads. `GateHold::release` removes
+  the version and, under the gate's lock, invalidates the cached CSRs of the
+  load's edge types, so no reader sees the vertices without the edges or fwd
+  without bwd. A hold dropped without release (a panic or a stopped re-drive)
+  keeps the version hidden for the life of the process. Semantic compaction
+  takes the gate's exclusion lock for writing (`Compactor::compact_all_locked`)
+  and every hold takes it for reading: folding hidden deltas into L2 (whose
+  rows carry the pass's version) would expose the load part way. A
+  background pass skips while the gate is closed; a manual one waits. Limits:
+  the gate is in memory and per `StorageManager` family (the handle and its
+  transaction and snapshot views; a fork has its own, since it has its own
+  version space). Other processes, and another handle on the same path (a
+  read-only reader beside a writer), read the tables directly and can still
+  see a load part way. A query that is running when the gate is released may
+  read some tables before and some after (reads are not pinned to one gate
+  state per query).
+- **A fork is never cut part way through a publish** (wave Q). The fork reads
+  through branches cut at the versions captured at creation, with a gate of
+  its own, so a fork point captured mid-publish kept part of the load for good
+  (measured on 7b5856437: the load's 20 vertices by label, none of its 30
+  edges). `create_fork_2pc` waits for the parent's gate to open
+  (`BulkVisibilityGate::wait_open`, bounded by 30 s), captures the fork point,
+  and retries the capture when the gate's epoch moved meanwhile (a publish
+  began). Past the bound -- a load left incomplete keeps its version hidden
+  while the re-drive retries -- it fails with `UniError::ForkLifecycle {
+  stage: "bulk_publish" }` before anything is registered, and the fork can be
+  retried. Seams: `fork::create-before-capture`,
+  `fork::create-bulk-publish-wait`.
+- **Declared endpoints are re-checked when a load is published** (wave Q,
+  `uni-bulk/src/endpoint_check.rs`). `insert_edges` checks each edge when it
+  is buffered, but an endpoint older than the load can lose its label, or be
+  deleted, before the hidden edge is published: the label-removal guard sees
+  no edge on it. Measured on 7b5856437: the type stayed `enforced` and
+  `()-[r:E]->()`, narrowed to the declared labels, missed the edge, live and
+  after reopen. The load is past its commit point and is not refused; each
+  conforming type it wrote is checked again and, on a violation, recorded
+  `Unverified` and reported (`BulkStats::warnings`, a `warn!`). `commit` and
+  the re-drive check the endpoints `insert_edges` found outside the load
+  (L0 first, then storage; not `VidLabelsIndex`, which learns of a label
+  change only at flush). Recovery at open cannot check before the WAL is
+  replayed, so a marker it completed is rewritten `Committed` (not
+  `endpoints_checked`) and `check_recovered_bulk_endpoints`, called after WAL
+  replay on the primary and on a fork, reads the load's edges from `edges` by
+  its `_version` (all of the type's edges for an older marker without one),
+  checks them, then writes the receipt and deletes the marker. The catalog is
+  saved on the primary; a fork records the types in
+  `catalog/forks/{id}/bulk_endpoints_unverified.json`, applied at each open.
+  Not closed: a removal that passes its own check before the publish and
+  commits after the re-check reads (unmeasured).
+- **A backend that cannot stage is refused** (wave Q):
+  `BulkWriterBuilder::build` returns `UniError::BulkLoadUnsupported` before
+  anything is written. The old protocol (visible writes; abort and crash
+  recovery by version restore, which discards other writers' commits to the
+  same tables) is gone; recovery still rolls back the legacy single marker of
+  releases that predate staging, and refuses, keeping it, a per-load marker
+  without a publish record.
 
 ## L0Buffer
 
@@ -1868,7 +2068,7 @@ L0Buffer {
     edge_types: HashMap<Eid, String>,            // EID → type name
     current_version: u64,                        // MVCC version counter
     mutation_count: usize,                       // For flush decisions
-    mutation_stats: MutationStats,               // Per-type mutation counters
+    mutation_stats: MutationStats,               // Statement side-effect counters (see below)
     estimated_size: usize,                       // O(1) maintained estimate
     constraint_index: HashMap<Vec<u8>, Vid>,     // Unique constraint lookups
     wal: Option<Arc<WriteAheadLog>>,             // Durability
@@ -1885,6 +2085,15 @@ L0Buffer {
 ```
 
 **Size Estimation**: Maintained incrementally on every mutation (O(1) per write, avoids O(V+E) traversal).
+
+**Side-effect counters** (wave P1, CNT). `ExecuteResult`'s counters are the diff of the transaction buffer's `MutationStats` across one statement (`Transaction::compute_execute_result`). They follow the openCypher TCK's side-effect vocabulary:
+
+- A *create* is counted by the buffer: `L0Buffer::insert_vertex_with_labels` (`+nodes 1`, `+labels` per label, `+properties` per non-null value) and `L0Buffer::insert_edge`. A row *rewrite* — `SET`, `REMOVE`, a `MERGE` action, a promote upsert — goes through `update_vertex_with_labels` / `update_edge` (writer and buffer) and counts nothing there. Before, every rewrite went through the create path: `MATCH … SET n.v = 7` reported `+nodes 1 +labels 1 +properties 3`, `MERGE … ON CREATE SET` reported `+nodes 2`.
+- Property effects are recorded by the executor, which holds the old row: `Writer::record_property_effects` → `L0Buffer::record_property_effect(entity, old, new)`. A property is the TCK's triple (entity, key, value): add = `+1` set, remove = `+1` removed, overwrite with a different value = both, same value = nothing.
+- Label changes (`SET n:L`, `REMOVE n:L`) are recorded where the executor writes the label set (`record_labels_added` / `record_labels_removed`), per node and only when the set changes. They counted nothing before.
+- A statement's net effect: an `l0::StatementScope` (opened per statement and per bulk batch, see Write Throttling) remembers the vertices and edges the statement created. A change to one of them adjusts the create's counts instead of adding new ones (`CREATE (n {x: 1}) SET n.x = 2` is `+properties 1`, as TCK Set1 [6] expects).
+- Counters follow Neo4j's `QueryStatistics`, not the TCK's side effects. openCypher specifies no execution counters, and `uni-tck` computes `+labels`, `-properties`, ... itself by diffing the graph (`world.rs`, `capture_before` / `capture_after`), so the TCK never reads `ExecuteResult`. Hence: a deleted entity's properties are not counted in `properties_removed` (Neo4j has no such counter; counting them was measured at 1.6–2.3x on a 20k-node `DETACH DELETE`, debug build), and labels count per node (`labelsAdded`), not as labels newly in use across the graph. Pinned by `cypher_write::execute_counters_matrix::deleting_counts_entities_not_their_properties`.
+- A delete counts once (wave Q): `L0Buffer::apply_vertex_deletion` / `apply_edge_deletion` bump `nodes_deleted` / `relationships_deleted` only when the tombstone is new, so an entity named twice in one `DELETE` (or deleted by name and again by `DETACH`) is one deletion. `DETACH DELETE n, m` with `m = n` used to report `nodes_deleted 2`.
 
 ## L0 Visibility Chain
 
@@ -1936,6 +2145,15 @@ The WAL ensures durability before flush. Each WAL segment is stored as a JSON fi
 | **Replay** | `replay_since(hwm)` fetches segments with LSN > high-water mark |
 
 On startup, the Writer calls `replay_wal(hwm)` to recover any mutations that were buffered in L0 but not yet flushed to L1.
+
+`replay_wal` also calls `WriteAheadLog::ensure_lsn_above(hwm)` after
+`initialize`. `initialize` resumes after the highest LSN still on disk, but a
+flush deletes every segment at or below the mark its manifest publishes, so a
+cleanly closed store has none and the log used to restart at LSN 1 under a
+manifest mark of, say, 3: recovery skipped every segment written between the
+reopen and the next flush (`bugs::wal_lsn_after_reopen`). `flushed_lsn` is
+raised to the mark too, so a later manifest's mark never goes backwards.
+Segments carry `writer_features` (see declared-endpoint conformance).
 
 ## PropertyManager
 
@@ -2850,6 +3068,62 @@ MATCH (n:Person) WHERE n.age > $min_age RETURN n
 
 Parameters prevent injection and enable query plan caching.
 
+A referenced parameter missing from the map is an error at every evaluation
+site -- the DataFusion expression translation (`df_expr::cypher_expr_to_df`),
+the row evaluator (`executor/read.rs` `Expr::Parameter`, which the write
+executor uses for `CREATE`/`SET`/`MERGE` values) and the Locy evaluator
+(`locy_eval::eval_expr`). Each raises `UniError::parameter_missing_message`,
+whose `PARAMETER_MISSING_TAG` prefix the API layer (`into_query_error`,
+`into_execution_error`, `into_stream_error`, Locy's `map_native_df_error`)
+parses back into the typed `UniError::ParameterMissing { names }`. The
+evaluator used to substitute `NULL`, which a write stored -- and a `SET`
+overwrote with.
+
+Those sites are now the fallback. Before a statement runs, the API layer checks
+its parameters up front (`impl_query::check_parameters`): the parse
+(`uni_cypher::parse_with_parameters`, `parse_locy_with_parameters`) also walks
+the pest tree for every `parameter` pair -- so subqueries, `SKIP`/`LIMIT`,
+procedure arguments and property maps all count and string literals do not --
+and returns their names in order of first appearance. Any the caller did not
+supply raise `ParameterMissing { names }` with all of them, as openCypher
+specifies (compile time) and Neo4j reports. A plan-cache hit skips the parse,
+so `PlanCacheEntry::parameters` keeps the names (session and `UniInner`
+caches), and `PreparedQuery` keeps them for each execution. Checked on the
+session and transaction paths, cursors, `PROFILE`, prepared queries and the two
+Locy evaluation entries (`evaluate_with_db_and_config_capturing`,
+`LocyEngine::evaluate_with_config_capturing`); not on `EXPLAIN`, which Neo4j
+plans without parameters. A parameter referenced only inside a rule registered
+earlier is not in the program text: each `CompiledRule` carries its own
+`parameters` (`RuleDefinition::parameters`, collected by the Locy walker from
+the same pest pairs), and `impl_locy::check_program_parameters` checks the
+program's names, then each merged rule's in stratum order, after
+`merge_registered_rules` (only the registered strata the program reaches). The
+same check runs for a prepared program (`PreparedLocy`), which checked nothing
+up front before (Wave Q).
+
+**Search-procedure node yields.** `uni.fts.query`, `uni.vector.query` and
+`uni.search` emit a node yield as `node._vid`, a VID-string placeholder `node`,
+`node._labels` and the requested property columns. When the yield is used as a
+whole entity (`"*"` or the structural sentinel in the collected properties),
+`plan_procedure_call` adds `_all_props` (which makes `hydrate_node_props` fetch
+every property) and replaces the placeholder with the same node struct a scan
+builds (`add_structural_projection`). Without it, entity functions inside the
+query saw a string.
+
+**One-row arrays across `Apply`.** `apply.rs::value_to_single_row_array`
+rebuilds a subquery's post-`SET` entity columns. Types without a dedicated arm
+-- a declared `MAP` (`List<Struct<key, value>>`), typed lists, vectors,
+temporals, `Float32` -- are built by `columnar_scan::build_property_column_static`,
+the builder that covers every declared property type, and a result of any
+other type is an error rather than a mistyped column. DateTime, Time and sparse
+vector structs are values, not entities, and take the same route.
+
+**`uni.graph.project` in a transaction.** The projection catalog
+(`projection_store`, per database) is not transactional. The procedure refuses
+when the host's `transaction_l0` has `mutation_count > 0`
+(`UniError::UncommittedWritesInTransaction`, carried as
+`UNCOMMITTED_WRITES_TAG`); a clean transaction builds from its snapshot.
+
 ## Aggregation Functions
 
 | Function | Description | Example |
@@ -3124,6 +3398,119 @@ schema'd (`Traverse`) and schemaless (`TraverseMainByType`) branches.
 
 Cypher and Locy share this path — `locy_planner` calls the same
 `QueryPlanner::plan_pattern` — so the two front-ends cannot diverge here.
+
+**Declared endpoints narrow a read only over conforming types.** `plan_traverse`
+turns an unlabelled endpoint into the edge type's declared label -- the
+anonymous source into a single-label `Scan` in place of `ScanAll` (via
+`replace_scan_all_with_label_union`), the unlabelled target into an inferred
+`target_label_id` that `check_target_label` enforces -- only when every type in
+the pattern has `EdgeTypeMeta::endpoint_conformance` conforming
+(`QueryPlanner::narrowing_side`); a virtual or undeclared type, an empty side,
+or an unverified type disables it for that side. A typed traversal reads
+violating edges: `compact_adjacency` files every L1 delta under each declared
+label it compacts and the L1 delta table is label-free, so narrowing over a
+violating edge would drop it.
+
+**An unconstrained source is read from the edge type's adjacency.** When
+narrowing does not apply (an unverified type, several declared source labels,
+`[:R|S]`, or no type at all) the source is still a `ScanAll`. If that `ScanAll`
+is unfiltered and non-optional and feeds a fixed-length, non-optional
+`Traverse` over native types, `DataFusionPlanner::plan_edge_driven_source`
+puts an `EdgeSourceScanExec` directly over the all-vertex `GraphScanExec`
+(below its filter, read-set wrapper and structural projection). At execute
+time it warms the types' CSRs, collects
+`GraphExecutionContext::edge_source_candidates` -- every vid the layers
+`get_neighbors` reads hold an entry for along the traversal's direction:
+Main CSR (`MainCsr::vids_with_entries`), frozen and active overlays, the
+shadow CSR on a versioned read, and the transaction L0's edges on a live read
+(`AdjacencyManager::collect_source_vids`) -- and publishes them as `_vid IN`
+chunks into the scan's `DynamicVidFilter`, the slot `VidLookupJoinExec` uses.
+The rows are those of the unrestricted plan by construction: the scan is the
+same operator under the same visibility, restricted only by vid; the
+candidates are a superset of the vertices with a visible neighbor; and the
+traversal above is unchanged and drops a source with none. Two arms read the
+whole table instead: a read-write transaction with SSI (its read set must
+record every vertex the pattern depended on, since a vertex with no edge yet
+is a read a concurrent insert must conflict with; Locy evaluations always
+have one) and `vertex_scan_beats_lookup` (candidates × 4 ≥ main-table rows).
+Variable-length, optional and virtual-type hops are not restricted.
+
+`EndpointConformance` is `Unverified` (serde default: every catalog written
+before it existed), `Enforced` (set by `add_edge_type_with_desc` when the name
+is not already in the schemaless registry -- stored schemaless edges of that
+name were written unchecked and are read by name), or `Verified { at }`. A
+declaration cannot change in place (`apply` refuses a re-declaration with other
+endpoints, and a dropped type is tombstoned, not re-addable), so the record
+cannot go stale; `set_endpoint_conformance` bumps the schema version.
+`Verified` is set by `CALL uni.admin.verifyEdgeEndpoints([type])`
+(`Executor::verify_edge_endpoints`). It refuses a fork and a transaction,
+flushes L0, takes the L0 manager's `current_version` as the read version `V`,
+and per unverified type reads the `(src, dst)` of every edge live at `V`
+(`MainEdgeDataset::find_visible_endpoints_by_type_name` under
+`RowVisibility::at_most(V)`: identity and MVCC columns only, newest row wins,
+bulk-hidden rows included), checking labels in bulk through
+`StorageManager::vids_carry_any_label` (falling back to
+`Writer::get_vertex_labels` for a vid the index lacks). Any reader at `V` or
+later sees the read's edges plus enforced writes (`Writer::insert_edge`, and
+`BulkWriter::insert_edges`, which checks the load's own vertices through a
+VID-run map before the database's) minus deletes. Readers fixed earlier are
+excluded three ways: `await_older_snapshots` waits (10 s, then fails) until
+`PinnedVersions::min_pinned()` reaches `V`, so no transaction snapshot older
+than the read survives the flag; `at` is stamped after that, and
+`distrust_verifications_after(t)` downgrades every `Verified { at > t }` in a
+fork's merged schema (`UniInner::at_fork`, `t` = fork `created_at`, or
+`MIN_UTC` for a nested fork), in a snapshot view's private schema copy
+(`UniInner::at_snapshot`, `t` = manifest `created_at`), and persistently on
+`StorageManager::restore_snapshot` (catalog first, then the pointer). The
+catalog is saved per clean type. A binary from before this record that writes
+to the store drops the field when it saves the catalog (reads as
+`Unverified`). One that writes edges without saving the catalog is caught by
+writer features: every enforcing binary stamps `WRITER_FEATURES`
+(`["endpoint_enforcement"]`, `uni_common::core::schema`) on each catalog save
+(`Schema::writer_features`, set in memory at load so every save carries it;
+`SchemaManager::loaded_writer_features` keeps what disk held), each snapshot
+manifest (`SnapshotManifest::writer_features`, stamped by
+`SnapshotManager::save_snapshot` -- the one choke point, since flushes clone
+the previous manifest) and each WAL segment (`WalSegment::writer_features`;
+`WriteAheadLog::without_writer_features` exists only to simulate an older
+binary in tests). After `replay_wal`, `UniInner` open calls
+`Writer::distrust_conformance_after_unmarked_writes(persist = !read_only)`:
+if a replayed segment was unmarked (`WalReplay::unmarked_segments`), or the
+latest manifest is unmarked and is not `Schema::trusted_unmarked_manifest`
+(trusted only when the loaded catalog itself was marked),
+`SchemaManager::distrust_all_conformance` sets every `Enforced` / `Verified`
+type to `Unverified`, with a `warn!`, and saves (never on a fork, whose view is
+downgraded in memory). An unmarked latest manifest is then recorded as the
+trusted floor, so a store whose last flush predates the upgrade does not
+downgrade types declared after it on the next open. Sound because an older
+binary's data writes always leave either an unmarked WAL segment or, once it
+flushes, an unmarked latest manifest (it clones the manifest and drops the
+unknown field). Not covered: a bulk load staged by such a binary and published
+by a later re-drive (the re-drive endpoint check is the bulk loader's), and an
+older binary writing Lance tables with the WAL disabled and crashing before
+its manifest.
+
+**A property write cannot move an edge.** `Writer::update_edge` (every
+`SET` / `REMOVE` on a relationship) takes `(src, dst, type)` from the row
+binding, and a map with `_eid` / `_src` / `_dst` / `_type` is such a binding,
+so it can name anything. `check_edge_identity` compares them with the stored
+identity -- tx buffer, current and pending L0 (`edge_endpoints`, kept for
+deleted edges too), then `L0Buffer::edge_identity_memo`, filled by reading the
+source's outgoing adjacency once per `(src, type)` (an eid is unique and an
+identity immutable, so every neighbour read is memoized; without it a `SET`
+over a hub's edges was O(degree^2)), then `lookup_edges_by_eids`. Without a
+CSR for the type, the first 64 identities per buffer are read from storage and
+the CSR is warmed after that. A mismatch is `UniError::EdgeIdentityChange`; an
+eid found nowhere gets `check_edge_endpoints`, like a create. The memo is
+charged to its buffer's `estimated_size` (40 bytes per identity, 24 per
+scanned pair; `EdgeIdentityMemo::charge`), so it counts toward the flush
+trigger and a transaction's memory limit; a merge or a fork, which do not
+carry the memo, leave its charge out.
+
+**Mixed declared and undeclared relationship types.** `[:R|Q]` with `R`
+declared and `Q` not is planned as one `TraverseMainByType` over all the names:
+the main edge table holds every edge under its type name. Only a plugin-virtual
+type mixed with an undeclared one is still refused.
 
 `shortestPath` / `allShortestPaths` apply the map **during** expansion rather
 than to the result set — the shortest path over permitted edges is not the
@@ -4201,12 +4588,12 @@ graph TB
 All `MATCH ... WHERE` and `YIELD` expressions — whether in standalone Cypher or inside Locy rules — are compiled to DataFusion `FilterExec` / projection plans via `CypherPhysicalExprCompiler`. This creates `SimilarToExecExpr` with full `GraphExecutionContext` access: auto-embedding, FTS search, multi-source fusion all work.
 
 **Path 2 — In-memory (Locy command dispatch):**
-`DERIVE`, `ABDUCE`, and `ASSUME` commands execute **after strata converge**. They operate on already-materialized `Vec<Row>` facts and use `eval_expr()` for WHERE filtering. This path calls `eval_similar_to_pure()`, which only supports vector-vector cosine similarity — no storage or schema access is available.
+`DERIVE`, `ABDUCE`, and `ASSUME` commands execute **after strata converge**, in program order. They operate on already-materialized `Vec<Row>` facts (re-derived after an earlier command wrote, see *Top-level commands are sequenced* below) and use `eval_expr()` for WHERE filtering. This path calls `eval_similar_to_pure()`, which only supports vector-vector cosine similarity — no storage or schema access is available.
 
 **Why two paths?** Locy execution is two-phase:
 
 1. **Strata evaluation** (DataFusion): Plans and executes rules via `LocyProgramExec` → fixpoint iteration → converged facts stored in `DerivedStore` as `RecordBatch`es.
-2. **Command dispatch** (row-level): Takes converged facts as `Vec<Row>` and applies commands — DERIVE generates mutations, ABDUCE does hypothetical reasoning with savepoints, ASSUME tests hypothetical mutations. These are not queries; they're fact-application operations that iterate over rows.
+2. **Command dispatch** (row-level): Takes the facts of the current state as `Vec<Row>` and applies commands in sequence — DERIVE generates mutations, ABDUCE does hypothetical reasoning with savepoints, ASSUME tests hypothetical mutations. These are not queries; they're fact-application operations that iterate over rows.
 
 The `GraphExecutionContext` and `SessionContext` are available in `NativeExecutionAdapter` at command dispatch time but are not currently threaded through to `eval_function()`. This is a known limitation, not a fundamental constraint.
 
@@ -4686,6 +5073,43 @@ When reranking is active, `score` reflects the reranker score and `rerank_score`
 
 ## Admin Procedures
 
+### Modes, the read-only check and authorization
+
+The `uni.admin.*` and `uni.schema.create*` / `drop*` procedures are executor
+built-ins (`Executor::execute_procedure`), not plugin-registry entries, so a
+registry lookup cannot classify them. Their modes live in one table,
+`uni_query::BUILTIN_PROCEDURE_MODES` (`query/executor/procedure.rs`):
+`Dbms` for `compact`, `snapshot.create`, `snapshot.restore`,
+`snapshot.delete`, `verifyEdgeEndpoints`; `Schema` for the DDL procedures; `Read` for
+`compactionStatus` and `snapshot.list`. Three consumers read it:
+
+- `uni_query::validate_read_only_with` consults the table before its
+  registry-backed predicate, so `validate_read_only` (time travel) and every
+  `Session::query` / prepared / pinned / read-only-handle path refuses a
+  non-`Read` built-in. Before, all of them were "reads": `Session::query` ran
+  `snapshot.restore()`, and a pinned session wrote the on-disk catalog through
+  `uni.schema.dropLabel`.
+- The authorization verb: `transaction::statement_verb` maps the statement's
+  strongest procedure mode (`uni_query::strongest_procedure_mode`, ranking
+  `Read < Write < Schema < Dbms`) to `"dbms"` / `"schema"`, else
+  `classify_verb`. `Transaction::query` / `execute` / `prepare` use it;
+  `Session::run` authorizes an administrative statement as `"dbms"`.
+- Dispatch: `execute_procedure` reaches its built-in arms only for a name in
+  the table, so a new built-in without a mode is not callable rather than
+  silently read-only; a unit test scans the dispatch `match` for unclassified
+  arms.
+
+`Session::run` routes a statement for which `uni_query::is_admin_statement`
+holds (a `Dbms` procedure, nothing else but reads) to
+`Session::run_admin_statement`: outside any transaction (`snapshot.restore`
+and `verifyEdgeEndpoints` refuse inside one), `UniError::ReadOnly` on a pinned
+session or a writer-less handle. A session-level Locy program and any `ASSUME`
+body refuse a Cypher command calling a `Schema`/`Dbms` procedure
+(`impl_locy::refuse_undeferrable_procedures`): their effect bypasses the
+overlay. Neo4j's procedure modes carry the same names; there, admin rights are a
+separate `@Admin` privilege (`dbms.listConfig`, `db.clearQueryCaches`), which
+uni expresses as the `dbms` authorization verb.
+
 ### Compaction
 
 ```cypher
@@ -4840,6 +5264,27 @@ are built with the storage `PropertyExtractor` (declared type, else the
 values' shared scalar type, else `CypherValue`); import decodes with the
 declared type or the field's raw-bytes hint. Local paths go through
 `Executor::validate_path`, which reads `config.file_sandbox`.
+
+Import writes through the statement's transaction buffer
+(`Executor::transaction_l0_override`) like any other write (wave P1, f): the
+rows are visible only to that transaction, a rollback discards them, the
+transaction memory check bounds them, and the commit makes them durable. It
+used to write the main L0 with `tx_l0 = None` and then `flush_to_l1`: the
+transaction saw none of its own rows, another session saw them before the
+commit, they were on disk before the commit, and they survived a rollback.
+Without a transaction (a bare executor) it still writes the main L0 and
+flushes. Edges go through `Writer::insert_edge`, so declared endpoints are
+enforced.
+
+**Declared values are stored in their column's form** (wave P1, VEC).
+`DataType::accepts` admits lossless widenings (`Int` into a float column, a
+numeric `List` into `VECTOR` or a multi-vector column); the write path
+(`Executor::coerce_and_validate_property_value` → `to_declared_form`) now
+converts them before they reach L0, so a row reads the same before and after a
+flush (`Float`, `Vector`). L0 used to hold the literal (`Int`, `List[Int]`)
+until the flush. The `index` UDF indexes a `Value::Vector` like a list
+(`n.e[0]`); it raised "cannot index into Vector". The row-at-a-time evaluator
+in `executor/read.rs` (`Expr::ArrayIndex`) still has no `Vector` arm.
 
 ## Time Travel
 
@@ -5465,7 +5910,7 @@ The referenced probability travels in a hidden body column: transient `__isprob_
 
 MNOR and MPROD assume independent derivations. Every `MNOR`/`MPROD` rule records its pre-fold rows as **lineage** (`locy_lineage::LineageStore`, held by the run's `ProvenanceStore`) once its stratum converges — every rule of the stratum before any is corrected, since a rule's formula reads its stratum-mates. A fact's possible-worlds formula is `OP over its rows of (row event AND each referenced fact's formula AND NOT the disjunction of each negated reference's facts' formulas)`, OP = OR for MNOR, AND for MPROD:
 
-- **One reference resolution.** Which facts a row references is read in one place, `locy_lineage::RefResolver`, from the hidden columns: `__deriv_isref_*` (positive) and `__deriv_isnot_*` (negated). Lineage, EXPLAIN's provenance support (`locy_fixpoint::row_provenance`) and so `TopKProofs` all read it. The old provenance join (`collect_is_ref_inputs`, matching the subject's body column against the referenced rule) is gone: it found nothing when YIELD did not carry the subject (`mid IS reach TO b`) and dropped the `TO` target, so EXPLAIN Mode A and the TopK support map recorded no support. A reference without a hidden column (to a rule with no PROB column, or from a rule that keeps no lineage) is a certain condition and is not support.
+- **One reference resolution.** Which facts a row references is read in one place, `locy_lineage::RefResolver`, from the hidden columns: `__deriv_isref_*` (positive) and `__deriv_isnot_*` (negated). **(Wave Q)** When the run records provenance (`LocyPlanBuilder::with_provenance`, set exactly when a tracker is attached), two more kinds of column are projected. Both are transient (`__lin_*`, `planner_locy_types::LIN_COL_PREFIX`): they are read from a clause's rows and then dropped (`strip_transient_columns`) before the facts are deduplicated, so they are never part of a fact's identity. (1) A PROB rule without a fold keeps a *transient lineage* (`LineageMode::Transient`): `__lin_ref_*`, `__lin_prob_*`, `__lin_not_*` and `__lin_event` mirror the `__deriv_*` columns. `LineageStore::record_rows` accumulates its distinct derivations: a derivation seen again over the same event and facts is dropped, while two derivations of one row are kept, because the fact holds when either does. `publish_rows` keeps those of its published facts, grouped by KEY and ORed (facts sharing a KEY are alternatives, as the complement's noisy-OR reads them). It then corrects the facts' own values (`correct_rows`). A published row derived more than one way, or whose row formula is not read-once (`Analysis`), raises `SharedProbabilisticDependency`. In exact mode and under `TopKProofs`, such a row is recomputed as the OR of its derivations (`fact_probability` over its row indices); `e.p` over `a IS reach TO b` gave `e.p × reach` and now gives `e.p`. A recursive stratum finishes its rules without a fold first, so that a stratum-mate that is corrected reads their lineage. Exact mode therefore composes such a fact's own formula, positive or negated. Before, the fact was one fresh variable: on the diamond, `reach(s,t) AND NOT edge(s,t)` was 0.2235 against possible worlds 0.045. (2) Every positive reference that no lineage column names (one to a rule without a PROB column, or from a rule that keeps no lineage) gets a `SupportRef` (`__lin_sup_*`, and `__lin_supp_*` when the target has a PROB column). `RowRefs::support` holds these references for provenance only: EXPLAIN Mode A lists them as children, at probability 1 for a certain fact. `RefScope` selects the columns: `All` for a clause's rows, `Kept` for facts, `Transient` for the recursive path's candidates (`transient_support`, keyed by yield row like `clause_attribution`). A derivation of a rule without a PROB column weighs 1 when it references only certain facts (`compute_proof_probability(has_prob, …)`). Lineage, EXPLAIN's provenance support (`locy_fixpoint::row_provenance`) and so `TopKProofs` all read it. The old provenance join (`collect_is_ref_inputs`, matching the subject's body column against the referenced rule) is gone: it found nothing when YIELD did not carry the subject (`mid IS reach TO b`) and dropped the `TO` target, so EXPLAIN Mode A and the TopK support map recorded no support. A reference without a hidden column (to a rule with no PROB column, or from a rule that keeps no lineage) is a certain condition and is not support.
 - **Row event.** The row's PROB value divided by the referenced probabilities and complements it carries, which recovers the clause's own weight whether the reference was multiplied in or read as a factor. A divisor of 0 (a referenced probability of 0, a negated one of 1) means a default value that is also exact, so the weight is never read. Two rows whose own weight is the same expression over the same nodes and relationships are one event: `__deriv_event` hashes the expression's shape and their identities (`locy_planner::row_event_expr`), so the direct `s→t` row of a reachability rule and its row through a self-loop at `t` share the edge `s→t`. A weight that reads no node or relationship (a constant) makes the row its own event.
 - **Referenced fact.** Found by `(rule, __deriv_isref_*)`; a fact of a rule without lineage (a non-fold PROB rule) is one independent event of the probability read. A reference to a lineage rule that holds no such fact fails the run.
 - **Negated facts.** The planner projects a typed-NULL `__deriv_isnot_{clause}_{occurrence}` (Binary) for every `IS NOT` to a PROB rule in an `MNOR`/`MPROD` rule (`NegatedLineageRef`), and the complement (`locy_complement::probe_prob_complement`) fills it with each fact its negation key matched: the fact's KEY hash, over the negated rule's KEY columns in yield order (the hash its lineage records), and the probability the complement used (24 bytes each, `encode_negated_facts`); NULL when nothing matched. Default mode keeps `1 - p`. Negation is stratified, so a negated fact is never in the referencing fact's strongly connected component; `fact_probability` evaluates components dependencies first, each a monotone least fixpoint, and the negated formula is complete before it is negated.
@@ -5684,7 +6129,26 @@ Bottom-up evaluation answers `QUERY reach WHERE a.uid = 'c0_0'` by deriving the 
 
 ## Locy Commands
 
-Commands execute in **Phase 2** (row-level dispatch) after strata have converged. They receive facts as `Vec<Row>` and perform operations that go beyond query evaluation — mutations, hypothetical reasoning, and derivation tracing.
+Commands execute in **Phase 2** (row-level dispatch) after strata have converged, one after another in program order. They receive the facts of the state they run in as `Vec<Row>` and perform operations that go beyond query evaluation — mutations, hypothetical reasoning, and derivation tracing.
+
+**Top-level commands are sequenced against the state they leave.** The contract: a program's commands behave like the same commands run one by one, each as its own `tx.locy`, in one transaction. The machinery is `uni_query::query::df_graph::locy_sequence`, shared with ASSUME bodies. `CommandSequence` holds the current state's `CommandFacts` (raw `DerivedStore` + hydrated `Arc<RowStore>` + the adapter's `base_state_token` when derived) and the merged `MutationFootprint` of the writes since (`pending`). `dispatch_native_command` (`impl_locy.rs`) returns a `DispatchOutcome { result, written }`; a write is recorded with `record_write`, and the next command that reads facts (`locy_sequence::reads_facts`: everything but Cypher and CALIBRATE) calls `CommandSequence::facts`, which re-derives through `derive_command_facts` with the previous state as baseline: `reuse_plan` keeps every stratum the footprint cannot affect (`uni_locy::incremental::affected_strata`), unless the base-state token moved (another transaction committed in between under the unpinned session path), in which case nothing is reused. Re-derivation is lazy: consecutive writes fold into one, and nothing is derived after the last write, so a write-free program and a program ending in DERIVE pay nothing. At the top level the re-derivation goes through `LocyExecutionContext::re_evaluate_sequenced`: when the program records provenance the adapter runs it with a fresh `ProvenanceStore` and no reuse (a reused stratum has no provenance), and keeps the new tracker and approximate-probability groups for later EXPLAIN commands; its warnings are added to the result's. `run_strata_native` now plans with `build_program_plan_with_full_neural`, as the program's own run does, so a model-invoking rule re-derives the same facts. Counters: `LocyStats::sequenced_strata_evaluated` / `sequenced_strata_reused`.
+
+What writes: a DERIVE with `affected > 0` (footprint = union of `query_footprint` over its mutations) and a Cypher command `uni_locy::incremental::query_may_write` accepts (anything but `MATCH`/`WITH`/`UNWIND`/`RETURN`, a `UNION` of those, or `EXPLAIN`); its footprint is `command_write_footprint`. ASSUME and ABDUCE restore the state they forked from. `run_program`'s inline loop (Cypher reads, VALIDATE, CALIBRATE run inside `LocyProgramExec`) stops at the first write command; that command and every later one go through the dispatch loop, which therefore also runs VALIDATE (against `CommandFacts::raw`) and CALIBRATE. A Cypher write ahead of the first DERIVE used to run inline, through `execute_subplan` with no `MutationContext`, and failed with "Mutation context not set".
+
+Write targets: `tx.locy` writes into the transaction's L0 (commit is the caller's). Every collecting (session-level) evaluation runs against an ephemeral overlay L0 (`writer.create_transaction_l0()`), created in `evaluate_compiled_capturing_inner` when the engine has none — `PreparedLocy` and the internal `InnerLocyBuilder` had none, so their DERIVE was invisible to later commands, their ASSUME failed to fork, and their Cypher write went straight to the shared L0. A session program's Cypher write is collected into the `DerivedFactSet` next to the DERIVE output, in program order, so `tx.apply` replays the whole program in one transaction. A collected DERIVE whose bound endpoints include a node the program created (id at or above the allocator's `current_vid` at program start and present in the overlay; `CollectedDeriveOutput::bound_vids`) is refused: the replay re-creates that node under a new id, and the DERIVE's id-matched statement would silently match nothing.
+
+**Prepared in a transaction (Wave P1).** `Transaction::prepare_locy` binds the `PreparedLocy` to the transaction (`PreparedTxBinding`: its L0, its live snapshot slot) and its cancel scope; every execution builds the engine `tx.locy` builds (`tx_l0_override` = `locy_l0` = the transaction's L0, `collect_derive = false`, the current read snapshot). It used to build a session-style engine: no transaction L0 (its reads missed the transaction's own writes), no snapshot (a concurrent commit leaked in), the default cancel scope, and collected writes. A session-prepared program is unchanged.
+
+**Parameters reach every command and the replay (Wave P1).** `NativeExecutionAdapter::execute_cypher_read` runs a dispatched Cypher command with the program's `params` (it passed none, so after the program's first write a `$param` read failed as unresolved and a `$param` write stored NULL) and under the program's cancel scope on every branch. `DerivedFactSet::mutation_params` (hidden) holds the program's params, and `Transaction::replay_facts` replays `mutation_queries` with them.
+
+**One budget for the whole program (Wave P1).** The program's deadline is its start plus the executor's `query_timeout` (`LocyLimits::timeout`). Every re-evaluation (`NativeExecutionAdapter::re_evaluate_with`: after a write, an ASSUME body, an ABDUCE candidate) runs with `timeout = Some(deadline - now)`, not a fresh timeout; it used to get the full timeout each time (8 writes, each followed by a QUERY, ran about three timeouts long and returned `Ok`). After the run, a program past its deadline fails with `Timeout` before converting and hydrating its facts, and an incomplete run without `allow_partial` returns its `LocyIncomplete` there too; the deadline is checked again before each dispatched command and after the last. `run_program` checks it after each clause body and before a rule's post-fixpoint chain, which run outside every operator's own check. Measured before (debug, 1200 items in five categories, 287k facts, 300 ms timeout): the clause body ended at 289 ms, dedup at 525 ms, the run at 781 ms, the row-store conversion at 1.08 s, hydration at 2.08 s, the QUERY at 2.85 s, then `Ok`. Under `allow_partial`:
+- a re-evaluation cut short (budget or `max_iterations`) returns its partial facts and records its `LocyIncomplete`, merged into the result's (`merge_incomplete`: first reason, every incomplete / skipped / unsound rule); `LocyExecutionContext::is_cut_short` then ends the commands (top level, ASSUME body, ABDUCE candidates), and the command that hit the cut is not reported, as a cut-short run of the program skips its commands. Before, the partial facts were answered as complete (`max_iterations 100`: 100 of 239 rows, `incomplete` unset). Without `allow_partial` the cut is `LocyError::Incomplete` → `UniError::LocyIncomplete`, not a string inside a runtime error;
+- an operator's deadline inside a stratum (`check_deadline`'s "Query timed out") is an interruption (`run_program::cut_by_deadline`, enabled by `LocyProgramExec::set_allow_partial`) recorded like the checks between strata and iterations; it raised `Timeout` before;
+- a budget spent after a complete run skips the commands and reports a `Timeout` `incomplete` with no rule listed (`commands_cut_short`). The facts derived are still converted and hydrated to be returned; that materialization is outside the deadline.
+
+**Wave Q follow-up.** An in-memory QUERY (`locy_query::evaluate_query`) runs inside no operator, so it calls `LocyExecutionContext::check_interrupt` every `QUERY_CHECK_INTERVAL` (1024) rows it evaluates across its filter, grouping and projection passes. The adapter's check fails with `LocyError::Timeout` once the program's budget is spent, or with a cancellation (`CancelScope::is_cancelled`, mapped to `UniError::Cancelled`). The command loop turns a `Timeout` from a command into a cut under `allow_partial` (the command is not answered), and into the typed `Timeout` without it. A command that finishes past the deadline keeps its answer under `allow_partial`, but the overrun is reported in `incomplete`, and no later command runs. The final check uses the same instant that `evaluation_time` ends on, so a result reported complete took at most its budget. Without `allow_partial`, converting and hydrating the facts (`native_store_to_row_store`, `enrich_vids_with_nodes`, at the top level, after a write, and in a re-evaluation) stop once the deadline passes, and the program fails with the `Timeout` it would raise afterwards anyway. Under `allow_partial` they stay unbounded: the documented contract returns the complete facts after a post-run cut, and a deadline-cut run would otherwise return no facts at all and leave its facts unhydrated (the `VID_HYDRATION_MIN_BUDGET` floor).
+
+`LocyResult::derived` stays the facts before the first command (re-hydrated after the commands when any command may write). Guard: `locy_toplevel_sequencing` (every case on seven entry points, L0 and flushed, against the per-command `tx.locy` oracle and a hard-coded answer) and the TCK `derive/CommandSequencing.feature`; the TCK's query/derived parity check compares only QUERYs ahead of the first write.
 
 > **Expression limitation:** WHERE filters in commands use `eval_expr()` (row-level evaluator), not DataFusion. Expression functions like `similar_to()` are limited to pure vector cosine — no auto-embed, FTS, or multi-source fusion. Rule WHERE clauses (Phase 1) have full DataFusion expression support.
 
@@ -5694,7 +6158,8 @@ Commands execute in **Phase 2** (row-level dispatch) after strata have converged
 QUERY reachable WHERE start.name = 'Alice' RETURN node, distance
 ```
 
-Reads the rule's facts as the fixpoint derived them, keeps the rows the WHERE
+Reads the rule's facts as the fixpoint derived them for the current state
+(derived again after an earlier command wrote), keeps the rows the WHERE
 holds for, and projects RETURN. It never derives a rule itself.
 
 ### DERIVE (Fact Derivation)
@@ -5703,7 +6168,7 @@ holds for, and projects RETURN. It never derives a rule itself.
 DERIVE risk_propagation WHERE threshold > 0.5 RETURN flagged_nodes
 ```
 
-Iterates over converged facts from the named rule, applies the WHERE filter, and generates Cypher CREATE/MERGE mutations for each matching row. The mutations are executed via `NativeExecutionAdapter::execute_mutation()`.
+Iterates over the named rule's facts in the current state, applies the WHERE filter, and generates Cypher CREATE/MERGE mutations for each matching row. The mutations are executed via `NativeExecutionAdapter::execute_mutation()`.
 
 ### ABDUCE (Abductive Reasoning)
 
@@ -5716,6 +6181,8 @@ ABDUCE NOT safe WHERE node.name = 'Gateway' RETURN required_conditions
 
 Three-phase pipeline: (1) build derivation tree via EXPLAIN, (2) extract candidate modifications (edge removals, property changes, edge additions), (3) validate each candidate by savepoint → mutate → re-evaluate the strata the candidate can affect (the rest reused, see *Incremental re-evaluation* under ASSUME) → check if conclusion holds → rollback. Returns the minimal set of changes that achieve (or prevent) the goal.
 
+**Anonymous body elements are bound for phase 1.** A removal candidate is proposed only when its edge is identified (bound `eid`, or both endpoint vids), and a derivation's evidence row (`execute_pattern` over the clause body) binds only named elements. So `locy_abduce::name_anonymous_elements` builds the tree over a program copy whose top-level body paths name every anonymous node and relationship (`abduce_anon_{n}`, skipping any name the clause's text already contains); naming changes a pattern's columns, not its rows. Generated names are reported as the empty variable (`anonymize`) and excluded from `ChangeProperty` candidates. Without it a body like `(l:Lot)-[:OBSERVED]->(:Feature)-[:ON]->(t:Tool)` proposed nothing. Guards: `locy_abduce_identity::abduce_through_anonymous_middle_node_proposes_both_edges`, the semiconductor flagship notebook.
+
 ### EXPLAIN RULE
 
 Show the inference chain:
@@ -5723,6 +6190,8 @@ Show the inference chain:
 ```locy
 EXPLAIN RULE risk_score WHERE account.id = 'ACC-001' RETURN derivation
 ```
+
+**Proof weights and top-k retention (Wave P1).** Every recorded derivation (`ProvenanceAnnotation`) carries `proof_probability`, its weight: the row's own pre-fold PROB value (the `MNOR`/`MPROD` fold's input column, else the rule's PROB column; `locy_fixpoint::derivation_weight_column`), which is its local weight times every probability it referenced. A leaf, referencing nothing, weighs its own PROB value; a rule without a PROB column falls back to the product of its references' probabilities, each carried on its `ProofTerm::prob` (`RefTerm::prob`), or `None`. Before, the weight came from `ProvenanceStore::base_fact_probs`, keyed by each recorded row's provenance hash under a literal `"PROB"` column and looked up by the support terms' `base_fact_id` (a referenced fact's KEY hash): the keys never matched, so every weight was `None`. Under `top_k_proofs > 0` a derivation is recorded under its *fact* (`locy_explain::top_k_fact_hash`: rule + KEY hash), so the fact's derivations compete; `record_top_k` keeps the `k` heaviest (stable on ties) and replaces a derivation recorded again by a recursive refinement (`ProvenanceAnnotation::derivation`, the per-derivation row hash). It used to key by the derivation's own row hash, so `k = 1` kept every derivation of a fact. `TopKProofAccumulator` groups proofs by fact the same way, with base variables interned per referenced `(rule, fact)`, so `TopKPruningCrossedDependency` is computed on real weights over a fact's competing proofs. `ProvenanceStore::all_entries` returns every retained derivation (one per key outside top-k). The synthetic EXPLAIN root carries no weight. Guards: `locy_proof_probability` (hand-computed 0.9 / 0.4 / 0.3 / 0.7), TCK `monotonic/TopKProofs.feature`.
 
 ### ASSUME (Hypothetical Reasoning)
 
@@ -5737,11 +6206,14 @@ THEN {
 }
 ```
 
-Executes within a savepoint: applies mutations, re-evaluates the strata in the mutated state, dispatches body commands (QUERY, Cypher, DERIVE, nested ASSUME) in sequence, concatenates their rows, then rolls back. The database is never permanently modified.
+Executes within a savepoint: applies mutations, re-evaluates the strata in the mutated state, dispatches body commands (QUERY, Cypher, DERIVE, nested ASSUME) in sequence, collects one result per command, then rolls back. The database is never permanently modified.
 
-**Body commands are sequenced against the state they leave.** The semantic contract is the body's commands run one by one in a transaction that is rolled back. `evaluate_assume` keeps the body's facts as a `BodyFacts` (parent facts + hydrated parent rows + the full row store with the body's own rules on top), derived by `derive_body_facts`. `dispatch_body_command` returns a `BodyOutcome { rows, written: Option<MutationFootprint> }`; when a command wrote, `derive_body_facts` runs again with the previous `BodyFacts` as the baseline and the write's footprint, so `reuse_plan` keeps every parent stratum the write cannot affect and the body's strata are re-derived on top (positionally reusing the new parent strata). The nested-ASSUME baseline is popped and re-pushed for the new state. A DERIVE's footprint is the union (`MutationFootprint::extend`) of `query_footprint` over the mutations it ran (`locy_derive::derive_command_footprint`); a DERIVE with `affected == 0` ran none and writes nothing. A Cypher command counts as a write when its footprint is non-empty or does not preserve existing entities. Before this, the facts were derived once before the first command, so a QUERY or second DERIVE after a DERIVE read stale facts while a Cypher read saw the new edges. Rows: QUERY/Cypher rows, one `{affected: n}` row per DERIVE (the top-level `CommandResult::Derive { affected }`), a nested ASSUME's rows (the DERIVE and nested rows used to be dropped). Guard: `locy_assume_body_sequencing` (each case against the tx + rollback oracle).
+**Body commands are sequenced against the state they leave.** The semantic contract is the body's commands run one by one in a transaction that is rolled back. `evaluate_assume` uses the same `locy_sequence::CommandSequence` as the top level, with `SequenceScope::Hypothetical` (counted in `hypothetical_strata_*`): its `CommandFacts` hold the parent facts + hydrated parent rows + the full row store with the body's own rules on top, derived by `derive_command_facts`. `dispatch_body_command` returns a `BodyOutcome { result: CommandResult, written: Option<MutationFootprint> }`; a write is recorded, and before the next body command that reads facts `derive_command_facts` runs again with the previous state as the baseline and the merged footprint, so `reuse_plan` keeps every parent stratum the writes cannot affect and the body's strata are re-derived on top (positionally reusing the new parent strata). The nested-ASSUME baseline is popped and re-pushed for the new state. A DERIVE's footprint is the union (`MutationFootprint::extend`) of `query_footprint` over the mutations it ran (`locy_derive::derive_command_footprint`); a DERIVE with `affected == 0` ran none and writes nothing. A Cypher command counts as a write when its footprint is non-empty or does not preserve existing entities. Before this, the facts were derived once before the first command, so a QUERY or second DERIVE after a DERIVE read stale facts while a Cypher read saw the new edges. Result: `evaluate_assume` returns `CommandResult::Assume { results, derived }`. `results` has one entry per body command, the variant the same command produces at the top level (`Query`, `Derive { affected }`, `Cypher`, a nested `Assume`). `derived` is the hypothetical state's facts at the point the first body command reads them: `CommandFacts::shared_store` of the facts `derive_command_facts` returned in step 3, taken before the sequence starts, so it is the post-mutation, pre-body state, the same point the top-level `LocyResult::derived` is taken at. The post-body state is deliberately not reported: re-derivation is lazy, and a body ending in a write never derives it. After `CommandSequence::finish` the handle is usually the only owner, so `Arc::try_unwrap` moves the rows out without a copy. `CommandResult::rows()` (used by `LocyResult::rows()`) searches an `Assume` depth first; the Python `AssumeCommandResult` mirrors `results` / `derived` / `rows` and records `has_rows` so `LocyResult.rows()` skips a row-less ASSUME as Rust does. (Until 4.2 the result was `Assume(Vec<FactRow>)`, every body command's rows concatenated, a DERIVE as an `{affected: n}` row, a rules-only body as every derived fact flattened.) Guards: `locy_assume_body_sequencing` (each body result against the same command run alone in a tx + rollback oracle, kind and rows), TCK `assume/AssumeBodyResults.feature` (path-addressed steps `the result at path i.j ...`).
 
-**ABDUCE and EXPLAIN RULE are rejected in an ASSUME body** at compile time (`LocyCompileError::AssumeBodyCommandNotAllowed`, raised in `compiler/mod.rs` for each `AssumeBlock`, so a nested body is checked when it is compiled). `CommandResult::Assume` carries rows only; the dispatcher used to evaluate them and drop the result. `dispatch_body_command` in `locy_assume.rs` refuses both too, for a hand-built `CompiledProgram`. The replacements are a top-level ABDUCE after the ASSUME, or `tx()` / `Session::scratch()` + mutate + command + `rollback()`.
+**ABDUCE and EXPLAIN RULE in an ASSUME body (Wave P1).** Both run against the hypothetical state; the compile-time ban (`AssumeBodyCommandNotAllowed`, 4.2-unreleased) is gone. Three pieces make them answer as the same command does at the top level in a transaction that applied the mutations:
+- *Provenance in every evaluation.* `CompiledProgram::needs_provenance_tracker` looks inside ASSUME bodies (their commands and their own rules, recursively). When it holds, the adapter (`NativeExecutionAdapter::records_provenance`) gives every hypothetical re-evaluation (`re_evaluate_strata_reusing`) a fresh `ProvenanceStore` and reuses no stratum, as the top-level sequenced re-derivation already did. `ReEvaluation` and `CommandFacts` carry the state's tracker and approximate groups, and a body `EXPLAIN RULE` passes them to `explain_rule`, so it takes Mode A from the hypothetical derivations. The same tracker is what `exact_probability`'s shared-proof correction runs on: without it a body `QUERY` read the independence value (0.484375 against the exact 0.46875 for the five-edge diamond in `locy_assume_explain_abduce`), a silent wrong answer.
+- *Entity lookups read the current state.* `NativeExecutionAdapter::state_ctx` is the one context for reads of the current state (active Locy L0, the hypothetical overlay inside ASSUME/ABDUCE, over the pinned snapshot), used by `execute_pattern`, the re-evaluation's hydration, and `lookup_ctx` (EXPLAIN's annotation hydration). `lookup_ctx` used the fixpoint context's L0, so an entity a hypothetical mutation created stayed a raw id, a body EXPLAIN's WHERE naming it matched nothing, and the tree fell back to Mode B.
+- *ABDUCE validates against the body's programs.* `locy_abduce::evaluate_abduce_with` takes a `SequencePrograms` (the parent's strata, and the body's program when the body has rules); `validate_modification` re-derives with `derive_command_facts` when there is a body program, so a body rule is validated as derived, not found empty in every candidate state. `evaluate_abduce` is the top-level wrapper (`body: None`, the previous path).
 
 #### Incremental re-evaluation (A4, 2026-10-18)
 
@@ -6118,7 +6590,7 @@ Transaction (write scope)
   ├─ Reads: query() (sees uncommitted writes)
   ├─ Writes: execute(), execute_with() → ExecuteBuilder, bulk_insert_*(), bulk_writer()
   ├─ Analysis: execute_with().profile() → (ExecuteResult, ProfileOutput)
-  ├─ Locy: locy() (DERIVE auto-applies to tx L0)
+  ├─ Locy: locy() (DERIVE and Cypher writes apply to tx L0; commands run in sequence)
   ├─ Apply: apply(derived_fact_set)
   └─ Lifecycle: commit(), rollback(), drop (auto-rollback)
 ```
@@ -6170,7 +6642,7 @@ let _n = scratch.query("MATCH (n:Person) RETURN count(*) AS c").await?; // read-
 
 ### DerivedFactSet Workflow
 
-Locy DERIVE can produce facts at the session level (read-only), then apply them in a transaction:
+Locy DERIVE can produce facts at the session level (nothing is written), then apply them in a transaction. A session-level program's writes (DERIVE output and Cypher write commands) land in an ephemeral overlay its later commands read, and come back in program order as one `DerivedFactSet`; `tx.apply` replays them in one transaction:
 
 ```rust
 // Session-level DERIVE (does not mutate)
@@ -6397,14 +6869,14 @@ buffer: 1.24 ms and 5.3 ms. The walk itself stays, for the reason given above.
 
 ## Write Throttling
 
-When L1 runs accumulate (compaction falling behind), write throttling kicks in to prevent unbounded growth:
+When flush generations accumulate faster than compaction folds them, write throttling slows and then stops writers. The count is `CompactionStatus::l1_runs`: every `flush_to_l1` adds one, and a completed full compaction pass (`StorageManager::run_full_pass`, run by the background task and by the manual `StorageManager::compact` / `CALL uni.admin.compact()`) subtracts the count it read when it started. It used to set the count to 0, which erased flushes that landed while the pass ran (wave P1, T2). The scoped `compact_label` / `compact_edge_type` fold no deltas and leave the count alone. `Writer::check_write_pressure` runs at the top of every vertex/edge insert and delete. It is charged once per statement or bulk batch (wave P1, T3): every Cypher statement on a transaction (`execute_internal_with_tx_l0`, the profile and AST variants) and every `Transaction::bulk_insert_*` call opens an `l0::StatementScope` on the transaction buffer; the first write in the scope waits and marks the buffer admitted (`L0Buffer::note_write_admitted`), and the scope's later writes skip the wait. The scope closes on drop, including when a timeout or cancellation drops the statement future. A write outside any scope (a direct `Writer` call, `tx_l0 = None`) is charged per call, as before. Before this a four-row `UNWIND … CREATE` waited four budgets, a two-node one-edge `CREATE` three, and `bulk_insert_edges` of three edges three (`storage::write_backpressure_test::soft_band_charges_once_per_statement_or_batch`).
 
 ```mermaid
 graph LR
     subgraph "Write Throttle Pressure"
-        NORMAL["Normal<br/>L1 runs < 8<br/>No delay"]
-        SOFT["Soft Throttle<br/>8 ≤ L1 runs < 16<br/>Exponential backoff<br/>from 10ms base"]
-        HARD["Hard Block<br/>L1 runs ≥ 16<br/>Writes blocked<br/>until compaction"]
+        NORMAL["Normal<br/>L1 runs < 16<br/>No delay"]
+        SOFT["Soft Throttle<br/>16 ≤ L1 runs < 32<br/>min(10ms × 2^(runs−16), 1.6s)<br/>re-checked every 100ms"]
+        HARD["Hard Block<br/>L1 runs ≥ 32<br/>Writes blocked<br/>until compaction"]
     end
 
     NORMAL -->|"L1 runs ≥ soft_limit"| SOFT
@@ -6413,15 +6885,31 @@ graph LR
     SOFT -->|"Compaction reduces L1"| NORMAL
 ```
 
-Configuration:
+Configuration (defaults):
 
 ```rust
 WriteThrottleConfig {
-    soft_limit: 8,          // L1 runs: throttle starts
-    hard_limit: 16,         // L1 runs: writes blocked
+    soft_limit: 16,         // L1 runs: throttle starts
+    hard_limit: 32,         // L1 runs: writes blocked
     base_delay: Duration::from_millis(10),  // Backoff base
 }
 ```
+
+Each step of the wait is decided by `write_pressure_step` from the count read just before it:
+
+- **Hard band** (`l1_runs ≥ hard_limit`): sleep `WRITE_PRESSURE_POLL` (100 ms) and re-check, with no time bound. This is the stop-writes guarantee; it ends only when compaction lowers the count (logged once per write as "Write stalled").
+- **Soft band** (`soft_limit ≤ l1_runs < hard_limit`): the write may wait at most `min(base_delay × 2^(l1_runs − soft_limit), 100 ms × (hard_limit − soft_limit))`, in sleeps of at most 100 ms. The budget is recomputed from the current count at every step, so a falling count shortens it and dropping below `soft_limit` ends it within one poll. The cap is one hard-limit poll period per run of the soft band: 1.6 s at the defaults. Below the cap the curve is unchanged (10 ms at 16 runs, 20 ms at 17, … 1.28 s at 23). The exponent and the multiplication saturate, so no `base_delay` or run count overflows.
+- **Normal**: proceed.
+
+The soft band used to be one uninterruptible sleep of the full curve: 40.96 s at 28 runs and 81.92 s at 29. That sleep did not end when compaction reset the count, and it outlived the 30 s default statement timeout, so a single-row `CREATE` failed with `Timeout { 30000 }` behind a compaction that had already finished. `fork_point_atomic_under_concurrent_parent_writes_async_flush` (auto-flush every 4 rows) hit this in about half of 16 parallel runs.
+
+**Deadlines and cancellation.** The writer holds no statement deadline. Both bands wait in ordinary `tokio` sleeps, and the executor enforces `query_timeout` and cancellation by racing the statement future and dropping it, so either band ends at the caller's deadline with the typed `UniError::Timeout`. Writes that reach the writer outside a statement (`Transaction::bulk_insert_vertices`, `bulk_insert_vertices_labeled`, `bulk_insert_edges`, `update_vertex_properties`, `delete_vertex_by_vid`) are bounded by `query_timeout` through `Transaction::bounded_write` (wave P1, T5); before, a bulk insert in the hard band was still blocked after 4 s where a `CREATE` timed out at its 1 s deadline. A batch cut short this way leaves the transaction rollback-only.
+
+**Compaction disabled** (wave P1, T6). With `compaction.enabled = false` nothing lowers the count, so `wait_for_write_pressure` does not wait in the soft band and refuses a write at `hard_limit` at once with `UniError::WriteStalled { l1_runs, hard_limit }`, whose message names `CALL uni.admin.compact()`. It used to poll until the statement deadline and fail with `Timeout`. The typed error crosses the executor's string boundary through `UniError::write_stalled_from_message`.
+
+**Metrics** (wave P1, T4). `DatabaseMetrics::write_throttle_pressure` is `writer::write_throttle_pressure(throttle, compaction_enabled, l1_runs)`: 0 below `soft_limit`, `(l1_runs − soft_limit + 1) / (hard_limit − soft_limit + 1)` in the soft band (0 with compaction disabled, where the band does not wait), 1 at `hard_limit`. `write_throttle_waits`, `write_throttle_wait_time` and `writes_stalled` come from `Writer::write_throttle_stats`; a wait is recorded by a drop guard, so one cut short by a deadline counts too. Prometheus: `uni_write_throttle_waits_total`, `uni_write_throttle_wait_seconds` (histogram), `uni_write_stalled_total`.
+
+**Open points.** A manual full compaction (`StorageManager::compact`, `CALL uni.admin.compact()`) is the background pass: Tier 2 then Tier 3, under the same `CompactionGuard` and directory lock (it waits for a running pass instead of overlapping it), and it lowers `l1_runs`, so it relieves a throttled writer (wave P1, T1; measured on df777cb3e: three manual compactions left `l1_runs` at 3 and the next `CREATE` timed out). With `compaction.enabled = false` the count only grows until a manual compaction; see above for how writes behave then.
 
 ## Triggers
 
@@ -6432,8 +6920,10 @@ Triggers react to mutations. A `TriggerPlugin` (see [Part XVII](#part-xvii-plugi
 - **Outcome** (`TriggerOutcome`): `Continue` (allow), `Reject { reason }` (abort, before-phase only), or `Defer { until }` (re-enqueue for later).
 - The mutation payload is an Arrow `MutationBatch` with columns `event_kind | vid_or_eid | label | property | old_value | new_value`; event kinds are bit-flags (`NODE_CREATE` … `LABEL_REMOVED`).
 - `old_value` is the entity's user property map, whether the pre-image came from the L0 chain or from storage (`PreExistingProbe::extend_with_l1`): declared columns and `ext_id`, plus the undeclared properties unpacked from `overflow_json`; no `_`-prefixed storage column and never the blob. The L1 probe used to copy every column, so a flushed vertex's pre-image carried `overflow_json` (its undeclared properties nested under it), `_deleted`, `_uid`, `_created_at` and `_updated_at` (`triggers::trigger_dispatch::update_pre_image_matches_between_l0_and_flushed_vertex`).
-- Edge pre-images come from `PreExistingProbe::extend_edges_with_committed_state`: every EID the transaction writes or deletes (minus those the committed L0 chain shows deleted) is read through `PropertyManager::get_batch_edge_props` with a `QueryContext` over the committed L0 chain (pending-flush, then current; never the tx buffer) and the `_all_props` wildcard, so the pre-image is the edge's committed state, L0 over L1, in one batched lookup per commit. `from_l0_chain` alone saw only edges still in L0 and only the newest buffer's row, so a flushed edge was `EDGE_CREATE` with no pre-image on its next update and an `EDGE_DELETE` with none. Edge-delete rows resolve the type name from the tombstone's type id, like writes (`triggers::trigger_edge_pre_image`).
-- Edge delta replay (`PropertyManager::replay_edge_delta_rows`, shared by the single-EID read and `get_batch_edge_props_for_type`, the mutation prefetch) treats the newest live delta row as the edge's whole state (CRDT columns still join across versions) and includes `overflow_json`. Every delta row is a whole row: every edge write, including a `SET` under `partial_lance_writes`, flushes as a full-row Append (`Writer::insert_edge_partial_full` delegates to `insert_edge`). The partial edge MergeInsert was removed: keyed on `eid` over an append log it failed on two source rows for one edge, dropped edges never flushed before (`WhenNotMatched::DoNothing`), and rewrote every logged row of the edge to one `_version`, tying the replay (`cypher_write::partial_lance_edge_state`).
+- The vertex pre-image read (`PreExistingProbe::extend_with_l1`) runs only for vertices whose node event rows something can receive (wave Q): CDC, or a route `TriggerRouter::wants_node_events_for` matches for a `NODE_CREATE` / `NODE_UPDATE` / `NODE_DELETE` row under one of the vertex's labels in the transaction (the rows' labels; an empty label when it has none). `pending_l1_candidates` also leaves out `L0Buffer::created_vertices` (created through `L0Buffer::insert_vertex_with_labels`, allocator-fresh). Before, the built-in node trigger on one label made it run for every vertex of every commit. Measured with the probe's `uni::trigger_probe` debug event (`triggers::trigger_vertex_probe_cost`, debug build, loaded 22-core box), no user trigger: 1M-vertex `SET` on flushed vertices 18.0 s, 1M creates beside 1M flushed 53.9 s, now not run (commit 67.5 s -> 13.3 s); with a node trigger on the label, 1M creates beside flushed 34.4 s -> not run, while the `SET` (18.2 s -> 18.1 s) still reads, as it must. At 100k: 0.73-1.07 s per arm -> not run.
+- Edge pre-images come from `PreExistingProbe::extend_edges_with_committed_state`: every EID the transaction writes or deletes (minus those the committed L0 chain shows deleted, and minus `L0Buffer::created_edges` -- edges the transaction created through `L0Buffer::insert_edge` have allocator-fresh ids and no committed state) is read through `PropertyManager::get_batch_edge_props` with a `QueryContext` over the committed L0 chain (pending-flush, then current; never the tx buffer) and the `_all_props` wildcard, so the pre-image is the edge's committed state, L0 over L1, in one batched lookup per commit. `from_l0_chain` alone saw only edges still in L0 and only the newest buffer's row, so a flushed edge was `EDGE_CREATE` with no pre-image on its next update and an `EDGE_DELETE` with none. Edge-delete rows resolve the type name from the tombstone's type id, like writes (`triggers::trigger_edge_pre_image`).
+- Edge delta replay (`PropertyManager::replay_edge_delta_rows`, shared by the single-EID read and `get_batch_edge_props_for_type`, the mutation prefetch) treats the newest live delta row as the edge's whole state (CRDT columns still join across versions) and includes `overflow_json`. Every delta row is a whole row: every edge write, including a `SET` under `partial_lance_writes`, flushes as a full-row Append (`Writer::insert_edge_partial_full` delegates to `update_edge`). The partial edge MergeInsert was removed: keyed on `eid` over an append log it failed on two source rows for one edge, dropped edges never flushed before (`WhenNotMatched::DoNothing`), and rewrote every logged row of the edge to one `_version`, tying the replay (`cypher_write::partial_lance_edge_state`).
+- Vertex rows are whole rows too (wave P1, VPK): `Writer::insert_vertex_partial_full` and `insert_vertex_partial` store a full row through `update_vertex_with_labels`, and `L0Buffer::vertex_partial_keys`, the flush's per-label partial batch, `VertexDataset::build_partial_record_batch` / `merge_insert_batch`, the partial constraint validator and `l0_visibility::has_partial_vertex_keys` are gone. The partial path was reachable only through the writer's non-transactional entry points (the commit merge never carried `vertex_partial_keys`), and there, with the flag on, it was wrong: a `MergeInsert` keyed on `_vid` updates every stored version of the vertex, so properties removed earlier in the flush window came back after the flush (A), a property removed in an earlier flushed row came back after compaction (B), and a vertex created and updated in one window had no row to match and was gone after the flush (C). Measured on df777cb3e by `cypher_write::partial_lance_vertex_state` (4 of 8 failed; the Cypher arms passed because they never reached the path). `uni_partial_writes_total` counted calls that the commit merge then discarded, and is no longer emitted. `partial_lance_writes` is inert.
 
 Triggers can be declared from Cypher via `CALL uni.plugin.declareTrigger(...)` (see Part VIII) or registered as a compiled `TriggerPlugin`.
 
@@ -6518,6 +7008,9 @@ catalog/
 │   ├── {snapshot_id_1}.json
 │   ├── {snapshot_id_2}.json
 │   └── ...
+├── restore_points/
+│   └── {snapshot_id}.json          // RestorePoint of an explicit snapshot (versions + catalog)
+├── restore_intent.json             // Present only while a restore is under way
 ├── latest                          // File containing latest snapshot_id
 └── named_snapshots.json            // { "name" → "snapshot_id" } map
 ```
@@ -6549,6 +7042,133 @@ YIELD snapshot_id, name, created_at, version_hwm
 CALL uni.admin.snapshot.restore($snapshot_id)
 YIELD status
 ```
+
+### Deleting Snapshots
+
+```cypher
+CALL uni.admin.snapshot.delete($snapshot_id)
+YIELD status
+```
+
+A manifest's `version_high_water_mark` is not enough for a restore: later
+writes create tables and index datasets the snapshot never had, and semantic
+compaction merges the rows a `_version` filter would need. (Until wave Q a
+flushed vertex delete also rewrote the snapshot's own rows in place; see
+[Versioned Reads](#versioned-reads).) Until wave P1 a restore only moved
+`catalog/latest`: reads still resolved every table at its newest version, the
+reopen started the version counter at the snapshot's mark (below versions
+already in storage), and the next flush moved the pointer back.
+
+**Restore points.** `Writer::create_snapshot` (behind `Uni::create_snapshot`
+and `uni.admin.snapshot.create`) pauses compaction
+(`StorageManager::pause_compaction`: the compaction guard plus the directory
+lock), takes `flush_lock`, flushes, and then records a `RestorePoint` in
+`catalog/restore_points/{id}.json` (fsynced): the version of every backend table
+(`table_names` / `get_table_version`), of every Lance dataset under `indexes/`
+(UID map, inverted, sparse and JSON index datasets), and the whole catalog
+(`RestorePoint::catalog`: labels, edge types, properties, indexes, constraints,
+the schemaless registry; `indexes` is kept as its copy of the index list).
+The catalog is read first: DDL widens storage before saving the catalog, so
+every column it declares is already in the tables read after it. Capture also
+holds `StorageManager::pause_index_builds`, so no background build changes an
+artifact or its catalog record in between. Every recorded version is pinned by a Lance tag
+`uni_snapshot_{id}` (`StorageBackend::tag_table_version`), because compaction's
+`cleanup_old_versions` deletes untagged versions older than
+`compaction.version_retention` (7 days by default). Lance's default cleanup
+policy turns an old *tagged* version into an error, which would fail every
+`optimize_table` of the table once a snapshot outlived the retention window, so
+`optimize_table` sets `error_if_tagged_old_versions: false`. A flush manifest
+has no restore point and cannot be restored; nor can a snapshot taken before
+restore points existed, nor one whose restore point predates catalog recording
+(`catalog: None`; refused with an error naming that, since restoring its data
+under today's catalog is the half-restore the catalog rewind exists to
+prevent). Pinned versions are kept for as long as the tag exists.
+
+**`Writer::delete_snapshot`** (`Uni::delete_snapshot`,
+`uni.admin.snapshot.delete`, mode `Dbms`). Refused on a fork, while a restore
+runs (`restore_in_progress`, checked before taking `flush_lock`, so it refuses
+rather than queues), while a restore intent is on disk, and while a fork's
+`parent_snapshot_id` is the snapshot; an id with neither manifest nor restore
+point is `UniError::SnapshotNotFound` (tagged display, recovered on the
+procedure path by `snapshot_not_found_from_message`). Under `flush_lock`, in an
+order that converges when re-run: remove the tag from every recorded table
+(`StorageBackend::delete_table_tag`, idempotent) and index dataset
+(`restore::release_restore_point`), delete the restore point, remove the
+snapshot's names, then delete the manifest -- after first publishing a copy
+under a fresh id as `latest` (fsynced) when `latest` names it. Tags before the
+record: a crash in between leaves a restore point whose versions cleanup may
+reclaim (a later restore fails loudly; re-running the delete converges),
+whereas the opposite order would leak the tags forever.
+
+**`Writer::restore_snapshot`.** Refused on a fork, while the fork registry
+holds any entry (`UniError::RestoreBlockedByForks`, any status: Active, Pending
+or Tombstoned), while any transaction holds a version pin
+(`PinnedVersions::distinct_pinned`), while a bulk load is publishing, and (in
+the procedure) inside a transaction. Forks block it because the rewind covers
+primary's tables and the shared `UidIndex` but not fork branches, so a fork
+would keep rows cut from the pre-restore primary and lose UID entries it
+registered after the snapshot. Fork creation captures its fork point under
+`flush_lock` but registers its Pending entry only afterwards, so a registry
+check alone has a window. `Writer::restore_epoch` closes it: the restore
+checks the registry, bumps the epoch (SeqCst) under `flush_lock`, then checks
+again; `create_fork_2pc` reads the epoch before the capture and again right
+after `begin_create`, and on a change rolls the Pending entry back with
+`ForkLifecycle { stage: "restore_race" }`. Either the restore's second check
+sees the Pending entry, or the fork sees the bump. Under paused index builds
+(`StorageManager::pause_index_builds`: the exclusive side of an
+`Arc<tokio::sync::RwLock<()>>` shared with pinned views; the rebuild worker
+holds the shared side from claiming a task until its outcome and the catalog
+are saved, as does `Indexes::rebuild` in the foreground), paused compaction
+and `flush_lock`, taken in that order (a build takes neither of the others):
+
+1. Flush L0, so nothing written after the snapshot remains in memory or in the
+   WAL (the flush truncates it); then wait for any CSR compaction task the flush
+   started.
+2. `distrust_verifications_after(snapshot.created_at)` and save the catalog.
+3. Save a new manifest -- the snapshot's contents, with the *current* version
+   and WAL marks, so versions stay monotonic -- and `catalog/restore_intent.json`
+   (target, new manifest id, labels whose indexes need rebuilding), both fsynced.
+4. `snapshot::restore::rewind_storage`: every table the snapshot had is rolled
+   back (`rollback_table`: Lance `restore()` of the recorded version); every
+   table created since is dropped (forks are refused, so no branch lives in
+   one; emptying it, as before, kept its columns, so a label redeclared with
+   another type after the snapshot kept a column of the later type); index
+   datasets are restored to their version or deleted. `rollback_table` drops
+   the table's cached Arrow schema: a restored version can lack a column the
+   cache still listed, and every read projecting it failed with `No field
+   named`. Storage first, catalog second: only then `install_catalog` replaces
+   the in-memory schema with the snapshot's, at `schema_version` =
+   max(live, snapshot) + 1 (cached plans of either are discarded), withdraws
+   verifications after the snapshot's `created_at`, widens every property table
+   to what that catalog declares (a safety net for a DDL caught between its
+   in-memory change and its widening), saves the catalog and fsyncs it.
+   Property renames and drops are catalog-only, so rewinding the catalog undoes
+   them against the rolled-back columns.
+5. Publish the new manifest as `latest` (fsynced) and cache it.
+6. Drop in-memory state: `AdjacencyManager::reset` (Main CSRs, overlay, frozen
+   segments and shadow CSR -- flushed edges stay in the overlay until a
+   compaction, so dropping the Main CSR alone kept serving removed edges),
+   `StorageManager::reload_vid_labels_index` (in place; a stale entry made a
+   traversal's target-label check reject a relabelled vertex), the property,
+   backend and cardinality caches. `CommitRegistry::fence` clears the OCC log,
+   advances the sequence by two and keeps one empty entry, so any transaction
+   whose read sequence predates the restore fails its commit check with
+   `HistoryTruncated` (SSI only).
+7. Rebuild the indexes of every label or edge type whose definition in the
+   restored catalog is not in the restore point with the same configuration and
+   `last_built_at` (`indexes_needing_rebuild`; empty when catalog and index
+   list were captured together, as they now are). Clear the intent.
+
+A crash between steps 3 and 7 leaves the intent; the next open runs
+`recover_interrupted_restore` (after bulk-load recovery, before the latest
+manifest is read), which repeats the idempotent rewind, publishes the
+manifest, rebuilds the listed indexes, reloads the VID-to-labels index and
+clears the intent (seam `restore::after-table`), with compaction paused (the
+background compactor is already running at that point of the open). An
+interrupted restore of a legacy point without a catalog is completed the old
+way (data only, current catalog kept and widened to). Forks are not rewound.
+Seam `index_manager::scalar-built` (between a scalar index's physical build and
+its catalog record) drives the build-versus-restore race test.
 
 ## Time Travel Queries
 
@@ -6585,6 +7205,64 @@ sequenceDiagram
     Exec->>Exec: Filter: _version ≤ 42
     Exec->>App: Historical results
 ```
+
+## Versioned Reads
+
+Four kinds of reader see the store as of a version: a session pinned to an
+explicit snapshot (`pin_to_version`, `VERSION AS OF`), one pinned to a flush
+manifest (`pin_to_timestamp` resolving to a manifest without a restore point),
+a transaction's L1 view (`pinned_at_version` at `started_at_version`), and a
+fork (its own Lance branches). Wave Q made each return the state as of its
+version (`storage::versioned_read_after_delete`, both declared and schemaless):
+
+- **Rows are appended, never rewritten.** A flushed vertex delete appends a
+  tombstone row (`_deleted = true`, the delete's `_version`, no properties)
+  to `vertices` and to each label table, in the same append as the flush's
+  live rows; a relabel does the same in the label table the vertex left. The
+  `MergeInsert` on `_vid` that replaced them (Round 12) restamped every stored
+  row of the vertex with the delete's version, so every reader below the
+  delete lost the vertex: on 7b5856437 a snapshot taken before
+  `DETACH DELETE` of `v = 2` read `[1, 3, 4, 5]`, and so did a transaction
+  begun before it. Every reader already took each vid's newest row at or
+  below its ceiling, tombstone included; `StorageManager::load_vid_labels_index`
+  did not (it filtered `_deleted = false` and kept the last row scanned) and
+  now ranks rows by version like the others.
+- **An explicit snapshot reads its restore point.** `UniInner::at_snapshot`
+  builds the view with `StorageManager::pinned_at_restore_point`: the backend
+  (`StorageBackend::at_table_versions`, Lance `open_at_version`) reads every
+  table at the version the restore point recorded and tagged, treats tables
+  created later as absent and refuses writes. Semantic compaction therefore
+  cannot reach it (before: after `CALL uni.admin.compact()` a declared label
+  read `[1, 3, 5]` of `[1..5]`). The version ceiling and bulk exclusions still
+  apply on top.
+- **A pinned view's VID-to-labels index is rewound.** A pinned view copied the
+  live index, so a traversal's target-label filter used labels from after the
+  snapshot (`(a:A)-[:R]->(b:B)` returned nothing once `b` lost `:B`).
+  `StorageManager::rewind_vid_labels_index_to_pin` re-reads, through the view,
+  the vertices with a row above the pin in the live table (a rebuild above
+  100k of them).
+- **A schemaless edge type honours the ceiling.** `find_edges_by_type_names`
+  (the `TraverseMainByType` read of `main_edges`) used no snapshot ceiling, so
+  a snapshot lost edges deleted after it and gained ones created after it. It
+  uses `edge_row_visibility` now (a transaction's edge tier stays unpinned, as
+  for the CSR).
+- **Compaction keeps what pinned readers read.** `PinnedVersions` (the live
+  `AdjacencyManager`'s pin registry) now also holds `StorageManager::pinned`
+  views. Each semantic merge starts with `StorageManager::begin_compaction_merge`,
+  which returns the oldest pin: `compact_vertices` merges only rows at or
+  below it and keeps the rest verbatim, and `compact_adjacency` folds only
+  deltas at or below the oldest pin whose edge tier is versioned (a
+  `pinned` view; a transaction reads the live adjacency). L2 rows carry no
+  `_version`, so everything folded must be visible at every such pin; the CSR
+  warm no longer filters L2 by `_version`, which was a schema error on any
+  pinned read once L2 existed. Before a merge
+  writes it records the version below which it lost history (a vertex with
+  more than one merged row, or the newest folded delta) in
+  `catalog/compaction_horizon.json` and in memory; a flush-manifest pin below
+  that horizon, made afterwards, is refused with `InvalidArgument`. Explicit
+  snapshots are never refused.
+- **A bulk load is excluded by every ceiling captured before it is visible**;
+  see [BulkWriter Path](#bulkwriter-path).
 
 ## Snapshot Best Practices
 
@@ -6681,7 +7359,11 @@ The first matching trigger fires a compaction task. After semantic compaction co
   `MissedTickBehavior::Skip`; unbiased, a tick made ready by a long pass won
   half the races against a pending shutdown and started another pass.
 - Frozen L0 segments remain readable during CSR rebuild until atomic swap
-- Snapshot-based reads are completely unaffected by compaction
+- Snapshot reads survive compaction: an explicit snapshot reads its tagged
+  table versions, and a merge keeps every row and delta above the oldest pin
+  (transaction or session pinned to a flush manifest); see
+  [Versioned Reads](#versioned-reads). Until wave Q this line claimed it and
+  it was false.
 - Shadow-CSR GC (`AdjacencyManager::gc_shadow`) runs on the same task, right after CSR compaction, bounded by the versions in-flight `pinned_at_version` views hold — an entry a live reader still resolves is never reclaimed (see [ShadowCsr](#shadowcsr-deleted-edge-overlay))
 - OOM guard prevents loading more than `max_compaction_rows` into memory
 
@@ -7692,8 +8374,8 @@ let config = UniConfig {
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `soft_limit` | `usize` | 8 | L1 runs: throttle starts (exponential backoff) |
-| `hard_limit` | `usize` | 16 | L1 runs: writes blocked |
+| `soft_limit` | `usize` | 16 | L1 runs: throttle starts (exponential backoff, capped at 100 ms × (`hard_limit` − `soft_limit`) per write, re-checked every 100 ms) |
+| `hard_limit` | `usize` | 32 | L1 runs: writes blocked until compaction |
 | `base_delay` | `Duration` | 10ms | Throttle backoff base |
 
 ### ObjectStoreConfig
@@ -9012,50 +9694,179 @@ Every evaluator — `_cypher_regex` (vectorized for two strings, per row
 otherwise), the fallback executor and Locy (both through
 `expr_eval::eval_binary_op`) — compiles through
 `expr_eval::compile_cypher_regex` into `java_regex::CypherRegex`, cached per
-thread by the pattern as written.
+thread by the pattern as written and the backtrack limit.
 
-`java_regex` parses the pattern into a `regex-syntax` **AST** and translates it
-node by node into an HIR that means what the Java pattern means, wraps it in
-`\A … \z`, and builds a `regex_automata::meta::Regex` from the HIR directly.
-(Printing the HIR and re-parsing it is not faithful: a repetition of a
-repetition prints as `a{2}?`, which reads back as a lazy quantifier, so
-`'' =~ '(?:a{2})?'` was false.) The translation tracks Java's flags (`i`,
-`u`, `U`, `m`, `s`, `x`; `(?U)` implies `u`) and applies Java's rules:
-ASCII `\w\d\s\b` and POSIX `\p{..}` unless `(?U)`; case folding per
-`Pattern.single` / `SliceU` / `BitClass.add` / `CIRange[U]`, using
-`Character.toUpperCase`/`toLowerCase` simple mappings (`java_upper`,
-`java_lower`: `char::to_uppercase` where it is one-to-one, plus the Greek
-iota-subscript table and U+0130); `.` excluding all five Java line
-terminators; `\v` as vertical whitespace; `\<`/`\>` as literals;
-`[[:alpha:]]` as a class of the characters `:alpha`; `[a&&]` ignoring the
-missing operand; `\p{..}` resolved like `Pattern.family`
-(`In`/`Is`/`sc=`/`gc=`, case rules, POSIX names, case-insensitive `Lu`/`Ll`/
-`Lt`/`Lower`/`Upper` matching every cased letter). Captures are dropped (only
-`is_match` is needed).
+**Architecture.** `java_regex` is a clean-room implementation of the
+behaviour `docs/specs/java_regex_behaviour.md` specifies (its rule ids,
+`LB-3`, `CAP-5`, …, are cited in the code), extended by black-box probes of
+JDK 21 where the spec is silent. `CypherRegex::with_backtrack_limit` runs
+four stages:
 
-Anchors use the node's position: `head` (only empty-matching nodes before it),
-`tail` (only empty-matching nodes after) and `rest_nonnull` (something after
-must consume). A tail `$` is `\z` in both modes; a multi-line `^` in tail
-position never matches (Java's never matches at the end); other `$`/`(?m)^`
-become `\r`/`\n` line anchors (`EndCRLF`/`StartCRLF`), which are exact under
-input conditions the regex crate cannot express. Those conditions are
-`Guards`, checked per input in `CypherRegex::is_match`; outside them the match
-is refused ("Unsupported regex input"): U+0085/U+2028/U+2029 with multi-line
-anchors; a line terminator before the final one with a non-tail default `$`;
-an empty input or one ending in a terminator when a multi-line `^` may sit at
-the end; and, for ASCII `\b`/`\B`, a nonspacing mark after a letter or digit
-(Java's `Bound` counts such a mark as a word character). Constructs with no
-exact translation are compile errors: possessive and stacked quantifiers,
-lookaround, backreferences, atomic groups, `\Q…\E`, blocks, `\p{java…}`,
-`--`/`~~` class operators, `(?R)`, `(?P<name>…)`, `\u{..}`, `{,n}`.
+- **Parse** (`parse`). A pattern becomes an `ast::Node` tree, and a pattern
+  is valid exactly when `Pattern.compile` accepts it; a refusal carries
+  Java's `PatternSyntaxException` description and, best effort, its index
+  in UTF-16 units, formatted as `getMessage()` (`PatternError`). `\Q…\E`
+  is removed before parsing, as Java does (LIT-10), and `(?x)` whitespace
+  and comments are skipped by the parser's `peek`, with the few raw reads
+  the probes showed. Every single-code-point matcher (a literal, a bracket
+  class, `\p{…}`, `.`, a predefined class) becomes a `Node::Set` holding a
+  code-point set (`charset::CodeSet`: sorted inclusive ranges over
+  `0..=0x10FFFF`, surrogates included) with the case rules of the flags at
+  its position already folded in (`casefold`, CI-1…CI-6); anchors carry
+  the `m`/`d`/`U` flags read at their position. So no later stage looks
+  at `i`/`u`. `props` resolves property names (PROP-1…PROP-7, SCR-1,
+  BLK-1) and `names` resolves `\N{…}` (LIT-8) against the generated
+  tables.
+- **Analyze** (`analyze`). Each quantifier gets a loop strategy
+  (`LoopKind`): *general* for a group whose body can match more than one
+  way (every iteration continues into the rest of the pattern),
+  *deterministic* for a quantified single atom, a group with one way to
+  match, or any possessive quantifier (each iteration matched atomically,
+  whole iterations given back on failure), and *optional* for `(X)?`. The
+  same pass computes Java's look-behind length estimate in 32-bit
+  arithmetic (wrapping sums, the running-value check on counted
+  quantifiers, `\X` and `(?c)` classes counting minimum 1 / maximum 0) and
+  refuses a look-behind without an "obvious maximum length" (LB-1, LB-2).
+- **Route** (`Route`). `linear::build` takes a pattern whose Java answer is
+  plain regular-language membership: no look-around, atomic group,
+  possessive quantifier, back-reference, `\X`, `\b`/`\B`/`\b{g}`, `(?c)`
+  class, no `\R` under a quantifier, and no anchor other than a leading
+  `^`/`\A`/`\G` and a trailing `$`/`\z`/`\Z` without MULTILINE. It is
+  translated to a `regex-syntax` HIR (each code-point set an exact class,
+  surrogates dropped since a Rust string has none) and runs on
+  `regex_automata::meta`, anchored at both ends, in linear time
+  (`Route::Linear`). A pattern too large for the automaton's size limits
+  stays on the backtracking route. The route is chosen per pattern; no
+  input switches it.
+- **Backtrack** (`backtrack`). Everything else compiles to a program run
+  over the subject's UTF-16 units with an explicit backtrack stack and no
+  recursion (`Route::Backtracking`). A single-code-point matcher reads the
+  code point at the position, pairing surrogates forwards only (SUR-1), so
+  a look-behind start or a back-reference can leave the position inside a
+  pair. A group records its capture when it closes, so a back-reference
+  inside the group reads the previous iteration's value (BR-4); every
+  capture change pushes an undo record (CAP-2), and a look-around, atomic
+  group or possessive iteration whose body succeeds commits, dropping its
+  choice points together with its undo records, so its captures survive
+  later backtracking (CAP-3). An iteration of a general loop that consumes
+  nothing ends the loop (QNT-8). Look-behind tries start positions from
+  `i - min` down to `i - max`, nearest first, in UTF-16 units, or in code
+  points when the pattern holds a supplementary character at or after the
+  look-behind; the body must end exactly at `i`. `\b{g}` holds at or past
+  the end of the grapheme cluster starting at a hidden position `last`,
+  which look-ahead bodies, atomic groups and most deterministic-loop
+  iterations move. `grapheme` computes clusters by the UAX #29 rules of
+  Unicode 15.0 over the classes JDK 21 applies (GC-1, GC-2), and `canon`
+  answers a `(?c)` class or property: the cluster's prefixes of two or more
+  code points whose NFC is one code point in the set, longest first, or
+  the cluster's only code point. Where Java's matcher itself throws on an
+  input (`(?=ab)a\b{g}b` on `"ab"` leaves `last` at the input length), the
+  match fails with `MatchError::JavaException` naming Java's exception
+  (`java.lang.StringIndexOutOfBoundsException`), as the query fails in
+  Neo4j.
 
-`java_regex::tests::answers_match_java` checks every case in
-`crates/uni-query-functions/testdata/java_regex_oracle.tsv` against the
-answer Java gave (regenerate with `scripts/java_regex_oracle/regenerate.sh`);
-setting `UNI_JAVA_REGEX_ORACLE` points it at another oracle file, which is how
-the randomized differential runs were done. The simple case mappings agree
-with JDK 25's `Character` for every code point except the 56 characters new in
-Unicode 17 (Rust's tables are newer). No `=~` reaches Lance or an index.
+**Unicode data.** Nothing consults the Rust toolchain's or `regex-syntax`'s
+Unicode version. `java_regex/ucd_tables.rs` and `java_regex/ucd_names.bin`
+are generated by `scripts/java_regex_oracle/regenerate_ucd_tables.sh`
+(`GenUcdTables.java`) from the output of JDK 21's public API (21.0.9,
+Unicode 15.0), the minimum JVM of the current Neo4j release (2026.09 lists
+"Java SE 21 and Java SE 25"): `Character.getType`, `UnicodeScript.of` and
+the names `UnicodeScript.forName` accepts, `UnicodeBlock.of` and every
+`UnicodeBlock.forName` key, the `Character.isXxx` predicates behind
+`\p{java…}`, the emoji predicates, `toUpperCase`/`toLowerCase(int)`,
+`Normalizer` combining classes and decompositions, and, in `ucd_names.bin`
+(0.5 MB), the 34,887 names `Character.getName` reports.
+`java_regex/ucd_extra.rs` is generated by
+`scripts/java_regex_oracle/gen_ucd_extra.py` from Unicode 15.0
+`PropList.txt` and `GraphemeBreakProperty.txt`, overridden where the
+black-box scan `ScanGraphemeClasses.java` shows JDK 21's `\X` classing a
+code point differently (unassigned code points are Control except reserved
+Extended_Pictographic ones and U+0378; U+11720..U+11721 are spacing
+marks). Generating from JDK 21 is the exact form of filtering newer tables
+by `Age=15.0`: it also keeps the properties and case mappings Unicode 16.0
+changed for characters that already existed.
+
+**Limits.** `UniConfig::regex_backtrack_limit` (default 10,000,000) counts
+steps on the backtracking route: every resumption at an alternative (a
+choice point, a given-back loop iteration, a shorter `(?c)` prefix, the
+next look-behind start) is one step, and so is every 4 units of forward
+work (instructions and code units scanned, `(?c)` weighted ×4, `\X`,
+`\b{g}` and Unicode case-insensitive backreferences ×2). Counting forward
+work is what bounds time: with resumptions alone, `(?:a|a)*(?=b*+c)` on
+1 KB scanned the rest of the input per step and took 15 s at 10M. Measured
+on 28 stress patterns over 1 KB subjects in a release build, a match
+refused at the limit takes 60–317 ms. Past it the match fails with
+`MatchError::BacktrackLimit`. Java has no such limit. More than
+`backtrack::MAX_FRAMES` (4,000,000 records of 16 bytes, about 64 MB) on the
+stack fails with `MatchError::RecursionLimit` ("Regex recursion limit
+exceeded"); `(?>a|b)*` over 1,000,000 characters needs 3.0M records and
+answers in 52 ms. Deterministic loops (`a*`, `(?:ab)*`, `(a)*`), which Java
+runs without recursion, do not hold choice points. Pattern nesting deeper than
+`parse::MAX_NESTING` (2000) is refused with Java's "Stack overflow during
+pattern compilation" (RES-3; Java's own threshold depends on the thread
+stack, accepting 1,000 nested capturing groups and refusing 3,000). Known
+divergence (RES-1, RES-2): Java throws `StackOverflowError` on a general
+loop far earlier (`(?:a|b)*` past about 1,500 characters on a default
+thread stack); here such inputs are answered within the limits above
+(`regex_java_exceptions_and_recursion_limit_are_errors` answers 200,000
+characters of `(?:a|b)*(?=)` and refuses 2,400,000). Between Java's
+default-stack nesting threshold (about 1,400, varying from run to run) and
+2,000, uni-db accepts patterns as Java does on a large stack.
+
+The limit reaches the matcher through `expr_eval::RegexRuntime`. A query
+registers its own `_cypher_regex` (`create_cypher_regex_udf_with_runtime`)
+on its own session state in `Executor::create_datafusion_planner`, because
+DataFusion runs partitions on spawned tasks that a task-local does not
+reach; the row-at-a-time evaluator reads the `REGEX_RUNTIME` task-local,
+scoped per `=~` in the legacy executor. The runtime's interrupt is the
+query's `QueryBudget::check`; the vectorized loop calls it before every row
+on the backtracking route and every 64 rows on the linear route. A limit
+hit is `MatchError::BacktrackLimit`'s text (pattern length-prefixed), which
+`classify_limit_refusal` reads back with
+`java_regex::parse_backtrack_limit_message` and turns into
+`UniError::RegexBacktrackLimit` on every path. A `JavaException` or
+`RecursionLimit` reaches the query as an error with its message.
+
+**Oracle.** `java_regex::tests::answers_match_java` checks every case in
+`crates/uni-query-functions/testdata/java_regex_oracle.tsv`, and every
+generated file named in `UNI_JAVA_REGEX_ORACLE` (colon-separated),
+against the answer `CypherRegex` gives on its route; a Java exception must
+be the same exception class, a `stackoverflow` or `timeout` accepts any
+answer, and a subject holding an unpaired surrogate (not a Rust string) is
+skipped.
+`scripts/java_regex_oracle/gen_cases.py` (seeded; `--profile
+anchors|all|unicode|lookbehind|backref|javaprops|names|grapheme|canon|
+cibackref|emptyloop|lookaround`, 300,000-case profiles for the gate)
+generates cases for `JavaRegexOracle.java`, which records the JDK's
+answer through the public API: `true`/`false`, `error` (a
+`PatternSyntaxException`), `exception:<class>`, `stackoverflow`, or
+`timeout` past its limit (2 s; `-Doracle.timeout.ms`). Answers are
+recorded with Java 21; where Java 21 and 25 answer differently (Unicode
+16.0 data, Java 25's grapheme rules) uni-db answers as Java 21. A stress
+fuzz of look-behinds with counts near 2^31 leaves disagreements on
+`{2147483647,}` and ~10^9-iteration zero-width loops, where Java's window
+arithmetic is not fully characterized (`PROVENANCE.md`, item 8).
+
+Measured against JDK 21.0.9 on 2026-10-21: the 12 profiles × 2 seeds give
+no wrong answer; the only differences are 24 `backref` cases refused at the
+backtrack limit where Java answered `false`. An independent corpus (591,648
+cases from a separate grammar with witness-based subjects) agrees on every
+case Java answered (14 Java timeouts excluded), and every refused pattern in
+it and in the gate corpora (812,665 cases, plus 271,048 random bracket
+classes) gets Java's exact description and index
+(`JavaRegexOracle -Doracle.detail=true`). Where Java 21 and 25 differ
+(48,985 cases: Unicode 16.0 data, the GB9c grapheme rule) uni-db answers as
+Java 21. No `=~` reaches Lance or an index.
+
+**Provenance.** `java_regex/PROVENANCE.md` records what the implementation
+was written from: the behaviour specification
+(`docs/specs/java_regex_behaviour.md`, itself written from public
+documentation and black-box probes), the public JDK 21 Javadoc, Unicode
+15.0 data and standards, the generated tables above, black-box experiments
+on JDK 21 and 25 through the public API, and the findings those probes
+added beyond the spec (loop strategies, `\b{g}`'s `last`, `(?c)`, class
+intersections, literal runs, COMMENTS mode, look-behind arithmetic,
+property spellings, grapheme data).
 
 **A condition that cannot be evaluated is an error, not a dropped row** (W6).
 Every Locy filter goes through `locy_eval::eval_condition`: true keeps the
@@ -9142,11 +9953,10 @@ purely relative rounding was tried first and broke convergence on cyclic
 path compares the key view with a candidate row index carried outside the join
 keys, and maps the survivors back to exact rows.
 
-**A Locy command never changes what a later command reads (C-NONINTERFERENCE).** Once the fixpoint
-publishes a program's facts, `QUERY`, `EXPLAIN RULE`, `ABDUCE` and `ASSUME`
-body commands receive that store by shared reference (`&RowStore`), at the top
+**A Locy command that does not write never changes what a later command reads (C-NONINTERFERENCE).** Commands run in sequence, so a `DERIVE` or a Cypher write does change what later commands read (see *Top-level commands are sequenced*); every other command does not. Each state's facts are published to `QUERY`, `EXPLAIN RULE`, `ABDUCE` and `ASSUME`
+body commands by shared reference (`&RowStore`), at the top
 level (`impl_locy.rs`, `dispatch_native_command`) and inside an `ASSUME` body,
-so a command that writes it does not compile. `EXPLAIN RULE` without provenance
+so a command that writes the store does not compile. `EXPLAIN RULE` without provenance
 to read (its WHERE matches no fact, or the rule has none) used to re-derive the
 rule through an in-memory SLG evaluator, which implemented neither FOLD, BEST
 BY, post-FOLD WHERE nor set semantics, and merged those rows into the shared
@@ -9176,7 +9986,15 @@ typed as a string and came back NULL, which is the only reason EXPLAIN kept its
 own re-derivation. Mode A classifies KEY columns from the hydrated published
 facts, so an integer KEY stays an integer. ABDUCE always builds its tree from
 the published facts (Mode B): the causes ABDUCE edits (edges, properties) are
-the evidence rows' bindings, which recorded provenance does not keep. Mode A's
+the evidence rows' bindings, which recorded provenance does not keep. Mode B
+tries a rule's clauses highest PRIORITY first (PRIORITY keeps the rows of
+the highest-priority clause per KEY), and takes an evidence row only when
+it yields the fact's non-KEY values too (`yields_match`: each non-KEY,
+non-PROB, non-FOLD YIELD expression the body row can evaluate). Matched on
+KEY alone in text order, it explained a PRIORITY- or BEST BY-kept fact by
+another clause's or another row's derivation, so ABDUCE NOT proposed edits
+that leave the fact (Wave Q). A removal candidate names the type of the edge
+the derivation actually read (`[e:E|G]` used to name `E`). Mode A's
 children are the facts a derivation references (its `support`, from
 `RefResolver`): each referenced fact is expanded into its derivations where it
 first appears (`ModeATree::node`) and is a leaf carrying its bindings elsewhere

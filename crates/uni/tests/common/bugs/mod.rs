@@ -204,6 +204,7 @@ pub mod in_query_procedure_call;
 pub mod write_procedure_in_transaction;
 // A procedure called in a transaction reads the transaction's view.
 pub mod procedure_reads_in_transaction;
+pub mod procedure_reads_in_transaction_on_fork;
 // An algorithm's list and map yields are lists and maps to every consumer.
 pub mod algorithm_list_yield_values;
 // A relationship bound earlier and matched again, with its type undeclared.
@@ -213,4 +214,20 @@ pub mod rebound_relationship_schemaless;
 pub mod escaped_identifier_round_trip;
 // A user property named `label`, `labels`, `type` or `properties` is an
 // ordinary property on every read path, never taken for an entity field.
+pub mod call_subquery_set_declared_types;
+pub mod declared_endpoint_narrowing;
+pub mod declared_endpoint_violation_reads;
+// `SET` / `REMOVE` on a relationship cannot move it or change its type.
+pub mod update_edge_identity;
+// An older binary writing after an enforcing one voids endpoint conformance.
+pub mod endpoint_conformance_writer_features;
 pub mod entity_field_name_collision;
+pub mod graph_project_in_transaction;
+pub mod mixed_declared_undeclared_edge_types;
+pub mod search_yield_node_is_full_entity;
+pub mod unbound_parameter_in_write;
+// WAL LSNs stay above the manifest mark after a reopen.
+pub mod wal_lsn_after_reopen;
+// Mutating built-in procedures are refused in read-only contexts and are
+// authorized as `dbms` / `schema`, never `read`.
+pub mod admin_procedure_read_only;

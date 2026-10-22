@@ -368,6 +368,11 @@ pub async fn restore_snapshot_core(db: &Uni, snapshot_id: &str) -> Result<(), Un
     db.restore_snapshot(snapshot_id).await
 }
 
+/// Delete a snapshot and release the versions it pins.
+pub async fn delete_snapshot_core(db: &Uni, snapshot_id: &str) -> Result<(), UniError> {
+    db.delete_snapshot(snapshot_id).await
+}
+
 // ============================================================================
 // Compaction Core
 // ============================================================================

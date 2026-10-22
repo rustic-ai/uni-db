@@ -4,7 +4,10 @@ pub mod locy_ast;
 pub mod pattern_requirements;
 pub mod plugin_aggregates;
 
-pub use grammar::{ParseError, parse, parse_expression, parse_locy};
+pub use grammar::{
+    ParseError, parse, parse_expression, parse_locy, parse_locy_with_parameters,
+    parse_with_parameters,
+};
 pub use plugin_aggregates::{
     is_known_plugin_aggregate, register_plugin_aggregate, unregister_plugin_aggregate,
 };

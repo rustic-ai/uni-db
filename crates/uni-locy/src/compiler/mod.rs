@@ -448,19 +448,6 @@ fn extract_commands(
                 }));
             }
             LocyStatement::AssumeBlock(ab) => {
-                // An ASSUME returns only the rows of its body's QUERY and
-                // Cypher commands; an ABDUCE or EXPLAIN result would be
-                // computed and dropped. A nested ASSUME body is checked when
-                // `extract_commands` below compiles it.
-                if let Some(command) = ab.body.iter().find_map(|stmt| match stmt {
-                    LocyStatement::AbduceQuery(_) => Some("ABDUCE"),
-                    LocyStatement::ExplainRule(_) => Some("EXPLAIN RULE"),
-                    _ => None,
-                }) {
-                    return Err(LocyCompileError::AssumeBodyCommandNotAllowed {
-                        command: command.to_string(),
-                    });
-                }
                 // Compile the ASSUME body as a sub-program
                 let body_program_ast = uni_cypher::locy_ast::LocyProgram {
                     module: None,

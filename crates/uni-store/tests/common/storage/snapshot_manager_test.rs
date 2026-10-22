@@ -32,6 +32,8 @@ fn create_test_manifest(id: &str) -> SnapshotManifest {
         wal_high_water_mark: 50,
         vertices: HashMap::new(),
         edges: HashMap::new(),
+        writer_features: Vec::new(),
+        unpublished_bulk_versions: Vec::new(),
     }
 }
 

@@ -17,6 +17,7 @@ use uni_db::{DataType, Uni, Value};
 
 fn flag_on_config() -> UniConfig {
     UniConfig {
+        #[expect(deprecated, reason = "exercises the deprecated no-op flag")]
         partial_lance_writes: true,
         ..UniConfig::default()
     }
@@ -495,6 +496,7 @@ async fn t8_partial_set_then_delete() -> Result<()> {
 async fn c1_partial_set_with_generated_column_recomputes() -> Result<()> {
     use uni_common::UniConfig;
     let cfg = UniConfig {
+        #[expect(deprecated, reason = "exercises the deprecated no-op flag")]
         partial_lance_writes: true,
         ..UniConfig::default()
     };
@@ -558,6 +560,7 @@ async fn c1_partial_set_with_generated_column_recomputes() -> Result<()> {
 async fn c2_partial_set_untouched_generator_dependency() -> Result<()> {
     use uni_common::UniConfig;
     let cfg = UniConfig {
+        #[expect(deprecated, reason = "exercises the deprecated no-op flag")]
         partial_lance_writes: true,
         ..UniConfig::default()
     };
@@ -602,6 +605,7 @@ async fn c2_partial_set_untouched_generator_dependency() -> Result<()> {
 async fn c3_partial_set_with_multiple_generators() -> Result<()> {
     use uni_common::UniConfig;
     let cfg = UniConfig {
+        #[expect(deprecated, reason = "exercises the deprecated no-op flag")]
         partial_lance_writes: true,
         ..UniConfig::default()
     };

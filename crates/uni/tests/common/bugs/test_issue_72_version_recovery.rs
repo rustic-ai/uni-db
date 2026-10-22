@@ -251,6 +251,8 @@ async fn test_snapshot_manager_has_any_manifests() -> Result<()> {
         wal_high_water_mark: 5,
         vertices: HashMap::new(),
         edges: HashMap::new(),
+        writer_features: Vec::new(),
+        unpublished_bulk_versions: Vec::new(),
     };
 
     snapshot_mgr.save_snapshot(&manifest).await?;

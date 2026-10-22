@@ -205,7 +205,12 @@ async fn answers(
         .command_results
         .iter()
         .filter_map(|c| match c {
-            CommandResult::Query(rows) | CommandResult::Assume(rows) => Some(canonical(rows)),
+            CommandResult::Query(rows) => Some(canonical(rows)),
+            // Each ASSUME's body is one QUERY (`THEN { QUERY r }`).
+            CommandResult::Assume { results, .. } => match results.as_slice() {
+                [CommandResult::Query(rows)] => Some(canonical(rows)),
+                other => panic!("expected the ASSUME body's one QUERY, got {other:?}"),
+            },
             _ => None,
         })
         .collect();
@@ -370,66 +375,89 @@ fn drive(cases: u32) {
         totals.families,
         totals.divergences.len()
     );
-    assert!(
-        totals.divergences.is_empty(),
-        "seed={seed}: {} divergences; first:\n{}",
-        totals.divergences.len(),
-        totals
-            .divergences
-            .iter()
-            .take(3)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n\n")
-    );
+    // Every check runs and every failure is reported together: a divergence
+    // (which an unsound reuse usually also causes) must not hide that the
+    // tracked-reuse pin fired, or the reverse.
+    let mut failures: Vec<String> = Vec::new();
+    if !totals.divergences.is_empty() {
+        failures.push(format!(
+            "{} divergences; first:\n{}",
+            totals.divergences.len(),
+            totals
+                .divergences
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        ));
+    }
     // Floors: reuse must engage, recomputation must happen, and the mutation
     // must change answers, or agreement proves nothing.
     let n = totals.compared.max(1);
-    assert!(
-        totals.compared * 2 >= totals.cases,
-        "seed={seed}: too few compared: {totals:?}"
-    );
+    if totals.compared * 2 < totals.cases {
+        failures.push(format!("too few compared: {totals:?}"));
+    }
     // Reuse is only possible where the runtime offers a baseline: a program
     // with a provenance tracker (an MNOR / MPROD fold, or EXPLAIN) never
     // gets one, so the reuse floor is taken over the other programs only,
     // and needs enough of them that it cannot hold vacuously.
     let min_eligible = (totals.compared / 6).max(3);
     let e = &totals.eligible;
-    assert!(
-        e.cases >= min_eligible,
-        "seed={seed}: only {} of {} compared cases can reuse strata (no provenance \
-         tracker); the reuse floor needs at least {min_eligible}. eligible {:?}, tracked {:?}",
-        e.cases,
-        totals.compared,
-        e,
-        totals.tracked
-    );
-    assert!(
-        e.reused * 100 >= 10 * (e.reused + e.evaluated),
-        "seed={seed}: reuse-eligible cases reused {} of {} strata ({:.1}%), below the 10% \
-         floor. eligible {:?}, tracked {:?}",
-        e.reused,
-        e.reused + e.evaluated,
-        e.reuse_pct(),
-        e,
-        totals.tracked
-    );
+    if e.cases < min_eligible {
+        failures.push(format!(
+            "only {} of {} compared cases can reuse strata (no provenance tracker); the \
+             reuse floor needs at least {min_eligible}. eligible {:?}, tracked {:?}",
+            e.cases, totals.compared, e, totals.tracked
+        ));
+    }
+    if e.reused * 100 < 10 * (e.reused + e.evaluated) {
+        failures.push(format!(
+            "reuse-eligible cases reused {} of {} strata ({:.1}%), below the 10% floor. \
+             eligible {:?}, tracked {:?}",
+            e.reused,
+            e.reused + e.evaluated,
+            e.reuse_pct(),
+            e,
+            totals.tracked
+        ));
+    }
     // Pins today's behavior: with a provenance tracker the runtime skips the
-    // top-level baseline, so nothing is reused. Expected to change if
+    // top-level baseline, and a hypothetical state that records provenance
+    // reuses nothing either, so nothing is reused. Expected to change if
     // baseline reuse is ever made sound under provenance; update this then.
-    assert_eq!(
-        totals.tracked.reused, 0,
-        "seed={seed}: programs with a provenance tracker reused {} strata, but the runtime \
-         skips the ASSUME baseline for them (impl_locy.rs, `enable_top_level_baseline`). If \
-         baseline reuse was made sound under provenance, this assertion is expected to \
-         change. tracked {:?}, eligible {:?}",
-        totals.tracked.reused, totals.tracked, totals.eligible
-    );
+    // It needs tracked cases to mean anything.
+    if totals.tracked.cases == 0 {
+        failures.push(format!(
+            "no compared case runs with a provenance tracker, so the tracked-reuse pin is \
+             vacuous. tracked {:?}, eligible {:?}",
+            totals.tracked, totals.eligible
+        ));
+    }
+    if totals.tracked.reused != 0 {
+        failures.push(format!(
+            "programs with a provenance tracker reused {} strata, but the runtime gives them \
+             no baseline (impl_locy.rs, `enable_top_level_baseline`) and reuses nothing in a \
+             state that records provenance (`re_evaluate_strata_reusing`). If baseline reuse \
+             was made sound under provenance, this pin is expected to change. tracked {:?}, \
+             eligible {:?}",
+            totals.tracked.reused, totals.tracked, totals.eligible
+        ));
+    }
+    if totals.evaluated * 100 < 10 * (totals.reused + totals.evaluated) {
+        failures.push(format!("too little recomputation: {totals:?}"));
+    }
+    if totals.changed * 100 < 20 * n {
+        failures.push(format!(
+            "too few answers changed by the mutation: {totals:?}"
+        ));
+    }
     assert!(
-        totals.evaluated * 100 >= 10 * (totals.reused + totals.evaluated),
-        "seed={seed}: {totals:?}"
+        failures.is_empty(),
+        "seed={seed}: {} check(s) failed:\n- {}",
+        failures.len(),
+        failures.join("\n- ")
     );
-    assert!(totals.changed * 100 >= 20 * n, "seed={seed}: {totals:?}");
 }
 
 fn assume_cases(default: u32) -> u32 {

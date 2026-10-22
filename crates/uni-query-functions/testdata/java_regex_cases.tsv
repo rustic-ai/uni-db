@@ -1,8 +1,6 @@
 # Cases for Cypher `=~` against Java's `Pattern.compile(p).matcher(s).matches()`.
-# Columns: pattern <TAB> subject [<TAB> reject]. Escapes: \\ \t \n \r \x{HEX}.
-# `reject` marks a valid Java pattern uni-db refuses because the regex crate
-# cannot evaluate it exactly. Regenerate the answers with
-# scripts/java_regex_oracle/regenerate.sh.
+# Columns: pattern <TAB> subject. Escapes: \\ \t \n \r \x{HEX}.
+# Regenerate the answers with scripts/java_regex_oracle/regenerate.sh.
 #
 # Whole-string matching
 b	abc
@@ -80,7 +78,7 @@ a(?i)b|c	C
 (?iu)\\x{10400}	\x{10428}
 (?u)\x{e9}	\x{c9}
 (?U)(?i)\x{e9}	\x{c9}
-(?iU-U)\x{e9}	\x{c9}	reject
+(?iU-U)\x{e9}	\x{c9}
 # Predefined classes: ASCII by default
 \\w	\x{e9}
 \\w	_
@@ -108,8 +106,8 @@ a\\Bb	ab
 \x{e9}\\b	\x{e9}
 (?U)\\b\x{e9}	\x{e9}
 (?U)\x{e9}\\b	\x{e9}
-e\\x{301}\\b	e\x{301}	reject
-e\\b\\x{301}	e\x{301}	reject
+e\\x{301}\\b	e\x{301}
+e\\b\\x{301}	e\x{301}
 !\\x{301}\\b	!\x{301}
 e\\x{301}	e\x{301}
 (?U)e\\x{301}\\b	e\x{301}
@@ -151,8 +149,8 @@ a$\n	a\r\n
 a$\r\n	a\n
 a$.	a\r
 a$..	a\r\n
-a$\nb	a\nb	reject
-a$\x{85}	a\x{85}	reject
+a$\nb	a\nb
+a$\x{85}	a\x{85}
 x|a$\n	a\n
 (?:a$)+\n	a\n
 a$|b	a
@@ -172,35 +170,35 @@ a$|b	b
 (?m)a\r\n^b	a\r\nb
 (?m)a\r^\nb	a\r\nb
 (?m)a\n^b	a\nb
-(?m)a$\x{2028}b	a\x{2028}b	reject
-(?m)a$\x{85}	a\x{85}	reject
-(?m)a\x{2028}^b	a\x{2028}b	reject
+(?m)a$\x{2028}b	a\x{2028}b
+(?m)a$\x{85}	a\x{85}
+(?m)a\x{2028}^b	a\x{2028}b
 (?m)^	
 (?m)^$	
 (?m)^$	a
 (?m)^.*$	abc
-(?m)^.*$	abc\n	reject
-(?m)^.*		reject
+(?m)^.*$	abc\n
+(?m)^.*	
 (?m)^a	a
 (?m)^a$	a
 (?m)a\n^	a\n
-(?m)a\n^b*	a\n	reject
+(?m)a\n^b*	a\n
 (?m)^\\w+$\n^\\w+$	ab\ncd
-(?m)^\\w+$\n^\\w+$	ab\n\x{2028}d	reject
+(?m)^\\w+$\n^\\w+$	ab\n\x{2028}d
 (?m)(?s)^.*$	a\nb
 (?m)(?s).*^.*$	a\nb
-(?m)(?s).*^.*$	a\nb\n	reject
+(?m)(?s).*^.*$	a\nb\n
 \\A	
 \\Aa\\z	a
-\\Za	a	reject
-\\Ga	a	reject
-a\\Z	a\n	reject
+\\Za	a
+\\Ga	a
+a\\Z	a\n
 # Quantifiers
-a*+a	aa	reject
-a++	aa	reject
-a?+	a	reject
-a{2}+	aa	reject
-a{1,3}+b	aab	reject
+a*+a	aa
+a++	aa
+a?+	a
+a{2}+	aa
+a{1,3}+b	aab
 a**	a
 a*?	aa
 a+?	aa
@@ -208,7 +206,7 @@ a{2}	aa
 a{2,}	aaa
 a{2,3}	aaaa
 a{,3}	a
-x{1}{2}	xx	reject
+x{1}{2}	xx
 (a*)+	aa
 (?:a{2})?	
 (?:a{2})?	a
@@ -237,7 +235,7 @@ a}	a}
 [^a[b]]	b
 [a[b]]	b
 [a--b]	a
-[a~~b]	a	reject
+[a~~b]	a
 [a&&]	a
 [&&a]	a
 [a&&]	b
@@ -301,8 +299,8 @@ a}	a}
 \\p{Greek}	\x{3b1}
 \\p{IsGreek}	\x{3b1}
 \\p{Isgreek}	\x{3b1}
-\\p{InGreek}	\x{3b1}	reject
-\\p{block=Greek}	\x{3b1}	reject
+\\p{InGreek}	\x{3b1}
+\\p{block=Greek}	\x{3b1}
 \\p{IsAlphabetic}	\x{e9}
 \\p{Alphabetic}	\x{e9}
 \\p{isalphabetic}	\x{e9}
@@ -344,16 +342,16 @@ a}	a}
 \\p{Cs}	a
 \\P{Cn}	\x{378}
 \\P{L}	1
-\\p{javaLowerCase}	a	reject
+\\p{javaLowerCase}	a
 # Escapes and literals
 \\x{e9}	\x{e9}
 \\u00e9	\x{e9}
 (?i)\\u00e9	\x{c9}
 \\u{e9}	\x{e9}
 \\U000000e9	\x{e9}
-\\0101	A	reject
-\\cA	\x{1}	reject
-\\e	\x{1b}	reject
+\\0101	A
+\\cA	\x{1}
+\\e	\x{1b}
 \\a	\x{7}
 \\f	\x{c}
 \\t	\t
@@ -367,13 +365,13 @@ a}	a}
 \\>	>
 \\<a\\>	<a>
 \\y	y
-\\h	\x{20}	reject
-\\R	\r\n	reject
-\\X	a	reject
-\\N{LATIN SMALL LETTER A}	a	reject
-\\Qa*\\E	a*	reject
+\\h	\x{20}
+\\R	\r\n
+\\X	a
+\\N{LATIN SMALL LETTER A}	a
+\\Qa*\\E	a*
 \\b{start}a	a
-\\b{g}		reject
+\\b{g}	
 # Groups, flags, unsupported constructs
 (?<n1>a)	a
 (?<1n>a)	a
@@ -382,17 +380,335 @@ a}	a}
 (?<n>a)(?<n>b)	ab
 (?:a)	a
 ()	
-(?)a	a	reject
-(?i-i)a	a	reject
+(?)a	a
+(?i-i)a	a
 (?R)a	a
-(?d).	\r	reject
+(?d).	\r
 (?U)a*?	a
-(?=a)a	a	reject
-(?!b)a	a	reject
-(?<=a)b	ab	reject
-(?>a)	a	reject
-(a)\\1	aa	reject
-\\1	a	reject
+(?=a)a	a
+(?!b)a	a
+(?<=a)b	ab
+(?>a)	a
+(a)\\1	aa
+\\1	a
 \\k<n>	a
 a)|(b	a
 [a	a
+# Hand cases from the hybrid-routing prototype.
+a$\\n	a\n
+a$\\n	x\ny
+a$\\n	a\nb
+.*a$\\n	b\na\n
+a$\nb	a\nb
+a$\n	a\n
+a$\r\n	a\r\n
+a$\r	a\r
+a$\x{85}	a\x{85}
+a$\x{2028}	a\x{2028}
+a$.*	a\n
+a$.*	a\nb
+a$(?s).*	a\n
+a$(?s).*	a\nb
+a$(?s).*	a\r\n
+a\r$\n	a\r\n
+(?m)a\r$\n	a\r\n
+(?m)a$\n^b	a\nb
+(?m)a$\r\n^b	a\r\nb
+(?m)a\r^\nb	a\r\nb
+(?m)a$\x{85}^b	a\x{85}b
+(?m)a$\x{2029}^b	a\x{2029}b
+(?m)^	
+(?m).*\n^	a\n
+(?m)(?s).*^	a\n
+(?m)(?s).*^.*	a\nb
+(?m)(?s)^.*	\n
+(?m)(?s).*^.*$	\x{2028}b
+(?m)a$(?s).*	a\x{2028}b
+\\b	
+e\\x{301}\\b	e\x{301}
+e\\b\\x{301}	e\x{301}
+\x{e9}\\x{301}\\b	\x{e9}\x{301}
+\x{e9}\\b\\x{301}	\x{e9}\x{301}
+\\x{301}\\b	\x{301}
+\\b\\x{301}	\x{301}
+.\\x{301}\\x{302}\\b	e\x{301}\x{302}
+.\\x{301}\\b\\x{302}	e\x{301}\x{302}
+.\\b\\x{301}	\x{1d400}\x{301}
+..\\b	\x{1d400}\x{301}
+.\\b.	e\x{1d167}
+..\\b	e\x{1d167}
+.\\B.	e\x{1d167}
+..\\b	1\x{301}
+..\\b	\x{663}\x{301}
+..\\b	 \x{301}
+..\\B	 \x{301}
+.\\B.	a\x{301}
+\\B	
+(?U)..\\b	e\x{301}
+(?U).\\b.	e\x{301}
+(?=a)a	a
+(?=a)b	b
+(?!b)a	a
+(?<=a)b	ab
+a(?<=a)b	ab
+a(?<!a)b	ab
+(?<=a+)b	ab
+(?<=a*)b	ab
+a(?<=a{1,3})b	ab
+a(?<=^a)b	ab
+a(?<=\\ba)b	ab
+a(?=b$)b	ab
+a(?=b$)b\n	ab\n
+(?>a|ab)c	abc
+(?>a|ab)c	ac
+(?>a*)a	aa
+a*+a	aa
+a++	aa
+a?+a	a
+a{1,3}+b	aab
+a{1,3}+a	aaa
+(?:ab)*+ab	abab
+[ab]*+b	ab
+a*?+	a
+(a)\\1	aa
+(a)\\1	ab
+(a)(b)\\2\\1	abba
+(a)\\11	aa1
+(a)\\2	a
+\\1(a)	a
+(a\\1)	a
+(a|b)+\\1	abb
+(a|b)+\\1	aba
+(?:(a)|b)+\\1	aba
+(?:(a)|b)+\\1	ab
+(a)|b\\1	b
+(a?)*\\1	aa
+(a*)*b\\1	aab
+(?<n>a)\\k<n>	aa
+(?<n>a)\\k<m>	aa
+(?i)(a)\\1	aA
+(?i)(\x{e9})\\1	\x{e9}\x{c9}
+(?iu)(\x{e9})\\1	\x{e9}\x{c9}
+(?i)(k)\\1	k\x{212a}
+(?iu)(k)\\1	k\x{212a}
+(?iu)(\x{df})\\1	\x{df}\x{1e9e}
+(?iu)(s)\\1	s\x{17f}
+(?i)(a)(?-i)\\1	aA
+(?=(a+))a*b\\1	aaba
+(?=(a+))a*b\\1	aabaa
+\\Ga	a
+a\\Ga	aa
+a\\Z	a\n
+a\\Z	a
+a\\Z\\n	a\n
+a\\Z.	ab
+(?m)a\\Z\\n	a\n
+\\R	\r\n
+\\R	\n
+\\R\\n	\r\n
+\\R\\R	\r\n
+\\R	\x{2028}
+\\R	\x{b}
+\\h	\x{20}
+\\h	\x{a0}
+\\h	\x{200b}
+[\\h]	\x{3000}
+\\H	a
+\\H	\t
+\\e	\x{1b}
+\\cA	\x{1}
+\\c?	\x{7f}
+\\0101	A
+\\0101	\x{8}1
+\\0400	 0
+\\0377	\x{ff}
+\\08	x
+\\Qa*\\E	a*
+\\Qa*\\Eb+	a*bb
+\\Qa*	a*
+[\\Q]\\E]	]
+(?i)\\Qab\\E	AB
+a\\E	a
+a(?<=a+)b	ab
+aa(?<=a+)b	aab
+a(?<=a*)b	ab
+a(?<=^a+)b	ab
+ba(?<=ba+)b	bab
+ba(?<=b(?:a|xx)+)b	bab
+ba(?<=b.*)b	bab
+a(?<=(a)\\1?)b	ab
+a\x{1f600}(?<=a.)	a😀
+\x{1f600}(?<=.)	😀
+a(?<=a+b+)	a
+a(?<=a+b)	a
+a(?<=(?:ab)+)	a
+.(?<=\\b.)	a
+# Hybrid routing: new syntax and routes.
+(?i)(a)\\1	aa
+(?iu)(a)\\k<n>	aa
+(?i)(?<n>a)\\k<n>	aA
+(?c)[a]	a
+(?c)a	a
+(?<=\\p{L})b	ab
+(?<=.)b	\x{1f600}b
+(?<!\\S)b	\x{1d400}b
+(?<=[a-z])b	\x{1f600}b
+(?<=\x{1f600})b	\x{1f600}b
+(?<=a{0,3})b	aab
+(?<=a+)b	aab
+(?<=a*b)c	abc
+(?<=\\w{1,3})c	abc
+(?<=(?=a)a)b	ab
+(?<=(?:a|bc)d)e	bcde
+\\R?\n	\r\n
+(\\R)?\n	\r\n
+\\R{2}	\r\n
+(\\R)*\n	\r\n\n
+(?:\\R|x)*\n	\r\n
+\\R++	\r\n\n
+(?x) a b # c\n c	abc
+(?x)[a b]+	ab
+(?x)a#c\x{2028}b	a\x{2028}b
+[a&&[b]&c]	&
+[a&&[b]&c]	a
+[[a]b&&]	a
+[&&a]	a
+[&&]	a
+[a-\\d]	a
+[\\v-z]	x
+a{2,1}	aa
+a{,2}	aa
+{2}		
+a{	a{
+}	}
+]	]
+(?<n>a)(?<n>b)	ab
+(?P<n>a)	a
+(?#x)a	a
+\\8	8
+(a)\\11	a1
+(a)\\10	aa0
+\\x{110000}	a
+\\uD83D\\uDE00	\x{1f600}
+\\x{D83D}\\x{DE00}	\x{1f600}
+[\\uD800-\\uDFFF]	\x{1f600}
+.\\uDE00	\x{1f600}
+(?d)a$\nb	a\nb
+(?d)a$\n	a\n
+(?d)(?m)^b	a\rb
+(?d)\\Z	\r
+(?U)\\bé\\b	é
+(?U)\\w+	\x{1d400}
+\\p{IsUnknown}	\x{378}
+\\p{sc=Zzzz}	\x{378}
+\\p{IsLatn}	a
+\\p{IsOldItalic}	\x{10300}
+\\p{IsOld_Italic}	\x{10300}
+\\p{gc=Alpha}	a
+((a+)+)+b	aaaaaaaaaaaaaaaaaaaaaaaaaaaaab
+# Wave P1: Unicode data pinned to Java 21 (Unicode 15.0).
+(?iu)\x{a7ce}	\x{a7cf}
+(?iu)\\x{19b}	\x{a7dc}
+\\p{Cn}	\x{897}
+(?U)\\w	\x{897}
+(?U).*\\bx	\x{897}x
+\\p{IsGaray}	a
+\\p{IsKawi}	\x{11f00}
+# Wave P1: backreferences inside their own group.
+(?s)(\\1{0,2}\\p{L}){0,2}	aa\x{10428}
+(?:x(\\1?a))+	xaxaa
+# Wave P1: bounded look-behinds over supplementary characters.
+(?s).*(?<=\\p{L})a	\x{10428}a
+(?s).*(?<=\\p{L}{1,2})a	\x{10428}a
+(?s).*(?<=[^a]{2})b	x\x{1f600}b
+(?s).*(?<=[^a]b?)c	\x{1f600}bc
+(?s).*(?<!\\p{L}|\\d{2})a	1\x{10428}a
+# Wave Q: \p{java…}, blocks, \N{…}, \X, \b{g}, (?c), case-insensitive backreferences,
+# Java's backtracking state, look-behinds with \b or look-around, and a Java exception.
+(?s)(\\1{0,2}\\p{L}){0,2}	aa\x{10428}
+(?:x(\\1?a))+	xaxaa
+\\A(\\1?a){2}\\z	aaa
+(a\\1)	a
+(?<n>a\\k<n>?)+	aa
+(?<n>a\\k<n>?)+	aaa
+((\\2|b)a)+	baba
+((\\2|b)a)+	bababa
+(?ms)\x{10428}+?^x{1}{2}|(?<g1>\t{0,1}+(?i:\\0101\\x41{1,2}+\\A\x{10428}|[^a[b]]\\p{L}*+)(\\d?\\p{IsAlphabetic}\\p{IsAlphabetic}{1,2}\\R|\\2??\\>)+?){2}	\tAAA\x{10428}
+(?:(?=(.))x|\\1a+)	xa
+(?:(?=(.))x|\\1a+)	aa
+(?:(?=(.))x|\\1a+)	xaa
+(?:(?>(.))x|\\1a+)	aa
+(?:(?>(.))x|\\1a+)	ba
+(?:(.)?+x|\\1a+)	aa
+(?:(.)?+x|\\1a+)	ba
+(|((a+){0,2}+)?\\3)?	aa
+(|((a+){0,2}+)?\\3)?	a
+(?:a|\\G){2}	a
+(?:a|\\G){2}	aa
+(?:\\R|\\G){2}	\n
+(?ms)[\x{e9}-\x{ff}]{0,2}(?i:[a~~b]|(?<!\\G\\p{Punct}{1,2}?)){2}	\x{e9}a
+(?:a|){2}	a
+(?<=\\b\\p{L})a	\x{10428}a
+.(?<=\\b\\p{L})a	\x{10428}a
+.*(?<=\\b\\p{L})a	\x{10428}a
+.*(?<=\\b\\p{L})a	ba
+.*(?<=(?=a)\\p{L})a	aa
+.*(?<=(?=a)\\p{L})a	ba
+.(?<=\\b.)	a
+(?i)(a)\\1	aA
+(?i)(a)\\1	aa
+(?i)(k)\\1	k\x{212a}
+(?iu)(k)\\1	k\x{212a}
+(?iu)(\x{df})\\1	\x{df}\x{1e9e}
+(?iu)(s)\\1	s\x{17f}
+(?iu)(\x{10400})\\1	\x{10400}\x{10428}
+(?i)(\x{10400})\\1	\x{10400}\x{10428}
+(?i)(?<n>a)\\k<n>	aA
+(?=ab)a\\b{g}b	ab
+a\\b{g}b	ab
+e\\b{g}\x{301}	e\x{301}
+ab\\b{g}\x{301}	ab\x{301}
+\\X	e\x{301}
+\\X	\r\n
+\\X\\X	\r\n
+\\X	\x{1F468}\x{200D}\x{1F469}
+\\X	\x{1F1FA}\x{1F1F8}
+\\X{2}	\x{1F1FA}\x{1F1F8}\x{1F1EB}
+\\X	\x{1100}\x{1161}\x{11A8}
+.*(?<=\\X)a	e\x{301}a
+(?c)[\x{e9}]	e\x{301}
+(?c)[e]\x{301}	e\x{301}
+(?c)\\p{L}	e\x{301}
+(?c)[\x{c5}]	\x{212b}
+(?c)[\x{c5}]	A\x{30a}
+(?c)[\x{ac00}]	\x{1100}\x{1161}
+(?c)[\x{e9}]x	e\x{301}x
+(?c).	e\x{301}
+(?c)[^a]	e\x{301}
+\\N{LATIN SMALL LETTER A}	a
+\\N{latin small letter a}	a
+\\N{ LATIN SMALL LETTER A }	a
+\\N{LATIN SMALL LETTER}	a
+\\N{CJK UNIFIED IDEOGRAPHS 4E00}	\x{4e00}
+[\\N{LATIN SMALL LETTER A}-\\N{LATIN SMALL LETTER C}]+	abc
+\\N{LINE FEED (LF)}	\n
+\\N{LATIN SMALL LETTER A	a
+\\N	a
+\\p{InGreek}	\x{3b1}
+\\p{InGreek_and_Coptic}	\x{3b1}
+\\p{block=Greek}	\x{3b1}
+\\p{blk=greek and coptic}	\x{3b1}
+\\p{InBasicLatin}	a
+\\p{InBASIC LATIN}	a
+\\p{InSurrogates_Area}	a
+\\p{InNoSuchBlock}	a
+\\p{javaLowerCase}	a
+\\p{javaLowerCase}	A
+(?i)\\p{javaLowerCase}	A
+\\p{javaMirrored}	(
+\\p{IsjavaDigit}	1
+\\p{gc=javaLetter}	a
+a(?<=a+b+)	a
+a(?<=a{2147483647}b{2147483647})	a
+(?<=a{1073741824}a{1073741824})a	a
+(?<=\\b{1073741824}a{1073741824}a{1073741824})a	a

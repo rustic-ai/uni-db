@@ -884,6 +884,19 @@ impl Session {
         convert::query_result_to_py_class(py, result)
     }
 
+    /// Run any Cypher statement, auto-committing writes.
+    ///
+    /// A read runs as `query()` does. An administrative statement (one calling
+    /// a DBMS-mode procedure such as `uni.admin.snapshot.restore()` or
+    /// `uni.admin.compact()`) runs outside any transaction. Any other write
+    /// runs in a fresh transaction that is committed for you.
+    fn run(&self, py: Python, cypher: &str) -> PyResult<crate::types::PyQueryResult> {
+        let result = py
+            .detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(self.inner.run(cypher)))
+            .map_err(crate::exceptions::uni_error_to_pyerr)?;
+        convert::query_result_to_py_class(py, result)
+    }
+
     /// Create a new transaction for multi-statement writes.
     fn tx(&self, py: Python<'_>) -> PyResult<super::sync_api::Transaction> {
         let tx = py
@@ -1082,6 +1095,20 @@ impl Session {
     /// Cancel in-progress operations on this session.
     fn cancel(&mut self) {
         self.inner.cancel();
+    }
+
+    /// Whether the bulk load `load_id`, run through this session, was applied.
+    ///
+    /// On a forked session it answers for loads run on that fork, whose
+    /// markers and receipts live in the fork's namespace; on a primary
+    /// session it answers as `Uni.bulk_load_applied`. Raises
+    /// `UniInvalidArgumentError` for a string that is not a load id.
+    fn bulk_load_applied(&self, py: Python<'_>, load_id: &str) -> PyResult<bool> {
+        py.detach(|| {
+            pyo3_async_runtimes::tokio::get_runtime()
+                .block_on(self.inner.bulk_load_applied(load_id))
+        })
+        .map_err(crate::exceptions::uni_error_to_pyerr)
     }
 
     /// Pin this session to a specific snapshot version.
@@ -2395,15 +2422,7 @@ impl StreamingAppender {
         let stats = py
             .detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(appender.finish()))
             .map_err(crate::exceptions::uni_error_to_pyerr)?;
-        Ok(BulkStats {
-            vertices_inserted: stats.vertices_inserted,
-            edges_inserted: stats.edges_inserted,
-            indexes_rebuilt: stats.indexes_rebuilt,
-            duration_secs: stats.duration.as_secs_f64(),
-            index_build_duration_secs: stats.index_build_duration.as_secs_f64(),
-            index_task_ids: stats.index_task_ids.clone(),
-            indexes_pending: stats.indexes_pending,
-        })
+        Ok(BulkStats::from(&stats))
     }
 
     /// Abort without committing.
@@ -2668,6 +2687,9 @@ impl BulkWriterState {
 #[pyclass]
 pub struct BulkWriter {
     pub(crate) inner: std::sync::Mutex<BulkWriterState>,
+    /// The load's id, kept here so it outlives the writer: after a failed or
+    /// ambiguous commit it is what `bulk_load_applied` is asked about.
+    pub(crate) load_id: String,
 }
 
 impl BulkWriter {
@@ -2686,6 +2708,14 @@ impl BulkWriter {
 
 #[pymethods]
 impl BulkWriter {
+    /// The load's id: stable for the writer's lifetime and still readable
+    /// after `commit` or `abort`. Pass it to `Uni.bulk_load_applied` to learn
+    /// whether the load was applied after a crash or an ambiguous outcome.
+    #[getter]
+    fn load_id(&self) -> String {
+        self.load_id.clone()
+    }
+
     /// Insert vertices in bulk, returning allocated VIDs.
     fn insert_vertices(
         &self,
@@ -2746,15 +2776,7 @@ impl BulkWriter {
     fn stats(&self) -> PyResult<BulkStats> {
         self.with_writer("stats", |writer| {
             let s = writer.stats();
-            Ok(BulkStats {
-                vertices_inserted: s.vertices_inserted,
-                edges_inserted: s.edges_inserted,
-                indexes_rebuilt: s.indexes_rebuilt,
-                duration_secs: s.duration.as_secs_f64(),
-                index_build_duration_secs: s.index_build_duration.as_secs_f64(),
-                index_task_ids: s.index_task_ids.clone(),
-                indexes_pending: s.indexes_pending,
-            })
+            Ok(BulkStats::from(s))
         })
     }
 
@@ -2780,15 +2802,7 @@ impl BulkWriter {
         let stats = py
             .detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(writer.commit()))
             .map_err(crate::exceptions::anyhow_to_pyerr)?;
-        Ok(BulkStats {
-            vertices_inserted: stats.vertices_inserted,
-            edges_inserted: stats.edges_inserted,
-            indexes_rebuilt: stats.indexes_rebuilt,
-            duration_secs: stats.duration.as_secs_f64(),
-            index_build_duration_secs: stats.index_build_duration.as_secs_f64(),
-            index_task_ids: stats.index_task_ids.clone(),
-            indexes_pending: stats.indexes_pending,
-        })
+        Ok(BulkStats::from(&stats))
     }
 
     /// Abort bulk loading and discard uncommitted changes.

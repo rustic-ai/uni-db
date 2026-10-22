@@ -136,10 +136,29 @@ pub struct LocyIsRef {
     /// already reads it. `None` otherwise, and the reference is a plain
     /// semi-join.
     pub prob_ref: Option<PositiveProbRef>,
-    /// For a negated reference to a PROB rule from an `MNOR`/`MPROD` rule:
-    /// the hidden column the complement fills with the negated facts it read,
-    /// for exact inference. `None` otherwise.
+    /// For a negated reference to a PROB rule from a rule that keeps lineage
+    /// (an `MNOR`/`MPROD` rule, or a PROB rule without a fold when
+    /// provenance is recorded): the hidden column the complement fills with
+    /// the negated facts it read, for exact inference. `None` otherwise.
     pub negated_lineage: Option<NegatedLineageRef>,
+    /// For a positive reference no lineage column identifies (one to a rule
+    /// without a PROB column, or from a rule that keeps no lineage), when
+    /// provenance is recorded: the transient columns naming the referenced
+    /// fact, so EXPLAIN shows it as the derivation's child. `None` otherwise.
+    pub support_ref: Option<SupportRef>,
+}
+
+/// The transient columns naming the fact a positive reference read, for
+/// provenance only (see [`LocyIsRef::support_ref`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupportRef {
+    /// The hidden body column (`__lin_sup_{clause}_{occurrence}`) holding the
+    /// hash of the referenced fact's KEY columns.
+    pub key_column: String,
+    /// The hidden body column holding the referenced fact's PROB value, when
+    /// the referenced rule has one. Without it, the referenced fact is
+    /// certain: its probability is 1.
+    pub prob_column: Option<String>,
 }
 
 /// Where a negated reference records the facts its complement read (see
@@ -190,8 +209,10 @@ pub struct PositiveProbRef {
     /// The hidden body column holding the referenced fact's PROB value.
     pub prob_column: String,
     /// The hidden body column holding a hash of the referenced fact's KEY
-    /// columns, for exact inference. Set only when the calling rule's PROB
-    /// column is an `MNOR`/`MPROD` fold, whose rows are kept as lineage.
+    /// columns, for exact inference. Set only when the calling rule keeps
+    /// lineage: its PROB column is an `MNOR`/`MPROD` fold, whose rows are
+    /// kept as lineage, or it has no fold and provenance is recorded (a
+    /// transient column, see [`LIN_COL_PREFIX`]).
     pub key_column: Option<String>,
     /// The calling rule's PROB column as the clause body names it (the FOLD
     /// variable for a folded PROB column).
@@ -231,6 +252,39 @@ pub const DERIV_ISNOT_COL_PREFIX: &str = "__deriv_isnot_";
 /// when the local part reads no node or relationship, which makes the row its
 /// own event.
 pub const DERIV_EVENT_COL: &str = "__deriv_event";
+
+/// Prefix of every transient lineage column.
+///
+/// A PROB rule without a fold has no pre-fold rows to keep its lineage in:
+/// its facts are its rows, deduplicated. When provenance is recorded, its
+/// clause bodies project the lineage columns under this prefix instead of
+/// [`FOLD_DISCRIMINATOR_COL_PREFIX`] ([`LIN_REF_COL_PREFIX`],
+/// [`LIN_PROB_COL_PREFIX`], [`LIN_NOT_COL_PREFIX`], [`LIN_EVENT_COL`]), as do
+/// the provenance-only columns of every other rule ([`LIN_SUP_COL_PREFIX`],
+/// [`LIN_SUPP_COL_PREFIX`]). They are read from a clause's rows before the
+/// facts are deduplicated, then dropped, so they are never part of a fact's
+/// identity.
+pub const LIN_COL_PREFIX: &str = "__lin_";
+
+/// [`DERIV_ISREF_COL_PREFIX`]'s transient counterpart (see [`LIN_COL_PREFIX`]).
+pub const LIN_REF_COL_PREFIX: &str = "__lin_ref_";
+
+/// [`DERIV_ISPROB_COL_PREFIX`]'s transient counterpart (see [`LIN_COL_PREFIX`]).
+pub const LIN_PROB_COL_PREFIX: &str = "__lin_prob_";
+
+/// [`DERIV_ISNOT_COL_PREFIX`]'s transient counterpart (see [`LIN_COL_PREFIX`]).
+pub const LIN_NOT_COL_PREFIX: &str = "__lin_not_";
+
+/// [`DERIV_EVENT_COL`]'s transient counterpart (see [`LIN_COL_PREFIX`]).
+pub const LIN_EVENT_COL: &str = "__lin_event";
+
+/// Prefix of the transient column holding the KEY hash of a fact a positive
+/// reference read, for provenance only (see [`SupportRef`]).
+pub const LIN_SUP_COL_PREFIX: &str = "__lin_sup_";
+
+/// Prefix of the transient column holding the probability of a fact a
+/// positive reference read, for provenance only (see [`SupportRef`]).
+pub const LIN_SUPP_COL_PREFIX: &str = "__lin_supp_";
 
 /// One component of a negated IS-reference's anti-join key.
 #[derive(Debug, Clone, PartialEq, Eq)]

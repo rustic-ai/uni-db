@@ -101,7 +101,8 @@ let db = Uni::temporary().build().await?;
 | `flush()` | `Result<()>` | Flush L0 buffer to persistent L1 storage. |
 | `create_snapshot(name)` | `Result<String>` | Create a named point-in-time snapshot. Returns snapshot ID. |
 | `list_snapshots()` | `Result<Vec<SnapshotManifest>>` | List all available snapshots. |
-| `restore_snapshot(id)` | `Result<()>` | Restore database to a specific snapshot. |
+| `restore_snapshot(id)` | `Result<()>` | Restore the database (data and schema) to a snapshot taken with `create_snapshot`, at once and on disk. |
+| `delete_snapshot(id)` | `Result<()>` | Delete a snapshot and release the storage versions it pins, so compaction reclaims them. |
 | `shutdown()` | `Result<()>` | Graceful shutdown: flush data, stop background tasks. |
 | `config()` | `&UniConfig` | Get current configuration. |
 | `write_lease()` | `Option<&WriteLease>` | Get write lease configuration, if any. |
@@ -460,7 +461,7 @@ tx.commit().await?;
 
 ### Locy Evaluation (within Transaction)
 
-DERIVE commands auto-apply to the transaction's private L0.
+DERIVE commands and Cypher write commands apply to the transaction's private L0 and commit or roll back with it. Commands run in sequence: a later command reads what an earlier one wrote.
 
 | Method | Returns | Description |
 |--------|---------|-------------|
@@ -487,7 +488,7 @@ DERIVE commands auto-apply to the transaction's private L0.
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `prepare(cypher)` | `Result<PreparedQuery>` | Prepare a Cypher query. |
-| `prepare_locy(program)` | `Result<PreparedLocy>` | Prepare a Locy program. |
+| `prepare_locy(program)` | `Result<PreparedLocy>` | Prepare a Locy program. Each execution runs as `tx.locy` does: it reads the transaction's uncommitted writes and snapshot, writes into the transaction, and is cancelled with it. |
 
 ### Lifecycle
 
@@ -868,7 +869,7 @@ A cancelled evaluation returns `UniError::Cancelled`. The session's own token
 
 ### TxLocyBuilder (Transaction-level)
 
-Created by `tx.locy_with(program)`. Same API as `LocyBuilder` but sees the transaction's uncommitted writes. DERIVE commands auto-apply to the private L0.
+Created by `tx.locy_with(program)`. Same API as `LocyBuilder` but sees the transaction's uncommitted writes. DERIVE commands and Cypher writes apply to the private L0, and later commands of the program read them.
 
 ### LocyResult
 
@@ -1048,10 +1049,14 @@ while let Some(n) = stream.next().await {
 guarantees contiguity, checkpoints its position, and halts on a gap rather
 than silently continuing past one. `watch()` will never provide that
 guarantee; `dropped_before` exists so you find out you need it.
+See [Triggers & CDC](../features/triggers-cdc.md) for the CDC surface,
+its event rows and its costs.
 
 The checkpoint is persisted asynchronously, off the commit path, and may lag
-the last delivered commit: after a crash a provider resumes from the persisted
-position and can see some commits again (at-least-once), but never skips one.
+the last delivered commit. On reopen the provider's `start` receives the
+persisted position; the host delivers only commits made after the stream
+starts, so any replay of commits between that position and the restart has to
+come from the provider itself.
 A provider whose `start` ignores `from_lsn` should return `false` from
 `resumes_from_checkpoint()` so the host does not persist a checkpoint nothing
 reads.
@@ -1341,8 +1346,11 @@ println!("Total queries: {}", m.total_queries);
 | `schema_version` | `u64` | Current schema version number. |
 | `uptime` | `Duration` | Time since database instance was created. |
 | `active_sessions` | `usize` | Currently active sessions. |
-| `l1_run_count` | `usize` | L1 compaction runs completed. |
-| `write_throttle_pressure` | `ThrottlePressure` | Write back-pressure (0.0--1.0). |
+| `l1_run_count` | `usize` | Uncompacted flush generations (the count the write throttle compares with its limits). |
+| `write_throttle_pressure` | `ThrottlePressure` | Write back-pressure: 0.0 below `soft_limit`, rising through the soft band, 1.0 at `hard_limit`. |
+| `write_throttle_waits` | `u64` | Writes (statements, batches) that waited on the throttle. |
+| `write_throttle_wait_time` | `Duration` | Total time spent in those waits. |
+| `writes_stalled` | `u64` | Writes refused with `WriteStalled` (hard limit, compaction disabled). |
 | `compaction_status` | `CompactionStatus` | Current compaction state. |
 | `wal_size_bytes` | `u64` | WAL size in bytes. |
 | `wal_lsn` | `u64` | Highest flushed WAL log sequence number. |
@@ -1423,6 +1431,19 @@ println!("Nodes created: {}", result.nodes_created);
 println!("Relationships created: {}", result.relationships_created);
 println!("Properties set: {}", result.properties_set);
 ```
+
+The counters are the statement's side effects in the openCypher TCK's terms:
+`properties_set` (`+properties`) counts properties added or overwritten with a
+different value, `properties_removed` (`-properties`) counts properties
+removed, set to null, or overwritten; assigning a property the value it
+already has counts nothing. A `SET`, `REMOVE` or `MERGE` action on an
+existing node is not a node creation. An entity created and changed in one
+statement reports only its final state. `properties_removed` counts explicit
+`REMOVE` / `SET ... = null` (and overwrites) only: the properties of a deleted
+node or relationship are not counted, as in Neo4j. `labels_added` /
+`labels_removed` count per node whose label set actually changes (Neo4j's
+`labelsAdded`). The TCK's side effects are a graph diff taken by its harness,
+not these counters. See [Write Counters](../guides/cypher-querying.md#write-counters).
 
 ### Row
 
@@ -1560,8 +1581,11 @@ session.pin_to_version(&snapshot_id).await?;
 let old_data = session.query("MATCH (n) RETURN count(n)").await?;
 session.refresh().await?;  // Return to live state
 
-// Restore to a snapshot (requires restart to fully take effect)
+// Restore to a snapshot taken with create_snapshot (takes effect at once)
 db.restore_snapshot(&snapshot_id).await?;
+
+// Delete it; the next compaction reclaims the versions only it kept
+db.delete_snapshot(&snapshot_id).await?;
 ```
 
 ---

@@ -20,6 +20,7 @@
 //! future join-order change does not have to update it.
 
 use tempfile::tempdir;
+use uni_common::core::schema::EndpointConformance;
 use uni_query::query::planner::{LogicalPlan, QueryPlanner};
 
 /// Forum/Post/Person with the two edge types the LDBC repro uses.
@@ -481,23 +482,28 @@ async fn a_disjunction_does_not_anchor() {
 }
 
 // ---------------------------------------------------------------------------
-// An anonymous unlabelled source, narrowed by the edge type's declared endpoints
+// Unlabelled endpoints, narrowed by declared endpoints only over conforming types
 // ---------------------------------------------------------------------------
 //
-// `MATCH ()-[w:WORK_AT]->()` planned the source as `ScanAll` — every vertex —
-// and expanded from each, though the traversal can only depart from a label the
-// edge type declares. At LDBC SF1 that was 3.18M vertices for 21654 edges:
-// 2278 MB resident and 5.2s, refused outright by the 1 GiB default query pool,
-// against 30 MB and 0.13s once the source carries the label.
+// `MATCH ()-[w:WORK_AT]->()` with an unnarrowed source plans `ScanAll` -- every
+// vertex -- and expands from each: at LDBC SF1 6.0 s and 1.47 GB peak RSS,
+// against 0.26 s once the source is scanned by WORK_AT's declared label.
 //
-// Soundness is storage's, not the schema's: `AdjacencyManager` loads CSR
-// adjacency only for `src_labels` outgoing / `dst_labels` incoming, and a typed
-// traverse reads only through that CSR, so an edge whose source is outside the
-// declared set is already invisible. These assert on plan shape because the
-// answers are identical either way — only the plan can tell them apart.
+// Narrowing is sound only when no stored edge violates the declaration, since a
+// typed traversal reads a violating edge (`compact_adjacency` files every delta
+// under each declared label) and only the narrowing would drop it. So it is
+// gated on the catalog's `endpoint_conformance`: a type created under write-time
+// enforcement narrows; an unverified one -- every type of a catalog written
+// before enforcement -- does not. The end-to-end answers are pinned by
+// `uni-db`'s `bugs::declared_endpoint_violation_reads` and
+// `bugs::declared_endpoint_narrowing`; these pin the plan.
 
-/// Two single-source types, one multi-source type, one self-referential type.
-async fn endpoint_planner() -> QueryPlanner {
+/// Two single-source types, one multi-source type, one self-referential type,
+/// each recorded with `conformance`, except `KNOWS` when `knows` is given.
+async fn endpoint_planner_with(
+    conformance: EndpointConformance,
+    knows: Option<EndpointConformance>,
+) -> QueryPlanner {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let sm = uni_common::core::schema::SchemaManager::load(&path.join("schema.json"))
@@ -522,8 +528,25 @@ async fn endpoint_planner() -> QueryPlanner {
         vec!["City".into()],
     )
     .unwrap();
+    for name in ["WORK_AT", "KNOWS", "LOCATED_IN"] {
+        let c = match (name, &knows) {
+            ("KNOWS", Some(k)) => k.clone(),
+            _ => conformance.clone(),
+        };
+        sm.set_endpoint_conformance(name, c).unwrap();
+    }
 
     QueryPlanner::new(sm.schema())
+}
+
+/// Every type enforced, as for a catalog created by this release.
+async fn endpoint_planner() -> QueryPlanner {
+    endpoint_planner_with(EndpointConformance::Enforced, None).await
+}
+
+/// Every type unverified, as for a catalog written before enforcement.
+async fn legacy_endpoint_planner() -> QueryPlanner {
+    endpoint_planner_with(EndpointConformance::Unverified, None).await
 }
 
 fn scans_all(plan: &LogicalPlan) -> bool {
@@ -535,21 +558,25 @@ fn scans_label(plan: &LogicalPlan, label: &str) -> bool {
     format!("{plan:?}").contains(&format!("{label:?}"))
 }
 
+/// Does the traversal carry an inferred (non-zero) target label?
+fn infers_target_label(plan: &LogicalPlan) -> bool {
+    !format!("{plan:?}").contains("target_label_id: 0")
+}
+
 #[tokio::test]
 async fn an_anonymous_source_is_narrowed_to_the_edge_type_s_source_label() {
     let p = endpoint_planner().await;
     let plan = plan_of(&p, "MATCH ()-[w:WORK_AT]->() RETURN count(w) AS c");
     assert!(
         !scans_all(&plan),
-        "an outgoing typed edge declares its source label, so the source must \
-         not be a scan of every vertex: {plan:?}"
+        "an outgoing enforced type declares its source label, so the source \
+         must not be a scan of every vertex: {plan:?}"
     );
     assert!(scans_label(&plan, "Person"), "{plan:?}");
 }
 
 /// Direction decides which side the source sits on. Getting this backwards is
-/// how the *target*-side inference once made `(b:B)<-[:R]-()` match nothing —
-/// a silent wrong answer with the data untouched.
+/// how the *target*-side inference once made `(b:B)<-[:R]-()` match nothing.
 #[tokio::test]
 async fn an_incoming_anonymous_source_takes_the_destination_label() {
     let p = endpoint_planner().await;
@@ -570,6 +597,71 @@ async fn an_undirected_self_referential_type_still_narrows() {
     let plan = plan_of(&p, "MATCH ()-[w:KNOWS]-() RETURN count(w) AS c");
     assert!(!scans_all(&plan), "{plan:?}");
     assert!(scans_label(&plan, "Person"), "{plan:?}");
+}
+
+/// An unlabelled target lands on the declared destination outgoing, and on the
+/// declared source incoming.
+#[tokio::test]
+async fn an_unlabelled_target_takes_the_declared_label_of_its_side() {
+    let p = endpoint_planner().await;
+    let out = plan_of(&p, "MATCH (a:Person)-[:WORK_AT]->(b) RETURN b.id AS id");
+    assert!(infers_target_label(&out), "{out:?}");
+    let inc = plan_of(&p, "MATCH (c:Company)<-[:WORK_AT]-(b) RETURN b.id AS id");
+    assert!(infers_target_label(&inc), "{inc:?}");
+    // Undirected may land on either side: never constrained.
+    let both = plan_of(&p, "MATCH (a:Person)-[:WORK_AT]-(b) RETURN b.id AS id");
+    assert!(!infers_target_label(&both), "{both:?}");
+}
+
+/// A legacy catalog's types are unverified: no endpoint is narrowed, in any
+/// direction, because a stored edge may violate the declaration.
+#[tokio::test]
+async fn an_unverified_type_narrows_no_endpoint() {
+    let p = legacy_endpoint_planner().await;
+    for cypher in [
+        "MATCH ()-[w:WORK_AT]->() RETURN count(w) AS c",
+        "MATCH ()<-[w:WORK_AT]-() RETURN count(w) AS c",
+        "MATCH ()-[w:KNOWS]-() RETURN count(w) AS c",
+    ] {
+        let plan = plan_of(&p, cypher);
+        assert!(scans_all(&plan), "{cypher}: {plan:?}");
+        assert!(!scans_label(&plan, "Person"), "{cypher}: {plan:?}");
+        assert!(!scans_label(&plan, "Company"), "{cypher}: {plan:?}");
+    }
+    let plan = plan_of(&p, "MATCH (a:Person)-[:WORK_AT]->(b) RETURN b.id AS id");
+    assert!(!infers_target_label(&plan), "{plan:?}");
+}
+
+/// A verified type narrows like an enforced one.
+#[tokio::test]
+async fn a_verified_type_narrows() {
+    let p = endpoint_planner_with(
+        EndpointConformance::Verified {
+            at: chrono::Utc::now(),
+        },
+        None,
+    )
+    .await;
+    let plan = plan_of(&p, "MATCH ()-[w:WORK_AT]->() RETURN count(w) AS c");
+    assert!(scans_label(&plan, "Person"), "{plan:?}");
+}
+
+/// A disjunction narrows only when every type in it conforms: `WORK_AT|KNOWS`
+/// share the source label Person, but one unverified type is enough to read
+/// every vertex.
+#[tokio::test]
+async fn a_disjunction_with_one_unverified_type_is_not_narrowed() {
+    let cypher = "MATCH ()-[w:WORK_AT|KNOWS]->() RETURN count(w) AS c";
+    let p = endpoint_planner().await;
+    let plan = plan_of(&p, cypher);
+    assert!(scans_label(&plan, "Person"), "all enforced: {plan:?}");
+    let p = endpoint_planner_with(
+        EndpointConformance::Enforced,
+        Some(EndpointConformance::Unverified),
+    )
+    .await;
+    let plan = plan_of(&p, cypher);
+    assert!(scans_all(&plan), "KNOWS unverified: {plan:?}");
 }
 
 /// Two or more labels would replace one `ScanAll` over the shared `vertices`

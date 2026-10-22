@@ -228,6 +228,7 @@ class GraphMachine(RuleBasedStateMachine):
         "relationships_created",
         "relationships_deleted",
         "properties_set",
+        "properties_removed",
         "labels_added",
         "labels_removed",
     )
@@ -240,10 +241,15 @@ class GraphMachine(RuleBasedStateMachine):
         `is_dirty()` correctly stays False for it. Measured: after
         `MATCH (n {uid: 999}) SET n.val = 1` against an empty database,
         `is_dirty()` is False.
+
+        The counters follow the openCypher side-effect rules, so a `SET` that
+        assigns the value a property already has reports no change, yet it
+        still writes the row (and makes the transaction dirty).
+        `affected_rows` counts the writes themselves and covers that case.
         """
         self._ensure_tx()
         r = self.tx.execute(cypher, params) if params else self.tx.execute(cypher)
-        if any(getattr(r, c, 0) for c in self._COUNTERS):
+        if r.affected_rows or any(getattr(r, c, 0) for c in self._COUNTERS):
             self.tx_mutated = True
         return r
 

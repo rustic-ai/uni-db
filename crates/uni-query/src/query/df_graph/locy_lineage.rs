@@ -24,8 +24,11 @@
 //!   formula `OP over its rows of (row event AND each positively referenced
 //!   fact's formula AND NOT each negated fact's formula)` under possible-worlds
 //!   semantics, where OP is OR for `MNOR` and AND for `MPROD`, every row event
-//!   is an independent variable, and a fact with no recorded lineage (a
-//!   non-fold PROB rule's) is one variable.
+//!   is an independent variable. A fact of a PROB rule without a fold is the
+//!   formula of its own row (`row event AND each positively referenced fact
+//!   AND NOT each negated fact`), the facts sharing its KEY ORed, recorded
+//!   when provenance is ([`LineageStore::record_rows`]); a fact with no
+//!   recorded lineage is one variable.
 //! * **`TopKProofs { k }`** evaluates the same formula with each `MNOR` fact
 //!   restricted to its `k` most probable rows (its proofs).
 //!
@@ -65,7 +68,9 @@ use super::common::{arrow_err, extract_scalar_key};
 use super::locy_bdd::bdd_probability;
 use super::locy_fixpoint::{FixpointRulePlan, pre_fold_column_name, yield_positions_in};
 use super::locy_row_hash::{ROW_HASH_WIDTH, row_hash};
-use crate::query::planner_locy_types::{DERIV_EVENT_COL, ISPROB_COL_PREFIX, ProbRead};
+use crate::query::planner_locy_types::{
+    DERIV_EVENT_COL, ISPROB_COL_PREFIX, LIN_COL_PREFIX, LIN_EVENT_COL, ProbRead,
+};
 
 /// The identity of a fact: the hash of its KEY columns.
 pub(crate) type FactKey = [u8; ROW_HASH_WIDTH as usize];
@@ -292,6 +297,33 @@ pub(crate) fn apply_positive_prob_factors(
     Ok(out)
 }
 
+/// Drops the transient lineage and provenance columns
+/// ([`LIN_COL_PREFIX`](crate::query::planner_locy_types::LIN_COL_PREFIX)) from a clause's rows, once they have been read:
+/// they are never part of a fact.
+///
+/// # Errors
+///
+/// Fails when a batch cannot be rebuilt without them.
+pub(crate) fn strip_transient_columns(batches: Vec<RecordBatch>) -> DFResult<Vec<RecordBatch>> {
+    batches
+        .into_iter()
+        .map(|batch| {
+            let schema = batch.schema();
+            if !schema
+                .fields()
+                .iter()
+                .any(|f| f.name().starts_with(LIN_COL_PREFIX))
+            {
+                return Ok(batch);
+            }
+            let keep: Vec<usize> = (0..schema.fields().len())
+                .filter(|&i| !schema.field(i).name().starts_with(LIN_COL_PREFIX))
+                .collect();
+            batch.project(&keep).map_err(arrow_err)
+        })
+        .collect()
+}
+
 /// Raises `ProbabilityReadNotFactor` once per rule for a clause whose PROB
 /// expression reads a referenced probability other than as one product
 /// factor.
@@ -349,8 +381,13 @@ pub(crate) struct RefTerm {
 /// The facts one derivation row references, as [`RefResolver`] reads them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct RowRefs {
-    /// Each positively referenced fact (`x IS r`).
+    /// Each positively referenced fact (`x IS r`) that is part of the row's
+    /// lineage: a probabilistic condition.
     pub positive: Vec<RefTerm>,
+    /// Each other positively referenced fact, for provenance only: one of a
+    /// rule without a PROB column (certain, probability 1), or one a rule
+    /// keeping no lineage read (with the probability it read).
+    pub support: Vec<RefTerm>,
     /// Each negated reference (`x IS NOT r`): the facts its complement read.
     /// The row holds only when none of them does.
     pub negated: Vec<Vec<RefTerm>>,
@@ -379,6 +416,27 @@ enum RefColumn<'a> {
         facts: &'a BinaryArray,
         name: &'a str,
     },
+    /// A reference named for provenance only: the referenced KEY hash, and
+    /// its probability when the referenced rule has one.
+    Support {
+        rule: &'a str,
+        key: &'a FixedSizeBinaryArray,
+        prob: Option<(&'a ArrayRef, &'a str)>,
+    },
+}
+
+/// Which hidden reference columns a [`RefResolver`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RefScope {
+    /// Every one the plan names: a clause's rows before the transient
+    /// columns ([`LIN_COL_PREFIX`](crate::query::planner_locy_types::LIN_COL_PREFIX)) are dropped.
+    All,
+    /// Only those kept with the facts (`__deriv_*`): a batch of facts, whose
+    /// transient columns are gone.
+    Kept,
+    /// Only the transient ones: a clause's rows, whose kept columns are read
+    /// from the facts instead.
+    Transient,
 }
 
 /// Resolves which facts each row of a batch of a rule's pre-fold rows
@@ -398,10 +456,19 @@ impl<'a> RefResolver<'a> {
     ///
     /// # Errors
     ///
-    /// Fails when a hidden column the plan names is missing from the batch or
-    /// is not of its type: a reference read from the wrong column would be
-    /// silently certain or absent.
-    pub(crate) fn new(rule: &'a FixpointRulePlan, batch: &'a RecordBatch) -> DFResult<Self> {
+    /// Fails when a hidden column the plan names, within `scope`, is missing
+    /// from the batch or is not of its type: a reference read from the wrong
+    /// column would be silently certain or absent.
+    pub(crate) fn new(
+        rule: &'a FixpointRulePlan,
+        batch: &'a RecordBatch,
+        scope: RefScope,
+    ) -> DFResult<Self> {
+        let in_scope = |name: &str| match scope {
+            RefScope::All => true,
+            RefScope::Kept => !name.starts_with(LIN_COL_PREFIX),
+            RefScope::Transient => name.starts_with(LIN_COL_PREFIX),
+        };
         let column = |name: &str| -> DFResult<&'a ArrayRef> {
             batch
                 .schema()
@@ -418,6 +485,7 @@ impl<'a> RefResolver<'a> {
         for binding in rule.clauses.iter().flat_map(|c| c.is_ref_bindings.iter()) {
             if let Some(r) = binding.prob_ref.as_ref()
                 && let Some(key_name) = r.key_column.as_deref()
+                && in_scope(key_name)
             {
                 let key = column(key_name)?
                     .as_any()
@@ -436,7 +504,33 @@ impl<'a> RefResolver<'a> {
                     read: r.read,
                 });
             }
-            if let Some(n) = binding.negated_lineage.as_ref() {
+            if let Some(sup) = binding.support_ref.as_ref()
+                && in_scope(&sup.key_column)
+            {
+                let key = column(&sup.key_column)?
+                    .as_any()
+                    .downcast_ref::<FixedSizeBinaryArray>()
+                    .ok_or_else(|| {
+                        internal(format!(
+                            "rule '{}': provenance column `{}` is not a row hash",
+                            rule.name, sup.key_column
+                        ))
+                    })?;
+                let prob = match sup.prob_column.as_deref() {
+                    Some(name) => Some((column(name)?, name)),
+                    None => None,
+                };
+                columns.push(RefColumn::Support {
+                    rule: binding.rule_name.as_str(),
+                    key,
+                    prob,
+                });
+            }
+            if let Some(n) = binding
+                .negated_lineage
+                .as_ref()
+                .filter(|n| in_scope(&n.column))
+            {
                 let facts = column(&n.column)?
                     .as_any()
                     .downcast_ref::<BinaryArray>()
@@ -527,6 +621,25 @@ impl<'a> RefResolver<'a> {
                             .collect(),
                     );
                 }
+                RefColumn::Support { rule, key, prob } => {
+                    // NULL: another clause's reference.
+                    if key.is_null(row) {
+                        continue;
+                    }
+                    let p = match prob {
+                        Some((column, name)) => f64_at(column.as_ref(), row, name)?.unwrap_or(1.0),
+                        // A fact of a rule without a PROB column is certain.
+                        None => 1.0,
+                    };
+                    let fact_key: FactKey = key
+                        .value(row)
+                        .try_into()
+                        .map_err(|_| internal(format!("rule '{rule}': malformed row hash")))?;
+                    refs.support.push(RefTerm {
+                        fact: ((*rule).to_string(), fact_key),
+                        prob: p.clamp(0.0, 1.0),
+                    });
+                }
             }
         }
         Ok(refs)
@@ -569,7 +682,8 @@ impl RowTerm {
     }
 }
 
-/// The lineage of one `MNOR`/`MPROD` rule: each fact's derivation rows.
+/// The lineage of one `MNOR`/`MPROD` rule, or PROB rule without a fold: each
+/// fact's derivation rows.
 #[derive(Debug)]
 struct RuleLineage {
     /// `MPROD` (all rows) rather than `MNOR` (any row).
@@ -581,15 +695,68 @@ struct RuleLineage {
     events: HashMap<FactKey, Vec<Option<FactKey>>>,
 }
 
-/// The lineage of every `MNOR`/`MPROD` rule evaluated so far in a program run.
+/// The lineage of every `MNOR`/`MPROD` rule, and of every PROB rule without
+/// a fold, evaluated so far in a program run.
 ///
-/// Recorded from each rule's pre-fold rows after its stratum converges, and
-/// read by exact inference, `TopKProofs` and shared-proof detection of the
-/// rules that reference it. Re-recording a rule (an `ASSUME` re-evaluation)
-/// replaces it.
+/// Recorded from each `MNOR`/`MPROD` rule's pre-fold rows after its stratum
+/// converges ([`Self::record_rule`]), and from a PROB rule's derivation rows
+/// as its clauses produce them, kept for its published facts
+/// ([`Self::record_rows`], [`Self::publish_rows`]). Read by exact inference,
+/// `TopKProofs` and shared-proof detection of the rules that reference it.
+/// Re-recording a rule (an `ASSUME` re-evaluation) replaces it.
 #[derive(Debug, Default)]
 pub(crate) struct LineageStore {
     rules: StdRwLock<HashMap<String, Arc<RuleLineage>>>,
+    /// Rows of PROB rules without a fold, accumulated before their facts
+    /// are published ([`Self::record_rows`]).
+    pending: StdRwLock<HashMap<String, PendingLineage>>,
+}
+
+/// One derivation row as lineage: its fact's KEY hash, its term and its
+/// event identity.
+type LineageRow = (FactKey, RowTerm, Option<FactKey>);
+
+/// What distinguishes one derivation of a row from another: the row
+/// (`identity`), its event and the facts it references and negates.
+fn derivation_key(identity: &[u8], term: &RowTerm, event: Option<&FactKey>) -> Vec<u8> {
+    let mut key = identity.to_vec();
+    key.push(0);
+    if let Some(event) = event {
+        key.push(1);
+        key.extend_from_slice(event);
+    }
+    match term {
+        RowTerm::Opaque { prob } => {
+            key.push(2);
+            key.extend_from_slice(&prob.to_le_bytes());
+        }
+        RowTerm::Conj { refs, negs, .. } => {
+            for r in refs {
+                key.push(3);
+                key.extend_from_slice(r.fact.0.as_bytes());
+                key.push(0);
+                key.extend_from_slice(&r.fact.1);
+            }
+            for group in negs {
+                key.push(4);
+                for r in group {
+                    key.extend_from_slice(r.fact.0.as_bytes());
+                    key.push(0);
+                    key.extend_from_slice(&r.fact.1);
+                }
+            }
+        }
+    }
+    key
+}
+
+/// The distinct derivation rows of a PROB rule without a fold seen so far,
+/// in order: each yield row's identity, its fact's KEY hash, its term and
+/// its event; and the [`derivation_key`] of each.
+#[derive(Debug, Default)]
+struct PendingLineage {
+    rows: Vec<(Vec<u8>, LineageRow)>,
+    seen: HashSet<Vec<u8>>,
 }
 
 /// A variable of a lineage formula.
@@ -669,74 +836,8 @@ impl LineageStore {
         let mut facts: HashMap<FactKey, Vec<RowTerm>> = HashMap::new();
         let mut events: HashMap<FactKey, Vec<Option<FactKey>>> = HashMap::new();
         for batch in pre_fold.iter().filter(|b| b.num_rows() > 0) {
-            let schema = batch.schema();
-            let (_, key_indices) = yield_positions_in(rule, &schema)?;
-            let key_columns: Vec<ArrayRef> = key_indices
-                .iter()
-                .map(|&i| Arc::clone(batch.column(i)))
-                .collect();
-            let prob_column = schema
-                .index_of(prob_name)
-                .map(|i| batch.column(i))
-                .map_err(|_| {
-                    internal(format!(
-                        "rule '{}': lineage column `{prob_name}` is missing from a fact batch",
-                        rule.name
-                    ))
-                })?;
-            let event_column = schema
-                .index_of(DERIV_EVENT_COL)
-                .ok()
-                .map(|i| {
-                    batch
-                        .column(i)
-                        .as_any()
-                        .downcast_ref::<FixedSizeBinaryArray>()
-                        .ok_or_else(|| {
-                            internal(format!(
-                                "rule '{}': `{DERIV_EVENT_COL}` is not a row hash",
-                                rule.name
-                            ))
-                        })
-                })
-                .transpose()?;
-            let resolver = RefResolver::new(rule, batch)?;
-            for row in 0..batch.num_rows() {
-                // A NULL input is skipped by the fold, so it is no proof.
-                let Some(weight) = f64_at(prob_column.as_ref(), row, prob_name)? else {
-                    continue;
-                };
-                let weight = weight.clamp(0.0, 1.0);
-                let refs = resolver.row(row)?;
-                let term = if refs.opaque {
-                    RowTerm::Opaque { prob: weight }
-                } else {
-                    // A divisor of 0 means a referenced probability of 0 or
-                    // a negated one of 1, so the weight is 0 as well. Such a
-                    // default value is also exact (a certain or impossible
-                    // fact stays so under any correlation), so the row's
-                    // own weight is never read.
-                    let local = if refs.divisor > 0.0 {
-                        (weight / refs.divisor).clamp(0.0, 1.0)
-                    } else {
-                        0.0
-                    };
-                    RowTerm::Conj {
-                        local,
-                        weight,
-                        refs: refs.positive,
-                        negs: refs.negated,
-                    }
-                };
-                let event = match event_column {
-                    Some(col) if !refs.opaque && !col.is_null(row) => {
-                        Some(col.value(row).try_into().map_err(|_| {
-                            internal(format!("rule '{}': malformed row hash", rule.name))
-                        })?)
-                    }
-                    _ => None,
-                };
-                let key = row_hash(&key_columns, row)?;
+            let rows = lineage_rows(rule, batch, prob_name, DERIV_EVENT_COL, RefScope::Kept)?;
+            for (key, term, event) in rows.into_iter().flatten() {
                 facts.entry(key).or_default().push(term);
                 events.entry(key).or_default().push(event);
             }
@@ -752,6 +853,252 @@ impl LineageStore {
             );
         }
         Ok(())
+    }
+
+    /// Accumulates the derivation rows of `rule`, a PROB rule without a fold,
+    /// from a clause's rows before its transient lineage columns are dropped
+    /// (see [`crate::query::planner_locy_types::LIN_COL_PREFIX`]). A rule
+    /// without them records nothing.
+    ///
+    /// A fact of such a rule is its row, deduplicated, and holds when any of
+    /// its derivations does: two derivations of one row resting on different
+    /// events or referenced facts are both its lineage. A derivation seen
+    /// again (the same row over the same event and facts, as a later
+    /// fixpoint iteration can produce it) is recorded once. The rows become
+    /// the rule's lineage only when its facts are published
+    /// ([`Self::publish_rows`]).
+    ///
+    /// # Errors
+    ///
+    /// Fails when a KEY, PROB or lineage column is missing from a batch.
+    pub(crate) fn record_rows(
+        &self,
+        rule: &FixpointRulePlan,
+        rows: &[RecordBatch],
+    ) -> DFResult<()> {
+        let Some(prob_name) = rule.prob_column_name.as_deref() else {
+            return Ok(());
+        };
+        if !rule.fold_bindings.is_empty() {
+            return Ok(());
+        }
+        // Every clause of a rule keeping a transient lineage projects its
+        // event column.
+        if !rows
+            .iter()
+            .any(|b| b.schema().index_of(LIN_EVENT_COL).is_ok())
+        {
+            return Ok(());
+        }
+        let Ok(mut pending) = self.pending.write() else {
+            return Ok(());
+        };
+        let entry = pending.entry(rule.name.clone()).or_default();
+        for batch in rows.iter().filter(|b| b.num_rows() > 0) {
+            let (yield_indices, _) = yield_positions_in(rule, &batch.schema())?;
+            let terms = lineage_rows(rule, batch, prob_name, LIN_EVENT_COL, RefScope::All)?;
+            for (row, term) in terms.into_iter().enumerate() {
+                let Some((key, term, event)) = term else {
+                    continue;
+                };
+                let identity = super::locy_fixpoint::fact_hash_key(batch, &yield_indices, row);
+                if entry
+                    .seen
+                    .insert(derivation_key(&identity, &term, event.as_ref()))
+                {
+                    entry.rows.push((identity, (key, term, event)));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Makes the rows [`Self::record_rows`] accumulated for `rule` its
+    /// lineage, restricted to its published facts `facts`, and returns the
+    /// facts with their PROB values corrected where the independence value
+    /// is not exact. A row that a post-fixpoint operator (PRIORITY, BEST BY)
+    /// dropped is no fact, and is not one of its fact's derivations either.
+    /// Replaces any lineage the rule had.
+    ///
+    /// A fact's PROB value is its row's: the row's weight times the
+    /// probabilities it referenced, as if they were independent, from one
+    /// derivation. That is its possible-worlds probability only when the
+    /// row's formula reads no variable twice and the row has one
+    /// derivation. Otherwise `SharedProbabilisticDependency` is raised, and
+    /// in exact mode (and under `TopKProofs`) the value is recomputed from
+    /// the formula: the OR of the row's derivations, each its event AND the
+    /// facts it references AND NOT the facts it negates. Over the variable
+    /// budget it keeps its value and is reported as approximate.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a published fact batch lacks a yield or PROB column, or a
+    /// reference names a fact its rule's lineage does not hold.
+    pub(crate) fn publish_rows(
+        &self,
+        rule: &FixpointRulePlan,
+        facts: Vec<RecordBatch>,
+        ctx: &ExactCtx<'_>,
+    ) -> DFResult<Vec<RecordBatch>> {
+        let Some(rows) = self
+            .pending
+            .write()
+            .ok()
+            .and_then(|mut p| p.remove(&rule.name))
+        else {
+            return Ok(facts);
+        };
+        let mut published: HashSet<Vec<u8>> = HashSet::new();
+        for batch in facts.iter().filter(|b| b.num_rows() > 0) {
+            let (yield_indices, _) = yield_positions_in(rule, &batch.schema())?;
+            for row in 0..batch.num_rows() {
+                published.insert(super::locy_fixpoint::fact_hash_key(
+                    batch,
+                    &yield_indices,
+                    row,
+                ));
+            }
+        }
+        let mut by_fact: HashMap<FactKey, Vec<RowTerm>> = HashMap::new();
+        let mut events: HashMap<FactKey, Vec<Option<FactKey>>> = HashMap::new();
+        // Each published row's derivations: its KEY and their indices among
+        // the KEY's rows.
+        let mut derivations: HashMap<Vec<u8>, (FactKey, Vec<usize>)> = HashMap::new();
+        for (identity, (key, term, event)) in rows.rows {
+            if published.contains(&identity) {
+                let rows_of_key = by_fact.entry(key).or_default();
+                derivations
+                    .entry(identity)
+                    .or_insert_with(|| (key, Vec::new()))
+                    .1
+                    .push(rows_of_key.len());
+                rows_of_key.push(term);
+                events.entry(key).or_default().push(event);
+            }
+        }
+        if let Ok(mut rules) = self.rules.write() {
+            rules.insert(
+                rule.name.clone(),
+                Arc::new(RuleLineage {
+                    // Facts sharing a KEY are alternatives: a reference to
+                    // the KEY reads any of them, and `IS NOT` none.
+                    conjunction: false,
+                    facts: by_fact,
+                    events,
+                }),
+            );
+        }
+        if ctx.semiring_kind == SemiringKind::MaxMinProb {
+            return Ok(facts);
+        }
+        self.correct_rows(rule, facts, &derivations, ctx)
+    }
+
+    /// The correction [`Self::publish_rows`] describes, over the rows'
+    /// `derivations`.
+    fn correct_rows(
+        &self,
+        rule: &FixpointRulePlan,
+        facts: Vec<RecordBatch>,
+        derivations: &HashMap<Vec<u8>, (FactKey, Vec<usize>)>,
+        ctx: &ExactCtx<'_>,
+    ) -> DFResult<Vec<RecordBatch>> {
+        let Some(prob_name) = rule.prob_column_name.as_deref() else {
+            return Ok(facts);
+        };
+        let snapshot = self.snapshot();
+        let analysis = Analysis::run(&snapshot, &rule.name, ANALYSIS_SUPPORT_CAP)?;
+        let inexact = |key: &FactKey, rows: &[usize]| {
+            rows.len() > 1
+                || analysis.locally_shared(&(rule.name.clone(), *key))
+                || !analysis.read_once(&(rule.name.clone(), *key))
+        };
+        // Shared only through a fact it references is that rule's warning;
+        // this rule's is for its own rows.
+        let shared = derivations.values().any(|(key, rows)| {
+            rows.len() > 1 || analysis.locally_shared(&(rule.name.clone(), *key))
+        });
+        if shared
+            && !matches!(ctx.semiring_kind, SemiringKind::TopKProofs { .. })
+            && let Ok(mut warnings) = ctx.warnings_slot.write()
+            && !warnings.iter().any(|w| {
+                w.code == RuntimeWarningCode::SharedProbabilisticDependency
+                    && w.rule_name == rule.name
+            })
+        {
+            warnings.push(RuntimeWarning {
+                code: RuntimeWarningCode::SharedProbabilisticDependency,
+                message: format!(
+                    "Rule '{}' has PROB facts derived more than one way, or whose \
+                         derivation reads one piece of evidence twice, violating the \
+                         independence assumption. Their PROB values may be inexact.",
+                    rule.name
+                ),
+                rule_name: rule.name.clone(),
+                variable_count: None,
+                key_group: None,
+            });
+        }
+        if !ctx.exact && ctx.top_k().is_none() {
+            return Ok(facts);
+        }
+        let mut out = Vec::with_capacity(facts.len());
+        for batch in facts {
+            if batch.num_rows() == 0 {
+                out.push(batch);
+                continue;
+            }
+            let schema = batch.schema();
+            let (yield_indices, key_indices) = yield_positions_in(rule, &schema)?;
+            let prob_index = schema.index_of(prob_name).map_err(|_| {
+                internal(format!(
+                    "rule '{}': PROB column `{prob_name}` is missing from a fact batch",
+                    rule.name
+                ))
+            })?;
+            let mut values: Vec<Option<f64>> = Vec::with_capacity(batch.num_rows());
+            let mut changed = false;
+            for row in 0..batch.num_rows() {
+                let current = f64_at(batch.column(prob_index).as_ref(), row, prob_name)?;
+                let identity = super::locy_fixpoint::fact_hash_key(&batch, &yield_indices, row);
+                let corrected = match derivations.get(&identity) {
+                    Some((key, rows)) if current.is_some() && inexact(key, rows) => {
+                        fact_probability(
+                            &snapshot,
+                            (rule.name.clone(), *key),
+                            Some(rows),
+                            &BudgetReport {
+                                batch: &batch,
+                                key_indices: &key_indices,
+                                row,
+                                ctx,
+                            },
+                        )?
+                    }
+                    _ => None,
+                };
+                changed |= corrected.is_some();
+                values.push(corrected.or(current));
+            }
+            if !changed {
+                out.push(batch);
+                continue;
+            }
+            let mut columns: Vec<ArrayRef> = batch.columns().to_vec();
+            columns[prob_index] = f64_column(values, &columns[prob_index])?;
+            let fields: Vec<arrow_schema::Field> = schema
+                .fields()
+                .iter()
+                .zip(&columns)
+                .map(|(f, c)| f.as_ref().clone().with_data_type(c.data_type().clone()))
+                .collect();
+            let new_schema = Arc::new(arrow_schema::Schema::new_with_metadata(
+                fields,
+                schema.metadata().clone(),
+            ));
+            out.push(RecordBatch::try_new(new_schema, columns).map_err(arrow_err)?);
+        }
+        Ok(out)
     }
 
     /// A consistent view of every recorded rule.
@@ -905,6 +1252,95 @@ impl LineageStore {
         }
         Ok((out, outcome))
     }
+}
+
+/// Each row of `batch`, a batch of `rule`'s derivation rows, as lineage:
+/// the KEY hash of its fact, its term and its event identity (from
+/// `event_column`). `None` for a row whose PROB value (`prob_name`) is NULL,
+/// which no fold reads and no fact carries.
+///
+/// # Errors
+///
+/// Fails when a KEY, PROB or lineage column within `scope` is missing from
+/// the batch, or of the wrong type.
+fn lineage_rows(
+    rule: &FixpointRulePlan,
+    batch: &RecordBatch,
+    prob_name: &str,
+    event_column: &str,
+    scope: RefScope,
+) -> DFResult<Vec<Option<LineageRow>>> {
+    let schema = batch.schema();
+    let (_, key_indices) = yield_positions_in(rule, &schema)?;
+    let key_columns: Vec<ArrayRef> = key_indices
+        .iter()
+        .map(|&i| Arc::clone(batch.column(i)))
+        .collect();
+    let prob_column = schema
+        .index_of(prob_name)
+        .map(|i| batch.column(i))
+        .map_err(|_| {
+            internal(format!(
+                "rule '{}': lineage column `{prob_name}` is missing from a fact batch",
+                rule.name
+            ))
+        })?;
+    let event_column = schema
+        .index_of(event_column)
+        .ok()
+        .map(|i| {
+            batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<FixedSizeBinaryArray>()
+                .ok_or_else(|| {
+                    internal(format!(
+                        "rule '{}': `{event_column}` is not a row hash",
+                        rule.name
+                    ))
+                })
+        })
+        .transpose()?;
+    let resolver = RefResolver::new(rule, batch, scope)?;
+    let mut out = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        // A NULL input is skipped by the fold, so it is no proof.
+        let Some(weight) = f64_at(prob_column.as_ref(), row, prob_name)? else {
+            out.push(None);
+            continue;
+        };
+        let weight = weight.clamp(0.0, 1.0);
+        let refs = resolver.row(row)?;
+        let term = if refs.opaque {
+            RowTerm::Opaque { prob: weight }
+        } else {
+            // A divisor of 0 means a referenced probability of 0 or a negated
+            // one of 1, so the weight is 0 as well. Such a default value is
+            // also exact (a certain or impossible fact stays so under any
+            // correlation), so the row's own weight is never read.
+            let local = if refs.divisor > 0.0 {
+                (weight / refs.divisor).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            RowTerm::Conj {
+                local,
+                weight,
+                refs: refs.positive,
+                negs: refs.negated,
+            }
+        };
+        let event = match event_column {
+            Some(col) if !refs.opaque && !col.is_null(row) => Some(
+                col.value(row)
+                    .try_into()
+                    .map_err(|_| internal(format!("rule '{}': malformed row hash", rule.name)))?,
+            ),
+            _ => None,
+        };
+        out.push(Some((row_hash(&key_columns, row)?, term, event)));
+    }
+    Ok(out)
 }
 
 /// The indices of the `k` rows of highest PROB value, ties broken by
@@ -1468,6 +1904,7 @@ mod tests {
                         read: ProbRead::Absent,
                     }),
                     negated_lineage: None,
+                    support_ref: None,
                 }],
                 priority: None,
                 along_bindings: Vec::new(),
@@ -1687,6 +2124,7 @@ mod tests {
                 read: ProbRead::Absent,
             }),
             negated_lineage: None,
+            support_ref: None,
         };
         let batch = RecordBatch::try_new(
             Arc::new(Schema::new(vec![
@@ -1734,6 +2172,7 @@ mod tests {
                 column: NOT_COL.into(),
                 target_key_columns: vec!["a".into()],
             }),
+            support_ref: None,
         });
         rule
     }
@@ -1901,7 +2340,7 @@ mod tests {
     fn the_resolver_reads_references_by_name_and_fails_closed() {
         let rule = rule();
         let batch = permuted(&[("x", 0.3, Some(0.6)), ("y", 0.3, None)]);
-        let resolver = RefResolver::new(&rule, &batch).unwrap();
+        let resolver = RefResolver::new(&rule, &batch, RefScope::All).unwrap();
         let x = resolver.row(0).unwrap();
         assert_eq!(x.positive.len(), 1);
         assert_eq!(x.positive[0].fact, ("base".to_string(), [7u8; 16]));
@@ -1912,7 +2351,7 @@ mod tests {
             vec![Arc::new(StringArray::from(vec!["x"]))],
         )
         .unwrap();
-        let err = RefResolver::new(&rule, &narrow)
+        let err = RefResolver::new(&rule, &narrow, RefScope::All)
             .err()
             .expect("a missing hidden column is an error");
         assert!(err.to_string().contains(KEY_COL), "{err}");

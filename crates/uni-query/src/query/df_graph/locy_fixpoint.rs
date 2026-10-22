@@ -14,7 +14,7 @@ use crate::query::df_graph::common::{
 use crate::query::df_graph::locy_best_by::{BestByExec, SortCriterion, order_column};
 use crate::query::df_graph::locy_errors::LocyRuntimeError;
 use crate::query::df_graph::locy_explain::{
-    ProofTerm, ProvenanceAnnotation, ProvenanceStore, compute_proof_probability,
+    ProofTerm, ProvenanceAnnotation, ProvenanceStore, compute_proof_probability, top_k_fact_hash,
 };
 use crate::query::df_graph::locy_fold::{FoldBinding, FoldExec};
 use crate::query::df_graph::locy_priority::PriorityExec;
@@ -2132,10 +2132,14 @@ pub struct IsRefBinding {
     /// the referenced probability (and KEY hash) and how the clause reads it
     /// (see [`crate::query::planner_locy_types::PositiveProbRef`]).
     pub prob_ref: Option<crate::query::planner_locy_types::PositiveProbRef>,
-    /// For a negated reference to a PROB rule from an `MNOR`/`MPROD` rule:
-    /// the hidden column its complement fills with the facts it read (see
-    /// [`crate::query::planner_locy_types::NegatedLineageRef`]).
+    /// For a negated reference to a PROB rule from a rule that keeps
+    /// lineage: the hidden column its complement fills with the facts it read
+    /// (see [`crate::query::planner_locy_types::NegatedLineageRef`]).
     pub negated_lineage: Option<crate::query::planner_locy_types::NegatedLineageRef>,
+    /// For a positive reference no lineage column names a fact for, when
+    /// provenance is recorded: the transient columns naming it for EXPLAIN
+    /// (see [`crate::query::planner_locy_types::SupportRef`]).
+    pub support_ref: Option<crate::query::planner_locy_types::SupportRef>,
 }
 
 /// A single clause (body) within a fixpoint rule.
@@ -2453,8 +2457,15 @@ async fn run_fixpoint_loop(
                     update_derived_scan_handles(&registry, &states, rule_idx, &rules);
                 }
 
+                // A PROB rule without a fold: its derivation rows, read
+                // before the transient columns carrying them go. Provenance
+                // reads them from `clause_candidates`; the facts never carry
+                // them.
+                if let Some(ref tracker) = derivation_tracker {
+                    tracker.lineage().record_rows(rule, &batches)?;
+                }
                 clause_candidates.push(batches.clone());
-                all_candidates.extend(batches);
+                all_candidates.extend(super::locy_lineage::strip_transient_columns(batches)?);
             }
 
             // Merge candidates into facts.
@@ -2588,37 +2599,21 @@ async fn run_fixpoint_loop(
             tracker.lineage().record_rule(rule, facts)?;
         }
     }
-    for (rule_idx, mut facts) in stratum_facts.into_iter().enumerate() {
-        let rule = &rules[rule_idx];
-        if facts.is_empty() {
+    let mut stratum_facts: Vec<Option<Vec<RecordBatch>>> =
+        stratum_facts.into_iter().map(Some).collect();
+    let mut processed_by_rule: Vec<Option<Vec<RecordBatch>>> = vec![None; rules.len()];
+    // A rule without a fold first: nothing corrects its facts and its chain
+    // reads no lineage, so it is finished before any rule of the stratum is
+    // corrected, and a PROB rule's lineage — its published facts' rows — is
+    // in place for the rules that read it.
+    for (rule_idx, rule) in rules.iter().enumerate() {
+        if !rule.fold_bindings.is_empty() {
             continue;
         }
+        let Some(facts) = stratum_facts[rule_idx].take().filter(|f| !f.is_empty()) else {
+            continue;
+        };
         super::locy_lineage::warn_opaque_prob_reads(rule, &warnings_slot);
-
-        // Shared-proof detection and, with `exact_probability`, exact
-        // inference over the recorded lineage (`locy_lineage`). Under
-        // `MaxMinProb`, `plus = max` is idempotent — shared proofs don't
-        // double-count — so the warning is moot and the work is skipped.
-        //
-        // TODO(C0-stage2): `TopKProofs` could read `TopKTag` DNFs here once
-        // `crates/uni-locy/src/top_k_proofs.rs` tags reach the runtime.
-        if semiring_kind != SemiringKind::MaxMinProb
-            && let Some(ref tracker) = derivation_tracker
-        {
-            let (corrected, _) = tracker.lineage().correct(
-                rule,
-                facts,
-                &super::locy_lineage::ExactCtx {
-                    exact: exact_probability,
-                    max_bdd_variables,
-                    semiring_kind,
-                    warnings_slot: &warnings_slot,
-                    approximate_slot: &approximate_slot,
-                },
-            )?;
-            facts = corrected;
-        }
-
         let processed = apply_post_fixpoint_chain(
             facts,
             rule,
@@ -2626,13 +2621,52 @@ async fn run_fixpoint_loop(
             strict_probability_domain,
             probability_epsilon,
             semiring_kind,
-            // Recursive strata have no profile collector in scope here; the
-            // non-recursive path in `locy_program.rs` is where these operators
-            // become observable (#177).
+            // See the call below.
             None,
             &params,
         )
         .await?;
+        let processed = match derivation_tracker {
+            Some(ref tracker) => tracker.lineage().publish_rows(
+                rule,
+                processed,
+                &super::locy_lineage::ExactCtx {
+                    exact: exact_probability,
+                    max_bdd_variables,
+                    semiring_kind,
+                    warnings_slot: &warnings_slot,
+                    approximate_slot: &approximate_slot,
+                },
+            )?,
+            None => processed,
+        };
+        processed_by_rule[rule_idx] = Some(processed);
+    }
+    for (rule_idx, facts) in stratum_facts.into_iter().enumerate() {
+        let rule = &rules[rule_idx];
+        let processed = match (processed_by_rule[rule_idx].take(), facts) {
+            (Some(processed), _) => processed,
+            (None, Some(facts)) if !facts.is_empty() => {
+                fold_rule_output(
+                    facts,
+                    rule,
+                    FoldRuleCtx {
+                        tracker: derivation_tracker.as_ref(),
+                        semiring_kind,
+                        exact_probability,
+                        max_bdd_variables,
+                        warnings_slot: &warnings_slot,
+                        approximate_slot: &approximate_slot,
+                        task_ctx: &task_ctx,
+                        strict_probability_domain,
+                        probability_epsilon,
+                        params: &params,
+                    },
+                )
+                .await?
+            }
+            _ => continue,
+        };
         per_rule_output
             .write()
             .unwrap_or_else(|e| e.into_inner())
@@ -2646,6 +2680,73 @@ async fn run_fixpoint_loop(
     }
 
     Ok(all_output)
+}
+
+/// What [`fold_rule_output`] needs from the fixpoint loop.
+struct FoldRuleCtx<'a> {
+    tracker: Option<&'a Arc<ProvenanceStore>>,
+    semiring_kind: SemiringKind,
+    exact_probability: bool,
+    max_bdd_variables: usize,
+    warnings_slot: &'a Arc<StdRwLock<Vec<RuntimeWarning>>>,
+    approximate_slot: &'a Arc<StdRwLock<HashMap<String, Vec<String>>>>,
+    task_ctx: &'a Arc<TaskContext>,
+    strict_probability_domain: bool,
+    probability_epsilon: f64,
+    params: &'a HashMap<String, Value>,
+}
+
+/// A converged rule's published facts: its pre-fold rows corrected by
+/// shared-proof detection and exact inference, then its post-fixpoint chain.
+///
+/// # Errors
+///
+/// A lineage or chain failure.
+async fn fold_rule_output(
+    mut facts: Vec<RecordBatch>,
+    rule: &FixpointRulePlan,
+    ctx: FoldRuleCtx<'_>,
+) -> DFResult<Vec<RecordBatch>> {
+    super::locy_lineage::warn_opaque_prob_reads(rule, ctx.warnings_slot);
+
+    // Shared-proof detection and, with `exact_probability`, exact
+    // inference over the recorded lineage (`locy_lineage`). Under
+    // `MaxMinProb`, `plus = max` is idempotent — shared proofs don't
+    // double-count — so the warning is moot and the work is skipped.
+    //
+    // TODO(C0-stage2): `TopKProofs` could read `TopKTag` DNFs here once
+    // `crates/uni-locy/src/top_k_proofs.rs` tags reach the runtime.
+    if ctx.semiring_kind != SemiringKind::MaxMinProb
+        && let Some(tracker) = ctx.tracker
+    {
+        let (corrected, _) = tracker.lineage().correct(
+            rule,
+            facts,
+            &super::locy_lineage::ExactCtx {
+                exact: ctx.exact_probability,
+                max_bdd_variables: ctx.max_bdd_variables,
+                semiring_kind: ctx.semiring_kind,
+                warnings_slot: ctx.warnings_slot,
+                approximate_slot: ctx.approximate_slot,
+            },
+        )?;
+        facts = corrected;
+    }
+
+    apply_post_fixpoint_chain(
+        facts,
+        rule,
+        ctx.task_ctx,
+        ctx.strict_probability_domain,
+        ctx.probability_epsilon,
+        ctx.semiring_kind,
+        // Recursive strata have no profile collector in scope here; the
+        // non-recursive path in `locy_program.rs` is where these operators
+        // become observable (#177).
+        None,
+        ctx.params,
+    )
+    .await
 }
 
 /// What [`evaluate_clause_once`] needs from the fixpoint loop.
@@ -2766,15 +2867,12 @@ async fn record_provenance(
     let classifier_registry = classifiers.registry;
     let classifier_cache = classifiers.cache;
 
-    // Pre-compute base fact probabilities for top-k mode.
-    let base_probs = if top_k_proofs > 0 {
-        tracker.base_fact_probs()
-    } else {
-        HashMap::new()
-    };
-
+    let weight_column = derivation_weight_column(rule);
     let mut topk_acc = TopKProofAccumulator::new();
     let attribution = clause_attribution(rule, clause_candidates)?;
+    // The references only transient columns name: read from the candidates,
+    // which the facts' rows were taken from.
+    let transient = transient_support(rule, clause_candidates)?;
 
     for delta_batch in state.all_delta() {
         let (hash_indices, key_indices) = yield_positions_in(rule, &delta_batch.schema())?;
@@ -2782,7 +2880,11 @@ async fn record_provenance(
             .iter()
             .map(|&i| Arc::clone(delta_batch.column(i)))
             .collect();
-        let resolver = super::locy_lineage::RefResolver::new(rule, delta_batch)?;
+        let resolver = super::locy_lineage::RefResolver::new(
+            rule,
+            delta_batch,
+            super::locy_lineage::RefScope::Kept,
+        )?;
         let derivation_indices =
             derivation_hash_indices(rule, &hash_indices, &delta_batch.schema());
         for row_idx in 0..delta_batch.num_rows() {
@@ -2792,18 +2894,23 @@ async fn record_provenance(
             let clause_index =
                 find_clause_for_row(rule, &attribution, delta_batch, &hash_indices, row_idx)?;
 
-            let (support, fact_key) = row_provenance(&resolver, &key_columns, row_idx)?;
-
-            let proof_probability = if top_k_proofs > 0 {
-                compute_proof_probability(&support, &base_probs)
-            } else {
-                None
-            };
+            let (mut support, fact_key) = row_provenance(&resolver, &key_columns, row_idx)?;
+            if let Some(more) =
+                transient.get(&extract_scalar_key(delta_batch, &hash_indices, row_idx))
+            {
+                support.extend(more.iter().cloned());
+            }
+            let proof_probability = compute_proof_probability(
+                weight_column.is_some(),
+                row_weight(&fact_row, weight_column),
+                &support,
+            );
 
             let entry = ProvenanceAnnotation {
                 rule_name: rule.name.clone(),
                 clause_index,
                 fact_key,
+                derivation: row_hash.clone(),
                 support,
                 along_values: {
                     let along_names: Vec<String> = rule
@@ -2830,8 +2937,9 @@ async fn record_provenance(
                 .await,
             };
             if top_k_proofs > 0 {
-                topk_acc.accumulate(&entry, &row_hash);
-                tracker.record_top_k(row_hash, entry, top_k_proofs);
+                let fact = top_k_fact_hash(&entry.rule_name, &entry.fact_key);
+                topk_acc.accumulate(&entry, &fact);
+                tracker.record_top_k(fact, entry, top_k_proofs);
             } else {
                 tracker.record_derivation(row_hash, entry);
             }
@@ -2849,7 +2957,8 @@ async fn record_provenance(
 /// makes the overlap detectable — proofs grounded in the same
 /// `base_fact_id` get the same `BaseRv`.
 struct TopKProofAccumulator {
-    per_fact: HashMap<Vec<u8>, Vec<uni_locy::Proof>>,
+    /// Each fact's proofs, by derivation.
+    per_fact: HashMap<Vec<u8>, Vec<(Vec<u8>, uni_locy::Proof)>>,
     base_rv_interner: HashMap<Vec<u8>, uni_locy::BaseRv>,
     next_rv: u32,
 }
@@ -2863,12 +2972,16 @@ impl TopKProofAccumulator {
         }
     }
 
-    fn accumulate(&mut self, entry: &ProvenanceAnnotation, row_hash: &[u8]) {
+    /// Adds `entry` as a proof of the fact `fact` (its
+    /// [`top_k_fact_hash`]), its referenced facts as its base variables. A
+    /// derivation added again (refined by a later iteration) replaces its
+    /// earlier proof.
+    fn accumulate(&mut self, entry: &ProvenanceAnnotation, fact: &[u8]) {
         let mut base_rvs = uni_locy::BaseRvSet::empty();
         for term in &entry.support {
             let rv = *self
                 .base_rv_interner
-                .entry(term.base_fact_id.clone())
+                .entry(top_k_fact_hash(&term.source_rule, &term.base_fact_id))
                 .or_insert_with(|| {
                     let r = uni_locy::BaseRv(self.next_rv);
                     self.next_rv += 1;
@@ -2876,14 +2989,16 @@ impl TopKProofAccumulator {
                 });
             base_rvs.insert(rv);
         }
-        self.per_fact
-            .entry(row_hash.to_vec())
-            .or_default()
-            .push(uni_locy::Proof {
-                weight: entry.proof_probability.unwrap_or(0.0),
-                base_rvs,
-                neural_calls: Vec::new(),
-            });
+        let proof = uni_locy::Proof {
+            weight: entry.proof_probability.unwrap_or(0.0),
+            base_rvs,
+            neural_calls: Vec::new(),
+        };
+        let proofs = self.per_fact.entry(fact.to_vec()).or_default();
+        match proofs.iter_mut().find(|(d, _)| *d == entry.derivation) {
+            Some((_, existing)) => *existing = proof,
+            None => proofs.push((entry.derivation.clone(), proof)),
+        }
     }
 
     fn emit_warning_if_any(
@@ -2899,8 +3014,9 @@ impl TopKProofAccumulator {
             .per_fact
             .values()
             .filter(|proofs| {
+                let proofs: Vec<uni_locy::Proof> = proofs.iter().map(|(_, p)| p.clone()).collect();
                 let (_kept, notice) =
-                    uni_locy::merge_top_k_runtime(Vec::new(), (*proofs).clone(), top_k_proofs);
+                    uni_locy::merge_top_k_runtime(Vec::new(), proofs, top_k_proofs);
                 notice == uni_locy::PruneNotice::CrossedDependency
             })
             .count();
@@ -3191,15 +3307,100 @@ fn eval_feature_expr_against_fact_row(
     }
 }
 
+/// The pre-fold column holding a derivation's weight: the input of the
+/// rule's `MNOR`/`MPROD` fold, or else its PROB column. `None` for a rule
+/// without one.
+fn derivation_weight_column(rule: &FixpointRulePlan) -> Option<&str> {
+    match rule
+        .fold_bindings
+        .iter()
+        .find(|fb| fb.aggregate.is_probability_aggregate())
+    {
+        Some(fold) => pre_fold_column_name(rule, fold.input_col_index),
+        None => rule.prob_column_name.as_deref(),
+    }
+}
+
+/// A derivation row's own weight, read from `column` of its pre-fold row.
+/// `None` when the rule has no weight column or the row holds no number
+/// there (a NULL input the fold skips).
+fn row_weight(fact_row: &HashMap<String, Value>, column: Option<&str>) -> Option<f64> {
+    match fact_row.get(column?)? {
+        Value::Float(p) => Some(*p),
+        Value::Int(p) => Some(*p as f64),
+        _ => None,
+    }
+}
+
+/// The facts each of an iteration's candidate rows references through
+/// transient columns only (see
+/// [`crate::query::planner_locy_types::LIN_COL_PREFIX`]), keyed by the row's
+/// yield columns as [`clause_attribution`] keys it; the first candidate wins.
+///
+/// A recursive rule's facts are its candidates deduplicated, without those
+/// columns, so a delta row's transient support is looked up here.
+///
+/// # Errors
+///
+/// Fails when a candidate batch lacks a yield or provenance column.
+fn transient_support(
+    rule: &FixpointRulePlan,
+    clause_candidates: &[Vec<RecordBatch>],
+) -> DFResult<HashMap<Vec<ScalarKey>, Vec<ProofTerm>>> {
+    let mut support: HashMap<Vec<ScalarKey>, Vec<ProofTerm>> = HashMap::new();
+    for batch in clause_candidates
+        .iter()
+        .flatten()
+        .filter(|b| b.num_rows() > 0)
+    {
+        let resolver = super::locy_lineage::RefResolver::new(
+            rule,
+            batch,
+            super::locy_lineage::RefScope::Transient,
+        )?;
+        if resolver.is_empty() {
+            continue;
+        }
+        let (indices, _) = yield_positions_in(rule, &batch.schema())?;
+        for row in 0..batch.num_rows() {
+            let key = extract_scalar_key(batch, &indices, row);
+            if support.contains_key(&key) {
+                continue;
+            }
+            let refs = resolver.row(row)?;
+            support.insert(
+                key,
+                refs.positive
+                    .into_iter()
+                    .chain(refs.support)
+                    .map(proof_term)
+                    .collect(),
+            );
+        }
+    }
+    Ok(support)
+}
+
+/// A referenced fact as a proof term.
+fn proof_term(r: super::locy_lineage::RefTerm) -> ProofTerm {
+    ProofTerm {
+        source_rule: r.fact.0,
+        base_fact_id: r.fact.1.to_vec(),
+        prob: r.prob,
+    }
+}
+
 /// The provenance of row `row` of a batch of `rule`'s pre-fold rows: the
 /// facts it positively references (its support), and its own KEY hash, both
 /// as lineage names facts.
 ///
 /// The support is read through the one reference resolution,
 /// [`super::locy_lineage::RefResolver`], so EXPLAIN shows, and `TopKProofs`
-/// and exact inference evaluate, the same references. A reference with no
-/// hidden identity column (to a rule without a PROB column, or from a rule
-/// that keeps no lineage) is a certain condition and is not support.
+/// and exact inference evaluate, the same references. A reference no
+/// lineage column names (to a rule without a PROB column, or from a rule
+/// that keeps no lineage) is support too when provenance is recorded, read
+/// from its transient column ([`crate::query::planner_locy_types::SupportRef`]);
+/// a fact of a rule without a PROB column is certain, of probability 1.
 fn row_provenance(
     resolver: &super::locy_lineage::RefResolver<'_>,
     key_columns: &[arrow_array::ArrayRef],
@@ -3208,14 +3409,11 @@ fn row_provenance(
     let support = if resolver.is_empty() {
         Vec::new()
     } else {
-        resolver
-            .row(row)?
-            .positive
+        let refs = resolver.row(row)?;
+        refs.positive
             .into_iter()
-            .map(|r| ProofTerm {
-                source_rule: r.fact.0,
-                base_fact_id: r.fact.1.to_vec(),
-            })
+            .chain(refs.support)
+            .map(proof_term)
             .collect()
     };
     let key = super::locy_row_hash::row_hash(key_columns, row)?.to_vec();
@@ -3394,13 +3592,7 @@ pub(crate) async fn record_provenance_nonrecursive(
     let classifier_registry = classifiers.registry;
     let classifier_cache = classifiers.cache;
 
-    // Pre-compute base fact probabilities for top-k mode.
-    let base_probs = if top_k_proofs > 0 {
-        tracker.base_fact_probs()
-    } else {
-        HashMap::new()
-    };
-
+    let weight_column = derivation_weight_column(rule);
     let mut topk_acc = TopKProofAccumulator::new();
 
     // Record provenance for each clause's facts.
@@ -3411,7 +3603,11 @@ pub(crate) async fn record_provenance_nonrecursive(
                 .iter()
                 .map(|&i| Arc::clone(batch.column(i)))
                 .collect();
-            let resolver = super::locy_lineage::RefResolver::new(rule, batch)?;
+            let resolver = super::locy_lineage::RefResolver::new(
+                rule,
+                batch,
+                super::locy_lineage::RefScope::All,
+            )?;
             let derivation_indices = derivation_hash_indices(rule, &hash_indices, &batch.schema());
             for row_idx in 0..batch.num_rows() {
                 let row_hash =
@@ -3419,17 +3615,17 @@ pub(crate) async fn record_provenance_nonrecursive(
                 let fact_row = batch_row_to_value_map(batch, row_idx);
 
                 let (support, fact_key) = row_provenance(&resolver, &key_columns, row_idx)?;
-
-                let proof_probability = if top_k_proofs > 0 {
-                    compute_proof_probability(&support, &base_probs)
-                } else {
-                    None
-                };
+                let proof_probability = compute_proof_probability(
+                    weight_column.is_some(),
+                    row_weight(&fact_row, weight_column),
+                    &support,
+                );
 
                 let entry = ProvenanceAnnotation {
                     rule_name: rule.name.clone(),
                     clause_index: *clause_index,
                     fact_key,
+                    derivation: row_hash.clone(),
                     support,
                     along_values: {
                         let along_names: Vec<String> = rule
@@ -3458,8 +3654,9 @@ pub(crate) async fn record_provenance_nonrecursive(
                     .await,
                 };
                 if top_k_proofs > 0 {
-                    topk_acc.accumulate(&entry, &row_hash);
-                    tracker.record_top_k(row_hash, entry, top_k_proofs);
+                    let fact = top_k_fact_hash(&entry.rule_name, &entry.fact_key);
+                    topk_acc.accumulate(&entry, &fact);
+                    tracker.record_top_k(fact, entry, top_k_proofs);
                 } else {
                     tracker.record(row_hash, entry);
                 }

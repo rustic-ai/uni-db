@@ -688,6 +688,7 @@ async fn diag_72_set_data_scale_with_hnsw_impl(
 
     let temp_dir = tempdir()?;
     let cfg = UniConfig {
+        #[expect(deprecated, reason = "exercises the deprecated no-op flag")]
         partial_lance_writes,
         // The warmup commits 500 mutations in a single transaction to build L0
         // version history; that one large commit can exceed the default 5s guard

@@ -516,6 +516,11 @@ impl Executor {
         };
 
         let writer: &uni_store::Writer = writer.as_ref();
+        // Inside a transaction the rows go to its private L0 like any other
+        // write: visible to the transaction only, gone on rollback, bounded by
+        // its memory limit, and made durable by its commit. Without one (a
+        // writer-level import) they go to the main L0 and are flushed below.
+        let tx_l0 = self.transaction_l0_override.as_ref();
         let count = rows.len();
         match &target {
             CopyTarget::Label(label) => {
@@ -524,7 +529,7 @@ impl Executor {
                     let vids = writer.allocate_vids(chunk.len()).await?;
                     for (row, vid) in chunk.iter().zip(vids) {
                         writer
-                            .insert_vertex_with_labels(vid, row.props.clone(), &labels, None)
+                            .insert_vertex_with_labels(vid, row.props.clone(), &labels, tx_l0)
                             .await?;
                     }
                 }
@@ -548,7 +553,7 @@ impl Executor {
                                 eid,
                                 row.props.clone(),
                                 Some(type_name.clone()),
-                                None,
+                                tx_l0,
                             )
                             .await?;
                     }
@@ -560,7 +565,7 @@ impl Executor {
             "Imported {count} rows from '{path}' into '{}'",
             target.name()
         );
-        if count > 0 {
+        if count > 0 && tx_l0.is_none() {
             writer.flush_to_l1(None).await?;
         }
         Ok(count)

@@ -320,6 +320,15 @@ fn build_use_declaration(pair: Pair<LocyRule>) -> Result<UseDecl, ParseError> {
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn build_rule_definition(pair: Pair<LocyRule>) -> Result<RuleDefinition, ParseError> {
+    let mut parameters: Vec<String> = Vec::new();
+    for inner in pair.clone().into_inner().flatten() {
+        if inner.as_rule() == LocyRule::parameter {
+            let name = walker::normalize_identifier(&inner.as_str()[1..]);
+            if !parameters.contains(&name) {
+                parameters.push(name);
+            }
+        }
+    }
     let mut name = None;
     let mut priority = None;
     let mut match_pattern = None;
@@ -390,6 +399,7 @@ fn build_rule_definition(pair: Pair<LocyRule>) -> Result<RuleDefinition, ParseEr
         having,
         best_by,
         output: output.unwrap(),
+        parameters,
     })
 }
 

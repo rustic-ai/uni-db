@@ -10,6 +10,7 @@ pub mod storage;
 pub mod store_utils;
 pub mod snapshot {
     pub mod manager;
+    pub mod restore;
 }
 
 pub use backend::StorageBackend;

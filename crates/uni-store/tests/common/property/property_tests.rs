@@ -357,11 +357,16 @@ proptest! {
         lsn in 1u64..10000,
         mutations in prop::collection::vec(mutation_strategy(), 0..10)
     ) {
-        let segment = WalSegment { lsn, mutations };
+        let segment = WalSegment {
+            lsn,
+            mutations,
+            writer_features: uni_common::core::schema::current_writer_features(),
+        };
         let json = serde_json::to_string(&segment).expect("serialize");
         let restored: WalSegment = serde_json::from_str(&json).expect("deserialize");
 
         prop_assert_eq!(segment.lsn, restored.lsn);
         prop_assert_eq!(segment.mutations.len(), restored.mutations.len());
+        prop_assert_eq!(segment.writer_features, restored.writer_features);
     }
 }

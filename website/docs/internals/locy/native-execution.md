@@ -20,11 +20,11 @@ Expression functions in rule `WHERE` and `YIELD` clauses have full `GraphExecuti
 
 ## Phase 2: Command Dispatch
 
-After strata converge, `dispatch_native_command()` processes each command:
+After strata converge, `dispatch_native_command()` processes each command in program order. A command that writes (a `DERIVE` that derived something, a Cypher write) marks the facts stale, and the next command that reads facts derives them again first, through `locy_sequence::CommandSequence` (shared with ASSUME bodies): strata the write cannot affect keep their facts, the rest are re-derived. Commands ahead of the first write that run inside `LocyProgramExec` (Cypher reads, `VALIDATE`, `CALIBRATE`) still run there; from the first write on, every command goes through the dispatch loop.
 
 | Command | Operation | Uses DataFusion? |
 |---------|-----------|-----------------|
-| `QUERY` | Read the rule's derived facts → filter → project | No (reads what the strata published) |
+| `QUERY` | Read the rule's derived facts → filter → project | No (reads what the strata published for the current state) |
 | `DERIVE` | Iterate facts → generate mutations | No (row-level) |
 | `ABDUCE` | Savepoint → mutate → re-evaluate → check → rollback | Yes (re-evaluates strata) |
 | `ASSUME` | Savepoint → mutate → re-evaluate → dispatch body | Yes (re-evaluates strata) |

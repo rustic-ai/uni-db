@@ -657,6 +657,77 @@ impl StorageBackend for BranchedBackend {
         Ok(())
     }
 
+    fn staged_record(
+        &self,
+        table_name: &str,
+        staged: &[crate::backend::traits::StagedAppend],
+    ) -> Result<Option<serde_json::Value>> {
+        let mut branch: Option<&str> = None;
+        let mut payloads: Vec<&(dyn std::any::Any + Send + Sync)> = Vec::new();
+        for append in staged {
+            let Some(payload) = append.payload() else {
+                continue;
+            };
+            let ForkStaged { branch: b, payload } =
+                payload.downcast_ref::<ForkStaged>().ok_or_else(|| {
+                    anyhow::anyhow!("rows staged for '{table_name}' were not staged by a fork")
+                })?;
+            match branch {
+                Some(existing) if existing != b => anyhow::bail!(
+                    "rows staged for '{table_name}' span branches '{existing}' and '{b}'"
+                ),
+                _ => branch = Some(b),
+            }
+            payloads.push(payload.as_ref());
+        }
+        let Some(branch) = branch else {
+            return Ok(None);
+        };
+        let Some(staged) = self
+            .branching()?
+            .staged_record_on_branch(table_name, branch, &payloads)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(
+            serde_json::json!({ "branch": branch, "staged": staged }),
+        ))
+    }
+
+    async fn publish_staged_record(
+        &self,
+        table_name: &str,
+        record: &serde_json::Value,
+        published_after: Option<u64>,
+    ) -> Result<crate::backend::traits::RecordedPublish> {
+        // `published_after` is the version the fork backend reported for the
+        // table before the publish, which is the primary's (see
+        // `get_table_version`); the branch publish searches the branch's own
+        // history instead.
+        let _ = published_after;
+        let branch = record
+            .get("branch")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!("the recorded publish to '{table_name}' names no fork branch")
+            })?;
+        let staged = record.get("staged").ok_or_else(|| {
+            anyhow::anyhow!("the recorded publish to '{table_name}' holds no staged rows")
+        })?;
+        // Same per-table mutex as `publish_staged`, so the exactly-once check
+        // and the commit cannot interleave with another in-process publish.
+        let _guard = self.inner.lock_table_for_write(table_name).await;
+        self.branching()?
+            .publish_staged_record_on_branch(table_name, branch, staged)
+            .await
+    }
+
+    fn hold_staged_files(&self, table_name: &str) -> crate::backend::traits::StagedFilesHold {
+        // A fork's optimize runs the primary backend's (see `optimize_table`),
+        // so the hold belongs there too.
+        self.inner.hold_staged_files(table_name)
+    }
+
     async fn discard_staged(
         &self,
         table_name: &str,

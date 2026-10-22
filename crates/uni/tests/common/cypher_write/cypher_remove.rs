@@ -89,7 +89,26 @@ async fn test_cypher_remove() -> anyhow::Result<()> {
     assert_eq!(res.len(), 1);
     assert_eq!(res[0].get("r.since"), Some(&uni_db::Value::Null));
 
-    // 5. Remove label from vertex
+    // 5. Remove label from vertex. Bob is the target of a FOLLOWS edge,
+    // declared User -> User, so dropping his only User label is refused while
+    // the edge exists.
+    let query = "MATCH (u:User {name: 'Bob'}) REMOVE u:User RETURN u";
+    let ast = uni_cypher::parse(query)?;
+    let plan = planner.plan(ast)?;
+    let err = executor
+        .execute(plan, &prop_manager, &params)
+        .await
+        .expect_err("removing a label a declared edge needs must be refused");
+    assert!(
+        err.to_string().contains("EdgeEndpointViolation"),
+        "unexpected error: {err}"
+    );
+    let query = "MATCH (:User)-[r:FOLLOWS]->(:User {name: 'Bob'}) DELETE r";
+    let ast = uni_cypher::parse(query)?;
+    let plan = planner.plan(ast)?;
+    executor.execute(plan, &prop_manager, &params).await?;
+
+    // With the edge gone the label can go.
     let query = "MATCH (u:User {name: 'Bob'}) REMOVE u:User RETURN u";
     let ast = uni_cypher::parse(query)?;
     let plan = planner.plan(ast)?;

@@ -743,6 +743,252 @@ async fn negation_exact_matches_possible_worlds_and_default_agrees_without_shari
     Ok(())
 }
 
+// ── Facts of a PROB rule without a fold inside exact formulas ──────────────
+
+/// Programs referencing a PROB rule without a fold (`edge`, one fact per
+/// edge, or `hop`, an edge then a reachability) from an `MNOR` rule. Exact
+/// mode must read each referenced fact as its own formula (the edge, or the
+/// edge and the reachability it rests on), not as a fresh variable.
+const NON_FOLD_PROGRAMS: &[NegatedProgram] = &[
+    // reach(a, b) AND NOT edge(a, b), `edge` one fact per edge
+    NegatedProgram {
+        rule: "CREATE RULE edge AS \
+             MATCH (a:N)-[e:E]->(b:N) YIELD KEY a, KEY b, e.p AS p PROB \n\
+             CREATE RULE odd AS \
+             MATCH (a:N) WHERE a IS reach TO b, a IS NOT edge TO b \
+             FOLD prob = MNOR(1.0) YIELD KEY a, KEY b, prob \n",
+        has_mid: false,
+        holds: |w, a, _, b| w.reach(a, b) && !w.link(a, b),
+    },
+    // reach(a, b) AND NOT hop(a, b, _): reachable, but not by an edge a → m
+    // then a path m ⇝ b (`TO b` binds `hop`'s second KEY column)
+    NegatedProgram {
+        rule: "CREATE RULE hop AS \
+             MATCH (a:N)-[e:E]->(m:N) WHERE m IS reach TO b \
+             YIELD KEY a, KEY b, KEY m, e.p AS p PROB \n\
+             CREATE RULE odd AS \
+             MATCH (a:N) WHERE a IS reach TO b, a IS NOT hop TO b \
+             FOLD prob = MNOR(1.0) YIELD KEY a, KEY b, prob \n",
+        has_mid: false,
+        holds: |w, a, _, b| {
+            let hop = NODES.iter().any(|m| w.link(a, m) && w.reach(m, b));
+            w.reach(a, b) && !hop
+        },
+    },
+    // edge(a, b) AND reach(a, b), both positive: the edge implies the
+    // reachability, so the conjunction is the edge alone
+    NegatedProgram {
+        rule: "CREATE RULE edge AS \
+             MATCH (a:N)-[e:E]->(b:N) YIELD KEY a, KEY b, e.p AS p PROB \n\
+             CREATE RULE odd AS \
+             MATCH (a:N) WHERE a IS edge TO b, a IS reach TO b \
+             FOLD prob = MNOR(1.0) YIELD KEY a, KEY b, prob \n",
+        has_mid: false,
+        holds: |w, a, _, b| w.link(a, b) && w.reach(a, b),
+    },
+    // reach(a, b) AND NOT twice(a, b), `twice` an edge times the
+    // reachability that edge is part of: a non-fold fact whose own value
+    // reads one edge twice
+    NegatedProgram {
+        rule: "CREATE RULE twice AS \
+             MATCH (a:N)-[e:E]->(b:N) WHERE a IS reach TO b YIELD KEY a, KEY b, e.p AS p PROB \n\
+             CREATE RULE odd AS \
+             MATCH (a:N) WHERE a IS reach TO b, a IS NOT twice TO b \
+             FOLD prob = MNOR(1.0) YIELD KEY a, KEY b, prob \n",
+        has_mid: false,
+        holds: |w, a, _, b| w.reach(a, b) && !(w.link(a, b) && w.reach(a, b)),
+    },
+];
+
+/// The PROB rule without a fold each [`NON_FOLD_PROGRAMS`] entry defines,
+/// queried directly: `(src, mid, dst, prob)` per fact, and when each fact
+/// holds in a world (`mid` empty without a middle KEY).
+const NON_FOLD_DIRECT: &[(&str, fn(&World<'_>, &str, &str, &str) -> bool)] = &[
+    (
+        "QUERY edge RETURN a.name AS src, '' AS mid, b.name AS dst, p AS prob",
+        |w, a, _, b| w.link(a, b),
+    ),
+    (
+        "QUERY hop RETURN a.name AS src, m.name AS mid, b.name AS dst, p AS prob",
+        |w, a, m, b| w.link(a, m) && w.reach(m, b),
+    ),
+    (
+        "QUERY edge RETURN a.name AS src, '' AS mid, b.name AS dst, p AS prob",
+        |w, a, _, b| w.link(a, b),
+    ),
+    (
+        "QUERY twice RETURN a.name AS src, '' AS mid, b.name AS dst, p AS prob",
+        |w, a, _, b| w.link(a, b) && w.reach(a, b),
+    ),
+];
+
+/// The facts `query` returns over `case`'s program, as `((src, mid, dst),
+/// prob)`.
+async fn run_direct(
+    db: &Uni,
+    case: &NegatedProgram,
+    query: &str,
+    config: LocyConfig,
+) -> Result<Vec<((String, String, String), f64)>> {
+    let program = format!("{}\n{LINK}{}{query}", reach_rules(), case.rule);
+    let result = db
+        .session()
+        .locy_with(&program)
+        .with_config(config)
+        .run()
+        .await?;
+    Ok(result
+        .rows()
+        .map(|rows| {
+            rows.iter()
+                .map(|r| {
+                    let name =
+                        |c: &str| r.get(c).and_then(Value::as_str).unwrap_or("?").to_string();
+                    let p = r.get("prob").and_then(Value::as_f64).unwrap_or(f64::NAN);
+                    ((name("src"), name("mid"), name("dst")), p)
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// `twice(s, t)` on the diamond, queried directly: the edge `s → t` times
+/// `reach(s, t)`, which that edge is part of. Possible worlds: X ∧ (X ∨ (Y ∧
+/// Z)) = X = 0.7. Its own value was the independent product 0.7 · 0.745 in
+/// exact mode too.
+#[tokio::test]
+async fn a_fact_without_a_fold_has_its_exact_value_in_exact_mode() -> Result<()> {
+    let db = seeded(DIAMOND).await?;
+    let (case, (query, _)) = (&NON_FOLD_PROGRAMS[3], NON_FOLD_DIRECT[3]);
+    let key = ("s".to_string(), String::new(), "t".to_string());
+    let exact = run_direct(&db, case, query, mode(true)).await?;
+    let p = exact.iter().find(|(k, _)| *k == key).map(|(_, p)| *p);
+    assert_close(p.expect("twice(s, t)"), 0.7, "exact twice(s, t)");
+    let default = run_direct(&db, case, query, mode(false)).await?;
+    let p = default.iter().find(|(k, _)| *k == key).map(|(_, p)| *p);
+    assert_close(p.expect("twice(s, t)"), 0.7 * 0.745, "default twice(s, t)");
+    Ok(())
+}
+
+/// `reach(s, t) AND NOT edge(s, t)` on the diamond, `edge` a PROB rule
+/// without a fold. Possible worlds: (X ∨ (Y ∧ Z)) ∧ ¬X = 0.3 · 0.3 · 0.5 =
+/// 0.045 (X = s→t, Y = s→m, Z = m→t). Read as a fresh variable, `edge(s, t)`
+/// is independent of `reach(s, t)`'s X and exact mode gave 0.745 · 0.3.
+#[tokio::test]
+async fn a_negated_fact_without_a_fold_is_its_own_formula_in_exact_mode() -> Result<()> {
+    let db = seeded(DIAMOND).await?;
+    let case = &NON_FOLD_PROGRAMS[0];
+    let expected = worlds_probability(DIAMOND, |w| (case.holds)(w, "s", "", "t"));
+    assert_close(expected, 0.045, "possible worlds");
+    let key = ("s".to_string(), String::new(), "t".to_string());
+    let (exact, _) = run_odd(&db, case, mode(true)).await?;
+    let p = exact.iter().find(|(k, _)| *k == key).map(|(_, p)| *p);
+    assert_close(p.expect("odd(s, t)"), 0.045, "exact odd(s, t)");
+    let (default, warnings) = run_odd(&db, case, mode(false)).await?;
+    let p = default.iter().find(|(k, _)| *k == key).map(|(_, p)| *p);
+    assert_close(p.expect("odd(s, t)"), 0.745 * 0.3, "default odd(s, t)");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w == "SharedProbabilisticDependency"),
+        "the negated fact shares s → t with the positive one: {warnings:?}"
+    );
+    Ok(())
+}
+
+/// Over random small graphs, programs referencing PROB rules without a fold
+/// (negated and positive, directly over edges and over a reachability):
+/// exact mode equals the possible-worlds probability of every fact, and
+/// wherever no shared-lineage warning is raised the default mode equals it
+/// too.
+#[tokio::test]
+async fn non_fold_references_exact_matches_possible_worlds() -> Result<()> {
+    let mut rng = Lcg(0x0f01d);
+    let mut directly = 0;
+    let mut agreed = 0;
+    let mut shared = 0;
+    for round in 0..32 {
+        let node_count = 3 + rng.next(2) as usize;
+        let edge_count = 2 + rng.next(4) as usize;
+        let edges: Vec<(&str, &str, f64)> = (0..edge_count)
+            .map(|_| {
+                let a = NODES[rng.next(node_count as u64) as usize];
+                let b = NODES[rng.next(node_count as u64) as usize];
+                let p = (1 + rng.next(9)) as f64 / 10.0;
+                (a, b, p)
+            })
+            .collect();
+        let case = &NON_FOLD_PROGRAMS[round % NON_FOLD_PROGRAMS.len()];
+        let db = seeded(&edges).await?;
+        let mut names: Vec<&str> = edges.iter().flat_map(|(a, b, _)| [*a, *b]).collect();
+        names.sort_unstable();
+        names.dedup();
+        let (exact, _) = run_odd(&db, case, mode(true)).await?;
+        let (default, warnings) = run_odd(&db, case, mode(false)).await?;
+        let sharing = warnings
+            .iter()
+            .any(|w| w == "SharedProbabilisticDependency");
+        if sharing {
+            shared += 1;
+        } else {
+            agreed += 1;
+        }
+        for a in &names {
+            for b in &names {
+                let key = (a.to_string(), String::new(), b.to_string());
+                let worlds = worlds_probability(&edges, |w| (case.holds)(w, a, "", b));
+                let what = format!("odd{key:?} over {edges:?} in\n{}", case.rule);
+                match exact.iter().find(|(k, _)| *k == key) {
+                    Some((_, p)) => assert_close(*p, worlds, &format!("exact {what}")),
+                    None => assert_close(0.0, worlds, &format!("missing {what}")),
+                }
+                if !sharing && let Some((_, p)) = default.iter().find(|(k, _)| *k == key) {
+                    assert_close(*p, worlds, &format!("default (no sharing) {what}"));
+                }
+            }
+        }
+        // The rule without a fold's own facts, queried directly. A KEY with
+        // several facts (parallel edges of different weights) is several
+        // values of one KEY, which `holds` does not tell apart: skipped.
+        let (query, holds) = NON_FOLD_DIRECT[round % NON_FOLD_DIRECT.len()];
+        let exact = run_direct(&db, case, query, mode(true)).await?;
+        let (default, warnings) = {
+            let program = format!("{}\n{LINK}{}{query}", reach_rules(), case.rule);
+            let result = db
+                .session()
+                .locy_with(&program)
+                .with_config(mode(false))
+                .run()
+                .await?;
+            let warned: Vec<String> = result
+                .warnings()
+                .iter()
+                .map(|w| format!("{:?}", w.code))
+                .collect();
+            (run_direct(&db, case, query, mode(false)).await?, warned)
+        };
+        let sharing = warnings
+            .iter()
+            .any(|w| w == "SharedProbabilisticDependency");
+        for (key, p) in &exact {
+            if exact.iter().filter(|(k, _)| k == key).count() > 1 {
+                continue;
+            }
+            directly += 1;
+            let (a, m, b) = key;
+            let worlds = worlds_probability(&edges, |w| holds(w, a, m, b));
+            let what = format!("{query} {key:?} over {edges:?}");
+            assert_close(*p, worlds, &format!("exact {what}"));
+            if !sharing && let Some((_, d)) = default.iter().find(|(k, _)| k == key) {
+                assert_close(*d, worlds, &format!("default (no sharing) {what}"));
+            }
+        }
+    }
+    assert!(agreed > 0 && shared > 0, "agreed {agreed}, shared {shared}");
+    assert!(directly > 0, "no fact of a rule without a fold was checked");
+    Ok(())
+}
+
 // ── EXPLAIN and TopKProofs read the same references as the lineage ─────────
 
 /// The name of a node bound in an EXPLAIN node's bindings.

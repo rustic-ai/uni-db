@@ -44,6 +44,30 @@ Uni uses OpenCypher as its primary query language, with extensions for vector se
     print(results)
     ```
 
+## Semantics Worth Knowing
+
+- **Parameters must be supplied.** A query that references `$x` without a
+  value for `x` fails with `UniError::ParameterMissing { names }` before it
+  reads or writes anything -- including `CREATE`, `SET`, `MERGE` and Locy
+  rules. `names` lists every missing parameter of the statement, in order of
+  first appearance (`RETURN $a, $b` with no parameters: `["a", "b"]`), even one
+  in a branch no row would reach. `EXPLAIN` plans without parameters. A
+  parameter supplied as `null` is a value, not a missing parameter.
+- **Relationship type disjunctions** (`[r:R|Q]`) match any listed type, whether
+  each type is declared in the schema or not.
+- **Declared endpoints never drop a match.** An edge type's declared source and
+  destination labels are enforced when edges are written, including by the
+  bulk loader. A pattern that does not label an endpoint is narrowed to them
+  only when every stored edge of the type is known to conform: types created
+  by this release are, types in a store written by an earlier one are
+  `unverified` until `CALL uni.admin.verifyEdgeEndpoints()` (or
+  `uni.admin.verifyEdgeEndpoints('R')` for one type) finds none violating.
+  Unverified, the pattern reads every vertex and matches violating edges --
+  correct, but on a large graph `MATCH ()-[r:R]->()` is much slower
+  (LDBC SF1 `WORK_AT`: about 6 s unverified, 0.3 s verified). The procedure yields
+  `edge_type`, `edges_checked`, `source_violations`, `target_violations` and
+  `conformance`; it runs on the primary database, not on a fork.
+
 ## Use Cases
 
 - Relationship queries and graph traversals.

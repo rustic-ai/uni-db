@@ -64,6 +64,12 @@ async fn test_stress_concurrent_read_write() -> anyhow::Result<()> {
                 for _ in 0..100 {
                     i += 1;
                     let vid = Vid::new(i);
+                    // `LINK` is declared `Node -> Node`, and declared
+                    // endpoints are enforced at write time: both ends must
+                    // exist as `:Node` before the edge is written.
+                    w.insert_vertex_with_labels(vid, HashMap::new(), &["Node".to_string()], None)
+                        .await
+                        .unwrap();
                     // Link to random previous node
                     if i > 1 {
                         let prev = {

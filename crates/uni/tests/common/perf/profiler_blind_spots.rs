@@ -568,10 +568,11 @@ async fn locy_profile_reports_per_iteration_planning() -> Result<()> {
 }
 
 /// Guard for the A4 "ASSUME `rows()` read 0" reading: `LocyResult::rows()`
-/// returns the first row-producing result (`Query`, `Assume` or `Cypher`), so
-/// the rows an `ASSUME … THEN { QUERY … }` produced are returned by `rows()`,
-/// as the Python binding's `rows` already did. Before this contract, Rust
-/// returned `None` here while Python returned the rows.
+/// returns the first row-producing result (`Query` or `Cypher`), descending
+/// into an `Assume` depth first, so the rows an `ASSUME … THEN { QUERY … }`
+/// produced are returned by `rows()`, as the Python binding's `rows` does.
+/// Before this contract, Rust returned `None` here while Python returned the
+/// rows.
 #[tokio::test]
 async fn assume_rows_are_returned_by_rows() -> Result<()> {
     let db = Uni::in_memory().build().await?;
@@ -591,16 +592,19 @@ async fn assume_rows_are_returned_by_rows() -> Result<()> {
         .await?;
 
     let assume_rows = match result.command_results() {
-        [uni_db::locy::CommandResult::Assume(rows)] => rows,
+        [uni_db::locy::CommandResult::Assume { results, .. }] => match results.as_slice() {
+            [uni_db::locy::CommandResult::Query(rows)] => rows,
+            other => panic!("expected the body's one Query result, got {other:?}"),
+        },
         other => panic!("expected exactly one Assume result, got {other:?}"),
     };
     assert_eq!(assume_rows.len(), 3, "the hypothetical sees a, b and zz");
     let rows = result
         .rows()
-        .expect("rows() returns the ASSUME result's rows");
+        .expect("rows() returns the ASSUME body's QUERY rows");
     assert!(
         std::ptr::eq(rows, assume_rows),
-        "rows() is the Assume result itself"
+        "rows() is the ASSUME body's Query result itself"
     );
     assert_eq!(result.columns(), Some(vec!["uid".to_string()]));
     Ok(())

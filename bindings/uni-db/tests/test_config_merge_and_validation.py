@@ -70,6 +70,7 @@ def test_every_accepted_key_is_accepted(tmp_path):
         "fork_sweeper_interval": timedelta(seconds=30),
         "disable_fork_sweeper": True,
         "vector_knn_default_k": 500,
+        "regex_backtrack_limit": 5000,
         "lance_metadata_cache_bytes": 64 * 1024 * 1024,
         "lance_index_cache_bytes": None,
     }
@@ -246,3 +247,24 @@ def test_lance_cache_keys_default_to_none(tmp_path):
     db = _builder(tmp_path).build()
     assert db.config()["lance_metadata_cache_bytes"] is None
     assert db.config()["lance_index_cache_bytes"] is None
+
+
+# --- regex_backtrack_limit ----------------------------------------------------
+
+# Exponential for a backtracking matcher; the look-ahead routes it there.
+_CATASTROPHIC = "(?:(a+)+)+b(?=)"
+_REGEX_QUERY = "RETURN 'aaaaaaaaaaaa' =~ '" + _CATASTROPHIC + "' AS r"
+
+
+def test_regex_backtrack_limit_raises_the_typed_error(tmp_path):
+    """A small limit refuses a match the default answers, with a typed error
+    that carries the pattern and the limit."""
+    default_db = _builder(tmp_path, "default").build()
+    assert default_db.session().query(_REGEX_QUERY).rows[0].get("r") is False
+
+    db = _builder(tmp_path, "small").config({"regex_backtrack_limit": 50}).build()
+    assert db.config()["regex_backtrack_limit"] == 50
+    with pytest.raises(uni_db.UniRegexBacktrackLimitError) as info:
+        db.session().query(_REGEX_QUERY)
+    assert info.value.pattern == _CATASTROPHIC
+    assert info.value.limit == 50

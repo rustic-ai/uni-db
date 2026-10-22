@@ -74,8 +74,15 @@ pub enum UniError {
     #[error("Index '{index}' not found")]
     IndexNotFound { index: String },
 
-    /// Snapshot not found
-    #[error("Snapshot '{snapshot_id}' not found")]
+    /// Snapshot not found.
+    ///
+    /// The display carries a tag and the JSON-encoded id, so the typed error
+    /// survives the executor's string boundary (see
+    /// [`UniError::snapshot_not_found_from_message`]).
+    #[error(
+        "{SNAPSHOT_NOT_FOUND_TAG}{}: Snapshot '{snapshot_id}' not found",
+        serde_json::to_string(snapshot_id).unwrap_or_default()
+    )]
     SnapshotNotFound { snapshot_id: String },
 
     /// A query or Locy evaluation was refused for exceeding a memory budget.
@@ -92,6 +99,20 @@ pub enum UniError {
 
     #[error("Operation timed out after {timeout_ms}ms")]
     Timeout { timeout_ms: u64 },
+
+    /// A `=~` match needed more backtracking steps than the limit allows.
+    ///
+    /// Patterns with look-around, backreferences, atomic groups, possessive
+    /// quantifiers and a few other constructs (`\b`, `\X`, `\b{g}`, `(?c)`)
+    /// run on a backtracking matcher, which can take exponential
+    /// time on some inputs. It stops after `limit` steps
+    /// (`UniConfig::regex_backtrack_limit`) instead of running away; Java has
+    /// no such limit, so the query fails where Neo4j would keep searching.
+    #[error(
+        "Regex backtrack limit of {limit} steps exceeded by pattern '{pattern}'; \
+         simplify the pattern or raise UniConfig::regex_backtrack_limit"
+    )]
+    RegexBacktrackLimit { pattern: String, limit: usize },
 
     /// A Locy program stopped before reaching its least fixed point because it
     /// exceeded its wall-clock `timeout` or its `max_iterations` cap.
@@ -239,6 +260,62 @@ pub enum UniError {
         id: u64,
     },
 
+    /// A bulk load is **committed** but `commit` could not finish publishing
+    /// it in this process.
+    ///
+    /// The load passed its commit point (its durable publish marker), so it
+    /// is decided: a background task retries the publish, with backoff, until
+    /// it completes or the database shuts down, and otherwise the next open
+    /// completes it, exactly once. Until then none of it is visible to readers
+    /// of this database handle. **Do not retry the load** -- a retry would
+    /// apply it twice. `load_id` is the load's id (`BulkWriter::load_id`);
+    /// `Uni::bulk_load_applied` (or `Session::bulk_load_applied` on a fork)
+    /// answers `true` for it.
+    #[error(
+        "Bulk load '{load_id}' is committed but its publish could not be finished by the \
+         commit ({message}); it is completed in the background, or on the next open -- do \
+         NOT retry it"
+    )]
+    BulkCommitIncomplete {
+        /// The committed load's id.
+        load_id: String,
+        /// Why the in-process publish could not be finished.
+        message: String,
+    },
+
+    /// Whether a bulk load reached its commit point is unknown: writing its
+    /// publish marker failed in a way that may still have written it, and
+    /// reading it back did not settle the question.
+    ///
+    /// The staged rows are kept. If the marker exists the next open completes
+    /// the load; otherwise nothing of it is ever visible. Reopen the database,
+    /// then check `Uni::bulk_load_applied(load_id)` before deciding to retry.
+    #[error(
+        "Bulk load '{load_id}': whether it committed is unknown ({message}); reopen the \
+         database and check bulk_load_applied before retrying"
+    )]
+    BulkCommitOutcomeUnknown {
+        /// The load's id.
+        load_id: String,
+        /// The marker write failure, and why reading it back did not decide.
+        message: String,
+    },
+
+    /// The storage backend cannot stage a bulk load's rows invisibly until
+    /// commit, so it cannot run one.
+    ///
+    /// A bulk load's isolation, abort and crash recovery all rest on staging
+    /// (`StorageBackend::stages_invisibly`): without it every write would be
+    /// visible as it lands, and the only undo would roll each table back by
+    /// version, discarding whatever other writers committed to it meanwhile.
+    /// Refused when the writer is built, before anything is written. Every
+    /// Lance-backed database, primary or fork, stages.
+    #[error("Bulk loading is not supported here: {reason}")]
+    BulkLoadUnsupported {
+        /// Why the backend cannot run a bulk load.
+        reason: String,
+    },
+
     /// Fork with the given name does not exist in the registry.
     #[error("Fork '{name}' not found")]
     ForkNotFound { name: String },
@@ -305,8 +382,10 @@ pub enum UniError {
     ///
     /// `stage` names the step (`registry_pending`, `create_branch`,
     /// `registry_active`, `tombstone`, `delete_branch`, `registry_clear`,
-    /// `backend_unsupported`, `recovery`) so recovery and humans can
-    /// triage without parsing prose.
+    /// `backend_unsupported`, `recovery`, `restore_race`) so recovery and
+    /// humans can triage without parsing prose. `restore_race` means a
+    /// snapshot restore ran while the fork was being created; the create was
+    /// rolled back and can be retried.
     #[error("Fork '{name}' lifecycle failed at stage '{stage}': {source}")]
     ForkLifecycle {
         name: String,
@@ -314,7 +393,131 @@ pub enum UniError {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+
+    /// A statement references parameters that the caller did not supply.
+    ///
+    /// Raised for reads and writes alike, before any row is written, so a
+    /// missing `$x` can no longer be stored as `NULL`. `names` lists the
+    /// parameters by name, without the `$`. openCypher's `ParameterMissing`;
+    /// Neo4j's `Neo.ClientError.Statement.ParameterMissing`.
+    #[error("{PARAMETER_MISSING_TAG}{}", names.join(", "))]
+    ParameterMissing { names: Vec<String> },
+
+    /// The operation cannot run in a transaction that holds uncommitted writes.
+    ///
+    /// Raised by operations whose effect is not transactional -- such as
+    /// `uni.graph.project`, whose projection catalog is shared by every session
+    /// and is not undone by a rollback -- and which would otherwise publish the
+    /// transaction's uncommitted writes. Commit or roll back first, or run the
+    /// operation outside the transaction.
+    #[error(
+        "'{operation}' cannot run in a transaction with uncommitted writes: {reason}; \
+         commit or roll back first"
+    )]
+    UncommittedWritesInTransaction { operation: String, reason: String },
+
+    /// Writes are stopped: the uncompacted flush generations reached the
+    /// write throttle's hard limit while background compaction is disabled,
+    /// so nothing would ever lower the count and a wait could only end in a
+    /// timeout. Run `CALL uni.admin.compact()` (or `Uni::compact`) to resume
+    /// writes, or enable compaction. Not retriable as is.
+    #[error(
+        "{WRITE_STALLED_TAG}l1_runs={l1_runs} hard_limit={hard_limit}: writes are stopped \
+         because {l1_runs} uncompacted flush generations reached the hard limit of \
+         {hard_limit} and background compaction is disabled; run CALL uni.admin.compact() \
+         to resume writes"
+    )]
+    WriteStalled { l1_runs: usize, hard_limit: usize },
+
+    /// A relationship's endpoint does not carry a label its declared edge type
+    /// allows.
+    ///
+    /// An edge type declared with source or target labels accepts an endpoint
+    /// only when the endpoint carries at least one of them. Raised when an
+    /// edge is written (CREATE, MERGE, bulk insert, COPY FROM, fork promote)
+    /// and when a `REMOVE` of a label would leave an existing edge violating
+    /// its declaration. `endpoint` is `"source"` or `"target"`; `labels` are
+    /// the endpoint's labels, `allowed` the declared ones.
+    #[error(
+        "{EDGE_ENDPOINT_TAG}{edge_type}|{endpoint}|{}|{}: edge type '{edge_type}' requires \
+         its {endpoint} to carry one of [{}], but it carries [{}]",
+        labels.join(","), allowed.join(","), allowed.join(", "), labels.join(", ")
+    )]
+    EdgeEndpointViolation {
+        edge_type: String,
+        endpoint: String,
+        labels: Vec<String>,
+        allowed: Vec<String>,
+    },
+
+    /// A property write (`SET` / `REMOVE`) on a relationship named endpoints
+    /// or a type other than the stored ones.
+    ///
+    /// A relationship's endpoints and type are fixed when it is created; a
+    /// property write rewrites its row but cannot move it. Raised when the
+    /// relationship value a `SET` / `REMOVE` acts on -- a map carrying `_eid`,
+    /// `_src`, `_dst` and `_type`, typically -- disagrees with the stored edge
+    /// `eid`. `stored` and `requested` read `(src)-[:TYPE]->(dst)`, with vertex
+    /// ids and the type name (`#<id>` when the schema cannot name it).
+    #[error(
+        "{EDGE_IDENTITY_TAG}{eid}|{stored}|{requested}: relationship {eid} is {stored}; a \
+         property write cannot change its endpoints or type to {requested}"
+    )]
+    EdgeIdentityChange {
+        eid: u64,
+        stored: String,
+        requested: String,
+    },
+
+    /// `restore_snapshot` refused because the database has forks.
+    ///
+    /// A restore rewinds the primary tables and the UID index that primary
+    /// and every fork share, but not the forks' branches: a fork would keep
+    /// data cut from the pre-restore primary and lose the UID entries it
+    /// registered after the snapshot. So a restore runs only once every fork
+    /// is fully dropped. `forks` names each fork the registry still holds,
+    /// whatever its state (active, being created, or being dropped), sorted.
+    /// Drop them with `drop_fork` (or `drop_fork_cascade` for a fork with
+    /// children) and retry.
+    #[error(
+        "{RESTORE_BLOCKED_BY_FORKS_TAG}{}: restore_snapshot refused: the database has \
+         forks [{}], and a restore does not rewind fork branches; drop them first \
+         (drop_fork, or drop_fork_cascade for a fork with children)",
+        serde_json::to_string(forks).unwrap_or_default(), forks.join(", ")
+    )]
+    RestoreBlockedByForks { forks: Vec<String> },
 }
+
+/// Display prefix of [`UniError::RestoreBlockedByForks`] (see
+/// [`UniError::restore_blocked_by_forks_from_message`]).
+pub const RESTORE_BLOCKED_BY_FORKS_TAG: &str = "RestoreBlockedByForks: ";
+
+/// Display prefix of [`UniError::SnapshotNotFound`] (see
+/// [`UniError::snapshot_not_found_from_message`]).
+pub const SNAPSHOT_NOT_FOUND_TAG: &str = "SnapshotNotFound: ";
+
+/// Display prefix of [`UniError::WriteStalled`], so the typed error survives
+/// the string boundary between the executor and the API layer (see
+/// [`UniError::write_stalled_from_message`]).
+pub const WRITE_STALLED_TAG: &str = "WriteStalled: ";
+
+/// Display prefix of [`UniError::EdgeEndpointViolation`] (see
+/// [`UniError::edge_endpoint_from_message`]).
+pub const EDGE_ENDPOINT_TAG: &str = "EdgeEndpointViolation: ";
+
+/// Display prefix of [`UniError::EdgeIdentityChange`] (see
+/// [`UniError::edge_identity_from_message`]).
+pub const EDGE_IDENTITY_TAG: &str = "EdgeIdentityChange: ";
+
+/// Display prefix of [`UniError::ParameterMissing`], also used verbatim by the
+/// query layers so the typed error survives their string boundary (see
+/// [`UniError::parameter_missing_from_message`]).
+pub const PARAMETER_MISSING_TAG: &str =
+    "ParameterMissing: MissingParameter - Expected parameter(s): ";
+
+/// Tag carried in the message of an [`UniError::UncommittedWritesInTransaction`]
+/// refusal raised below the API layer.
+pub const UNCOMMITTED_WRITES_TAG: &str = "UncommittedWritesInTransaction:";
 
 /// Tag carried in the reason of a reserved-property-name rejection, so the
 /// typed error survives the string boundary between the executor and the API
@@ -343,6 +546,192 @@ impl UniError {
         let (name, rest) = tail.split_once("': ")?;
         rest.starts_with(RESERVED_PROPERTY_TAG)
             .then(|| Self::reserved_property_name(name))
+    }
+
+    /// The message the query layers raise for missing parameters.
+    ///
+    /// Parsed back into [`Self::ParameterMissing`] by
+    /// [`Self::parameter_missing_from_message`].
+    ///
+    /// # Examples
+    /// ```
+    /// use uni_common::UniError;
+    ///
+    /// let msg = UniError::parameter_missing_message(["x", "y"]);
+    /// assert!(matches!(
+    ///     UniError::parameter_missing_from_message(&msg),
+    ///     Some(UniError::ParameterMissing { names }) if names == ["x", "y"]
+    /// ));
+    /// ```
+    #[must_use]
+    pub fn parameter_missing_message<I, S>(names: I) -> String
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let names: Vec<String> = names.into_iter().map(|n| n.as_ref().to_string()).collect();
+        format!("{PARAMETER_MISSING_TAG}{}", names.join(", "))
+    }
+
+    /// Recovers [`Self::ParameterMissing`] from a message produced by
+    /// [`Self::parameter_missing_message`], wherever it sits in `msg` (upstream
+    /// layers may prefix it, or append context after a `:`).
+    #[must_use]
+    pub fn parameter_missing_from_message(msg: &str) -> Option<Self> {
+        let tail = &msg[msg.find(PARAMETER_MISSING_TAG)? + PARAMETER_MISSING_TAG.len()..];
+        let names: Vec<String> = tail
+            .split(", ")
+            .map_while(|part| {
+                let name: String = part
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                (!name.is_empty()).then_some(name)
+            })
+            .collect();
+        (!names.is_empty()).then_some(Self::ParameterMissing { names })
+    }
+
+    /// The tagged message an operation below the API layer raises when it
+    /// refuses to run over uncommitted transaction writes.
+    #[must_use]
+    pub fn uncommitted_writes_message(operation: &str, reason: &str) -> String {
+        format!("{UNCOMMITTED_WRITES_TAG}{operation}|{reason}")
+    }
+
+    /// Recovers [`Self::UncommittedWritesInTransaction`] from a message built by
+    /// [`Self::uncommitted_writes_message`], wherever it sits in `msg`.
+    #[must_use]
+    pub fn uncommitted_writes_from_message(msg: &str) -> Option<Self> {
+        let tail = &msg[msg.find(UNCOMMITTED_WRITES_TAG)? + UNCOMMITTED_WRITES_TAG.len()..];
+        let (operation, reason) = tail.split_once('|')?;
+        Some(Self::UncommittedWritesInTransaction {
+            operation: operation.to_string(),
+            reason: reason.to_string(),
+        })
+    }
+
+    /// Recovers [`Self::WriteStalled`] from its display text, wherever it sits
+    /// in `msg` (upstream layers may prefix it).
+    #[must_use]
+    pub fn write_stalled_from_message(msg: &str) -> Option<Self> {
+        let tail = &msg[msg.find(WRITE_STALLED_TAG)? + WRITE_STALLED_TAG.len()..];
+        let tail = tail.strip_prefix("l1_runs=")?;
+        let (runs, tail) = tail.split_once(' ')?;
+        let tail = tail.strip_prefix("hard_limit=")?;
+        let (hard, _) = tail.split_once(':')?;
+        Some(Self::WriteStalled {
+            l1_runs: runs.parse().ok()?,
+            hard_limit: hard.parse().ok()?,
+        })
+    }
+
+    /// Recovers [`Self::SnapshotNotFound`] from its display text, wherever it
+    /// sits in `msg`.
+    ///
+    /// # Examples
+    /// ```
+    /// use uni_common::UniError;
+    ///
+    /// let err = UniError::SnapshotNotFound { snapshot_id: "it's: 1".into() };
+    /// let back = UniError::snapshot_not_found_from_message(&format!("ctx: {err}"));
+    /// assert!(matches!(
+    ///     back,
+    ///     Some(UniError::SnapshotNotFound { snapshot_id }) if snapshot_id == "it's: 1"
+    /// ));
+    /// ```
+    #[must_use]
+    pub fn snapshot_not_found_from_message(msg: &str) -> Option<Self> {
+        let tail = &msg[msg.find(SNAPSHOT_NOT_FOUND_TAG)? + SNAPSHOT_NOT_FOUND_TAG.len()..];
+        // The id is a JSON string: it may hold `'` or `: `.
+        let snapshot_id: String = serde_json::Deserializer::from_str(tail)
+            .into_iter::<String>()
+            .next()?
+            .ok()?;
+        Some(Self::SnapshotNotFound { snapshot_id })
+    }
+
+    /// Recovers [`Self::EdgeEndpointViolation`] from its display text,
+    /// wherever it sits in `msg`.
+    #[must_use]
+    pub fn edge_endpoint_from_message(msg: &str) -> Option<Self> {
+        let tail = &msg[msg.find(EDGE_ENDPOINT_TAG)? + EDGE_ENDPOINT_TAG.len()..];
+        let (head, _) = tail.split_once(": ")?;
+        let mut parts = head.split('|');
+        let edge_type = parts.next()?.to_string();
+        let endpoint = parts.next()?.to_string();
+        let split = |s: &str| -> Vec<String> {
+            s.split(',')
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        let labels = split(parts.next()?);
+        let allowed = split(parts.next()?);
+        Some(Self::EdgeEndpointViolation {
+            edge_type,
+            endpoint,
+            labels,
+            allowed,
+        })
+    }
+
+    /// Recovers [`Self::EdgeIdentityChange`] from its display text,
+    /// wherever it sits in `msg`.
+    ///
+    /// # Examples
+    /// ```
+    /// use uni_common::UniError;
+    ///
+    /// let err = UniError::EdgeIdentityChange {
+    ///     eid: 7,
+    ///     stored: "(1)-[:R]->(2)".into(),
+    ///     requested: "(3)-[:R]->(2)".into(),
+    /// };
+    /// let back = UniError::edge_identity_from_message(&format!("ctx: {err}"));
+    /// assert!(matches!(back, Some(UniError::EdgeIdentityChange { eid: 7, .. })));
+    /// ```
+    #[must_use]
+    pub fn edge_identity_from_message(msg: &str) -> Option<Self> {
+        let tail = &msg[msg.find(EDGE_IDENTITY_TAG)? + EDGE_IDENTITY_TAG.len()..];
+        let (head, _) = tail.split_once(": ")?;
+        let mut parts = head.splitn(3, '|');
+        let eid = parts.next()?.parse().ok()?;
+        let stored = parts.next()?.to_string();
+        let requested = parts.next()?.to_string();
+        Some(Self::EdgeIdentityChange {
+            eid,
+            stored,
+            requested,
+        })
+    }
+
+    /// Recovers [`Self::RestoreBlockedByForks`] from its display text,
+    /// wherever it sits in `msg`.
+    ///
+    /// # Examples
+    /// ```
+    /// use uni_common::UniError;
+    ///
+    /// let err = UniError::RestoreBlockedByForks {
+    ///     forks: vec!["a, b: c".into(), "d".into()],
+    /// };
+    /// let back = UniError::restore_blocked_by_forks_from_message(&format!("ctx: {err}"));
+    /// assert!(matches!(
+    ///     back,
+    ///     Some(UniError::RestoreBlockedByForks { forks }) if forks == ["a, b: c", "d"]
+    /// ));
+    /// ```
+    #[must_use]
+    pub fn restore_blocked_by_forks_from_message(msg: &str) -> Option<Self> {
+        let tail =
+            &msg[msg.find(RESTORE_BLOCKED_BY_FORKS_TAG)? + RESTORE_BLOCKED_BY_FORKS_TAG.len()..];
+        // The names are a JSON array: a fork name may hold `,` or `: `.
+        let forks: Vec<String> = serde_json::Deserializer::from_str(tail)
+            .into_iter::<Vec<String>>()
+            .next()?
+            .ok()?;
+        (!forks.is_empty()).then_some(Self::RestoreBlockedByForks { forks })
     }
 
     /// Returns `true` when retrying the failed operation from scratch may succeed.
@@ -667,6 +1056,59 @@ impl GraphComputeIncomplete {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_stalled_round_trips_through_its_message() {
+        let e = UniError::WriteStalled {
+            l1_runs: 32,
+            hard_limit: 32,
+        };
+        let msg = format!("Query error: CREATE failed: {e}");
+        assert!(msg.contains("uni.admin.compact()"));
+        assert!(matches!(
+            UniError::write_stalled_from_message(&msg),
+            Some(UniError::WriteStalled {
+                l1_runs: 32,
+                hard_limit: 32
+            })
+        ));
+        assert!(UniError::write_stalled_from_message("unrelated").is_none());
+    }
+
+    #[test]
+    fn edge_endpoint_violation_round_trips_through_its_message() {
+        let e = UniError::EdgeEndpointViolation {
+            edge_type: "R".into(),
+            endpoint: "target".into(),
+            labels: vec!["A".into(), "C".into()],
+            allowed: vec!["B".into()],
+        };
+        let msg = format!("Execution error: CREATE failed: {e}");
+        match UniError::edge_endpoint_from_message(&msg) {
+            Some(UniError::EdgeEndpointViolation {
+                edge_type,
+                endpoint,
+                labels,
+                allowed,
+            }) => {
+                assert_eq!(edge_type, "R");
+                assert_eq!(endpoint, "target");
+                assert_eq!(labels, vec!["A".to_string(), "C".to_string()]);
+                assert_eq!(allowed, vec!["B".to_string()]);
+            }
+            other => panic!("{other:?}"),
+        }
+        let unlabeled = UniError::EdgeEndpointViolation {
+            edge_type: "R".into(),
+            endpoint: "source".into(),
+            labels: vec![],
+            allowed: vec!["A".into()],
+        };
+        match UniError::edge_endpoint_from_message(&unlabeled.to_string()) {
+            Some(UniError::EdgeEndpointViolation { labels, .. }) => assert!(labels.is_empty()),
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[test]
     fn graph_compute_incomplete_tag_round_trips() {

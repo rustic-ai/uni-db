@@ -148,3 +148,36 @@ Feature: CALIBRATE statement (Phase C C2)
     # multi-class form (TARGET class_idx METRICS class_probs).
     Then evaluation should fail
     And the evaluation error should mention "Dirichlet"
+
+  # ── CALIBRATE after a write reads the state the write left ──────────────
+
+  Scenario: CALIBRATE after a Cypher write collects the written samples too
+    Given having executed:
+      """
+      UNWIND range(0, 39) AS i CREATE (:Sample {idx: i, label: i % 2 = 0})
+      """
+    And a registered mock classifier "scorer" returning 0.95
+    When evaluating the following Locy program with neural_predicates_preview:
+      """
+      CREATE MODEL scorer AS
+        INPUT (s)
+        OUTPUT PROB risk
+        USING xervo('classify/scorer')
+
+      CALIBRATE scorer
+        ON MATCH (s:Sample)
+        TARGET s.label
+        METHOD platt_scaling
+        HOLDOUT 0.25
+
+      UNWIND range(40, 79) AS i CREATE (:Sample {idx: i, label: i % 2 = 0})
+
+      CALIBRATE scorer
+        ON MATCH (s:Sample)
+        TARGET s.label
+        METHOD platt_scaling
+        HOLDOUT 0.25
+      """
+    Then evaluation should succeed
+    And the result at path 0 should be a Calibrate of 40 samples with 10 held out
+    And the result at path 2 should be a Calibrate of 80 samples with 20 held out

@@ -207,7 +207,7 @@ jobs:
           cargo nextest run -p uni-db --test integration --run-ignored all \
             -E 'test(/^hybrid_localstack_e2e::/)'
 
-  # rustdoc gate + generated-notebook freshness check.
+  # rustdoc gate + generated-notebook freshness check + strict site build.
   docs:
     if: github.repository == 'rustic-ai/uni-db'
     name: Documentation
@@ -221,6 +221,21 @@ jobs:
           python3 website/scripts/generate_semiconductor_flagship_notebook.py --check
           python3 website/scripts/generate_pharma_flagship_notebook.py --check
           python3 website/scripts/generate_cyber_flagship_notebook.py --check
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+
+      # Site build with link checking. The notebook pages are gitignored
+      # outputs of convert_notebooks.py, so generate them first (convert only,
+      # no kernel or wheel needed) or every link to them is reported missing.
+      # --strict turns any warning, broken links included, into a failure.
+      - name: Build documentation site (strict)
+        working-directory: website
+        run: |
+          uv run --no-project --with nbconvert python scripts/convert_notebooks.py --no-execute
+          uv run --no-project --with zensical --with pymdown-extensions zensical build --strict
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

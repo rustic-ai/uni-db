@@ -244,6 +244,21 @@ pub struct WalSegment {
     pub lsn: u64,
     /// Mutations in this segment
     pub mutations: Vec<Mutation>,
+    /// Writer features of the binary that wrote the segment
+    /// (`uni_common::core::schema::WRITER_FEATURES`). Empty in a segment an
+    /// older binary wrote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writer_features: Vec<String>,
+}
+
+/// What [`WriteAheadLog::replay_since_with_provenance`] recovered.
+#[derive(Debug, Default)]
+pub struct WalReplay {
+    /// Mutations of every replayed segment, in LSN order.
+    pub mutations: Vec<Mutation>,
+    /// Replayed segments that carry no writer features, i.e. were written by
+    /// a binary that may not enforce declared edge endpoints.
+    pub unmarked_segments: usize,
 }
 
 /// Borrowed serialization view of [`WalSegment`].
@@ -255,6 +270,8 @@ pub struct WalSegment {
 struct WalSegmentRef<'a> {
     lsn: u64,
     mutations: &'a [Mutation],
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    writer_features: &'a [String],
 }
 
 pub struct WriteAheadLog {
@@ -267,6 +284,8 @@ pub struct WriteAheadLog {
     /// commits. `None` for remote stores (the PUT ack is the durability
     /// point there).
     local_root: Option<std::path::PathBuf>,
+    /// Recorded in every segment this log writes.
+    writer_features: Vec<String>,
     state: Mutex<WalState>,
 }
 
@@ -284,6 +303,7 @@ impl WriteAheadLog {
             store,
             prefix,
             local_root: None,
+            writer_features: uni_common::core::schema::current_writer_features(),
             state: Mutex::new(WalState {
                 buffer: Vec::new(),
                 next_lsn: 1, // Start at 1 so 0 means "no WAL"
@@ -300,6 +320,15 @@ impl WriteAheadLog {
         self
     }
 
+    /// Write segments without writer features, as a binary that predates
+    /// them does. Only for tests that simulate such a binary.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn without_writer_features(mut self) -> Self {
+        self.writer_features.clear();
+        self
+    }
+
     /// Initialize WAL state from existing segments (called on startup)
     pub async fn initialize(&self) -> Result<u64> {
         let max_lsn = self.find_max_lsn().await?;
@@ -309,6 +338,25 @@ impl WriteAheadLog {
             state.flushed_lsn = max_lsn;
         }
         Ok(max_lsn)
+    }
+
+    /// Keep LSNs above `floor`, the WAL mark of the latest snapshot manifest.
+    ///
+    /// [`Self::initialize`] resumes after the highest LSN still on disk, but
+    /// a flush truncates every segment at or below the mark it publishes, so
+    /// a store shut down cleanly has none: the log restarted at LSN 1 while
+    /// the manifest said 3, and recovery (`replay_since(3)`) skipped every
+    /// segment written after the reopen -- a crash before the next flush lost
+    /// those commits. Raises the next LSN to `floor + 1` and the flushed LSN
+    /// to `floor`, so the marks a later flush publishes never go backwards.
+    ///
+    /// # Errors
+    /// When the state lock is poisoned.
+    pub fn ensure_lsn_above(&self, floor: u64) -> Result<()> {
+        let mut state = acquire_mutex(&self.state, "wal_state")?;
+        state.next_lsn = state.next_lsn.max(floor + 1);
+        state.flushed_lsn = state.flushed_lsn.max(floor);
+        Ok(())
     }
 
     /// Find the maximum LSN in existing WAL segments by parsing filenames.
@@ -381,6 +429,7 @@ impl WriteAheadLog {
         let segment = WalSegmentRef {
             lsn,
             mutations: &batch,
+            writer_features: &self.writer_features,
         };
 
         // Serialize segment; restore buffer on failure
@@ -516,8 +565,20 @@ impl WriteAheadLog {
     /// commit it belonged to was never acknowledged. A corrupt segment with
     /// valid segments **after** it is real data loss and fails recovery with
     /// an error naming the file.
-    #[instrument(skip(self), level = "debug")]
     pub async fn replay_since(&self, high_water_mark: u64) -> Result<Vec<Mutation>> {
+        Ok(self
+            .replay_since_with_provenance(high_water_mark)
+            .await?
+            .mutations)
+    }
+
+    /// [`Self::replay_since`], also counting the replayed segments written
+    /// without writer features (see [`WalReplay::unmarked_segments`]).
+    ///
+    /// # Errors
+    /// As [`Self::replay_since`].
+    #[instrument(skip(self), level = "debug")]
+    pub async fn replay_since_with_provenance(&self, high_water_mark: u64) -> Result<WalReplay> {
         let start = std::time::Instant::now();
         debug!(high_water_mark, "Replaying WAL segments");
         let metas = list_with_timeout(&self.store, Some(&self.prefix), DEFAULT_TIMEOUT).await?;
@@ -537,6 +598,7 @@ impl WriteAheadLog {
         paths.sort();
 
         let mut segments_replayed = 0;
+        let mut unmarked_segments = 0;
 
         for (idx, path) in paths.iter().enumerate() {
             // A segment can disappear between the listing above and this read.
@@ -604,6 +666,9 @@ impl WriteAheadLog {
 
             // Double-check LSN from segment content (handles fallback case)
             if segment.lsn > high_water_mark {
+                if !uni_common::core::schema::writer_enforces_endpoints(&segment.writer_features) {
+                    unmarked_segments += 1;
+                }
                 mutations.extend(segment.mutations);
                 segments_replayed += 1;
             }
@@ -617,7 +682,10 @@ impl WriteAheadLog {
         metrics::histogram!("uni_wal_replay_duration_seconds")
             .record(start.elapsed().as_secs_f64());
 
-        Ok(mutations)
+        Ok(WalReplay {
+            mutations,
+            unmarked_segments,
+        })
     }
 
     /// Replay all WAL segments.
@@ -1340,18 +1408,56 @@ mod tests {
                 version: 5,
             },
         ];
-        let owned = WalSegment {
-            lsn: 42,
-            mutations: mutations.clone(),
-        };
-        let borrowed = WalSegmentRef {
-            lsn: 42,
-            mutations: &mutations,
-        };
-        assert_eq!(
-            serde_json::to_vec(&owned).unwrap(),
-            serde_json::to_vec(&borrowed).unwrap()
+        for features in [
+            uni_common::core::schema::current_writer_features(),
+            Vec::new(),
+        ] {
+            let owned = WalSegment {
+                lsn: 42,
+                mutations: mutations.clone(),
+                writer_features: features.clone(),
+            };
+            let borrowed = WalSegmentRef {
+                lsn: 42,
+                mutations: &mutations,
+                writer_features: &features,
+            };
+            assert_eq!(
+                serde_json::to_vec(&owned).unwrap(),
+                serde_json::to_vec(&borrowed).unwrap()
+            );
+        }
+    }
+
+    /// A segment this binary writes records its writer features; one written
+    /// without them (an older binary) is counted as unmarked on replay.
+    #[tokio::test]
+    async fn replay_counts_segments_without_writer_features() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            object_store::local::LocalFileSystem::new_with_prefix(dir.path())?,
         );
+        let prefix = Path::from("wal");
+        let mutation = || Mutation::DeleteVertex {
+            vid: Vid::new(1),
+            labels: vec![],
+        };
+        let marked = WriteAheadLog::new(store.clone(), prefix.clone());
+        marked.initialize().await?;
+        marked.append(mutation())?;
+        marked.flush().await?;
+        let replay = marked.replay_since_with_provenance(0).await?;
+        assert_eq!((replay.mutations.len(), replay.unmarked_segments), (1, 0));
+
+        let older = WriteAheadLog::new(store.clone(), prefix.clone()).without_writer_features();
+        older.initialize().await?;
+        older.append(mutation())?;
+        older.flush().await?;
+        let replay = WriteAheadLog::new(store, prefix)
+            .replay_since_with_provenance(0)
+            .await?;
+        assert_eq!((replay.mutations.len(), replay.unmarked_segments), (2, 1));
+        Ok(())
     }
 
     /// An `ObjectStore` that lists a chosen path but returns `NotFound` when it

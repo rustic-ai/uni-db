@@ -79,6 +79,22 @@ fn rows_to_batch(
         .map_err(|e| FnError::new(0x600, format!("uni.schema.*: build batch: {e}")))
 }
 
+/// Live `:label` nodes in the calling query's view, counted by an inner
+/// read query so it follows the caller's transaction, snapshot and fork.
+async fn label_node_count(host: &QueryProcedureHost, label: &str) -> anyhow::Result<i64> {
+    let cypher = format!(
+        "MATCH (n:`{}`) RETURN count(n) AS c",
+        label.replace('`', "``")
+    );
+    let rows = host
+        .execute_inner_query(&cypher, &HashMap::new(), ProcedureMode::Read)
+        .await?;
+    match rows.first().and_then(|r| r.get("c")) {
+        Some(Value::Int(c)) => Ok(*c),
+        other => Err(anyhow::anyhow!("unexpected count row {other:?}")),
+    }
+}
+
 fn single_batch_stream(schema: SchemaRef, batch: RecordBatch) -> SendableRecordBatchStream {
     Box::pin(RecordBatchStreamAdapter::new(
         schema,
@@ -121,10 +137,9 @@ impl ProcedurePlugin for SchemaLabelsProc {
         ctx: ProcedureContext<'_>,
         _args: &[ColumnarValue],
     ) -> Result<SendableRecordBatchStream, FnError> {
-        let host = require_host(&ctx)?;
-        let storage = Arc::clone(host.storage());
+        let host = require_host(&ctx)?.clone();
         let stream = futures::stream::once(async move {
-            let uni_schema = storage.schema_manager().schema();
+            let uni_schema = host.storage().schema_manager().schema();
             let mut rows: Vec<HashMap<String, Value>> = Vec::new();
             for label_name in uni_schema.labels.keys() {
                 let prop_count = uni_schema
@@ -132,15 +147,15 @@ impl ProcedurePlugin for SchemaLabelsProc {
                     .get(label_name)
                     .map(|p| p.len() as i64)
                     .unwrap_or(0);
-                // Node count via the `StorageBackend` (correct `.lance` path);
-                // the prior raw-dataset read reported 0 for flushed tables.
-                let backend = storage.backend();
-                let table = uni_store::backend::table_names::vertex_table_name(label_name);
-                let node_count = if backend.table_exists(&table).await.unwrap_or(false) {
-                    backend.count_rows(&table, None).await.unwrap_or(0) as i64
-                } else {
-                    0
-                };
+                // The label's live nodes as the calling query sees them: its
+                // transaction's own writes and deletes, unflushed commits, and
+                // on a fork the fork's branch. A row count of the label's
+                // storage table counted none of the unflushed nodes, counted
+                // every stored version and deleted row, and on a fork counted
+                // whichever table the branch resolved to.
+                let node_count = label_node_count(&host, label_name)
+                    .await
+                    .map_err(|e| exec_err(format!("uni.schema.labels: {e}")))?;
                 let idx_count = uni_schema
                     .indexes
                     .iter()

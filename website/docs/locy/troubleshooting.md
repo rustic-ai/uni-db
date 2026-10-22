@@ -30,7 +30,7 @@ Fix: switch to a monotone aggregate (`MSUM` for additive accumulation, `MMAX`/`M
 
 Cause: a clause has a recursive `IS`-reference and a `FOLD` aggregate but no `ALONG`. This is a warning, not an error, and the shape is legitimate — it is how a bill-of-materials or risk rollup is written.
 
-Fix: nothing, if you wanted a per-KEY rollup. The warning exists because authors who wanted a value accumulated along each *path* — a cost, a hop count — want `ALONG` instead. See [Rule semantics](locy/rule-semantics.md#what-a-self-reference-reads) for what the self-reference binds.
+Fix: nothing, if you wanted a per-KEY rollup. The warning exists because authors who wanted a value accumulated along each *path* — a cost, a hop count — want `ALONG` instead. See [Rule semantics](rule-semantics.md#what-a-self-reference-reads) for what the self-reference binds.
 
 ### A recursive rollup returns a number that disagrees with its own children
 
@@ -79,6 +79,27 @@ Python: `session.locy_with(prog).with_config({"allow_partial": True}).run()`, or
 True` and an `incomplete` diagnostics object carrying the same `reason`,
 strata counts, and `incomplete_rules` / `skipped_rules` /
 `complement_rules_affected` lists. You are responsible for checking them.
+
+The `timeout` is the budget of the whole program: its own evaluation, every
+evaluation it runs again after a write, every ASSUME body and ABDUCE candidate,
+and its commands all share it. A program whose budget runs out after its facts
+are complete stops before its next command; with `allow_partial` its result has
+the complete facts and an `incomplete` with reason `timeout` and no rule listed.
+When an evaluation the program runs again (after a write, or in an ASSUME body)
+is cut short, `allow_partial` reports it in the same `incomplete`, naming its
+rules, and the commands stop there: the command that needed those facts is not
+answered from them. A QUERY over the derived facts checks the budget every 1024 rows. With
+`allow_partial`, a QUERY the budget stops is not answered and the cut is
+reported. A command that finishes past the deadline keeps its answer, but the
+overrun is reported in `incomplete` and no later command runs: a result
+reported complete took at most its `timeout`. Without `allow_partial`,
+converting and hydrating the facts stop at the deadline too, and the program
+fails with `Timeout`. With `allow_partial`, converting the derived facts to
+rows and hydrating their node and relationship IDs can run past the deadline.
+The result promises the facts the run derived, complete and hydrated, whatever
+the timing. A run cut by its deadline starts this work after the deadline, so
+bounding it would return no facts, or raw IDs, exactly when partial results are
+wanted. The overrun is reported in `incomplete`.
 
 ### Memory Pressure
 

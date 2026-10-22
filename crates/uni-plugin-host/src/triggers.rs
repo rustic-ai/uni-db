@@ -559,6 +559,55 @@ impl TriggerRouter {
         self.by_phase.iter().all(|v| v.is_empty())
     }
 
+    /// True if some registered trigger can receive an edge event row
+    /// (`EDGE_CREATE`, `EDGE_UPDATE`, `EDGE_DELETE`, or the kind-agnostic
+    /// `PROPERTY_CHANGE`).
+    ///
+    /// Gates the commit-time edge pre-image read: a store whose only
+    /// triggers watch nodes (the built-in `:_AuditMe` audit trigger is
+    /// registered by default) has no use for it, and the read costs one
+    /// batched storage lookup over every edge the commit writes.
+    #[must_use]
+    pub fn wants_edge_events(&self) -> bool {
+        let edge = TriggerEventMask::EDGE_CREATE
+            .union(TriggerEventMask::EDGE_UPDATE)
+            .union(TriggerEventMask::EDGE_DELETE)
+            .union(TriggerEventMask::PROPERTY_CHANGE);
+        self.by_phase
+            .iter()
+            .flatten()
+            .any(|route| route.event_mask & edge.0 != 0)
+    }
+
+    /// True if some registered trigger can receive a node event row
+    /// (`NODE_CREATE`, `NODE_UPDATE` or `NODE_DELETE`) for a vertex carrying
+    /// `labels`, the labels such a row is emitted under (one row per label;
+    /// one row with an empty label when there are none).
+    ///
+    /// Gates the commit-time vertex pre-image read per vertex: only those
+    /// rows use it, to tell a create from an update and to carry the old
+    /// value. The built-in `:_AuditMe` trigger watches one label, so a store
+    /// whose only trigger is that one reads no pre-image for other vertices.
+    #[must_use]
+    pub fn wants_node_events_for(&self, labels: &[String]) -> bool {
+        let kinds = [
+            TriggerEventMask::NODE_CREATE,
+            TriggerEventMask::NODE_UPDATE,
+            TriggerEventMask::NODE_DELETE,
+        ];
+        let unlabelled = [String::new()];
+        let labels = if labels.is_empty() {
+            &unlabelled[..]
+        } else {
+            labels
+        };
+        self.by_phase.iter().flatten().any(|route| {
+            kinds
+                .iter()
+                .any(|kind| labels.iter().any(|label| route.matches(*kind, label)))
+        })
+    }
+
     /// Union of node/edge property names that any compiled trigger
     /// predicate references (across all phases). Empty when no
     /// trigger has a `predicate_source` mentioning `n.<prop>` /
@@ -1076,6 +1125,11 @@ impl PreExistingProbe {
             if self.vertices.contains_key(vid) || self.dead_vertices.contains(vid) {
                 continue;
             }
+            // Created by this transaction with a fresh id: nothing committed
+            // to read, as for `created_edges` in `pending_edge_candidates`.
+            if tx_l0.created_vertices.contains(vid) {
+                continue;
+            }
             let label = tx_l0
                 .vertex_labels
                 .get(vid)
@@ -1291,6 +1345,9 @@ impl PreExistingProbe {
     /// `tx_l0` read lock; hand the result to
     /// [`Self::extend_edges_with_committed_state`] outside it.
     ///
+    /// Edges the transaction created (`L0Buffer::created_edges`) are left
+    /// out: their ids are fresh, so no committed state exists for them.
+    ///
     /// Each EID carries its edge type name when one is known, from the
     /// transaction's own `edge_types` or else from the type id it records
     /// (`edge_endpoints` for a write, the tombstone for a delete) through
@@ -1313,7 +1370,14 @@ impl PreExistingProbe {
             .map(|(eid, ts)| (*eid, ts.edge_type));
         written
             .chain(deleted)
-            .filter(|(eid, _)| !self.dead_edges.contains(eid) && seen.insert(*eid))
+            // An edge this transaction created got a fresh id: it has no
+            // committed state to read, so probing it is pure cost (one L1
+            // lookup per new edge).
+            .filter(|(eid, _)| {
+                !self.dead_edges.contains(eid)
+                    && !tx_l0.created_edges.contains(eid)
+                    && seen.insert(*eid)
+            })
             .map(|(eid, type_id)| {
                 let name = tx_l0
                     .edge_types
@@ -2794,6 +2858,59 @@ mod tests {
             compiled_predicate: None,
             properties_referenced: HashSet::new(),
         }
+    }
+
+    /// A router with one route of `mask` on `labels` (`None`: any label).
+    fn router_with(mask: TriggerEventMask, labels: Option<&[&str]>) -> TriggerRouter {
+        let mut route = ec_route("probe-gate", 0);
+        route.event_mask = mask.0;
+        route.label_filter = labels.map(|ls| ls.iter().map(|l| (*l).to_owned()).collect());
+        TriggerRouter {
+            by_phase: [vec![route], Vec::new(), Vec::new(), Vec::new()],
+            defer_queue: None,
+            ec_queue: EcQueue::new(None, Duration::from_secs(1), 10_000),
+            task_tracker: None,
+        }
+    }
+
+    /// The vertex pre-image gate asks the routes exactly what a node event
+    /// row of the vertex's labels would be delivered to.
+    #[test]
+    fn node_event_gate_follows_the_routes() {
+        let labels = |ls: &[&str]| ls.iter().map(|l| (*l).to_owned()).collect::<Vec<_>>();
+        let audit = router_with(TriggerEventMask::NODE_UPDATE, Some(&[":_AuditMe"]));
+        assert!(!audit.wants_node_events_for(&labels(&["V"])));
+        assert!(!audit.wants_node_events_for(&[]));
+        let on_v = router_with(TriggerEventMask::NODE_DELETE, Some(&["V"]));
+        assert!(on_v.wants_node_events_for(&labels(&["W", "V"])));
+        assert!(!on_v.wants_node_events_for(&labels(&["W"])));
+        let any = router_with(TriggerEventMask::NODE_CREATE, None);
+        assert!(any.wants_node_events_for(&labels(&["W"])));
+        assert!(any.wants_node_events_for(&[]), "an unlabelled vertex's row");
+        let edges = router_with(TriggerEventMask::EDGE_UPDATE, None);
+        assert!(!edges.wants_node_events_for(&labels(&["V"])));
+        let property = router_with(TriggerEventMask::PROPERTY_CHANGE, None);
+        assert!(
+            !property.wants_node_events_for(&labels(&["V"])),
+            "no node row is a PROPERTY_CHANGE row"
+        );
+    }
+
+    /// A vertex the transaction created has no committed state to read.
+    #[test]
+    fn created_vertices_are_not_probed_in_l1() {
+        let mut tx = L0Buffer::new(0, None);
+        let created = uni_common::Vid::new(7);
+        let updated = uni_common::Vid::new(8);
+        tx.insert_vertex_with_labels(created, Properties::new(), &["V".to_owned()]);
+        tx.update_vertex_with_labels(updated, Properties::new(), &["V".to_owned()]);
+        let probe = PreExistingProbe::default();
+        let candidates: Vec<_> = probe
+            .pending_l1_candidates(&tx)
+            .into_iter()
+            .map(|(vid, _)| vid)
+            .collect();
+        assert_eq!(candidates, vec![updated]);
     }
 
     /// One-column Int64 `RecordBatch` carrying `vals` — a stand-in for the

@@ -40,10 +40,10 @@ semver = "1.0"
 # VERSION SYNC: keep wasmtime/wasmtime-wasi on the same major as the wasmtime
 # pulled in by `extism` (crates/uni-plugin-extism) — a mismatch links two
 # wasmtime copies into every uni-db binary. Bump all three together. The
-# 49.0.3 floor is the first 49.x carrying the RUSTSEC-2026-0352/0359/0362/0363
-# fixes.
-wasmtime = { version = "49.0.3", default-features = false, features = ["runtime", "cranelift", "component-model"], optional = true }
-wasmtime-wasi = { version = "49.0.3", optional = true }
+# 49.0.4 floor is the first 49.x carrying the RUSTSEC-2026-0378/0379 fixes
+# (49.0.3 carried 0352/0359/0362/0363).
+wasmtime = { version = "49.0.4", default-features = false, features = ["runtime", "cranelift", "component-model"], optional = true }
+wasmtime-wasi = { version = "49.0.4", optional = true }
 datafusion = { workspace = true, optional = true }
 
 [features]

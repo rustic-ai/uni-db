@@ -94,6 +94,14 @@ pub const OPERATORS: &[Operator] = &[
         },
     },
     Operator {
+        ty: "EdgeSourceScanExec",
+        runtime_name: "EdgeSourceScanExec",
+        status: Status::Proven {
+            by: "edge_source_scan_plan_shape",
+            in_file: "crates/uni/tests/common/cypher_read/edge_source_scan_test.rs",
+        },
+    },
+    Operator {
         ty: "VidLookupJoinExec",
         runtime_name: "VidLookupJoinExec",
         status: Status::Proven {

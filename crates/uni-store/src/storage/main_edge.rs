@@ -20,6 +20,7 @@ use crate::backend::table_names;
 use crate::backend::types::{FilterExpr, Scalar, ScalarIndexType, ScanRequest};
 use crate::runtime::counters::QueryCounters;
 use crate::storage::arrow_convert::build_timestamp_column_from_eid_map;
+use crate::storage::bulk_gate::IntoRowVisibility;
 use anyhow::{Result, anyhow};
 use arrow_array::builder::{LargeBinaryBuilder, StringBuilder};
 use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
@@ -419,9 +420,10 @@ impl MainEdgeDataset {
     pub async fn find_props_by_eid(
         backend: &dyn StorageBackend,
         eid: Eid,
-        version: Option<u64>,
+        version: impl IntoRowVisibility,
     ) -> Result<Option<Properties>> {
-        Self::find_props_by_eid_counted(backend, eid, version, None).await
+        let version = version.into_row_visibility();
+        Self::find_props_by_eid_counted(backend, eid, &version, None).await
     }
 
     /// [`Self::find_props_by_eid`], carrying a query's counters into the backend.
@@ -434,9 +436,10 @@ impl MainEdgeDataset {
     pub async fn find_props_by_eid_counted(
         backend: &dyn StorageBackend,
         eid: Eid,
-        version: Option<u64>,
+        version: impl IntoRowVisibility,
         counters: Option<&Arc<QueryCounters>>,
     ) -> Result<Option<Properties>> {
+        let version = version.into_row_visibility();
         // MVCC (review C2): the scan must see deletion tombstones — the
         // highest-version row wins, and a deleted winner yields `None`.
         // Filtering `_deleted = false` here would let an OLDER live version
@@ -449,7 +452,7 @@ impl MainEdgeDataset {
         // survives. This is the same composition `find_props_by_vid` uses.
         let filter = super::with_version_bound(
             FilterExpr::equals("_eid", Scalar::UInt(eid.as_u64())),
-            version,
+            &version,
         );
         let batches = Self::execute_query(
             backend,
@@ -531,9 +534,10 @@ impl MainEdgeDataset {
     pub async fn find_props_by_eids(
         backend: &dyn StorageBackend,
         eids: &[Eid],
-        version: Option<u64>,
+        version: impl IntoRowVisibility,
     ) -> Result<HashMap<Eid, Properties>> {
-        Self::find_props_by_eids_counted(backend, eids, version, None).await
+        let version = version.into_row_visibility();
+        Self::find_props_by_eids_counted(backend, eids, &version, None).await
     }
 
     /// [`Self::find_props_by_eids`], carrying a query's counters into the
@@ -547,9 +551,10 @@ impl MainEdgeDataset {
     pub async fn find_props_by_eids_counted(
         backend: &dyn StorageBackend,
         eids: &[Eid],
-        version: Option<u64>,
+        version: impl IntoRowVisibility,
         counters: Option<&Arc<QueryCounters>>,
     ) -> Result<HashMap<Eid, Properties>> {
+        let version = version.into_row_visibility();
         if eids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -568,7 +573,7 @@ impl MainEdgeDataset {
             // One pass, filtered in memory. Streamed rather than collected: the
             // whole table's `props_json` would otherwise be resident at once.
             let wanted: std::collections::HashSet<u64> = eids.iter().map(Eid::as_u64).collect();
-            let filter = super::with_version_bound(FilterExpr::Literal(true), version);
+            let filter = super::with_version_bound(FilterExpr::Literal(true), &version);
             let request = ScanRequest::all(table_name)
                 .with_filter(filter)
                 .with_columns(columns.into_iter().map(String::from).collect())
@@ -582,7 +587,7 @@ impl MainEdgeDataset {
             for chunk in eids.chunks(MAX_EIDS_PER_CHUNK) {
                 let filter = super::with_version_bound(
                     FilterExpr::one_of("_eid", chunk.iter().map(|e| Scalar::UInt(e.as_u64()))),
-                    version,
+                    &version,
                 );
                 let batches =
                     Self::execute_query(backend, filter, Some(columns.clone()), counters).await?;
@@ -873,9 +878,10 @@ impl MainEdgeDataset {
     pub async fn find_edges_by_eids_counted(
         backend: &dyn StorageBackend,
         eids: &[Eid],
-        version: Option<u64>,
+        version: impl IntoRowVisibility,
         counters: Option<&Arc<QueryCounters>>,
     ) -> Result<HashMap<Eid, EdgeRecord>> {
+        let version = version.into_row_visibility();
         if eids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -891,7 +897,7 @@ impl MainEdgeDataset {
             let request = ScanRequest::all(table_name)
                 .with_filter(super::with_version_bound(
                     FilterExpr::Literal(true),
-                    version,
+                    &version,
                 ))
                 .with_columns(columns.into_iter().map(String::from).collect())
                 .with_counters(counters.cloned());
@@ -904,7 +910,7 @@ impl MainEdgeDataset {
             for chunk in eids.chunks(MAX_EIDS_PER_CHUNK) {
                 let filter = super::with_version_bound(
                     FilterExpr::one_of("_eid", chunk.iter().map(|e| Scalar::UInt(e.as_u64()))),
-                    version,
+                    &version,
                 );
                 let batches =
                     Self::execute_query(backend, filter, Some(columns.clone()), counters).await?;
@@ -961,6 +967,29 @@ impl MainEdgeDataset {
         endpoint_filter: Option<(EndpointSide, &[Vid])>,
         counters: Option<&Arc<QueryCounters>>,
     ) -> Result<Vec<(Eid, Vid, Vid, String, Properties)>> {
+        Self::find_visible_edges_by_type_names_counted(
+            backend,
+            type_names,
+            endpoint_filter,
+            &crate::storage::bulk_gate::RowVisibility::default(),
+            counters,
+        )
+        .await
+    }
+
+    /// [`Self::find_edges_by_type_names_counted`], reading only the rows
+    /// `visibility` admits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table cannot be read.
+    pub async fn find_visible_edges_by_type_names_counted(
+        backend: &dyn StorageBackend,
+        type_names: &[&str],
+        endpoint_filter: Option<(EndpointSide, &[Vid])>,
+        visibility: &crate::storage::bulk_gate::RowVisibility,
+        counters: Option<&Arc<QueryCounters>>,
+    ) -> Result<Vec<(Eid, Vid, Vid, String, Properties)>> {
         if type_names.is_empty() {
             return Ok(Vec::new());
         }
@@ -981,10 +1010,10 @@ impl MainEdgeDataset {
         // proportion to delete volume until compaction rewrites the table.
         // `not_deleted()` was a post-index row filter, never an index probe, so
         // the `type` BTree and the endpoint pushdown below still bound the scan.
-        let base_filter = FilterExpr::one_of(
+        let base_filter = visibility.bound(FilterExpr::one_of(
             "type",
             type_names.iter().map(|t| Scalar::Str((*t).to_string())),
-        );
+        ));
 
         // Winners keyed by eid, carried across every endpoint chunk below so an
         // edge whose live row and tombstone land in different chunks still ranks
@@ -1039,6 +1068,72 @@ impl MainEdgeDataset {
         edges.sort_unstable_by_key(|(eid, ..)| eid.as_u64());
 
         Ok(edges)
+    }
+
+    /// The `(src, dst)` of every edge of `type_name` live at `visibility`,
+    /// reading only the identity and MVCC columns.
+    ///
+    /// The same newest-row-wins ranking as
+    /// [`Self::find_visible_edges_by_type_names_counted`] -- ties go to the
+    /// tombstone -- without fetching or decoding properties: a whole-type
+    /// pass over millions of edges that needs only endpoints (endpoint
+    /// verification) would otherwise materialize every property map.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the table cannot be read.
+    pub async fn find_visible_endpoints_by_type_name(
+        backend: &dyn StorageBackend,
+        type_name: &str,
+        visibility: &crate::storage::bulk_gate::RowVisibility,
+    ) -> Result<Vec<(Vid, Vid)>> {
+        let filter = visibility.bound(FilterExpr::one_of(
+            "type",
+            [Scalar::Str(type_name.to_string())],
+        ));
+        let batches = Self::execute_query(
+            backend,
+            filter,
+            Some(vec!["_eid", "src_vid", "dst_vid", "_version", "_deleted"]),
+            None,
+        )
+        .await?;
+        // eid -> (version, deleted, src, dst)
+        let mut winners: HashMap<u64, (u64, bool, u64, u64)> = HashMap::new();
+        for batch in &batches {
+            let col = |name: &str| {
+                batch
+                    .column_by_name(name)
+                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+                    .ok_or_else(|| anyhow!("main edges table: column '{name}' missing"))
+            };
+            let (eids, srcs, dsts) = (col("_eid")?, col("src_vid")?, col("dst_vid")?);
+            let versions = col("_version").ok();
+            let deleted = batch
+                .column_by_name("_deleted")
+                .and_then(|c| c.as_any().downcast_ref::<arrow_array::BooleanArray>());
+            for i in 0..batch.num_rows() {
+                if eids.is_null(i) || srcs.is_null(i) || dsts.is_null(i) {
+                    continue;
+                }
+                let version = versions.filter(|a| !a.is_null(i)).map_or(0, |a| a.value(i));
+                let dead = deleted.is_some_and(|a| !a.is_null(i) && a.value(i));
+                let row = (version, dead, srcs.value(i), dsts.value(i));
+                winners
+                    .entry(eids.value(i))
+                    .and_modify(|best| {
+                        if version > best.0 || (version == best.0 && dead) {
+                            *best = row;
+                        }
+                    })
+                    .or_insert(row);
+            }
+        }
+        Ok(winners
+            .into_values()
+            .filter(|(_, dead, ..)| !dead)
+            .map(|(_, _, src, dst)| (Vid::new(src), Vid::new(dst)))
+            .collect())
     }
 
     /// Fold one batch into the per-eid winners map, keeping the highest

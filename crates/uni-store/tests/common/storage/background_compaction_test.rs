@@ -494,3 +494,270 @@ async fn cancel_compaction_stops_the_background_loop() {
         .expect("the compaction loop kept running after cancel_compaction")
         .unwrap();
 }
+
+// ── Write backpressure ─────────────────────────────────────────────────────
+//
+// These drive `Writer::check_write_pressure` through a real write by setting
+// the flush-generation counter (`CompactionStatus::l1_runs`) directly — the
+// same counter `flush_to_l1` increments and a compaction run resets. They run
+// on a paused clock, so the waits are measured in virtual time: deterministic,
+// and an 81.92 s sleep costs nothing to observe.
+
+/// Hard-limit poll period, mirrored from the writer: the soft path must notice
+/// relief at least this promptly.
+const PRESSURE_POLL: Duration = Duration::from_millis(100);
+
+/// Build a writer over a fresh store with `throttle` applied and the
+/// flush-generation counter preset to `l1_runs`.
+///
+/// Compaction is enabled in the writer's config, so the throttle waits for
+/// relief; no background loop runs in a bare writer, and the tests relieve
+/// the pressure themselves through [`set_l1_runs`].
+async fn writer_under_pressure(
+    db_path_str: &str,
+    throttle: uni_common::config::WriteThrottleConfig,
+    l1_runs: usize,
+) -> (Arc<StorageManager>, Writer) {
+    writer_under_pressure_with(db_path_str, throttle, l1_runs, true).await
+}
+
+/// [`writer_under_pressure`] with the compaction switch given.
+async fn writer_under_pressure_with(
+    db_path_str: &str,
+    throttle: uni_common::config::WriteThrottleConfig,
+    l1_runs: usize,
+    compaction_enabled: bool,
+) -> (Arc<StorageManager>, Writer) {
+    let mut config = UniConfig::default();
+    config.compaction.enabled = compaction_enabled;
+    config.throttle = throttle;
+    let (storage, schema_manager, _) = setup_schema_and_storage(db_path_str, config.clone()).await;
+    let writer =
+        Writer::new_with_config(storage.clone(), schema_manager, 0, config, None, None, None)
+            .await
+            .unwrap();
+    set_l1_runs(&storage, l1_runs);
+    (storage, writer)
+}
+
+fn set_l1_runs(storage: &StorageManager, l1_runs: usize) {
+    storage.compaction_status.lock().unwrap().l1_runs = l1_runs;
+}
+
+/// One vertex write, returning how long it took in (virtual) time.
+async fn timed_write(writer: &Writer) -> Duration {
+    let vid = writer.next_vid().await.unwrap();
+    let started = tokio::time::Instant::now();
+    writer
+        .insert_vertex_with_labels(vid, HashMap::new(), &["Person".to_string()], None)
+        .await
+        .unwrap();
+    started.elapsed()
+}
+
+/// A soft-throttled write must end as soon as compaction drops the run count
+/// below `soft_limit`, not finish a delay computed from the count it saw first.
+///
+/// At 28 runs the default curve gives 10 ms × 2^12 = 40.96 s. That one
+/// uninterruptible sleep outlived the 30 s statement timeout, which is how
+/// `fork_point_atomic_under_concurrent_parent_writes_async_flush` failed with
+/// `Timeout { 30000 }` while the background compaction had long since reset
+/// the counter.
+#[tokio::test(start_paused = true)]
+async fn soft_throttle_ends_when_compaction_relieves_pressure() {
+    let dir = tempdir().unwrap();
+    let (storage, writer) = writer_under_pressure(
+        dir.path().to_str().unwrap(),
+        uni_common::config::WriteThrottleConfig::default(),
+        28,
+    )
+    .await;
+
+    let relief_after = Duration::from_millis(250);
+    let relief_storage = storage.clone();
+    let relief = tokio::spawn(async move {
+        tokio::time::sleep(relief_after).await;
+        set_l1_runs(&relief_storage, 0);
+    });
+
+    let waited = timed_write(&writer).await;
+    relief.await.unwrap();
+
+    assert!(
+        waited >= relief_after,
+        "the write must actually be throttled while pressure lasts; waited {waited:?}"
+    );
+    assert!(
+        waited <= relief_after + PRESSURE_POLL,
+        "the write must return within one poll period of relief ({relief_after:?}); \
+         waited {waited:?}"
+    );
+}
+
+/// Sustained soft pressure is a slowdown, not a stall: the wait is bounded
+/// by one hard-limit poll period per run of the soft band, here
+/// 100 ms × (32 − 16) = 1.6 s, rather than the 81.92 s the curve gives at 29
+/// runs.
+#[tokio::test(start_paused = true)]
+async fn soft_throttle_wait_is_bounded_under_sustained_pressure() {
+    let dir = tempdir().unwrap();
+    let throttle = uni_common::config::WriteThrottleConfig::default();
+    let (_storage, writer) =
+        writer_under_pressure(dir.path().to_str().unwrap(), throttle, 29).await;
+
+    let budget = PRESSURE_POLL * (throttle.hard_limit - throttle.soft_limit) as u32;
+    let waited = timed_write(&writer).await;
+
+    assert!(
+        waited >= budget,
+        "sustained pressure must still throttle for the full budget {budget:?}; \
+         waited {waited:?}"
+    );
+    assert!(
+        waited <= budget + PRESSURE_POLL,
+        "the soft wait must stop at its budget {budget:?}; waited {waited:?}"
+    );
+}
+
+/// Below the cap the original exponential curve is unchanged: one run over
+/// `soft_limit` costs `base_delay × 2`.
+#[tokio::test(start_paused = true)]
+async fn soft_throttle_keeps_the_exponential_curve_below_the_budget() {
+    let dir = tempdir().unwrap();
+    let throttle = uni_common::config::WriteThrottleConfig::default();
+    let (_storage, writer) =
+        writer_under_pressure(dir.path().to_str().unwrap(), throttle, 17).await;
+
+    let expected = throttle.base_delay * 2;
+    let waited = timed_write(&writer).await;
+
+    assert!(
+        waited >= expected && waited <= expected + Duration::from_millis(5),
+        "17 runs at soft_limit 16 must wait base_delay × 2 = {expected:?}; waited {waited:?}"
+    );
+}
+
+/// The backoff exponent and the `base_delay` multiplication saturate rather
+/// than overflow: a huge `base_delay` with a deep excess waits the budget.
+///
+/// Before the fix `base_delay * 2^31` panicked with "overflow when
+/// multiplying duration" for any `base_delay` above about 8.6e9 s.
+#[tokio::test(start_paused = true)]
+async fn soft_throttle_backoff_saturates_instead_of_overflowing() {
+    let dir = tempdir().unwrap();
+    let throttle = uni_common::config::WriteThrottleConfig {
+        soft_limit: 16,
+        hard_limit: 16 + 1000,
+        base_delay: Duration::from_secs(1 << 40),
+    };
+    let (_storage, writer) =
+        writer_under_pressure(dir.path().to_str().unwrap(), throttle, 16 + 500).await;
+
+    let budget = PRESSURE_POLL * 1000;
+    let waited = timed_write(&writer).await;
+
+    assert!(
+        waited >= budget && waited <= budget + PRESSURE_POLL,
+        "a saturated backoff must wait exactly the budget {budget:?}; waited {waited:?}"
+    );
+}
+
+/// The hard limit still stalls writes until compaction relieves it, and the
+/// soft band's budget does not let a write through at or above it.
+#[tokio::test(start_paused = true)]
+async fn hard_limit_stalls_until_pressure_drops() {
+    let dir = tempdir().unwrap();
+    let (storage, writer) = writer_under_pressure(
+        dir.path().to_str().unwrap(),
+        uni_common::config::WriteThrottleConfig::default(),
+        32,
+    )
+    .await;
+
+    // Well past the soft budget, so a write released by it would show.
+    let relief_after = Duration::from_secs(10);
+    let relief_storage = storage.clone();
+    let relief = tokio::spawn(async move {
+        tokio::time::sleep(relief_after).await;
+        set_l1_runs(&relief_storage, 0);
+    });
+
+    let waited = timed_write(&writer).await;
+    relief.await.unwrap();
+
+    assert!(
+        waited >= relief_after && waited <= relief_after + PRESSURE_POLL,
+        "a hard-limited write must wait for relief at {relief_after:?}; waited {waited:?}"
+    );
+}
+
+/// With compaction disabled nothing will lower the count: the soft band does
+/// not wait, and the hard limit refuses the write at once with the typed
+/// `WriteStalled` instead of polling forever.
+#[tokio::test(start_paused = true)]
+async fn compaction_disabled_soft_band_proceeds_and_hard_limit_refuses() {
+    let dir = tempdir().unwrap();
+    let (storage, writer) = writer_under_pressure_with(
+        dir.path().to_str().unwrap(),
+        uni_common::config::WriteThrottleConfig::default(),
+        28,
+        false,
+    )
+    .await;
+    assert_eq!(
+        timed_write(&writer).await,
+        Duration::ZERO,
+        "soft band, compaction off"
+    );
+    assert_eq!(writer.write_throttle_stats().waits, 0);
+
+    set_l1_runs(&storage, 32);
+    let vid = writer.next_vid().await.unwrap();
+    let err = writer
+        .insert_vertex_with_labels(vid, HashMap::new(), &["Person".to_string()], None)
+        .await
+        .expect_err("hard limit with compaction off must refuse");
+    match err.downcast_ref::<uni_common::UniError>() {
+        Some(uni_common::UniError::WriteStalled {
+            l1_runs: 32,
+            hard_limit: 32,
+        }) => {}
+        other => panic!("expected WriteStalled, got {other:?} ({err})"),
+    }
+    assert_eq!(writer.write_throttle_stats().stalled, 1);
+}
+
+/// `write_throttle_pressure` is 0 below the soft limit, rises through the
+/// soft band, and is 1 at the hard limit; with compaction off the soft band
+/// (which does not wait) reads 0.
+#[test]
+fn write_throttle_pressure_follows_the_bands() {
+    use uni_store::runtime::writer::write_throttle_pressure as p;
+    let t = uni_common::config::WriteThrottleConfig::default(); // 16 / 32
+    assert_eq!(p(&t, true, 0), 0.0);
+    assert_eq!(p(&t, true, 15), 0.0);
+    let first = p(&t, true, 16);
+    let last = p(&t, true, 31);
+    assert!(first > 0.0 && first < last && last < 1.0, "{first} {last}");
+    assert_eq!(p(&t, true, 32), 1.0);
+    assert_eq!(p(&t, true, 99), 1.0);
+    assert_eq!(p(&t, false, 20), 0.0);
+    assert_eq!(p(&t, false, 32), 1.0);
+}
+
+/// A soft-band wait is counted once, with its duration.
+#[tokio::test(start_paused = true)]
+async fn throttle_waits_are_counted() {
+    let dir = tempdir().unwrap();
+    let (_storage, writer) = writer_under_pressure(
+        dir.path().to_str().unwrap(),
+        uni_common::config::WriteThrottleConfig::default(),
+        20,
+    )
+    .await;
+    let waited = timed_write(&writer).await;
+    let stats = writer.write_throttle_stats();
+    assert_eq!(stats.waits, 1);
+    assert_eq!(stats.wait_time, waited);
+    assert_eq!(stats.stalled, 0);
+}

@@ -19,9 +19,49 @@ use uni_cypher::ast::{
 };
 use uni_store::QueryContext;
 use uni_store::backend::types::{FilterExpr, Scalar};
+use uni_store::runtime::l0::StatEntity;
 use uni_store::runtime::l0_visibility;
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::runtime::writer::Writer;
+
+/// Whether `key` is a user property for side-effect counting: the storage
+/// columns and `ext_id` are not observable as properties (they are excluded
+/// from `properties(n)` the same way).
+fn is_counted_property(key: &str) -> bool {
+    !uni_common::core::schema::is_reserved_property_name(key) && key != "ext_id"
+}
+
+/// The `(before, after)` pairs of every user property whose value differs
+/// between two full rows of one entity. A `Null` value is an absent property.
+fn row_property_effects(
+    before: &HashMap<String, Value>,
+    after: &HashMap<String, Value>,
+) -> Vec<(Option<Value>, Option<Value>)> {
+    let present = |m: &HashMap<String, Value>, k: &str| m.get(k).filter(|v| !v.is_null()).cloned();
+    before
+        .keys()
+        .chain(after.keys().filter(|k| !before.contains_key(*k)))
+        .filter(|k| is_counted_property(k))
+        .filter_map(|k| {
+            let (b, a) = (present(before, k), present(after, k));
+            (b != a).then_some((b, a))
+        })
+        .collect()
+}
+
+/// The `(before, None)` pairs of the named properties `props` holds.
+fn removal_effects(
+    props: &HashMap<String, Value>,
+    names: &[String],
+) -> Vec<(Option<Value>, Option<Value>)> {
+    let mut seen = HashSet::new();
+    names
+        .iter()
+        .filter(|n| seen.insert(n.as_str()))
+        .filter_map(|n| props.get(n).filter(|v| !v.is_null()))
+        .map(|v| (Some(v.clone()), None))
+        .collect()
+}
 
 /// Canonical, hashable key for a single-node MERGE: the key properties as a
 /// `(name, value)` list sorted by name. Used to group existing vertices by key
@@ -46,18 +86,14 @@ struct PendingVertexSet {
     labels: Vec<String>,
     /// Full property map (storage union L0 from
     /// `get_all_vertex_props_with_ctx` plus the touched values applied
-    /// in-order). Flushed to L0 whole; L0's `vertex_partial_keys` set
-    /// tells the flush which columns to send to Lance via MergeInsert.
+    /// in-order). Written to L0 whole, as a full row.
     props: HashMap<String, Value>,
-    /// `true` when the SET should flush via the partial-column MergeInsert
-    /// path: set when `UniConfig::partial_lance_writes` is on AND the
-    /// label has no generated columns. Generated-column labels still need
-    /// the full-row Append so the regenerated values land.
-    partial: bool,
-    /// Set of property keys touched by this statement. Threaded into L0
-    /// so the flush emits a `MergeInsertBuilder` source with exactly
-    /// these columns. Empty when `partial == false`.
+    /// Property keys this SET assigned. Drives the auto-embed refresh of
+    /// targets whose source column changed.
     touched: HashSet<String>,
+    /// Each assigned key's value before its first assignment in this SET
+    /// (`None` = absent), for the statement's property side effects.
+    before: HashMap<String, Option<Value>>,
 }
 
 /// Per-variable accumulator for SetItem::Property items targeting an edge.
@@ -67,15 +103,10 @@ struct PendingEdgeSet {
     edge_type_id: u32,
     eid: Eid,
     edge_type_name: String,
-    /// `true` when the SET should flush via the partial-column
-    /// MergeInsert path on the per-edge-type delta tables (Round 12
-    /// §A). Set when `UniConfig::partial_lance_writes` is on.
-    partial: bool,
-    /// Property keys touched by this statement. Threaded into L0 so
-    /// the flush emits a `MergeInsertBuilder` source with exactly
-    /// these columns. Empty when `partial == false`.
-    touched: HashSet<String>,
     props: HashMap<String, Value>,
+    /// Each assigned key's value before its first assignment in this SET
+    /// (`None` = absent), for the statement's property side effects.
+    before: HashMap<String, Option<Value>>,
 }
 
 /// Refuse to mutate an ephemeral node (M5g / proposal §4.13.1).
@@ -292,6 +323,7 @@ impl Executor {
         prefetched: &Prefetch,
     ) -> Result<HashMap<String, Value>> {
         let current = read_vertex_props_with_prefetch(vid, prefetched, prop_manager, ctx).await?;
+        let before = current.clone();
         let write_props = Self::merge_props(current, new_props, replace);
         let mut enriched = write_props.clone();
         for label_name in labels {
@@ -305,9 +337,11 @@ impl Executor {
             .await?;
         }
         let enriched = Self::coerce_and_validate_props(enriched, schema, labels)?;
+        let effects = row_property_effects(&before, &enriched);
         let _ = writer
-            .insert_vertex_with_labels(vid, enriched.clone(), labels, tx_l0)
+            .update_vertex_with_labels(vid, enriched.clone(), labels, tx_l0)
             .await?;
+        writer.record_property_effects(StatEntity::Vertex(vid), &effects, tx_l0);
         Ok(enriched)
     }
 
@@ -413,14 +447,16 @@ impl Executor {
                 let etype = self.resolve_edge_type_id(&Value::String(edge.edge_type.clone()))?;
                 let current =
                     read_edge_props_with_prefetch(eid, prefetched, prop_manager, ctx).await?;
+                let before = current.clone();
                 let write_props = Self::merge_props(current, new_props, replace);
                 let write_props = Self::coerce_and_validate_props(
                     write_props,
                     &schema,
                     std::slice::from_ref(&edge.edge_type),
                 )?;
+                let effects = row_property_effects(&before, &write_props);
                 writer
-                    .insert_edge(
+                    .update_edge(
                         src,
                         dst,
                         etype,
@@ -430,6 +466,7 @@ impl Executor {
                         tx_l0,
                     )
                     .await?;
+                writer.record_property_effects(StatEntity::Edge(eid), &effects, tx_l0);
                 // Update the in-memory row binding
                 if let Some(Value::Edge(e)) = row.get_mut(variable) {
                     e.properties = write_props
@@ -446,6 +483,7 @@ impl Executor {
                 let ei = self.extract_edge_identity(map)?;
                 let current =
                     read_edge_props_with_prefetch(ei.eid, prefetched, prop_manager, ctx).await?;
+                let before = current.clone();
                 let write_props = Self::merge_props(current, new_props, replace);
                 let edge_type_name = Value::Map(map.clone())
                     .edge_type_ref()
@@ -463,8 +501,9 @@ impl Executor {
                     )?,
                     None => write_props,
                 };
+                let effects = row_property_effects(&before, &write_props);
                 writer
-                    .insert_edge(
+                    .update_edge(
                         ei.src,
                         ei.dst,
                         ei.edge_type_id,
@@ -474,6 +513,7 @@ impl Executor {
                         tx_l0,
                     )
                     .await?;
+                writer.record_property_effects(StatEntity::Edge(ei.eid), &effects, tx_l0);
                 // Update the in-memory map-encoded edge binding
                 if let Some(Value::Map(edge_map)) = row.get_mut(variable) {
                     edge_map.retain(|k, _| uni_common::core::schema::is_reserved_property_name(k));
@@ -804,23 +844,6 @@ impl Executor {
         }
         sm.save().await?;
         Ok(())
-    }
-
-    /// True if `key` is a generated property on any of the given labels.
-    /// Used by the partial-write flush path (Round 12 §C) to decide
-    /// whether the property should be added to `touched_keys` so that
-    /// Lance MergeInsert sends the recomputed value.
-    fn is_generated_key(&self, labels: &[String], key: &str) -> bool {
-        let schema = self.storage.schema_manager().schema();
-        for label in labels {
-            if let Some(props_meta) = schema.properties.get(label)
-                && let Some(meta) = props_meta.get(key)
-                && meta.generation_expression.is_some()
-            {
-                return true;
-            }
-        }
-        false
     }
 
     pub(crate) async fn enrich_properties_with_generated_columns(
@@ -3077,7 +3100,7 @@ impl Executor {
         // `Temporal`→`Timestamp` widenings, declared composite columns (`Map`/`List`/
         // `Vector`) receiving their matching value, and `Null` (always accepted).
         if dt.accepts(&val) {
-            return Ok(val);
+            return Ok(Self::to_declared_form(dt, val));
         }
 
         // Known-safe coercion: a string into a temporal column is parsed as if it had
@@ -3118,6 +3141,53 @@ impl Executor {
             dt,
             value_type_name(&val)
         );
+    }
+
+    /// Rewrites an accepted value into the form a flushed row of the declared
+    /// column reads back as.
+    ///
+    /// [`DataType::accepts`](uni_common::core::schema::DataType::accepts)
+    /// admits lossless widenings: an `Int` into a float column, a numeric
+    /// `List` into a `VECTOR` (or a list of them into a multi-vector column).
+    /// Stored as given, L0 held `Int` / `List[Int]` while the flushed row held
+    /// `Float` / `Vector`, so `RETURN n` and `properties(n)` changed type
+    /// across a flush. Every other accepted value is returned unchanged.
+    fn to_declared_form(dt: &uni_common::core::schema::DataType, val: Value) -> Value {
+        use uni_common::core::schema::DataType;
+        fn as_vector(items: &[Value]) -> Option<Vec<f32>> {
+            items
+                .iter()
+                .map(|v| match v {
+                    Value::Int(i) => Some(*i as f32),
+                    Value::Float(f) => Some(*f as f32),
+                    _ => None,
+                })
+                .collect()
+        }
+        match (dt, val) {
+            (DataType::Float32 | DataType::Float64, Value::Int(i)) => Value::Float(i as f64),
+            (DataType::Vector { .. }, Value::List(items)) => match as_vector(&items) {
+                Some(v) => Value::Vector(v),
+                None => Value::List(items),
+            },
+            (DataType::List(inner), Value::List(tokens))
+                if matches!(inner.as_ref(), DataType::Vector { .. }) =>
+            {
+                Value::List(
+                    tokens
+                        .into_iter()
+                        .map(|t| match t {
+                            Value::List(items) => match as_vector(&items) {
+                                Some(v) => Value::Vector(v),
+                                None => Value::List(items),
+                            },
+                            other => other,
+                        })
+                        .collect(),
+                )
+            }
+            (_, val) => val,
+        }
     }
 
     /// Canonicalizes and validates a value destined for a `SparseVector` column.
@@ -3245,22 +3315,9 @@ impl Executor {
 
                             // Lazy one-time read. Always read the full row
                             // (preserves CRDT merge + constraint validation
-                            // + scan-side L0 visibility). The
-                            // partial-lance-writes optimization happens
-                            // PURELY AT FLUSH TIME via the per-VID
-                            // `vertex_partial_keys` set tracked in L0 — so
-                            // L0 holds the full row, scans see the full
-                            // row, and Lance only receives the touched
-                            // columns. Generated-column-bearing labels
-                            // ride the partial path too (Round 12 §C):
-                            // `enrich_properties_with_generated_columns`
-                            // runs at flush time over the merged-in-L0
-                            // full row, and the produced generator keys
-                            // are appended to `touched` so they land in
-                            // the MergeInsert source.
+                            // + scan-side L0 visibility); the SET stores it
+                            // back whole.
                             if !pending_v.contains_key(var_name) {
-                                let storage_cfg = &self.storage.config;
-                                let partial = storage_cfg.partial_lance_writes;
                                 let read = read_vertex_props_with_prefetch(
                                     vid,
                                     prefetched,
@@ -3274,8 +3331,8 @@ impl Executor {
                                         vid,
                                         labels: labels.clone(),
                                         props: read,
-                                        partial,
                                         touched: HashSet::new(),
+                                        before: HashMap::new(),
                                     },
                                 );
                             }
@@ -3290,6 +3347,10 @@ impl Executor {
                             let pv = pending_v
                                 .get_mut(var_name)
                                 .expect("inserted above when absent");
+                            if !pv.before.contains_key(prop_name) {
+                                let old = pv.props.get(prop_name).cloned();
+                                pv.before.insert(prop_name.clone(), old);
+                            }
                             pv.props.insert(prop_name.clone(), val.clone());
                             // Record every SET-assigned key. For the partial path this
                             // drives the MergeInsert source; for the full path it is the
@@ -3334,7 +3395,6 @@ impl Executor {
                                     ctx,
                                 )
                                 .await?;
-                                let partial = self.storage.config.partial_lance_writes;
                                 pending_e.insert(
                                     var_name.clone(),
                                     PendingEdgeSet {
@@ -3344,8 +3404,7 @@ impl Executor {
                                         eid: ei.eid,
                                         edge_type_name: edge_type_name.clone(),
                                         props: initial,
-                                        partial,
-                                        touched: HashSet::new(),
+                                        before: HashMap::new(),
                                     },
                                 );
                             }
@@ -3363,10 +3422,11 @@ impl Executor {
                             let pe = pending_e
                                 .get_mut(var_name)
                                 .expect("inserted above when absent");
-                            pe.props.insert(prop_name.clone(), val.clone());
-                            if pe.partial {
-                                pe.touched.insert(prop_name.clone());
+                            if !pe.before.contains_key(prop_name) {
+                                let old = pe.props.get(prop_name).cloned();
+                                pe.before.insert(prop_name.clone(), old);
                             }
+                            pe.props.insert(prop_name.clone(), val.clone());
 
                             // Update the row object so subsequent RHS sees the new value.
                             if let Some(binding) = row.get_mut(var_name) {
@@ -3391,7 +3451,6 @@ impl Executor {
                                     ctx,
                                 )
                                 .await?;
-                                let partial = self.storage.config.partial_lance_writes;
                                 pending_e.insert(
                                     var_name.clone(),
                                     PendingEdgeSet {
@@ -3401,8 +3460,7 @@ impl Executor {
                                         eid,
                                         edge_type_name: edge_type_name.clone(),
                                         props: initial,
-                                        partial,
-                                        touched: HashSet::new(),
+                                        before: HashMap::new(),
                                     },
                                 );
                             }
@@ -3420,10 +3478,11 @@ impl Executor {
                             let pe = pending_e
                                 .get_mut(var_name)
                                 .expect("inserted above when absent");
-                            pe.props.insert(prop_name.clone(), val.clone());
-                            if pe.partial {
-                                pe.touched.insert(prop_name.clone());
+                            if !pe.before.contains_key(prop_name) {
+                                let old = pe.props.get(prop_name).cloned();
+                                pe.before.insert(prop_name.clone(), old);
                             }
+                            pe.props.insert(prop_name.clone(), val.clone());
 
                             // Update the row object so subsequent RHS sees the new value.
                             if let Some(binding) = row.get_mut(var_name) {
@@ -3476,11 +3535,14 @@ impl Executor {
                             // and OCC-conflictable), falling back to the context
                             // (main) L0 for non-transactional callers. Replace
                             // semantics via `set_vertex_labels`.
+                            let added = labels_to_add.len();
                             let mut new_labels = current_labels;
                             new_labels.extend(labels_to_add);
                             if let Some(ctx) = ctx {
                                 let l0 = ctx.transaction_l0.as_ref().unwrap_or(&ctx.l0);
-                                l0.write().set_vertex_labels(vid, &new_labels);
+                                let mut guard = l0.write();
+                                guard.set_vertex_labels(vid, &new_labels);
+                                guard.record_labels_added(vid, added);
                             }
 
                             // Update the node value in the row with the new
@@ -3546,89 +3608,80 @@ impl Executor {
             }
         }
 
-        // Flush all remaining coalesced writes — one writer call per target.
-        // Partial entries (no generated columns) call
-        // `Writer::insert_vertex_partial_full` so L0 holds the FULL row
-        // but the touched-keys hint drives a MergeInsert at flush. Full
-        // entries continue through the legacy
-        // `insert_vertex_with_labels` (Append) path with
-        // generated-column enrichment.
-        for (_var_name, mut pv) in pending_v {
-            // A SET that touches an auto-embed source column must refresh the target
-            // embedding; both the partial MergeInsert and the full Append paths
-            // otherwise re-write the stale vector. Applied before the branch so both
-            // writer entry points get the refreshed props + touched keys.
-            writer.refresh_embed_targets(&mut pv.props, &mut pv.touched, &pv.labels);
-            if pv.partial {
-                // Round 12 §C: run the generator enrichment over the
-                // merged-in-L0 full row, then add the produced generator
-                // keys to `touched` so they ride the MergeInsert source.
-                // Idempotent — generators always recompute against the
-                // post-merge property map.
-                let pre_keys: HashSet<String> = pv.props.keys().cloned().collect();
-                for label_name in &pv.labels {
-                    self.enrich_properties_with_generated_columns(
-                        label_name,
-                        &mut pv.props,
-                        prop_manager,
-                        params,
-                        ctx,
-                    )
-                    .await?;
-                }
-                for k in pv.props.keys() {
-                    if !pre_keys.contains(k) || self.is_generated_key(&pv.labels, k) {
-                        pv.touched.insert(k.clone());
-                    }
-                }
-                writer
-                    .insert_vertex_partial_full(pv.vid, pv.props, pv.touched, &pv.labels, tx_l0)
-                    .await?;
-            } else {
-                for label_name in &pv.labels {
-                    self.enrich_properties_with_generated_columns(
-                        label_name,
-                        &mut pv.props,
-                        prop_manager,
-                        params,
-                        ctx,
-                    )
-                    .await?;
-                }
-                let _ = writer
-                    .insert_vertex_with_labels(pv.vid, pv.props, &pv.labels, tx_l0)
-                    .await?;
-            }
+        // Flush all remaining coalesced writes — one writer call per target,
+        // each a full-row update.
+        for (_var_name, pv) in pending_v {
+            self.write_pending_vertex(pv, writer, prop_manager, params, ctx, tx_l0)
+                .await?;
         }
         for (_var_name, pe) in pending_e {
-            if pe.partial {
-                writer
-                    .insert_edge_partial_full(
-                        pe.src,
-                        pe.dst,
-                        pe.edge_type_id,
-                        pe.eid,
-                        pe.props,
-                        Some(pe.edge_type_name),
-                        pe.touched,
-                        tx_l0,
-                    )
-                    .await?;
-            } else {
-                writer
-                    .insert_edge(
-                        pe.src,
-                        pe.dst,
-                        pe.edge_type_id,
-                        pe.eid,
-                        pe.props,
-                        Some(pe.edge_type_name),
-                        tx_l0,
-                    )
-                    .await?;
-            }
+            Self::write_pending_edge(pe, writer, tx_l0).await?;
         }
 
+        Ok(())
+    }
+
+    /// Write one coalesced vertex SET: refresh auto-embed targets, regenerate
+    /// generated columns, store the full row, and record the property side
+    /// effects of the keys the SET assigned.
+    async fn write_pending_vertex(
+        &self,
+        mut pv: PendingVertexSet,
+        writer: &Writer,
+        prop_manager: &PropertyManager,
+        params: &HashMap<String, Value>,
+        ctx: Option<&QueryContext>,
+        tx_l0: Option<&Arc<parking_lot::RwLock<uni_store::runtime::l0::L0Buffer>>>,
+    ) -> Result<()> {
+        // A SET that touches an auto-embed source column must refresh the
+        // target embedding, or the write re-stores the stale vector.
+        writer.refresh_embed_targets(&mut pv.props, &mut pv.touched, &pv.labels);
+        for label_name in &pv.labels {
+            self.enrich_properties_with_generated_columns(
+                label_name,
+                &mut pv.props,
+                prop_manager,
+                params,
+                ctx,
+            )
+            .await?;
+        }
+        let effects: Vec<(Option<Value>, Option<Value>)> = pv
+            .before
+            .iter()
+            .map(|(k, old)| (old.clone(), pv.props.get(k).cloned()))
+            .collect();
+        writer
+            .update_vertex_with_labels(pv.vid, pv.props, &pv.labels, tx_l0)
+            .await?;
+        writer.record_property_effects(StatEntity::Vertex(pv.vid), &effects, tx_l0);
+        Ok(())
+    }
+
+    /// Write one coalesced edge SET as a full row and record its property
+    /// side effects.
+    async fn write_pending_edge(
+        pe: PendingEdgeSet,
+        writer: &Writer,
+        tx_l0: Option<&Arc<parking_lot::RwLock<uni_store::runtime::l0::L0Buffer>>>,
+    ) -> Result<()> {
+        let effects: Vec<(Option<Value>, Option<Value>)> = pe
+            .before
+            .iter()
+            .map(|(k, old)| (old.clone(), pe.props.get(k).cloned()))
+            .collect();
+        writer
+            .update_edge(
+                pe.src,
+                pe.dst,
+                pe.edge_type_id,
+                pe.eid,
+                pe.props,
+                Some(pe.edge_type_name),
+                tx_l0,
+            )
+            .await?;
+        writer.record_property_effects(StatEntity::Edge(pe.eid), &effects, tx_l0);
         Ok(())
     }
 
@@ -3650,70 +3703,12 @@ impl Executor {
         tx_l0: Option<&Arc<parking_lot::RwLock<uni_store::runtime::l0::L0Buffer>>>,
         _prefetched: &Prefetch,
     ) -> Result<()> {
-        if let Some(mut pv) = pending_v.remove(var) {
-            if pv.partial {
-                let pre_keys: HashSet<String> = pv.props.keys().cloned().collect();
-                for label_name in &pv.labels {
-                    self.enrich_properties_with_generated_columns(
-                        label_name,
-                        &mut pv.props,
-                        prop_manager,
-                        _params,
-                        ctx,
-                    )
-                    .await?;
-                }
-                for k in pv.props.keys() {
-                    if !pre_keys.contains(k) || self.is_generated_key(&pv.labels, k) {
-                        pv.touched.insert(k.clone());
-                    }
-                }
-                writer
-                    .insert_vertex_partial_full(pv.vid, pv.props, pv.touched, &pv.labels, tx_l0)
-                    .await?;
-            } else {
-                for label_name in &pv.labels {
-                    self.enrich_properties_with_generated_columns(
-                        label_name,
-                        &mut pv.props,
-                        prop_manager,
-                        _params,
-                        ctx,
-                    )
-                    .await?;
-                }
-                let _ = writer
-                    .insert_vertex_with_labels(pv.vid, pv.props, &pv.labels, tx_l0)
-                    .await?;
-            }
+        if let Some(pv) = pending_v.remove(var) {
+            self.write_pending_vertex(pv, writer, prop_manager, _params, ctx, tx_l0)
+                .await?;
         }
         if let Some(pe) = pending_e.remove(var) {
-            if pe.partial {
-                writer
-                    .insert_edge_partial_full(
-                        pe.src,
-                        pe.dst,
-                        pe.edge_type_id,
-                        pe.eid,
-                        pe.props,
-                        Some(pe.edge_type_name),
-                        pe.touched,
-                        tx_l0,
-                    )
-                    .await?;
-            } else {
-                writer
-                    .insert_edge(
-                        pe.src,
-                        pe.dst,
-                        pe.edge_type_id,
-                        pe.eid,
-                        pe.props,
-                        Some(pe.edge_type_name),
-                        tx_l0,
-                    )
-                    .await?;
-            }
+            Self::write_pending_edge(pe, writer, tx_l0).await?;
         }
         Ok(())
     }
@@ -3754,7 +3749,8 @@ impl Executor {
                     }
                 }
                 RemoveItem::Labels { variable, labels } => {
-                    self.execute_remove_labels(variable, labels, row, ctx)?;
+                    self.execute_remove_labels(variable, labels, row, prop_manager, ctx)
+                        .await?;
                 }
             }
         }
@@ -3771,13 +3767,10 @@ impl Executor {
                     read_vertex_props_with_prefetch(vid, prefetched, prop_manager, ctx).await?;
 
                 // Only write back if at least one property actually exists
-                let removed_count = prop_names
-                    .iter()
-                    .filter(|p| props.get(*p).is_some_and(|v| !v.is_null()))
-                    .count();
-                let any_exist = removed_count > 0;
+                let effects = removal_effects(&props, prop_names);
+                let any_exist = !effects.is_empty();
                 if any_exist {
-                    writer.track_properties_removed(removed_count, tx_l0);
+                    writer.record_property_effects(StatEntity::Vertex(vid), &effects, tx_l0);
                     for prop_name in prop_names {
                         props.insert(prop_name.clone(), Value::Null);
                     }
@@ -3791,7 +3784,7 @@ impl Executor {
                 if any_exist {
                     let labels = Self::extract_labels_from_node(node_val).unwrap_or_default();
                     let _ = writer
-                        .insert_vertex_with_labels(vid, props, &labels, tx_l0)
+                        .update_vertex_with_labels(vid, props, &labels, tx_l0)
                         .await?;
                 }
 
@@ -3812,13 +3805,10 @@ impl Executor {
                         read_edge_props_with_prefetch(ei.eid, prefetched, prop_manager, ctx)
                             .await?;
 
-                    let removed_count = prop_names
-                        .iter()
-                        .filter(|p| props.get(*p).is_some_and(|v| !v.is_null()))
-                        .count();
-                    let any_exist = removed_count > 0;
+                    let effects = removal_effects(&props, prop_names);
+                    let any_exist = !effects.is_empty();
                     if any_exist {
-                        writer.track_properties_removed(removed_count, tx_l0);
+                        writer.record_property_effects(StatEntity::Edge(ei.eid), &effects, tx_l0);
                         for prop_name in prop_names {
                             props.insert(prop_name.to_string(), Value::Null);
                         }
@@ -3841,7 +3831,7 @@ impl Executor {
                                     .edge_type_name_by_id_unified(ei.edge_type_id)
                             });
                         writer
-                            .insert_edge(
+                            .update_edge(
                                 ei.src,
                                 ei.dst,
                                 ei.edge_type_id,
@@ -3872,17 +3862,14 @@ impl Executor {
                 let mut props =
                     read_edge_props_with_prefetch(eid, prefetched, prop_manager, ctx).await?;
 
-                let removed_count = prop_names
-                    .iter()
-                    .filter(|p| props.get(*p).is_some_and(|v| !v.is_null()))
-                    .count();
-                if removed_count > 0 {
-                    writer.track_properties_removed(removed_count, tx_l0);
+                let effects = removal_effects(&props, prop_names);
+                if !effects.is_empty() {
+                    writer.record_property_effects(StatEntity::Edge(eid), &effects, tx_l0);
                     for prop_name in prop_names {
                         props.insert(prop_name.to_string(), Value::Null);
                     }
                     writer
-                        .insert_edge(
+                        .update_edge(
                             src,
                             dst,
                             etype,
@@ -3906,11 +3893,16 @@ impl Executor {
     }
 
     /// Execute label removal.
-    pub(crate) fn execute_remove_labels(
+    ///
+    /// Refused with `EdgeEndpointViolation` when the removal would leave one
+    /// of the node's existing edges outside its edge type's declared endpoint
+    /// labels.
+    pub(crate) async fn execute_remove_labels(
         &self,
         variable: &str,
         labels: &[String],
         row: &mut HashMap<String, Value>,
+        prop_manager: &PropertyManager,
         ctx: Option<&QueryContext>,
     ) -> Result<()> {
         if let Some(node_val) = row.get(variable)
@@ -3941,9 +3933,18 @@ impl Executor {
                     .filter(|l| !labels_to_remove.contains(l))
                     .cloned()
                     .collect();
+                self.check_label_removal_keeps_edges_declared(
+                    vid,
+                    &remaining_labels,
+                    prop_manager,
+                    ctx,
+                )?;
+                let removed = labels_to_remove.len();
                 if let Some(ctx) = ctx {
                     let l0 = ctx.transaction_l0.as_ref().unwrap_or(&ctx.l0);
-                    l0.write().set_vertex_labels(vid, &remaining_labels);
+                    let mut guard = l0.write();
+                    guard.set_vertex_labels(vid, &remaining_labels);
+                    guard.record_labels_removed(vid, removed);
                 }
 
                 // Update the node value in the row with the remaining labels.
@@ -3952,6 +3953,81 @@ impl Executor {
                     // encoded vertex showing its old label set (#234).
                     binding.set_entity_labels(remaining_labels);
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse a label removal that would leave an edge of `vid` outside its
+    /// edge type's declared endpoint labels.
+    ///
+    /// For every declared edge type whose source (target) labels the node
+    /// would no longer carry, the node must have no outgoing (incoming) edge
+    /// of that type. Edges are read through the same CSR + L0 overlay a
+    /// traversal uses, so edges written earlier in this transaction count.
+    ///
+    /// # Errors
+    /// `EdgeEndpointViolation` naming the first such edge type.
+    fn check_label_removal_keeps_edges_declared(
+        &self,
+        vid: Vid,
+        remaining: &[String],
+        prop_manager: &PropertyManager,
+        ctx: Option<&QueryContext>,
+    ) -> Result<()> {
+        use uni_store::storage::direction::Direction;
+        let schema = self.storage.schema_manager().schema();
+        let carries = |allowed: &[String]| remaining.iter().any(|l| allowed.contains(l));
+        let mut probes: Vec<(&String, u32, Direction, &'static str, &Vec<String>)> = Vec::new();
+        for (name, meta) in &schema.edge_types {
+            if !meta.src_labels.is_empty() && !carries(&meta.src_labels) {
+                probes.push((
+                    name,
+                    meta.id,
+                    Direction::Outgoing,
+                    "source",
+                    &meta.src_labels,
+                ));
+            }
+            if !meta.dst_labels.is_empty() && !carries(&meta.dst_labels) {
+                probes.push((
+                    name,
+                    meta.id,
+                    Direction::Incoming,
+                    "target",
+                    &meta.dst_labels,
+                ));
+            }
+        }
+        if probes.is_empty() {
+            return Ok(());
+        }
+        let l0_context = match ctx {
+            Some(c) => crate::query::df_graph::L0Context::from_query_context(c),
+            None => crate::query::df_graph::L0Context::empty(),
+        };
+        let pm_arc = self.prop_manager_arc.clone().unwrap_or_else(|| {
+            Arc::new(PropertyManager::new(
+                self.storage.clone(),
+                self.storage.schema_manager_arc(),
+                prop_manager.cache_size(),
+            ))
+        });
+        let graph_ctx = crate::query::df_graph::GraphExecutionContext::with_l0_context(
+            self.effective_storage(),
+            l0_context,
+            pm_arc,
+        );
+        for (name, type_id, dir, endpoint, allowed) in probes {
+            if !graph_ctx.get_neighbors(vid, type_id, dir).is_empty() {
+                return Err(anyhow::Error::new(
+                    uni_common::UniError::EdgeEndpointViolation {
+                        edge_type: name.clone(),
+                        endpoint: endpoint.to_string(),
+                        labels: remaining.to_vec(),
+                        allowed: allowed.clone(),
+                    },
+                ));
             }
         }
         Ok(())

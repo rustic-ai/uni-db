@@ -50,7 +50,12 @@ fn candidates() -> Vec<(&'static str, fn(&mut UniConfig))> {
             c.execution_batch_size = Some(64)
         }),
         ("partial_lance_writes", |c| {
-            c.partial_lance_writes = !c.partial_lance_writes
+            #[expect(deprecated, reason = "exercises the deprecated no-op flag")]
+            let flipped = !c.partial_lance_writes;
+            #[expect(deprecated, reason = "exercises the deprecated no-op flag")]
+            {
+                c.partial_lance_writes = flipped;
+            }
         }),
         ("async_flush_enabled", |c| {
             c.async_flush_enabled = !c.async_flush_enabled

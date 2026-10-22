@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uni_common::Value;
 use uni_cypher::ast::Expr;
+use uni_plugin::traits::procedure::ProcedureMode;
 use uni_store::QueryContext;
 use uni_store::runtime::property_manager::PropertyManager;
 
@@ -15,6 +16,53 @@ fn success_result(success: bool) -> Result<Vec<HashMap<String, Value>>> {
         "success".to_string(),
         Value::Bool(success),
     )])])
+}
+
+/// Mode of every procedure the executor dispatches by name rather than
+/// through the plugin registry.
+///
+/// This table is the single source of truth for what those procedures may do.
+/// The read-only oracle ([`crate::validate_read_only_with`]) and the
+/// authorization verb come from it: a registry lookup cannot see these
+/// procedures, so before this table they were all taken for reads, and a
+/// read-only session ran `uni.admin.snapshot.restore()`. It also gates
+/// dispatch: `Executor::execute_procedure` reaches its built-in arms only for
+/// a name listed here, so a built-in added without a mode is not callable
+/// rather than silently read-only.
+///
+/// Modes follow uni's `ProcedureMode` contract, which Neo4j's procedure modes
+/// inspired: `Schema` issues DDL, `Dbms` acts on the database as a whole
+/// (storage files, snapshots, the catalog's conformance records) rather than
+/// on graph rows. Any mode but `Read` is refused in a read-only context.
+pub const BUILTIN_PROCEDURE_MODES: &[(&str, ProcedureMode)] = &[
+    ("uni.admin.compact", ProcedureMode::Dbms),
+    ("uni.admin.verifyEdgeEndpoints", ProcedureMode::Dbms),
+    ("uni.admin.compactionStatus", ProcedureMode::Read),
+    ("uni.admin.snapshot.create", ProcedureMode::Dbms),
+    ("uni.admin.snapshot.list", ProcedureMode::Read),
+    ("uni.admin.snapshot.restore", ProcedureMode::Dbms),
+    ("uni.admin.snapshot.delete", ProcedureMode::Dbms),
+    ("uni.schema.createLabel", ProcedureMode::Schema),
+    ("uni.schema.createEdgeType", ProcedureMode::Schema),
+    ("uni.schema.createIndex", ProcedureMode::Schema),
+    ("uni.schema.createConstraint", ProcedureMode::Schema),
+    ("uni.schema.dropLabel", ProcedureMode::Schema),
+    ("uni.schema.dropEdgeType", ProcedureMode::Schema),
+    ("uni.schema.dropIndex", ProcedureMode::Schema),
+    ("uni.schema.dropConstraint", ProcedureMode::Schema),
+];
+
+/// Mode of the executor built-in procedure `name`, or `None` when `name` is
+/// not one (it may still be a registered plugin procedure).
+///
+/// Matching is exact, as dispatch is: a differently cased name is not the
+/// built-in and does not run it.
+#[must_use]
+pub fn builtin_procedure_mode(name: &str) -> Option<ProcedureMode> {
+    BUILTIN_PROCEDURE_MODES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, mode)| *mode)
 }
 
 /// Value type for procedure parameters and outputs.
@@ -367,6 +415,187 @@ fn filter_yield_items(
 }
 
 impl Executor {
+    /// Check stored edges against their types' declared endpoints, and record
+    /// the types found clean so the planner may narrow on them.
+    ///
+    /// Backs `CALL uni.admin.verifyEdgeEndpoints([edgeType])`. Writes enforce a
+    /// declaration, but a store written before that may hold edges that
+    /// violate it, and its catalog marks such types
+    /// [`EndpointConformance::Unverified`]. This flushes, so the edges still
+    /// buffered in memory reach storage, then reads every edge of each such
+    /// type that has a row in the main edges table -- deleted ones included,
+    /// since a reader on an older snapshot can still see them -- and checks
+    /// both endpoints' labels. A type with no violation is recorded
+    /// `Verified` as of just before its read: every edge stored then was read,
+    /// and every write since was enforced. A type with violations stays
+    /// unverified and its counts are reported; the violating edges stay
+    /// readable either way. A deleted violating edge counts until compaction
+    /// drops its rows.
+    ///
+    /// One row per declared, active edge type considered: `edge_type`,
+    /// `edges_checked`, `source_violations`, `target_violations` and
+    /// `conformance` (`enforced`, `verified` or `unverified`, after the pass).
+    /// A type already enforced or verified is reported without being read.
+    ///
+    /// # Errors
+    /// On a forked session (the verification would describe the fork's branch
+    /// but live in primary's catalog), without a writer, for an unknown
+    /// `only` type, or when a read or the catalog save fails.
+    pub(crate) async fn verify_edge_endpoints(
+        &self,
+        only: Option<&str>,
+    ) -> Result<Vec<HashMap<String, Value>>> {
+        use uni_common::core::schema::{EndpointConformance, SchemaElementState};
+
+        if self.storage.fork_scope().is_some() {
+            return Err(anyhow!(
+                "uni.admin.verifyEdgeEndpoints() runs on the primary database, not on a fork: \
+                 a fork created before a verification keeps its own unverified view"
+            ));
+        }
+        let writer = self.writer.as_ref().ok_or_else(|| {
+            anyhow!("uni.admin.verifyEdgeEndpoints() requires a writable database")
+        })?;
+        if self.transaction_l0_override.is_some() {
+            // The caller's own snapshot would be older than the read below,
+            // and the pass waits for every such snapshot to end.
+            return Err(anyhow!(
+                "uni.admin.verifyEdgeEndpoints() cannot run inside a transaction"
+            ));
+        }
+        let sm = self.storage.schema_manager_arc();
+        let schema = sm.schema();
+        if let Some(name) = only
+            && !schema.edge_types.contains_key(name)
+        {
+            return Err(anyhow!("Edge type '{}' not found", name));
+        }
+        let mut names: Vec<&String> = schema
+            .edge_types
+            .iter()
+            .filter(|(n, m)| {
+                matches!(m.state, SchemaElementState::Active) && only.is_none_or(|o| o == *n)
+            })
+            .map(|(n, _)| n)
+            .collect();
+        names.sort();
+
+        // Flushed first so the read below covers edges still buffered in
+        // memory, then read as of one version: every reader at that version or
+        // later sees what the read saw plus enforced writes, minus deletes.
+        let needs_read = names
+            .iter()
+            .any(|n| !schema.edge_types[*n].endpoint_conformance.is_conforming());
+        let read_version = if needs_read {
+            writer.flush_to_l1(None).await?;
+            writer.l0_manager.pin_snapshot().started_at_version
+        } else {
+            0
+        };
+
+        let mut rows = Vec::with_capacity(names.len());
+        for name in names {
+            let meta = &schema.edge_types[name];
+            let mut checked = 0usize;
+            let mut src_bad = 0usize;
+            let mut dst_bad = 0usize;
+            let mut conformance = meta.endpoint_conformance.clone();
+            if !conformance.is_conforming() {
+                let edges = self
+                    .storage
+                    .find_edge_endpoints_by_type_at(name, read_version)
+                    .await?;
+                checked = edges.len();
+                for (side, allowed, bad) in [
+                    (0, &meta.src_labels, &mut src_bad),
+                    (1, &meta.dst_labels, &mut dst_bad),
+                ] {
+                    if allowed.is_empty() {
+                        continue;
+                    }
+                    let vids: Vec<uni_common::core::id::Vid> = edges
+                        .iter()
+                        .map(|(s, d)| if side == 0 { *s } else { *d })
+                        .collect();
+                    let known = self.storage.vids_carry_any_label(&vids, allowed);
+                    for (vid, carries) in vids.iter().zip(known) {
+                        let carries = match carries {
+                            Some(c) => c,
+                            // Not in the index: resolve through the writer,
+                            // which reads every buffer and storage.
+                            None => writer
+                                .get_vertex_labels(*vid, None)
+                                .await?
+                                .unwrap_or_default()
+                                .iter()
+                                .any(|l| allowed.contains(l)),
+                        };
+                        if !carries {
+                            *bad += 1;
+                        }
+                    }
+                }
+                if src_bad == 0 && dst_bad == 0 {
+                    self.await_older_snapshots(read_version).await?;
+                    // Stamped after the read: a fork created or a snapshot
+                    // taken earlier may hold an edge deleted before the read,
+                    // so those distrust this verification.
+                    conformance = EndpointConformance::Verified {
+                        at: chrono::Utc::now(),
+                    };
+                    sm.set_endpoint_conformance(name, conformance.clone())?;
+                    // Saved per type, so a pass cut short by the statement
+                    // timeout keeps what it verified. Catalog only: the pass
+                    // changes no storage, so there is nothing to widen first.
+                    sm.save().await?;
+                }
+            }
+            rows.push(HashMap::from([
+                ("edge_type".to_string(), Value::String(name.clone())),
+                ("edges_checked".to_string(), Value::Int(checked as i64)),
+                ("source_violations".to_string(), Value::Int(src_bad as i64)),
+                ("target_violations".to_string(), Value::Int(dst_bad as i64)),
+                (
+                    "conformance".to_string(),
+                    Value::String(conformance.as_str().to_string()),
+                ),
+            ]));
+        }
+        Ok(rows)
+    }
+
+    /// Wait until no transaction reads a snapshot older than `version`.
+    ///
+    /// Such a transaction can still see an edge deleted after its snapshot and
+    /// before an endpoint verification's read at `version`; were the
+    /// verification recorded while it runs, its plans would narrow over an
+    /// edge the verification never checked.
+    ///
+    /// # Errors
+    /// When older snapshots are still pinned after the wait.
+    async fn await_older_snapshots(&self, version: u64) -> Result<()> {
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+        const POLL: std::time::Duration = std::time::Duration::from_millis(20);
+        let pins = self.storage.adjacency_manager().pinned_versions().clone();
+        let started = std::time::Instant::now();
+        loop {
+            match pins.min_pinned() {
+                Some(oldest) if oldest < version => {
+                    if started.elapsed() >= WAIT {
+                        return Err(anyhow!(
+                            "uni.admin.verifyEdgeEndpoints(): a transaction opened before the \
+                             verification (snapshot version {oldest} < {version}) is still open \
+                             after {}s; commit or roll it back and retry",
+                            WAIT.as_secs()
+                        ));
+                    }
+                    tokio::time::sleep(POLL).await;
+                }
+                _ => return Ok(()),
+            }
+        }
+    }
+
     /// Evaluate a procedure argument as a string, returning an error with the given description.
     async fn eval_string_arg<'a>(
         &'a self,
@@ -393,6 +622,13 @@ impl Executor {
         params: &'a HashMap<String, Value>,
         ctx: Option<&'a QueryContext>,
     ) -> Result<Vec<HashMap<String, Value>>> {
+        // Only a classified built-in reaches the arms below; see
+        // `BUILTIN_PROCEDURE_MODES`.
+        if builtin_procedure_mode(name).is_none() {
+            return self
+                .execute_non_builtin_procedure(name, args, yield_items, prop_manager, params, ctx)
+                .await;
+        }
         match name {
             "uni.admin.compact" => {
                 let stats = self.storage.compact().await?;
@@ -436,6 +672,20 @@ impl Executor {
                 ]);
 
                 Ok(vec![filter_yield_items(full_result, yield_items)])
+            }
+            "uni.admin.verifyEdgeEndpoints" => {
+                let only = match args.first() {
+                    Some(arg) => Some(
+                        self.eval_string_arg(arg, "edge type name", prop_manager, params, ctx)
+                            .await?,
+                    ),
+                    None => None,
+                };
+                let rows = self.verify_edge_endpoints(only.as_deref()).await?;
+                Ok(rows
+                    .into_iter()
+                    .map(|row| filter_yield_items(row, yield_items))
+                    .collect())
             }
             "uni.admin.compactionStatus" => {
                 let status = self
@@ -488,7 +738,7 @@ impl Executor {
                     .as_ref()
                     .ok_or_else(|| anyhow!("Database is in read-only mode"))?;
                 let writer: &uni_store::Writer = writer_arc.as_ref();
-                let snapshot_id = writer.flush_to_l1(name).await?;
+                let snapshot_id = writer.create_snapshot(name).await?;
 
                 Ok(vec![HashMap::from([(
                     "snapshot_id".to_string(),
@@ -525,13 +775,41 @@ impl Executor {
                     .eval_string_arg(&args[0], "Snapshot ID", prop_manager, params, ctx)
                     .await?;
 
-                self.storage
-                    .snapshot_manager()
-                    .set_latest_snapshot(&id)
-                    .await?;
+                if self.transaction_l0_override.is_some() {
+                    // A restore cannot be undone by a rollback, and it refuses
+                    // while any transaction is open.
+                    return Err(anyhow!(
+                        "uni.admin.snapshot.restore() cannot run inside a transaction"
+                    ));
+                }
+                let writer = self
+                    .writer
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("Database is in read-only mode"))?;
+                writer.restore_snapshot(&id).await?;
                 Ok(vec![HashMap::from([(
                     "status".to_string(),
                     Value::String("Restored".to_string()),
+                )])])
+            }
+            "uni.admin.snapshot.delete" => {
+                let id = self
+                    .eval_string_arg(&args[0], "Snapshot ID", prop_manager, params, ctx)
+                    .await?;
+                if self.transaction_l0_override.is_some() {
+                    // Unpinning versions cannot be undone by a rollback.
+                    return Err(anyhow!(
+                        "uni.admin.snapshot.delete() cannot run inside a transaction"
+                    ));
+                }
+                let writer = self
+                    .writer
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("Database is in read-only mode"))?;
+                writer.delete_snapshot(&id).await?;
+                Ok(vec![HashMap::from([(
+                    "status".to_string(),
+                    Value::String("Deleted".to_string()),
                 )])])
             }
             // DDL Procedures
@@ -675,64 +953,79 @@ impl Executor {
                 };
                 success_result(success)
             }
-            _ => {
-                // M4: Plugin path — consult the framework PluginRegistry
-                // before falling back to the legacy TCK mock registry.
-                if let Some(registry) = &self.procedure_registry
-                    && let Some(entry) = registry.resolve_user_procedure(name)
-                {
-                    return self
-                        .execute_plugin_procedure(
-                            name,
-                            &entry,
-                            args,
-                            yield_items,
-                            prop_manager,
-                            params,
-                            ctx,
-                        )
-                        .await;
-                }
-
-                // Algorithm-provider fallthrough (procedure-miss only): a
-                // plugin registered purely via `PluginRegistrar::algorithm`
-                // — e.g. a third-party graph algorithm under its own
-                // namespace. Built-in `uni.algo.*` register as procedures
-                // and are caught above, so they never reach here.
-                if let Some(registry) = &self.procedure_registry
-                    && let Some(entry) = registry.resolve_user_algorithm(name)
-                {
-                    return self
-                        .execute_algorithm_provider(
-                            name,
-                            &entry,
-                            args,
-                            yield_items,
-                            prop_manager,
-                            params,
-                            ctx,
-                        )
-                        .await;
-                }
-
-                // Legacy TCK mock-procedure registry.
-                if let Some(registry) = &self.procedure_registry
-                    && let Some(proc_def) = registry.get(name)
-                {
-                    return self
-                        .execute_registered_procedure(
-                            &proc_def,
-                            args,
-                            yield_items,
-                            prop_manager,
-                            params,
-                            ctx,
-                        )
-                        .await;
-                }
-                Err(anyhow!("ProcedureNotFound: Unknown procedure '{}'", name))
-            }
+            _ => Err(anyhow!(
+                "built-in procedure '{name}' is classified in BUILTIN_PROCEDURE_MODES \
+                 but has no dispatch arm"
+            )),
         }
+    }
+
+    /// Dispatches a procedure that is not an executor built-in: a plugin
+    /// procedure, an algorithm provider, or a TCK mock procedure.
+    async fn execute_non_builtin_procedure<'a>(
+        &'a self,
+        name: &str,
+        args: &[Expr],
+        yield_items: &[String],
+        prop_manager: &'a PropertyManager,
+        params: &'a HashMap<String, Value>,
+        ctx: Option<&'a QueryContext>,
+    ) -> Result<Vec<HashMap<String, Value>>> {
+        // M4: Plugin path — consult the framework PluginRegistry
+        // before falling back to the legacy TCK mock registry.
+        if let Some(registry) = &self.procedure_registry
+            && let Some(entry) = registry.resolve_user_procedure(name)
+        {
+            return self
+                .execute_plugin_procedure(
+                    name,
+                    &entry,
+                    args,
+                    yield_items,
+                    prop_manager,
+                    params,
+                    ctx,
+                )
+                .await;
+        }
+
+        // Algorithm-provider fallthrough (procedure-miss only): a
+        // plugin registered purely via `PluginRegistrar::algorithm`
+        // — e.g. a third-party graph algorithm under its own
+        // namespace. Built-in `uni.algo.*` register as procedures
+        // and are caught above, so they never reach here.
+        if let Some(registry) = &self.procedure_registry
+            && let Some(entry) = registry.resolve_user_algorithm(name)
+        {
+            return self
+                .execute_algorithm_provider(
+                    name,
+                    &entry,
+                    args,
+                    yield_items,
+                    prop_manager,
+                    params,
+                    ctx,
+                )
+                .await;
+        }
+
+        // Legacy TCK mock-procedure registry.
+        if let Some(registry) = &self.procedure_registry
+            && let Some(proc_def) = registry.get(name)
+        {
+            return self
+                .execute_registered_procedure(
+                    &proc_def,
+                    args,
+                    yield_items,
+                    prop_manager,
+                    params,
+                    ctx,
+                )
+                .await;
+        }
+        Err(anyhow!("ProcedureNotFound: Unknown procedure '{}'", name))
     }
 
     /// Executes a procedure registered through the plugin framework.
@@ -1184,5 +1477,73 @@ mod arrow_scalar_to_value_tests {
         let got =
             arrow_scalar_to_value(arr.as_ref(), 0, &plain_field(Dt::LargeBinary)).expect("null");
         assert_eq!(got, Value::Null);
+    }
+}
+
+#[cfg(test)]
+mod builtin_mode_tests {
+    use super::{BUILTIN_PROCEDURE_MODES, ProcedureMode, builtin_procedure_mode};
+
+    /// The dispatch `match` of `execute_procedure`, as source text.
+    fn dispatch_source() -> &'static str {
+        let src = include_str!("procedure.rs");
+        let start = src
+            .find("pub(crate) async fn execute_procedure<")
+            .expect("execute_procedure");
+        let end = src[start..]
+            .find("async fn execute_non_builtin_procedure<")
+            .expect("execute_non_builtin_procedure")
+            + start;
+        &src[start..end]
+    }
+
+    /// Every `"uni.…"` literal the dispatch matches on is classified, and
+    /// every classified name has an arm. An arm without a mode is not
+    /// reachable (dispatch gates on the table), so this catches it at test
+    /// time rather than as a "procedure not found" in production.
+    #[test]
+    fn every_dispatch_arm_is_classified_and_every_mode_dispatched() {
+        let dispatch = dispatch_source();
+        let mut arms = Vec::new();
+        for (i, _) in dispatch.match_indices("\"uni.") {
+            let rest = &dispatch[i + 1..];
+            let name = &rest[..rest.find('"').expect("closing quote")];
+            let after = rest[name.len() + 1..].trim_start();
+            if after.starts_with("=>") || after.starts_with('|') {
+                arms.push(name);
+            }
+        }
+        assert!(!arms.is_empty(), "no arms found; the scan is broken");
+        for arm in &arms {
+            assert!(
+                builtin_procedure_mode(arm).is_some(),
+                "built-in `{arm}` has no mode in BUILTIN_PROCEDURE_MODES"
+            );
+        }
+        for (name, _) in BUILTIN_PROCEDURE_MODES {
+            assert!(
+                arms.contains(name),
+                "`{name}` is classified but not dispatched"
+            );
+        }
+    }
+
+    /// The administrative procedures that mutate are not reads.
+    #[test]
+    fn mutating_admin_procedures_are_dbms() {
+        for name in [
+            "uni.admin.compact",
+            "uni.admin.verifyEdgeEndpoints",
+            "uni.admin.snapshot.create",
+            "uni.admin.snapshot.restore",
+            "uni.admin.snapshot.delete",
+        ] {
+            assert_eq!(builtin_procedure_mode(name), Some(ProcedureMode::Dbms));
+        }
+        assert_eq!(
+            builtin_procedure_mode("uni.admin.compactionStatus"),
+            Some(ProcedureMode::Read)
+        );
+        assert_eq!(builtin_procedure_mode("UNI.ADMIN.COMPACT"), None);
     }
 }

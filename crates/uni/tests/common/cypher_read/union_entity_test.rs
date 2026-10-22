@@ -357,4 +357,50 @@ async fn a_non_entity_type_conflict_keeps_each_rows_value() {
     let nodes = vals.iter().filter(|v| matches!(v, Value::Node(_))).count();
     let ints = vals.iter().filter(|v| matches!(v, Value::Int(_))).count();
     assert_eq!((nodes, ints, vals.len()), (3, 3, 6), "got {vals:?}");
+
+    // The counts alone would pass with the wrong rows: the nodes must be the
+    // three P nodes and the integers exactly their ids.
+    let oracle = db
+        .session()
+        .query("MATCH (p:P) RETURN id(p) AS id, p.name AS name")
+        .await
+        .expect("oracle");
+    let mut want_ids: Vec<i64> = Vec::new();
+    let mut want_nodes: Vec<(i64, String)> = Vec::new();
+    for row in oracle.rows() {
+        let id: i64 = row.get("id").expect("id");
+        let name: String = row.get("name").expect("name");
+        want_ids.push(id);
+        want_nodes.push((id, name));
+    }
+    want_ids.sort_unstable();
+    want_nodes.sort();
+    let mut got_ids: Vec<i64> = vals
+        .iter()
+        .filter_map(|v| match v {
+            Value::Int(i) => Some(*i),
+            _ => None,
+        })
+        .collect();
+    got_ids.sort_unstable();
+    assert_eq!(
+        got_ids, want_ids,
+        "the integers are the P nodes' ids: {vals:?}"
+    );
+    let mut got_nodes: Vec<(i64, String)> = vals
+        .iter()
+        .filter_map(|v| match v {
+            Value::Node(n) => {
+                assert_eq!(n.labels, vec!["P".to_string()], "got {n:?}");
+                let name = match n.properties.get("name") {
+                    Some(Value::String(s)) => s.clone(),
+                    other => panic!("node without its name: {other:?}"),
+                };
+                Some((n.vid.as_u64() as i64, name))
+            }
+            _ => None,
+        })
+        .collect();
+    got_nodes.sort();
+    assert_eq!(got_nodes, want_nodes, "the nodes are the P nodes: {vals:?}");
 }

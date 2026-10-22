@@ -596,9 +596,9 @@ THEN {
 }
 ```
 
-Execution: fork L0 buffer -> apply mutations -> re-evaluate strata -> execute body -> rollback. Database is never permanently modified. Can be nested. Returns `CommandResult::Assume(Vec<FactRow>)`.
+Execution: fork L0 buffer -> apply mutations -> re-evaluate strata -> execute body -> rollback. Database is never permanently modified. Can be nested. Returns `CommandResult::Assume { results, derived }`: one result per body command in order (`Query`, `Derive { affected }`, `Cypher`, nested `Assume`), plus every rule's facts in the hypothetical state the first body command reads.
 
-The result is the rows of the body's `QUERY` and Cypher commands. `ABDUCE` and `EXPLAIN RULE` inside an ASSUME body (at any nesting depth) are compile errors (`LocyCompileError::AssumeBodyCommandNotAllowed`): run them at the top level after the ASSUME, or apply the change in `tx()` / `session.scratch()`, run the command there, and roll back. `DERIVE` and nested `ASSUME` are allowed.
+`CommandResult::rows()` / `LocyResult::rows()` take the first row-producing body result, depth first; Python's `AssumeCommandResult` has `.results`, `.derived` and `.rows`. `ABDUCE`, `EXPLAIN RULE`, `DERIVE` and nested `ASSUME` run inside an ASSUME body, at any nesting depth, against the hypothetical state; `ABDUCE` validates its candidates against the body's own rules too. `CALIBRATE` and `VALIDATE` are refused there.
 
 ### ABDUCE (Abductive Reasoning)
 
@@ -743,7 +743,7 @@ Convenience: `result.warnings()`, `result.has_warning(code)`.
 | Variant | Payload |
 |---------|---------|
 | `Query` | `Vec<FactRow>` |
-| `Assume` | `Vec<FactRow>` |
+| `Assume` | `{ results: Vec<CommandResult>, derived: HashMap<String, Vec<FactRow>> }`: one result per body command; `rows()` returns the first row-producing body result, depth first |
 | `Explain` | `DerivationNode` |
 | `Abduce` | `AbductionResult` (contains `Vec<ValidatedModification>`) |
 | `Derive` | `{ affected: usize }` |

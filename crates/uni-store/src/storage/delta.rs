@@ -528,8 +528,9 @@ impl DeltaDataset {
         backend: &dyn StorageBackend,
         vid: Vid,
         schema: &Schema,
-        version_hwm: Option<u64>,
+        version_hwm: impl crate::storage::bulk_gate::IntoRowVisibility,
     ) -> Result<Vec<L1Entry>> {
+        let visibility = version_hwm.into_row_visibility();
         let table_name = table_names::delta_table_name(&self.edge_type, &self.direction);
 
         if !backend.table_exists(&table_name).await? {
@@ -538,11 +539,8 @@ impl DeltaDataset {
 
         let base_filter = FilterExpr::equals(self.filter_column(), Scalar::UInt(vid.as_u64()));
 
-        // Add version filtering if snapshot is active
-        let final_filter = match version_hwm {
-            Some(hwm) => FilterExpr::all([base_filter, FilterExpr::version_at_most(hwm)]),
-            None => base_filter,
-        };
+        // Snapshot ceiling, and the versions of in-flight bulk publishes.
+        let final_filter = visibility.bound(base_filter);
 
         let batches = backend
             .scan(ScanRequest::all(&table_name).with_filter(final_filter))
@@ -566,8 +564,9 @@ impl DeltaDataset {
         backend: &dyn StorageBackend,
         vids: &[Vid],
         schema: &Schema,
-        version_hwm: Option<u64>,
+        version_hwm: impl crate::storage::bulk_gate::IntoRowVisibility,
     ) -> Result<HashMap<Vid, Vec<L1Entry>>> {
+        let visibility = version_hwm.into_row_visibility();
         if vids.is_empty() {
             return Ok(HashMap::new());
         }
@@ -578,15 +577,11 @@ impl DeltaDataset {
             return Ok(HashMap::new());
         }
 
-        let mut filter = FilterExpr::one_of(
+        // Snapshot ceiling, and the versions of in-flight bulk publishes.
+        let filter = visibility.bound(FilterExpr::one_of(
             self.filter_column(),
             vids.iter().map(|v| Scalar::UInt(v.as_u64())),
-        );
-
-        // Add version filtering if snapshot is active
-        if let Some(hwm) = version_hwm {
-            filter = FilterExpr::all([filter, FilterExpr::version_at_most(hwm)]);
-        }
+        ));
 
         let batches = backend
             .scan(ScanRequest::all(&table_name).with_filter(filter))

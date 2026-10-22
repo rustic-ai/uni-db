@@ -201,18 +201,17 @@ async fn batch_vertex_props_keeps_every_label_s_properties() -> Result<()> {
     Ok(())
 }
 
-/// A partial L0 write must not hide the properties still living in storage.
+/// A partial write must not hide the properties still living in storage.
 ///
 /// `get_batch_vertex_props_for_label_projected` skips storage entirely for any
-/// vid that has L0 properties. That is sound while L0 rows are complete — the
-/// invariant `L0Buffer::insert_vertex_partial_full` documents, and the default
-/// write path upholds by merging a full map before staging.
+/// vid that has L0 properties, which is sound only while L0 rows are complete.
 ///
-/// With `partial_lance_writes` on, `Writer::insert_vertex_partial` stages only
-/// the touched keys, so the L0 row is a delta. The reader then returns just
-/// those keys and the stored ones vanish. That matters most on the write path:
-/// the SET prefetch reads this map, merges over it, and writes the result back,
-/// so a dropped property is not merely missing from one read — it is deleted.
+/// `Writer::insert_vertex_partial` takes only the touched keys. With
+/// `partial_lance_writes` on it used to stage them as a delta row, so the
+/// reader returned just those keys and the stored ones vanish -- and since the
+/// SET prefetch reads this map, merges over it, and writes the result back, a
+/// dropped property was deleted. It now merges the touched keys over the
+/// current row and stores a complete one (the flag is inert).
 #[tokio::test]
 async fn a_partial_l0_write_does_not_hide_stored_properties() -> Result<()> {
     use uni_common::Value;
@@ -231,6 +230,7 @@ async fn a_partial_l0_write_does_not_hide_stored_properties() -> Result<()> {
 
     let storage = Arc::new(StorageManager::new(&path, schema_manager.clone()).await?);
     let config = UniConfig {
+        #[expect(deprecated, reason = "exercises the deprecated no-op flag")]
         partial_lance_writes: true,
         ..Default::default()
     };

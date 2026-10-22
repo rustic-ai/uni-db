@@ -28,6 +28,7 @@ nav:
       - Graph Algorithms: features/graph-algorithms.md
       - Neural Predicates: features/neural-predicates.md
       - Transactions & Consistency: features/transactions-consistency.md
+      - Triggers & CDC: features/triggers-cdc.md
       - Snapshots & Time Travel: features/snapshots-time-travel.md
       - Forks & Branches: features/forks.md
       - Bulk Ingest: features/bulk-ingest.md

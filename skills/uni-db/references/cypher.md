@@ -563,6 +563,10 @@ Options: `method` (`'rrf'`|`'weighted'`), `alpha` (vector vs FTS weight), `over_
 
 ### Snapshots
 
+`uni.admin.snapshot.create/restore`, `uni.admin.compact`, `uni.admin.verifyEdgeEndpoints`
+and the `uni.schema.create*`/`drop*` procedures are not reads: `session.query()` refuses
+them. Run them with `session.run()` (admin ones run outside any transaction).
+
 ```cypher
 CALL uni.admin.snapshot.create('release-v1.0') YIELD snapshot_id
 CALL uni.admin.snapshot.list() YIELD snapshot_id, name, created_at, version_hwm

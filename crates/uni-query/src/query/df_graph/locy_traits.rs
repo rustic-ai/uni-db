@@ -19,6 +19,7 @@ use uni_cypher::ast::{Expr, Pattern, Query};
 use uni_locy::{CompiledProgram, FactRow, LocyConfig, LocyError};
 
 use super::locy_delta::RowStore;
+use super::locy_explain::ProvenanceStore;
 use super::locy_program::{DerivedStore, ReusedStrata};
 
 /// The facts of one evaluated state, offered for reuse by a hypothetical
@@ -45,6 +46,13 @@ pub struct ReEvaluation {
     pub facts: Option<Arc<DerivedStore>>,
     /// Positions of the strata whose facts were copied rather than derived.
     pub reused: BTreeSet<usize>,
+    /// The provenance recorded while deriving these facts, when the program
+    /// records provenance (an `EXPLAIN RULE` or a probabilistic fold
+    /// anywhere in it): what an `EXPLAIN RULE` reading them explains.
+    pub tracker: Option<Arc<ProvenanceStore>>,
+    /// The rules whose groups fell back to approximate probabilities in
+    /// this evaluation, by rule name.
+    pub approximate: HashMap<String, Vec<String>>,
 }
 
 /// Read-only access to derived facts and graph data.
@@ -180,7 +188,37 @@ pub trait LocyExecutionContext: DerivedFactSource {
             rows: self.re_evaluate_strata(program, config).await?,
             facts: None,
             reused: BTreeSet::new(),
+            tracker: None,
+            approximate: HashMap::new(),
         })
+    }
+
+    /// Re-evaluate the strata for a program's top-level command sequence,
+    /// after a command wrote (see [`super::locy_sequence`]).
+    ///
+    /// Unlike a hypothetical re-evaluation, the facts replace the program's
+    /// own for every later command, so an adapter that records provenance for
+    /// the program records it here too. The default implementation is
+    /// [`Self::re_evaluate_strata_reusing`].
+    async fn re_evaluate_sequenced(
+        &self,
+        program: &CompiledProgram,
+        config: &LocyConfig,
+        reused: Option<ReusedStrata>,
+    ) -> Result<ReEvaluation, LocyError> {
+        self.re_evaluate_strata_reusing(program, config, reused)
+            .await
+    }
+
+    /// Identifies the state outside this evaluation's own writes (what other
+    /// transactions commit to), for checking that facts derived earlier in
+    /// the evaluation still describe it apart from those writes.
+    ///
+    /// Equal tokens mean the outside state did not change in between.
+    /// `None` when it cannot change (a pinned snapshot) or nothing can
+    /// write; the default.
+    fn base_state_token(&self) -> Option<u64> {
+        None
     }
 
     /// The facts of the current state, when the adapter holds them.
@@ -201,4 +239,32 @@ pub trait LocyExecutionContext: DerivedFactSource {
 
     /// Drop the baseline the last [`Self::push_reuse_baseline`] recorded.
     fn pop_reuse_baseline(&self) {}
+
+    /// Whether a re-evaluation of this program was cut short under
+    /// `allow_partial` (its budget ran out, or a recursive stratum hit
+    /// `max_iterations`).
+    ///
+    /// Commands stop there, as they do when the program's own run is cut
+    /// short: the facts later commands would read are partial, and so is the
+    /// result of the command that hit the cut, which is not reported. The
+    /// cut itself is, in the program's `incomplete`. The default never cuts.
+    fn is_cut_short(&self) -> bool {
+        false
+    }
+
+    /// Fails when the program must stop now: its budget is spent
+    /// ([`LocyError::Timeout`]) or it was cancelled.
+    ///
+    /// Work that runs inside no operator, an in-memory QUERY over the
+    /// derived facts above all, calls it between rows, since no operator's
+    /// deadline or cancellation check can interrupt it. The default never
+    /// stops.
+    ///
+    /// # Errors
+    ///
+    /// `LocyError::Timeout` once the budget is spent; an executor error
+    /// reporting the cancellation once cancelled.
+    fn check_interrupt(&self) -> Result<(), LocyError> {
+        Ok(())
+    }
 }

@@ -218,6 +218,61 @@ class TestAsyncBulkAdd:
         for person in people:
             assert person.is_persisted
 
+    @pytest.mark.parametrize(
+        "exc_name",
+        ["UniBulkCommitIncompleteError", "UniBulkCommitOutcomeUnknownError"],
+    )
+    async def test_bulk_add_propagates_committed_outcomes(
+        self, async_session, exc_name
+    ):
+        """A committed (or possibly committed) load is never a BulkLoadError."""
+        import uni_db
+
+        exc = getattr(uni_db, exc_name)
+        async_session.register(Person)
+        await async_session.sync_schema()
+        async_session._db_session = _AsyncFailingDbSession(exc("committed"))
+        people = [Person(name="A", email="a@test.com")]
+        with pytest.raises(exc):
+            await async_session.bulk_add(people)
+        assert not people[0].is_persisted
+
+
+class _AsyncFailingDbSession:
+    """An async session whose bulk writer's commit raises `error`."""
+
+    def __init__(self, error):
+        self._error = error
+
+    async def tx(self):
+        error = self._error
+
+        class _Writer:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def insert_vertices(self, label, rows):
+                return list(range(len(rows)))
+
+            async def commit(self):
+                raise error
+
+        class _Builder:
+            async def build(self):
+                return _Writer()
+
+        class _Tx:
+            def bulk_writer(self):
+                return _Builder()
+
+            async def commit(self):
+                return None
+
+        return _Tx()
+
 
 class TestAsyncTransaction:
     """Tests for async transaction handling."""

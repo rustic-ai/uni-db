@@ -10,7 +10,7 @@ async fn test_ddl_procedures() -> Result<()> {
 
     // 1. Create Label
     db.session()
-        .query(
+        .run(
             r#"
         CALL uni.schema.createLabel('Product', {
             "properties": {
@@ -50,7 +50,7 @@ async fn test_ddl_procedures() -> Result<()> {
 
     // 2. Create Edge Type
     db.session()
-        .query(
+        .run(
             r#"
         CALL uni.schema.createEdgeType('RELATED_TO', ['Product'], ['Product'], {
             "properties": {
@@ -64,7 +64,7 @@ async fn test_ddl_procedures() -> Result<()> {
 
     // 3. Create Index separately
     db.session()
-        .query(
+        .run(
             r#"
         CALL uni.schema.createIndex('Product', 'price', {
             "type": "BTREE",
@@ -79,7 +79,7 @@ async fn test_ddl_procedures() -> Result<()> {
 
     // 4. Create Constraint separately
     db.session()
-        .query(
+        .run(
             r#"
         CALL uni.schema.createConstraint('Product', 'EXISTS', ['price'])
     "#,
@@ -95,7 +95,7 @@ async fn test_ddl_procedures() -> Result<()> {
 
     // 5. Drop Index
     db.session()
-        .query("CALL uni.schema.dropIndex('idx_price')")
+        .run("CALL uni.schema.dropIndex('idx_price')")
         .await?;
     let info_dropped_idx = db.get_label_info("Product").await?.unwrap();
     assert!(
@@ -107,7 +107,7 @@ async fn test_ddl_procedures() -> Result<()> {
 
     // 6. Drop Label
     db.session()
-        .query("CALL uni.schema.dropLabel('Product')")
+        .run("CALL uni.schema.dropLabel('Product')")
         .await?;
     assert!(!db.label_exists("Product").await?);
 
@@ -121,7 +121,7 @@ async fn test_ddl_validation() -> Result<()> {
     // Invalid identifier
     let res = db
         .session()
-        .query("CALL uni.schema.createLabel('Invalid-Name!', {})")
+        .run("CALL uni.schema.createLabel('Invalid-Name!', {})")
         .await;
     assert!(res.is_err());
     let err_str = res.unwrap_err().to_string();
@@ -133,7 +133,7 @@ async fn test_ddl_validation() -> Result<()> {
     // Reserved word
     let res = db
         .session()
-        .query("CALL uni.schema.createLabel('MATCH', {})")
+        .run("CALL uni.schema.createLabel('MATCH', {})")
         .await;
     assert!(res.is_err());
     assert!(res.unwrap_err().to_string().contains("reserved word"));
@@ -141,7 +141,7 @@ async fn test_ddl_validation() -> Result<()> {
     // Invalid Data Type
     let res = db
         .session()
-        .query(
+        .run(
             r#"
         CALL uni.schema.createLabel('ValidName', {
             "properties": { "bad_prop": { "type": "UNKNOWN_TYPE" } }

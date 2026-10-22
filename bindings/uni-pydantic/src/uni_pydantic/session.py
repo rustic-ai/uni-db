@@ -610,17 +610,23 @@ class UniSession:
         """
         Bulk-add entities using bulk_writer for performance.
 
-        Groups entities by label and uses db.bulk_writer().
-        Returns VIDs and attaches sessions.
+        Every label goes into one bulk load with one commit, so the whole call
+        is applied or not applied as a unit. Returns VIDs and attaches sessions.
 
         Args:
             entities: Sequence of UniNode instances to bulk-insert.
 
         Returns:
-            List of assigned vertex IDs.
+            List of assigned vertex IDs, in label-group order.
 
         Raises:
-            BulkLoadError: If bulk insertion fails.
+            BulkLoadError: The load failed before its commit point; nothing was
+                applied and retrying is safe.
+            uni_db.UniBulkCommitIncompleteError: The load is committed and the
+                next open completes it. Do not retry.
+            uni_db.UniBulkCommitOutcomeUnknownError: Whether the load committed
+                is unknown; check ``bulk_load_applied(e.load_id)`` after
+                reopening before retrying.
         """
         if not entities:
             return []
@@ -633,34 +639,39 @@ class UniSession:
                 by_label[label] = []
             by_label[label].append(entity)
 
-        all_vids: list[int] = []
+        import uni_db
+
+        assigned: list[tuple[str, list[UniNode], list[int]]] = []
         try:
-            for label, group in by_label.items():
-                # Run before_create hooks
-                for entity in group:
-                    run_hooks(entity, _BEFORE_CREATE)
-
-                # Convert to property dicts
-                prop_dicts = [e.to_properties() for e in group]
-
-                # Bulk insert via transaction
-                tx = self._db_session.tx()
-                with tx.bulk_writer().build() as bw:
-                    vids = bw.insert_vertices(label, prop_dicts)
-                    bw.commit()
-                tx.commit()
-
-                # Attach sessions and record VIDs
-                for entity, vid in zip(group, vids):
-                    entity._attach_session(self, vid)
-                    self._identity_map[(label, vid)] = entity
-                    run_hooks(entity, _AFTER_CREATE)
-                    entity._mark_clean()
-
-                all_vids.extend(vids)
+            tx = self._db_session.tx()
+            with tx.bulk_writer().build() as bw:
+                for label, group in by_label.items():
+                    for entity in group:
+                        run_hooks(entity, _BEFORE_CREATE)
+                    prop_dicts = [e.to_properties() for e in group]
+                    assigned.append(
+                        (label, group, bw.insert_vertices(label, prop_dicts))
+                    )
+                bw.commit()
+            tx.commit()
+        except (
+            uni_db.UniBulkCommitIncompleteError,
+            uni_db.UniBulkCommitOutcomeUnknownError,
+        ):
+            # Committed, or possibly committed: a BulkLoadError would invite a
+            # retry that loads the entities twice.
+            raise
         except Exception as e:
             raise BulkLoadError(f"Bulk insert failed: {e}") from e
 
+        all_vids: list[int] = []
+        for label, group, vids in assigned:
+            for entity, vid in zip(group, vids):
+                entity._attach_session(self, vid)
+                self._identity_map[(label, vid)] = entity
+                run_hooks(entity, _AFTER_CREATE)
+                entity._mark_clean()
+            all_vids.extend(vids)
         return all_vids
 
     def explain(self, cypher: str) -> uni_db.ExplainOutput:

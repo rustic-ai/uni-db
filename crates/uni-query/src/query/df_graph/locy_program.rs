@@ -225,6 +225,11 @@ pub struct LocyProgramExec {
     /// Strata to copy from an earlier evaluation rather than derive; set
     /// before `execute()` by [`Self::set_reused_strata`].
     reused_strata: StdRwLock<Option<ReusedStrata>>,
+    /// Whether the caller accepts partial results (`LocyConfig::allow_partial`):
+    /// an operator's deadline then ends the evaluation as an interruption,
+    /// recorded in `incomplete_slot`, rather than as an error. Set before
+    /// `execute()` by [`Self::set_allow_partial`].
+    allow_partial: std::sync::atomic::AtomicBool,
 }
 
 /// Encoding for the shared interruption signal threaded through the stratum
@@ -514,7 +519,17 @@ impl LocyProgramExec {
             profile_enabled: std::sync::atomic::AtomicBool::new(false),
             profile_slot: Arc::new(StdRwLock::new(None)),
             reused_strata: StdRwLock::new(None),
+            allow_partial: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Accept partial results: an operator's deadline, like the checks
+    /// between strata and fixpoint iterations, then stops the evaluation
+    /// with its facts so far and an `incomplete` record instead of failing
+    /// it. Must be called before `execute()`.
+    pub fn set_allow_partial(&self, allow: bool) {
+        self.allow_partial
+            .store(allow, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Reuse the facts of some strata from an earlier evaluation.
@@ -707,6 +722,9 @@ impl ExecutionPlan for LocyProgramExec {
             .load(std::sync::atomic::Ordering::Relaxed);
         let profile_slot = Arc::clone(&self.profile_slot);
         let reused_strata = self.reused_strata.read().ok().and_then(|g| g.clone());
+        let allow_partial = self
+            .allow_partial
+            .load(std::sync::atomic::Ordering::Relaxed);
 
         let fut = async move {
             run_program(
@@ -745,6 +763,7 @@ impl ExecutionPlan for LocyProgramExec {
                 profile_enabled,
                 profile_slot,
                 reused_strata,
+                allow_partial,
             )
             .await
         };
@@ -857,6 +876,28 @@ async fn execute_cypher_inline(
 // run_program — core evaluation algorithm
 // ---------------------------------------------------------------------------
 
+/// Whether `error` is an operator's deadline that, with `allow_partial`,
+/// ends the evaluation as an interruption rather than an error; records the
+/// timeout in `flag` when it does.
+///
+/// The checks between strata and between fixpoint iterations already stop
+/// a partial evaluation with its facts so far. A deadline an operator hits
+/// inside a clause body is the same condition noticed in a different layer,
+/// so under `allow_partial` it must be reported the same way, not raised.
+fn cut_by_deadline(
+    error: &datafusion::error::DataFusionError,
+    allow_partial: bool,
+    flag: &std::sync::atomic::AtomicU8,
+) -> bool {
+    // `check_deadline`'s message, which every operator's check raises.
+    let cut = allow_partial && error.to_string().contains("Query timed out");
+    if cut {
+        tracing::warn!("Locy program timeout exceeded inside a stratum (allow_partial)");
+        interruption::set(flag, interruption::TIMEOUT);
+    }
+    cut
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "program evaluation requires full graph and session context"
@@ -897,6 +938,7 @@ async fn run_program(
     profile_enabled: bool,
     profile_slot: Arc<StdRwLock<Option<LocyExecProfile>>>,
     reused_strata: Option<ReusedStrata>,
+    allow_partial: bool,
 ) -> DFResult<Vec<RecordBatch>> {
     let start = Instant::now();
     let mut derived_store = DerivedStore::new();
@@ -942,7 +984,7 @@ async fn run_program(
     let total_strata = strata.len();
     let mut completed_strata = 0usize;
     let mut partial_stratum: Option<usize> = None;
-    for (stratum_idx, stratum) in strata.iter().enumerate() {
+    'strata: for (stratum_idx, stratum) in strata.iter().enumerate() {
         // A reused stratum is not evaluated: its rules' facts are those of the
         // earlier evaluation, and later strata read them from the store.
         if let Some(reused) = reused_strata
@@ -1024,8 +1066,13 @@ async fn run_program(
             // but this accumulation sits outside it, and `peak_memory_slot` only
             // reports the total afterwards.
             let mut reservation = operator_reservation("LocyProgramExec", 0, &task_ctx);
-            let _concatenated =
-                collect_all_partitions(&exec_arc, task_ctx, &mut reservation).await?;
+            if let Err(e) = collect_all_partitions(&exec_arc, task_ctx, &mut reservation).await {
+                if cut_by_deadline(&e, allow_partial, &timeout_flag) {
+                    partial_stratum = Some(stratum_idx);
+                    break 'strata;
+                }
+                return Err(e);
+            }
             // The fixpoint driver spans the whole stratum and is a child of
             // nothing, so this is the only place it can be observed (#177).
             // Recorded only while profiling, so the walk is not paid otherwise.
@@ -1103,7 +1150,7 @@ async fn run_program(
                     // Phase B A4 follow-up: the planner inserts
                     // `LocyModelInvoke` between body and `LocyProject`
                     // when the clause has neural invocations.
-                    let mut batches = execute_locy_clause_body(
+                    let mut batches = match execute_locy_clause_body(
                         &clause.body,
                         &params,
                         &graph_ctx,
@@ -1113,7 +1160,28 @@ async fn run_program(
                         collector.is_some(),
                         &mut iter_ops,
                     )
-                    .await?;
+                    .await
+                    {
+                        Ok(batches) => batches,
+                        Err(e) => {
+                            if cut_by_deadline(&e, allow_partial, &timeout_flag) {
+                                partial_stratum = Some(stratum_idx);
+                                break 'strata;
+                            }
+                            return Err(e);
+                        }
+                    };
+
+                    // The budget between clause bodies, as between strata: a
+                    // single-stratum program crosses no stratum boundary, and
+                    // its clause body may finish just inside an operator's
+                    // deadline with the rest of the rule still to run.
+                    if start.elapsed() >= timeout {
+                        tracing::warn!("Locy program timeout exceeded during rule evaluation");
+                        interruption::set(&timeout_flag, interruption::TIMEOUT);
+                        partial_stratum = Some(stratum_idx);
+                        break 'strata;
+                    }
 
                     // Apply negated IS-ref semantics per-clause.
                     batches = super::locy_complement::apply_negated_is_refs(
@@ -1175,13 +1243,22 @@ async fn run_program(
                         },
                     )
                     .await?;
+                    // A PROB rule without a fold: its derivation rows, read
+                    // before the transient columns carrying them go.
+                    for (_, batches) in &tagged_clause_facts {
+                        tracker.lineage().record_rows(fp_rule, batches)?;
+                    }
                 }
 
-                // Flatten tagged facts for post-fixpoint chain.
-                let mut all_clause_facts: Vec<RecordBatch> = tagged_clause_facts
-                    .into_iter()
-                    .flat_map(|(_, batches)| batches)
-                    .collect();
+                // Flatten tagged facts for post-fixpoint chain, without the
+                // transient provenance and lineage columns.
+                let mut all_clause_facts: Vec<RecordBatch> =
+                    super::locy_lineage::strip_transient_columns(
+                        tagged_clause_facts
+                            .into_iter()
+                            .flat_map(|(_, batches)| batches)
+                            .collect(),
+                    )?;
 
                 // Lineage, shared-proof detection and, with
                 // `exact_probability`, exact inference (`locy_lineage`).
@@ -1206,8 +1283,17 @@ async fn run_program(
                     }
                 }
 
+                // And before the post-fixpoint chain and the deduplication,
+                // which run outside every operator's deadline check.
+                if start.elapsed() >= timeout {
+                    tracing::warn!("Locy program timeout exceeded during rule evaluation");
+                    interruption::set(&timeout_flag, interruption::TIMEOUT);
+                    partial_stratum = Some(stratum_idx);
+                    break 'strata;
+                }
+
                 // Apply post-fixpoint operators (PRIORITY, FOLD, BEST BY) on union.
-                let facts = super::locy_fixpoint::apply_post_fixpoint_chain(
+                let facts = match super::locy_fixpoint::apply_post_fixpoint_chain(
                     all_clause_facts,
                     fp_rule,
                     &task_ctx,
@@ -1221,7 +1307,17 @@ async fn run_program(
                     collector.as_ref().map(|_| &mut iter_ops),
                     &params,
                 )
-                .await?;
+                .await
+                {
+                    Ok(facts) => facts,
+                    Err(e) => {
+                        if cut_by_deadline(&e, allow_partial, &timeout_flag) {
+                            partial_stratum = Some(stratum_idx);
+                            break 'strata;
+                        }
+                        return Err(e);
+                    }
+                };
 
                 // A fact is a row: two derivations of the same row are one fact,
                 // as the fixpoint's delta computation makes them in a recursive
@@ -1245,6 +1341,22 @@ async fn run_program(
                         ));
                     }
                     facts
+                };
+                // A PROB rule without a fold: its lineage, and its values
+                // corrected where they are not exact (`publish_rows`).
+                let facts = match derivation_tracker {
+                    Some(ref tracker) => tracker.lineage().publish_rows(
+                        fp_rule,
+                        facts,
+                        &super::locy_lineage::ExactCtx {
+                            exact: exact_probability,
+                            max_bdd_variables,
+                            semiring_kind,
+                            warnings_slot: &warnings_slot,
+                            approximate_slot: &approximate_slot,
+                        },
+                    )?,
+                    None => facts,
                 };
 
                 // Profiling: record this rule's single non-recursive pass.
@@ -1378,21 +1490,25 @@ async fn run_program(
     // plan's real output schema, and QUERY now answers from the derived store
     // rather than re-deriving. Deferral is about orchestration, not types.
     //
-    // Cypher commands that appear AFTER a DERIVE command are also deferred:
-    // they need the ephemeral L0 overlay populated by DERIVE to see derived
-    // edges, which is only available in the orchestrator's dispatch loop.
-    let first_derive_idx = commands
-        .iter()
-        .position(|c| matches!(c, LocyCommand::Derive { .. }));
+    // Commands run in sequence: a command that writes (DERIVE, a Cypher
+    // write) changes what every later command reads. The inline loop runs
+    // before any command, so only the commands before the first write run
+    // here; that write and everything after it are dispatched in order by
+    // the orchestrator, which derives the facts again after a write
+    // (`locy_sequence`). A Cypher write run here also had no mutation
+    // context to write through ("Mutation context not set").
+    let first_write_idx = commands.iter().position(|c| match c {
+        LocyCommand::Derive { .. } => true,
+        LocyCommand::Cypher { query } => uni_locy::incremental::query_may_write(query),
+        _ => false,
+    });
     let mut inline_results: Vec<(usize, CommandResult)> = Vec::new();
     for (cmd_idx, cmd) in commands.iter().enumerate() {
+        if first_write_idx.is_some_and(|wi| cmd_idx >= wi) {
+            break;
+        }
         match cmd {
             LocyCommand::Cypher { query } => {
-                // Defer Cypher commands that follow a DERIVE to the dispatch loop
-                // so they can read from the ephemeral L0 overlay.
-                if first_derive_idx.is_some_and(|di| cmd_idx > di) {
-                    continue;
-                }
                 let rows = execute_cypher_inline(
                     query,
                     &schema_info,
@@ -1772,6 +1888,7 @@ fn convert_is_refs(
                 target_prob_col: is_ref.target_prob_col.clone(),
                 prob_ref: is_ref.prob_ref.clone(),
                 negated_lineage: is_ref.negated_lineage.clone(),
+                support_ref: is_ref.support_ref.clone(),
             })
         })
         .collect()
@@ -2003,6 +2120,36 @@ fn facts_are_per_path(rule: &crate::query::planner_locy_types::LocyRulePlan) -> 
 mod tests {
     use super::*;
     use arrow_array::{Int64Array, LargeBinaryArray, StringArray};
+
+    /// An operator's deadline ends a partial evaluation as a timeout
+    /// interruption; anything else, or any error without `allow_partial`,
+    /// stays an error and leaves the flag alone.
+    #[test]
+    fn cut_by_deadline_only_takes_an_operator_deadline_under_allow_partial() {
+        let deadline = datafusion::error::DataFusionError::Execution("Query timed out".into());
+        let cancelled = datafusion::error::DataFusionError::Execution("Query cancelled".into());
+
+        let flag = std::sync::atomic::AtomicU8::new(interruption::NONE);
+        assert!(!cut_by_deadline(&deadline, false, &flag));
+        assert!(!cut_by_deadline(&cancelled, true, &flag));
+        assert_eq!(interruption::reason(&flag), None);
+
+        assert!(cut_by_deadline(&deadline, true, &flag));
+        assert_eq!(
+            interruption::reason(&flag),
+            Some(uni_common::LocyIncompleteReason::Timeout)
+        );
+
+        // Wrapped, as DataFusion passes an operator's error up a plan.
+        let flag = std::sync::atomic::AtomicU8::new(interruption::NONE);
+        let wrapped = datafusion::error::DataFusionError::Context(
+            "while running a clause body".into(),
+            Box::new(datafusion::error::DataFusionError::Execution(
+                "Query timed out".into(),
+            )),
+        );
+        assert!(cut_by_deadline(&wrapped, true, &flag));
+    }
 
     #[test]
     fn test_derived_store_insert_and_get() {

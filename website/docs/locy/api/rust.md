@@ -82,7 +82,7 @@ Common fields:
 - `command_results: Vec<CommandResult>`
 - `warnings: Vec<RuntimeWarning>`
 - `approximate_groups: HashMap<String, Vec<String>>`
-- `derived_fact_set: DerivedFactSet` — opaque fact set for `tx.apply()` materialization
+- `derived_fact_set: DerivedFactSet` — opaque fact set for `tx.apply()` materialization: every write of a session-level program (DERIVE output and Cypher writes), in program order
 
 Helpers:
 
@@ -112,9 +112,24 @@ bodies, `operators` lists the steps that run outside a plan, with `actual_rows` 
 `result.metrics().physical_plans` counts every physical plan the program built.
 
 Note: `result.rows()` returns the rows of the first row-producing command in program order:
-a `QUERY`, an `ASSUME { ... } THEN { ... }` block (`CommandResult::Assume`), or a Cypher
-statement. The Python `rows` follows the same rule. Use `result.command_results()` to reach a
-specific command's result.
+a `QUERY` or a Cypher statement, with an `ASSUME { ... } THEN { ... }` block searched depth
+first through its body's results. The Python `rows` follows the same rule. Use
+`result.command_results()` to reach a specific command's result.
+
+An ASSUME returns `CommandResult::Assume { results, derived }`: `results` holds one
+`CommandResult` per body command, in order (a nested ASSUME's own `Assume` among them), and
+`derived` every rule's facts in the hypothetical state the body's first command reads.
+`CommandResult::as_assume()` returns both; `CommandResult::rows()` is the first
+row-producing result, depth first.
+
+```rust
+let result = session
+    .locy("... ASSUME { CREATE (:Marker) } THEN { QUERY linked RETURN a  DERIVE link  QUERY linked RETURN a }")
+    .await?;
+let (results, derived) = result.command_results()[0].as_assume().expect("an ASSUME");
+assert!(matches!(results[1], CommandResult::Derive { .. }));
+let after_derive = results[2].rows().expect("the second QUERY's rows");
+```
 
 ## Explain Output (`LocyExplainOutput`)
 
