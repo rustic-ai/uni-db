@@ -4,7 +4,7 @@
 """Tests for type mapping utilities."""
 
 from datetime import date, datetime, time, timedelta
-from typing import Annotated
+from typing import Annotated, ForwardRef
 
 import pytest
 
@@ -368,6 +368,21 @@ class TestPythonTypeToUni:
 
         with pytest.raises(TypeMappingError):
             python_type_to_uni(CustomClass)
+
+    @pytest.mark.parametrize(
+        "ref",
+        [
+            pytest.param("Bio | None", id="string"),
+            # What pydantic leaves on an unresolved field, and what Python
+            # 3.14's lazy annotations (PEP 649) yield for an undefined name.
+            pytest.param(ForwardRef("Bio | None"), id="ForwardRef"),
+        ],
+    )
+    def test_forward_reference_names_the_reference(self, ref):
+        """An unresolved forward reference is reported as one, by its source
+        text, whether it arrives as a string or as a ForwardRef."""
+        with pytest.raises(TypeMappingError, match=r"forward reference 'Bio \| None'"):
+            python_type_to_uni(ref)
 
 
 class TestUniToPythonType:

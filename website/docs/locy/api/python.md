@@ -191,6 +191,9 @@ for rule, groups in out.approximate_groups.items():
 
 - Python API currently materializes query result lists.
 - Use focused `QUERY` clauses to keep payloads manageable.
+- A registered `AuthzPolicy` authorizes every Locy evaluation before it runs,
+  as it does Cypher; see [Authorization](rust.md#authorization) for the
+  actions a program asks for.
 
 ## Full API References
 

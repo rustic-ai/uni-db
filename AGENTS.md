@@ -142,7 +142,9 @@ from each phase for deeper context.
   defaults to `NOT NULL`, so rejecting would break the most common
   builder call. `NOT NULL` is still enforced forward, at write time.
 - **Every catalog change that alters a label's property set must
-  widen storage before `SchemaManager::save`.** Storage first,
+  widen storage before the property enters the live catalog** — not
+  merely before its own `SchemaManager::save`, because any commit's
+  `save_if_dirty` persists a dirty catalog. Storage first,
   catalog second: a Lance column the catalog does not know about is
   invisible and harmless, while a catalog column Lance lacks is a
   hard read failure — and there is no WAL record for schema DDL, so

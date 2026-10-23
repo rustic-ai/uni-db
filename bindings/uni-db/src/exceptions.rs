@@ -507,6 +507,9 @@ pub fn uni_error_to_pyerr(e: uni_common::UniError) -> PyErr {
         // Only a storage backend that cannot stage refuses a bulk load, and every
         // backend a Python database opens stages.
         BulkLoadUnsupported { .. } => UniError::new_err(msg),
+        // Synchronous before-triggers are a Rust-side surface; the message
+        // names the trigger and the label or edge type.
+        BulkLoadBlockedByTrigger { .. } => UniError::new_err(msg),
         BulkCommitIncomplete { load_id, message } => {
             fork_err_with(UniBulkCommitIncompleteError::new_err(msg), |_py, val| {
                 val.setattr("load_id", load_id)?;

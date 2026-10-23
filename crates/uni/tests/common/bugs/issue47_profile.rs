@@ -82,8 +82,10 @@ async fn profile_edge_creation() {
             tx.commit().await.unwrap();
         }
 
-        // Profile THIS specific edge creation
-        let (_result, profile) = session
+        // Profile THIS specific edge creation (a write, so in a transaction:
+        // session queries are read-only).
+        let tx = session.tx().await.unwrap();
+        let (_result, profile) = tx
             .query_with(
                 "MATCH (m), (u) WHERE id(m) = $mid AND id(u) = $uid CREATE (m)-[:SENT_BY]->(u)",
             )
@@ -92,6 +94,7 @@ async fn profile_edge_creation() {
             .profile()
             .await
             .unwrap();
+        tx.commit().await.unwrap();
 
         eprintln!("\n=== PROFILE {} (after {} edges) ===", label, idx);
         eprintln!("Total: {}ms", profile.total_time_ms);

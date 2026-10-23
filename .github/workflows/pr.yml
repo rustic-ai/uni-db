@@ -825,6 +825,24 @@ jobs:
         working-directory: bindings/uni-db
         run: uv run maturin develop
 
+      # The abi3 wheel `python-pydantic-py314` installs instead of compiling
+      # the extension a second time. Same profile and features as the
+      # `maturin develop` above, so cargo reuses its build; `dist/` is cleared
+      # first so the upload carries exactly one wheel (see ci.yml's notebooks).
+      - name: Build abi3 wheel (uni-db)
+        working-directory: bindings/uni-db
+        run: |
+          rm -f dist/*.whl
+          uv run maturin build --out dist
+
+      - name: Upload abi3 wheel (uni-db)
+        uses: actions/upload-artifact@v4
+        with:
+          name: uni-db-abi3-wheel
+          path: bindings/uni-db/dist/*.whl
+          if-no-files-found: error
+          retention-days: 1
+
       - name: Check Python formatting (uni-db)
         working-directory: bindings/uni-db
         run: uv run ruff format --check .
@@ -890,3 +908,63 @@ jobs:
       - name: Run Python tests (uni-pydantic)
         working-directory: bindings/uni-pydantic
         run: uv run pytest tests/ -v -n auto
+
+  # uni-pydantic on Python 3.14 (PEP 649 lazy annotations), against the abi3
+  # wheel `python-tests` built — no Rust toolchain, no second compile. The wheel
+  # is cp310-abi3, so it loads on 3.14 unchanged. It is tagged plain
+  # `linux_x86_64` (no manylinux audit), so this job runs on the same runner
+  # label that built it rather than on `ubuntu-latest`.
+  #
+  # uni-pydantic depends on uni-db through an editable path source, so a plain
+  # `uv sync` would build the extension from source. `--no-install-package`
+  # skips it and `--frozen` keeps uv from re-resolving (which would read
+  # uni-db's dynamic metadata through maturin); the wheel is installed after,
+  # and every later `uv run` passes `--no-sync` so uv does not swap the editable
+  # build back in.
+  #
+  # mypy runs with `--python-version 3.14`: the project config targets 3.10,
+  # under which the `annotationlib` branch is unreachable and never checked.
+  python-pydantic-py314:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: Python Tests (uni-pydantic, 3.14)
+    needs: python-tests
+    runs-on: ubuntu-xlarge
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.14'
+
+      - name: Download abi3 wheel (uni-db)
+        uses: actions/download-artifact@v4
+        with:
+          name: uni-db-abi3-wheel
+          path: dist
+
+      - name: Install Python dependencies (uni-pydantic)
+        working-directory: bindings/uni-pydantic
+        run: uv sync --frozen --group dev --no-install-package uni-db
+
+      - name: Install built wheel (uni-db)
+        working-directory: bindings/uni-pydantic
+        run: uv pip install ../../dist/*.whl
+
+      - name: Verify interpreter and wheel
+        working-directory: bindings/uni-pydantic
+        run: |
+          uv run --no-sync python - <<'PY'
+          import sys, uni_db
+          assert sys.version_info[:2] == (3, 14), sys.version
+          assert "site-packages" in uni_db.__file__, uni_db.__file__
+          print(sys.version, uni_db.__file__)
+          PY
+
+      - name: Run Python tests (uni-pydantic)
+        working-directory: bindings/uni-pydantic
+        run: uv run --no-sync pytest tests/ -v -n auto
+
+      - name: Type-check (uni-pydantic, mypy)
+        working-directory: bindings/uni-pydantic
+        run: uv run --no-sync mypy --python-version 3.14 src

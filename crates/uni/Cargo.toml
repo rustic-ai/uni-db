@@ -130,6 +130,9 @@ metrics-util = "0.20"
 # Randomized workload generation for the SSI invariant-oracle + chaos tests.
 proptest = { workspace = true }
 iai-callgrind = "0.16.1"
+# Process CPU clock (`CLOCK_PROCESS_CPUTIME_ID`) for the perf tests whose bounds
+# are on work done rather than wall time; see `tests/common/perf/cpu_clock.rs`.
+libc = "0.2"
 
 [[bench]]
 name = "algo_benchmarks"

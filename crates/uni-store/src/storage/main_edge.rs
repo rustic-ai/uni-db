@@ -402,12 +402,12 @@ impl MainEdgeDataset {
     ///   snapshot-pinned reader reads L0 and the delta tier at its snapshot but
     ///   this L1 fallback at HEAD, so a post-snapshot write becomes visible.
     ///
-    ///   The bound only bites when the calling `PropertyManager` was built over
-    ///   pinned storage, which today means `UniInner::at_snapshot`'s
-    ///   time-travel view. A read-write transaction routes its *scans* through
-    ///   `pinned_at_version` but deliberately keeps the live, unbounded
-    ///   `PropertyManager` so property point-reads honour read-your-writes —
-    ///   see the design note at `uni-query`'s `executor/read.rs`.
+    ///   The shared `PropertyManager` sits on live storage, so it passes the
+    ///   pinned view's visibility here from `QueryContext::l1_visibility`
+    ///   whenever a query runs against one (a read-write transaction or a
+    ///   time-travel snapshot), and its own live visibility otherwise.
+    ///   Read-your-writes is unaffected: a transaction's uncommitted edge
+    ///   properties are in its tx_l0, which is consulted before this tier.
     ///   Schemaless and overflow edge properties live only in `props_json`
     ///   (never in delta columns), so this path is reached on *every* such
     ///   read — not only after compaction.

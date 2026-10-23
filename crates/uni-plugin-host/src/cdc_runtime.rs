@@ -40,14 +40,17 @@
 //!   write at a time. Per provider it keeps only the LATEST submitted LSN,
 //!   and submissions arrive in commit order from the single driver task,
 //!   so a stale checkpoint can never overwrite a newer one.
-//! - **At-least-once, not exactly-once.** The persisted LSN may lag the
-//!   acknowledged one: several commits that arrive while a write is in
-//!   flight coalesce into one write of the newest LSN, and a crash (or a
-//!   failed write) before it lands means those commits are redelivered
-//!   after a restart. This was already the contract for a failed write;
-//!   coalescing only widens the window, it never lets the checkpoint
-//!   skip ahead. A failed write keeps its LSNs queued (unless superseded)
-//!   so the next write retries them.
+//! - **May lag, never leads.** The persisted LSN may lag the acknowledged
+//!   one: several commits that arrive while a write is in flight coalesce
+//!   into one write of the newest LSN, and a crash (or a failed write)
+//!   before it lands leaves the older LSN on disk. The runtime never
+//!   re-sends history — it forwards only commits announced after it
+//!   starts — so after a restart the provider is started from an LSN
+//!   older than the last commit it received; a provider that replays from
+//!   `from_lsn` out of its own log sees those commits twice. Coalescing
+//!   only widens that window, it never lets the checkpoint skip ahead. A
+//!   failed write keeps its LSNs queued (unless superseded) so the next
+//!   write retries them.
 //!
 //! The write itself (two `fsync`s) runs on tokio's blocking pool, never on
 //! an executor thread. A slow disk therefore delays only the checkpoint,
@@ -306,17 +309,17 @@ impl CheckpointWriter {
             Ok((_, Ok(()))) => return,
             Ok((batch, Err(e))) => (Some(batch), e),
             // The blocking task panicked or was cancelled; its batch is gone,
-            // so those commits are redelivered after a restart.
+            // so a restart resumes the provider from an older LSN.
             Err(e) => (None, e.to_string()),
         };
         // #233 P3: was `debug!`, i.e. below the default level, so a lost
         // checkpoint was invisible in a normal deployment. Not a gap — the
-        // commits WERE delivered — but they will be redelivered after a
-        // restart, which is at-least-once and worth saying.
+        // commits WERE delivered — but a restart hands the provider an
+        // older `from_lsn` than it has seen, which is worth saying.
         tracing::warn!(
             error = %error,
-            "CdcRuntime: checkpoint write failed; the affected commits will be redelivered \
-             after a restart (at-least-once) unless a later write succeeds",
+            "CdcRuntime: checkpoint write failed; unless a later write succeeds, a restart \
+             resumes the provider from an LSN before the affected commits",
         );
         if let Some(batch) = batch {
             let mut state = self.state.lock();
@@ -352,6 +355,100 @@ struct ActiveStream {
     /// There is no redelivery path, so continuing would create a permanent,
     /// undetectable hole in the CDC feed.
     halted: bool,
+}
+
+/// Deliver `batch` to every live stream, halting any whose `deliver` fails or
+/// panics. A panicking plugin halts its own stream rather than unwinding
+/// through the driver and taking every other stream with it.
+fn deliver_to_all(streams: &mut [ActiveStream], batch: &CdcBatch) {
+    for active in streams.iter_mut() {
+        // Never deliver to (or checkpoint) a halted stream — its checkpoint
+        // must stay at the last contiguous commit so the gap is visible, not
+        // papered over by a later successful commit.
+        if active.halted {
+            continue;
+        }
+        let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            active.stream.deliver(batch)
+        }));
+        match delivered {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    provider = %active.name,
+                    error = %e,
+                    "CdcRuntime: deliver failed; halting stream to avoid a silent feed gap \
+                     (its checkpoint stays at the last delivered commit)",
+                );
+                halt(active, "deliver failed");
+            }
+            Err(_) => halt(active, "deliver panicked"),
+        }
+    }
+}
+
+/// Chunks of a bulk load a mutation stream holds undelivered before its
+/// sender waits; see [`CdcRuntime::open_mutation_stream`].
+pub const MUTATION_STREAM_DEPTH: usize = 4;
+
+/// A message on a bulk load's mutation stream.
+enum StreamMsg {
+    /// The next chunk of the load's event rows.
+    Rows(Arc<arrow_array::RecordBatch>),
+    /// Every row was sent.
+    Done,
+}
+
+/// The sending half of a bulk load's mutation stream; see
+/// [`CdcRuntime::open_mutation_stream`].
+#[derive(Debug)]
+pub struct MutationStreamSender {
+    id: u64,
+    tx: tokio::sync::mpsc::Sender<StreamMsg>,
+}
+
+impl std::fmt::Debug for StreamMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rows(b) => write!(f, "Rows({})", b.num_rows()),
+            Self::Done => f.write_str("Done"),
+        }
+    }
+}
+
+impl MutationStreamSender {
+    /// The id to announce the load with
+    /// ([`CommitNotification::mutation_stream`]).
+    #[must_use]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Send the load's next chunk of event rows, waiting while the runtime
+    /// holds [`MUTATION_STREAM_DEPTH`] undelivered.
+    ///
+    /// Returns `false` when the runtime no longer reads this stream; stop
+    /// sending then.
+    pub async fn send(&self, rows: arrow_array::RecordBatch) -> bool {
+        self.tx.send(StreamMsg::Rows(Arc::new(rows))).await.is_ok()
+    }
+
+    /// Mark the load complete: the runtime checkpoints after it.
+    ///
+    /// Dropping the sender without finishing marks the load incomplete, and
+    /// the runtime halts its streams instead of checkpointing past it.
+    pub async fn finish(self) {
+        let _ = self.tx.send(StreamMsg::Done).await;
+    }
+}
+
+/// Mutation streams opened but not yet reached by the driver.
+#[derive(Default)]
+struct MutationStreams {
+    next_id: u64,
+    open: std::collections::HashMap<u64, tokio::sync::mpsc::Receiver<StreamMsg>>,
+    /// The driver stopped: no stream will be read again.
+    closed: bool,
 }
 
 /// Halt `active`, counting the transition so an operator can see it.
@@ -455,6 +552,9 @@ pub struct CdcRuntime {
     /// providers registered *after* `Uni::build` returned (e.g., via
     /// `Uni::add_plugin`).
     registry: Arc<PluginRegistry>,
+    /// Bulk loads' mutation streams awaiting delivery; see
+    /// [`Self::open_mutation_stream`].
+    mutation_streams: Mutex<MutationStreams>,
 }
 
 impl std::fmt::Debug for CdcRuntime {
@@ -523,6 +623,7 @@ impl CdcRuntime {
             checkpoint,
             writer,
             registry: Arc::clone(registry),
+            mutation_streams: Mutex::new(MutationStreams::default()),
         });
         runtime.publish_counts(&active);
 
@@ -559,12 +660,17 @@ impl CdcRuntime {
                                  leave a silent gap in every feed)",
                             );
                             halt_all_streams(&mut streams);
+                            // A dropped announcement may have named a load's
+                            // mutation stream; release every waiting sender.
+                            runtime_clone.drop_mutation_streams(false);
                             runtime_clone.publish_counts(&streams);
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
             }
+            // No stream will be read again: release any sender waiting on one.
+            runtime_clone.drop_mutation_streams(true);
             // No more submissions can arrive: let the writer persist what is
             // queued and wait for it, so a tracked shutdown covers the final
             // checkpoints too.
@@ -720,6 +826,10 @@ impl CdcRuntime {
             }
             return;
         }
+        if let Some(id) = notif.mutation_stream {
+            self.deliver_mutation_stream(streams, notif, id);
+            return;
+        }
         let mutations = notif.mutations.clone().unwrap_or_else(|| {
             Arc::new(arrow_array::RecordBatch::new_empty(
                 crate::triggers::event_row_schema(),
@@ -731,35 +841,81 @@ impl CdcRuntime {
             mutations,
             commit_timestamp: SystemTime::now(),
         };
+        deliver_to_all(streams, &batch);
+        self.checkpoint_all(streams);
+    }
 
+    /// Deliver a bulk load announced by `notif`, whose rows arrive on mutation
+    /// stream `id` in chunks: each chunk is delivered as a [`CdcBatch`] with
+    /// the load's LSN range, and every stream is checkpointed once, after the
+    /// last. A load with no rows is delivered as one empty batch, as a commit
+    /// with none is.
+    ///
+    /// A stream that ends without the load's sender finishing it (the load
+    /// failed to read its rows back, or was dropped part way), or that is no
+    /// longer registered (a broadcaster lag discarded it), halts every stream:
+    /// the load reached them only in part, and checkpointing past it would
+    /// hide the gap.
+    fn deliver_mutation_stream(
+        &self,
+        streams: &mut [ActiveStream],
+        notif: &CommitNotification,
+        id: u64,
+    ) {
+        let receiver = self.mutation_streams.lock().open.remove(&id);
+        let Some(mut receiver) = receiver else {
+            tracing::error!(
+                version = notif.version,
+                "CdcRuntime: a bulk load's mutation stream is gone; halting streams",
+            );
+            halt_all_streams(streams);
+            return;
+        };
+        let commit_timestamp = SystemTime::now();
+        let batch = |mutations: Arc<arrow_array::RecordBatch>| CdcBatch {
+            lsn_start: CdcLsn(notif.causal_version),
+            lsn_end: CdcLsn(notif.version),
+            mutations,
+            commit_timestamp,
+        };
+        let mut delivered_any = false;
+        loop {
+            match receiver.blocking_recv() {
+                Some(StreamMsg::Rows(rows)) => {
+                    deliver_to_all(streams, &batch(rows));
+                    delivered_any = true;
+                }
+                Some(StreamMsg::Done) => break,
+                None => {
+                    tracing::error!(
+                        version = notif.version,
+                        "CdcRuntime: a bulk load's mutation stream ended before the load's \
+                         last rows; halting streams rather than checkpointing past the gap",
+                    );
+                    halt_all_streams(streams);
+                    return;
+                }
+            }
+        }
+        if !delivered_any {
+            deliver_to_all(
+                streams,
+                &batch(Arc::new(arrow_array::RecordBatch::new_empty(
+                    crate::triggers::event_row_schema(),
+                ))),
+            );
+        }
+        self.checkpoint_all(streams);
+    }
+
+    /// Ask every live stream for its checkpoint and queue it for the writer.
+    ///
+    /// A panicking `checkpoint` halts its stream; an error is logged and the
+    /// stream carries on (its persisted LSN simply does not advance).
+    fn checkpoint_all(&self, streams: &mut [ActiveStream]) {
         for active in streams.iter_mut() {
-            // Never deliver to (or checkpoint) a halted stream — its checkpoint
-            // must stay at the last contiguous commit so the gap is visible, not
-            // papered over by a later successful commit.
             if active.halted {
                 continue;
-            }
-            // A panicking plugin halts its own stream rather than unwinding
-            // through the driver and taking every other stream with it.
-            let delivered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                active.stream.deliver(&batch)
-            }));
-            match delivered {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
-                    tracing::warn!(
-                        provider = %active.name,
-                        error = %e,
-                        "CdcRuntime: deliver failed; halting stream to avoid a silent feed gap \
-                         (its checkpoint stays at the last delivered commit)",
-                    );
-                    halt(active, "deliver failed");
-                    continue;
-                }
-                Err(_) => {
-                    halt(active, "deliver panicked");
-                    continue;
-                }
             }
             let checkpointed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 active.stream.checkpoint()
@@ -786,6 +942,40 @@ impl CdcRuntime {
                 ),
             }
         }
+    }
+
+    /// Open a stream that carries a bulk load's mutation rows to this
+    /// runtime in chunks; see [`CommitNotification::mutation_stream`].
+    ///
+    /// Announce the load with the returned sender's [`MutationStreamSender::id`],
+    /// then send its rows and [`MutationStreamSender::finish`]. Sends wait while
+    /// the runtime has [`MUTATION_STREAM_DEPTH`] chunks of the load undelivered,
+    /// which bounds the memory a load's CDC delivery holds. Returns `None` once
+    /// the runtime has stopped.
+    ///
+    /// The runtime owns the receiving half until it reaches the announcement,
+    /// and drops it when it falls behind the broadcaster (`Lagged`, which
+    /// halts every stream anyway) or stops, so a sender never waits on a
+    /// stream nothing will read: its sends then return `false`.
+    #[must_use]
+    pub fn open_mutation_stream(&self) -> Option<MutationStreamSender> {
+        let mut streams = self.mutation_streams.lock();
+        if streams.closed {
+            return None;
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel(MUTATION_STREAM_DEPTH);
+        let id = streams.next_id;
+        streams.next_id += 1;
+        streams.open.insert(id, rx);
+        Some(MutationStreamSender { id, tx })
+    }
+
+    /// Drop every open mutation stream's receiver, releasing its sender; with
+    /// `close`, refuse new ones too.
+    fn drop_mutation_streams(&self, close: bool) {
+        let mut streams = self.mutation_streams.lock();
+        streams.open.clear();
+        streams.closed |= close;
     }
 
     /// Call `shutdown()` on every active stream and drop them.
@@ -899,6 +1089,7 @@ mod tests {
             causal_version: version - 1,
             mutations: None,
             mutations_failed: false,
+            mutation_stream: None,
             dropped_before: 0,
         })
     }
@@ -1237,5 +1428,190 @@ mod tests {
         s.write_one("kafka", CdcLsn(3)).unwrap();
         assert_eq!(s.lookup("kafka").unwrap(), Some(CdcLsn(3)));
         assert_eq!(s.load_all().unwrap().len(), 1);
+    }
+
+    /// Records every delivered batch's LSN range and row count, and every
+    /// checkpoint taken.
+    struct Recorder {
+        log: Arc<parking_lot::Mutex<Vec<String>>>,
+    }
+
+    struct RecorderStream {
+        log: Arc<parking_lot::Mutex<Vec<String>>>,
+        last: CdcLsn,
+    }
+
+    impl CdcOutputProvider for Recorder {
+        fn name(&self) -> &str {
+            "recorder"
+        }
+        fn start(&self, _ctx: CdcStartContext<'_>) -> Result<Box<dyn CdcStream>, FnError> {
+            Ok(Box::new(RecorderStream {
+                log: Arc::clone(&self.log),
+                last: CdcLsn(0),
+            }))
+        }
+    }
+
+    impl CdcStream for RecorderStream {
+        fn deliver(&mut self, batch: &CdcBatch) -> Result<(), FnError> {
+            self.last = batch.lsn_end;
+            self.log.lock().push(format!(
+                "deliver {}..{} rows={}",
+                batch.lsn_start.0,
+                batch.lsn_end.0,
+                batch.mutations.num_rows()
+            ));
+            Ok(())
+        }
+        fn checkpoint(&mut self) -> Result<CdcLsn, FnError> {
+            self.log.lock().push(format!("checkpoint {}", self.last.0));
+            Ok(self.last)
+        }
+        fn shutdown(&mut self) -> Result<(), FnError> {
+            Ok(())
+        }
+    }
+
+    type Log = Arc<parking_lot::Mutex<Vec<String>>>;
+
+    fn recorder_runtime() -> (
+        Arc<CdcRuntime>,
+        broadcast::Sender<Arc<CommitNotification>>,
+        Log,
+        ShutdownHandle,
+    ) {
+        let log = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let registry = Arc::new(PluginRegistry::new());
+        let caps = CapabilitySet::from_iter_of([Capability::Cdc]);
+        let mut r = PluginRegistrar::new(PluginId::new("test"), &caps, &registry);
+        r.cdc_output(Arc::new(Recorder {
+            log: Arc::clone(&log),
+        }))
+        .unwrap();
+        r.commit_to_registry().unwrap();
+        let (tx, rx) = broadcast::channel(16);
+        let shutdown = ShutdownHandle::new(Duration::from_secs(10));
+        let runtime = CdcRuntime::spawn_with_sidecar(&registry, rx, None, &shutdown);
+        (runtime, tx, log, shutdown)
+    }
+
+    fn load_notification(version: u64, causal: u64, stream: u64) -> Arc<CommitNotification> {
+        let mut n = (*commit(version)).clone();
+        n.causal_version = causal;
+        n.mutation_stream = Some(stream);
+        Arc::new(n)
+    }
+
+    fn rows(n: u64) -> arrow_array::RecordBatch {
+        crate::triggers::MutationEvents::creates(
+            (0..n).map(|i| crate::triggers::CreatedVertex {
+                vid: uni_common::Vid::new(i),
+                labels: vec!["A".to_owned()],
+                properties: None,
+            }),
+            [],
+            &std::collections::HashSet::new(),
+        )
+        .materialize_all()
+        .unwrap()
+        .unwrap()
+    }
+
+    async fn wait_for(log: &parking_lot::Mutex<Vec<String>>, n: usize) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while log.lock().len() < n {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the driver did not get there");
+    }
+
+    /// A load's chunks are each delivered with the load's LSN range, and the
+    /// stream is checkpointed once, after the last; commits around it keep
+    /// their order.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mutation_stream_delivers_chunks_then_checkpoints_once() {
+        let (runtime, tx, log, shutdown) = recorder_runtime();
+        let sender = runtime.open_mutation_stream().unwrap();
+        tx.send(commit(5)).unwrap();
+        tx.send(load_notification(7, 6, sender.id())).unwrap();
+        tx.send(commit(8)).unwrap();
+        for n in [3, 2, 4] {
+            assert!(sender.send(rows(n)).await);
+        }
+        sender.finish().await;
+        wait_for(&log, 8).await;
+        assert_eq!(
+            *log.lock(),
+            [
+                "deliver 4..5 rows=0",
+                "checkpoint 5",
+                "deliver 6..7 rows=3",
+                "deliver 6..7 rows=2",
+                "deliver 6..7 rows=4",
+                "checkpoint 7",
+                "deliver 7..8 rows=0",
+                "checkpoint 8",
+            ]
+        );
+        shutdown.shutdown_async().await.unwrap();
+    }
+
+    /// A load with no rows is still one (empty) delivery and one checkpoint.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn empty_mutation_stream_delivers_one_empty_batch() {
+        let (runtime, tx, log, shutdown) = recorder_runtime();
+        let sender = runtime.open_mutation_stream().unwrap();
+        tx.send(load_notification(3, 2, sender.id())).unwrap();
+        sender.finish().await;
+        wait_for(&log, 2).await;
+        assert_eq!(*log.lock(), ["deliver 2..3 rows=0", "checkpoint 3"]);
+        shutdown.shutdown_async().await.unwrap();
+    }
+
+    /// A load whose sender is dropped part way halts the streams: the part
+    /// delivered is not checkpointed past, and later commits are not
+    /// delivered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unfinished_mutation_stream_halts_without_checkpointing() {
+        let (runtime, tx, log, shutdown) = recorder_runtime();
+        let sender = runtime.open_mutation_stream().unwrap();
+        tx.send(load_notification(3, 2, sender.id())).unwrap();
+        tx.send(commit(4)).unwrap();
+        assert!(sender.send(rows(2)).await);
+        drop(sender);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while runtime.halted_stream_count() == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the stream must halt");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(*log.lock(), ["deliver 2..3 rows=2"]);
+        shutdown.shutdown_async().await.unwrap();
+    }
+
+    /// A stream the driver stopped reading releases its sender.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closed_runtime_releases_mutation_stream_senders() {
+        let (runtime, _tx, _log, shutdown) = recorder_runtime();
+        let sender = runtime.open_mutation_stream().unwrap();
+        shutdown.shutdown_async().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            // Never announced, so only the driver's stop releases it; the
+            // channel depth is bounded, so a held receiver would block here.
+            for _ in 0..=MUTATION_STREAM_DEPTH {
+                if !sender.send(rows(1)).await {
+                    return;
+                }
+            }
+            panic!("the sender was never released");
+        })
+        .await
+        .expect("a send waited on a stream nothing reads");
+        assert!(runtime.open_mutation_stream().is_none());
     }
 }

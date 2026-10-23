@@ -239,8 +239,9 @@ async fn fork_cut_before_a_delete_keeps_the_vertex() -> Result<()> {
 }
 
 /// A transaction begun before the changes reads the seed's vertices after
-/// they commit and are flushed underneath it. Only the vertex tier: the edge
-/// tier of a transaction is not version-pinned (`pinned_at_version`).
+/// they commit and are flushed underneath it. Only the vertex tier is checked
+/// here; a transaction's edge reads are pinned separately, at read time
+/// (`StorageManager::neighbors`).
 #[tokio::test]
 async fn transaction_begun_before_a_flushed_delete_keeps_the_vertex() -> Result<()> {
     for mode in MODES {

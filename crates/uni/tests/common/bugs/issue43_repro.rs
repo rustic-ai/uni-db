@@ -196,15 +196,19 @@ mod tests {
         tx.execute("CREATE (:Participant {name: 'Gina'})").await?;
         tx.commit().await?;
 
-        // Prepare queries once — one per speaker since MATCH patterns differ
-        let stmt_jon = session
+        // Prepare queries once — one per speaker since MATCH patterns differ.
+        // A prepared write must come from a transaction (session-level
+        // prepared queries are read-only), so the whole run is one
+        // transaction rather than one per insert.
+        let tx = session.tx().await?;
+        let stmt_jon = tx
             .prepare(
                 "CREATE (m:Message {content: $c}) \
                  WITH m MATCH (p:Participant {name: 'Jon'}) CREATE (m)-[:SENT_BY]->(p) \
                  WITH m MATCH (e:Entity {name: 'Gina'}) CREATE (m)-[:MENTIONS]->(e)",
             )
             .await?;
-        let stmt_gina = session
+        let stmt_gina = tx
             .prepare(
                 "CREATE (m:Message {content: $c}) \
                  WITH m MATCH (p:Participant {name: 'Gina'}) CREATE (m)-[:SENT_BY]->(p) \
@@ -240,6 +244,7 @@ mod tests {
             }
         }
 
+        tx.commit().await?;
         let total_secs = total_start.elapsed().as_secs_f64();
         print_report("prepared-query", &latencies, total_secs);
 

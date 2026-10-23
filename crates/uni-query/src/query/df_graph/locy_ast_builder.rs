@@ -206,7 +206,30 @@ fn match_node_from_binding(var_name: &str, bindings: &FactRow) -> (NodePattern, 
 }
 
 /// Build a MERGE query for DERIVE MERGE a, b.
-pub fn build_merge_query(a: &str, b: &str, _bindings: &FactRow) -> Result<Query, LocyError> {
+///
+/// Both endpoints are rebound by VID from `bindings`, as an existing endpoint
+/// of a derived edge is: a bare `MERGE (a)-[:MERGED_WITH]->(b)` binds neither
+/// variable, so it cannot run.
+///
+/// # Errors
+///
+/// [`LocyError::EvaluationError`] when `a` or `b` is not bound to a node.
+pub fn build_merge_query(a: &str, b: &str, bindings: &FactRow) -> Result<Query, LocyError> {
+    let mut match_paths = Vec::new();
+    let mut vid_filters = Vec::new();
+    for var in [a, b] {
+        let (node, vid_filter) = match_node_from_binding(var, bindings);
+        let vid_filter = vid_filter.ok_or_else(|| LocyError::EvaluationError {
+            message: format!("DERIVE MERGE {a}, {b}: '{var}' is not bound to a node"),
+        })?;
+        match_paths.push(PathPattern {
+            variable: None,
+            elements: vec![PatternElement::Node(node)],
+            shortest_path_mode: None,
+        });
+        vid_filters.push(vid_filter);
+    }
+
     let source = PatternElement::Node(NodePattern {
         variable: Some(a.to_string()),
         labels: LabelExpr::Empty,
@@ -237,11 +260,19 @@ pub fn build_merge_query(a: &str, b: &str, _bindings: &FactRow) -> Result<Query,
     };
 
     Ok(Query::Single(Statement {
-        clauses: vec![Clause::Merge(MergeClause {
-            pattern: Pattern { paths: vec![path] },
-            on_match: vec![],
-            on_create: vec![],
-        })],
+        clauses: vec![
+            Clause::Match(MatchClause {
+                optional: false,
+                pattern: Pattern { paths: match_paths },
+                where_clause: combine_where_conditions(&vid_filters),
+                for_update: false,
+            }),
+            Clause::Merge(MergeClause {
+                pattern: Pattern { paths: vec![path] },
+                on_match: vec![],
+                on_create: vec![],
+            }),
+        ],
     }))
 }
 

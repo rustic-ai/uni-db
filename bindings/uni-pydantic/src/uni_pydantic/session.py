@@ -12,13 +12,12 @@ from typing import (
     Any,
     TypeVar,
     cast,
-    get_type_hints,
 )
 from weakref import WeakValueDictionary
 
 from pydantic import ValidationError
 
-from .base import UniEdge, UniNode
+from .base import UniEdge, UniNode, _resolve_type_hints
 from .exceptions import (
     BulkLoadError,
     NotPersisted,
@@ -58,6 +57,48 @@ EdgeT = TypeVar("EdgeT", bound=UniEdge)
 
 # Convenience alias: RETURN clause for a single node variable "n".
 _NODE_RETURN = "properties(n) AS _props, id(n) AS _vid, labels(n) AS _labels"
+
+# The node object a bare ``RETURN n`` yields (optional, like ``types.py``).
+try:
+    from uni_db import Node as _RustNode
+
+    _DbNode: type[_RustNode] | None = _RustNode
+except ImportError:  # pragma: no cover - uni_db is a hard dependency
+    _DbNode = None
+
+
+def _cypher_node_target(
+    value: Any,
+    result_type: type[NodeT],
+    node_models: dict[str, type[UniNode]],
+) -> tuple[dict[str, Any], type[NodeT]] | None:
+    """Pick the node data and model to hydrate one ``cypher()`` column as.
+
+    ``value`` is either a ``uni_db.Node`` (what ``RETURN n`` yields) or a dict
+    carrying ``_label`` (a node-shaped map). The model is ``result_type`` when
+    the node carries its label, else a registered subclass of ``result_type``
+    for one of its labels. A node of an unrelated label is not a
+    ``result_type`` and yields ``None`` -- it is never coerced into one.
+    """
+    if _DbNode is not None and isinstance(value, _DbNode):
+        labels = list(value.labels)
+        data = dict(value.properties)
+        data["_id"] = int(value.id)
+    elif isinstance(value, dict) and "_label" in value:
+        labels = [value["_label"]]
+        data = dict(value)
+    else:
+        return None
+
+    if result_type.__label__ in labels:
+        data["_label"] = result_type.__label__
+        return data, result_type
+    for label in labels:
+        model = node_models.get(label)
+        if model is not None and issubclass(model, result_type):
+            data["_label"] = label
+            return data, model
+    return None
 
 
 class UniTransaction:
@@ -345,10 +386,7 @@ class UniSession:
         props = _row_to_node_dict(results[0].to_dict())
         if props is None:
             raise SessionError(f"Entity with vid={entity._vid} no longer exists")
-        try:
-            hints = get_type_hints(type(entity))
-        except Exception:
-            hints = {}
+        hints = _resolve_type_hints(type(entity))
 
         for field_name in entity.get_property_fields():
             if field_name in props:
@@ -437,31 +475,25 @@ class UniSession:
             return [r.to_dict() for r in results]
 
         # Map results to model instances
-        mapped = []
+        mapped: list[NodeT] = []
+        node_models = self._schema_gen._node_models
         for raw_row in results:
             row = raw_row.to_dict()
-            # Try to find node data in the row
-            for key, value in row.items():
-                if isinstance(value, dict):
-                    # Check for _id/_label keys (uni-db node dict)
-                    if "_id" in value and "_label" in value:
-                        instance = self._result_to_model(value, result_type)
-                        if instance is not None:
-                            mapped.append(instance)
-                            break
-                    # Also check if _label matches registered model
-                    elif "_label" in value:
-                        label = value["_label"]
-                        if label in self._schema_gen._node_models:
-                            model = self._schema_gen._node_models[label]
-                            instance = self._result_to_model(value, model)
-                            if instance is not None:
-                                mapped.append(instance)
-                                break
+            # The first column holding a node of `result_type` (or a registered
+            # subclass) is the row's entity.
+            for value in row.values():
+                target = _cypher_node_target(value, result_type, node_models)
+                if target is None:
+                    continue
+                instance = self._result_to_model(*target)
+                if instance is not None:
+                    mapped.append(instance)
+                    break
             else:
-                # Try the first column
+                # No node column: an unlabelled map in the first column is a
+                # projection of `result_type`'s properties.
                 first_value = next(iter(row.values()), None)
-                if isinstance(first_value, dict):
+                if isinstance(first_value, dict) and "_label" not in first_value:
                     instance = self._result_to_model(first_value, result_type)
                     if instance is not None:
                         mapped.append(instance)
@@ -473,13 +505,17 @@ class UniSession:
         source: UniNode, target: UniNode
     ) -> tuple[int, int, str, str]:
         """Validate that both endpoints are persisted and return (src_vid, dst_vid, src_label, dst_label)."""
-        if not source.is_persisted:
+        # `is_persisted` is `_vid is not None`; test the ids themselves so the
+        # returned vids are known to be ints.
+        src_vid = source._vid
+        if src_vid is None:
             raise NotPersisted(source)
-        if not target.is_persisted:
+        dst_vid = target._vid
+        if dst_vid is None:
             raise NotPersisted(target)
         return (
-            source._vid,
-            target._vid,
+            src_vid,
+            dst_vid,
             source.__class__.__label__,
             target.__class__.__label__,
         )
@@ -769,10 +805,7 @@ class UniSession:
         label = entity.__class__.__label__
 
         # Convert dirty prop values via python_to_db_value
-        try:
-            hints = get_type_hints(type(entity))
-        except Exception:
-            hints = {}
+        hints = _resolve_type_hints(type(entity))
 
         dirty_props = {}
         for name in entity._dirty:
@@ -850,14 +883,7 @@ class UniSession:
         data.pop("_label", None)
 
         try:
-            instance = cast(
-                NodeT,
-                model.from_properties(
-                    data,
-                    vid=vid,
-                    session=self,
-                ),
-            )
+            instance = model.from_properties(data, vid=vid, session=self)
         except ValidationError as exc:
             _warn_unhydratable(model, vid, exc)
             return None
@@ -973,7 +999,9 @@ class UniSession:
             # the caller to use the `eager_load()` they already used.
             cache_attr = f"_rel_cache_{rel_name}"
             for entity in entities:
-                related = by_source.get(entity._vid, [])
+                related = (
+                    by_source.get(entity._vid, []) if entity._vid is not None else []
+                )
                 if is_list:
                     setattr(entity, cache_attr, related)
                 else:

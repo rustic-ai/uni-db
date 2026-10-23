@@ -23,7 +23,7 @@ use uni_plugin::{FnError, PluginError, PluginRegistrar};
 /// Register the built-in triggers into `r`.
 ///
 /// Currently registers a single `LabelAuditTrigger` matching any
-/// `:_AuditMe`-labeled node mutation. Real deployments override or
+/// `_AuditMe`-labeled node mutation. Real deployments override or
 /// drop this trigger via the `apoc.trigger.drop`-style meta-procedure
 /// (M9 follow-up).
 ///
@@ -31,7 +31,10 @@ use uni_plugin::{FnError, PluginError, PluginRegistrar};
 ///
 /// Returns [`PluginError`] if registration fails.
 pub fn register_into(r: &mut PluginRegistrar<'_>) -> Result<(), PluginError> {
-    r.trigger(Arc::new(LabelAuditTrigger::new(":_AuditMe")))?;
+    // The bare label: event rows carry it bare. The router also accepts the
+    // Cypher form `:_AuditMe`, but the shipped subscription should not lean
+    // on that.
+    r.trigger(Arc::new(LabelAuditTrigger::new("_AuditMe")))?;
     Ok(())
 }
 
@@ -51,6 +54,9 @@ pub struct LabelAuditTrigger {
 
 impl LabelAuditTrigger {
     /// Construct a trigger watching `label`.
+    ///
+    /// `label` is a bare label name (`"Customer"`); the Cypher form
+    /// (`":Customer"`) names the same label.
     #[must_use]
     pub fn new(label: &str) -> Self {
         let mask = TriggerEventMask::NODE_CREATE
@@ -128,11 +134,14 @@ mod tests {
 
     #[test]
     fn subscription_targets_audit_label_and_node_events() {
-        let t = LabelAuditTrigger::new(":_AuditMe");
+        let t = LabelAuditTrigger::new("_AuditMe");
         let s = t.subscription();
         assert_eq!(s.phase, TriggerPhase::AfterMutation);
         assert_eq!(s.fire_mode, FireMode::Async);
-        assert_eq!(s.labels.as_ref().unwrap().len(), 1);
+        assert_eq!(
+            s.labels.as_deref(),
+            Some(&[smol_str::SmolStr::new("_AuditMe")][..])
+        );
         assert!(s.events.contains(TriggerEventMask::NODE_CREATE));
         assert!(s.events.contains(TriggerEventMask::NODE_UPDATE));
         assert!(s.events.contains(TriggerEventMask::NODE_DELETE));

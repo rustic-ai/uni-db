@@ -246,10 +246,14 @@ async fn faulted_populated_store(
     let vids: Vec<u64> = rows.iter().map(|(v, _)| *v).collect();
     let exts: Vec<&str> = rows.iter().map(|(_, e)| *e).collect();
     let deleted = vec![false; rows.len()];
+    // `_version` as the real main vertex table carries it: readers judge a
+    // vertex by its newest row.
+    let versions = vec![1u64; rows.len()];
     let arrow_schema = Arc::new(ArrowSchema::new(vec![
         Field::new("_vid", DataType::UInt64, false),
         Field::new("ext_id", DataType::Utf8, true),
         Field::new("_deleted", DataType::Boolean, false),
+        Field::new("_version", DataType::UInt64, false),
     ]));
     let batch = RecordBatch::try_new(
         arrow_schema,
@@ -257,6 +261,7 @@ async fn faulted_populated_store(
             Arc::new(UInt64Array::from(vids)),
             Arc::new(StringArray::from(exts)),
             Arc::new(BooleanArray::from(deleted)),
+            Arc::new(UInt64Array::from(versions)),
         ],
     )
     .unwrap();
@@ -347,10 +352,14 @@ async fn populated_store(
     let vids: Vec<u64> = rows.iter().map(|(v, _)| *v).collect();
     let exts: Vec<&str> = rows.iter().map(|(_, e)| *e).collect();
     let deleted = vec![false; rows.len()];
+    // `_version` as the real main vertex table carries it: readers judge a
+    // vertex by its newest row.
+    let versions = vec![1u64; rows.len()];
     let arrow_schema = Arc::new(ArrowSchema::new(vec![
         Field::new("_vid", DataType::UInt64, false),
         Field::new("ext_id", DataType::Utf8, true),
         Field::new("_deleted", DataType::Boolean, false),
+        Field::new("_version", DataType::UInt64, false),
     ]));
     let batch = RecordBatch::try_new(
         arrow_schema,
@@ -358,6 +367,7 @@ async fn populated_store(
             Arc::new(UInt64Array::from(vids)),
             Arc::new(StringArray::from(exts)),
             Arc::new(BooleanArray::from(deleted)),
+            Arc::new(UInt64Array::from(versions)),
         ],
     )
     .unwrap();

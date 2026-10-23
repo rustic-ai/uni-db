@@ -421,6 +421,7 @@ impl Transaction {
             validate_constraints: None,
             max_buffer_size_bytes: None,
             on_progress: None,
+            skip_before_triggers: false,
         }
     }
 
@@ -444,6 +445,7 @@ impl Transaction {
             batch_size: None,
             defer_vector_indexes: None,
             max_buffer_size_bytes: None,
+            skip_before_triggers: false,
         }
     }
 
@@ -483,6 +485,7 @@ pub struct TxBulkWriterBuilder {
     validate_constraints: Option<bool>,
     max_buffer_size_bytes: Option<usize>,
     on_progress: Option<Py<PyAny>>,
+    skip_before_triggers: bool,
 }
 
 #[pymethods]
@@ -522,6 +525,18 @@ impl TxBulkWriterBuilder {
         slf
     }
 
+    /// Load even though a synchronous before-mutation or before-commit trigger
+    /// subscribes to what the load writes, without running that trigger.
+    ///
+    /// A bulk load's events are emitted after it is visible, too late for a
+    /// before-trigger to veto it, so by default such a load is refused with
+    /// `UniError`. With `True` it proceeds; after-phase triggers and CDC still
+    /// receive its events.
+    fn skip_before_triggers(mut slf: PyRefMut<'_, Self>, skip: bool) -> PyRefMut<'_, Self> {
+        slf.skip_before_triggers = skip;
+        slf
+    }
+
     fn build(&self, py: Python) -> PyResult<crate::builders::BulkWriter> {
         let tx_ref = self.tx.borrow(py);
         let tx = tx_ref.check_active()?;
@@ -529,7 +544,8 @@ impl TxBulkWriterBuilder {
         builder = builder
             .defer_vector_indexes(self.defer_vector_indexes)
             .defer_scalar_indexes(self.defer_scalar_indexes)
-            .async_indexes(self.async_indexes);
+            .async_indexes(self.async_indexes)
+            .skip_before_triggers(self.skip_before_triggers);
         crate::apply_opt!(builder, self.batch_size, batch_size);
         crate::apply_opt!(builder, self.validate_constraints, validate_constraints);
         crate::apply_opt!(builder, self.max_buffer_size_bytes, max_buffer_size_bytes);
@@ -559,6 +575,7 @@ pub struct TxAppenderBuilder {
     batch_size: Option<usize>,
     defer_vector_indexes: Option<bool>,
     max_buffer_size_bytes: Option<usize>,
+    skip_before_triggers: bool,
 }
 
 #[pymethods]
@@ -578,10 +595,24 @@ impl TxAppenderBuilder {
         slf
     }
 
+    /// Load even though a synchronous before-mutation or before-commit trigger
+    /// subscribes to what the load writes, without running that trigger.
+    ///
+    /// A bulk load's events are emitted after it is visible, too late for a
+    /// before-trigger to veto it, so by default such a load is refused with
+    /// `UniError`. With `True` it proceeds; after-phase triggers and CDC still
+    /// receive its events.
+    fn skip_before_triggers(mut slf: PyRefMut<'_, Self>, skip: bool) -> PyRefMut<'_, Self> {
+        slf.skip_before_triggers = skip;
+        slf
+    }
+
     fn build(&self, py: Python) -> PyResult<crate::builders::StreamingAppender> {
         let tx_ref = self.tx.borrow(py);
         let tx = tx_ref.check_active()?;
-        let mut builder = tx.appender(&self.label);
+        let mut builder = tx
+            .appender(&self.label)
+            .skip_before_triggers(self.skip_before_triggers);
         crate::apply_opt!(builder, self.batch_size, batch_size);
         crate::apply_opt!(builder, self.defer_vector_indexes, defer_vector_indexes);
         crate::apply_opt!(builder, self.max_buffer_size_bytes, max_buffer_size_bytes);

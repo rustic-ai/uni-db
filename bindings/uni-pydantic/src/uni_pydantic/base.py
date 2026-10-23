@@ -5,11 +5,16 @@
 
 from __future__ import annotations
 
+import ast
+import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
+    ForwardRef,
+    TypeVar,
     get_type_hints,
 )
 
@@ -29,8 +34,17 @@ from .types import (
 )
 
 if TYPE_CHECKING:
+    from pydantic._internal._model_construction import ModelMetaclass
+
+    from .async_session import AsyncUniSession
     from .query import PropertyProxy
     from .session import UniSession
+else:
+    # pydantic's metaclass is private API; name it only through the public
+    # ``BaseModel`` at runtime. Under TYPE_CHECKING the private import above
+    # gives mypy the real base, so class attributes such as ``__name__`` and
+    # ``__mro__`` resolve through ``type`` instead of our ``__getattr__``.
+    ModelMetaclass = type(BaseModel)
 
 
 def _resolve_type_hints(cls: type) -> dict[str, Any]:
@@ -53,6 +67,12 @@ def _resolve_type_hints(cls: type) -> dict[str, Any]:
     except Exception:
         pass
     try:
+        from .async_session import AsyncUniSession
+
+        localns["AsyncUniSession"] = AsyncUniSession
+    except Exception:
+        pass
+    try:
         from .query import PropertyProxy
 
         localns["PropertyProxy"] = PropertyProxy
@@ -62,6 +82,168 @@ def _resolve_type_hints(cls: type) -> dict[str, Any]:
         return get_type_hints(cls, localns=localns)
     except Exception:
         return {}
+
+
+def _class_namespace_annotations(namespace: dict[str, Any]) -> dict[str, Any]:
+    """Return the annotations declared in a class body, from a metaclass.
+
+    Before Python 3.14 -- and on 3.14 when the module uses
+    ``from __future__ import annotations`` -- the compiler stores an eager
+    ``__annotations__`` dict in the class namespace. Under PEP 649/749 (3.14+)
+    a class body without the future import instead carries only a lazy annotate
+    function (``__annotate__``/``__annotate_func__``), so a plain
+    ``namespace.get("__annotations__", {})`` returns ``{}`` and every annotation
+    is invisible. That is evaluated here in ``FORWARDREF`` format, which never
+    raises on names defined later in the module (they come back as
+    ``ForwardRef`` objects) -- the same format pydantic uses for this step.
+    """
+    if "__annotations__" in namespace:
+        annotations: dict[str, Any] = namespace["__annotations__"]
+        return annotations
+    if sys.version_info >= (3, 14):
+        import annotationlib
+
+        annotate = annotationlib.get_annotate_from_class_namespace(namespace)
+        if annotate is not None:
+            return dict(
+                annotationlib.call_annotate_function(
+                    annotate, annotationlib.Format.FORWARDREF
+                )
+            )
+    return {}
+
+
+def _exclude_lazy_annotations(
+    namespace: dict[str, Any], excluded: frozenset[str]
+) -> Callable[[type], None]:
+    """Hide ``excluded`` names from a 3.14+ class's lazy annotate function.
+
+    The metaclass removes each relationship's annotation so pydantic does not
+    treat the relationship as a field. With an eager ``__annotations__`` dict
+    that is a ``del``; with a PEP 649 annotate function there is no dict to
+    edit, so the function is replaced by a wrapper that drops those names from
+    whatever the original returns. Every reader -- pydantic's metaclass, which
+    calls the annotate function from the namespace, and
+    ``annotationlib.get_annotations``/``typing.get_type_hints`` on the finished
+    class -- then sees the filtered mapping, and evaluation stays lazy, so a
+    property annotation that names a class defined later in the module still
+    resolves the same way it would without this metaclass.
+
+    Returns a callback that records the created class as the owner passed to
+    the original annotate function (used to resolve class-scoped names in
+    ``ForwardRef`` evaluation).
+    """
+    import annotationlib
+
+    original = annotationlib.get_annotate_from_class_namespace(namespace)
+    if original is None:
+        # Only called for a namespace whose relationships were read from its
+        # lazy annotations, which therefore has an annotate function.
+        raise TypeError("class namespace has no annotate function to filter")
+    owner: list[type] = []
+
+    def __annotate__(format: int, /) -> dict[str, Any]:
+        if format == annotationlib.Format.VALUE_WITH_FAKE_GLOBALS:
+            # Only meaningful for compiler-generated functions; the protocol
+            # says to refuse it, and VALUE/FORWARDREF/STRING are served below.
+            raise NotImplementedError(format)
+        result = annotationlib.call_annotate_function(
+            original,
+            annotationlib.Format(format),
+            owner=owner[0] if owner else None,
+        )
+        return {k: v for k, v in result.items() if k not in excluded}
+
+    key = "__annotate__" if "__annotate__" in namespace else "__annotate_func__"
+    namespace[key] = __annotate__
+    return owner.append
+
+
+def _string_annotation_shape(source: str) -> tuple[bool, Any]:
+    """Shape of a relationship annotation known only as source text.
+
+    Annotations arrive unevaluated as strings under
+    ``from __future__ import annotations`` (``"list[Book]"``), when quoted
+    (``"Bio | None"``), and -- via ``ForwardRef`` -- for names not yet defined
+    under Python 3.14's lazy annotations. The target model usually is not
+    defined yet either, so the text cannot be evaluated; its shape is read from
+    the syntax instead. Recognized: ``list[X]``/``List[X]``, and optionality as
+    ``X | None``, ``Optional[X]`` or ``Union[X, None]``, nested either way. The
+    target is returned as source text (``"Book"``), which schema generation
+    matches against registered models. Unparseable text is returned as-is,
+    as a to-one target.
+    """
+    try:
+        node = ast.parse(source.strip(), mode="eval").body
+    except SyntaxError:
+        return False, source
+
+    def is_none(n: ast.expr) -> bool:
+        return isinstance(n, ast.Constant) and n.value is None
+
+    def name_of(n: ast.expr) -> str | None:
+        if isinstance(n, ast.Name):
+            return n.id
+        if isinstance(n, ast.Attribute):  # typing.List, t.Optional, ...
+            return n.attr
+        return None
+
+    def strip_optional(n: ast.expr) -> ast.expr:
+        if isinstance(n, ast.BinOp) and isinstance(n.op, ast.BitOr):
+            if is_none(n.right):
+                return strip_optional(n.left)
+            if is_none(n.left):
+                return strip_optional(n.right)
+        if isinstance(n, ast.Subscript):
+            wrapper = name_of(n.value)
+            if wrapper == "Optional":
+                return strip_optional(n.slice)
+            if wrapper == "Union" and isinstance(n.slice, ast.Tuple):
+                members = [e for e in n.slice.elts if not is_none(e)]
+                if len(members) == 1 and len(members) < len(n.slice.elts):
+                    return strip_optional(members[0])
+        return n
+
+    def text_of(n: ast.expr) -> str:
+        # A nested quoted name (`list["Book"]` under the future import) is a
+        # string constant; its value, not its repr, is the target.
+        if isinstance(n, ast.Constant) and isinstance(n.value, str):
+            return n.value
+        return ast.unparse(n)
+
+    node = strip_optional(node)
+    if isinstance(node, ast.Subscript) and name_of(node.value) in ("list", "List"):
+        return True, text_of(strip_optional(node.slice))
+    return False, text_of(node)
+
+
+def _relationship_shape(annotation: Any) -> tuple[bool, Any]:
+    """Return ``(is_list, target)`` for a relationship field's annotation.
+
+    ``annotation`` is whatever the class namespace yields: an evaluated type
+    (``list[Book]``), a string (quoted, or every annotation under
+    ``from __future__ import annotations``), or a ``ForwardRef`` (Python 3.14's
+    lazy annotations evaluate an undefined name to one -- ``Bio | None`` becomes
+    ``ForwardRef('Bio | None')`` -- and ``typing.List["Book"]`` holds one on any
+    version). Strings and forward references are read syntactically by
+    `_string_annotation_shape`; an evaluated type is unwrapped with the typing
+    helpers, and a forward reference left inside it is reduced the same way.
+    """
+    if isinstance(annotation, ForwardRef):
+        annotation = annotation.__forward_arg__
+    if isinstance(annotation, str):
+        return _string_annotation_shape(annotation)
+    is_opt, inner = is_optional(annotation)
+    if is_opt:
+        annotation = inner
+    is_lst, elem_type = is_list_type(annotation)
+    if is_lst:
+        if isinstance(elem_type, (str, ForwardRef)):
+            return True, _relationship_shape(elem_type)[1]
+        return True, elem_type
+    if isinstance(annotation, (str, ForwardRef)):
+        return _relationship_shape(annotation)
+    return False, annotation
 
 
 def _model_to_properties(
@@ -103,7 +285,7 @@ def _convert_db_values(
     }
 
 
-class UniModelMeta(type(BaseModel)):  # type: ignore[misc]
+class UniModelMeta(ModelMetaclass):
     """Metaclass for UniNode and UniEdge that processes relationship fields."""
 
     def __new__(
@@ -113,8 +295,11 @@ class UniModelMeta(type(BaseModel)):  # type: ignore[misc]
         namespace: dict[str, Any],
         **kwargs: Any,
     ) -> type[Any]:
-        # Process relationship markers in annotations
-        annotations = namespace.get("__annotations__", {})
+        # Process relationship markers in annotations. On Python 3.14+ (PEP 649)
+        # the namespace may hold only a lazy annotate function rather than an
+        # `__annotations__` dict; see `_class_namespace_annotations`.
+        eager_annotations = "__annotations__" in namespace
+        annotations = _class_namespace_annotations(namespace)
         relationships: dict[str, RelationshipConfig] = {}
         # Shape of each relationship, captured *before* its annotation is
         # deleted below. The descriptor loop further down used to re-read
@@ -129,12 +314,7 @@ class UniModelMeta(type(BaseModel)):  # type: ignore[misc]
             default = namespace.get(field_name)
             if isinstance(default, _RelationshipMarker):
                 # Determine if it's a list or single relationship
-                is_opt, inner = is_optional(annotation)
-                is_lst, elem_type = is_list_type(inner if is_opt else annotation)
-                rel_shapes[field_name] = (
-                    is_lst,
-                    elem_type if is_lst else (inner if is_opt else annotation),
-                )
+                rel_shapes[field_name] = _relationship_shape(annotation)
 
                 # Store relationship config
                 relationships[field_name] = default.config
@@ -142,15 +322,26 @@ class UniModelMeta(type(BaseModel)):  # type: ignore[misc]
                 # Remove from namespace and annotations to exclude from Pydantic validation
                 if field_name in namespace:
                     del namespace[field_name]
-                # Also remove from annotations so Pydantic doesn't treat it as a required field
-                del annotations[field_name]
+                # Also remove from annotations so Pydantic doesn't treat it as a
+                # required field. `annotations` is the namespace's own dict only
+                # on the eager path; the lazy path is filtered below.
+                if eager_annotations:
+                    del annotations[field_name]
+
+        set_annotate_owner: Callable[[type], None] | None = None
+        if relationships and not eager_annotations:
+            set_annotate_owner = _exclude_lazy_annotations(
+                namespace, frozenset(relationships)
+            )
 
         # Create the class
         cls = super().__new__(mcs, name, bases, namespace, **kwargs)
+        if set_annotate_owner is not None:
+            set_annotate_owner(cls)
 
         # Store relationship configs on the class
         existing_rels = getattr(cls, "__relationships__", {})
-        cls.__relationships__ = {**existing_rels, **relationships}
+        setattr(cls, "__relationships__", {**existing_rels, **relationships})
 
         # Add relationship descriptors
         for field_name, config in relationships.items():
@@ -164,7 +355,7 @@ class UniModelMeta(type(BaseModel)):  # type: ignore[misc]
             )
             setattr(cls, field_name, descriptor)
 
-        return cls  # type: ignore[no-any-return]
+        return cls
 
     def __getattr__(cls, name: str) -> PropertyProxy[Any] | Any:
         """Enable filter DSL: Person.age >= 18 returns a FilterExpr."""
@@ -174,7 +365,11 @@ class UniModelMeta(type(BaseModel)):  # type: ignore[misc]
 
         # Check if it's a model field
         model_fields = getattr(cls, "model_fields", None)
-        if model_fields and name in model_fields:
+        if (
+            model_fields
+            and name in model_fields
+            and issubclass(cls, (UniNode, UniEdge))
+        ):
             from .query import PropertyProxy
 
             return PropertyProxy(name, cls)
@@ -208,6 +403,12 @@ class SearchScores:
     sparse: float | None = None
     rerank: float | None = None
     distance: float | None = None
+
+
+# `from_properties` returns the class it is called on (`Person.from_properties`
+# gives a `Person`), which these typevars express on Python 3.10.
+_NodeSelfT = TypeVar("_NodeSelfT", bound="UniNode")
+_EdgeSelfT = TypeVar("_EdgeSelfT", bound="UniEdge")
 
 
 class UniNode(BaseModel, metaclass=UniModelMeta):
@@ -256,7 +457,7 @@ class UniNode(BaseModel, metaclass=UniModelMeta):
     # Private attributes for session tracking
     _vid: int | None = PrivateAttr(default=None)
     _uid: str | None = PrivateAttr(default=None)
-    _session: UniSession | None = PrivateAttr(default=None)
+    _session: UniSession | AsyncUniSession | None = PrivateAttr(default=None)
     _dirty: set[str] = PrivateAttr(default_factory=set)
     _is_new: bool = PrivateAttr(default=True)
     _scores: SearchScores | None = PrivateAttr(default=None)
@@ -312,7 +513,7 @@ class UniNode(BaseModel, metaclass=UniModelMeta):
         self._is_new = False
 
     def _attach_session(
-        self, session: UniSession, vid: int, uid: str | None = None
+        self, session: UniSession | AsyncUniSession, vid: int, uid: str | None = None
     ) -> None:
         """Attach this node to a session with its database IDs."""
         self._session = session
@@ -344,13 +545,13 @@ class UniNode(BaseModel, metaclass=UniModelMeta):
 
     @classmethod
     def from_properties(
-        cls,
+        cls: type[_NodeSelfT],
         props: dict[str, Any],
         *,
         vid: int | None = None,
         uid: str | None = None,
-        session: UniSession | None = None,
-    ) -> UniNode:
+        session: UniSession | AsyncUniSession | None = None,
+    ) -> _NodeSelfT:
         """Create an instance from a property dictionary.
 
         Accepts _id (string->int vid) and _label from uni-db node dicts.
@@ -377,7 +578,7 @@ class UniNode(BaseModel, metaclass=UniModelMeta):
         return instance
 
     def __repr__(self) -> str:
-        vid_str = f"vid={self._vid}" if self._vid else "unsaved"
+        vid_str = f"vid={self._vid}" if self._vid is not None else "unsaved"
         return f"{self.__class__.__name__}({vid_str}, {super().__repr__()})"
 
 
@@ -426,7 +627,7 @@ class UniEdge(BaseModel, metaclass=UniModelMeta):
     _eid: int | None = PrivateAttr(default=None)
     _src_vid: int | None = PrivateAttr(default=None)
     _dst_vid: int | None = PrivateAttr(default=None)
-    _session: UniSession | None = PrivateAttr(default=None)
+    _session: UniSession | AsyncUniSession | None = PrivateAttr(default=None)
     _is_new: bool = PrivateAttr(default=True)
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -457,7 +658,7 @@ class UniEdge(BaseModel, metaclass=UniModelMeta):
 
     def _attach(
         self,
-        session: UniSession,
+        session: UniSession | AsyncUniSession,
         eid: int,
         src_vid: int,
         dst_vid: int,
@@ -498,14 +699,14 @@ class UniEdge(BaseModel, metaclass=UniModelMeta):
 
     @classmethod
     def from_properties(
-        cls,
+        cls: type[_EdgeSelfT],
         props: dict[str, Any],
         *,
         eid: int | None = None,
         src_vid: int | None = None,
         dst_vid: int | None = None,
-        session: UniSession | None = None,
-    ) -> UniEdge:
+        session: UniSession | AsyncUniSession | None = None,
+    ) -> _EdgeSelfT:
         """Create an instance from a property dictionary.
 
         Accepts _id, _type, _src, _dst from uni-db edge dicts.
@@ -543,7 +744,7 @@ class UniEdge(BaseModel, metaclass=UniModelMeta):
         cls,
         data: dict[str, Any],
         *,
-        session: UniSession | None = None,
+        session: UniSession | AsyncUniSession | None = None,
     ) -> UniEdge:
         """Create an instance from a uni-db edge result dict.
 
@@ -552,5 +753,5 @@ class UniEdge(BaseModel, metaclass=UniModelMeta):
         return cls.from_properties(data, session=session)
 
     def __repr__(self) -> str:
-        eid_str = f"eid={self._eid}" if self._eid else "unsaved"
+        eid_str = f"eid={self._eid}" if self._eid is not None else "unsaved"
         return f"{self.__class__.__name__}({eid_str}, {super().__repr__()})"

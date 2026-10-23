@@ -10,10 +10,12 @@ from pydantic import field_validator
 
 from uni_pydantic import (
     AsyncUniSession,
+    Btic,
     Field,
     Relationship,
     UniEdge,
     UniNode,
+    Vector,
     before_create,
 )
 
@@ -124,6 +126,30 @@ class TestAsyncSessionCRUD:
 
         await async_session.refresh(alice)
         assert alice.age == 31
+
+    async def test_update_converts_vector_and_btic_values(self, async_session):
+        """Regression: see the sync twin in test_integration.py -- a bare
+        `get_type_hints` always raised here, so updated `Vector`/`Btic` values
+        reached the database unconverted and the commit failed."""
+
+        class VecBticDoc(UniNode):
+            title: str
+            emb: Vector[2]
+            when: Btic | None = None
+
+        async_session.register(VecBticDoc)
+        await async_session.sync_schema()
+        doc = VecBticDoc(title="a", emb=Vector[2]([1.0, 0.0]), when=Btic("2020"))
+        async_session.add(doc)
+        await async_session.commit()
+
+        doc.emb = Vector[2]([0.0, 1.0])
+        doc.when = Btic("2021")
+        await async_session.commit()
+
+        await async_session.refresh(doc)
+        assert doc.emb == Vector[2]([0.0, 1.0])
+        assert doc.when == Btic("2021")
 
     async def test_delete_entity(self, async_session):
         """Test deleting an entity."""
@@ -454,3 +480,42 @@ class TestAsyncExplainAndProfileReachTheBuilder:
         result, stats = await async_session.profile("MATCH (n) RETURN n")
         assert result is not None
         assert stats is not None
+
+
+class AsyncCypherCo(UniNode):
+    __label__ = "AsyncCypherCo"
+    name: str
+
+
+class TestAsyncCypherResultType:
+    """Async mirror of `TestCypherResultType` in test_integration.py."""
+
+    async def _setup(self, async_session):
+        async_session.register(Person, AsyncCypherCo)
+        await async_session.sync_schema()
+        async_session.add(AsyncCypherCo(name="Acme"))
+        await async_session.commit()
+
+    async def test_return_node_hydrates_result_type(self, async_session):
+        await self._setup(async_session)
+        found = await async_session.cypher(
+            "MATCH (c:AsyncCypherCo) RETURN c", result_type=AsyncCypherCo
+        )
+        assert [type(c) for c in found] == [AsyncCypherCo]
+        assert found[0].name == "Acme"
+        assert found[0].is_persisted
+        assert found[0]._session is async_session
+
+    async def test_node_of_other_label_is_not_coerced(self, async_session):
+        await self._setup(async_session)
+        found = await async_session.cypher(
+            "MATCH (c:AsyncCypherCo) RETURN c", result_type=Person
+        )
+        assert found == []
+
+    async def test_labelled_map_of_other_label_is_not_returned(self, async_session):
+        await self._setup(async_session)
+        found = await async_session.cypher(
+            "RETURN {_label: 'AsyncCypherCo', name: 'Acme'} AS c", result_type=Person
+        )
+        assert found == []

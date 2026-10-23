@@ -24,6 +24,7 @@ pub mod persistence_restart_test;
 pub mod property_batch_test;
 pub mod property_manager;
 pub mod reader_isolation;
+pub mod schema_ddl_widen_resilience;
 pub mod shutdown_test;
 pub mod snapshot_integration;
 pub mod snapshot_restore_rewinds;

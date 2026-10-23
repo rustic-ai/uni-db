@@ -1,6 +1,6 @@
 # Concurrency Model
 
-Uni provides snapshot isolation with **Serializable Snapshot Isolation (SSI)** via optimistic concurrency control (OCC) as the default. Multiple sessions and transactions can coexist, each with its own plan cache and private write buffers. Read-write transactions read from a pinned L0 snapshot and track an item-level read/write-set; the writer lock acquired at commit time is the *validation* point, where a transaction whose reads or writes conflict with a commit that landed since its snapshot is **aborted** and must be **retried**. SSI is controlled by `UniConfig.ssi_enabled` (default `true`); setting it to `false` reverts to the older last-writer-wins behavior.
+Uni provides snapshot isolation with **Serializable Snapshot Isolation (SSI)** via optimistic concurrency control (OCC) as the default. Multiple sessions and transactions can coexist, each with its own plan cache and private write buffers. Read-write transactions read from a pinned snapshot — buffered and flushed vertices, edges and property values alike, so another transaction's commit or flush does not change what they see — and track an item-level read/write-set; the writer lock acquired at commit time is the *validation* point, where a transaction whose reads or writes conflict with a commit that landed since its snapshot is **aborted** and must be **retried**. SSI is controlled by `UniConfig.ssi_enabled` (default `true`); setting it to `false` reverts to the older last-writer-wins behavior.
 
 ## Design Philosophy
 
@@ -416,6 +416,15 @@ tokio::spawn(async move {
 2. **Async Flush**: Flush in background while accepting new writes
 3. **Multiple Databases**: Shard data across independent Uni instances
 4. **Read Replicas**: Sync snapshots to read-only replicas
+
+### Long-Lived Transactions Hold Back Compaction
+
+While a transaction is open, compaction does not fold edge changes committed
+after it began: folded edges carry no version, so the transaction would see
+them. A transaction left open for a long time keeps those changes in the
+delta tables until it ends, so keep transactions short. A bulk load does not need its host transaction to stay
+open, because `BulkWriter::commit` commits the load on its own, so end the host
+transaction once the writer is built.
 
 ---
 

@@ -251,6 +251,42 @@ impl Executor {
         node_val.entity_labels().filter(|l| !l.is_empty())
     }
 
+    /// The labels `vid` carries now, as this statement sees them.
+    ///
+    /// A row's binding holds the labels the vertex had when the row was
+    /// matched; a write through another binding of the same vertex — a
+    /// second variable in the row, or the same variable in an earlier row —
+    /// does not update it. Computing a label write from the binding therefore
+    /// rebuilt the set from labels that no longer held: `SET a:X SET b:Y` on
+    /// one vertex stored `[A, Y]`. Every write of this statement lands in the
+    /// L0 chain, so that is read first (transaction buffer, then main, then
+    /// pending flush); a vertex no L0 holds has not been relabelled since it
+    /// was matched, so its binding is current, and the persisted label index
+    /// covers a binding that carries no labels.
+    fn current_vertex_labels(
+        &self,
+        vid: Vid,
+        binding: &Value,
+        ctx: Option<&QueryContext>,
+    ) -> Vec<String> {
+        ctx.and_then(|ctx| l0_visibility::get_vertex_labels_optional(vid, ctx))
+            .or_else(|| Self::extract_labels_from_node(binding))
+            .or_else(|| self.storage.get_labels_from_index(vid))
+            .unwrap_or_default()
+    }
+
+    /// Gives every binding of `vid` in `row` the label set `labels`.
+    ///
+    /// openCypher binds a node by reference, so after `SET a:X` a second
+    /// variable bound to the same node projects `X` too.
+    fn set_labels_on_bindings(row: &mut HashMap<String, Value>, vid: Vid, labels: &[String]) {
+        for binding in row.values_mut() {
+            if binding.entity_vid() == Some(vid) {
+                binding.set_entity_labels(labels.to_vec());
+            }
+        }
+    }
+
     /// Extracts user-visible properties from a value that represents a node or edge.
     ///
     /// Strips internal bookkeeping keys (those prefixed with `_` or named
@@ -385,7 +421,11 @@ impl Executor {
         match target {
             Some(Value::Node(ref node)) => {
                 let vid = node.vid;
-                let labels = node.labels.clone();
+                // Current labels, not the binding's: the write stores them
+                // with the row, and stale ones would restore a label an
+                // earlier write removed.
+                let labels =
+                    self.current_vertex_labels(vid, row.get(variable).unwrap_or(&Value::Null), ctx);
                 let enriched = self
                     .write_vertex_props(
                         vid,
@@ -408,7 +448,7 @@ impl Executor {
             }
             Some(ref node_val) if Self::vid_from_value(node_val).is_ok() => {
                 let vid = Self::vid_from_value(node_val)?;
-                let labels = Self::extract_labels_from_node(node_val).unwrap_or_default();
+                let labels = self.current_vertex_labels(vid, node_val, ctx);
                 let enriched = self
                     .write_vertex_props(
                         vid,
@@ -962,24 +1002,35 @@ impl Executor {
                     );
                     true
                 };
+                // Storage before catalog -- before the live catalog, not just
+                // before `sm.save()` below: a Lance column the catalog does not
+                // know about is invisible, while a catalog column Lance lacks is
+                // a hard read failure -- including through a fork branch, which
+                // carries its own schema copy and is widened here too (issue
+                // #249). Any commit saves a dirty catalog, so declaring first
+                // let one persist the property ahead of its column. A property
+                // already declared is refused by `add_property_with_desc`, and
+                // is not widened to a type it does not have.
+                let declared = sm
+                    .schema()
+                    .properties
+                    .get(entity_name)
+                    .is_some_and(|props| props.contains_key(&prop.name));
+                if !declared {
+                    storage
+                        .widen_for_declared_properties(
+                            entity_name,
+                            &[(prop.name.clone(), dt.clone())],
+                        )
+                        .await?;
+                }
                 sm.add_property_with_desc(
                     entity_name,
                     &prop.name,
-                    dt.clone(),
+                    dt,
                     effective_nullable,
                     prop.description,
                 )?;
-                // Storage before catalog (`sm.save()` below): a Lance column
-                // the catalog does not know about is invisible, while a
-                // catalog column Lance lacks is a hard read failure --
-                // including through a fork branch, which carries its own
-                // schema copy and is widened here too (issue #249).
-                storage
-                    .widen_for_declared_properties(
-                        entity_name,
-                        &[arrow_schema::Field::new(&prop.name, dt.to_arrow(), true)],
-                    )
-                    .await?;
             }
             AlterAction::DropProperty(prop_name) => {
                 sm.drop_property(entity_name, &prop_name)?;
@@ -3309,8 +3360,7 @@ impl Executor {
                     {
                         if let Ok(vid) = Self::vid_from_value(node_val) {
                             reject_if_ephemeral_vid(vid)?;
-                            let labels =
-                                Self::extract_labels_from_node(node_val).unwrap_or_default();
+                            let labels = self.current_vertex_labels(vid, node_val, ctx);
                             let schema = self.storage.schema_manager().schema().clone();
 
                             // Lazy one-time read. Always read the full row
@@ -3518,9 +3568,9 @@ impl Executor {
                             .and_then(|pr| pr.plugin_registry());
                         reject_virtual_label_write(registry.as_ref(), labels, "SET")?;
 
-                        // Get current labels from node value
-                        let current_labels =
-                            Self::extract_labels_from_node(node_val).unwrap_or_default();
+                        // The vertex's labels now, not the binding's: the
+                        // write below replaces the whole set.
+                        let current_labels = self.current_vertex_labels(vid, node_val, ctx);
 
                         // Determine new labels to add (skip duplicates)
                         let labels_to_add: Vec<_> = labels
@@ -3536,22 +3586,22 @@ impl Executor {
                             // (main) L0 for non-transactional callers. Replace
                             // semantics via `set_vertex_labels`.
                             let added = labels_to_add.len();
-                            let mut new_labels = current_labels;
+                            let mut new_labels = current_labels.clone();
                             new_labels.extend(labels_to_add);
                             if let Some(ctx) = ctx {
                                 let l0 = ctx.transaction_l0.as_ref().unwrap_or(&ctx.l0);
                                 let mut guard = l0.write();
-                                guard.set_vertex_labels(vid, &new_labels);
+                                guard.relabel_vertex(vid, &current_labels, &new_labels);
                                 guard.record_labels_added(vid, added);
                             }
 
-                            // Update the node value in the row with the new
-                            // labels. This reached into a `Value::Map` only, so a
-                            // natively-encoded vertex kept its old label set even
-                            // though the relabel had reached storage (#234).
-                            if let Some(binding) = row.get_mut(variable) {
-                                binding.set_entity_labels(new_labels);
-                            }
+                            // Update every binding of the vertex in the row. This
+                            // reached into a `Value::Map` only, so a natively
+                            // encoded vertex kept its old label set even though
+                            // the relabel had reached storage (#234); and only
+                            // `variable`'s binding, so another variable bound to
+                            // the same vertex projected the old set.
+                            Self::set_labels_on_bindings(row, vid, &new_labels);
                         }
                     }
                 }
@@ -3782,7 +3832,7 @@ impl Executor {
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
                 if any_exist {
-                    let labels = Self::extract_labels_from_node(node_val).unwrap_or_default();
+                    let labels = self.current_vertex_labels(vid, node_val, ctx);
                     let _ = writer
                         .update_vertex_with_labels(vid, props, &labels, tx_l0)
                         .await?;
@@ -3915,8 +3965,9 @@ impl Executor {
                 .and_then(|pr| pr.plugin_registry());
             reject_virtual_label_write(registry.as_ref(), labels, "REMOVE")?;
 
-            // Get current labels from node value
-            let current_labels = Self::extract_labels_from_node(node_val).unwrap_or_default();
+            // The vertex's labels now, not the binding's: the write below
+            // replaces the whole set.
+            let current_labels = self.current_vertex_labels(vid, node_val, ctx);
 
             // Determine which labels to actually remove (only those currently present)
             let labels_to_remove: Vec<_> = labels
@@ -3943,16 +3994,14 @@ impl Executor {
                 if let Some(ctx) = ctx {
                     let l0 = ctx.transaction_l0.as_ref().unwrap_or(&ctx.l0);
                     let mut guard = l0.write();
-                    guard.set_vertex_labels(vid, &remaining_labels);
+                    guard.relabel_vertex(vid, &current_labels, &remaining_labels);
                     guard.record_labels_removed(vid, removed);
                 }
 
-                // Update the node value in the row with the remaining labels.
-                if let Some(binding) = row.get_mut(variable) {
-                    // Map-only before, so `REMOVE n:Label` left a natively
-                    // encoded vertex showing its old label set (#234).
-                    binding.set_entity_labels(remaining_labels);
-                }
+                // Update every binding of the vertex in the row. Map-only
+                // before, so `REMOVE n:Label` left a natively encoded vertex
+                // showing its old label set (#234).
+                Self::set_labels_on_bindings(row, vid, &remaining_labels);
             }
         }
         Ok(())

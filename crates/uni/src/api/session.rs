@@ -1269,6 +1269,7 @@ impl Session {
             self.db.clone(),
             self.rule_registry.clone(),
             program,
+            self.principal.clone(),
         )
     }
 
@@ -2106,39 +2107,6 @@ fn collect_pattern_element(
     }
 }
 
-/// Best-effort extraction of the structured authz [`Resource`] fields —
-/// labels, relationship types, touched property keys, and operations — from a
-/// parsed Cypher query. Labels/types/operations are complete; property
-/// extraction covers inline pattern map literals (a refinement, not a security
-/// boundary on its own).
-///
-/// [`Resource`]: uni_plugin::traits::connector::Resource
-fn extract_authz_fields(
-    query: &uni_cypher::ast::Query,
-) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
-    use std::collections::BTreeSet;
-
-    let mut labels = BTreeSet::new();
-    let mut rel_types = BTreeSet::new();
-    let mut properties = BTreeSet::new();
-    let mut operations = BTreeSet::new();
-
-    walk_authz_query(
-        query,
-        &mut labels,
-        &mut rel_types,
-        &mut properties,
-        &mut operations,
-    );
-
-    (
-        labels.into_iter().collect(),
-        rel_types.into_iter().collect(),
-        properties.into_iter().collect(),
-        operations.into_iter().collect(),
-    )
-}
-
 /// Recurse the [`Query`](uni_cypher::ast::Query) enum (Single / Union / Explain /
 /// TimeTravel / Schema), accumulating authz fields from each statement's clauses.
 fn walk_authz_query(
@@ -2245,6 +2213,106 @@ pub(crate) fn authorize_query(
     cypher: &str,
     verb: &str,
 ) -> Result<()> {
+    if db.plugin_registry.authz_policies().is_empty() {
+        return Ok(());
+    }
+    // Parse the query (only when policies are active) to populate the structured
+    // Resource. This is the same parse execution runs a moment later; a parse
+    // failure leaves the structured fields empty (path-only) — the query will
+    // fail to execute anyway, and a label/type-gating policy denies on empties.
+    let fields = match uni_cypher::parse(cypher) {
+        Ok(query) => {
+            let mut fields = AuthzFields::default();
+            fields.add_query(&query);
+            fields
+        }
+        Err(_) => AuthzFields::default(),
+    };
+    authorize_resource(db, principal, verb, cypher, fields)
+}
+
+/// The structured [`Resource`] fields of one authorization request: labels,
+/// relationship types, touched property keys and operations.
+///
+/// Best-effort: labels, types and operations are complete; property
+/// extraction covers inline pattern map literals (a refinement, not a
+/// security boundary on its own).
+///
+/// [`Resource`]: uni_plugin::traits::connector::Resource
+#[derive(Debug, Default)]
+pub(crate) struct AuthzFields {
+    labels: std::collections::BTreeSet<String>,
+    rel_types: std::collections::BTreeSet<String>,
+    properties: std::collections::BTreeSet<String>,
+    operations: std::collections::BTreeSet<String>,
+}
+
+impl AuthzFields {
+    /// Adds what a parsed Cypher query names, operations included.
+    pub(crate) fn add_query(&mut self, query: &uni_cypher::ast::Query) {
+        walk_authz_query(
+            query,
+            &mut self.labels,
+            &mut self.rel_types,
+            &mut self.properties,
+            &mut self.operations,
+        );
+    }
+
+    /// Adds the labels, relationship types and inline property keys of a
+    /// pattern, without recording an operation.
+    pub(crate) fn add_pattern(&mut self, pattern: &uni_cypher::ast::Pattern) {
+        for path in &pattern.paths {
+            for el in &path.elements {
+                collect_pattern_element(
+                    el,
+                    &mut self.labels,
+                    &mut self.rel_types,
+                    &mut self.properties,
+                );
+            }
+        }
+    }
+
+    /// Adds one vertex label.
+    pub(crate) fn add_label(&mut self, label: &str) {
+        self.labels.insert(label.to_owned());
+    }
+
+    /// Adds one relationship type.
+    pub(crate) fn add_rel_type(&mut self, rel_type: &str) {
+        self.rel_types.insert(rel_type.to_owned());
+    }
+
+    /// Adds the keys of `expr` when it is an inline map literal.
+    pub(crate) fn add_map_keys(&mut self, expr: Option<&uni_cypher::ast::Expr>) {
+        collect_map_keys(expr, &mut self.properties);
+    }
+
+    /// Adds one operation (`"read"`, `"write"`, …).
+    pub(crate) fn add_operation(&mut self, operation: &str) {
+        self.operations.insert(operation.to_owned());
+    }
+}
+
+/// Consults the registered `AuthzPolicy` chain for `verb` on a resource
+/// whose path is `path` and whose structured fields are `fields`.
+///
+/// The parse-free core of [`authorize_query`], for callers that hold an AST
+/// rather than statement text — a Locy program's commands, or the statements
+/// `tx.apply` replays.
+///
+/// # Errors
+///
+/// [`UniError::AuthorizationDenied`] when a policy denies the request or fails
+/// to evaluate it.
+pub(crate) fn authorize_resource(
+    db: &UniInner,
+    principal: Option<&uni_plugin::traits::connector::Principal>,
+    verb: &str,
+    path: &str,
+    fields: AuthzFields,
+) -> Result<()> {
     use uni_plugin::traits::connector::{Action, Decision, Principal, Resource};
 
     let policies = db.plugin_registry.authz_policies();
@@ -2256,20 +2324,12 @@ pub(crate) fn authorize_query(
     let action = Action {
         verb: verb.to_owned(),
     };
-    // Parse the query (only when policies are active) to populate the structured
-    // Resource. This is the same parse execution runs a moment later; a parse
-    // failure leaves the structured fields empty (path-only) — the query will
-    // fail to execute anyway, and a label/type-gating policy denies on empties.
-    let (labels, rel_types, properties, operations) = match uni_cypher::parse(cypher) {
-        Ok(query) => extract_authz_fields(&query),
-        Err(_) => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
-    };
     let resource = Resource {
-        path: cypher.to_owned(),
-        labels,
-        rel_types,
-        properties,
-        operations,
+        path: path.to_owned(),
+        labels: fields.labels.into_iter().collect(),
+        rel_types: fields.rel_types.into_iter().collect(),
+        properties: fields.properties.into_iter().collect(),
+        operations: fields.operations.into_iter().collect(),
     };
     for policy in policies.iter() {
         match policy.check(principal, &action, &resource) {

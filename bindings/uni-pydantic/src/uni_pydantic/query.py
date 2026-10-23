@@ -22,7 +22,7 @@ from typing import (
 
 from pydantic import ValidationError
 
-from .base import SearchScores, UniNode
+from .base import SearchScores, UniEdge, UniNode
 from .exceptions import CypherInjectionError, QueryError
 from .fields import RelationshipDescriptor
 
@@ -189,7 +189,9 @@ class PropertyProxy(Generic[T]):
         >>> query.filter(Person.name.starts_with("A"))
     """
 
-    def __init__(self, property_name: str, model: type[UniNode]) -> None:
+    def __init__(
+        self, property_name: str, model: type[UniNode] | type[UniEdge]
+    ) -> None:
         self._property_name = property_name
         self._model = model
 

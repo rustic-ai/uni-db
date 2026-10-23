@@ -410,7 +410,7 @@ The internal vertex identifier — a 64-bit auto-incrementing integer.
 | **Encoding** | Pure auto-increment (no embedded label/offset bits) |
 | **Sentinel** | `Vid::INVALID = u64::MAX` |
 | **Purpose** | O(1) array indexing during query execution |
-| **Label Resolution** | Via `VidLabelsIndex` (separate in-memory bidirectional map) |
+| **Label Resolution** | Via `VidLabelsIndex` (separate in-memory copy-on-write VID → labels map) |
 
 VIDs are dense, sequential, and never reused. They serve as the primary key in all Lance tables (`_vid` column) and as array offsets in CSR adjacency structures.
 
@@ -871,7 +871,19 @@ Key rules:
 A flush batch's Arrow schema comes from the *declared catalog properties*
 (`VertexDataset::get_arrow_schema`), not from the dataset on disk. So the
 catalog and the stored table have to be kept in step, and every DDL path that
-changes a label's property set widens storage before persisting the catalog.
+changes a label's property set widens storage before the property enters the
+live catalog — not merely before that DDL saves it. Every primary commit saves
+a dirty catalog (`save_if_dirty`), so a property declared in memory first could
+reach disk ahead of its column through an unrelated commit; a crash before the
+widening finished then failed every read of the label after reopen (`column
+types must match schema types`). `SchemaBuilder::apply` therefore widens, in
+one pass before its catalog loop, every property the batch declares that the
+catalog lacks or re-declares with the same type (a conflicting re-declaration
+is left to `declare_property` to refuse), and `ALTER ... ADD PROPERTY` widens
+before `add_property_with_desc`. `widen_for_declared_properties` takes each
+property's declared type from its caller for the same reason: the backfill
+below cannot look it up in a catalog that does not hold it yet. A widening that
+fails now leaves the catalog untouched.
 
 What happens on `ADD PROPERTY`:
 
@@ -892,8 +904,8 @@ What happens on `ADD PROPERTY`:
    later `SET n.p = NULL` cannot resurrect it through the `_all_props`
    coalesce. This pass is skipped entirely — one scan, no commit — when the
    property has no schemaless data, which is the ordinary case.
-4. **Then, and only then, the catalog is saved.** Storage first, catalog
-   second: a Lance column the catalog does not know about is invisible and
+4. **Then, and only then, the property is declared and the catalog saved.**
+   Storage first, catalog second: a Lance column the catalog does not know about is invisible and
    harmless, whereas a catalog column Lance lacks is a hard read failure. There
    is no WAL record for schema DDL, so ordering is the only recovery lever, and
    because the widening is idempotent a half-applied DDL converges on re-run.
@@ -1990,8 +2002,8 @@ Invariants:
   `commit` hides it before the first table: `BulkVisibilityGate::hide`
   returns a `GateHold`, and every L1 read in the `StorageManager` read tree
   conjoins `NOT (_version IN hidden)` through `RowVisibility`
-  (`row_visibility` for the scan tier, `edge_row_visibility` for the edge
-  tier, `visibility_at(hwm)`; the main-table readers take
+  (`row_visibility` for every L1 tier, scan and edge alike, and
+  `visibility_at(hwm)`; the main-table readers take
   `impl IntoRowVisibility`, so write-side callers passing a bare
   `Option<u64>` stay ungated). `AdjacencyManager::warm` reads under the same
   filter and installs the CSR only if the gate's epoch did not change while
@@ -2091,6 +2103,7 @@ L0Buffer {
 - A *create* is counted by the buffer: `L0Buffer::insert_vertex_with_labels` (`+nodes 1`, `+labels` per label, `+properties` per non-null value) and `L0Buffer::insert_edge`. A row *rewrite* — `SET`, `REMOVE`, a `MERGE` action, a promote upsert — goes through `update_vertex_with_labels` / `update_edge` (writer and buffer) and counts nothing there. Before, every rewrite went through the create path: `MATCH … SET n.v = 7` reported `+nodes 1 +labels 1 +properties 3`, `MERGE … ON CREATE SET` reported `+nodes 2`.
 - Property effects are recorded by the executor, which holds the old row: `Writer::record_property_effects` → `L0Buffer::record_property_effect(entity, old, new)`. A property is the TCK's triple (entity, key, value): add = `+1` set, remove = `+1` removed, overwrite with a different value = both, same value = nothing.
 - Label changes (`SET n:L`, `REMOVE n:L`) are recorded where the executor writes the label set (`record_labels_added` / `record_labels_removed`), per node and only when the set changes. They counted nothing before.
+- A label write is a delta against the vertex's *current* labels (`Executor::current_vertex_labels`: the L0 chain, transaction buffer first; then the row's binding, which no write of the statement can have outdated when no L0 holds the vertex; then the `VidLabelsIndex`). `L0Buffer::set_vertex_labels` replaces the whole set, and the executor used to compute that set from the row's binding — a snapshot from match time — so a second binding of the same vertex (another variable of the row, or the same variable in a later row) rebuilt the set from labels that no longer held: `SET a:X SET b:Y` on one vertex stored `[A, Y]`, `REMOVE a:B REMOVE b:C` stored `[A, B]`. Property writes (`SET n.p`, `SET n = / += map`, `REMOVE n.p`) pass the same current labels: `L0Buffer::apply_vertex_write` appends the labels it is given, so a stale binding put back a label removed a moment earlier. After a label write every binding of the vertex in the row takes the new set (`Executor::set_labels_on_bindings`), so `RETURN a, b` projects it for both, as openCypher's by-reference node binding requires.
 - A statement's net effect: an `l0::StatementScope` (opened per statement and per bulk batch, see Write Throttling) remembers the vertices and edges the statement created. A change to one of them adjusts the create's counts instead of adding new ones (`CREATE (n {x: 1}) SET n.x = 2` is `+properties 1`, as TCK Set1 [6] expects).
 - Counters follow Neo4j's `QueryStatistics`, not the TCK's side effects. openCypher specifies no execution counters, and `uni-tck` computes `+labels`, `-properties`, ... itself by diffing the graph (`world.rs`, `capture_before` / `capture_after`), so the TCK never reads `ExecuteResult`. Hence: a deleted entity's properties are not counted in `properties_removed` (Neo4j has no such counter; counting them was measured at 1.6–2.3x on a 20k-node `DETACH DELETE`, debug build), and labels count per node (`labelsAdded`), not as labels newly in use across the graph. Pinned by `cypher_write::execute_counters_matrix::deleting_counts_entities_not_their_properties`.
 - A delete counts once (wave Q): `L0Buffer::apply_vertex_deletion` / `apply_edge_deletion` bump `nodes_deleted` / `relationships_deleted` only when the tombstone is new, so an entity named twice in one `DELETE` (or deleted by name and again by `DETACH`) is one deletion. `DETACH DELETE n, m` with `m = n` used to report `nodes_deleted 2`.
@@ -2179,7 +2192,7 @@ PropertyManager {
 
 Step 4 spans two tiers, and both conjoin `_version <= hwm` when the `PropertyManager`'s own `StorageManager` carries one: the per-type delta scan (via `StorageManager::apply_version_filter`) and the `props_json` fallback in the main edges table (via `MainEdgeDataset::find_props_by_eid`). Schemaless and overflow edge properties live *only* in `props_json`, so every such read reaches the fallback — not only reads that come after a compaction.
 
-> **Which readers are actually bounded.** The high water mark comes from the `StorageManager` the `PropertyManager` was *constructed* with, not from whatever manager the surrounding query routes its scans through. Only the manifest-pinned time-travel view built by `UniInner::at_snapshot` constructs a `PropertyManager` over pinned storage, so only it gets a bounded step 4. A read-write transaction routes *scans* through `pinned_at_version` but keeps the live database-level `PropertyManager` on purpose (see [Known Limitations](#known-limitations)), so its hwm is `None` and step 4 reads at HEAD; forks are likewise unbounded. Step 3's LRU cache is version-agnostic in every case.
+> **Which readers are bounded.** A read-write transaction shares the live database-level `PropertyManager` (so its own uncommitted properties, in tx_l0, stay readable at step 2), and the `PropertyManager`'s own `StorageManager` carries no hwm. The bound therefore travels with the read: `QueryContext::l1_visibility` holds the pinned view's `RowVisibility` (`StorageManager::pinned_row_visibility`, set by `Executor::get_context`, the DataFusion graph `query_context`, the procedure host and the Locy fixpoint), and every step-4 read takes its filter from the context when present, else from its own storage (`PropertyManager::l1_visibility`). A pinned read neither serves from nor fills step 3's LRU cache, which holds HEAD values (`PropertyManager::cache_usable`). The L0 gates are unchanged. The one step-4 read that stays live is `flushed_edge_key_conflict`, a writer-side check that must see the newest committed row. Before, only the `UniInner::at_snapshot` view, which constructs its own `PropertyManager` over pinned storage, was bounded: a transaction read L1 properties and the cache at HEAD, so an edge property updated and flushed by another transaction changed under it (`ssi_edge_pinning::property_reads_are_pinned_across_a_flush`).
 
 > **Embedder note (breaking).** `MainEdgeDataset::find_props_by_eid` takes a third argument, `version: Option<u64>`; pass `storage.version_high_water_mark()`, or `None` for an unbounded read at HEAD. Without it even a snapshot-pinned reader read L0 and the delta tier at its snapshot but this tier at HEAD, so a post-snapshot write leaked in and a post-snapshot delete made the edge vanish. The version bound is a *conjunct* — the highest-version-row-wins tombstone rule runs unchanged over whatever survives it. `exists_by_eid` stays deliberately unbounded: it is the compaction dual-write invariant check and must see rows at any version.
 
@@ -2399,14 +2412,26 @@ Postings (`term → VIDs`) are built transiently during index operations, not st
 
 ### VidLabelsIndex
 
-In-memory bidirectional index for O(1) VID ↔ label lookups:
+In-memory VID → labels index, copy-on-write so that a pinned view can take
+its own copy for the cost of a pointer clone:
 
 ```rust
 VidLabelsIndex {
-    vid_to_labels: HashMap<Vid, Vec<String>>,
-    label_to_vids: HashMap<String, HashSet<Vid>>,
+    shards: HashMap<u64, Arc<HashMap<Vid, Vec<String>>>>, // keyed by vid >> 12
+    label_counts: Arc<HashMap<String, usize>>,
+    len: usize,
 }
 ```
+
+`Clone` copies the shard map (one `Arc` per 4096-VID shard) and the count
+map's `Arc`; a write `Arc::make_mut`s only the shard it touches, so a clone is
+an isolated snapshot (`vid_labels::tests::test_clone_is_an_isolated_snapshot`).
+Every transaction begin clones the index for its pinned view, and before this
+it deep-copied a `label → HashSet<Vid>` map as well: begin cost 67 ms at 200k
+vertices, 636× its cost at 1k; it is now flat (9.6 µs at both;
+`perf::tx_begin_cost`). The label → VIDs direction is gone:
+`get_vids_with_label` walks the shards and returns an owned set, and
+`label_counts` answers the per-label counts the map was kept for.
 
 Rebuilt from the main vertex table on database open. Updated incrementally on writes.
 
@@ -5094,6 +5119,19 @@ registry lookup cannot classify them. Their modes live in one table,
   `Read < Write < Schema < Dbms`) to `"dbms"` / `"schema"`, else
   `classify_verb`. `Transaction::query` / `execute` / `prepare` use it;
   `Session::run` authorizes an administrative statement as `"dbms"`.
+  Inside a transaction every entry point classifies through
+  `Transaction::authz_verb` (`"read"` for a pure read, else `statement_verb`)
+  and authorizes exactly once: `Transaction::execute` delegates to the
+  `query` body, which holds the only check on that path; the builders check in
+  `run_exec_guards`, prepared statements in `PreparedGuards::run`.
+- The principal: procedure capability gates read `CURRENT_PRINCIPAL`, a
+  task-local, never the session. Every executing entry point must install it —
+  Cypher in a transaction via `Transaction::with_principal_scope`, Locy in a
+  transaction via `Transaction::with_locy_scope` (principal plus the instance
+  plugin registry, as `LocyBuilder::run` does), prepared statements from the
+  principal captured at prepare time. A cursor executes after its builder
+  returns, so `build_guarded_cursor` captures the principal and session plugin
+  registry at build time and re-installs them around every poll.
 - Dispatch: `execute_procedure` reaches its built-in arms only for a name in
   the table, so a new built-in without a mode is not callable rather than
   silently read-only; a unit test scans the dispatch `match` for unclassified
@@ -5109,6 +5147,34 @@ body refuse a Cypher command calling a `Schema`/`Dbms` procedure
 overlay. Neo4j's procedure modes carry the same names; there, admin rights are a
 separate `@Admin` privilege (`dbms.listConfig`, `db.clearQueryCaches`), which
 uni expresses as the `dbms` authorization verb.
+
+### Locy authorization
+
+Every Locy program is authorized before any of it runs
+(`api::locy_authz::authorize_locy_program`, called from
+`LocyEngine::evaluate_compiled_capturing`, which every entry point reaches:
+`Session::locy` / `locy_with().run()` / `.profile()`, the `Transaction`
+equivalents, and `PreparedLocy::execute` for a session- or
+transaction-prepared program). Before, no Locy entry point consulted the
+`AuthzPolicy` chain: with a deny-all policy, `tx.locy` ran Cypher writes and
+`tx.locy("CALL uni.admin.snapshot.create(..)")` created a snapshot. The
+principal is the session's or transaction's (`LocyEngine::principal`; a
+prepared program keeps the one that prepared it); the resource path is the
+program text. A program makes one `read` request covering what it evaluates
+(rule bodies, goal queries, `EXPLAIN RULE`, `ABDUCE`, `CALIBRATE`/`VALIDATE`,
+read-only Cypher commands), when it evaluates anything, and one request per
+writing command under the verb Cypher gives that statement
+(`transaction::procedure_verb`, the core of `statement_verb`): `write` for a
+Cypher write and for `DERIVE`, `schema` / `dbms` for a command calling a
+`Schema` / `Dbms` procedure. The mutations of an `ASSUME` block count, as a
+Cypher write counts whether or not its transaction commits. Each request
+carries the labels / relationship types / properties / operations of the
+parts it covers (`session::AuthzFields`). `Transaction::apply` authorizes each
+statement of the `DerivedFactSet` it replays (`locy_authz::authorize_replay`,
+path `<locy-apply>`) before replaying any: the set is plain data, which another
+principal's session, or a caller by hand, may have built. Administrative and
+DDL procedures stay callable from `tx.locy`, authorized as `dbms` / `schema`,
+in parity with `tx.execute`.
 
 ### Compaction
 
@@ -6492,16 +6558,14 @@ lose updates in this mode.
 - **Flush-boundary edge cases**: transactions pin the L1 vertex-scan tier
   (vertex rows filter to `_version <=` the snapshot version, so
   post-snapshot inserts flushed mid-transaction stay invisible). The pin is
-  on row *existence*, not property values or edges. Scans route through the
-  version-pinned `StorageManager`, but the `PropertyManager` deliberately
-  stays on **live** storage: a transaction must read its own uncommitted
-  properties out of tx_l0, and a version filter would hide them (it would
-  break e.g. MERGE's edge-property match). The edge/adjacency tier stays
-  live for the mirror-image reason — a `pinned_at_version` view *shares* the
-  live `AdjacencyManager`, so the transaction's own unflushed edges stay
-  visible to traversal. Cross-transaction property/edge skew on an
-  already-visible row is therefore caught by OCC validation at commit (edge
-  reads are recorded in the read-set), not by the pin. A vertex whose
+  on L1 rows: scans route through the version-pinned `StorageManager`; the
+  shared live `PropertyManager` bounds its L1 reads by the context's
+  `l1_visibility` and skips its cache, while the transaction's own
+  uncommitted properties still come from tx_l0; and the shared live
+  `AdjacencyManager` is read through `StorageManager::neighbors`, filtered by
+  the pin, with the transaction's own unflushed edges overlaid from tx_l0.
+  Write skew between transactions is caught by OCC validation at commit
+  (edge reads are recorded in the read-set), not by the pin. A vertex whose
   only pre-transaction state is in L1 and that is updated-and-flushed
   mid-transaction is *excluded* from the pinned scan rather than shown old
   (L1 rows are single-versioned).
@@ -7159,6 +7223,23 @@ and `flush_lock`, taken in that order (a build takes neither of the others):
    `last_built_at` (`indexes_needing_rebuild`; empty when catalog and index
    list were captured together, as they now are). Clear the intent.
 
+Schema DDL takes none of the restore's locks, so a DDL can run across a
+restore. What keeps the catalog file consistent with the handle is that
+`SchemaManager::save` is ordered: it holds `save_order` (a
+`tokio::sync::Mutex<()>` on the manager) from reading the in-memory catalog
+until its object-store write returns, so writes land in the order their
+contents were read and the file always ends at the newest catalog. Before
+that, a DDL's save that serialized the pre-restore catalog and wrote it after
+step 4's save left the pre-restore catalog on disk under rewound storage: the
+handle was right, and the next open declared the post-snapshot labels and
+properties again and lost the renamed-back ones (`Person.age` read NULL on
+every row). Seam `schema::save::before-put`; test
+`catalog_save_racing_a_restore_cannot_resurrect_the_old_catalog`. The same
+ordering covers any two concurrent saves (two DDLs, a DDL and a commit's
+`save_if_dirty`, an index build recording its outcome). A DDL that is part
+way through when the restore installs the snapshot's catalog is undone with
+the rest of the catalog; it is ordered before the restore.
+
 A crash between steps 3 and 7 leaves the intent; the next open runs
 `recover_interrupted_restore` (after bulk-load recovery, before the latest
 manifest is read), which repeats the idempotent rewind, publishes the
@@ -7244,15 +7325,17 @@ version (`storage::versioned_read_after_delete`, both declared and schemaless):
 - **A schemaless edge type honours the ceiling.** `find_edges_by_type_names`
   (the `TraverseMainByType` read of `main_edges`) used no snapshot ceiling, so
   a snapshot lost edges deleted after it and gained ones created after it. It
-  uses `edge_row_visibility` now (a transaction's edge tier stays unpinned, as
-  for the CSR).
+  uses `row_visibility` now, which carries a transaction's ceiling as well.
 - **Compaction keeps what pinned readers read.** `PinnedVersions` (the live
   `AdjacencyManager`'s pin registry) now also holds `StorageManager::pinned`
   views. Each semantic merge starts with `StorageManager::begin_compaction_merge`,
   which returns the oldest pin: `compact_vertices` merges only rows at or
   below it and keeps the rest verbatim, and `compact_adjacency` folds only
-  deltas at or below the oldest pin whose edge tier is versioned (a
-  `pinned` view; a transaction reads the live adjacency). L2 rows carry no
+  deltas at or below the oldest edge pin. A `pinned` view pins its version;
+  a transaction (`PinnedVersions::pin_transaction(version, edge_version)`)
+  pins `min(excluded bulk versions) - 1` when a load it must not see is in
+  flight, else its version, since a folded load could no longer be excluded.
+  L2 rows carry no
   `_version`, so everything folded must be visible at every such pin; the CSR
   warm no longer filters L2 by `_version`, which was a schema error on any
   pinned read once L2 existed. Before a merge
@@ -7261,6 +7344,30 @@ version (`storage::versioned_read_after_delete`, both declared and schemaless):
   `catalog/compaction_horizon.json` and in memory; a flush-manifest pin below
   that horizon, made afterwards, is refused with `InvalidArgument`. Explicit
   snapshots are never refused.
+- **A transaction reads edges as of its snapshot.** A `pinned_at_version`
+  view shares the live `AdjacencyManager`, whose CSR, shadow CSR and
+  commit-replay overlay hold every committed edge, so traversal saw edges
+  committed after the transaction began (and through them, vertices outside
+  its snapshot) and kept edges deleted after it began. Neighbour reads now go
+  through `StorageManager::neighbors`, which for a pinned view
+  (`edge_visibility`: the hwm plus excluded bulk versions) calls
+  `AdjacencyManager::get_neighbors_visible`; the shadow CSR keeps an edge iff
+  its creation is admitted and its deletion is not
+  (`ShadowCsr::get_entries_visible`), which restores edges deleted after the
+  pin. Warming still reads unfiltered (`snapshot_version_hwm`), so a pinned
+  reader never installs a filtered CSR into the shared cache. The commit
+  replay mirrors the transaction's edges into the overlay with their main-L0
+  commit versions (`Writer::mirror_edges_into_adjacency`), not the
+  transaction-local ones, so the filter compares like with like. The
+  transaction's own unflushed edges come from its tx_l0 overlay, unfiltered
+  (`ssi_edge_pinning`).
+- **The `ext_id` map takes each vertex's newest row.**
+  `StorageManager::get_vertex_ext_ids` kept the first row it met per VID across
+  fragments, so after an `ext_id` was deleted and reused it could resolve to a
+  tombstoned row, and promote upsert inserted a duplicate instead of updating
+  the live vertex. It now projects `_vid, ext_id, _version, _deleted`, keeps
+  the newest row per VID (a tombstone wins a tie) under the reader's
+  `row_visibility` (`fork::fork_promote_ext_id_reuse`).
 - **A bulk load is excluded by every ceiling captured before it is visible**;
   see [BulkWriter Path](#bulkwriter-path).
 
@@ -9093,7 +9200,11 @@ Every surface trait lives in `crates/uni-plugin/src/traits/`, is `Send + Sync + 
 | Catalog | `CatalogProvider` + `CatalogTable` (catalog.rs) | `list_labels`, `resolve_label` | — |
 | Replacement scan | `ReplacementScanProvider` (catalog.rs) | — | — |
 
-**CDC checkpoints** (`crates/uni-plugin-host/src/cdc_runtime.rs`). After a stream accepts a commit, the driver task queues the stream's `checkpoint()` LSN with a per-runtime writer task, which persists `<data_path>/_system/cdc_checkpoints.json` on the blocking pool — never inline on the executor, where its two `fsync`s once stalled whole `current_thread` runtimes for the duration of a slow disk flush. The writer keeps only the latest LSN per provider and runs one write at a time, so a stale checkpoint never overwrites a newer one; the persisted LSN may lag (coalesced or failed writes ⇒ at-least-once redelivery after a restart) but never runs ahead of a delivered commit, and shutdown waits for queued writes. Providers whose `resumes_from_checkpoint()` is `false` (they ignore `from_lsn`, like the built-in `memory` provider) are not persisted. **No CDC provider is registered by default.** The runtime starts a stream for every registered provider and the transaction commit path extracts per-row mutation events whenever any CDC output is registered (`transaction.rs`, `cdc_active`); the in-memory `memory` provider keeps every batch it receives until shutdown, so registering it by default made every database retain every commit (≈9.9 KB of RSS per small commit, measured over 20k commits). It is opt-in: `db.add_plugin(uni_plugin_builtin::extras::MemoryCdcPlugin::with_provider(p.clone()))`, then read `p.delivered()`.
+**CDC checkpoints** (`crates/uni-plugin-host/src/cdc_runtime.rs`). After a stream accepts a commit, the driver task queues the stream's `checkpoint()` LSN with a per-runtime writer task, which persists `<data_path>/_system/cdc_checkpoints.json` on the blocking pool — never inline on the executor, where its two `fsync`s once stalled whole `current_thread` runtimes for the duration of a slow disk flush. The writer keeps only the latest LSN per provider and runs one write at a time, so a stale checkpoint never overwrites a newer one; the persisted LSN may lag (coalesced or failed writes ⇒ after a restart the provider is started from an LSN older than the last commit it received; the runtime itself never re-sends history, so only a provider that replays from `from_lsn` out of its own log sees those commits twice) but never runs ahead of a delivered commit, and shutdown waits for queued writes. Providers whose `resumes_from_checkpoint()` is `false` (they ignore `from_lsn`, like the built-in `memory` provider) are not persisted. **No CDC provider is registered by default.** The runtime starts a stream for every registered provider and the transaction commit path extracts per-row mutation events whenever any CDC output is registered (`transaction.rs`, `cdc_active`); the in-memory `memory` provider keeps every batch it receives until shutdown, so registering it by default made every database retain every commit (≈9.9 KB of RSS per small commit, measured over 20k commits). It is opt-in: `db.add_plugin(uni_plugin_builtin::extras::MemoryCdcPlugin::with_provider(p.clone()))`, then read `p.delivered()`.
+
+**Commit announcement order** (`crates/uni-store/src/runtime/publish_sequencer.rs`). The `CommitNotification` every watcher and the CDC runtime consume is sent after the writer's `flush_lock` is released, because building it awaits post-commit work. The order is fixed under the lock instead: `Writer::commit_transaction_l0_sequenced` returns the commit's own version (read from the main buffer under its write lock, right after the merge) and a `PublishTicket` issued by the writer's `PublishSequencer`, and `Transaction::commit` sends the notification through `ticket.publish(..)`. The sequencer releases announcements strictly in ticket order: one that is not yet due is buffered (nothing waits) and sent by whichever caller completes the gap; a ticket dropped unpublished (error, panic, cancellation after the commit point) releases its slot, announcing its *abandon announcement* (`PublishTicket::on_abandon`) in its place if one was set. `Transaction::commit` sets one through `commit_transaction_l0_sequenced`'s `on_abandon` argument, at the moment the ticket is issued (so it also covers the writer's own post-merge awaits, such as the inline flush): a `CommitNotification` for the commit's version with `mutations_failed: true`, on which CDC halts (#233) and watchers still learn of the commit. Before this, a `commit()` future dropped at the post-commit `save_if_dirty().await` released the slot silently and CDC checkpointed past the commit (`triggers::bulk_events_delivery_resilience::transaction_abandoned_after_commit_point_halts_cdc_not_a_hole_resilience`, seam `commit::abandon-after-commit-point`). Internal commits that never announce (`commit_transaction_l0_with_lock_timeout`) pass `None` and still release silently. Before this, `Transaction::commit` re-read `current_version` after the lock was released and sent directly, so a commit landing in between lent its version to the earlier one and could be announced first: with commit A paused after its commit point (`commit::before-notify` failpoint) and B committed meanwhile, A returned version 3 = B's, and watch and CDC both saw `[3, 3]` (`triggers::commit_order_resilience`). `CdcBatch::lsn_end` therefore never decreases across deliveries. `Writer::sequence_announcement` takes a ticket and the current version under `flush_lock` for writes that become visible elsewhere (bulk loads).
+
+**Bulk-load events** (`crates/uni-bulk/src/events.rs`, `crates/uni/src/api/bulk_events.rs`). A bulk load bypasses the transaction buffer, so the commit path's event extraction never saw it. `BulkBackend::events` (a `BulkEventSink`, `DbBulkEventSink` over a weak `UniInner`) closes that: after `show_load` in `BulkWriter::commit` (and in `Redrive::finish` for a load completed in the background) the writer hands a `VisibleLoad` to the sink, which takes a ticket via `sequence_announcement`, publishes one `CommitNotification` (`causal_version` = the load's `write_version`, `version` = the current version, `tx_id` = load id, `session_id` `"bulk-load"`), then reads the load back from the main vertex and edge tables filtered on `_version = write_version` (no other write uses a reserved bulk version) through `LoadEventReader`, at most `BULK_EVENT_CHUNK_ROWS` (4096) rows per chunk, building `MutationEvents::creates` rows (`NODE_CREATE` per vertex label, `EDGE_CREATE` per edge; `props_json` decoded only when a predicate references properties). Each chunk goes to `TriggerRouter::dispatch_after` and, when a CDC output is registered, to a CDC *mutation stream*: `CdcRuntime::open_mutation_stream` registers a bounded (`MUTATION_STREAM_DEPTH` = 4) channel whose id rides on `CommitNotification::mutation_stream`; the driver, on reaching that notification, delivers each chunk as a `CdcBatch` with the load's LSN range and checkpoints once after the sender's `finish`. A stream that closes unfinished, or is missing, halts every stream (the gap stays visible). The runtime drops all pending receivers on `Lagged` and on stop, so a sender never waits on a stream nothing reads. Synchronous before-phase triggers cannot be honoured after the commit point: `BulkWriter::check_before_triggers` asks `TriggerRouter::synchronous_before_trigger_for` (event kind + label / edge type; predicates count as matching) before staging a label's or edge type's rows and again at the top of `commit` (then discarding the load), and refuses with `UniError::BulkLoadBlockedByTrigger` unless `skip_before_triggers(true)`. The sink is driven from a task of its own (`BulkWriter::publish_events` spawns `sink.publish` on a task tracked like the re-drive, and `commit` awaits a oneshot), so dropping `commit()` drops only the wait: before, a drop at `sequence_announcement` announced nothing (and leaked the mutation stream's receiver, which the sink opened first; it now takes the ticket before opening the stream), and a drop mid-stream left triggers short and halted every CDC stream (`triggers::bulk_events_delivery_resilience`). Only after-phase triggers that select a row of the load (`TriggerRouter::wants_after_event` for `NODE_CREATE` per label, `EDGE_CREATE` per edge type) cause the read-back; the built-in `_AuditMe` trigger used to cause it for every load. The delivery holds no strong `UniInner`: it subscribes to the view's shutdown signal before checking `ShutdownHandle::is_signalled`, and stops between chunks or while CDC back-pressures, returning `EventDelivery::Interrupted`; the dropped sender halts CDC (its checkpoint stays before the load), and the load's marker is kept -- `finalize` writes it `Committed` with `events_pending`, `Redrive::finish` leaves it `Active` -- so the next open delivers the load again. **Open-time delivery.** `finalize` promotes the marker to `Committed` only after the delivery, so a marker recovery finds `Active` (or `Committed` with `events_pending`) is a load whose events are not known delivered: `recover_interrupted_bulk_load` rewrites it `Committed` + `events_pending` (with `rows`, recorded at the commit point) and returns it as a `RecoveredLoad` (sorted by `write_version`; edge types from the marker's tables). `UniBuilder::build` hands them to `bulk_events::deliver_recovered_loads` after the `UniInner` exists, which announces each (tickets taken before `build` returns, so ahead of every user commit), finishes at once the markers of loads nothing consumes, and streams the rest on a tracked task, calling `finish_recovered_load_events` (receipt + delete, or just clearing `events_pending` when a read-only open left the endpoint check due) after each. `check_recovered_bulk_endpoints` leaves an `events_pending` marker for that call. A crash before it re-delivers at the next open: at least once. The consumers are those present during `build`: built-in triggers and declared triggers (reactivated by `register_builtin_plugins`, before recovery); `UniBuilder` has no plugin hook, so CDC outputs and plugin triggers, which register after `build` returns, never see an open-time delivery. A read-only open has no writer and delivers nothing; the markers wait. A marker of a release that did not record `version` cannot be read back and is not delivered. A fork's recovery runs in `UniInner::at_fork`, which returns its loads for `ForkBuilder::build` to deliver once the fork inner is shared. Forks have no CDC runtime (`UniInner::cdc_runtime` is `None` on derived inners), so a fork's load reaches triggers only.
 
 The authoritative *surface count* is the `Capability` enum's **26 extension variants** (3.0.0 removed `Connector` and added `LocyGenerator` + `GraphCompute`).
 
@@ -9212,6 +9323,7 @@ The scheduler (M11) drives durable, recurring maintenance:
 - **`TriggerPhase`**: `BeforeMutation`, `AfterMutation`, `BeforeCommit`, `AfterCommit`. Independently, **`FireMode`** ∈ `{ Synchronous, Async, EventualConsistency }` controls whether firing blocks the writer, runs on the runtime's blocking pool as a task tracked by the database's shutdown handle, or is batched. As of 3.0.0 `EventualConsistency` is a **real batched queue** (coalescing per-trigger events, draining on interval/size thresholds through a `BackgroundJobProvider`) rather than an alias for `Async` — tune with `UniConfig::ec_flush_interval` (default 1 s) and `ec_flush_threshold` (default 10,000).
 - **`TriggerOutcome`**: `Continue`, `Reject { reason }` (aborts the commit when fired in a *before* phase), `Defer { until }` (re-enqueue).
 - **`MutationBatch`** wraps an Arrow `RecordBatch` (`events: Arc<RecordBatch>`) with columns `event_kind | vid_or_eid | label | property | old_value | new_value`; event kinds are `TriggerEventMask` bit-constants (`NODE_CREATE` … `LABEL_REMOVED`).
+- **Label / edge-type selectors** (`TriggerSubscription::labels` / `edge_types`) are bare names; a leading `:` (the Cypher form, `":Customer"`) is accepted and stripped where `TriggerRouter::from_registry_with_queue` turns subscriptions into routes (`normalize_selectors`). Routes compare exactly against the bare label an event row carries, so before this a colon-prefixed selector matched nothing — including the built-in `LabelAuditTrigger`, which subscribed to `":_AuditMe"` and never fired. It now ships `"_AuditMe"`. Declared triggers already stripped the colon from `ON :Label`. Since the built-in now matches, an `_AuditMe` commit pays the vertex pre-image probe its `NODE_UPDATE` / `NODE_DELETE` routes ask for (`wants_node_events_for`); commits that touch no `_AuditMe` vertex are unaffected.
 - **`uni.plugin.declareTrigger`** now installs a real firing `TriggerPlugin` (previously a callable procedure that never fired). Declared triggers take an event filter (`CREATE|UPDATE|DELETE [ON :Label | -[:Type]-] [WHEN pred] [ASYNC]`), bind `$vid` / `$label` / `$event_kind`, run their declared Cypher action body, and replay across restart.
 
 ## Hot Reload & Multi-Version ABI
@@ -10326,7 +10438,7 @@ Quick reference of all anti-patterns from every chapter:
 | **VectorClock** | Vector Clock CRDT — logical clocks for causal ordering |
 | **VertexDataset** | Per-label Lance tables storing vertex data with typed property columns |
 | **VID** | Vertex ID — 64-bit auto-increment identifier for vertices |
-| **VidLabelsIndex** | In-memory bidirectional index mapping VIDs to labels and labels to VIDs |
+| **VidLabelsIndex** | In-memory copy-on-write index mapping VIDs to labels, with per-label counts |
 | **VLP** | Variable-Length Path — a `-[:T*]->` or `-[:T*1..n]->` pattern, executed by `GraphVariableLengthTraverseExec` |
 | **WAL** | Write-Ahead Log — durability mechanism recording mutations before they're flushed |
 | **WorkingGraph** | Materialized subgraph loaded from storage for query execution |

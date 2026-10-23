@@ -186,6 +186,74 @@ async fn the_memory_ceiling_fires_while_the_result_is_still_arriving() -> Result
     Ok(())
 }
 
+/// Read `query` through a cursor that pauses after every batch, with a budget
+/// the pauses alone overrun, and assert every row arrives.
+///
+/// # On the budget
+///
+/// The property is that the consumer's pauses are not charged to the query, so
+/// the budget has to be (a) well above what the query itself takes and (b)
+/// well below the pauses in total. This used to be a fixed 3 s budget against
+/// 1.2 s pauses, and (a) failed beside a full workspace run: the deadline is
+/// wall-clock, the query's own work on 25 000 rows is wall-clock too, and a
+/// contended machine stretched it past 3 s with nothing wrong.
+///
+/// So the budget is set from the query's own cost, measured here by the same
+/// cursor read without pauses: five times that, and at least one second. Each
+/// pause is half the budget, so the pauses after the first three batches alone
+/// come to one and a half budgets. A deadline that charged them fails however
+/// loaded the machine is (the pauses scale with the measured cost), and only a
+/// fivefold slowdown between the measurement and the run seconds later fails a
+/// correct one. Measured beside 66 CPU-bound processes on 22 cores, the sorted
+/// test took 103 s at ten times; the factor is the trade between that and the
+/// margin.
+async fn assert_slow_consumer_gets_every_row(db: &Uni, query: &str) -> Result<()> {
+    let mut batches = 0usize;
+    let started = std::time::Instant::now();
+    let mut cursor = db
+        .session()
+        .query_with(query)
+        .timeout(std::time::Duration::from_secs(3600))
+        .cursor()
+        .await?;
+    while let Some(batch) = cursor.next_batch().await {
+        batch?;
+        batches += 1;
+    }
+    let own = started.elapsed();
+    assert!(
+        batches >= 3,
+        "{query}: premise: {batches} batch(es); the pauses must outlast the budget"
+    );
+    let budget = (own * 5).max(std::time::Duration::from_secs(1));
+    let pause = budget / 2;
+
+    let mut cursor = db
+        .session()
+        .query_with(query)
+        .timeout(budget)
+        .cursor()
+        .await?;
+    let mut delivered = 0usize;
+    while let Some(batch) = cursor.next_batch().await {
+        delivered += batch
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "{query}: failed after {delivered} rows; own cost {own:?}, budget \
+                     {budget:?}, pause {pause:?} per batch: {e}"
+                )
+            })?
+            .len();
+        tokio::time::sleep(pause).await;
+    }
+    assert_eq!(
+        delivered,
+        usize::try_from(MULTI_BATCH_ROWS).expect("fits"),
+        "{query}: a slow consumer lost rows to the query deadline"
+    );
+    Ok(())
+}
+
 /// A consumer that pages slowly is not charged the query's own budget.
 ///
 /// `query_timeout` bounds how long the *query* may take. While `execute_stream`
@@ -194,37 +262,18 @@ async fn the_memory_ceiling_fires_while_the_result_is_still_arriving() -> Result
 /// produced, the two diverge: an absolute deadline would fail a cursor for the
 /// crime of being read slowly, which is precisely what a cursor is for.
 ///
-/// The consumer here sleeps well past `query_timeout` in total while the query
-/// itself runs in a fraction of it.
+/// The consumer here pauses well past the budget in total while the query
+/// itself runs in a fraction of it; see [`assert_slow_consumer_gets_every_row`]
+/// for how the budget is chosen.
 #[tokio::test]
 async fn a_slow_consumer_is_not_charged_the_query_budget() -> Result<()> {
     let db = multi_batch_store(uni_db::UniConfig {
         batch_size: 8192,
         max_query_memory: 256_000_000,
-        query_timeout: std::time::Duration::from_secs(3),
         ..Default::default()
     })
     .await?;
-
-    let mut cursor = db
-        .session()
-        .query_with("MATCH (p:P) RETURN p.n")
-        .cursor()
-        .await?;
-
-    let mut delivered = 0usize;
-    while let Some(batch) = cursor.next_batch().await {
-        delivered += batch?.len();
-        // Cumulative sleep exceeds the 3 s budget across the four batches.
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-    }
-
-    assert_eq!(
-        delivered,
-        usize::try_from(MULTI_BATCH_ROWS).expect("fits"),
-        "a slow consumer lost rows to the query deadline"
-    );
-    Ok(())
+    assert_slow_consumer_gets_every_row(&db, "MATCH (p:P) RETURN p.n").await
 }
 
 /// A slow consumer is not charged the budget through the deadline guards.
@@ -234,32 +283,17 @@ async fn a_slow_consumer_is_not_charged_the_query_budget() -> Result<()> {
 /// after the consumer's think-time, not only while the sort drains its input.
 #[tokio::test]
 async fn a_slow_consumer_of_a_sorted_result_is_not_charged_the_query_budget() -> Result<()> {
+    let db = multi_batch_store(uni_db::UniConfig {
+        batch_size: 8192,
+        max_query_memory: 256_000_000,
+        ..Default::default()
+    })
+    .await?;
     for query in [
         "MATCH (p:P) RETURN p.n ORDER BY p.n",
         "MATCH (p:P) RETURN p.n AS n, count(*) AS c",
     ] {
-        let db = multi_batch_store(uni_db::UniConfig {
-            batch_size: 8192,
-            max_query_memory: 256_000_000,
-            query_timeout: std::time::Duration::from_secs(3),
-            ..Default::default()
-        })
-        .await?;
-
-        let mut cursor = db.session().query_with(query).cursor().await?;
-
-        let mut delivered = 0usize;
-        while let Some(batch) = cursor.next_batch().await {
-            delivered += batch?.len();
-            // Cumulative sleep exceeds the 3 s budget across the four batches.
-            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
-        }
-
-        assert_eq!(
-            delivered,
-            usize::try_from(MULTI_BATCH_ROWS).expect("fits"),
-            "{query}: a slow consumer lost rows to the query deadline"
-        );
+        assert_slow_consumer_gets_every_row(&db, query).await?;
     }
     Ok(())
 }

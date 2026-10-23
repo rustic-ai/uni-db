@@ -260,6 +260,14 @@ pub struct L0Buffer {
     /// (not append) these vids' labels and `WriteSet::from_l0` knows they are
     /// conflictable writes. A transaction-buffer concept; empty on main L0.
     pub vertex_label_overwrites: HashSet<Vid>,
+    /// Each relabeled vid's labels as they stood before this buffer's first
+    /// `SET n:Label` / `REMOVE n:Label` of it ([`L0Buffer::relabel_vertex`]).
+    ///
+    /// What the commit's `LABEL_ADDED` / `LABEL_REMOVED` trigger and CDC
+    /// events are the difference from: `vertex_labels` holds only the final
+    /// set, and a vertex committed earlier has no labels in this buffer at
+    /// all before the relabel.
+    pub vertex_labels_before: HashMap<Vid, Vec<String>>,
     /// Version of each vid's latest label mutation in this buffer.
     ///
     /// Kept apart from `vertex_versions` because the L0 read paths take a
@@ -427,6 +435,7 @@ impl Clone for L0Buffer {
             vertex_labels: self.vertex_labels.clone(),
             label_to_vids: self.label_to_vids.clone(),
             vertex_label_overwrites: self.vertex_label_overwrites.clone(),
+            vertex_labels_before: self.vertex_labels_before.clone(),
             vertex_label_versions: self.vertex_label_versions.clone(),
             edge_types: self.edge_types.clone(),
             current_version: self.current_version,
@@ -550,6 +559,16 @@ impl L0Buffer {
         // won every latest-version read: the flush undid the relabel.
         self.vertex_label_versions.insert(vid, self.current_version);
         self.mutation_count += 1;
+    }
+
+    /// [`Self::set_vertex_labels`] for a relabel whose labels before it are
+    /// `previous`; the first relabel of `vid` in this buffer records them for
+    /// the commit's label events (`vertex_labels_before`).
+    pub fn relabel_vertex(&mut self, vid: Vid, previous: &[String], labels: &[String]) {
+        self.vertex_labels_before
+            .entry(vid)
+            .or_insert_with(|| previous.to_vec());
+        self.set_vertex_labels(vid, labels);
     }
 
     /// Version of `vid`'s latest write in this buffer, properties or labels.
@@ -762,6 +781,7 @@ impl L0Buffer {
             vertex_labels: HashMap::new(),
             label_to_vids: HashMap::new(),
             vertex_label_overwrites: HashSet::new(),
+            vertex_labels_before: HashMap::new(),
             vertex_label_versions: HashMap::new(),
             edge_types: HashMap::new(),
             current_version: start_version,

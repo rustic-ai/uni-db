@@ -19,6 +19,7 @@ pub struct AppenderBuilder {
     batch_size: usize,
     defer_vector_indexes: bool,
     max_buffer_size_bytes: Option<usize>,
+    skip_before_triggers: bool,
 }
 
 impl AppenderBuilder {
@@ -34,6 +35,7 @@ impl AppenderBuilder {
             batch_size: 5000,
             defer_vector_indexes: true,
             max_buffer_size_bytes: None,
+            skip_before_triggers: false,
         }
     }
 
@@ -61,6 +63,17 @@ impl AppenderBuilder {
         self
     }
 
+    /// Append even though a synchronous before-trigger subscribes to the
+    /// label, without running it; see
+    /// [`BulkWriterBuilder::skip_before_triggers`].
+    ///
+    /// Default: `false` (such a load is refused with
+    /// `UniError::BulkLoadBlockedByTrigger`).
+    pub fn skip_before_triggers(mut self, skip: bool) -> Self {
+        self.skip_before_triggers = skip;
+        self
+    }
+
     /// Build the streaming appender.
     ///
     /// The owning Transaction already holds the session write guard, so the
@@ -68,7 +81,8 @@ impl AppenderBuilder {
     pub fn build(self) -> Result<StreamingAppender> {
         let mut bulk_builder = BulkWriterBuilder::new_unguarded(self.backend)
             .batch_size(self.batch_size)
-            .defer_vector_indexes(self.defer_vector_indexes);
+            .defer_vector_indexes(self.defer_vector_indexes)
+            .skip_before_triggers(self.skip_before_triggers);
         if let Some(max_buf) = self.max_buffer_size_bytes {
             bulk_builder = bulk_builder.max_buffer_size_bytes(max_buf);
         }

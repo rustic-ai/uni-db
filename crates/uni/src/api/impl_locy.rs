@@ -413,6 +413,7 @@ fn bare_rule_hint(program: &str, registry: &std::sync::RwLock<LocyRuleRegistry>)
 /// Evaluate a Locy program against the database with a specific rule registry.
 ///
 /// This is the core evaluation path used by Session and Transaction.
+/// `principal` is who the program is authorized for (anonymous when `None`).
 pub(crate) async fn evaluate_with_db_and_config(
     db: &crate::api::UniInner,
     program: &str,
@@ -420,6 +421,7 @@ pub(crate) async fn evaluate_with_db_and_config(
     rule_registry: &std::sync::RwLock<LocyRuleRegistry>,
     cancel: crate::api::impl_query::CancelScope,
     max_memory: Option<usize>,
+    principal: Option<Arc<uni_plugin::traits::connector::Principal>>,
 ) -> Result<LocyResult> {
     evaluate_with_db_and_config_capturing(
         db,
@@ -429,12 +431,17 @@ pub(crate) async fn evaluate_with_db_and_config(
         None,
         cancel,
         max_memory,
+        principal,
     )
     .await
 }
 
 /// Like [`evaluate_with_db_and_config`], but optionally captures a structured
 /// execution profile into `profile_capture` (the session `profile()` path).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The session evaluation's program, registry, profile slot and per-call scope (cancellation, memory bound, principal)"
+)]
 pub(crate) async fn evaluate_with_db_and_config_capturing(
     db: &crate::api::UniInner,
     program: &str,
@@ -443,6 +450,7 @@ pub(crate) async fn evaluate_with_db_and_config_capturing(
     profile_capture: Option<&Arc<std::sync::Mutex<Option<uni_query::LocyExecProfile>>>>,
     cancel: crate::api::impl_query::CancelScope,
     max_memory: Option<usize>,
+    principal: Option<Arc<uni_plugin::traits::connector::Principal>>,
 ) -> Result<LocyResult> {
     // Compile with the given registry
     let (ast, parameters) = match uni_cypher::parse_locy_with_parameters(program) {
@@ -502,9 +510,10 @@ pub(crate) async fn evaluate_with_db_and_config_capturing(
         read_snapshot: None,
         cancel,
         max_memory,
+        principal,
     };
     engine
-        .evaluate_compiled_capturing(compiled, config, profile_capture)
+        .evaluate_compiled_capturing(compiled, program, config, profile_capture)
         .await
 }
 
@@ -567,6 +576,10 @@ pub struct LocyEngine<'a> {
     /// builder had no way to raise or lower the bound for one program
     /// (issue #284). `None` keeps the database setting.
     pub(crate) max_memory: Option<usize>,
+    /// Who the program runs for, authorized against the `AuthzPolicy` chain
+    /// before it runs ([`crate::api::locy_authz`]). `None` is the anonymous
+    /// principal, as for Cypher.
+    pub(crate) principal: Option<Arc<uni_plugin::traits::connector::Principal>>,
 }
 
 impl LocyEngine<'_> {
@@ -747,7 +760,7 @@ impl<'a> LocyEngine<'a> {
         // reason reports that; the merged rules' parameters count too.
         check_program_parameters(&parameters, &compiled, &config.params)?;
 
-        self.evaluate_compiled_capturing(compiled, config, profile_capture)
+        self.evaluate_compiled_capturing(compiled, program, config, profile_capture)
             .await
     }
 
@@ -755,13 +768,15 @@ impl<'a> LocyEngine<'a> {
     ///
     /// This is the core execution path: it takes a `CompiledProgram` (with any
     /// registry merges already applied) and runs it through planning, execution,
-    /// and command dispatch.
+    /// and command dispatch. `program` is the source text it was compiled
+    /// from, the resource path its authorization names.
     pub async fn evaluate_compiled_with_config(
         &self,
         compiled: CompiledProgram,
+        program: &str,
         config: &LocyConfig,
     ) -> Result<LocyResult> {
-        self.evaluate_compiled_capturing(compiled, config, None)
+        self.evaluate_compiled_capturing(compiled, program, config, None)
             .await
     }
 
@@ -783,12 +798,24 @@ impl<'a> LocyEngine<'a> {
     /// fixpoint — completely unguarded. This mirrors how the Cypher terminals
     /// enforce cancellation: race the execution, do not rely on the inner
     /// layers to poll a token.
+    ///
+    /// Every entry point that runs a program reaches here, so this is where
+    /// the program is authorized: before anything of it runs, for the
+    /// engine's principal, with `program` (its source text) as the resource
+    /// path. Locy consulted no policy at all before.
     pub(crate) async fn evaluate_compiled_capturing(
         &self,
         compiled: CompiledProgram,
+        program: &str,
         config: &LocyConfig,
         profile_capture: Option<&Arc<std::sync::Mutex<Option<uni_query::LocyExecProfile>>>>,
     ) -> Result<LocyResult> {
+        crate::api::locy_authz::authorize_locy_program(
+            self.db,
+            self.principal.as_deref(),
+            program,
+            &compiled,
+        )?;
         tokio::select! {
             biased;
             () = self.cancel.cancelled() => Err(UniError::Cancelled),
@@ -830,6 +857,7 @@ impl<'a> LocyEngine<'a> {
                 read_snapshot: self.read_snapshot.clone(),
                 cancel: self.cancel.clone(),
                 max_memory: self.max_memory,
+                principal: self.principal.clone(),
             };
             return Box::pin(scoped.evaluate_compiled_capturing_inner(
                 compiled,
@@ -2504,6 +2532,9 @@ impl NativeExecutionAdapter<'_> {
             // The adapter carries no override of its own; the bound for this
             // re-entry comes from the database config, as it did before.
             max_memory: None,
+            // Runs strata of a program already authorized as a whole; it is
+            // not an entry point and does not reach the authorization.
+            principal: None,
         };
         // What remains of the program's budget; an exhausted one stops the
         // run before its first stratum, as an interruption.

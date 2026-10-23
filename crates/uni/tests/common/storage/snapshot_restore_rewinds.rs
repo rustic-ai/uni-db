@@ -1074,6 +1074,86 @@ mod resilience {
         Ok(())
     }
 
+    /// A catalog save that serialized the catalog before a restore swapped
+    /// it, and reaches the store only after the restore saved the snapshot's
+    /// catalog, must not leave the pre-restore catalog on disk. Without
+    /// ordering between saves the late write won: the handle served the
+    /// snapshot's catalog while the file held the pre-restore one, so a
+    /// reopen brought back every label, property and index declared after
+    /// the snapshot over storage rewound to before them.
+    ///
+    /// The save under test is a schema DDL's (`SchemaBuilder::apply`), held
+    /// between serializing and writing. It runs on a named thread so the
+    /// seam holds it and nothing else (background index builds save the
+    /// catalog too). The restore gets up to 3 s to finish while the save is
+    /// held: an unordered restore on this store finishes well inside that,
+    /// while an ordered one waits for the held save and the window simply
+    /// elapses.
+    ///
+    /// fail-rs's registry is process-global; nextest runs each test in its
+    /// own process.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn catalog_save_racing_a_restore_cannot_resurrect_the_old_catalog() -> Result<()> {
+        const SEAM: &str = "schema::save::before-put";
+        const DDL_THREAD: &str = "racing-ddl";
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().to_str().unwrap();
+        let (db, snapshot, indexes) = catalog_diverged_store(path).await?;
+        let db = std::sync::Arc::new(db);
+
+        let (reached_tx, reached_rx) = std::sync::mpsc::channel::<()>();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let reached_tx = std::sync::Mutex::new(Some(reached_tx));
+        let go_rx = std::sync::Mutex::new(go_rx);
+        fail::cfg_callback(SEAM, move || {
+            if std::thread::current().name() != Some(DDL_THREAD) {
+                return;
+            }
+            if let Some(tx) = reached_tx.lock().unwrap().take() {
+                let _ = tx.send(());
+                let _ = go_rx.lock().unwrap().recv();
+            }
+        })
+        .unwrap();
+
+        let ddl_db = db.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let ddl = std::thread::Builder::new()
+            .name(DDL_THREAD.to_string())
+            .spawn(move || runtime.block_on(ddl_db.schema().label("Racer").apply()))?;
+        tokio::task::spawn_blocking(move || reached_rx.recv_timeout(Duration::from_secs(30)))
+            .await??;
+
+        let restorer = db.clone();
+        let snap = snapshot.clone();
+        let restore = tokio::spawn(async move { restorer.restore_snapshot(&snap).await });
+        let window = std::time::Instant::now() + Duration::from_secs(3);
+        while !restore.is_finished() && std::time::Instant::now() < window {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        go_tx.send(())?;
+        restore.await??;
+        tokio::task::spawn_blocking(move || ddl.join())
+            .await?
+            .map_err(|_| anyhow::anyhow!("the DDL thread panicked"))??;
+        fail::remove(SEAM);
+
+        assert_snapshot_catalog(&db, &indexes, "same handle after the race").await?;
+        let racer = db.label_exists("Racer").await?;
+        let db = std::sync::Arc::try_unwrap(db).map_err(|_| anyhow::anyhow!("shared"))?;
+        db.shutdown().await?;
+
+        let db = Uni::open(path).build().await?;
+        assert_snapshot_catalog(&db, &indexes, "reopened after the race").await?;
+        assert_eq!(
+            db.label_exists("Racer").await?,
+            racer,
+            "the reopened catalog is the one the handle served"
+        );
+        db.shutdown().await?;
+        Ok(())
+    }
+
     /// A fork whose fork point was captured before a restore, but which
     /// registered only after the restore checked the registry, is rolled
     /// back instead of being created from pre-restore dataset versions.

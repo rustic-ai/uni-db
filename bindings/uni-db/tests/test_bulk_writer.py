@@ -133,6 +133,28 @@ class TestBulkWriter:
         tx.commit()
         assert stats.vertices_inserted == 100
 
+    @pytest.mark.parametrize("skip", [True, False])
+    def test_bulk_writer_skip_before_triggers(self, db, skip):
+        """`skip_before_triggers` chains and, with no before-trigger, loads."""
+        tx = db.session().tx()
+        writer = tx.bulk_writer().skip_before_triggers(skip).build()
+        writer.insert_vertices("Person", [{"name": "Ada", "age": 36}])
+        stats = writer.commit()
+        tx.commit()
+        assert stats.vertices_inserted == 1
+
+    @pytest.mark.parametrize("skip", [True, False])
+    def test_appender_builder_skip_before_triggers(self, db, skip):
+        """The appender builder accepts `skip_before_triggers` too."""
+        tx = db.session().tx()
+        builder = tx.appender_builder("Person").skip_before_triggers(skip)
+        assert type(builder).__name__ == "TxAppenderBuilder"
+        app = builder.build()
+        app.append({"name": "Ada", "age": 36})
+        stats = app.finish()
+        tx.commit()
+        assert stats.vertices_inserted == 1
+
 
 class TestBulkStats:
     """Tests for BulkStats data class."""

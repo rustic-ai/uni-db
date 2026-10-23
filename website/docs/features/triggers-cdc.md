@@ -143,8 +143,10 @@ attempts, after which the item is dropped with a warning.
 A `TriggerSubscription` selects events with:
 
 - `events`: a `TriggerEventMask`; combine masks with `.union()`.
-- `labels`: node events only. Exact match; `None` means every label.
-- `edge_types`: edge events only. Exact match; `None` means every type.
+- `labels`: node events only. Exact match; `None` means every label. Write
+  bare names (`"Account"`); the Cypher form `":Account"` names the same label.
+- `edge_types`: edge events only. Exact match; `None` means every type. A
+  leading `:` is accepted here too.
 - `predicate_source`: a Cypher boolean expression evaluated per event row.
   - `n.<prop>` reads the post-mutation value and `old.<prop>` the pre-image.
   - The event columns (`event_kind`, `vid_or_eid`, `label`, ...) are also in
@@ -312,6 +314,20 @@ Each commit becomes one `CdcBatch`:
 A commit with no event rows is delivered as an empty batch with the same
 schema.
 
+Batches arrive in commit order: `lsn_end` never decreases from one batch to
+the next. A commit's notification is ordered at the moment it becomes visible,
+under the writer's commit lock, so a commit that finishes its post-commit work
+first still cannot be delivered ahead of an earlier one. (Before this was
+fixed, a commit landing in that window could make an earlier commit report
+the later commit's version and be delivered after it.)
+
+A bulk load (`bulk_writer`, `appender`) is delivered as one or more batches,
+all carrying the load's LSN range (`lsn_start` the load's version, `lsn_end`
+the database version when it became visible, which can equal the previous
+commit's `lsn_end`). Its rows are split across them in chunks of at most 4096,
+and each stream is checkpointed once, after the last. See
+[Bulk loads](#bulk-loads).
+
 ### Delivery
 
 - **After commit, off the commit path.** A commit does not wait for sinks.
@@ -357,6 +373,57 @@ It keeps every batch until shutdown, ignores `from_lsn` and does not resume
 from a checkpoint. Do not leave it on in a long-running process. When it was
 registered by default it cost 236.6 MB of RSS over 20,000 small commits,
 against 55.8 MB without it.
+
+## Bulk loads
+
+A bulk load (`tx.bulk_writer()`, `tx.appender()`) writes straight to storage,
+not through a transaction, and commits on its own. Once it is visible it emits:
+
+- one commit notification, with `tx_id` the load id and `session_id`
+  `"bulk-load"`;
+- a `NODE_CREATE` row per vertex and label and an `EDGE_CREATE` row per edge,
+  read back from storage in chunks of at most 4096 rows. A load's events are
+  never held in memory at once. `old_value` and `properties_old` are null;
+  `properties_new` follows the same predicate-referenced rule as a commit.
+- After-phase triggers fire once per chunk, so a large load reaches a trigger
+  as several batches.
+- CDC gets the chunks as batches of one announcement, as described under
+  [CDC outputs](#cdc-outputs).
+
+A synchronous `BeforeMutation` / `BeforeCommit` trigger cannot veto a load: its
+events exist only after the load is visible. A load that would write rows such
+a trigger subscribes to (by event kind and label or edge type; a predicate is
+not evaluated, so a predicated trigger counts as matching) is refused with
+`UniError::BulkLoadBlockedByTrigger` before those rows are staged, or at
+`commit()` for a trigger registered mid-load, and nothing of it becomes
+visible. `BulkWriterBuilder::skip_before_triggers(true)` (and the same option on
+the appender builder) loads anyway, without running those triggers.
+
+Once a load is visible, its events are delivered by a background task of
+their own, which `commit()` waits for. Dropping the `commit()` future does not
+stop the delivery: every event still reaches triggers and CDC. (The dropped
+commit skips the load's index and snapshot finalization; the next open
+completes it and delivers the load's events again, so consumers see them
+twice.) A shutdown during the delivery stops it; CDC then halts with its
+checkpoint before the load, and the next open delivers the whole load again.
+
+A load completed in the background after `BulkCommitIncomplete` emits its events
+when it becomes visible. A load the database completes while opening, after a
+crash that came before its events were delivered, emits them from the open:
+announced before `build()` returns, so ahead of any commit made through the
+handle, with its rows streamed in the background. Only consumers that exist
+during the open see them: built-in triggers and triggers declared with
+`uni.plugin.declareTrigger` (the open reactivates those), and CDC outputs
+already registered -- which the public API offers no way to do before
+`build()` returns. A trigger or CDC output registered after the open does not
+get the load. Delivery is at least once: a crash during it delivers the load
+again at the next open. A fork's recovered load fires triggers when the fork is
+next opened. See [Data ingestion](../guides/data-ingestion.md#triggers-cdc-and-the-enclosing-transaction).
+
+A transaction commit that is abandoned after its commit point (its `commit()`
+future dropped, or failing, before the notification goes out) is announced with
+`mutations_failed: true` instead of not at all, so CDC halts rather than skip
+it.
 
 ## Forks
 

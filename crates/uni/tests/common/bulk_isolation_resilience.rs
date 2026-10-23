@@ -247,8 +247,13 @@ async fn uncommitted_bulk_load_invisible_across_compaction_resilience() -> Resul
     let seed = seed_vids(&db).await?;
     let passes = wait_for_pass(&db, 0).await?;
 
+    // The load outlives its host transaction, which ends here: an open
+    // transaction pins edge compaction at its snapshot, so while it lived no
+    // pass could fold the concurrent writes below and the pass this test needs
+    // could not run.
     let tx = db.session().tx().await?;
     let mut bulk = tx.bulk_writer().batch_size(10).build()?;
+    tx.rollback();
     bulk.insert_vertices("P", bulk_vertices()).await?;
     bulk.insert_edges("E", bulk_edges(&seed)).await?;
 
@@ -274,7 +279,6 @@ async fn uncommitted_bulk_load_invisible_across_compaction_resilience() -> Resul
     );
 
     bulk.commit().await?;
-    tx.commit().await?;
     let committed = View {
         bulk_edges: BULK_EDGES as i64,
         bulk_vertices: BULK_VERTICES,
@@ -359,8 +363,8 @@ async fn bulk_abort_keeps_concurrent_committed_writes_resilience() -> Result<()>
     Ok(())
 }
 
-/// A crash part way through publishing, after a compaction pass folded the
-/// already-published forward deltas into L2 (and cleared them from the delta
+/// A crash part way through publishing, then a compaction pass that folds the
+/// already-published forward deltas into L2 (and clears them from the delta
 /// table): reopen completes the publish, and must recognize the forward
 /// deltas as already published although no current fragment holds them, or
 /// the forward direction counts every bulk edge twice. Both directions must
@@ -376,66 +380,41 @@ async fn bulk_publish_crash_after_compaction_completes_consistently_resilience()
     let adj_fwd = table_names::adjacency_table_name("E", "fwd");
     let adj_rows_before = row_count(&db, &adj_fwd).await?;
 
-    // Publish hit 1 is the fwd delta, hit 2 the bwd delta. Hit 2 parks until a
-    // compaction pass has run over the half-published load, then crashes.
-    let (reached_tx, reached_rx) = mpsc::channel::<()>();
-    let (release_tx, release_rx) = mpsc::channel::<()>();
-    let release_rx = std::sync::Mutex::new(release_rx);
+    // Publish hit 1 is the fwd delta, hit 2 the bwd delta; hit 2 crashes. No
+    // pass can run during the publish itself (it holds the bulk gate, which a
+    // pass must take exclusively), so the pass below runs where it can in
+    // production: after the crash, over the half-published load, before the
+    // reopen that completes it.
     let hits = Arc::new(AtomicUsize::new(0));
     {
         let hits = Arc::clone(&hits);
         fail::cfg_callback(SEAM, move || {
             if hits.fetch_add(1, Ordering::SeqCst) == 1 {
-                reached_tx.send(()).ok();
-                release_rx
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(30))
-                    .ok();
                 panic!("injected crash while publishing the bwd delta");
             }
         })
         .unwrap();
     }
 
-    // The bulk writer's future is not `Send`, so it runs on this task and the
-    // compaction on a worker; the seam blocks the loading thread only.
-    let compactor = tokio::spawn({
-        let db = Arc::clone(&db);
-        let adj_fwd = adj_fwd.clone();
-        async move {
-            let reached = tokio::task::spawn_blocking(move || {
-                reached_rx.recv_timeout(Duration::from_secs(30))
-            })
-            .await?;
-            let result = match reached {
-                Ok(()) => {
-                    let pass = Compactor::new(db.storage()).compact_all().await;
-                    let rows = row_count(&db, &adj_fwd).await;
-                    release_tx.send(()).ok();
-                    pass?;
-                    Some(rows?)
-                }
-                Err(_) => {
-                    release_tx.send(()).ok();
-                    None
-                }
-            };
-            anyhow::Ok(result)
-        }
-    });
-
+    // The host transaction ends before the publish: an open transaction pins
+    // edge compaction at its snapshot, so while it lived the pass could not
+    // fold the half-published load.
     let tx = db.session().tx().await?;
     let mut bulk = tx.bulk_writer().batch_size(10).build()?;
+    tx.rollback();
     bulk.insert_edges("E", bulk_edges(&seed)).await?;
     let crashed = std::panic::AssertUnwindSafe(bulk.commit())
         .catch_unwind()
         .await
         .is_err();
     fail::remove(SEAM);
-    let adj_rows_mid = compactor
-        .await??
-        .ok_or_else(|| anyhow::anyhow!("publish never reached the bwd delta"))?;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "premise: the publish must reach the bwd delta"
+    );
+    Compactor::new(db.storage()).compact_all().await?;
+    let adj_rows_mid = row_count(&db, &adj_fwd).await?;
     assert!(
         crashed,
         "premise: the injected crash must interrupt the commit"
@@ -445,7 +424,6 @@ async fn bulk_publish_crash_after_compaction_completes_consistently_resilience()
         "premise: the pass must have folded the published fwd deltas into L2 \
          ({adj_rows_before} -> {adj_rows_mid} rows), or the test proves nothing"
     );
-    drop(tx);
     drop(db);
 
     let db = Uni::open(&path).config(config(false)).build().await?;

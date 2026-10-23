@@ -378,6 +378,7 @@ impl QueryProcedureHost {
         if let Some(counters) = self.counters.clone() {
             ctx.set_counters(counters);
         }
+        ctx.set_l1_visibility(self.storage.pinned_row_visibility());
         ctx
     }
 

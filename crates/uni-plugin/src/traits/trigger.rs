@@ -84,8 +84,13 @@ pub struct TriggerSubscription {
     /// Event-kind bitmask (`NodeCreate | NodeUpdate | EdgeDelete | ...`).
     pub events: TriggerEventMask,
     /// Optional label allow-list; `None` means all labels.
+    ///
+    /// Bare label names (`"Customer"`). The host also accepts the Cypher
+    /// form (`":Customer"`) and strips the leading colon when it builds its
+    /// routes, so both name the same label.
     pub labels: Option<Vec<SmolStr>>,
-    /// Optional edge-type allow-list.
+    /// Optional edge-type allow-list; bare names, with a leading `:`
+    /// accepted as for [`Self::labels`].
     pub edge_types: Option<Vec<SmolStr>>,
     /// Optional property allow-list — for `*Update` events, restrict to
     /// updates touching these properties.

@@ -1042,11 +1042,12 @@ impl StorageManager {
             fork_scope: self.fork_scope.clone(),
             fork_registry: self.fork_registry.clone(),
             backend: self.backend.clone(),
-            // Deep-copy, not Arc-clone: a fork/pin must get its OWN label index
-            // so its flushes/relabels don't mutate the parent's (review H1/L2),
-            // mirroring the fresh `adjacency_manager` above. `VidLabelsIndex`
-            // derives `Clone`; the snapshot is taken after flush-before-branch so
-            // inherited labels (#99) are preserved.
+            // Its own copy, not the shared lock: a fork/pin must get its OWN
+            // label index so its flushes/relabels don't mutate the parent's, nor
+            // the parent's reach it (review H1/L2). The clone is copy-on-write
+            // by shard, so taking it costs no pass over the index. The snapshot
+            // is taken after flush-before-branch so inherited labels (#99) are
+            // preserved.
             vid_labels_index: Arc::new(parking_lot::RwLock::new(
                 self.vid_labels_index.read().clone(),
             )),
@@ -1096,10 +1097,12 @@ impl StorageManager {
     /// fresh: commits replay their edges into the live manager's overlay,
     /// which is the traversal path's only source for L0-resident edges — a
     /// fresh manager would make every unflushed edge invisible to the
-    /// transaction. The cost is that the edge tier is not version-pinned
-    /// (post-snapshot edges remain visible to traversals, exactly as before
-    /// C2); edge reads are recorded in the OCC read-set, so a conflicting
-    /// read-modify-write still aborts at commit.
+    /// transaction. Its edges are version-pinned at READ time instead
+    /// ([`Self::neighbors`] filters by [`Self::edge_visibility`]): every
+    /// adjacency entry carries the version that created it, and the shadow CSR
+    /// keeps edges deleted after the pin. The shared CSR is still warmed
+    /// unfiltered ([`Self::snapshot_version_hwm`]), since a filtered warm would
+    /// poison it for every other reader.
     pub fn pinned_at_version(&self, hwm: u64) -> Self {
         self.pinned_at_version_excluding(hwm, &[])
     }
@@ -1114,8 +1117,18 @@ impl StorageManager {
     pub fn pinned_at_version_excluding(&self, hwm: u64, excluded: &[u64]) -> Self {
         let excluded: Vec<u64> = excluded.to_vec();
         // Register the pin for as long as this view lives, so shadow GC cannot
-        // reclaim entries this reader still resolves. Dropped with the view.
-        let pin_guard = Some(self.adjacency_manager.pinned_versions().pin(hwm));
+        // reclaim entries this reader still resolves and compaction neither
+        // merges a vertex row above `hwm` nor folds an edge delta this reader
+        // must not see into unversioned L2. Dropped with the view.
+        let edge_pin = excluded
+            .iter()
+            .min()
+            .map_or(hwm, |&oldest| oldest.saturating_sub(1).min(hwm));
+        let pin_guard = Some(
+            self.adjacency_manager
+                .pinned_versions()
+                .pin_transaction(hwm, edge_pin),
+        );
         Self {
             requires_adjacency_revalidation: self.requires_adjacency_revalidation,
             base_uri: self.base_uri.clone(),
@@ -1135,11 +1148,12 @@ impl StorageManager {
             fork_scope: self.fork_scope.clone(),
             fork_registry: self.fork_registry.clone(),
             backend: self.backend.clone(),
-            // Deep-copy, not Arc-clone: a fork/pin must get its OWN label index
-            // so its flushes/relabels don't mutate the parent's (review H1/L2),
-            // mirroring the fresh `adjacency_manager` above. `VidLabelsIndex`
-            // derives `Clone`; the snapshot is taken after flush-before-branch so
-            // inherited labels (#99) are preserved.
+            // Its own copy, not the shared lock: a fork/pin must get its OWN
+            // label index so its flushes/relabels don't mutate the parent's, nor
+            // the parent's reach it (review H1/L2). The clone is copy-on-write
+            // by shard, so taking it costs no pass over the index. The snapshot
+            // is taken after flush-before-branch so inherited labels (#99) are
+            // preserved.
             vid_labels_index: Arc::new(parking_lot::RwLock::new(
                 self.vid_labels_index.read().clone(),
             )),
@@ -1214,11 +1228,12 @@ impl StorageManager {
             fork_scope: Some(scope),
             fork_registry: self.fork_registry.clone(),
             backend: branched_backend,
-            // Deep-copy, not Arc-clone: a fork/pin must get its OWN label index
-            // so its flushes/relabels don't mutate the parent's (review H1/L2),
-            // mirroring the fresh `adjacency_manager` above. `VidLabelsIndex`
-            // derives `Clone`; the snapshot is taken after flush-before-branch so
-            // inherited labels (#99) are preserved.
+            // Its own copy, not the shared lock: a fork/pin must get its OWN
+            // label index so its flushes/relabels don't mutate the parent's, nor
+            // the parent's reach it (review H1/L2). The clone is copy-on-write
+            // by shard, so taking it costs no pass over the index. The snapshot
+            // is taken after flush-before-branch so inherited labels (#99) are
+            // preserved.
             vid_labels_index: Arc::new(parking_lot::RwLock::new(
                 self.vid_labels_index.read().clone(),
             )),
@@ -1315,12 +1330,17 @@ impl StorageManager {
     /// Widen storage so newly declared properties on `entity` have a column
     /// everywhere they will be written **or read** (issue #249).
     ///
-    /// Call this *before* persisting the catalog. The asymmetry decides the
-    /// order: a Lance column absent from the catalog is invisible and
-    /// harmless, while a catalog column absent from Lance is a hard read
-    /// failure. There is no WAL record for schema DDL, so ordering is the only
-    /// recovery lever — and since the widening is idempotent, re-running a
-    /// half-applied DDL converges.
+    /// Call this *before* the property enters the live catalog, not merely
+    /// before this caller saves it. The asymmetry decides the order: a Lance
+    /// column absent from the catalog is invisible and harmless, while a
+    /// catalog column absent from Lance is a hard read failure. There is no WAL
+    /// record for schema DDL, so ordering is the only recovery lever — and any
+    /// commit saves a dirty catalog (`save_if_dirty`), so a property declared
+    /// in memory first could reach disk ahead of its column, and a crash before
+    /// the widening finished left the entity unreadable. Each property comes
+    /// with its declared type for that reason: the catalog does not hold it
+    /// yet. The widening is idempotent, so re-running a half-applied DDL
+    /// converges.
     ///
     /// Primary is widened first, so any fork branch cut *after* this point
     /// inherits the column from primary's current version and needs nothing.
@@ -1332,15 +1352,23 @@ impl StorageManager {
     pub async fn widen_for_declared_properties(
         &self,
         entity: &str,
-        fields: &[arrow_schema::Field],
+        properties: &[(String, uni_common::DataType)],
     ) -> anyhow::Result<()> {
-        if fields.is_empty() {
+        // Test-only seam (no-op without `fail/failpoints`): a DDL is about to
+        // widen storage, so the property must not be in the live catalog yet.
+        fail::fail_point!("storage::widen-declared-properties");
+        if properties.is_empty() {
             return Ok(());
         }
         let tables = self.property_tables_for(entity);
         if tables.is_empty() {
             return Ok(());
         }
+        let fields: Vec<arrow_schema::Field> = properties
+            .iter()
+            .map(|(name, ty)| arrow_schema::Field::new(name, ty.to_arrow(), true))
+            .collect();
+        let fields = fields.as_slice();
 
         let backend = self.backend();
         for table in &tables {
@@ -1360,22 +1388,10 @@ impl StorageManager {
         // copy-on-write sharing and corrupting anything that computes a fork's
         // own delta.
         if self.fork_scope().is_none() {
-            let schema = self.schema_manager().schema();
-            for field in fields {
-                let Some(declared) = schema
-                    .properties
-                    .get(entity)
-                    .and_then(|p| p.get(field.name()))
-                    .map(|m| m.r#type.clone())
-                else {
-                    continue;
-                };
+            for (name, declared) in properties {
                 for table in &tables {
                     crate::storage::schema_evolution::backfill_property_from_overflow(
-                        backend,
-                        table,
-                        field.name(),
-                        &declared,
+                        backend, table, name, declared,
                     )
                     .await?;
                 }
@@ -1468,8 +1484,9 @@ impl StorageManager {
     ///
     /// Used by the SCAN tier (vertex tables, property reads) to filter data
     /// by version: when set, only rows with
-    /// `_version <= version_high_water_mark` are visible. The edge/adjacency
-    /// path must use [`Self::snapshot_version_hwm`] instead.
+    /// `_version <= version_high_water_mark` are visible. Adjacency reads are
+    /// bounded by it too, through [`Self::edge_visibility`]; adjacency
+    /// WARMING must use [`Self::snapshot_version_hwm`] instead.
     pub fn version_high_water_mark(&self) -> Option<u64> {
         self.pinned_snapshot
             .as_ref()
@@ -1481,11 +1498,11 @@ impl StorageManager {
     /// `edge_tier` an edge type's deltas in one direction).
     ///
     /// The guard's [`CompactionMerge::floor`] is the oldest version an
-    /// in-flight pinned reader reads at (a transaction's L1 pin, or a session
-    /// pinned to a snapshot read from the live tables; only the latter for
-    /// edge deltas, since a transaction reads the live adjacency): the merge
-    /// must merge no row and fold no delta above it, so each such reader
-    /// still finds its rows. Before the merge writes, [`CompactionMerge::record`] persists the
+    /// in-flight pinned reader reads at (a transaction's pin, or a session
+    /// pinned to a snapshot read from the live tables; for edge deltas a
+    /// transaction's edge pin, which sits below any bulk load it excludes):
+    /// the merge must merge no row and fold no delta above it, so each such
+    /// reader still finds its rows. Before the merge writes, [`CompactionMerge::record`] persists the
     /// version below which it loses history; a session pinned below that
     /// afterwards is refused ([`Self::history_is_whole`]).
     pub fn begin_compaction_merge(&self, edge_tier: bool) -> CompactionMerge {
@@ -1513,18 +1530,66 @@ impl StorageManager {
     /// Version high-water mark from a manifest-pinned (time-travel) snapshot
     /// ONLY — never from a transaction-level version pin.
     ///
-    /// The edge/adjacency read path switches to version-filtered CSR reads
-    /// and skips the L0 overlays when a hwm is present. That is correct for
-    /// time-travel (a snapshot is flushed state, with its own fresh
-    /// `AdjacencyManager`), but a transaction pin shares the LIVE adjacency
-    /// manager and needs live CSR + L0 overlays + its tx-L0 — filtering
-    /// there would hide unflushed edges and poison the shared warm cache.
-    /// The edge tier is deliberately not version-pinned for transactions
-    /// (see [`Self::pinned_at_version`]).
+    /// The ceiling adjacency is WARMED at. A time-travel snapshot is flushed
+    /// state with its own fresh `AdjacencyManager`, so warming it filtered is
+    /// right; a transaction pin shares the LIVE adjacency manager, and warming
+    /// that filtered would poison the cache for every other reader. A
+    /// transaction's adjacency reads are filtered instead
+    /// ([`Self::edge_visibility`]).
     pub fn snapshot_version_hwm(&self) -> Option<u64> {
         self.pinned_snapshot
             .as_ref()
             .map(|s| s.version_high_water_mark)
+    }
+
+    /// What this view's adjacency reads may return, or `None` for a live
+    /// view, which sees every committed edge.
+    ///
+    /// A pinned view — a time-travel snapshot or a transaction — sees the
+    /// edges created at or below its ceiling and not deleted by then, minus
+    /// the bulk loads it excludes. The in-flight bulk gate is not consulted:
+    /// a load reserved at or below the ceiling and unpublished when the view
+    /// was made is already excluded, and any later one is above the ceiling.
+    #[must_use]
+    pub fn edge_visibility(&self) -> Option<crate::storage::bulk_gate::RowVisibility> {
+        self.version_high_water_mark().map(|hwm| {
+            crate::storage::bulk_gate::RowVisibility::new(
+                Some(hwm),
+                Arc::clone(&self.excluded_versions),
+            )
+        })
+    }
+
+    /// The L1 visibility a pinned view's reads must carry into the shared
+    /// property manager ([`crate::runtime::context::QueryContext::l1_visibility`]),
+    /// or `None` for a live view.
+    #[must_use]
+    pub fn pinned_row_visibility(&self) -> Option<crate::storage::bulk_gate::RowVisibility> {
+        self.version_high_water_mark()
+            .map(|_| self.row_visibility())
+    }
+
+    /// The committed neighbours of `vid` this view sees: the adjacency
+    /// manager's, filtered by [`Self::edge_visibility`] when the view is
+    /// pinned.
+    ///
+    /// Excludes a transaction's own uncommitted edges, which live in its
+    /// private L0 buffer; callers holding one overlay it on top.
+    pub fn neighbors(
+        &self,
+        vid: uni_common::core::id::Vid,
+        edge_type: u32,
+        direction: crate::storage::direction::Direction,
+    ) -> Vec<(uni_common::core::id::Vid, uni_common::core::id::Eid)> {
+        match self.edge_visibility() {
+            Some(visibility) => {
+                self.adjacency_manager
+                    .get_neighbors_visible(vid, edge_type, direction, &visibility)
+            }
+            None => self
+                .adjacency_manager
+                .get_neighbors(vid, edge_type, direction),
+        }
     }
 
     /// Apply version filtering to a base filter expression.
@@ -1576,13 +1641,6 @@ impl StorageManager {
     #[must_use]
     pub fn row_visibility(&self) -> crate::storage::bulk_gate::RowVisibility {
         self.visibility_at(self.version_high_water_mark())
-    }
-
-    /// Row visibility for the edge tier: [`Self::snapshot_version_hwm`] plus
-    /// the bulk visibility gate.
-    #[must_use]
-    pub fn edge_row_visibility(&self) -> crate::storage::bulk_gate::RowVisibility {
-        self.visibility_at(self.snapshot_version_hwm())
     }
 
     /// Build a filter expression that excludes soft-deleted rows and optionally
@@ -2578,7 +2636,7 @@ impl StorageManager {
                         .await?;
 
                     // Get neighbors from AdjacencyManager (Main CSR + overlay)
-                    let edges = self.adjacency_manager.get_neighbors(vid, etype_id, dir);
+                    let edges = self.neighbors(vid, etype_id, dir);
 
                     for (neighbor_vid, eid) in edges {
                         graph.add_vertex(neighbor_vid);
@@ -3071,12 +3129,11 @@ impl StorageManager {
         additional_filter: Option<&FilterExpr>,
         counters: Option<&Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<Option<arrow_array::RecordBatch>> {
-        // Edge path: manifest pin only. A transaction version pin must NOT
-        // version-filter edge reads — the edge tier is not version-pinned
-        // (the live AdjacencyManager + tx-L0 overlay carry unflushed and
-        // in-transaction edges), so filtering here would hide a relationship
-        // the same transaction just created (MERGE read-your-writes).
-        let edge_hwm = self.snapshot_version_hwm();
+        // Bounded by this view's ceiling, transaction pins included. A
+        // transaction's own edges are never in L1 before it commits — they are
+        // in its private L0, which readers overlay on top — so the ceiling
+        // hides only what other transactions committed after it began.
+        let edge_hwm = self.version_high_water_mark();
         let backend = self.backend();
         let table_name = table_names::delta_table_name(edge_type, direction);
 
@@ -3093,7 +3150,7 @@ impl StorageManager {
         // unlabelled scans of a pinned session read the snapshot but were never
         // counted, so a pinned query that touched no labelled vertex reported
         // `snapshot_reads: 0`.
-        if edge_hwm.is_some()
+        if self.snapshot_version_hwm().is_some()
             && let Some(c) = counters
         {
             c.add_snapshot_read();
@@ -3225,23 +3282,39 @@ impl StorageManager {
     /// collapse to one identity (review H4). This exposes the stored `ext_id`
     /// so the diff can fold it back into its recomputed UID. Reads through the
     /// (branched) backend, so a forked manager sees its own + inherited rows.
-    /// Covers flushed (Lance) rows; `ext_id` is immutable so no version
-    /// reconciliation is needed.
+    /// Covers flushed (Lance) rows visible to this view.
+    ///
+    /// The main vertex table is append-only: a deleted vertex keeps its older
+    /// live rows beside the tombstone appended after them, and a vertex's
+    /// `ext_id` can be cleared or move to another vertex. So each VID is judged
+    /// by its newest row alone (a tombstone wins a tie), as
+    /// `MainVertexDataset::find_by_ext_id` does. Reading every row whose
+    /// `_deleted` is false instead returned deleted vertices too, and inverting
+    /// the map for a reused `ext_id` could then pick the dead VID.
     pub async fn get_vertex_ext_ids(&self) -> Result<std::collections::HashMap<Vid, String>> {
-        use arrow_array::StringArray;
+        use arrow_array::{BooleanArray, StringArray};
         let backend = self.backend.as_ref();
         let vtable = table_names::main_vertex_table_name();
         let mut out = std::collections::HashMap::new();
         if !backend.table_exists(vtable).await? {
             return Ok(out);
         }
-        let request = ScanRequest::all(vtable)
-            .with_filter(self.visibility_at(None).bound(FilterExpr::not_deleted()))
-            .with_columns(vec!["_vid".to_string(), "ext_id".to_string()]);
+        let mut request = ScanRequest::all(vtable).with_columns(vec![
+            "_vid".to_string(),
+            "ext_id".to_string(),
+            "_version".to_string(),
+            "_deleted".to_string(),
+        ]);
+        if let Some(filter) = self.row_visibility().filter() {
+            request = request.with_filter(filter);
+        }
         let batches = backend
             .scan(request)
             .await
             .map_err(|e| anyhow!("get_vertex_ext_ids: {}", e))?;
+        // Newest row per VID: (version, deleted, ext_id).
+        let mut newest: std::collections::HashMap<Vid, (u64, bool, Option<String>)> =
+            std::collections::HashMap::new();
         for batch in batches {
             let vids = batch
                 .column_by_name("_vid")
@@ -3251,14 +3324,40 @@ impl StorageManager {
                 .column_by_name("ext_id")
                 .and_then(|c| c.as_any().downcast_ref::<StringArray>())
                 .ok_or_else(|| anyhow!("get_vertex_ext_ids: missing/invalid ext_id column"))?;
+            let versions = batch
+                .column_by_name("_version")
+                .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+                .ok_or_else(|| anyhow!("get_vertex_ext_ids: missing/invalid _version column"))?;
+            let deleted = batch
+                .column_by_name("_deleted")
+                .and_then(|c| c.as_any().downcast_ref::<BooleanArray>())
+                .ok_or_else(|| anyhow!("get_vertex_ext_ids: missing/invalid _deleted column"))?;
             for i in 0..batch.num_rows() {
-                if exts.is_null(i) {
-                    continue;
-                }
-                let ext = exts.value(i);
-                if !ext.is_empty() {
-                    out.insert(Vid::from(vids.value(i)), ext.to_string());
-                }
+                let row = (
+                    if versions.is_null(i) {
+                        0
+                    } else {
+                        versions.value(i)
+                    },
+                    !deleted.is_null(i) && deleted.value(i),
+                    (!exts.is_null(i)).then(|| exts.value(i).to_string()),
+                );
+                newest
+                    .entry(Vid::from(vids.value(i)))
+                    .and_modify(|best| {
+                        if (row.0, row.1) > (best.0, best.1) {
+                            *best = row.clone();
+                        }
+                    })
+                    .or_insert(row);
+            }
+        }
+        for (vid, (_, deleted, ext)) in newest {
+            if let Some(ext) = ext
+                && !deleted
+                && !ext.is_empty()
+            {
+                out.insert(vid, ext);
             }
         }
         Ok(out)
@@ -3315,7 +3414,7 @@ impl StorageManager {
                 self.backend(),
                 type_names,
                 None,
-                &self.edge_row_visibility(),
+                &self.row_visibility(),
                 counters,
             )
             .await?;
@@ -3332,16 +3431,16 @@ impl StorageManager {
                 .collect());
         }
 
-        // The edge tier's visibility: a pinned snapshot's ceiling and the bulk
-        // gate. Without the ceiling a snapshot read of a schemaless type lost
-        // every edge deleted after the snapshot (the tombstone outranked the
-        // live row) and gained every edge created after it. A transaction pin
-        // is not applied, as for the CSR path (see `pinned_at_version`).
+        // The view's visibility: its ceiling (a snapshot's or a transaction's)
+        // and the bulk gate. Without the ceiling a pinned read of a schemaless
+        // type lost every edge deleted after the pin (the tombstone outranked
+        // the live row) and gained every edge created after it — the same
+        // ceiling the CSR path reads at (see `neighbors`).
         MainEdgeDataset::find_visible_edges_by_type_names_counted(
             self.backend(),
             type_names,
             endpoint_filter,
-            &self.edge_row_visibility(),
+            &self.row_visibility(),
             counters,
         )
         .await
@@ -4688,7 +4787,7 @@ impl StorageManager {
                     HashMap::new();
                 for chunk in hop_vids.chunks(MAX_SUBGRAPH_VIDS_PER_SCAN) {
                     let part = delta_ds
-                        .read_deltas_batch(backend, chunk, &schema, self.edge_row_visibility())
+                        .read_deltas_batch(backend, chunk, &schema, self.row_visibility())
                         .await?;
                     for (vid, entries) in part {
                         delta_by_vid.entry(vid).or_default().extend(entries);

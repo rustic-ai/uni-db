@@ -49,6 +49,7 @@ use uni_store::storage::manager::StorageManager;
 use uni_store::storage::{IndexManager, IndexRebuildManager};
 use uuid::Uuid;
 
+use crate::events::EventDelivery;
 use crate::flush_intent;
 
 /// Test-only fault-injection: when set, the bulk writer returns an error
@@ -94,11 +95,26 @@ pub struct BulkBackend {
     /// keep alive while the task writes (a temporary database's directory).
     /// `None` tracks it with [`Self::shutdown`] alone.
     pub track_task: Option<TaskTracker>,
+    /// Where a load's trigger and CDC events go once it is visible, and what
+    /// it asks before staging rows a synchronous before-trigger would see
+    /// (see [`crate::events`]). `None` emits nothing and refuses nothing.
+    pub events: Option<Arc<dyn crate::events::BulkEventSink>>,
 }
 
 /// Tracks a spawned task until the database shuts down; see
 /// [`BulkBackend::track_task`].
 pub type TaskTracker = Arc<dyn Fn(tokio::task::JoinHandle<()>) + Send + Sync>;
+
+impl BulkBackend {
+    /// Track `handle` as [`Self::track_task`] says: so the database's shutdown
+    /// waits for it.
+    fn track(&self, handle: tokio::task::JoinHandle<()>) {
+        match &self.track_task {
+            Some(track) => track(handle),
+            None => self.shutdown.track_task(handle),
+        }
+    }
+}
 
 /// Yields a database's shared [`IndexRebuildManager`], creating it (and
 /// starting its worker) on first use.
@@ -264,6 +280,22 @@ impl BulkWriterBuilder {
         self
     }
 
+    /// Load even though a synchronous `BeforeMutation` / `BeforeCommit`
+    /// trigger subscribes to what the load writes, without running it.
+    ///
+    /// A bulk load's mutation events are emitted after the load is visible,
+    /// past the point a before-trigger could veto it, so such a trigger cannot
+    /// be honoured. By default the load is refused with
+    /// `UniError::BulkLoadBlockedByTrigger` before the matching rows are
+    /// staged. With `true` the load proceeds and those triggers are skipped
+    /// for it; after-phase triggers and CDC still receive its events.
+    ///
+    /// Default: `false`.
+    pub fn skip_before_triggers(mut self, skip: bool) -> Self {
+        self.config.skip_before_triggers = skip;
+        self
+    }
+
     /// Build the bulk writer.
     ///
     /// # Errors
@@ -338,6 +370,9 @@ pub struct BulkConfig {
     /// a checkpoint is triggered to flush data to storage while continuing to
     /// accept new data.
     pub max_buffer_size_bytes: usize,
+    /// Load past synchronous before-triggers instead of refusing; see
+    /// [`BulkWriterBuilder::skip_before_triggers`]. Default: `false`.
+    pub skip_before_triggers: bool,
 }
 
 impl Default for BulkConfig {
@@ -349,6 +384,7 @@ impl Default for BulkConfig {
             async_indexes: false,
             validate_constraints: true,
             max_buffer_size_bytes: 1_073_741_824, // 1 GB
+            skip_before_triggers: false,
         }
     }
 }
@@ -642,6 +678,9 @@ impl BulkWriter {
     ///
     /// Returns an error if:
     /// - The label is not found in the schema
+    /// - A synchronous before-trigger subscribes to the label's creates
+    ///   (`UniError::BulkLoadBlockedByTrigger`; see
+    ///   [`BulkWriterBuilder::skip_before_triggers`])
     /// - Constraint validation fails (when enabled)
     /// - Storage write fails
     pub async fn insert_vertices(
@@ -670,6 +709,8 @@ impl BulkWriter {
         if vertices.is_empty() {
             return Ok(Vec::new());
         }
+        // Before anything of this label is staged.
+        self.check_before_triggers(crate::events::BulkWriteKind::Vertex, label)?;
 
         // A property named after a storage column is refused whether or not
         // constraint validation is on: it is a storage collision, not a
@@ -1196,7 +1237,10 @@ impl BulkWriter {
     ///
     /// # Errors
     ///
-    /// Returns an error if the edge type is not found in the schema or if
+    /// Returns `UniError::BulkLoadBlockedByTrigger` if a synchronous
+    /// before-trigger subscribes to the type's creates (see
+    /// [`BulkWriterBuilder::skip_before_triggers`]), and an error if the edge
+    /// type is not found in the schema or if
     /// storage write fails.
     pub async fn insert_edges(
         &mut self,
@@ -1212,6 +1256,10 @@ impl BulkWriter {
             .ok_or_else(|| UniError::EdgeTypeNotFound {
                 edge_type: edge_type.to_string(),
             })?;
+        // Before anything of this edge type is staged or recorded.
+        if !edges.is_empty() {
+            self.check_before_triggers(crate::events::BulkWriteKind::Edge, edge_type)?;
+        }
         // Declared endpoints are enforced here as on every other write path:
         // these rows go straight to storage, so nothing downstream checks
         // them, and the planner narrows on a type whose edges all conform.
@@ -1623,6 +1671,7 @@ impl BulkWriter {
                         plan.records.clone(),
                         plan.labels.clone(),
                         self.write_version,
+                        self.loaded_rows(),
                     )
                     .await
                 }
@@ -1635,6 +1684,7 @@ impl BulkWriter {
                             plan.records.clone(),
                             plan.labels.clone(),
                             self.write_version,
+                            self.loaded_rows(),
                         )
                         .await?;
                     }
@@ -2203,8 +2253,13 @@ impl BulkWriter {
     /// - the receipt and the marker delete: the marker is kept whenever an
     ///   earlier step that recovery repeats did not succeed, and recovery then
     ///   writes the receipt and deletes the marker at the next open.
-    async fn finalize(&mut self, plan: &PublishPlan) {
-        let mut keep_marker = false;
+    ///
+    /// `events` is how the delivery of the load's events ended: interrupted by
+    /// a shutdown, the marker is promoted with its events still pending and
+    /// kept, so the next open delivers them again.
+    async fn finalize(&mut self, plan: &PublishPlan, events: EventDelivery) {
+        let events_interrupted = events == EventDelivery::Interrupted;
+        let mut keep_marker = events_interrupted;
 
         // Unchecked, the marker is kept: recovery checks them at the next open.
         let endpoints_checked = self.recheck_external_endpoints().await;
@@ -2260,6 +2315,7 @@ impl BulkWriter {
                 plan.labels.clone(),
                 self.write_version,
                 endpoints_checked,
+                events_interrupted.then(|| self.loaded_rows()),
             )
             .await
         {
@@ -2392,10 +2448,28 @@ impl BulkWriter {
     /// is next opened, and `Session::bulk_load_applied` on the fork answers
     /// for it.
     ///
+    /// Once the load is visible, and before indexes are finalized, `commit`
+    /// announces it and delivers its create events to after-phase triggers
+    /// and CDC through [`BulkBackend::events`], reading its rows back in
+    /// chunks of at most [`crate::BULK_EVENT_CHUNK_ROWS`]; see
+    /// [`crate::events`]. It waits while CDC has
+    /// `MUTATION_STREAM_DEPTH` chunks undelivered. The delivery runs on a task
+    /// of its own, so dropping this future once the load is visible does not
+    /// cut it short; the dropped commit skips finalizing the load (index
+    /// builds, snapshot), which the next open completes -- delivering the
+    /// load's events a second time. A trigger registered after a label's rows
+    /// were staged that would make the load refused (see
+    /// [`BulkWriterBuilder::skip_before_triggers`]) is caught here, before the
+    /// commit point, and the load is discarded.
+    ///
     /// # Errors
     ///
-    /// As listed above.
+    /// As listed above, and `UniError::BulkLoadBlockedByTrigger`.
     pub async fn commit(mut self) -> Result<BulkStats> {
+        if let Err(e) = self.check_before_triggers_for_load() {
+            self.discard_after_failed_commit().await;
+            return Err(e);
+        }
         let plan = match self.prepare_commit().await {
             Ok(plan) => plan,
             Err(e) => {
@@ -2453,13 +2527,22 @@ impl BulkWriter {
             }
             .into());
         }
+        let visible = hold.is_some();
         show_load(&self.backend.storage, hold, &self.touched_edge_types);
         // Visible now: a ceiling captured from here on includes the load.
         self.version_reservation = None;
         // Every staged file is referenced by a table version now.
         self.staged_holds.clear();
+        // Announce the load and stream its events to after-phase triggers and
+        // CDC. Before the index finalization below, which can take long and
+        // does not change what is visible.
+        let events = if visible {
+            self.publish_events().await
+        } else {
+            EventDelivery::Finished
+        };
 
-        self.finalize(&plan).await;
+        self.finalize(&plan, events).await;
 
         self.committed = true;
         self.stats.duration = self.start_time.elapsed();
@@ -2479,6 +2562,94 @@ impl BulkWriter {
         }
     }
 
+    /// Refuse to write `kind` rows under `name` when a synchronous
+    /// before-trigger would see them, unless the caller opted out with
+    /// [`BulkWriterBuilder::skip_before_triggers`].
+    ///
+    /// A load's events exist only once it is visible, past any veto, so such
+    /// a trigger cannot be honoured; refusing before the rows are staged keeps
+    /// the load from ever becoming visible behind its back.
+    fn check_before_triggers(&self, kind: crate::events::BulkWriteKind, name: &str) -> Result<()> {
+        if self.config.skip_before_triggers {
+            return Ok(());
+        }
+        let Some(sink) = &self.backend.events else {
+            return Ok(());
+        };
+        match sink.blocking_trigger(kind, name) {
+            None => Ok(()),
+            Some(trigger) => Err(UniError::BulkLoadBlockedByTrigger {
+                trigger,
+                target: match kind {
+                    crate::events::BulkWriteKind::Vertex => format!("label '{name}'"),
+                    crate::events::BulkWriteKind::Edge => format!("edge type '{name}'"),
+                },
+            }
+            .into()),
+        }
+    }
+
+    /// [`Self::check_before_triggers`] for everything the load wrote: a
+    /// trigger registered after a label's rows were staged is caught here,
+    /// before the commit point.
+    fn check_before_triggers_for_load(&self) -> Result<()> {
+        for label in &self.touched_labels {
+            self.check_before_triggers(crate::events::BulkWriteKind::Vertex, label)?;
+        }
+        for edge_type in &self.touched_edge_types {
+            self.check_before_triggers(crate::events::BulkWriteKind::Edge, edge_type)?;
+        }
+        Ok(())
+    }
+
+    /// Rows this load wrote: vertices plus edges.
+    fn loaded_rows(&self) -> usize {
+        self.stats.vertices_inserted + self.stats.edges_inserted
+    }
+
+    /// Hand the now-visible load to the event sink; see [`crate::events`].
+    ///
+    /// The sink runs on a task of its own, tracked like the re-drive, and
+    /// this waits for it. Once the load is visible its events must be
+    /// delivered whole: run inline, a caller dropping `commit()` part way
+    /// would cut the delivery short -- before the announcement, a load CDC
+    /// never hears of; mid-stream, the rest of the load lost to triggers and
+    /// every CDC stream halted. Dropping `commit()` now drops only this wait.
+    async fn publish_events(&self) -> EventDelivery {
+        let (Some(sink), Some(write_version)) = (&self.backend.events, self.write_version) else {
+            return EventDelivery::Finished;
+        };
+        let mut labels: Vec<String> = self.touched_labels.iter().cloned().collect();
+        labels.sort();
+        let mut edge_types: Vec<String> = self.touched_edge_types.iter().cloned().collect();
+        edge_types.sort();
+        let reader = crate::events::LoadEventReader::new(
+            Arc::clone(&self.backend.storage),
+            write_version,
+            !labels.is_empty(),
+            !edge_types.is_empty(),
+        );
+        let load = crate::events::VisibleLoad {
+            load_id: self.load_id.clone(),
+            write_version,
+            labels,
+            edge_types,
+            rows: self.loaded_rows(),
+            reader,
+        };
+        let sink = Arc::clone(sink);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let delivery = sink.publish(load).await;
+            // The committer may have stopped waiting; the delivery stands.
+            let _ = done_tx.send(delivery);
+        });
+        self.backend.track(handle);
+        // A task that ended without answering panicked, or was aborted by the
+        // runtime shutting down: the delivery did not finish.
+        done_rx.await.unwrap_or(EventDelivery::Interrupted)
+    }
+
     /// Hide this load's version from the storage manager's readers; `None`
     /// when nothing is staged (nothing would become visible).
     pub(crate) async fn hide_load(&self) -> Option<GateHold> {
@@ -2496,10 +2667,7 @@ impl BulkWriter {
         let redrive = self.redrive(plan, hold);
         let shutdown = self.backend.shutdown.subscribe();
         let handle = tokio::spawn(redrive.run(shutdown));
-        match &self.backend.track_task {
-            Some(track) => track(handle),
-            None => self.backend.shutdown.track_task(handle),
-        }
+        self.backend.track(handle);
     }
 
     /// The re-drive of this committed load, taking over what it still owns:
@@ -2521,6 +2689,9 @@ impl BulkWriter {
             hold,
             version_reservation: self.version_reservation.take(),
             staged_holds: self.staged_holds.drain().map(|(_, h)| h).collect(),
+            events: self.backend.events.clone(),
+            load_rows: self.stats.vertices_inserted + self.stats.edges_inserted,
+            vertex_labels: self.touched_labels.iter().cloned().collect(),
         }
     }
 
@@ -2689,6 +2860,12 @@ pub(crate) struct Redrive {
     /// Released once the load is shown; see `BulkWriter::version_reservation`.
     version_reservation: Option<uni_store::runtime::l0_manager::BulkVersionReservation>,
     staged_holds: Vec<StagedFilesHold>,
+    /// Receives the load's events once it is shown; see [`crate::events`].
+    events: Option<Arc<dyn crate::events::BulkEventSink>>,
+    /// Rows the load wrote, for its announcement.
+    load_rows: usize,
+    /// Labels the load wrote vertices under, for its announcement.
+    vertex_labels: Vec<String>,
 }
 
 impl Redrive {
@@ -2758,8 +2935,35 @@ impl Redrive {
     }
 
     async fn finish(mut self) {
+        let visible = self.hold.is_some();
         show_load(&self.storage, self.hold.take(), &self.edge_types);
         self.version_reservation = None;
+        // The load is visible from here: announce it and deliver its events,
+        // as `BulkWriter::commit` does for a load it publishes itself.
+        let mut events = EventDelivery::Finished;
+        if visible && let (Some(sink), Some(write_version)) = (self.events.clone(), self.version) {
+            let mut labels = std::mem::take(&mut self.vertex_labels);
+            labels.sort();
+            let mut edge_types: Vec<String> = self.edge_types.iter().cloned().collect();
+            edge_types.sort();
+            let reader = crate::events::LoadEventReader::new(
+                Arc::clone(&self.storage),
+                write_version,
+                !labels.is_empty(),
+                !edge_types.is_empty(),
+            );
+            let delivery = sink
+                .publish(crate::events::VisibleLoad {
+                    load_id: self.load_id.clone(),
+                    write_version,
+                    labels,
+                    edge_types,
+                    rows: self.load_rows,
+                    reader,
+                })
+                .await;
+            events = delivery;
+        }
         for (label, vids) in std::mem::take(&mut self.written_vids) {
             for vid in vids {
                 self.storage
@@ -2768,6 +2972,17 @@ impl Redrive {
         }
         // Every staged file is referenced by a table version now.
         self.staged_holds.clear();
+        if events == EventDelivery::Interrupted {
+            // Shut down part way through the delivery: the marker stays
+            // `Active`, so the next open repeats the bookkeeping below and
+            // delivers the load's events again.
+            tracing::info!(
+                load_id = %self.load_id,
+                "bulk load re-drive: event delivery stopped by shutdown; the next open delivers \
+                 the load's events again"
+            );
+            return;
+        }
         // The steps below only finish the bookkeeping; the marker is kept on
         // any failure and the next open repeats them.
         let types =

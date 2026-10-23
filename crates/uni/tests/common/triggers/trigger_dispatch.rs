@@ -403,7 +403,10 @@ async fn async_fire_is_counted_and_awaited_by_shutdown() -> Result<()> {
     let baseline = db.background_task_count();
 
     let tx = db.session().tx().await?;
-    tx.execute("CREATE (:_AuditMe {x: 1})").await?;
+    // `:Other`, not `:_AuditMe`: the built-in audit trigger is Async too
+    // and fires on `_AuditMe`, so its own short-lived background task would
+    // race this test's count of the one fire under test.
+    tx.execute("CREATE (:Other {x: 1})").await?;
     tx.commit().await?;
     assert_eq!(
         db.background_task_count(),
@@ -436,7 +439,10 @@ async fn async_fire_on_a_fork_is_counted_and_awaited_by_shutdown() -> Result<()>
 
     let fork = db.session().fork("f").await?;
     let tx = fork.tx().await?;
-    tx.execute("CREATE (:_AuditMe {x: 1})").await?;
+    // `:Other`, not `:_AuditMe`: the built-in audit trigger is Async too
+    // and fires on `_AuditMe`, so its own short-lived background task would
+    // race this test's count of the one fire under test.
+    tx.execute("CREATE (:Other {x: 1})").await?;
     tx.commit().await?;
     drop(fork);
     assert_eq!(
@@ -464,7 +470,10 @@ async fn async_fire_on_a_fork_is_awaited_by_drop() -> Result<()> {
 
     let fork = db.session().fork("f").await?;
     let tx = fork.tx().await?;
-    tx.execute("CREATE (:_AuditMe {x: 1})").await?;
+    // `:Other`, not `:_AuditMe`: the built-in audit trigger is Async too
+    // and fires on `_AuditMe`, so its own short-lived background task would
+    // race this test's count of the one fire under test.
+    tx.execute("CREATE (:Other {x: 1})").await?;
     tx.commit().await?;
     drop(fork);
     drop(db);

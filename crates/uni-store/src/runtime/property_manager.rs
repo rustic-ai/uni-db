@@ -147,6 +147,23 @@ impl PropertyManager {
     }
 
     #[instrument(skip(self, ctx), level = "trace")]
+    /// What an L1 read for `ctx` may return: the pinned view's visibility
+    /// when the query runs against one, else this manager's (live) storage's.
+    fn l1_visibility(
+        &self,
+        ctx: Option<&QueryContext>,
+    ) -> crate::storage::bulk_gate::RowVisibility {
+        ctx.and_then(|c| c.l1_visibility.clone())
+            .unwrap_or_else(|| self.storage.row_visibility())
+    }
+
+    /// Whether the shared cache may serve or store a value for `ctx`. It
+    /// holds the newest committed values, so a pinned read neither trusts it
+    /// nor fills it.
+    fn cache_usable(ctx: Option<&QueryContext>) -> bool {
+        ctx.is_none_or(|c| c.l1_visibility.is_none())
+    }
+
     pub async fn get_edge_prop(
         &self,
         eid: uni_common::core::id::Eid,
@@ -164,7 +181,9 @@ impl PropertyManager {
         }
 
         // 3. Check Cache (if enabled)
-        if let Some(ref cache) = self.edge_cache {
+        if Self::cache_usable(ctx)
+            && let Some(ref cache) = self.edge_cache
+        {
             let mut cache = cache.lock().await;
             if let Some(val) = cache.get(&(eid, prop.to_string())) {
                 debug!(eid = ?eid, prop, "Cache HIT");
@@ -184,7 +203,9 @@ impl PropertyManager {
             .unwrap_or(Value::Null);
 
         // 5. Update Cache (if enabled) - Cache ALL fetched properties, not just requested one
-        if let Some(ref cache) = self.edge_cache {
+        if Self::cache_usable(ctx)
+            && let Some(ref cache) = self.edge_cache
+        {
             let mut cache = cache.lock().await;
             if let Some(ref props) = all {
                 for (prop_name, prop_val) in props {
@@ -279,7 +300,7 @@ impl PropertyManager {
             }
 
             let base_filter = FilterExpr::equals("eid", Scalar::UInt(eid.as_u64()));
-            let filter_expr = self.storage.apply_version_filter(base_filter);
+            let filter_expr = self.l1_visibility(ctx).bound(base_filter);
 
             let batches = match backend
                 .scan(
@@ -336,14 +357,14 @@ impl PropertyManager {
         // Fallback to main edges table props_json for unknown/schemaless types.
         // Bounded by the same high water mark the delta tier is filtered by
         // above — otherwise this tier alone reads at HEAD while the others
-        // honour the snapshot. The hwm is `None` unless this `PropertyManager`
-        // was built over pinned storage (today: `UniInner::at_snapshot`), so
-        // for a read-write transaction both tiers read at HEAD by design.
+        // honour the snapshot. For a query against a pinned view (a
+        // read-write transaction or a time-travel snapshot) that is the
+        // view's `QueryContext::l1_visibility`; otherwise both tiers read live.
         use crate::storage::main_edge::MainEdgeDataset;
         if let Some(props) = MainEdgeDataset::find_props_by_eid_counted(
             self.storage.backend(),
             eid,
-            self.storage.row_visibility(),
+            self.l1_visibility(ctx),
             counters_of(ctx),
         )
         .await?
@@ -570,7 +591,7 @@ impl PropertyManager {
             let base_filter =
                 FilterExpr::one_of("_vid", vids.iter().map(|v| Scalar::UInt(v.as_u64())));
 
-            let final_filter = self.storage.apply_version_filter(base_filter);
+            let final_filter = self.l1_visibility(ctx).bound(base_filter);
 
             // Build column list for projection
             let mut columns: Vec<String> = Vec::with_capacity(valid_props.len() + 4);
@@ -658,7 +679,7 @@ impl PropertyManager {
             .copied()
             .filter(|vid| !result.contains_key(vid) && !tombstoned.contains(vid))
             .collect();
-        self.main_table_fallback(&missing, &mut result).await?;
+        self.main_table_fallback(&missing, &mut result, ctx).await?;
 
         // 3. Overlay L0 buffers in age order: pending (oldest to newest) -> current -> transaction
         if let Some(ctx) = ctx {
@@ -915,7 +936,7 @@ impl PropertyManager {
             let base_filter =
                 FilterExpr::one_of("eid", eids.iter().map(|e| Scalar::UInt(e.as_u64())));
 
-            let final_filter = self.storage.apply_version_filter(base_filter);
+            let final_filter = self.l1_visibility(ctx).bound(base_filter);
 
             // Build column list for projection
             let mut columns: Vec<String> = Vec::with_capacity(valid_props.len() + 4);
@@ -1074,7 +1095,7 @@ impl PropertyManager {
                 let fetched = MainEdgeDataset::find_props_by_eids_counted(
                     self.storage.backend(),
                     &unresolved,
-                    self.storage.row_visibility(),
+                    self.l1_visibility(ctx),
                     counters_of(ctx),
                 )
                 .await?;
@@ -1226,7 +1247,7 @@ impl PropertyManager {
         // Fallback to storage backend for VIDs not in the index
         if !vids_needing_lancedb.is_empty() {
             let backend = self.storage.backend();
-            let version = self.storage.row_visibility();
+            let version = self.l1_visibility(ctx);
             let storage_labels = MainVertexDataset::find_batch_labels_by_vids(
                 backend,
                 &vids_needing_lancedb,
@@ -1403,7 +1424,7 @@ impl PropertyManager {
             need_storage.iter().map(|v| Scalar::UInt(v.as_u64())),
         );
 
-        let filter_expr = self.storage.apply_version_filter(base_filter);
+        let filter_expr = self.l1_visibility(ctx).bound(base_filter);
 
         let table_name = crate::backend::table_names::vertex_table_name(label);
         let batches: Vec<RecordBatch> = self
@@ -1508,7 +1529,7 @@ impl PropertyManager {
             .copied()
             .filter(|vid| !result.contains_key(vid) && !per_vid_best_version.contains_key(vid))
             .collect();
-        self.main_table_fallback(&missing, &mut result).await?;
+        self.main_table_fallback(&missing, &mut result, ctx).await?;
 
         // Phase 3: Normalize CRDT properties.
         if ctx.is_some() {
@@ -1538,6 +1559,7 @@ impl PropertyManager {
         &self,
         missing: &[Vid],
         out: &mut HashMap<Vid, Properties>,
+        ctx: Option<&QueryContext>,
     ) -> Result<()> {
         if missing.is_empty() {
             return Ok(());
@@ -1545,7 +1567,7 @@ impl PropertyManager {
         let main_props = MainVertexDataset::find_batch_props_by_vids(
             self.storage.backend(),
             missing,
-            self.storage.row_visibility(),
+            self.l1_visibility(ctx),
         )
         .await?;
         for (vid, props) in main_props {
@@ -1618,7 +1640,7 @@ impl PropertyManager {
 
         let base_filter =
             FilterExpr::one_of("eid", need_storage.iter().map(|e| Scalar::UInt(e.as_u64())));
-        let filter_expr = self.storage.apply_version_filter(base_filter);
+        let filter_expr = self.l1_visibility(ctx).bound(base_filter);
 
         let batches = match backend
             .scan(
@@ -1728,7 +1750,7 @@ impl PropertyManager {
             let fetched = MainEdgeDataset::find_props_by_eids_counted(
                 self.storage.backend(),
                 &unresolved,
-                self.storage.row_visibility(),
+                self.l1_visibility(ctx),
                 counters_of(ctx),
             )
             .await?;
@@ -2060,7 +2082,7 @@ impl PropertyManager {
             // Query using backend scan API
             let base_filter = FilterExpr::equals("_vid", Scalar::UInt(vid.as_u64()));
 
-            let filter_expr = self.storage.apply_version_filter(base_filter);
+            let filter_expr = self.l1_visibility(ctx).bound(base_filter);
 
             let table_name = crate::backend::table_names::vertex_table_name(label_name);
             let batches: Vec<RecordBatch> = match self
@@ -2139,7 +2161,7 @@ impl PropertyManager {
             && let Some(main_props) = MainVertexDataset::find_props_by_vid_counted(
                 self.storage.backend(),
                 vid,
-                self.storage.row_visibility(),
+                self.l1_visibility(ctx),
                 counters_of(ctx),
             )
             .await?
@@ -2206,7 +2228,9 @@ impl PropertyManager {
         }
 
         // 5. Check Cache (if enabled)
-        if let Some(ref cache) = self.vertex_cache {
+        if Self::cache_usable(ctx)
+            && let Some(ref cache) = self.vertex_cache
+        {
             let mut cache = cache.lock().await;
             if let Some(val) = cache.get(&(vid, prop.to_string())) {
                 debug!(vid = ?vid, prop, "Cache HIT");
@@ -2223,7 +2247,9 @@ impl PropertyManager {
         let storage_val = self.fetch_prop_from_storage(vid, prop, ctx).await?;
 
         // 7. Update Cache (if enabled)
-        if let Some(ref cache) = self.vertex_cache {
+        if Self::cache_usable(ctx)
+            && let Some(ref cache) = self.vertex_cache
+        {
             let mut cache = cache.lock().await;
             cache.put((vid, prop.to_string()), storage_val.clone());
         }
@@ -2340,7 +2366,9 @@ impl PropertyManager {
         ctx: Option<&QueryContext>,
     ) -> Result<Value> {
         // Check Cache (if enabled)
-        let cached_val = if let Some(ref cache) = self.vertex_cache {
+        let cached_val = if Self::cache_usable(ctx)
+            && let Some(ref cache) = self.vertex_cache
+        {
             let mut cache = cache.lock().await;
             cache.get(&(vid, prop.to_string())).cloned()
         } else {
@@ -2356,7 +2384,9 @@ impl PropertyManager {
         let storage_val = self.fetch_prop_from_storage(vid, prop, ctx).await?;
 
         // Update Cache (if enabled)
-        if let Some(ref cache) = self.vertex_cache {
+        if Self::cache_usable(ctx)
+            && let Some(ref cache) = self.vertex_cache
+        {
             let mut cache = cache.lock().await;
             cache.put((vid, prop.to_string()), storage_val.clone());
         }
@@ -2397,7 +2427,7 @@ impl PropertyManager {
             // Query using backend scan API
             let base_filter = FilterExpr::equals("_vid", Scalar::UInt(vid.as_u64()));
 
-            let filter_expr = self.storage.apply_version_filter(base_filter);
+            let filter_expr = self.l1_visibility(ctx).bound(base_filter);
 
             // Always request metadata columns and overflow_json
             let mut columns = vec![
@@ -2510,7 +2540,7 @@ impl PropertyManager {
             && let Some(main_props) = MainVertexDataset::find_props_by_vid_counted(
                 self.storage.backend(),
                 vid,
-                self.storage.row_visibility(),
+                self.l1_visibility(ctx),
                 counters_of(ctx),
             )
             .await?

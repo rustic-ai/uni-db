@@ -7,22 +7,26 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use uni_common::core::id::{Eid, Vid};
-use uni_store::storage::adjacency_manager::AdjacencyManager;
 use uni_store::storage::direction::Direction;
+use uni_store::storage::manager::StorageManager;
 
 /// Zero-copy traversal on storage primitives.
 ///
 /// Use this for light algorithms like BFS, DFS, or point-to-point shortest path
 /// where projection overhead isn't justified.
 pub struct DirectTraversal<'a> {
-    am: &'a AdjacencyManager,
+    storage: &'a StorageManager,
     edge_types: Vec<u32>,
 }
 
 impl<'a> DirectTraversal<'a> {
-    /// Create a new direct traversal context.
-    pub fn new(am: &'a AdjacencyManager, edge_types: Vec<u32>) -> Self {
-        Self { am, edge_types }
+    /// Create a new direct traversal context over `storage`'s adjacency, as
+    /// `storage` sees it ([`StorageManager::neighbors`]).
+    pub fn new(storage: &'a StorageManager, edge_types: Vec<u32>) -> Self {
+        Self {
+            storage,
+            edge_types,
+        }
     }
 
     /// Iterate neighbors of a vertex in the given direction.
@@ -30,7 +34,7 @@ impl<'a> DirectTraversal<'a> {
         let mut result = Vec::new();
 
         for &edge_type in &self.edge_types {
-            let neighbors = self.am.get_neighbors(vid, edge_type, direction);
+            let neighbors = self.storage.neighbors(vid, edge_type, direction);
             result.extend(neighbors);
         }
 

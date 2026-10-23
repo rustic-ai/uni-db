@@ -1,8 +1,14 @@
+pub mod bulk_events;
+pub mod bulk_events_delivery_resilience;
+pub mod commit_order_resilience;
+pub mod event_support;
 pub mod trigger_declared;
 pub mod trigger_defer;
 pub mod trigger_dispatch;
 pub mod trigger_edge_pre_image;
 pub mod trigger_edge_probe_cost;
+pub mod trigger_label_events;
 pub mod trigger_predicate;
 pub mod trigger_predicate_properties;
+pub mod trigger_selector_colon;
 pub mod trigger_vertex_probe_cost;

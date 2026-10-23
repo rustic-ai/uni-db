@@ -4,28 +4,28 @@
 //! Component C2 — transaction-level L1 (Lance) pinning.
 //!
 //! A read-write transaction pins the L0 tier via its `SnapshotView` (C1),
-//! and C2 pins the L1 VERTEX-SCAN tier: scans route through a
-//! `StorageManager` clone whose vertex reads filter to
-//! `_version <= started_at_version`, so an L0→L1 flush completing
-//! mid-transaction cannot leak post-snapshot ROWS into the transaction's
-//! view (previously: "flush-boundary read skew").
+//! and C2 pins the L1 tier: scans route through a `StorageManager` clone
+//! whose reads filter to `_version <= started_at_version` (minus bulk loads
+//! unpublished at begin), so an L0→L1 flush completing mid-transaction
+//! cannot leak post-snapshot ROWS into the transaction's view (previously:
+//! "flush-boundary read skew").
 //!
-//! Scope — the pin is on row EXISTENCE (which vertices a scan returns),
-//! deliberately not on property values or edges:
+//! Scope:
 //! - **Vertex scans** filter by version. L1 vertex rows are single-versioned
 //!   (`MergeInsert` replaces in place), so post-snapshot INSERTS are hidden;
 //!   a row updated-and-flushed mid-transaction is *excluded* rather than
 //!   shown at its old value (the same boundary time-travel has). L0-resident
 //!   rows are immune (L0 shadows L1).
-//! - **Property reads** stay on LIVE storage: a property point-read must
-//!   honor read-your-writes (a transaction's own uncommitted edge/vertex
-//!   properties live in tx_l0, not L1; a version filter would hide them and
-//!   break e.g. MERGE's edge-property match). Cross-transaction property
-//!   skew on an already-visible row is caught by OCC at commit, not the pin.
-//! - **Edges** are not version-pinned: traversals share the live
-//!   `AdjacencyManager` (its commit-replay overlay is the only source of
-//!   unflushed edges), and edge-table reads use the manifest-only hwm. Edge
-//!   reads are in the OCC read-set, so a conflicting RMW still aborts.
+//! - **Property reads** go through the shared PropertyManager on LIVE
+//!   storage, so read-your-writes holds (a transaction's own uncommitted
+//!   edge/vertex properties live in tx_l0, consulted before L1 — e.g. MERGE's
+//!   edge-property match). Its L1 tiers are bounded by the pin, carried in
+//!   `QueryContext::l1_visibility`, and it bypasses its shared LRU cache
+//!   while pinned.
+//! - **Edges** are version-pinned at read time: the pinned clone shares the
+//!   live `AdjacencyManager` (its commit-replay overlay is the only source of
+//!   unflushed edges) and `StorageManager::neighbors` filters it by the
+//!   view's `RowVisibility`. The shared CSR is still warmed unfiltered.
 
 use anyhow::Result;
 use uni_db::{DataType, Uni, UniConfig};

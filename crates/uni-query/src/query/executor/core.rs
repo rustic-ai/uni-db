@@ -754,6 +754,9 @@ impl Executor {
                 ctx.set_cancellation_token(token.clone());
             }
             ctx.set_counters(self.counters.clone());
+            // The shared property manager reads live storage; a pinned
+            // read's L1 visibility travels with the context.
+            ctx.set_l1_visibility(self.effective_storage().pinned_row_visibility());
             Some(ctx)
         } else {
             self.l0_manager.as_ref().map(|m| {
@@ -775,6 +778,7 @@ impl Executor {
                     ctx.set_cancellation_token(token.clone());
                 }
                 ctx.set_counters(self.counters.clone());
+                ctx.set_l1_visibility(self.effective_storage().pinned_row_visibility());
                 ctx
             })
         }

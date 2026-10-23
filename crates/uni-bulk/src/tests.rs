@@ -185,6 +185,7 @@ impl Fixture {
                 config: UniConfig::default(),
                 rebuild_manager: None,
                 track_task: None,
+                events: None,
             },
         }
     }
@@ -384,25 +385,48 @@ async fn the_commit_point_is_the_marker_and_recovery_completes_the_publish_once(
     std::mem::forget(bulk);
     assert_eq!(fx.load_rows().await, [0; 4]);
 
-    flush_intent::recover_interrupted_bulk_load(fx.storage())
+    let recovered = flush_intent::recover_interrupted_bulk_load(fx.storage())
         .await
         .unwrap();
     assert_eq!(fx.load_rows().await, [4, 4, 4, 4], "recovery publishes it");
-    // `E` is enforced, so the marker waits for the post-replay check.
+    // Its events were never delivered: recovery hands the load back for that.
+    assert_eq!(
+        recovered
+            .iter()
+            .map(|l| l.load_id.as_str())
+            .collect::<Vec<_>>(),
+        [load_id.as_str()]
+    );
+    assert_eq!(recovered[0].rows, 12, "the marker records the load's rows");
+    assert_eq!(recovered[0].labels, ["P", "Q"]);
+    assert_eq!(recovered[0].edge_types, ["E"]);
+    // `E` is enforced, so the marker waits for the post-replay check, and for
+    // the events to be delivered.
     let marker = flush_intent::read_marker(&Markers::for_storage(fx.storage()), &load_id)
         .await
         .unwrap()
         .expect("kept until its endpoints are checked");
     assert_eq!(marker.phase, BulkIntentPhase::Committed);
     assert!(marker.publish.is_none() && !marker.endpoints_checked);
+    assert!(marker.events_pending);
 
-    // A second recovery (a crash before the check) publishes nothing again.
-    flush_intent::recover_interrupted_bulk_load(fx.storage())
+    // A second recovery (a crash before the check) publishes nothing again,
+    // and still hands the load's events back: they were not delivered.
+    let again = flush_intent::recover_interrupted_bulk_load(fx.storage())
         .await
         .unwrap();
     assert_eq!(fx.load_rows().await, [4, 4, 4, 4], "exactly once");
+    assert_eq!(again, recovered);
 
     flush_intent::check_recovered_bulk_endpoints(fx.storage(), fx.writer(), true)
+        .await
+        .unwrap();
+    assert_eq!(
+        fx.markers().await,
+        vec![format!("{load_id}.json")],
+        "checked, but kept until the events are delivered"
+    );
+    flush_intent::finish_recovered_load_events(fx.storage(), &load_id)
         .await
         .unwrap();
     assert!(fx.markers().await.is_empty());
@@ -431,6 +455,8 @@ async fn a_per_load_marker_without_a_publish_record_is_kept_not_rolled_back() {
         labels: Vec::new(),
         version: None,
         endpoints_checked: false,
+        rows: None,
+        events_pending: false,
     };
     let markers = Markers::for_storage(fx.storage());
     let load_id = uuid::Uuid::new_v4().to_string();
@@ -472,6 +498,8 @@ fn which_markers_decide_their_load() {
         labels: Vec::new(),
         version: None,
         endpoints_checked: false,
+        rows: None,
+        events_pending: false,
     };
     assert!(
         !flush_intent::marker_applies(&base),
@@ -610,7 +638,7 @@ async fn recovered_load_endpoints_are_checked_with_the_writers_view() {
         CommitPoint::Reached
     ));
     std::mem::forget(bulk);
-    flush_intent::recover_interrupted_bulk_load(fx.storage())
+    let recovered = flush_intent::recover_interrupted_bulk_load(fx.storage())
         .await
         .unwrap();
     // The removal reaches only L0 (as a replayed WAL record would): storage
@@ -626,7 +654,102 @@ async fn recovered_load_endpoints_are_checked_with_the_writers_view() {
         fx.storage().schema_manager().schema().edge_types["E"].endpoint_conformance,
         EndpointConformance::Unverified
     );
+    // The marker waits for the load's events, which the database delivers.
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(fx.markers().await.len(), 1);
+    flush_intent::finish_recovered_load_events(fx.storage(), &recovered[0].load_id)
+        .await
+        .unwrap();
     assert!(fx.markers().await.is_empty());
+}
+
+/// A load whose marker records its events delivered is not handed back; one
+/// left `events_pending` by an interrupted delivery is, on every open until
+/// the delivery is finished. A marker whose endpoint check is still due (a
+/// read-only open skipped it) outlives the delivery, for that check.
+#[tokio::test]
+async fn recovery_hands_back_only_loads_whose_events_are_pending() {
+    let fx = Fixture::new(true).await;
+    let markers = Markers::for_storage(fx.storage());
+    let delivered_intent = BulkFlushIntent {
+        phase: BulkIntentPhase::Committed,
+        tables: BTreeMap::new(),
+        snapshot_id: None,
+        publish: None,
+        labels: vec!["P".to_string()],
+        version: Some(7),
+        endpoints_checked: true,
+        rows: Some(3),
+        events_pending: false,
+    };
+    let pending_intent = BulkFlushIntent {
+        events_pending: true,
+        version: Some(9),
+        ..delivered_intent.clone()
+    };
+    let earlier_intent = BulkFlushIntent {
+        version: Some(8),
+        ..pending_intent.clone()
+    };
+    let delivered = uuid::Uuid::new_v4().to_string();
+    let pending = uuid::Uuid::new_v4().to_string();
+    let earlier = uuid::Uuid::new_v4().to_string();
+    for (id, intent) in [
+        (&delivered, &delivered_intent),
+        (&pending, &pending_intent),
+        (&earlier, &earlier_intent),
+    ] {
+        flush_intent::write_for_test(&markers, id, intent)
+            .await
+            .unwrap();
+    }
+
+    for _ in 0..2 {
+        let recovered = flush_intent::recover_interrupted_bulk_load(fx.storage())
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered
+                .iter()
+                .map(|l| (l.load_id.as_str(), l.write_version, l.rows))
+                .collect::<Vec<_>>(),
+            [(earlier.as_str(), 8, 3), (pending.as_str(), 9, 3)],
+            "pending loads only, in version order"
+        );
+    }
+    assert_eq!(
+        fx.markers().await.len(),
+        2,
+        "the delivered load is finished"
+    );
+    for id in [&earlier, &pending] {
+        flush_intent::finish_recovered_load_events(fx.storage(), id)
+            .await
+            .unwrap();
+    }
+    assert!(fx.markers().await.is_empty());
+    assert!(
+        flush_intent::bulk_load_applied(fx.storage(), &pending)
+            .await
+            .unwrap()
+    );
+
+    let unchecked = uuid::Uuid::new_v4().to_string();
+    let unchecked_intent = BulkFlushIntent {
+        endpoints_checked: false,
+        ..pending_intent
+    };
+    flush_intent::write_for_test(&markers, &unchecked, &unchecked_intent)
+        .await
+        .unwrap();
+    flush_intent::finish_recovered_load_events(fx.storage(), &unchecked)
+        .await
+        .unwrap();
+    let left = flush_intent::read_marker(&markers, &unchecked)
+        .await
+        .unwrap()
+        .expect("kept for its endpoint check");
+    assert!(!left.events_pending && !left.endpoints_checked);
 }
 
 #[tokio::test]

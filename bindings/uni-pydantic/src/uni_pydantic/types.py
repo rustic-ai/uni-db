@@ -10,6 +10,7 @@ from datetime import date, datetime, time, timedelta
 from typing import (
     Annotated,
     Any,
+    ForwardRef,
     Generic,
     TypeVar,
     Union,
@@ -25,13 +26,17 @@ from .exceptions import TypeMappingError
 # Import the Rust BTIC binding (optional — allows pydantic layer to work
 # for type annotations even when the Rust extension is not installed).
 try:
-    from uni_db import Btic as _PyBtic
+    from uni_db import Btic as _RustBtic
+
+    _PyBtic: type[_RustBtic] | None = _RustBtic
 except ImportError:
     _PyBtic = None
 
 # Import the Rust SparseVector binding (optional, like Btic above).
 try:
-    from uni_db import SparseVector as _PySparseVector
+    from uni_db import SparseVector as _RustSparseVector
+
+    _PySparseVector: type[_RustSparseVector] | None = _RustSparseVector
 except ImportError:
     _PySparseVector = None
 
@@ -137,6 +142,16 @@ class Vector(Generic[N], metaclass=VectorMeta):
                 info_arg=False,
             ),
         )
+
+
+def vector_class(dimensions: int) -> type[Vector[Any]]:
+    """Return the ``Vector[dimensions]`` class for a dimension known only at runtime.
+
+    ``Vector[1536]`` in an annotation is a literal subscript; with a variable
+    (``Vector[dims]``) a type checker reads it as an invalid type expression.
+    This calls the same ``VectorMeta.__getitem__`` (and its class cache).
+    """
+    return VectorMeta.__getitem__(Vector, dimensions)
 
 
 def get_vector_dimensions(type_hint: Any) -> int | None:
@@ -526,14 +541,13 @@ def db_to_python_value(value: Any, type_hint: Any) -> Any:
     if is_lst:
         elem_dims = get_vector_dimensions(elem_type)
         if elem_dims is not None and isinstance(value, list):
-            vec_cls = Vector[elem_dims]
-            return [vec_cls(v) if isinstance(v, list) else v for v in value]
+            elem_cls = vector_class(elem_dims)
+            return [elem_cls(v) if isinstance(v, list) else v for v in value]
 
     # Vector fields: list[float] → Vector
     dims = get_vector_dimensions(type_hint)
     if dims is not None and isinstance(value, list):
-        vec_cls = Vector[dims]
-        return vec_cls(value)
+        return vector_class(dims)(value)
 
     return value
 
@@ -622,12 +636,16 @@ def python_type_to_uni(type_hint: Any, *, nullable: bool = False) -> tuple[str, 
                 return f"map:string:{val_uni}", nullable
         return "json", nullable
 
-    # Handle forward references (strings)
-    if isinstance(type_hint, str):
-        # This is a forward reference, can't resolve here
+    # Handle forward references: a quoted annotation (a plain string) or a
+    # ``ForwardRef`` -- which is what pydantic leaves on an unresolved field, and
+    # what Python 3.14's lazy annotations (PEP 649) produce for a name that is
+    # not yet defined. Both carry the same source text; neither can be resolved
+    # here, so report the reference itself rather than an opaque repr.
+    if isinstance(type_hint, (str, ForwardRef)):
+        ref = type_hint if isinstance(type_hint, str) else type_hint.__forward_arg__
         raise TypeMappingError(
             type_hint,
-            f"Cannot resolve forward reference {type_hint!r}. "
+            f"Cannot resolve forward reference {ref!r}. "
             "Ensure the referenced class is defined before schema sync.",
         )
 

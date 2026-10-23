@@ -55,6 +55,18 @@
 //!    is completed in the background through `publish_records`, hidden from
 //!    the handle's readers until it is, and otherwise by the next open.
 //!
+//! 8. A load's events (see [`crate::events`]) are delivered after it becomes
+//!    visible and before its marker is promoted to `Committed`. A marker
+//!    recovery finds still `Active` therefore belongs to a load whose events
+//!    are not known to have been delivered. Recovery keeps such a marker, as
+//!    `Committed` with `events_pending`, and returns the load
+//!    ([`RecoveredLoad`]) for the database to deliver once its event
+//!    machinery exists; [`finish_recovered_load_events`] then finishes the
+//!    marker. A crash, or a shutdown, before that leaves the marker for the
+//!    next open, which delivers the events again: at least once, never a
+//!    hole. A `Committed` marker written with `events_pending` (the commit's
+//!    delivery was interrupted by a shutdown) is returned the same way.
+//!
 //! Recovery is idempotent: a marker is deleted only after its reconciliation
 //! fully succeeded, and repeating a completed step is a no-op, so a crash
 //! during recovery is recovered by the next open. The single marker file of
@@ -197,6 +209,59 @@ pub(crate) struct BulkFlushIntent {
     /// marker; recovery then checks them once the WAL is replayed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub endpoints_checked: bool,
+    /// Rows the load wrote (vertices plus edges), for the announcement of a
+    /// load whose events recovery delivers. Absent in earlier releases'
+    /// markers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<usize>,
+    /// The load is visible but its events are not known to have been
+    /// delivered: the next open delivers them (see [`RecoveredLoad`]) before
+    /// the marker is finished.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub events_pending: bool,
+}
+
+/// A load whose events recovery leaves to the database to deliver; see
+/// [`recover_interrupted_bulk_load`].
+///
+/// Deliver them through the database's `BulkEventSink` path (announce, then
+/// stream the rows [`Self::into_visible`] reads back), then call
+/// [`finish_recovered_load_events`]. Until then the load's marker stays, so a
+/// crash delivers them again at the next open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredLoad {
+    /// The load's id.
+    pub load_id: String,
+    /// The `_version` every row of the load carries.
+    pub write_version: u64,
+    /// Labels the load wrote vertices under, sorted.
+    pub labels: Vec<String>,
+    /// Edge types the load wrote edges of, sorted.
+    pub edge_types: Vec<String>,
+    /// Rows the load wrote; `0` when its marker did not record them.
+    pub rows: usize,
+}
+
+impl RecoveredLoad {
+    /// The load as its events are delivered: announced as `load_id`, its rows
+    /// read back from `storage`, the storage it was recovered on.
+    #[must_use]
+    pub fn into_visible(self, storage: Arc<StorageManager>) -> crate::events::VisibleLoad {
+        let reader = crate::events::LoadEventReader::new(
+            storage,
+            self.write_version,
+            !self.labels.is_empty(),
+            !self.edge_types.is_empty(),
+        );
+        crate::events::VisibleLoad {
+            load_id: self.load_id,
+            write_version: self.write_version,
+            labels: self.labels,
+            edge_types: self.edge_types,
+            rows: self.rows,
+            reader,
+        }
+    }
 }
 
 pub(crate) fn table_map(tables: &HashMap<String, Option<u64>>) -> BTreeMap<String, Option<u64>> {
@@ -213,6 +278,7 @@ pub(crate) async fn write_publishing(
     publish: Vec<StagedTablePublish>,
     labels: Vec<String>,
     version: Option<u64>,
+    rows: usize,
 ) -> Result<()> {
     let intent = BulkFlushIntent {
         phase: BulkIntentPhase::Active,
@@ -222,15 +288,22 @@ pub(crate) async fn write_publishing(
         labels,
         version,
         endpoints_checked: false,
+        rows: Some(rows),
+        events_pending: false,
     };
     write(markers, load_id, &intent).await
 }
 
 /// Promote `load_id`'s marker to `Committed`, recording the target snapshot
-/// id when one was saved, and whether the published edges' endpoints were
-/// checked again. Must be called only once every row of the load is visible
-/// -- recovery of a `Committed` marker publishes nothing -- and *before* the
-/// latest pointer is flipped.
+/// id when one was saved, whether the published edges' endpoints were
+/// checked again, and -- `pending_rows`, the load's row count, when `Some` --
+/// that the load's events are still to be delivered by the next open. Must be called only once every row
+/// of the load is visible -- recovery of a `Committed` marker publishes
+/// nothing -- and *before* the latest pointer is flipped.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one argument per marker field; a marker is written in one place"
+)]
 pub(crate) async fn write_committed(
     markers: &Markers,
     load_id: &str,
@@ -239,6 +312,7 @@ pub(crate) async fn write_committed(
     labels: Vec<String>,
     version: Option<u64>,
     endpoints_checked: bool,
+    pending_rows: Option<usize>,
 ) -> Result<()> {
     let intent = BulkFlushIntent {
         phase: BulkIntentPhase::Committed,
@@ -248,6 +322,8 @@ pub(crate) async fn write_committed(
         labels,
         version,
         endpoints_checked,
+        rows: pending_rows,
+        events_pending: pending_rows.is_some(),
     };
     write(markers, load_id, &intent).await
 }
@@ -415,15 +491,21 @@ fn is_not_found(e: &anyhow::Error) -> bool {
 /// for the recovery policy. Idempotent and safe to call on every open (a no-op
 /// when no marker is present).
 ///
+/// Returns the loads whose events are not known to have been delivered, in
+/// the order their rows were versioned (`write_version`), which is the order
+/// they became decided. Their markers are kept: deliver each one's events
+/// (see [`RecoveredLoad`]), then call [`finish_recovered_load_events`].
+///
 /// # Errors
 ///
 /// Returns an error if a marker cannot be read or any load cannot be fully
 /// reconciled. Every marker not fully reconciled is kept, so the next open
 /// retries it; the others are reconciled and deleted regardless.
-pub async fn recover_interrupted_bulk_load(storage: &StorageManager) -> Result<()> {
+pub async fn recover_interrupted_bulk_load(storage: &StorageManager) -> Result<Vec<RecoveredLoad>> {
     let markers = Markers::for_storage(storage);
     let store = markers.store.clone();
     let mut failed = Vec::new();
+    let mut recovered = Vec::new();
     for path in marker_paths(&markers).await? {
         let Some(intent) = read(&store, &path).await? else {
             continue;
@@ -436,6 +518,23 @@ pub async fn recover_interrupted_bulk_load(storage: &StorageManager) -> Result<(
             // answering once the marker is gone.
             Ok(()) => {
                 let load_id = markers.marker_load_id(&path);
+                if let Some(load_id) = &load_id
+                    && let Some(load) = events_to_deliver(storage, load_id, &intent)
+                {
+                    // Applied and visible, its events not known delivered:
+                    // keep the marker, as `Committed` (recovery of it
+                    // publishes nothing), until they are.
+                    let kept = BulkFlushIntent {
+                        endpoints_checked: intent.endpoints_checked
+                            || !needs_endpoint_check(storage, &intent),
+                        events_pending: true,
+                        rows: Some(load.rows),
+                        ..committed_unchecked(&intent)
+                    };
+                    write(&markers, load_id, &kept).await?;
+                    recovered.push(load);
+                    continue;
+                }
                 if let Some(load_id) = &load_id
                     && needs_endpoint_check(storage, &intent)
                 {
@@ -467,7 +566,76 @@ pub async fn recover_interrupted_bulk_load(storage: &StorageManager) -> Result<(
             failed.join("; ")
         );
     }
-    Ok(())
+    recovered.sort_by_key(|load| load.write_version);
+    Ok(recovered)
+}
+
+/// The load whose events the open must deliver, if `intent` (just reconciled)
+/// is one: a recorded publish recovery completed -- `commit` promotes the
+/// marker to `Committed` only after delivering the events -- or a `Committed`
+/// marker whose delivery was left pending. A marker without the load's
+/// version (an earlier release's) cannot have its rows told apart from
+/// others', so its events are not delivered.
+fn events_to_deliver(
+    storage: &StorageManager,
+    load_id: &str,
+    intent: &BulkFlushIntent,
+) -> Option<RecoveredLoad> {
+    let pending = match intent.phase {
+        BulkIntentPhase::Active => intent.publish.is_some(),
+        BulkIntentPhase::Committed => intent.events_pending,
+    };
+    if !pending {
+        return None;
+    }
+    let Some(write_version) = intent.version else {
+        tracing::warn!(
+            load_id,
+            "bulk recovery: a recovered load's marker does not record its version, so its \
+             trigger and CDC events cannot be read back and are not delivered"
+        );
+        return None;
+    };
+    let mut labels = intent.labels.clone();
+    labels.sort();
+    Some(RecoveredLoad {
+        load_id: load_id.to_owned(),
+        write_version,
+        labels,
+        edge_types: crate::endpoint_check::edge_types_of_tables(storage, intent.tables.keys()),
+        rows: intent.rows.unwrap_or(0),
+    })
+}
+
+/// Finish the marker of a load returned by [`recover_interrupted_bulk_load`]
+/// once its events are delivered: write its receipt and delete it -- or, when
+/// its edges' declared endpoints are still to be checked (a read-only open
+/// skipped [`check_recovered_bulk_endpoints`]), only record the delivery and
+/// leave the marker for that check. A missing marker, or one with no
+/// delivery pending, is left as it is.
+///
+/// # Errors
+///
+/// Returns an error if the marker cannot be read or written, or the receipt
+/// written; the marker is then kept, and the next open delivers the events
+/// again.
+pub async fn finish_recovered_load_events(storage: &StorageManager, load_id: &str) -> Result<()> {
+    let markers = Markers::for_storage(storage);
+    let Some(intent) = read_marker(&markers, load_id).await? else {
+        return Ok(());
+    };
+    if intent.phase != BulkIntentPhase::Committed || !intent.events_pending {
+        return Ok(());
+    }
+    if !intent.endpoints_checked {
+        let delivered = BulkFlushIntent {
+            events_pending: false,
+            ..intent
+        };
+        return write(&markers, load_id, &delivered).await;
+    }
+    write_receipt(&markers, load_id).await?;
+    clear(&markers, load_id).await
 }
 
 /// Whether `intent`'s load is applied and wrote edges of a type the catalog
@@ -546,8 +714,18 @@ pub async fn check_recovered_bulk_endpoints(
             continue;
         }
         crate::endpoint_check::persist_downgrades(storage, &found).await?;
-        write_receipt(&markers, &load_id).await?;
-        delete_marker(&markers.store, &path).await?;
+        if intent.events_pending {
+            // The load's events are still to be delivered; the delivery
+            // finishes the marker (`finish_recovered_load_events`).
+            let checked = BulkFlushIntent {
+                endpoints_checked: true,
+                ..intent
+            };
+            write(&markers, &load_id, &checked).await?;
+        } else {
+            write_receipt(&markers, &load_id).await?;
+            delete_marker(&markers.store, &path).await?;
+        }
         tracing::warn!(
             load_id = %load_id,
             checked = types.len(),

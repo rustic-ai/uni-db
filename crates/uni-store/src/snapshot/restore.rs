@@ -341,21 +341,20 @@ async fn rewiden_declared_properties(storage: &StorageManager) -> Result<()> {
     let schema = storage.schema_manager().schema();
     let backend = storage.backend();
     for (entity, props) in &schema.properties {
-        let declared: Vec<arrow_schema::Field> = props
+        let declared: Vec<(String, uni_common::DataType)> = props
             .iter()
             .filter(|(_, meta)| matches!(meta.state, SchemaElementState::Active))
-            .map(|(name, meta)| arrow_schema::Field::new(name, meta.r#type.to_arrow(), true))
+            .map(|(name, meta)| (name.clone(), meta.r#type.clone()))
             .collect();
-        let mut missing: Vec<arrow_schema::Field> = Vec::new();
+        let mut missing: Vec<(String, uni_common::DataType)> = Vec::new();
         for table in storage.property_tables_for(entity) {
             let Some(stored) = backend.get_table_schema(&table).await? else {
                 continue;
             };
-            for field in &declared {
-                if stored.field_with_name(field.name()).is_err()
-                    && !missing.iter().any(|f| f.name() == field.name())
+            for (name, ty) in &declared {
+                if stored.field_with_name(name).is_err() && !missing.iter().any(|(n, _)| n == name)
                 {
-                    missing.push(field.clone());
+                    missing.push((name.clone(), ty.clone()));
                 }
             }
         }

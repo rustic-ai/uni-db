@@ -4901,11 +4901,13 @@ async fn precompute_neighbor_feature_maps(
     // why the topology trio's `AlgoContext` consumes L0 via
     // `L0Manager` whereas property reads need this separate path.
     let query_ctx = graph_algo.l0_buffers.as_ref().map(|bufs| {
-        uni_store::runtime::context::QueryContext::new_with_pending(
+        let mut ctx = uni_store::runtime::context::QueryContext::new_with_pending(
             bufs.current.clone(),
             bufs.transaction.clone(),
             bufs.pending_flush.clone(),
-        )
+        );
+        ctx.set_l1_visibility(storage.pinned_row_visibility());
+        ctx
     });
 
     // Group needed tuples by (rel_type, prop_name, direction) — one
@@ -4969,7 +4971,6 @@ async fn precompute_neighbor_feature_maps(
         // with no numeric neighbors retain an empty Vec (→ Null at
         // row time).
         let mut vid_to_values: HashMap<u64, Vec<f64>> = HashMap::new();
-        let adj = storage.adjacency_manager();
 
         // Walk the adjacency for every subject first, then read the property
         // for all neighbours in one batch rather than one round-trip per
@@ -4981,13 +4982,14 @@ async fn precompute_neighbor_feature_maps(
             let mut neighbors: Vec<uni_common::core::id::Vid> = Vec::new();
             for dir in direction.store_directions() {
                 neighbors.extend(
-                    adj.get_neighbors(
-                        uni_common::core::id::Vid::from(subject_vid),
-                        edge_type_id,
-                        *dir,
-                    )
-                    .into_iter()
-                    .map(|(neighbor_vid, _eid)| neighbor_vid),
+                    storage
+                        .neighbors(
+                            uni_common::core::id::Vid::from(subject_vid),
+                            edge_type_id,
+                            *dir,
+                        )
+                        .into_iter()
+                        .map(|(neighbor_vid, _eid)| neighbor_vid),
                 );
             }
             all_neighbors.extend(neighbors.iter().copied());

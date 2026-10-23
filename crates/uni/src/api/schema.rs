@@ -161,10 +161,6 @@ impl<'a> SchemaBuilder<'a> {
     pub async fn apply(self) -> Result<()> {
         let manager = &self.db.inner.schema;
         let mut indexes_to_build = Vec::new();
-        // Properties declared in this batch, paired with the Arrow field the
-        // storage layer must grow. Collected here and materialized after the
-        // loop so each table is widened once, in one commit.
-        let mut added_properties: Vec<(String, arrow_schema::Field)> = Vec::new();
 
         // Changes apply one at a time to the live schema, so a property name
         // refused part-way would leave the labels and properties before it
@@ -176,6 +172,51 @@ impl<'a> SchemaBuilder<'a> {
                         message: e.to_string(),
                     }
                 })?;
+            }
+        }
+
+        // Storage before catalog -- before the LIVE catalog, not merely before
+        // the save below. Any commit saves a dirty catalog (`save_if_dirty`),
+        // so a property declared in memory first could reach disk ahead of its
+        // column, and a crash before the widening finished left the entity
+        // unreadable. Each table is widened once, for every property this
+        // batch declares that the catalog lacks, or re-declares with the type
+        // it already has (which repairs a half-applied earlier declaration). A
+        // conflicting re-declaration is left to `declare_property` to refuse.
+        // See `StorageManager::widen_for_declared_properties`.
+        {
+            use std::collections::BTreeMap;
+            let schema = manager.schema();
+            let mut by_entity: BTreeMap<&str, Vec<(String, DataType)>> = BTreeMap::new();
+            for change in &self.pending {
+                let SchemaChange::AddProperty {
+                    label_or_type,
+                    name,
+                    data_type,
+                    ..
+                } = change
+                else {
+                    continue;
+                };
+                let conflicting = schema
+                    .properties
+                    .get(label_or_type)
+                    .and_then(|props| props.get(name))
+                    .is_some_and(|meta| meta.r#type != *data_type);
+                if !conflicting {
+                    by_entity
+                        .entry(label_or_type)
+                        .or_default()
+                        .push((name.clone(), data_type.clone()));
+                }
+            }
+            for (entity, properties) in by_entity {
+                self.db
+                    .inner
+                    .storage
+                    .widen_for_declared_properties(entity, &properties)
+                    .await
+                    .map_err(UniError::Internal)?;
             }
         }
 
@@ -287,10 +328,6 @@ impl<'a> SchemaBuilder<'a> {
                         .map_err(|e| UniError::Schema {
                             message: e.to_string(),
                         })?;
-                    added_properties.push((
-                        label_or_type.clone(),
-                        arrow_schema::Field::new(&name, data_type.to_arrow(), true),
-                    ));
                 }
                 SchemaChange::AddIndex(idx) => {
                     // The Python config paths build an `IndexDefinition` with no
@@ -395,23 +432,10 @@ impl<'a> SchemaBuilder<'a> {
             }
         }
 
-        // Storage before catalog -- see
-        // `StorageManager::widen_for_declared_properties` for why this order.
-        {
-            use std::collections::BTreeMap;
-            let mut by_entity: BTreeMap<String, Vec<arrow_schema::Field>> = BTreeMap::new();
-            for (entity, field) in added_properties {
-                by_entity.entry(entity).or_default().push(field);
-            }
-            for (entity, fields) in by_entity {
-                self.db
-                    .inner
-                    .storage
-                    .widen_for_declared_properties(&entity, &fields)
-                    .await
-                    .map_err(UniError::Internal)?;
-            }
-        }
+        // Test-only seam (no-op without `fail/failpoints`): the live catalog
+        // holds this batch's properties and is not yet saved, so any commit
+        // here persists it.
+        fail::fail_point!("schema_builder::declared-before-save");
 
         manager.save().await.map_err(UniError::Internal)?;
 

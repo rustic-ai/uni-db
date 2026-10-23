@@ -656,10 +656,7 @@ impl ProjectionBuilder {
                 .and_then(|snap| snap.transaction.as_ref())
                 .map(|tx| tx.read());
             let neighbors_of = |vid: Vid, type_id: u32, dir: CacheDir| {
-                let mut neighbors = self
-                    .storage
-                    .adjacency_manager()
-                    .get_neighbors(vid, type_id, dir);
+                let mut neighbors = self.storage.neighbors(vid, type_id, dir);
                 if let Some(tx) = tx_guard.as_deref() {
                     uni_store::runtime::l0_visibility::overlay_l0_neighbors(
                         vid,

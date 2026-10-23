@@ -57,6 +57,17 @@ pub struct CommitNotification {
     /// exactly the silent feed gap the `halted` flag exists to prevent.
     /// `CdcRuntime` halts a stream rather than delivering when this is set.
     pub mutations_failed: bool,
+    /// For a bulk load: the id of the stream that carries its mutation rows
+    /// to the CDC runtime, in bounded chunks, instead of [`Self::mutations`].
+    ///
+    /// A load can hold millions of rows, so they are never collected into one
+    /// batch: the load reads them back from storage chunk by chunk and hands
+    /// each to the runtime through a stream it opened
+    /// (`CdcRuntime::open_mutation_stream`). The runtime delivers each chunk as
+    /// a `CdcBatch` with this notification's LSN range and checkpoints once,
+    /// after the last. `None` for every transaction commit, and for a load
+    /// when no CDC output was registered.
+    pub mutation_stream: Option<u64>,
     /// Commits this stream lost, immediately before this one, because the
     /// consumer fell behind the broadcast channel.
     ///
@@ -256,6 +267,7 @@ mod tests {
             causal_version: version.saturating_sub(1),
             mutations: None,
             mutations_failed: false,
+            mutation_stream: None,
             dropped_before: 0,
         })
     }

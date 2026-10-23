@@ -1,4 +1,6 @@
+// Process CPU clock for bounds on work done rather than wall time.
 pub mod anchored_lookup_test;
+pub mod cpu_clock;
 pub mod iai_wallclock;
 pub mod l0_load_probe;
 pub mod limit_pushdown_test;
@@ -14,3 +16,5 @@ pub mod test_count_performance;
 pub mod update_microbench_stress;
 // `x IN fs` with `fs` a column repeated in runs (the IC5 shape).
 pub mod in_list_column_runs;
+// Transaction begin is independent of the flushed vertex count.
+pub mod tx_begin_cost;

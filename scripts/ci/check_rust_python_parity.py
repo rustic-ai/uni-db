@@ -144,6 +144,7 @@ ERROR_NO_DEDICATED_EXCEPTION = {
     "PendingFlushTimeout": "not bound yet; the only fork-lifecycle variant without one",
     "ForkWritesNotYetSupported": "explicitly routed to base UniError",
     "BulkLoadUnsupported": "only a backend that cannot stage raises it; none is reachable from Python",
+    "BulkLoadBlockedByTrigger": "synchronous before-triggers are a Rust-side surface",
 }
 
 

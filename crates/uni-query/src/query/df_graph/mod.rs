@@ -756,6 +756,9 @@ impl GraphExecutionContext {
         if let Some(counters) = self.counters.clone() {
             ctx.set_counters(counters);
         }
+        // Property reads go through the shared, live property manager; a
+        // pinned view's L1 visibility travels with the context.
+        ctx.set_l1_visibility(self.storage.pinned_row_visibility());
         ctx
     }
 
@@ -771,8 +774,9 @@ impl GraphExecutionContext {
         direction: Direction,
     ) -> anyhow::Result<()> {
         let am = self.adjacency_manager();
-        // Manifest pin only: tx version pins must NOT filter adjacency
-        // warming/reads (see StorageManager::snapshot_version_hwm).
+        // Manifest pin only: a transaction's pin must NOT filter the warm of
+        // the shared CSR; its reads are filtered instead (see
+        // StorageManager::snapshot_version_hwm).
         let version = self.storage.snapshot_version_hwm();
         for &etype_id in edge_type_ids {
             for &dir in direction.expand() {
@@ -843,16 +847,15 @@ impl GraphExecutionContext {
         edge_type_ids: &[u32],
         direction: Direction,
     ) -> std::collections::HashSet<Vid> {
-        let version_hwm = self.storage.snapshot_version_hwm();
+        // A pinned read resurrects shadow entries, so their vertices count.
+        let pinned = self.storage.edge_visibility().is_some();
         let am = self.adjacency_manager();
         let mut out = std::collections::HashSet::new();
         for &edge_type in edge_type_ids {
-            am.collect_source_vids(edge_type, direction, version_hwm.is_some(), &mut out);
+            am.collect_source_vids(edge_type, direction, pinned, &mut out);
         }
-        // `neighbors_for_vid` overlays the transaction L0 only on a live read.
-        if version_hwm.is_none()
-            && let Some(tx_l0) = &self.l0_context.transaction_l0
-        {
+        // `neighbors_for_vid` overlays the transaction L0 on top.
+        if let Some(tx_l0) = &self.l0_context.transaction_l0 {
             let guard = tx_l0.read();
             for edge in guard.graph.edges() {
                 if !edge_type_ids.contains(&edge.edge_type) {
@@ -907,19 +910,10 @@ impl GraphExecutionContext {
     ///
     /// Vector of (neighbor VID, edge ID) pairs.
     pub fn get_neighbors(&self, vid: Vid, edge_type: u32, direction: Direction) -> Vec<(Vid, Eid)> {
-        // Manifest pin only (time-travel); tx pins read live edges + L0 overlays.
-        let version_hwm = self.storage.snapshot_version_hwm();
         // Single-vid case: acquire the transaction-L0 guard once for this
         // vertex (the batch path amortizes it across many vertices).
         let tx_guard = self.l0_context.transaction_l0.as_ref().map(|l0| l0.read());
-        self.neighbors_for_vid(
-            vid,
-            edge_type,
-            direction,
-            version_hwm,
-            tx_guard.as_deref(),
-            true,
-        )
+        self.neighbors_for_vid(vid, edge_type, direction, tx_guard.as_deref(), true)
     }
 
     /// Get neighbors for multiple vertices in batch.
@@ -942,22 +936,14 @@ impl GraphExecutionContext {
         edge_type: u32,
         direction: Direction,
     ) -> Vec<(Vid, Vid, Eid)> {
-        // Manifest pin only (time-travel); tx pins read live edges + L0 overlays.
-        let version_hwm = self.storage.snapshot_version_hwm();
         let tx_guard = self.l0_context.transaction_l0.as_ref().map(|l0| l0.read());
 
         let mut results = Vec::new();
         for &vid in vids {
             // record_reads=false: the whole batch is recorded in one read-set
             // lock below instead of two lock acquisitions per source vertex.
-            let neighbors = self.neighbors_for_vid(
-                vid,
-                edge_type,
-                direction,
-                version_hwm,
-                tx_guard.as_deref(),
-                false,
-            );
+            let neighbors =
+                self.neighbors_for_vid(vid, edge_type, direction, tx_guard.as_deref(), false);
             results.extend(
                 neighbors
                     .into_iter()
@@ -1053,19 +1039,14 @@ impl GraphExecutionContext {
         } else {
             edge_type_ids
         };
-        let version_hwm = self.storage.snapshot_version_hwm();
         // Returns the edge type that places `eid` on `vid`'s outgoing side.
         // The type is a by-product of the search, not extra work.
         let outgoing_type = |vid: Vid| -> Option<u32> {
             probe_types.iter().copied().find(|&etype| {
-                let neighbors = match version_hwm {
-                    Some(hwm) => {
-                        self.storage
-                            .get_neighbors_at_version(vid, etype, Direction::Outgoing, hwm)
-                    }
-                    None => adjacency_manager.get_neighbors(vid, etype, Direction::Outgoing),
-                };
-                neighbors.iter().any(|&(_, e)| e == eid)
+                self.storage
+                    .neighbors(vid, etype, Direction::Outgoing)
+                    .iter()
+                    .any(|&(_, e)| e == eid)
             })
         };
 
@@ -1108,31 +1089,23 @@ impl GraphExecutionContext {
         vid: Vid,
         edge_type: u32,
         direction: Direction,
-        version_hwm: Option<u64>,
         tx_guard: Option<&L0Buffer>,
         record_reads: bool,
     ) -> Vec<(Vid, Eid)> {
-        // Use AdjacencyManager which reads Main CSR + overlay (dual-write).
-        // For snapshot queries, filter by version via StorageManager delegate.
-        let mut neighbors = if let Some(hwm) = version_hwm {
-            self.storage
-                .get_neighbors_at_version(vid, edge_type, direction, hwm)
-        } else {
-            self.adjacency_manager()
-                .get_neighbors(vid, edge_type, direction)
-        };
+        // Main CSR + overlay (dual-write), filtered to what this view sees
+        // when it is pinned — a time-travel snapshot or a transaction.
+        let mut neighbors = self.storage.neighbors(vid, edge_type, direction);
 
-        // Overlay transaction L0 if present (transaction edges bypass Writer/AM).
-        if version_hwm.is_none()
-            && let Some(tx_guard) = tx_guard
-        {
+        // Overlay the transaction's own writes (they bypass Writer/AM), which
+        // it always sees whatever its pin.
+        if let Some(tx_guard) = tx_guard {
             uni_store::runtime::l0_visibility::overlay_l0_neighbors(
                 vid,
                 edge_type,
                 direction,
                 tx_guard,
                 &mut neighbors,
-                version_hwm,
+                None,
             );
         }
 

@@ -949,13 +949,30 @@ impl crate::api::UniInner {
         // paths saying the same thing. Wall clock was exact before this became
         // a real stream only because every batch arrived in the first poll.
         let executed_micros = Arc::new(AtomicU64::new(0));
+
+        // The caller's task-local context — principal and session plugin
+        // registry — is in scope only while the cursor is being built; the
+        // stream executes later, polled by the consumer outside that scope. A
+        // procedure reached on a later poll would then see no principal at its
+        // capability gate and no session-scoped plugins. Capture both here and
+        // re-install them around every poll of the executor.
+        let principal = uni_query::current_principal();
+        let session_registry = uni_query::current_session_plugin_registry();
         let stream = {
             let executed_micros = Arc::clone(&executed_micros);
             futures::stream::unfold(stream, move |mut inner| {
                 let executed_micros = Arc::clone(&executed_micros);
+                let principal = principal.clone();
+                let session_registry = session_registry.clone();
                 async move {
                     let started = Instant::now();
-                    let item = inner.next().await;
+                    let next = inner.next();
+                    let item = match session_registry {
+                        Some(registry) => {
+                            uni_query::scoped_with_session_context(registry, principal, next).await
+                        }
+                        None => uni_query::maybe_scope_with_principal(principal, next).await,
+                    };
                     let spent = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
                     executed_micros.fetch_add(spent, Ordering::Relaxed);
                     item.map(|item| (item, inner))

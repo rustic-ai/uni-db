@@ -206,3 +206,29 @@ async def test_async_bulk_insert_edges_convenience(bulk_db):
         "RETURN p.name AS p_name, c.name AS c_name"
     )
     assert len(results) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("skip", [True, False])
+async def test_async_bulk_writer_skip_before_triggers(bulk_db, skip):
+    """`skip_before_triggers` chains and, with no before-trigger, loads."""
+    tx = await bulk_db.session().tx()
+    writer = await tx.bulk_writer().skip_before_triggers(skip).build()
+    await writer.insert_vertices("Person", [{"name": "Ada", "age": 36}])
+    stats = await writer.commit()
+    await tx.commit()
+    assert stats.vertices_inserted == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("skip", [True, False])
+async def test_async_appender_builder_skip_before_triggers(bulk_db, skip):
+    """The async appender builder accepts `skip_before_triggers` too."""
+    tx = await bulk_db.session().tx()
+    builder = tx.appender_builder("Person").skip_before_triggers(skip)
+    assert type(builder).__name__ == "AsyncTxAppenderBuilder"
+    app = await builder.build()
+    await app.append({"name": "Ada", "age": 36})
+    stats = await app.finish()
+    await tx.commit()
+    assert stats.vertices_inserted == 1

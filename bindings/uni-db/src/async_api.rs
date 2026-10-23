@@ -1747,6 +1747,7 @@ impl AsyncTransaction {
             validate_constraints: None,
             max_buffer_size_bytes: None,
             on_progress: None,
+            skip_before_triggers: false,
         }
     }
 
@@ -1774,6 +1775,7 @@ impl AsyncTransaction {
             batch_size: None,
             defer_vector_indexes: None,
             max_buffer_size_bytes: None,
+            skip_before_triggers: false,
         }
     }
 
@@ -1820,6 +1822,7 @@ pub struct AsyncTxBulkWriterBuilder {
     validate_constraints: Option<bool>,
     max_buffer_size_bytes: Option<usize>,
     on_progress: Option<Py<PyAny>>,
+    skip_before_triggers: bool,
 }
 
 #[pymethods]
@@ -1859,6 +1862,18 @@ impl AsyncTxBulkWriterBuilder {
         slf
     }
 
+    /// Load even though a synchronous before-mutation or before-commit trigger
+    /// subscribes to what the load writes, without running that trigger.
+    ///
+    /// A bulk load's events are emitted after it is visible, too late for a
+    /// before-trigger to veto it, so by default such a load is refused with
+    /// `UniError`. With `True` it proceeds; after-phase triggers and CDC still
+    /// receive its events.
+    fn skip_before_triggers(mut slf: PyRefMut<'_, Self>, skip: bool) -> PyRefMut<'_, Self> {
+        slf.skip_before_triggers = skip;
+        slf
+    }
+
     fn build<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let tx = self.tx.clone();
         let defer_vector = self.defer_vector_indexes;
@@ -1868,6 +1883,7 @@ impl AsyncTxBulkWriterBuilder {
         let validate_constraints = self.validate_constraints;
         let max_buffer_size_bytes = self.max_buffer_size_bytes;
         let on_progress = self.on_progress.as_ref().map(|cb| cb.clone_ref(py));
+        let skip_before_triggers = self.skip_before_triggers;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = tx.lock().await;
             let tx_ref = active_tx(&guard)?;
@@ -1875,7 +1891,8 @@ impl AsyncTxBulkWriterBuilder {
                 .bulk_writer()
                 .defer_vector_indexes(defer_vector)
                 .defer_scalar_indexes(defer_scalar)
-                .async_indexes(async_indexes);
+                .async_indexes(async_indexes)
+                .skip_before_triggers(skip_before_triggers);
             crate::apply_opt!(builder, batch_size, batch_size);
             crate::apply_opt!(builder, validate_constraints, validate_constraints);
             crate::apply_opt!(builder, max_buffer_size_bytes, max_buffer_size_bytes);
@@ -2080,6 +2097,7 @@ pub struct AsyncTxAppenderBuilder {
     batch_size: Option<usize>,
     defer_vector_indexes: Option<bool>,
     max_buffer_size_bytes: Option<usize>,
+    skip_before_triggers: bool,
 }
 
 #[pymethods]
@@ -2099,6 +2117,18 @@ impl AsyncTxAppenderBuilder {
         slf
     }
 
+    /// Load even though a synchronous before-mutation or before-commit trigger
+    /// subscribes to what the load writes, without running that trigger.
+    ///
+    /// A bulk load's events are emitted after it is visible, too late for a
+    /// before-trigger to veto it, so by default such a load is refused with
+    /// `UniError`. With `True` it proceeds; after-phase triggers and CDC still
+    /// receive its events.
+    fn skip_before_triggers(mut slf: PyRefMut<'_, Self>, skip: bool) -> PyRefMut<'_, Self> {
+        slf.skip_before_triggers = skip;
+        slf
+    }
+
     /// Build the streaming appender (returns awaitable).
     fn build<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let tx = self.tx.clone();
@@ -2106,10 +2136,13 @@ impl AsyncTxAppenderBuilder {
         let batch_size = self.batch_size;
         let defer_vector_indexes = self.defer_vector_indexes;
         let max_buffer_size_bytes = self.max_buffer_size_bytes;
+        let skip_before_triggers = self.skip_before_triggers;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = tx.lock().await;
             let tx_ref = active_tx(&guard)?;
-            let mut builder = tx_ref.appender(&label);
+            let mut builder = tx_ref
+                .appender(&label)
+                .skip_before_triggers(skip_before_triggers);
             crate::apply_opt!(builder, batch_size, batch_size);
             crate::apply_opt!(builder, defer_vector_indexes, defer_vector_indexes);
             crate::apply_opt!(builder, max_buffer_size_bytes, max_buffer_size_bytes);

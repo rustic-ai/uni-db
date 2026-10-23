@@ -265,6 +265,7 @@ async fn main() -> Result<()> {
 | `async_indexes(bool)` | Build indexes in background after commit | `false` |
 | `validate_constraints(bool)` | Enforce NOT NULL / UNIQUE / CHECK during bulk load | `true` |
 | `max_buffer_size_bytes(usize)` | Trigger checkpoint flush when buffer is large | `1_073_741_824` (1 GB) |
+| `skip_before_triggers(bool)` | Load even though a synchronous before-trigger watches what the load writes, without running it (see [Triggers and CDC](#triggers-cdc-and-the-enclosing-transaction)) | `false` |
 | `on_progress(callback)` | Progress callback for monitoring | None |
 
 ### Progress Monitoring
@@ -398,6 +399,66 @@ in others: measured, a label scan (`MATCH (n:Label)`) seeing the new vertices
 while a label-less scan (`MATCH (n)`) did not, and edges traversable from the
 source side before the destination side. Reads are consistent again once
 `commit()` returns.
+
+### Triggers, CDC and the Enclosing Transaction
+
+**A bulk load commits on its own.** `tx.bulk_writer()` and `tx.appender()`
+borrow the transaction only for its session write guard. `bulk.commit()` (or
+`appender.finish()`) makes the load durable and visible by itself; committing
+the transaction afterwards adds nothing to it, and rolling the transaction back
+does not undo it.
+
+**Events.** Once a load is visible, `commit()` announces it as one commit
+notification (`session.watch()` sees it, with `tx_id` set to the load id and
+`session_id` `"bulk-load"`) and emits a create event for every row:
+`NODE_CREATE` per vertex and label, `EDGE_CREATE` per edge, in the same event
+rows a transaction produces (see [Triggers & CDC](../features/triggers-cdc.md)).
+The rows are read back from storage in chunks of at most 4096
+(`uni_bulk::BULK_EVENT_CHUNK_ROWS`), so a load's events are never held in
+memory at once:
+
+- After-phase triggers (`AfterMutation`, `AfterCommit`) fire once per chunk.
+- CDC receives the load as one announcement whose rows arrive as one or more
+  `CdcBatch`es, each carrying the load's LSN range: `lsn_start` is the load's
+  version, `lsn_end` the database version when the load became visible. Each
+  stream is checkpointed once, after the last of them. While CDC has four
+  chunks undelivered, `commit()` waits for it.
+- `commit()` returns after the events are delivered (asynchronous triggers are
+  only started by then). Index building comes after.
+
+**Before-triggers refuse a load.** A synchronous `BeforeMutation` or
+`BeforeCommit` trigger can veto a transaction, but a load's events exist only
+once it is already visible. So a load that writes vertices under a label, or
+edges of a type, that such a trigger subscribes to is refused with
+`UniError::BulkLoadBlockedByTrigger` before those rows are staged; a trigger
+registered while a load is running is caught by `commit()`, which then discards
+the load. Either way nothing of the load becomes visible. The match is on event
+kind (`NODE_CREATE` / `EDGE_CREATE`) and label or edge type only: a trigger
+with a predicate counts as matching, since the predicate cannot be evaluated
+before the rows exist. To load anyway, accepting that those triggers do not see
+the load, build the writer with `.skip_before_triggers(true)` (the appender has
+the same option); after-phase triggers and CDC still get the events.
+
+**Cancelling `commit()`.** Once the load is visible, its events are delivered
+by a background task that `commit()` waits for. Dropping the `commit()` future
+does not stop that delivery: the events still reach every trigger and CDC
+output. The dropped commit does skip the load's finalization (index builds,
+snapshot), which the next open completes -- and that open delivers the load's
+events a second time.
+
+**Loads completed later.** A load whose publish `commit()` could not finish
+(`BulkCommitIncomplete`) emits its announcement and events from the background
+task once that task makes it visible. A load completed by recovery when the
+database is next opened -- the process died after the load became visible and
+before its events were delivered -- emits them during that open: the open
+announces it before `build()` returns and streams its rows in the background.
+They reach the triggers present during the open, which are the built-in ones and
+those declared with `uni.plugin.declareTrigger`; a trigger or CDC output
+registered after `build()` returns does not see them. The load's marker stays
+until the delivery finishes, so a crash during it repeats the delivery at the
+next open (consumers may see a load twice, never not at all). A fork's
+recovered load fires triggers when the fork is next opened. A read-only open
+delivers nothing and leaves the load to the next writable open.
 
 ### Performance Guidelines
 

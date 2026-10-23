@@ -401,6 +401,7 @@ Async builder for a StreamingAppender within a transaction.
 | `batch_size(size: int) -> AsyncTxAppenderBuilder` | — |
 | `defer_vector_indexes(defer: bool) -> AsyncTxAppenderBuilder` | — |
 | `max_buffer_size_bytes(size: int) -> AsyncTxAppenderBuilder` | — |
+| `skip_before_triggers(skip: bool) -> AsyncTxAppenderBuilder` | — |
 | `async build() -> AsyncStreamingAppender` | — |
 
 ---
@@ -418,6 +419,7 @@ Async builder for configuring bulk data loading within a transaction.
 | `validate_constraints(validate: bool) -> AsyncTxBulkWriterBuilder` | — |
 | `max_buffer_size_bytes(size: int) -> AsyncTxBulkWriterBuilder` | — |
 | `on_progress(callback: Callable[[BulkProgress], None]) -> AsyncTxBulkWriterBuilder` | — |
+| `skip_before_triggers(skip: bool) -> AsyncTxBulkWriterBuilder` | — |
 | `async build() -> AsyncBulkWriter` | — |
 
 ---
@@ -2113,6 +2115,7 @@ Builder for configuring a StreamingAppender within a transaction.
 | `batch_size(size: int) -> TxAppenderBuilder` | — |
 | `defer_vector_indexes(defer: bool) -> TxAppenderBuilder` | — |
 | `max_buffer_size_bytes(size: int) -> TxAppenderBuilder` | — |
+| `skip_before_triggers(skip: bool) -> TxAppenderBuilder` | — |
 | `build() -> StreamingAppender` | — |
 
 ---
@@ -2130,6 +2133,7 @@ Builder for configuring bulk data loading within a transaction.
 | `validate_constraints(validate: bool) -> TxBulkWriterBuilder` | — |
 | `max_buffer_size_bytes(size: int) -> TxBulkWriterBuilder` | — |
 | `on_progress(callback: Callable[[BulkProgress], None]) -> TxBulkWriterBuilder` | — |
+| `skip_before_triggers(skip: bool) -> TxBulkWriterBuilder` | — |
 | `build() -> BulkWriter` | — |
 
 ---

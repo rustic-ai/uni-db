@@ -55,11 +55,13 @@ use uni_common::core::id::{Eid, Vid};
 ///   views every read-write transaction takes, and the safe floor is the
 ///   minimum version among them.
 /// * Semantic compaction merges no vertex row above the oldest pin, and folds
-///   no edge delta above the oldest pin of a reader whose edge tier is
-///   versioned ([`Self::begin_merge`]), so every registered reader still finds
-///   its rows. A transaction's edge tier reads the live adjacency, so only
-///   `StorageManager::pinned` views (a session pinned to a snapshot that reads
-///   the live tables, registered with [`Self::pin_checked`]) hold edge deltas.
+///   no edge delta above the oldest edge-tier pin ([`Self::begin_merge`]), so
+///   every registered reader still finds its rows. Folded adjacency (L2) rows
+///   carry no version, so an edge-tier pin must sit below every version its
+///   reader cannot see: a transaction registers its edge tier below the bulk
+///   loads it excludes ([`Self::pin_transaction`]), and a session pinned to a
+///   snapshot that reads the live tables registers both tiers at its ceiling
+///   ([`Self::pin_checked`]).
 ///
 /// A merge also raises the *horizon*: the version below which merged history
 /// is gone. A reader pinned below it, registered afterwards, would read a
@@ -94,14 +96,37 @@ pub struct MergeToken(u64);
 
 impl PinnedVersions {
     /// Register `version` as pinned until the returned guard drops, for a
-    /// reader whose edge tier is live (a transaction).
+    /// reader whose edge tier is live.
     pub fn pin(self: &Arc<Self>, version: u64) -> PinGuard {
         let mut state = self.state.lock();
         *state.counts.entry(version).or_insert(0) += 1;
         PinGuard {
             versions: Arc::clone(self),
             version,
-            edge_tier: false,
+            edge_version: None,
+        }
+    }
+
+    /// Register a transaction's pins until the returned guard drops: its
+    /// vertex tier at `version`, its edge tier at `edge_version`.
+    ///
+    /// `edge_version` is at most `version`, lower when the transaction excludes
+    /// a bulk load at or below its ceiling: compaction folds deltas at or
+    /// below the edge pin into unversioned L2 rows, where an excluded load's
+    /// edges could no longer be told apart.
+    ///
+    /// Unlike [`Self::pin_checked`] nothing is reported back. A transaction
+    /// pins the newest version, and a merge only ever folds rows that were
+    /// flushed before it started, all of which are at or below that.
+    pub fn pin_transaction(self: &Arc<Self>, version: u64, edge_version: u64) -> PinGuard {
+        debug_assert!(edge_version <= version);
+        let mut state = self.state.lock();
+        *state.counts.entry(version).or_insert(0) += 1;
+        *state.edge_counts.entry(edge_version).or_insert(0) += 1;
+        PinGuard {
+            versions: Arc::clone(self),
+            version,
+            edge_version: Some(edge_version),
         }
     }
 
@@ -118,7 +143,7 @@ impl PinnedVersions {
             PinGuard {
                 versions: Arc::clone(self),
                 version,
-                edge_tier: true,
+                edge_version: Some(version),
             },
             readable,
         )
@@ -179,7 +204,8 @@ impl PinnedVersions {
 pub struct PinGuard {
     versions: Arc<PinnedVersions>,
     version: u64,
-    edge_tier: bool,
+    /// The edge-tier pin, when this reader's edge tier is versioned.
+    edge_version: Option<u64>,
 }
 
 impl Drop for PinGuard {
@@ -194,8 +220,8 @@ impl Drop for PinGuard {
         }
         let mut state = self.versions.state.lock();
         release(&mut state.counts, self.version);
-        if self.edge_tier {
-            release(&mut state.edge_counts, self.version);
+        if let Some(edge_version) = self.edge_version {
+            release(&mut state.edge_counts, edge_version);
         }
     }
 }
@@ -401,15 +427,32 @@ impl AdjacencyManager {
 
     /// Returns neighbors visible at a specific snapshot version.
     ///
-    /// Filters Main CSR entries by `created_version`, applies frozen/active
-    /// overlay with version filtering, and resurrects Shadow CSR entries
-    /// that were alive at the given version.
+    /// [`Self::get_neighbors_visible`] with ceiling `version` and nothing
+    /// excluded.
     pub fn get_neighbors_at_version(
         &self,
         vid: Vid,
         edge_type: u32,
         direction: Direction,
         version: u64,
+    ) -> Vec<(Vid, Eid)> {
+        let visibility = crate::storage::bulk_gate::RowVisibility::at_most(Some(version));
+        self.get_neighbors_visible(vid, edge_type, direction, &visibility)
+    }
+
+    /// Returns the neighbors a reader with `visibility` sees.
+    ///
+    /// An edge is visible when `visibility` admits the version that created
+    /// it and not the version that deleted it. Filters Main CSR entries by
+    /// `created_version`, applies the frozen and active overlays with the
+    /// same test, and resurrects Shadow CSR entries deleted after the
+    /// reader's ceiling.
+    pub fn get_neighbors_visible(
+        &self,
+        vid: Vid,
+        edge_type: u32,
+        direction: Direction,
+        visibility: &crate::storage::bulk_gate::RowVisibility,
     ) -> Vec<(Vid, Eid)> {
         // Same accumulation and ordering contract as `get_neighbors`.
         let mut result: Vec<(Vid, Eid)> = Vec::new();
@@ -420,7 +463,7 @@ impl AdjacencyManager {
                 result.extend(
                     csr.get_entries(vid)
                         .iter()
-                        .filter(|entry| entry.created_version <= version)
+                        .filter(|entry| visibility.admits(entry.created_version))
                         .map(|entry| (entry.neighbor_vid, entry.eid)),
                 );
             }
@@ -440,7 +483,7 @@ impl AdjacencyManager {
                     result.extend(
                         neighbors
                             .iter()
-                            .filter(|&&(_, _, ver)| ver <= version)
+                            .filter(|&&(_, _, ver)| visibility.admits(ver))
                             .map(|&(neighbor, eid, _)| (neighbor, eid)),
                     );
                 }
@@ -449,7 +492,7 @@ impl AdjacencyManager {
                         segment
                             .tombstones
                             .get(eid)
-                            .is_none_or(|ts| ts.version > version)
+                            .is_none_or(|ts| !visibility.admits(ts.version))
                     });
                 }
             }
@@ -466,8 +509,8 @@ impl AdjacencyManager {
                     let not_tombstoned = active
                         .tombstones
                         .get(&eid)
-                        .is_none_or(|ts| ts.version > version);
-                    if ver <= version && not_tombstoned {
+                        .is_none_or(|ts| !visibility.admits(ts.version));
+                    if visibility.admits(ver) && not_tombstoned {
                         result.push((neighbor, eid));
                     }
                 }
@@ -477,14 +520,14 @@ impl AdjacencyManager {
                     active
                         .tombstones
                         .get(eid)
-                        .is_none_or(|ts| ts.version > version)
+                        .is_none_or(|ts| !visibility.admits(ts.version))
                 });
             }
 
             // 4. Shadow CSR — resurrect edges alive at version
             result.extend(
                 self.shadow
-                    .get_entries_at_version(vid, edge_type, dir, version),
+                    .get_entries_visible(vid, edge_type, dir, visibility),
             );
         }
 

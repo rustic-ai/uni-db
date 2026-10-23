@@ -4,7 +4,7 @@ This document lists every CI job from `.github/workflows/pr.yml` and `.github/wo
 with the **exact command** to run it locally, plus prerequisites, ordering, and the local-only
 gotchas that bite.
 
-> **Source of truth = the workflow YAML.** This runbook mirrors the workflows as of 2026-10-03.
+> **Source of truth = the workflow YAML.** This runbook mirrors the workflows as of 2026-10-22.
 > If a command here disagrees with `.github/workflows/{pr,ci}.yml`, the YAML wins — update this doc.
 > **Bump the date above whenever you add a job or change a command.** The stamp is how drift gets
 > noticed: it sat at 2026-07-26 through four later edits while three PR-blocking jobs went
@@ -341,6 +341,26 @@ cargo nextest run -p uni-tck --test tck
   uv run ruff format --check .
   uv run ruff check .
   uv run pytest tests/ -v -n auto )
+
+# The abi3 wheel `python-tests` also builds and uploads (`uni-db-abi3-wheel`)
+# for the 3.14 lane below.
+( cd bindings/uni-db
+  rm -f dist/*.whl
+  uv run maturin build --out dist )
+```
+
+### Python Tests (uni-pydantic, 3.14)
+Needs `python-tests`; installs its abi3 wheel instead of compiling. `--frozen` and
+`--no-install-package uni-db` keep uv from building the editable uni-db path source;
+`--no-sync` keeps it from swapping that build back in. A separate environment keeps
+the 3.14 lane off the default `.venv` (under the ignored `target/`).
+```bash
+( cd bindings/uni-pydantic
+  export UV_PYTHON=3.14 UV_PROJECT_ENVIRONMENT=../../target/venv-py314
+  uv sync --frozen --group dev --no-install-package uni-db
+  uv pip install --python ../../target/venv-py314/bin/python ../uni-db/dist/*.whl
+  uv run --no-sync pytest tests/ -v -n auto
+  uv run --no-sync mypy --python-version 3.14 src )
 ```
 
 ### Static Guards (pr.yml) — run these before every push

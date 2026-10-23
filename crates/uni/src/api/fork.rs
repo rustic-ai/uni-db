@@ -155,11 +155,15 @@ impl<'a> ForkBuilder<'a> {
                 existing
             }
             None => {
-                let new_inner = Arc::new(parent.db.at_fork(scope.clone()).await?);
+                let (new_inner, recovered_loads) = parent.db.at_fork(scope.clone()).await?;
+                let new_inner = Arc::new(new_inner);
                 parent
                     .db
                     .fork_inners
                     .insert(info.id, Arc::downgrade(&new_inner));
+                // Bulk loads on this fork that its recovery completed emit
+                // their events now, as an ordinary fork load does.
+                super::bulk_events::deliver_recovered_loads(&new_inner, recovered_loads).await;
                 debug!(fork_id = %info.id, fork_name = %info.name, "fork inner cache miss; constructed");
                 new_inner
             }

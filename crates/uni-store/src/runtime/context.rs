@@ -3,6 +3,7 @@
 
 use crate::runtime::counters::QueryCounters;
 use crate::runtime::l0::L0Buffer;
+use crate::storage::bulk_gate::RowVisibility;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Instant;
@@ -28,6 +29,14 @@ pub struct QueryContext {
     /// contexts constructed outside a query (recovery, compaction, admin), where
     /// there is no result to attribute counts to.
     pub counters: Option<Arc<QueryCounters>>,
+    /// What an L1 read on this query's behalf may return, when the query runs
+    /// against a pinned view (a transaction, or a time-travel snapshot).
+    ///
+    /// The property manager is shared and sits on LIVE storage, so its own
+    /// visibility has no ceiling inside a transaction; without this, a
+    /// property value committed and flushed after the transaction began would
+    /// be read in place of the one its snapshot holds. `None`: live reads.
+    pub l1_visibility: Option<RowVisibility>,
 }
 
 impl QueryContext {
@@ -39,6 +48,7 @@ impl QueryContext {
             deadline: None,
             cancellation_token: None,
             counters: None,
+            l1_visibility: None,
         }
     }
 
@@ -53,6 +63,7 @@ impl QueryContext {
             deadline: None,
             cancellation_token: None,
             counters: None,
+            l1_visibility: None,
         }
     }
 
@@ -68,6 +79,7 @@ impl QueryContext {
             deadline: None,
             cancellation_token: None,
             counters: None,
+            l1_visibility: None,
         }
     }
 
@@ -77,6 +89,12 @@ impl QueryContext {
 
     pub fn set_cancellation_token(&mut self, token: CancellationToken) {
         self.cancellation_token = Some(token);
+    }
+
+    /// Bounds this query's L1 reads to a pinned view's visibility
+    /// ([`Self::l1_visibility`]); `None` leaves them live.
+    pub fn set_l1_visibility(&mut self, visibility: Option<RowVisibility>) {
+        self.l1_visibility = visibility;
     }
 
     /// Attaches the per-query counter set.

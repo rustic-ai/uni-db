@@ -118,6 +118,33 @@ impl ShadowCsr {
         result
     }
 
+    /// Returns edges a reader with `visibility` sees: those whose creating
+    /// version it admits and whose deleting version it does not.
+    ///
+    /// With nothing hidden this is [`Self::get_entries_at_version`] at the
+    /// visibility's ceiling.
+    pub fn get_entries_visible(
+        &self,
+        vid: Vid,
+        edge_type: u32,
+        direction: Direction,
+        visibility: &crate::storage::bulk_gate::RowVisibility,
+    ) -> Vec<(Vid, Eid)> {
+        let mut result = Vec::new();
+        if let Some(map) = self.entries.get(&(edge_type, direction))
+            && let Some(edges) = map.get(&vid)
+        {
+            for edge in edges {
+                if visibility.admits(edge.created_version)
+                    && !visibility.admits(edge.deleted_version)
+                {
+                    result.push((edge.neighbor_vid, edge.eid));
+                }
+            }
+        }
+        result
+    }
+
     /// Adds to `out` every vertex holding a shadow entry for
     /// `(edge_type, direction)`, whatever its versions.
     ///

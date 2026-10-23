@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, get_type_hints
+from typing import TYPE_CHECKING, Any
 
-from .base import UniEdge, UniNode
+from .base import UniEdge, UniNode, _resolve_type_hints
 from .exceptions import SchemaError
 from .fields import get_field_config
 from .types import (
@@ -106,12 +106,11 @@ class SchemaGenerator:
         """Generate schema for a single property field."""
         field_info = model.model_fields[field_name]
 
-        # Get type hints with forward refs resolved
-        try:
-            hints = get_type_hints(model)
-            type_hint = hints.get(field_name, field_info.annotation)
-        except Exception:
-            type_hint = field_info.annotation
+        # Get type hints with forward refs resolved. A bare `get_type_hints`
+        # always raised here (NameError on the TYPE_CHECKING-only private-attr
+        # annotations of UniNode/UniEdge), so only pydantic's annotation was
+        # ever used; `_resolve_type_hints` supplies those names.
+        type_hint = _resolve_type_hints(model).get(field_name, field_info.annotation)
 
         # Check for nullability
         is_nullable, inner_type = is_optional(type_hint)
@@ -346,7 +345,7 @@ class SchemaGenerator:
                         pass  # Index may already exist
                 elif prop.index_type == "sparse":
                     try:
-                        cfg = {"type": "sparse"}
+                        cfg: dict[str, Any] = {"type": "sparse"}
                         if prop.data_type.startswith("sparse_vector:"):
                             cfg["dimensions"] = int(prop.data_type.split(":")[1])
                         db.schema().label(label).index(prop.name, cfg).apply()
@@ -420,7 +419,7 @@ class SchemaGenerator:
                         pass  # Index may already exist
                 elif prop.index_type == "sparse":
                     try:
-                        cfg = {"type": "sparse"}
+                        cfg: dict[str, Any] = {"type": "sparse"}
                         if prop.data_type.startswith("sparse_vector:"):
                             cfg["dimensions"] = int(prop.data_type.split(":")[1])
                         await db.schema().label(label).index(prop.name, cfg).apply()

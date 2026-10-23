@@ -9,6 +9,7 @@ import pytest
 from pydantic import field_validator
 
 from uni_pydantic import (
+    Btic,
     BulkLoadError,
     Field,
     Relationship,
@@ -134,6 +135,33 @@ class TestSessionCRUD:
         # Refresh and verify
         session.refresh(alice)
         assert alice.age == 31
+
+    def test_update_converts_vector_and_btic_values(self, session):
+        """Regression: the dirty-update path resolved type hints with a bare
+        `typing.get_type_hints`, which always raised NameError on UniNode's
+        TYPE_CHECKING-only private-attr annotations; the swallowed error left
+        `hints == {}`, so no value was converted and updating a `Vector` or
+        `Btic` field failed with "cannot convert Python object of type ...".
+        """
+
+        class VecBticDoc(UniNode):
+            title: str
+            emb: Vector[2]
+            when: Btic | None = None
+
+        session.register(VecBticDoc)
+        session.sync_schema()
+        doc = VecBticDoc(title="a", emb=Vector[2]([1.0, 0.0]), when=Btic("2020"))
+        session.add(doc)
+        session.commit()
+
+        doc.emb = Vector[2]([0.0, 1.0])
+        doc.when = Btic("2021")
+        session.commit()
+
+        session.refresh(doc)
+        assert doc.emb == Vector[2]([0.0, 1.0])
+        assert doc.when == Btic("2021")
 
     def test_delete_entity(self, session):
         """Test deleting an entity."""
@@ -885,3 +913,62 @@ class TestExplainAndProfileReachTheBuilder:
         result, stats = session.profile("MATCH (n) RETURN n")
         assert result is not None
         assert stats is not None
+
+
+class TestCypherResultType:
+    """`cypher(..., result_type=M)` hydrates nodes of `M`, and only those.
+
+    The mapper only recognised node-shaped *dicts*, but a bare ``RETURN n``
+    yields a ``uni_db.Node`` object -- so the documented use returned ``[]``.
+    And a labelled map of another label was hydrated as that label's registered
+    model, handing a ``Company`` back from a call typed ``list[Person]``.
+    """
+
+    def _setup(self, session):
+        session.register(Person, Company)
+        session.sync_schema()
+        session.add(Company(name="Acme"))
+        session.commit()
+
+    def test_return_node_hydrates_result_type(self, session):
+        self._setup(session)
+        found = session.cypher("MATCH (c:Company) RETURN c", result_type=Company)
+        assert len(found) == 1
+        assert isinstance(found[0], Company)
+        assert found[0].name == "Acme"
+        assert found[0].is_persisted
+        assert found[0]._session is session
+
+    def test_node_of_other_label_is_not_coerced(self, session):
+        self._setup(session)
+        assert session.cypher("MATCH (c:Company) RETURN c", result_type=Person) == []
+
+    def test_labelled_map_of_other_label_is_not_returned(self, session):
+        self._setup(session)
+        query = "RETURN {_label: 'Company', name: 'Acme'} AS c"
+        assert session.cypher(query, result_type=Person) == []
+        found = session.cypher(query, result_type=Company)
+        assert [type(c) for c in found] == [Company]
+        assert found[0].name == "Acme"
+
+    def test_unlabelled_map_is_a_projection_of_result_type(self, session):
+        self._setup(session)
+        found = session.cypher("RETURN {name: 'Acme'} AS c", result_type=Company)
+        assert [c.name for c in found] == ["Acme"]
+
+    def test_node_column_is_found_after_scalar_columns(self, session):
+        self._setup(session)
+        found = session.cypher(
+            "MATCH (c:Company) RETURN c.name AS name, c", result_type=Company
+        )
+        assert [c.name for c in found] == ["Acme"]
+
+
+def test_repr_treats_id_zero_as_saved():
+    """vid/eid 0 is a real id; `__repr__` used to test truthiness and say "unsaved"."""
+    node = Company.from_properties({"name": "Acme"}, vid=0)
+    assert "vid=0" in repr(node)
+    edge = FriendshipEdge.from_properties(
+        {"since": date(2020, 1, 1)}, eid=0, src_vid=0, dst_vid=1
+    )
+    assert "eid=0" in repr(edge)

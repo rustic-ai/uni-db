@@ -83,6 +83,8 @@ mod multivector_resilience;
 mod plan_shape;
 #[path = "common/sparse_resilience.rs"]
 mod sparse_resilience;
+#[path = "common/ssi_edge_pinning.rs"]
+mod ssi_edge_pinning;
 #[path = "common/ssi_for_update.rs"]
 mod ssi_for_update;
 #[path = "common/ssi_hermitage.rs"]

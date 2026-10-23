@@ -316,6 +316,27 @@ pub enum UniError {
         reason: String,
     },
 
+    /// A bulk load would write rows that a synchronous `BeforeMutation` /
+    /// `BeforeCommit` trigger subscribes to.
+    ///
+    /// A bulk load's events are emitted only once the load is visible, past
+    /// the point a before-trigger could veto it, so such a trigger cannot be
+    /// honoured. The load is refused before the matching rows are staged (or,
+    /// for a trigger registered mid-load, at commit), and nothing of it
+    /// becomes visible. To load anyway, accepting that those triggers do not
+    /// run for the load, opt in with `BulkWriterBuilder::skip_before_triggers`.
+    #[error(
+        "Bulk load refused: synchronous before-trigger '{trigger}' subscribes to {target}, and a \
+         bulk load cannot be vetoed; opt in with skip_before_triggers(true) to load without it"
+    )]
+    BulkLoadBlockedByTrigger {
+        /// The trigger that would have seen the load's rows.
+        trigger: String,
+        /// What the load writes that it subscribes to (`label 'A'` /
+        /// `edge type 'R'`).
+        target: String,
+    },
+
     /// Fork with the given name does not exist in the registry.
     #[error("Fork '{name}' not found")]
     ForkNotFound { name: String },

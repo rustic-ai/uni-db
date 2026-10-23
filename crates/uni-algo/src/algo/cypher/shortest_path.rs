@@ -88,8 +88,7 @@ impl AlgoProcedure for ShortestPathProcedure {
                     .await?;
             }
 
-            let am = ctx.storage.adjacency_manager();
-            let traversal = DirectTraversal::new(&am, edge_type_ids);
+            let traversal = DirectTraversal::new(&ctx.storage, edge_type_ids);
 
             if let Some(path) = traversal.shortest_path(source_vid, target_vid, Direction::Outgoing)
             {

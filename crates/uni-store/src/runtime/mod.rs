@@ -18,6 +18,7 @@ pub mod l0_manager;
 pub mod l0_visibility;
 pub mod occ;
 pub mod property_manager;
+pub mod publish_sequencer;
 /// Concurrency-primitive shim: aliases to `std` normally, `loom`/`shuttle` under
 /// their features, so the OCC commit core can be model-checked. See `sync.rs`.
 pub(crate) mod sync;

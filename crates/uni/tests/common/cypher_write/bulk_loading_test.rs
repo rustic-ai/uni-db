@@ -621,6 +621,55 @@ async fn test_bulk_abort_after_flush_rollback() -> Result<()> {
     Ok(())
 }
 
+/// Pins how a bulk load relates to the transaction it was created from.
+///
+/// It is not part of that transaction. `bulk.commit()` commits the load on its
+/// own: other sessions see it at once, before the transaction commits, and a
+/// rollback of the transaction does not undo it. The transaction's own reads
+/// never see it, before `bulk.commit()` or after — they read the snapshot the
+/// transaction started from, plus its own Cypher writes. Ten rows go through
+/// the writer with `batch_size(3)`, so three batches are staged in storage
+/// before the commit, not just held in memory.
+#[tokio::test]
+async fn bulk_load_is_not_part_of_its_hosting_transaction() -> Result<()> {
+    let (db, _temp) = setup_db().await?;
+    let count = "MATCH (p:Person) RETURN count(p) AS c";
+    let s = db.session();
+    let tx = s.tx().await?;
+    tx.execute("CREATE (:Person {name: 'via_cypher'})").await?;
+    let mut bulk = tx.bulk_writer().batch_size(3).build()?;
+    let props: Vec<HashMap<String, uni_db::Value>> = (0..10)
+        .map(|i| HashMap::from([("name".to_string(), unival!(format!("P{i}")))]))
+        .collect();
+    bulk.insert_vertices("Person", props).await?;
+
+    let tx_sees = tx.query(count).await?.rows()[0].get::<i64>("c")?;
+    let others_see = db.session().query(count).await?.rows()[0].get::<i64>("c")?;
+    assert_eq!(
+        (tx_sees, others_see),
+        (1, 0),
+        "before bulk.commit(): the transaction sees only its Cypher row, others nothing"
+    );
+
+    bulk.commit().await?;
+    let tx_sees = tx.query(count).await?.rows()[0].get::<i64>("c")?;
+    let others_see = db.session().query(count).await?.rows()[0].get::<i64>("c")?;
+    assert_eq!(
+        (tx_sees, others_see),
+        (1, 10),
+        "after bulk.commit(): others see the load before the transaction commits; \
+         the transaction itself still does not"
+    );
+
+    tx.rollback();
+    let others_see = db.session().query(count).await?.rows()[0].get::<i64>("c")?;
+    assert_eq!(
+        others_see, 10,
+        "rolling the transaction back drops its Cypher row and keeps the load"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_bulk_buffer_limit_checkpoint() -> Result<()> {
     let (db, _temp) = setup_db().await?;

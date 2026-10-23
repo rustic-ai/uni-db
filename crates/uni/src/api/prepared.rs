@@ -231,7 +231,18 @@ impl PreparedQuery {
         // prepared handle must not bypass an `AuthzPolicy` or hook (review #5b).
         self.guards.run(&self.db, &self.query_text, &params)?;
         crate::api::impl_query::check_parameters(&self.parameters, &params)?;
+        // Execute under the preparing caller's principal, as the live paths
+        // do, so a procedure the statement calls sees it at its capability gate.
+        uni_query::maybe_scope_with_principal(
+            self.guards.principal.clone(),
+            self.execute_unguarded(params),
+        )
+        .await
+    }
 
+    /// Execute after the guards have passed: through the transaction's L0 when
+    /// bound to one, else the cached read-only plan.
+    async fn execute_unguarded(&self, params: HashMap<String, Value>) -> Result<QueryResult> {
         if let Some(tx) = &self.tx {
             // Read the live snapshot, dropping the (non-Send) guard before the
             // await so the returned future stays `Send`.
@@ -377,6 +388,9 @@ pub struct PreparedLocy {
     /// The scope every execution runs under: the transaction's for a
     /// transaction-prepared program.
     cancel: crate::api::impl_query::CancelScope,
+    /// The principal of the session or transaction that prepared the
+    /// program; every execution is authorized for it.
+    principal: Option<Arc<uni_plugin::traits::connector::Principal>>,
     inner: std::sync::RwLock<PreparedLocyInner>,
 }
 
@@ -386,6 +400,7 @@ impl PreparedLocy {
         db: Arc<UniInner>,
         rule_registry: Arc<std::sync::RwLock<LocyRuleRegistry>>,
         program: &str,
+        principal: Option<Arc<uni_plugin::traits::connector::Principal>>,
     ) -> Result<Self> {
         Self::build(
             db,
@@ -395,6 +410,7 @@ impl PreparedLocy {
             // A session-prepared program is owned by the instance, not a
             // session, so it has no enclosing scope to inherit.
             crate::api::impl_query::CancelScope::default(),
+            principal,
         )
     }
 
@@ -406,8 +422,9 @@ impl PreparedLocy {
         program: &str,
         binding: PreparedTxBinding,
         cancel: crate::api::impl_query::CancelScope,
+        principal: Option<Arc<uni_plugin::traits::connector::Principal>>,
     ) -> Result<Self> {
-        Self::build(db, rule_registry, program, Some(binding), cancel)
+        Self::build(db, rule_registry, program, Some(binding), cancel, principal)
     }
 
     fn build(
@@ -416,6 +433,7 @@ impl PreparedLocy {
         program: &str,
         tx: Option<PreparedTxBinding>,
         cancel: crate::api::impl_query::CancelScope,
+        principal: Option<Arc<uni_plugin::traits::connector::Principal>>,
     ) -> Result<Self> {
         let (compiled, parameters) = compile_locy_with_registry(program, &rule_registry)?;
         let schema_version = db.schema.schema().schema_version;
@@ -426,6 +444,7 @@ impl PreparedLocy {
             program_text: program.to_string(),
             tx,
             cancel,
+            principal,
             inner: std::sync::RwLock::new(PreparedLocyInner {
                 compiled,
                 parameters,
@@ -501,10 +520,17 @@ impl PreparedLocy {
             // No per-call override on this path; the database
             // setting applies.
             max_memory: None,
+            principal: self.principal.clone(),
         };
-        engine
-            .evaluate_compiled_with_config(compiled, &config)
-            .await
+        // The task-local scope `LocyBuilder::run` / `Transaction::locy`
+        // install: the principal for procedure capability gates, the instance
+        // registry for in-memory Locy plugin dispatch.
+        uni_query::scoped_with_session_context(
+            Arc::clone(&self.db.plugin_registry),
+            self.principal.clone(),
+            engine.evaluate_compiled_with_config(compiled, &self.program_text, &config),
+        )
+        .await
     }
 
     /// Re-compile if the schema has changed.

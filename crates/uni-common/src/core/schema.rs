@@ -1455,6 +1455,10 @@ pub struct SchemaManager {
     /// The catalog file on the local filesystem, when the store is local;
     /// see [`SchemaManager::set_local_file`].
     local_file: std::sync::OnceLock<std::path::PathBuf>,
+    /// Orders [`SchemaManager::save`]s: held from reading the catalog to the
+    /// end of its write, so writes reach the store in the order their
+    /// contents were taken and the last one holds the newest catalog.
+    save_order: tokio::sync::Mutex<()>,
 }
 
 impl SchemaManager {
@@ -1522,6 +1526,7 @@ impl SchemaManager {
                     persisted_version: AtomicU32::new(loaded_version),
                     loaded_writer_features,
                     local_file: std::sync::OnceLock::new(),
+                    save_order: tokio::sync::Mutex::new(()),
                 })
             }
             Err(object_store::Error::NotFound { .. }) => Ok(Self {
@@ -1533,12 +1538,28 @@ impl SchemaManager {
                 persisted_version: AtomicU32::new(0),
                 loaded_writer_features: current_writer_features(),
                 local_file: std::sync::OnceLock::new(),
+                save_order: tokio::sync::Mutex::new(()),
             }),
             Err(e) => Err(anyhow::Error::from(e)),
         }
     }
 
+    /// Write the live catalog to the store.
+    ///
+    /// Saves are ordered: each reads the catalog and writes it while holding
+    /// `save_order`, so a save that read the catalog earlier can never land
+    /// after one that read it later. Unordered, a save that serialized the
+    /// catalog and was then overtaken (by another DDL's save, or by a
+    /// snapshot restore installing the snapshot's catalog) overwrote the
+    /// newer file with its stale copy. The handle kept serving the newer
+    /// catalog, and the next open read the stale one — after a restore, the
+    /// pre-restore catalog over storage rewound to the snapshot.
+    ///
+    /// # Errors
+    /// Propagates the object-store write failure, a serialization failure, or
+    /// a poisoned schema lock.
     pub async fn save(&self) -> Result<()> {
+        let _ordered = self.save_order.lock().await;
         let (content, version) = {
             let schema_guard = acquire_read(&self.schema, "schema")?;
             (
@@ -1546,6 +1567,9 @@ impl SchemaManager {
                 schema_guard.schema_version,
             )
         };
+        // Test-only seam (no-op without `fail/failpoints`): a save holding a
+        // serialized catalog that has not reached the store yet.
+        fail::fail_point!("schema::save::before-put");
         self.store
             .put(&self.path, content.into())
             .await
@@ -1733,6 +1757,7 @@ impl SchemaManager {
             loaded_writer_features: self.loaded_writer_features.clone(),
             // Never saved, so never synced.
             local_file: std::sync::OnceLock::new(),
+            save_order: tokio::sync::Mutex::new(()),
         })
     }
 

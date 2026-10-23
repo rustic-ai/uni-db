@@ -10,17 +10,27 @@
 //! deadline came to be missing from `GraphExecutionContext` entirely without
 //! anything going red.
 //!
-//! The discriminating signal is therefore **wall time**, not the error variant:
-//! before the fix these queries also return `UniError::Timeout`, just long after
-//! the budget expired. Asserting only the variant reproduces the original blind
-//! spot.
+//! The discriminating signal is therefore **how much work ran**, not the error
+//! variant: before the fix these queries also return `UniError::Timeout`, just
+//! after running to completion. Asserting only the variant reproduces the
+//! original blind spot.
 //!
 //! # On the bounds
 //!
-//! These tests assert elapsed time, so they are load-sensitive in principle. The
-//! bounds are absolute ceilings set roughly an order of magnitude above the
-//! observed passing values and an order of magnitude below the failing ones, so
-//! ordinary load cannot move a result across them.
+//! The bounds are on the **process CPU time** spent across the query
+//! ([`super::cpu_clock`]), set roughly an order of magnitude above the observed
+//! passing values and an order of magnitude below the failing ones.
+//!
+//! They were wall-clock ceilings, and those measured the machine as well as the
+//! query: beside a full workspace run one of them held the session 602 ms
+//! against a 600 ms ceiling, and the search test below took 856 ms against
+//! 600 ms with 44 CPU-bound processes competing for 22 cores, both with the
+//! mechanism under test intact. The deadline is wall-clock, so under contention
+//! a preempted query gets *fewer* cycles before it fires and its CPU time goes
+//! down, while an unpreempted one still does its whole natural runtime of work
+//! (seconds): the separation a wall-clock bound loses. Wall time is still
+//! reported in every failure message. The bounds rely on nextest's
+//! process-per-test model; see [`super::cpu_clock`] for `cargo test`.
 //!
 //! Deliberately no "these may flake, check the machine" note here. An earlier
 //! version of `deadline_overrun_does_not_scale_with_fixture_size` carried one,
@@ -31,10 +41,12 @@
 //! If one of these goes red, treat it as a real signal and measure a failure
 //! rate before concluding anything about the machine.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Result;
 use uni_db::Uni;
+
+use super::cpu_clock::{Spent, measure};
 
 /// A comprehension whose pattern variables are all fresh cannot anchor, so it
 /// compiles to `PatternComprehensionSubqueryExpr` — one sub-plan execution on a
@@ -67,17 +79,16 @@ async fn build_chain(n: usize) -> Result<Uni> {
     Ok(db)
 }
 
-/// Run the fallback under `BUDGET`, returning how long the session was actually
-/// held. Asserts the query did time out, so the caller only reasons about time.
-async fn held_for(db: &Uni, label: &str) -> Result<Duration> {
-    let started = Instant::now();
-    let res = db
-        .session()
-        .query_with(PER_ROW_FALLBACK)
-        .timeout(BUDGET)
-        .fetch_all()
-        .await;
-    let elapsed = started.elapsed();
+/// Run the fallback under `BUDGET`, returning what the query spent. Asserts
+/// the query did time out, so the caller only reasons about cost.
+async fn held_for(db: &Uni, label: &str) -> Result<Spent> {
+    let (res, spent) = measure(
+        db.session()
+            .query_with(PER_ROW_FALLBACK)
+            .timeout(BUDGET)
+            .fetch_all(),
+    )
+    .await;
 
     let err = res
         .err()
@@ -86,7 +97,8 @@ async fn held_for(db: &Uni, label: &str) -> Result<Duration> {
         matches!(err, uni_db::UniError::Timeout { .. }),
         "{label}: expected UniError::Timeout, got {err:?}"
     );
-    Ok(elapsed)
+    eprintln!("{label}: cpu {:?}, wall {:?}", spent.cpu, spent.wall);
+    Ok(spent)
 }
 
 /// The session must be released within a bounded overrun of the deadline.
@@ -98,15 +110,17 @@ async fn held_for(db: &Uni, label: &str) -> Result<Duration> {
 #[tokio::test]
 async fn a_mid_execution_deadline_releases_the_session_promptly() -> Result<()> {
     let db = build_chain(900).await?;
-    let elapsed = held_for(&db, "n=900").await?;
+    let spent = held_for(&db, "n=900").await?;
 
-    // The natural runtime of this fixture is well over a second; one sub-plan
-    // evaluation past a 50 ms budget is a few milliseconds. 600 ms sits far
-    // above the fixed cost and far below the unpreempted time.
+    // The natural runtime of this fixture is seconds of work; one sub-plan
+    // evaluation past a 50 ms budget is a few milliseconds. 600 ms of CPU sits
+    // far above the fixed cost and far below the unpreempted work.
     assert!(
-        elapsed < Duration::from_millis(600),
-        "held the session for {elapsed:?} against a {BUDGET:?} budget — the \
-         deadline was reported but never enforced"
+        spent.cpu < Duration::from_millis(600),
+        "the query used {:?} of CPU ({:?} wall) against a {BUDGET:?} budget — \
+         the deadline was reported but never enforced",
+        spent.cpu,
+        spent.wall
     );
     Ok(())
 }
@@ -140,9 +154,11 @@ async fn deadline_overrun_does_not_scale_with_fixture_size() -> Result<()> {
     const CEILING: Duration = Duration::from_millis(500);
     for (label, held) in [("n=300", small), ("n=900", large)] {
         assert!(
-            held < CEILING,
-            "{label}: held the session {held:?} against a {BUDGET:?} budget \
-             (ceiling {CEILING:?}); per-row work is not being bounded"
+            held.cpu < CEILING,
+            "{label}: used {:?} of CPU ({:?} wall) against a {BUDGET:?} budget \
+             (ceiling {CEILING:?}); per-row work is not being bounded",
+            held.cpu,
+            held.wall
         );
     }
     Ok(())
@@ -160,27 +176,28 @@ async fn cancelling_a_running_query_interrupts_it() -> Result<()> {
     let db = build_chain(900).await?;
     let token = tokio_util::sync::CancellationToken::new();
 
-    let started = Instant::now();
-    let handle = {
-        let token = token.clone();
-        let session = db.session();
-        tokio::spawn(async move {
-            session
-                .query_with(PER_ROW_FALLBACK)
-                // No timeout: cancellation alone must stop this.
-                .cancellation_token(token)
-                .fetch_all()
-                .await
-        })
-    };
+    let (res, spent) = measure(async {
+        let handle = {
+            let token = token.clone();
+            let session = db.session();
+            tokio::spawn(async move {
+                session
+                    .query_with(PER_ROW_FALLBACK)
+                    // No timeout: cancellation alone must stop this.
+                    .cancellation_token(token)
+                    .fetch_all()
+                    .await
+            })
+        };
 
-    // Let execution get properly under way before pulling the plug, so this
-    // cannot pass by the pre-cancelled route the other tests take.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    token.cancel();
-
-    let res = handle.await.expect("query task panicked");
-    let elapsed = started.elapsed();
+        // Let execution get properly under way before pulling the plug, so
+        // this cannot pass by the pre-cancelled route the other tests take.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        token.cancel();
+        handle.await.expect("query task panicked")
+    })
+    .await;
+    eprintln!("cancel n=900: cpu {:?}, wall {:?}", spent.cpu, spent.wall);
 
     let err = res.err().expect("a cancelled query must not succeed");
     assert!(
@@ -188,9 +205,11 @@ async fn cancelling_a_running_query_interrupts_it() -> Result<()> {
         "expected UniError::Cancelled, got {err:?}"
     );
     assert!(
-        elapsed < Duration::from_millis(900),
-        "cancellation took {elapsed:?} to take effect — the token never reached \
-         the per-row loop"
+        spent.cpu < Duration::from_millis(900),
+        "the query used {:?} of CPU ({:?} wall) after a cancel at 50 ms — the \
+         token never reached the per-row loop",
+        spent.cpu,
+        spent.wall
     );
     Ok(())
 }
@@ -201,8 +220,8 @@ async fn cancelling_a_running_query_interrupts_it() -> Result<()> {
 const UNYIELDING: &str = "UNWIND range(1, 5000) AS a UNWIND range(1, 5000) AS b \
      WITH count(*) AS c RETURN c";
 
-/// Ceiling for the tests below: an order of magnitude above the ~55 ms they
-/// take with the budget enforced, and well below the unbounded runtime.
+/// CPU-time ceiling for the tests below: an order of magnitude above what they
+/// use with the budget enforced, and well below the unbounded runtime.
 const UNYIELDING_CEILING: Duration = Duration::from_millis(600);
 
 /// A database with `test.unyielding()` declared, whose body is [`UNYIELDING`].
@@ -217,16 +236,9 @@ async fn with_unyielding_procedure() -> Result<Uni> {
     Ok(db)
 }
 
-/// Run `query` against [`BUDGET`] and return how long it held the session.
-async fn timed_out_after(db: &Uni, query: &str) -> Result<Duration> {
-    let started = Instant::now();
-    let res = db
-        .session()
-        .query_with(query)
-        .timeout(BUDGET)
-        .fetch_all()
-        .await;
-    let elapsed = started.elapsed();
+/// Run `query` against [`BUDGET`] and return what it spent.
+async fn timed_out_after(db: &Uni, query: &str) -> Result<Spent> {
+    let (res, spent) = measure(db.session().query_with(query).timeout(BUDGET).fetch_all()).await;
     let err = res
         .err()
         .expect("the query must not finish within its budget");
@@ -234,7 +246,8 @@ async fn timed_out_after(db: &Uni, query: &str) -> Result<Duration> {
         matches!(err, uni_db::UniError::Timeout { .. }),
         "expected UniError::Timeout, got {err:?}"
     );
-    Ok(elapsed)
+    eprintln!("{query}: cpu {:?}, wall {:?}", spent.cpu, spent.wall);
+    Ok(spent)
 }
 
 /// UNWIND makes its rows without pulling input for each one, so under an
@@ -244,10 +257,12 @@ async fn timed_out_after(db: &Uni, query: &str) -> Result<Duration> {
 #[tokio::test]
 async fn an_unwind_under_an_aggregate_stops_at_the_deadline() -> Result<()> {
     let db = Uni::in_memory().build().await?;
-    let elapsed = timed_out_after(&db, UNYIELDING).await?;
+    let spent = timed_out_after(&db, UNYIELDING).await?;
     assert!(
-        elapsed < UNYIELDING_CEILING,
-        "held the session {elapsed:?} against a {BUDGET:?} budget"
+        spent.cpu < UNYIELDING_CEILING,
+        "used {:?} of CPU ({:?} wall) against a {BUDGET:?} budget",
+        spent.cpu,
+        spent.wall
     );
     Ok(())
 }
@@ -260,10 +275,12 @@ async fn an_unwind_under_an_aggregate_stops_at_the_deadline() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_declared_procedure_body_stops_at_the_callers_deadline() -> Result<()> {
     let db = with_unyielding_procedure().await?;
-    let elapsed = timed_out_after(&db, "CALL test.unyielding()").await?;
+    let spent = timed_out_after(&db, "CALL test.unyielding()").await?;
     assert!(
-        elapsed < UNYIELDING_CEILING,
-        "the procedure body held the session {elapsed:?} against a {BUDGET:?} budget"
+        spent.cpu < UNYIELDING_CEILING,
+        "the procedure body used {:?} of CPU ({:?} wall) against a {BUDGET:?} budget",
+        spent.cpu,
+        spent.wall
     );
     Ok(())
 }
@@ -276,31 +293,38 @@ async fn cancelling_a_declared_procedure_interrupts_its_body() -> Result<()> {
     let db = with_unyielding_procedure().await?;
     let token = tokio_util::sync::CancellationToken::new();
 
-    let started = Instant::now();
-    let handle = {
-        let token = token.clone();
-        let session = db.session();
-        tokio::spawn(async move {
-            session
-                .query_with("CALL test.unyielding()")
-                .cancellation_token(token)
-                .fetch_all()
-                .await
-        })
-    };
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    token.cancel();
-
-    let res = handle.await.expect("query task panicked");
-    let elapsed = started.elapsed();
+    let (res, spent) = measure(async {
+        let handle = {
+            let token = token.clone();
+            let session = db.session();
+            tokio::spawn(async move {
+                session
+                    .query_with("CALL test.unyielding()")
+                    .cancellation_token(token)
+                    .fetch_all()
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        token.cancel();
+        handle.await.expect("query task panicked")
+    })
+    .await;
+    eprintln!(
+        "cancel procedure: cpu {:?}, wall {:?}",
+        spent.cpu, spent.wall
+    );
     let err = res.err().expect("a cancelled call must not succeed");
     assert!(
         matches!(err, uni_db::UniError::Cancelled),
         "expected UniError::Cancelled, got {err:?}"
     );
     assert!(
-        elapsed < UNYIELDING_CEILING,
-        "cancellation took {elapsed:?} to reach the procedure body"
+        spent.cpu < UNYIELDING_CEILING,
+        "the call used {:?} of CPU ({:?} wall) after a cancel at 50 ms — the \
+         cancellation never reached the procedure body",
+        spent.cpu,
+        spent.wall
     );
     Ok(())
 }
@@ -314,10 +338,12 @@ async fn a_cypher_graph_projection_stops_at_the_callers_deadline() -> Result<()>
          edgeQuery: 'MATCH (a)-[r]->(b) RETURN id(a) AS source, id(b) AS target'}}, {{}}) \
          YIELD nodeId, score RETURN nodeId, score"
     );
-    let elapsed = timed_out_after(&db, &query).await?;
+    let spent = timed_out_after(&db, &query).await?;
     assert!(
-        elapsed < UNYIELDING_CEILING,
-        "the projection held the session {elapsed:?} against a {BUDGET:?} budget"
+        spent.cpu < UNYIELDING_CEILING,
+        "the projection used {:?} of CPU ({:?} wall) against a {BUDGET:?} budget",
+        spent.cpu,
+        spent.wall
     );
     Ok(())
 }
@@ -326,7 +352,9 @@ async fn a_cypher_graph_projection_stops_at_the_callers_deadline() -> Result<()>
 ///
 /// Both merged each unflushed candidate into the results by a linear search of
 /// a list that grew with every append, so 40,000 rows took 2.2 s in a debug
-/// build, against about 0.1 s now. The ceiling sits between the two.
+/// build, against about 0.1 s now. The ceiling, on CPU time, sits between the
+/// two; as a wall-clock ceiling it failed at 856 ms beside 44 CPU-bound
+/// competitors with the search still linear.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_search_over_unflushed_rows_is_linear_in_them() -> Result<()> {
     const ROWS: usize = 40_000;
@@ -359,13 +387,15 @@ async fn a_search_over_unflushed_rows_is_linear_in_them() -> Result<()> {
             "CALL uni.fts.query('Doc', 'body', 'alpha', 10) YIELD node RETURN count(*) AS c",
         ),
     ] {
-        let started = Instant::now();
-        let rows = db.session().query(query).await?;
-        let elapsed = started.elapsed();
+        let (rows, spent) = measure(db.session().query(query)).await;
+        let rows = rows?;
+        eprintln!("{name}: cpu {:?}, wall {:?}", spent.cpu, spent.wall);
         assert_eq!(rows.rows()[0].get::<i64>("c")?, 10, "{name}");
         assert!(
-            elapsed < CEILING,
-            "{name} search over {ROWS} unflushed rows took {elapsed:?}"
+            spent.cpu < CEILING,
+            "{name} search over {ROWS} unflushed rows used {:?} of CPU ({:?} wall)",
+            spent.cpu,
+            spent.wall
         );
     }
     Ok(())

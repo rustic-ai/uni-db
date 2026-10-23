@@ -17,6 +17,7 @@ pub mod edge_endpoint_enforcement;
 pub mod execute_counters_matrix;
 pub mod foreach_test;
 pub mod inlined_unwind_pushdown_test;
+pub mod label_write_shared_vertex;
 pub mod merge_failclosed_test;
 pub mod merge_keyed_endpoint_semantics;
 pub mod mutation_stress_test;

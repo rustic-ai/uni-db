@@ -7,6 +7,7 @@
 //! (CDC, scheduler, deferral tick); tracked join handles are awaited up
 //! to a configurable timeout so tasks drain before the process exits.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -44,6 +45,9 @@ impl std::fmt::Debug for ShutdownHandle {
 /// One handle's shutdown broadcast, plus the signals of handles derived from it.
 struct Signal {
     tx: broadcast::Sender<()>,
+    /// Set before the first send: a task that subscribes after the send
+    /// misses it, so it checks this after subscribing.
+    sent: AtomicBool,
     /// Signals of handles made by [`ShutdownHandle::derive`], fired with this
     /// one. Weak, so a dropped dependent view does not stay listed.
     derived: Mutex<Vec<Weak<Signal>>>,
@@ -54,13 +58,20 @@ impl Signal {
         let (tx, _) = broadcast::channel(16);
         Self {
             tx,
+            sent: AtomicBool::new(false),
             derived: Mutex::new(Vec::new()),
         }
     }
 
+    /// Sends on this signal only.
+    fn send(&self) {
+        self.sent.store(true, Ordering::SeqCst);
+        let _ = self.tx.send(());
+    }
+
     /// Sends on this signal, then on every live derived one, recursively.
     fn fire(&self) {
-        let _ = self.tx.send(());
+        self.send();
         // Collected first so no lock is held while descending.
         let derived: Vec<Arc<Signal>> = {
             let mut derived = self.derived.lock().unwrap();
@@ -172,7 +183,19 @@ impl ShutdownHandle {
     /// use. The tasks stay tracked, so the root handle's shutdown still waits
     /// for any that are finishing.
     pub fn release(&self) {
-        let _ = self.signal.tx.send(());
+        self.signal.send();
+    }
+
+    /// Whether this handle's signal has been sent, by a shutdown (here or on
+    /// a handle this one derives from) or by [`Self::release`].
+    ///
+    /// A broadcast receiver sees only what is sent after it subscribed, so a
+    /// task that may start after the signal subscribes with
+    /// [`Self::subscribe`] first and then checks this: one of the two
+    /// observes the signal.
+    #[must_use]
+    pub fn is_signalled(&self) -> bool {
+        self.signal.sent.load(Ordering::SeqCst)
     }
 
     /// Tracks `handle` so shutdown waits for it and it is counted while alive.

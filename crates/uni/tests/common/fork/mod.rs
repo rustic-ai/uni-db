@@ -41,6 +41,7 @@ pub mod fork_partial_mutation_inherited;
 pub mod fork_pin;
 pub mod fork_promote;
 pub mod fork_promote_edges;
+pub mod fork_promote_ext_id_reuse;
 pub mod fork_read_only;
 pub mod fork_schema_evolution;
 pub mod fork_schema_hardening;

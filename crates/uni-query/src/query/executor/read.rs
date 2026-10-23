@@ -314,13 +314,13 @@ impl Executor {
         };
 
         // C2: scans route through the version-pinned storage manager so
-        // post-snapshot L1 ROWS are invisible (the row-existence pin). The
-        // PropertyManager, by contrast, stays on LIVE storage: property
-        // point-reads must honor read-your-writes (a transaction's own
-        // uncommitted edge/vertex properties live in tx_l0, not L1, and a
-        // version filter would hide them — breaking e.g. MERGE's
-        // edge-property match). Cross-transaction property skew on an
-        // already-visible row is caught by OCC at commit, not the pin.
+        // post-snapshot L1 ROWS are invisible (the row-existence pin), and
+        // its adjacency reads are filtered to the pin. The PropertyManager
+        // is shared and stays on LIVE storage, so read-your-writes holds (a
+        // transaction's own uncommitted edge/vertex properties live in
+        // tx_l0, consulted before L1 — e.g. MERGE's edge-property match);
+        // its L1 reads are bounded by the pin through the query context's
+        // `l1_visibility`, and it bypasses its shared cache while pinned.
         let effective_storage = self.effective_storage();
 
         // Prefer the shared `Arc<PropertyManager>` installed via

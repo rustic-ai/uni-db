@@ -149,6 +149,31 @@ println!("rule names: {:?}", compiled.rule_names());
 
 Validates the program structure and returns metadata without evaluation.
 
+## Authorization
+
+When an `AuthzPolicy` is registered, every Locy evaluation is authorized
+before any of it runs: `session.locy`, `tx.locy`, their `locy_with` builders
+(`run` and `profile`), and prepared programs. The principal is the session's
+or transaction's, and the resource path is the program text. A program asks
+for:
+
+- `read`, for what it evaluates: rules, `QUERY`, `EXPLAIN RULE`, `ABDUCE`,
+  and read-only Cypher commands;
+- one more action per command that writes, the action Cypher uses for that
+  statement: `write` for a Cypher write and for `DERIVE`, `schema` for a DDL
+  procedure, `dbms` for an administrative one (`uni.admin.*`). `ASSUME`
+  mutations ask for `write` too, although they are discarded.
+
+A `DERIVE` request names what the equivalent Cypher write would: the labels,
+relationship types and inline property keys of the patterns its rule matches
+— and of every rule that rule reaches through `IS`, since those bind what it
+writes — together with those it creates (`MERGED_WITH` for `DERIVE MERGE`).
+A policy keyed on a label therefore sees a derive over that label.
+
+`tx.apply(derived)` asks for `write` for each statement it replays, with the
+path `<locy-apply>`. A refused program returns
+`UniError::AuthorizationDenied` and has no effect.
+
 ## Full API References
 
 - [Main Rust API Reference](../../reference/rust-api.md)

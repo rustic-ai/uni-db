@@ -11,14 +11,13 @@ from typing import (
     Any,
     TypeVar,
     cast,
-    get_type_hints,
 )
 from weakref import WeakValueDictionary
 
 from pydantic import ValidationError
 
 from .async_query import AsyncQueryBuilder
-from .base import UniEdge, UniNode
+from .base import UniEdge, UniNode, _resolve_type_hints
 from .exceptions import (
     BulkLoadError,
     NotPersisted,
@@ -45,7 +44,7 @@ from .query import (
     _warn_unhydratable,
 )
 from .schema import SchemaGenerator
-from .session import _NODE_RETURN, UniSession
+from .session import _NODE_RETURN, UniSession, _cypher_node_target
 from .types import db_to_python_value, python_to_db_value
 
 if TYPE_CHECKING:
@@ -280,10 +279,7 @@ class AsyncUniSession:
         props = _row_to_node_dict(results[0].to_dict())
         if props is None:
             raise SessionError(f"Entity with vid={entity._vid} no longer exists")
-        try:
-            hints = get_type_hints(type(entity))
-        except Exception:
-            hints = {}
+        hints = _resolve_type_hints(type(entity))
 
         for field_name in entity.get_property_fields():
             if field_name in props:
@@ -336,27 +332,22 @@ class AsyncUniSession:
         if result_type is None:
             return [r.to_dict() for r in results]
 
-        mapped = []
+        mapped: list[NodeT] = []
+        node_models = self._schema_gen._node_models
         for raw_row in results:
             row = raw_row.to_dict()
-            for key, value in row.items():
-                if isinstance(value, dict):
-                    if "_id" in value and "_label" in value:
-                        instance = self._result_to_model(value, result_type)
-                        if instance is not None:
-                            mapped.append(instance)
-                            break
-                    elif "_label" in value:
-                        label = value["_label"]
-                        if label in self._schema_gen._node_models:
-                            model = self._schema_gen._node_models[label]
-                            instance = self._result_to_model(value, model)
-                            if instance is not None:
-                                mapped.append(instance)
-                                break
+            # Same column selection as `UniSession.cypher`.
+            for value in row.values():
+                target = _cypher_node_target(value, result_type, node_models)
+                if target is None:
+                    continue
+                instance = self._result_to_model(*target)
+                if instance is not None:
+                    mapped.append(instance)
+                    break
             else:
                 first_value = next(iter(row.values()), None)
-                if isinstance(first_value, dict):
+                if isinstance(first_value, dict) and "_label" not in first_value:
                     instance = self._result_to_model(first_value, result_type)
                     if instance is not None:
                         mapped.append(instance)
@@ -526,10 +517,7 @@ class AsyncUniSession:
     async def _update_node(self, entity: UniNode) -> None:
         run_hooks(entity, _BEFORE_UPDATE)
         label = entity.__class__.__label__
-        try:
-            hints = get_type_hints(type(entity))
-        except Exception:
-            hints = {}
+        hints = _resolve_type_hints(type(entity))
         dirty_props = {}
         for name in entity._dirty:
             value = getattr(entity, name)
@@ -584,10 +572,7 @@ class AsyncUniSession:
         data.pop("_label", None)
 
         try:
-            instance = cast(
-                NodeT,
-                model.from_properties(data, vid=vid, session=self),
-            )
+            instance = model.from_properties(data, vid=vid, session=self)
         except ValidationError as exc:
             _warn_unhydratable(model, vid, exc)
             return None
@@ -668,7 +653,9 @@ class AsyncUniSession:
 
             cache_attr = f"_rel_cache_{rel_name}"
             for entity in entities:
-                related = by_source.get(entity._vid, [])
+                related = (
+                    by_source.get(entity._vid, []) if entity._vid is not None else []
+                )
                 if is_list:
                     setattr(entity, cache_attr, related)
                 else:
