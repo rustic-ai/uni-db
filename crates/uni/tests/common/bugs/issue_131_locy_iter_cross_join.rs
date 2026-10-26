@@ -91,7 +91,12 @@ async fn profile(iters: usize) -> (usize, usize) {
 
     // `LocyResult` derefs to `uni_locy::LocyResult`, whose `derived_facts`
     // returns the per-rule fact rows.
-    let facts = result.derived_facts("reach").map(|v| v.len()).unwrap_or(0);
+    let facts = result
+        .derived_rule("reach")
+        .await
+        .unwrap()
+        .map(|v| v.len())
+        .unwrap_or(0);
 
     (xj_rows, facts)
 }

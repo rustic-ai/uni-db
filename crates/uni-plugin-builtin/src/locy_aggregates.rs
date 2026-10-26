@@ -377,11 +377,14 @@ fn scalar_from_array(col: &dyn Array, i: usize) -> Result<ScalarValue, FnError> 
 // SUM — comm ∧ assoc (monotone over non-negative; rejected in recursive)
 // =========================================================================
 
-/// `SUM` aggregate — additive monoid over `f64`.
+/// `SUM` aggregate — Cypher's `sum`.
 ///
-/// Not monotone in general (negative inputs can decrease totals). The
-/// compiler should reject recursive use unless inputs are constrained
-/// non-negative; the [`Semilattice::monotone_join`] flag is `false`.
+/// Integers sum to an exact integer, continuing as a float only if the total
+/// leaves the 64-bit range (Neo4j's rule); floats sum to a float; a Cypher
+/// value column takes numbers or durations. Not monotone in general
+/// (negative inputs can decrease totals). The compiler should reject
+/// recursive use unless inputs are constrained non-negative; the
+/// [`Semilattice::monotone_join`] flag is `false`.
 #[derive(Debug)]
 pub struct SumAgg;
 
@@ -392,9 +395,9 @@ impl LocyAggregate for SumAgg {
     fn output_type(&self) -> DataType {
         DataType::Float64
     }
-    /// A Cypher-value column sums to a Cypher value: a float, or a duration.
+    /// Returns `LargeBinary` for integer or Cypher-value inputs, otherwise `Float64`.
     fn output_type_for_input(&self, input: &DataType) -> DataType {
-        cypher_total_type(input)
+        sum_total_type(input)
     }
     fn create(&self) -> Box<dyn LocyAggState> {
         Box::new(SumState::default())
@@ -409,7 +412,7 @@ impl LocyAggregate for SumAgg {
 
 /// `MSUM` aggregate — monotone sum-of-non-negatives.
 ///
-/// Identical runtime to [`SumAgg`] but declares
+/// Identical runtime to [`SumAgg`], numbers only, but declares
 /// [`Semilattice::monotone_join`] = `true` (the caller guarantees
 /// non-negative inputs, so the running sum is monotone across fixpoint
 /// iterations and sound in recursive Locy strata). `has_top` is `false`.
@@ -436,6 +439,10 @@ impl LocyAggregate for MSumAgg {
     fn output_type(&self) -> DataType {
         DataType::Float64
     }
+    /// Returns `LargeBinary` for integer or Cypher-value inputs, otherwise `Float64`.
+    fn output_type_for_input(&self, input: &DataType) -> DataType {
+        sum_total_type(input)
+    }
     fn create(&self) -> Box<dyn LocyAggState> {
         // A recursive sum is monotone only over non-negative numbers: no
         // durations.
@@ -454,17 +461,28 @@ impl LocyAggregate for MSumAgg {
 
 /// Sum state.
 ///
-/// A group with no non-null value sums to 0.0, as Cypher's `sum` does: the
-/// same aggregate means the same thing in both languages. It used to finalise
-/// to NULL there. A Cypher-value column (a schemaless or duration property)
-/// accumulates through [`CypherSum`], as Cypher's `sum` does, so durations add
-/// up and anything that is neither a number nor a duration is an error;
-/// `MSUM` (`numbers_only`) reads numbers alone.
+/// An integer column and a Cypher-value column (a schemaless or duration
+/// property) accumulate through [`CypherSum`], as Cypher's `sum` does: an
+/// integer total stays exact, continuing as a float only past the 64-bit
+/// range, durations add up, and anything that is neither a number nor a
+/// duration is an error. Integers used to be summed as `f64`, so two ledger
+/// amounts of 2^53 and 1 summed to 2^53 (issue #316). `MSUM`
+/// (`numbers_only`) refuses durations. A float column sums in `f64`.
+///
+/// A group with no non-null value sums to 0 — `Int(0)` through
+/// [`CypherSum`], `0.0` over floats — as Cypher's `sum` does: the same
+/// aggregate means the same thing in both languages.
 #[derive(Debug, Default)]
 struct SumState {
     value: f64,
     cypher: Option<CypherSum>,
     numbers_only: bool,
+}
+
+impl SumState {
+    fn name(&self) -> &'static str {
+        if self.numbers_only { "MSUM" } else { "SUM" }
+    }
 }
 
 impl LocyAggState for SumState {
@@ -477,11 +495,23 @@ impl LocyAggState for SumState {
         indices: &[usize],
         _cx: &FoldContext,
     ) -> Result<(), FnError> {
-        if col.data_type() == &DataType::LargeBinary && !self.numbers_only {
+        let name = self.name();
+        let dt = col.data_type();
+        if dt == &DataType::LargeBinary || dt.is_integer() {
+            // Set before the rows, so a group of NULLs still sums to the
+            // Cypher value `0` its column type promises.
+            let numbers_only = self.numbers_only;
             let total = self.cypher.get_or_insert_default();
             for &i in indices {
-                if !col.is_null(i) {
-                    add_cypher_cell(total, col, i, "SUM")?;
+                if col.is_null(i) {
+                    continue;
+                }
+                if dt.is_integer() {
+                    add_integer_cell(total, col, i, name)?;
+                } else if numbers_only {
+                    add_number_cell(total, col, i, name)?;
+                } else {
+                    add_cypher_cell(total, col, i, name)?;
                 }
             }
             return Ok(());
@@ -493,7 +523,7 @@ impl LocyAggState for SumState {
             // #233 Tier 1: an unreadable cell is an error, never silently
             // skipped — a sum of nothing is 0.0, so skipping would hide it.
             let Some(v) = numeric_at(col, i) else {
-                return Err(unreadable_cell("SUM", col));
+                return Err(unreadable_cell(name, col));
             };
             self.value += v;
         }
@@ -506,7 +536,7 @@ impl LocyAggState for SumState {
             self.cypher
                 .get_or_insert_default()
                 .merge(other_total)
-                .map_err(|e| cypher_total_error("SUM", &e))?;
+                .map_err(|e| cypher_total_error(self.name(), &e))?;
         }
         Ok(())
     }
@@ -518,14 +548,60 @@ impl LocyAggState for SumState {
     }
 }
 
-/// A Cypher-value column (`LargeBinary`) folds by `SUM` / `AVG` to a Cypher
-/// value; any other column to Float64.
+/// The column `SUM` / `MSUM` fold to.
+///
+/// An integer or Cypher-value (`LargeBinary`) column sums to a Cypher value:
+/// an exact integer that becomes a float only if it overflows, or for a
+/// Cypher-value column a duration. Neither fits one Arrow type, so the
+/// column holds the encoded value. Any other column sums to Float64.
+fn sum_total_type(input: &DataType) -> DataType {
+    if input == &DataType::LargeBinary || input.is_integer() {
+        DataType::LargeBinary
+    } else {
+        DataType::Float64
+    }
+}
+
+/// A Cypher-value column (`LargeBinary`) folds by `AVG` to a Cypher value;
+/// any other column to Float64.
 fn cypher_total_type(input: &DataType) -> DataType {
     if input == &DataType::LargeBinary {
         DataType::LargeBinary
     } else {
         DataType::Float64
     }
+}
+
+/// Adds row `i` of the integer column `col` to `total`: exactly, or for an
+/// unsigned value past `i64::MAX` as the float it overflows to.
+fn add_integer_cell(
+    total: &mut CypherSum,
+    col: &dyn Array,
+    i: usize,
+    agg: &str,
+) -> Result<(), FnError> {
+    use arrow_array::cast::AsArray;
+    use arrow_array::types::{
+        Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+    };
+    let added = match col.data_type() {
+        DataType::Int64 => total.add_int(col.as_primitive::<Int64Type>().value(i)),
+        DataType::Int32 => total.add_int(i64::from(col.as_primitive::<Int32Type>().value(i))),
+        DataType::Int16 => total.add_int(i64::from(col.as_primitive::<Int16Type>().value(i))),
+        DataType::Int8 => total.add_int(i64::from(col.as_primitive::<Int8Type>().value(i))),
+        DataType::UInt32 => total.add_int(i64::from(col.as_primitive::<UInt32Type>().value(i))),
+        DataType::UInt16 => total.add_int(i64::from(col.as_primitive::<UInt16Type>().value(i))),
+        DataType::UInt8 => total.add_int(i64::from(col.as_primitive::<UInt8Type>().value(i))),
+        DataType::UInt64 => {
+            let v = col.as_primitive::<UInt64Type>().value(i);
+            match i64::try_from(v) {
+                Ok(v) => total.add_int(v),
+                Err(_) => total.add_float(v as f64),
+            }
+        }
+        _ => return Err(unreadable_cell(agg, col)),
+    };
+    added.map_err(|e| cypher_total_error(agg, &e))
 }
 
 /// Adds the Cypher value in row `i` of `col` to `total`.
@@ -535,28 +611,53 @@ fn add_cypher_cell(
     i: usize,
     agg: &str,
 ) -> Result<(), FnError> {
-    use arrow_array::cast::AsArray;
-    let value =
-        uni_common::cypher_value_codec::decode(col.as_binary::<i64>().value(i)).map_err(|e| {
-            FnError::new(
-                CODE_UNREADABLE_CELL,
-                format!("{agg}: cannot decode a non-null cell: {e}"),
-            )
-        })?;
+    let value = decode_cypher_cell(col, i, agg)?;
     total.add(&value).map_err(|e| cypher_total_error(agg, &e))
+}
+
+/// Adds the number in row `i` of the Cypher-value column `col` to `total`;
+/// NULL is skipped, and anything else (a duration, a string) is an error.
+fn add_number_cell(
+    total: &mut CypherSum,
+    col: &dyn Array,
+    i: usize,
+    agg: &str,
+) -> Result<(), FnError> {
+    let added = match decode_cypher_cell(col, i, agg)? {
+        uni_common::Value::Null => return Ok(()),
+        uni_common::Value::Int(n) => total.add_int(n),
+        uni_common::Value::Float(f) => total.add_float(f),
+        other => {
+            return Err(FnError::new(
+                CODE_UNREADABLE_CELL,
+                format!(
+                    "{agg} takes numbers, got {}",
+                    uni_common::cypher_sum::describe(&other)
+                ),
+            ));
+        }
+    };
+    added.map_err(|e| cypher_total_error(agg, &e))
+}
+
+/// Decodes the Cypher value in row `i` of the `LargeBinary` column `col`.
+fn decode_cypher_cell(col: &dyn Array, i: usize, agg: &str) -> Result<uni_common::Value, FnError> {
+    use arrow_array::cast::AsArray;
+    uni_common::cypher_value_codec::decode(col.as_binary::<i64>().value(i)).map_err(|e| {
+        FnError::new(
+            CODE_UNREADABLE_CELL,
+            format!("{agg}: cannot decode a non-null cell: {e}"),
+        )
+    })
 }
 
 fn cypher_total_error(agg: &str, e: &anyhow::Error) -> FnError {
     FnError::new(CODE_UNREADABLE_CELL, format!("{agg}: {e}"))
 }
 
-/// A `SUM` / `AVG` over Cypher values, as a Cypher value: a float for numbers,
-/// as over a numeric column, a duration for durations, NULL for no average.
+/// A `SUM` / `AVG` over Cypher values, as a Cypher value: an integer sum stays
+/// an integer, as Cypher's `sum`; a float; a duration; NULL for no average.
 fn cypher_total_value(value: uni_common::Value) -> ScalarValue {
-    let value = match value {
-        uni_common::Value::Int(i) => uni_common::Value::Float(i as f64),
-        other => other,
-    };
     ScalarValue::LargeBinary(
         (!value.is_null()).then(|| uni_common::cypher_value_codec::encode(&value)),
     )
@@ -1282,13 +1383,11 @@ mod tests {
 
         let mut sum = SumAgg.create();
         sum.ingest(&batch, 0).expect("SUM ingests Int32");
-        match sum.finalize().expect("finalize") {
-            ScalarValue::Float64(Some(v)) => assert_eq!(
-                v, 6.0,
-                "SUM over Int32 must be 6.0; 0.0 is the value the skipped-cell path produced"
-            ),
-            other => panic!("expected Float64(Some), got {other:?}"),
-        }
+        assert_eq!(
+            decoded(sum.finalize().expect("finalize")),
+            uni_common::Value::Int(6),
+            "SUM over Int32 must be 6; 0 is the value the skipped-cell path produced"
+        );
 
         let mut avg = AvgAgg.create();
         avg.ingest(&batch, 0).expect("AVG ingests Int32");
@@ -1387,7 +1486,115 @@ mod tests {
             let mut s = agg.create();
             s.ingest(&one_col_batch(vec![None, None]), 0).unwrap();
             assert_eq!(s.finalize().unwrap(), ScalarValue::Float64(Some(0.0)));
+            // Over an integer column, the integer 0 its column type promises.
+            let mut s = agg.create();
+            s.ingest(&int64_batch(vec![None, None]), 0).unwrap();
+            assert_eq!(decoded(s.finalize().unwrap()), uni_common::Value::Int(0));
         }
+    }
+
+    fn int64_batch(values: Vec<Option<i64>>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+        RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(values))]).unwrap()
+    }
+
+    fn cypher_batch(values: Vec<uni_common::Value>) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "v",
+            DataType::LargeBinary,
+            true,
+        )]));
+        let encoded: Vec<Vec<u8>> = values
+            .iter()
+            .map(uni_common::cypher_value_codec::encode)
+            .collect();
+        let arr = arrow_array::LargeBinaryArray::from(
+            encoded
+                .iter()
+                .map(|b| Some(b.as_slice()))
+                .collect::<Vec<_>>(),
+        );
+        RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap()
+    }
+
+    /// The Cypher value a `SUM` finalized to.
+    fn decoded(v: ScalarValue) -> uni_common::Value {
+        let ScalarValue::LargeBinary(Some(bytes)) = v else {
+            panic!("expected a Cypher value, got {v:?}");
+        };
+        uni_common::cypher_value_codec::decode(&bytes).unwrap()
+    }
+
+    /// Issue #316: `SUM` / `MSUM` of integers are exact integers, typed or
+    /// schemaless, and continue as a float only past the 64-bit range. They
+    /// were summed in `f64`, so 2^53 + 1 was 2^53.
+    #[test]
+    fn sum_of_integers_is_exact_and_widens_on_overflow() {
+        use uni_common::Value;
+        let two_53 = 1_i64 << 53;
+        for agg in [&SumAgg as &dyn LocyAggregate, &MSumAgg] {
+            assert_eq!(
+                agg.output_type_for_input(&DataType::Int64),
+                DataType::LargeBinary
+            );
+            assert_eq!(
+                agg.output_type_for_input(&DataType::Float64),
+                DataType::Float64
+            );
+            for (values, want) in [
+                (vec![two_53, 1], Value::Int(two_53 + 1)),
+                (vec![i64::MAX - 1, 1], Value::Int(i64::MAX)),
+                (vec![i64::MAX, 1], Value::Float(2f64.powi(63))),
+                (vec![i64::MAX, 1, -1], Value::Float(2f64.powi(63))),
+            ] {
+                let mut s = agg.create();
+                s.ingest(&int64_batch(values.iter().copied().map(Some).collect()), 0)
+                    .unwrap();
+                assert_eq!(decoded(s.finalize().unwrap()), want, "{values:?}");
+                let mut s = agg.create();
+                s.ingest(
+                    &cypher_batch(values.iter().copied().map(Value::Int).collect()),
+                    0,
+                )
+                .unwrap();
+                assert_eq!(decoded(s.finalize().unwrap()), want, "{values:?}");
+            }
+            // Partial states merge exactly too.
+            let mut a = agg.create();
+            a.ingest(&int64_batch(vec![Some(two_53)]), 0).unwrap();
+            let mut b = agg.create();
+            b.ingest(&int64_batch(vec![Some(1)]), 0).unwrap();
+            a.merge(b.as_ref()).unwrap();
+            assert_eq!(decoded(a.finalize().unwrap()), Value::Int(two_53 + 1));
+            // A float among them makes a float.
+            let mut s = agg.create();
+            s.ingest(&cypher_batch(vec![Value::Int(1), Value::Float(0.5)]), 0)
+                .unwrap();
+            assert_eq!(decoded(s.finalize().unwrap()), Value::Float(1.5));
+        }
+    }
+
+    /// `MSUM` takes numbers alone: a duration in a Cypher-value column is an
+    /// error, where `SUM` adds it.
+    #[test]
+    fn msum_refuses_a_duration_that_sum_adds() {
+        let d = uni_common::Value::Temporal(uni_common::TemporalValue::Duration {
+            months: 0,
+            days: 1,
+            nanos: 0,
+        });
+        let batch = cypher_batch(vec![d.clone(), d]);
+        let mut s = SumAgg.create();
+        s.ingest(&batch, 0).unwrap();
+        assert!(matches!(
+            decoded(s.finalize().unwrap()),
+            uni_common::Value::Temporal(_)
+        ));
+        let err = MSumAgg
+            .create()
+            .ingest(&batch, 0)
+            .expect_err("MSUM takes numbers only");
+        assert!(err.message.contains("number"), "{}", err.message);
     }
 
     #[test]

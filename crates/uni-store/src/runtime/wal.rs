@@ -9,6 +9,7 @@ use metrics;
 use object_store::ObjectStore;
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, instrument, warn};
 use uni_common::Properties;
@@ -26,6 +27,23 @@ fn parse_lsn_from_filename(path: &Path) -> Option<u64> {
     // `str::get(..20)` yields `None` (instead of panicking) when byte index 20
     // falls mid-UTF-8-character, so a foreign multibyte filename is skipped.
     filename.get(..20).and_then(|s| s.parse::<u64>().ok())
+}
+
+/// Put a batch whose flush failed back in front of what arrived since,
+/// shifting the later commit spans past it.
+fn restore_unflushed(state: &mut WalState, batch: Vec<Mutation>, spans: Vec<CommitSpan>) {
+    let offset = batch.len();
+    let new_mutations = std::mem::take(&mut state.buffer);
+    let new_spans = std::mem::take(&mut state.spans);
+    state.buffer = batch;
+    state.buffer.extend(new_mutations);
+    state.spans = spans;
+    state
+        .spans
+        .extend(new_spans.into_iter().map(|span| CommitSpan {
+            start: span.start + offset,
+            len: span.len,
+        }));
 }
 
 /// Magic prefix of checksummed (v2) WAL segments.
@@ -197,6 +215,12 @@ pub enum Mutation {
         dst_vid: Vid,
         edge_type: u32,
         version: u64,
+        /// Edge type name, so replay can resolve the type by name: a
+        /// schemaless `edge_type` id is only meaningful in the registry of
+        /// the process that wrote the record. `None` in segments written
+        /// before this field existed (externally-tagged serde, `default`).
+        #[serde(default)]
+        edge_type_name: Option<String>,
     },
     InsertVertex {
         vid: Vid,
@@ -249,6 +273,45 @@ pub struct WalSegment {
     /// older binary wrote.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub writer_features: Vec<String>,
+    /// The highest WAL LSN whose commit had been announced when this segment
+    /// was written (the publish sequencer's mark). `0` in a segment an older
+    /// binary wrote, which recovery reads as "nothing known announced".
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub announced_through: u64,
+    /// The ranges of [`Self::mutations`] that are a transaction commit's own
+    /// writes, in commit order. Other mutations in the segment (a declared
+    /// trigger's action, written straight to main L0) were never announced as
+    /// a commit, so recovery does not announce them either.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commits: Vec<CommitSpan>,
+}
+
+/// A transaction commit's mutations within a [`WalSegment`]:
+/// `mutations[start..start + len]`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitSpan {
+    /// Index of the commit's first mutation.
+    pub start: usize,
+    /// Number of the commit's mutations.
+    pub len: usize,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+/// What [`WriteAheadLog::replay_segments_since`] recovered.
+#[derive(Debug, Default)]
+pub struct WalSegmentReplay {
+    /// Every replayed segment, in LSN order.
+    pub segments: Vec<WalSegment>,
+    /// Replayed segments that carry no writer features; see
+    /// [`WalReplay::unmarked_segments`].
+    pub unmarked_segments: usize,
 }
 
 /// What [`WriteAheadLog::replay_since_with_provenance`] recovered.
@@ -272,6 +335,10 @@ struct WalSegmentRef<'a> {
     mutations: &'a [Mutation],
     #[serde(skip_serializing_if = "<[String]>::is_empty")]
     writer_features: &'a [String],
+    #[serde(skip_serializing_if = "is_zero")]
+    announced_through: u64,
+    #[serde(skip_serializing_if = "<[CommitSpan]>::is_empty")]
+    commits: &'a [CommitSpan],
 }
 
 pub struct WriteAheadLog {
@@ -286,11 +353,18 @@ pub struct WriteAheadLog {
     local_root: Option<std::path::PathBuf>,
     /// Recorded in every segment this log writes.
     writer_features: Vec<String>,
+    /// The publish sequencer's announced mark, stamped into every segment;
+    /// see [`WalSegment::announced_through`].
+    announced: Arc<AtomicU64>,
     state: Mutex<WalState>,
 }
 
 struct WalState {
     buffer: Vec<Mutation>,
+    /// The commits among `buffer`; see [`WalSegment::commits`].
+    spans: Vec<CommitSpan>,
+    /// The highest announced mark a durable segment records.
+    written_announced: u64,
     /// Current LSN counter (incremented per flush)
     next_lsn: u64,
     /// Highest LSN successfully flushed
@@ -304,8 +378,11 @@ impl WriteAheadLog {
             prefix,
             local_root: None,
             writer_features: uni_common::core::schema::current_writer_features(),
+            announced: Arc::new(AtomicU64::new(0)),
             state: Mutex::new(WalState {
                 buffer: Vec::new(),
+                spans: Vec::new(),
+                written_announced: 0,
                 next_lsn: 1, // Start at 1 so 0 means "no WAL"
                 flushed_lsn: 0,
             }),
@@ -405,18 +482,96 @@ impl WriteAheadLog {
         Ok(())
     }
 
+    /// Append a transaction commit's mutations as one unit, recorded as a
+    /// [`CommitSpan`] of the segment they are flushed in.
+    ///
+    /// # Errors
+    /// When the state lock is poisoned.
+    pub fn append_commit(&self, mutations: Vec<Mutation>) -> Result<()> {
+        if mutations.is_empty() {
+            return Ok(());
+        }
+        let mut state = acquire_mutex(&self.state, "wal_state")?;
+        let span = CommitSpan {
+            start: state.buffer.len(),
+            len: mutations.len(),
+        };
+        metrics::counter!("uni_wal_entries_total").increment(mutations.len() as u64);
+        state.buffer.extend(mutations);
+        state.spans.push(span);
+        Ok(())
+    }
+
+    /// The announced mark this log stamps into its segments. The writer's
+    /// publish sequencer raises it (`PublishSequencer::with_announced_mark`).
+    #[must_use]
+    pub fn announced_mark(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.announced)
+    }
+
+    /// Raise the announced mark to `lsn`, a mark recovery read back from a
+    /// durable segment (or the snapshot manifest): it is known announced and
+    /// known recorded.
+    ///
+    /// # Errors
+    /// When the state lock is poisoned.
+    pub fn restore_announced_mark(&self, lsn: u64) -> Result<()> {
+        self.announced.fetch_max(lsn, Ordering::AcqRel);
+        let mut state = acquire_mutex(&self.state, "wal_state")?;
+        state.written_announced = state.written_announced.max(lsn);
+        Ok(())
+    }
+
+    /// Record the announced mark durably if a segment does not already: write
+    /// an empty segment carrying it. A no-op when nothing was announced since
+    /// the last segment.
+    ///
+    /// Without it, the commits announced after the last segment was written
+    /// look unannounced to the next open, which announces them again. Call it
+    /// when the log's owner closes.
+    ///
+    /// # Errors
+    /// As [`Self::flush`].
+    pub async fn seal(&self) -> Result<u64> {
+        self.flush_inner(true).await
+    }
+
+    /// Whether [`Self::seal`] would write: the announced mark is ahead of
+    /// every durable segment's and nothing buffered would carry it.
+    #[must_use]
+    pub fn needs_seal(&self) -> bool {
+        let announced = self.announced.load(Ordering::Acquire);
+        acquire_mutex(&self.state, "wal_state")
+            .map(|state| announced > state.written_announced)
+            .unwrap_or(false)
+    }
+
     /// Flush buffered mutations to a WAL segment. Returns the LSN of the flushed segment.
     #[instrument(skip(self), fields(lsn, mutations_count, size_bytes))]
     pub async fn flush(&self) -> Result<u64> {
+        self.flush_inner(false).await
+    }
+
+    /// [`Self::flush`]; with `seal`, also when the buffer is empty but the
+    /// announced mark is ahead of every durable segment's (see [`Self::seal`]).
+    async fn flush_inner(&self, seal: bool) -> Result<u64> {
         let start = std::time::Instant::now();
-        let (batch, lsn) = {
+        let (batch, spans, announced_through, lsn) = {
             let mut state = acquire_mutex(&self.state, "wal_state")?;
-            if state.buffer.is_empty() {
+            // Read under the state lock: a segment never records a mark from
+            // after a later segment's.
+            let announced_through = self.announced.load(Ordering::Acquire);
+            if state.buffer.is_empty() && !(seal && announced_through > state.written_announced) {
                 return Ok(state.flushed_lsn);
             }
             let lsn = state.next_lsn;
             state.next_lsn += 1;
-            (std::mem::take(&mut state.buffer), lsn)
+            (
+                std::mem::take(&mut state.buffer),
+                std::mem::take(&mut state.spans),
+                announced_through,
+                lsn,
+            )
         };
 
         tracing::Span::current().record("lsn", lsn);
@@ -430,6 +585,8 @@ impl WriteAheadLog {
             lsn,
             mutations: &batch,
             writer_features: &self.writer_features,
+            announced_through,
+            commits: &spans,
         };
 
         // Serialize segment; restore buffer on failure
@@ -439,9 +596,7 @@ impl WriteAheadLog {
                 warn!(lsn, error = %e, "Failed to serialize WAL segment, restoring buffer");
                 // Restore buffer on serialization failure
                 let mut state = acquire_mutex(&self.state, "wal_state")?;
-                let new_mutations = std::mem::take(&mut state.buffer);
-                state.buffer = batch;
-                state.buffer.extend(new_mutations);
+                restore_unflushed(&mut state, batch, spans);
                 // Don't roll back LSN - gap is harmless and maintains monotonicity
                 return Err(e.into());
             }
@@ -466,9 +621,7 @@ impl WriteAheadLog {
             // Restore buffer so data isn't lost on transient failures
             let mut state = acquire_mutex(&self.state, "wal_state")?;
             // Prepend the failed batch to any new mutations that arrived
-            let new_mutations = std::mem::take(&mut state.buffer);
-            state.buffer = batch;
-            state.buffer.extend(new_mutations);
+            restore_unflushed(&mut state, batch, spans);
             // Don't roll back LSN - gap is harmless and maintains strict monotonicity
             // All WAL consumers use `>` / `<=` comparisons, not equality checks
             return Err(e);
@@ -522,6 +675,7 @@ impl WriteAheadLog {
         {
             let mut state = acquire_mutex(&self.state, "wal_state")?;
             state.flushed_lsn = lsn;
+            state.written_announced = state.written_announced.max(announced_through);
         }
 
         let duration = start.elapsed();
@@ -579,10 +733,29 @@ impl WriteAheadLog {
     /// As [`Self::replay_since`].
     #[instrument(skip(self), level = "debug")]
     pub async fn replay_since_with_provenance(&self, high_water_mark: u64) -> Result<WalReplay> {
+        let replay = self.replay_segments_since(high_water_mark).await?;
+        Ok(WalReplay {
+            mutations: replay
+                .segments
+                .into_iter()
+                .flat_map(|segment| segment.mutations)
+                .collect(),
+            unmarked_segments: replay.unmarked_segments,
+        })
+    }
+
+    /// The segments [`Self::replay_since_with_provenance`] replays, whole and
+    /// in LSN order, so a caller can apply them one at a time.
+    ///
+    /// # Errors
+    /// As [`Self::replay_since`].
+    #[instrument(skip(self), level = "debug")]
+    pub async fn replay_segments_since(&self, high_water_mark: u64) -> Result<WalSegmentReplay> {
         let start = std::time::Instant::now();
         debug!(high_water_mark, "Replaying WAL segments");
         let metas = list_with_timeout(&self.store, Some(&self.prefix), DEFAULT_TIMEOUT).await?;
-        let mut mutations = Vec::new();
+        let mut segments = Vec::new();
+        let mut mutations_count = 0;
 
         // Collect candidate paths and sort by LSN (filename prefix).
         // Lexicographical sort works for the zero-padded LSN prefix.
@@ -669,21 +842,18 @@ impl WriteAheadLog {
                 if !uni_common::core::schema::writer_enforces_endpoints(&segment.writer_features) {
                     unmarked_segments += 1;
                 }
-                mutations.extend(segment.mutations);
+                mutations_count += segment.mutations.len();
+                segments.push(segment);
                 segments_replayed += 1;
             }
         }
 
-        info!(
-            segments_replayed,
-            mutations_count = mutations.len(),
-            "WAL replay completed"
-        );
+        info!(segments_replayed, mutations_count, "WAL replay completed");
         metrics::histogram!("uni_wal_replay_duration_seconds")
             .record(start.elapsed().as_secs_f64());
 
-        Ok(WalReplay {
-            mutations,
+        Ok(WalSegmentReplay {
+            segments,
             unmarked_segments,
         })
     }
@@ -1406,21 +1576,31 @@ mod tests {
                 dst_vid: Vid::new(3),
                 edge_type: 4,
                 version: 5,
+                edge_type_name: Some("T".to_string()),
             },
         ];
-        for features in [
-            uni_common::core::schema::current_writer_features(),
-            Vec::new(),
+        let spans = vec![CommitSpan { start: 0, len: 1 }];
+        for (features, announced_through, commits) in [
+            (
+                uni_common::core::schema::current_writer_features(),
+                7,
+                spans.clone(),
+            ),
+            (Vec::new(), 0, Vec::new()),
         ] {
             let owned = WalSegment {
                 lsn: 42,
                 mutations: mutations.clone(),
                 writer_features: features.clone(),
+                announced_through,
+                commits: commits.clone(),
             };
             let borrowed = WalSegmentRef {
                 lsn: 42,
                 mutations: &mutations,
                 writer_features: &features,
+                announced_through,
+                commits: &commits,
             };
             assert_eq!(
                 serde_json::to_vec(&owned).unwrap(),
@@ -1457,6 +1637,86 @@ mod tests {
             .replay_since_with_provenance(0)
             .await?;
         assert_eq!((replay.mutations.len(), replay.unmarked_segments), (2, 1));
+        Ok(())
+    }
+
+    /// A commit appended as one unit is recorded as a span of the segment it
+    /// is flushed in, after whatever was appended before it; each segment
+    /// records the announced mark as of its write; and a seal records a mark
+    /// raised since, once, in an empty segment.
+    #[tokio::test]
+    async fn segments_record_commit_spans_and_the_announced_mark() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            object_store::local::LocalFileSystem::new_with_prefix(dir.path())?,
+        );
+        let prefix = Path::from("wal");
+        let mutation = |vid| Mutation::DeleteVertex {
+            vid: Vid::new(vid),
+            labels: vec![],
+        };
+        let wal = WriteAheadLog::new(store.clone(), prefix.clone());
+        wal.initialize().await?;
+        let mark = wal.announced_mark();
+
+        // A direct write, then a commit of two mutations.
+        wal.append(mutation(1))?;
+        wal.append_commit(vec![mutation(2), mutation(3)])?;
+        let first = wal.flush().await?;
+        assert!(!wal.needs_seal(), "nothing announced yet");
+
+        // The commit is announced; the next segment records it.
+        mark.store(first, Ordering::Release);
+        assert!(wal.needs_seal());
+        wal.append_commit(vec![mutation(4)])?;
+        let second = wal.flush().await?;
+        assert!(!wal.needs_seal(), "the second segment carries the mark");
+
+        // The second commit is announced; only a seal records it.
+        mark.store(second, Ordering::Release);
+        assert!(wal.needs_seal());
+        let sealed = wal.seal().await?;
+        assert!(sealed > second);
+        assert!(!wal.needs_seal());
+        assert_eq!(wal.seal().await?, sealed, "a second seal writes nothing");
+
+        let replay = WriteAheadLog::new(store, prefix)
+            .replay_segments_since(0)
+            .await?;
+        let summary: Vec<_> = replay
+            .segments
+            .iter()
+            .map(|s| {
+                (
+                    s.lsn,
+                    s.mutations.len(),
+                    s.announced_through,
+                    s.commits.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (first, 3, 0, vec![CommitSpan { start: 1, len: 2 }]),
+                (second, 1, first, vec![CommitSpan { start: 0, len: 1 }]),
+                (sealed, 0, second, vec![]),
+            ]
+        );
+        Ok(())
+    }
+
+    /// A mark recovery restores counts as recorded: no seal is needed for it.
+    #[tokio::test]
+    async fn a_restored_mark_needs_no_seal() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store: Arc<dyn ObjectStore> = Arc::new(
+            object_store::local::LocalFileSystem::new_with_prefix(dir.path())?,
+        );
+        let wal = WriteAheadLog::new(store, Path::from("wal"));
+        wal.restore_announced_mark(7)?;
+        assert_eq!(wal.announced_mark().load(Ordering::Acquire), 7);
+        assert!(!wal.needs_seal());
         Ok(())
     }
 

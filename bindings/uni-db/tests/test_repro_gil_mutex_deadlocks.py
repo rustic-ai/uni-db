@@ -12,33 +12,94 @@
 #                  await, then written back (mirrors fetch_all).
 #
 # Each defect used to FREEZE the whole interpreter, so every scenario runs in an
-# isolated subprocess with a 12 s timeout as a hang backstop. With the fix the
-# child completes and prints DONE_NO_DEADLOCK; a regressed lock order would
-# re-freeze and the guard would fail on timeout.
+# isolated subprocess. With the fix the child completes and prints
+# DONE_NO_DEADLOCK; a regressed lock order re-freezes it and the guard fails on
+# timeout.
+#
+# The hang timeout covers only the phase that can deadlock. The child prints
+# READY once its setup (database, schema, data) is done, and the clock starts
+# then; setup gets its own, much larger budget and failing it is reported as
+# slow setup, never as a deadlock. The timeout used to cover the setup too, so
+# 5000 single CREATEs on a debug build under a parallel run (6-16 s measured)
+# tripped the 12 s deadlock detector with no deadlock anywhere.
 
 import subprocess
 import sys
 import textwrap
+import threading
+from dataclasses import dataclass
 
-# Deadlock manifests within a couple of seconds; give generous headroom, then
-# treat a timeout as the reproduction signal.
+# Deadlock manifests within a couple of seconds once the contended phase
+# starts; give generous headroom, then treat a timeout as the reproduction
+# signal.
 _HANG_TIMEOUT = 12.0
+# Setup does no contended work: only a broken environment takes this long.
+_SETUP_TIMEOUT = 180.0
+_READY = "READY"
 
 
-def _run_child(src: str) -> subprocess.CompletedProcess | None:
-    """Return the completed process, or None if it hung (deadlock reproduced)."""
+@dataclass
+class ChildResult:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+def _run_child(src: str) -> ChildResult | None:
+    """Run `src` in a subprocess; time it from its READY line.
+
+    Returns the completed child, or None if it hung after READY (deadlock
+    reproduced). A child that does not reach READY within the setup budget
+    fails the test as slow setup.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", textwrap.dedent(src)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    out: list[str] = []
+    err: list[str] = []
+    ready = threading.Event()
+
+    def read_stdout() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            out.append(line)
+            if line.strip() == _READY:
+                ready.set()
+        ready.set()  # EOF: the child exited (or crashed) before or after READY
+
+    def read_stderr() -> None:
+        assert proc.stderr is not None
+        err.extend(proc.stderr)
+
+    readers = [
+        threading.Thread(target=f, daemon=True) for f in (read_stdout, read_stderr)
+    ]
+    for r in readers:
+        r.start()
     try:
-        return subprocess.run(
-            [sys.executable, "-c", textwrap.dedent(src)],
-            capture_output=True,
-            text=True,
-            timeout=_HANG_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return None
+        if not ready.wait(_SETUP_TIMEOUT):
+            proc.kill()
+            proc.wait()
+            raise AssertionError(
+                f"child setup did not finish within {_SETUP_TIMEOUT}s (not a deadlock "
+                f"verdict): {''.join(err)}"
+            )
+        try:
+            proc.wait(timeout=_HANG_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return None
+    finally:
+        for r in readers:
+            r.join(timeout=5)
+    return ChildResult(proc.returncode, "".join(out), "".join(err))
 
 
-def _assert_no_deadlock(result: subprocess.CompletedProcess | None) -> None:
+def _assert_no_deadlock(result: ChildResult | None) -> None:
     """Assert the child completed cleanly and reached its DONE sentinel."""
     assert result is not None, "deadlock regressed: child hung past the timeout"
     detail = result.stdout + result.stderr
@@ -58,10 +119,10 @@ def test_prepared_query_shared_across_threads_no_deadlock():
     db = uni_db.UniBuilder.temporary().build()
     db.schema().label("N").property("v", "int").done().apply()
     s = db.session(); tx = s.tx()
-    for i in range(300):
-        tx.execute("CREATE (:N {v:%d})" % i)
+    tx.execute("UNWIND range(0, 299) AS i CREATE (:N {v: i})")
     tx.commit()
     pq = s.prepare("MATCH (a:N),(b:N) RETURN count(*) AS c")
+    print("READY", flush=True)
     def worker():
         for _ in range(50):
             pq.execute()
@@ -90,6 +151,7 @@ def test_commit_stream_close_during_iteration_no_deadlock():
     db.schema().label("N").property("v", "int").done().apply()
     s = db.session()
     stream = s.watch()          # no commits will ever arrive
+    print("READY", flush=True)
     def reader():
         for _ in stream:        # __next__ parks in block_on holding the mutex
             pass
@@ -116,10 +178,10 @@ def test_shared_cursor_next_row_no_deadlock():
     db = uni_db.UniBuilder.temporary().build()
     db.schema().label("N").property("v", "int").done().apply()
     s = db.session(); tx = s.tx()
-    for i in range(5000):
-        tx.execute("CREATE (:N {v:%d})" % i)
+    tx.execute("UNWIND range(0, 4999) AS i CREATE (:N {v: i})")
     tx.commit()
     cur = s.query_with("MATCH (n:N) RETURN n.v AS v").cursor()
+    print("READY", flush=True)
     def worker():
         while True:
             try:

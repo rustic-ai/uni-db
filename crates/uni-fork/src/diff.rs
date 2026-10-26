@@ -12,7 +12,7 @@
 // Diff engine
 // ============================================================================
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use tracing::warn;
 use uni_common::Properties;
@@ -47,8 +47,10 @@ pub async fn compute_diff<Q: ForkQueryHost + ?Sized>(a: &Q, b: &Q) -> Result<For
     let ext_a = a.storage().get_vertex_ext_ids().await?;
     let ext_b = b.storage().get_vertex_ext_ids().await?;
 
-    let labels_a: HashSet<String> = a.schema().schema().labels.keys().cloned().collect();
-    let labels_b: HashSet<String> = b.schema().schema().labels.keys().cloned().collect();
+    // Declared names alone miss schemaless labels and edge types, which exist
+    // only in data (#306): enumerate both, on each side.
+    let labels_a = labels_of(a).await?;
+    let labels_b = labels_of(b).await?;
     let labels_union: Vec<&String> = labels_a.union(&labels_b).collect();
 
     for label in labels_union {
@@ -57,8 +59,8 @@ pub async fn compute_diff<Q: ForkQueryHost + ?Sized>(a: &Q, b: &Q) -> Result<For
         diff_label(label, rows_a, rows_b, &mut diff.vertices);
     }
 
-    let edges_a: HashSet<String> = a.schema().schema().edge_types.keys().cloned().collect();
-    let edges_b: HashSet<String> = b.schema().schema().edge_types.keys().cloned().collect();
+    let edges_a = edge_types_of(a).await?;
+    let edges_b = edge_types_of(b).await?;
     let edges_union: Vec<&String> = edges_a.union(&edges_b).collect();
 
     for edge_type in edges_union {
@@ -138,6 +140,42 @@ struct EdgeRow {
     src_uid: UniId,
     dst_uid: UniId,
     properties: Properties,
+}
+
+/// Every label `s` can see: the declared ones (which may hold no rows yet)
+/// plus those discovered in data, which covers schemaless labels.
+///
+/// The data scan mirrors uni-db's `Schema::list_labels`.
+async fn labels_of<Q: ForkQueryHost + ?Sized>(s: &Q) -> Result<BTreeSet<String>> {
+    let mut labels: BTreeSet<String> = s.schema().schema().labels.keys().cloned().collect();
+    let rs = s
+        .query("MATCH (n) RETURN DISTINCT labels(n) AS labels")
+        .await?;
+    for row in rs.rows() {
+        if let Some(Value::List(names)) = row.value("labels") {
+            for name in names {
+                if let Value::String(label) = name {
+                    labels.insert(label.clone());
+                }
+            }
+        }
+    }
+    Ok(labels)
+}
+
+/// Every edge type `s` can see: the declared ones plus those discovered in
+/// data, which covers schemaless edge types.
+async fn edge_types_of<Q: ForkQueryHost + ?Sized>(s: &Q) -> Result<BTreeSet<String>> {
+    let mut types: BTreeSet<String> = s.schema().schema().edge_types.keys().cloned().collect();
+    let rs = s
+        .query("MATCH ()-[r]->() RETURN DISTINCT type(r) AS t")
+        .await?;
+    for row in rs.rows() {
+        if let Some(Value::String(t)) = row.value("t") {
+            types.insert(t.clone());
+        }
+    }
+    Ok(types)
 }
 
 async fn scan_label_nodes<Q: ForkQueryHost + ?Sized>(
@@ -410,6 +448,13 @@ async fn batch_resolve_primary_vids<Q: ForkQueryHost + ?Sized>(
     if uids.is_empty() {
         return (out, false);
     }
+    // A label undeclared on primary (schemaless, #306) has no per-label
+    // table and so no UidIndex: the flush registers UIDs only for declared
+    // labels. Every lookup would miss and promote would insert a duplicate
+    // of each row primary already holds. Resolve it by content instead.
+    if !primary.schema().schema().labels.contains_key(label) {
+        return resolve_primary_vids_by_scan(primary, label, uids, primary_ext_ids).await;
+    }
     // Collect *all* candidate VIDs per UID by scanning the shared
     // UidIndex with an IN filter. The shared index is not
     // branch-isolated, so a single UID may have a fork-only VID and
@@ -467,6 +512,42 @@ async fn batch_resolve_primary_vids<Q: ForkQueryHost + ?Sized>(
             .find(|v| live_uid_by_vid.get(&v.as_u64()) == Some(&uid))
         {
             out.insert(uid, vid);
+        }
+    }
+    (out, false)
+}
+
+/// Resolve content UIDs to primary VIDs by scanning `label` on primary.
+///
+/// The fallback of [`batch_resolve_primary_vids`] for a label with no
+/// UidIndex (undeclared on primary). Hashes every live primary vertex of
+/// the label exactly as the index path re-verifies a candidate, so the
+/// two paths agree on what "present" means. One primary query, linear in
+/// the label's size. A failed query degrades exactly as the index path
+/// does: an empty map plus `degraded = true`.
+async fn resolve_primary_vids_by_scan<Q: ForkQueryHost + ?Sized>(
+    primary: &Q,
+    label: &str,
+    uids: &[UniId],
+    primary_ext_ids: &HashMap<Vid, String>,
+) -> (HashMap<UniId, Vid>, bool) {
+    let mut out: HashMap<UniId, Vid> = HashMap::new();
+    let wanted: HashSet<&UniId> = uids.iter().collect();
+    let cypher = format!("MATCH (n:`{}`) RETURN n", escape_backticks(label));
+    let Ok(rs) = primary.query(&cypher).await else {
+        return (out, true);
+    };
+    for row in rs.rows() {
+        let Some(Value::Node(node)) = row.value("n") else {
+            continue;
+        };
+        let uid = content_uid_with_ext_id(
+            label,
+            ext_id_for(primary_ext_ids, node.vid),
+            &node.properties,
+        );
+        if wanted.contains(&uid) {
+            out.entry(uid).or_insert(node.vid);
         }
     }
     (out, false)
@@ -1129,7 +1210,9 @@ where
     // on the fork so callers see they exist (and weren't promoted).
     if !any_edge_pattern {
         let mut edge_seen = 0usize;
-        for et in fork.schema().schema().edge_types.keys() {
+        // The same declared ∪ discovered set the diff scans, so schemaless
+        // edges are reported too (#306).
+        for et in &edge_types_of(fork).await? {
             let cypher = format!(
                 "MATCH ()-[r:`{}`]->() RETURN count(r) AS c",
                 escape_backticks(et)

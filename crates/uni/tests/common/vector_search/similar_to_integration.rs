@@ -462,7 +462,9 @@ async fn test_similar_to_in_locy_where() -> Result<()> {
         .await?;
 
     let relevant = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("relevant")
         .expect("rule 'relevant' missing");
     // Only Alpha (1.0) and Delta (0.8) exceed 0.7
@@ -489,7 +491,12 @@ async fn test_similar_to_in_locy_yield() -> Result<()> {
         )
         .await?;
 
-    let scored = result.derived.get("scored").expect("rule 'scored' missing");
+    let scored = result
+        .derived_rules()
+        .await
+        .unwrap()
+        .get("scored")
+        .expect("rule 'scored' missing");
     assert_eq!(
         scored.len(),
         4,
@@ -568,7 +575,9 @@ async fn test_similar_to_in_locy_along() -> Result<()> {
         .await?;
 
     let paths = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("sim_path")
         .expect("rule 'sim_path' missing");
     // A→B, B→C, and transitively A→C
@@ -995,7 +1004,9 @@ async fn test_similar_to_in_locy_fold() -> Result<()> {
         .await?;
 
     let best = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("best_neighbor")
         .expect("rule 'best_neighbor' missing");
 

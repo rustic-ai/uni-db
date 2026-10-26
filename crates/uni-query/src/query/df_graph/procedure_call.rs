@@ -156,16 +156,80 @@ fn expand_node_yield_fields(
 /// Build an output `Field` for a yield based on a signature field, using
 /// the user's output name (alias or yield name) and preserving the
 /// signature field's data type, nullability, and metadata.
+/// Whether a procedure output field carries an entity's identity (a vid or an
+/// eid) rather than a value: node-shaped yield metadata, or an id column name.
+pub(crate) fn is_identity_field(field: &Field) -> bool {
+    let name = field.name();
+    field.metadata().contains_key("_yield_kind")
+        || matches!(name.as_str(), "_vid" | "_eid")
+        || name.ends_with("._vid")
+        || name.ends_with("._eid")
+}
+
+/// The planned field for a declared procedure output.
+///
+/// A plain `UInt64` *value* yield is planned as a Cypher value
+/// (`LargeBinary`), and [`widen_unsigned_yields`] converts its column: Cypher
+/// has one, signed, integer type, so an unsigned value past `i64::MAX` is the
+/// float it is. Read with `as i64` it wrapped, and `u64::MAX` came back as
+/// `-1`. An identity field keeps `UInt64` (see [`is_identity_field`]).
 fn field_from_signature(col_name: &str, sig_field: &Field) -> Field {
-    let mut new_field = Field::new(
-        col_name,
-        sig_field.data_type().clone(),
-        sig_field.is_nullable(),
-    );
+    let data_type = match sig_field.data_type() {
+        DataType::UInt64 if !is_identity_field(sig_field) => DataType::LargeBinary,
+        other => other.clone(),
+    };
+    let mut new_field = Field::new(col_name, data_type, sig_field.is_nullable());
     if !sig_field.metadata().is_empty() {
         new_field = new_field.with_metadata(sig_field.metadata().clone());
     }
     new_field
+}
+
+/// Converts each `UInt64` column the plan types as a Cypher value (a plain
+/// unsigned yield, see [`field_from_signature`]) into that Cypher value: an
+/// integer while it fits, the float it is past `i64::MAX`.
+fn widen_unsigned_yields(batch: RecordBatch, schema: &SchemaRef) -> DFResult<RecordBatch> {
+    let planned_as_value = |col: &ArrayRef, planned: &Field| {
+        col.data_type() == &DataType::UInt64 && planned.data_type() == &DataType::LargeBinary
+    };
+    if batch.num_columns() != schema.fields().len()
+        || !batch
+            .columns()
+            .iter()
+            .zip(schema.fields())
+            .any(|(col, planned)| planned_as_value(col, planned))
+    {
+        return Ok(batch);
+    }
+    let batch_schema = batch.schema();
+    let mut fields = Vec::with_capacity(batch.num_columns());
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(batch.num_columns());
+    for ((col, field), planned) in batch
+        .columns()
+        .iter()
+        .zip(batch_schema.fields())
+        .zip(schema.fields())
+    {
+        if !planned_as_value(col, planned) {
+            fields.push(field.as_ref().clone());
+            columns.push(Arc::clone(col));
+            continue;
+        }
+        let unsigned = col
+            .as_any()
+            .downcast_ref::<arrow_array::UInt64Array>()
+            .ok_or_else(|| exec_err("UInt64 column is not a UInt64Array"))?;
+        let values: arrow_array::LargeBinaryArray = unsigned
+            .iter()
+            .map(|v| v.map(|v| uni_common::cypher_value_codec::encode(&Value::from(v))))
+            .collect();
+        fields.push(
+            Field::new(field.name(), DataType::LargeBinary, true)
+                .with_metadata(field.metadata().clone()),
+        );
+        columns.push(Arc::new(values));
+    }
+    RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).map_err(arrow_err)
 }
 
 /// Procedure call execution plan for DataFusion.
@@ -857,8 +921,10 @@ fn execute_algorithm_provider_streaming(
     let raw = run_algorithm_provider_raw(graph_ctx, procedure_name, entry, args)?;
     let yield_items = yield_items.to_vec();
     let procedure_name = procedure_name.to_string();
+    let planned = schema.clone();
     let projected = raw.map(move |item| {
         item.and_then(|batch| project_procedure_batch(batch, &yield_items, &procedure_name))
+            .and_then(|batch| widen_unsigned_yields(batch, &planned))
     });
     Ok(Box::pin(
         datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(schema.clone(), projected),
@@ -1000,7 +1066,8 @@ async fn finalize_procedure_stream(
         return Ok(Some(combined));
     }
 
-    project_procedure_batch(combined, yield_items, procedure_name).map(Some)
+    let projected = project_procedure_batch(combined, yield_items, procedure_name)?;
+    widen_unsigned_yields(projected, schema).map(Some)
 }
 
 /// Projects one procedure-output batch onto the requested `YIELD` columns.

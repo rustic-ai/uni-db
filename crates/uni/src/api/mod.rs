@@ -18,6 +18,7 @@ pub mod appender {
 }
 pub mod builder;
 pub(crate) mod bulk_events;
+pub(crate) mod commit_events;
 /// Bulk writer engine, re-exported from `uni-bulk`.
 ///
 /// Shim kept so `crate::api::bulk::*` paths resolve unchanged after the
@@ -70,6 +71,7 @@ pub mod session;
 pub mod sync;
 pub mod template;
 pub mod transaction;
+pub(crate) mod wal_recovery;
 /// Trigger dispatch engine — moved to `uni-plugin-host`; re-exported to keep
 /// the `uni_db::api::triggers::*` path stable.
 pub mod triggers {
@@ -443,7 +445,33 @@ fn build_executor_template(
     Arc::new(e)
 }
 
+/// A storage-layer error as a `UniError`: a typed error the storage layer
+/// raised (wrapped in `anyhow`) keeps its variant, anything else is internal.
+pub(crate) fn storage_error(e: anyhow::Error) -> UniError {
+    match e.downcast::<UniError>() {
+        Ok(typed) => typed,
+        Err(e) => UniError::Internal(e),
+    }
+}
+
 impl UniInner {
+    /// Copy a label's rows from the main vertex table into its label table
+    /// right after the label entered the live catalog (#304).
+    ///
+    /// Goes through the writer when there is one, so flushes that read the
+    /// schema before the declaration are waited out first; see
+    /// `Writer::backfill_declared_label`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the barrier's and the backfill's failures.
+    pub(crate) async fn backfill_declared_label(&self, label: &str) -> anyhow::Result<usize> {
+        match &self.writer {
+            Some(writer) => writer.backfill_declared_label(label).await,
+            None => self.storage.backfill_declared_label(label).await,
+        }
+    }
+
     /// This view's background index-rebuild manager, created with its worker
     /// on first use.
     ///
@@ -711,7 +739,11 @@ impl UniInner {
     pub(crate) async fn at_fork(
         &self,
         scope: Arc<uni_store::fork::ForkScope>,
-    ) -> Result<(UniInner, Vec<uni_bulk::RecoveredLoad>)> {
+    ) -> Result<(
+        UniInner,
+        Vec<uni_bulk::RecoveredLoad>,
+        Vec<wal_recovery::RecoveredCommit>,
+    )> {
         // Phase 3 (nested forks): `self` may itself be a fork-scoped
         // UniInner, in which case `self.schema` already encodes
         // `primary ⊕ parent_overlay`. Layering the child's overlay on
@@ -777,14 +809,30 @@ impl UniInner {
         // a per-fork WAL stream (Day 5), and the fork-scoped storage's
         // BranchedBackend (Day 2). User writes are still gated at
         // `Session::tx()` until Day 7.
+        // The fork's own latest snapshot, recorded at each fork flush under
+        // `catalog/forks/{fork_id}/latest`. `None` for a fork that never
+        // flushed.
+        let fork_latest_snapshot = forked_storage
+            .snapshot_manager()
+            .load_latest_snapshot()
+            .await
+            .map_err(UniError::Internal)?;
+        // The fork's MVCC version floor: above the parent's fork-point HWM, so
+        // in-tx fork reads see inherited rows, AND above every version the
+        // fork itself already flushed, exactly as primary's open resumes from
+        // its snapshot's HWM. WAL replay below only advances the counter past
+        // the *unflushed* writes; starting at the fork point instead let a
+        // reopened fork stamp a write at or below a version it had already
+        // flushed, so a delete of a flushed edge lost to the older insert.
+        let fork_start_version = fork_latest_snapshot
+            .as_ref()
+            .map_or(0, |s| s.version_high_water_mark + 1)
+            .max(scope.fork_info().fork_point_version_hwm);
         let forked_writer = uni_store::fork::writer_factory::new_for_fork(
             forked_storage.clone(),
             merged_schema.clone(),
             &scope.fork_id(),
-            // Bootstrap the fork's MVCC version floor to the parent's
-            // fork-point HWM so in-tx fork reads see inherited rows. WAL
-            // replay below advances the counter for the fork's own writes.
-            scope.fork_info().fork_point_version_hwm,
+            fork_start_version,
             self.config.clone(),
         )
         .await
@@ -803,25 +851,39 @@ impl UniInner {
         // double-apply them. A fork that has never flushed (or a pre-fix
         // on-disk fork) has no per-fork snapshot, so we fall back to 0 —
         // correct, since nothing has been moved out of the WAL yet.
-        let fork_wal_hwm = forked_storage
-            .snapshot_manager()
-            .load_latest_snapshot()
-            .await
-            .map_err(UniError::Internal)?
-            .map(|s| s.wal_high_water_mark)
-            .unwrap_or(0);
-        let replayed = forked_writer
-            .replay_wal(fork_wal_hwm)
-            .await
-            .map_err(UniError::Internal)?;
+        let fork_wal_hwm = fork_latest_snapshot
+            .as_ref()
+            .map_or(0, |s| s.wal_high_water_mark);
+        let forked_writer_arc = Arc::new(forked_writer);
+        // Commits the fork's WAL holds that the crashed process never
+        // announced are announced by the caller, as recovered loads are.
+        let (replayed, recovered_commits) = wal_recovery::replay_wal(
+            &forked_writer_arc,
+            &forked_storage,
+            &prop_manager,
+            &self.plugin_registry,
+            fork_wal_hwm,
+            true,
+        )
+        .await?;
+        // Replay re-resolves edge types by name and may intern a schemaless
+        // one the overlay never recorded (a crash between the commit and its
+        // overlay write). Record it now, before a flush can move its edges
+        // into `deltas_{type}_*` where only the name finds them. Skipped on a
+        // read-only database (no primary writer), which persists nothing.
+        if self.writer.is_some() {
+            crate::api::fork::record_fork_schemaless_edge_types(&scope, &merged_schema)
+                .await
+                .map_err(UniError::Internal)?;
+        }
         // The fork's catalog view is never saved, so a downgrade stays in it.
-        forked_writer
+        forked_writer_arc
             .distrust_conformance_after_unmarked_writes(false)
             .await
             .map_err(UniError::Internal)?;
         // As on the primary: a fork load completed by recovery above has its
         // edges' declared endpoints checked once the fork's WAL is replayed.
-        uni_bulk::check_recovered_bulk_endpoints(&forked_storage, &forked_writer, true)
+        uni_bulk::check_recovered_bulk_endpoints(&forked_storage, &forked_writer_arc, true)
             .await
             .map_err(UniError::Internal)?;
         if replayed > 0 {
@@ -832,7 +894,6 @@ impl UniInner {
             );
         }
 
-        let forked_writer_arc = Arc::new(forked_writer);
         let executor_template = build_executor_template(
             forked_storage.clone(),
             self.config.clone(),
@@ -854,6 +915,7 @@ impl UniInner {
                 executor_template,
             ),
             recovered_loads,
+            recovered_commits,
         ))
     }
 }
@@ -1428,6 +1490,16 @@ impl Uni {
             if let Err(e) = writer.flush_to_l1(None).await {
                 tracing::error!("Error flushing during shutdown: {}", e);
             }
+            // A flush that did not run (or found nothing to flush) leaves
+            // announced commits in the WAL; record that they were announced,
+            // so the next open does not announce them again.
+            if let Err(e) = writer.seal_wal().await {
+                tracing::warn!(
+                    error = %e,
+                    "could not record the WAL's announced mark at shutdown; the next open \
+                     announces the latest commits again",
+                );
+            }
             // Close the async-flush coordinator's submit channel so its
             // finalizer task exits now. The finalizer's JoinHandle is
             // tracked by `shutdown_handle`, but the loop blocks on
@@ -1676,6 +1748,43 @@ impl Drop for ScratchDir {
     }
 }
 
+impl UniInner {
+    /// Record the WAL's announced mark (`Writer::seal_wal`) as this view
+    /// closes, so a reopen does not announce the commits announced since the
+    /// last WAL segment again. A temporary database is never reopened, and
+    /// is skipped.
+    ///
+    /// Runs the write on the process-wide IO runtime: `Drop` is synchronous
+    /// and may run on a runtime thread, or on none. Skipped, not waited for,
+    /// while a flush holds the WAL (see `Writer::try_seal_wal`).
+    fn seal_wal_on_drop(&self) {
+        let Some(writer) = self.writer.as_ref() else {
+            return;
+        };
+        if self._temp_dir.is_some() || !writer.wal_needs_seal() {
+            return;
+        }
+        // Never wait for `flush_lock` here: this blocks the dropping thread,
+        // and the lock's holder may be a flush that only that thread can drive
+        // (a `current_thread` runtime). Waiting deadlocked such a drop.
+        let writer = Arc::clone(writer);
+        let sealed = uni_store::runtime::io_runtime::block_on_io_runtime(async move {
+            writer.try_seal_wal().await
+        });
+        let error = match sealed {
+            Ok(Ok(true)) => return,
+            Ok(Ok(false)) => "a flush holds the WAL".to_owned(),
+            Ok(Err(e)) => e.to_string(),
+            Err(e) => e.to_string(),
+        };
+        tracing::warn!(
+            error,
+            "could not record the WAL's announced mark as the database closed; the next open \
+             announces the latest commits again",
+        );
+    }
+}
+
 impl Drop for UniInner {
     /// Signal this view's own background tasks, and reap the scratch directory
     /// on the implicit teardown path.
@@ -1692,6 +1801,7 @@ impl Drop for UniInner {
     /// when the *last* `Arc` dies, not when one handle goes out of scope while
     /// a `Session` still holds a reference to the data underneath it.
     fn drop(&mut self) {
+        self.seal_wal_on_drop();
         // Stop the tasks this view started; nothing can reach them any more. A
         // fork's last session going away is the common case. Tasks of views
         // derived from this one (a nested fork) are left alone, and the tasks
@@ -2066,6 +2176,11 @@ impl UniBuilder {
             .as_ref()
             .map(Self::cloud_config_to_lancedb_storage_options);
 
+        // Declarations (and the restore and recovery paths that redo their
+        // storage half on open) judge the values a property already holds by
+        // the write path's rule; see `uni_store::storage::declared_values`.
+        uni_store::storage::declared_values::install_coercion(uni_query::coerce_declared_value);
+
         let mut storage = if is_hybrid || is_remote_uri {
             // Preserve explicit cloud settings (endpoint, credentials, path style)
             // by reusing the constructed remote store.
@@ -2386,15 +2501,37 @@ impl UniBuilder {
         // with LSN > wal_high_water_mark (the snapshot manifest's mark) are
         // replayed, so this is exactly the committed-but-unflushed suffix and
         // cannot double-apply.
-        {
-            let replayed = writer
-                .replay_wal(wal_high_water_mark)
-                .await
-                .map_err(UniError::Internal)?;
+        //
+        // Commits in it that the crashed process made durable but never
+        // announced are announced at the end of the open, once the broadcaster
+        // and the reactivated declared triggers exist; their places in the
+        // announcement order are taken now (see `wal_recovery`). A read-only
+        // open has nothing to announce with.
+        let recovered_commits = {
+            let (replayed, recovered_commits) = wal_recovery::replay_wal(
+                &writer,
+                &storage,
+                &prop_manager,
+                &plugin_registry,
+                wal_high_water_mark,
+                !self.read_only,
+            )
+            .await?;
             if replayed > 0 {
                 info!("WAL recovery: replayed {} mutations", replayed);
             }
-        }
+            // Replay re-resolves edge types by name and may intern a
+            // schemaless one the catalog never saved (a crash between a
+            // commit and its schema save). Save it before a flush moves the
+            // edges into `deltas_{type}_*`, where only the name finds them.
+            if !self.read_only {
+                schema_manager
+                    .save_if_dirty()
+                    .await
+                    .map_err(UniError::Internal)?;
+            }
+            recovered_commits
+        };
         // A WAL segment or latest manifest written by a binary that does not
         // enforce declared edge endpoints voids the catalog's conformance
         // records; a read-only open downgrades its in-memory view only.
@@ -2408,6 +2545,27 @@ impl UniBuilder {
         uni_bulk::check_recovered_bulk_endpoints(&storage, &writer, !self.read_only)
             .await
             .map_err(UniError::Internal)?;
+        // A label declaration whose backfill a crash cut short (#304): the
+        // catalog may already declare the label while its flushed rows are
+        // still only in the main table. Finished here, before any write can
+        // race it. The labels' indexes were built over the label table as it
+        // stood, so each recovered label with an index is rebuilt below, once
+        // the index machinery is up.
+        let recovered_backfills = if self.read_only {
+            Vec::new()
+        } else {
+            let recovered = storage
+                .recover_label_backfills()
+                .await
+                .map_err(UniError::Internal)?;
+            for (label, rows) in &recovered {
+                writer
+                    .record_backfilled_rows(label, *rows)
+                    .await
+                    .map_err(UniError::Internal)?;
+            }
+            recovered
+        };
 
         // Wire up IndexRebuildManager for post-flush automatic rebuild scheduling
         let mut auto_rebuild_manager = None;
@@ -2575,7 +2733,7 @@ impl UniBuilder {
             // `DiskManagerMode::OsTmpDirectory`, so DataFusion's buffering
             // operators can spill, and #202 had already disproved the claim.
             // The full reasoning, and what would change it, is on
-            // `Executor::memory_bounded_runtime`, which makes the same choice.
+            // `Executor::query_runtime`, which makes the same choice.
             //
             // Two honest limits. The pool is on the shared template, so it is
             // a budget across concurrent queries rather than per query — which
@@ -2827,6 +2985,21 @@ impl UniBuilder {
             }),
         };
 
+        // The rows a recovered label backfill copied in postdate its indexes'
+        // last build; rebuild them in the background.
+        for (label, _) in recovered_backfills {
+            if db
+                .inner
+                .schema
+                .schema()
+                .indexes
+                .iter()
+                .any(|i| i.label() == label)
+            {
+                db.indexes().rebuild(&label, true).await?;
+            }
+        }
+
         // The single `HostCypherExecutor` impl the moved plugin-host engines
         // (scheduler job host + persistence sinks) call back through for
         // write-mode Cypher (replaces the per-engine `Weak<UniInner>` they used
@@ -2887,10 +3060,12 @@ impl UniBuilder {
             track_task_with_scratch_claim(&db.inner.shutdown_handle, scratch_dir.as_ref(), handle);
         }
 
-        // Deliver the events of the bulk loads recovery completed above, now
+        // Announce the commits the WAL replay above recovered unannounced,
+        // then deliver the events of the bulk loads recovery completed, now
         // that the commit broadcaster, the CDC runtime and the reactivated
         // declared triggers exist. Their announcements are ordered here, so
         // they precede every commit made through the returned handle.
+        wal_recovery::deliver_recovered_commits(&db.inner, recovered_commits);
         bulk_events::deliver_recovered_loads(&db.inner, recovered_loads).await;
 
         Ok(db)
@@ -3031,7 +3206,7 @@ mod fork_inner_tests {
             registry,
         ));
 
-        let (forked_inner, _) = primary_inner.at_fork(scope.clone()).await.unwrap();
+        let (forked_inner, _, _) = primary_inner.at_fork(scope.clone()).await.unwrap();
         assert!(forked_inner.storage.fork_scope().is_some());
         // Phase 2 Day 4: a forked UniInner now carries its own Writer.
         // The Writer's storage is the fork-scoped clone; its allocator

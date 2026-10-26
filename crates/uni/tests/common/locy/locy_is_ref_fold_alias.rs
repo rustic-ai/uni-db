@@ -72,7 +72,9 @@ async fn fold_over_non_first_is_ref_value_column() -> Result<()> {
         .await?;
 
     let infringed = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("infringed")
         .expect("rule 'infringed' missing");
     assert_eq!(

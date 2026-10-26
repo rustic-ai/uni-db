@@ -349,6 +349,54 @@ async fn test_l1_runs_counts_non_empty_only() {
     );
 }
 
+/// A flush of an empty L0 is not a flush generation.
+///
+/// It appends no fragment to any table, so there is nothing for compaction to
+/// fold — but it counted toward `l1_runs`, and a stream of them (a `flush()`
+/// loop, the auto-flush timer while a transaction keeps its writes private)
+/// drove the counter past the write throttle's hard limit: the next write
+/// stalled until compaction caught up (#311's ~30x slower in-transaction SET).
+#[tokio::test]
+async fn test_empty_flush_is_not_a_flush_generation() {
+    let dir = tempdir().unwrap();
+    let mut config = UniConfig::default();
+    config.compaction.enabled = false;
+    let (storage, schema_manager, _) =
+        setup_schema_and_storage(dir.path().to_str().unwrap(), config.clone()).await;
+    let writer = Writer::new_with_config(
+        storage.clone(),
+        schema_manager.clone(),
+        0,
+        config,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let runs = || storage.compaction_status().unwrap().l1_runs;
+
+    for _ in 0..40 {
+        writer.flush_to_l1(None).await.unwrap();
+    }
+    assert_eq!(
+        runs(),
+        0,
+        "40 flushes of an empty L0 counted as flush generations"
+    );
+
+    // A flush that writes a row still counts, once.
+    let vid = writer.next_vid().await.unwrap();
+    writer
+        .insert_vertex_with_labels(vid, HashMap::new(), &["Person".to_string()], None)
+        .await
+        .unwrap();
+    writer.flush_to_l1(None).await.unwrap();
+    assert_eq!(runs(), 1, "a flush that wrote a row must count");
+    writer.flush_to_l1(None).await.unwrap();
+    assert_eq!(runs(), 1, "the empty flush after it must not");
+}
+
 /// Verify l1_estimated_bytes is computed from row counts, not hardcoded to 0.
 #[tokio::test(start_paused = true)]
 async fn test_compaction_status_tracks_data_size() {

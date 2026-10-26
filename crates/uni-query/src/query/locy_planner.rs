@@ -422,8 +422,9 @@ fn infer_yield_type_rec(
     visited: &mut HashSet<String>,
 ) -> DataType {
     // FOLD outputs — type depends on the aggregate function.
-    // COUNT/MCOUNT produce Int64; SUM/MSUM/AVG produce Float64, but SUM/AVG
-    // over a Cypher value produce a Cypher value.
+    // COUNT/MCOUNT produce Int64; SUM/MSUM/AVG produce Float64, but SUM/MSUM
+    // over integers, and SUM/MSUM/AVG over a Cypher value, produce a Cypher
+    // value.
     if fold_output_names.contains(name) {
         if let Some(fold) = first_clause.fold.iter().find(|fb| fb.name == name)
             && let Expr::FunctionCall { name: fn_name, .. } = &fold.aggregate
@@ -439,11 +440,38 @@ fn infer_yield_type_rec(
                         return dt;
                     }
                 }
-                // Over a Cypher value (a schemaless or duration property), a
-                // Cypher value: a float, or a duration. The input stays the
-                // Cypher value too, since this is also its column type; cast to
-                // Float64, a duration was refused.
-                "SUM" | "AVG"
+                // Over integers or a Cypher value (a schemaless or duration
+                // property), a Cypher value: an exact integer that continues
+                // as a float only past the 64-bit range, a float, or (`SUM`
+                // only) a duration. As a Float64 the sum of the integers 2^53
+                // and 1 was 2^53 (issue #316). The input takes this type
+                // too, since it is also its column type: cast to Float64, an
+                // integer was rounded before it was added, and a duration
+                // refused.
+                "SUM" | "MSUM" => {
+                    let arg_type =
+                        fold_argument_type(&fold.aggregate, schema, var_labels, node_vars).or_else(
+                            || {
+                                let Expr::FunctionCall { args, .. } = &fold.aggregate else {
+                                    return None;
+                                };
+                                arithmetic_yield_type(
+                                    args.first()?,
+                                    first_clause,
+                                    node_vars,
+                                    along_types,
+                                    rule_catalog,
+                                    schema,
+                                    var_labels,
+                                    visited,
+                                )
+                            },
+                        );
+                    if arg_type.is_some_and(|t| t == DataType::LargeBinary || t.is_integer()) {
+                        return DataType::LargeBinary;
+                    }
+                }
+                "AVG"
                     if fold_argument_type(&fold.aggregate, schema, var_labels, node_vars)
                         == Some(DataType::LargeBinary) =>
                 {
@@ -471,6 +499,18 @@ fn infer_yield_type_rec(
                     // A bare Variable naming a node var is a whole-node KEY → UInt64.
                     if node_vars.contains(v) {
                         return DataType::UInt64;
+                    }
+                    // A model invocation's output (`__model_<name>_<i>`), which
+                    // `LocyModelInvokeExec` writes as a Float64 probability.
+                    // Typed by the catch-all as a string, the column the facts
+                    // carried disagreed with the rule's declared schema, and a
+                    // rule reading it through `IS` failed (issue #314).
+                    if first_clause
+                        .model_invocations
+                        .iter()
+                        .any(|inv| inv.output_column == *v)
+                    {
+                        return DataType::Float64;
                     }
                     // A relationship is carried by its EID, as a node by its
                     // VID, and hydrated into the edge after the fixpoint.
@@ -543,7 +583,7 @@ fn infer_yield_type_rec(
                     }
                 }
                 let _ = is_key;
-                if let Some(dt) = arithmetic_yield_type(
+                let dt = arithmetic_yield_type(
                     &item.expr,
                     first_clause,
                     node_vars,
@@ -552,10 +592,16 @@ fn infer_yield_type_rec(
                     schema,
                     var_labels,
                     visited,
-                ) {
-                    return dt;
+                )
+                .unwrap_or_else(|| infer_expr_type(&item.expr, node_vars));
+                // A probability is numeric by definition, and the complement
+                // and noisy-OR arithmetic read the PROB column as a Float64,
+                // so a value whose type is only known at run time is brought
+                // to it (as an undeclared property is, above).
+                if item.is_prob && dt == DataType::LargeBinary {
+                    return DataType::Float64;
                 }
-                return infer_expr_type(&item.expr, node_vars);
+                return dt;
             }
         }
     }
@@ -632,6 +678,15 @@ fn arithmetic_yield_type(
                 }
             }
             Expr::Variable(v) if node_vars.contains(v) => None,
+            // A model invocation's output: a Float64 probability.
+            Expr::Variable(v)
+                if clause
+                    .model_invocations
+                    .iter()
+                    .any(|inv| inv.output_column == *v) =>
+            {
+                Some(Kind::Float)
+            }
             Expr::Variable(v) => match along_types.get(v.as_str()) {
                 Some(dt) => of_type(dt.clone()),
                 None => infer_is_ref_value_col_type(v, clause, rule_catalog, schema, visited)
@@ -748,15 +803,36 @@ fn infer_is_ref_value_col_type(
     ))
 }
 
-/// Infer Arrow DataType from a Cypher expression.
+/// The Arrow type a YIELD expression computes, as the expression compiler
+/// produces it: the type the rule declares for the column, and its facts
+/// carry.
+///
+/// Every expression whose value has one Arrow type is typed by it: a
+/// comparison, a predicate (`IN`, `EXISTS {}`, a quantifier, a label test,
+/// `VALID_AT`, `IS NULL`) a boolean, `COUNT {}` an integer, string
+/// functions and literals a `Utf8` string as the compiler emits them. An
+/// expression whose type is only known at run time — a parameter, a list
+/// element or slice, a map, a function this list does not name, a CASE
+/// whose branches differ — is a Cypher value (`LargeBinary`), which carries
+/// any value; the projection encodes it, and it decodes to what was
+/// computed.
+///
+/// The catch-all was a string, and the projection cast whatever was
+/// computed to it: a boolean became the text `"true"`, so a consumer's
+/// `flag = true` silently matched nothing, a list element its raw bytes, a
+/// date its text, and a value the cast refused (an integer from `COUNT {}`
+/// or a parameter) left the facts disagreeing with the declared schema of
+/// every rule reading them through `IS`. An unknown function took its
+/// first argument's type, which typed `labels(n)` as a node id (issue
+/// #314).
 fn infer_expr_type(expr: &Expr, node_vars: &HashSet<String>) -> DataType {
     match expr {
         Expr::Variable(v) if node_vars.contains(v) => DataType::UInt64,
         Expr::Literal(CypherLiteral::Integer(_)) => DataType::Int64,
         Expr::Literal(CypherLiteral::Float(_)) => DataType::Float64,
-        Expr::Literal(CypherLiteral::String(_)) => DataType::LargeUtf8,
+        Expr::Literal(CypherLiteral::String(_)) => DataType::Utf8,
         Expr::Literal(CypherLiteral::Bool(_)) => DataType::Boolean,
-        Expr::Literal(CypherLiteral::Null) => DataType::LargeUtf8,
+        Expr::Literal(CypherLiteral::Null) => DataType::Utf8,
         // A duration accessor on a computed value — `duration.inDays(a, b).days`,
         // `.months`, `.secondsOfMinute`, … — is integral. Every arm of
         // `datetime::duration_component` returns `Value::Int`, so typing these
@@ -771,25 +847,35 @@ fn infer_expr_type(expr: &Expr, node_vars: &HashSet<String>) -> DataType {
         {
             DataType::Int64
         }
-        Expr::Property(_, _) => DataType::Float64,
+        // A property of a pattern variable, in arithmetic: the callers type a
+        // bare one from the schema (`property_arrow_type`).
+        Expr::Property(object, _) if matches!(object.as_ref(), Expr::Variable(_)) => {
+            DataType::Float64
+        }
+        // A key of a computed map, or a component of a temporal value.
+        Expr::Property(_, _) => DataType::LargeBinary,
         // Binary operations: infer from operator and operand types.
         Expr::BinaryOp { left, op, right } => {
             use uni_cypher::ast::BinaryOp::*;
             match op {
                 // Comparison and logical operators always return Boolean.
                 Eq | NotEq | Lt | LtEq | Gt | GtEq | And | Or | Xor | Regex | Contains
-                | StartsWith | EndsWith => DataType::Boolean,
-                // Arithmetic operators: infer from operands.
-                Add | Sub | Mul | Div | Mod | Pow | ApproxEq => {
+                | StartsWith | EndsWith | ApproxEq => DataType::Boolean,
+                // Arithmetic: a number of two numbers, a string of two
+                // strings (`+` concatenates); anything else (a list, a
+                // temporal, a Cypher value) is known at run time.
+                Add | Sub | Mul | Div | Mod | Pow => {
                     let lt = infer_expr_type(left, node_vars);
                     let rt = infer_expr_type(right, node_vars);
-                    // If either operand is Float64, result is Float64.
-                    if lt == DataType::Float64 || rt == DataType::Float64 {
-                        DataType::Float64
-                    } else if lt == DataType::Int64 && rt == DataType::Int64 {
+                    let numeric = |t: &DataType| matches!(t, DataType::Int64 | DataType::Float64);
+                    if lt == DataType::Int64 && rt == DataType::Int64 && !matches!(op, Pow) {
                         DataType::Int64
-                    } else {
+                    } else if numeric(&lt) && numeric(&rt) {
                         DataType::Float64
+                    } else if matches!(op, Add) && lt == DataType::Utf8 && rt == DataType::Utf8 {
+                        DataType::Utf8
+                    } else {
+                        DataType::LargeBinary
                     }
                 }
             }
@@ -802,20 +888,44 @@ fn infer_expr_type(expr: &Expr, node_vars: &HashSet<String>) -> DataType {
                 UnaryOp::Neg => infer_expr_type(inner, node_vars),
             }
         }
-        Expr::IsNull(_) | Expr::IsNotNull(_) => DataType::Boolean,
-        // Lists and maps, and the expressions that build them: no single Arrow
-        // type holds every such value (a list of encoded values, a nested
-        // list, a map), so the column is a Cypher value. The catch-all below
-        // typed them as strings, and the projection cast a list to its text.
-        Expr::List(_)
-        | Expr::Map(_)
-        | Expr::ListComprehension { .. }
-        | Expr::PatternComprehension { .. }
-        | Expr::MapProjection { .. }
-        | Expr::CollectSubquery(_)
-        | Expr::Reduce { .. } => DataType::LargeBinary,
+        Expr::IsNull(_)
+        | Expr::IsNotNull(_)
+        | Expr::IsUnique(_)
+        | Expr::In { .. }
+        | Expr::Exists { .. }
+        | Expr::Quantifier { .. }
+        | Expr::LabelCheck { .. }
+        | Expr::ValidAt { .. } => DataType::Boolean,
+        Expr::CountSubquery(_) => DataType::Int64,
+        // One type when every branch has it (a NULL branch has any), a float
+        // when they mix integers and floats; otherwise known at run time.
+        Expr::Case {
+            when_then,
+            else_expr,
+            ..
+        } => {
+            let branches: Vec<DataType> = when_then
+                .iter()
+                .map(|(_, then)| then)
+                .chain(else_expr.as_deref())
+                .filter(|e| !matches!(e, Expr::Literal(CypherLiteral::Null)))
+                .map(|e| infer_expr_type(e, node_vars))
+                .collect();
+            match branches.first() {
+                None => DataType::Utf8,
+                Some(first) if branches.iter().all(|t| t == first) => first.clone(),
+                Some(_)
+                    if branches
+                        .iter()
+                        .all(|t| matches!(t, DataType::Int64 | DataType::Float64)) =>
+                {
+                    DataType::Float64
+                }
+                Some(_) => DataType::LargeBinary,
+            }
+        }
         // Function calls: infer return type from function name.
-        Expr::FunctionCall { name, args, .. } => {
+        Expr::FunctionCall { name, .. } => {
             match name.to_uppercase().as_str() {
                 // Numeric functions → Float64
                 "SIMILAR_TO" | "ABS" | "SQRT" | "LOG" | "LOG10" | "EXP" | "CEIL" | "FLOOR"
@@ -826,23 +936,27 @@ fn infer_expr_type(expr: &Expr, node_vars: &HashSet<String>) -> DataType {
                 "TOINTEGER" | "LENGTH" | "SIZE" | "ID" => DataType::Int64,
                 // String-returning functions
                 "TOSTRING" | "TOLOWER" | "TOUPPER" | "TRIM" | "LTRIM" | "RTRIM" | "REPLACE"
-                | "SUBSTRING" | "LEFT" | "RIGHT" | "REVERSE" | "TYPE" => DataType::LargeUtf8,
+                | "SUBSTRING" | "LEFT" | "RIGHT" | "REVERSE" | "TYPE" => DataType::Utf8,
                 // Boolean-returning functions
-                "EXISTS" | "STARTSWITH" | "ENDSWITH" | "CONTAINS" => DataType::Boolean,
-                // Aggregates that return Float64
-                "SUM" | "AVG" | "MAX" | "MIN" => DataType::Float64,
-                "COUNT" => DataType::Int64,
-                // Unknown function: try to infer from first argument
-                _ => {
-                    if let Some(first_arg) = args.first() {
-                        infer_expr_type(first_arg, node_vars)
-                    } else {
-                        DataType::LargeUtf8
-                    }
+                "EXISTS" | "STARTSWITH" | "ENDSWITH" | "CONTAINS" | "TOBOOLEAN" => {
+                    DataType::Boolean
                 }
+                // No aggregate arm: this types YIELD items, and an aggregate
+                // there is a compile error (`check_no_aggregate_outside_fold`
+                // in uni-locy's typecheck); a FOLD output is typed by
+                // `infer_yield_type_rec`. The arm typed `sum` Float64, which
+                // an integer sum is not.
+                //
+                // Any other function (`labels`, `keys`, `properties`,
+                // `elementId`, `head`, `coalesce`, a temporal constructor, a
+                // plugin function) returns what it returns; its first
+                // argument does not say what that is.
+                _ => DataType::LargeBinary,
             }
         }
-        _ => DataType::LargeUtf8,
+        // Lists and maps and the expressions that build or read them, a
+        // parameter, a variable no caller typed: a Cypher value.
+        _ => DataType::LargeBinary,
     }
 }
 
@@ -2703,6 +2817,7 @@ impl<'a> LocyPlanBuilder<'a> {
             }
             Ok(LogicalPlan::LocyDerivedScan {
                 scan_index: handle.scan_index,
+                rule_name: handle.rule_name.clone(),
                 data: handle.data.clone(),
                 schema: scan_schema,
             })
@@ -7488,6 +7603,75 @@ mod tests {
         Ok((program, plan))
     }
 
+    /// The declared type of each YIELD column of `rule` in `src`, planned with
+    /// model invocations enabled.
+    fn declared_yield_types(src: &str, rule: &str) -> HashMap<String, DataType> {
+        let ast = uni_cypher::parse_locy(src).expect("parses");
+        let config = uni_locy::LocyConfig {
+            neural_predicates_preview: true,
+            ..Default::default()
+        };
+        let program = uni_locy::compile_with_config(&ast, &config).expect("compiles");
+        let planner = test_planner();
+        let plan = LocyPlanBuilder::new(&planner)
+            .build_program_plan(
+                &program,
+                1000,
+                std::time::Duration::from_secs(30),
+                256 * 1024 * 1024,
+                true,
+                false,
+                1e-15,
+                false,
+                1000,
+                0,
+            )
+            .expect("plans");
+        let LogicalPlan::LocyProgram { strata, .. } = &plan else {
+            panic!("expected LocyProgram");
+        };
+        strata
+            .iter()
+            .flat_map(|s| &s.rules)
+            .find(|r| r.name == rule)
+            .expect("rule planned")
+            .yield_schema
+            .iter()
+            .map(|c| (c.name.clone(), c.data_type.clone()))
+            .collect()
+    }
+
+    /// A rule declares each YIELD column with the type its expression
+    /// computes (issue #314): a model output a Float64 probability, a
+    /// predicate a boolean, a string a `Utf8` string, and a value whose type
+    /// is only known at run time a Cypher value — never the string the
+    /// catch-all made of it.
+    #[test]
+    fn yield_columns_declare_the_type_their_expression_computes() {
+        let src = "CREATE MODEL scorer AS INPUT (n) OUTPUT PROB risk USING xervo('m')\n\
+                   CREATE RULE r AS MATCH (n:N) YIELD KEY n, scorer(n) AS score, \
+                   scorer(n) * 2.0 AS twice, n.v IN [1, 2] AS member, \
+                   EXISTS { MATCH (n)-->() } AS linked, COUNT { MATCH (n)-->() } AS degree, \
+                   'x' AS label, labels(n) AS tags, $p AS param, [1, 2][0] AS first, \
+                   CASE WHEN n.v = 1 THEN 1 ELSE 2.5 END AS mixed\n";
+        let types = declared_yield_types(src, "r");
+        let expect = [
+            ("score", DataType::Float64),
+            ("twice", DataType::Float64),
+            ("member", DataType::Boolean),
+            ("linked", DataType::Boolean),
+            ("degree", DataType::Int64),
+            ("label", DataType::Utf8),
+            ("tags", DataType::LargeBinary),
+            ("param", DataType::LargeBinary),
+            ("first", DataType::LargeBinary),
+            ("mixed", DataType::Float64),
+        ];
+        for (column, ty) in expect {
+            assert_eq!(types.get(column), Some(&ty), "{column}: {types:?}");
+        }
+    }
+
     /// Runs [`check_sources`] over every planned clause of `src`, each against
     /// its compiled clause's binding plan; returns how many it checked.
     fn guard_every_clause(src: &str) -> usize {
@@ -7620,6 +7804,7 @@ mod tests {
                 }),
                 right: Box::new(LogicalPlan::LocyDerivedScan {
                     scan_index: 0,
+                    rule_name: "r".to_string(),
                     data: Arc::new(RwLock::new(Vec::new())),
                     schema: Arc::new(ArrowSchema::new(vec![
                         Field::new("__isref0_e", DataType::UInt64, true),

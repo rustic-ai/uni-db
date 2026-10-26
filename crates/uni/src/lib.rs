@@ -119,8 +119,8 @@ pub use uni_xervo::runtime::ModelRuntime;
 
 // Re-exports from internal crates
 pub use uni_common::{
-    CrdtType, DataType, Eid, LocyIncomplete, LocyIncompleteReason, Result, Schema, UniConfig,
-    UniError, UniId, Vid, unival,
+    CrdtType, DataType, DeclaredTypeConflict, Eid, LocyIncomplete, LocyIncompleteReason, Result,
+    Schema, UniConfig, UniError, UniId, Vid, unival,
 };
 pub use uni_query::{
     Edge, ExecuteResult, ExplainOutput, FromValue, Node, Path, ProfileOutput, QueryMetrics,
@@ -179,8 +179,9 @@ pub mod locy {
     pub use uni_locy::LocyResult as RawLocyResult;
     pub use uni_locy::magic;
     pub use uni_locy::{
-        CommandResult, CompiledProgram, DerivedEdge, DerivedFactSet, GoalDirected,
-        GoalDirectedReport, LocyCompileError, LocyConfig, LocyError, rewrite_goal_directed,
+        CommandResult, CompiledProgram, DerivedEdge, DerivedFactSet, FactRow, GoalDirected,
+        GoalDirectedReport, LazyDerived, LocyCompileError, LocyConfig, LocyError, RuleFacts,
+        rewrite_goal_directed,
     };
     pub use uni_query::{
         LocyExecProfile, LocyIterationProfile, LocyRuleProfile, LocyStratumProfile,

@@ -258,7 +258,7 @@ The same surface is available via `uni_db` in Python, sync and async.
 ### Non-goals
 
 - Multi-edge promotion (parallel edges of the same type between the same endpoints with different property bags) — requires an edge-content UID; deferred.
-- Schema migration during promote — fork-only labels / edge types must be registered on primary before promote, or the call errors with `LabelNotFound` / `EdgeTypeNotFound`.
+- Schema migration during promote — a label / edge type the fork *declared* (`fork_schema()`) must be registered on primary before promote, or the call errors with `LabelNotFound` / `EdgeTypeNotFound`. Labels and edge types declared on neither side (schemaless) need no registration: diff covers them and promote inserts them schemalessly, as a `CREATE` on primary would.
 
 ## Cheaper alternatives for throwaway rollouts
 

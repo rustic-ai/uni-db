@@ -110,19 +110,23 @@ slow-timeout = { period = "120s", terminate-after = 20 }
 # The DQP soaks are the longest single tests in the suite and need more than the
 # soak profile's 40-minute ceiling.
 #
-# Measured on a 22-core box in the **nightly configuration** — all eight
-# concurrently at DQP_CASES=10000, which is what the dqp job actually runs:
+# Measured 2026-10-22 on a 22-core box in the **nightly configuration** — the
+# dqp job's exact command, all thirteen soaks concurrently at DQP_CASES=10000:
 #
-#   fork agg 8.8   pinned agg 9.7   flush agg 10.2   plan_cache agg 12.3
-#   fork    21.7   pinned    22.0   flush    23.9   plan_cache    29.9   (minutes)
+#   fork agg 5.9   flush agg 6.5   pinned agg 6.5   plan_cache agg 8.1
+#   flush pushdown 8.3   flush wide 12.3   cert 16.2
+#   fork 21.3   pinned 21.7   flush 23.8   plan_cache 28.6
+#   topo 32.8   topo small batches 34.5                            (minutes)
 #
-# Total wall-clock 29.9 min, i.e. the slowest rather than the sum. Aggregates are
+# Total wall-clock 35.2 min, i.e. the slowest rather than the sum. Aggregates are
 # cheap because they return one row per case; the plain kinds materialize tens of
-# millions of rows each.
+# millions of rows each. The two topo soaks are now the slowest, at 64% of this
+# ceiling.
 #
-# This measurement supersedes the earlier serial one taken at 20 000 cases with
-# four soaks. It is also pessimistic for CI: eight heavy tests contending over 22
-# cores is more contention than the 64-core runner sees.
+# This supersedes the earlier figure (eight soaks, 29.9 min), which predated
+# flush_pushdown, flush_wide, cert and the two topo soaks. It is pessimistic
+# for CI: thirteen heavy tests contending over 22 cores is more contention than
+# the 64-core runner sees.
 #
 # The 54-minute ceiling (120s x 27) is kept rather than tightened to 30: it was
 # set when the numbers were less certain, and the job's own `timeout-minutes` is
@@ -136,6 +140,22 @@ slow-timeout = { period = "120s", terminate-after = 20 }
 [[profile.soak.overrides]]
 filter = 'test(/metamorphic::dqp::/) and test(soak)'
 slow-timeout = { period = "120s", terminate-after = 27 }
+
+# Ignored tests that load a real embedding model, run one at a time under the
+# soak profile (the nightly ignored-test sweep). On a cold model cache, two
+# processes fetching the same model at once fail outright -- the loser gets
+# hf-hub's `Lock acquisition failed` instead of waiting for the download -- so
+# from an empty cache 16 of the 23 ungated model tests failed in parallel and
+# 22 passed one at a time (2026-10-22); the 23rd, bge-m3, timed out loading
+# lazily inside a 30 s query and passes since it warms eagerly, spending about
+# two minutes downloading 2.1 GB. Matched by module, so a model-backed test added elsewhere
+# needs adding here.
+[test-groups.model-downloads]
+max-threads = 1
+
+[[profile.soak.overrides]]
+filter = 'binary_id(uni-db::integration) & test(/^(bge_m3_real_onnx::|storage::embedding_stack_overflow_test::|vector_search::similar_to_integration::auto_embed_tests::|index::indexing_integration::|bugs::issue43_|bugs::issue49_|bugs::issue_55_get_edges_scaling_autoembed::|bugs::issue_55_observed_in_growth::)/)'
+test-group = 'model-downloads'
 
 # The random Locy oracle soak (`uni-locy-oracle` `random_programs_soak`, 5 000
 # generated programs by default) costs about 0.5 s a case, because every case

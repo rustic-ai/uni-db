@@ -12,7 +12,9 @@ use uni_common::{
         ScalarIndexConfig, ScalarIndexType, VectorIndexConfig, validate_identifier,
     },
 };
+use uni_store::runtime::writer::Writer;
 use uni_store::storage::StorageManager;
+use uni_store::storage::declared_values::DeclaredEntity;
 
 #[derive(Deserialize)]
 struct LabelConfig {
@@ -127,8 +129,49 @@ fn add_properties(
     Ok(())
 }
 
+/// The storage half of declaring `properties` on `name`, before the catalog
+/// change: take the writer's declaration lock (returned, to be held until the
+/// catalog change is made), flush the entity's committed L0, refuse values the
+/// declared types cannot hold, and widen / convert storage. Mirrors
+/// `SchemaBuilder::apply`.
+async fn prepare_declaration(
+    storage: &StorageManager,
+    writer: Option<&Writer>,
+    name: &str,
+    kind: DeclaredEntity,
+    properties: &HashMap<String, PropertyConfig>,
+) -> Result<Option<uni_store::runtime::DeclarationLock>> {
+    if properties.is_empty() {
+        return Ok(None);
+    }
+    let mut declared = Vec::with_capacity(properties.len());
+    for (prop_name, prop_config) in properties {
+        declared.push((prop_name.clone(), parse_data_type(&prop_config.data_type)?));
+    }
+    let held = match writer {
+        Some(writer) => {
+            let held = writer.declaration_lock().await?;
+            writer.flush_before_declaration(&held, &[name]).await?;
+            Some(held)
+        }
+        None => None,
+    };
+    storage.check_declared_values(name, kind, &declared).await?;
+    storage
+        .widen_for_checked_properties(name, kind, &declared)
+        .await?;
+    Ok(held)
+}
+
+/// `uni.schema.createLabel`.
+///
+/// The label may already hold vertices created schemaless and flushed into the
+/// main table only; they are copied into the new label's table before its
+/// indexes are built (#304). `writer` supplies the flush barrier that copy
+/// needs; see `Writer::backfill_declared_label`.
 pub async fn create_label(
     storage: &StorageManager,
+    writer: Option<&Writer>,
     name: &str,
     config_val: &Value,
 ) -> Result<bool> {
@@ -141,7 +184,31 @@ pub async fn create_label(
         .into());
     }
 
-    let config = parse_label_config(config_val)?;
+    let mut config = parse_label_config(config_val)?;
+
+    // Rows that already carry the label cannot satisfy a NOT NULL property,
+    // so it is recorded nullable, as `SchemaBuilder::apply` does.
+    let l0 = writer.map(|w| w.committed_l0_context()).unwrap_or_default();
+    for (prop_name, prop_config) in config.properties.iter_mut() {
+        prop_config.nullable = storage
+            .new_property_nullability(name, prop_name, prop_config.nullable, &l0)
+            .await?;
+    }
+
+    // Existing schemaless values must fit the declared types, or the backfill
+    // would store them as NULL; refused before anything changes. See
+    // `StorageManager::check_declared_values`.
+    let declaration_lock = prepare_declaration(
+        storage,
+        writer,
+        name,
+        DeclaredEntity::Label,
+        &config.properties,
+    )
+    .await?;
+
+    // The marker precedes the live catalog; see `mark_label_backfill_pending`.
+    storage.mark_label_backfill_pending(name).await?;
 
     // Create label
     storage
@@ -150,6 +217,13 @@ pub async fn create_label(
 
     // Add properties
     add_properties(storage, name, config.properties)?;
+
+    // Commits from here re-validate against the declaration.
+    drop(declaration_lock);
+    match writer {
+        Some(writer) => writer.backfill_declared_label(name).await?,
+        None => storage.backfill_declared_label(name).await?,
+    };
 
     // Add indexes
     for idx in config.indexes {
@@ -169,11 +243,13 @@ pub async fn create_label(
     }
 
     storage.schema_manager().save().await?;
+    storage.clear_label_backfill_marker(name).await?;
     Ok(true)
 }
 
 pub async fn create_edge_type(
     storage: &StorageManager,
+    writer: Option<&Writer>,
     name: &str,
     src_labels: Vec<String>,
     dst_labels: Vec<String>,
@@ -183,6 +259,26 @@ pub async fn create_edge_type(
 
     let config = parse_label_config(config_val)?;
 
+    // Relationships written under the type schemaless keep their values,
+    // which must fit the declared types; see `prepare_declaration`.
+    let declaration_lock = if storage
+        .schema_manager()
+        .schema()
+        .edge_types
+        .contains_key(name)
+    {
+        None
+    } else {
+        prepare_declaration(
+            storage,
+            writer,
+            name,
+            DeclaredEntity::EdgeType,
+            &config.properties,
+        )
+        .await?
+    };
+
     storage.schema_manager().add_edge_type_with_desc(
         name,
         src_labels,
@@ -191,6 +287,7 @@ pub async fn create_edge_type(
     )?;
 
     add_properties(storage, name, config.properties)?;
+    drop(declaration_lock);
 
     // Constraints
     for c in config.constraints {

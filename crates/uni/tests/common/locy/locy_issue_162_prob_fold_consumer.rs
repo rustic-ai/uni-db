@@ -98,7 +98,9 @@ async fn run_program(program: &str, r1: f64, r2: f64) -> Result<Vec<(String, f64
         .await?;
 
     let build = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("build")
         .expect("rule 'build' produced no derived facts");
 
@@ -209,7 +211,12 @@ async fn a_later_stratum_consumer_sees_the_folded_value() -> Result<()> {
         .with_config(default_config())
         .run()
         .await?;
-    let report = result.derived.get("report").expect("no 'report' facts");
+    let report = result
+        .derived_rules()
+        .await
+        .unwrap()
+        .get("report")
+        .expect("no 'report' facts");
     let mid = report
         .iter()
         .find(|r| {

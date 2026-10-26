@@ -589,20 +589,23 @@ async fn a_scalar_index_survives_a_later_write() {
 /// background compaction tick, and all fourteen queries reporting
 /// `index_scans=0` against indexes present on disk (#247).
 ///
-/// Semantic compaction is reached only from the background scheduler:
-/// `compact_label` runs Lance's `compact_files` alone (the uncalled
-/// `trigger_async_compaction` was removed). So this drives the scheduler with
-/// a short interval and a flush to give `pick_compaction_task` something to
-/// pick, which is what the earlier compaction test missed — it called
-/// `compact()` and never reached `replace`.
+/// `compact_label` runs Lance's `compact_files` alone, so this drives the
+/// background scheduler to exercise the semantic pass and `replace`. Gate it
+/// on the second explicit flush: allowing it after the first races the index
+/// build and the baseline query, especially under CI load. Wait for a completed
+/// pass rather than assuming a fixed sleep is long enough.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_scalar_index_survives_semantic_compaction() {
     use uni_db::UniConfig;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut cfg = UniConfig::default();
+    let mut cfg = UniConfig {
+        auto_flush_interval: None,
+        auto_flush_threshold: usize::MAX,
+        ..Default::default()
+    };
     cfg.compaction.check_interval = std::time::Duration::from_millis(200);
-    cfg.compaction.max_l1_runs = 1;
+    cfg.compaction.max_l1_runs = 2;
     let db = Uni::open(dir.path().to_str().unwrap())
         .config(cfg)
         .build()
@@ -653,6 +656,14 @@ async fn a_scalar_index_survives_semantic_compaction() {
         before.index_comparisons
     );
 
+    let status = db.storage().compaction_status().unwrap();
+    assert_eq!(status.l1_runs, 1, "only the initial explicit flush ran");
+    assert_eq!(
+        status.total_compactions, 0,
+        "baseline must precede compaction"
+    );
+    assert!(!status.compaction_in_progress);
+
     // A second flush raises `l1_runs` so the scheduler picks a task.
     let tx = s.tx().await.unwrap();
     tx.execute("CREATE (:Item {name: 'extra', age: 1})")
@@ -660,7 +671,21 @@ async fn a_scalar_index_survives_semantic_compaction() {
         .unwrap();
     tx.commit().await.unwrap();
     db.flush().await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            let status = db.storage().compaction_status().unwrap();
+            if status.total_compactions > 0 && !status.compaction_in_progress {
+                assert_eq!(
+                    status.l1_runs, 0,
+                    "the pass consumed both flush generations"
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("background semantic compaction did not complete within 30 seconds");
 
     let after = db
         .session()

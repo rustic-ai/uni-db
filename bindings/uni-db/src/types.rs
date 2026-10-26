@@ -1132,16 +1132,26 @@ impl LocyStats {
 }
 
 /// Result of a Locy program evaluation, mirroring the Rust `LocyResult`.
-#[pyclass(get_all, name = "LocyResult")]
+#[pyclass(name = "LocyResult")]
 #[derive(Debug)]
 pub struct PyLocyResult {
-    /// Derived relations as a dict of relation-name → list[dict].
+    /// Derived relations as a dict of relation-name → list[dict]; read
+    /// through the `derived` getter, which first adds the left-out rules.
     pub derived: Py<PyAny>,
+    /// The rules the evaluation left out under the default goal-directed
+    /// mode, not yet added to `derived`. Taken by the first `derived` access
+    /// that derives them.
+    pub lazy: std::sync::Mutex<Option<uni_locy::LazyDerived>>,
     /// Evaluation statistics (`LocyStats`).
+    #[pyo3(get)]
     pub stats: Py<PyAny>,
     /// Command results (goal queries, explanations, etc.).
+    #[pyo3(get)]
     pub command_results: Py<PyAny>,
-    /// Runtime warnings emitted during evaluation.
+    /// Runtime warnings emitted during evaluation. Those raised while
+    /// deriving the rules the evaluation left out are appended when `derived`
+    /// (or `derived_async()`) first derives them.
+    #[pyo3(get)]
     pub warnings: Py<PyAny>,
     /// Compile-time warnings from rule compilation, as a list of dicts with
     /// `code`, `message` and `rule_name`.
@@ -1152,19 +1162,24 @@ pub struct PyLocyResult {
     /// They were previously dropped at the PyO3 boundary, so a Python caller
     /// had no way to see them (issue #159 was filed against a program the
     /// compiler had already warned about).
+    #[pyo3(get)]
     pub compile_warnings: Py<PyAny>,
     /// Groups flagged as approximate (shared-proof detection).
+    #[pyo3(get)]
     pub approximate_groups: Py<PyAny>,
     /// Opaque derived fact set, pass to `tx.apply()` to materialize.
+    #[pyo3(get)]
     pub derived_fact_set: Py<PyAny>,
     /// `True` when evaluation was cut short (timeout or iteration limit). Only
     /// ever set on the `allow_partial=True` path — by default an over-budget
     /// evaluation raises `UniLocyIncompleteError` instead of returning a result.
+    #[pyo3(get)]
     pub timed_out: bool,
     /// Diagnostics dict for a partial evaluation, or `None` when complete. Keys:
     /// `reason`, `elapsed_ms`, `limit_ms`, `max_iterations`, `completed_strata`,
     /// `total_strata`, `incomplete_rules`, `skipped_rules`,
     /// `complement_rules_affected`.
+    #[pyo3(get)]
     pub incomplete: Py<PyAny>,
     /// Timing and scan counters for the evaluation, the same `QueryMetrics`
     /// type a Cypher `QueryResult` carries.
@@ -1178,11 +1193,56 @@ pub struct PyLocyResult {
     /// Cypher parse/cache path those measure. A zero that
     /// means "not measured" is indistinguishable from one that means "fast",
     /// hence this note.
+    #[pyo3(get)]
     pub metrics: Py<PyQueryMetrics>,
 }
 
 #[pymethods]
 impl PyLocyResult {
+    /// Every rule's facts, as a dict of relation-name → list[dict].
+    ///
+    /// Holds every rule of the program, as it stood before the first
+    /// command. Rules the evaluation left out because only goal-directed
+    /// `QUERY` commands needed them (the default `goal_directed="auto"`) are
+    /// derived on the first access, against the snapshot the evaluation read,
+    /// and added to this same dict, and the warnings that derivation raised
+    /// are appended to `warnings`. The access blocks while they are derived
+    /// (async code should `await derived_async()` instead) and raises what
+    /// the derivation raised (a timeout, say), after which a later access
+    /// tries again.
+    #[getter]
+    fn derived(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        // Not held while deriving: the derivation releases the GIL, and a
+        // thread waiting on this lock while holding the GIL would deadlock it.
+        if let Some(lazy) = self.pending_lazy() {
+            // Concurrent callers share one derivation.
+            py.detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(lazy.materialize()))
+                .map_err(crate::exceptions::uni_error_to_pyerr)?;
+            self.absorb_lazy(py, &lazy)?;
+        }
+        Ok(self.derived.clone_ref(py))
+    }
+
+    /// `derived`, awaited: derives the left-out rules on the runtime without
+    /// blocking the event loop, then returns the same dict `derived` does.
+    fn derived_async<'py>(slf: Py<Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let lazy = slf.borrow(py).pending_lazy();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if let Some(lazy) = &lazy {
+                lazy.materialize()
+                    .await
+                    .map_err(crate::exceptions::uni_error_to_pyerr)?;
+            }
+            Python::attach(|py| {
+                let this = slf.borrow(py);
+                if let Some(lazy) = &lazy {
+                    this.absorb_lazy(py, lazy)?;
+                }
+                Ok(this.derived.clone_ref(py))
+            })
+        })
+    }
+
     fn __repr__(&self, py: Python<'_>) -> String {
         let n_warnings = self.warnings.bind(py).len().unwrap_or(0);
         format!(
@@ -1201,11 +1261,11 @@ impl PyLocyResult {
         let len = list.len()?;
         for i in 0..len {
             let item = list.get_item(i)?;
-            // Each warning is expected to have a `.code` attribute (string).
-            if let Ok(c) = item.getattr("code")
-                && let Ok(s) = c.extract::<String>()
-                && s == code
-            {
+            // Each warning is a dict (`runtime_warning_to_py`) keyed by
+            // `code`. This read a `.code` attribute, which a dict does not
+            // have, so it answered `False` for every code.
+            let c = item.get_item("code")?;
+            if c.extract::<String>()? == code {
                 return Ok(true);
             }
         }
@@ -1222,7 +1282,8 @@ impl PyLocyResult {
     /// Returns the list of fact dicts for the given rule, or `None` if the rule
     /// produced no derived facts.
     fn derived_facts(&self, py: Python<'_>, rule: &str) -> PyResult<Option<Py<PyAny>>> {
-        let result = self.derived.bind(py).call_method1("get", (rule,))?;
+        let derived = self.derived(py)?;
+        let result = derived.bind(py).call_method1("get", (rule,))?;
         if result.is_none() {
             Ok(None)
         } else {
@@ -1273,6 +1334,46 @@ impl PyLocyResult {
     #[getter]
     fn iterations(&self, py: Python<'_>) -> PyResult<usize> {
         self.stats.bind(py).getattr("total_iterations")?.extract()
+    }
+}
+
+impl PyLocyResult {
+    /// The left-out rules still to be added to `derived`, if any.
+    fn pending_lazy(&self) -> Option<uni_locy::LazyDerived> {
+        self.lazy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Adds the derived left-out rules' facts to `derived` and their warnings
+    /// to `warnings`, once. Called under the GIL, so the first caller after
+    /// the derivation adds them and the rest find nothing pending.
+    fn absorb_lazy(&self, py: Python<'_>, lazy: &uni_locy::LazyDerived) -> PyResult<()> {
+        let (Some(facts), Some(warnings)) = (lazy.get(), lazy.warnings()) else {
+            return Ok(());
+        };
+        if self
+            .lazy
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .is_none()
+        {
+            return Ok(());
+        }
+        let dict = self.derived.bind(py);
+        for (rule_name, rows) in facts {
+            dict.set_item(
+                rule_name,
+                crate::convert::locy_rows_to_py(py, rows.clone())?,
+            )?;
+        }
+        let list = self.warnings.bind(py);
+        for w in warnings {
+            list.call_method1("append", (crate::convert::runtime_warning_to_py(py, w)?,))?;
+        }
+        Ok(())
     }
 }
 
@@ -3423,7 +3524,8 @@ impl PyLocyConfig {
     fn top_k_proofs_training(&self) -> Option<usize> {
         self.inner.top_k_proofs_training
     }
-    /// Goal-directed `QUERY` evaluation mode: `"off"`, `"on"` or `"shadow"`.
+    /// Goal-directed `QUERY` evaluation mode: `"auto"` (the default), `"off"`,
+    /// `"on"` or `"shadow"`.
     #[getter]
     fn goal_directed(&self) -> &'static str {
         crate::convert::goal_directed_name(self.inner.goal_directed)

@@ -123,7 +123,8 @@ async fn locy_is_not_complement_partitions_fleet_with_fold_and_recursion() -> Re
 
     // A rule that derives zero facts is absent from the `derived` map; treat a
     // missing key as 0 rows.
-    let len_of = |rule: &str| result.derived.get(rule).map_or(0, |rows| rows.len());
+    let derived = result.derived_rules().await?;
+    let len_of = |rule: &str| derived.get(rule).map_or(0, |rows| rows.len());
 
     assert_eq!(
         len_of("failure_prone"),

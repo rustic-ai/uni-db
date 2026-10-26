@@ -279,7 +279,7 @@ Aggregates values across rows sharing the same KEY group.
 
 | Aggregate | Description | Output Type | In recursion |
 |-----------|-------------|-------------|--------------|
-| `SUM(expr)` | Sum of values | Float64 | Rejected |
+| `SUM(expr)` | Sum of values | An exact integer over integers (a float only past the 64-bit range); Float64 over floats | Rejected |
 | `AVG(expr)` | Arithmetic mean | Float64 | Rejected |
 | `COUNT(expr)` | Count of non-null values | Int64 | Allowed (unbounded) |
 | `COUNT(*)` | Count of all rows | Int64 | Allowed (unbounded) |
@@ -317,7 +317,7 @@ aggregates reload normally.
 
 | Aggregate | Formula | Direction | Identity | Domain |
 |-----------|---------|-----------|----------|--------|
-| `MSUM(expr)` | `acc + val` | Non-decreasing | 0.0 | Non-negative |
+| `MSUM(expr)` | `acc + val` (exact over integers, as `SUM`) | Non-decreasing | 0 | Non-negative |
 | `MMAX(expr)` | `max(acc, val)` | Non-decreasing | -infinity | None |
 | `MMIN(expr)` | `min(acc, val)` | Non-increasing | +infinity | None |
 | `MCOUNT(expr)` | `acc + 1` | Non-decreasing | 0 | None |

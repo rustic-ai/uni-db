@@ -39,7 +39,9 @@ async fn rule_rows(db: &Uni, program: &str, rule: &str) -> Result<usize> {
         .run()
         .await?;
     Ok(result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get(rule)
         .map(|rows| rows.len())
         .unwrap_or_default())

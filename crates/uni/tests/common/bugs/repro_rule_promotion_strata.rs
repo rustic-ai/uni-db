@@ -62,7 +62,13 @@ async fn promoted_rule_missing_strata_never_evaluates() -> anyhow::Result<()> {
 
     // Observe how many `reach` facts the promoted rule produced.
     let promoted_count = match &promoted_result {
-        Ok(r) => r.derived.get("reach").map(|f| f.len()).unwrap_or(0),
+        Ok(r) => r
+            .derived_rules()
+            .await
+            .unwrap()
+            .get("reach")
+            .map(|f| f.len())
+            .unwrap_or(0),
         Err(_) => 0,
     };
 
@@ -87,7 +93,13 @@ async fn promoted_rule_missing_strata_never_evaluates() -> anyhow::Result<()> {
     db2.flush().await?;
     session2.rules().register(RULE).await?;
     let control = session2.locy("QUERY reach WHERE a.name = 'A'").await?;
-    let control_count = control.derived.get("reach").map(|f| f.len()).unwrap_or(0);
+    let control_count = control
+        .derived_rules()
+        .await
+        .unwrap()
+        .get("reach")
+        .map(|f| f.len())
+        .unwrap_or(0);
 
     assert!(
         control_count >= 2,

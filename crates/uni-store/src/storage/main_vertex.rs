@@ -25,7 +25,9 @@ use anyhow::{Result, anyhow};
 use arrow_array::builder::{
     FixedSizeBinaryBuilder, LargeBinaryBuilder, ListBuilder, StringBuilder,
 };
-use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, UInt64Array};
+use arrow_array::{
+    Array, ArrayRef, BooleanArray, RecordBatch, TimestampNanosecondArray, UInt64Array,
+};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
@@ -1078,6 +1080,35 @@ impl MainVertexDataset {
         version: impl IntoRowVisibility,
         counters: Option<&Arc<QueryCounters>>,
     ) -> Result<HashMap<Vid, Properties>> {
+        Ok(
+            Self::find_label_latest_rows(backend, label, version, counters)
+                .await?
+                .into_iter()
+                .filter(|(_, row)| row.is_live_with(label))
+                .map(|(vid, row)| (vid, row.props))
+                .collect(),
+        )
+    }
+
+    /// The latest row (within `version`) of every flushed vertex that has
+    /// *ever* carried `label`.
+    ///
+    /// Unlike [`Self::find_label_props_counted`] this keeps the vertices whose
+    /// latest row is a tombstone or no longer carries `label`, so a caller
+    /// reconciling another copy of the label's rows can retire them too (see
+    /// `StorageManager::backfill_declared_label`). Properties are decoded only
+    /// for a latest row that is live and carries `label`; every other row
+    /// comes back with empty properties.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a scan fails or a `props_json` blob does not decode.
+    pub async fn find_label_latest_rows(
+        backend: &dyn StorageBackend,
+        label: &str,
+        version: impl IntoRowVisibility,
+        counters: Option<&Arc<QueryCounters>>,
+    ) -> Result<HashMap<Vid, MainVertexRow>> {
         let version = version.into_row_visibility();
         let table_name = table_names::main_vertex_table_name();
 
@@ -1124,6 +1155,8 @@ impl MainVertexDataset {
                         "props_json".to_string(),
                         "_version".to_string(),
                         "_deleted".to_string(),
+                        "_created_at".to_string(),
+                        "_updated_at".to_string(),
                     ])
                     .with_counters(counters.cloned()),
             )
@@ -1160,38 +1193,74 @@ impl MainVertexDataset {
             }
         }
 
-        let mut props_map = HashMap::with_capacity(best.len());
-        for (vid, (_, b, i)) in best {
+        let timestamp = |batch: &RecordBatch, column: &str, i: usize| {
+            batch
+                .column_by_name(column)
+                .and_then(|c| c.as_any().downcast_ref::<TimestampNanosecondArray>())
+                .filter(|a| a.is_valid(i))
+                .map(|a| a.value(i))
+        };
+
+        let mut latest = HashMap::with_capacity(best.len());
+        for (vid, (version, b, i)) in best {
             let batch = &rows[b];
             let deleted = batch
                 .column_by_name("_deleted")
                 .and_then(|c| c.as_any().downcast_ref::<BooleanArray>())
                 .is_some_and(|d| d.is_valid(i) && d.value(i));
-            if deleted {
-                continue;
-            }
-            let carries_label = batch
+            let labels = batch
                 .column_by_name("labels")
                 .and_then(|c| c.as_any().downcast_ref::<arrow_array::ListArray>())
                 .and_then(|l| list_array_to_labels(l, i))
-                .is_some_and(|labels| labels.iter().any(|l| l == label));
-            if !carries_label {
-                continue;
-            }
-            let Some(props_arr) = batch
-                .column_by_name("props_json")
-                .and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>())
-            else {
-                continue;
+                .unwrap_or_default();
+            let mut row = MainVertexRow {
+                version,
+                deleted,
+                labels,
+                props: Properties::new(),
+                created_at: timestamp(batch, "_created_at", i),
+                updated_at: timestamp(batch, "_updated_at", i),
             };
-            if props_arr.is_null(i) || props_arr.value(i).is_empty() {
-                props_map.insert(vid, Properties::new());
-                continue;
+            if row.is_live_with(label)
+                && let Some(props_arr) = batch
+                    .column_by_name("props_json")
+                    .and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>())
+                && !props_arr.is_null(i)
+                && !props_arr.value(i).is_empty()
+            {
+                row.props = decode_props_blob(props_arr.value(i))?;
             }
-            props_map.insert(vid, decode_props_blob(props_arr.value(i))?);
+            latest.insert(vid, row);
         }
 
-        Ok(props_map)
+        Ok(latest)
+    }
+}
+
+/// A vertex's latest row in the main `vertices` table, as returned by
+/// [`MainVertexDataset::find_label_latest_rows`].
+#[derive(Debug, Clone)]
+pub struct MainVertexRow {
+    /// MVCC version of the row.
+    pub version: u64,
+    /// Whether the row is a tombstone.
+    pub deleted: bool,
+    /// The vertex's labels as of this row.
+    pub labels: Vec<String>,
+    /// The vertex's properties; empty unless the row is live and carries the
+    /// label it was looked up by.
+    pub props: Properties,
+    /// `_created_at`, in nanoseconds since the epoch.
+    pub created_at: Option<i64>,
+    /// `_updated_at`, in nanoseconds since the epoch.
+    pub updated_at: Option<i64>,
+}
+
+impl MainVertexRow {
+    /// Whether this row is live and still carries `label`.
+    #[must_use]
+    pub fn is_live_with(&self, label: &str) -> bool {
+        !self.deleted && self.labels.iter().any(|l| l == label)
     }
 }
 

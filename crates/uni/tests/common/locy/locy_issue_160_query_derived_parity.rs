@@ -127,7 +127,12 @@ async fn setup() -> Result<Uni> {
 async fn counts(db: &Uni, program: &str, rule: &str) -> Result<(usize, usize)> {
     let result = db.session().locy(program).await?;
     let empty = vec![];
-    let derived = result.derived_facts(rule).unwrap_or(&empty).len();
+    let derived = result
+        .derived_rule(rule)
+        .await
+        .unwrap()
+        .unwrap_or(&empty)
+        .len();
     let queried = result.rows().unwrap_or(&empty).len();
     Ok((derived, queried))
 }

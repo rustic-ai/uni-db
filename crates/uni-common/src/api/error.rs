@@ -507,7 +507,61 @@ pub enum UniError {
         serde_json::to_string(forks).unwrap_or_default(), forks.join(", ")
     )]
     RestoreBlockedByForks { forks: Vec<String> },
+
+    /// A property declaration refused because values the entity already holds
+    /// cannot be stored in the declared type.
+    ///
+    /// Raised before the catalog or storage changes. Declaring the property
+    /// would move those values (schemaless data in the main vertex table or
+    /// the `overflow_json` blob) into a typed column, and a value that the
+    /// write path would refuse for that type would read back as NULL there.
+    /// The rule is the write path's: whatever a `CREATE`/`SET` of the declared
+    /// property would accept (including its widenings and coercions, such as
+    /// `Int` into a float column or a temporal string into a temporal column)
+    /// is accepted here too. See [`DeclaredTypeConflict`] for the payload.
+    #[error(
+        "{DECLARED_TYPE_CONFLICT_TAG}{}: cannot declare {}.{} as {}: {} existing value(s) \
+         cannot be stored as {} (e.g. {} holds {}); convert or remove them first",
+        serde_json::json!([
+            detail.entity,
+            detail.property,
+            detail.declared,
+            detail.count,
+            detail.example_id,
+            detail.example_value
+        ]),
+        detail.entity,
+        detail.property,
+        detail.declared,
+        detail.count,
+        detail.declared,
+        detail.example_id,
+        detail.example_value
+    )]
+    DeclaredTypeConflict { detail: Box<DeclaredTypeConflict> },
 }
+
+/// Payload of [`UniError::DeclaredTypeConflict`]. Boxed to keep `UniError`
+/// small.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredTypeConflict {
+    /// The label or edge type.
+    pub entity: String,
+    /// The property being declared.
+    pub property: String,
+    /// The declared type, as written by its `Debug` form (`Int64`, ...).
+    pub declared: String,
+    /// How many stored values the type cannot hold.
+    pub count: usize,
+    /// One of them: `vid N` or `eid N`.
+    pub example_id: String,
+    /// That value, as Cypher renders it.
+    pub example_value: String,
+}
+
+/// Display prefix of [`UniError::DeclaredTypeConflict`] (see
+/// [`UniError::declared_type_conflict_from_message`]).
+pub const DECLARED_TYPE_CONFLICT_TAG: &str = "DeclaredTypeConflict: ";
 
 /// Display prefix of [`UniError::RestoreBlockedByForks`] (see
 /// [`UniError::restore_blocked_by_forks_from_message`]).
@@ -753,6 +807,55 @@ impl UniError {
             .next()?
             .ok()?;
         (!forks.is_empty()).then_some(Self::RestoreBlockedByForks { forks })
+    }
+
+    /// Recovers [`Self::DeclaredTypeConflict`] from its display text,
+    /// wherever it sits in `msg`.
+    ///
+    /// # Examples
+    /// ```
+    /// use uni_common::{DeclaredTypeConflict, UniError};
+    ///
+    /// let detail = DeclaredTypeConflict {
+    ///     entity: "L".into(),
+    ///     property: "p".into(),
+    ///     declared: "Int64".into(),
+    ///     count: 2,
+    ///     example_id: "vid 7".into(),
+    ///     example_value: "\"x: y\"".into(),
+    /// };
+    /// let err = UniError::DeclaredTypeConflict { detail: Box::new(detail.clone()) };
+    /// let back = UniError::declared_type_conflict_from_message(&format!("ctx: {err}"));
+    /// assert!(matches!(
+    ///     back,
+    ///     Some(UniError::DeclaredTypeConflict { detail: ref d }) if **d == detail
+    /// ));
+    /// ```
+    #[must_use]
+    pub fn declared_type_conflict_from_message(msg: &str) -> Option<Self> {
+        let tail = &msg[msg.find(DECLARED_TYPE_CONFLICT_TAG)? + DECLARED_TYPE_CONFLICT_TAG.len()..];
+        // The fields are a JSON array: a value may hold `: ` or `|`.
+        let (entity, property, declared, count, example_id, example_value): (
+            String,
+            String,
+            String,
+            usize,
+            String,
+            String,
+        ) = serde_json::Deserializer::from_str(tail)
+            .into_iter()
+            .next()?
+            .ok()?;
+        Some(Self::DeclaredTypeConflict {
+            detail: Box::new(DeclaredTypeConflict {
+                entity,
+                property,
+                declared,
+                count,
+                example_id,
+                example_value,
+            }),
+        })
     }
 
     /// Returns `true` when retrying the failed operation from scratch may succeed.

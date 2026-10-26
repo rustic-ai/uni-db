@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use crate::api::UniInner;
 use crate::api::impl_locy::{self, LocyRuleRegistry};
+use crate::api::impl_query::QueryOverrides;
 use crate::api::session::Session;
 use crate::api::triggers::{MutationEvents, TriggerRouter, tx_id_to_u64};
 use crate::shutdown::ShutdownHandle;
@@ -513,7 +514,7 @@ impl Transaction {
             Some(self.id_reservoir.clone()),
             self.read_snapshot(),
             self.cancel_scope(None),
-            None,
+            QueryOverrides::default(),
         );
         self.with_principal_scope(fut).await
     }
@@ -761,6 +762,7 @@ impl Transaction {
             params: HashMap::new(),
             timeout: None,
             cancellation_token: None,
+            max_memory: None,
         }
     }
 
@@ -931,6 +933,19 @@ impl Transaction {
         labels: &[&str],
         properties_list: Vec<uni_common::Properties>,
     ) -> Result<Vec<uni_common::core::id::Vid>> {
+        self.insert_vertices_batch_impl(labels, properties_list, false)
+            .await
+    }
+
+    /// Shared body of the bulk vertex inserts. `allow_schemaless` admits
+    /// undeclared labels, as a Cypher `CREATE` does; the public bulk API
+    /// stays strict and only fork promote passes `true`.
+    async fn insert_vertices_batch_impl(
+        &self,
+        labels: &[&str],
+        properties_list: Vec<uni_common::Properties>,
+        allow_schemaless: bool,
+    ) -> Result<Vec<uni_common::core::id::Vid>> {
         self.check_completed()?;
         if labels.is_empty() {
             return Err(UniError::Schema {
@@ -938,14 +953,16 @@ impl Transaction {
                     .to_string(),
             });
         }
-        let schema = self.db.schema.schema();
-        for label in labels {
-            schema
-                .labels
-                .get(*label)
-                .ok_or_else(|| UniError::LabelNotFound {
-                    label: (*label).to_string(),
-                })?;
+        if !allow_schemaless {
+            let schema = self.db.schema.schema();
+            for label in labels {
+                schema
+                    .labels
+                    .get(*label)
+                    .ok_or_else(|| UniError::LabelNotFound {
+                        label: (*label).to_string(),
+                    })?;
+            }
         }
         let writer_lock = self.db.writer.as_ref().ok_or_else(|| UniError::ReadOnly {
             operation: "bulk_insert_vertices".to_string(),
@@ -1050,16 +1067,40 @@ impl Transaction {
             uni_common::Properties,
         )>,
     ) -> Result<()> {
+        self.insert_edges_batch_impl(edge_type, edges, false).await
+    }
+
+    /// Shared body of the bulk edge insert. `allow_schemaless` resolves an
+    /// undeclared edge type through the schemaless registry (interning it,
+    /// as a Cypher `CREATE` does; the commit persists it); the public bulk
+    /// API stays strict and only fork promote passes `true`.
+    async fn insert_edges_batch_impl(
+        &self,
+        edge_type: &str,
+        edges: Vec<(
+            uni_common::core::id::Vid,
+            uni_common::core::id::Vid,
+            uni_common::Properties,
+        )>,
+        allow_schemaless: bool,
+    ) -> Result<()> {
         self.check_completed()?;
-        let schema = self.db.schema.schema();
-        let edge_meta =
-            schema
-                .edge_types
-                .get(edge_type)
-                .ok_or_else(|| UniError::EdgeTypeNotFound {
+        let declared = self
+            .db
+            .schema
+            .schema()
+            .edge_types
+            .get(edge_type)
+            .map(|meta| meta.id);
+        let type_id = match declared {
+            Some(id) => id,
+            None if allow_schemaless => self.db.schema.get_or_assign_edge_type_id(edge_type),
+            None => {
+                return Err(UniError::EdgeTypeNotFound {
                     edge_type: edge_type.to_string(),
-                })?;
-        let type_id = edge_meta.id;
+                });
+            }
+        };
         let writer_lock = self.db.writer.as_ref().ok_or_else(|| UniError::ReadOnly {
             operation: "bulk_insert_edges".to_string(),
         })?;
@@ -1148,6 +1189,7 @@ impl Transaction {
         // Transaction path: auto-apply DERIVE mutations to the private L0.
         let engine = impl_locy::LocyEngine {
             counters: std::sync::Arc::new(uni_store::QueryCounters::new()),
+            statement_memory: Default::default(),
             db: &self.db,
             tx_l0_override: Some(self.tx_l0.clone()),
             locy_l0: Some(self.tx_l0.clone()),
@@ -1158,6 +1200,8 @@ impl Transaction {
             // setting applies.
             max_memory: None,
             principal: self.principal.clone(),
+            // A transaction's state cannot be held past the call.
+            handle: None,
         };
         self.with_locy_scope(engine.evaluate(program)).await
     }
@@ -1309,144 +1353,37 @@ impl Transaction {
         let cdc_active = !self.db.plugin_registry.cdc_outputs_is_empty();
         let need_events = !trigger_router.is_empty() || cdc_active;
 
-        // For the trigger / CDC path, capture an `L0Manager` handle
-        // ahead of the L0 read scope so `PreExistingProbe` can scan
-        // committed L0 + pending-flush L0s for the VIDs/EIDs about to
-        // be committed. The handle is cheap (Arc clone).
+        // For the trigger / CDC path, capture an `L0Manager` handle so
+        // `PreExistingProbe` can scan committed L0 + pending-flush L0s for
+        // the VIDs/EIDs about to be committed. The handle is cheap (Arc
+        // clone).
         let l0_manager_for_probe = if need_events {
-            if let Some(wl) = self.db.writer.as_ref() {
-                Some(Arc::clone(&wl.l0_manager))
-            } else {
-                None
-            }
+            self.db.writer.as_ref().map(|wl| Arc::clone(&wl.l0_manager))
         } else {
             None
         };
 
-        // Snapshot labels and edge types from L0 (sync read, short
-        // lock scope). Also build the L0-chain portion of the probe
-        // here while we already hold the lock — `from_l0_chain` is
-        // sync.
-        let (labels_affected, edge_types_affected, mut probe_opt) = {
-            let l0 = self.tx_l0.read();
-            let labels: Vec<String> = l0
-                .vertex_labels
-                .values()
-                .flatten()
-                .cloned()
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-            let edge_types: Vec<String> = l0
-                .edge_types
-                .values()
-                .cloned()
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-            let probe = l0_manager_for_probe
-                .as_ref()
-                .map(|l0m| crate::api::triggers::PreExistingProbe::from_l0_chain(l0m, &l0));
-            (labels, edge_types, probe)
-        };
+        // Snapshot labels and edge types from L0 (sync read, short lock
+        // scope).
+        let (labels_affected, edge_types_affected) =
+            crate::api::commit_events::affected(&self.tx_l0.read());
 
-        // Extend the probe with an L1 storage existence scan for VIDs
-        // not found in the L0 chain. The candidate snapshot is taken
-        // under a short sync lock; the async probe runs outside the
-        // lock to keep the L0 buffer available to other readers and
-        // to satisfy the Send bound on the surrounding async fn.
-        //
-        // Edges take a different route: every edge the tx writes or deletes
-        // gets its committed state (L0 chain over L1) read in one batched
-        // lookup, which both detects pre-existence for edges already flushed
-        // and supplies their whole pre-image.
-        //
-        // The edge read runs only when an edge event can be delivered: a CDC
-        // output, or a trigger subscribed to edge events. Node-only triggers
-        // (the default `:_AuditMe` audit trigger among them) never read an
-        // edge's pre-image.
-        let wants_edge_pre_images = cdc_active || trigger_router.wants_edge_events();
-        if let Some(ref mut probe) = probe_opt {
-            let schema_manager = self.db.storage.schema_manager();
-            let (candidates, edge_candidates) = {
-                let l0 = self.tx_l0.read();
-                let resolve = |type_id: u32| schema_manager.edge_type_name_by_id_unified(type_id);
-                let mut candidates = probe.pending_l1_candidates(&l0);
-                // A vertex's pre-image feeds only its node event rows, which
-                // are emitted under its labels in this transaction; read it
-                // only when CDC or a trigger can receive one of them.
-                if !cdc_active {
-                    candidates.retain(|(vid, _)| {
-                        let labels = l0.vertex_labels.get(vid).map_or(&[][..], Vec::as_slice);
-                        trigger_router.wants_node_events_for(labels)
-                    });
-                }
-                (
-                    candidates,
-                    if wants_edge_pre_images {
-                        probe.pending_edge_candidates(&l0, &resolve)
-                    } else {
-                        Vec::new()
-                    },
-                )
-            };
-            if !candidates.is_empty() {
-                let started = std::time::Instant::now();
-                let vertices = candidates.len();
-                probe.extend_with_l1(candidates, &self.db.storage).await;
-                tracing::debug!(
-                    target: "uni::trigger_probe",
-                    vertices,
-                    elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-                    "vertex pre-image probe"
-                );
-            }
-            if !edge_candidates.is_empty()
-                && let Some(l0m) = l0_manager_for_probe.as_ref()
-            {
-                let schema = schema_manager.schema();
-                let started = std::time::Instant::now();
-                let edges = edge_candidates.len();
-                probe
-                    .extend_edges_with_committed_state(
-                        edge_candidates,
-                        l0m,
-                        &self.db.properties,
-                        &schema,
-                    )
-                    .await;
-                tracing::debug!(
-                    target: "uni::trigger_probe",
-                    edges,
-                    elapsed_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
-                    "edge pre-image probe"
-                );
-            }
-        }
-
-        // Build trigger events under a second short read of tx_l0
-        // — the tx is single-threaded, so its contents are stable
-        // between the snapshot above and now. Includes the CDC path:
-        // when triggers aren't registered but CDC subscribers are, we
-        // still extract events (with no property bag — the trigger
-        // predicate gate is the only consumer of `properties_referenced`).
+        // Build trigger events — the tx is single-threaded, so its contents
+        // are stable from here to the commit. Includes the CDC path: when
+        // triggers aren't registered but CDC subscribers are, we still
+        // extract events.
         let trigger_events = if need_events {
-            let l0 = self.tx_l0.read();
-            let props_referenced = trigger_router.properties_referenced();
-            // #233: the edge type NAME may be missing from `edge_types`, but
-            // the type id is always carried in `edge_endpoints`. Give the
-            // event builder a schema-backed resolver so it never falls back to
-            // an empty type name, which the trigger router silently fails to
-            // match.
-            let schema_for_types = self.db.storage.schema_manager();
-            let resolve_edge_type =
-                move |type_id: u32| schema_for_types.edge_type_name_by_id_unified(type_id);
-            Some(MutationEvents::from_l0_with_probe(
-                &l0,
-                probe_opt.as_ref(),
-                &props_referenced,
-                &resolve_edge_type,
-            ))
+            Some(
+                crate::api::commit_events::extract(
+                    &self.db.storage,
+                    &self.db.properties,
+                    l0_manager_for_probe.as_ref(),
+                    &self.tx_l0,
+                    &trigger_router,
+                    cdc_active,
+                )
+                .await,
+            )
         } else {
             None
         };
@@ -1474,7 +1411,8 @@ impl Transaction {
         // whole future would cancel it past the durable point (WAL flush) — e.g.
         // during the inline post-commit L0→L1 flush — and return a retriable
         // `CommitTimeout` for a transaction that is already durable and visible,
-        // which a retry would double-apply. The writer surfaces `CommitTimeout`
+        // which a retry would double-apply. (The post-commit flush now runs
+        // after the announcement, below.) The writer surfaces `CommitTimeout`
         // with an empty `tx_id` on a lock-acquisition timeout; we fill it in.
         //
         // The commit's version and its place in the announcement order are
@@ -1518,6 +1456,7 @@ impl Transaction {
                     causal_version,
                     mutations: None,
                     mutations_failed: true,
+                    cdc_active,
                     mutation_stream: None,
                     dropped_before: 0,
                 }));
@@ -1525,7 +1464,7 @@ impl Transaction {
         };
         let uni_store::runtime::writer::CommittedTx {
             wal_lsn,
-            flush_pending: _flush_pending,
+            flush_pending: _,
             version,
             ticket: announce_ticket,
         } = writer_lock
@@ -1552,9 +1491,6 @@ impl Transaction {
         // the commit-notification ordering tests pause here to provoke. No-op
         // unless built with `--features failpoints`.
         fail::fail_point!("commit::before-notify");
-        // _flush_pending is true when async_flush_enabled and the coordinator
-        // accepted a flush submission. Nothing to do here — the spawned stream
-        // task drives the pipeline to completion independently.
         let writer: &uni_store::Writer = writer_lock.as_ref();
         // Update cached metrics atomics while we still hold the writer lock
         {
@@ -1599,9 +1535,24 @@ impl Transaction {
         // durable, and returning an error would invite a retry that
         // double-applies it. The manager stays dirty, so the next commit
         // retries the write rather than dropping it silently.
-        if self.db.storage.fork_scope().is_none()
-            && let Err(e) = self.db.storage.schema_manager().save_if_dirty().await
-        {
+        if let Some(scope) = self.db.storage.fork_scope() {
+            // The fork's counterpart: record the names in the fork's overlay.
+            // Same failure policy — the overlay is unchanged on error, so the
+            // next commit (or the next open of this fork) retries.
+            if let Err(e) = crate::api::fork::record_fork_schemaless_edge_types(
+                scope,
+                self.db.storage.schema_manager(),
+            )
+            .await
+            {
+                tracing::error!(
+                    error = %e,
+                    "failed to persist the fork's schemaless edge types after commit; \
+                     a newly interned edge type will be lost if the process exits \
+                     before a later commit retries the write"
+                );
+            }
+        } else if let Err(e) = self.db.storage.schema_manager().save_if_dirty().await {
             tracing::error!(
                 error = %e,
                 "failed to persist the schema after commit; \
@@ -1752,6 +1703,7 @@ impl Transaction {
             causal_version: self.started_at_version,
             mutations: mutations_batch,
             mutations_failed,
+            cdc_active,
             // Only a bulk load streams its rows; a commit carries them above.
             mutation_stream: None,
             // Always 0 at the producer. Lag is a per-consumer property — one
@@ -1855,6 +1807,12 @@ impl Transaction {
             trigger_router.dispatch_after(ctx, &events, &runtime);
         }
 
+        // The post-commit auto-flush, now that this commit's announcement is
+        // released: a flush waits for that (see `Writer::flush_after_commit`).
+        // In async-flush mode it only submits; the spawned stream task drives
+        // the pipeline to completion independently.
+        writer_lock.flush_after_commit().await;
+
         info!("Transaction committed");
 
         Ok(commit_result)
@@ -1940,12 +1898,17 @@ impl Transaction {
         cypher: &str,
         params: HashMap<String, Value>,
         cancellation_token: Option<CancellationToken>,
-        timeout: Option<Duration>,
+        overrides: QueryOverrides,
     ) -> Result<ExecuteResult> {
         self.check_completed()?;
         self.run_exec_guards(cypher, &params).await?;
         let before = self.snapshot_l0();
         let cancel = self.cancel_scope(cancellation_token);
+        // The timeout is enforced inside, at its effective value. It used to be
+        // a `tokio::time::timeout` wrapped around this call while execution
+        // stayed bounded by `UniConfig::query_timeout`, so a builder timeout
+        // could only tighten the database setting, and `max_memory` was
+        // dropped here altogether.
         let fut = self.db.execute_internal_with_tx_l0(
             cypher,
             params,
@@ -1953,11 +1916,9 @@ impl Transaction {
             Some(self.id_reservoir.clone()),
             self.read_snapshot(),
             cancel,
-            None,
+            overrides,
         );
-        let result = self
-            .with_principal_scope(with_optional_timeout(timeout, fut))
-            .await?;
+        let result = self.with_principal_scope(fut).await?;
         let after = self.snapshot_l0();
         Ok(Self::compute_execute_result(&before, &after, &result))
     }
@@ -2078,6 +2039,9 @@ pub struct ExecuteBuilder<'a> {
     /// a read on this transaction but not to a write, and the mutation
     /// terminal would silently ignore one.
     cancellation_token: Option<CancellationToken>,
+    /// Mirrors [`TxQueryBuilder::max_memory`]: a mutation's `MATCH` side
+    /// builds the same operators a read does.
+    max_memory: Option<usize>,
 }
 
 impl<'a> ExecuteBuilder<'a> {
@@ -2102,9 +2066,24 @@ impl<'a> ExecuteBuilder<'a> {
     }
 
     /// Set maximum execution time for this mutation.
+    ///
+    /// Replaces `UniConfig::query_timeout` for this statement, in either
+    /// direction: a value above the database setting allows a mutation the
+    /// setting alone would stop.
     pub fn timeout(mut self, duration: Duration) -> Self {
         self.timeout = Some(duration);
         self
+    }
+
+    /// Cap the memory this mutation may reserve, overriding
+    /// `UniConfig::max_query_memory` for this call alone.
+    pub fn max_memory(mut self, bytes: usize) -> Self {
+        self.max_memory = Some(bytes);
+        self
+    }
+
+    fn overrides(&self) -> QueryOverrides {
+        QueryOverrides::new(self.timeout, self.max_memory)
     }
 
     /// Execute the mutation and return affected row count with detailed stats.
@@ -2116,12 +2095,13 @@ impl<'a> ExecuteBuilder<'a> {
     /// Inner body of [`Self::run`]; the public method wraps the result in
     /// `mark_on_err` so any failure poisons the transaction (bug #15).
     async fn run_inner(self) -> Result<ExecuteResult> {
+        let overrides = self.overrides();
         self.tx
             .run_tx_mutation(
                 &self.cypher,
                 self.params,
                 self.cancellation_token,
-                self.timeout,
+                overrides,
             )
             .await
     }
@@ -2147,18 +2127,17 @@ impl<'a> ExecuteBuilder<'a> {
         self.tx.check_completed()?;
         self.tx.run_exec_guards(&self.cypher, &self.params).await?;
         let before = self.tx.snapshot_l0();
+        let overrides = self.overrides();
         let fut = self.tx.db.profile_internal_with_tx_l0(
             &self.cypher,
             self.params,
             self.tx.tx_l0.clone(),
             Some(self.tx.id_reservoir.clone()),
             self.tx.read_snapshot(),
-            None,
+            self.tx.cancel_scope(self.cancellation_token),
+            overrides,
         );
-        let (result, profile) = self
-            .tx
-            .with_principal_scope(with_optional_timeout(self.timeout, fut))
-            .await?;
+        let (result, profile) = self.tx.with_principal_scope(fut).await?;
         let after = self.tx.snapshot_l0();
         Ok((
             Transaction::compute_execute_result(&before, &after, &result),
@@ -2217,14 +2196,19 @@ impl<'a> TxQueryBuilder<'a> {
     /// Inner body of [`Self::execute`]; the public method wraps the result in
     /// `mark_on_err` so any failure poisons the transaction (bug #15).
     async fn execute_inner(self) -> Result<ExecuteResult> {
+        let overrides = self.overrides();
         self.tx
             .run_tx_mutation(
                 &self.cypher,
                 self.params,
                 self.cancellation_token,
-                self.timeout,
+                overrides,
             )
             .await
+    }
+
+    fn overrides(&self) -> QueryOverrides {
+        QueryOverrides::new(self.timeout, self.max_memory)
     }
 
     /// Execute as a query and return rows.
@@ -2241,7 +2225,8 @@ impl<'a> TxQueryBuilder<'a> {
     /// this existed the only transaction profiler was on `ExecuteBuilder`, so a
     /// *read* inside a transaction could not be profiled at all.
     ///
-    /// Honours `timeout` and `max_memory` set on this builder.
+    /// Honours `timeout`, `max_memory` and the cancellation token set on this
+    /// builder, and the transaction's own cancellation scope.
     pub async fn profile(self) -> Result<(QueryResult, ProfileOutput)> {
         let tx = self.tx;
         tx.mark_on_err(self.profile_inner().await)
@@ -2252,17 +2237,17 @@ impl<'a> TxQueryBuilder<'a> {
     async fn profile_inner(self) -> Result<(QueryResult, ProfileOutput)> {
         self.tx.check_completed()?;
         self.tx.run_exec_guards(&self.cypher, &self.params).await?;
+        let overrides = self.overrides();
         let fut = self.tx.db.profile_internal_with_tx_l0(
             &self.cypher,
             self.params,
             self.tx.tx_l0.clone(),
             Some(self.tx.id_reservoir.clone()),
             self.tx.read_snapshot(),
-            self.max_memory,
+            self.tx.cancel_scope(self.cancellation_token),
+            overrides,
         );
-        self.tx
-            .with_principal_scope(with_optional_timeout(self.timeout, fut))
-            .await
+        self.tx.with_principal_scope(fut).await
     }
 
     /// Inner body of [`Self::fetch_all`]; the public method wraps the result in
@@ -2271,6 +2256,7 @@ impl<'a> TxQueryBuilder<'a> {
         self.tx.check_completed()?;
         self.tx.run_exec_guards(&self.cypher, &self.params).await?;
         let cancel = self.tx.cancel_scope(self.cancellation_token);
+        let overrides = QueryOverrides::new(self.timeout, self.max_memory);
         let fut = self.tx.db.execute_internal_with_tx_l0(
             &self.cypher,
             self.params,
@@ -2278,11 +2264,9 @@ impl<'a> TxQueryBuilder<'a> {
             Some(self.tx.id_reservoir.clone()),
             self.tx.read_snapshot(),
             cancel,
-            self.max_memory,
+            overrides,
         );
-        self.tx
-            .with_principal_scope(with_optional_timeout(self.timeout, fut))
-            .await
+        self.tx.with_principal_scope(fut).await
     }
 
     /// Execute the query and return the first row, or `None` if empty.
@@ -2310,13 +2294,7 @@ impl<'a> TxQueryBuilder<'a> {
         // handed down rather than awaited here — until now `cursor_inner`
         // dropped both on the floor, so a transaction cursor ran unbounded and
         // uncancellable while the builder accepted the options.
-        let mut config = self.tx.db.config.clone();
-        if let Some(t) = self.timeout {
-            config.query_timeout = t;
-        }
-        if let Some(m) = self.max_memory {
-            config.max_query_memory = m;
-        }
+        let config = self.overrides().apply(&self.tx.db.config);
 
         // Built inside the principal scope: the cursor captures the scope it
         // was built in and re-installs it around every poll, since the stream
@@ -2325,6 +2303,8 @@ impl<'a> TxQueryBuilder<'a> {
             &self.cypher,
             self.params,
             self.tx.tx_l0.clone(),
+            Some(self.tx.id_reservoir.clone()),
+            self.tx.read_snapshot(),
             config,
             self.tx.cancel_scope(self.cancellation_token),
         );
@@ -2396,7 +2376,9 @@ impl uni_fork::ForkPromoteSink for Transaction {
         label: &str,
         rows: Vec<uni_common::Properties>,
     ) -> Result<Vec<uni_common::core::id::Vid>> {
-        Transaction::bulk_insert_vertices(self, label, rows).await
+        // Promote's gate already refused a label the fork declared but
+        // primary lacks; any other undeclared label is schemaless (#306).
+        self.insert_vertices_batch_impl(&[label], rows, true).await
     }
 
     async fn bulk_insert_edges(
@@ -2408,7 +2390,8 @@ impl uni_fork::ForkPromoteSink for Transaction {
             uni_common::Properties,
         )>,
     ) -> Result<()> {
-        Transaction::bulk_insert_edges(self, edge_type, edges).await
+        // As for vertices: an undeclared edge type here is schemaless.
+        self.insert_edges_batch_impl(edge_type, edges, true).await
     }
 
     async fn update_vertex_properties(

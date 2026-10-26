@@ -27,17 +27,25 @@ The second `WHERE` (after `FOLD`) filters on aggregated values — equivalent to
 | Operator | Semantics | Use In Recursion? |
 |----------|-----------|-------------------|
 | `COUNT(*)` / `COUNT(expr)` | Row count | Safe (unbounded) |
-| `SUM(expr)` | Sum of numbers or of durations (anything else is an error) | Non-recursive only |
+| `SUM(expr)` | Sum of numbers or of durations (anything else is an error); integers sum to an exact integer | Non-recursive only |
 | `AVG(expr)` | Mean of numbers or of durations | Non-recursive only |
 | `MIN(expr)` | Minimum value, in Cypher's `ORDER BY` order | Safe in recursion |
 | `MAX(expr)` | Maximum value, in Cypher's `ORDER BY` order | Safe in recursion |
 | `COLLECT(expr)` | Collect into list | Safe (unbounded) |
-| `MSUM(expr)` | Monotonic sum of non-negative numbers | Safe (unbounded) |
+| `MSUM(expr)` | Monotonic sum of non-negative numbers; integers sum to an exact integer | Safe (unbounded) |
 | `MMAX(expr)` | Monotonic maximum | Safe in recursion |
 | `MMIN(expr)` | Monotonic minimum | Safe in recursion |
 | `MCOUNT(expr)` | Monotonic count | Safe (unbounded) |
 | `MNOR(expr)` | Noisy-OR probability: `1 − ∏(1 − pᵢ)` | Safe in recursion |
 | `MPROD(expr)` | Product probability: `∏ pᵢ` | Safe in recursion |
+
+`SUM` and `MSUM` over integers keep the total an exact integer, as Cypher's
+`sum` does: two ledger amounts of `9007199254740992` and `1` fold to
+`9007199254740993`. Should the total leave the 64-bit integer range it
+continues as a float (Neo4j's rule) rather than wrapping or failing, and a
+float among the inputs makes the total a float. Over floats the result is a
+float, as before. A group with no non-null input sums to `0` (an integer over
+an integer column, `0.0` over a float column).
 
 Recursion safety comes from the aggregate's registered semilattice (`monotone_join`), not from an `M` prefix; the compiler falls back to the six built-in `M*` names only when the aggregate registry has no entry. `SUM` and `AVG` are non-monotone and are rejected inside a recursive stratum.
 

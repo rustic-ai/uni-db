@@ -57,7 +57,9 @@ async fn locy_facts(
 ) -> Result<Vec<Vec<Value>>> {
     let result = db.session().locy(program).await?;
     let mut facts: Vec<Vec<Value>> = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get(rule)
         .map(|facts| facts.iter().map(|f| project(f, columns)).collect())
         .unwrap_or_default();

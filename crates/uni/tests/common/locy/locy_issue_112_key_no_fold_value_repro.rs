@@ -48,7 +48,7 @@ async fn key_value_column_no_fold_is_typed() -> Result<()> {
     // The KEY column must be the real String value on BOTH surfaces:
     // the derived relation and the QUERY projection.
     let empty = vec![];
-    let derived = result.derived_facts("tags").unwrap_or(&empty);
+    let derived = result.derived_rule("tags").await.unwrap().unwrap_or(&empty);
     assert_column_non_null(derived, "tag");
     assert_column_eq(derived, "tag", &Value::String("a".to_string()));
 

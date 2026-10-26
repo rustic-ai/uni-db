@@ -366,8 +366,16 @@ async fn derived_is_the_state_the_first_body_command_reads() -> Result<()> {
     assert_eq!(count("linked"), Some(0), "the body's DERIVE is not");
     // The program's own `derived` is the stored state: no body rule, and the
     // hypothetical edge is not in it.
-    assert!(!result.derived.contains_key("kn"));
-    assert_eq!(result.derived.get("linked").map(Vec::len), Some(0));
+    assert!(!result.derived_rules().await.unwrap().contains_key("kn"));
+    assert_eq!(
+        result
+            .derived_rules()
+            .await
+            .unwrap()
+            .get("linked")
+            .map(Vec::len),
+        Some(0)
+    );
     // `rows()` is the first row-producing body result: the QUERY's.
     assert_eq!(result.rows().map(Vec::len), Some(4));
     Ok(())

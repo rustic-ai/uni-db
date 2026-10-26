@@ -47,6 +47,11 @@
   mechanism, and migration recipe: `docs/test_layout.md`.
 - Benchmarks go in `crates/uni/benches/` using Criterion.
 - If a test is flaky or sensitive to parallelism, document the constraint in a comment at the test site.
+- **An `#[ignore]`d test still has to run somewhere.** The nightly `ignored-sweep` job
+  runs every ignored test except those a dedicated lane already selects and those
+  listed in `ON_DEMAND` in `scripts/ci/ignored_tests.py` (each with the reason it
+  cannot run unattended). Slow, model-backed and assertion-free probes belong in the
+  sweep, not in `ON_DEMAND`: running them is what catches a hang or a rotted API.
 - For TCK compliance runs, use `scripts/run_tck_with_report.sh`.
 - For filtered TCK subsets, use `scripts/run_tck_with_report.sh "~Match1"` (replace filter as needed).
 - TCK run artifacts are written under `target/cucumber/` (results/report) and synced into `compliance_reports/` by mode.
@@ -104,8 +109,12 @@ from each phase for deeper context.
   entries from both primary and fork branches. Anything that
   resolves UID → primary VID must verify the candidate via
   `MATCH (n:Label) WHERE id(n) = $vid` on a primary session. The
-  `resolve_primary_vid` helper in `crates/uni/src/api/fork_diff.rs`
-  is the canonical implementation.
+  `batch_resolve_primary_vids` helper in `crates/uni-fork/src/diff.rs`
+  is the canonical implementation. A label undeclared on primary
+  (schemaless) has no UidIndex at all — the flush registers UIDs only
+  for declared labels — so that helper resolves it by a content scan
+  of the label on primary instead; never treat "no index hit" as
+  "absent" for such a label, or promote duplicates every primary row.
 - **Diff identity is content UID, not VID.** Vertex pairing is by
   `compute_vertex_uid(label, ext_id, properties)`; edge pairing is
   by `(src_uid, dst_uid)` scoped to edge type. VIDs on `DiffVertex`
@@ -156,7 +165,34 @@ from each phase for deeper context.
   special-case index file deletion in the fork drop path.
 - **`UidIndex` registers UIDs from forks too,** which is why every
   Phase 5 fusion type and every Phase 6/6b promote dedup uses
-  `resolve_primary_vid` rather than raw `UidIndex::get_vid`.
+  `batch_resolve_primary_vids` rather than raw `UidIndex::get_vid`.
+- **Schemaless edge types are identified by NAME across a fork's
+  lifetime, never by id.** A schemaless id (bit 31 set) comes from the
+  in-memory `SchemalessEdgeTypeRegistry`; a fork's registry lives in its
+  merged schema, which is never saved, and is rebuilt on every open from
+  primary's *current* registry — where the fork's old id may since name
+  a different type. So: (1) `SchemaDelta.added_schemaless_edge_types`
+  records every name the fork interned (written after each fork commit
+  and after the fork's WAL replay, via
+  `ForkScope::record_schemaless_edge_types` →
+  `ForkRegistryHandle::update_schema_overlay`), and `with_overlay`
+  re-interns them, assigning fresh ids; (2) WAL replay
+  (`Writer::remap_replayed_edge_types`) re-derives every replayed edge
+  mutation's type id from the record's type name — `InsertEdge` and
+  `DeleteEdge` both carry `edge_type_name` — on primary too, whose open
+  then saves the catalog if replay interned a name.
+- **Fork candidate datasets include schemaless edge types.**
+  `fork_candidate_dataset_names` lists `deltas_/adjacency_{type}_*` for
+  declared *and* schemaless edge types. A schemaless type's tables left
+  unbranched at fork creation made the fork read primary's live table
+  (post-fork primary edges leaked in) and branch it at primary's
+  current version on the fork's first write.
+- **A reopened fork resumes its version floor from its own snapshot.**
+  `UniInner::at_fork` starts the fork writer at
+  `max(fork_point_version_hwm, fork_latest.version_high_water_mark + 1)`.
+  Starting at the fork point alone let a reopened fork stamp a write at or
+  below a version it had already flushed, so a delete or update of a
+  fork-flushed row lost to the older row (declared and schemaless alike).
 
 ## Fork invariants (Phase 2)
 - **Registry edits go through `ForkRegistryHandle`.** Never write `catalog/fork_registry.json`, `catalog/fork_schemas/*`, `catalog/fork_tombstones/*`, or `catalog/forks/{fork_id}/id_allocator.json` directly — the 2PC state machine assumes single-writer access through the handle.
@@ -173,12 +209,13 @@ from each phase for deeper context.
 - **`StorageManager::at_fork_with_schema` must receive the merged schema.** `at_fork` (no-schema variant) clones primary's `schema_manager` into the fork's storage, which means `uni-query`'s strict-schema check sees primary's view, not the fork's. Always use `at_fork_with_schema(scope, merged_schema)` from `UniInner::at_fork` so the fork's storage and its `UniInner` share the same `Arc<SchemaManager>` and a fork-local `add_label` is visible to subsequent writes.
 
 ## Fork invariants (Phase 6b — diff & promote)
-- **Diff identity is content-addressed UID, not VID.** `compute_diff` in `crates/uni/src/api/fork_diff.rs` buckets vertex rows by `compute_vertex_uid(label, None, properties)` and edge rows by `(src_uid, dst_uid)` scoped to the edge type — siblings off the same parent and totally unrelated forks compare correctly even when VIDs collide. `DiffVertex.vid` survives as an informational `Option<Vid>`; never branch on it for pairing.
+- **Diff identity is content-addressed UID, not VID.** `compute_diff` in `crates/uni-fork/src/diff.rs` (driven from `crates/uni/src/api/fork_admin.rs`) buckets vertex rows by `compute_vertex_uid(label, None, properties)` and edge rows by `(src_uid, dst_uid)` scoped to the edge type — siblings off the same parent and totally unrelated forks compare correctly even when VIDs collide. `DiffVertex.vid` survives as an informational `Option<Vid>`; never branch on it for pairing.
 - **Promote runs inside one primary transaction.** `Uni::promote_from_fork` opens a single `Session::tx()` against primary, runs every pattern, and commits at the end. Partial-failure semantics inherit from the underlying tx — a failure on pattern N rolls back patterns 1..N-1. Don't refactor into per-pattern transactions without preserving that atomicity.
-- **Edge endpoints must exist on primary at edge-promote time.** `run_promote` checks the `just_inserted` cache (vertices added earlier in the same call) before falling back to `resolve_primary_vid` (UidIndex + Cypher MATCH-by-VID verify on primary). Fork-only endpoints surface as `edges_skipped_no_endpoint`; mix `PromotePattern::label(...)` and `PromotePattern::edge_type(...)` in one call to promote endpoints together with their edges.
-- **The shared `UidIndex` is not branch-isolated.** Both primary and the fork write UID→VID entries into the same Lance dataset under `indexes/uni_id_to_vid/{label}/index.lance`. `get_vid` returns *any* registered VID (fork or primary), so always verify via `MATCH (n:Label) WHERE id(n) = $vid` on a primary session before treating the result as a primary endpoint. The helper `resolve_primary_vid` does this round-trip; route every primary UID lookup through it.
+- **Edge endpoints must exist on primary at edge-promote time.** `run_promote` checks the `just_inserted` cache (vertices added earlier in the same call) before falling back to `batch_resolve_primary_vids` (`crates/uni-fork/src/diff.rs`) (UidIndex + Cypher MATCH-by-VID verify on primary). Fork-only endpoints surface as `edges_skipped_no_endpoint`; mix `PromotePattern::label(...)` and `PromotePattern::edge_type(...)` in one call to promote endpoints together with their edges.
+- **The shared `UidIndex` is not branch-isolated.** Both primary and the fork write UID→VID entries into the same Lance dataset under `indexes/uni_id_to_vid/{label}/index.lance`. `get_vid` returns *any* registered VID (fork or primary), so always verify via `MATCH (n:Label) WHERE id(n) = $vid` on a primary session before treating the result as a primary endpoint. The helper `batch_resolve_primary_vids` (`crates/uni-fork/src/diff.rs`) does this round-trip; route every primary UID lookup through it.
 - **Promote flushes the fork before scanning.** `Uni::promote_from_fork` calls `fork.flush().await?` immediately after opening the fresh fork session. Without this, edges committed via a now-dropped earlier fork session aren't visible to the new session's read path. Vertices happen to be visible without flush in practice, but edges depend on it — relying on that asymmetry would silently miss edge promotion targets.
-- **Promote enforces label / edge-type presence on primary before opening the tx.** Surfacing `UniError::LabelNotFound` or `UniError::EdgeTypeNotFound` early is preferable to a half-committed tx that fails in `bulk_insert_*`. Fork-only labels need a separate `db.schema().label(...).apply()` on primary first; same for fork-only edge types.
+- **Diff and promote see schemaless types.** `compute_diff` scans the union of each side's declared labels/edge types and those discovered in data (`MATCH (n) RETURN DISTINCT labels(n)`, `MATCH ()-[r]->() RETURN DISTINCT type(r)`); `edges_skipped` counts over the same set. Note `MATCH (n) UNWIND labels(n) AS l …` returns no rows today — use the `RETURN DISTINCT labels(n)` form.
+- **Promote's gate runs before opening the tx.** A target is accepted when declared on primary, or undeclared on both sides (schemaless — the promote sink, `ForkPromoteSink for Transaction`, inserts it schemalessly through crate-private paths; the public `bulk_insert_*` stay strict). A label / edge type the fork *declared* in its overlay but primary lacks is refused with `UniError::LabelNotFound` / `EdgeTypeNotFound`, since promoting it schemalessly would silently drop the declaration: `db.schema().label(...).apply()` it on primary first.
 
 ## Fork invariants (Phase 5b — vector + FTS fork-local fusion)
 - **Per-branch vector + FTS index builds use Lance's native API.** Confirmed by the Phase 5b spike (`crates/uni-store/src/backend/lance_branch.rs::tests::phase5b_spike_per_branch_vector`): `Dataset::create_index` against a branch-checked-out dataset writes a branch-local vector index — main sees zero, branch sees one. Same pattern as Phase 5a's scalar BTree spike. FTS uses the same `IndexType::Inverted` path as primary's `IndexManager::create_fts_index` (with `InvertedIndexParams::default` — `ScalarIndexParams::for_builtin(Inverted)` is missing the required `base_tokenizer` field and will fail).

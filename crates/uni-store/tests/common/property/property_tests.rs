@@ -248,14 +248,16 @@ fn mutation_strategy() -> impl Strategy<Value = Mutation> {
             small_vid_strategy(),
             small_vid_strategy(),
             0u32..5,
-            0u64..1000
+            0u64..1000,
+            proptest::option::of("[A-Z]{1,8}")
         )
-            .prop_map(|(eid, src, dst, etype, ver)| Mutation::DeleteEdge {
+            .prop_map(|(eid, src, dst, etype, ver, name)| Mutation::DeleteEdge {
                 eid,
                 src_vid: src,
                 dst_vid: dst,
                 edge_type: etype,
                 version: ver,
+                edge_type_name: name,
             }),
     ]
 }
@@ -320,6 +322,7 @@ fn mutations_equal(a: &Mutation, b: &Mutation) -> bool {
                 dst_vid: d1,
                 edge_type: t1,
                 version: v1,
+                edge_type_name: n1,
             },
             Mutation::DeleteEdge {
                 eid: e2,
@@ -327,6 +330,7 @@ fn mutations_equal(a: &Mutation, b: &Mutation) -> bool {
                 dst_vid: d2,
                 edge_type: t2,
                 version: v2,
+                edge_type_name: n2,
             },
         ) => {
             e1.as_u64() == e2.as_u64()
@@ -334,6 +338,7 @@ fn mutations_equal(a: &Mutation, b: &Mutation) -> bool {
                 && d1.as_u64() == d2.as_u64()
                 && t1 == t2
                 && v1 == v2
+                && n1 == n2
         }
         _ => false,
     }
@@ -357,10 +362,17 @@ proptest! {
         lsn in 1u64..10000,
         mutations in prop::collection::vec(mutation_strategy(), 0..10)
     ) {
+        let mutations_len = mutations.len();
         let segment = WalSegment {
             lsn,
             mutations,
             writer_features: uni_common::core::schema::current_writer_features(),
+            announced_through: lsn / 2,
+            commits: if mutations_len > 0 {
+                vec![uni_store::runtime::wal::CommitSpan { start: 0, len: mutations_len }]
+            } else {
+                Vec::new()
+            },
         };
         let json = serde_json::to_string(&segment).expect("serialize");
         let restored: WalSegment = serde_json::from_str(&json).expect("deserialize");
@@ -368,5 +380,7 @@ proptest! {
         prop_assert_eq!(segment.lsn, restored.lsn);
         prop_assert_eq!(segment.mutations.len(), restored.mutations.len());
         prop_assert_eq!(segment.writer_features, restored.writer_features);
+        prop_assert_eq!(segment.announced_through, restored.announced_through);
+        prop_assert_eq!(segment.commits, restored.commits);
     }
 }

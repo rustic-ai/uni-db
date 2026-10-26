@@ -86,7 +86,9 @@ async fn fork_write_and_read(db: &Uni, fork_name: &str) -> Result<(Vec<String>, 
 
     let locy_result = fork.locy(LOCY_P).await?;
     let mut locy: Vec<String> = locy_result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("thing")
         .map(|facts| {
             facts

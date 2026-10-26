@@ -2280,6 +2280,7 @@ async fn run_fixpoint_loop(
                     rule_name: rule.name.clone(),
                     variable_count: None,
                     key_group: None,
+                    probability: None,
                 });
                 already_warned.insert(rule.name.clone());
             }
@@ -2873,6 +2874,9 @@ async fn record_provenance(
     // The references only transient columns name: read from the candidates,
     // which the facts' rows were taken from.
     let transient = transient_support(rule, clause_candidates)?;
+    // The model features, which the facts do not carry either: EXPLAIN
+    // looks a fact's model call up by the features it was invoked with.
+    let features = transient_features(rule, clause_candidates)?;
 
     for delta_batch in state.all_delta() {
         let (hash_indices, key_indices) = yield_positions_in(rule, &delta_batch.schema())?;
@@ -2895,10 +2899,13 @@ async fn record_provenance(
                 find_clause_for_row(rule, &attribution, delta_batch, &hash_indices, row_idx)?;
 
             let (mut support, fact_key) = row_provenance(&resolver, &key_columns, row_idx)?;
-            if let Some(more) =
-                transient.get(&extract_scalar_key(delta_batch, &hash_indices, row_idx))
-            {
+            let candidate_key = extract_scalar_key(delta_batch, &hash_indices, row_idx);
+            if let Some(more) = transient.get(&candidate_key) {
                 support.extend(more.iter().cloned());
+            }
+            let mut invocation_row = fact_row.clone();
+            if let Some(values) = features.get(&candidate_key) {
+                invocation_row.extend(values.iter().cloned());
             }
             let proof_probability = compute_proof_probability(
                 weight_column.is_some(),
@@ -2929,7 +2936,7 @@ async fn record_provenance(
                 neural_calls: collect_neural_calls_for_row(
                     rule,
                     clause_index,
-                    &fact_row,
+                    &invocation_row,
                     classifier_registry,
                     classifier_cache,
                     classifiers.provenance_store,
@@ -3047,6 +3054,7 @@ impl TopKProofAccumulator {
             ),
             variable_count: None,
             key_group: None,
+            probability: None,
         });
     }
 }
@@ -3251,7 +3259,7 @@ fn eval_feature_expr_against_fact_row(
                 // symmetric — without it, the YIELD-position case
                 // (where `fact_row[v]` is a vid Int, not a Node)
                 // returns Null and the store-lookup misses.
-                let hidden_key = format!("__feat_{}_{}", v, prop);
+                let hidden_key = uni_locy::feature_column_name(v, prop);
                 if let Some(val) = fact_row.get(&hidden_key) {
                     return value_to_feature(Some(val));
                 }
@@ -3379,6 +3387,74 @@ fn transient_support(
         }
     }
     Ok(support)
+}
+
+/// Each candidate row's model-feature values, by column name, keyed by the
+/// row's yield columns (see [`transient_features`]).
+type FeatureValues = HashMap<Vec<ScalarKey>, Vec<(String, Value)>>;
+
+/// The model-feature columns
+/// ([`FEATURE_COL_PREFIX`](uni_locy::FEATURE_COL_PREFIX)) of an iteration's
+/// candidate rows, keyed as [`transient_support`] keys them; the first
+/// candidate wins.
+///
+/// A recursive rule's facts are its candidates without those columns, so a
+/// delta row's features, which EXPLAIN reads to look up the model call that
+/// scored it, are looked up here.
+///
+/// # Errors
+///
+/// Fails when a candidate batch lacks a yield column.
+fn transient_features(
+    rule: &FixpointRulePlan,
+    clause_candidates: &[Vec<RecordBatch>],
+) -> DFResult<FeatureValues> {
+    use uni_store::storage::arrow_convert::{arrow_to_value, type_hint_for_field};
+
+    let mut features: FeatureValues = HashMap::new();
+    for batch in clause_candidates
+        .iter()
+        .flatten()
+        .filter(|b| b.num_rows() > 0)
+    {
+        let schema = batch.schema();
+        let columns: Vec<usize> = (0..schema.fields().len())
+            .filter(|&i| {
+                schema
+                    .field(i)
+                    .name()
+                    .starts_with(uni_locy::FEATURE_COL_PREFIX)
+            })
+            .collect();
+        if columns.is_empty() {
+            continue;
+        }
+        let (indices, _) = yield_positions_in(rule, &schema)?;
+        for row in 0..batch.num_rows() {
+            let key = extract_scalar_key(batch, &indices, row);
+            if features.contains_key(&key) {
+                continue;
+            }
+            let values = columns
+                .iter()
+                .map(|&i| {
+                    let field = schema.field(i);
+                    let value =
+                        arrow_to_value(batch.column(i).as_ref(), row, type_hint_for_field(field))
+                            .map_err(|e| {
+                            datafusion::error::DataFusionError::Execution(format!(
+                                "rule '{}': feature column `{}` failed to decode: {e}",
+                                rule.name,
+                                field.name()
+                            ))
+                        })?;
+                    Ok((field.name().clone(), value.canonical_entity()))
+                })
+                .collect::<DFResult<Vec<_>>>()?;
+            features.insert(key, values);
+        }
+    }
+    Ok(features)
 }
 
 /// A referenced fact as a proof term.
@@ -3612,7 +3688,14 @@ pub(crate) async fn record_provenance_nonrecursive(
             for row_idx in 0..batch.num_rows() {
                 let row_hash =
                     provenance_fact_hash(&rule.name, batch, &derivation_indices, row_idx);
-                let fact_row = batch_row_to_value_map(batch, row_idx);
+                // The body row: the model call is looked up by its features,
+                // which the fact the annotation describes does not carry.
+                let invocation_row = batch_row_to_value_map(batch, row_idx);
+                let fact_row: HashMap<String, Value> = invocation_row
+                    .iter()
+                    .filter(|(name, _)| !super::locy_lineage::is_transient_column(name))
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect();
 
                 let (support, fact_key) = row_provenance(&resolver, &key_columns, row_idx)?;
                 let proof_probability = compute_proof_probability(
@@ -3646,7 +3729,7 @@ pub(crate) async fn record_provenance_nonrecursive(
                     neural_calls: collect_neural_calls_for_row(
                         rule,
                         *clause_index,
-                        &fact_row,
+                        &invocation_row,
                         classifier_registry,
                         classifier_cache,
                         classifiers.provenance_store,
@@ -4289,7 +4372,7 @@ fn build_feature_resolvers(
                 let col = if schema.index_of(&direct).is_ok() {
                     direct
                 } else {
-                    format!("__feat_{}_{}", v, prop)
+                    uni_locy::feature_column_name(v, prop)
                 };
                 Ok(FeatureValueSrc::Col(lookup_col(col)?))
             }
@@ -5355,6 +5438,8 @@ fn feed_stratum_scans(
 /// This is critical for fixpoint iteration: the data handle is updated between
 /// iterations, and each re-execution of the subplan must read the latest data.
 pub struct DerivedScanExec {
+    /// The rule whose relation is scanned.
+    rule_name: String,
     data: Arc<RwLock<Vec<RecordBatch>>>,
     schema: SchemaRef,
     properties: Arc<PlanProperties>,
@@ -5365,10 +5450,49 @@ pub struct DerivedScanExec {
     metrics: ExecutionPlanMetricsSet,
 }
 
+/// Checks that a batch of `rule`'s facts has the columns a scan of its
+/// relation declares: as many, and of the same types in order. The names may
+/// differ, since a scan names a column per reference.
+///
+/// # Errors
+///
+/// An internal error naming the rule and both schemas, the declared
+/// (`expected`) and the facts' (`actual`).
+pub(crate) fn check_fact_columns(
+    rule: &str,
+    expected: &SchemaRef,
+    actual: &SchemaRef,
+) -> DFResult<()> {
+    let agree = expected.fields().len() == actual.fields().len()
+        && expected
+            .fields()
+            .iter()
+            .zip(actual.fields())
+            .all(|(e, a)| e.data_type() == a.data_type());
+    if agree {
+        return Ok(());
+    }
+    let describe = |schema: &SchemaRef| {
+        schema
+            .fields()
+            .iter()
+            .map(|f| format!("{}: {}", f.name(), f.data_type()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Err(datafusion::error::DataFusionError::Internal(format!(
+        "rule '{rule}': its facts do not have its declared columns; \
+         expected [{}], actual [{}]",
+        describe(expected),
+        describe(actual)
+    )))
+}
+
 impl DerivedScanExec {
-    pub fn new(data: Arc<RwLock<Vec<RecordBatch>>>, schema: SchemaRef) -> Self {
+    pub fn new(rule_name: String, data: Arc<RwLock<Vec<RecordBatch>>>, schema: SchemaRef) -> Self {
         let properties = compute_plan_properties(Arc::clone(&schema));
         Self {
+            rule_name,
             data,
             schema,
             properties,
@@ -5380,6 +5504,7 @@ impl DerivedScanExec {
 impl fmt::Debug for DerivedScanExec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DerivedScanExec")
+            .field("rule_name", &self.rule_name)
             .field("schema", &self.schema)
             .finish()
     }
@@ -5431,9 +5556,13 @@ impl ExecutionPlan for DerivedScanExec {
                 guard
                     .iter()
                     .map(|b| {
+                        check_fact_columns(&self.rule_name, &self.schema, &b.schema())?;
                         RecordBatch::try_new(Arc::clone(&self.schema), b.columns().to_vec())
                             .map_err(|e| {
-                                datafusion::error::DataFusionError::ArrowError(Box::new(e), None)
+                                datafusion::error::DataFusionError::Internal(format!(
+                                    "rule '{}': its facts cannot be scanned as declared ({e})",
+                                    self.rule_name
+                                ))
                             })
                     })
                     .collect::<DFResult<Vec<_>>>()?
@@ -5642,6 +5771,17 @@ fn apply_post_fold_projection(
                         "post-fold projection '{name}' conversion: {e}"
                     ))
                 })?;
+            // A Cypher-value FOLD output (`SUM` / `MSUM` over integers or a
+            // schemaless property, `MIN`, `COLLECT`) computes through the
+            // Cypher arithmetic UDFs, as in HAVING: DataFusion's own coercion
+            // has no `LargeBinary + Int64`, so `t + 0` failed to plan.
+            let df_expr = crate::query::df_expr::apply_type_coercion(&df_expr, &df_schema)
+                .map_err(|e| {
+                    datafusion::common::DataFusionError::Internal(format!(
+                        "post-fold projection '{name}' type coercion: {e}"
+                    ))
+                })?;
+            let df_expr = resolve_registered_udfs(df_expr, task_ctx.scalar_functions())?;
             let empty = datafusion::logical_expr::LogicalPlan::EmptyRelation(
                 datafusion::logical_expr::EmptyRelation {
                     produce_one_row: false,

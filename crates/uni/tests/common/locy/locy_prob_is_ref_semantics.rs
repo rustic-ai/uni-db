@@ -248,7 +248,10 @@ async fn shared_edge_is_corrected_by_exact_mode_only() -> Result<()> {
     assert!(default.warned("SharedProbabilisticDependency"));
     let exact = run(&db, REACH, true).await?;
     assert_close(exact.prob("A", "D"), 0.264, "exact");
-    assert!(exact.warned("SharedProbabilisticDependency"));
+    // Exact mode resolved the shared edge, so the value is no overestimate:
+    // the sharing is reported as resolved, not warned of (issue #315).
+    assert!(!exact.warned("SharedProbabilisticDependency"));
+    assert!(exact.warned("SharedDependencyResolved"));
     assert!(!exact.warned("BddLimitExceeded"));
     Ok(())
 }
@@ -268,7 +271,9 @@ async fn cycle_is_exact_in_exact_mode() -> Result<()> {
     assert_close(reach_probability(&edges, "s", "t"), 0.4, "possible worlds");
     let exact = run(&db, REACH, true).await?;
     assert_close(exact.prob("s", "t"), 0.4, "exact");
-    assert!(exact.warned("SharedProbabilisticDependency"));
+    // Resolved by exact inference: a status, not the warning (issue #315).
+    assert!(!exact.warned("SharedProbabilisticDependency"));
+    assert!(exact.warned("SharedDependencyResolved"));
     Ok(())
 }
 

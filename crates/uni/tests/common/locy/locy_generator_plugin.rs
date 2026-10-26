@@ -253,12 +253,12 @@ async fn locy_generator_rule_is_derived_by_the_fixpoint() -> anyhow::Result<()> 
         (
             "FOLD in a generator rule",
             "CREATE RULE g AS MATCH (n:Cnt) WHERE myplugin.range(n.k) -> (i) FOLD s = SUM(i) YIELD KEY n, s\nQUERY g RETURN n.name AS n, s".to_string(),
-            &["n=three s=3.0", "n=two s=1.0"],
+            &["n=three s=3", "n=two s=1"],
         ),
         (
             "post-FOLD WHERE in a generator rule",
             "CREATE RULE g AS MATCH (n:Cnt) WHERE myplugin.range(n.k) -> (i) FOLD s = SUM(i) WHERE s > 2 YIELD KEY n, s\nQUERY g RETURN n.name AS n, s".to_string(),
-            &["n=three s=3.0"],
+            &["n=three s=3"],
         ),
         (
             "BEST BY in a generator rule",

@@ -821,6 +821,14 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             // LabelCheck: delegate to standard compilation (uses cypher_expr_to_df)
             Expr::LabelCheck { .. } => self.compile_standard(expr, input_schema),
 
+            // `VALID_AT` is a macro for `uni.temporal.validAt`. The planner
+            // expands it in a WHERE predicate only, so anywhere else (a
+            // RETURN item, a Locy YIELD) the standard translation refused it.
+            Expr::ValidAt { .. } => self.compile(
+                &crate::query::planner::QueryPlanner::transform_valid_at_to_function(expr.clone()),
+                input_schema,
+            ),
+
             // Default to standard compilation for leaf nodes or non-custom trees
             _ => self.compile_standard(expr, input_schema),
         }
@@ -1506,6 +1514,7 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
             // translation and must be compiled as a custom physical expression.
             Expr::CountSubquery(_) | Expr::CollectSubquery(_) => true,
             Expr::LabelCheck { expr, .. } => Self::contains_custom_expr(expr),
+            Expr::ValidAt { .. } => true,
             _ => false,
         }
     }
@@ -1885,7 +1894,9 @@ impl<'a> CypherPhysicalExprCompiler<'a> {
         // column. `EndpointHydrateExec` materialised the endpoints of the *list*
         // before this expression runs; carry them into the inner schema under
         // the loop variable's name so the body can reach them.
-        let endpoint_lists = if let Expr::Variable(list_var) = list {
+        let endpoint_lists = if let Some(list_var) =
+            crate::query::df_graph::endpoint_hydrate::endpoint_list_column(list)
+        {
             let src = crate::query::df_graph::endpoint_hydrate::endpoint_column(list_var, true);
             let dst = crate::query::df_graph::endpoint_hydrate::endpoint_column(list_var, false);
             match (input_schema.index_of(&src), input_schema.index_of(&dst)) {

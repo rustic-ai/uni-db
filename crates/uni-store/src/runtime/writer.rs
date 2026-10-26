@@ -354,6 +354,16 @@ pub struct CommittedTx {
     pub ticket: crate::runtime::publish_sequencer::PublishTicket,
 }
 
+/// The WAL segments recovery replays, as [`Writer::begin_wal_replay`]
+/// returns them.
+#[derive(Debug)]
+pub struct WalRecovery {
+    /// Every segment above the snapshot manifest's mark, in LSN order.
+    pub segments: Vec<crate::runtime::wal::WalSegment>,
+    /// The highest WAL LSN known announced; see [`Writer::begin_wal_replay`].
+    pub announced_through: u64,
+}
+
 /// Parent state captured atomically at a fork point under `flush_lock`.
 ///
 /// Holds the allocator high-water marks and every existing dataset's
@@ -391,6 +401,12 @@ pub struct ForkPoint {
     /// alongside `dataset_versions` so a concurrent parent commit+flush cannot
     /// advance the tip between capture and branch creation.
     pub parent_branch_versions: BTreeMap<String, u64>,
+}
+
+/// `flush_lock`, held by a schema declaration; see [`Writer::declaration_lock`].
+#[must_use = "the declaration is only serialized against commits while this is held"]
+pub struct DeclarationLock {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
 }
 
 /// RAII latch on [`StorageManager::flush_in_progress`].
@@ -575,6 +591,10 @@ impl Drop for RestoreInProgress {
     }
 }
 
+/// How long a flush waits for the announcements of visible commits to be
+/// released before refusing; see `Writer::flush_l0_rotate`.
+const ANNOUNCEMENT_RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Number of recent commits retained for OCC conflict detection. Large enough
 /// that under-run — and the resulting conservative abort — is rare in practice;
 /// each entry is a small set of touched ids.
@@ -742,6 +762,14 @@ impl Writer {
             Arc::new(IdAllocator::new(store, path, 1000).await?)
         };
 
+        // The sequencer raises the log's announced mark, which the log stamps
+        // into its segments (see `publish_sequencer`).
+        let publish_sequencer = match wal.as_ref() {
+            Some(wal) => crate::runtime::publish_sequencer::PublishSequencer::with_announced_mark(
+                wal.announced_mark(),
+            ),
+            None => crate::runtime::publish_sequencer::PublishSequencer::new(),
+        };
         let l0_manager = Arc::new(L0Manager::new(start_version, wal));
         // Route commit-time CRDT merges through the DB's plugin registry (if
         // installed on the StorageManager). Behavior-preserving when absent.
@@ -844,7 +872,7 @@ impl Writer {
             flush_coordinator,
             commit_sequence,
             committed_writes,
-            publish_sequencer: crate::runtime::publish_sequencer::PublishSequencer::new(),
+            publish_sequencer,
             for_update_locks,
             throttle_stats: Arc::new(WriteThrottleStats::default()),
             restore_epoch: std::sync::atomic::AtomicU64::new(0),
@@ -1045,64 +1073,270 @@ impl Writer {
         }
     }
 
+    /// Re-resolve every replayed edge mutation's type id from its type name.
+    ///
+    /// A schemaless edge type id is assigned by the in-memory registry of the
+    /// process that wrote the WAL record, and that registry need not survive:
+    /// a fork's merged schema is never saved, and is rebuilt on reopen from
+    /// primary's *current* registry, where the fork's old id may since have
+    /// been given to a different name. Replaying the raw id then either
+    /// relabels the edge (the id now names another type) or makes the next
+    /// flush fail (`Edge type ID … not found`). The name in the record is the
+    /// authority; the id is re-derived from it here, interning the name when
+    /// the registry no longer knows it.
+    ///
+    /// An edge delete written before deletes carried a name falls back to the
+    /// name an insert in this same replay gave its id; failing that, its id is
+    /// left as written.
+    fn remap_replayed_edge_types<'a>(
+        &self,
+        mutations: impl IntoIterator<Item = &'a mut crate::runtime::wal::Mutation>,
+    ) {
+        use crate::runtime::wal::Mutation;
+        let mut name_by_logged_id: HashMap<u32, String> = HashMap::new();
+        let mut remapped = 0usize;
+        for mutation in mutations {
+            let (edge_type, name) = match mutation {
+                Mutation::InsertEdge {
+                    edge_type,
+                    edge_type_name: Some(name),
+                    ..
+                } => {
+                    name_by_logged_id
+                        .entry(*edge_type)
+                        .or_insert_with(|| name.clone());
+                    (edge_type, name.clone())
+                }
+                Mutation::DeleteEdge {
+                    edge_type,
+                    edge_type_name,
+                    ..
+                } => {
+                    let Some(name) = edge_type_name
+                        .clone()
+                        .or_else(|| name_by_logged_id.get(edge_type).cloned())
+                    else {
+                        continue;
+                    };
+                    (edge_type, name)
+                }
+                _ => continue,
+            };
+            let id = self.schema_manager.get_or_assign_edge_type_id(&name);
+            if *edge_type != id {
+                *edge_type = id;
+                remapped += 1;
+            }
+        }
+        if remapped > 0 {
+            log::info!(
+                "WAL replay: re-resolved the edge type id of {remapped} edge mutations by name"
+            );
+        }
+    }
+
+    /// Replay the WAL above `wal_high_water_mark` into L0 in one step.
+    ///
+    /// Announces nothing: a caller that announces recovered commits drives
+    /// [`Self::begin_wal_replay`], [`Self::apply_replayed_mutations`] and
+    /// [`Self::finish_wal_replay`] itself, one segment at a time. Returns the
+    /// number of mutations replayed.
+    ///
+    /// # Errors
+    /// As [`Self::begin_wal_replay`] and [`Self::apply_replayed_mutations`].
     pub async fn replay_wal(&self, wal_high_water_mark: u64) -> Result<usize> {
+        let Some(recovery) = self.begin_wal_replay(wal_high_water_mark).await? else {
+            return Ok(0);
+        };
+        let mut count = 0;
+        for segment in recovery.segments {
+            count += segment.mutations.len();
+            self.apply_replayed_mutations(segment.mutations)?;
+        }
+        if count > 0 {
+            log::info!(
+                "Replaying {} mutations from WAL (LSN > {})",
+                count,
+                wal_high_water_mark
+            );
+            self.finish_wal_replay();
+        }
+        Ok(count)
+    }
+
+    /// Read the WAL segments above `wal_high_water_mark` for replay, in LSN
+    /// order, and restore the announced mark they record; `None` without a
+    /// WAL. Apply each with [`Self::apply_replayed_mutations`], then call
+    /// [`Self::finish_wal_replay`].
+    ///
+    /// [`WalRecovery::announced_through`] is the highest LSN known announced:
+    /// a commit in a segment above it may never have been announced, since
+    /// the process can die between a commit's WAL flush and its announcement.
+    /// Every segment at or below the mark is, and so is everything at or below
+    /// `wal_high_water_mark`, because a flush waits for the announcements of
+    /// the commits it moves to L1 (see `flush_l0_rotate`).
+    ///
+    /// # Errors
+    /// The log cannot be read, or holds a corrupt segment before its tail.
+    pub async fn begin_wal_replay(&self, wal_high_water_mark: u64) -> Result<Option<WalRecovery>> {
         let l0 = self.l0_manager.get_current();
         let wal = l0.read().wal.clone();
+        let Some(wal) = wal else {
+            return Ok(None);
+        };
+        wal.initialize().await?;
+        // Segments at or below the manifest's mark were truncated by the
+        // flush that published it; new ones must number above it, or the
+        // next recovery skips them.
+        wal.ensure_lsn_above(wal_high_water_mark)?;
+        let mut replay = wal.replay_segments_since(wal_high_water_mark).await?;
+        // Remapped across every segment at once, so a legacy unnamed delete
+        // can borrow the name an insert in an earlier segment gave its id.
+        self.remap_replayed_edge_types(
+            replay
+                .segments
+                .iter_mut()
+                .flat_map(|segment| segment.mutations.iter_mut()),
+        );
+        self.unmarked_wal_segments
+            .store(replay.unmarked_segments, Ordering::Release);
+        let announced_through = replay
+            .segments
+            .iter()
+            .map(|segment| segment.announced_through)
+            .fold(wal_high_water_mark, u64::max);
+        wal.restore_announced_mark(announced_through)?;
+        Ok(Some(WalRecovery {
+            segments: replay.segments,
+            announced_through,
+        }))
+    }
 
-        if let Some(wal) = wal {
-            wal.initialize().await?;
-            // Segments at or below the manifest's mark were truncated by the
-            // flush that published it; new ones must number above it, or the
-            // next recovery skips them.
-            wal.ensure_lsn_above(wal_high_water_mark)?;
-            let replay = wal
-                .replay_since_with_provenance(wal_high_water_mark)
-                .await?;
-            self.unmarked_wal_segments
-                .store(replay.unmarked_segments, Ordering::Release);
-            let mutations = replay.mutations;
-            let count = mutations.len();
-
-            if count > 0 {
-                log::info!(
-                    "Replaying {} mutations from WAL (LSN > {})",
-                    count,
-                    wal_high_water_mark
-                );
-                let mut l0_guard = l0.write();
-                l0_guard.replay_mutations(mutations)?;
-                // Rebuild the UNIQUE constraint index over the recovered rows
-                // (Bug #9 Mechanism B). `replay_mutations` restores
-                // vertices/properties/labels but never repopulates
-                // `constraint_index` (its only other caller is the live insert
-                // path). Without this, a unique key that lives only in the WAL
-                // (committed but not yet flushed to Lance) is invisible to
-                // `check_unique_constraint_multi` after recovery and a
-                // duplicate of it could be created.
-                self.rebuild_constraint_index(&mut l0_guard);
-                // Null out wrong-dimension vector values recovered from a WAL written
-                // before dimension enforcement (issue #137). The flush path now fails
-                // closed on a dimension mismatch, so without this pass a single
-                // pre-fix value would make every flush of its label fail forever,
-                // leaving the database unopenable (the ghost-commit hazard documented
-                // on `commit_transaction_l0`). Nulling preserves exactly the pre-fix
-                // flush outcome for these values, with a loud signal.
-                self.sanitize_replayed_vector_dims(&mut l0_guard);
-                // Mirror the recovered edges into the AdjacencyManager overlay
-                // (issues #281, #282). `replay_mutations` restores them into
-                // the L0 buffer only, and the traversal read path does not read
-                // edges from there — see `mirror_edges_into_adjacency`. Without
-                // this, a store that crashed before its first flush, or a second
-                // handle replaying another handle's committed-but-unflushed WAL,
-                // returns every committed vertex and none of the committed edges.
-                let fallback_version = l0_guard.current_version;
-                self.mirror_edges_into_adjacency(&l0_guard, &l0_guard, fallback_version);
-            }
-
-            Ok(count)
-        } else {
-            Ok(0)
+    /// Apply one replayed segment's mutations to the current L0.
+    ///
+    /// # Errors
+    /// A mutation cannot be applied.
+    pub fn apply_replayed_mutations(
+        &self,
+        mutations: Vec<crate::runtime::wal::Mutation>,
+    ) -> Result<()> {
+        if mutations.is_empty() {
+            return Ok(());
         }
+        self.l0_manager
+            .get_current()
+            .write()
+            .replay_mutations(mutations)
+    }
+
+    /// Rebuild what replayed mutations do not restore by themselves; call
+    /// once after the last [`Self::apply_replayed_mutations`].
+    pub fn finish_wal_replay(&self) {
+        let l0 = self.l0_manager.get_current();
+        let mut l0_guard = l0.write();
+        // Rebuild the UNIQUE constraint index over the recovered rows
+        // (Bug #9 Mechanism B). `replay_mutations` restores
+        // vertices/properties/labels but never repopulates
+        // `constraint_index` (its only other caller is the live insert
+        // path). Without this, a unique key that lives only in the WAL
+        // (committed but not yet flushed to Lance) is invisible to
+        // `check_unique_constraint_multi` after recovery and a
+        // duplicate of it could be created.
+        self.rebuild_constraint_index(&mut l0_guard);
+        // Null out wrong-dimension vector values recovered from a WAL written
+        // before dimension enforcement (issue #137). The flush path now fails
+        // closed on a dimension mismatch, so without this pass a single
+        // pre-fix value would make every flush of its label fail forever,
+        // leaving the database unopenable (the ghost-commit hazard documented
+        // on `commit_transaction_l0`). Nulling preserves exactly the pre-fix
+        // flush outcome for these values, with a loud signal.
+        self.sanitize_replayed_vector_dims(&mut l0_guard);
+        // Mirror the recovered edges into the AdjacencyManager overlay
+        // (issues #281, #282). `replay_mutations` restores them into
+        // the L0 buffer only, and the traversal read path does not read
+        // edges from there — see `mirror_edges_into_adjacency`. Without
+        // this, a store that crashed before its first flush, or a second
+        // handle replaying another handle's committed-but-unflushed WAL,
+        // returns every committed vertex and none of the committed edges.
+        let fallback_version = l0_guard.current_version;
+        self.mirror_edges_into_adjacency(&l0_guard, &l0_guard, fallback_version);
+    }
+
+    /// The current L0's version.
+    #[must_use]
+    pub fn current_version(&self) -> u64 {
+        self.l0_manager.get_current().read().current_version
+    }
+
+    /// Take a place in the announcement order for a commit recovery replayed
+    /// from WAL segment `lsn` and has not announced yet (see
+    /// [`Self::begin_wal_replay`]).
+    ///
+    /// Take it as the segment is replayed, before anything else can be
+    /// announced: a flush waits for the place to be released, so the commit
+    /// cannot reach L1 (and leave the WAL) before its announcement does.
+    pub async fn sequence_recovered_commit(
+        &self,
+        lsn: u64,
+    ) -> crate::runtime::publish_sequencer::PublishTicket {
+        let _flush_lock_guard = self.flush_lock.lock().await;
+        self.publish_sequencer.issue_at(lsn)
+    }
+
+    /// Whether the WAL's announced mark is ahead of every durable segment's:
+    /// a reopen would then announce the commits announced since the last
+    /// segment again, unless [`Self::seal_wal`] records the mark first.
+    #[must_use]
+    pub fn wal_needs_seal(&self) -> bool {
+        self.l0_manager
+            .get_current()
+            .read()
+            .wal
+            .as_ref()
+            .is_some_and(|wal| wal.needs_seal())
+    }
+
+    /// Record the WAL's announced mark durably before the writer's owner
+    /// closes; see [`Self::wal_needs_seal`] and `WriteAheadLog::seal`. A no-op
+    /// without a WAL.
+    ///
+    /// # Errors
+    /// As `WriteAheadLog::seal`.
+    pub async fn seal_wal(&self) -> Result<()> {
+        // Under `flush_lock`, as every other flush of the log: a seal writes
+        // whatever is buffered, and a commit between its append and its own
+        // WAL flush would otherwise find its mutations taken by the seal's
+        // still-unfinished write and report an older segment as its commit
+        // point.
+        let _flush_lock_guard = self.flush_lock.lock().await;
+        self.seal_wal_locked().await
+    }
+
+    /// [`Self::seal_wal`] only if `flush_lock` is free right now; `Ok(false)`
+    /// without sealing when it is held.
+    ///
+    /// For a caller that must not wait, such as a synchronous `Drop` that
+    /// blocks its thread: the lock's holder may be a flush that can only make
+    /// progress on that very thread (a `current_thread` runtime), so waiting
+    /// for it would deadlock. Skipping costs at most re-announcing the commits
+    /// announced since the last segment at the next open.
+    ///
+    /// # Errors
+    /// As `WriteAheadLog::seal`.
+    pub async fn try_seal_wal(&self) -> Result<bool> {
+        let Ok(_flush_lock_guard) = self.flush_lock.try_lock() else {
+            return Ok(false);
+        };
+        self.seal_wal_locked().await?;
+        Ok(true)
+    }
+
+    async fn seal_wal_locked(&self) -> Result<()> {
+        let wal = self.l0_manager.get_current().read().wal.clone();
+        if let Some(wal) = wal {
+            wal.seal().await?;
+        }
+        Ok(())
     }
 
     /// Withdraw every `enforced` / `verified` endpoint-conformance record when
@@ -1398,7 +1632,10 @@ impl Writer {
     pub fn create_transaction_l0(&self) -> Arc<RwLock<L0Buffer>> {
         let current_version = self.l0_manager.get_current().read().current_version;
         // Transaction mutations are logged to WAL at COMMIT time, not during the transaction.
-        let buf = L0Buffer::new(current_version, None);
+        let mut buf = L0Buffer::new(current_version, None);
+        // The schema its statements validate against; see
+        // `revalidate_declared_properties`.
+        buf.validated_schema_version = Some(self.schema_manager.schema().schema_version);
         // SSI: stamp the OCC read sequence at begin so commit can detect any
         // transaction that committed since. Gated on the runtime `ssi_enabled`
         // toggle — when off, `occ_read_set` stays `None` and every downstream
@@ -1599,11 +1836,14 @@ impl Writer {
         lock_timeout: Option<std::time::Duration>,
     ) -> Result<(u64, bool)> {
         // The ticket is dropped unpublished: this caller announces nothing,
-        // and the drop releases its place in the announcement order.
+        // and the drop releases its place in the announcement order -- before
+        // the auto-flush, which waits for every issued place to be released.
         let committed = self
             .commit_transaction_l0_sequenced(tx_l0_arc, lock_timeout, None)
             .await?;
-        Ok((committed.wal_lsn, committed.flush_pending))
+        let wal_lsn = committed.wal_lsn;
+        drop(committed.ticket);
+        Ok((wal_lsn, self.flush_after_commit().await))
     }
 
     /// Like [`Self::commit_transaction_l0_with_lock_timeout`], and also
@@ -1619,9 +1859,13 @@ impl Writer {
     ///
     /// `on_abandon`, given the commit's version, is set as the ticket's
     /// [`PublishTicket::on_abandon`] the moment it is issued, so it covers the
-    /// rest of this call too: once the commit is visible, this call may still
-    /// await (the inline post-commit flush), and a caller dropped there would
-    /// otherwise drop the ticket before it ever saw it.
+    /// rest of this call too: a caller dropped after the commit is visible
+    /// would otherwise drop the ticket before it ever saw it.
+    ///
+    /// The post-commit auto-flush is not run here. Run
+    /// [`Self::flush_after_commit`] once the ticket is published or dropped:
+    /// a flush waits for every issued ticket to be released, so running it
+    /// while holding this one waits for itself.
     ///
     /// [`PublishTicket::on_abandon`]: crate::runtime::publish_sequencer::PublishTicket::on_abandon
     ///
@@ -1840,6 +2084,29 @@ impl Writer {
             self.validate_edge_endpoints_overlay(&tx_l0)?;
         }
 
+        // A declaration that landed while the transaction was open: its
+        // statements validated property values against the schema before it,
+        // so a value of a now-declared property may not fit the declared type
+        // (and the flush would refuse it). Re-validated -- and converted, as
+        // the write path converts -- here, under `flush_lock` and before the
+        // WAL append, so the transaction fails cleanly instead. A declaration
+        // publishes its catalog change under `flush_lock` too
+        // (`Writer::declaration_lock`), so no commit slips between a
+        // declaration's value check and its catalog change. The version
+        // compare keeps the common path free.
+        {
+            let schema = self.schema_manager.schema();
+            let stale = tx_l0_arc
+                .read()
+                .validated_schema_version
+                .is_some_and(|v| v != schema.schema_version);
+            if stale {
+                let mut tx_l0 = tx_l0_arc.write();
+                self.revalidate_declared_properties(&mut tx_l0, &schema)?;
+                tx_l0.validated_schema_version = Some(schema.schema_version);
+            }
+        }
+
         // Crash-recovery seam: SSI validation has passed; the transaction is
         // about to become durable. A crash here must leave NO trace (validation
         // happens before the WAL is touched). No-op unless `failpoints`.
@@ -1854,13 +2121,27 @@ impl Writer {
 
             // If WAL exists, write mutations to it for durability
             if let Some(wal) = main_l0.wal.as_ref() {
+                // Collected, then appended as one unit, so the segment records
+                // which of its mutations are this commit's (`CommitSpan`):
+                // recovery announces exactly those.
+                let mut pending = Vec::new();
+                // An edge delete records its type NAME as well as its id, so
+                // replay can resolve the type by name: a schemaless id is
+                // only meaningful in this process's registry.
+                let wal_edge_type_name = |eid: Eid, edge_type: u32| {
+                    tx_l0
+                        .edge_types
+                        .get(&eid)
+                        .cloned()
+                        .or_else(|| self.schema_manager.edge_type_name_by_id_unified(edge_type))
+                };
                 // Order: vertices first, then edges (to ensure src/dst exist on replay)
 
                 // Vertex insertions
                 for (vid, properties) in &tx_l0.vertex_properties {
                     if !tx_l0.vertex_tombstones.contains(vid) {
                         let labels = tx_l0.vertex_labels.get(vid).cloned().unwrap_or_default();
-                        wal.append(crate::runtime::wal::Mutation::InsertVertex {
+                        pending.push(crate::runtime::wal::Mutation::InsertVertex {
                             vid: *vid,
                             properties: properties.clone(),
                             labels,
@@ -1869,14 +2150,14 @@ impl Writer {
                             // fresh clock reading at commit time.
                             created_at: tx_l0.vertex_created_at.get(vid).copied(),
                             updated_at: tx_l0.vertex_updated_at.get(vid).copied(),
-                        })?;
+                        });
                     }
                 }
 
                 // Vertex deletions
                 for vid in &tx_l0.vertex_tombstones {
                     let labels = tx_l0.vertex_labels.get(vid).cloned().unwrap_or_default();
-                    wal.append(crate::runtime::wal::Mutation::DeleteVertex { vid: *vid, labels })?;
+                    pending.push(crate::runtime::wal::Mutation::DeleteVertex { vid: *vid, labels });
                 }
 
                 // Label-only mutations (SET n:Label / REMOVE n:Label). After
@@ -1887,10 +2168,8 @@ impl Writer {
                         continue;
                     }
                     let labels = tx_l0.vertex_labels.get(vid).cloned().unwrap_or_default();
-                    wal.append(crate::runtime::wal::Mutation::SetVertexLabels {
-                        vid: *vid,
-                        labels,
-                    })?;
+                    pending
+                        .push(crate::runtime::wal::Mutation::SetVertexLabels { vid: *vid, labels });
                 }
 
                 // Crash-recovery seam: vertices appended, edges not yet. Tests
@@ -1902,19 +2181,20 @@ impl Writer {
                 for (eid, (src_vid, dst_vid, edge_type)) in &tx_l0.edge_endpoints {
                     if tx_l0.tombstones.contains_key(eid) {
                         let version = tx_l0.edge_versions.get(eid).copied().unwrap_or(0);
-                        wal.append(crate::runtime::wal::Mutation::DeleteEdge {
+                        pending.push(crate::runtime::wal::Mutation::DeleteEdge {
                             eid: *eid,
                             src_vid: *src_vid,
                             dst_vid: *dst_vid,
                             edge_type: *edge_type,
                             version,
-                        })?;
+                            edge_type_name: wal_edge_type_name(*eid, *edge_type),
+                        });
                     } else {
                         let properties =
                             tx_l0.edge_properties.get(eid).cloned().unwrap_or_default();
                         let version = tx_l0.edge_versions.get(eid).copied().unwrap_or(0);
                         let edge_type_name = tx_l0.edge_types.get(eid).cloned();
-                        wal.append(crate::runtime::wal::Mutation::InsertEdge {
+                        pending.push(crate::runtime::wal::Mutation::InsertEdge {
                             src_vid: *src_vid,
                             dst_vid: *dst_vid,
                             edge_type: *edge_type,
@@ -1924,7 +2204,7 @@ impl Writer {
                             edge_type_name,
                             created_at: tx_l0.edge_created_at.get(eid).copied(),
                             updated_at: tx_l0.edge_updated_at.get(eid).copied(),
-                        })?;
+                        });
                     }
                 }
 
@@ -1934,15 +2214,17 @@ impl Writer {
                 for (eid, tombstone) in &tx_l0.tombstones {
                     if !tx_l0.edge_endpoints.contains_key(eid) {
                         let version = tx_l0.edge_versions.get(eid).copied().unwrap_or(0);
-                        wal.append(crate::runtime::wal::Mutation::DeleteEdge {
+                        pending.push(crate::runtime::wal::Mutation::DeleteEdge {
                             eid: *eid,
                             src_vid: tombstone.src_vid,
                             dst_vid: tombstone.dst_vid,
                             edge_type: tombstone.edge_type,
                             version,
-                        })?;
+                            edge_type_name: wal_edge_type_name(*eid, tombstone.edge_type),
+                        });
                     }
                 }
+                wal.append_commit(pending)?;
             }
         }
 
@@ -2002,7 +2284,10 @@ impl Writer {
         };
         // Commit order is fixed here, under `flush_lock`: the announcement
         // order follows it whatever the post-commit work does.
-        let mut ticket = self.publish_sequencer.issue();
+        // The ticket carries the commit's WAL LSN: releasing it raises the
+        // announced mark the log records, which is how a reopen tells a commit
+        // that was announced from one that was not.
+        let mut ticket = self.publish_sequencer.issue_at(wal_lsn);
         if let Some(announce) = on_abandon {
             ticket.on_abandon(move || announce(version));
         }
@@ -2029,18 +2314,30 @@ impl Writer {
 
         self.update_metrics();
 
-        // 4. Best-effort post-commit auto-flush.
-        //
-        // Two paths:
-        // - async_flush_enabled = false (default): inline under our
-        //   existing flush_lock guard via flush_inline_under_lock.
-        // - async_flush_enabled = true: rotate inline, drop flush_lock,
-        //   then submit the stream phase to the coordinator. Gated on
-        //   `pending_flush_count() < max_pending_flushes` so we don't
-        //   stack up rotations beyond the configured pipeline depth.
-        //   `try_acquire_permit` is non-blocking: if we lose the race
-        //   for the last permit, we just skip this trigger (the next
-        //   commit retries).
+        // The post-commit auto-flush is NOT run here: a flush must not move
+        // this commit into L1 before it is announced (see
+        // `flush_l0_rotate`), and the announcement happens after this returns.
+        // The caller runs it after publishing the ticket, through
+        // [`Self::flush_after_commit`].
+        Ok(CommittedTx {
+            wal_lsn,
+            flush_pending: false,
+            version,
+            ticket,
+        })
+    }
+
+    /// The best-effort auto-flush a commit triggers, run once the commit's
+    /// announcement has been released (or its ticket dropped).
+    ///
+    /// Returns whether an async flush was submitted (async-flush mode only).
+    /// A flush failure is logged, never returned: the commit it follows is
+    /// already durable.
+    pub async fn flush_after_commit(self: &Arc<Self>) -> bool {
+        if !self.should_flush() {
+            return false;
+        }
+        let _flush_lock_guard = self.flush_lock.lock().await;
         let mut flush_pending = false;
         if self.should_flush() {
             if self.config.async_flush_enabled
@@ -2100,12 +2397,7 @@ impl Writer {
                                     );
                                     flush_pending = true;
                                     // Early return — flush_lock already dropped.
-                                    return Ok(CommittedTx {
-                                        wal_lsn,
-                                        flush_pending,
-                                        version,
-                                        ticket,
-                                    });
+                                    return flush_pending;
                                 }
                                 Err(e) => {
                                     tracing::warn!("Async rotate failed (non-critical): {}", e);
@@ -2133,12 +2425,7 @@ impl Writer {
             }
         }
 
-        Ok(CommittedTx {
-            wal_lsn,
-            flush_pending,
-            version,
-            ticket,
-        })
+        flush_pending
     }
 
     /// Take a place in the commit announcement order for a write that became
@@ -5431,6 +5718,274 @@ impl Writer {
         Ok(())
     }
 
+    /// Re-validate the declared-property values a transaction carries against
+    /// `schema`, converting them as the write path would.
+    ///
+    /// For a commit whose statements validated against an older schema; see
+    /// the call in [`Self::commit_transaction_l0_sequenced`]. Vertices are
+    /// judged by the declared type of the first of their labels that declares
+    /// the property (as the write path does), edges by their type's.
+    ///
+    /// # Errors
+    ///
+    /// `UniError::Type` for the first value the declared type cannot hold.
+    fn revalidate_declared_properties(
+        &self,
+        tx_l0: &mut L0Buffer,
+        schema: &uni_common::core::schema::Schema,
+    ) -> Result<()> {
+        use crate::storage::declared_values::coerce;
+        let refuse = |what: String, name: &str, declared: &uni_common::DataType, e| {
+            anyhow::Error::from(uni_common::UniError::Type {
+                expected: format!(
+                    "TypeError: property '{name}' of {what} is declared {declared:?} (declared \
+                     while this transaction was open) but its value does not fit: {e}"
+                ),
+                actual: String::new(),
+            })
+        };
+        let L0Buffer {
+            vertex_properties,
+            vertex_labels,
+            vertex_tombstones,
+            edge_properties,
+            edge_endpoints,
+            edge_types,
+            tombstones,
+            ..
+        } = tx_l0;
+        for (vid, props) in vertex_properties.iter_mut() {
+            if vertex_tombstones.contains(vid) {
+                continue;
+            }
+            let Some(labels) = vertex_labels.get(vid) else {
+                continue;
+            };
+            for (name, value) in props.iter_mut() {
+                let Some(declared) = labels.iter().find_map(|l| {
+                    schema
+                        .properties
+                        .get(l)
+                        .and_then(|p| p.get(name))
+                        .map(|m| &m.r#type)
+                }) else {
+                    continue;
+                };
+                if declared.accepts(value) && declared.check_vector_dims(value).is_ok() {
+                    continue;
+                }
+                *value = coerce(name, declared, value.clone())
+                    .map_err(|e| refuse(format!("vertex {}", vid.as_u64()), name, declared, e))?;
+            }
+        }
+        for (eid, props) in edge_properties.iter_mut() {
+            if tombstones.contains_key(eid) {
+                continue;
+            }
+            let type_name = edge_types.get(eid).cloned().or_else(|| {
+                edge_endpoints
+                    .get(eid)
+                    .and_then(|(_, _, t)| self.schema_manager.edge_type_name_by_id_unified(*t))
+            });
+            let Some(declared_props) = type_name.and_then(|t| schema.properties.get(&t)) else {
+                continue;
+            };
+            for (name, value) in props.iter_mut() {
+                let Some(declared) = declared_props.get(name).map(|m| &m.r#type) else {
+                    continue;
+                };
+                if declared.accepts(value) && declared.check_vector_dims(value).is_ok() {
+                    continue;
+                }
+                *value = coerce(name, declared, value.clone())
+                    .map_err(|e| refuse(format!("edge {}", eid.as_u64()), name, declared, e))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Backfill `label` from the main vertex table once it has entered the
+    /// live catalog (#304). See [`StorageManager::backfill_declared_label`].
+    ///
+    /// A flush reads the schema once, at the start of its stream phase, and
+    /// writes a vertex into a label table only for labels that snapshot
+    /// declares. A flush still holding a snapshot from before the declaration
+    /// adds rows to the main table alone, and if it does so after the backfill
+    /// scanned, they stay hidden. Every such flush is waited out first:
+    /// - an inline flush holds `flush_lock` from rotate to finalize, so taking
+    ///   the lock once waits for it;
+    /// - an async flush rotates under `flush_lock` and streams outside it, so
+    ///   the coordinator is drained.
+    ///
+    /// The lock is released before the drain, because finalizing an async
+    /// flush takes it. A flush that rotates after the lock was taken reads the
+    /// schema after the declaration and writes the label table itself; it may
+    /// run alongside the backfill, which is safe for the reason given on
+    /// `backfill_declared_label`. The backfill does not hold `flush_lock`, so
+    /// commits are not stalled behind a scan of the main table.
+    ///
+    /// # Errors
+    ///
+    /// Fails if pending flushes stall past `flush_drain_timeout`, or if the
+    /// backfill fails.
+    pub async fn backfill_declared_label(&self, label: &str) -> Result<usize> {
+        self.drain_pre_declaration_flushes(label).await?;
+        let copied = self.storage.backfill_declared_label(label).await?;
+        self.record_backfilled_rows(label, copied).await?;
+        Ok(copied)
+    }
+
+    /// Count `rows` appended to `label`'s table outside a flush in the
+    /// manifest the next flush publishes.
+    ///
+    /// `SnapshotManifest::vertices[label].count` accumulates the live rows
+    /// each flush appends, and the index growth trigger compares it with an
+    /// index's `row_count_at_build` (a Lance row count, which does include
+    /// backfilled rows). Left out, a label declared over a million vertices
+    /// would need a million and a half flushed rows, not half a million, to
+    /// trigger a rebuild. The flush publishes the manifest it seeds from
+    /// `cached_manifest`, so the rows are added there. Like a flush's own
+    /// increment, it can be lost to an async flush whose stream copied the
+    /// manifest before this and finalizes after it; the count only drives a
+    /// heuristic trigger and `SHOW STATISTICS`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a failure to load the latest manifest.
+    pub async fn record_backfilled_rows(&self, label: &str, rows: usize) -> Result<()> {
+        if rows == 0 {
+            return Ok(());
+        }
+        if self.cached_manifest.lock().is_none() {
+            // Seeded as a flush would seed it. No manifest at all means
+            // nothing was ever flushed, so there was nothing to backfill.
+            let Some(latest) = self
+                .storage
+                .snapshot_manager()
+                .load_latest_snapshot()
+                .await?
+            else {
+                return Ok(());
+            };
+            let mut cached = self.cached_manifest.lock();
+            if cached.is_none() {
+                *cached = Some(latest);
+            }
+        }
+        if let Some(manifest) = self.cached_manifest.lock().as_mut() {
+            manifest
+                .vertices
+                .entry(label.to_string())
+                .or_insert(LabelSnapshot {
+                    version: 0,
+                    count: 0,
+                    lance_version: 0,
+                })
+                .count += rows as u64;
+        }
+        Ok(())
+    }
+
+    /// Exclude commits and flushes while a declaration checks the values its
+    /// entities already hold and publishes its catalog change.
+    ///
+    /// A declaration validates and converts the values it adopts
+    /// (`StorageManager::check_declared_values`), then changes the catalog.
+    /// A commit landing between the two would carry values validated against
+    /// the schema without the declaration, and the commit's own re-validation
+    /// (`revalidate_declared_properties`) would not fire because the version
+    /// had not moved yet. Holding `flush_lock` across both closes that window:
+    /// a commit before it is flushed and checked, one after it sees the new
+    /// version. Async flushes still streaming are drained first (their
+    /// finalize needs the lock), so none is in flight while it is held.
+    ///
+    /// Commits wait for the declaration while this is held. Drop it before
+    /// anything that takes `flush_lock` itself, such as
+    /// [`Self::backfill_declared_label`] or [`Self::flush_to_l1`].
+    ///
+    /// # Errors
+    ///
+    /// Fails if pending flushes stall past `flush_drain_timeout`.
+    pub async fn declaration_lock(&self) -> Result<DeclarationLock> {
+        loop {
+            if let Some(coord) = self.flush_coordinator.as_ref() {
+                coord
+                    .drain(self.config.flush_drain_timeout)
+                    .await
+                    .map_err(|e| {
+                        anyhow!(
+                            "cannot start a schema declaration: pending flushes did not \
+                             drain: {e} (waited {:?})",
+                            self.config.flush_drain_timeout
+                        )
+                    })?;
+            }
+            let guard = self.flush_lock.clone().lock_owned().await;
+            // A commit may have rotated an async flush between the drain and
+            // the lock; none can while the lock is held.
+            if self
+                .flush_coordinator
+                .as_ref()
+                .is_none_or(|c| c.pending_flush_count() == 0)
+            {
+                return Ok(DeclarationLock { _guard: guard });
+            }
+        }
+    }
+
+    /// Flush committed L0 data of `entities` ahead of a declaration that
+    /// changes their property set, under its [`Self::declaration_lock`].
+    ///
+    /// A declaration validates and converts the values it moves into typed
+    /// columns (`StorageManager::check_declared_values`), and it reads them
+    /// where flushed data lives. Flushing first puts every committed value
+    /// there. A no-op when none of `entities` has L0 data.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a flush failure.
+    pub async fn flush_before_declaration(
+        &self,
+        _held: &DeclarationLock,
+        entities: &[&str],
+    ) -> Result<()> {
+        let l0 = self.committed_l0_context();
+        if entities.iter().any(|e| l0.entity_count(e) > 0) {
+            self.flush_inline_under_lock(None).await?;
+            self.ensure_no_failed_flush()?;
+        }
+        Ok(())
+    }
+
+    /// The committed, unflushed L0 buffers: current plus pending flush, with
+    /// no transaction buffer.
+    #[must_use]
+    pub fn committed_l0_context(&self) -> crate::runtime::l0_visibility::L0Context {
+        crate::runtime::l0_visibility::L0Context {
+            current_l0: Some(self.l0_manager.get_current()),
+            transaction_l0: None,
+            pending_flush_l0s: self.l0_manager.get_pending_flush(),
+        }
+    }
+
+    /// The barrier half of [`Self::backfill_declared_label`].
+    async fn drain_pre_declaration_flushes(&self, label: &str) -> Result<()> {
+        drop(self.flush_lock.lock().await);
+        if let Some(coord) = self.flush_coordinator.as_ref() {
+            coord
+                .drain(self.config.flush_drain_timeout)
+                .await
+                .map_err(|e| {
+                    anyhow!(
+                        "cannot backfill label '{label}': pending flushes did not drain: {e} \
+                         (waited {:?})",
+                        self.config.flush_drain_timeout
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
     /// Flushes the current in-memory L0 buffer to L1 storage.
     ///
     /// # Lock Ordering
@@ -6064,6 +6619,26 @@ impl Writer {
     /// alive for the full flush lifetime — including any future async
     /// path where stream runs on a spawned task.
     async fn flush_l0_rotate(&self) -> Result<RotateOutput> {
+        // The rotated buffer is flushed to L1 and its WAL segments truncated,
+        // after which recovery can no longer announce a commit in it. So every
+        // commit visible now must have its announcement released first: wait
+        // for every issued ticket. `flush_lock` (held by every caller) keeps
+        // new tickets from being issued meanwhile, and a ticket's holder
+        // releases it without taking that lock, so the wait is bounded by the
+        // in-flight commits' post-commit work. A ticket that is never released
+        // (a commit future held unpolled) fails the flush rather than hiding a
+        // commit from recovery; its data stays durable in the WAL.
+        if !self
+            .publish_sequencer
+            .wait_released(ANNOUNCEMENT_RELEASE_TIMEOUT)
+            .await
+        {
+            return Err(anyhow!(
+                "flush refused: a commit visible in L0 has not released its announcement after \
+                 {ANNOUNCEMENT_RELEASE_TIMEOUT:?}, and flushing it would hide it from crash \
+                 recovery; its data stays durable in the WAL"
+            ));
+        }
         // Acquire the in-progress counter BEFORE any heavy work. The
         // guard lives on RotateOutput; dropping RotateOutput drops the
         // guard, so the counter goes back to zero exactly when the flush
@@ -7208,8 +7783,15 @@ impl Writer {
         metrics::counter!("uni_flush_bytes_total").increment(initial_size as u64);
         metrics::counter!("uni_flush_rows_total").increment(initial_count as u64);
 
-        // P. Increment flush generation counter for write throttling.
-        {
+        // P. Increment flush generation counter for write throttling — only
+        // for a flush that wrote something. An empty buffer's flush appends no
+        // fragment to any table, so it is no generation for compaction to fold;
+        // counting it let back-to-back flushes of an idle L0 (a `flush()` loop,
+        // the auto-flush timer while a transaction holds its writes privately)
+        // drive `l1_runs` past the hard limit, and the next write — a
+        // transaction's first `SET` — stalled until compaction caught up:
+        // ~10 s for a 250 ms statement (`bugs::issue_311_tx_index_rekey`).
+        if old_l0_arc.read().holds_flushable_data() {
             let mut status = uni_common::sync::acquire_mutex(
                 &shared.storage.compaction_status,
                 "compaction_status",

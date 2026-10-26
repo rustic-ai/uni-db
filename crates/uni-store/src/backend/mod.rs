@@ -21,6 +21,20 @@ pub mod lance_branch;
 pub mod lance_directory;
 #[cfg(feature = "lance-backend")]
 pub(crate) mod lance_fts;
+#[cfg(feature = "lance-backend")]
+pub(crate) use lance_fts::score_documents;
+
+/// Refuse scored search when no BM25 implementation is compiled in.
+#[cfg(not(feature = "lance-backend"))]
+pub(crate) async fn score_documents(
+    _column: &str,
+    _query: &str,
+    _docs: Vec<(u64, String)>,
+    check: impl Fn() -> anyhow::Result<()> + Clone + Send + Sync + 'static,
+) -> anyhow::Result<Vec<(u64, f32)>> {
+    check()?;
+    anyhow::bail!("Schemaless full-text scoring requires BM25 support")
+}
 pub mod table_names;
 pub mod traits;
 pub mod types;

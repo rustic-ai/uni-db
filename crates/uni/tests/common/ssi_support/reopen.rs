@@ -57,4 +57,39 @@ impl DiskHarness {
     pub async fn open_with(&self, config: UniConfig) -> Result<Uni> {
         Ok(Uni::open(self.uri()).config(config).build().await?)
     }
+
+    /// Simulates a power loss that tore the last commit's WAL segment:
+    /// overwrites the newest segment holding mutations with garbage.
+    ///
+    /// Tests stand a dropped handle in for the crash, and a closing database
+    /// seals its WAL with an empty segment recording which commits were
+    /// announced (`Writer::seal_wal`). A power loss during the last commit's
+    /// write never gets that far, so those trailing empty segments are
+    /// removed first.
+    ///
+    /// # Panics
+    ///
+    /// When no segment holds a mutation.
+    pub fn tear_wal_tail(&self) -> Result<()> {
+        let wal_dir = std::path::PathBuf::from(self.uri()).join("wal");
+        let mut segments: Vec<std::path::PathBuf> = std::fs::read_dir(&wal_dir)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "wal"))
+            .collect();
+        segments.sort();
+        while let Some(last) = segments.last() {
+            let segment = uni_store::runtime::wal::decode_segment(&std::fs::read(last)?)
+                .map_err(|e| anyhow::anyhow!("WAL segment {}: {e}", last.display()))?;
+            if !segment.mutations.is_empty() {
+                break;
+            }
+            std::fs::remove_file(last)?;
+            segments.pop();
+        }
+        let tail = segments
+            .last()
+            .expect("at least one WAL segment holding a commit");
+        std::fs::write(tail, b"torn-by-power-loss")?;
+        Ok(())
+    }
 }

@@ -538,8 +538,24 @@ async fn derived_holds_the_facts_before_the_first_command() -> Result<()> {
     let tx = db.session().tx().await?;
     let result = tx.locy(&program(&["DERIVE link", Q_LINKED])).await?;
     assert_eq!(rendered(&result)?[1], vec![AB, BC, CD]);
-    assert_eq!(result.derived.get("linked").map(Vec::len), Some(0));
-    assert_eq!(result.derived.get("knows").map(Vec::len), Some(3));
+    assert_eq!(
+        result
+            .derived_rules()
+            .await
+            .unwrap()
+            .get("linked")
+            .map(Vec::len),
+        Some(0)
+    );
+    assert_eq!(
+        result
+            .derived_rules()
+            .await
+            .unwrap()
+            .get("knows")
+            .map(Vec::len),
+        Some(3)
+    );
     Ok(())
 }
 

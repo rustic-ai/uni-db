@@ -703,13 +703,18 @@ pub fn record_batches_to_locy_rows(batches: &[RecordBatch]) -> Vec<FactRow> {
         for row_idx in 0..batch.num_rows() {
             let mut row = HashMap::new();
             for (col_idx, field) in schema.fields().iter().enumerate() {
-                // Phase B Slice 3 (post-Slice-3 follow-up): strip
-                // synthetic property-feature columns (`__feat_*`)
-                // emitted by `extract_model_invocations` so they
-                // don't leak into user-visible FactRows.
-                if field.name().starts_with("__feat_") {
-                    continue;
-                }
+                // A model invocation's property-feature columns
+                // (`__feat_*`) are body columns, dropped with the other
+                // transient ones before a row becomes a fact
+                // (`strip_transient_columns`). Skipping them here hid that
+                // the facts kept them: a rule reading the relation through
+                // `IS` then scanned one column more than it declares
+                // (issue #314).
+                debug_assert!(
+                    !field.name().starts_with(uni_locy::FEATURE_COL_PREFIX),
+                    "feature column `{}` reached a fact row",
+                    field.name()
+                );
                 let column = batch.column(col_idx);
                 // Recover the Uni DataType so LargeBinary / struct columns decode
                 // correctly. `Bytes`, `CypherValue` and `Duration` all map to Arrow

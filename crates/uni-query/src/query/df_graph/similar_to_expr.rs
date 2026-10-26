@@ -198,11 +198,12 @@ fn arrow_to_value_at(col: &dyn Array, row: usize) -> Value {
                 .unwrap()
                 .value(row),
         ),
-        DataType::UInt64 => Value::Int(
+        // An engine `UInt64` is an identity: its bits, not a value (see `Value::from_id_bits`).
+        DataType::UInt64 => Value::from_id_bits(
             col.as_any()
                 .downcast_ref::<UInt64Array>()
                 .unwrap()
-                .value(row) as i64,
+                .value(row),
         ),
         DataType::FixedSizeList(_, _) => {
             let fsl = col.as_any().downcast_ref::<FixedSizeListArray>().unwrap();

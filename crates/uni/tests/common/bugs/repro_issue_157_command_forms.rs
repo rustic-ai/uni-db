@@ -69,7 +69,12 @@ async fn derive_command_retains_its_registered_rule() {
         result.err()
     );
     assert!(
-        !result.unwrap().derived.contains_key("tripwire"),
+        !result
+            .unwrap()
+            .derived_rules()
+            .await
+            .unwrap()
+            .contains_key("tripwire"),
         "the unreferenced registered rule must not be evaluated"
     );
 }
@@ -102,7 +107,7 @@ async fn explain_rule_command_retains_its_registered_rule() {
         "EXPLAIN RULE should yield one command result"
     );
     assert!(
-        !out.derived.contains_key("tripwire"),
+        !out.derived_rules().await.unwrap().contains_key("tripwire"),
         "the unreferenced registered rule must not be evaluated"
     );
 }
@@ -125,7 +130,12 @@ async fn abduce_command_retains_its_registered_rule() {
         result.err()
     );
     assert!(
-        !result.unwrap().derived.contains_key("tripwire"),
+        !result
+            .unwrap()
+            .derived_rules()
+            .await
+            .unwrap()
+            .contains_key("tripwire"),
         "the unreferenced registered rule must not be evaluated"
     );
 }
@@ -153,12 +163,14 @@ async fn a_bare_reference_inside_its_module_retains_the_qualified_rule() {
     // Assert the rows, not merely that the call succeeded: resolving to an empty
     // relation would be just as wrong as erroring, and far quieter.
     let facts = out
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("m.adult")
         .expect("the qualified rule must appear in `derived`");
     assert_eq!(facts.len(), 2, "both seeded X nodes must be derived");
     assert!(
-        !out.derived.contains_key("tripwire"),
+        !out.derived_rules().await.unwrap().contains_key("tripwire"),
         "the unreferenced registered rule must not be evaluated"
     );
 }
@@ -177,12 +189,14 @@ async fn a_fully_qualified_reference_retains_the_registered_rule() {
 
     let out = result.unwrap_or_else(|e| panic!("a fully qualified reference must resolve: {e}"));
     let facts = out
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("m.adult")
         .expect("the qualified rule must appear in `derived`");
     assert_eq!(facts.len(), 2, "both seeded X nodes must be derived");
     assert!(
-        !out.derived.contains_key("tripwire"),
+        !out.derived_rules().await.unwrap().contains_key("tripwire"),
         "the unreferenced registered rule must not be evaluated"
     );
 }
@@ -299,11 +313,11 @@ async fn a_prepared_program_referencing_a_rule_still_gets_its_facts() {
     );
     let out = result.unwrap();
     assert!(
-        out.derived.contains_key("connected"),
+        out.derived_rules().await.unwrap().contains_key("connected"),
         "the referenced rule must be derived on the prepared path"
     );
     assert!(
-        !out.derived.contains_key("tripwire"),
+        !out.derived_rules().await.unwrap().contains_key("tripwire"),
         "the unreferenced registered rule must not be evaluated"
     );
 }

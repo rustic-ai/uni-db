@@ -43,7 +43,9 @@ async fn test_fold_having_basic() -> Result<()> {
         .await?;
 
     let facts = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("frequent_payer")
         .expect("rule 'frequent_payer' missing");
 
@@ -90,7 +92,9 @@ async fn test_fold_having_filters_all() -> Result<()> {
         .await?;
 
     let facts = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("high_volume")
         .expect("rule 'high_volume' missing");
     assert_eq!(
@@ -136,7 +140,9 @@ async fn test_fold_without_having_unchanged() -> Result<()> {
         .await?;
 
     let facts = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("spending")
         .expect("rule 'spending' missing");
     // Both people present without HAVING filter
@@ -193,7 +199,9 @@ async fn test_fold_having_multiple_conditions() -> Result<()> {
         .await?;
 
     let facts = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("big_spenders")
         .expect("rule 'big_spenders' missing");
 
@@ -251,7 +259,11 @@ async fn test_fold_having_with_best_by() -> Result<()> {
     // without error. The exact row count depends on BEST BY semantics
     // with FOLD grouping.
     assert!(
-        result.derived.contains_key("top_spender"),
+        result
+            .derived_rules()
+            .await
+            .unwrap()
+            .contains_key("top_spender"),
         "rule should be present in derived set"
     );
 

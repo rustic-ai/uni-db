@@ -36,6 +36,7 @@ pub use query::executor::procedure::{
     BUILTIN_PROCEDURE_MODES, ProcedureOutput, ProcedureParam, ProcedureRegistry,
     ProcedureValueType, RegisteredProcedure, builtin_procedure_mode,
 };
+pub use query::executor::write::coerce_declared_value;
 pub use query::executor::{CustomFunctionRegistry, CustomScalarFn, Executor, ResultNormalizer};
 // M8.6: session-scoped plugin registry plumbing. Host crates wrap their
 // per-query execution paths with `scoped_with_session_plugin_registry`;

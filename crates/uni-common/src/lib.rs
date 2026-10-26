@@ -30,9 +30,9 @@ pub mod graph {
 
 // Re-exports for convenience
 pub use api::error::{
-    GRAPH_COMPUTE_INCOMPLETE_TAG, GraphComputeIncomplete, GraphComputeIncompleteReason,
-    LocyIncomplete, LocyIncompleteReason, PARAMETER_MISSING_TAG, RESERVED_PROPERTY_TAG, Result,
-    UNCOMMITTED_WRITES_TAG, UniError,
+    DeclaredTypeConflict, GRAPH_COMPUTE_INCOMPLETE_TAG, GraphComputeIncomplete,
+    GraphComputeIncompleteReason, LocyIncomplete, LocyIncompleteReason, PARAMETER_MISSING_TAG,
+    RESERVED_PROPERTY_TAG, Result, UNCOMMITTED_WRITES_TAG, UniError,
 };
 pub use config::{CloudStorageConfig, UniConfig};
 pub use core::edge_type::EdgeTypeId;

@@ -50,10 +50,15 @@ use crate::types::{CompiledCommand, CompiledProgram, CompiledRule, Stratum};
 ///
 /// ```
 /// use uni_locy::prune::collect_referenced_rule_names;
-/// use uni_locy::types::CompiledProgram;
 ///
-/// let empty = CompiledProgram::default();
-/// assert!(collect_referenced_rule_names(&empty).is_empty());
+/// // A rule nothing references, and no command: nothing is reached.
+/// let src = "CREATE RULE r AS MATCH (n:N) YIELD KEY n";
+/// let program = uni_locy::compile(&uni_cypher::parse_locy(src).unwrap()).unwrap();
+/// assert!(collect_referenced_rule_names(&program).is_empty());
+///
+/// let src = "CREATE RULE r AS MATCH (n:N) YIELD KEY n\nQUERY r RETURN n";
+/// let program = uni_locy::compile(&uni_cypher::parse_locy(src).unwrap()).unwrap();
+/// assert!(collect_referenced_rule_names(&program).contains("r"));
 /// ```
 #[must_use]
 pub fn collect_referenced_rule_names(program: &CompiledProgram) -> HashSet<String> {

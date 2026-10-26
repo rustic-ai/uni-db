@@ -464,13 +464,17 @@ impl Uni {
     /// pattern are visible to a subsequent edge pattern via an
     /// in-memory cache.
     ///
+    /// A label or edge type declared on neither side (schemaless) is
+    /// promoted schemalessly, as a Cypher `CREATE` on primary would
+    /// write it.
+    ///
     /// # Errors
     ///
     /// - [`UniError::ForkNotFound`] when the fork name is unknown.
     /// - [`UniError::LabelNotFound`] when a vertex pattern targets a
-    ///   label that does not exist on primary.
+    ///   label the fork declared but primary does not.
     /// - [`UniError::EdgeTypeNotFound`] when an edge pattern targets
-    ///   an edge type that does not exist on primary.
+    ///   an edge type the fork declared but primary does not.
     /// - Any error from the primary write path.
     ///
     /// # Examples
@@ -519,7 +523,8 @@ impl Uni {
     ///
     /// # Errors
     /// Returns [`UniError::LabelNotFound`] / [`UniError::EdgeTypeNotFound`]
-    /// when a pattern targets a label or edge type absent on primary, or
+    /// when a pattern targets a label or edge type the fork declared but
+    /// primary does not, or
     /// any error from the underlying fork flush, transaction, or commit.
     ///
     /// [`options`]: fork_diff::PromoteOptions
@@ -536,21 +541,29 @@ impl Uni {
         // committed via a now-dropped fork session may not be visible
         // to the fresh fork session we just opened.
         fork.flush().await?;
-        // Ensure every pattern's target (label or edge type) exists on
-        // primary; surfacing a clear error is preferable to letting
-        // bulk_insert_* fail mid-flight.
+        // Every pattern's target (label or edge type) must be one primary can
+        // take: declared on primary, or undeclared on both sides (schemaless,
+        // #306), which the promote sink inserts schemalessly. A target the
+        // fork declared in its overlay but primary lacks is refused before
+        // the transaction opens: promoting it schemalessly would silently
+        // drop the fork's declaration (types, constraints, indexes).
         let primary_schema = self.inner.schema.schema();
+        let fork_schema = fork.db.schema.schema();
         for pat in patterns {
             if pat.is_edge() {
                 let edge_type = pat.edge_type_name();
-                if !primary_schema.edge_types.contains_key(edge_type) {
+                if !primary_schema.edge_types.contains_key(edge_type)
+                    && fork_schema.edge_types.contains_key(edge_type)
+                {
                     return Err(UniError::EdgeTypeNotFound {
                         edge_type: edge_type.to_string(),
                     });
                 }
             } else {
                 let label = pat.label_name();
-                if !primary_schema.labels.contains_key(label) {
+                if !primary_schema.labels.contains_key(label)
+                    && fork_schema.labels.contains_key(label)
+                {
                     return Err(UniError::LabelNotFound {
                         label: label.to_string(),
                     });

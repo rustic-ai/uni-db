@@ -41,10 +41,10 @@ async fn test_locy_register_persists_rules() -> anyhow::Result<()> {
 
     // The QUERY should find A→B and A→C (via the registered rule).
     assert!(
-        result.derived.contains_key("reach"),
+        result.derived_rules().await.unwrap().contains_key("reach"),
         "Should have 'reach' derived relation"
     );
-    let facts = &result.derived["reach"];
+    let facts = &result.derived_rules().await.unwrap()["reach"];
     assert!(
         facts.len() >= 2,
         "Should find at least 2 facts (A→B, A→C), got {}",

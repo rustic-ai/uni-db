@@ -155,14 +155,17 @@ impl<'a> ForkBuilder<'a> {
                 existing
             }
             None => {
-                let (new_inner, recovered_loads) = parent.db.at_fork(scope.clone()).await?;
+                let (new_inner, recovered_loads, recovered_commits) =
+                    parent.db.at_fork(scope.clone()).await?;
                 let new_inner = Arc::new(new_inner);
                 parent
                     .db
                     .fork_inners
                     .insert(info.id, Arc::downgrade(&new_inner));
-                // Bulk loads on this fork that its recovery completed emit
-                // their events now, as an ordinary fork load does.
+                // Commits the fork's WAL recovered unannounced are announced
+                // now, and bulk loads on this fork that its recovery completed
+                // emit their events, as an ordinary fork load does.
+                super::wal_recovery::deliver_recovered_commits(&new_inner, recovered_commits);
                 super::bulk_events::deliver_recovered_loads(&new_inner, recovered_loads).await;
                 debug!(fork_id = %info.id, fork_name = %info.name, "fork inner cache miss; constructed");
                 new_inner
@@ -310,6 +313,10 @@ async fn create_fork_2pc(
             SchemaManager::validate_schema_element_name("Label", label)?;
         }
         for edge_type in schema.edge_types.keys() {
+            SchemaManager::validate_schema_element_name("Edge type", edge_type)?;
+        }
+        // Schemaless edge types name `deltas_…` datasets and branches too.
+        for edge_type in schema.schemaless_registry.names() {
             SchemaManager::validate_schema_element_name("Edge type", edge_type)?;
         }
     }
@@ -527,6 +534,27 @@ async fn create_fork_2pc(
     Ok(active)
 }
 
+/// Record every schemaless edge type `schema` has interned in the fork's
+/// persisted overlay.
+///
+/// A fork's merged schema is never saved (it shares primary's catalog path),
+/// so this is what lets a reopened fork resolve the `deltas_{type}_*` data
+/// of a schemaless edge type first written on the fork. Called after each
+/// fork commit and after the fork's WAL replay at open. A no-op when nothing
+/// is new.
+///
+/// # Errors
+/// Returns the overlay PUT failure.
+pub(crate) async fn record_fork_schemaless_edge_types(
+    scope: &uni_store::fork::ForkScope,
+    schema: &uni_common::core::schema::SchemaManager,
+) -> anyhow::Result<()> {
+    scope
+        .record_schemaless_edge_types(schema.schemaless_edge_type_names())
+        .await
+        .map(|_| ())
+}
+
 /// Candidate Lance dataset names a fork may branch, derived from `schema`.
 ///
 /// The single source of truth for fork dataset naming, shared by the
@@ -550,8 +578,20 @@ pub(crate) fn fork_candidate_dataset_names(
         names.push(format!("vertices_{label}"));
     }
 
-    // Per-edge-type delta + adjacency tables.
-    for edge_type in schema.edge_types.keys() {
+    // Per-edge-type delta + adjacency tables, for declared and schemaless
+    // edge types alike: a schemaless type flushes to `deltas_{type}_*` just
+    // as a declared one does. Leaving it out left its tables unbranched, so
+    // the fork read primary's live table and saw primary's post-fork edges.
+    let schemaless = schema
+        .schemaless_registry
+        .names()
+        .filter(|name| !schema.edge_types.contains_key(*name));
+    for edge_type in schema
+        .edge_types
+        .keys()
+        .map(String::as_str)
+        .chain(schemaless)
+    {
         names.push(format!("deltas_{edge_type}_fwd"));
         names.push(format!("deltas_{edge_type}_bwd"));
         names.push(format!("adjacency_{edge_type}_fwd"));

@@ -1,7 +1,7 @@
 # Workspace Test Layout
 
 This workspace consolidates integration tests into a single binary per crate
-(or a small number of categorical binaries for very large crates). Without
+(with separate binaries only for documented exceptions). Without
 the convention, Cargo's default behavior — one binary per file in `tests/` —
 turns a routine test workload into dozens of independent rustc + link
 cycles, each statically linking the full transitive dep set
@@ -20,9 +20,10 @@ only binaries produced from files under `tests/`.
 Concretely, when you add a test:
 
 - **Adding a repro or an integration test?** Add a `mod <name>;` line to
-  the crate's existing `tests/integration.rs` and drop your file next to
-  it. Do **not** create a new top-level `tests/<name>.rs` — that silently
-  mints a whole new binary (full relink of datafusion/lance/candle/...),
+  the crate's existing integration module tree. In `crates/uni`, add the
+  file under `tests/common/<group>/` and register it in that group's `mod.rs`;
+  `tests/integration.rs` already includes the groups. Do **not** create a new
+  top-level `tests/<name>.rs` — that silently mints a whole new binary (full relink of datafusion/lance/candle/...),
   which is the exact drift this convention exists to prevent.
 - **Crate has no `integration.rs` yet?** If it already has more than ~3
   loose `tests/*.rs` files, consolidate them first (see the migration
@@ -31,11 +32,12 @@ Concretely, when you add a test:
   a mutually-exclusive feature set (e.g. `provider-onnx-dynamic`), a
   loom/model-check target built under a different feature, or a
   registry/linker-section test that needs process isolation. Record the
-  reason in a comment on the `[[test]]` entry. "It's a separate topic" is
+  reason in a comment on the `[[test]]` entry or, for an auto-discovered
+  target, in the test file's module documentation. "It's a separate topic" is
   **not** a reason — that's what modules are for.
 
-The three legitimate exception classes are the only ones observed in this
-workspace; see "Edge cases" for each.
+Custom test harnesses also require a separate binary; see `uni-tck` below.
+A topic or a large source-file count alone does not justify another binary.
 
 ## The pattern
 
@@ -83,13 +85,12 @@ the same directory.
 - With one consolidated binary, rustc builds and links a single test
   executable instead of N. The dep graph is shared; codegen and link
   costs amortize.
-- `cargo test --test integration <pattern>` and
-  `cargo nextest run -E 'test(<pattern>)'` still filter by test name.
-  Test names gain the module prefix (e.g. `foo_test::it_works`) so
-  category filters become `cargo test --test integration foo_test::`.
-- The Rust test harness still parallelizes test execution across threads
-  within the binary, so wall-clock runtime is dominated by the longest
-  test, not the binary count.
+- `cargo nextest run --test integration -E 'test(<pattern>)'` filters by
+  test name. Module prefixes (e.g. `foo_test::it_works`) let you select a
+  group without creating a separate binary.
+- Nextest runs tests in separate processes and schedules them in parallel.
+  Consolidation saves compilation and linking without requiring serial test
+  execution; `.config/nextest.toml` controls timeouts and constrained groups.
 
 ## Edge cases
 
@@ -112,10 +113,9 @@ empty. **No separate binary is required.** Avoid carving out a
 `tests/integration_<feature>.rs` unless the feature gate is genuinely
 cross-cutting at the binary level (rare).
 
-This is what `crates/uni-store` does: nine files share
-`#![cfg(feature = "lance-backend")]` at their head, all are `mod`-ed
-unconditionally from `tests/integration.rs`, and the test count flips
-between 239 (feature on) and 0 (feature off) automatically.
+`crates/uni-store/tests/integration.rs` uses module-level feature gates for
+feature-specific groups. Feature gates control test inclusion; they do not
+establish that the entire crate builds under every feature combination.
 
 ### Cross-cutting lint allowances
 
@@ -128,21 +128,21 @@ If you want them workspace-uniform, hoist them to `tests/integration.rs`.
 
 ### Genuinely incompatible feature combinations
 
-`crates/uni` is the precedent for the rare case where one binary can't
-cover all feature combinations: M7 (`rhai-plugins`) and M8
-(`pyo3-plugins`) tests are kept as separate `[[test]]` entries because
-their feature gates are mutually exclusive with the default test build
-shape. Use this escape hatch sparingly; per-file `#![cfg(...)]` is
-almost always sufficient.
+`crates/uni/tests/reranker_integration.rs` remains separate because CI also
+builds it with `--no-default-features --features provider-onnx-dynamic`.
+The main integration suite requires a different feature configuration.
+Rhai and PyO3 test groups are included in the main integration module tree;
+their feature gates do not require separate binaries.
 
-### Categorical binaries for very large crates
+### Large test suites and process isolation
 
-`crates/uni` carries 280+ integration test files. To keep individual
-binary build times reasonable, it splits into 9 categorical shims —
-`integration_api`, `integration_cypher`, `integration_search`, etc. —
-each `mod`-ing roughly 30 files. The pattern is the same; only the
-fan-out differs. Choose categorical splitting when a single binary's
-build time becomes painful in dev, not as a default.
+`crates/uni/tests/integration.rs` includes the groups under `tests/common/`
+in one binary. Add tests to those groups; do not restore the historical
+categorical shims or introduce a binary per topic.
+
+`repro_nested_fork_capture_race.rs` is a separate, feature-gated target
+because its process-global failpoint must be isolated from other fork-creating
+tests. Its module documentation records that reason and the run command.
 
 ## Migration recipe
 
@@ -168,19 +168,20 @@ To convert an unconverted crate:
 
 | Crate | Integration binaries | Notes |
 |---|---|---|
-| `uni` | 9 categorical shims + 5 feature-gated standalones | Original; 280 files behind 14 binaries |
+| `uni` (`uni-db`) | 3 (`integration`, `reranker_integration`, `repro_nested_fork_capture_race`) | Main suite, alternate reranker feature configuration, and isolated failpoint regression |
 | `uni-store` | 2 (`integration` + `occ_model`) | `occ_model` is the loom/shuttle model-check target (`#![cfg(any(feature = "loom", feature = "shuttle"))]`) and must stay standalone — merging it drags real-`Writer` tests into the loom build, which panics |
-| `uni-query` | 1 (`integration`) | 27+ files behind 1 binary |
-| `uni-cypher` | 1 (`integration`) | 9 files consolidated |
-| `uni-plugin-host` | 1 (`integration`) | 6 `bug_*` repros consolidated |
-| `uni-locy` | 1 (`integration`) | 5 repros consolidated |
-| `uni-query-functions` | 1 (`integration`) | 4 repros consolidated |
+| `uni-query` | 1 (`integration`) | Consolidated integration modules |
+| `uni-cypher` | 1 (`integration`) | Consolidated integration modules |
+| `uni-plugin-host` | 1 (`integration`) | Consolidated integration modules |
+| `uni-locy` | 1 (`integration`) | Consolidated integration modules |
+| `uni-query-functions` | 1 (`integration`) | Consolidated integration modules |
 | `uni-tck` | 2 (`tck` + `integration`) | `tck` is the cucumber/openCypher runner and must stay standalone — it is `harness = false`, supplying its own `fn main()` via libtest-mimic, which cannot host ordinary `#[test]` functions |
 
 Every crate above is at or under the 3-binary cap. When adding a test to any
 of them, add a `mod` to its `tests/integration.rs` — do not create a new
-top-level `tests/*.rs` file (`autotests = false` is set, so a stray file would
-not even be built until it is explicitly `mod`-ed or given its own `[[test]]`).
+top-level `tests/*.rs` file. In crates with `autotests = false`, an unregistered
+file is not built at all. `uni-db` currently uses auto-discovery, so a new
+top-level file there creates another binary immediately.
 
 Crates with ≤3 integration test files are already within the cap and need no
 `integration.rs` yet — but the moment a 4th would be added, consolidate first

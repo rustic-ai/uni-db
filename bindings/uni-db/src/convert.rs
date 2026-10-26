@@ -632,7 +632,10 @@ pub fn rows_to_py(py: Python, rows: Vec<::uni_db::Row>) -> PyResult<Vec<Py<PyAny
 }
 
 /// Convert Locy rows (HashMap<String, Value>) to a Python list of dicts.
-fn locy_rows_to_py(py: Python, rows: Vec<HashMap<String, Value>>) -> PyResult<Vec<Py<PyAny>>> {
+pub(crate) fn locy_rows_to_py(
+    py: Python,
+    rows: Vec<HashMap<String, Value>>,
+) -> PyResult<Vec<Py<PyAny>>> {
     let mut result = Vec::new();
     for row in rows {
         let dict = PyDict::new(py);
@@ -896,17 +899,19 @@ fn command_result_to_py(py: Python, cmd: uni_locy::CommandResult) -> PyResult<Py
 
 /// Parse the Python spelling of [`uni_locy::GoalDirected`].
 ///
-/// Accepts `"off"`, `"on"` or `"shadow"`, case-insensitively. Anything else is
+/// Accepts `"auto"` (the default), `"off"`, `"on"` or `"shadow"`,
+/// case-insensitively. Anything else is
 /// a `ValueError` (a non-string a `TypeError`) rather than a fallback to the
 /// default, so a misspelt mode cannot silently run the full evaluation.
 pub(crate) fn parse_goal_directed(v: &Bound<'_, PyAny>) -> PyResult<::uni_locy::GoalDirected> {
     let raw: String = v.extract()?;
     match raw.to_ascii_lowercase().as_str() {
+        "auto" => Ok(::uni_locy::GoalDirected::Auto),
         "off" => Ok(::uni_locy::GoalDirected::Off),
         "on" => Ok(::uni_locy::GoalDirected::On),
         "shadow" => Ok(::uni_locy::GoalDirected::Shadow),
         _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "invalid goal_directed '{raw}'; expected one of 'off', 'on', 'shadow'"
+            "invalid goal_directed '{raw}'; expected one of 'auto', 'off', 'on', 'shadow'"
         ))),
     }
 }
@@ -914,6 +919,7 @@ pub(crate) fn parse_goal_directed(v: &Bound<'_, PyAny>) -> PyResult<::uni_locy::
 /// The Python spelling of a [`uni_locy::GoalDirected`] mode.
 pub(crate) fn goal_directed_name(mode: ::uni_locy::GoalDirected) -> &'static str {
     match mode {
+        ::uni_locy::GoalDirected::Auto => "auto",
         ::uni_locy::GoalDirected::Off => "off",
         ::uni_locy::GoalDirected::On => "on",
         ::uni_locy::GoalDirected::Shadow => "shadow",
@@ -1064,10 +1070,15 @@ pub fn locy_result_to_py(py: Python, result: uni_db::locy::LocyResult) -> PyResu
 
     // derived: HashMap<String, Vec<Row>> -> Python dict of lists of dicts
     let derived_dict = PyDict::new(py);
-    for (rule_name, rows) in result.derived {
-        derived_dict.set_item(&rule_name, locy_rows_to_py(py, rows)?)?;
+    let all = py
+        .detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(result.derived_rules()))
+        .map_err(crate::exceptions::uni_error_to_pyerr)?;
+    for (rule_name, rows) in all {
+        derived_dict.set_item(rule_name, locy_rows_to_py(py, rows.clone())?)?;
     }
     dict.set_item("derived", derived_dict)?;
+    // Every warning, the left-out rules' derivation's included (it ran above).
+    let warnings = result.warnings().to_vec();
 
     // stats
     let stats = crate::types::LocyStats {
@@ -1096,23 +1107,8 @@ pub fn locy_result_to_py(py: Python, result: uni_db::locy::LocyResult) -> PyResu
 
     // warnings: Vec<RuntimeWarning> -> list of dicts
     let warn_list = PyList::empty(py);
-    for w in result.warnings {
-        let wd = PyDict::new(py);
-        // See `RuntimeWarningCode::as_str`: the mapping lives on the enum in
-        // `uni-locy` so a new variant fails a build the workspace lanes run.
-        let code_str = w.code.as_str();
-        wd.set_item("code", code_str)?;
-        wd.set_item("message", &w.message)?;
-        wd.set_item("rule_name", &w.rule_name)?;
-        match w.variable_count {
-            Some(n) => wd.set_item("variable_count", n)?,
-            None => wd.set_item("variable_count", py.None())?,
-        }
-        match w.key_group {
-            Some(ref g) => wd.set_item("key_group", g)?,
-            None => wd.set_item("key_group", py.None())?,
-        }
-        warn_list.append(wd)?;
+    for w in &warnings {
+        warn_list.append(runtime_warning_to_py(py, w)?)?;
     }
     dict.set_item("warnings", warn_list)?;
 
@@ -1195,6 +1191,57 @@ pub fn execute_result_to_py(
     })
 }
 
+/// One runtime warning as the dict a Python `LocyResult.warnings` holds.
+///
+/// `code`, `message`, `rule_name`, `variable_count` and `key_group` as
+/// before; `severity` is `"info"` for a status report (an exact-resolved
+/// shared dependency) and `"warning"` otherwise; `probability` is the
+/// structured shared-dependency diagnostic, or `None`. Both result
+/// conversions and the lazy `LocyResult.warnings` getter build their dicts
+/// here, so a new field is one edit.
+pub(crate) fn runtime_warning_to_py<'py>(
+    py: Python<'py>,
+    w: &uni_locy::RuntimeWarning,
+) -> PyResult<Bound<'py, PyDict>> {
+    let wd = PyDict::new(py);
+    // See `RuntimeWarningCode::as_str`: the mapping lives on the enum in
+    // `uni-locy` so a new variant fails a build the workspace lanes run.
+    wd.set_item("code", w.code.as_str())?;
+    wd.set_item(
+        "severity",
+        if w.code.is_informational() {
+            "info"
+        } else {
+            "warning"
+        },
+    )?;
+    wd.set_item("message", &w.message)?;
+    wd.set_item("rule_name", &w.rule_name)?;
+    wd.set_item("variable_count", w.variable_count)?;
+    wd.set_item("key_group", w.key_group.as_deref())?;
+    match &w.probability {
+        Some(d) => {
+            let pd = PyDict::new(py);
+            pd.set_item("inference_mode", d.inference_mode.as_str())?;
+            pd.set_item("resolution", d.resolution.as_str())?;
+            pd.set_item("reason", d.reason.as_deref())?;
+            pd.set_item("groups_detected", d.groups_detected)?;
+            pd.set_item("groups_fallen_back", d.groups_fallen_back)?;
+            pd.set_item(
+                "configured_bdd_variable_limit",
+                d.configured_bdd_variable_limit,
+            )?;
+            pd.set_item(
+                "effective_bdd_variable_limit",
+                d.effective_bdd_variable_limit,
+            )?;
+            wd.set_item("probability", pd)?;
+        }
+        None => wd.set_item("probability", py.None())?,
+    }
+    Ok(wd)
+}
+
 /// Convert a LocyResult to a Python LocyResult class instance.
 pub fn locy_result_to_py_class(
     py: Python,
@@ -1208,10 +1255,12 @@ pub fn locy_result_to_py_class(
     // Capture before the by-value field moves below — `timed_out()`
     // borrows `&result`, which would conflict afterwards.
     let timed_out = result.timed_out();
-    // Reuse the existing dict-based conversion for the inner fields
+    // The rules the evaluation derived now; the ones it left out (under the
+    // default goal-directed mode) are derived on the first `derived` access.
+    let lazy = result.lazy_derived().cloned();
     let derived_dict = pyo3::types::PyDict::new(py);
-    for (rule_name, rows) in result.derived {
-        derived_dict.set_item(&rule_name, locy_rows_to_py(py, rows)?)?;
+    for (rule_name, rows) in result.evaluated_rules() {
+        derived_dict.set_item(rule_name, locy_rows_to_py(py, rows.clone())?)?;
     }
 
     let stats = crate::types::LocyStats {
@@ -1239,23 +1288,8 @@ pub fn locy_result_to_py_class(
     let compile_warn_list = compile_warnings_to_py(py, &result.compile_warnings)?;
 
     let warn_list = pyo3::types::PyList::empty(py);
-    for w in result.warnings {
-        let wd = pyo3::types::PyDict::new(py);
-        // See `RuntimeWarningCode::as_str`: the mapping lives on the enum in
-        // `uni-locy` so a new variant fails a build the workspace lanes run.
-        let code_str = w.code.as_str();
-        wd.set_item("code", code_str)?;
-        wd.set_item("message", &w.message)?;
-        wd.set_item("rule_name", &w.rule_name)?;
-        match w.variable_count {
-            Some(n) => wd.set_item("variable_count", n)?,
-            None => wd.set_item("variable_count", py.None())?,
-        }
-        match w.key_group {
-            Some(ref g) => wd.set_item("key_group", g)?,
-            None => wd.set_item("key_group", py.None())?,
-        }
-        warn_list.append(wd)?;
+    for w in &result.warnings {
+        warn_list.append(runtime_warning_to_py(py, w)?)?;
     }
 
     let approx_dict = pyo3::types::PyDict::new(py);
@@ -1277,6 +1311,7 @@ pub fn locy_result_to_py_class(
 
     Ok(crate::types::PyLocyResult {
         derived: derived_dict.into(),
+        lazy: std::sync::Mutex::new(lazy),
         stats: stats.into_py_any(py)?,
         command_results: cmd_list.into(),
         warnings: warn_list.into(),

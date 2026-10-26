@@ -5,6 +5,7 @@ use super::core::*;
 use crate::query::df_graph::mutation_common::Prefetch;
 use crate::query::planner::LogicalPlan;
 use anyhow::{Result, anyhow};
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uni_common::DataType;
@@ -23,6 +24,7 @@ use uni_store::runtime::l0::StatEntity;
 use uni_store::runtime::l0_visibility;
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::runtime::writer::Writer;
+use uni_store::storage::declared_values::DeclaredEntity;
 
 /// Whether `key` is a user property for side-effect counting: the storage
 /// columns and `ext_id` are not observable as properties (they are excluded
@@ -861,15 +863,48 @@ impl Executor {
             return Ok(());
         }
         let types = Self::prevalidate_property_definitions(&clause.properties)?;
+        let is_new = !sm.schema().labels.contains_key(&clause.name);
+        // Existing schemaless values must fit the declared types, or the
+        // backfill would store them as NULL; refused before anything changes.
+        // See `StorageManager::check_declared_values`.
+        let declared: Vec<(String, DataType)> = clause
+            .properties
+            .iter()
+            .zip(&types)
+            .map(|(prop, dt)| (prop.name.clone(), dt.clone()))
+            .collect();
+        let declaration_lock = if is_new {
+            self.prepare_declaration(&clause.name, DeclaredEntity::Label, &declared)
+                .await?
+        } else {
+            None
+        };
+        // The label may already hold vertices created schemaless; see
+        // `backfill_declared_label`. The marker precedes the live catalog.
+        if is_new {
+            self.storage
+                .mark_label_backfill_pending(&clause.name)
+                .await?;
+        }
+        // Rows that already carry the label cannot satisfy a NOT NULL
+        // property, so it is recorded nullable (as `SchemaBuilder::apply`
+        // does). Decided before the label enters the catalog.
+        let l0 = self
+            .writer
+            .as_ref()
+            .map(|w| w.committed_l0_context())
+            .unwrap_or_default();
+        let mut nullability = Vec::with_capacity(clause.properties.len());
+        for prop in &clause.properties {
+            nullability.push(
+                self.storage
+                    .new_property_nullability(&clause.name, &prop.name, prop.nullable, &l0)
+                    .await?,
+            );
+        }
         sm.add_label_with_desc(&clause.name, clause.description)?;
-        for (prop, dt) in clause.properties.into_iter().zip(types) {
-            sm.add_property_with_desc(
-                &clause.name,
-                &prop.name,
-                dt,
-                prop.nullable,
-                prop.description,
-            )?;
+        for ((prop, dt), nullable) in clause.properties.into_iter().zip(types).zip(nullability) {
+            sm.add_property_with_desc(&clause.name, &prop.name, dt, nullable, prop.description)?;
             if prop.unique {
                 let constraint = Constraint {
                     name: format!("{}_{}_unique", clause.name, prop.name),
@@ -882,8 +917,59 @@ impl Executor {
                 sm.add_constraint(constraint)?;
             }
         }
+        // Commits from here re-validate against the declaration.
+        drop(declaration_lock);
+        if is_new {
+            self.backfill_declared_label(&clause.name).await?;
+        }
         sm.save().await?;
+        if is_new {
+            self.storage
+                .clear_label_backfill_marker(&clause.name)
+                .await?;
+        }
         Ok(())
+    }
+
+    /// The storage half of declaring `declared` on `entity`, before the
+    /// catalog change: take the writer's declaration lock (returned, to be
+    /// held until the catalog change is made), flush the entity's committed
+    /// L0, refuse values the declared types cannot hold, and widen / convert
+    /// storage. See `SchemaBuilder::apply`, which does the same.
+    pub(crate) async fn prepare_declaration(
+        &self,
+        entity: &str,
+        kind: DeclaredEntity,
+        declared: &[(String, DataType)],
+    ) -> Result<Option<uni_store::runtime::DeclarationLock>> {
+        if declared.is_empty() {
+            return Ok(None);
+        }
+        let held = match self.writer.as_ref() {
+            Some(writer) => {
+                let held = writer.declaration_lock().await?;
+                writer.flush_before_declaration(&held, &[entity]).await?;
+                Some(held)
+            }
+            None => None,
+        };
+        self.storage
+            .check_declared_values(entity, kind, declared)
+            .await?;
+        self.storage
+            .widen_for_checked_properties(entity, kind, declared)
+            .await?;
+        Ok(held)
+    }
+
+    /// Copy a just-declared label's flushed rows from the main vertex table
+    /// into its label table (#304), through the writer's flush barrier when
+    /// there is a writer. See `Writer::backfill_declared_label`.
+    pub(crate) async fn backfill_declared_label(&self, label: &str) -> Result<usize> {
+        match &self.writer {
+            Some(writer) => writer.backfill_declared_label(label).await,
+            None => self.storage.backfill_declared_label(label).await,
+        }
     }
 
     pub(crate) async fn enrich_properties_with_generated_columns(
@@ -950,6 +1036,20 @@ impl Executor {
             return Ok(());
         }
         let types = Self::prevalidate_property_definitions(&clause.properties)?;
+        // Relationships written under the type schemaless keep their values,
+        // which must fit the declared types; see `prepare_declaration`.
+        let declared: Vec<(String, DataType)> = clause
+            .properties
+            .iter()
+            .zip(&types)
+            .map(|(prop, dt)| (prop.name.clone(), dt.clone()))
+            .collect();
+        let declaration_lock = if sm.schema().edge_types.contains_key(&clause.name) {
+            None
+        } else {
+            self.prepare_declaration(&clause.name, DeclaredEntity::EdgeType, &declared)
+                .await?
+        };
         sm.add_edge_type_with_desc(
             &clause.name,
             clause.src_labels,
@@ -965,6 +1065,7 @@ impl Executor {
                 prop.description,
             )?;
         }
+        drop(declaration_lock);
         sm.save().await?;
         Ok(())
     }
@@ -1056,12 +1157,38 @@ impl Executor {
         Ok(())
     }
 
+    /// For `ADD PROPERTY`: take the writer's declaration lock and flush
+    /// `entity`'s committed L0, so the values the declaration checks and
+    /// promotes are all where it reads them and no commit slips in before the
+    /// catalog change. Held by the caller across the whole ALTER. See
+    /// `Writer::declaration_lock`.
+    async fn lock_for_add_property(
+        &self,
+        entity: &str,
+        action: &AlterAction,
+    ) -> Result<Option<uni_store::runtime::DeclarationLock>> {
+        if matches!(action, AlterAction::AddProperty(_))
+            && let Some(writer) = self.writer.as_ref()
+        {
+            let held = writer.declaration_lock().await?;
+            writer.flush_before_declaration(&held, &[entity]).await?;
+            return Ok(Some(held));
+        }
+        Ok(None)
+    }
+
     pub(crate) async fn execute_alter_label(&self, clause: AlterLabel) -> Result<()> {
+        let _held = self
+            .lock_for_add_property(&clause.name, &clause.action)
+            .await?;
         let l0 = self.visible_l0().await;
         Self::execute_alter_entity(&self.storage, &l0, &clause.name, clause.action).await
     }
 
     pub(crate) async fn execute_alter_edge_type(&self, clause: AlterEdgeType) -> Result<()> {
+        let _held = self
+            .lock_for_add_property(&clause.name, &clause.action)
+            .await?;
         let l0 = self.visible_l0().await;
         Self::execute_alter_entity(&self.storage, &l0, &clause.name, clause.action).await
     }
@@ -2133,7 +2260,7 @@ impl Executor {
                 )
                 .await?;
             }
-            Self::bind_path_variables(path_pattern, &mut row, temp_vars);
+            Self::bind_path_variables(path_pattern, &mut row, temp_vars)?;
             out.push(row);
         } else {
             // Apply ON MATCH SET to every matched node (multi-match semantics),
@@ -2200,7 +2327,7 @@ impl Executor {
                     .await?;
                     m.insert(var.clone(), Self::build_node_map(vid, label, props));
                 }
-                Self::bind_path_variables(path_pattern, &mut m, temp_vars);
+                Self::bind_path_variables(path_pattern, &mut m, temp_vars)?;
                 out.push(m);
             }
         }
@@ -2233,7 +2360,7 @@ impl Executor {
         // than a per-entity loop. Indexed keys get an index point-lookup;
         // un-indexed keys still skip planning (the lookup is a filtered scan).
         // The shape is the same for every row, so it is detected once.
-        let fastpath = self.merge_single_node_fastpath(pattern);
+        let fastpath = self.merge_single_node_fastpath(&path_pattern);
 
         // The same batched key resolution serves a relationship MERGE whose far
         // endpoint is found-or-created. Detected here rather than beside the
@@ -2515,7 +2642,7 @@ impl Executor {
                                 )
                                 .await?;
                             }
-                            Self::bind_path_variables(&path_pattern, &mut row, &temp_vars);
+                            Self::bind_path_variables(&path_pattern, &mut row, &temp_vars)?;
                             results.push(row);
                             continue;
                         }
@@ -2561,7 +2688,7 @@ impl Executor {
                                     .or_default()
                                     .push(new_vid);
                             }
-                            Self::bind_path_variables(&path_pattern, &mut row, &temp_vars);
+                            Self::bind_path_variables(&path_pattern, &mut row, &temp_vars)?;
                             results.push(row);
                             continue;
                         }
@@ -2651,7 +2778,7 @@ impl Executor {
                             )
                             .await?;
                         }
-                        Self::bind_path_variables(&path_pattern, &mut row, &temp_vars);
+                        Self::bind_path_variables(&path_pattern, &mut row, &temp_vars)?;
                         results.push(row);
                         continue;
                     }
@@ -2666,7 +2793,7 @@ impl Executor {
             let matches = self
                 // `path_pattern`, not `pattern`: when the MERGE carries a path
                 // variable, `prepare_pattern_for_path_binding` names the
-                // otherwise-anonymous relationships so they can be bound. The
+                // otherwise-anonymous nodes and relationships so they can be bound. The
                 // match ran on the original, which has nothing to bind, while
                 // `bind_path_variables` below reads the prepared one — so a
                 // matched `MERGE p = (a)-[:R]->(b)` produced a `p` holding its
@@ -2693,7 +2820,7 @@ impl Executor {
                             )
                             .await?;
                         }
-                        Self::bind_path_variables(&path_pattern, &mut m, &temp_vars);
+                        Self::bind_path_variables(&path_pattern, &mut m, &temp_vars)?;
                         batch.push(m);
                     }
                 } else {
@@ -2727,7 +2854,7 @@ impl Executor {
                         )
                         .await?;
                     }
-                    Self::bind_path_variables(&path_pattern, &mut row, &temp_vars);
+                    Self::bind_path_variables(&path_pattern, &mut row, &temp_vars)?;
                     batch.push(row);
                 }
                 Ok(batch)
@@ -3121,6 +3248,29 @@ impl Executor {
             Self::validate_structural_property_value(prop_name, &val)?;
             return Ok(val);
         };
+        Self::coerce_to_declared_type(prop_name, dt, val)
+    }
+
+    /// The declared-column half of [`Self::coerce_and_validate_property_value`]:
+    /// `val` in the form a column declared `dt` stores, or the type error.
+    ///
+    /// Also the rule a declaration applies to the values a property already
+    /// holds (installed into `uni-store` as its declared-value coercion), so
+    /// declaring and then writing agrees with writing and then declaring.
+    ///
+    /// # Errors
+    /// Returns an error if `dt` cannot hold `val`.
+    pub(crate) fn coerce_to_declared_type(
+        prop_name: &str,
+        dt: &uni_common::core::schema::DataType,
+        val: Value,
+    ) -> Result<Value> {
+        use uni_common::core::schema::DataType;
+
+        // CypherValue columns accept any value (including maps).
+        if matches!(dt, DataType::CypherValue) {
+            return Ok(val);
+        }
 
         // Sparse vectors carry invariants the type system cannot express (strictly
         // ascending unique term ids, finite weights, equal-length arrays, term ids
@@ -4889,53 +5039,71 @@ impl Executor {
         Ok(final_matches)
     }
 
-    /// Prepare a MERGE pattern for path variable binding.
+    /// Prepare a CREATE or MERGE pattern for path variable binding.
     ///
-    /// If any path in the pattern has a path variable (e.g., `MERGE p = (a)-[:R]->(b)`),
-    /// unnamed relationships need internal variable names so that `execute_create_pattern`
-    /// stores the edge data in the row for later path construction.
+    /// A path variable (`CREATE p = (a)-[:R]->(:X)`) is built from the row's
+    /// element values, so every element of a named path must land in the row.
+    /// Anonymous nodes and relationships of such a path are given internal
+    /// names, `__path{pi}_n{idx}` / `__path{pi}_r{idx}`, which
+    /// `execute_create_pattern` and the MERGE match bind like any other
+    /// variable and [`Self::bind_path_variables`] strips afterwards. The path
+    /// index keeps two paths of one pattern from sharing a name.
     ///
-    /// Returns the (possibly modified) pattern and a list of temp variable names to clean up.
-    fn prepare_pattern_for_path_binding(pattern: &Pattern) -> (Pattern, Vec<String>) {
+    /// Returns the pattern — borrowed unchanged when it names no path — and
+    /// the internal names to remove.
+    pub(crate) fn prepare_pattern_for_path_binding(
+        pattern: &Pattern,
+    ) -> (Cow<'_, Pattern>, Vec<String>) {
         let has_path_vars = pattern
             .paths
             .iter()
             .any(|p| p.variable.as_ref().is_some_and(|v| !v.is_empty()));
 
         if !has_path_vars {
-            return (pattern.clone(), Vec::new());
+            return (Cow::Borrowed(pattern), Vec::new());
         }
 
         let mut modified = pattern.clone();
         let mut temp_vars = Vec::new();
 
-        for path in &mut modified.paths {
+        for (pi, path) in modified.paths.iter_mut().enumerate() {
             if path.variable.as_ref().is_none_or(|v| v.is_empty()) {
                 continue;
             }
             for (idx, element) in path.elements.iter_mut().enumerate() {
-                if let PatternElement::Relationship(r) = element
-                    && r.variable.as_ref().is_none_or(String::is_empty)
-                {
-                    let temp_var = format!("__path_r_{}", idx);
-                    r.variable = Some(temp_var.clone());
+                let (slot, kind) = match element {
+                    PatternElement::Node(n) => (&mut n.variable, 'n'),
+                    PatternElement::Relationship(r) => (&mut r.variable, 'r'),
+                    PatternElement::Parenthesized { .. } => continue,
+                };
+                if slot.as_ref().is_none_or(String::is_empty) {
+                    let temp_var = format!("__path{pi}_{kind}{idx}");
+                    *slot = Some(temp_var.clone());
                     temp_vars.push(temp_var);
                 }
             }
         }
 
-        (modified, temp_vars)
+        (Cow::Owned(modified), temp_vars)
     }
 
-    /// Bind path variables in the result row based on the MERGE pattern.
+    /// Bind path variables in the result row from a pattern prepared by
+    /// [`Self::prepare_pattern_for_path_binding`].
     ///
-    /// Walks each path in the pattern, collects node/edge values from the row
-    /// by variable name, and constructs a `Value::Path`.
+    /// Walks each named path, collects node/edge values from the row by
+    /// variable name, and constructs a `Value::Path`. Every element of a
+    /// prepared path has a name, so an element the row does not carry is an
+    /// error: skipping it would bind a shorter path than the one written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an element of a named path is missing from the row
+    /// or is not a node / relationship.
     fn bind_path_variables(
         pattern: &Pattern,
         row: &mut HashMap<String, Value>,
         temp_vars: &[String],
-    ) {
+    ) -> Result<()> {
         for path in &pattern.paths {
             let Some(path_var) = path.variable.as_ref() else {
                 continue;
@@ -4950,35 +5118,85 @@ impl Executor {
             for element in &path.elements {
                 match element {
                     PatternElement::Node(n) => {
-                        if let Some(var) = &n.variable
-                            && let Some(val) = row.get(var)
-                            && let Some(node) = Self::value_to_node_for_path(val)
-                        {
-                            nodes.push(node);
-                        }
+                        let node = n
+                            .variable
+                            .as_ref()
+                            .and_then(|var| row.get(var))
+                            .and_then(Self::value_to_node_for_path)
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "cannot bind path '{path_var}': node {:?} is not bound \
+                                     to a node in the row",
+                                    n.variable
+                                )
+                            })?;
+                        nodes.push(node);
                     }
                     PatternElement::Relationship(r) => {
-                        if let Some(var) = &r.variable
-                            && let Some(val) = row.get(var)
-                            && let Some(edge) = Self::value_to_edge_for_path(val, &r.types)
-                        {
-                            edges.push(edge);
-                        }
+                        let edge = r
+                            .variable
+                            .as_ref()
+                            .and_then(|var| row.get(var))
+                            .and_then(|val| Self::value_to_edge_for_path(val, &r.types))
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "cannot bind path '{path_var}': relationship {:?} is not \
+                                     bound to a relationship in the row",
+                                    r.variable
+                                )
+                            })?;
+                        edges.push(edge);
                     }
-                    _ => {}
+                    PatternElement::Parenthesized { .. } => {
+                        return Err(anyhow!(
+                            "cannot bind path '{path_var}': a parenthesized pattern \
+                             cannot be part of a written path"
+                        ));
+                    }
                 }
             }
 
-            if !nodes.is_empty() {
-                use uni_common::value::Path;
-                row.insert(path_var.clone(), Value::Path(Path { nodes, edges }));
-            }
+            use uni_common::value::Path;
+            row.insert(path_var.clone(), Value::Path(Path { nodes, edges }));
         }
 
         // Clean up internal temp variables
         for var in temp_vars {
             row.remove(var);
         }
+        Ok(())
+    }
+
+    /// Run one CREATE pattern against `row` and bind its path variables.
+    ///
+    /// `prepared` / `temp_vars` come from
+    /// [`Self::prepare_pattern_for_path_binding`], called once per pattern
+    /// rather than once per row. Every CREATE executor goes through here so a
+    /// `CREATE p = …` binds `p` wherever it runs.
+    #[expect(clippy::too_many_arguments)]
+    pub(crate) async fn execute_create_binding_paths(
+        &self,
+        prepared: &Pattern,
+        temp_vars: &[String],
+        row: &mut HashMap<String, Value>,
+        writer: &Writer,
+        prop_manager: &PropertyManager,
+        params: &HashMap<String, Value>,
+        ctx: Option<&QueryContext>,
+        tx_l0: Option<&Arc<parking_lot::RwLock<uni_store::runtime::l0::L0Buffer>>>,
+    ) -> Result<()> {
+        self.execute_create_pattern(
+            prepared,
+            row,
+            writer,
+            prop_manager,
+            params,
+            ctx,
+            tx_l0,
+            None,
+        )
+        .await?;
+        Self::bind_path_variables(prepared, row, temp_vars)
     }
 
     /// Convert a Value (Map or Node) to a Node for path construction.
@@ -5108,6 +5326,24 @@ pub(crate) async fn read_edge_props_with_prefetch(
             .await?
             .unwrap_or_default()),
     }
+}
+
+/// The write path's rule for a value of a declared property: `val` in the
+/// form a column declared `dt` stores, or the type error a `CREATE`/`SET`
+/// would raise.
+///
+/// Installed into `uni-store` (`uni_store::storage::declared_values`) as the
+/// rule a declaration applies to values a property already holds, so that
+/// declaring then writing and writing then declaring agree.
+///
+/// # Errors
+/// Returns an error if `dt` cannot hold `val`.
+pub fn coerce_declared_value(
+    prop_name: &str,
+    dt: &uni_common::core::schema::DataType,
+    val: Value,
+) -> Result<Value> {
+    Executor::coerce_to_declared_type(prop_name, dt, val)
 }
 
 #[cfg(test)]

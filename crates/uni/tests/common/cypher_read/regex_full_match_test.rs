@@ -326,7 +326,12 @@ async fn regex_full_match_locy() -> Result<()> {
                 p = lit(pattern)
             );
             let result = session.locy(&program).await?;
-            let hit = result.derived_facts("hit").cloned().unwrap_or_default();
+            let hit = result
+                .derived_rule("hit")
+                .await
+                .unwrap()
+                .cloned()
+                .unwrap_or_default();
             let hit_subjects: Vec<Value> = hit.iter().filter_map(|r| r.get("s").cloned()).collect();
             let subject_value = Value::String(subject.to_string());
             assert_eq!(

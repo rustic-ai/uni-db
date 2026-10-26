@@ -466,8 +466,9 @@ pub fn arrow_to_value(
     }
 
     // Integer types
+    // An engine `UInt64` is an identity: its bits, not a value (see `Value::from_id_bits`).
     if let Some(u) = col.as_any().downcast_ref::<UInt64Array>() {
-        return Ok(Value::Int(u.value(row) as i64));
+        return Ok(Value::from_id_bits(u.value(row)));
     }
     if let Some(i) = col.as_any().downcast_ref::<Int64Array>() {
         return Ok(Value::Int(i.value(row)));

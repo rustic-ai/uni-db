@@ -79,7 +79,9 @@ async fn locy_rmw_conflicts_like_cypher() -> Result<()> {
         )
         .await?;
     let fact_values = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("fact_values")
         .expect("rule 'fact_values' missing");
     assert_eq!(fact_values.len(), 3, "locy must see the 3 base facts");

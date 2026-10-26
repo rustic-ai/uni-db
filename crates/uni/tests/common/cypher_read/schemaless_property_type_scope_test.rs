@@ -120,7 +120,9 @@ async fn derived(db: &Uni, program: &str, column: &str) -> Result<Vec<Value>, St
         .await
         .map_err(|e| e.to_string())?;
     let mut values: Vec<Value> = result
-        .derived_facts("r")
+        .derived_rule("r")
+        .await
+        .unwrap()
         .ok_or("no facts for r")?
         .iter()
         .map(|row| row.get(column).cloned().unwrap_or(Value::Null))

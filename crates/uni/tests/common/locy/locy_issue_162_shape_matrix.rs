@@ -77,7 +77,14 @@ async fn run_with(
         .await?;
 
     let mut out = Vec::new();
-    for row in result.derived.get(relation).into_iter().flatten() {
+    for row in result
+        .derived_rules()
+        .await
+        .unwrap()
+        .get(relation)
+        .into_iter()
+        .flatten()
+    {
         let name = match row.get("p") {
             Some(uni_common::Value::Node(n)) => n
                 .properties
@@ -249,7 +256,14 @@ CREATE RULE build AS \
         .await?;
 
     let mut got = Vec::new();
-    for row in result.derived.get("build").into_iter().flatten() {
+    for row in result
+        .derived_rules()
+        .await
+        .unwrap()
+        .get("build")
+        .into_iter()
+        .flatten()
+    {
         if let (Some(uni_common::Value::Node(n)), Some(uni_common::Value::Float(f))) =
             (row.get("p"), row.get("b"))
         {

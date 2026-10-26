@@ -126,6 +126,20 @@ impl<'a> ForkSchemaBuilder<'a> {
                             "fork_schema: label {name} not visible in fork SchemaManager after add"
                         ))
                     })?;
+                    // Vertices the fork (or primary, before the fork point)
+                    // created under this label schemalessly live only in the
+                    // main table; copy them into the label's table on the
+                    // fork's branch, or label-scoped reads lose them (#304).
+                    // Append-only, so primary is untouched. Done before the
+                    // overlay persists: the overlay is the fork's only durable
+                    // schema record, so a crash before it leaves the label
+                    // undeclared and its rows still read from the main table,
+                    // and a re-declaration backfills again.
+                    self.session
+                        .db()
+                        .backfill_declared_label(&name)
+                        .await
+                        .map_err(UniError::Internal)?;
                     persist_label(&scope, name.clone(), meta).await?;
                 }
                 ForkSchemaChange::AddEdgeType {

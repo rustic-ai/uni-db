@@ -47,7 +47,9 @@ async fn profile_recursive_transitive_closure() -> Result<()> {
 
     // The result is identical to `run()`: A→B, B→C, A→C.
     let reachable = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("reachable")
         .expect("rule 'reachable' missing");
     assert_eq!(reachable.len(), 3, "expected 3 reachable facts");
@@ -122,7 +124,15 @@ async fn profile_non_recursive_single_iteration() -> Result<()> {
         .profile()
         .await?;
 
-    assert_eq!(result.derived.get("edge").map(|r| r.len()), Some(1));
+    assert_eq!(
+        result
+            .derived_rules()
+            .await
+            .unwrap()
+            .get("edge")
+            .map(|r| r.len()),
+        Some(1)
+    );
 
     let stratum = profile
         .profile

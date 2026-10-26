@@ -75,7 +75,7 @@ async fn forwarded_is_ref_value_column_is_consumable_downstream() -> Result<()> 
         .await?;
 
     // The downstream rule must materialize (it errored before the fix).
-    let rollup = result.derived.get("rollup").expect(
+    let rollup = result.derived_rules().await.unwrap().get("rollup").expect(
         "rule 'rollup' missing — downstream consumption of a forwarded \
                  IS-ref value column failed",
     );

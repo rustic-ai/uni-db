@@ -129,7 +129,8 @@ behaves like `tx()` but refuses `commit()`, so its writes are always discarded.
 
 ## ABDUCE
 
-`ABDUCE` asks: "what minimal changes would make (or prevent) this conclusion hold?"
+`ABDUCE` asks: "which single change to the graph would make (or prevent) this
+conclusion hold?"
 
 ```locy
 ABDUCE compromised WHERE target.name = 'ServerA' RETURN assumptions
@@ -142,9 +143,15 @@ ABDUCE NOT reachable WHERE a.name = 'Alice' RETURN b
 2. **Extract candidate modifications** — edge removals, property changes, edge additions that could alter the derivation.
 3. **Validate each candidate**: savepoint → apply mutation → re-evaluate all strata → check if conclusion holds → rollback.
 
-Returns the minimal set of changes that achieve (or prevent) the goal. The database is never permanently modified.
-
-Typical outputs include modification candidates, validation flags, and estimated costs.
+Each candidate is one edit — for `ABDUCE NOT`, one edge removed or one numeric
+property set to zero; for a positive `ABDUCE`, one edge added — and is
+validated on its own; candidates are never combined. The result lists every candidate tried, each with a `validated` flag
+and a fixed per-kind cost (property change 0.5, edge removal 1.0, edge addition
+1.5), validated candidates first and then by ascending cost, up to
+`max_abduce_results`. The cost ranks kinds of edit; it is not a measure of how
+small the change is, and no search for a minimal *set* of changes is made: a
+goal that only several edits together achieve returns no validated candidate.
+The database is never permanently modified.
 
 An `ABDUCE NOT` candidate edits the one entity the derivation read: a removal
 carries the edge's `eid` (or, for an anonymous relationship, its endpoints'

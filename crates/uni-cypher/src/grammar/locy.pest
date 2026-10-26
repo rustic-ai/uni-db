@@ -435,8 +435,11 @@ derive_edge_spec = {
 // GOAL-DIRECTED EVALUATION  (QUERY)
 // ═══════════════════════════════════════════════════════════════════════════
 //
-// QUERY evaluates a rule using SLG-resolution (top-down with tabling)
-// instead of bottom-up fixpoint.
+// QUERY reads a rule's facts as the bottom-up fixpoint derived them, then
+// filters them by WHERE and shapes them by RETURN. A WHERE that pins a node
+// KEY column of the rule is answered by the magic-sets rewrite
+// (`uni_locy::magic`, on by default), which derives only what that goal
+// reaches; the evaluation is still bottom-up.
 
 goal_query = {
     QUERY_KW ~ rule_name

@@ -9,8 +9,13 @@
 //!   property, for each construct the rewrite adorns and each one it refuses.
 //!   Each case also states whether the rewrite applies, so a case that
 //!   silently stops being rewritten fails instead of passing for free.
-//! * `derived`: in `On` mode a rule evaluated only for a rewritten goal is
-//!   absent, never partial; in `Shadow` mode `derived` equals the full run's.
+//! * `derived`: in `Auto` mode (the default) a rule evaluated only for a
+//!   rewritten goal is derived on first access, against the evaluation's
+//!   snapshot, and every rule's facts equal the full run's — for programs
+//!   mixing QUERY with other commands, recursion, constructs the rewrite
+//!   refuses, writes between commands, and a transaction. In `On` mode such a
+//!   rule is absent, never partial; in `Shadow` mode the facts equal the full
+//!   run's.
 //! * Work: on `k` disjoint chains of 20, a QUERY from one chain head derives
 //!   a constant number of facts with the rewrite on, and `k`-proportional
 //!   facts with it off, measured at two scales through `profile()`.
@@ -18,7 +23,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::Result;
-use uni_db::locy::{CommandResult, GoalDirected, LocyConfig, rewrite_goal_directed};
+use uni_db::locy::{CommandResult, GoalDirected, LocyConfig, RuleFacts, rewrite_goal_directed};
 use uni_db::{Uni, Value};
 
 /// `(name, bad)` nodes and `(src, dst, w)` edges. `a -> b -> c -> d` with a
@@ -259,7 +264,45 @@ fn answers(result: &uni_db::locy::LocyResult) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// Every QUERY answers the same rows off, on and in shadow mode.
+/// A cell independent of map order: a node's properties are a hash map,
+/// whose Debug order varies between two reads of the same node.
+fn cell(v: &Value) -> String {
+    match v {
+        Value::Node(n) => {
+            let props: BTreeMap<&String, String> = n
+                .properties
+                .iter()
+                .map(|(k, v)| (k, format!("{v:?}")))
+                .collect();
+            format!("node#{}{:?}{props:?}", n.vid.as_u64(), n.labels)
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+/// Every rule's facts, cells sorted by column and rows sorted, so two
+/// evaluations compare regardless of row order.
+fn canonical(facts: &RuleFacts) -> BTreeMap<String, Vec<String>> {
+    facts
+        .iter()
+        .map(|(name, rows)| {
+            let mut v: Vec<String> = rows
+                .iter()
+                .map(|r| {
+                    let mut cells: Vec<String> =
+                        r.iter().map(|(k, v)| format!("{k}={}", cell(v))).collect();
+                    cells.sort();
+                    cells.join(",")
+                })
+                .collect();
+            v.sort();
+            (name.clone(), v)
+        })
+        .collect()
+}
+
+/// Every QUERY answers the same rows off, auto, on and in shadow mode, and
+/// auto and shadow publish the derived facts off does.
 #[tokio::test]
 async fn goal_directed_answers_equal_full_evaluation() -> Result<()> {
     let db = graph().await?;
@@ -284,7 +327,8 @@ async fn goal_directed_answers_equal_full_evaluation() -> Result<()> {
             .await?;
         let want = answers(&off);
         assert!(!want.is_empty(), "{label}: no QUERY result");
-        for mode in [GoalDirected::On, GoalDirected::Shadow] {
+        let want_derived = canonical(off.derived_rules().await?);
+        for mode in [GoalDirected::Auto, GoalDirected::On, GoalDirected::Shadow] {
             let got = db
                 .session()
                 .locy_with(&program)
@@ -297,21 +341,23 @@ async fn goal_directed_answers_equal_full_evaluation() -> Result<()> {
                     answers(&got)
                 ));
             }
-            if mode == GoalDirected::Shadow {
-                let names = |r: &uni_db::locy::LocyResult| {
-                    let mut m: BTreeMap<String, usize> = BTreeMap::new();
-                    for (k, v) in &r.derived {
-                        m.insert(k.clone(), v.len());
-                    }
-                    m
-                };
-                if names(&got) != names(&off) {
+            // Auto and Shadow publish every rule's full relation; Auto derives
+            // the rules it left out on this first access.
+            if mode != GoalDirected::On {
+                let got_derived = canonical(got.derived_rules().await?);
+                if got_derived != want_derived {
                     failures.push(format!(
-                        "{label}: shadow derived {:?} != off {:?}",
-                        names(&got),
-                        names(&off)
+                        "{label}: {mode:?} derived {got_derived:?} != off {want_derived:?}"
                     ));
                 }
+            }
+            // A goal not rewritten leaves nothing out. (A rewritten one may
+            // not either: another reader can keep its rule.)
+            if mode == GoalDirected::Auto && !rewritten && !got.lazily_derived_rules().is_empty() {
+                failures.push(format!(
+                    "{label}: Auto left out {:?} for a goal it did not rewrite",
+                    got.lazily_derived_rules()
+                ));
             }
         }
     }
@@ -334,18 +380,31 @@ async fn on_mode_omits_rules_only_goals_needed() -> Result<()> {
         .with_config(config(GoalDirected::On, &[]))
         .run()
         .await?;
-    assert!(!on.derived.contains_key("reach"), "{:?}", on.derived.keys());
+    let derived = on.derived_rules().await?;
+    assert!(!derived.contains_key("reach"), "{:?}", derived.keys());
     assert!(
-        on.derived.contains_key("hub"),
+        derived.contains_key("hub"),
         "an unrelated rule is still published"
     );
     assert!(
-        on.derived.keys().all(|k| !k.starts_with("__locy_gd")),
+        derived.keys().all(|k| !k.starts_with("__locy_gd")),
         "{:?}",
-        on.derived.keys()
+        derived.keys()
     );
-    let off = db.session().locy(&program).await?;
-    assert_eq!(off.derived["hub"].len(), on.derived["hub"].len());
+    assert!(
+        on.lazily_derived_rules().is_empty(),
+        "On derives nothing later"
+    );
+    let off = db
+        .session()
+        .locy_with(&program)
+        .with_config(config(GoalDirected::Off, &[]))
+        .run()
+        .await?;
+    assert_eq!(
+        off.derived_rule("hub").await?.map(Vec::len),
+        on.derived_rule("hub").await?.map(Vec::len)
+    );
     Ok(())
 }
 
@@ -418,7 +477,10 @@ async fn goal_directed_work_is_proportional_to_the_goal() -> Result<()> {
         let db = chains(k).await?;
         let off = work(&db, GoalDirected::Off).await?;
         let on = work(&db, GoalDirected::On).await?;
-        eprintln!("k={k}: off (facts, rows_scanned, rows) = {off:?}; on = {on:?}");
+        let auto = work(&db, GoalDirected::Auto).await?;
+        eprintln!("k={k}: off (facts, rows_scanned, rows) = {off:?}; on = {on:?}; auto = {auto:?}");
+        assert_eq!(auto.0, on.0, "k={k}: auto derives what on derives");
+        assert_eq!(auto.2, 19, "k={k}: auto-mode answer");
         assert_eq!(on.2, 19, "k={k}: on-mode answer");
         assert_eq!(off.2, 19, "k={k}: off-mode answer");
         seen.push((k, off, on));
@@ -440,5 +502,364 @@ async fn goal_directed_work_is_proportional_to_the_goal() -> Result<()> {
         on_large.1,
         off_large.1
     );
+    Ok(())
+}
+
+/// Evaluates `program` with `mode`, every result's facts read in full.
+async fn derived_in(
+    db: &Uni,
+    program: &str,
+    mode: GoalDirected,
+) -> Result<(uni_db::locy::LocyResult, BTreeMap<String, Vec<String>>)> {
+    let result = db
+        .session()
+        .locy_with(program)
+        .with_config(config(mode, &[]))
+        .run()
+        .await?;
+    let facts = canonical(result.derived_rules().await?);
+    Ok((result, facts))
+}
+
+/// Under the default mode every rule's facts equal full evaluation's, for
+/// programs that mix a rewritten QUERY with other commands, recursion, and
+/// constructs the rewrite refuses; and the rules left out are the ones only
+/// the rewritten goals needed.
+#[tokio::test]
+async fn auto_derived_equals_full_evaluation() -> Result<()> {
+    let db = graph().await?;
+    // `(label, program, rules Auto must leave out)`.
+    let cases: Vec<(&str, String, Vec<&str>)> = vec![
+        (
+            "QUERY beside an unrelated rule and a Cypher read",
+            format!(
+                "{TC_RIGHT}CREATE RULE hub AS MATCH (v:N)-[:E]->(:N) YIELD KEY v\n\
+                 QUERY reach WHERE a.name = 'a' RETURN b.name AS n\n\
+                 QUERY hub RETURN v.name AS n\n\
+                 MATCH (n:N) RETURN count(n) AS c"
+            ),
+            vec!["reach"],
+        ),
+        (
+            "non-linear recursion",
+            "CREATE RULE tc AS MATCH (a:N)-[:E]->(b:N) YIELD KEY a, KEY b\n\
+             CREATE RULE tc AS MATCH (a:N) WHERE a IS tc TO m, m IS tc TO b YIELD KEY a, KEY b\n\
+             QUERY tc WHERE a.name = 'x' RETURN b.name AS n"
+                .to_string(),
+            // The copy's inner call reads `tc` in full, which keeps it.
+            vec![],
+        ),
+        (
+            "two rewritten goals over one rule",
+            format!(
+                "{TC_RIGHT}QUERY reach WHERE a.name = 'a' RETURN b.name AS n\n\
+                 QUERY reach WHERE a.name = 'x' RETURN b.name AS n"
+            ),
+            vec!["reach"],
+        ),
+        (
+            "a rewritten goal over a rule another rule reads in full",
+            format!(
+                "{TC_RIGHT}CREATE RULE fan AS MATCH (a:N) WHERE a IS reach TO b \
+                   FOLD k = COUNT(b) YIELD KEY a, k\n\
+                 QUERY reach WHERE a.name = 'a' RETURN b.name AS n"
+            ),
+            vec![],
+        ),
+        (
+            "non-recursive FOLD adorned",
+            format!(
+                "{TC_RIGHT}CREATE RULE fan AS MATCH (a:N) WHERE a IS reach TO b \
+                   FOLD k = COUNT(b) YIELD KEY a, k\n\
+                 QUERY fan WHERE a.name = 'b' RETURN k AS n"
+            ),
+            vec!["fan", "reach"],
+        ),
+        (
+            "PROB goal falls back, a second goal is rewritten",
+            format!(
+                "{TC_RIGHT}CREATE RULE risky AS MATCH (a:N)-[e:E]->(b:N) \
+                   YIELD KEY a, KEY b, 0.5 AS p PROB\n\
+                 QUERY risky WHERE a.name = 'a' RETURN b.name AS n, p\n\
+                 QUERY reach WHERE a.name = 'x' RETURN b.name AS n"
+            ),
+            vec!["reach"],
+        ),
+        (
+            "recursive FOLD falls back",
+            "CREATE RULE far AS MATCH (a:N)-[e:E]->(b:N) FOLD w = MAX(e.w) YIELD KEY a, KEY b, w\n\
+             CREATE RULE far AS MATCH (a:N)-[e:E]->(m:N) WHERE m IS far TO b \
+               FOLD w = MAX(e.w) YIELD KEY a, KEY b, w\n\
+             QUERY far WHERE a.name = 'a' RETURN b.name AS n, w"
+                .to_string(),
+            vec![],
+        ),
+        (
+            "ASSUME reading the rewritten goal's rule",
+            format!(
+                "{TC_RIGHT}QUERY reach WHERE a.name = 'x' RETURN b.name AS n\n\
+                 ASSUME {{ MATCH (z:N {{name: 'z'}}), (a:N {{name: 'a'}}) \
+                   CREATE (z)-[:E {{w: 1}}]->(a) }} \
+                 THEN {{ QUERY reach WHERE a.name = 'x' RETURN b.name AS n }}"
+            ),
+            // The body's QUERY is not rewritten and reads `reach` in full.
+            vec![],
+        ),
+    ];
+    let mut failures = Vec::new();
+    for (label, program, left_out) in cases {
+        let (off, want) = derived_in(&db, &program, GoalDirected::Off).await?;
+        let auto = db
+            .session()
+            .locy_with(&program)
+            .with_config(config(GoalDirected::Auto, &[]))
+            .run()
+            .await?;
+        let lazy: Vec<&str> = auto
+            .lazily_derived_rules()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        if lazy != left_out {
+            failures.push(format!("{label}: left out {lazy:?}, expected {left_out:?}"));
+        }
+        // One rule first, then the whole map: both reach the same facts.
+        for rule in &left_out {
+            let one = auto.derived_rule(rule).await?.map(Vec::len);
+            let full = off.derived_rule(rule).await?.map(Vec::len);
+            if one != full {
+                failures.push(format!(
+                    "{label}: derived_rule({rule}) {one:?} != off {full:?}"
+                ));
+            }
+        }
+        let got = canonical(auto.derived_rules().await?);
+        if got != want {
+            failures.push(format!("{label}: derived {got:?} != off {want:?}"));
+        }
+        if answers(&auto) != answers(&off) {
+            failures.push(format!(
+                "{label}: answers {:?} != off {:?}",
+                answers(&auto),
+                answers(&off)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    Ok(())
+}
+
+/// A rule left out is derived in the state the evaluation read, not the
+/// state at the time of access: a commit between the evaluation and the
+/// first access does not reach it.
+#[tokio::test]
+async fn auto_derives_left_out_rules_in_the_evaluated_snapshot() -> Result<()> {
+    let db = graph().await?;
+    let program = format!("{TC_RIGHT}QUERY reach WHERE a.name = 'x' RETURN b.name AS n");
+    let (_, want) = derived_in(&db, &program, GoalDirected::Off).await?;
+    let auto = db.session().locy(&program).await?;
+    assert_eq!(auto.lazily_derived_rules(), ["reach".to_string()]);
+
+    // `z -> a` joins the two components: full evaluation now derives more.
+    let tx = db.session().tx().await?;
+    tx.execute("MATCH (z:N {name: 'z'}), (a:N {name: 'a'}) CREATE (z)-[:E {w: 1}]->(a)")
+        .await?;
+    tx.commit().await?;
+    let (_, after) = derived_in(&db, &program, GoalDirected::Off).await?;
+    assert_ne!(after, want, "the commit changes the full relation");
+
+    assert_eq!(canonical(auto.derived_rules().await?), want);
+    Ok(())
+}
+
+/// A program that writes is evaluated in full under the default mode: its
+/// derived facts are read in the state its commands leave, which no snapshot
+/// taken before them holds.
+#[tokio::test]
+async fn auto_evaluates_writing_programs_in_full() -> Result<()> {
+    let db = graph().await?;
+    let program = format!(
+        "{TC_RIGHT}QUERY reach WHERE a.name = 'x' RETURN b.name AS n\n\
+         MATCH (y:N {{name: 'y'}}) SET y.bad = false\n\
+         QUERY reach WHERE a.name = 'x' RETURN b.name AS n"
+    );
+    let (off, want) = derived_in(&db, &program, GoalDirected::Off).await?;
+    let (auto, got) = derived_in(&db, &program, GoalDirected::Auto).await?;
+    assert!(auto.lazily_derived_rules().is_empty());
+    assert_eq!(got, want);
+    assert_eq!(answers(&auto), answers(&off));
+    Ok(())
+}
+
+/// Inside a transaction the default mode evaluates in full: the
+/// transaction's own writes keep changing after the call and its reads must
+/// reach its conflict check, so nothing is left for later.
+#[tokio::test]
+async fn auto_in_a_transaction_evaluates_in_full() -> Result<()> {
+    let db = graph().await?;
+    let program = format!("{TC_RIGHT}QUERY reach WHERE a.name = 'x' RETURN b.name AS n");
+    let (off, want) = derived_in(&db, &program, GoalDirected::Off).await?;
+    let tx = db.session().tx().await?;
+    let in_tx = tx.locy(&program).await?;
+    assert!(in_tx.lazily_derived_rules().is_empty());
+    assert_eq!(canonical(in_tx.derived_rules().await?), want);
+    assert_eq!(answers(&in_tx), answers(&off));
+    tx.rollback();
+    Ok(())
+}
+
+/// A rule left out of an evaluation cut short is reported as skipped and not
+/// derived later.
+#[tokio::test]
+async fn auto_cut_short_reports_left_out_rules_as_skipped() -> Result<()> {
+    let db = chains(2).await?;
+    let config = LocyConfig {
+        max_iterations: 3,
+        allow_partial: true,
+        ..Default::default()
+    };
+    let result = db
+        .session()
+        .locy_with(CHAIN_TC)
+        .with_config(config)
+        .run()
+        .await?;
+    let incomplete = result.incomplete.as_ref().expect("cut short");
+    // The goal-directed copy was the rule cut short; the diagnostics name
+    // the program's rule, never a generated one.
+    assert!(
+        incomplete.incomplete_rules.iter().any(|r| r == "reach")
+            || incomplete.skipped_rules.iter().any(|r| r == "reach"),
+        "{incomplete:?}"
+    );
+    assert!(
+        incomplete
+            .incomplete_rules
+            .iter()
+            .chain(&incomplete.skipped_rules)
+            .chain(&incomplete.complement_rules_affected)
+            .all(|r| !r.starts_with("__locy_gd")),
+        "{incomplete:?}"
+    );
+    assert!(result.lazily_derived_rules().is_empty());
+    assert!(result.derived_rule("reach").await?.is_none());
+    Ok(())
+}
+
+/// Once the database is gone the left-out rules cannot be derived, and
+/// reading them says so instead of returning nothing.
+#[tokio::test]
+async fn auto_left_out_rules_after_the_database_closed_is_an_error() -> Result<()> {
+    let db = graph().await?;
+    let program = format!("{TC_RIGHT}QUERY reach WHERE a.name = 'x' RETURN b.name AS n");
+    let result = db.session().locy(&program).await?;
+    assert_eq!(result.lazily_derived_rules(), ["reach".to_string()]);
+    drop(db);
+    let err = result
+        .derived_rules()
+        .await
+        .expect_err("the database is closed");
+    assert!(err.to_string().contains("closed"), "{err}");
+    // The rules the evaluation itself derived are still there.
+    assert!(result.evaluated_rules().keys().all(|k| k != "reach"));
+    Ok(())
+}
+
+/// `(code, rule)` of every warning, sorted.
+fn warning_keys(result: &uni_db::locy::LocyResult) -> Vec<String> {
+    let mut keys: Vec<String> = result
+        .warnings()
+        .iter()
+        .map(|w| format!("{:?}@{}", w.code, w.rule_name))
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// After the derived facts are read, a result that left rules out reports
+/// the runtime warnings full evaluation does, each once.
+///
+/// `reach` is an MNOR rule whose two proofs of `A -> D` share the edge
+/// `C -> D`, so it raises `SharedProbabilisticDependency`. `hop` is an
+/// unrelated rule and `link` a plain rule over `reach`, both pruned by their
+/// goals; deriving `link` later evaluates `reach` again, and that second
+/// warning must not be reported twice.
+#[tokio::test]
+async fn auto_reports_full_evaluation_warnings_once_derived() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE LABEL P (name STRING)").await?;
+    tx.execute("CREATE EDGE TYPE Q (p FLOAT) FROM P TO P")
+        .await?;
+    tx.commit().await?;
+    let tx = db.session().tx().await?;
+    for n in ["A", "B", "C", "D"] {
+        tx.execute(&format!("CREATE (:P {{name: '{n}'}})")).await?;
+    }
+    for (a, b, p) in [
+        ("A", "B", 0.5),
+        ("A", "C", 0.3),
+        ("B", "C", 0.4),
+        ("C", "D", 0.6),
+    ] {
+        tx.execute(&format!(
+            "MATCH (x:P {{name: '{a}'}}), (y:P {{name: '{b}'}}) CREATE (x)-[:Q {{p: {p}}}]->(y)"
+        ))
+        .await?;
+    }
+    tx.commit().await?;
+    let program = "CREATE RULE reach AS MATCH (a:P)-[e:Q]->(b:P) \
+                     FOLD prob = MNOR(e.p) YIELD KEY a, KEY b, prob\n\
+                   CREATE RULE reach AS MATCH (a:P)-[e:Q]->(mid:P) WHERE mid IS reach TO b \
+                     FOLD prob = MNOR(e.p) YIELD KEY a, KEY b, prob\n\
+                   CREATE RULE hop AS MATCH (a:P)-[:Q]->(b:P) YIELD KEY a, KEY b\n\
+                   CREATE RULE hop AS MATCH (a:P)-[:Q]->(m:P) WHERE m IS hop TO b \
+                     YIELD KEY a, KEY b\n\
+                   CREATE RULE link AS MATCH (a:P)-[:Q]->(b:P) WHERE b IS reach TO c \
+                     YIELD KEY a, KEY c\n\
+                   QUERY reach RETURN a.name AS src, b.name AS dst, prob\n\
+                   QUERY hop WHERE a.name = 'A' RETURN b.name AS n\n\
+                   QUERY link WHERE a.name = 'A' RETURN c.name AS n";
+    let (off, want) = derived_in(&db, program, GoalDirected::Off).await?;
+    let auto = db
+        .session()
+        .locy_with(program)
+        .with_config(config(GoalDirected::Auto, &[]))
+        .run()
+        .await?;
+    assert_eq!(
+        auto.lazily_derived_rules(),
+        ["hop".to_string(), "link".to_string()]
+    );
+    let off_warnings = warning_keys(&off);
+    assert!(
+        off_warnings
+            .iter()
+            .any(|k| k.starts_with("SharedProbabilisticDependency")),
+        "the fixture must warn: {off_warnings:?}"
+    );
+    assert_eq!(canonical(auto.derived_rules().await?), want);
+    assert_eq!(warning_keys(&auto), off_warnings);
+    Ok(())
+}
+
+/// `stats.derived_nodes` counts the facts the evaluation derived: under
+/// `Auto` the left-out rules are not counted, before or after they are read.
+#[tokio::test]
+async fn auto_derived_nodes_counts_what_the_evaluation_derived() -> Result<()> {
+    let db = graph().await?;
+    let program = format!(
+        "{TC_RIGHT}CREATE RULE hub AS MATCH (v:N)-[:E]->(:N) YIELD KEY v\n\
+         QUERY reach WHERE a.name = 'x' RETURN b.name AS n"
+    );
+    let (off, _) = derived_in(&db, &program, GoalDirected::Off).await?;
+    let auto = db.session().locy(&program).await?;
+    assert_eq!(auto.lazily_derived_rules(), ["reach".to_string()]);
+    let evaluated: usize = auto.evaluated_rules().values().map(Vec::len).sum();
+    assert_eq!(auto.stats.derived_nodes, evaluated);
+    let all: usize = auto.derived_rules().await?.values().map(Vec::len).sum();
+    assert_eq!(auto.stats.derived_nodes, evaluated, "unchanged by the read");
+    assert_eq!(off.stats.derived_nodes, all);
+    assert!(evaluated < all);
     Ok(())
 }

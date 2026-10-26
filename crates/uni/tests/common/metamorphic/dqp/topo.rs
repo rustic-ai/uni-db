@@ -1262,8 +1262,9 @@ impl Relation {
                 )]],
             }),
             Relation::LocyFold => Some(Rewrite {
-                // `SUM` folds to a Float (documented); `MIN` / `MAX` keep the
-                // input's type, so the Cypher side converts only the sum.
+                // FOLD `SUM` is Cypher's `sum` (an integer sum stays an
+                // integer, issue #316) and `MIN` / `MAX` keep the input's
+                // type, so the Cypher side converts nothing.
                 reference: format!(
                     "CREATE RULE f AS MATCH {}{} \
                      FOLD n = COUNT(*), s = SUM(b.age), lo = MIN(b.id), hi = MAX(b.id) \
@@ -1273,7 +1274,7 @@ impl Relation {
                     case.body_where()
                 ),
                 equivalents: vec![vec![format!(
-                    "{} RETURN a.id AS c0, count(*) AS c1, toFloat(sum(b.age)) AS c2, \
+                    "{} RETURN a.id AS c0, count(*) AS c1, sum(b.age) AS c2, \
                      min(b.id) AS c3, max(b.id) AS c4",
                     case.joined(Naming::Anonymous)
                 )]],

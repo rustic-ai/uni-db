@@ -110,9 +110,40 @@ impl<'a> PropertyColumnBuilder<'a> {
             let deleted = self.deleted.unwrap_or(&default_deleted);
 
             for (name, meta) in sorted_props {
-                let extractor = PropertyExtractor::new(name, &meta.r#type);
-                let column =
-                    extractor.build_column(self.len, deleted, |i| get_row_props(i).get(name))?;
+                // The column converters store a value they cannot hold as
+                // NULL. Every declared value is validated (and converted) on
+                // the way in -- at write time, at commit when the schema moved
+                // under the transaction, and when a declaration adopts stored
+                // values -- so one that still does not fit here is refused,
+                // never dropped. A value the write path would convert (an ISO
+                // string into a temporal column, ...) is converted here too.
+                let declared = &meta.r#type;
+                let mut converted: HashMap<usize, Value> = HashMap::new();
+                for (i, gone) in deleted.iter().enumerate().take(self.len) {
+                    if *gone {
+                        continue;
+                    }
+                    let Some(value) = get_row_props(i).get(name) else {
+                        continue;
+                    };
+                    if stored_as_is(declared, value) {
+                        continue;
+                    }
+                    let value =
+                        crate::storage::declared_values::coerce(name, declared, value.clone())
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "refusing to store {}.{name}: {e}; the value does not fit the \
+                             declared column and would be lost as NULL",
+                                    self.label
+                                )
+                            })?;
+                    converted.insert(i, value);
+                }
+                let extractor = PropertyExtractor::new(name, declared);
+                let column = extractor.build_column(self.len, deleted, |i| {
+                    converted.get(&i).or_else(|| get_row_props(i).get(name))
+                })?;
                 let column = if meta.nullable {
                     column
                 } else {
@@ -124,6 +155,13 @@ impl<'a> PropertyColumnBuilder<'a> {
 
         Ok(columns)
     }
+}
+
+/// Whether the column converters store `value` in a column declared
+/// `declared` without loss: what [`uni_common::DataType::accepts`] admits, at
+/// the declared vector dimensions.
+fn stored_as_is(declared: &uni_common::DataType, value: &Value) -> bool {
+    declared.accepts(value) && declared.check_vector_dims(value).is_ok()
 }
 
 /// `column` with the nulls of deleted rows replaced by an all-zero value of
@@ -261,6 +299,41 @@ mod tests {
             )
             .unwrap_or_else(|e| panic!("{dt:?}: tombstone row is not a valid NOT NULL value: {e}"));
         }
+    }
+
+    /// A live value the declared column cannot hold is refused, not stored as
+    /// NULL; a value it holds as is, and a deleted row's, build as before.
+    #[test]
+    fn a_value_that_does_not_fit_its_declared_column_is_refused() {
+        use arrow_array::{Array, Int64Array};
+        use uni_common::core::schema::{DataType, SchemaManager};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap());
+        let sm = futures::executor::block_on(SchemaManager::load_from_store(
+            store,
+            &object_store::path::Path::from("schema.json"),
+        ))
+        .unwrap();
+        sm.add_label("L").unwrap();
+        sm.add_property("L", "age", DataType::Int64, true).unwrap();
+        let schema = sm.schema();
+
+        let row = |v: Value| Properties::from([("age".to_string(), v)]);
+        let rows = [row(Value::Int(7)), row(Value::String("old".into()))];
+        let err = PropertyColumnBuilder::new(&schema, "L", 2)
+            .build(|i| &rows[i])
+            .expect_err("a string cannot be stored in an Int64 column");
+        assert!(err.to_string().contains("L.age"), "{err}");
+
+        // The same row deleted is a placeholder, and fits.
+        let columns = PropertyColumnBuilder::new(&schema, "L", 2)
+            .with_deleted(&[false, true])
+            .build(|i| &rows[i])
+            .unwrap();
+        let ages = columns[0].as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(ages.value(0), 7);
     }
 
     /// The declared column wins a key collision; schemaless keys still merge.

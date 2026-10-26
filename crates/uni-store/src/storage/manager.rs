@@ -17,6 +17,7 @@ use crate::storage::compaction::{
     CompactionCancelled, CompactionDirLock, Compactor, SemanticCompactionReport,
     is_compaction_cancelled,
 };
+use crate::storage::declared_values::DeclaredEntity;
 use crate::storage::delta::{DeltaDataset, ENTRY_SIZE_ESTIMATE, Op};
 use crate::storage::direction::Direction;
 #[cfg(feature = "lance-backend")]
@@ -802,6 +803,24 @@ fn clamp_defaulted_refine(refine_factor: u32, fetch_k: usize) -> u32 {
     clamped
 }
 
+/// Vids per `_vid IN (...)` probe of a label table during a label backfill.
+const LABEL_BACKFILL_VID_CHUNK: usize = 10_000;
+
+/// Directory of the markers [`StorageManager::mark_label_backfill_pending`]
+/// writes.
+const LABEL_BACKFILL_MARKER_DIR: &str = "catalog/label_backfill";
+
+/// Marker path for `label`. Hex-encoded: a schemaless label is any string, and
+/// a `/` in it would otherwise nest the path.
+fn label_backfill_marker_path(label: &str) -> object_store::path::Path {
+    use std::fmt::Write as _;
+    let mut name = String::with_capacity(label.len() * 2);
+    for b in label.as_bytes() {
+        let _ = write!(name, "{b:02x}");
+    }
+    object_store::path::Path::from(format!("{LABEL_BACKFILL_MARKER_DIR}/{name}"))
+}
+
 impl StorageManager {
     /// Create a new StorageManager with a pre-configured backend.
     pub async fn new_with_backend(
@@ -1324,7 +1343,542 @@ impl StorageManager {
                 total += backend.count_rows(&table, None).await?;
             }
         }
+        // A label's schemaless rows live only in the main table until the
+        // label is declared and backfilled (#304), so a label populated
+        // schemalessly and flushed has no label table to count yet.
+        let schema = self.schema_manager.schema();
+        if total == 0 && !schema.edge_types.contains_key(entity) {
+            let main = table_names::main_vertex_table_name();
+            if backend.table_exists(main).await? {
+                let carries = FilterExpr::array_contains("labels", Scalar::Str(entity.to_string()));
+                total += backend.count_rows(main, Some(&carries)).await?;
+            }
+        }
         Ok(total)
+    }
+
+    /// The nullability to record for a property being *added* to `entity`.
+    ///
+    /// A `NOT NULL` property cannot be satisfied by rows that already exist --
+    /// they have no value for it. It is recorded as nullable instead, with a
+    /// warning, so the catalog matches what the data can support; `NOT NULL`
+    /// is still enforced forward, at write time. Only for a property the
+    /// catalog does not hold yet: rewriting the declaration of one it already
+    /// holds is what made unchanged re-declarations collide (#286).
+    ///
+    /// # Errors
+    ///
+    /// Propagates a row-count failure.
+    pub async fn new_property_nullability(
+        &self,
+        entity: &str,
+        property: &str,
+        nullable: bool,
+        l0: &crate::runtime::l0_visibility::L0Context,
+    ) -> Result<bool> {
+        if nullable {
+            return Ok(true);
+        }
+        let rows = self.existing_row_count(entity, l0).await?;
+        if rows == 0 {
+            return Ok(false);
+        }
+        tracing::warn!(
+            entity,
+            property,
+            rows,
+            "declaring a NOT NULL property on a populated entity; \
+             recording it as nullable because existing rows have no value"
+        );
+        Ok(true)
+    }
+
+    /// Copy `label`'s rows from the main `vertices` table into its label
+    /// table, so a label declared over existing schemaless vertices keeps
+    /// them (#304).
+    ///
+    /// A flush writes a vertex into `vertices_{label}` only for a label the
+    /// schema it snapshotted declares; every other label's rows live only in
+    /// the main table. Once the label is declared, a label-scoped read goes to
+    /// the label table alone, so anything flushed before the declaration is
+    /// invisible until it is copied over. This is that copy.
+    ///
+    /// The main table's latest row per vertex decides what the label table
+    /// should hold, and the label table is brought to it — never past it:
+    /// - latest row live and carrying `label`: written at its own version,
+    ///   labels, properties and timestamps, unless the label table already
+    ///   has that vertex at that version or later;
+    /// - latest row a tombstone, or no longer carrying `label`: if the label
+    ///   table's latest row for it is live and older, a tombstone is written
+    ///   at the main row's version, as a flush writes for a delete or a
+    ///   relabel away. This retires rows a backfill interrupted earlier, or a
+    ///   label dropped and re-declared, left behind.
+    ///
+    /// That makes it idempotent and safe to re-run, and safe to race with a
+    /// flush that already sees the declaration: reads keep the highest
+    /// `_version` per vertex, and every row written here is one the main
+    /// table already holds, at the version it holds it.
+    ///
+    /// The caller must ensure no flush that snapshotted the schema *before*
+    /// the declaration is still writing; such a flush adds main-only rows
+    /// this scan cannot see. `Writer::backfill_declared_label` provides that
+    /// barrier.
+    ///
+    /// Appends only, so it is fork-safe: on a fork-scoped manager the writes
+    /// land on the fork's branch, and the reads see the fork's fused view of
+    /// the main table.
+    ///
+    /// Returns the number of live rows copied (tombstones written to retire
+    /// stale rows are not counted), which is what a flush adds to the
+    /// label's manifest row count for the same rows. A label the schema does
+    /// not declare is skipped.
+    ///
+    /// # Errors
+    ///
+    /// Propagates scan, decode and write failures.
+    pub async fn backfill_declared_label(&self, label: &str) -> Result<usize> {
+        let schema = self.schema_manager.schema();
+        if !schema.labels.contains_key(label) {
+            return Ok(0);
+        }
+        let backend = self.backend();
+
+        // Every version, bulk-gated ones included: a row copied here keeps
+        // its version, so whatever hides it in the main table hides it in the
+        // label table too.
+        let latest = MainVertexDataset::find_label_latest_rows(
+            backend,
+            label,
+            crate::storage::bulk_gate::RowVisibility::at_most(None),
+            None,
+        )
+        .await?;
+        if latest.is_empty() {
+            return Ok(0);
+        }
+
+        // The label table's latest (version, deleted) per candidate vertex.
+        let table = table_names::vertex_table_name(label);
+        let mut present: HashMap<Vid, (u64, bool)> = HashMap::new();
+        if backend.table_exists(&table).await? {
+            let mut vids: Vec<u64> = latest.keys().map(|v| v.as_u64()).collect();
+            vids.sort_unstable();
+            for chunk in vids.chunks(LABEL_BACKFILL_VID_CHUNK) {
+                let batches = backend
+                    .scan(
+                        ScanRequest::all(&table)
+                            .with_filter(FilterExpr::one_of(
+                                "_vid",
+                                chunk.iter().map(|v| Scalar::UInt(*v)),
+                            ))
+                            .with_columns(vec![
+                                "_vid".to_string(),
+                                "_version".to_string(),
+                                "_deleted".to_string(),
+                            ]),
+                    )
+                    .await?;
+                for batch in &batches {
+                    let (Some(vid_arr), Some(ver_arr)) = (
+                        batch
+                            .column_by_name("_vid")
+                            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
+                        batch
+                            .column_by_name("_version")
+                            .and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
+                    ) else {
+                        continue;
+                    };
+                    let del_arr = batch
+                        .column_by_name("_deleted")
+                        .and_then(|c| c.as_any().downcast_ref::<arrow_array::BooleanArray>());
+                    for i in 0..batch.num_rows() {
+                        if vid_arr.is_null(i) {
+                            continue;
+                        }
+                        let vid = Vid::new(vid_arr.value(i));
+                        let version = if ver_arr.is_null(i) {
+                            0
+                        } else {
+                            ver_arr.value(i)
+                        };
+                        let deleted = del_arr.is_some_and(|d| d.is_valid(i) && d.value(i));
+                        if present.get(&vid).is_some_and(|(v, _)| version < *v) {
+                            continue;
+                        }
+                        present.insert(vid, (version, deleted));
+                    }
+                }
+            }
+        }
+
+        let mut vertices: Vec<(Vid, Vec<String>, uni_common::Properties)> = Vec::new();
+        let mut deleted: Vec<bool> = Vec::new();
+        let mut versions: Vec<u64> = Vec::new();
+        let mut created_at: HashMap<Vid, i64> = HashMap::new();
+        let mut updated_at: HashMap<Vid, i64> = HashMap::new();
+        let mut live_rows: Vec<(Vid, u64)> = Vec::new();
+        let mut ordered: Vec<_> = latest.into_iter().collect();
+        ordered.sort_unstable_by_key(|(vid, _)| *vid);
+        for (vid, row) in ordered {
+            let existing = present.get(&vid).copied();
+            if row.is_live_with(label) {
+                if existing.is_some_and(|(v, _)| v >= row.version) {
+                    continue;
+                }
+                // Declared properties in the form a write of them stores.
+                // `check_declared_values` refused the declaration if any value
+                // could not be; a failure here is a value that arrived since,
+                // refused rather than stored as NULL.
+                let mut row = row;
+                if let Some(declared) = schema.properties.get(label) {
+                    for (name, meta) in declared {
+                        if let Some(value) = row.props.remove(name) {
+                            let value =
+                                crate::storage::declared_values::coerce(name, &meta.r#type, value)
+                                    .map_err(|e| {
+                                        anyhow!(
+                                            "cannot backfill vid {} into label '{label}': {e}",
+                                            vid.as_u64()
+                                        )
+                                    })?;
+                            row.props.insert(name.clone(), value);
+                        }
+                    }
+                }
+                if let Some(ts) = row.created_at {
+                    created_at.insert(vid, ts);
+                }
+                if let Some(ts) = row.updated_at {
+                    updated_at.insert(vid, ts);
+                }
+                live_rows.push((vid, row.version));
+                vertices.push((vid, row.labels, row.props));
+                deleted.push(false);
+                versions.push(row.version);
+            } else if existing.is_some_and(|(v, gone)| !gone && v < row.version) {
+                if let Some(ts) = row.updated_at {
+                    updated_at.insert(vid, ts);
+                }
+                vertices.push((vid, vec![label.to_string()], uni_common::Properties::new()));
+                deleted.push(true);
+                versions.push(row.version);
+            }
+        }
+        if vertices.is_empty() {
+            return Ok(0);
+        }
+
+        let ds = self.vertex_dataset(label)?;
+        let batch = ds.build_record_batch_with_timestamps(
+            &vertices,
+            &deleted,
+            &versions,
+            &schema,
+            Some(&created_at),
+            Some(&updated_at),
+        )?;
+        ds.write_batch(backend, batch, &schema).await?;
+        ds.ensure_default_indexes(backend).await?;
+        let copied = live_rows.len();
+
+        // UID mappings for the live rows, stamped with each row's own
+        // version, as the flush that would have written them stamps its own.
+        #[cfg(feature = "lance-backend")]
+        if !live_rows.is_empty()
+            && let Ok(uid_index) = self.uid_index(label)
+        {
+            let props_by_vid: HashMap<Vid, &uni_common::Properties> = vertices
+                .iter()
+                .zip(&deleted)
+                .filter(|(_, gone)| !**gone)
+                .map(|((vid, _, props), _)| (*vid, props))
+                .collect();
+            let mappings: Vec<(UniId, Vid, u64)> = live_rows
+                .iter()
+                .filter_map(|(vid, version)| {
+                    let props = props_by_vid.get(vid)?;
+                    let ext_id = props.get("ext_id").and_then(|v| v.as_str());
+                    let uid = VertexDataset::compute_vertex_uid(label, ext_id, props);
+                    Some((uid, *vid, *version))
+                })
+                .collect();
+            uid_index.write_mappings_at_versions(&mappings).await?;
+        }
+        #[cfg(not(feature = "lance-backend"))]
+        let _ = live_rows;
+
+        self.invalidate_table_cache(label);
+        self.cardinality().invalidate_all();
+        tracing::info!(
+            label,
+            copied,
+            retired = vertices.len() - copied,
+            "backfilled a newly declared label from the main vertex table"
+        );
+        Ok(copied)
+    }
+
+    /// Record that `label` is being declared and its backfill has not yet
+    /// completed (#304).
+    ///
+    /// Written before the label enters the live catalog: any commit may save
+    /// a dirty catalog, so the declaration can reach disk before the backfill
+    /// runs, and a crash in between would leave the label's flushed rows
+    /// hidden for good. [`Self::recover_label_backfills`] finishes the job on
+    /// the next open; [`Self::clear_label_backfill_marker`] retires the marker
+    /// once the backfill and the catalog save have both completed.
+    ///
+    /// A no-op on a fork-scoped manager. A fork persists its schema only
+    /// through its overlay, which its declaration path writes after the
+    /// backfill, so ordering alone covers it.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the object-store write failure.
+    pub async fn mark_label_backfill_pending(&self, label: &str) -> Result<()> {
+        use object_store::ObjectStoreExt;
+        if self.fork_scope.is_some() {
+            return Ok(());
+        }
+        self.store
+            .put(
+                &label_backfill_marker_path(label),
+                label.as_bytes().to_vec().into(),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Retire the marker [`Self::mark_label_backfill_pending`] wrote.
+    ///
+    /// # Errors
+    ///
+    /// Propagates an object-store delete failure other than "not found".
+    pub async fn clear_label_backfill_marker(&self, label: &str) -> Result<()> {
+        use object_store::ObjectStoreExt;
+        if self.fork_scope.is_some() {
+            return Ok(());
+        }
+        match self.store.delete(&label_backfill_marker_path(label)).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Finish every label backfill a crash interrupted (#304).
+    ///
+    /// For each pending marker: a label the loaded catalog declares is
+    /// backfilled (idempotent); a label it does not declare never reached
+    /// disk, so its rows are still read from the main table and there is
+    /// nothing to do. Either way the marker is then cleared. Returns each
+    /// label that was backfilled with the live rows copied, for the caller to
+    /// rebuild its indexes and record the rows in the manifest.
+    ///
+    /// A backfill that fails is logged at `error` and its marker kept, so the
+    /// next open retries it; the open itself goes on. Failing the open instead
+    /// would turn a deterministic failure (one the declaration itself would
+    /// have hit too) into a database that cannot be opened, while going on
+    /// confines the cost to the label's pre-declaration rows staying hidden.
+    ///
+    /// Run on a writable open, before any write can race it.
+    ///
+    /// # Errors
+    ///
+    /// Propagates marker listing, reading and deleting failures.
+    pub async fn recover_label_backfills(&self) -> Result<Vec<(String, usize)>> {
+        use futures::TryStreamExt;
+        use object_store::ObjectStoreExt;
+        if self.fork_scope.is_some() {
+            return Ok(Vec::new());
+        }
+        let prefix = object_store::path::Path::from(LABEL_BACKFILL_MARKER_DIR);
+        let markers: Vec<object_store::ObjectMeta> =
+            self.store.list(Some(&prefix)).try_collect().await?;
+        let mut recovered = Vec::new();
+        for meta in markers {
+            let bytes = self.store.get(&meta.location).await?.bytes().await?;
+            let label = String::from_utf8(bytes.to_vec()).map_err(|e| {
+                anyhow!("label backfill marker {} is not UTF-8: {e}", meta.location)
+            })?;
+            if self.schema_manager.schema().labels.contains_key(&label) {
+                match self.backfill_declared_label(&label).await {
+                    Ok(rows) => {
+                        tracing::warn!(
+                            label = %label,
+                            rows,
+                            "completed a label backfill interrupted by a crash"
+                        );
+                        recovered.push((label.clone(), rows));
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            label = %label,
+                            error = %e,
+                            "label backfill failed; vertices flushed before the label was \
+                             declared stay hidden from label-scoped reads until it succeeds \
+                             (retried on the next open)"
+                        );
+                        continue;
+                    }
+                }
+            }
+            self.clear_label_backfill_marker(&label).await?;
+        }
+        Ok(recovered)
+    }
+
+    /// Refuse to declare `properties` on `entity` if values it already holds
+    /// cannot be stored in their declared types.
+    ///
+    /// The declaration moves those values into typed columns, and a column
+    /// builder stores a value it cannot hold as NULL, so without this check
+    /// the declaration itself would silently lose data. The values examined
+    /// are the ones the declaration moves:
+    /// - for a declared label or edge type (#249's promotion): every row's
+    ///   `overflow_json` entry for the property in the entity's tables, all
+    ///   versions, as the promotion rewrites all of them;
+    /// - for a label not yet declared (#304's backfill): the property on the
+    ///   latest live main-table row of every vertex carrying the label.
+    ///
+    /// Each value is judged by the write path's rule (see
+    /// [`crate::storage::declared_values`]). Unflushed values are not read
+    /// here; callers flush the entity's committed L0 first
+    /// (`Writer::flush_before_declaration`), which moves them where this
+    /// looks.
+    ///
+    /// Must run before the catalog or storage changes, so a refused
+    /// declaration leaves both as they were.
+    ///
+    /// # Errors
+    ///
+    /// [`uni_common::UniError::DeclaredTypeConflict`] (wrapped in
+    /// `anyhow::Error`) for the first conflicting property; scan and decode
+    /// failures otherwise.
+    pub async fn check_declared_values(
+        &self,
+        entity: &str,
+        kind: DeclaredEntity,
+        properties: &[(String, uni_common::DataType)],
+    ) -> Result<()> {
+        use crate::storage::declared_values::check_value;
+        // A property the catalog already declares had its values checked
+        // when it was declared, and they live in its typed column; re-running
+        // the check for an unchanged re-declaration (the register-on-every-
+        // open pattern) would rescan the entity for nothing.
+        let properties: Vec<(String, uni_common::DataType)> = {
+            let schema = self.schema_manager.schema();
+            let declared = schema.properties.get(entity);
+            properties
+                .iter()
+                .filter(|(name, _)| !declared.is_some_and(|p| p.contains_key(name)))
+                .cloned()
+                .collect()
+        };
+        let properties = properties.as_slice();
+        if properties.is_empty() {
+            return Ok(());
+        }
+        let backend = self.backend();
+        // Per property: (count, first offender as (id, value)).
+        let mut conflicts: Vec<(usize, Option<(String, uni_common::Value)>)> =
+            vec![(0, None); properties.len()];
+        let mut note = |i: usize, id: String, value: &uni_common::Value| {
+            let (count, example) = &mut conflicts[i];
+            *count += 1;
+            if example.is_none() {
+                *example = Some((id, value.clone()));
+            }
+        };
+
+        // A relationship's rows sit in both delta directions; one is read.
+        let tables = self.declaration_tables(entity, kind);
+        if !tables.is_empty() {
+            for table in tables.iter().take(1) {
+                if !backend.table_exists(table).await? {
+                    continue;
+                }
+                let is_vertex_table = table == &table_names::vertex_table_name(entity);
+                let id_column = if is_vertex_table { "_vid" } else { "eid" };
+                let batches = backend
+                    .scan(
+                        ScanRequest::all(table)
+                            .with_columns(vec![id_column.to_string(), "overflow_json".to_string()]),
+                    )
+                    .await?;
+                for batch in &batches {
+                    let ids = batch
+                        .column_by_name(id_column)
+                        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>());
+                    let overflow = batch
+                        .column_by_name("overflow_json")
+                        .and_then(|c| c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>());
+                    if overflow.is_none() {
+                        continue;
+                    }
+                    for row in 0..batch.num_rows() {
+                        for (i, (name, declared)) in properties.iter().enumerate() {
+                            let Some(bytes) =
+                                crate::runtime::columnar_scan::extract_from_overflow_blob(
+                                    overflow, row, name,
+                                )?
+                            else {
+                                continue;
+                            };
+                            let value = uni_common::cypher_value_codec::decode(&bytes)
+                                .map_err(|e| anyhow!("corrupt overflow value: {e}"))?;
+                            if !check_value(name, declared, &value) {
+                                let id = ids.map_or(0, |a| a.value(row));
+                                let kind = if is_vertex_table { "vid" } else { "eid" };
+                                note(i, format!("{kind} {id}"), &value);
+                            }
+                        }
+                    }
+                }
+            }
+        } else if kind == DeclaredEntity::Label {
+            let latest = MainVertexDataset::find_label_latest_rows(
+                backend,
+                entity,
+                crate::storage::bulk_gate::RowVisibility::at_most(None),
+                None,
+            )
+            .await?;
+            let mut ordered: Vec<_> = latest.iter().collect();
+            ordered.sort_unstable_by_key(|(vid, _)| **vid);
+            for (vid, row) in ordered {
+                if !row.is_live_with(entity) {
+                    continue;
+                }
+                for (i, (name, declared)) in properties.iter().enumerate() {
+                    if let Some(value) = row.props.get(name)
+                        && !check_value(name, declared, value)
+                    {
+                        note(i, format!("vid {}", vid.as_u64()), value);
+                    }
+                }
+            }
+        }
+
+        for ((name, declared), (count, example)) in properties.iter().zip(conflicts) {
+            if count == 0 {
+                continue;
+            }
+            let (example_id, example_value) =
+                example.unwrap_or_else(|| (String::new(), uni_common::Value::Null));
+            return Err(uni_common::UniError::DeclaredTypeConflict {
+                detail: Box::new(uni_common::DeclaredTypeConflict {
+                    entity: entity.to_string(),
+                    property: name.clone(),
+                    declared: format!("{declared:?}"),
+                    count,
+                    example_id,
+                    example_value: example_value.to_string(),
+                }),
+            }
+            .into());
+        }
+        Ok(())
     }
 
     /// Widen storage so newly declared properties on `entity` have a column
@@ -1360,7 +1914,248 @@ impl StorageManager {
         if properties.is_empty() {
             return Ok(());
         }
+        let kind = if self.schema_manager.schema().edge_types.contains_key(entity) {
+            DeclaredEntity::EdgeType
+        } else {
+            DeclaredEntity::Label
+        };
+        // Before anything changes: a refused declaration leaves storage as it was.
+        self.check_declared_values(entity, kind, properties).await?;
+        self.widen_for_checked_properties(entity, kind, properties)
+            .await
+    }
+
+    /// The tables a declaration of `entity`'s properties widens and promotes
+    /// from: the entity's own tables once declared (see
+    /// [`Self::property_tables_for`]); for an edge type not yet declared, the
+    /// delta tables its schemaless relationships were flushed to, which keep
+    /// serving it once declared; for a label not yet declared, none -- its
+    /// rows are backfilled into a new table instead
+    /// ([`Self::backfill_declared_label`]).
+    fn declaration_tables(&self, entity: &str, kind: DeclaredEntity) -> Vec<String> {
         let tables = self.property_tables_for(entity);
+        if !tables.is_empty() || kind == DeclaredEntity::Label {
+            return tables;
+        }
+        vec![
+            table_names::delta_table_name(entity, "fwd"),
+            table_names::delta_table_name(entity, "bwd"),
+        ]
+    }
+
+    /// Rewrite the main-table copies of `entity`'s values for newly declared
+    /// `properties` into the form a write of the declared property stores.
+    ///
+    /// The main `vertices` / `main_edges` tables keep every property in a
+    /// `props_json` blob, which reads that do not go through the entity's
+    /// typed columns (an unlabeled `MATCH (n)`, `properties(n)`) return as
+    /// stored. A value written after the declaration was converted on the way
+    /// in (an `Int` stored as a `Float` in a float column, an ISO string as a
+    /// datetime); one written before it would otherwise stay in its schemaless
+    /// form there, so the two reads disagreed. Only the latest row of each
+    /// vertex (carrying the label) or relationship (of the type) is rewritten,
+    /// in place by `(id, _version)`, and only when a value changes; older
+    /// versions keep the form they were written in.
+    ///
+    /// Primary only, as for the promotion out of `overflow_json`.
+    ///
+    /// # Errors
+    ///
+    /// A value the declared type cannot hold (refused earlier by
+    /// [`Self::check_declared_values`]), and scan or write failures.
+    pub async fn convert_main_table_values(
+        &self,
+        entity: &str,
+        kind: DeclaredEntity,
+        properties: &[(String, uni_common::DataType)],
+    ) -> Result<usize> {
+        use crate::storage::declared_values::coerce;
+        if properties.is_empty() || self.fork_scope.is_some() {
+            return Ok(0);
+        }
+        let backend = self.backend();
+        let convert = |props: &uni_common::Properties| -> Result<Option<uni_common::Properties>> {
+            let mut out = props.clone();
+            let mut changed = false;
+            for (name, declared) in properties {
+                if let Some(value) = props.get(name) {
+                    let new = coerce(name, declared, value.clone())?;
+                    if &new != value {
+                        out.insert(name.clone(), new);
+                        changed = true;
+                    }
+                }
+            }
+            Ok(changed.then_some(out))
+        };
+        let encode = |props: uni_common::Properties| {
+            uni_common::cypher_value_codec::encode(&uni_common::Value::Map(props))
+        };
+
+        // (id, _version, re-encoded props_json) of a row to rewrite.
+        type Rewrite = (u64, u64, Vec<u8>);
+        let (table, id_column, rows): (&str, &str, Vec<Rewrite>) = match kind {
+            DeclaredEntity::Label => {
+                let latest = MainVertexDataset::find_label_latest_rows(
+                    backend,
+                    entity,
+                    crate::storage::bulk_gate::RowVisibility::at_most(None),
+                    None,
+                )
+                .await?;
+                let mut rows = Vec::new();
+                for (vid, row) in latest {
+                    if !row.is_live_with(entity) {
+                        continue;
+                    }
+                    if let Some(props) = convert(&row.props)? {
+                        rows.push((vid.as_u64(), row.version, encode(props)));
+                    }
+                }
+                (table_names::main_vertex_table_name(), "_vid", rows)
+            }
+            DeclaredEntity::EdgeType => {
+                let table = table_names::main_edge_table_name();
+                let mut rows = Vec::new();
+                if backend.table_exists(table).await? {
+                    let batches = backend
+                        .scan(
+                            ScanRequest::all(table)
+                                .with_filter(FilterExpr::equals(
+                                    "type",
+                                    Scalar::Str(entity.to_string()),
+                                ))
+                                .with_columns(vec![
+                                    "_eid".to_string(),
+                                    "_version".to_string(),
+                                    "_deleted".to_string(),
+                                    "props_json".to_string(),
+                                ]),
+                        )
+                        .await?;
+                    // Latest row per relationship: (version, deleted, blob).
+                    let mut latest: HashMap<u64, (u64, bool, Option<Vec<u8>>)> = HashMap::new();
+                    for batch in &batches {
+                        let (Some(eids), Some(versions)) = (
+                            batch
+                                .column_by_name("_eid")
+                                .and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
+                            batch
+                                .column_by_name("_version")
+                                .and_then(|c| c.as_any().downcast_ref::<UInt64Array>()),
+                        ) else {
+                            continue;
+                        };
+                        let deleted = batch
+                            .column_by_name("_deleted")
+                            .and_then(|c| c.as_any().downcast_ref::<arrow_array::BooleanArray>());
+                        let blobs = batch.column_by_name("props_json").and_then(|c| {
+                            c.as_any().downcast_ref::<arrow_array::LargeBinaryArray>()
+                        });
+                        for i in 0..batch.num_rows() {
+                            let (eid, version) = (eids.value(i), versions.value(i));
+                            if latest.get(&eid).is_some_and(|(v, _, _)| version < *v) {
+                                continue;
+                            }
+                            let gone = deleted.is_some_and(|d| d.is_valid(i) && d.value(i));
+                            let blob = blobs
+                                .filter(|b| b.is_valid(i) && !b.value(i).is_empty())
+                                .map(|b| b.value(i).to_vec());
+                            latest.insert(eid, (version, gone, blob));
+                        }
+                    }
+                    for (eid, (version, gone, blob)) in latest {
+                        let Some(blob) = blob.filter(|_| !gone) else {
+                            continue;
+                        };
+                        let props = match uni_common::cypher_value_codec::decode(&blob)
+                            .map_err(|e| anyhow!("corrupt props_json of edge {eid}: {e}"))?
+                        {
+                            uni_common::Value::Map(m) => m,
+                            _ => continue,
+                        };
+                        if let Some(props) = convert(&props)? {
+                            rows.push((eid, version, encode(props)));
+                        }
+                    }
+                }
+                (table, "_eid", rows)
+            }
+        };
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let count = rows.len();
+        let schema = Arc::new(arrow_schema::Schema::new(vec![
+            arrow_schema::Field::new(id_column, arrow_schema::DataType::UInt64, false),
+            arrow_schema::Field::new("_version", arrow_schema::DataType::UInt64, false),
+            arrow_schema::Field::new("props_json", arrow_schema::DataType::LargeBinary, true),
+        ]));
+        let mut ids = Vec::with_capacity(count);
+        let mut versions = Vec::with_capacity(count);
+        let mut blobs = arrow_array::builder::LargeBinaryBuilder::new();
+        for (id, version, blob) in rows {
+            ids.push(id);
+            versions.push(version);
+            blobs.append_value(blob);
+        }
+        let batch = arrow_array::RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(UInt64Array::from(ids)),
+                Arc::new(UInt64Array::from(versions)),
+                Arc::new(blobs.finish()),
+            ],
+        )?;
+        merge_insert_batch_with_lance_conflict_retry(
+            backend,
+            table,
+            batch,
+            &[id_column, "_version"],
+        )
+        .await?;
+        tracing::info!(
+            entity,
+            rows = count,
+            "converted main-table values of newly declared properties"
+        );
+        Ok(count)
+    }
+
+    /// [`Self::widen_for_declared_properties`] without its value check, for a
+    /// caller that has already run [`Self::check_declared_values`] for every
+    /// entity in a batch, so that one refusal leaves the whole batch's storage
+    /// untouched.
+    ///
+    /// # Errors
+    ///
+    /// Propagates widening and promotion failures.
+    pub async fn widen_for_checked_properties(
+        &self,
+        entity: &str,
+        kind: DeclaredEntity,
+        properties: &[(String, uni_common::DataType)],
+    ) -> anyhow::Result<()> {
+        if properties.is_empty() {
+            return Ok(());
+        }
+        // The main tables first: values there are only rewritten into the
+        // declared form, which is a valid schemaless value too, so this is
+        // safe ahead of the catalog.
+        self.convert_main_table_values(entity, kind, properties)
+            .await?;
+        let mut tables = self.declaration_tables(entity, kind);
+        if self.property_tables_for(entity).is_empty() {
+            // An undeclared edge type's delta tables exist only if its
+            // relationships were ever flushed.
+            let mut existing = Vec::with_capacity(tables.len());
+            for table in tables {
+                if self.backend().table_exists(&table).await? {
+                    existing.push(table);
+                }
+            }
+            tables = existing;
+        }
         if tables.is_empty() {
             return Ok(());
         }
@@ -4331,37 +5126,56 @@ impl StorageManager {
             })
             .unwrap_or_default();
 
-        let mut scores: HashMap<Vid, f32> = HashMap::new();
-        let mut results = if schemaless {
-            // A schemaless property has no column to search, so flushed and
-            // unflushed rows both use the word-overlap score, which needs no
-            // statistics.
-            let mut deadline = ctx.map(DeadlineTicker::new);
-            let mut hits = Vec::new();
+        // Schemaless rows have no text column in Lance. Assemble their visible
+        // corpus before scoring so superseded/deleted rows do not affect BM25.
+        if schemaless {
+            let scoring_ctx = ctx.cloned();
+            let check = move || {
+                scoring_ctx
+                    .as_ref()
+                    .map_or(Ok(()), QueryContext::check_timeout)
+            };
+            check()?;
+            let mut corpus: HashMap<Vid, String> = HashMap::new();
             for (vid, props) in self.flushed_label_properties(label, ctx).await? {
-                if let Some(ticker) = deadline.as_mut() {
-                    ticker.tick()?;
-                }
-                let score = props
-                    .get(property)
-                    .and_then(|value| value.as_str())
-                    .map_or(0.0, |text| compute_text_relevance(query, text));
-                if score > 0.0 {
-                    hits.push((vid, score));
+                check()?;
+                if let Some(text) = props.get(property).and_then(|value| value.as_str()) {
+                    corpus.insert(vid, text.to_string());
                 }
             }
-            hits.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(a.0.cmp(&b.0))
-            });
-            scores = docs
+            if let Some((excluded, l0)) = &unflushed {
+                for vid in l0.tombstoned.iter().chain(excluded) {
+                    corpus.remove(vid);
+                }
+                for (vid, text) in &l0.texts {
+                    check()?;
+                    if l0.tombstoned.contains(vid) || excluded.contains(vid) {
+                        continue;
+                    }
+                    if let Some(text) = text {
+                        corpus.insert(*vid, text.clone());
+                    } else {
+                        corpus.remove(vid);
+                    }
+                }
+            }
+            let mut documents: Vec<_> = corpus
                 .into_iter()
-                .map(|(vid, text)| (Vid::new(vid), compute_text_relevance(query, &text)))
-                .filter(|(_, score)| *score > 0.0)
+                .map(|(vid, text)| (vid.as_u64(), text))
                 .collect();
-            hits
-        } else if docs.is_empty() && !backend.table_exists(&name).await? {
+            documents.sort_unstable_by_key(|(vid, _)| *vid);
+            let scored = crate::backend::score_documents(property, query, documents, check).await?;
+            let mut hits: Vec<_> = scored
+                .into_iter()
+                .map(|(vid, score)| (Vid::new(vid), score))
+                .collect();
+            hits.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            hits.truncate(k);
+            return Ok(hits);
+        }
+
+        let mut scores: HashMap<Vid, f32> = HashMap::new();
+        let mut results = if docs.is_empty() && !backend.table_exists(&name).await? {
             Vec::new()
         } else {
             // Build combined filter: _deleted = false + optional user filter + HWM
@@ -5584,6 +6398,240 @@ mod l0_merge_tests {
                 (Vid::new(1), 0.9),
                 (Vid::new(3), 0.3),
             ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod label_backfill_tests {
+    use super::*;
+    use object_store::local::LocalFileSystem;
+    use object_store::path::Path as ObjectStorePath;
+    use uni_common::Value;
+
+    fn props(uid: &str) -> uni_common::Properties {
+        let mut p = uni_common::Properties::new();
+        p.insert("uid".to_string(), Value::String(uid.to_string()));
+        p
+    }
+
+    fn labels(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    async fn manager(dir: &tempfile::TempDir) -> (Arc<SchemaManager>, StorageManager) {
+        let store = Arc::new(LocalFileSystem::new_with_prefix(dir.path()).unwrap());
+        let schema_manager = Arc::new(
+            SchemaManager::load_from_store(store, &ObjectStorePath::from("schema.json"))
+                .await
+                .unwrap(),
+        );
+        let sm = StorageManager::new(dir.path().to_str().unwrap(), schema_manager.clone())
+            .await
+            .unwrap();
+        (schema_manager, sm)
+    }
+
+    fn declare_l(schema_manager: &SchemaManager) {
+        schema_manager.add_label("L").unwrap();
+        schema_manager
+            .add_property("L", "uid", uni_common::DataType::String, true)
+            .unwrap();
+    }
+
+    async fn write_main(
+        sm: &StorageManager,
+        rows: &[(Vid, Vec<String>, uni_common::Properties, bool, u64)],
+    ) {
+        MainVertexDataset::write_batch(
+            sm.backend(),
+            MainVertexDataset::build_record_batch(rows, None, None).unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+
+    /// `vid`'s rows in the label table `L`, as sorted (version, deleted, uid).
+    async fn label_rows(sm: &StorageManager, vid: u64) -> Vec<(u64, bool, Option<String>)> {
+        let batches = sm
+            .backend()
+            .scan(
+                ScanRequest::all(table_names::vertex_table_name("L"))
+                    .with_filter(FilterExpr::one_of("_vid", [Scalar::UInt(vid)]))
+                    .with_columns(vec![
+                        "_version".to_string(),
+                        "_deleted".to_string(),
+                        "uid".to_string(),
+                    ]),
+            )
+            .await
+            .unwrap();
+        let mut rows = Vec::new();
+        for b in &batches {
+            let ver = b
+                .column_by_name("_version")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            let del = b
+                .column_by_name("_deleted")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow_array::BooleanArray>()
+                .unwrap();
+            let uid = arrow::compute::cast(
+                b.column_by_name("uid").unwrap(),
+                &arrow_schema::DataType::Utf8,
+            )
+            .unwrap();
+            let uid = uid
+                .as_any()
+                .downcast_ref::<arrow_array::StringArray>()
+                .unwrap();
+            for i in 0..b.num_rows() {
+                // A tombstone's property cells are placeholders.
+                let live = !del.value(i);
+                rows.push((
+                    ver.value(i),
+                    del.value(i),
+                    (live && uid.is_valid(i)).then(|| uid.value(i).to_string()),
+                ));
+            }
+        }
+        rows.sort();
+        rows
+    }
+
+    /// The backfill brings the label table to the main table's latest row per
+    /// vertex: it copies what is missing, retires what the main table deleted
+    /// or relabeled away, leaves what is current alone, and converges.
+    #[tokio::test]
+    async fn backfill_reconciles_label_table_with_main_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let (schema_manager, sm) = manager(&dir).await;
+        declare_l(&schema_manager);
+        let l = labels(&["L"]);
+
+        // 1 deleted at v2, 2 relabeled away at v2, 3 never copied, 4 already
+        // copied at its latest version.
+        write_main(
+            &sm,
+            &[
+                (Vid::new(1), l.clone(), props("one"), false, 1),
+                (
+                    Vid::new(1),
+                    l.clone(),
+                    uni_common::Properties::new(),
+                    true,
+                    2,
+                ),
+                (Vid::new(2), l.clone(), props("two"), false, 1),
+                (Vid::new(2), labels(&["Other"]), props("two"), false, 2),
+                (
+                    Vid::new(3),
+                    labels(&["L", "Other"]),
+                    props("three"),
+                    false,
+                    3,
+                ),
+                (Vid::new(4), l.clone(), props("four"), false, 1),
+            ],
+        )
+        .await;
+
+        // What an interrupted earlier backfill left: 1, 2 and 4 live at v1.
+        let ds = sm.vertex_dataset("L").unwrap();
+        let schema = schema_manager.schema();
+        let residue = vec![
+            (Vid::new(1), l.clone(), props("one")),
+            (Vid::new(2), l.clone(), props("two")),
+            (Vid::new(4), l.clone(), props("four")),
+        ];
+        let batch = ds
+            .build_record_batch(&residue, &[false; 3], &[1; 3], &schema)
+            .unwrap();
+        ds.write_batch(sm.backend(), batch, &schema).await.unwrap();
+
+        assert_eq!(sm.backfill_declared_label("L").await.unwrap(), 1);
+
+        assert_eq!(
+            label_rows(&sm, 1).await,
+            vec![(1, false, Some("one".into())), (2, true, None)]
+        );
+        assert_eq!(
+            label_rows(&sm, 2).await,
+            vec![(1, false, Some("two".into())), (2, true, None)]
+        );
+        assert_eq!(
+            label_rows(&sm, 3).await,
+            vec![(3, false, Some("three".into()))]
+        );
+        assert_eq!(
+            label_rows(&sm, 4).await,
+            vec![(1, false, Some("four".into()))]
+        );
+
+        assert_eq!(
+            sm.backfill_declared_label("L").await.unwrap(),
+            0,
+            "converged"
+        );
+        assert_eq!(
+            sm.backfill_declared_label("Other").await.unwrap(),
+            0,
+            "an undeclared label is skipped"
+        );
+    }
+
+    /// Recovery backfills a marked label the catalog declares and clears its
+    /// marker; a marker for a label the catalog lacks is only cleared.
+    #[tokio::test]
+    async fn recovery_backfills_marked_declared_labels_and_clears_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (schema_manager, sm) = manager(&dir).await;
+        write_main(
+            &sm,
+            &[(Vid::new(7), labels(&["L"]), props("seven"), false, 1)],
+        )
+        .await;
+
+        sm.mark_label_backfill_pending("L").await.unwrap();
+        sm.mark_label_backfill_pending("never/saved").await.unwrap();
+        declare_l(&schema_manager);
+
+        assert_eq!(
+            sm.recover_label_backfills().await.unwrap(),
+            vec![("L".to_string(), 1)]
+        );
+        assert_eq!(
+            label_rows(&sm, 7).await,
+            vec![(1, false, Some("seven".into()))]
+        );
+        assert!(
+            sm.recover_label_backfills().await.unwrap().is_empty(),
+            "markers cleared"
+        );
+    }
+
+    /// The row count a NOT NULL declaration consults includes vertices that
+    /// carry the label only in the main table.
+    #[tokio::test]
+    async fn existing_row_count_counts_main_table_rows_of_an_undeclared_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let (_schema_manager, sm) = manager(&dir).await;
+        let l0 = crate::runtime::l0_visibility::L0Context::default();
+        assert_eq!(sm.existing_row_count("L", &l0).await.unwrap(), 0);
+        write_main(
+            &sm,
+            &[(Vid::new(7), labels(&["L"]), props("seven"), false, 1)],
+        )
+        .await;
+        assert_eq!(sm.existing_row_count("L", &l0).await.unwrap(), 1);
+        assert!(
+            sm.new_property_nullability("L", "p", false, &l0)
+                .await
+                .unwrap()
         );
     }
 }

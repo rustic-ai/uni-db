@@ -137,12 +137,22 @@ async fn ddl_widen_abort_child() {
         .expect("join")
         .expect("DDL never reached the seam");
 
-    // An unrelated commit while the live catalog holds `age`, unsaved.
+    // An unrelated commit while the DDL is in flight.
     let tx = db.session().tx().await.expect("begin tx");
     tx.execute("CREATE (:Person {name: 'cy'})")
         .await
         .expect("create");
-    tx.commit().await.expect("commit");
+    if alter {
+        // `ALTER ... ADD PROPERTY` holds the writer's declaration lock from
+        // its value check to its catalog change (#304), and the seam is
+        // inside that window: the commit cannot land there, and waits.
+        match tx.commit().await {
+            Err(uni_db::UniError::CommitTimeout { .. }) => {}
+            other => panic!("a commit during the declaration must wait for it, got {other:?}"),
+        }
+    } else {
+        tx.commit().await.expect("commit");
+    }
 
     let catalog = std::fs::read_to_string(path.join("catalog/schema.json"))
         .or_else(|_| std::fs::read_to_string(path.join("storage/catalog/schema.json")))
@@ -162,7 +172,9 @@ async fn commit_during_add_property_then_crash_keeps_label_readable() {
 }
 
 /// The same race through Cypher `ALTER LABEL ... ADD PROPERTY`, held as it is
-/// about to widen storage.
+/// about to widen storage. That point is now inside the declaration lock
+/// (#304), so the racing commit waits rather than landing; the label must
+/// still be readable, without the commit's row.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn commit_during_alter_add_property_then_crash_keeps_label_readable() {
     assert_readable_after("commit_during_alter_add_property").await;
@@ -175,6 +187,12 @@ async fn commit_after_add_property_then_crash_keeps_label_readable() {
 }
 
 async fn assert_readable_after(scenario: &str) {
+    // The ALTER's racing commit is held off by the declaration lock.
+    let expected: &[&str] = if scenario == "commit_during_alter_add_property" {
+        &["ada", "bob"]
+    } else {
+        &["ada", "bob", "cy"]
+    };
     let dir = tempfile::tempdir().expect("tempdir");
     let store = dir.path().join("store");
 
@@ -194,5 +212,5 @@ async fn assert_readable_after(scenario: &str) {
         .iter()
         .map(|r| r.get::<String>("name").expect("name"))
         .collect();
-    assert_eq!(names, vec!["ada", "bob", "cy"]);
+    assert_eq!(names, expected);
 }

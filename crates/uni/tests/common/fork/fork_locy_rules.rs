@@ -213,10 +213,14 @@ async fn fork_locy_derive_over_inherited_unflushed_l0() -> Result<()> {
     let result = forked.locy("QUERY connected").await?;
 
     assert!(
-        result.derived.contains_key("connected"),
+        result
+            .derived_rules()
+            .await
+            .unwrap()
+            .contains_key("connected"),
         "fork QUERY should produce the 'connected' relation"
     );
-    let facts = &result.derived["connected"];
+    let facts = &result.derived_rules().await.unwrap()["connected"];
     assert_eq!(
         facts.len(),
         2,

@@ -11,6 +11,7 @@ mod copy;
 pub mod core;
 pub mod ddl_procedures;
 pub mod path_builder;
+mod peak_pool;
 pub mod plan_shape;
 pub mod plugin_adapter;
 pub mod procedure;

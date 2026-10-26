@@ -146,6 +146,9 @@ pub mod issue_266_bulk_update_lost_on_inserting_handle;
 pub mod issue_268_reverse_traversal_anchor;
 pub mod issue_269_bulk_rows_absent_from_vid_labels_index;
 pub mod issue_290_runtime_bound_state;
+pub mod issue_311_tx_index_rekey;
+// A CREATE / MERGE endpoint carries only its identity, not its property bag.
+pub mod issue_312_write_endpoint_fanout;
 pub mod label_disjunction_in_expressions;
 pub mod label_disjunction_on_traversal_target;
 pub mod merge_path_binding;
@@ -166,6 +169,9 @@ pub mod reduce_accumulator_types;
 pub mod relabel_reads;
 pub mod repro_distinct_entity_over_counts;
 pub mod repro_issue_249_add_property_to_existing_label;
+pub mod repro_issue_304_declare_populated_label;
+pub mod repro_issue_304_declared_type_conflict;
+pub mod repro_issue_304_edge_type_declaration;
 pub mod repro_optional_match_over_unwound_entity;
 pub mod repro_path_element_hydration_after_flush;
 pub mod repro_registry_monotonicity_oracle;
@@ -178,6 +184,8 @@ pub mod sum_of_nothing_is_zero;
 pub mod typed_values_survive_rewrites;
 // sum/avg take numbers or durations; a string is a type error.
 pub mod sum_avg_take_numbers_or_durations;
+// An unsigned value above i64::MAX reads as a float, not a negative integer.
+pub mod uint64_values_do_not_wrap;
 // Numeric functions and statistics reject a non-number instead of answering NULL.
 pub mod numeric_functions_take_numbers;
 // Durations sort by length; min/max follow ORDER BY; `<` between durations is null.
@@ -231,3 +239,10 @@ pub mod wal_lsn_after_reopen;
 // Mutating built-in procedures are refused in read-only contexts and are
 // authorized as `dbms` / `schema`, never `read`.
 pub mod admin_procedure_read_only;
+// UNWIND evaluates its list expression with the expression compiler, and
+// types `nodes(p)` / `relationships(p)` elements as entities.
+pub mod unwind_entity_attribute_functions;
+// #305: dropping an unfinished BulkWriter must not lose committed rows.
+pub mod issue_305_dropped_bulk_writer;
+// #310: FTS scores must not collapse to 0.5 before the index is built.
+pub mod issue_310_fts_score_constant_before_index;

@@ -7,10 +7,12 @@ pub mod fork_create_concurrent_writes;
 pub mod fork_creation_concurrency;
 pub mod fork_custom_functions;
 pub mod fork_diff;
+pub mod fork_diff_schemaless_306;
 pub mod fork_diff_uid;
 pub mod fork_drop_cleanup;
 pub mod fork_drop_inflight;
 pub mod fork_drop_open_race;
+pub mod fork_schemaless_edge_types;
 // Phase 9: crash inside every fork 2PC window and prove recovery lands on
 // Active or absent, never a torn state.
 pub mod fork_2pc_recovery_matrix;

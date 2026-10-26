@@ -65,6 +65,29 @@ pub fn endpoint_column(rel: &str, is_start: bool) -> String {
     format!("_endpoint.{side}.{rel}")
 }
 
+/// The column whose endpoints a list comprehension over `list` reads.
+///
+/// `rels` for `[r IN rels | startNode(r)]`, and the path `p` for
+/// `[r IN relationships(p) | startNode(r)]`: a path value carries its
+/// relationships, so [`EndpointHydrateExec`] hydrates it per relationship, in
+/// the order `relationships(p)` lists them. Reached only through the function,
+/// the endpoints were never hydrated, and `startNode(r)` failed with "endpoint
+/// not available in this scope" (CREATE and MATCH paths alike).
+#[must_use]
+pub fn endpoint_list_column(list: &uni_cypher::ast::Expr) -> Option<&str> {
+    use uni_cypher::ast::Expr;
+    match list {
+        Expr::Variable(v) => Some(v),
+        Expr::FunctionCall { name, args, .. } if name.eq_ignore_ascii_case("relationships") => {
+            match args.as_slice() {
+                [Expr::Variable(p)] => Some(p),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Appends hydrated endpoint-node columns for one relationship column.
 pub struct EndpointHydrateExec {
     input: Arc<dyn ExecutionPlan>,
@@ -225,6 +248,12 @@ impl EndpointHydrateStream {
                     .iter()
                     .map(|v| (endpoint_vid(v, true), endpoint_vid(v, false)))
                     .collect(),
+                // A path: one entry per relationship, as `relationships(p)`.
+                other if path_of(other).is_some() => path_of(other)
+                    .into_iter()
+                    .flat_map(|p| p.edges)
+                    .map(|e| (Some(e.src), Some(e.dst)))
+                    .collect(),
                 other => vec![(endpoint_vid(other, true), endpoint_vid(other, false))],
             });
         }
@@ -242,14 +271,16 @@ impl EndpointHydrateStream {
         // select the list path — and the real read that follows propagates the
         // same failure, which is where it is reportable.
         (0..batch.num_rows()).any(|row| {
-            matches!(
-                uni_store::storage::arrow_convert::arrow_to_value(
-                    batch.column(idx).as_ref(),
-                    row,
-                    None
-                ),
-                Ok(Value::List(_))
-            )
+            match uni_store::storage::arrow_convert::arrow_to_value(
+                batch.column(idx).as_ref(),
+                row,
+                None,
+            ) {
+                Ok(Value::List(_)) => true,
+                // A path is hydrated as the list of its relationships.
+                Ok(other) => path_of(&other).is_some(),
+                Err(_) => false,
+            }
         })
     }
 
@@ -294,6 +325,15 @@ impl EndpointHydrateStream {
         }
 
         Ok(RecordBatch::try_new(self.schema.clone(), columns)?)
+    }
+}
+
+/// The path `value` denotes, in either encoding (native or map-encoded).
+fn path_of(value: &Value) -> Option<uni_common::Path> {
+    match value {
+        Value::Path(p) => Some(p.clone()),
+        Value::Map(_) => uni_common::Path::try_from(value).ok(),
+        _ => None,
     }
 }
 

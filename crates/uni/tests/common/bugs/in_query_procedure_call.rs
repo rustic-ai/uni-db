@@ -35,6 +35,71 @@ use uni_plugin::traits::connector::Principal;
 use uni_plugin::{Capability, CapabilitySet};
 use uni_query::{ProcedureOutput, ProcedureParam, ProcedureValueType, RegisteredProcedure};
 
+/// Nested executors spend one statement's counters, not a private set per call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn procedure_inner_queries_share_scan_counters() -> Result<()> {
+    // The direct and wrapped reads must observe the same storage tier even
+    // when the suite is under load: an automatic flush would change l0_reads.
+    let db = Uni::in_memory()
+        .config(uni_db::UniConfig {
+            auto_flush_interval: None,
+            ..Default::default()
+        })
+        .build()
+        .await?;
+    let session = db.session();
+    let tx = session.tx().await?;
+    tx.execute("UNWIND range(1, 12) AS i CREATE (:CounterProbe {i: i})")
+        .await?;
+    tx.execute(
+        "CALL uni.plugin.declareProcedure('t.scan_counters', \
+        'MATCH (n:CounterProbe) RETURN n.i AS i', 'READ', '[]', '[]')",
+    )
+    .await?;
+    tx.execute(
+        "CALL uni.plugin.declareProcedure('t.nested_counters', \
+        'CALL t.scan_counters() YIELD row_json RETURN row_json', 'READ', '[]', '[]')",
+    )
+    .await?;
+    tx.commit().await?;
+    for flushed in [false, true] {
+        if flushed {
+            db.flush().await?;
+        }
+        let direct = session
+            .query("MATCH (n:CounterProbe) RETURN n.i AS i")
+            .await?;
+        assert_eq!(direct.rows().len(), 12);
+        assert_eq!(direct.metrics().rows_scanned, 12);
+        for (query, calls) in [
+            ("CALL t.scan_counters() YIELD i RETURN i", 1),
+            ("CALL t.nested_counters() YIELD row_json RETURN row_json", 1),
+            (
+                "UNWIND [1, 2, 3] AS k CALL t.scan_counters() YIELD row_json RETURN k, row_json",
+                3,
+            ),
+        ] {
+            let result = session.query(query).await?;
+            assert_eq!(
+                result.rows().len(),
+                12 * calls,
+                "{query}, flushed={flushed}"
+            );
+            assert_eq!(
+                result.metrics().rows_scanned,
+                direct.metrics().rows_scanned * calls,
+                "{query}, flushed={flushed}"
+            );
+            assert_eq!(
+                result.metrics().l0_reads,
+                direct.metrics().l0_reads * calls,
+                "{query}, flushed={flushed}"
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn bag(db: &Uni, query: &str) -> Result<Vec<String>> {
     let result = db.session().query(query).await?;
     let mut rows: Vec<String> = result
@@ -265,5 +330,52 @@ async fn in_query_procedure_call_unit_body_keeps_row_count() -> Result<()> {
     tx.commit().await?;
     let got = bag(&db, "MATCH (q:Q) RETURN count(q)").await?;
     assert_eq!(got, ["[Int(6)]"]);
+    Ok(())
+}
+
+/// A node-yielding procedure called after a MATCH yields a node on every row.
+///
+/// The per-row `Apply` typed the call's output with one `Utf8` column for the
+/// node, so anything that read the node as one failed to plan: `id(node)`
+/// with `No field named "node._vid"`. The node's property is the matched
+/// row's, so a mix-up between rows would show.
+#[tokio::test]
+async fn in_query_procedure_call_node_yield_after_match() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:P {uid: 'a'}), (:P {uid: 'b'})")
+        .await?;
+    tx.commit().await?;
+
+    let r = db
+        .session()
+        .query(
+            "MATCH (p:P) \
+             CALL uni.create.vNode(['Copy'], {of: p.uid}) YIELD node \
+             RETURN p.uid AS uid, node.of AS of, labels(node) AS l, id(node) AS nid, \
+                    node \
+             ORDER BY uid",
+        )
+        .await?;
+    assert_eq!(r.rows().len(), 2);
+    let mut ids = std::collections::HashSet::new();
+    for (row, want) in r.rows().iter().zip(["a", "b"]) {
+        ids.insert(row.get::<i64>("nid")?);
+        assert_eq!(row.get::<String>("uid")?, want);
+        assert_eq!(row.get::<String>("of")?, want);
+        assert_eq!(row.get::<Vec<String>>("l")?, vec!["Copy"]);
+        assert!(
+            row.get::<i64>("nid")? < 0,
+            "a virtual node's id is negative: {row:?}"
+        );
+        match row.value("node") {
+            Some(Value::Node(n)) => {
+                assert!(n.vid.is_ephemeral(), "{n:?}");
+                assert_eq!(n.properties.get("of"), Some(&Value::String(want.into())));
+            }
+            other => panic!("node should be a Node, got {other:?}"),
+        }
+    }
+    assert_eq!(ids.len(), 2, "each row's call mints its own node");
     Ok(())
 }

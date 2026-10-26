@@ -9,6 +9,7 @@ pub mod bulk_gate;
 pub mod cardinality;
 pub mod compaction;
 pub mod csr;
+pub mod declared_values;
 pub mod delta;
 pub mod direction;
 #[cfg(feature = "lance-backend")]

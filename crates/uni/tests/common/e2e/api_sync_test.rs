@@ -247,3 +247,95 @@ fn dropping_a_unisync_persists_its_commits_without_the_wal() {
         "the commit did not survive dropping the UniSync"
     );
 }
+
+/// The blocking builders forward every per-statement option, like the async
+/// builders they wrap. `QueryBuilderSync` and `TxQueryBuilderSync` had no
+/// `.cancellation_token()`, and `TxQueryBuilderSync`/`ExecuteBuilderSync` no
+/// `.timeout()`/`.max_memory()`, so a blocking caller could not bound or
+/// cancel a statement the async surface could.
+#[test]
+fn sync_builders_forward_every_statement_option() -> Result<()> {
+    let db = UniSync::in_memory()?;
+    db.schema().label("Node").apply()?;
+    let session = db.session();
+    let tx = session.tx()?;
+    tx.execute("UNWIND range(1, 100) AS i CREATE (:Node)")?;
+    tx.commit()?;
+    let scan = "MATCH (n:Node) RETURN n";
+
+    // A cancelled token from elsewhere, so the statement's own session scope
+    // is not what cancels it.
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+
+    let err = session
+        .query_with(scan)
+        .cancellation_token(token.clone())
+        .fetch_all()
+        .expect_err("session sync builder ignored a cancelled token");
+    assert!(matches!(err, uni_db::UniError::Cancelled), "got {err:?}");
+
+    let tx = session.tx()?;
+    let err = tx
+        .query_with(scan)
+        .cancellation_token(token.clone())
+        .fetch_all()
+        .expect_err("tx sync builder ignored a cancelled token");
+    assert!(matches!(err, uni_db::UniError::Cancelled), "got {err:?}");
+    tx.rollback();
+
+    let tx = session.tx()?;
+    let err = tx
+        .query_with(scan)
+        .max_memory(100)
+        .fetch_all()
+        .expect_err("tx sync builder ignored max_memory");
+    assert!(
+        matches!(
+            err,
+            uni_db::UniError::MemoryLimitExceeded {
+                limit_bytes: 100,
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+    tx.rollback();
+
+    let tx = session.tx()?;
+    let err = tx
+        .query_with(scan)
+        .timeout(std::time::Duration::from_nanos(1))
+        .fetch_all()
+        .expect_err("tx sync builder ignored timeout");
+    assert!(
+        matches!(err, uni_db::UniError::Timeout { .. }),
+        "got {err:?}"
+    );
+    tx.rollback();
+
+    let tx = session.tx()?;
+    let err = tx
+        .execute_with(scan)
+        .max_memory(100)
+        .run()
+        .expect_err("execute sync builder ignored max_memory");
+    assert!(
+        matches!(
+            err,
+            uni_db::UniError::MemoryLimitExceeded {
+                limit_bytes: 100,
+                ..
+            }
+        ),
+        "got {err:?}"
+    );
+    tx.rollback();
+
+    // Controls: without the options every one of these succeeds.
+    assert_eq!(session.query_with(scan).fetch_all()?.len(), 100);
+    let tx = session.tx()?;
+    assert_eq!(tx.query_with(scan).fetch_all()?.len(), 100);
+    tx.rollback();
+    Ok(())
+}

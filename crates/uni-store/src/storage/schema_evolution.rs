@@ -258,7 +258,17 @@ pub async fn backfill_property_from_overflow(
                 crate::runtime::columnar_scan::extract_from_overflow_blob(overflow, row, prop)?;
             match raw {
                 Some(bytes) => {
-                    from_blob.push(Some(codec::decode(&bytes)?));
+                    // In the form a write of the declared property stores.
+                    // `check_declared_values` refused the declaration if any
+                    // value could not be, so a failure here is a value that
+                    // arrived since; refuse rather than store it as NULL.
+                    let value = crate::storage::declared_values::coerce(
+                        prop,
+                        data_type,
+                        codec::decode(&bytes)?,
+                    )
+                    .map_err(|e| anyhow::anyhow!("cannot promote '{prop}' in {table_name}: {e}"))?;
+                    from_blob.push(Some(value));
                     moved += 1;
                     // Re-encode the blob without the promoted key.
                     let arr = overflow.expect("a raw entry implies a blob");

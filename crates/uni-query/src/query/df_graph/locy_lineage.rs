@@ -62,7 +62,10 @@ use biodivine_lib_bdd::{Bdd, BddVariable, BddVariableSet};
 use datafusion::common::Result as DFResult;
 use datafusion::error::DataFusionError;
 use uni_common::Value;
-use uni_locy::{RuntimeWarning, RuntimeWarningCode, SemiringKind};
+use uni_locy::{
+    DependencyResolution, FEATURE_COL_PREFIX, InferenceMode, ProbabilityDiagnostic, RuntimeWarning,
+    RuntimeWarningCode, SemiringKind,
+};
 
 use super::common::{arrow_err, extract_scalar_key};
 use super::locy_bdd::bdd_probability;
@@ -297,9 +300,19 @@ pub(crate) fn apply_positive_prob_factors(
     Ok(out)
 }
 
-/// Drops the transient lineage and provenance columns
-/// ([`LIN_COL_PREFIX`](crate::query::planner_locy_types::LIN_COL_PREFIX)) from a clause's rows, once they have been read:
-/// they are never part of a fact.
+/// Whether `name` is a transient body column that no fact carries: a lineage
+/// or provenance column ([`LIN_COL_PREFIX`]) or a model invocation's property
+/// feature ([`FEATURE_COL_PREFIX`]).
+pub(crate) fn is_transient_column(name: &str) -> bool {
+    name.starts_with(LIN_COL_PREFIX) || name.starts_with(FEATURE_COL_PREFIX)
+}
+
+/// Drops the transient columns ([`is_transient_column`]) from a clause's
+/// rows, once they have been read: they are never part of a fact.
+///
+/// A feature column kept in the facts made them one column wider than the
+/// rule's declared schema, and a rule reading a model-backed relation
+/// through `IS` failed to scan it (issue #314).
 ///
 /// # Errors
 ///
@@ -312,12 +325,12 @@ pub(crate) fn strip_transient_columns(batches: Vec<RecordBatch>) -> DFResult<Vec
             if !schema
                 .fields()
                 .iter()
-                .any(|f| f.name().starts_with(LIN_COL_PREFIX))
+                .any(|f| is_transient_column(f.name()))
             {
                 return Ok(batch);
             }
             let keep: Vec<usize> = (0..schema.fields().len())
-                .filter(|&i| !schema.field(i).name().starts_with(LIN_COL_PREFIX))
+                .filter(|&i| !is_transient_column(schema.field(i).name()))
                 .collect();
             batch.project(&keep).map_err(arrow_err)
         })
@@ -366,6 +379,7 @@ pub(crate) fn warn_opaque_prob_reads(
         rule_name: rule.name.clone(),
         variable_count: None,
         key_group: None,
+        probability: None,
     });
 }
 
@@ -773,7 +787,13 @@ enum Var {
 /// What [`LineageStore::correct`] found for one rule.
 #[derive(Debug, Default)]
 pub(crate) struct LineageOutcome {
-    /// Whether some fact's formula reads one variable twice.
+    /// Whether some fact's formula reads one variable twice. The runtime
+    /// reports it through the shared-dependency diagnostic instead
+    /// (`report_shared_dependency`), once the recomputation has run.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the unit tests of the sharing analysis")
+    )]
     pub shared: bool,
 }
 
@@ -800,6 +820,150 @@ impl ExactCtx<'_> {
             SemiringKind::TopKProofs { k } if k > 0 => Some(k as usize),
             _ => None,
         }
+    }
+
+    /// How shared facts are evaluated: recomputed under `TopKProofs` and in
+    /// exact mode, combined as independent otherwise.
+    fn inference_mode(&self) -> InferenceMode {
+        if self.top_k().is_some() {
+            InferenceMode::TopKProofs
+        } else if self.exact {
+            InferenceMode::Exact
+        } else {
+            InferenceMode::Approximate
+        }
+    }
+
+    /// The variable limit a fact's formula is evaluated under: the
+    /// configured one, capped by the BDD library's variable range.
+    fn effective_bdd_variable_limit(&self) -> usize {
+        self.max_bdd_variables.min(usize::from(u16::MAX))
+    }
+}
+
+/// The KEY groups of one rule whose exact recomputation needed more
+/// variables than the limit, each with its KEY and the count it needed.
+#[derive(Default)]
+struct Fallbacks(std::cell::RefCell<Vec<(String, usize)>>);
+
+/// Reports what became of `rule`'s shared probabilistic dependencies (issue
+/// #315), once evaluation has decided it, at most once per rule.
+///
+/// `groups` is how many of its facts rest on shared evidence, `example` one
+/// of them, `fallbacks` those whose recomputation fell back, and `premise`
+/// the sentence that names the sharing. In a mode that resolves sharing
+/// with no fallback, the report is the informational
+/// `SharedDependencyResolved`; otherwise it is the
+/// `SharedProbabilisticDependency` warning, saying whether resolution was
+/// not attempted or fell back, and why. The warning was raised before the
+/// recomputation ran, so an exact result was reported as a possible
+/// overestimate.
+fn report_shared_dependency(
+    rule: &str,
+    groups: usize,
+    example: Option<String>,
+    fallbacks: &Fallbacks,
+    premise: &str,
+    ctx: &ExactCtx<'_>,
+) {
+    if groups == 0 {
+        return;
+    }
+    let fallbacks = fallbacks.0.borrow();
+    let mode = ctx.inference_mode();
+    let limits = |d: ProbabilityDiagnostic| ProbabilityDiagnostic {
+        configured_bdd_variable_limit: Some(ctx.max_bdd_variables),
+        effective_bdd_variable_limit: Some(ctx.effective_bdd_variable_limit()),
+        ..d
+    };
+    let warning = match (mode, fallbacks.is_empty()) {
+        (InferenceMode::Approximate, _) => RuntimeWarning {
+            code: RuntimeWarningCode::SharedProbabilisticDependency,
+            message: format!(
+                "{premise} Results may overestimate probability: exact_probability is \
+                 off, so the shared evidence was counted once per proof."
+            ),
+            rule_name: rule.to_string(),
+            variable_count: None,
+            key_group: example,
+            probability: Some(ProbabilityDiagnostic {
+                inference_mode: mode,
+                resolution: DependencyResolution::NotAttempted,
+                reason: Some("exact_probability_disabled".to_string()),
+                groups_detected: groups,
+                groups_fallen_back: groups,
+                configured_bdd_variable_limit: None,
+                effective_bdd_variable_limit: None,
+            }),
+        },
+        (_, true) => RuntimeWarning {
+            code: RuntimeWarningCode::SharedDependencyResolved,
+            message: format!(
+                "Rule '{rule}': {groups} KEY group(s) rest on shared evidence; {} \
+                 evaluated them without the independence assumption.",
+                match mode {
+                    InferenceMode::TopKProofs => "top-k proof inference",
+                    _ => "exact inference",
+                }
+            ),
+            rule_name: rule.to_string(),
+            variable_count: None,
+            key_group: example,
+            probability: Some(limits(ProbabilityDiagnostic {
+                inference_mode: mode,
+                resolution: DependencyResolution::Completed,
+                reason: None,
+                groups_detected: groups,
+                groups_fallen_back: 0,
+                configured_bdd_variable_limit: None,
+                effective_bdd_variable_limit: None,
+            })),
+        },
+        (_, false) => RuntimeWarning {
+            code: RuntimeWarningCode::SharedProbabilisticDependency,
+            message: format!(
+                "{premise} Results may overestimate probability: {} of {groups} shared \
+                 group(s) needed more than max_bdd_variables ({}) and kept the \
+                 independence value.",
+                fallbacks.len(),
+                ctx.max_bdd_variables
+            ),
+            rule_name: rule.to_string(),
+            variable_count: fallbacks.iter().map(|(_, n)| *n).max(),
+            key_group: fallbacks.first().map(|(k, _)| k.clone()),
+            probability: Some(limits(ProbabilityDiagnostic {
+                inference_mode: mode,
+                resolution: DependencyResolution::Fallback,
+                reason: Some("bdd_variable_limit_exceeded".to_string()),
+                groups_detected: groups,
+                groups_fallen_back: fallbacks.len(),
+                configured_bdd_variable_limit: None,
+                effective_bdd_variable_limit: None,
+            })),
+        },
+    };
+    let Ok(mut warnings) = ctx.warnings_slot.write() else {
+        return;
+    };
+    let existing = warnings.iter().position(|w| {
+        w.rule_name == rule
+            && matches!(
+                w.code,
+                RuntimeWarningCode::SharedProbabilisticDependency
+                    | RuntimeWarningCode::SharedDependencyResolved
+            )
+    });
+    match existing {
+        None => warnings.push(warning),
+        // A later evaluation of the rule that did not resolve its sharing
+        // outranks an earlier one that did.
+        Some(i)
+            if warnings[i].code == RuntimeWarningCode::SharedDependencyResolved
+                && warning.code == RuntimeWarningCode::SharedProbabilisticDependency =>
+        {
+            warnings[i] = warning;
+        }
+        Some(_) => {}
     }
 }
 
@@ -1014,32 +1178,33 @@ impl LineageStore {
                 || !analysis.read_once(&(rule.name.clone(), *key))
         };
         // Shared only through a fact it references is that rule's warning;
-        // this rule's is for its own rows.
-        let shared = derivations.values().any(|(key, rows)| {
-            rows.len() > 1 || analysis.locally_shared(&(rule.name.clone(), *key))
-        });
-        if shared
-            && !matches!(ctx.semiring_kind, SemiringKind::TopKProofs { .. })
-            && let Ok(mut warnings) = ctx.warnings_slot.write()
-            && !warnings.iter().any(|w| {
-                w.code == RuntimeWarningCode::SharedProbabilisticDependency
-                    && w.rule_name == rule.name
+        // this rule's is for its own rows. Reported once the recomputation
+        // has run, by what it achieved.
+        let shared_groups: HashSet<&FactKey> = derivations
+            .values()
+            .filter(|(key, rows)| {
+                rows.len() > 1 || analysis.locally_shared(&(rule.name.clone(), *key))
             })
-        {
-            warnings.push(RuntimeWarning {
-                code: RuntimeWarningCode::SharedProbabilisticDependency,
-                message: format!(
+            .map(|(key, _)| key)
+            .collect();
+        let fallbacks = Fallbacks::default();
+        let report = |fallbacks: &Fallbacks| {
+            report_shared_dependency(
+                &rule.name,
+                shared_groups.len(),
+                None,
+                fallbacks,
+                &format!(
                     "Rule '{}' has PROB facts derived more than one way, or whose \
-                         derivation reads one piece of evidence twice, violating the \
-                         independence assumption. Their PROB values may be inexact.",
+                     derivation reads one piece of evidence twice, violating the \
+                     independence assumption.",
                     rule.name
                 ),
-                rule_name: rule.name.clone(),
-                variable_count: None,
-                key_group: None,
-            });
-        }
+                ctx,
+            );
+        };
         if !ctx.exact && ctx.top_k().is_none() {
+            report(&fallbacks);
             return Ok(facts);
         }
         let mut out = Vec::with_capacity(facts.len());
@@ -1072,6 +1237,7 @@ impl LineageStore {
                                 key_indices: &key_indices,
                                 row,
                                 ctx,
+                                fallbacks: &fallbacks,
                             },
                         )?
                     }
@@ -1098,6 +1264,7 @@ impl LineageStore {
             ));
             out.push(RecordBatch::try_new(new_schema, columns).map_err(arrow_err)?);
         }
+        report(&fallbacks);
         Ok(out)
     }
 
@@ -1144,9 +1311,34 @@ impl LineageStore {
         let outcome = LineageOutcome {
             shared: !shared.is_empty(),
         };
-        self.warn(rule, lineage, &snapshot, outcome.shared, ctx);
+        self.warn(rule, lineage, &snapshot, ctx);
+        let fallbacks = Fallbacks::default();
+        let report = |fallbacks: &Fallbacks| {
+            let example = shared
+                .iter()
+                .map(|k| {
+                    k.iter()
+                        .take(8)
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                })
+                .min();
+            report_shared_dependency(
+                &rule.name,
+                shared.len(),
+                example,
+                fallbacks,
+                &format!(
+                    "Rule '{}' aggregates with MNOR/MPROD but some proof paths share \
+                     intermediate facts, violating the independence assumption.",
+                    rule.name
+                ),
+                ctx,
+            );
+        };
         let top_k = ctx.top_k();
         if !ctx.exact && top_k.is_none() {
+            report(&fallbacks);
             return Ok((pre_fold, outcome));
         }
 
@@ -1163,6 +1355,7 @@ impl LineageStore {
             }
         }
         if needs.is_empty() {
+            report(&fallbacks);
             return Ok((pre_fold, outcome));
         }
         let prob_name = pre_fold_column_name(rule, fold.input_col_index)
@@ -1209,6 +1402,7 @@ impl LineageStore {
                                 key_indices: &key_indices,
                                 row,
                                 ctx,
+                                fallbacks: &fallbacks,
                             },
                         )?;
                         exact.insert(key, p);
@@ -1250,6 +1444,7 @@ impl LineageStore {
             ));
             out.push(RecordBatch::try_new(new_schema, columns).map_err(arrow_err)?);
         }
+        report(&fallbacks);
         Ok((out, outcome))
     }
 }
@@ -1364,6 +1559,8 @@ struct BudgetReport<'a, 'c> {
     key_indices: &'a [usize],
     row: usize,
     ctx: &'a ExactCtx<'c>,
+    /// Where the fact is recorded when it falls back.
+    fallbacks: &'a Fallbacks,
 }
 
 /// The possible-worlds probability of `root`, over only its rows `rows` when
@@ -1405,11 +1602,16 @@ fn fact_probability(
     }
     let rule_name = &root.0;
     let ctx = report.ctx;
-    if vars.len() > ctx.max_bdd_variables || vars.len() > usize::from(u16::MAX) {
+    if vars.len() > ctx.effective_bdd_variable_limit() {
         let key_desc = format!(
             "{:?}",
             extract_scalar_key(report.batch, report.key_indices, report.row)
         );
+        report
+            .fallbacks
+            .0
+            .borrow_mut()
+            .push((key_desc.clone(), vars.len()));
         if let Ok(mut warnings) = ctx.warnings_slot.write()
             && !warnings.iter().any(|w| {
                 w.code == RuntimeWarningCode::BddLimitExceeded
@@ -1428,6 +1630,15 @@ fn fact_probability(
                 rule_name: rule_name.clone(),
                 variable_count: Some(vars.len()),
                 key_group: Some(key_desc.clone()),
+                probability: Some(ProbabilityDiagnostic {
+                    inference_mode: ctx.inference_mode(),
+                    resolution: DependencyResolution::Fallback,
+                    reason: Some("bdd_variable_limit_exceeded".to_string()),
+                    groups_detected: 1,
+                    groups_fallen_back: 1,
+                    configured_bdd_variable_limit: Some(ctx.max_bdd_variables),
+                    effective_bdd_variable_limit: Some(ctx.effective_bdd_variable_limit()),
+                }),
             });
         }
         if let Ok(mut approx) = ctx.approximate_slot.write() {
@@ -1524,14 +1735,14 @@ fn fact_probability(
 }
 
 impl LineageStore {
-    /// Raises `SharedProbabilisticDependency` and `CrossGroupCorrelationNotExact`
-    /// for `rule`, at most once each.
+    /// Raises `CrossGroupCorrelationNotExact` for `rule`, at most once. Its
+    /// shared dependencies are reported after their recomputation
+    /// ([`report_shared_dependency`]).
     fn warn(
         &self,
         rule: &FixpointRulePlan,
         lineage: &RuleLineage,
         snapshot: &HashMap<String, Arc<RuleLineage>>,
-        shared: bool,
         ctx: &ExactCtx<'_>,
     ) {
         // Facts of this rule consuming each referenced fact (or base event).
@@ -1584,27 +1795,7 @@ impl LineageStore {
                 rule_name: rule.name.clone(),
                 variable_count: Some(crossing.len()),
                 key_group: example.first().cloned(),
-            });
-        }
-        // Under `TopKProofs` shared facts are recomputed whatever
-        // `exact_probability` says, so the "may overestimate" premise is
-        // false.
-        let suppress = matches!(ctx.semiring_kind, SemiringKind::TopKProofs { .. });
-        if shared
-            && !suppress
-            && !warned(&warnings, RuntimeWarningCode::SharedProbabilisticDependency)
-        {
-            warnings.push(RuntimeWarning {
-                code: RuntimeWarningCode::SharedProbabilisticDependency,
-                message: format!(
-                    "Rule '{}' aggregates with MNOR/MPROD but some proof paths \
-                     share intermediate facts, violating the independence assumption. \
-                     Results may overestimate probability.",
-                    rule.name
-                ),
-                rule_name: rule.name.clone(),
-                variable_count: None,
-                key_group: None,
+                probability: None,
             });
         }
     }

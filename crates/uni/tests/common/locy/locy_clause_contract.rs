@@ -215,12 +215,12 @@ async fn clause_contract_one_fold_tail_per_rule() -> Result<()> {
             CHAIN,
             rec("WHERE t >= 1", "WHERE t >= 1"),
             Expect::Rows(&[
-                "t=1.0 x=a y=b",
-                "t=1.0 x=a y=c",
-                "t=1.0 x=a y=d",
-                "t=1.0 x=b y=c",
-                "t=1.0 x=b y=d",
-                "t=1.0 x=c y=d",
+                "t=1 x=a y=b",
+                "t=1 x=a y=c",
+                "t=1 x=a y=d",
+                "t=1 x=b y=c",
+                "t=1 x=b y=d",
+                "t=1 x=c y=d",
             ]),
         ),
         (

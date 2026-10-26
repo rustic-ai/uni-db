@@ -2,6 +2,11 @@
 
 Uni uses OpenCypher as its primary query language, with extensions for vector search, time travel, and admin procedures. This keeps graph queries expressive and readable.
 
+`id(node)` and `id(relationship)` return signed integer identities. Virtual
+entities created by procedures use negative IDs, so `id(node) < 0` identifies
+a virtual node. Comparisons, ordering and arithmetic use the same integer
+returned to the caller; `elementId(entity)` is its string representation.
+
 ## What It Provides
 
 - Pattern matching for nodes and relationships, including `OPTIONAL MATCH` for left-outer-join semantics.

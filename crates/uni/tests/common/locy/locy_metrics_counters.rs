@@ -82,7 +82,9 @@ async fn locy_result_reports_the_rows_its_rules_scanned() -> Result<()> {
     let scanned = result.metrics().rows_scanned;
     let returned = result.metrics().rows_returned;
     let derived = result
-        .derived_facts("hot_item")
+        .derived_rule("hot_item")
+        .await
+        .unwrap()
         .map(|f| f.len())
         .unwrap_or(0);
 

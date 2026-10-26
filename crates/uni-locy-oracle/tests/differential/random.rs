@@ -281,7 +281,9 @@ async fn identity_divergences(
         Ok(result) => {
             for rel in rels {
                 let rows = result
-                    .derived
+                    .derived_rules()
+                    .await
+                    .unwrap()
                     .get(rel.as_str())
                     .cloned()
                     .unwrap_or_default();
@@ -302,7 +304,9 @@ async fn identity_divergences(
                 match db.session().locy(&sub.program_text).await {
                     Ok(result) => {
                         let rows = result
-                            .derived
+                            .derived_rules()
+                            .await
+                            .unwrap()
                             .get(rel.as_str())
                             .cloned()
                             .unwrap_or_default();

@@ -44,7 +44,9 @@ async fn test_locy_works_via_spawn_blocking_workaround() -> Result<()> {
     .expect("Locy evaluation failed");
 
     let reachable = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("reachable")
         .expect("rule 'reachable' missing");
 

@@ -231,7 +231,7 @@ fn expr_contains_aggregate(expr: &uni_cypher::ast::Expr) -> bool {
 /// relation into zero rows — only a `WHERE` or a `LIMIT` can. So for a `QUERY`
 /// with neither, non-empty `derived` implies non-empty rows. Every other shape
 /// is skipped rather than guessed at.
-fn assert_query_derived_parity(program: &str, result: &uni_locy::LocyResult) {
+async fn assert_query_derived_parity(program: &str, result: &uni_locy::LocyResult) {
     use uni_cypher::locy_ast::LocyStatement;
 
     // A program the TCK feeds us that does not re-parse is not this guard's
@@ -303,7 +303,7 @@ fn assert_query_derived_parity(program: &str, result: &uni_locy::LocyResult) {
         }
 
         let rule = gq.rule_name.to_string();
-        let Some(derived) = result.derived.get(&rule) else {
+        let Some(derived) = result.derived_rules().await.unwrap().get(&rule) else {
             continue;
         };
         if derived.is_empty() {
@@ -431,7 +431,7 @@ async fn store_result(
             }
             // Checked on every scenario, not just the parity feature. An `Err`
             // result is skipped — a failed evaluation has no parity to violate.
-            assert_query_derived_parity(program, &inner);
+            assert_query_derived_parity(program, &inner).await;
             Ok(inner)
         }
         Err(e) => Err(e),
@@ -486,18 +486,24 @@ async fn when_evaluating_locy_program_without_apply(
 
 /// The configuration every scenario evaluates under.
 ///
-/// `UNI_LOCY_TCK_GOAL_DIRECTED=shadow` (or `on`) runs the corpus with the
-/// goal-directed rewrite (`uni_locy::magic`). Shadow keeps every rule's full
-/// relation in `derived`, so all assertions apply unchanged while each
-/// rewritten `QUERY` is answered by the rewritten program; `on` also drops
-/// rules only rewritten goals needed, so scenarios asserting such a rule's
-/// `derived` relation are expected to fail in that mode.
+/// Unset, the corpus runs under the default goal-directed mode
+/// (`GoalDirected::Auto`): each rewritten `QUERY` is answered by the
+/// rewritten program and a rule only such goals needed is derived when a
+/// step reads it, so every assertion applies unchanged.
+/// `UNI_LOCY_TCK_GOAL_DIRECTED` selects another mode (`uni_locy::magic`):
+/// `off` evaluates every rule in full; `shadow` keeps every rule's full
+/// relation in the evaluation itself; `on` drops rules only rewritten goals
+/// needed, so scenarios asserting such a rule's derived relation are expected
+/// to fail in that mode.
 fn base_config() -> LocyConfig {
     let goal_directed = match std::env::var("UNI_LOCY_TCK_GOAL_DIRECTED").as_deref() {
         Ok("shadow") => uni_locy::GoalDirected::Shadow,
         Ok("on") => uni_locy::GoalDirected::On,
-        Ok("off") | Err(_) => uni_locy::GoalDirected::Off,
-        Ok(other) => panic!("UNI_LOCY_TCK_GOAL_DIRECTED={other}: expected off, on or shadow"),
+        Ok("off") => uni_locy::GoalDirected::Off,
+        Ok("auto") | Err(_) => uni_locy::GoalDirected::Auto,
+        Ok(other) => {
+            panic!("UNI_LOCY_TCK_GOAL_DIRECTED={other}: expected auto, off, on or shadow")
+        }
     };
     LocyConfig {
         goal_directed,

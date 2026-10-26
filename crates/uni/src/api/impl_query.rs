@@ -118,6 +118,8 @@ pub(crate) fn into_query_error(e: impl std::fmt::Display, cypher: &str) -> UniEr
         reserved
     } else if let Some(stalled) = UniError::write_stalled_from_message(&msg) {
         stalled
+    } else if let Some(conflict) = UniError::declared_type_conflict_from_message(&msg) {
+        conflict
     } else if let Some(endpoint) = UniError::edge_endpoint_from_message(&msg) {
         endpoint
     } else if let Some(identity) = UniError::edge_identity_from_message(&msg) {
@@ -170,6 +172,8 @@ fn into_execution_error(
         reserved
     } else if let Some(stalled) = UniError::write_stalled_from_message(&msg) {
         stalled
+    } else if let Some(conflict) = UniError::declared_type_conflict_from_message(&msg) {
+        conflict
     } else if let Some(endpoint) = UniError::edge_endpoint_from_message(&msg) {
         endpoint
     } else if let Some(identity) = UniError::edge_identity_from_message(&msg) {
@@ -230,6 +234,8 @@ fn into_stream_error(
         reserved
     } else if let Some(stalled) = UniError::write_stalled_from_message(&msg) {
         stalled
+    } else if let Some(conflict) = UniError::declared_type_conflict_from_message(&msg) {
+        conflict
     } else if let Some(endpoint) = UniError::edge_endpoint_from_message(&msg) {
         endpoint
     } else if let Some(identity) = UniError::edge_identity_from_message(&msg) {
@@ -534,6 +540,16 @@ impl CancelScope {
         Self { scope, caller }
     }
 
+    /// This scope without the enclosing session or transaction scope: only
+    /// the caller's own token, for work done on the caller's behalf after
+    /// the statement returned.
+    pub(crate) fn caller_only(&self) -> Self {
+        Self {
+            scope: None,
+            caller: self.caller.clone(),
+        }
+    }
+
     /// Resolve as soon as any source is cancelled; pend forever if there are
     /// none, so callers can `select!` on it unconditionally.
     pub(crate) async fn cancelled(&self) {
@@ -573,6 +589,105 @@ impl CancelScope {
             executor.set_cancellation_token(token);
         }
     }
+}
+
+/// Per-statement overrides of the database's query limits.
+///
+/// Every Cypher terminal (`fetch_all`, `fetch_one`, `cursor`, `execute`,
+/// `run`, `profile`) on every builder carries one of these down to execution,
+/// and every enforcement point reads the *effective* value from it: the
+/// operator-level deadline (`Executor::context_deadline` reads
+/// `config.query_timeout`), the DataFusion memory pool (built from
+/// `config.max_query_memory`), the outer `tokio::time::timeout`, the elapsed
+/// check behind it, the post-run result-size check, and the budget an error
+/// reports.
+///
+/// The semantics are the ones `query_with(..).fetch_all()` and the Locy
+/// builders already had: an explicit value **replaces** the configured one in
+/// both directions, so a builder timeout above `UniConfig::query_timeout`
+/// allows a query the database setting would have stopped, and an unset value
+/// keeps the configured one. Before this type existed several terminals
+/// honoured an override only in the tightening direction, because the explicit
+/// timeout was an outer wrapper around an execution still bounded by the
+/// database setting, and some dropped `max_memory` entirely.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct QueryOverrides {
+    /// Replaces `UniConfig::query_timeout` when set.
+    pub(crate) timeout: Option<Duration>,
+    /// Replaces `UniConfig::max_query_memory` when set (`0` disables it).
+    pub(crate) max_memory: Option<usize>,
+}
+
+impl QueryOverrides {
+    /// Overrides from a builder's two optional knobs.
+    pub(crate) fn new(timeout: Option<Duration>, max_memory: Option<usize>) -> Self {
+        Self {
+            timeout,
+            max_memory,
+        }
+    }
+
+    /// Whether nothing is overridden, so the database config applies as is.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.timeout.is_none() && self.max_memory.is_none()
+    }
+
+    /// The effective config for a statement run against `base`.
+    pub(crate) fn apply(&self, base: &UniConfig) -> UniConfig {
+        let mut config = base.clone();
+        if let Some(t) = self.timeout {
+            config.query_timeout = t;
+        }
+        if let Some(m) = self.max_memory {
+            config.max_query_memory = m;
+        }
+        config
+    }
+
+    /// The effective `query_timeout` against `base`.
+    pub(crate) fn timeout_or(&self, base: &UniConfig) -> Duration {
+        self.timeout.unwrap_or(base.query_timeout)
+    }
+
+    /// The effective `max_query_memory` against `base`.
+    pub(crate) fn max_memory_or(&self, base: &UniConfig) -> usize {
+        self.max_memory.unwrap_or(base.max_query_memory)
+    }
+}
+
+/// Run `Executor::profile` under the same limits `fetch_all` runs under.
+///
+/// The profile terminals used to call `executor.profile(..)` bare: no
+/// cancellation race, no wall-clock bound beyond the operators' cooperative
+/// checks, and no post-run result-size check. So `.profile()` was the one
+/// terminal a cancelled token or an elapsed `.timeout()` could not stop, and a
+/// result `fetch_all` refused for size was returned when profiled. `config` is
+/// the statement's effective config ([`QueryOverrides::apply`]).
+async fn run_profile(
+    executor: &uni_query::Executor,
+    plan: LogicalPlan,
+    params: &HashMap<String, ApiValue>,
+    cypher: &str,
+    cancel: &CancelScope,
+    config: &UniConfig,
+) -> Result<(Vec<HashMap<String, ApiValue>>, ProfileOutput)> {
+    let timeout = config.query_timeout;
+    let max_mem = config.max_query_memory;
+    let exec_start = Instant::now();
+    let out = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(UniError::Cancelled),
+        res = tokio::time::timeout(timeout, executor.profile(plan, params)) => res
+            .map_err(|_| query_timed_out_error(timeout))?
+            .map_err(|e| into_execution_error(e, cypher, timeout, max_mem))?,
+    };
+    // `tokio::time::timeout` never fires on a future that completes in its
+    // first poll; see `execute_plan_internal`.
+    if exec_start.elapsed() > timeout {
+        return Err(query_timed_out_error(timeout));
+    }
+    enforce_memory_limit(&out.0, max_mem)?;
+    Ok(out)
 }
 
 /// Reject a result set whose estimated in-memory size exceeds `max_mem` bytes.
@@ -771,7 +886,8 @@ impl crate::api::UniInner {
         &self,
         cypher: &str,
         params: HashMap<String, ApiValue>,
-        max_memory: Option<usize>,
+        cancel: CancelScope,
+        overrides: QueryOverrides,
     ) -> Result<(QueryResult, ProfileOutput)> {
         let ast = self.parse_checking_parameters(cypher, &params)?;
         let (ast, tt_spec) = split_time_travel(ast);
@@ -784,12 +900,12 @@ impl crate::api::UniInner {
             return Box::pin(
                 self.pinned_at(&spec)
                     .await?
-                    .profile_ast_internal(ast, cypher, params, max_memory),
+                    .profile_ast_internal(ast, cypher, params, cancel, overrides),
             )
             .await;
         }
 
-        self.profile_ast_internal(ast, cypher, params, max_memory)
+        self.profile_ast_internal(ast, cypher, params, cancel, overrides)
             .await
     }
 
@@ -798,39 +914,24 @@ impl crate::api::UniInner {
         ast: uni_cypher::ast::Query,
         cypher: &str,
         params: HashMap<String, ApiValue>,
-        max_memory: Option<usize>,
+        cancel: CancelScope,
+        overrides: QueryOverrides,
     ) -> Result<(QueryResult, ProfileOutput)> {
         let plan_start = Instant::now();
         let planner = self.base_planner();
         let logical_plan = self.plan_and_rewrite(&planner, ast, cypher)?;
         let plan_time = plan_start.elapsed();
 
+        let config = overrides.apply(&self.config);
         let mut executor = uni_query::Executor::new(self.storage.clone());
-        // A profile that accepted `.max_memory(..)` and ignored it would be a
-        // setter that writes a field nothing reads -- the defect class #284 was
-        // about. Both profile paths took the database config unconditionally
-        // until now.
-        executor.set_config(match max_memory {
-            Some(limit) => {
-                let mut cfg = self.config.clone();
-                cfg.max_query_memory = limit;
-                cfg
-            }
-            None => self.config.clone(),
-        });
+        executor.set_config(config.clone());
         self.apply_session_executor_state(&mut executor);
+        cancel.install(&mut executor);
 
         let projection_order = extract_projection_order(&logical_plan);
 
         let (results, mut profile_output) =
-            executor.profile(logical_plan, &params).await.map_err(|e| {
-                into_execution_error(
-                    e,
-                    cypher,
-                    self.config.query_timeout,
-                    max_memory.unwrap_or(self.config.max_query_memory),
-                )
-            })?;
+            run_profile(&executor, logical_plan, &params, cypher, &cancel, &config).await?;
 
         let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
@@ -1120,12 +1221,11 @@ impl crate::api::UniInner {
     /// Execute a Cypher query with a private transaction L0 buffer.
     /// The tx_l0 is installed on the executor so both reads and mutations
     /// are routed through the caller's private L0 (commit-time serialization).
-    /// `max_memory` overrides `UniConfig::max_query_memory` for this query
-    /// alone, which is how `TxQueryBuilder::max_memory` binds. `None` keeps the
-    /// database-wide ceiling. The session path carries a whole `UniConfig` for
-    /// the same purpose; an `Option<usize>` is enough here because nothing else
-    /// on this path is overridable, and it keeps the executor-template fast
-    /// path — the reason this entry point exists — untouched when unset.
+    /// `overrides` replace `UniConfig::query_timeout` / `max_query_memory` for
+    /// this statement alone, which is how the transaction builders' `.timeout()`
+    /// and `.max_memory()` bind. When nothing is overridden the executor keeps
+    /// the template's config, so the executor-template fast path — the reason
+    /// this entry point exists — is untouched.
     #[expect(
         clippy::too_many_arguments,
         reason = "transaction read path already carries the full tx context"
@@ -1138,7 +1238,7 @@ impl crate::api::UniInner {
         id_reservoir: Option<Arc<uni_store::runtime::TxIdReservoir>>,
         read_snapshot: Option<uni_store::runtime::SnapshotView>,
         cancel: CancelScope,
-        max_memory: Option<usize>,
+        overrides: QueryOverrides,
     ) -> Result<QueryResult> {
         let total_start = Instant::now();
 
@@ -1230,16 +1330,16 @@ impl crate::api::UniInner {
         // The manual `Clone` impl installs a fresh `warnings` Mutex so
         // each query gets its own warnings accumulator.
         let mut executor = (*self.executor_template).clone();
-        // A per-query memory ceiling has to reach the executor's config before
-        // execution: the DataFusion pool is built from
-        // `config.max_query_memory` at plan time, so setting it afterwards
-        // would bound nothing. Only done when overridden, so the common path
-        // keeps the template's config untouched.
-        if let Some(limit) = max_memory {
-            let mut cfg = self.config.clone();
-            cfg.max_query_memory = limit;
-            executor.set_config(cfg);
+        // Overrides have to reach the executor's config before execution: the
+        // DataFusion pool is built from `config.max_query_memory` at plan time,
+        // and every operator's deadline from `config.query_timeout`, so setting
+        // either afterwards would bound nothing. Only done when overridden, so
+        // the common path keeps the template's config untouched.
+        if !overrides.is_empty() {
+            executor.set_config(overrides.apply(&self.config));
         }
+        let timeout_duration = overrides.timeout_or(&self.config);
+        let max_mem = overrides.max_memory_or(&self.config);
         // Per-query state.
         if let Ok(reg) = self.custom_functions.read()
             && !reg.is_empty()
@@ -1259,8 +1359,12 @@ impl crate::api::UniInner {
         let projection_order = extract_projection_order(&logical_plan);
 
         let exec_start = Instant::now();
-        let timeout_duration = self.config.query_timeout;
-        let deadline = exec_start + timeout_duration;
+        // Measured from the start of the statement, parse and plan included:
+        // the transaction builders used to enforce their `.timeout()` with a
+        // `tokio::time::timeout` wrapped around this whole call, which bounded
+        // planning too but could not loosen the database setting below it. The
+        // deadline now lives here, once, at its effective value.
+        let deadline = total_start + timeout_duration;
         // The transaction's own scope reaches execution here. Without this the
         // token accepted by `TxQueryBuilder::cancellation_token` was discarded
         // for want of a parameter to put it in, and `Transaction::cancel()`
@@ -1276,18 +1380,11 @@ impl crate::api::UniInner {
             biased;
             () = cancel.cancelled() => return Err(UniError::Cancelled),
             res = tokio::time::timeout(
-                timeout_duration,
+                deadline.saturating_duration_since(exec_start),
                 executor.execute(logical_plan, &self.properties, &params),
             ) => res
                 .map_err(|_| query_timed_out_error(timeout_duration))?
-                .map_err(|e| {
-                into_execution_error(
-                    e,
-                    cypher,
-                    self.config.query_timeout,
-                    max_memory.unwrap_or(self.config.max_query_memory),
-                )
-            })?,
+                .map_err(|e| into_execution_error(e, cypher, timeout_duration, max_mem))?,
         };
         let exec_time = exec_start.elapsed();
 
@@ -1303,7 +1400,7 @@ impl crate::api::UniInner {
         // Adding it to the cursor without adding it here would have handed the
         // transaction surface a fresh asymmetry — streaming stricter than
         // materializing — which is the shape of defect this work removes.
-        enforce_memory_limit(&results, max_memory.unwrap_or(self.config.max_query_memory))?;
+        enforce_memory_limit(&results, max_mem)?;
 
         let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
@@ -1331,6 +1428,10 @@ impl crate::api::UniInner {
     /// so mutations land in the caller's private L0 (commit-time
     /// serialization) — this is what lets `ExecuteBuilder::profile()`
     /// profile a transaction write end-to-end.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "transaction profile path carries the same tx context as execute"
+    )]
     pub(crate) async fn profile_internal_with_tx_l0(
         &self,
         cypher: &str,
@@ -1338,7 +1439,8 @@ impl crate::api::UniInner {
         tx_l0: std::sync::Arc<parking_lot::RwLock<uni_store::runtime::l0::L0Buffer>>,
         id_reservoir: Option<Arc<uni_store::runtime::TxIdReservoir>>,
         read_snapshot: Option<uni_store::runtime::SnapshotView>,
-        max_memory: Option<usize>,
+        cancel: CancelScope,
+        overrides: QueryOverrides,
     ) -> Result<(QueryResult, ProfileOutput)> {
         let ast = self.parse_checking_parameters(cypher, &params)?;
 
@@ -1356,19 +1458,9 @@ impl crate::api::UniInner {
         let logical_plan = self.plan_and_rewrite(&planner, ast, cypher)?;
         let plan_time = plan_start.elapsed();
 
+        let config = overrides.apply(&self.config);
         let mut executor = uni_query::Executor::new(self.storage.clone());
-        // A profile that accepted `.max_memory(..)` and ignored it would be a
-        // setter that writes a field nothing reads -- the defect class #284 was
-        // about. Both profile paths took the database config unconditionally
-        // until now.
-        executor.set_config(match max_memory {
-            Some(limit) => {
-                let mut cfg = self.config.clone();
-                cfg.max_query_memory = limit;
-                cfg
-            }
-            None => self.config.clone(),
-        });
+        executor.set_config(config.clone());
         self.apply_session_executor_state(&mut executor);
         // The statement's scope on the transaction buffer: its writes pay the
         // write throttle once, and its side-effect counts see what it created.
@@ -1378,18 +1470,12 @@ impl crate::api::UniInner {
         if let Some(r) = id_reservoir {
             executor.set_id_reservoir(r);
         }
+        cancel.install(&mut executor);
 
         let projection_order = extract_projection_order(&logical_plan);
 
         let (results, mut profile_output) =
-            executor.profile(logical_plan, &params).await.map_err(|e| {
-                into_execution_error(
-                    e,
-                    cypher,
-                    self.config.query_timeout,
-                    max_memory.unwrap_or(self.config.max_query_memory),
-                )
-            })?;
+            run_profile(&executor, logical_plan, &params, cypher, &cancel, &config).await?;
 
         let columns = columns_for_results(&results, projection_order)?;
         let rows = rows_for_results(results, &columns, true);
@@ -1408,12 +1494,25 @@ impl crate::api::UniInner {
     /// Execute a cursor query with a private transaction L0 buffer.
     ///
     /// Mirrors `execute_cursor_internal_with_config` but installs the
-    /// caller's private L0 so reads see uncommitted transaction writes.
+    /// caller's private L0 so reads see uncommitted transaction writes, and the
+    /// transaction's pinned read snapshot and id reservoir, exactly as
+    /// [`Self::execute_internal_with_tx_l0`] does.
+    ///
+    /// The snapshot used to be missing here, so under `ssi_enabled` a cursor
+    /// read the *live* L0 while `fetch_all` on the same transaction read the
+    /// pinned one: a row another session committed after the transaction began
+    /// was invisible to one terminal and visible to the other.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "transaction cursor path carries the same tx context as execute"
+    )]
     pub(crate) async fn execute_cursor_internal_with_tx_l0(
         &self,
         cypher: &str,
         params: HashMap<String, ApiValue>,
         tx_l0: std::sync::Arc<parking_lot::RwLock<uni_store::runtime::l0::L0Buffer>>,
+        id_reservoir: Option<Arc<uni_store::runtime::TxIdReservoir>>,
+        read_snapshot: Option<uni_store::runtime::SnapshotView>,
         config: UniConfig,
         cancel: CancelScope,
     ) -> Result<QueryCursor> {
@@ -1435,6 +1534,10 @@ impl crate::api::UniInner {
         executor.set_config(config.clone());
         self.apply_session_executor_state(&mut executor);
         executor.set_transaction_l0(tx_l0);
+        executor.set_read_snapshot(read_snapshot);
+        if let Some(r) = id_reservoir {
+            executor.set_id_reservoir(r);
+        }
         cancel.install(&mut executor);
 
         Ok(self.build_guarded_cursor(executor, logical_plan, params, cypher, &config, cancel))

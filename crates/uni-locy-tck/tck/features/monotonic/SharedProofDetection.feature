@@ -176,4 +176,8 @@ Feature: Shared-Proof Detection
       """
     Then evaluation should succeed
     And the derived relation 'combined' should contain a fact where a.name = 'Source' and b.name = 'Target' and p = 0.29
-    And the result should contain a SharedProbabilisticDependency warning for rule 'combined'
+    # Exact inference resolves the sharing, so the result is no
+    # overestimate: reported as a status, not the warning (issue #315).
+    And the result should report a SharedDependencyResolved status for rule 'combined'
+    And the result should not contain a SharedProbabilisticDependency warning
+    And the shared dependency of rule 'combined' should have inference mode 'exact' and resolution 'completed'

@@ -60,8 +60,14 @@ async fn build_grid(db: &Uni) -> Result<()> {
 /// Count derived facts for a rule whose grouping KEY's first column equals
 /// `it_vid` — i.e. how many reach pairs belong to one iteration. The KEY
 /// columns are `it`, `a`, `b`; the `it` value is the Iter node's identity.
-fn reach_count_total(result: &LocyResult) -> usize {
-    result.derived.get("reach").map(|v| v.len()).unwrap_or(0)
+async fn reach_count_total(result: &LocyResult) -> usize {
+    result
+        .derived_rules()
+        .await
+        .unwrap()
+        .get("reach")
+        .map(|v| v.len())
+        .unwrap_or(0)
 }
 
 /// REQ-1 core: `(it, a) IS reach TO m, (it, m) IS active TO b` reaches the
@@ -97,14 +103,14 @@ async fn prefix_to_grouped_recursion_reaches_fixpoint() -> Result<()> {
         .run()
         .await?;
 
-    let total = reach_count_total(&result);
+    let total = reach_count_total(&result).await;
     assert_eq!(
         total,
         4,
         "per-group transitive closure must derive 4 facts \
          (it0: AB,BC,AC; it1: AB). Got {total} — 3 means the recursion stalled at one hop \
          (missing the transitive AC pair), 5 means iteration groups leaked. Facts: {:?}",
-        result.derived.get("reach")
+        result.derived_rules().await.unwrap().get("reach")
     );
     Ok(())
 }
@@ -145,7 +151,12 @@ async fn prefix_to_single_group_matches_scalar_to() -> Result<()> {
         .run()
         .await?;
 
-    let reach = result.derived.get("reach").expect("rule 'reach' missing");
+    let reach = result
+        .derived_rules()
+        .await
+        .unwrap()
+        .get("reach")
+        .expect("rule 'reach' missing");
     // 4-node chain A→B→C→D in a single iteration: 6 reachable pairs.
     assert_eq!(
         reach.len(),
@@ -200,12 +211,16 @@ async fn and_between_is_predicates_equals_comma() -> Result<()> {
         .await?;
 
     let n_and = res_and
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("both")
         .expect("rule 'both' missing")
         .len();
     let n_comma = res_comma
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("both")
         .expect("rule 'both' missing")
         .len();

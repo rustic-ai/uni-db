@@ -1282,8 +1282,8 @@ async fn path_output_reads_no_extra_adjacency() -> Result<()> {
 /// Timing probe for path output on the ladder graph; prints, asserts nothing.
 ///
 /// Run with `--run-ignored only -E 'test(path_output_timing_probe)'
-/// --no-capture`. Recorded in the P2 entry of
-/// `docs/proposals/open_issues_plan_2026_10_17.md`.
+/// --no-capture`. Its 2k and 8k ladder timings are recorded under "P2
+/// leftovers" in `docs/proposals/open_issues_plan_2026_10_17.md`.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "timing probe, run manually"]
 async fn path_output_timing_probe() -> Result<()> {

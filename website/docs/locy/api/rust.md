@@ -77,7 +77,7 @@ Common fields:
 
 ## Result Shape (`LocyResult`)
 
-- `derived: HashMap<String, Vec<FactRow>>` (where `FactRow = HashMap<String, Value>`)
+- every rule's facts, through `result.derived_rules().await?` (a `HashMap<String, Vec<FactRow>>`, `FactRow = HashMap<String, Value>`) or `result.derived_rule(name).await?`. Async and fallible: a rule the default goal-directed mode left out is derived on that first read, against the evaluation's snapshot. `result.evaluated_rules()` is the synchronous view of what the evaluation itself derived; `result.lazily_derived_rules()` names the rest
 - `stats: LocyStats`
 - `command_results: Vec<CommandResult>`
 - `warnings: Vec<RuntimeWarning>`
@@ -91,7 +91,7 @@ Helpers:
 - `result.stats()`
 - `result.warnings()`
 - `result.has_warning(...)`
-- `result.derived_facts(rule_name)`
+- `result.derived_rule(rule_name).await?`
 - `result.iterations`
 
 ## Profile Output (`LocyProfileOutput`)

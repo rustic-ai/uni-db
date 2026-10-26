@@ -354,6 +354,55 @@ impl ForkScope {
         Ok(())
     }
 
+    /// Record schemaless edge-type names in the overlay and persist it.
+    ///
+    /// A fork interns a schemaless edge type in its merged schema only, which
+    /// is never saved; this is how the name outlives the session, so a
+    /// reopened fork can resolve its flushed `deltas_{name}_*` data. Names
+    /// already recorded are skipped, and nothing is written when none are
+    /// new. Returns whether the overlay changed.
+    ///
+    /// The caller may pass every name its merged schema knows, including the
+    /// ones inherited from primary: recording those too is harmless, since
+    /// [`uni_common::core::schema::SchemaManager::with_overlay`] interns a
+    /// name primary already has as a no-op.
+    ///
+    /// # Errors
+    /// Returns the registry PUT failure; the in-memory overlay is then left
+    /// unchanged, so a later call retries.
+    pub async fn record_schemaless_edge_types<I>(&self, names: I) -> anyhow::Result<bool>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let fresh: Vec<String> = {
+            let current = self.overlay.load();
+            names
+                .into_iter()
+                .filter(|n| !current.added_schemaless_edge_types.contains(n))
+                .collect()
+        };
+        if fresh.is_empty() {
+            return Ok(false);
+        }
+        let _guard = self.overlay_lock.lock().await;
+        let mut next = (**self.overlay.load()).clone();
+        let before = next.added_schemaless_edge_types.len();
+        for name in fresh {
+            if !next.added_schemaless_edge_types.contains(&name) {
+                next.added_schemaless_edge_types.push(name);
+            }
+        }
+        if next.added_schemaless_edge_types.len() == before {
+            return Ok(false);
+        }
+        self.registry
+            .update_schema_overlay(&self.fork_id, &next)
+            .await
+            .with_context(|| format!("persist schema overlay for fork {}", self.fork_id))?;
+        self.overlay.store(Arc::new(next));
+        Ok(true)
+    }
+
     /// Registry handle (used by admin paths to e.g. compute holder counts).
     #[must_use]
     pub fn registry(&self) -> Arc<ForkRegistryHandle> {

@@ -34,7 +34,7 @@ Use plain Cypher when you need direct reads/writes on existing graph state. Use 
 - Recursive closure and fixed-point reasoning.
 - Explainable inferred facts.
 - What-if analysis with rollback boundaries.
-- Suggested minimal changes to satisfy or prevent outcomes.
+- Suggested single edits (one edge or property change, each validated) that satisfy or prevent outcomes.
 
 ## API Entry Points
 

@@ -220,15 +220,24 @@ async fn collect_and_fetch_vertex_prefetch(
         if vids.is_empty() {
             continue;
         }
-        if let Ok(label_results) = pm
+        match pm
             .get_batch_vertex_props_for_label(&vids, &label, ctx)
             .await
         {
-            for (vid, props) in label_results {
-                prefetch.vertex.entry(vid).or_insert(props);
+            Ok(label_results) => {
+                for (vid, props) in label_results {
+                    prefetch.vertex.entry(vid).or_insert(props);
+                }
             }
+            // The per-row fallback keeps the answer right, at one storage
+            // read per row; say so rather than degrade silently.
+            Err(e) => tracing::warn!(
+                label = %label,
+                vids = vids.len(),
+                error = %e,
+                "batched property prefetch failed; falling back to per-row reads"
+            ),
         }
-        // Batch errors fall through to per-row fallback (correctness preserved).
     }
     for (type_name, eid_set) in by_type {
         let eids: Vec<Eid> = eid_set.into_iter().collect();
@@ -915,18 +924,27 @@ async fn apply_mutations(
 
     match mutation_kind {
         MutationKind::Create { pattern } => {
+            let (prepared, temp_vars) = Executor::prepare_pattern_for_path_binding(pattern);
             for row in rows.iter_mut() {
-                exec.execute_create_pattern(pattern, row, writer, pm, params, ctx, tx_l0, None)
-                    .await
-                    .map_err(|e| df_err("CREATE failed", e))?;
+                exec.execute_create_binding_paths(
+                    &prepared, &temp_vars, row, writer, pm, params, ctx, tx_l0,
+                )
+                .await
+                .map_err(|e| df_err("CREATE failed", e))?;
             }
         }
         MutationKind::CreateBatch { patterns } => {
+            let prepared: Vec<_> = patterns
+                .iter()
+                .map(Executor::prepare_pattern_for_path_binding)
+                .collect();
             for row in rows.iter_mut() {
-                for pattern in patterns {
-                    exec.execute_create_pattern(pattern, row, writer, pm, params, ctx, tx_l0, None)
-                        .await
-                        .map_err(|e| df_err("CREATE failed", e))?;
+                for (pattern, temp_vars) in &prepared {
+                    exec.execute_create_binding_paths(
+                        pattern, temp_vars, row, writer, pm, params, ctx, tx_l0,
+                    )
+                    .await
+                    .map_err(|e| df_err("CREATE failed", e))?;
                 }
             }
         }

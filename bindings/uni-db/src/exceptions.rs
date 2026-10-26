@@ -568,6 +568,17 @@ pub fn uni_error_to_pyerr(e: uni_common::UniError) -> PyErr {
                 Ok(())
             })
         }
+        DeclaredTypeConflict { detail } => {
+            fork_err_with(UniSchemaError::new_err(msg), |_py, val| {
+                val.setattr("entity", detail.entity)?;
+                val.setattr("property", detail.property)?;
+                val.setattr("declared", detail.declared)?;
+                val.setattr("count", detail.count)?;
+                val.setattr("example_id", detail.example_id)?;
+                val.setattr("example_value", detail.example_value)?;
+                Ok(())
+            })
+        }
         // Catch-all for future variants (non_exhaustive)
         _ => UniError::new_err(msg),
     }

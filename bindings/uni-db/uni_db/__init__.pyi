@@ -1010,10 +1010,35 @@ class LocyStats:
 class LocyResult:
     """Result of a Locy program evaluation."""
 
-    derived: Any
+    @property
+    def derived(self) -> dict[str, list[dict[str, Any]]]:
+        """Every rule's facts, as they stood before the program's first command.
+
+        Rules the evaluation left out because only goal-directed ``QUERY``
+        commands needed them (the default ``goal_directed="auto"``) are derived
+        on the first access, against the snapshot the evaluation read, and
+        added to this dict, and the warnings that derivation raised are
+        appended to ``warnings``. That access blocks while they are derived
+        (in async code, ``await derived_async()`` instead) and raises what
+        the derivation raised.
+        """
+    async def derived_async(self) -> dict[str, list[dict[str, Any]]]:
+        """``derived``, without blocking the event loop.
+
+        Derives the rules the evaluation left out on the runtime, then
+        returns the same dict ``derived`` does. Use this from async code.
+        """
     stats: Any
     command_results: Any
     warnings: Any
+    """Runtime warnings, one dict each: ``code`` (snake_case), ``severity``
+    (``"info"`` for a status report such as ``shared_dependency_resolved``,
+    else ``"warning"``), ``message``, ``rule_name``, ``variable_count``,
+    ``key_group``, and ``probability`` — the structured shared-dependency
+    diagnostic (``inference_mode``, ``resolution``, ``reason``,
+    ``groups_detected``, ``groups_fallen_back``,
+    ``configured_bdd_variable_limit``, ``effective_bdd_variable_limit``) or
+    ``None``."""
     compile_warnings: list[dict[str, str]]
     approximate_groups: Any
     derived_fact_set: Any
@@ -1026,7 +1051,9 @@ class LocyResult:
     ``exec_time_ms`` is the remainder. Every other field is real.
     """
 
-    def has_warning(self, code: str) -> bool: ...
+    def has_warning(self, code: str) -> bool:
+        """Whether a runtime warning with this snake_case ``code`` was emitted."""
+        ...
     def warnings_list(self) -> Any: ...
     def derived_facts(self, rule: str) -> list[dict[str, Any]] | None: ...
     def rows(self) -> list[dict[str, Any]] | None: ...
@@ -1495,6 +1522,8 @@ class TxExecuteBuilder:
 
     def param(self, name: str, value: Any) -> TxExecuteBuilder: ...
     def timeout(self, seconds: float) -> TxExecuteBuilder: ...
+    def max_memory(self, bytes: int) -> TxExecuteBuilder: ...
+    def cancellation_token(self, token: CancellationToken) -> TxExecuteBuilder: ...
     def run(self) -> ExecuteResult: ...
     def profile(self) -> tuple[ExecuteResult, ProfileOutput]: ...
 
@@ -1879,8 +1908,8 @@ class LocyConfig:
         max_bdd_variables: int | None = None,
         top_k_proofs: int | None = None,
         top_k_proofs_training: int | None = None,
-        # "off" | "on" | "shadow", matched case-insensitively; anything else
-        # raises ValueError.
+        # "auto" (the default) | "off" | "on" | "shadow", matched
+        # case-insensitively; anything else raises ValueError.
         goal_directed: str | None = None,
     ) -> None: ...
     @property
@@ -1913,7 +1942,7 @@ class LocyConfig:
     @property
     def top_k_proofs_training(self) -> int | None: ...
     @property
-    def goal_directed(self) -> Literal["off", "on", "shadow"]: ...
+    def goal_directed(self) -> Literal["auto", "off", "on", "shadow"]: ...
     @property
     def classifier_aliases(self) -> list[str]: ...
     # Parameter is named `callable` at runtime (src/classifier.rs). It shadows
@@ -2572,6 +2601,8 @@ class AsyncTxExecuteBuilder:
 
     def param(self, name: str, value: Any) -> AsyncTxExecuteBuilder: ...
     def timeout(self, seconds: float) -> AsyncTxExecuteBuilder: ...
+    def max_memory(self, bytes: int) -> AsyncTxExecuteBuilder: ...
+    def cancellation_token(self, token: CancellationToken) -> AsyncTxExecuteBuilder: ...
     async def run(self) -> ExecuteResult: ...
     async def profile(self) -> tuple[ExecuteResult, ProfileOutput]: ...
 

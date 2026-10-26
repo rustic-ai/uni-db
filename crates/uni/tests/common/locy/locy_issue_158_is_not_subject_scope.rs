@@ -107,7 +107,11 @@ async fn probe(db: &Uni, yield_clause: &str, subject: &str, col: &str) -> Result
     );
     let result = db.session().locy(&program).await?;
     let empty = vec![];
-    let facts = result.derived_facts("probe").unwrap_or(&empty);
+    let facts = result
+        .derived_rule("probe")
+        .await
+        .unwrap()
+        .unwrap_or(&empty);
 
     let mut names: Vec<String> = facts
         .iter()
@@ -179,7 +183,11 @@ async fn issue_158_positive_is_ref_is_unaffected() -> Result<()> {
     );
     let result = db.session().locy(&program).await?;
     let empty = vec![];
-    let facts = result.derived_facts("probe").unwrap_or(&empty);
+    let facts = result
+        .derived_rule("probe")
+        .await
+        .unwrap()
+        .unwrap_or(&empty);
     let names: Vec<String> = facts
         .iter()
         .filter_map(|row| match row.get("subj") {
@@ -240,7 +248,11 @@ async fn issue_158_unprojected_subject_filters_correctly() -> Result<()> {
     );
     let result = db.session().locy(&program).await?;
     let empty = vec![];
-    let facts = result.derived_facts("probe").unwrap_or(&empty);
+    let facts = result
+        .derived_rule("probe")
+        .await
+        .unwrap()
+        .unwrap_or(&empty);
     let mut names: Vec<String> = facts
         .iter()
         .filter_map(|row| match row.get("name") {
@@ -318,7 +330,11 @@ async fn issue_158_hidden_vid_column_does_not_leak_into_derived() -> Result<()> 
     );
     let result = db.session().locy(&program).await?;
     let empty = vec![];
-    let facts = result.derived_facts("probe").unwrap_or(&empty);
+    let facts = result
+        .derived_rule("probe")
+        .await
+        .unwrap()
+        .unwrap_or(&empty);
     assert!(
         !facts.is_empty(),
         "precondition: the rule must derive facts"

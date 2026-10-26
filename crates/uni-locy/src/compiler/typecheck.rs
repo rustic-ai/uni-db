@@ -269,6 +269,7 @@ pub fn check(
                 });
             }
             check_fold_yield_is_grouped(rule_name, def)?;
+            check_no_aggregate_outside_fold(rule_name, def)?;
 
             // Phase B Slice 3 + A4 follow-up: extract model invocations
             // from YIELD items, ALONG bindings, and FOLD aggregate
@@ -1320,6 +1321,53 @@ fn check_fold_yield_is_grouped(
     Ok(())
 }
 
+/// Rejects an aggregate function call in a YIELD item or an ALONG binding.
+///
+/// Rule-body WHERE already refuses one (the Cypher planner's
+/// `InvalidAggregation`); a YIELD or ALONG aggregate reached the physical
+/// planner and failed there with an unstructured error.
+fn check_no_aggregate_outside_fold(
+    rule_name: &str,
+    def: &RuleDefinition,
+) -> Result<(), LocyCompileError> {
+    // `Expr::is_aggregate` stops at a non-aggregate call, so `abs(count(e))`
+    // is looked into here.
+    fn contains_aggregate(expr: &Expr) -> bool {
+        let mut found = expr.is_aggregate();
+        expr.for_each_child(&mut |child| found = found || contains_aggregate(child));
+        found
+    }
+    fn locy_expr_is_aggregate(expr: &LocyExpr) -> bool {
+        match expr {
+            LocyExpr::PrevRef(_) => false,
+            LocyExpr::Cypher(e) => contains_aggregate(e),
+            LocyExpr::BinaryOp { left, right, .. } => {
+                locy_expr_is_aggregate(left) || locy_expr_is_aggregate(right)
+            }
+            LocyExpr::UnaryOp(_, inner) => locy_expr_is_aggregate(inner),
+        }
+    }
+    let refuse = |position: String| LocyCompileError::AggregateOutsideFold {
+        rule: rule_name.to_string(),
+        position,
+    };
+    if let RuleOutput::Yield(yc) = &def.output {
+        let names = resolve_yield_column_names(&yc.items);
+        if let Some((_, column)) = yc
+            .items
+            .iter()
+            .zip(names)
+            .find(|(item, _)| contains_aggregate(&item.expr))
+        {
+            return Err(refuse(format!("YIELD column '{column}'")));
+        }
+    }
+    if let Some(along) = def.along.iter().find(|a| locy_expr_is_aggregate(&a.expr)) {
+        return Err(refuse(format!("ALONG binding '{}'", along.name)));
+    }
+    Ok(())
+}
+
 /// Whether `expr` contains a variable whose name is in `names`.
 fn expr_mentions_any(expr: &Expr, names: &HashSet<&str>) -> bool {
     if let Expr::Variable(v) = expr
@@ -1698,30 +1746,25 @@ where
 
 // ─── Slice 3: model invocation extraction + YIELD rewriting ─────────────────
 
-/// Phase B Slice 3: lift neural-model calls out of YIELD items.
+/// The result of lifting neural-model calls out of a clause
+/// ([`extract_model_invocations`]).
 ///
-/// For each top-level `YIELD ... model_name(args) [AS alias]` where
-/// `model_name` is declared in `model_catalog`, this emits a
-/// [`ModelInvocation`] entry whose `output_column` matches the YIELD
-/// item's resolved column name, and rewrites the YIELD item's expression
-/// to a placeholder literal `0.0`. At runtime, the body projection still
-/// materializes a column with that name (initially zero); the
-/// invocation pass then **overwrites** that column with the classifier's
-/// per-row output before any downstream operator (FOLD, IS-ref) reads
-/// from it.
+/// Every call to a model declared in `model_catalog`, in a YIELD item, an
+/// ALONG binding or a FOLD aggregate — nested inside other calls, operators,
+/// lists and maps included — becomes a [`ModelInvocation`] whose
+/// `output_column` is a synthetic name `__model_<name>_<idx>`, and the call
+/// site is rewritten to `Variable("__model_<name>_<idx>")`, a reference to
+/// that column. No literal placeholder is emitted.
 ///
-/// Why a literal placeholder rather than a synthetic column? The body's
-/// projection is built by the planner from the (rewritten) YIELD items
-/// alone — there's no plan-node insertion point between projection and
-/// downstream operators where a brand-new column could be threaded in
-/// without restructuring the planner. Overwriting an existing column
-/// keeps the diff to the runtime alone.
+/// At runtime the planner inserts `LogicalPlan::LocyModelInvoke` between the
+/// clause body and its `LocyProject` (`locy_planner.rs`); its
+/// `LocyModelInvokeExec` adds the column, typed `Float64`, holding the
+/// classifier's per-row output (overwriting a same-named input column if one
+/// exists), so the rewritten YIELD / ALONG / FOLD expressions read it like
+/// any other body column. Calls in a rule's WHERE are not lifted.
 ///
-/// Slice 3 limits the extraction to direct top-level model calls in
-/// YIELD items (the common case from DEEP_LOCY.md §9.4). Nested calls
-/// (`f(model_x(s))`, `model_x(s) + 1`), invocations in WHERE, FOLD, or
-/// ALONG are not lifted in this slice — they parse and validate (arity)
-/// but won't execute at runtime. Follow-up slices extend the lift.
+/// `hidden_yield_cols` names the `__feat_<var>_<prop>` YIELD items appended
+/// so that property features are materialized into each fact row.
 pub(crate) struct ExtractedInvocations {
     pub output: RuleOutput,
     pub along: Vec<AlongBinding>,
@@ -1772,7 +1815,7 @@ impl<'a> InvocationLifter<'a> {
     /// materialized into the per-row fact_row, deduping by column name.
     fn register_property_feature(&mut self, v: &str, prop: &str, refs: &mut Vec<(String, String)>) {
         refs.push((v.to_string(), prop.to_string()));
-        let col_name = format!("__feat_{}_{}", v, prop);
+        let col_name = crate::types::feature_column_name(v, prop);
         if self.seen_hidden.insert(col_name.clone()) {
             let hidden_expr =
                 Expr::Property(Box::new(Expr::Variable(v.to_string())), prop.to_string());

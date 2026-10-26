@@ -99,44 +99,22 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Static check (no compile): every wheel variant must enable the plugin
-      # loader features its shared binding source calls unconditionally.
-      - name: Check wheel-variant plugin features
-        run: python3 scripts/ci/check_wheel_variant_features.py
-
-      # Every Python-visible version must track the workspace Cargo version.
-      # release.yml checks pyproject.toml, but only at release time; this runs
-      # per-PR and also forbids re-introducing a hardcoded `__version__`.
-      - name: Check Python version consistency
-        run: python3 scripts/ci/check_version_consistency.py
-
-      # Documented counts must match what source or the filesystem already
-      # asserts — plugin surfaces (`assert_eq!(kinds.len(), 22)` in
-      # uni_plugin::surfaces), graph algorithms (`DISTINCT_ALGORITHMS` in
-      # uni-plugin-builtin's builtin_register test), both TCK suites' feature
-      # files and scenario totals, and the skill reference pages.
-      - name: Check documented counts
-        run: python3 scripts/ci/check_documented_counts.py
-
-      # The Python symbol reference is generated from `__init__.pyi`; a stale
-      # checked-in copy is the drift this replaced, so fail rather than diverge.
-      - name: Check generated Python API reference is current
-        run: python3 scripts/gen_python_api_reference.py --check
-
-      # Documented Python methods must exist. Kills the invented-method class
-      # (`xervo.rerank`, `session.profile_with`) that two hand-maintained
-      # references produced independently.
-      - name: Check documented Python symbols exist
-        run: python3 scripts/ci/check_doc_symbols.py
-
-      # The four guards above this one all compare Python to Python, so a Rust
-      # field or error variant that never got bound is invisible to them --
-      # which is how `config({"ssi_enabled": False})` came to be accepted and
-      # ignored. This one compares Rust to Python and requires every gap to be
-      # allowlisted with a reason, so a new one is a decision rather than an
-      # omission.
-      - name: Check Rust <-> Python parity
-        run: python3 scripts/ci/check_rust_python_parity.py
+      # Every guard runs in one step, from the one list in
+      # `scripts/ci/static_guards.py`, which the local runbook runs too: when
+      # the list lived here and was copied into the runbook, a binding change
+      # reached CI with a stale generated API reference (PR #318). The script
+      # runs every guard even after a failure and prints each one's fix. The
+      # guards (see the script for each one's rationale):
+      #   - wheel-variant plugin features
+      #   - Python version consistency
+      #   - documented counts
+      #   - generated Python API reference is current
+      #   - documented Python symbols exist
+      #   - Rust <-> Python parity (Rust compared to Python; every gap allowlisted
+      #     with a reason)
+      #   - ignored-test registry (the nightly sweep's exceptions are current)
+      - name: Static guards
+        run: python3 scripts/ci/static_guards.py
 
   supply-chain:
     if: github.repository == 'rustic-ai/uni-db'

@@ -81,12 +81,17 @@ impl CypherSum {
     /// # Errors
     ///
     /// When the running total is a duration.
+    #[inline]
     pub fn add_int(&mut self, i: i64) -> Result<()> {
         *self = match *self {
             Self::Empty => Self::Int(i),
-            Self::Int(total) => total
-                .checked_add(i)
-                .map_or(Self::Float(total as f64 + i as f64), Self::Int),
+            // On overflow the exact sum is rounded once, through i128: adding
+            // the two as floats rounded each operand first, and could land a
+            // unit in the last place away from the nearest float.
+            Self::Int(total) => total.checked_add(i).map_or_else(
+                || Self::Float((total as i128 + i as i128) as f64),
+                Self::Int,
+            ),
             Self::Float(total) => Self::Float(total + i as f64),
             Self::Duration { .. } => return Err(mixed()),
         };
@@ -98,6 +103,7 @@ impl CypherSum {
     /// # Errors
     ///
     /// When the running total is a duration.
+    #[inline]
     pub fn add_float(&mut self, f: f64) -> Result<()> {
         *self = match *self {
             Self::Empty => Self::Float(f),
@@ -242,6 +248,9 @@ pub fn describe(value: &Value) -> String {
 mod tests {
     use super::*;
 
+    // An exact reference value: `powi` has unspecified precision, including in Miri.
+    const TWO_POW_63: f64 = (1_u64 << 63) as f64;
+
     fn total(values: &[Value]) -> Result<CypherSum> {
         let mut t = CypherSum::default();
         for v in values {
@@ -265,6 +274,53 @@ mod tests {
         assert_eq!(
             total(&[Value::Int(i64::MAX), Value::Int(1)]).unwrap().sum(),
             Value::Float(i64::MAX as f64 + 1.0)
+        );
+    }
+
+    /// Integers stay exact up to the end of the 64-bit range, past 2^53 where
+    /// a float sum rounds, and only an overflow continues as a float.
+    #[test]
+    fn integers_are_exact_until_they_overflow() {
+        let two_53 = 1_i64 << 53;
+        assert_eq!(
+            total(&[Value::Int(two_53), Value::Int(1)]).unwrap().sum(),
+            Value::Int(two_53 + 1)
+        );
+        assert_eq!(
+            total(&[Value::Int(i64::MAX - 1), Value::Int(1)])
+                .unwrap()
+                .sum(),
+            Value::Int(i64::MAX)
+        );
+        assert_eq!(
+            total(&[Value::Int(i64::MIN), Value::Int(-1)])
+                .unwrap()
+                .sum(),
+            Value::Float(-TWO_POW_63)
+        );
+        // Once a float, a float, even back in range.
+        assert_eq!(
+            total(&[Value::Int(i64::MAX), Value::Int(1), Value::Int(-1)])
+                .unwrap()
+                .sum(),
+            Value::Float(TWO_POW_63)
+        );
+    }
+
+    /// The overflowing sum is the exact sum rounded once. Rounding each
+    /// operand first turned `(2^62 + 1) + (2^62 + 1025)` into
+    /// `2^62 + (2^62 + 1024)`, a tie that rounds to `2^63`; the exact
+    /// `2^63 + 1026` is nearest to `2^63 + 2048`.
+    #[test]
+    fn an_overflowing_sum_is_rounded_once() {
+        let a = (1_i64 << 62) + 1;
+        let b = (1_i64 << 62) + 1025;
+        let exact = TWO_POW_63 + 2048.0;
+        // Keep the witness sensitive to rounding the operands before adding.
+        assert_ne!(a as f64 + b as f64, exact);
+        assert_eq!(
+            total(&[Value::Int(a), Value::Int(b)]).unwrap().sum(),
+            Value::Float(exact)
         );
     }
 

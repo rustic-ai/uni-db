@@ -423,6 +423,13 @@ fn infer_unwind_output_type(expr: &Expr, vars_in_scope: &[VariableInfo]) -> Vari
         {
             infer_with_output_type(&args[0], vars_in_scope)
         }
+        // `nodes(p)` / `relationships(p)` yield nodes / relationships one at a
+        // time. Typing the element `Scalar` rejected `UNWIND nodes(p) AS m
+        // RETURN labels(m)` as "labels() requires a node argument".
+        Expr::FunctionCall { .. } => match infer_with_output_type(expr, vars_in_scope) {
+            t @ (VariableType::NodeList | VariableType::EdgeList) => unwrap_list_type(t),
+            _ => VariableType::Scalar,
+        },
         Expr::List(items) => {
             let mut inferred: Option<VariableType> = None;
             for item in items {
@@ -2468,6 +2475,9 @@ pub enum LogicalPlan {
     /// Scan a derived relation's in-memory buffer during fixpoint iteration.
     LocyDerivedScan {
         scan_index: usize,
+        /// The rule whose relation is scanned, named when its facts do not
+        /// match `schema`.
+        rule_name: String,
         data: Arc<RwLock<Vec<RecordBatch>>>,
         schema: SchemaRef,
     },
@@ -4343,6 +4353,16 @@ impl QueryPlanner {
                                 PatternElement::Parenthesized { .. } => {}
                             }
                         }
+                        // A path variable (`CREATE p = (a)-[:R]->(b)`) is a
+                        // new binding like a relationship's. Checked after the
+                        // path's own elements so `p = (p)-[:R]->()` is caught
+                        // as a rebinding rather than read as a reference.
+                        if let Some(v) = path.variable.as_deref()
+                            && !v.is_empty()
+                        {
+                            check_not_already_bound(v, &vars_in_scope, &create_vars)?;
+                            create_vars.push(v);
+                        }
                     }
 
                     // Batch consecutive CREATEs to avoid deep recursion
@@ -4367,8 +4387,15 @@ impl QueryPlanner {
                             };
                         }
                     }
-                    // Add variables from created nodes and relationships to scope
+                    // Add variables from created paths, nodes and relationships
+                    // to scope
                     for path in &create_clause.pattern.paths {
+                        if let Some(var) = &path.variable
+                            && !var.is_empty()
+                        {
+                            create_introduced_vars.insert(var.clone());
+                            add_var_to_scope(&mut vars_in_scope, var, VariableType::Path)?;
+                        }
                         for element in &path.elements {
                             match element {
                                 PatternElement::Node(n) => {
@@ -4782,7 +4809,7 @@ impl QueryPlanner {
     ///
     /// `e VALID_AT timestamp` becomes `uni.temporal.validAt(e, 'valid_from', 'valid_to', timestamp)`
     /// `e VALID_AT(timestamp, 'start', 'end')` becomes `uni.temporal.validAt(e, 'start', 'end', timestamp)`
-    fn transform_valid_at_to_function(expr: Expr) -> Expr {
+    pub(crate) fn transform_valid_at_to_function(expr: Expr) -> Expr {
         match expr {
             Expr::ValidAt {
                 entity,
@@ -4860,7 +4887,11 @@ impl QueryPlanner {
     ///
     /// All three functions share the same shape: single-arg, argument
     /// must be a node/edge variable, returns the column value directly.
-    fn rewrite_id_to_vid(expr: Expr, vars_in_scope: &[VariableInfo]) -> Expr {
+    fn rewrite_id_to_vid(
+        expr: Expr,
+        vars_in_scope: &[VariableInfo],
+        stored_ids: &HashSet<String>,
+    ) -> Expr {
         match expr {
             Expr::FunctionCall {
                 name,
@@ -4869,6 +4900,17 @@ impl QueryPlanner {
                 window_spec,
             } if args.len() == 1 && Self::metadata_function_column(&name, None).is_some() => {
                 if let Expr::Variable(ref var) = args[0] {
+                    // Only stored identities have a nonnegative numeric value.
+                    // Procedure/UNWIND entities can carry ephemeral signed bits;
+                    // retain id() there so residual filters normalize them.
+                    if name.eq_ignore_ascii_case("id") && !stored_ids.contains(var) {
+                        return Expr::FunctionCall {
+                            name,
+                            args,
+                            distinct,
+                            window_spec,
+                        };
+                    }
                     // `id()` resolves to `_eid` for an edge binding and `_vid`
                     // for a node — edge rows expose `_eid`, not `_vid`. Mirror
                     // the projection path (`df_expr.rs` translate of `id`).
@@ -4887,13 +4929,13 @@ impl QueryPlanner {
                 }
             }
             Expr::BinaryOp { left, op, right } => Expr::BinaryOp {
-                left: Box::new(Self::rewrite_id_to_vid(*left, vars_in_scope)),
+                left: Box::new(Self::rewrite_id_to_vid(*left, vars_in_scope, stored_ids)),
                 op,
-                right: Box::new(Self::rewrite_id_to_vid(*right, vars_in_scope)),
+                right: Box::new(Self::rewrite_id_to_vid(*right, vars_in_scope, stored_ids)),
             },
             Expr::UnaryOp { op, expr: inner } => Expr::UnaryOp {
                 op,
-                expr: Box::new(Self::rewrite_id_to_vid(*inner, vars_in_scope)),
+                expr: Box::new(Self::rewrite_id_to_vid(*inner, vars_in_scope, stored_ids)),
             },
             // `IN` recurses for the same reason `=` does, and its absence was
             // load-bearing: `extract_vid_from_cypher_filter`'s `Expr::In` arm
@@ -4902,15 +4944,15 @@ impl QueryPlanner {
             // not fire from any Cypher a user would write. `id(n) = 5` reached
             // it only because `=` is a `BinaryOp` and was already rewritten.
             Expr::In { expr: inner, list } => Expr::In {
-                expr: Box::new(Self::rewrite_id_to_vid(*inner, vars_in_scope)),
-                list: Box::new(Self::rewrite_id_to_vid(*list, vars_in_scope)),
+                expr: Box::new(Self::rewrite_id_to_vid(*inner, vars_in_scope, stored_ids)),
+                list: Box::new(Self::rewrite_id_to_vid(*list, vars_in_scope, stored_ids)),
             },
             // Reached through the arm above, so a list holding `id(m)` is
             // rewritten consistently with the value it is compared against.
             Expr::List(items) => Expr::List(
                 items
                     .into_iter()
-                    .map(|item| Self::rewrite_id_to_vid(item, vars_in_scope))
+                    .map(|item| Self::rewrite_id_to_vid(item, vars_in_scope, stored_ids))
                     .collect(),
             ),
             other => other,
@@ -8554,7 +8596,20 @@ impl QueryPlanner {
 
         // Rewrite id(var) to var._vid (or var._eid for an edge) so
         // PredicateAnalyzer can push it down.
-        let transformed_predicate = Self::rewrite_id_to_vid(transformed_predicate, vars_in_scope);
+        let stored_ids = vars_in_scope
+            .iter()
+            .filter(|var| {
+                Self::rewrite_target_reachable(&plan, &var.name, RewriteTarget::Scan)
+                    || Self::rewrite_target_reachable(
+                        &plan,
+                        &var.name,
+                        RewriteTarget::TraverseTarget,
+                    )
+            })
+            .map(|var| var.name.clone())
+            .collect();
+        let transformed_predicate =
+            Self::rewrite_id_to_vid(transformed_predicate, vars_in_scope, &stored_ids);
 
         let rewritten =
             self.rewrite_predicates_using_indexes(&transformed_predicate, &plan, vars_in_scope)?;
@@ -12074,6 +12129,18 @@ pub fn collect_properties_from_plan(plan: &LogicalPlan) -> HashMap<String, HashS
     let mut kinds: HashMap<String, VariableKind> = HashMap::new();
     crate::query::df_planner::collect_variable_kinds(plan, &mut kinds);
     collect_properties_recursive(plan, &mut properties, &kinds);
+    // A subquery body's `RETURN *` can export an outer entity whole without
+    // naming it, so no bare-variable read widens it. A variable some site
+    // marked struct-only (a CREATE/MERGE endpoint, a `SET n.p` target) is then
+    // widened rather than handed over with only the properties named
+    // elsewhere.
+    if properties.contains_key(SUBQUERY_WILDCARD_KEY) {
+        for set in properties.values_mut() {
+            if set.contains(STRUCT_ONLY_SENTINEL) {
+                set.insert("*".to_string());
+            }
+        }
+    }
     properties
 }
 
@@ -12177,9 +12244,18 @@ pub(crate) fn reconcile_passthrough_properties(
                 }
             }
         }
+        // A statement ending in a write clause returns no rows, so nothing is
+        // returned whole: it is the same case as a terminal projection that
+        // names no bare entity (`… CREATE … RETURN 1`). Forwarded variables
+        // keep only what the clauses that do read them recorded — a write
+        // endpoint's identity, a SET's properties, `"*"` from `SET n += …`.
+        // Keeping them wide made `MATCH (a) WITH a CREATE (a)-[:R]->(b)`
+        // carry `a`'s whole property bag through every join (#312).
+        None if ends_in_write(plan) => {}
         None => {
-            // Output shape unknown (write op, UNION, …) — keep every forwarded
-            // variable wide rather than risk narrowing a returned entity.
+            // Output shape unknown (UNION, a CALL subquery, …) — keep every
+            // forwarded variable wide rather than risk narrowing a returned
+            // entity.
             for set in properties.values_mut() {
                 if set.remove(WITH_PASSTHROUGH_SENTINEL) {
                     set.insert("*".to_string());
@@ -12224,6 +12300,34 @@ fn has_chained_alias(alias_source: &HashMap<String, String>, v: &str) -> bool {
         .any(|(alias, _)| alias_source.values().any(|s| s == alias))
 }
 
+/// Does the statement end in a write clause, and so return no rows?
+///
+/// The planner terminates a statement whose last clause is a write in
+/// `LIMIT 0` (the openCypher "no RETURN, no rows" wrap at the end of
+/// `plan_single_typed`), and that shape is what is
+/// recognized here. Anything else — a `CALL { … }`, a `UNION` — falls to the
+/// caller's conservative branch.
+fn ends_in_write(plan: &LogicalPlan) -> bool {
+    let LogicalPlan::Limit {
+        input,
+        fetch: Some(0),
+        ..
+    } = plan
+    else {
+        return false;
+    };
+    matches!(
+        input.as_ref(),
+        LogicalPlan::Create { .. }
+            | LogicalPlan::CreateBatch { .. }
+            | LogicalPlan::Merge { .. }
+            | LogicalPlan::Set { .. }
+            | LogicalPlan::Remove { .. }
+            | LogicalPlan::Delete { .. }
+            | LogicalPlan::Foreach { .. }
+    )
+}
+
 /// Descend result-shaping wrappers (`Sort`/`Limit`/`Distinct`) to the outermost
 /// projection — the query's terminal output shape — or `None` if the root is
 /// not a projection-topped plan.
@@ -12240,9 +12344,8 @@ fn terminal_projection(plan: &LogicalPlan) -> Option<&Vec<(Expr, Option<String>)
 /// Downgrade `"*"` to the structural-only marker for an entity whose only use
 /// is being counted.
 ///
-/// `mark_pattern_variables` marks every pattern variable `"*"` — a full record
-/// — before anything has said it wants one, because most uses of a variable do.
-/// `count(n)` does not: it needs to know a row exists, not what is in it. For a
+/// A bare entity reference marks its variable `"*"` — a full record — because
+/// most uses of a whole variable want one. `count(n)` does not: it needs to know a row exists, not what is in it. For a
 /// schemaless scan the difference is the whole property blob of every vertex,
 /// and at LDBC SF1 `MATCH (n) RETURN count(n)` was reading every property of
 /// 3.18M vertices in order to count them. Fat rows also narrow the `_vid` range
@@ -12719,8 +12822,8 @@ fn collect_properties_recursive(
             collect_properties_recursive(input, properties, kinds);
         }
         LogicalPlan::Create { input, pattern } => {
-            // Mark variables referenced in CREATE patterns with "*" so plan_scan
-            // adds structural projections (bare entity columns). Without this,
+            // Mark variables referenced in CREATE patterns so plan_scan adds
+            // structural projections (bare entity columns). Without this,
             // execute_create_pattern() can't find bound variables and creates
             // spurious new nodes instead of using existing MATCH'd ones.
             mark_pattern_variables(pattern, properties, kinds);
@@ -13026,53 +13129,92 @@ fn mark_set_item_variables(
     }
 }
 
-/// Mark all variables in a CREATE/MERGE pattern with "*" so that plan_scan
-/// adds structural projections (bare entity Struct columns) for them.
-/// This is needed so that execute_create_pattern() can find bound variables
-/// in the row HashMap and reuse existing nodes instead of creating new ones.
+/// Mark the variables of a CREATE/MERGE pattern so that `plan_scan` builds a
+/// bare entity struct column for each bound one.
+///
+/// The writer needs that column to recognize a variable as already bound:
+/// `execute_create_pattern` reuses an existing node only when the row carries
+/// it, and creates a spurious new one otherwise. What it reads from the column
+/// is the identity alone — `vid_from_value` on CREATE, plus `_labels` for
+/// MERGE's match-side scan — and both are fields of the struct-only struct. So
+/// a pattern variable is marked [`STRUCT_ONLY_SENTINEL`], not `"*"`: marking it
+/// `"*"` made every bound endpoint drag its whole property bag (`_all_props`,
+/// `overflow_json`) through every join beneath the write, so one 200 KB
+/// property on a matched node cost ~2.4 MB per row and a CREATE over a few
+/// hundred rows exhausted a 1 GiB query pool (#312).
+///
+/// A later clause that does read the entity — `RETURN a`, `a.x`, `SET a += …`,
+/// an inline `{k: a.x}` map — records its own requirement on the same variable,
+/// and `"*"` dominates the sentinel, so nothing downstream is narrowed.
+///
+/// The one in-pattern consumer of whole entity values is a named path:
+/// `bind_path_variables` builds `p` from the row's element values, so every
+/// element of a path that binds a variable stays `"*"`.
 fn mark_pattern_variables(
     pattern: &Pattern,
     properties: &mut HashMap<String, HashSet<String>>,
     kinds: &HashMap<String, VariableKind>,
 ) {
     for path in &pattern.paths {
-        if let Some(ref v) = path.variable {
+        let marker = if let Some(ref v) = path.variable {
             properties
                 .entry(v.clone())
                 .or_default()
                 .insert("*".to_string());
-        }
-        for element in &path.elements {
-            match element {
-                PatternElement::Node(n) => {
-                    if let Some(ref v) = n.variable {
-                        properties
-                            .entry(v.clone())
-                            .or_default()
-                            .insert("*".to_string());
-                    }
-                    // Also collect properties from inline property expressions
-                    if let Some(ref props) = n.properties {
-                        collect_properties_from_expr_into(props, properties, kinds);
-                    }
+            "*"
+        } else {
+            STRUCT_ONLY_SENTINEL
+        };
+        mark_path_elements(&path.elements, marker, properties, kinds);
+    }
+}
+
+/// Mark each element variable of one CREATE/MERGE path with `marker` and
+/// collect the properties its inline maps read. See [`mark_pattern_variables`].
+fn mark_path_elements(
+    elements: &[PatternElement],
+    marker: &str,
+    properties: &mut HashMap<String, HashSet<String>>,
+    kinds: &HashMap<String, VariableKind>,
+) {
+    for element in elements {
+        match element {
+            PatternElement::Node(n) => {
+                if let Some(ref v) = n.variable {
+                    properties
+                        .entry(v.clone())
+                        .or_default()
+                        .insert(marker.to_string());
                 }
-                PatternElement::Relationship(r) => {
-                    if let Some(ref v) = r.variable {
-                        properties
-                            .entry(v.clone())
-                            .or_default()
-                            .insert("*".to_string());
-                    }
-                    if let Some(ref props) = r.properties {
-                        collect_properties_from_expr_into(props, properties, kinds);
-                    }
+                // Also collect properties from inline property expressions
+                if let Some(ref props) = n.properties {
+                    collect_properties_from_expr_into(props, properties, kinds);
                 }
-                PatternElement::Parenthesized { pattern, .. } => {
-                    let sub = Pattern {
-                        paths: vec![pattern.as_ref().clone()],
-                    };
-                    mark_pattern_variables(&sub, properties, kinds);
+            }
+            PatternElement::Relationship(r) => {
+                if let Some(ref v) = r.variable {
+                    properties
+                        .entry(v.clone())
+                        .or_default()
+                        .insert(marker.to_string());
                 }
+                if let Some(ref props) = r.properties {
+                    collect_properties_from_expr_into(props, properties, kinds);
+                }
+            }
+            PatternElement::Parenthesized { pattern, .. } => {
+                // A nested path variable widens its own elements; otherwise
+                // the enclosing path's marker carries through.
+                let inner_marker = if let Some(ref v) = pattern.variable {
+                    properties
+                        .entry(v.clone())
+                        .or_default()
+                        .insert("*".to_string());
+                    "*"
+                } else {
+                    marker
+                };
+                mark_path_elements(&pattern.elements, inner_marker, properties, kinds);
             }
         }
     }
@@ -13313,20 +13455,19 @@ fn collect_properties_from_expr_into(
             start_prop,
             end_prop,
         } => {
-            // Extract property requirements from ValidAt expression
+            // Extract property requirements from ValidAt expression. Without
+            // explicit names the macro reads `valid_from` / `valid_to`
+            // (`transform_valid_at_to_function`), which must be loaded too:
+            // `n VALID_AT t` as a RETURN item failed with `No field named
+            // "n.valid_from"`.
             if let Expr::Variable(var) = entity.as_ref() {
-                if let Some(prop) = start_prop {
-                    properties
-                        .entry(var.clone())
-                        .or_default()
-                        .insert(prop.clone());
-                }
-                if let Some(prop) = end_prop {
-                    properties
-                        .entry(var.clone())
-                        .or_default()
-                        .insert(prop.clone());
-                }
+                let entry = properties.entry(var.clone()).or_default();
+                entry.insert(
+                    start_prop
+                        .clone()
+                        .unwrap_or_else(|| "valid_from".to_string()),
+                );
+                entry.insert(end_prop.clone().unwrap_or_else(|| "valid_to".to_string()));
             }
             collect_properties_from_expr_into(entity, properties, kinds);
             collect_properties_from_expr_into(timestamp, properties, kinds);
@@ -16337,5 +16478,92 @@ mod dead_unwind_wildcard_tests {
         let mut properties = HashMap::new();
         mark_dead_unwind_sources(&plan, &mut properties);
         assert!(!properties.contains_key(DEAD_UNWIND_SOURCES_KEY));
+    }
+}
+
+/// Projection resolution for write statements (#312): a write endpoint needs
+/// its identity, not its property bag, however it reaches the write.
+#[cfg(test)]
+mod write_endpoint_projection_tests {
+    use super::*;
+
+    /// Collected and reconciled properties for `cypher`, as the physical
+    /// planner sees them.
+    fn resolved(cypher: &str) -> HashMap<String, HashSet<String>> {
+        let ast = uni_cypher::parse(cypher).unwrap_or_else(|e| panic!("parse {cypher}: {e}"));
+        let plan = QueryPlanner::new(Arc::new(Schema::default()))
+            .plan(ast)
+            .unwrap_or_else(|e| panic!("plan {cypher}: {e}"));
+        let mut props = collect_properties_from_plan(&plan);
+        let mut kinds = HashMap::new();
+        crate::query::df_planner::collect_variable_kinds(&plan, &mut kinds);
+        let narrowable: HashSet<String> = kinds
+            .into_iter()
+            .filter(|(_, k)| matches!(k, VariableKind::Node | VariableKind::Edge))
+            .map(|(v, _)| v)
+            .collect();
+        reconcile_passthrough_properties(&plan, &mut props, &narrowable);
+        props
+    }
+
+    fn marks(props: &HashMap<String, HashSet<String>>, var: &str) -> HashSet<String> {
+        props.get(var).cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn a_forwarded_endpoint_of_a_final_write_is_struct_only() {
+        for q in [
+            "MATCH (a:A) WITH a CREATE (a)-[:R]->(:B)",
+            "MATCH (a:A), (b:B) WITH a, b CREATE (a)-[:R]->(b)",
+            "MATCH (a:A), (b:B) WITH a, b MERGE (a)-[:R]->(b)",
+            "MATCH (a:A) WITH a MERGE (a)-[:R]->(:B {k: 1})",
+        ] {
+            let props = resolved(q);
+            let a = marks(&props, "a");
+            assert!(
+                a.contains(STRUCT_ONLY_SENTINEL) && !a.contains("*"),
+                "{q}: `a` is only written through — got {a:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_forwarded_endpoint_keeps_what_a_final_set_reads() {
+        let props =
+            resolved("MATCH (a:A), (b:B) WITH a, b MERGE (a)-[:R]->(b) ON MATCH SET a.x = a.y + 1");
+        let a = marks(&props, "a");
+        assert!(
+            a.contains("y") && a.contains("x") && !a.contains("*"),
+            "got {a:?}"
+        );
+    }
+
+    /// Clauses that consume the whole entity still widen it.
+    #[test]
+    fn a_whole_entity_consumer_still_widens() {
+        for q in [
+            "MATCH (a:A) WITH a CREATE (a)-[:R]->(:B) RETURN a",
+            "MATCH (a:A) WITH a CREATE (a)-[:R]->(:B) RETURN *",
+            "MATCH (a:A) WITH a CREATE (a)-[:R]->(:B) SET a += {z: 1}",
+            "MATCH (a:A) WITH a CREATE (a)-[:R]->(b:B) SET b = properties(a)",
+            "MATCH (a:A) WITH a MERGE (a)-[:R]->(b:B) ON CREATE SET b = a",
+            "MATCH (a:A) WITH a DETACH DELETE a",
+            "MATCH (a:A) WITH a MERGE p = (a)-[:R]->(:B)",
+        ] {
+            let a = marks(&resolved(q), "a");
+            assert!(a.contains("*"), "{q}: `a` is consumed whole — got {a:?}");
+        }
+    }
+
+    /// Shapes whose output the reconcile pass cannot see stay conservative.
+    #[test]
+    fn an_unknown_output_shape_stays_wide() {
+        for q in [
+            "MATCH (a:A) WITH a CALL { WITH a CREATE (a)-[:R]->(:B) }",
+            "MATCH (a:A) WITH a RETURN a UNION MATCH (a:A) WITH a RETURN a",
+        ] {
+            let a = marks(&resolved(q), "a");
+            assert!(a.contains("*"), "{q}: output shape unknown — got {a:?}");
+        }
     }
 }

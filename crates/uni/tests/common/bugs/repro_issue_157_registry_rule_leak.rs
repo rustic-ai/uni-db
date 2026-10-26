@@ -157,15 +157,19 @@ async fn a_transitive_chain_is_retained_and_a_sibling_is_not() {
     );
     let derived = result.unwrap();
     assert!(
-        derived.derived.contains_key("mid"),
+        derived.derived_rules().await.unwrap().contains_key("mid"),
         "the referenced rule must be derived"
     );
     assert!(
-        derived.derived.contains_key("base"),
+        derived.derived_rules().await.unwrap().contains_key("base"),
         "the transitively referenced rule must be derived"
     );
     assert!(
-        !derived.derived.contains_key("unrelated"),
+        !derived
+            .derived_rules()
+            .await
+            .unwrap()
+            .contains_key("unrelated"),
         "an unreferenced registered rule must NOT be evaluated"
     );
 }
@@ -207,7 +211,12 @@ async fn a_recursive_registered_rule_still_reaches_its_fixpoint() {
     // B is reachable in one hop, C only through the recursive clause; a
     // truncated stratum set would lose C.
     assert!(
-        result.unwrap().derived.contains_key("reach"),
+        result
+            .unwrap()
+            .derived_rules()
+            .await
+            .unwrap()
+            .contains_key("reach"),
         "the recursive rule must derive facts"
     );
 }
@@ -255,7 +264,12 @@ async fn a_negated_reference_retains_its_target() {
         result.err()
     );
     let rows = result.unwrap();
-    let safe = rows.derived.get("safe").expect("safe must be derived");
+    let safe = rows
+        .derived_rules()
+        .await
+        .unwrap()
+        .get("safe")
+        .expect("safe must be derived");
     assert_eq!(
         safe.len(),
         1,

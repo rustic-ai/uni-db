@@ -79,7 +79,10 @@ async fn locy_facts_and_filters_a_fact_is_a_row() -> Result<()> {
         ]
     );
     let result = db.session().locy(program).await?;
-    assert_eq!(result.derived_facts("r").map(Vec::len), Some(2));
+    assert_eq!(
+        result.derived_rule("r").await.unwrap().map(Vec::len),
+        Some(2)
+    );
     // A FOLD still counts every derivation.
     assert_eq!(
         rows(
@@ -128,9 +131,11 @@ async fn locy_facts_and_filters_sum_of_nothing_is_zero() -> Result<()> {
             "CREATE RULE s AS MATCH (a:P)-[:K]->(b:P) WHERE b.id = 2 FOLD t = {agg}(b.age) \
              YIELD KEY a, t QUERY s RETURN t AS c0"
         );
+        // `age` is an integer column, so the sum is the integer 0, as Cypher's
+        // `sum` over no value is (issue #316: an integer sum is an integer).
         assert_eq!(
             rows(&db, &program).await?,
-            vec![vec![Value::Float(0.0)]],
+            vec![vec![Value::Int(0)]],
             "{agg}"
         );
     }
@@ -319,14 +324,15 @@ async fn locy_facts_and_filters_along_facts_are_per_path() -> Result<()> {
     let sum = "CREATE RULE s AS MATCH (p:Q) WHERE p IS x TO c FOLD t = SUM(q) YIELD KEY p, t \
                QUERY s RETURN t AS c0";
     for program in [format!("{base}{sum}"), format!("{base}{recursive}{sum}")] {
+        // The integer `q`s sum to an integer (issue #316).
         assert_eq!(
             rows(&db, &program).await?,
-            vec![vec![Value::Float(4.0)]],
+            vec![vec![Value::Int(4)]],
             "{program}"
         );
         let result = db.session().locy(&program).await?;
         assert_eq!(
-            result.derived_facts("x").map(Vec::len),
+            result.derived_rule("x").await.unwrap().map(Vec::len),
             Some(2),
             "{program}"
         );
@@ -524,12 +530,16 @@ async fn locy_facts_and_filters_along_paths_diverging_below_the_first_hop() -> R
                    CREATE RULE tot AS MATCH (a:N) WHERE a IS cost TO b \
                    FOLD n = COUNT(*), s = SUM(q) YIELD KEY a, n, s \
                    QUERY tot WHERE a.id = 0 RETURN n AS c0, s AS c1";
+    // The integer path costs sum to an integer (issue #316).
     assert_eq!(
         rows(&db, program).await?,
-        vec![vec![Value::Int(3), Value::Float(7.0)]]
+        vec![vec![Value::Int(3), Value::Int(7)]]
     );
     let result = db.session().locy(program).await?;
-    assert_eq!(result.derived_facts("cost").map(Vec::len), Some(5));
+    assert_eq!(
+        result.derived_rule("cost").await.unwrap().map(Vec::len),
+        Some(5)
+    );
     Ok(())
 }
 

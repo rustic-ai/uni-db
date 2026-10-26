@@ -202,6 +202,13 @@ MNOR and MPROD assume independent derivations. When two proofs of one fact rest 
 
 Set `exact_probability = true` in `LocyConfig` to compute those facts exactly, under possible-worlds semantics: each fact is the OR (MNOR) or AND (MPROD) of its rows, each row is its own event AND every fact it references AND NOT every fact its `IS NOT` matched, and the formula is evaluated with a BDD. On `A -0.5-> B -0.4-> C -0.6-> D` plus `A -0.3-> C`, both proofs of `reach(A, D)` need `C -> D`; exact mode gives `0.6 × (1 - 0.7 × 0.8) = 0.264` where independence gives 0.2784. When no fact is shared, the two modes agree.
 
+Exact mode reports a shared dependency it resolved as the informational status
+`SharedDependencyResolved` (`inference_mode: exact`, `resolution: completed`) instead of the
+`SharedProbabilisticDependency` warning, whose "may overestimate" premise no longer holds. The
+warning stays when a group falls back (`resolution: fallback`, `reason:
+bdd_variable_limit_exceeded`, with the configured and effective limits) and in default mode
+(`inference_mode: approximate`, `resolution: not_attempted`).
+
 With negation: over `s -0.7-> t`, `s -0.3-> m -0.5-> t`, a rule
 `MATCH (a), (m) WHERE a IS reach TO b, m IS NOT link TO b` (with `link(a, b)` the noisy-OR of the
 `a -> b` edges) holds for `(s, m, t)` when `t` is reachable from `s` without the edge `m -> t`:

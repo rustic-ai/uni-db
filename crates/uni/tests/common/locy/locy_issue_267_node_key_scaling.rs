@@ -156,7 +156,12 @@ async fn measure(db: &Uni, program: &str) -> Result<(Duration, usize)> {
         .run()
         .await?;
     let elapsed = started.elapsed();
-    let facts = result.derived_facts("r").map(|f| f.len()).unwrap_or(0);
+    let facts = result
+        .derived_rule("r")
+        .await
+        .unwrap()
+        .map(|f| f.len())
+        .unwrap_or(0);
     Ok((elapsed, facts))
 }
 

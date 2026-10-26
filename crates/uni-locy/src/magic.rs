@@ -70,14 +70,23 @@
 //!
 //! # Observable effects
 //!
-//! QUERY answers are unchanged. In [`GoalDirected::On`] the copies and magic
-//! rules are hidden from `LocyResult::derived` (see [`is_goal_directed_rule`]),
-//! and an original rule evaluated only for rewritten goals is not evaluated
-//! at all, so it is absent from `derived` — never present with a partial
-//! relation. [`GoalDirected::Shadow`] keeps every original rule, so `derived`
-//! is exactly what it is with the rewrite off while QUERY reads the copies;
-//! it exists to verify the rewrite (the Locy TCK runs in it). The profile
-//! shows the hidden rules, which is how to see that the rewrite engaged.
+//! QUERY answers are unchanged. The copies and magic rules are hidden from
+//! `LocyResult`'s derived facts (see [`is_goal_directed_rule`]), and an
+//! original rule evaluated only for rewritten goals is not evaluated at all.
+//! What happens to such a rule depends on the mode:
+//!
+//! * [`GoalDirected::Auto`], the default: it is derived on first access to
+//!   the result's derived facts, against the snapshot the evaluation read,
+//!   by [`materialization_program`], so the derived facts are exactly what
+//!   [`GoalDirected::Off`] gives. Programs for which that cannot hold are
+//!   evaluated in full ([`AutoFallback`]).
+//! * [`GoalDirected::On`]: it is absent from the derived facts — never
+//!   present with a partial relation.
+//!
+//! [`GoalDirected::Shadow`] keeps every original rule, so the derived facts
+//! are exactly what they are with the rewrite off while QUERY reads the
+//! copies; it exists to verify the rewrite. The profile shows the hidden
+//! rules, which is how to see that the rewrite engaged.
 
 // Rust guideline compliant
 
@@ -106,17 +115,117 @@ pub const GOAL_DIRECTED_PREFIX: &str = "__locy_gd";
 /// See the [module documentation](self) for the rewrite and its effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GoalDirected {
-    /// Every rule is evaluated in full (the historical behavior).
-    #[default]
+    /// Every rule is evaluated in full (the behavior before
+    /// [`Self::Auto`] became the default).
     Off,
+    /// The default. Qualifying `QUERY` commands are answered by the
+    /// rewritten program and rules only they needed are not evaluated, as in
+    /// [`Self::On`], but `LocyResult`'s derived facts are unchanged: such a
+    /// rule is derived on first access, against the snapshot the evaluation
+    /// read (`uni_locy::LazyDerived`).
+    ///
+    /// A program for which the left-out rules could not be derived later
+    /// with the facts a full evaluation would give is evaluated in full, as
+    /// [`Self::Off`] does: see [`auto_fallback`]. The runtime adds the cases
+    /// it alone can see (an evaluation inside a transaction, whose state
+    /// cannot be held past the call). [`rewrite_goal_directed`] treats `Auto`
+    /// as `On`; the caller decides whether `Auto` applies.
+    #[default]
+    Auto,
     /// Qualifying `QUERY` commands are answered by the rewritten program, and
     /// rules only they needed are not evaluated, nor published in
-    /// `LocyResult::derived`.
+    /// `LocyResult`'s derived facts.
     On,
     /// As [`Self::On`], but every original rule is still evaluated and
     /// published, so `derived` is unchanged. Costs more than [`Self::Off`];
     /// it verifies that the rewritten answers equal the full ones.
     Shadow,
+}
+
+/// Why [`GoalDirected::Auto`] evaluates a program in full.
+///
+/// `Auto` leaves rules out only when they can be derived later, against the
+/// snapshot the evaluation read, with exactly the facts full evaluation
+/// derives. The program-level cases where that does not hold:
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoFallback {
+    /// A command writes (a `DERIVE`, a Cypher write). The derived facts are
+    /// read with their entities as the commands left them, a state no
+    /// snapshot taken before the commands holds.
+    WriteCommand,
+    /// A command records provenance (`EXPLAIN RULE`), which can change the
+    /// facts' probabilities in a way an evaluation without it does not
+    /// reproduce.
+    Provenance,
+    /// The evaluation's state cannot be held past the call: an evaluation
+    /// inside a transaction (its private writes keep changing, and its reads
+    /// must reach its own conflict check), or one with no database handle to
+    /// derive with later. Reported by the runtime, never by
+    /// [`auto_fallback`].
+    NoSnapshot,
+}
+
+/// Why [`GoalDirected::Auto`] evaluates `program` in full, if a reason
+/// visible in the program itself applies; see [`AutoFallback`].
+///
+/// # Examples
+///
+/// ```
+/// use uni_locy::magic::{AutoFallback, auto_fallback};
+///
+/// let src = "CREATE RULE r AS MATCH (a:N)-[:E]->(b:N) YIELD KEY a, KEY b\n\
+///            QUERY r WHERE a.name = 'x' RETURN b";
+/// let program = uni_locy::compile(&uni_cypher::parse_locy(src).unwrap()).unwrap();
+/// assert_eq!(auto_fallback(&program), None);
+/// ```
+#[must_use]
+pub fn auto_fallback(program: &CompiledProgram) -> Option<AutoFallback> {
+    let writes = program.commands.iter().any(|c| match c {
+        CompiledCommand::DeriveCommand(_) => true,
+        CompiledCommand::Cypher(q) => crate::incremental::query_may_write(q),
+        _ => false,
+    });
+    if writes {
+        return Some(AutoFallback::WriteCommand);
+    }
+    if program
+        .commands
+        .iter()
+        .any(|c| matches!(c, CompiledCommand::ExplainRule(_)))
+    {
+        return Some(AutoFallback::Provenance);
+    }
+    None
+}
+
+/// The program that derives `rules` of `program`: the strata of `rules` and
+/// of every rule they reference, and no commands.
+///
+/// This is what derives the rules [`GoalDirected::Auto`] left out. `program`
+/// is the program as compiled, before [`rewrite_goal_directed`].
+#[must_use]
+pub fn materialization_program(program: &CompiledProgram, rules: &[String]) -> CompiledProgram {
+    let mut out = program.clone();
+    out.commands.clear();
+    let evaluated: Vec<&CompiledRule> = program.strata.iter().flat_map(|s| &s.rules).collect();
+    let mut needed: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = rules.iter().cloned().collect();
+    while let Some(reference) = queue.pop_front() {
+        if !seen.insert(reference.clone()) {
+            continue;
+        }
+        for rule in &evaluated {
+            if name_matches(&rule.name, &reference) && needed.insert(rule.name.clone()) {
+                queue.extend(references(rule));
+            }
+        }
+    }
+    for stratum in &mut out.strata {
+        stratum.rules.retain(|r| needed.contains(&r.name));
+    }
+    out.strata.retain(|s| !s.rules.is_empty());
+    out
 }
 
 /// Whether `name` is a rule the goal-directed rewrite added.
@@ -152,6 +261,46 @@ impl GoalDirectedReport {
             .iter()
             .filter(|g| matches!(g.outcome, GoalOutcome::Rewritten { .. }))
             .count()
+    }
+
+    /// The original rule each generated rule stands for: every copy and
+    /// magic rule of every rewritten goal, mapped to the catalog name of the
+    /// rule it was generated from.
+    ///
+    /// For reporting evaluation detail (an interrupted rule, say) in terms of
+    /// the program's own rules.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::collections::HashMap;
+    /// use uni_locy::magic::{GoalDirected, rewrite_goal_directed};
+    ///
+    /// let src = "CREATE RULE reach AS MATCH (a:N)-[:E]->(b:N) YIELD KEY a, KEY b\n\
+    ///            QUERY reach WHERE a.name = 'x' RETURN b";
+    /// let program = uni_locy::compile(&uni_cypher::parse_locy(src).unwrap()).unwrap();
+    /// let (_, report) = rewrite_goal_directed(program, GoalDirected::On, &HashMap::new());
+    /// let origins = report.generated_rule_origins();
+    /// assert_eq!(origins["__locy_gd0_reach_bf"], "reach");
+    /// assert_eq!(origins["__locy_gdm0_reach_bf"], "reach");
+    /// ```
+    #[must_use]
+    pub fn generated_rule_origins(&self) -> HashMap<String, String> {
+        let mut out = HashMap::new();
+        for goal in &self.goals {
+            let GoalOutcome::Rewritten { adorned, .. } = &goal.outcome else {
+                continue;
+            };
+            for entry in adorned {
+                let Some((rule, tag)) = entry.rsplit_once('/') else {
+                    continue;
+                };
+                let suffix = format!("{}_{}_{tag}", goal.command, sanitize(rule));
+                out.insert(format!("{GOAL_DIRECTED_PREFIX}{suffix}"), rule.to_string());
+                out.insert(format!("{GOAL_DIRECTED_PREFIX}m{suffix}"), rule.to_string());
+            }
+        }
+        out
     }
 }
 
@@ -232,7 +381,9 @@ pub enum Unsafe {
 ///
 /// Returns the program to evaluate and what happened to each `QUERY`. With
 /// [`GoalDirected::Off`], or when no goal qualifies, the program comes back
-/// unchanged. `params` are the evaluation's parameters: a `$param` in a goal
+/// unchanged. [`GoalDirected::Auto`] rewrites as [`GoalDirected::On`] does:
+/// deciding whether `Auto` applies to a program ([`auto_fallback`]) and
+/// deriving the rules it leaves out is the caller's part. `params` are the evaluation's parameters: a `$param` in a goal
 /// conjunct seeds only when its value is a string, an integer or a boolean
 /// (or a list of those for `IN`).
 ///
@@ -1145,7 +1296,7 @@ fn assemble(
         new_rules.extend(rewrite.rules);
     }
 
-    if mode == GoalDirected::On {
+    if matches!(mode, GoalDirected::On | GoalDirected::Auto) {
         prune_originals(&mut out, &adorned_originals, &new_rules);
     }
 

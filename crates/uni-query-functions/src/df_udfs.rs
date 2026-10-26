@@ -417,7 +417,7 @@ impl ScalarUDFImpl for CustomScalarUdf {
 }
 
 // ============================================================================
-// id(node) -> UInt64
+// id(node) -> Int64
 // ============================================================================
 
 /// Create the `id` UDF for getting vertex/edge internal IDs.
@@ -456,7 +456,7 @@ impl ScalarUDFImpl for IdUdf {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> DFResult<DataType> {
-        Ok(DataType::UInt64)
+        Ok(DataType::Int64)
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DFResult<ColumnarValue> {
@@ -465,17 +465,23 @@ impl ScalarUDFImpl for IdUdf {
                 "id(): requires 1 argument".to_string(),
             ));
         }
-        // Usually a pass-through: the planner rewrites `id(n)` to the `n._vid`
-        // column, which is already `UInt64`. But when `n` is an entity carried as
-        // a single CypherValue column — what `UNWIND` over a collected list binds
-        // — there is no `_vid` column to rewrite to, so the whole entity arrives
-        // here and its id has to be read out of the encoding.
-        // `return_type` promises `UInt64`, and DataFusion asserts that at
-        // runtime, so every branch here has to produce one — passing an argument
-        // straight through is only correct when it is already `UInt64`.
+        // Normalize storage identity bits before expressions evaluate them.
+        // Result decoding alone is too late: an unsigned comparison would
+        // already have judged an ephemeral id greater than zero.
         let arg = args.args[0].clone();
         match arg.data_type() {
-            DataType::UInt64 => Ok(arg),
+            DataType::Int64 => Ok(arg),
+            DataType::UInt64 => match arg {
+                ColumnarValue::Scalar(ScalarValue::UInt64(id)) => Ok(ColumnarValue::Scalar(
+                    ScalarValue::Int64(id.map(|id| id as i64)),
+                )),
+                ColumnarValue::Array(array) => {
+                    let ids = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+                    let signed: Int64Array = ids.iter().map(|id| id.map(|id| id as i64)).collect();
+                    Ok(ColumnarValue::Array(Arc::new(signed)))
+                }
+                _ => unreachable!("UInt64 columnar value"),
+            },
             DataType::LargeBinary => {
                 let array = arg.to_array(args.number_rows)?;
                 let blobs = array
@@ -486,17 +492,17 @@ impl ScalarUDFImpl for IdUdf {
                             "id(): expected a LargeBinary entity column".to_string(),
                         )
                     })?;
-                let ids: UInt64Array = (0..blobs.len())
+                let ids: Int64Array = (0..blobs.len())
                     .map(|i| {
                         if blobs.is_null(i) {
                             return None;
                         }
                         // Documented exception (#233 class): this closure feeds
-                        // an infallible `collect()` into a `UInt64Array`. A blob
+                        // an infallible `collect()` into an `Int64Array`. A blob
                         // that will not decode yields no id, which reads as "not
                         // an entity" — logged so it is not silent.
                         match uni_common::cypher_value_codec::decode(blobs.value(i)) {
-                            Ok(value) => entity_identity(&value),
+                            Ok(value) => entity_identity(&value).map(|id| id as i64),
                             Err(e) => {
                                 tracing::error!(error = %e, "id(): value failed to decode");
                                 None
@@ -531,23 +537,22 @@ impl ScalarUDFImpl for IdUdf {
                             "id(): struct entity column carries no `_vid` or `_eid` field, got {fields:?}"
                         ))
                     })?;
-                let ids = arrow::compute::cast(entities.column(id_field), &DataType::UInt64)
-                    .map_err(|_| {
-                        datafusion::error::DataFusionError::Execution(
-                            "id(): struct entity column's identity field is not an id".to_string(),
-                        )
-                    })?;
-                let ids = ids.as_any().downcast_ref::<UInt64Array>().ok_or_else(|| {
-                    datafusion::error::DataFusionError::Execution(
-                        "id(): identity field did not cast to UInt64".to_string(),
-                    )
-                })?;
-                let out: UInt64Array = (0..entities.len())
+                let column = entities.column(id_field);
+                let unsigned = column.as_any().downcast_ref::<UInt64Array>();
+                let signed = column.as_any().downcast_ref::<Int64Array>();
+                if unsigned.is_none() && signed.is_none() {
+                    return Err(datafusion::error::DataFusionError::Execution(
+                        "id(): struct entity column's identity field is not an id".to_string(),
+                    ));
+                }
+                let out: Int64Array = (0..entities.len())
                     .map(|i| {
-                        if entities.is_null(i) || ids.is_null(i) {
+                        if entities.is_null(i) || column.is_null(i) {
                             None
+                        } else if let Some(ids) = unsigned {
+                            Some(ids.value(i) as i64)
                         } else {
-                            Some(ids.value(i))
+                            Some(signed.unwrap().value(i))
                         }
                     })
                     .collect();
@@ -555,7 +560,7 @@ impl ScalarUDFImpl for IdUdf {
             }
             other => {
                 let array = arg.to_array(args.number_rows)?;
-                arrow::compute::cast(&array, &DataType::UInt64)
+                arrow::compute::cast(&array, &DataType::Int64)
                     .map(ColumnarValue::Array)
                     .map_err(|_| {
                         datafusion::error::DataFusionError::Execution(format!(
@@ -807,43 +812,15 @@ impl ScalarUDFImpl for KeysUdf {
 
             let arg = &val_args[0];
             let keys = match arg {
-                Value::Map(map) => {
-                    // For schemaless entities, properties are stored in the
-                    // _all_props CypherValue blob.  If the map contains an _all_props
-                    // sub-map, extract property names from it instead of from
-                    // the top-level map (which only has system fields).
-                    // When _all_props is present, the input is a schemaless
-                    // entity (node/relationship).  Per the property graph model,
-                    // a null-valued property does not exist on the entity, so we
-                    // must filter it out.  For plain maps (literal or parameter),
-                    // null-valued keys are valid and must be included.
-                    let (source, is_entity) =
-                        match uni_common::value::entity_property_container(map) {
-                            Some(props) => (props, true),
-                            None => (map, false),
-                        };
-                    let mut key_strings: Vec<String> = source
-                        .iter()
-                        .filter(|(k, v)| {
-                            !uni_common::core::schema::is_reserved_property_name(k)
-                                && (!is_entity || !v.is_null())
-                        })
-                        .map(|(k, _)| k.clone())
-                        .collect();
-                    key_strings.sort();
-                    key_strings
-                        .into_iter()
-                        .map(Value::String)
-                        .collect::<Vec<_>>()
-                }
-                // Native encodings. Only the map form was handled, so
-                // `keys(n)` on a `Value::Node` fell to the catch-all and
-                // returned an empty list — a wrong answer with no error, and
-                // indistinguishable from an entity that genuinely has no
-                // properties (#234). A null-valued property does not exist on
-                // an entity, per the property graph model, so it is filtered
-                // out here exactly as the map arm above does.
-                Value::Node(_) | Value::Edge(_) => arg
+                // An OPTIONAL MATCH that found nothing reaches here as a struct
+                // of null columns rather than a null struct; its identity
+                // column is the tell (see `properties()` below).
+                Value::Map(map) if is_null_entity_struct(map) => return Ok(Value::Null),
+                // One definition for every encoding (#234). A null-valued
+                // property does not exist on an entity, so it is dropped; on a
+                // plain map (a literal or a parameter) a null value is a
+                // legitimate entry and its key is kept.
+                Value::Map(_) | Value::Node(_) | Value::Edge(_) => arg
                     .property_names()
                     .unwrap_or_default()
                     .into_iter()
@@ -867,6 +844,20 @@ impl ScalarUDFImpl for KeysUdf {
 // ============================================================================
 // properties(entity) -> Map (all user-visible properties as a map)
 // ============================================================================
+
+/// Whether `map` is the struct an OPTIONAL MATCH builds for an entity it did
+/// not find: the identity column (`_vid` for a node, `_eid` for an edge) is
+/// present and null.
+///
+/// `add_structural_projection` builds a `named_struct` from the entity's
+/// individual columns, which yields a valid struct of null fields rather than a
+/// null struct. A plain map (`properties({name: 'foo'})`) has no identity
+/// column, so it is never mistaken for one.
+fn is_null_entity_struct(map: &std::collections::HashMap<String, Value>) -> bool {
+    map.get("_vid")
+        .or_else(|| map.get("_eid"))
+        .is_some_and(Value::is_null)
+}
 
 pub fn create_properties_udf() -> ScalarUDF {
     ScalarUDF::new_from_impl(PropertiesUdf::new())
@@ -922,18 +913,20 @@ impl ScalarUDFImpl for PropertiesUdf {
                     // Note: only check when the field EXISTS — regular maps passed
                     // to properties() (e.g. properties({name: 'foo'})) won't have
                     // these fields and should proceed normally.
-                    let identity_null = map
-                        .get("_vid")
-                        .map(|v| v.is_null())
-                        .or_else(|| map.get("_eid").map(|v| v.is_null()))
-                        .unwrap_or(false);
-                    if identity_null {
+                    if is_null_entity_struct(map) {
                         return Ok(Value::Null);
                     }
 
-                    // A schemaless or serialised entity nests its properties.
+                    // An entity, in any of its map encodings: a null-valued
+                    // property does not exist on it. A declared label's
+                    // columns sit flattened beside `_all_props: null`, so an
+                    // unset declared property arrived here as a null entry and
+                    // `properties(n)` listed it.
+                    if let Some(props) = arg.entity_properties() {
+                        return Ok(Value::Map(props));
+                    }
+                    // A plain map keeps its null entries.
                     let source = uni_common::value::entity_property_container(map).unwrap_or(map);
-                    // Filter out the engine's reserved fields
                     let filtered: std::collections::HashMap<String, Value> = source
                         .iter()
                         .filter(|(k, _)| !uni_common::core::schema::is_reserved_property_name(k))
@@ -944,10 +937,10 @@ impl ScalarUDFImpl for PropertiesUdf {
                 // Native encodings. Falling through to `Value::Null` meant
                 // `properties(n)` silently returned null for an entity that was
                 // present — the same shape as the map arm above, one encoding
-                // short (#234). Their property maps hold user properties only,
-                // so no `_`-filtering is needed here.
-                Value::Node(node) => Ok(Value::Map(node.properties.clone())),
-                Value::Edge(edge) => Ok(Value::Map(edge.properties.clone())),
+                // short (#234).
+                Value::Node(_) | Value::Edge(_) => {
+                    Ok(Value::Map(arg.entity_properties().unwrap_or_default()))
+                }
                 _ => Ok(Value::Null),
             }
         })
@@ -2325,7 +2318,10 @@ fn get_value_from_array(
             downcast_arr!(arr, LargeStringArray).value(row),
         )),
         DataType::Boolean => Ok(Value::Bool(downcast_arr!(arr, BooleanArray).value(row))),
-        DataType::UInt64 => Ok(Value::Int(downcast_arr!(arr, UInt64Array).value(row) as i64)),
+        // An engine `UInt64` is an identity: its bits, not a value (see `Value::from_id_bits`).
+        DataType::UInt64 => Ok(Value::from_id_bits(
+            downcast_arr!(arr, UInt64Array).value(row),
+        )),
         DataType::Int32 => Ok(Value::Int(downcast_arr!(arr, Int32Array).value(row) as i64)),
         DataType::Float32 => Ok(Value::Float(
             downcast_arr!(arr, Float32Array).value(row) as f64
@@ -2586,7 +2582,8 @@ pub fn scalar_to_value(scalar: &ScalarValue) -> DFResult<Value> {
         ScalarValue::LargeList(arr) => scalar_arr_to_value(arr.as_ref()),
         ScalarValue::FixedSizeList(arr) => scalar_arr_to_value(arr.as_ref()),
         // Unsigned and smaller integer types
-        ScalarValue::UInt64(Some(u)) => Ok(Value::Int(*u as i64)),
+        // An engine `UInt64` is an identity: its bits, not a value (see `Value::from_id_bits`).
+        ScalarValue::UInt64(Some(u)) => Ok(Value::from_id_bits(*u)),
         ScalarValue::UInt32(Some(u)) => Ok(Value::Int(*u as i64)),
         ScalarValue::UInt16(Some(u)) => Ok(Value::Int(*u as i64)),
         ScalarValue::UInt8(Some(u)) => Ok(Value::Int(*u as i64)),
@@ -6397,8 +6394,9 @@ pub fn create_cypher_max_udaf() -> AggregateUDF {
 ///
 /// Both fold into a [`crate::cypher_sum::CypherSum`], so they take numbers or
 /// durations and reject anything else, and an integer `sum` stays an integer.
-/// The result is CypherValue-encoded `LargeBinary`. The planner sends a
-/// numeric column to DataFusion's own `sum` / `avg` and everything else here.
+/// The result is CypherValue-encoded `LargeBinary`. Every `sum` but one over
+/// a float column comes here (DataFusion's own wraps an integer overflow), and
+/// every `avg` but one over a numeric column.
 #[derive(Debug, Clone)]
 struct CypherSumUdaf {
     signature: Signature,
@@ -6443,6 +6441,18 @@ impl AggregateUDFImpl for CypherSumUdaf {
         // CypherValue-encoded: an Int, a Float or a Duration.
         Ok(DataType::LargeBinary)
     }
+    fn groups_accumulator_supported(
+        &self,
+        args: datafusion::logical_expr::function::AccumulatorArgs,
+    ) -> bool {
+        !args.is_distinct
+    }
+    fn create_groups_accumulator(
+        &self,
+        _args: datafusion::logical_expr::function::AccumulatorArgs,
+    ) -> DFResult<Box<dyn datafusion::logical_expr::GroupsAccumulator>> {
+        Ok(Box::new(CypherSumGroupsAccumulator::new(self.avg)))
+    }
     fn accumulator(
         &self,
         _acc_args: datafusion::logical_expr::function::AccumulatorArgs,
@@ -6484,59 +6494,77 @@ fn sum_error(e: anyhow::Error) -> datafusion::error::DataFusionError {
     datafusion::error::DataFusionError::Execution(e.to_string())
 }
 
+/// Adds row `i` of `arr`, which is not null, to `total`.
+///
+/// Returns whether a value was added: a Cypher-value NULL is skipped and not
+/// counted, as an Arrow null is.
+fn add_sum_cell(
+    total: &mut crate::cypher_sum::CypherSum,
+    arr: &ArrayRef,
+    i: usize,
+) -> DFResult<bool> {
+    use uni_common::cypher_value_codec::{TAG_FLOAT, TAG_INT, decode_float, decode_int, peek_tag};
+    let added = match arr.data_type() {
+        DataType::LargeBinary => {
+            let bytes = arr
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .unwrap()
+                .value(i);
+            match peek_tag(bytes) {
+                Some(TAG_INT) => match decode_int(bytes).map_err(|e| cv_decode_error(&e))? {
+                    Some(v) => total.add_int(v).map(|()| true),
+                    None => Ok(false),
+                },
+                Some(TAG_FLOAT) => match decode_float(bytes).map_err(|e| cv_decode_error(&e))? {
+                    Some(v) => total.add_float(v).map(|()| true),
+                    None => Ok(false),
+                },
+                _ => {
+                    let value = uni_common::cypher_value_codec::decode(bytes)
+                        .map_err(|e| cv_decode_error(&e))?;
+                    let present = !value.is_null();
+                    total.add(&value).map(|()| present)
+                }
+            }
+        }
+        DataType::Int64 => {
+            let v = arr.as_any().downcast_ref::<Int64Array>().unwrap().value(i);
+            total.add_int(v).map(|()| true)
+        }
+        // Above i64::MAX an unsigned value cannot be an integer total: it
+        // continues as a float, as an overflowing sum does, never wrapping.
+        DataType::UInt64 => {
+            let v = arr.as_any().downcast_ref::<UInt64Array>().unwrap().value(i);
+            match i64::try_from(v) {
+                Ok(v) => total.add_int(v),
+                Err(_) => total.add_float(v as f64),
+            }
+            .map(|()| true)
+        }
+        DataType::Float64 => {
+            let v = arr
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(i);
+            total.add_float(v).map(|()| true)
+        }
+        // Any other type through its Cypher value: a narrower number or an
+        // interval is added, a string or a boolean is an error.
+        _ => {
+            let value = scalar_to_value(&ScalarValue::try_from_array(arr, i)?)?;
+            let present = !value.is_null();
+            total.add(&value).map(|()| present)
+        }
+    };
+    added.map_err(sum_error)
+}
+
 impl CypherSumAccumulator {
     /// Adds one non-null cell of `arr`.
     fn add_cell(&mut self, arr: &ArrayRef, i: usize) -> DFResult<()> {
-        use uni_common::cypher_value_codec::{
-            TAG_FLOAT, TAG_INT, decode_float, decode_int, peek_tag,
-        };
-        let added = match arr.data_type() {
-            DataType::LargeBinary => {
-                let bytes = arr
-                    .as_any()
-                    .downcast_ref::<LargeBinaryArray>()
-                    .unwrap()
-                    .value(i);
-                match peek_tag(bytes) {
-                    Some(TAG_INT) => match decode_int(bytes).map_err(|e| cv_decode_error(&e))? {
-                        Some(v) => self.total.add_int(v).map(|()| true),
-                        None => Ok(false),
-                    },
-                    Some(TAG_FLOAT) => {
-                        match decode_float(bytes).map_err(|e| cv_decode_error(&e))? {
-                            Some(v) => self.total.add_float(v).map(|()| true),
-                            None => Ok(false),
-                        }
-                    }
-                    _ => {
-                        let value = uni_common::cypher_value_codec::decode(bytes)
-                            .map_err(|e| cv_decode_error(&e))?;
-                        let present = !value.is_null();
-                        self.total.add(&value).map(|()| present)
-                    }
-                }
-            }
-            DataType::Int64 => {
-                let v = arr.as_any().downcast_ref::<Int64Array>().unwrap().value(i);
-                self.total.add_int(v).map(|()| true)
-            }
-            DataType::Float64 => {
-                let v = arr
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .unwrap()
-                    .value(i);
-                self.total.add_float(v).map(|()| true)
-            }
-            // Any other type through its Cypher value: a narrower number or
-            // an interval is added, a string or a boolean is an error.
-            _ => {
-                let value = scalar_to_value(&ScalarValue::try_from_array(arr, i)?)?;
-                let present = !value.is_null();
-                self.total.add(&value).map(|()| present)
-            }
-        };
-        if added.map_err(sum_error)? {
+        if add_sum_cell(&mut self.total, arr, i)? {
             self.count += 1;
         }
         Ok(())
@@ -6600,6 +6628,171 @@ impl DfAccumulator for CypherSumAccumulator {
             self.total.merge(&partial).map_err(sum_error)?;
         }
         Ok(())
+    }
+}
+
+/// The grouped form of [`CypherSumAccumulator`]: one [`CypherSum`] and count
+/// per group, so a `GROUP BY` sum adds each row in place instead of through a
+/// boxed accumulator per group.
+///
+/// A typed integer column comes here, not to DataFusion's `sum`, which wraps
+/// on overflow: each group stays an exact integer and continues as a float
+/// once it leaves the 64-bit range, as Cypher's (Neo4j's) `sum` does.
+///
+/// [`CypherSum`]: crate::cypher_sum::CypherSum
+#[derive(Debug)]
+struct CypherSumGroupsAccumulator {
+    totals: Vec<crate::cypher_sum::CypherSum>,
+    /// Non-null values added per group, the divisor of `avg`.
+    counts: Vec<u64>,
+    avg: bool,
+}
+
+impl CypherSumGroupsAccumulator {
+    fn new(avg: bool) -> Self {
+        Self {
+            totals: Vec::new(),
+            counts: Vec::new(),
+            avg,
+        }
+    }
+
+    fn grow(&mut self, total_num_groups: usize) {
+        if self.totals.len() < total_num_groups {
+            self.totals
+                .resize(total_num_groups, crate::cypher_sum::CypherSum::Empty);
+            self.counts.resize(total_num_groups, 0);
+        }
+    }
+}
+
+/// Whether row `i` passes the aggregate's `FILTER`, when it has one.
+fn passes_filter(opt_filter: Option<&BooleanArray>, i: usize) -> bool {
+    opt_filter.is_none_or(|f| f.is_valid(i) && f.value(i))
+}
+
+impl datafusion::logical_expr::GroupsAccumulator for CypherSumGroupsAccumulator {
+    fn update_batch(
+        &mut self,
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        opt_filter: Option<&BooleanArray>,
+        total_num_groups: usize,
+    ) -> DFResult<()> {
+        self.grow(total_num_groups);
+        let arr = &values[0];
+        let all_rows = arr.null_count() == 0 && opt_filter.is_none();
+        // The common typed cases read the column once, outside the row loop.
+        match arr.data_type() {
+            DataType::Int64 => {
+                let ints = arr.as_any().downcast_ref::<Int64Array>().unwrap();
+                for (i, &g) in group_indices.iter().enumerate() {
+                    if all_rows || (ints.is_valid(i) && passes_filter(opt_filter, i)) {
+                        self.totals[g].add_int(ints.value(i)).map_err(sum_error)?;
+                        self.counts[g] += 1;
+                    }
+                }
+            }
+            DataType::Float64 => {
+                let floats = arr.as_any().downcast_ref::<Float64Array>().unwrap();
+                for (i, &g) in group_indices.iter().enumerate() {
+                    if all_rows || (floats.is_valid(i) && passes_filter(opt_filter, i)) {
+                        self.totals[g]
+                            .add_float(floats.value(i))
+                            .map_err(sum_error)?;
+                        self.counts[g] += 1;
+                    }
+                }
+            }
+            _ => {
+                for (i, &g) in group_indices.iter().enumerate() {
+                    if arr.is_valid(i)
+                        && passes_filter(opt_filter, i)
+                        && add_sum_cell(&mut self.totals[g], arr, i)?
+                    {
+                        self.counts[g] += 1;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn evaluate(&mut self, emit_to: datafusion::logical_expr::EmitTo) -> DFResult<ArrayRef> {
+        let totals = emit_to.take_needed(&mut self.totals);
+        let counts = emit_to.take_needed(&mut self.counts);
+        let mut out =
+            arrow::array::LargeBinaryBuilder::with_capacity(totals.len(), totals.len() * 9);
+        for (total, count) in totals.iter().zip(counts) {
+            // `sum` over nothing is 0, `avg` over nothing NULL, as the
+            // ungrouped accumulator answers.
+            let value = if self.avg {
+                total.avg(count)
+            } else {
+                total.sum()
+            };
+            if value.is_null() {
+                out.append_null();
+            } else {
+                out.append_value(uni_common::cypher_value_codec::encode(&value));
+            }
+        }
+        Ok(Arc::new(out.finish()))
+    }
+
+    fn state(&mut self, emit_to: datafusion::logical_expr::EmitTo) -> DFResult<Vec<ArrayRef>> {
+        let totals = emit_to.take_needed(&mut self.totals);
+        let counts = emit_to.take_needed(&mut self.counts);
+        let mut out =
+            arrow::array::LargeBinaryBuilder::with_capacity(totals.len(), totals.len() * 9);
+        for total in &totals {
+            let state = total.to_state();
+            if state.is_null() {
+                out.append_null();
+            } else {
+                out.append_value(uni_common::cypher_value_codec::encode(&state));
+            }
+        }
+        Ok(vec![
+            Arc::new(out.finish()),
+            Arc::new(UInt64Array::from(counts)),
+        ])
+    }
+
+    fn merge_batch(
+        &mut self,
+        values: &[ArrayRef],
+        group_indices: &[usize],
+        opt_filter: Option<&BooleanArray>,
+        total_num_groups: usize,
+    ) -> DFResult<()> {
+        self.grow(total_num_groups);
+        let totals = values[0]
+            .as_any()
+            .downcast_ref::<LargeBinaryArray>()
+            .unwrap();
+        let counts = values[1].as_any().downcast_ref::<UInt64Array>().unwrap();
+        for (i, &g) in group_indices.iter().enumerate() {
+            if !passes_filter(opt_filter, i) {
+                continue;
+            }
+            if counts.is_valid(i) {
+                self.counts[g] += counts.value(i);
+            }
+            if totals.is_null(i) {
+                continue;
+            }
+            let value = uni_common::cypher_value_codec::decode(totals.value(i))
+                .map_err(|e| cv_decode_error(&e))?;
+            let partial = crate::cypher_sum::CypherSum::from_state(&value).map_err(sum_error)?;
+            self.totals[g].merge(&partial).map_err(sum_error)?;
+        }
+        Ok(())
+    }
+
+    fn size(&self) -> usize {
+        self.totals.capacity() * std::mem::size_of::<crate::cypher_sum::CypherSum>()
+            + self.counts.capacity() * std::mem::size_of::<u64>()
     }
 }
 
@@ -7515,6 +7708,67 @@ mod tests {
     use super::*;
     use datafusion::execution::FunctionRegistry;
 
+    /// The grouped Cypher `sum` keeps each group exact, widens only the group
+    /// that overflows, and merges partial states and emits groups in order as
+    /// DataFusion's multi-phase aggregation drives it.
+    #[test]
+    fn grouped_cypher_sum_is_exact_per_group() {
+        use datafusion::logical_expr::{EmitTo, GroupsAccumulator};
+        let decode = |arr: &ArrayRef| -> Vec<Value> {
+            let arr = arr.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
+            (0..arr.len())
+                .map(|i| {
+                    if arr.is_null(i) {
+                        Value::Null
+                    } else {
+                        uni_common::cypher_value_codec::decode(arr.value(i)).unwrap()
+                    }
+                })
+                .collect()
+        };
+        let two_53 = 1_i64 << 53;
+        // Groups: 0 exact above 2^53, 1 overflowing, 2 all NULL, 3 a float.
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![
+            Some(two_53),
+            Some(i64::MAX),
+            None,
+            Some(1),
+            Some(1),
+        ]));
+        let groups = [0, 1, 2, 0, 1];
+        let mut partial = CypherSumGroupsAccumulator::new(false);
+        partial.update_batch(&[ints], &groups, None, 3).unwrap();
+        let floats: ArrayRef = Arc::new(Float64Array::from(vec![Some(0.5)]));
+        partial.update_batch(&[floats], &[3], None, 4).unwrap();
+        let state = partial.state(EmitTo::All).unwrap();
+
+        let mut fin = CypherSumGroupsAccumulator::new(false);
+        // Merged into reordered groups, twice: every total doubles.
+        fin.merge_batch(&state, &[3, 2, 1, 0], None, 4).unwrap();
+        fin.merge_batch(&state, &[3, 2, 1, 0], None, 4).unwrap();
+        let first = fin.evaluate(EmitTo::First(1)).unwrap();
+        assert_eq!(decode(&first), vec![Value::Float(1.0)]);
+        let rest = fin.evaluate(EmitTo::All).unwrap();
+        assert_eq!(
+            decode(&rest),
+            vec![
+                Value::Int(0),
+                // 2^63 from the overflow, twice.
+                Value::Float(2f64.powi(64)),
+                Value::Int(2 * (two_53 + 1)),
+            ]
+        );
+
+        // `avg` over the same: NULL for the all-NULL group.
+        let ints: ArrayRef = Arc::new(Int64Array::from(vec![Some(1), Some(2), None]));
+        let mut avg = CypherSumGroupsAccumulator::new(true);
+        avg.update_batch(&[ints], &[0, 0, 1], None, 2).unwrap();
+        assert_eq!(
+            decode(&avg.evaluate(EmitTo::All).unwrap()),
+            vec![Value::Float(1.5), Value::Null]
+        );
+    }
+
     /// `large_binary_row` gates the run-length memo that decides whether a UDF
     /// argument is re-decoded for a row (#245). A wrong `Some` there makes the
     /// previous row's decoded value stand in for this one, silently.
@@ -7771,6 +8025,56 @@ mod tests {
     fn test_id_udf_signature() {
         let udf = create_id_udf();
         assert_eq!(udf.name(), "id");
+    }
+
+    #[test]
+    fn id_udf_preserves_ephemeral_bits_and_nulls() {
+        use datafusion::config::ConfigOptions;
+        let udf = create_id_udf();
+        for input in [
+            ColumnarValue::Array(Arc::new(UInt64Array::from(vec![
+                Some(1 << 63),
+                None,
+                Some(7),
+            ]))),
+            ColumnarValue::Array(Arc::new(Int64Array::from(vec![
+                Some(i64::MIN),
+                None,
+                Some(7),
+            ]))),
+            ColumnarValue::Array(Arc::new(arrow_array::StructArray::new(
+                vec![Arc::new(arrow_schema::Field::new(
+                    "_vid",
+                    DataType::UInt64,
+                    true,
+                ))]
+                .into(),
+                vec![Arc::new(UInt64Array::from(vec![1 << 63, 111, 7]))],
+                Some(arrow::buffer::NullBuffer::from(vec![true, false, true])),
+            ))),
+        ] {
+            let ty = input.data_type();
+            assert_eq!(
+                udf.return_type(std::slice::from_ref(&ty)).unwrap(),
+                DataType::Int64
+            );
+            let result = udf
+                .invoke_with_args(ScalarFunctionArgs {
+                    args: vec![input],
+                    arg_fields: vec![Arc::new(arrow_schema::Field::new("id", ty, true))],
+                    number_rows: 3,
+                    return_field: Arc::new(arrow_schema::Field::new("id", DataType::Int64, true)),
+                    config_options: Arc::new(ConfigOptions::default()),
+                })
+                .unwrap()
+                .to_array(3)
+                .unwrap();
+            let ids = result.as_any().downcast_ref::<Int64Array>().unwrap();
+            assert_eq!(
+                ids.iter().collect::<Vec<_>>(),
+                vec![Some(i64::MIN), None, Some(7)]
+            );
+        }
     }
 
     #[test]

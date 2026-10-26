@@ -708,7 +708,7 @@ async fn test_uncancelled_locy_program_still_runs() -> Result<()> {
 ///
 /// That fact is a *dependency default*, not something this repo controls. If
 /// DataFusion ever ships `Disabled` as the default, the reasoning on
-/// `memory_bounded_runtime` silently becomes wrong again and the old comment
+/// `query_runtime` silently becomes wrong again and the old comment
 /// becomes right by accident. This is the cheapest way to be told.
 #[test]
 fn disk_manager_default_is_a_real_directory() {
@@ -717,7 +717,7 @@ fn disk_manager_default_is_a_real_directory() {
     assert!(
         matches!(DiskManagerMode::default(), DiskManagerMode::OsTmpDirectory),
         "DataFusion's default disk manager is what makes spilling possible; \
-         the GreedyMemoryPool reasoning in `memory_bounded_runtime` and on the \
+         the GreedyMemoryPool reasoning in `query_runtime` and on the \
          session template assumes it, and #238 exists because an earlier \
          comment assumed the reverse"
     );
@@ -2746,50 +2746,70 @@ async fn locy_timeout_interrupts_work_inside_an_operator() {
 /// breaker, where the polling still repeats.
 ///
 /// The wall-clock assertion is what makes this test mean anything — the query
-/// returned the right answer before, just twenty seconds late. The control
-/// establishes the query is genuinely slow, so a fast failure is enforcement
-/// rather than the fixture being trivial.
+/// returned the right answer before, just twenty seconds late. The lower bound
+/// is the control: a typed `Timeout` raised no earlier than the deadline means
+/// the query was still running when the budget ran out, so a stop shortly
+/// after it is enforcement rather than the fixture being trivial.
+///
+/// Load-sensitive by nature (it bounds wall-clock time), so nothing in it runs
+/// the slow query to completion. The plan-shape precondition used to: it
+/// profiled the full 600^3 cartesian under the default 30 s `query_timeout`,
+/// which takes ~7 s idle and exceeded 30 s on a host at load ~90 — every
+/// failure of this test in loaded runs was that precondition, on the base code
+/// and on this tree alike, never the assertion it guards. The plan does not
+/// depend on the data (the planner takes no decision from cardinality), so the
+/// shape is checked on a small copy of the fixture instead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_deadline_is_enforced_under_a_pipeline_breaking_operator() {
-    let db = Uni::in_memory().build().await.unwrap();
-    db.schema()
-        .label("Entity")
-        .property("uid", DataType::String)
-        .done()
-        .apply()
-        .await
-        .unwrap();
-    let tx = db.session().tx().await.unwrap();
-    for i in 0..600 {
-        tx.execute_with("CREATE (:Entity {uid: $u})")
-            .param("u", format!("e{i}"))
-            .run()
+    async fn entities(n: usize) -> Uni {
+        let db = Uni::in_memory().build().await.unwrap();
+        db.schema()
+            .label("Entity")
+            .property("uid", DataType::String)
+            .done()
+            .apply()
             .await
             .unwrap();
+        let tx = db.session().tx().await.unwrap();
+        for i in 0..n {
+            tx.execute_with("CREATE (:Entity {uid: $u})")
+                .param("u", format!("e{i}"))
+                .run()
+                .await
+                .unwrap();
+        }
+        tx.commit().await.unwrap();
+        db
     }
-    tx.commit().await.unwrap();
 
     // Three-way cartesian under an aggregate: 600^3 rows to count.
     const SLOW: &str = "MATCH (a:Entity),(b:Entity),(c:Entity) RETURN count(*) AS n";
+    const BUDGET: Duration = Duration::from_secs(2);
 
     // The guard is actually in this plan. Without this, a fast failure could
     // come from anywhere and the test would still be green.
-    let session = db.session();
-    crate::plan_shape::assert_plan_uses(&session, SLOW, "DeadlineGuardExec").await;
+    let shape = entities(5).await;
+    crate::plan_shape::assert_plan_uses(&shape.session(), SLOW, "DeadlineGuardExec").await;
 
+    let db = entities(600).await;
     let started = Instant::now();
     let err = db
         .session()
         .query_with(SLOW)
-        .timeout(Duration::from_secs(2))
+        .timeout(BUDGET)
         .fetch_all()
         .await
         .expect_err("a 2s timeout must stop this query");
     let elapsed = started.elapsed();
 
     assert!(
-        err.to_string().to_lowercase().contains("time"),
-        "expected a timeout, got: {err}"
+        matches!(err, uni_db::UniError::Timeout { .. }),
+        "expected UniError::Timeout, got: {err:?}"
+    );
+    assert!(
+        elapsed >= BUDGET,
+        "timed out after {elapsed:?}, before its {BUDGET:?} budget: the query was \
+         not shown to be slower than the budget"
     );
     assert!(
         elapsed < Duration::from_secs(10),
@@ -3052,6 +3072,564 @@ async fn cypher_memory_refusals_are_typed() -> Result<()> {
             uni_db::UniError::MemoryLimitExceeded { limit_bytes, .. } if limit_bytes == 64 * 1024
         ),
         "the result-size estimate must be MemoryLimitExceeded, got: {err:?}"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Every Cypher terminal honours every per-statement option
+// ---------------------------------------------------------------------------
+//
+// Each builder accepts `.timeout()`, `.max_memory()` and
+// `.cancellation_token()`, and each terminal used to forward a different
+// subset of them:
+//
+// * `TxQueryBuilder::execute` / `ExecuteBuilder::run` passed no `max_memory`,
+//   and enforced `.timeout()` as an outer `tokio::time::timeout` around an
+//   execution still bounded by `UniConfig::query_timeout`, so a builder timeout
+//   could tighten the database setting but never loosen it. `fetch_all` and
+//   `profile` on the transaction builder had the same one-directional timeout.
+// * every `profile()` dropped the cancellation token, the session one also
+//   dropped `.timeout()`, and `ExecuteBuilder` had no `.max_memory()` at all.
+//
+// The tests below run the whole matrix rather than the known holes: a matrix
+// with holes in it is how this arose.
+
+/// Every Cypher terminal across the session, transaction and execute builders.
+#[derive(Clone, Copy, Debug)]
+enum Terminal {
+    SessionFetchAll,
+    SessionFetchOne,
+    SessionCursor,
+    SessionProfile,
+    TxExecute,
+    TxFetchAll,
+    TxFetchOne,
+    TxCursor,
+    TxProfile,
+    ExecRun,
+    ExecProfile,
+}
+
+const TERMINALS: [Terminal; 11] = [
+    Terminal::SessionFetchAll,
+    Terminal::SessionFetchOne,
+    Terminal::SessionCursor,
+    Terminal::SessionProfile,
+    Terminal::TxExecute,
+    Terminal::TxFetchAll,
+    Terminal::TxFetchOne,
+    Terminal::TxCursor,
+    Terminal::TxProfile,
+    Terminal::ExecRun,
+    Terminal::ExecProfile,
+];
+
+/// The options a statement may carry.
+#[derive(Clone, Default)]
+struct StatementOptions {
+    timeout: Option<Duration>,
+    max_memory: Option<usize>,
+    token: Option<tokio_util::sync::CancellationToken>,
+}
+
+macro_rules! with_options {
+    ($builder:expr, $opts:expr) => {{
+        let mut b = $builder;
+        if let Some(t) = $opts.timeout {
+            b = b.timeout(t);
+        }
+        if let Some(m) = $opts.max_memory {
+            b = b.max_memory(m);
+        }
+        if let Some(tok) = $opts.token.clone() {
+            b = b.cancellation_token(tok);
+        }
+        b
+    }};
+}
+
+/// Run `cypher` through `terminal` with `opts`, draining a cursor fully, and
+/// return the statement's error, if any. Each transaction terminal gets a fresh
+/// transaction, so a failure on one does not poison the next.
+async fn run_terminal(
+    db: &Uni,
+    terminal: Terminal,
+    cypher: &str,
+    opts: &StatementOptions,
+) -> std::result::Result<(), uni_db::UniError> {
+    let session = db.session();
+    match terminal {
+        Terminal::SessionFetchAll => with_options!(session.query_with(cypher), opts)
+            .fetch_all()
+            .await
+            .map(|_| ()),
+        Terminal::SessionFetchOne => with_options!(session.query_with(cypher), opts)
+            .fetch_one()
+            .await
+            .map(|_| ()),
+        Terminal::SessionCursor => {
+            let cursor = with_options!(session.query_with(cypher), opts)
+                .cursor()
+                .await?;
+            drain_cursor(cursor).await.map_or(Ok(()), Err)
+        }
+        Terminal::SessionProfile => with_options!(session.query_with(cypher), opts)
+            .profile()
+            .await
+            .map(|_| ()),
+        _ => {
+            let tx = session.tx().await?;
+            match terminal {
+                Terminal::TxExecute => with_options!(tx.query_with(cypher), opts)
+                    .execute()
+                    .await
+                    .map(|_| ()),
+                Terminal::TxFetchAll => with_options!(tx.query_with(cypher), opts)
+                    .fetch_all()
+                    .await
+                    .map(|_| ()),
+                Terminal::TxFetchOne => with_options!(tx.query_with(cypher), opts)
+                    .fetch_one()
+                    .await
+                    .map(|_| ()),
+                Terminal::TxCursor => {
+                    let cursor = with_options!(tx.query_with(cypher), opts).cursor().await?;
+                    drain_cursor(cursor).await.map_or(Ok(()), Err)
+                }
+                Terminal::TxProfile => with_options!(tx.query_with(cypher), opts)
+                    .profile()
+                    .await
+                    .map(|_| ()),
+                Terminal::ExecRun => with_options!(tx.execute_with(cypher), opts)
+                    .run()
+                    .await
+                    .map(|_| ()),
+                Terminal::ExecProfile => with_options!(tx.execute_with(cypher), opts)
+                    .profile()
+                    .await
+                    .map(|_| ()),
+                _ => unreachable!("session terminals are handled above"),
+            }
+        }
+    }
+}
+
+const SCAN: &str = "MATCH (n:Node) RETURN n";
+
+#[tokio::test]
+async fn every_terminal_refuses_a_query_over_its_max_memory() -> Result<()> {
+    let db = seeded_db().await?;
+    let opts = StatementOptions {
+        max_memory: Some(100),
+        ..Default::default()
+    };
+    for terminal in TERMINALS {
+        let err = run_terminal(&db, terminal, SCAN, &opts)
+            .await
+            .expect_err(&format!(
+                "{terminal:?} ran a full scan under a 100-byte `.max_memory()`"
+            ));
+        // The limit the error reports is the effective one: a terminal that
+        // dropped the override would be refused, if at all, by the 1 GiB
+        // database default and report that.
+        assert!(
+            matches!(
+                err,
+                uni_db::UniError::MemoryLimitExceeded {
+                    limit_bytes: 100,
+                    ..
+                }
+            ),
+            "{terminal:?}: expected MemoryLimitExceeded at 100 bytes, got: {err:?}"
+        );
+    }
+    Ok(())
+}
+
+/// Control for the above: the same scan under a workable ceiling succeeds on
+/// every terminal.
+#[tokio::test]
+async fn every_terminal_runs_a_query_that_fits_its_max_memory() -> Result<()> {
+    let db = seeded_db().await?;
+    let opts = StatementOptions {
+        max_memory: Some(256 * 1024 * 1024),
+        ..Default::default()
+    };
+    for terminal in TERMINALS {
+        run_terminal(&db, terminal, SCAN, &opts)
+            .await
+            .map_err(|e| anyhow::anyhow!("{terminal:?}: {e:?}"))?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_terminal_fires_a_timeout_below_the_configured_one() -> Result<()> {
+    let db = seeded_db().await?;
+    let opts = StatementOptions {
+        timeout: Some(Duration::from_nanos(1)),
+        ..Default::default()
+    };
+    for terminal in TERMINALS {
+        let err = run_terminal(&db, terminal, SCAN, &opts)
+            .await
+            .expect_err(&format!(
+                "{terminal:?} ran to completion under a 1ns timeout"
+            ));
+        assert!(
+            matches!(err, uni_db::UniError::Timeout { .. }),
+            "{terminal:?}: expected UniError::Timeout, got: {err:?}"
+        );
+    }
+    Ok(())
+}
+
+/// An explicit timeout *replaces* `UniConfig::query_timeout`, so one above it
+/// lets through a statement the database setting alone would stop.
+///
+/// The database timeout is 1 ns, which every statement exceeds; the control
+/// arm proves that on each terminal before the override is asserted to lift
+/// it. Several terminals used to apply the builder timeout as an outer wrapper
+/// around an execution still bounded by the configured one, which can only
+/// tighten.
+#[tokio::test]
+async fn every_terminal_lets_a_timeout_above_the_configured_one_through() -> Result<()> {
+    let mut config = uni_db::UniConfig::default();
+    config.query_timeout = Duration::from_nanos(1);
+    let db = Uni::in_memory().config(config).build().await?;
+    // No seeding: a seeding statement would itself exceed 1 ns. The query
+    // needs no data to be slower than the database's timeout.
+    let cypher = "UNWIND range(1, 100) AS x RETURN x";
+
+    for terminal in TERMINALS {
+        let err = run_terminal(&db, terminal, cypher, &StatementOptions::default())
+            .await
+            .expect_err(&format!(
+                "{terminal:?}: the control must exceed the 1ns database timeout"
+            ));
+        assert!(
+            matches!(err, uni_db::UniError::Timeout { .. }),
+            "{terminal:?}: control expected UniError::Timeout, got: {err:?}"
+        );
+
+        let opts = StatementOptions {
+            timeout: Some(Duration::from_secs(60)),
+            ..Default::default()
+        };
+        run_terminal(&db, terminal, cypher, &opts)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "{terminal:?}: a 60s builder timeout did not replace the 1ns database \
+                 timeout: {e:?}"
+                )
+            })?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn every_terminal_honours_a_cancellation_token() -> Result<()> {
+    let db = seeded_db().await?;
+    let token = tokio_util::sync::CancellationToken::new();
+    token.cancel();
+    let opts = StatementOptions {
+        token: Some(token),
+        ..Default::default()
+    };
+    for terminal in TERMINALS {
+        let err = run_terminal(&db, terminal, SCAN, &opts)
+            .await
+            .expect_err(&format!(
+                "{terminal:?} ran to completion under an already-cancelled token"
+            ));
+        assert!(
+            matches!(err, uni_db::UniError::Cancelled),
+            "{terminal:?}: expected UniError::Cancelled, got: {err:?}"
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PROFILE reports a measured peak
+// ---------------------------------------------------------------------------
+//
+// `ProfileOutput::peak_memory_bytes` was hard-coded to 0. It is now the
+// query's reserved high-water mark across every memory pool it builds.
+
+async fn wide_db(max_query_memory: usize) -> Result<Uni> {
+    let mut config = uni_db::UniConfig::default();
+    config.max_query_memory = max_query_memory;
+    let db = Uni::in_memory().config(config).build().await?;
+    db.schema()
+        .label("W")
+        .property("k", DataType::Int64)
+        .property("pad", DataType::String)
+        .apply()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute("UNWIND range(0, 1999) AS i CREATE (:W {k: i % 97, pad: 'payload-' + toString(i)})")
+        .await?;
+    tx.commit().await?;
+    Ok(db)
+}
+
+#[tokio::test]
+async fn profile_reports_a_peak_for_a_sort_and_a_join() -> Result<()> {
+    // Bounded (the 1 GiB default) and unbounded (0) pools: the wrapper is
+    // installed either way, so both must measure.
+    for limit in [1024 * 1024 * 1024, 0] {
+        let db = wide_db(limit).await?;
+        let session = db.session();
+
+        let (rows, sort) = session
+            .query_with("MATCH (w:W) RETURN w.pad AS p ORDER BY w.pad DESC")
+            .profile()
+            .await?;
+        assert_eq!(rows.rows().len(), 2000);
+        assert!(
+            sort.peak_memory_bytes > 0,
+            "limit={limit}: a 2000-row sort reserved nothing? peak_memory_bytes=0"
+        );
+
+        let (rows, join) = session
+            .query_with(
+                "MATCH (a:W), (b:W) WHERE a.k = b.k AND a.k < 3 \
+                 RETURN count(*) AS c",
+            )
+            .profile()
+            .await?;
+        assert!(rows.rows()[0].get::<i64>("c")? > 0);
+        assert!(
+            join.peak_memory_bytes > 0,
+            "limit={limit}: a join reserved nothing? peak_memory_bytes=0"
+        );
+
+        // The same figure on the transaction surface.
+        let tx = session.tx().await?;
+        let (_, tx_sort) = tx
+            .query_with("MATCH (w:W) RETURN w.pad AS p ORDER BY w.pad DESC")
+            .profile()
+            .await?;
+        assert!(
+            tx_sort.peak_memory_bytes > 0,
+            "limit={limit}: tx profile peak_memory_bytes=0"
+        );
+    }
+    Ok(())
+}
+
+/// The peak is the reserved figure the ceiling is compared against, so a query
+/// that completes under a ceiling must report a peak no larger than it.
+#[tokio::test]
+async fn profile_peak_does_not_exceed_the_ceiling_it_ran_under() -> Result<()> {
+    let ceiling = 64 * 1024 * 1024;
+    let db = wide_db(ceiling).await?;
+    let (_, profile) = db
+        .session()
+        .query_with("MATCH (w:W) RETURN w.pad AS p ORDER BY w.pad DESC")
+        .profile()
+        .await?;
+    assert!(profile.peak_memory_bytes > 0);
+    assert!(
+        profile.peak_memory_bytes <= ceiling,
+        "peak {} above the {ceiling}-byte pool it ran in",
+        profile.peak_memory_bytes
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// A transaction cursor reads the transaction's snapshot
+// ---------------------------------------------------------------------------
+
+/// Under SSI a transaction pins a read snapshot when it begins, and
+/// `fetch_all` reads through it. The transaction cursor did not install it, so
+/// it read the live L0 instead: a row another session committed after the
+/// transaction began was invisible to `fetch_all` and visible to `cursor()` on
+/// the same transaction.
+#[tokio::test]
+async fn a_tx_cursor_reads_the_transactions_snapshot_like_fetch_all() -> Result<()> {
+    let mut config = uni_db::UniConfig::default();
+    config.ssi_enabled = true;
+    let db = seeded_db_with_config(config).await?;
+    let count = "MATCH (n:Node) RETURN count(n) AS c";
+
+    let reader = db.session();
+    let tx = reader.tx().await?;
+    let before: i64 = tx.query_with(count).fetch_all().await?.rows()[0].get("c")?;
+    assert_eq!(before, 100);
+
+    // Another session commits after the transaction's first read.
+    let writer = db.session();
+    let wtx = writer.tx().await?;
+    wtx.execute("CREATE (:Node)").await?;
+    wtx.commit().await?;
+    assert_eq!(
+        db.session().query(count).await?.rows()[0].get::<i64>("c")?,
+        101,
+        "the concurrent commit must be visible outside the transaction"
+    );
+
+    let via_fetch: i64 = tx.query_with(count).fetch_all().await?.rows()[0].get("c")?;
+    let mut cursor = tx.query_with(count).cursor().await?;
+    let mut via_cursor = None;
+    while let Some(batch) = cursor.next_batch().await {
+        for row in batch? {
+            via_cursor = Some(row.get::<i64>("c")?);
+        }
+    }
+    let via_cursor = via_cursor.expect("count(*) returns one row");
+
+    assert_eq!(
+        via_fetch, 100,
+        "fetch_all must not see a commit made after the snapshot was pinned"
+    );
+    assert_eq!(
+        via_cursor, via_fetch,
+        "the transaction cursor saw a different snapshot than fetch_all"
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// One memory budget per statement
+// ---------------------------------------------------------------------------
+//
+// A statement can build more than one physical plan. Correlated sub-plans run
+// on the outer plan's `SessionContext` and always shared its pool, but a
+// procedure's inner query (`QueryProcedureHost::execute_inner_query`) built an
+// executor of its own, with a pool of its own sized from
+// `UniConfig::default()` (1 GiB, whatever the statement's `max_memory`), once
+// per call. The outer plan's reservations and the inner query's were held at
+// the same time, each under a separate budget, so a statement could hold more
+// than its limit and `PROFILE` reported only the outer share.
+//
+// Measured on the fixture below (one pool per statement):
+//
+// | statement                                   | reserved peak |
+// |---------------------------------------------|---------------|
+// | the procedure body alone                    |   ~562 KB     |
+// | the outer join alone                        |   ~110 KB     |
+// | the join calling the procedure per row      |   ~853 KB     |
+//
+// The join holds its build side while the procedure runs for each output row,
+// so the two are concurrent. A 700 KB ceiling sits above both parts and below
+// the whole.
+
+const PER_ROW_PROC_CEILING: usize = 700_000;
+const PROC_BODY: &str = "MATCH (x:X) RETURN x.pad AS p ORDER BY p DESC LIMIT 1";
+const JOIN_ALONE: &str = "MATCH (a:W), (b:W) WHERE a.k = b.k AND b.k = 0 RETURN count(*) AS c";
+const JOIN_CALLING_PROC: &str = "MATCH (a:W), (b:W) WHERE a.k = b.k AND b.k = 0 \
+     CALL t.sorted() YIELD row_json RETURN count(*) AS c";
+/// The join yields 441 rows and calls the procedure once per row, ~37 ms a
+/// call in a debug build: 16 s idle. Under the default 30 s query timeout the
+/// statement timed out on a loaded machine (workspace suite, load average
+/// ~25), so it runs with room. The memory assertions do not depend on time.
+const JOIN_CALLING_PROC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+async fn db_with_per_row_procedure() -> Result<Uni> {
+    let db = wide_db(0).await?;
+    let tx = db.session().tx().await?;
+    tx.execute("UNWIND range(0, 1999) AS i CREATE (:X {k: i % 50, pad: 'xpad-' + toString(i)})")
+        .await?;
+    tx.execute(&format!(
+        "CALL uni.plugin.declareProcedure('t.sorted', '{PROC_BODY}', 'READ', '[]', '[]')"
+    ))
+    .await?;
+    tx.commit().await?;
+    Ok(db)
+}
+
+/// Requires the multi-thread runtime: the declared procedure bridges
+/// sync→async with `block_in_place`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_procedure_called_per_row_shares_the_statements_memory_budget() -> Result<()> {
+    let db = db_with_per_row_procedure().await?;
+    let session = db.session();
+
+    // Standalone CALL uses the simple executor's host, not a graph context.
+    // It must initialize its shared pool from the caller's limit too.
+    for part in [PROC_BODY, "CALL t.sorted() YIELD row_json RETURN row_json"] {
+        let err = session
+            .query_with(part)
+            .max_memory(1024)
+            .fetch_all()
+            .await
+            .expect_err("the sort cannot fit a 1 KiB statement pool");
+        assert!(
+            matches!(err, uni_db::UniError::MemoryLimitExceeded { .. }),
+            "{part}: {err:?}"
+        );
+    }
+
+    // Each part fits the ceiling on its own. Without these, a ceiling that
+    // refused the procedure body by itself would pass the assertion below.
+    for part in [PROC_BODY, JOIN_ALONE] {
+        session
+            .query_with(part)
+            .max_memory(PER_ROW_PROC_CEILING)
+            .fetch_all()
+            .await
+            .map_err(|e| anyhow::anyhow!("`{part}` alone must fit the ceiling: {e}"))?;
+    }
+
+    let err = session
+        .query_with(JOIN_CALLING_PROC)
+        .timeout(JOIN_CALLING_PROC_TIMEOUT)
+        .max_memory(PER_ROW_PROC_CEILING)
+        .fetch_all()
+        .await
+        .expect_err(
+            "the join and its per-row procedure together exceed the ceiling; a \
+             procedure that draws on a pool of its own is not bounded by it",
+        );
+    assert!(
+        matches!(err, uni_db::UniError::MemoryLimitExceeded { .. }),
+        "expected MemoryLimitExceeded, got: {err:?}"
+    );
+
+    // And with room for both, the statement runs.
+    let rows = session
+        .query_with(JOIN_CALLING_PROC)
+        .timeout(JOIN_CALLING_PROC_TIMEOUT)
+        .max_memory(64 * 1024 * 1024)
+        .fetch_all()
+        .await?;
+    assert!(rows.rows()[0].get::<i64>("c")? > 0);
+    Ok(())
+}
+
+/// With one pool per statement, the reserved peak `PROFILE` reports covers the
+/// procedure's inner queries. It used to report the outer plan's share alone,
+/// below what the procedure body reserves when run by itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn profile_peak_includes_a_procedures_inner_query() -> Result<()> {
+    let db = db_with_per_row_procedure().await?;
+    let session = db.session();
+
+    let (_, body) = session.query_with(PROC_BODY).profile().await?;
+    let (_, join) = session.query_with(JOIN_ALONE).profile().await?;
+    let (_, both) = session
+        .query_with(JOIN_CALLING_PROC)
+        .timeout(JOIN_CALLING_PROC_TIMEOUT)
+        .profile()
+        .await?;
+    assert!(body.peak_memory_bytes > 0 && join.peak_memory_bytes > 0);
+    assert!(
+        both.peak_memory_bytes >= body.peak_memory_bytes,
+        "statement peak {} is below its procedure body's own peak {}: the inner \
+         query's reservations were not counted",
+        both.peak_memory_bytes,
+        body.peak_memory_bytes
+    );
+    assert!(
+        both.peak_memory_bytes > join.peak_memory_bytes,
+        "statement peak {} does not exceed the outer join's {}",
+        both.peak_memory_bytes,
+        join.peak_memory_bytes
     );
     Ok(())
 }

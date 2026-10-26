@@ -84,7 +84,9 @@ async fn test_evaluate_non_recursive() -> Result<()> {
         .await?;
 
     let friends = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("friends")
         .expect("rule 'friends' missing");
     assert_eq!(friends.len(), 1);
@@ -116,7 +118,9 @@ async fn test_evaluate_recursive_transitive_closure() -> Result<()> {
         .await?;
 
     let reachable = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("reachable")
         .expect("rule 'reachable' missing");
     // A→B, B→C, A→C (transitive)
@@ -278,7 +282,9 @@ async fn test_end_to_end_smoke() -> Result<()> {
         .await?;
 
     let reachable = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("reachable")
         .expect("rule 'reachable' missing");
 

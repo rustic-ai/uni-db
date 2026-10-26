@@ -57,20 +57,27 @@ out = (
         "exact_probability": True,
         "max_bdd_variables": 1000,
         "top_k_proofs": 100,
-        # Goal-directed QUERY evaluation: "off" (default), "on" or "shadow"
+        # Goal-directed QUERY evaluation: "auto" (default), "off", "on" or "shadow"
         "goal_directed": "on",
     })
     .run()
 )
 ```
 
-`goal_directed` takes `"off"`, `"on"` or `"shadow"` (case-insensitive; any
-other string raises `ValueError`). The same option is the `goal_directed=`
-keyword of `uni_db.LocyConfig(...)`, which reports it back as a lowercase
-string. With `"on"`, a `QUERY` whose `WHERE` pins a node KEY column derives
-only what that goal reaches; its answers are unchanged, but a rule only such
-goals needed is left out of `result.derived` rather than returned partial.
-`"shadow"` answers from the rewrite while keeping `derived` complete. See
+`goal_directed` takes `"auto"`, `"off"`, `"on"` or `"shadow"`
+(case-insensitive; any other string raises `ValueError`). The same option is
+the `goal_directed=` keyword of `uni_db.LocyConfig(...)`, which reports it
+back as a lowercase string. Under the default `"auto"`, a `QUERY` whose
+`WHERE` pins a node KEY column derives only what that goal reaches; its
+answers are unchanged, and so is `result.derived`: a rule only such goals
+needed is derived the first time `result.derived` is read, against the
+snapshot the evaluation read, and the warnings that derivation raised are
+appended to `result.warnings`. That first read blocks while it runs and raises
+what the derivation raised; in async code use `await result.derived_async()`,
+which derives on the runtime without blocking the event loop and returns the
+same dict. `"off"` evaluates every rule in full; with `"on"` such
+a rule is left out of `result.derived` rather than returned partial;
+`"shadow"` answers from the rewrite while evaluating every rule. See
 [Goal-directed QUERY](../advanced/modules-priority-query.md#goal-directed-query).
 
 Builder methods:
@@ -152,11 +159,21 @@ Each warning dict has:
 
 ```python
 {
-    "code": "SharedProbabilisticDependency",  # or "BddLimitExceeded", "CrossGroupCorrelationNotExact"
+    "code": "shared_probabilistic_dependency",  # the snake_case code, see below
+    "severity": "warning",    # "info" for a status report (shared_dependency_resolved)
     "message": "...",
     "rule_name": "supplier_risk",
-    "variable_count": None,   # set for BddLimitExceeded
+    "variable_count": None,   # set for bdd_limit_exceeded, and after a fallback
     "key_group": None,        # set when a specific key group is affected
+    "probability": {          # shared-dependency codes only, else None
+        "inference_mode": "approximate",   # "exact", "top_k_proofs"
+        "resolution": "not_attempted",     # "completed", "fallback"
+        "reason": "exact_probability_disabled",  # or "bdd_variable_limit_exceeded"; None when completed
+        "groups_detected": 1,              # KEY groups resting on shared evidence
+        "groups_fallen_back": 1,           # of those, groups that kept the independence value
+        "configured_bdd_variable_limit": None,  # max_bdd_variables, when resolution was attempted
+        "effective_bdd_variable_limit": None,   # the limit applied (capped by the BDD library)
+    },
 }
 ```
 
@@ -164,9 +181,17 @@ Warning codes:
 
 | Code | Meaning |
 |------|---------|
-| `SharedProbabilisticDependency` | Multiple MNOR/MPROD proof paths reuse the same evidence; result is approximate |
-| `BddLimitExceeded` | `exact_probability` was enabled but group exceeded `max_bdd_variables`; fell back to independence mode |
-| `CrossGroupCorrelationNotExact` | Shared evidence spans multiple aggregate groups; cross-group correlation is approximate |
+| `shared_probabilistic_dependency` | MNOR/MPROD proof paths reuse the same evidence and the value was computed as if they did not: exact mode was off, or a group fell back. The result may overestimate; `probability` says which |
+| `shared_dependency_resolved` | Informational (`severity == "info"`): proof paths share evidence, and exact (or top-k proof) inference evaluated every shared group without the independence assumption |
+| `bdd_limit_exceeded` | `exact_probability` was enabled but group exceeded `max_bdd_variables`; fell back to independence mode |
+| `cross_group_correlation_not_exact` | Shared evidence spans multiple aggregate groups; cross-group correlation is approximate |
+
+With two suppliers depending on one facility event of probability 0.2, an
+MNOR over the suppliers is 0.36 in ordinary mode, with
+`shared_probabilistic_dependency` (`inference_mode: "approximate"`,
+`resolution: "not_attempted"`), and 0.2 with `exact_probability=True`, with
+`shared_dependency_resolved` (`inference_mode: "exact"`,
+`resolution: "completed"`) and no overestimation warning.
 
 Rows from approximate groups are marked with `_approximate = True` in the derived facts.
 
@@ -179,8 +204,8 @@ if out.warnings:
     for w in out.warnings:
         print(f"[{w['code']}] {w['message']}")
 
-# Check for a specific warning code
-has_shared = out.has_warning("SharedProbabilisticDependency")
+# Check for a specific warning code (the snake_case code string)
+has_shared = out.has_warning("shared_probabilistic_dependency")
 
 # Inspect which groups are approximate
 for rule, groups in out.approximate_groups.items():

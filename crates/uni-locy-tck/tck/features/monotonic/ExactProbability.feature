@@ -50,7 +50,11 @@ Feature: Exact BDD-based Probability Computation
       """
     Then evaluation should succeed
     And the derived relation 'reach' should contain a fact where a.name = 'A' and b.name = 'D' and prob = 0.264
-    And the result should contain a SharedProbabilisticDependency warning for rule 'reach'
+    # Exact inference resolves the sharing, so the result is no
+    # overestimate: reported as a status, not the warning (issue #315).
+    And the result should report a SharedDependencyResolved status for rule 'reach'
+    And the result should not contain a SharedProbabilisticDependency warning
+    And the shared dependency of rule 'reach' should have inference mode 'exact' and resolution 'completed'
     And the result should not contain a BddLimitExceeded warning
 
   # ── BDD limit exceeded ─────────────────────────────────────────────────
@@ -84,6 +88,8 @@ Feature: Exact BDD-based Probability Computation
     Then evaluation should succeed
     And the result should contain a BddLimitExceeded warning for rule 'reach'
     And the result should contain a SharedProbabilisticDependency warning for rule 'reach'
+    And the shared dependency of rule 'reach' should have inference mode 'exact' and resolution 'fallback'
+    And the result should not report a SharedDependencyResolved status
 
   # ── Default mode (exact_probability=false) ─────────────────────────────
   # Only the SharedProbabilisticDependency warning, no BDD (shared-edge graph).
@@ -114,6 +120,8 @@ Feature: Exact BDD-based Probability Computation
     Then evaluation should succeed
     And the derived relation 'reach' should contain a fact where a.name = 'A' and b.name = 'D' and prob = 0.2784
     And the result should contain a SharedProbabilisticDependency warning for rule 'reach'
+    And the shared dependency of rule 'reach' should have inference mode 'approximate' and resolution 'not_attempted'
+    And the result should not report a SharedDependencyResolved status
     And the result should not contain a BddLimitExceeded warning
 
   # ── Independent groups unaffected ──────────────────────────────────────
@@ -168,7 +176,11 @@ Feature: Exact BDD-based Probability Computation
       """
     Then evaluation should succeed
     And the derived relation 'reach' should contain a fact where a.name = 'A' and b.name = 'D' and prob = 0.036
-    And the result should contain a SharedProbabilisticDependency warning for rule 'reach'
+    # Exact inference resolves the sharing, so the result is no
+    # overestimate: reported as a status, not the warning (issue #315).
+    And the result should report a SharedDependencyResolved status for rule 'reach'
+    And the result should not contain a SharedProbabilisticDependency warning
+    And the shared dependency of rule 'reach' should have inference mode 'exact' and resolution 'completed'
     And the result should not contain a BddLimitExceeded warning
 
   # ── Numeric probability assertions: exact_probability mode ─────────────
@@ -293,6 +305,8 @@ Feature: Exact BDD-based Probability Computation
     And the derived relation 'reach' should contain a fact where a.name = 'A' and b.name = 'D' and prob = 0.2784
     And the result should contain a BddLimitExceeded warning for rule 'reach'
     And the result should contain a SharedProbabilisticDependency warning for rule 'reach'
+    And the shared dependency of rule 'reach' should have inference mode 'exact' and resolution 'fallback'
+    And the result should not report a SharedDependencyResolved status
 
   # ── Scenario 2E: MPROD diamond with exact_probability ──────────────────
   # MPROD is the conjunction of the rows: X AND (Y AND Z)
@@ -517,7 +531,11 @@ Feature: Exact BDD-based Probability Computation
       """
     Then evaluation should succeed
     And the derived relation 'odd' should contain a fact where a.name = 's' and m.name = 'm' and prob = 0.35
-    And the result should contain a SharedProbabilisticDependency warning for rule 'odd'
+    # Exact inference resolves the sharing, so the result is no
+    # overestimate: reported as a status, not the warning (issue #315).
+    And the result should report a SharedDependencyResolved status for rule 'odd'
+    And the result should not contain a SharedProbabilisticDependency warning
+    And the shared dependency of rule 'odd' should have inference mode 'exact' and resolution 'completed'
 
   Scenario: A negated fact sharing an edge with the positive part is an independent factor in default mode
     Given having executed:

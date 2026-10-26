@@ -122,17 +122,9 @@ pub(crate) async fn search_with_unstored(
     configure: impl FnOnce(&mut Scanner),
 ) -> Result<TextSearch> {
     let Some(dataset) = dataset else {
-        let (_, stats) = flat_bm25(
-            unstored_stream(column, &unstored)?,
-            column,
-            query,
-            simple_tokenizer()?,
-            None,
-        )
-        .await?;
         return Ok(TextSearch {
             stored: Vec::new(),
-            unstored: rescore(&stats, &mut simple_tokenizer()?, query, unstored),
+            unstored: score_documents(column, query, unstored, || Ok(())).await?,
         });
     };
 
@@ -219,7 +211,7 @@ pub(crate) async fn search_with_unstored(
     let mut tokenizer = tokenizer;
     Ok(TextSearch {
         stored,
-        unstored: rescore(&stats, &mut tokenizer, query, unstored),
+        unstored: rescore_checked(&stats, &mut tokenizer, query, unstored, || Ok(()))?,
     })
 }
 
@@ -229,20 +221,25 @@ fn unstored_stream(column: &str, docs: &[(u64, String)]) -> Result<SendableRecor
         Field::new(ROW_ID, DataType::UInt64, false),
         Field::new(column, DataType::Utf8, true),
     ]));
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from_iter_values(
-                docs.iter().map(|(id, _)| *id),
-            )),
-            Arc::new(StringArray::from_iter_values(
-                docs.iter().map(|(_, t)| t.as_str()),
-            )),
-        ],
-    )?;
+    let batches: Vec<_> = docs
+        .chunks(1024)
+        .map(|docs| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(UInt64Array::from_iter_values(
+                        docs.iter().map(|(id, _)| *id),
+                    )),
+                    Arc::new(StringArray::from_iter_values(
+                        docs.iter().map(|(_, t)| t.as_str()),
+                    )),
+                ],
+            )
+        })
+        .collect::<std::result::Result<_, _>>()?;
     Ok(Box::pin(RecordBatchStreamAdapter::new(
         schema,
-        futures::stream::iter(vec![Ok(batch)]),
+        futures::stream::iter(batches.into_iter().map(Ok)),
     )))
 }
 
@@ -302,15 +299,43 @@ async fn take_scored(dataset: &Dataset, mut hits: Vec<(u64, f32)>) -> Result<Rec
     )?)
 }
 
+/// Flat BM25 for a visible corpus without a persistent text column.
+/// Uses the same tokenizer and statistics as the unindexed dataset path.
+pub(crate) async fn score_documents(
+    column: &str,
+    query: &str,
+    docs: Vec<(u64, String)>,
+    check: impl Fn() -> Result<()> + Clone + Send + Sync + 'static,
+) -> Result<Vec<(u64, f32)>> {
+    check()?;
+    if docs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input = unstored_stream(column, &docs)?;
+    let schema = input.schema();
+    let check_stats = check.clone();
+    let input = RecordBatchStreamAdapter::new(
+        schema,
+        input.map(move |batch| {
+            check_stats().map_err(|e| DataFusionError::External(e.into()))?;
+            batch
+        }),
+    );
+    let (_, stats) = flat_bm25(Box::pin(input), column, query, simple_tokenizer()?, None).await?;
+    check()?;
+    rescore_checked(&stats, &mut simple_tokenizer()?, query, docs, check)
+}
+
 /// `docs` scored against `scorer`'s statistics without adding to them, by the
 /// formula and token counting of Lance's flat pass (`flat_bm25_score`):
 /// the sum over query tokens of `idf * doc_weight(freq, doc_tokens)`.
-fn rescore(
+fn rescore_checked(
     scorer: &MemBM25Scorer,
     tokenizer: &mut Box<dyn LanceTokenizer>,
     query: &str,
     docs: Vec<(u64, String)>,
-) -> Vec<(u64, f32)> {
+    check: impl Fn() -> Result<()>,
+) -> Result<Vec<(u64, f32)>> {
     let tokens = collect_query_tokens(query, tokenizer);
     let mut index_of: std::collections::HashMap<String, Vec<usize>> =
         std::collections::HashMap::new();
@@ -322,11 +347,15 @@ fn rescore(
     }
     let mut out = Vec::with_capacity(docs.len());
     for (id, text) in docs {
+        check()?;
         let mut freqs = vec![0u32; tokens.len()];
         let mut doc_tokens = 0u32;
         let mut stream = tokenizer.token_stream_for_doc(&text);
         while let Some(token) = stream.next() {
             doc_tokens += 1;
+            if doc_tokens.is_multiple_of(1024) {
+                check()?;
+            }
             if let Some(indices) = index_of.get(&token.text) {
                 for &i in indices {
                     freqs[i] += 1;
@@ -345,7 +374,7 @@ fn rescore(
             out.push((id, score));
         }
     }
-    out
+    Ok(out)
 }
 
 /// Every committed inverted-index segment on `column`, or none, and the
@@ -430,4 +459,32 @@ async fn flat_bm25(
         .await
         .map_err(|e| anyhow!("flat BM25 on '{column}': {e}"))?;
     Ok((batches, scorer))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn schemaless_bm25_checks_budget_during_statistics() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let checks = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&checks);
+        let docs = (0..2049).map(|id| (id, "supplier".to_string())).collect();
+        let error = score_documents("text", "supplier", docs, move || {
+            // Entry passes; cancellation happens as statistics read the corpus.
+            if checks.fetch_add(1, Ordering::Relaxed) > 0 {
+                anyhow::bail!("Query cancelled");
+            }
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("Query cancelled"));
+        assert!(
+            error.to_string().contains("flat BM25 on 'text'"),
+            "cancellation must interrupt the statistics pass, not only its caller: {error:#}"
+        );
+        assert!(observed.load(Ordering::Relaxed) >= 2);
+    }
 }

@@ -264,3 +264,55 @@ async def test_async_execute_result_metrics_dict(async_chain_db):
 async def test_async_locy_profile_iterations_carry_planning(async_chain_db):
     _, profile = await async_chain_db.session().locy_with(REACH_PROGRAM).profile()
     _assert_locy_planning(profile)
+
+
+def test_ephemeral_id_expressions_use_signed_identity():
+    db = uni_db.Uni.in_memory()
+    result = db.session().query(
+        "CALL uni.create.vNode(['L'], '{}') YIELD node "
+        "RETURN id(node) AS id, id(node) < 0 AS negative, "
+        "elementId(node) = toString(id(node)) AS same_string"
+    )
+    assert result[0]["id"] < 0
+    assert result[0]["negative"] is True
+    assert result[0]["same_string"] is True
+
+
+def test_declared_procedure_inherits_scan_counters():
+    db = uni_db.Uni.in_memory()
+    session = db.session()
+    tx = session.tx()
+    tx.execute("UNWIND range(1, 12) AS i CREATE (:CounterProbe {i:i})")
+    tx.execute(
+        "CALL uni.plugin.declareProcedure('t.scan_counters', "
+        "'MATCH (n:CounterProbe) RETURN n.i AS i', 'READ', '[]', '[]')"
+    )
+    tx.commit()
+    direct = session.query("MATCH (n:CounterProbe) RETURN n.i AS i")
+    wrapped = session.query("CALL t.scan_counters() YIELD i RETURN i")
+    assert len(direct) == len(wrapped) == 12
+    assert direct.metrics.rows_scanned == 12
+    assert wrapped.metrics.rows_scanned == direct.metrics.rows_scanned
+    assert wrapped.metrics.l0_reads == direct.metrics.l0_reads
+
+
+def test_schemaless_fts_uses_document_statistics():
+    db = uni_db.Uni.in_memory()
+    session = db.session()
+    tx = session.tx()
+    for i, text in enumerate(
+        ["supplier", "supplier supplier", "supplier site code", "customer order"]
+    ):
+        tx.execute("CREATE (:TextProbe {i:$i, text:$text})", {"i": i, "text": text})
+    tx.commit()
+    query = (
+        "CALL uni.fts.query('TextProbe', 'text', 'supplier', 10) "
+        "YIELD node, score RETURN node.i AS i, score ORDER BY score DESC, i"
+    )
+    before = [row.to_dict() for row in session.query(query)]
+    assert len(before) == 3
+    assert len({row["score"] for row in before}) > 1
+    db.flush()
+    after = [row.to_dict() for row in session.query(query)]
+    assert [r["i"] for r in after] == [r["i"] for r in before]
+    assert [r["score"] for r in after] == pytest.approx([r["score"] for r in before])

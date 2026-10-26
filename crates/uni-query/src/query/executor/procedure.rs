@@ -338,10 +338,21 @@ fn arrow_scalar_to_value(
             arr.as_primitive::<arrow_array::types::Int32Type>()
                 .value(row_idx) as i64,
         )),
-        Dt::UInt64 => Ok(Value::Int(
-            arr.as_primitive::<arrow_array::types::UInt64Type>()
-                .value(row_idx) as i64,
-        )),
+        // A plugin's `UInt64` yield is a value: past i64::MAX the float it
+        // is, not a wrapped negative integer. An entity's id column is an
+        // identity and keeps its bits (`Value::from_id_bits`).
+        Dt::UInt64 => {
+            let v = arr
+                .as_primitive::<arrow_array::types::UInt64Type>()
+                .value(row_idx);
+            Ok(
+                if crate::query::df_graph::procedure_call::is_identity_field(field) {
+                    Value::from_id_bits(v)
+                } else {
+                    Value::from(v)
+                },
+            )
+        }
         Dt::Float64 => Ok(Value::Float(
             arr.as_primitive::<arrow_array::types::Float64Type>()
                 .value(row_idx),
@@ -822,8 +833,13 @@ impl Executor {
                     .evaluate_expr(&args[1], &empty_row, prop_manager, params, ctx)
                     .await?;
 
-                let success =
-                    super::ddl_procedures::create_label(&self.storage, &name, &config).await?;
+                let success = super::ddl_procedures::create_label(
+                    &self.storage,
+                    self.writer.as_deref(),
+                    &name,
+                    &config,
+                )
+                .await?;
                 success_result(success)
             }
             "uni.schema.createEdgeType" => {
@@ -865,6 +881,7 @@ impl Executor {
 
                 let success = super::ddl_procedures::create_edge_type(
                     &self.storage,
+                    self.writer.as_deref(),
                     &name,
                     src_labels,
                     dst_labels,
@@ -1083,6 +1100,10 @@ impl Executor {
             host = host.with_writer(Arc::clone(writer));
         }
         host = host.with_property_manager(self.live_property_manager());
+        host = host.with_statement_resources(
+            Arc::clone(&self.counters),
+            Arc::clone(&self.query_runtime()?.memory_pool),
+        );
         // A declared procedure runs its body as an inner query, inside this
         // poll and under `block_in_place`, where the caller's timeout and
         // cancellation cannot reach it. Without the budget the body ran to
@@ -1202,6 +1223,10 @@ impl Executor {
         // spend the caller's budget, as a declared procedure's body does.
         let (deadline, token) = self.procedure_budget(ctx);
         resolver_host = resolver_host.with_budget(deadline, token);
+        resolver_host = resolver_host.with_statement_resources(
+            Arc::clone(&self.counters),
+            Arc::clone(&self.query_runtime()?.memory_pool),
+        );
         let resolver = crate::procedures_plugin::algo::guest_graph_resolver(resolver_host);
         let mut stream = crate::procedures_plugin::algo::run_algorithm_provider(
             entry,

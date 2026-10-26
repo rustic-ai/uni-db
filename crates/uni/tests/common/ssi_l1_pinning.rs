@@ -102,7 +102,15 @@ async fn mid_tx_flush_does_not_leak_into_locy() -> Result<()> {
     let before = tx
         .locy("CREATE RULE items AS MATCH (i:Item) YIELD KEY i")
         .await?;
-    assert_eq!(before.derived.get("items").map(Vec::len), Some(1));
+    assert_eq!(
+        before
+            .derived_rules()
+            .await
+            .unwrap()
+            .get("items")
+            .map(Vec::len),
+        Some(1)
+    );
 
     {
         let s2 = db.session();
@@ -116,7 +124,12 @@ async fn mid_tx_flush_does_not_leak_into_locy() -> Result<()> {
         .locy("CREATE RULE items AS MATCH (i:Item) YIELD KEY i")
         .await?;
     assert_eq!(
-        after.derived.get("items").map(Vec::len),
+        after
+            .derived_rules()
+            .await
+            .unwrap()
+            .get("items")
+            .map(Vec::len),
         Some(1),
         "post-snapshot L1 row leaked into a Locy evaluation inside the tx"
     );

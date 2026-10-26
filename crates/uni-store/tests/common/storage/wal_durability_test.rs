@@ -251,6 +251,7 @@ async fn test_wal_edge_mutations() -> Result<()> {
         dst_vid,
         edge_type: 1,
         version: 2,
+        edge_type_name: None,
     })?;
 
     wal.flush().await?;

@@ -83,7 +83,9 @@ async fn linear_tc_ground_truth() -> Result<()> {
         .await?;
 
     let reachable = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("reachable")
         .expect("rule 'reachable' missing");
     assert_eq!(
@@ -119,7 +121,9 @@ async fn chained_is_refs_cross_rule_probe() -> Result<()> {
         .await?;
 
     let two_hop = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("two_hop")
         .expect("rule 'two_hop' missing");
     assert_eq!(
@@ -155,7 +159,9 @@ async fn single_is_ref_control_probe() -> Result<()> {
         .await?;
 
     let two_hop = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("two_hop")
         .expect("rule 'two_hop' missing");
     assert_eq!(
@@ -193,7 +199,9 @@ async fn two_is_refs_match_bound_subjects_probe() -> Result<()> {
         .await?;
 
     let two_hop = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("two_hop")
         .expect("rule 'two_hop' missing");
     assert_eq!(
@@ -232,7 +240,9 @@ async fn nonlinear_tc_semi_naive_completeness() -> Result<()> {
         .await?;
 
     let reachable = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("reachable")
         .expect("rule 'reachable' missing");
     assert_eq!(

@@ -178,3 +178,158 @@ def test_locy_metrics_document_which_fields_are_unmeasured(db):
     # ... while the fields Locy does populate are real.
     assert metrics.total_time_ms > 0.0
     assert metrics.rows_returned > 0
+
+
+# --- every terminal forwards every option ------------------------------------
+#
+# The builders accepted `timeout`, `max_memory` and `cancellation_token`, and
+# several terminals dropped some of them on the way to Rust: the sync
+# `TxQueryBuilder.execute` dropped `timeout` and `max_memory`, its `cursor`
+# dropped `max_memory`, the async twin's `execute` dropped `max_memory`, the
+# async session `profile` forwarded nothing but the parameters, and the
+# execute builders had no `max_memory` or `cancellation_token` at all.
+
+
+@pytest.mark.parametrize("builder", ["TxExecuteBuilder", "AsyncTxExecuteBuilder"])
+@pytest.mark.parametrize("knob", ["timeout", "max_memory", "cancellation_token"])
+def test_execute_builders_expose_every_option(builder, knob):
+    cls = getattr(uni_db, builder)
+    assert hasattr(cls, knob), f"{builder} is missing .{knob}()"
+
+
+def _foreign_cancelled_token(db):
+    """A cancelled token that belongs to *another* session.
+
+    Using the statement's own session token would cancel through the session
+    scope and pass whether or not the builder forwarded the token.
+    """
+    token = db.session().cancellation_token()
+    token.cancel()
+    return token
+
+
+def _drain(cursor):
+    return cursor.fetch_all()
+
+
+SYNC_TERMINALS = {
+    "session.fetch_all": lambda s, b: b(s.query_with(CYCLIC)).fetch_all(),
+    "session.cursor": lambda s, b: _drain(b(s.query_with(CYCLIC)).cursor()),
+    "session.profile": lambda s, b: b(s.query_with(CYCLIC)).profile(),
+    "tx.execute": lambda s, b: b(s.tx().query_with(CYCLIC)).execute(),
+    "tx.fetch_all": lambda s, b: b(s.tx().query_with(CYCLIC)).fetch_all(),
+    "tx.cursor": lambda s, b: _drain(b(s.tx().query_with(CYCLIC)).cursor()),
+    "tx.profile": lambda s, b: b(s.tx().query_with(CYCLIC)).profile(),
+    "execute_with.run": lambda s, b: b(s.tx().execute_with(CYCLIC)).run(),
+    "execute_with.profile": lambda s, b: b(s.tx().execute_with(CYCLIC)).profile(),
+}
+
+
+@pytest.mark.parametrize("terminal", sorted(SYNC_TERMINALS))
+def test_every_sync_terminal_honours_max_memory(db, terminal):
+    with pytest.raises(uni_db.UniMemoryLimitExceededError):
+        SYNC_TERMINALS[terminal](db.session(), lambda b: b.max_memory(TINY))
+
+
+@pytest.mark.parametrize("terminal", sorted(SYNC_TERMINALS))
+def test_every_sync_terminal_honours_timeout(db, terminal):
+    with pytest.raises(uni_db.UniTimeoutError):
+        SYNC_TERMINALS[terminal](db.session(), lambda b: b.timeout(1e-9))
+
+
+@pytest.mark.parametrize("terminal", sorted(SYNC_TERMINALS))
+def test_every_sync_terminal_honours_cancellation_token(db, terminal):
+    token = _foreign_cancelled_token(db)
+    with pytest.raises(uni_db.UniCancelledError):
+        SYNC_TERMINALS[terminal](db.session(), lambda b: b.cancellation_token(token))
+
+
+@pytest.mark.parametrize("terminal", sorted(SYNC_TERMINALS))
+def test_every_sync_terminal_runs_under_a_roomy_ceiling(db, terminal):
+    """The control: a workable ceiling refuses nothing."""
+    SYNC_TERMINALS[terminal](db.session(), lambda b: b.max_memory(ROOMY))
+
+
+def test_builder_timeout_above_the_configured_one_is_honoured(tmp_path):
+    """An explicit timeout replaces the database's, upward as well as down."""
+    database = (
+        uni_db.UniBuilder.open(str(tmp_path / "slowcfg"))
+        .config({"query_timeout": 1e-9})
+        .build()
+    )
+    session = database.session()
+    query = "UNWIND range(1, 100) AS x RETURN x"
+    # Control: the database setting alone stops it.
+    with pytest.raises(uni_db.UniTimeoutError):
+        session.tx().query_with(query).execute()
+    # The builder's 60s replaces it, on the terminals that used to drop it.
+    session.tx().query_with(query).timeout(60.0).execute()
+    session.tx().execute_with(query).timeout(60.0).run()
+    session.tx().query_with(query).timeout(60.0).profile()
+    session.query_with(query).timeout(60.0).profile()
+
+
+async def _async_db(tmp_path):
+    database = await uni_db.AsyncUniBuilder.open(str(tmp_path / "ag")).build()
+    await (
+        database.schema()
+        .label("E")
+        .property("uid", "string")
+        .done()
+        .edge_type("OWNS", ["E"], ["E"])
+        .done()
+        .apply()
+    )
+    tx = await database.session().tx()
+    await tx.execute("UNWIND range(0, 29) AS i CREATE (:E {uid: 'e' + toString(i)})")
+    await tx.execute(
+        "MATCH (a:E), (b:E) WITH a, b, toInteger(substring(a.uid, 1)) AS i, "
+        "toInteger(substring(b.uid, 1)) AS j "
+        "WHERE j = (i * 7 + 1) % 30 OR j = (i * 7 + 14) % 30 OR j = (i * 7 + 27) % 30 "
+        "CREATE (a)-[:OWNS]->(b)"
+    )
+    await tx.commit()
+    return database
+
+
+async def test_async_session_profile_forwards_its_options(tmp_path):
+    database = await _async_db(tmp_path)
+    session = database.session()
+    with pytest.raises(uni_db.UniMemoryLimitExceededError):
+        await session.query_with(CYCLIC).max_memory(TINY).profile()
+    with pytest.raises(uni_db.UniTimeoutError):
+        await session.query_with(CYCLIC).timeout(1e-9).profile()
+    token = await database.session().cancellation_token()
+    token.cancel()
+    with pytest.raises(uni_db.UniCancelledError):
+        await session.query_with(CYCLIC).cancellation_token(token).profile()
+    # Control.
+    await session.query_with(CYCLIC).max_memory(ROOMY).profile()
+
+
+async def test_async_tx_execute_forwards_max_memory(tmp_path):
+    database = await _async_db(tmp_path)
+    tx = await database.session().tx()
+    with pytest.raises(uni_db.UniMemoryLimitExceededError):
+        await tx.query_with(CYCLIC).max_memory(TINY).execute()
+    tx = await database.session().tx()
+    with pytest.raises(uni_db.UniMemoryLimitExceededError):
+        await tx.execute_with(CYCLIC).max_memory(TINY).run()
+    tx = await database.session().tx()
+    token = await database.session().cancellation_token()
+    token.cancel()
+    with pytest.raises(uni_db.UniCancelledError):
+        await tx.execute_with(CYCLIC).cancellation_token(token).profile()
+    # Control.
+    tx = await database.session().tx()
+    await tx.query_with(CYCLIC).max_memory(ROOMY).execute()
+
+
+def test_profile_reports_a_measured_peak(db):
+    """`peak_memory_bytes` was hard-coded to 0."""
+    _, profile = (
+        db.session()
+        .query_with("MATCH (a:E) RETURN a.uid AS u ORDER BY a.uid DESC")
+        .profile()
+    )
+    assert profile.peak_memory_bytes > 0

@@ -1355,8 +1355,8 @@ fn eval_entity_function(name: &str, args: &[Value]) -> Result<Value> {
             (None, None) => Value::Null,
         },
         "ELEMENTID" => match (arg.entity_vid(), arg.entity_eid()) {
-            (Some(vid), _) => Value::String(vid.as_u64().to_string()),
-            (None, Some(eid)) => Value::String(eid.as_u64().to_string()),
+            (Some(vid), _) => Value::String((vid.as_u64() as i64).to_string()),
+            (None, Some(eid)) => Value::String((eid.as_u64() as i64).to_string()),
             (None, None) => Value::Null,
         },
         "TYPE" => match arg.edge_type_ref() {
@@ -1388,43 +1388,15 @@ fn eval_entity_function(name: &str, args: &[Value]) -> Result<Value> {
 
 fn eval_keys(arg: &Value) -> Result<Value> {
     match arg {
-        // A native node or edge: its property names, null-valued ones excluded
-        // as for an entity map.
-        Value::Node(_) | Value::Edge(_) => {
-            let mut keys: Vec<String> = arg
-                .entity_properties()
-                .map(|props| props.into_keys().collect())
-                .unwrap_or_default();
-            keys.sort();
-            Ok(Value::List(keys.into_iter().map(Value::String).collect()))
-        }
-        Value::Map(map) => {
-            // Entities (nodes/edges) are detected by internal fields (_vid, _eid).
-            // For entities, null-valued properties don't exist (REMOVE sets them to Null).
-            // For plain maps, null-valued keys are valid and must be included.
-            // A schemaless or serialised entity nests its properties.
-            let (source, is_entity) = match uni_common::value::entity_property_container(map) {
-                Some(props) => (props, true),
-                None => (
-                    map,
-                    map.contains_key("_vid")
-                        || map.contains_key("_eid")
-                        || map.contains_key("_labels"),
-                ),
-            };
-            let mut keys: Vec<&String> = source
-                .iter()
-                .filter(|(k, v)| {
-                    !uni_common::core::schema::is_reserved_property_name(k)
-                        && (!is_entity || !v.is_null())
-                })
-                .map(|(k, _)| k)
-                .collect();
-            keys.sort();
-            Ok(Value::List(
-                keys.into_iter().map(|k| Value::String(k.clone())).collect(),
-            ))
-        }
+        // One definition with the `keys` UDF: `Value::property_names` drops
+        // an entity's null-valued properties and keeps a plain map's.
+        Value::Node(_) | Value::Edge(_) | Value::Map(_) => Ok(Value::List(
+            arg.property_names()
+                .unwrap_or_default()
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+        )),
         Value::Null => Ok(Value::Null),
         _ => Err(anyhow!("keys() expects a Map, a node or a relationship")),
     }

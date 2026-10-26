@@ -103,7 +103,12 @@ async fn locy_anonymous_relationship_property_map_filters() -> Result<()> {
              YIELD KEY a, KEY b, 1 AS hit",
         )
         .await?;
-    let facts = result.derived.get("probe_inline").map_or(0, Vec::len);
+    let facts = result
+        .derived_rules()
+        .await
+        .unwrap()
+        .get("probe_inline")
+        .map_or(0, Vec::len);
     assert_eq!(
         facts, 1,
         "Locy must honour the inline relationship property map; got {facts} facts"
@@ -125,7 +130,12 @@ async fn locy_where_on_bound_relationship_filters() -> Result<()> {
              YIELD KEY a, KEY b, 1 AS hit",
         )
         .await?;
-    let facts = result.derived.get("probe_where").map_or(0, Vec::len);
+    let facts = result
+        .derived_rules()
+        .await
+        .unwrap()
+        .get("probe_where")
+        .map_or(0, Vec::len);
     assert_eq!(facts, 1, "WHERE-on-bound-relationship control must filter");
     Ok(())
 }

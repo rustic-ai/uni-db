@@ -38,6 +38,10 @@ RUST_BUILDER_SRC = [
     ROOT / "crates/uni/src/api/session.rs",
     ROOT / "crates/uni/src/api/transaction.rs",
     ROOT / "crates/uni/src/api/locy_builder.rs",
+    # `tx.bulk_writer()` / `tx.appender()` hand out the `uni_bulk` builders
+    # directly (re-exported through `uni::api::{bulk, appender}`).
+    ROOT / "crates/uni-bulk/src/bulk.rs",
+    ROOT / "crates/uni-bulk/src/appender.rs",
 ]
 # `QueryResult` and `LocyResult` live outside the api/ builder files. Both
 # `LocyResult` impls are included deliberately: `uni::api::locy_result` is the
@@ -62,6 +66,8 @@ BUILDER_PARITY = {
     "TxQueryBuilder": "TxQueryBuilder",
     "LocyBuilder": "SessionLocyBuilder",
     "TxLocyBuilder": "TxLocyBuilder",
+    "BulkWriterBuilder": "TxBulkWriterBuilder",
+    "AppenderBuilder": "TxAppenderBuilder",
 }
 RESULT_PARITY = {
     "QueryResult": "QueryResult",
@@ -158,6 +164,9 @@ BUILDER_NOT_BOUND = {
     "LocyBuilder.params_map": "Rust convenience over `params`; Python `params` already takes a dict",
     "TxLocyBuilder.params_map": "Rust convenience over `params`; Python `params` already takes a dict",
     "TxLocyBuilder.params": "bulk params is session-only on the Locy arm; not bound yet",
+    # --- Bulk builders -------------------------------------------------------
+    "BulkWriterBuilder.new_unguarded": "constructor; Python gets the builder from tx.bulk_writer()",
+    "AppenderBuilder.new_from_tx": "constructor; Python gets the builder from tx.appender_builder()",
     # --- QueryResult ---------------------------------------------------------
     # Python's QueryResult is a data class: Rust's constructors, internal
     # mutators and iterator adaptors have no counterpart by design.
@@ -173,6 +182,14 @@ BUILDER_NOT_BOUND = {
     # --- LocyResult ----------------------------------------------------------
     "LocyResult.into_inner": "Rust unwrap; Python receives the converted fields",
     "LocyResult.into_parts": "Rust unwrap; Python receives the converted fields",
+    "LocyResult.with_derived": "Rust constructor used by the engine",
+    "LocyResult.with_lazy_derived": "Rust constructor used by the engine",
+    "LocyResult.derived_rules": "bound as the `derived` property and `derived_async()`",
+    "LocyResult.derived_rule": "bound as `derived_facts(rule)`",
+    "LocyResult.evaluated_rules": "not bound; Python exposes only the complete `derived` view",
+    "LocyResult.into_evaluated_rules": "by-value Rust accessor; not bound, as `evaluated_rules`",
+    "LocyResult.lazily_derived_rules": "not bound yet; Python derives them on first `derived` access",
+    "LocyResult.lazy_derived": "Rust handle the binding itself holds to derive on first access",
 }
 
 

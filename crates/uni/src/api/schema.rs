@@ -10,6 +10,7 @@ use uni_common::core::schema::{
     VectorIndexType,
 };
 use uni_common::{Result, UniError};
+use uni_store::storage::declared_values::DeclaredEntity;
 
 /// Builder for defining and modifying the graph schema.
 ///
@@ -175,6 +176,29 @@ impl<'a> SchemaBuilder<'a> {
             }
         }
 
+        // Labels this batch adds to the catalog. Each may already hold
+        // vertices created schemaless, flushed into the main table only, which
+        // must be copied into the label's table once it is declared or a
+        // label-scoped read stops seeing them (#304). The marker goes down
+        // before the label enters the live catalog: any commit can save the
+        // catalog from then on, and the marker is what lets the next open
+        // finish a backfill a crash cut short.
+        let new_labels: Vec<String> = {
+            let schema = manager.schema();
+            let mut names: Vec<String> = self
+                .pending
+                .iter()
+                .filter_map(|change| match change {
+                    SchemaChange::AddLabel { name, .. } if !schema.labels.contains_key(name) => {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            names.sort();
+            names.dedup();
+            names
+        };
         // Storage before catalog -- before the LIVE catalog, not merely before
         // the save below. Any commit saves a dirty catalog (`save_if_dirty`),
         // so a property declared in memory first could reach disk ahead of its
@@ -184,10 +208,10 @@ impl<'a> SchemaBuilder<'a> {
         // it already has (which repairs a half-applied earlier declaration). A
         // conflicting re-declaration is left to `declare_property` to refuse.
         // See `StorageManager::widen_for_declared_properties`.
-        {
+        let by_entity = {
             use std::collections::BTreeMap;
             let schema = manager.schema();
-            let mut by_entity: BTreeMap<&str, Vec<(String, DataType)>> = BTreeMap::new();
+            let mut by_entity: BTreeMap<String, Vec<(String, DataType)>> = BTreeMap::new();
             for change in &self.pending {
                 let SchemaChange::AddProperty {
                     label_or_type,
@@ -205,19 +229,94 @@ impl<'a> SchemaBuilder<'a> {
                     .is_some_and(|meta| meta.r#type != *data_type);
                 if !conflicting {
                     by_entity
-                        .entry(label_or_type)
+                        .entry(label_or_type.clone())
                         .or_default()
                         .push((name.clone(), data_type.clone()));
                 }
             }
-            for (entity, properties) in by_entity {
-                self.db
-                    .inner
-                    .storage
-                    .widen_for_declared_properties(entity, &properties)
+            by_entity
+        };
+
+        // Values the entities already hold must fit the types declared for
+        // them, or the declaration would store them as NULL. All entities are
+        // checked before any is widened, so a refusal leaves catalog, storage
+        // and data exactly as they were. Committed unflushed values are
+        // flushed first, to where the check (and the promotion and backfill
+        // that convert them) read. From the check to the catalog change the
+        // writer's declaration lock keeps commits out, so none can slip a
+        // value past both the check and its own commit-time re-validation.
+        // See `StorageManager::check_declared_values`.
+        let gaining: Vec<String> = {
+            let schema = manager.schema();
+            by_entity
+                .iter()
+                .filter(|(entity, props)| {
+                    let declared = schema.properties.get(entity.as_str());
+                    props
+                        .iter()
+                        .any(|(name, _)| !declared.is_some_and(|p| p.contains_key(name)))
+                })
+                .map(|(entity, _)| entity.clone())
+                .collect()
+        };
+        let declaration_lock = match self.db.inner.writer.as_ref() {
+            Some(writer) if !gaining.is_empty() => {
+                let held = writer
+                    .declaration_lock()
                     .await
-                    .map_err(UniError::Internal)?;
+                    .map_err(crate::api::storage_error)?;
+                let entities: Vec<&str> = gaining.iter().map(String::as_str).collect();
+                writer
+                    .flush_before_declaration(&held, &entities)
+                    .await
+                    .map_err(crate::api::storage_error)?;
+                Some(held)
             }
+            _ => None,
+        };
+        let kind_of = {
+            let schema = manager.schema();
+            let new_edge_types: std::collections::HashSet<String> = self
+                .pending
+                .iter()
+                .filter_map(|change| match change {
+                    SchemaChange::AddEdgeType { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            move |entity: &str| {
+                if schema.edge_types.contains_key(entity) || new_edge_types.contains(entity) {
+                    DeclaredEntity::EdgeType
+                } else {
+                    DeclaredEntity::Label
+                }
+            }
+        };
+        for (entity, properties) in &by_entity {
+            self.db
+                .inner
+                .storage
+                .check_declared_values(entity, kind_of(entity), properties)
+                .await
+                .map_err(crate::api::storage_error)?;
+        }
+
+        for label in &new_labels {
+            self.db
+                .inner
+                .storage
+                .mark_label_backfill_pending(label)
+                .await
+                .map_err(UniError::Internal)?;
+        }
+
+        for (entity, properties) in &by_entity {
+            self.db
+                .inner
+                .storage
+                .widen_for_checked_properties(entity, kind_of(entity), properties)
+                .await
+                .map_err(UniError::Internal)?;
         }
 
         for change in self.pending {
@@ -282,39 +381,22 @@ impl<'a> SchemaBuilder<'a> {
                         // New property: relax NOT NULL only if rows exist that
                         // cannot satisfy it. Counting rows here rather than
                         // above also keeps re-registration off the row-count
-                        // path entirely.
+                        // path entirely. Unflushed rows exist too; see
+                        // `existing_row_count`.
                         None => {
-                            // Unflushed rows exist too; see `existing_row_count`.
                             let l0 = self
                                 .db
                                 .inner
                                 .writer
                                 .as_ref()
-                                .map(|w| uni_store::runtime::l0_visibility::L0Context {
-                                    current_l0: Some(w.l0_manager.get_current()),
-                                    transaction_l0: None,
-                                    pending_flush_l0s: w.l0_manager.get_pending_flush(),
-                                })
+                                .map(|w| w.committed_l0_context())
                                 .unwrap_or_default();
-                            let rows = self
-                                .db
+                            self.db
                                 .inner
                                 .storage
-                                .existing_row_count(&label_or_type, &l0)
+                                .new_property_nullability(&label_or_type, &name, nullable, &l0)
                                 .await
-                                .map_err(UniError::Internal)?;
-                            if nullable || rows == 0 {
-                                nullable
-                            } else {
-                                tracing::warn!(
-                                    entity = %label_or_type,
-                                    property = %name,
-                                    rows,
-                                    "declaring a NOT NULL property on a populated entity; \
-                                     recording it as nullable because existing rows have no value"
-                                );
-                                true
-                            }
+                                .map_err(UniError::Internal)?
                         }
                     };
                     manager
@@ -432,12 +514,45 @@ impl<'a> SchemaBuilder<'a> {
             }
         }
 
+        // The catalog holds the declaration: commits from here re-validate
+        // against it. Released before the backfill, whose flush barrier takes
+        // the same lock.
+        drop(declaration_lock);
+
+        // Copy each new label's flushed rows into its table, now that the
+        // label and all of this batch's properties for it are in the catalog
+        // (the table is created with their columns), and before the index
+        // builds below, so those cover the copied rows.
+        //
+        // Test-only seam (no-op without `fail/failpoints`): the new labels are
+        // in the live catalog, which any commit may now save, and not yet
+        // backfilled.
+        if !new_labels.is_empty() {
+            fail::fail_point!("schema_builder::label-declared-before-backfill");
+        }
+        for label in &new_labels {
+            self.db
+                .inner
+                .backfill_declared_label(label)
+                .await
+                .map_err(UniError::Internal)?;
+        }
+
         // Test-only seam (no-op without `fail/failpoints`): the live catalog
         // holds this batch's properties and is not yet saved, so any commit
         // here persists it.
         fail::fail_point!("schema_builder::declared-before-save");
 
         manager.save().await.map_err(UniError::Internal)?;
+
+        for label in &new_labels {
+            self.db
+                .inner
+                .storage
+                .clear_label_backfill_marker(label)
+                .await
+                .map_err(UniError::Internal)?;
+        }
 
         // Trigger index builds for affected labels
         // We use a set to avoid rebuilding same label multiple times if multiple indexes added
@@ -1224,9 +1339,104 @@ impl Uni {
                 message: e.to_string(),
             })?;
 
+        // Labels the loaded schema adds may already hold schemaless vertices,
+        // flushed into the main table only; they are backfilled into the new
+        // labels' tables as `SchemaBuilder::apply` does (#304).
+        let new_labels: Vec<String> = {
+            let current = self.inner.schema.schema();
+            schema
+                .labels
+                .keys()
+                .filter(|name| !current.labels.contains_key(*name))
+                .cloned()
+                .collect()
+        };
+
+        // Properties the loaded schema adds to a label or an edge type, old or
+        // new. Their existing values must fit the declared types (refused
+        // before anything changes, as `SchemaBuilder::apply` does), and
+        // storage is widened before the catalog names the columns, under the
+        // writer's declaration lock.
+        // (entity, its kind, the properties it gains)
+        type Gain = (String, DeclaredEntity, Vec<(String, DataType)>);
+        let added: Vec<Gain> = {
+            let current = self.inner.schema.schema();
+            schema
+                .properties
+                .iter()
+                .filter_map(|(entity, props)| {
+                    let kind = if schema.edge_types.contains_key(entity) {
+                        DeclaredEntity::EdgeType
+                    } else if schema.labels.contains_key(entity) {
+                        DeclaredEntity::Label
+                    } else {
+                        return None;
+                    };
+                    let have = current.properties.get(entity);
+                    let new: Vec<(String, DataType)> = props
+                        .iter()
+                        .filter(|(name, _)| !have.is_some_and(|h| h.contains_key(*name)))
+                        .map(|(name, meta)| (name.clone(), meta.r#type.clone()))
+                        .collect();
+                    (!new.is_empty()).then(|| (entity.clone(), kind, new))
+                })
+                .collect()
+        };
+        let declaration_lock = match self.inner.writer.as_ref() {
+            Some(writer) if !added.is_empty() => {
+                let held = writer
+                    .declaration_lock()
+                    .await
+                    .map_err(crate::api::storage_error)?;
+                let entities: Vec<&str> = added.iter().map(|(e, _, _)| e.as_str()).collect();
+                writer
+                    .flush_before_declaration(&held, &entities)
+                    .await
+                    .map_err(crate::api::storage_error)?;
+                Some(held)
+            }
+            _ => None,
+        };
+        for (entity, kind, properties) in &added {
+            self.inner
+                .storage
+                .check_declared_values(entity, *kind, properties)
+                .await
+                .map_err(crate::api::storage_error)?;
+        }
+        for (entity, kind, properties) in &added {
+            self.inner
+                .storage
+                .widen_for_checked_properties(entity, *kind, properties)
+                .await
+                .map_err(UniError::Internal)?;
+        }
+
+        for label in &new_labels {
+            self.inner
+                .storage
+                .mark_label_backfill_pending(label)
+                .await
+                .map_err(UniError::Internal)?;
+        }
+
         // We need a way to update the schema in SchemaManager.
         // I'll add a `replace_schema` or similar to SchemaManager.
         self.inner.schema.replace_schema(schema);
+        // Commits from here re-validate against the loaded schema.
+        drop(declaration_lock);
+
+        for label in &new_labels {
+            self.inner
+                .backfill_declared_label(label)
+                .await
+                .map_err(UniError::Internal)?;
+            self.inner
+                .storage
+                .clear_label_backfill_marker(label)
+                .await
+                .map_err(UniError::Internal)?;
+        }
         Ok(())
     }
 

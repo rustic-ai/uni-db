@@ -339,6 +339,22 @@ let result = session.query_with("MATCH (n:Person) WHERE n.age > $min RETURN n")
 | `explain()` | `Result<ExplainOutput>` | Explain the query plan without executing. |
 | `profile()` | `Result<(QueryResult, ProfileOutput)>` | Execute with profiling. |
 
+**Option semantics (every builder, every terminal).** The same rules hold for the session
+`QueryBuilder`, the transaction `TxQueryBuilder` (`tx.query_with`) and `ExecuteBuilder`
+(`tx.execute_with`), and for each of their executing terminals (`fetch_all`, `fetch_one`,
+`cursor`, `execute`, `run`, `profile`):
+
+- `timeout(d)` **replaces** `UniConfig::query_timeout` for that statement, in both
+  directions: a value above the database setting lets through a statement the setting
+  alone would stop. Unset, the database setting applies. An elapsed deadline is
+  `UniError::Timeout`.
+- `max_memory(bytes)` replaces `UniConfig::max_query_memory` for that statement (`0`
+  disables the ceiling). A refusal is `UniError::MemoryLimitExceeded` carrying the
+  effective limit.
+- `cancellation_token(token)` aborts the statement with `UniError::Cancelled`, in addition
+  to the session's (or transaction's) own cancellation scope.
+- `profile()` runs under exactly the limits `fetch_all()` does.
+
 ---
 
 ## Transaction

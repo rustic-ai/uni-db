@@ -432,6 +432,8 @@ Async fluent builder for mutations within a transaction.
 |---|---|
 | `param(name: str, value: Any) -> AsyncTxExecuteBuilder` | — |
 | `timeout(seconds: float) -> AsyncTxExecuteBuilder` | — |
+| `max_memory(bytes: int) -> AsyncTxExecuteBuilder` | — |
+| `cancellation_token(token: CancellationToken) -> AsyncTxExecuteBuilder` | — |
 | `async run() -> ExecuteResult` | — |
 | `async profile() -> tuple[ExecuteResult, ProfileOutput]` | — |
 
@@ -1335,7 +1337,7 @@ Configuration for Locy program evaluation.
 | `max_bdd_variables() -> int` *(property)* | — |
 | `top_k_proofs() -> int` *(property)* | — |
 | `top_k_proofs_training() -> int | None` *(property)* | — |
-| `goal_directed() -> Literal['off', 'on', 'shadow']` *(property)* | — |
+| `goal_directed() -> Literal['auto', 'off', 'on', 'shadow']` *(property)* | — |
 | `classifier_aliases() -> list[str]` *(property)* | — |
 | `register_classifier(alias: str, callable: Callable[..., Any]) -> None` | — |
 
@@ -1379,7 +1381,9 @@ Result of a Locy program evaluation.
 
 | Signature | Description |
 |---|---|
-| `has_warning(code: str) -> bool` | — |
+| `derived() -> dict[str, list[dict[str, Any]]]` *(property)* | Every rule's facts, as they stood before the program's first command. |
+| `async derived_async() -> dict[str, list[dict[str, Any]]]` | ``derived``, without blocking the event loop. |
+| `has_warning(code: str) -> bool` | Whether a runtime warning with this snake_case ``code`` was emitted. |
 | `warnings_list() -> Any` | — |
 | `derived_facts(rule: str) -> list[dict[str, Any]] | None` | — |
 | `rows() -> list[dict[str, Any]] | None` | — |
@@ -1392,7 +1396,6 @@ Result of a Locy program evaluation.
 
 | Name | Type |
 |---|---|
-| `derived` | `Any` |
 | `stats` | `Any` |
 | `command_results` | `Any` |
 | `warnings` | `Any` |
@@ -2146,6 +2149,8 @@ Fluent builder for mutations within a transaction.
 |---|---|
 | `param(name: str, value: Any) -> TxExecuteBuilder` | — |
 | `timeout(seconds: float) -> TxExecuteBuilder` | — |
+| `max_memory(bytes: int) -> TxExecuteBuilder` | — |
+| `cancellation_token(token: CancellationToken) -> TxExecuteBuilder` | — |
 | `run() -> ExecuteResult` | — |
 | `profile() -> tuple[ExecuteResult, ProfileOutput]` | — |
 

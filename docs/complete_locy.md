@@ -202,7 +202,7 @@ let result = session.locy("
         YIELD KEY a, KEY b
 ").await?;
 
-for (rule_name, facts) in &result.derived {
+for (rule_name, facts) in result.derived_rules().await? {
     println!("{}: {} facts", rule_name, facts.len());
 }
 
@@ -708,7 +708,7 @@ These aggregates are **not monotonic** and cannot be used in recursive strata. T
 
 | Aggregate | Description | Output Type |
 |-----------|-------------|-------------|
-| `SUM(expr)` | Sum of values; 0.0 when there are none, as in Cypher | Float64 |
+| `SUM(expr)` | Sum of values; 0 when there are none, as in Cypher | As Cypher's `sum`: an exact integer over integers, continuing as a float only past the 64-bit range; Float64 over floats |
 | `COUNT(expr)` | Count of non-null values | Int64 |
 | `COUNT(*)` | Count of all rows | Int64 |
 | `AVG(expr)` | Arithmetic mean | Float64 |
@@ -739,7 +739,7 @@ These aggregates are **monotonic** — their value can only move in one directio
 
 | Aggregate | Formula | Direction | Identity | Domain |
 |-----------|---------|-----------|----------|--------|
-| `MSUM(expr)` | `acc + val` | Non-decreasing | 0.0 | Non-negative for convergence |
+| `MSUM(expr)` | `acc + val` (exact over integers, as `SUM`) | Non-decreasing | 0 | Non-negative for convergence |
 | `MMAX(expr)` | `max(acc, val)` | Non-decreasing | -infinity | None |
 | `MMIN(expr)` | `min(acc, val)` | Non-increasing | +infinity | None |
 | `MCOUNT(expr)` | `acc + 1` | Non-decreasing | 0 | None |
@@ -1163,15 +1163,15 @@ Answered from the **derived store** — the same semi-naive fixpoint result that
 
 Every rule has a published relation, empty when it derived nothing, including a rule with a **generator**: the fixpoint runs generators as a row-explosion operator (`LocyGenerateExec`), so a generator rule's FOLD, BEST BY and post-FOLD WHERE apply and other rules can reference it. There is no second, goal-directed evaluator; a missing relation is an error.
 
-### Goal-directed QUERY (magic sets, opt-in)
+### Goal-directed QUERY (magic sets, on by default)
 
-By default a `QUERY ... WHERE` filters the converged relation: `QUERY reach WHERE a.uid = 'c0_0'` derives the whole transitive closure first (76k facts for a 19-row answer in the A1 measurement). With `LocyConfig::goal_directed = GoalDirected::On` the compiled program is rewritten before planning (`uni_locy::magic`, the magic-sets transformation) so the fixpoint derives only what the goal can reach. Answers are unchanged.
+Without the rewrite a `QUERY ... WHERE` filters the converged relation: `QUERY reach WHERE a.uid = 'c0_0'` derives the whole transitive closure first (76k facts for a 19-row answer in the A1 measurement). Under the default `LocyConfig::goal_directed = GoalDirected::Auto` (and under `On`) the compiled program is rewritten before planning (`uni_locy::magic`, the magic-sets transformation) so the fixpoint derives only what the goal can reach. Answers are unchanged.
 
 - **What binds.** A top-level WHERE conjunct `c.p = v`, `v = c.p` or `c.p IN [...]` where `c` is a node KEY column of the queried rule and `v` a string, integer or boolean literal, or a `$param` holding one (or a list of them). Floats, OR, comparisons between columns and conjuncts on value (non-KEY) columns do not bind; they stay filters. The whole WHERE is still applied to the answer.
 - **The rewrite.** Each adorned rule `r` (adornment = which KEY columns are bound) gets a copy `__locy_gd{g}_r_{bf}` whose clauses are guarded by `(bound vars) IS __locy_gdm{g}_r_{bf}`, a magic rule seeded by `MATCH (c:L) WHERE <conjuncts> YIELD KEY c`. A call inside a copy is adorned on the KEY positions bound by the head or by MATCH nodes connected to a bound head variable; it then contributes a magic propagation clause (the connected MATCH paths, the guard, the filters over them). Magic rules read only the graph and other magic rules, so the rewritten program stratifies whenever the original does.
 - **Fallback to full evaluation** (never a partial answer): ALONG; FOLD, BEST BY, REQUIRE or post-FOLD WHERE in a *recursive* stratum; PROB columns, MNOR/MPROD, `IS NOT` of a PROB rule; PRIORITY; generators; neural models; DERIVE rules. `IS NOT` targets are always read in full (never adorned). FOLD / BEST BY in a non-recursive stratum are adorned: the guard is on KEY columns, so whole KEY groups are kept or dropped. Only top-level `QUERY` is rewritten: `EXPLAIN RULE`, `DERIVE`, `ABDUCE` and commands inside `ASSUME` use full evaluation.
-- **Effect on `.derived`.** The copies and magic rules never appear in `.derived`. In `On` mode a rule that only rewritten goals needed is not evaluated, so it is *absent* from `.derived` (never present with a partial relation); every other rule is evaluated and published as before. `GoalDirected::Shadow` evaluates every original rule too, so `.derived` is unchanged while QUERY reads the rewritten copies — a verification mode (the Locy TCK runs in it with `UNI_LOCY_TCK_GOAL_DIRECTED=shadow`). `profile()` shows the generated rules.
-- **Default: `Off`.** `.derived` is documented as every rule's full relation; turning the rewrite on by default would empty that contract for every queried rule. Opt in per evaluation.
+- **Effect on `.derived`.** The copies and magic rules never appear in `.derived`. A rule that only rewritten goals needed is not evaluated with the program. Under `Auto` it is derived on the first read of `.derived` (Rust: `derived_rules().await` / `derived_rule(name).await`), against the snapshot the evaluation read, and cached, so `.derived` equals `Off`'s; programs with a write command or `EXPLAIN RULE`, and evaluations inside a transaction, are evaluated in full instead. In `On` mode such a rule is *absent* from `.derived` (never present with a partial relation); every other rule is evaluated and published as before. `GoalDirected::Shadow` evaluates every original rule too, so `.derived` is unchanged while QUERY reads the rewritten copies — a verification mode (the Locy TCK runs in it with `UNI_LOCY_TCK_GOAL_DIRECTED=shadow`). `profile()` shows the generated rules.
+- **Default: `Auto`** (#307). `Off` evaluates every rule in full, as before `Auto` existed.
 - **Not passed sideways:** bindings produced by one IS reference for another (the inner call of non-linear recursion reads its callee in full).
 
 ```
@@ -1247,7 +1247,9 @@ Asks: "What graph modifications would make this rule hold (or stop holding)?"
 **Three-phase pipeline:**
 1. **Generate candidates**: Build derivation tree via EXPLAIN, extract candidate modifications (RemoveEdge, AddEdge, ChangeProperty)
 2. **Validate**: For each candidate, use ASSUME-style fork → mutate → re-evaluate (only the strata the candidate can affect, as for ASSUME) → check if goal holds → rollback
-3. **Return**: Validated modifications sorted by cost, up to `max_abduce_results`
+3. **Return**: Every candidate tried, validated ones first, then by ascending cost, up to `max_abduce_results`
+
+Each candidate is a **single** modification, validated on its own; the search never combines candidates, so a goal that only two or more edits together achieve yields no validated candidate. The cost is fixed per kind (`ChangeProperty` 0.5, `RemoveEdge` 1.0, `AddEdge` 1.5; `compute_cost` in `crates/uni-query/src/query/df_graph/locy_abduce.rs`) and ranks kinds of edit, not the size of a change: ABDUCE does not compute a minimal set of changes.
 
 ```
 -- "What edges would we need to remove to disconnect A from C?"
@@ -2439,7 +2441,7 @@ struct ExplainRule { rule_name: QualifiedName, where_expr: Option<Expr>, return_
 
 ## Appendix D: TCK Coverage Map
 
-**74 feature files, 553 scenarios** covering all Locy features.
+**76 feature files, 558 scenarios** covering all Locy features.
 
 ### Core Evaluation
 

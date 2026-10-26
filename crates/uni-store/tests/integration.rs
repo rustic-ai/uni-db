@@ -32,11 +32,16 @@ mod compaction_resilience;
 #[cfg(feature = "failpoints")]
 #[path = "common/flush_resilience.rs"]
 mod flush_resilience;
+// Property reads fail on a failed storage scan. Gated on `failpoints` (the
+// file itself carries the attribute) so the injection seam is compiled in.
 #[cfg(feature = "lance-backend")]
 #[path = "common/fork_recovery/mod.rs"]
 mod fork_recovery;
 #[path = "common/property/mod.rs"]
 mod property;
+#[cfg(feature = "failpoints")]
+#[path = "common/property_scan_failure_resilience.rs"]
+mod property_scan_failure_resilience;
 #[path = "common/ssi_occ_test.rs"]
 mod ssi_occ_test;
 #[cfg(feature = "lance-backend")]

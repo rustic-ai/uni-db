@@ -76,7 +76,11 @@ async fn anchored_is_refs_join_by_hash_in_every_order() -> Result<()> {
             "order {conjuncts:?}: expected a HashJoinExec per anchored reference and no \
              CrossJoinExec, got {hash_joins} hash and {cross_joins} cross joins in {operators:?}"
         );
-        let facts = result.derived_facts("r").map_or(0, |rows| rows.len());
+        let facts = result
+            .derived_rule("r")
+            .await
+            .unwrap()
+            .map_or(0, |rows| rows.len());
         ensure!(
             facts == 1,
             "order {conjuncts:?}: expected one fact (a, 60.0), got {facts}"

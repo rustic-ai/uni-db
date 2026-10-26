@@ -296,3 +296,34 @@ async fn length_rejects_a_value_with_no_length() -> Result<()> {
     assert!(row.get::<bool>("n")?, "length(null) should be null");
     Ok(())
 }
+
+/// An anonymous node in a MERGE'd path is part of `p`.
+///
+/// `prepare_pattern_for_path_binding` named only anonymous relationships, so an
+/// anonymous node was in nothing the row carried and `bind_path_variables`
+/// skipped it: `MERGE p = (a)-[:R]->(:E {uid:'m'})` bound a path of one node
+/// and one relationship. Checked on both the creating and the matching run.
+#[tokio::test]
+async fn a_merged_path_keeps_its_anonymous_node() -> Result<()> {
+    let db = two_nodes().await?;
+    for run in ["created", "matched"] {
+        let tx = db.session().tx().await?;
+        let r = tx
+            .query(
+                "MATCH (a:E {uid:'a'}) MERGE p = (a)-[:R]->(:E {uid:'m'}) \
+                 RETURN [n IN nodes(p) | n.uid] AS uids, size(relationships(p)) AS r, \
+                        length(p) AS len",
+            )
+            .await?;
+        tx.commit().await?;
+        let row = &r.rows()[0];
+        assert_eq!(
+            row.get::<Vec<String>>("uids")?,
+            vec!["a", "m"],
+            "{run}: the anonymous node is missing from p"
+        );
+        assert_eq!(row.get::<i64>("r")?, 1, "{run}: relationship missing");
+        assert_eq!(row.get::<i64>("len")?, 1, "{run}");
+    }
+    Ok(())
+}

@@ -264,6 +264,18 @@ fn ext_id_equality(
     None
 }
 
+/// Whether `expr` is built only from literals, list literals and map literals —
+/// the shapes `GraphUnwindExec` evaluates itself, and the only ones whose
+/// element type it can infer natively.
+fn is_constant_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::Literal(_) => true,
+        Expr::List(items) => items.iter().all(is_constant_literal),
+        Expr::Map(entries) => entries.iter().all(|(_, v)| is_constant_literal(v)),
+        _ => false,
+    }
+}
+
 /// Whether `expr` is a `sum(...)` aggregate.
 fn is_sum_aggregate(expr: &Expr) -> bool {
     matches!(expr, Expr::FunctionCall { name, window_spec: None, .. } if name.eq_ignore_ascii_case("sum"))
@@ -654,9 +666,12 @@ impl HybridPhysicalPlanner {
     /// Share an enclosing query's warning collector with this sub-plan.
     #[must_use]
     pub(crate) fn with_inherited_warnings(mut self, parent: &GraphExecutionContext) -> Self {
+        // The transient-id stream crosses with the warnings: a sub-plan's
+        // `uni.create.vNode` must not mint ids the outer query already used.
         let ctx = self
             .take_graph_ctx()
-            .with_warnings_sink(parent.warnings_sink());
+            .with_warnings_sink(parent.warnings_sink())
+            .with_transient_ids(parent.transient_ids());
         self.graph_ctx = Arc::new(ctx);
         self
     }
@@ -666,6 +681,18 @@ impl HybridPhysicalPlanner {
     #[must_use]
     pub fn with_counters(mut self, counters: Option<Arc<uni_store::QueryCounters>>) -> Self {
         let ctx = self.take_graph_ctx().with_counters(counters);
+        self.graph_ctx = Arc::new(ctx);
+        self
+    }
+
+    /// Attach the statement's memory pool, so operators that build an inner
+    /// executor (a procedure's inner query) draw on the same budget.
+    #[must_use]
+    pub fn with_memory_pool(
+        mut self,
+        pool: Option<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>,
+    ) -> Self {
+        let ctx = self.take_graph_ctx().with_memory_pool(pool);
         self.graph_ctx = Arc::new(ctx);
         self
     }
@@ -1779,10 +1806,12 @@ impl HybridPhysicalPlanner {
 
             LogicalPlan::LocyDerivedScan {
                 scan_index: _,
+                rule_name,
                 data,
                 schema,
             } => Ok(Arc::new(
                 super::df_graph::locy_fixpoint::DerivedScanExec::new(
+                    rule_name.clone(),
                     Arc::clone(data),
                     Arc::clone(schema),
                 ),
@@ -2392,18 +2421,38 @@ impl HybridPhysicalPlanner {
         all_properties: &HashMap<String, HashSet<String>>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
         // Recursively plan the input
-        let input_plan = self.plan_internal(&input, all_properties)?;
+        let mut input_plan = self.plan_internal(&input, all_properties)?;
 
         // Drop the source list when the planner proved nothing above reads it.
         // Without this the list rides through every operator above, and a
         // traversal replicates it once per fan-out row (#184).
-        let drop_source = match &expr {
+        let mut drop_source = match &expr {
             Expr::Variable(name) => all_properties
                 .get(crate::query::planner::DEAD_UNWIND_SOURCES_KEY)
                 .filter(|dead| dead.contains(name))
                 .map(|_| name.clone()),
             _ => None,
         };
+
+        // Anything but a column, a parameter or a constant is computed by the
+        // expression compiler into a hidden column first, and the operator
+        // unwinds that column. The operator's own row evaluator knew a handful
+        // of functions and answered `[]` for every other call and `NULL` for
+        // every other expression, so `UNWIND labels(n)` produced no rows and
+        // `UNWIND [id(n)]` produced `[]` — silently, while the same expression
+        // under `WITH` or `RETURN` was right.
+        let mut expr = expr;
+        let is_column = matches!(&expr, Expr::Variable(name) if input_plan.schema().column_with_name(name).is_some());
+        if !is_column && !matches!(expr, Expr::Parameter(_)) && !is_constant_literal(&expr) {
+            let hidden = format!("__unwind_list_{variable}");
+            input_plan = self.plan_project_from_input(
+                input_plan,
+                &[(Expr::Wildcard, None), (expr, Some(hidden.clone()))],
+                Some(&input),
+            )?;
+            expr = Expr::Variable(hidden.clone());
+            drop_source = Some(hidden);
+        }
 
         let unwind = GraphUnwindExec::new_dropping_source(
             input_plan,
@@ -2475,11 +2524,34 @@ impl HybridPhysicalPlanner {
         // 2. Infer subquery output schema from logical plan + UniSchema metadata.
         // Use the ORIGINAL (still-wrapped) subquery so a unit subquery resolves
         // to an empty schema, which `GraphApplyExec` reads as the unit signal.
-        let sub_schema = infer_logical_plan_schema(
-            subquery,
-            &self.schema,
-            self.graph_ctx.procedure_registry().map(Arc::as_ref),
-        );
+        //
+        // A node-yielding procedure is the exception: its columns depend on
+        // what the clauses after it read from the node (`node.k`, `RETURN
+        // node`), which the logical walk cannot type — it saw one `Utf8`
+        // column, so `id(node)` after a second `CALL` failed to plan with
+        // `No field named "node._vid"`. Plan it here with those requirements
+        // and take its schema; each row's sub-plan is planned with the same
+        // requirements (`with_subplan_properties`), so they agree.
+        let node_yield_properties =
+            node_yield_subplan_properties(subquery_effective, all_properties);
+        let sub_schema = match &node_yield_properties {
+            Some(extra) => {
+                let mut properties = collect_properties_from_plan(subquery_effective);
+                for (var, props) in extra {
+                    properties
+                        .entry(var.clone())
+                        .or_default()
+                        .extend(props.iter().cloned());
+                }
+                self.plan_internal(subquery_effective, &properties)?
+                    .schema()
+            }
+            None => infer_logical_plan_schema(
+                subquery,
+                &self.schema,
+                self.graph_ctx.procedure_registry().map(Arc::as_ref),
+            ),
+        };
 
         // 3. Merge schemas: subquery fields override input fields with the
         //    same name. The subquery's RETURN list is authoritative for the
@@ -2532,7 +2604,7 @@ impl HybridPhysicalPlanner {
         fields.extend(sub_schema.fields().iter().cloned());
         let output_schema: SchemaRef = Arc::new(Schema::new(fields));
 
-        Ok(Arc::new(GraphApplyExec::new(
+        let apply = GraphApplyExec::new(
             input_exec,
             subquery_effective.clone(),
             input_filter.cloned(),
@@ -2545,7 +2617,11 @@ impl HybridPhysicalPlanner {
             kept_input_indices,
             kept_input_overrides,
             self.mutation_ctx.clone(),
-        )))
+        );
+        Ok(Arc::new(match node_yield_properties {
+            Some(extra) => apply.with_subplan_properties(extra),
+            None => apply,
+        }))
     }
 
     /// Plan a vector KNN search.
@@ -6103,6 +6179,25 @@ impl HybridPhysicalPlanner {
                 };
                 let cross_domain = (is_string(&actual_dt) && is_numeric(target_dt))
                     || (is_numeric(&actual_dt) && is_string(target_dt));
+                // A cast that would turn the computed value into something
+                // else, rather than widen it: any value to its text, a
+                // boolean to or from a number. The declared type is wrong,
+                // and casting stored `true` as the string "true", which a
+                // consumer's `flag = true` silently never matched (issue
+                // #314). Refused, naming the column.
+                let rewrites = actual_dt != DataType::Null
+                    && actual_dt != *target_dt
+                    && ((is_string(target_dt) && !is_string(&actual_dt))
+                        || ((*target_dt == DataType::Boolean) != (actual_dt == DataType::Boolean)
+                            && *target_dt != DataType::LargeBinary));
+                if rewrites {
+                    return Err(anyhow!(
+                        "Locy column '{}' is declared {target_dt} but its expression `{}` \
+                         computes {actual_dt}",
+                        alias.as_deref().unwrap_or("?"),
+                        expr.to_string_repr()
+                    ));
+                }
                 if actual_dt != *target_dt && *target_dt == DataType::LargeBinary {
                     // A dynamically typed column: encode the value, whatever
                     // its type, instead of an Arrow cast that cannot carry a
@@ -6477,11 +6572,15 @@ impl HybridPhysicalPlanner {
                         count(get_arg()?)
                     }
                 }
-                // DataFusion's own `sum` / `avg` only for a numeric column;
-                // anything else (an encoded value, a string, a duration, any
-                // expression) folds by Cypher's rules, which take numbers or
-                // durations and reject the rest. A string column used to be
-                // cast to Int64, so `sum` over '12' answered 12.
+                // DataFusion's own `sum` only for a float column, its own
+                // `avg` for any numeric one; anything else (an integer, an
+                // encoded value, a string, a duration, any expression) folds
+                // by Cypher's rules, which take numbers or durations and
+                // reject the rest. A string column used to be cast to Int64,
+                // so `sum` over '12' answered 12. An integer column went to
+                // DataFusion's `sum`, which wraps: `i64::MAX + 1` summed to
+                // `i64::MIN`. Cypher's (Neo4j's) stays an exact integer and
+                // continues as a float past the 64-bit range.
                 "sum" => {
                     let arg = get_arg()?;
                     match Self::numeric_column_type(&arg, schema) {
@@ -6489,11 +6588,8 @@ impl HybridPhysicalPlanner {
                             Box::new(arg),
                             datafusion::arrow::datatypes::DataType::Float64,
                         ))),
-                        // Widen small integers to Int64 (DataFusion has no Int32 sum).
-                        Some(false) => sum(DfExpr::Cast(datafusion::logical_expr::Cast::new(
-                            Box::new(arg),
-                            datafusion::arrow::datatypes::DataType::Int64,
-                        ))),
+                        Some(false) => Arc::new(crate::query::df_udfs::create_cypher_sum_udaf())
+                            .call(vec![Self::widen_narrow_integer(arg, schema)]),
                         None => Arc::new(crate::query::df_udfs::create_cypher_sum_udaf())
                             .call(vec![arg]),
                     }
@@ -7419,26 +7515,35 @@ impl HybridPhysicalPlanner {
                 }
             };
 
-            // `sum` / `avg` over anything but a numeric column fold by Cypher's
-            // rules, as the grouped aggregates do: DataFusion's cast below
-            // summed the strings '12' and '3' to 15, and failed on durations
-            // and on every schemaless (encoded) property.
-            let cypher_sum = matches!(name_lower.as_str(), "sum" | "avg")
-                && matches!(args.as_slice(), [arg] if !matches!(arg, Expr::Wildcard))
-                && !matches!(
-                    cypher_expr_to_df(&args[0], tx_ctx.as_ref())?.get_type(&df_schema),
-                    Ok(datafusion::arrow::datatypes::DataType::Float16
-                        | datafusion::arrow::datatypes::DataType::Float32
-                        | datafusion::arrow::datatypes::DataType::Float64
-                        | datafusion::arrow::datatypes::DataType::Int8
-                        | datafusion::arrow::datatypes::DataType::Int16
-                        | datafusion::arrow::datatypes::DataType::Int32
-                        | datafusion::arrow::datatypes::DataType::Int64
-                        | datafusion::arrow::datatypes::DataType::UInt8
-                        | datafusion::arrow::datatypes::DataType::UInt16
-                        | datafusion::arrow::datatypes::DataType::UInt32
-                        | datafusion::arrow::datatypes::DataType::UInt64)
-                );
+            // `sum` over anything but a float column, and `avg` over anything
+            // but a numeric one, fold by Cypher's rules, as the grouped
+            // aggregates do: DataFusion's cast below summed the strings '12'
+            // and '3' to 15, failed on durations and on every schemaless
+            // (encoded) property, and wrapped an integer sum on overflow.
+            let cypher_sum = match (name_lower.as_str(), args.as_slice()) {
+                ("sum" | "avg", [arg]) if !matches!(arg, Expr::Wildcard) => {
+                    use datafusion::arrow::datatypes::DataType as D;
+                    let arg_type = cypher_expr_to_df(arg, tx_ctx.as_ref())?.get_type(&df_schema);
+                    let float = matches!(arg_type, Ok(D::Float16 | D::Float32 | D::Float64));
+                    let integer = matches!(
+                        arg_type,
+                        Ok(D::Int8
+                            | D::Int16
+                            | D::Int32
+                            | D::Int64
+                            | D::UInt8
+                            | D::UInt16
+                            | D::UInt32
+                            | D::UInt64)
+                    );
+                    if name_lower == "sum" {
+                        !float
+                    } else {
+                        !float && !integer
+                    }
+                }
+                _ => false,
+            };
             // A non-built-in aggregate ignores DataFusion's DISTINCT flag.
             let mut window_distinct = *distinct;
             if cypher_sum {
@@ -7476,22 +7581,16 @@ impl HybridPhysicalPlanner {
                             let mut df_expr = cypher_expr_to_df(arg, tx_ctx.as_ref())?;
 
                             // Cast numeric types only for SUM/AVG aggregate functions:
-                            // SUM widens integers to Int64 and floats to Float64, as
-                            // the grouped `sum` does — casting every argument to
-                            // Int64 truncated each float before it was added
-                            // (`sum(0.5, 1.25) OVER ()` returned 1). AVG needs Float64.
+                            // only a float SUM and a numeric AVG reach DataFusion's
+                            // own, and both take Float64. (An integer SUM is Cypher's,
+                            // above: DataFusion's wraps on overflow. Casting every
+                            // argument to Int64 also truncated each float before it
+                            // was added: `sum(0.5, 1.25) OVER ()` returned 1.)
                             if is_aggregate && !cypher_sum {
-                                let is_float = matches!(
-                                    df_expr.get_type(&df_schema),
-                                    Ok(datafusion::arrow::datatypes::DataType::Float32
-                                        | datafusion::arrow::datatypes::DataType::Float64)
-                                );
                                 let cast_type = match name_lower.as_str() {
-                                    "sum" if is_float => {
+                                    "sum" | "avg" => {
                                         Some(datafusion::arrow::datatypes::DataType::Float64)
                                     }
-                                    "sum" => Some(datafusion::arrow::datatypes::DataType::Int64),
-                                    "avg" => Some(datafusion::arrow::datatypes::DataType::Float64),
                                     _ => None,
                                 };
                                 if let Some(target_type) = cast_type {
@@ -8399,6 +8498,23 @@ impl HybridPhysicalPlanner {
         }
     }
 
+    /// An integer column narrower than 64 bits, cast to `Int64`, so the Cypher
+    /// sum reads it on its typed path. `Int64` and `UInt64` are left as they
+    /// are: no cast holds an unsigned value above `i64::MAX`, and the sum
+    /// reads one as a float rather than wrapping it.
+    fn widen_narrow_integer(expr: DfExpr, schema: &SchemaRef) -> DfExpr {
+        use datafusion::arrow::datatypes::DataType as D;
+        let DfExpr::Column(col) = &expr else {
+            return expr;
+        };
+        match schema.field_with_name(&col.name).map(|f| f.data_type()) {
+            Ok(D::Int8 | D::Int16 | D::Int32 | D::UInt8 | D::UInt16 | D::UInt32) => DfExpr::Cast(
+                datafusion::logical_expr::Cast::new(Box::new(expr), D::Int64),
+            ),
+            _ => expr,
+        }
+    }
+
     fn is_large_binary_col(&self, expr: &DfExpr, schema: &SchemaRef) -> bool {
         if let DfExpr::Column(col) = expr
             && let Ok(field) = schema.field_with_name(&col.name)
@@ -8635,7 +8751,11 @@ fn resolve_fold_bindings(
                         smol_str::SmolStr::new_static("COUNTALL")
                     } else {
                         match upper.as_str() {
-                            "SUM" | "MSUM" => smol_str::SmolStr::new_static("SUM"),
+                            "SUM" => smol_str::SmolStr::new_static("SUM"),
+                            // Its own aggregate: numbers only, where `SUM`
+                            // also adds durations. As `SUM` it read every
+                            // Cypher value as a float to refuse a duration.
+                            "MSUM" => smol_str::SmolStr::new_static("MSUM"),
                             "COUNT" | "MCOUNT" => smol_str::SmolStr::new_static("COUNT"),
                             "MAX" | "MMAX" => smol_str::SmolStr::new_static("MAX"),
                             "MIN" | "MMIN" => smol_str::SmolStr::new_static("MIN"),
@@ -8746,6 +8866,45 @@ fn apply_passthrough_reconciliation(
 /// Prefix of the columns `EndpointHydrateExec` appends.
 pub(crate) const ENDPOINT_COLUMN_PREFIX: &str = "_endpoint.";
 
+/// The outer requirements on the nodes a node-yielding procedure sub-plan
+/// binds, or `None` when `subquery` is not such a call.
+///
+/// Looks through the wrappers a `CALL … YIELD … WHERE` adds. Every node yield
+/// is listed, with no requirement when the query reads nothing from it, so the
+/// sub-plan is still planned (and typed) as a node.
+fn node_yield_subplan_properties(
+    subquery: &LogicalPlan,
+    all_properties: &HashMap<String, HashSet<String>>,
+) -> Option<HashMap<String, HashSet<String>>> {
+    use crate::query::df_graph::procedure_call::{
+        is_node_yield_procedure_static, map_yield_to_canonical,
+    };
+    match subquery {
+        LogicalPlan::Filter { input, .. }
+        | LogicalPlan::Sort { input, .. }
+        | LogicalPlan::Limit { input, .. }
+        | LogicalPlan::Distinct { input } => node_yield_subplan_properties(input, all_properties),
+        LogicalPlan::ProcedureCall {
+            procedure_name,
+            yield_items,
+            ..
+        } if is_node_yield_procedure_static(procedure_name) => Some(
+            yield_items
+                .iter()
+                .filter(|(name, _)| map_yield_to_canonical(name) == "node")
+                .map(|(name, alias)| {
+                    let var = alias.as_ref().unwrap_or(name);
+                    (
+                        var.clone(),
+                        all_properties.get(var).cloned().unwrap_or_default(),
+                    )
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
 /// Collect the relationship variables named by `startNode(x)` / `endNode(x)`.
 ///
 /// Only a bare variable argument is collected. `startNode(<expr>)` has no column
@@ -8771,15 +8930,15 @@ fn collect_endpoint_relationships(expr: &Expr, out: &mut Vec<String>) {
         where_clause,
         map_expr,
     } = expr
-        && let Expr::Variable(list_var) = list.as_ref()
+        && let Some(list_var) = crate::query::df_graph::endpoint_hydrate::endpoint_list_column(list)
     {
         let mut inner = Vec::new();
         collect_endpoint_relationships(map_expr, &mut inner);
         if let Some(w) = where_clause {
             collect_endpoint_relationships(w, &mut inner);
         }
-        if inner.contains(variable) && !out.contains(list_var) {
-            out.push(list_var.clone());
+        if inner.contains(variable) && !out.iter().any(|o| o == list_var) {
+            out.push(list_var.to_string());
         }
     }
     expr.for_each_child(&mut |child| collect_endpoint_relationships(child, out));

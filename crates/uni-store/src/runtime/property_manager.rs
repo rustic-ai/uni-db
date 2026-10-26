@@ -10,7 +10,7 @@ use crate::storage::main_vertex::MainVertexDataset;
 use crate::storage::manager::StorageManager;
 use crate::storage::property_builder::EXT_ID_COLUMN;
 use crate::storage::value_codec::CrdtDecodeMode;
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use arrow_array::{Array, BooleanArray, RecordBatch, UInt64Array};
 use lru::LruCache;
 use metrics;
@@ -164,6 +164,40 @@ impl PropertyManager {
         ctx.is_none_or(|c| c.l1_visibility.is_none())
     }
 
+    /// Every storage scan a property read issues.
+    ///
+    /// One place, so a failed scan has one meaning: an error the read returns.
+    /// Several reads used to drop it (`Err(_) => continue`, or a `warn!` and
+    /// `continue`) and answer as though the table held no row for the entity —
+    /// a property that exists on disk came back missing, with nothing to say
+    /// the answer was partial. The `property_manager::scan` failpoint injects
+    /// such a failure for the tests that pin this.
+    async fn scan_props(
+        &self,
+        request: crate::backend::types::ScanRequest,
+    ) -> Result<Vec<RecordBatch>> {
+        fail::fail_point!("property_manager::scan", |_| Err(anyhow!(
+            "injected property scan failure (property_manager::scan)"
+        )));
+        let table = request.table_name.clone();
+        self.storage
+            .backend()
+            .scan(request)
+            .await
+            .with_context(|| format!("property read: scanning `{table}` failed"))
+    }
+
+    /// Whether `table` exists, failing on a storage error rather than reading
+    /// it as "no table" — which, like a swallowed scan error, answers a
+    /// property read with nothing.
+    async fn props_table_exists(&self, table: &str) -> Result<bool> {
+        self.storage
+            .backend()
+            .table_exists(table)
+            .await
+            .with_context(|| format!("property read: checking for `{table}` failed"))
+    }
+
     pub async fn get_edge_prop(
         &self,
         eid: uni_common::core::id::Eid,
@@ -271,7 +305,6 @@ impl PropertyManager {
         ctx: Option<&QueryContext>,
     ) -> Result<Option<Properties>> {
         let schema = self.schema_manager.schema();
-        let backend = self.storage.backend();
 
         // If hint provided, use it directly
         let type_names: Vec<&str> = if let Some(hint) = type_name_hint {
@@ -295,24 +328,20 @@ impl PropertyManager {
             use crate::backend::types::ScanRequest;
 
             let table_name = table_names::delta_table_name(type_name, "fwd");
-            if !backend.table_exists(&table_name).await.unwrap_or(false) {
+            if !self.props_table_exists(&table_name).await? {
                 continue; // No data for this type, try next
             }
 
             let base_filter = FilterExpr::equals("eid", Scalar::UInt(eid.as_u64()));
             let filter_expr = self.l1_visibility(ctx).bound(base_filter);
 
-            let batches = match backend
-                .scan(
+            let batches = self
+                .scan_props(
                     ScanRequest::all(&table_name)
                         .with_filter(filter_expr)
                         .with_counters(counters_of(ctx).cloned()),
                 )
-                .await
-            {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
+                .await?;
 
             // Collect all rows for this edge; replayed in version order below.
             let mut rows: Vec<(u64, u8, Properties)> = Vec::new();
@@ -406,8 +435,7 @@ impl PropertyManager {
         use crate::backend::types::ScanRequest;
 
         let table_name = table_names::delta_table_name(edge_type, "fwd");
-        let backend = self.storage.backend();
-        if !backend.table_exists(&table_name).await.unwrap_or(false) {
+        if !self.props_table_exists(&table_name).await? {
             return Ok(false);
         }
 
@@ -434,8 +462,8 @@ impl PropertyManager {
 
         // No counters: this is the write-side uniqueness probe, not a read on a
         // query's behalf, so it has no result to attribute the scan to.
-        let batches = backend
-            .scan(ScanRequest::all(&table_name).with_filter(filter_expr))
+        let batches = self
+            .scan_props(ScanRequest::all(&table_name).with_filter(filter_expr))
             .await?;
 
         // Distinct candidate eids from the narrowed scan.
@@ -581,10 +609,9 @@ impl PropertyManager {
                 Ok(ds) => ds,
                 Err(_) => continue,
             };
-            let backend = self.storage.backend();
             let vtable_name = ds.table_name();
 
-            if !backend.table_exists(&vtable_name).await.unwrap_or(false) {
+            if !self.props_table_exists(&vtable_name).await? {
                 continue; // Table doesn't exist yet — skip this label
             }
 
@@ -611,17 +638,7 @@ impl PropertyManager {
                 .with_columns(columns)
                 .with_counters(counters_of(ctx).cloned());
 
-            let batches: Vec<RecordBatch> = match backend.scan(request).await {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(
-                        label = %label_name,
-                        error = %e,
-                        "failed to scan label table, skipping"
-                    );
-                    continue;
-                }
-            };
+            let batches: Vec<RecordBatch> = self.scan_props(request).await?;
             for batch in batches {
                 let vid_col = match batch
                     .column_by_name("_vid")
@@ -926,10 +943,9 @@ impl PropertyManager {
                 Ok(ds) => ds,
                 Err(_) => continue,
             };
-            let backend = self.storage.backend();
             let dtable_name = delta_ds.table_name();
 
-            if !backend.table_exists(&dtable_name).await.unwrap_or(false) {
+            if !self.props_table_exists(&dtable_name).await? {
                 continue; // Table doesn't exist yet — skip this edge type
             }
 
@@ -954,17 +970,7 @@ impl PropertyManager {
                 .with_columns(columns)
                 .with_counters(counters_of(ctx).cloned());
 
-            let batches: Vec<RecordBatch> = match backend.scan(request).await {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(
-                        edge_type = %type_name,
-                        error = %e,
-                        "failed to scan edge delta table, skipping"
-                    );
-                    continue;
-                }
-            };
+            let batches: Vec<RecordBatch> = self.scan_props(request).await?;
             for batch in batches {
                 let eid_col = match batch
                     .column_by_name("eid")
@@ -1428,9 +1434,7 @@ impl PropertyManager {
 
         let table_name = crate::backend::table_names::vertex_table_name(label);
         let batches: Vec<RecordBatch> = self
-            .storage
-            .backend()
-            .scan(
+            .scan_props(
                 crate::backend::types::ScanRequest::all(&table_name)
                     .with_filter(filter_expr.clone())
                     .with_columns(columns.clone())
@@ -1633,8 +1637,7 @@ impl PropertyManager {
         }
 
         let table_name = table_names::delta_table_name(type_name, "fwd");
-        let backend = self.storage.backend();
-        if !backend.table_exists(&table_name).await.unwrap_or(false) {
+        if !self.props_table_exists(&table_name).await? {
             return Ok(result);
         }
 
@@ -1642,17 +1645,13 @@ impl PropertyManager {
             FilterExpr::one_of("eid", need_storage.iter().map(|e| Scalar::UInt(e.as_u64())));
         let filter_expr = self.l1_visibility(ctx).bound(base_filter);
 
-        let batches = match backend
-            .scan(
+        let batches = self
+            .scan_props(
                 ScanRequest::all(&table_name)
                     .with_filter(filter_expr)
                     .with_counters(counters_of(ctx).cloned()),
             )
-            .await
-        {
-            Ok(b) => b,
-            Err(_) => return Ok(result), // Storage error: per-row fallback handles correctness
-        };
+            .await?;
 
         // Collect (eid, version, op, props) tuples, then group + replay per EID.
         let mut per_eid_rows: HashMap<Eid, Vec<(u64, u8, Properties)>> = HashMap::new();
@@ -2085,20 +2084,14 @@ impl PropertyManager {
             let filter_expr = self.l1_visibility(ctx).bound(base_filter);
 
             let table_name = crate::backend::table_names::vertex_table_name(label_name);
-            let batches: Vec<RecordBatch> = match self
-                .storage
-                .backend()
-                .scan(
+            let batches: Vec<RecordBatch> = self
+                .scan_props(
                     crate::backend::types::ScanRequest::all(&table_name)
                         .with_filter(filter_expr.clone())
                         .with_columns(columns.clone())
                         .with_counters(counters_of(ctx).cloned()),
                 )
-                .await
-            {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
+                .await?;
 
             // Convert Vec<String> to Vec<&str> for downstream use
             let prop_name_refs: Vec<&str> = prop_names.iter().map(|s| s.as_str()).collect();
@@ -2445,20 +2438,14 @@ impl PropertyManager {
             }
 
             let table_name = crate::backend::table_names::vertex_table_name(label_name);
-            let batches: Vec<RecordBatch> = match self
-                .storage
-                .backend()
-                .scan(
+            let batches: Vec<RecordBatch> = self
+                .scan_props(
                     crate::backend::types::ScanRequest::all(&table_name)
                         .with_filter(filter_expr.clone())
                         .with_columns(columns)
                         .with_counters(counters_of(ctx).cloned()),
                 )
-                .await
-            {
-                Ok(b) => b,
-                Err(_) => continue,
-            };
+                .await?;
 
             for batch in batches {
                 let deleted_col = match batch

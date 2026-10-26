@@ -399,8 +399,18 @@ async fn locy_profile_shows_isnot_antijoin_and_fact_dedup() -> Result<()> {
             .with_config(locy_config())
             .profile()
             .await?;
-        let chain_facts = result.derived.get("d").map_or(0, Vec::len);
-        let ok_facts = result.derived.get("ok").map_or(0, Vec::len);
+        let chain_facts = result
+            .derived_rules()
+            .await
+            .unwrap()
+            .get("d")
+            .map_or(0, Vec::len);
+        let ok_facts = result
+            .derived_rules()
+            .await
+            .unwrap()
+            .get("ok")
+            .map_or(0, Vec::len);
         assert_eq!(
             chain_facts,
             len - 1,

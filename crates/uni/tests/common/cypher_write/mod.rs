@@ -1,6 +1,7 @@
 pub mod bidirectional_create_test;
 pub mod bulk_loading_test;
 pub mod copy_from_transaction;
+pub mod create_path_binding;
 pub mod create_set_fusion_test;
 pub mod cypher_create;
 pub mod cypher_delete;

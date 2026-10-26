@@ -211,6 +211,21 @@ pub struct CompiledClause {
     pub binding: ClauseBinding,
 }
 
+/// Prefix of the hidden body columns that carry a model invocation's
+/// property features (`__feat_<var>_<prop>`, see [`feature_column_name`]).
+///
+/// The body batch carries them so the invocation can read the property per
+/// row. They are inputs to the classifier, never columns of the rule: a fact
+/// does not hold them, and a rule reading the relation through `IS` scans
+/// the rule's declared columns only.
+pub const FEATURE_COL_PREFIX: &str = "__feat_";
+
+/// The hidden body column carrying property `prop` of `var` for a model
+/// invocation's features.
+pub fn feature_column_name(var: &str, prop: &str) -> String {
+    format!("{FEATURE_COL_PREFIX}{var}_{prop}")
+}
+
 /// A single neural-model invocation site extracted from a clause body.
 ///
 /// At runtime, after the clause body produces a batch of rows, each
@@ -473,8 +488,17 @@ pub enum SemiringKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeWarningCode {
     /// Two or more proof paths aggregated by MNOR/MPROD share an
-    /// intermediate fact, violating the independence assumption.
+    /// intermediate fact, violating the independence assumption, and the
+    /// value was computed as if they did not: exact inference was off, or a
+    /// shared group fell back to the independence value. The result may
+    /// overestimate. [`RuntimeWarning::probability`] says which.
     SharedProbabilisticDependency,
+    /// Proof paths share an intermediate fact, and inference evaluated every
+    /// shared group under possible-worlds semantics, so the values are not
+    /// inflated by the sharing. Informational
+    /// ([`RuntimeWarningCode::is_informational`]): it reports what was
+    /// detected and how it was resolved, not a problem.
+    SharedDependencyResolved,
     /// A shared-proof group exceeded `max_bdd_variables`, so the BDD
     /// computation fell back to the independence-mode result.
     BddLimitExceeded,
@@ -523,6 +547,7 @@ impl RuntimeWarningCode {
     pub fn as_str(&self) -> &'static str {
         match self {
             RuntimeWarningCode::SharedProbabilisticDependency => "shared_probabilistic_dependency",
+            RuntimeWarningCode::SharedDependencyResolved => "shared_dependency_resolved",
             RuntimeWarningCode::BddLimitExceeded => "bdd_limit_exceeded",
             RuntimeWarningCode::CrossGroupCorrelationNotExact => {
                 "cross_group_correlation_not_exact"
@@ -533,6 +558,92 @@ impl RuntimeWarningCode {
             RuntimeWarningCode::ProbabilityReadNotFactor => "probability_read_not_factor",
         }
     }
+
+    /// Whether this code reports a status rather than a problem: the result
+    /// is what it claims to be, and the entry says how it was reached.
+    pub fn is_informational(&self) -> bool {
+        match self {
+            RuntimeWarningCode::SharedDependencyResolved => true,
+            RuntimeWarningCode::SharedProbabilisticDependency
+            | RuntimeWarningCode::BddLimitExceeded
+            | RuntimeWarningCode::CrossGroupCorrelationNotExact
+            | RuntimeWarningCode::FuzzyNotProbabilistic
+            | RuntimeWarningCode::EntityHydrationIncomplete
+            | RuntimeWarningCode::TopKPruningCrossedDependency
+            | RuntimeWarningCode::ProbabilityReadNotFactor => false,
+        }
+    }
+}
+
+/// How a rule's PROB values were computed where its proofs share evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceMode {
+    /// Independence evaluation (`exact_probability` off): shared proofs are
+    /// combined as if unrelated.
+    Approximate,
+    /// Possible-worlds evaluation over a BDD (`exact_probability`).
+    Exact,
+    /// The `TopKProofs` semiring: each fact over its most probable proofs,
+    /// shared evidence counted once among them.
+    TopKProofs,
+}
+
+impl InferenceMode {
+    /// The stable snake_case identifier, as it crosses a language boundary.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InferenceMode::Approximate => "approximate",
+            InferenceMode::Exact => "exact",
+            InferenceMode::TopKProofs => "top_k_proofs",
+        }
+    }
+}
+
+/// What became of a rule's shared probabilistic dependencies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DependencyResolution {
+    /// Every shared group was evaluated without the independence assumption.
+    Completed,
+    /// At least one shared group kept its independence value
+    /// ([`ProbabilityDiagnostic::reason`] says why).
+    Fallback,
+    /// No resolution was attempted: the mode does not resolve sharing.
+    NotAttempted,
+}
+
+impl DependencyResolution {
+    /// The stable snake_case identifier, as it crosses a language boundary.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DependencyResolution::Completed => "completed",
+            DependencyResolution::Fallback => "fallback",
+            DependencyResolution::NotAttempted => "not_attempted",
+        }
+    }
+}
+
+/// The structured part of a shared-dependency diagnostic (issue #315): what
+/// was detected, how the rule was evaluated, and how that ended, so an
+/// application can render the outcome without parsing the message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbabilityDiagnostic {
+    /// How the rule's values were computed.
+    pub inference_mode: InferenceMode,
+    /// What became of the shared groups.
+    pub resolution: DependencyResolution,
+    /// Why a group was not resolved: `exact_probability_disabled` when no
+    /// resolution was attempted, `bdd_variable_limit_exceeded` when a group
+    /// needed more variables than the limit. `None` when completed.
+    pub reason: Option<String>,
+    /// KEY groups (facts) found to rest on shared evidence.
+    pub groups_detected: usize,
+    /// Of those, the groups that kept their independence value.
+    pub groups_fallen_back: usize,
+    /// `max_bdd_variables` as configured, when a resolution was attempted.
+    pub configured_bdd_variable_limit: Option<usize>,
+    /// The limit actually applied: the configured one, capped by the BDD
+    /// library's variable range.
+    pub effective_bdd_variable_limit: Option<usize>,
 }
 
 /// A non-fatal runtime diagnostic collected during evaluation.
@@ -544,10 +655,17 @@ pub struct RuntimeWarning {
     pub message: String,
     /// Rule that triggered the warning, when applicable.
     pub rule_name: String,
-    /// BDD variable count for the affected group (BddLimitExceeded only).
+    /// BDD variable count for the affected group: the count that exceeded
+    /// the limit (`BddLimitExceeded`, and `SharedProbabilisticDependency`
+    /// after a fallback, the largest such group).
     pub variable_count: Option<usize>,
-    /// Human-readable KEY group description (BddLimitExceeded only).
+    /// Human-readable KEY group description: the group that exceeded the
+    /// limit, or the first shared group.
     pub key_group: Option<String>,
+    /// The structured shared-dependency diagnostic
+    /// (`SharedProbabilisticDependency`, `SharedDependencyResolved`,
+    /// `BddLimitExceeded`); `None` for other codes.
+    pub probability: Option<ProbabilityDiagnostic>,
 }
 
 #[cfg(test)]

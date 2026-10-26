@@ -1012,9 +1012,12 @@ fn translate_in_expression(
                     VariableKind::Edge => COL_EID,
                     _ => unreachable!(),
                 };
-                cast_expr(
-                    DfExpr::Column(Column::from_name(format!("{}.{}", var, id_col))),
-                    datafusion::arrow::datatypes::DataType::Int64,
+                dummy_udf_expr(
+                    "id",
+                    vec![DfExpr::Column(Column::from_name(format!(
+                        "{}.{}",
+                        var, id_col
+                    )))],
                 )
             }
             _ => cypher_expr_to_df(expr, context)?,
@@ -2477,29 +2480,12 @@ fn translate_graph_function(
     context: Option<&TranslationContext>,
 ) -> Option<Result<DfExpr>> {
     match name_upper {
-        // `elementId(n)` is `id(n)` as a string. It is registered as needing
-        // only the entity's identity, so the entity itself is never
-        // materialized as a column — and handed the whole entity, every call
-        // on a scan- or traversal-bound variable failed with "No field named
-        // n". Read the identity column instead, as `id` does. Anything else
-        // takes the generic path, which decodes an encoded entity.
-        "ELEMENTID" => {
-            let Some(Expr::Variable(var)) = args.first() else {
-                return None;
-            };
-            let kind = context.and_then(|ctx| ctx.variable_kinds.get(var))?;
-            let id_suffix = match kind {
-                VariableKind::Node => COL_VID,
-                VariableKind::Edge => COL_EID,
-                _ => return None,
-            };
-            Some(Ok(DfExpr::Cast(datafusion::logical_expr::Cast::new(
-                Box::new(DfExpr::Column(Column::from_name(format!(
-                    "{var}.{id_suffix}"
-                )))),
-                datafusion::arrow::datatypes::DataType::Utf8,
-            ))))
-        }
+        // Use the same identity conversion for columns, structs and encoded
+        // entities; there is no separate elementid UDF to fall back to.
+        "ELEMENTID" => Some(
+            translate_graph_function("ID", "id", df_args, args, context)?
+                .map(|id| cast_expr(id, datafusion::arrow::datatypes::DataType::Utf8)),
+        ),
         "ID" => {
             // When called with a bare variable (ID(n)), rewrite to the internal
             // identity column reference (_vid for nodes, _eid for edges).
@@ -2525,10 +2511,13 @@ fn translate_graph_function(
                     return Some(Ok(dummy_udf_expr("id", df_args.to_vec())));
                 }
                 let id_suffix = if is_edge { COL_EID } else { COL_VID };
-                Some(Ok(DfExpr::Column(Column::from_name(format!(
-                    "{}.{}",
-                    var, id_suffix
-                )))))
+                Some(Ok(dummy_udf_expr(
+                    "id",
+                    vec![DfExpr::Column(Column::from_name(format!(
+                        "{}.{}",
+                        var, id_suffix
+                    )))],
+                )))
             } else {
                 Some(Ok(dummy_udf_expr("id", df_args.to_vec())))
             }

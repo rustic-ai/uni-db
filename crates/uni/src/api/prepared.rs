@@ -256,7 +256,7 @@ impl PreparedQuery {
                     Some(tx.id_reservoir.clone()),
                     snapshot,
                     self.cancel.clone(),
-                    None,
+                    crate::api::impl_query::QueryOverrides::default(),
                 )
                 .await;
         }
@@ -511,6 +511,7 @@ impl PreparedLocy {
         };
         let engine = crate::api::impl_locy::LocyEngine {
             counters: std::sync::Arc::new(uni_store::QueryCounters::new()),
+            statement_memory: Default::default(),
             db: &self.db,
             tx_l0_override: tx_l0.clone(),
             locy_l0: tx_l0,
@@ -521,6 +522,9 @@ impl PreparedLocy {
             // setting applies.
             max_memory: None,
             principal: self.principal.clone(),
+            // A session-prepared program can derive left-out rules later; a
+            // transaction's state cannot be held past the call.
+            handle: self.tx.is_none().then(|| Arc::downgrade(&self.db)),
         };
         // The task-local scope `LocyBuilder::run` / `Transaction::locy`
         // install: the principal for procedure capability gates, the instance

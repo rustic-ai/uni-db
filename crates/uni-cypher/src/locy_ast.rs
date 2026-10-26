@@ -273,7 +273,7 @@ pub fn default_yield_name(expr: &Expr) -> String {
 /// and non-colliding names are returned unchanged.
 ///
 /// This is the single source of truth for YIELD column naming; the type
-/// checker, planner, and SLG resolver all call it so their column names agree
+/// checker, planner, and fixpoint runtime all call it so their column names agree
 /// (the names double as the fixpoint join keys).
 ///
 /// # Examples

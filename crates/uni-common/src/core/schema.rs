@@ -1059,6 +1059,11 @@ impl SchemalessEdgeTypeRegistry {
         self.id_to_name.keys().copied().collect()
     }
 
+    /// Returns every registered schemaless type name, in no particular order.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.name_to_id.keys().map(String::as_str)
+    }
+
     /// Returns true if the registry has any schemaless types.
     pub fn is_empty(&self) -> bool {
         self.name_to_id.is_empty()
@@ -1740,6 +1745,13 @@ impl SchemaManager {
                     },
                 );
             }
+            // Fork-interned schemaless edge types get an id in the merged
+            // registry. The id is assigned here, not restored: primary may
+            // have handed the fork's original id to another name since, so
+            // only the name is authoritative (WAL replay remaps by name too).
+            for name in &overlay.added_schemaless_edge_types {
+                merged.get_or_assign_edge_type_id(name);
+            }
             merged
         };
 
@@ -2064,6 +2076,21 @@ impl SchemaManager {
             .expect("Schema lock poisoned - a thread panicked while holding it");
         let schema = Arc::make_mut(&mut *guard);
         schema.get_or_assign_edge_type_id(type_name)
+    }
+
+    /// Names of every schemaless (undeclared) edge type this schema has interned.
+    ///
+    /// # Panics
+    /// Panics if the schema lock is poisoned.
+    #[must_use]
+    pub fn schemaless_edge_type_names(&self) -> Vec<String> {
+        let schema = acquire_read(&self.schema, "schema")
+            .expect("Schema lock poisoned - a thread panicked while holding it");
+        schema
+            .schemaless_registry
+            .names()
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Delegates to [`Schema::edge_type_name_by_id_unified`].
@@ -3589,6 +3616,7 @@ mod tests {
             added_labels: vec![("NewLabel".to_string(), label_meta)],
             added_edge_types: vec![("NewEdge".to_string(), edge_meta)],
             added_properties: vec![],
+            added_schemaless_edge_types: vec![],
         };
 
         let overlay = primary.with_overlay(&delta);
@@ -3599,6 +3627,50 @@ mod tests {
 
         // Primary unchanged.
         assert!(!primary.schema().labels.contains_key("NewLabel"));
+        Ok(())
+    }
+
+    /// Schemaless edge-type names recorded in an overlay are interned in the
+    /// merged registry by name. A name primary already knows keeps primary's
+    /// id; a fork-only name gets a fresh id, never one primary already gave
+    /// to a different name.
+    #[tokio::test]
+    async fn with_overlay_interns_schemaless_edge_type_names() -> Result<()> {
+        use crate::core::fork::SchemaDelta;
+
+        let dir = tempdir()?;
+        let store = Arc::new(LocalFileSystem::new_with_prefix(dir.path())?);
+        let path = ObjectStorePath::from("schema.json");
+        let primary = SchemaManager::load_from_store(store, &path).await?;
+        let shared = primary.get_or_assign_edge_type_id("SHARED");
+        let foo = primary.get_or_assign_edge_type_id("FOO");
+
+        let delta = SchemaDelta {
+            added_schemaless_edge_types: vec!["SHARED".into(), "LINK".into()],
+            ..Default::default()
+        };
+        let overlay = primary.with_overlay(&delta);
+        assert_eq!(
+            overlay.schema().edge_type_id_unified("SHARED"),
+            Some(shared)
+        );
+        assert_eq!(overlay.schema().edge_type_id_unified("FOO"), Some(foo));
+        let link = overlay
+            .schema()
+            .edge_type_id_unified("LINK")
+            .expect("overlay name interned");
+        assert!(is_schemaless_edge_type(link));
+        assert_ne!(link, shared);
+        assert_ne!(link, foo);
+        assert_eq!(
+            overlay.edge_type_name_by_id_unified(link).as_deref(),
+            Some("LINK")
+        );
+        // Primary never learns the fork's name.
+        assert_eq!(primary.schema().edge_type_id_unified("LINK"), None);
+        let mut names = overlay.schemaless_edge_type_names();
+        names.sort();
+        assert_eq!(names, vec!["FOO", "LINK", "SHARED"]);
         Ok(())
     }
 

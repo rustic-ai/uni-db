@@ -51,6 +51,9 @@ fn carry_budget(
     // counting — which made `tx.locy(...)` under-report against
     // `session.locy(...)`, since only the transaction path rebuilds one.
     ctx = ctx.with_counters(parent.counters().cloned());
+    // And the statement's memory pool, so a procedure called from a rebuilt
+    // context charges the same budget.
+    ctx = ctx.with_memory_pool(parent.memory_pool().cloned());
     ctx
 }
 
@@ -415,7 +418,7 @@ fn bare_rule_hint(program: &str, registry: &std::sync::RwLock<LocyRuleRegistry>)
 /// This is the core evaluation path used by Session and Transaction.
 /// `principal` is who the program is authorized for (anonymous when `None`).
 pub(crate) async fn evaluate_with_db_and_config(
-    db: &crate::api::UniInner,
+    db: &Arc<crate::api::UniInner>,
     program: &str,
     config: &LocyConfig,
     rule_registry: &std::sync::RwLock<LocyRuleRegistry>,
@@ -443,7 +446,7 @@ pub(crate) async fn evaluate_with_db_and_config(
     reason = "The session evaluation's program, registry, profile slot and per-call scope (cancellation, memory bound, principal)"
 )]
 pub(crate) async fn evaluate_with_db_and_config_capturing(
-    db: &crate::api::UniInner,
+    db: &Arc<crate::api::UniInner>,
     program: &str,
     config: &LocyConfig,
     rule_registry: &std::sync::RwLock<LocyRuleRegistry>,
@@ -504,6 +507,7 @@ pub(crate) async fn evaluate_with_db_and_config_capturing(
     let engine = LocyEngine {
         db,
         counters: std::sync::Arc::new(uni_store::QueryCounters::new()),
+        statement_memory: Default::default(),
         tx_l0_override: locy_l0.clone(),
         locy_l0,
         collect_derive: true,
@@ -511,6 +515,7 @@ pub(crate) async fn evaluate_with_db_and_config_capturing(
         cancel,
         max_memory,
         principal,
+        handle: Some(Arc::downgrade(db)),
     };
     engine
         .evaluate_compiled_capturing(compiled, program, config, profile_capture)
@@ -554,6 +559,10 @@ pub struct LocyEngine<'a> {
     /// vanish. A vanished count is indistinguishable from work that never
     /// happened, which is the whole failure being fixed.
     pub(crate) counters: Arc<uni_store::QueryCounters>,
+    /// The evaluation's memory pool, shared like `counters` by every executor
+    /// the evaluation builds (its re-entries included), so the evaluation
+    /// draws on one `max_memory` budget rather than one per executor.
+    pub(crate) statement_memory: uni_query::query::executor::core::StatementMemory,
     /// The transaction's pinned read snapshot (Components C1 + C2), when
     /// evaluating inside a read-write transaction under SSI. Installed on
     /// the executor so Locy clause bodies read the frozen L0 generations and
@@ -580,6 +589,15 @@ pub struct LocyEngine<'a> {
     /// before it runs ([`crate::api::locy_authz`]). `None` is the anonymous
     /// principal, as for Cypher.
     pub(crate) principal: Option<Arc<uni_plugin::traits::connector::Principal>>,
+    /// A handle on the database `db` is, for the work a result does after the
+    /// evaluation returned: deriving the rules [`GoalDirected::Auto`] left
+    /// out ([`SnapshotMaterializer`]). Weak, so a result kept around does
+    /// not keep the database open. `None` where the evaluation's state cannot
+    /// outlive the call (a transaction, an internal re-entry), and `Auto`
+    /// then evaluates in full.
+    ///
+    /// [`GoalDirected::Auto`]: uni_locy::GoalDirected::Auto
+    pub(crate) handle: Option<std::sync::Weak<crate::api::UniInner>>,
 }
 
 impl LocyEngine<'_> {
@@ -854,10 +872,12 @@ impl<'a> LocyEngine<'a> {
                 locy_l0: Some(overlay),
                 collect_derive: true,
                 counters: Arc::clone(&self.counters),
+                statement_memory: self.statement_memory.clone(),
                 read_snapshot: self.read_snapshot.clone(),
                 cancel: self.cancel.clone(),
                 max_memory: self.max_memory,
                 principal: self.principal.clone(),
+                handle: self.handle.clone(),
             };
             return Box::pin(scoped.evaluate_compiled_capturing_inner(
                 compiled,
@@ -868,10 +888,72 @@ impl<'a> LocyEngine<'a> {
         }
         let start = Instant::now();
 
-        // Goal-directed (magic-sets) rewrite of qualifying QUERY commands; the
-        // identity unless `config.goal_directed` asks for it (uni_locy::magic).
-        let (compiled, _goal_report) =
-            uni_locy::magic::rewrite_goal_directed(compiled, config.goal_directed, &config.params);
+        // Goal-directed (magic-sets) rewrite of qualifying QUERY commands
+        // (uni_locy::magic). Under `Auto` the rules it leaves out are derived
+        // later, on first access to the result's facts, against the snapshot
+        // this evaluation reads — so that snapshot is pinned here and the
+        // whole evaluation reads it. Where that cannot give exactly the facts
+        // full evaluation gives, `Auto` evaluates in full.
+        let (mode, lazy_capable) = match config.goal_directed {
+            uni_locy::GoalDirected::Auto => {
+                let capable = self.collect_derive
+                    && self.handle.is_some()
+                    && uni_locy::magic::auto_fallback(&compiled).is_none();
+                if capable {
+                    (uni_locy::GoalDirected::Auto, true)
+                } else {
+                    (uni_locy::GoalDirected::Off, false)
+                }
+            }
+            other => (other, false),
+        };
+        // The program as compiled, when the rewrite may prune: to name the
+        // pruned rules (and, under `Auto`, to derive them later).
+        let original = matches!(
+            mode,
+            uni_locy::GoalDirected::On | uni_locy::GoalDirected::Auto
+        )
+        .then(|| compiled.clone());
+        let (compiled, goal_report) =
+            uni_locy::magic::rewrite_goal_directed(compiled, mode, &config.params);
+        // Evaluation detail names generated rules; reports use the program's.
+        let generated_origins = goal_report.generated_rule_origins();
+        let left_out: Vec<String> = match &original {
+            Some(original) => {
+                let evaluated: HashSet<&str> = compiled
+                    .strata
+                    .iter()
+                    .flat_map(|s| s.rules.iter().map(|r| r.name.as_str()))
+                    .collect();
+                let mut out: Vec<String> = original
+                    .strata
+                    .iter()
+                    .flat_map(|s| s.rules.iter().map(|r| r.name.clone()))
+                    .filter(|name| !evaluated.contains(name.as_str()))
+                    .collect();
+                out.sort();
+                out.dedup();
+                out
+            }
+            None => Vec::new(),
+        };
+        // The snapshot every read of this evaluation (and of the left-out
+        // rules' later derivation) sees. A database without a writer cannot
+        // change, and needs none.
+        let read_snapshot = if !lazy_capable || left_out.is_empty() || self.read_snapshot.is_some()
+        {
+            self.read_snapshot.clone()
+        } else {
+            self.db.writer.as_ref().map(|writer| {
+                let mut snap = writer.l0_manager.pin_snapshot();
+                snap.pinned_storage =
+                    Some(Arc::new(self.db.storage.pinned_at_version_excluding(
+                        snap.started_at_version,
+                        &snap.unpublished_bulk,
+                    )));
+                snap
+            })
+        };
 
         // Capture current version for staleness detection in DerivedFactSet
         let evaluated_at_version = if self.collect_derive {
@@ -936,6 +1018,7 @@ impl<'a> LocyEngine<'a> {
         let limits = LocyLimits::new(&executor_config, config);
         df_executor.set_config(executor_config);
         df_executor.set_counters(self.counters.clone());
+        df_executor.set_statement_memory(self.statement_memory.clone());
         if let Some(ref w) = self.db.writer {
             df_executor.set_writer(w.clone());
         }
@@ -954,8 +1037,8 @@ impl<'a> LocyEngine<'a> {
         // version-pinned L1 storage), matching the Cypher path's
         // `set_read_snapshot` — Locy reads see the same snapshot the rest of
         // the transaction does.
-        if self.read_snapshot.is_some() {
-            df_executor.set_read_snapshot(self.read_snapshot.clone());
+        if read_snapshot.is_some() {
+            df_executor.set_read_snapshot(read_snapshot.clone());
         }
         df_executor.set_xervo_runtime(self.db.xervo_runtime.clone());
         df_executor.set_procedure_registry(self.db.procedure_registry.clone());
@@ -1031,7 +1114,7 @@ impl<'a> LocyEngine<'a> {
         // The base state the facts below are derived from, for incremental
         // ASSUME / ABDUCE (see `NativeExecutionAdapter::enable_top_level_baseline`).
         // Taken before the run, so a commit during it is detected afterwards.
-        let base_before_run = base_fingerprint(self.db, &self.read_snapshot);
+        let base_before_run = base_fingerprint(self.db, &read_snapshot);
 
         // 5. Execute strata
         let _stats_batches = uni_query::Executor::collect_batches(&session_ctx, exec_plan)
@@ -1053,11 +1136,12 @@ impl<'a> LocyEngine<'a> {
         // on converting, hydrating and answering commands unbounded (a
         // 1200-item cross join: 2.6 s against a 614 ms timeout).
         let deadline = start + limits.timeout;
-        if let Some(detail) = incomplete_slot.read().ok().and_then(|g| g.clone())
+        if let Some(mut detail) = incomplete_slot.read().ok().and_then(|g| g.clone())
             && !config.allow_partial
         {
             // The same error the end of this function would raise, without
             // first converting and hydrating facts nobody will see.
+            name_program_rules(&mut detail, &generated_origins, &left_out);
             return Err(UniError::LocyIncomplete {
                 detail: Box::new(detail),
             });
@@ -1155,7 +1239,7 @@ impl<'a> LocyEngine<'a> {
             planner.session_ctx().clone(),
             config.params.clone(),
             self.tx_l0_override.clone(),
-            self.read_snapshot.clone(),
+            read_snapshot.clone(),
             self.cancel.clone(),
         );
         // Propagate locy_l0 to the adapter for DERIVE/ASSUME/ABDUCE scoping.
@@ -1240,7 +1324,13 @@ impl<'a> LocyEngine<'a> {
                     sequence
                         .facts(&native_ctx, config, &mut locy_stats)
                         .await
-                        .map_err(|e| map_runtime_error(e, limits))?
+                        .map_err(|e| {
+                            in_program_rules(
+                                map_runtime_error(e, limits),
+                                &generated_origins,
+                                &left_out,
+                            )
+                        })?
                 } else {
                     sequence.last_derived()
                 };
@@ -1286,7 +1376,13 @@ impl<'a> LocyEngine<'a> {
                         );
                         break;
                     }
-                    Err(e) => return Err(map_runtime_error(e, limits)),
+                    Err(e) => {
+                        return Err(in_program_rules(
+                            map_runtime_error(e, limits),
+                            &generated_origins,
+                            &left_out,
+                        ));
+                    }
                 };
                 // A command whose own re-evaluations (ASSUME, ABDUCE) were
                 // cut short answered from partial facts: not reported.
@@ -1446,6 +1542,9 @@ impl<'a> LocyEngine<'a> {
         if let Some(cut) = native_ctx.rederivation_incomplete.lock().unwrap().take() {
             merge_incomplete(&mut incomplete, cut);
         }
+        if let Some(detail) = incomplete.as_mut() {
+            name_program_rules(detail, &generated_origins, &left_out);
+        }
         // An over-budget evaluation is a hard error by default: partial,
         // possibly-unsound facts must not be returned silently. Callers that
         // want anytime / best-effort semantics opt in via `allow_partial`, which
@@ -1457,6 +1556,31 @@ impl<'a> LocyEngine<'a> {
                 detail: Box::new(detail.clone()),
             });
         }
+        let lazy = match (&original, &self.handle) {
+            (Some(original), Some(handle))
+                if lazy_capable && incomplete.is_none() && !left_out.is_empty() =>
+            {
+                let materializer = SnapshotMaterializer {
+                    db: handle.clone(),
+                    program: uni_locy::magic::materialization_program(original, &left_out),
+                    config: LocyConfig {
+                        goal_directed: uni_locy::GoalDirected::Off,
+                        allow_partial: false,
+                        ..config.clone()
+                    },
+                    read_snapshot: read_snapshot.clone(),
+                    cancel: self.cancel.caller_only(),
+                    max_memory: self.max_memory,
+                    principal: self.principal.clone(),
+                    session_plugins: uni_query::current_session_plugin_registry(),
+                };
+                Some(uni_locy::LazyDerived::new(
+                    left_out.clone(),
+                    Arc::new(materializer),
+                ))
+            }
+            _ => None,
+        };
         Ok(build_locy_result(
             enriched_derived,
             command_results,
@@ -1469,6 +1593,7 @@ impl<'a> LocyEngine<'a> {
             derived_fact_set,
             incomplete,
             self.counters.snapshot(),
+            lazy,
         ))
     }
 
@@ -1552,6 +1677,7 @@ impl<'a> LocyEngine<'a> {
         let limits = LocyLimits::new(&executor_config, config);
         df_executor.set_config(executor_config);
         df_executor.set_counters(self.counters.clone());
+        df_executor.set_statement_memory(self.statement_memory.clone());
         if let Some(ref w) = self.db.writer {
             df_executor.set_writer(w.clone());
         }
@@ -2521,6 +2647,14 @@ impl NativeExecutionAdapter<'_> {
                 .counters()
                 .cloned()
                 .unwrap_or_else(|| std::sync::Arc::new(uni_store::QueryCounters::new())),
+            // The evaluation's pool, from the same place and for the same
+            // reason as its counters.
+            statement_memory: self
+                .graph_ctx
+                .memory_pool()
+                .cloned()
+                .map(uni_query::query::executor::core::StatementMemory::with_pool)
+                .unwrap_or_default(),
             tx_l0_override: locy_l0.clone(),
             locy_l0,
             collect_derive: false,
@@ -2535,6 +2669,7 @@ impl NativeExecutionAdapter<'_> {
             // Runs strata of a program already authorized as a whole; it is
             // not an entry point and does not reach the authorization.
             principal: None,
+            handle: None,
         };
         // What remains of the program's budget; an exhausted one stops the
         // run before its first stratum, as an interruption.
@@ -3381,6 +3516,7 @@ async fn enrich_vids_with_nodes(
                 rule_name: name.clone(),
                 variable_count: None,
                 key_group: None,
+                probability: None,
             });
         }
 
@@ -3389,6 +3525,146 @@ async fn enrich_vids_with_nodes(
     }
 
     Ok((enriched, warnings))
+}
+
+/// States an interrupted evaluation's diagnostics in the program's own rules.
+///
+/// A generated rule (a goal-directed copy or magic rule) is named by the rule
+/// it was generated from. A rule the rewrite pruned is listed as skipped: it
+/// was not evaluated, and is not derived later — full evaluation would have
+/// reached it with what remained of the budget, or not at all, and a later
+/// derivation with a fresh budget could not tell which.
+fn name_program_rules(
+    detail: &mut uni_common::LocyIncomplete,
+    origins: &HashMap<String, String>,
+    pruned: &[String],
+) {
+    fn rename(names: &mut Vec<String>, origins: &HashMap<String, String>) {
+        let mut out: Vec<String> = Vec::with_capacity(names.len());
+        for name in names.drain(..) {
+            let name = origins.get(&name).cloned().unwrap_or(name);
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+        *names = out;
+    }
+    rename(&mut detail.incomplete_rules, origins);
+    rename(&mut detail.skipped_rules, origins);
+    rename(&mut detail.complement_rules_affected, origins);
+    for rule in pruned {
+        if !detail.incomplete_rules.contains(rule) && !detail.skipped_rules.contains(rule) {
+            detail.skipped_rules.push(rule.clone());
+        }
+    }
+    // A rule whose generated copy was cut short is incomplete, not skipped.
+    let incomplete = detail.incomplete_rules.clone();
+    detail.skipped_rules.retain(|r| !incomplete.contains(r));
+}
+
+/// `error`, with an interrupted evaluation's diagnostics stated in the
+/// program's own rules ([`name_program_rules`]).
+fn in_program_rules(
+    error: UniError,
+    origins: &HashMap<String, String>,
+    pruned: &[String],
+) -> UniError {
+    match error {
+        UniError::LocyIncomplete { mut detail } => {
+            name_program_rules(&mut detail, origins, pruned);
+            UniError::LocyIncomplete { detail }
+        }
+        other => other,
+    }
+}
+
+/// Derives the rules a [`uni_locy::GoalDirected::Auto`] evaluation left out,
+/// after it returned, in the state it read.
+///
+/// Holds what the evaluation read: the pinned snapshot (released when the
+/// facts are cached or the result dropped), the program restricted to the
+/// left-out rules and what they reference, and the configuration with its
+/// limits. The derivation is a full evaluation of that program
+/// ([`uni_locy::GoalDirected::Off`]) under a fresh budget of the same size
+/// and the same memory bound; a cut-short derivation fails rather than
+/// returning partial facts. It is cancelled by the caller's own token, not by
+/// the session's, which may have been cancelled and replaced since. It runs
+/// rules of a program already authorized as a whole, so it is not authorized
+/// again.
+struct SnapshotMaterializer {
+    db: std::sync::Weak<crate::api::UniInner>,
+    program: CompiledProgram,
+    config: LocyConfig,
+    read_snapshot: Option<uni_store::runtime::SnapshotView>,
+    cancel: crate::api::impl_query::CancelScope,
+    max_memory: Option<usize>,
+    principal: Option<Arc<uni_plugin::traits::connector::Principal>>,
+    /// The session's plugin registry the evaluation ran under, re-installed
+    /// for the derivation.
+    session_plugins: Option<Arc<uni_plugin::PluginRegistry>>,
+}
+
+#[async_trait]
+impl uni_locy::DerivedMaterializer for SnapshotMaterializer {
+    async fn materialize(&self, _rules: &[String]) -> Result<uni_locy::Materialized> {
+        // Test seam: the derivation fails (`return`) as a timeout or memory
+        // bound would, so the failure path is exercised deterministically.
+        fail::fail_point!("locy::lazy-derive", |_| {
+            Err(UniError::Internal(anyhow::anyhow!(
+                "injected failure deriving left-out rules"
+            )))
+        });
+        let db = self.db.upgrade().ok_or_else(|| UniError::InvalidArgument {
+            arg: "LocyResult".to_string(),
+            message: "the rules this result derives on first access cannot be derived: \
+                      the database it was evaluated on is closed"
+                .to_string(),
+        })?;
+        let engine = LocyEngine {
+            db: &db,
+            counters: Arc::new(uni_store::QueryCounters::new()),
+            // A pool of its own, like its counters: the derivation is a
+            // statement of its own, run after the evaluation's statement (and
+            // its pool) has finished, under the same `max_query_memory`.
+            statement_memory: Default::default(),
+            tx_l0_override: None,
+            locy_l0: None,
+            collect_derive: true,
+            read_snapshot: self.read_snapshot.clone(),
+            cancel: self.cancel.clone(),
+            max_memory: self.max_memory,
+            principal: self.principal.clone(),
+            handle: None,
+        };
+        let run = async {
+            tokio::select! {
+                biased;
+                () = engine.cancel.cancelled() => Err(UniError::Cancelled),
+                res = engine.evaluate_compiled_capturing_inner(
+                    self.program.clone(),
+                    &self.config,
+                    None,
+                ) => res,
+            }
+        };
+        let result = match &self.session_plugins {
+            Some(plugins) => {
+                uni_query::scoped_with_session_context(
+                    Arc::clone(plugins),
+                    self.principal.clone(),
+                    run,
+                )
+                .await
+            }
+            None => uni_query::maybe_scope_with_principal(self.principal.clone(), run).await,
+        }?;
+        let mut inner = result.into_inner();
+        let warnings = std::mem::take(&mut inner.warnings);
+        Ok(uni_locy::Materialized {
+            facts: inner.into_evaluated_rules(),
+            warnings,
+        })
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3404,6 +3680,7 @@ fn build_locy_result(
     derived_fact_set: Option<DerivedFactSet>,
     incomplete: Option<uni_common::LocyIncomplete>,
     counters: uni_store::CounterSnapshot,
+    lazy: Option<uni_locy::LazyDerived>,
 ) -> LocyResult {
     // The goal-directed rewrite's copies and magic rules are evaluation
     // detail, not rules of the program.
@@ -3418,16 +3695,17 @@ fn build_locy_result(
     orchestrator_stats.derived_nodes = total_facts;
     orchestrator_stats.evaluation_time = evaluation_time;
 
-    let inner = uni_locy::LocyResult {
-        derived,
-        stats: orchestrator_stats,
-        command_results,
-        warnings,
-        compile_warnings: compiled.warnings.clone(),
-        approximate_groups,
-        derived_fact_set,
-        incomplete,
-    };
+    let mut inner = uni_locy::LocyResult::with_derived(derived);
+    inner.stats = orchestrator_stats;
+    inner.command_results = command_results;
+    inner.warnings = warnings;
+    inner.compile_warnings = compiled.warnings.clone();
+    inner.approximate_groups = approximate_groups;
+    inner.derived_fact_set = derived_fact_set;
+    inner.incomplete = incomplete;
+    if let Some(lazy) = lazy {
+        inner = inner.with_lazy_derived(lazy);
+    }
     // The counters are one `Arc` of atomics shared by the whole evaluation, so
     // this total already spans every fixpoint iteration — there is nothing to
     // sum here. They were ticking all along; only the harvest was missing, so

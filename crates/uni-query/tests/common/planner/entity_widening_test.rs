@@ -159,3 +159,104 @@ async fn an_entity_returned_whole_is_not_narrowed_at_this_stage() {
          got {b:?}"
     );
 }
+
+/// Mirrors `STRUCT_ONLY_SENTINEL` (`pub(crate)`): build the entity struct with
+/// its identity and the properties named elsewhere, not the whole schema.
+const STRUCT_ONLY: &str = "__set_struct__";
+
+/// A CREATE over a matched endpoint needs only the endpoint's identity (#312).
+///
+/// The writer reuses a bound node by its vid, so the endpoint must reach it as
+/// a struct column — but marking it `"*"` carried every property, `_all_props`
+/// included, through every join beneath the write. One 200 KB property became
+/// ~2.4 MB per row and a CREATE over a few hundred rows exhausted a 1 GiB pool.
+#[tokio::test]
+async fn a_create_endpoint_is_struct_only() {
+    let p = planner().await;
+    for q in [
+        "MATCH (a:Person) CREATE (a)-[:WORKS_AT]->(:Company)",
+        "MATCH (a:Person), (b:Company) CREATE (a)-[:WORKS_AT]->(b)",
+        "MATCH (a:Person) CREATE (a)-[:WORKS_AT]->(c:Company) RETURN c.name",
+    ] {
+        let props = collected(&p, q);
+        let a = props.get("a").expect("`a` must be collected");
+        assert!(
+            a.contains(STRUCT_ONLY) && !a.contains("*"),
+            "{q}: `a` is only written through, so it must be struct-only — got {a:?}"
+        );
+    }
+}
+
+/// The MERGE twin of the above. MERGE's match side also reads `_labels`, which
+/// the struct-only struct carries.
+#[tokio::test]
+async fn a_merge_endpoint_is_struct_only() {
+    let p = planner().await;
+    for q in [
+        "MATCH (a:Person), (b:Company) MERGE (a)-[:WORKS_AT]->(b)",
+        "MATCH (a:Person) MERGE (a)-[:WORKS_AT]->(:Company {name: 'x'})",
+    ] {
+        let props = collected(&p, q);
+        let a = props.get("a").expect("`a` must be collected");
+        assert!(
+            a.contains(STRUCT_ONLY) && !a.contains("*"),
+            "{q}: `a` is only written through, so it must be struct-only — got {a:?}"
+        );
+    }
+}
+
+/// `ON MATCH SET a.name = … a.age …` reads `age`: it must be collected beside
+/// the struct-only marker, or the SET would compute from a missing property.
+#[tokio::test]
+async fn a_merge_set_keeps_the_properties_it_reads() {
+    let p = planner().await;
+    let props = collected(
+        &p,
+        "MATCH (a:Person), (b:Company) MERGE (a)-[:WORKS_AT]->(b) \
+         ON MATCH SET a.name = toString(a.age + 1)",
+    );
+    let a = props.get("a").expect("`a` must be collected");
+    assert!(
+        a.contains("age") && a.contains(STRUCT_ONLY),
+        "`a.age` is read by ON MATCH SET — got {a:?}"
+    );
+}
+
+/// A named path is built from the row's element values, so every element of
+/// it stays whole — for MERGE and CREATE alike. The CREATE queries also pin
+/// that the planner brings a CREATE path variable into scope: before it did,
+/// `CREATE p = … RETURN p` failed to plan with `UndefinedVariable`.
+#[tokio::test]
+async fn a_named_write_path_keeps_its_elements_wide() {
+    let p = planner().await;
+    for q in [
+        "MATCH (a:Person), (b:Company) MERGE p = (a)-[:WORKS_AT]->(b) RETURN length(p)",
+        "MATCH (a:Person) MERGE p = (a)-[:WORKS_AT]->(:Company) RETURN length(p)",
+        "MATCH (a:Person), (b:Company) CREATE p = (a)-[:WORKS_AT]->(b) RETURN length(p)",
+        "MATCH (a:Person) CREATE p = (a)-[:WORKS_AT]->(:Company) RETURN p",
+    ] {
+        let props = collected(&p, q);
+        let a = props.get("a").expect("`a` must be collected");
+        assert!(
+            a.contains("*"),
+            "{q}: `a` is an element of the named path `p`, so it must stay wide — got {a:?}"
+        );
+    }
+}
+
+/// A subquery body's `RETURN *` can export an outer entity whole without naming
+/// it, so the struct-only marker must not narrow it.
+#[tokio::test]
+async fn a_subquery_wildcard_widens_a_create_endpoint() {
+    let p = planner().await;
+    let props = collected(
+        &p,
+        "MATCH (a:Person) CREATE (a)-[:WORKS_AT]->(:Company) \
+         RETURN COLLECT { MATCH (a)-[:KNOWS]->(x:Person) RETURN * } AS xs",
+    );
+    let a = props.get("a").expect("`a` must be collected");
+    assert!(
+        a.contains("*"),
+        "a subquery `RETURN *` may export `a` whole — got {a:?}"
+    );
+}

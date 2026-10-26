@@ -9,6 +9,13 @@ Uni supports full-text search over string properties and JSON documents, plus JS
 - `CONTAINS` predicates on JSON documents.
 - `CALL uni.fts.query(...)` for BM25-scored search with relevance ranking.
 
+`uni.fts.query` also searches undeclared string properties. It computes BM25
+over the documents visible to the current session, using the same tokenizer
+as an unindexed declared property. Buffered replacements and deletes are
+applied before scoring; flushing does not change the ranking or scores.
+This path scans the visible corpus rather than using a persistent text index.
+Schemaless search does not accept a pushed-down property filter.
+
 ## Example
 
 === "Rust"

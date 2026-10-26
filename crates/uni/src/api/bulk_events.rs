@@ -37,7 +37,7 @@ impl DbBulkEventSink {
     }
 }
 
-fn router(inner: &UniInner) -> Result<TriggerRouter, uni_common::UniError> {
+pub(crate) fn router(inner: &UniInner) -> Result<TriggerRouter, uni_common::UniError> {
     Ok(TriggerRouter::from_registry_with_queue(
         &inner.plugin_registry,
         Some(Arc::clone(&inner.defer_queue)),
@@ -242,6 +242,8 @@ async fn announce(inner: &Arc<UniInner>, load: VisibleLoad) -> Option<AnnouncedL
         causal_version: load.write_version,
         mutations: None,
         mutations_failed: false,
+        // Rows are captured (streamed) only when CDC opened a stream for them.
+        cdc_active: cdc_stream.is_some(),
         mutation_stream: cdc_stream.as_ref().map(|s| s.id()),
         dropped_before: 0,
     };
@@ -372,7 +374,7 @@ impl AnnouncedLoad {
 /// The write-enabled host a declared trigger's after-commit action runs
 /// against, as a transaction commit builds it (WS-A): the load is in storage,
 /// and the action's own writes land in main L0.
-fn trigger_host(
+pub(crate) fn trigger_host(
     inner: &UniInner,
     writer: &Arc<uni_store::Writer>,
 ) -> Arc<dyn uni_plugin::traits::procedure::ProcedureHost> {

@@ -101,7 +101,7 @@ A model that scores assets for failure likelihood, invoked inside a rule:
       YIELD KEY a, failure_likelihood(a.score) AS risk
     "#;
     let result = session.locy_with(program).with_config(config).run().await?;
-    println!("{:?}", result.derived().get("at_risk"));
+    println!("{:?}", result.derived_rule("at_risk").await?);
     # Ok(())
     # }
     ```

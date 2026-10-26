@@ -42,7 +42,7 @@ pub use config::{ClassifierRegistry, ConfigError, LocyConfig};
 pub use dependency_dnf::{BaseRv, BaseRvSet, DependencyDnf};
 pub use errors::LocyError;
 #[doc(inline)]
-pub use magic::{GoalDirected, GoalDirectedReport, rewrite_goal_directed};
+pub use magic::{AutoFallback, GoalDirected, GoalDirectedReport, rewrite_goal_directed};
 pub use neural::{
     CalibratedClassifier, CandleLinearClassifier, ClassifierError, ClassifierResult, ClassifyInput,
     FeatureValue, MockClassifier, ModelInvocationCache, NeuralClassifier, NeuralProvenanceRecord,
@@ -50,8 +50,9 @@ pub use neural::{
 };
 pub use result::{
     AbductionResult, CalibrationResult, CommandResult, ConfidenceBand, ConfidenceSource,
-    DerivationNode, DerivedEdge, DerivedFactSet, FactRow, LocyResult, LocyStats, Modification,
-    NeuralProvenance, RuleFacts, ValidatedModification, ValidationResult,
+    DerivationNode, DerivedEdge, DerivedFactSet, DerivedMaterializer, FactRow, LazyDerived,
+    LocyResult, LocyStats, Materialized, Modification, NeuralProvenance, RuleFacts,
+    ValidatedModification, ValidationResult,
 };
 pub use semiring::merge_top_k_dispatch_owned as merge_top_k_runtime;
 pub use semiring::{
@@ -60,5 +61,6 @@ pub use semiring::{
 pub use top_k_proofs::{NeuralCallId, Proof, PruneNotice, TopKProofs, TopKTag};
 pub use types::{
     CompiledCalibrate, CompiledCommand, CompiledInputBinding, CompiledModel, CompiledProgram,
-    CompiledValidate, ModelInvocation, RuntimeWarning, RuntimeWarningCode, SemiringKind,
+    CompiledValidate, DependencyResolution, FEATURE_COL_PREFIX, InferenceMode, ModelInvocation,
+    ProbabilityDiagnostic, RuntimeWarning, RuntimeWarningCode, SemiringKind, feature_column_name,
 };

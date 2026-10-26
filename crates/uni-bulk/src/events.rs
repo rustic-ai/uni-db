@@ -32,7 +32,6 @@ use uni_common::Properties;
 use uni_common::core::id::{Eid, Vid};
 use uni_plugin_host::triggers::{CreatedEdge, CreatedVertex, MutationEvents};
 use uni_store::backend::table_names;
-use uni_store::backend::traits::RecordBatchStream;
 use uni_store::backend::types::{CmpOp, FilterExpr, Scalar, ScanRequest};
 use uni_store::storage::manager::StorageManager;
 
@@ -136,9 +135,93 @@ pub struct LoadEventReader {
     phase: Phase,
     has_vertices: bool,
     has_edges: bool,
-    stream: Option<RecordBatchStream>,
+    stream: Option<ScanFeed>,
+    /// Whether `stream` has yielded a batch: its reads are under way.
+    stream_started: bool,
     /// A scanned batch not yet fully emitted, and the offset of its next row.
     pending: Option<(RecordBatch, usize)>,
+}
+
+/// What a [`ScanFeed`]'s scan task hands its reader.
+enum ScanMsg {
+    Batch(RecordBatch),
+    Failed(anyhow::Error),
+    End,
+}
+
+/// A table scan driven on the process-wide IO runtime, its batches handed
+/// over a bounded channel.
+///
+/// Lance spawns a scan's fragment reads on the runtime that polls the scan,
+/// and unwraps their `JoinError` (lance 11, `io/exec/filtered_read.rs`): a
+/// scan polled once the runtime that spawned its reads has shut down panics
+/// with `JoinError::Cancelled` instead of ending. A load's events are read
+/// back from a detached task, on whatever runtime ran the load's `commit`,
+/// which the caller may drop at any point. Driven here, the scan's reads live
+/// on a runtime that is never shut down (`uni_store::runtime::io_runtime`),
+/// whatever happens to the reader's.
+///
+/// Dropping the feed aborts the scan task.
+pub(crate) struct ScanFeed {
+    rx: tokio::sync::mpsc::Receiver<ScanMsg>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// Batches a [`ScanFeed`] reads ahead of its reader.
+const SCAN_FEED_DEPTH: usize = 2;
+
+impl ScanFeed {
+    /// Start `request` on the IO runtime.
+    ///
+    /// # Errors
+    ///
+    /// The IO runtime cannot be built.
+    pub(crate) fn open(storage: Arc<StorageManager>, request: ScanRequest) -> Result<Self> {
+        let (tx, rx) = tokio::sync::mpsc::channel(SCAN_FEED_DEPTH);
+        let task = uni_store::runtime::io_runtime::io_runtime()?.spawn(async move {
+            let mut stream = match storage.backend().scan_stream(request).await {
+                Ok(stream) => stream,
+                Err(e) => {
+                    let _ = tx.send(ScanMsg::Failed(e)).await;
+                    return;
+                }
+            };
+            while let Some(batch) = stream.next().await {
+                let msg = match batch {
+                    Ok(batch) => ScanMsg::Batch(batch),
+                    Err(e) => {
+                        let _ = tx.send(ScanMsg::Failed(e)).await;
+                        return;
+                    }
+                };
+                if tx.send(msg).await.is_err() {
+                    // The reader is gone; stop scanning.
+                    return;
+                }
+            }
+            let _ = tx.send(ScanMsg::End).await;
+        });
+        Ok(Self { rx, task })
+    }
+
+    /// The next batch, `None` at the end of the scan.
+    pub(crate) async fn next(&mut self) -> Option<Result<RecordBatch>> {
+        match self.rx.recv().await {
+            Some(ScanMsg::Batch(batch)) => Some(Ok(batch)),
+            Some(ScanMsg::Failed(e)) => Some(Err(e)),
+            Some(ScanMsg::End) => None,
+            // The task ended without saying so: it panicked or was aborted.
+            None => Some(Err(anyhow!(
+                "bulk load events: the read-back scan stopped before its end"
+            ))),
+        }
+    }
+}
+
+impl Drop for ScanFeed {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 impl LoadEventReader {
@@ -157,6 +240,7 @@ impl LoadEventReader {
             has_vertices,
             has_edges,
             stream: None,
+            stream_started: false,
             pending: None,
         }
     }
@@ -192,8 +276,15 @@ impl LoadEventReader {
                 return Ok(Some(events));
             }
             if let Some(stream) = self.stream.as_mut() {
+                if self.stream_started {
+                    // Test seam: the scan has yielded a batch, so its fragment
+                    // reads are in flight, and the next is about to be awaited.
+                    // No-op unless built with `--features failpoints`.
+                    fail::fail_point!("bulk::events::mid-scan");
+                }
                 match stream.next().await {
                     Some(batch) => {
+                        self.stream_started = true;
                         let batch = batch?;
                         if batch.num_rows() > 0 {
                             self.pending = Some((batch, 0));
@@ -202,6 +293,7 @@ impl LoadEventReader {
                     }
                     None => {
                         self.stream = None;
+                        self.stream_started = false;
                         self.phase = match self.phase {
                             Phase::Vertices => Phase::Edges,
                             Phase::Edges | Phase::Done => Phase::Done,
@@ -236,7 +328,7 @@ impl LoadEventReader {
                     op: CmpOp::Eq,
                     value: Scalar::UInt(self.write_version),
                 });
-            self.stream = Some(self.storage.backend().scan_stream(request).await?);
+            self.stream = Some(ScanFeed::open(Arc::clone(&self.storage), request)?);
         }
     }
 }

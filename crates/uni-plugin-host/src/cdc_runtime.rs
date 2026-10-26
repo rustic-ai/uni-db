@@ -80,9 +80,17 @@
 //! the broadcaster pre-materializes the RecordBatch on `CommitNotification`
 //! when at least one `CdcOutputProvider` is registered (FU-4), using the
 //! same machinery as `crate::triggers::MutationEvents`. An empty batch
-//! (matching the canonical event-row schema) is delivered only as a
-//! fallback when a commit carried zero rows or a provider registered
-//! mid-commit (picked up on the next commit).
+//! (matching the canonical event-row schema) is delivered when a commit
+//! carried zero rows.
+//!
+//! A commit that decided not to capture rows, because no CDC output was
+//! registered ([`CommitNotification::cdc_active`] is `false`), carries none
+//! for anyone. A provider registered after that decision, but before the
+//! runtime reaches the notification, starts after it: it is not delivered
+//! the commit and does not checkpoint it, so its first checkpoint is the first
+//! commit it actually received. A stream that was already running when such
+//! a commit was decided (its provider was unregistered at the time) halts:
+//! the commit's rows are a hole in its feed.
 
 // Rust guideline compliant
 
@@ -772,9 +780,10 @@ impl CdcRuntime {
     }
 
     /// Discover any providers registered after `Uni::build` (e.g.,
-    /// via `Uni::add_plugin`) and start a stream for each one. Called
-    /// at the start of every `deliver_commit` so dynamic
-    /// registrations don't miss any commits past the first.
+    /// via `Uni::add_plugin`) and start a stream for each one, appended to
+    /// `streams`. Called at the start of every `deliver_commit`, so a new
+    /// provider's feed begins at the first commit announced after it
+    /// registered.
     fn discover_new_providers(&self, streams: &mut Vec<ActiveStream>) {
         let snapshot = self.registry.cdc_outputs_snapshot();
         for (name, provider) in snapshot {
@@ -796,16 +805,44 @@ impl CdcRuntime {
     /// Runs on the blocking pool (see [`Self::off_executor`]): every call in
     /// here into a stream is a synchronous plugin call.
     fn deliver_commit(&self, streams: &mut Vec<ActiveStream>, notif: &CommitNotification) {
+        let first_new = streams.len();
         self.discover_new_providers(streams);
+        // The commit decided not to capture its rows: no CDC output was
+        // registered then. A provider started just now registered after that
+        // decision, so this commit is not part of its feed -- delivering it
+        // the empty batch below would let it checkpoint past rows it never
+        // received. It starts after this commit instead. A stream that was
+        // already running should have received the rows, and halts.
+        if !notif.cdc_active {
+            for (index, active) in streams.iter_mut().enumerate() {
+                if index >= first_new {
+                    tracing::info!(
+                        provider = %active.name,
+                        version = notif.version,
+                        "CdcRuntime: provider registered after this commit was announced \
+                         without CDC rows; its feed starts after it",
+                    );
+                    continue;
+                }
+                if active.halted {
+                    continue;
+                }
+                tracing::error!(
+                    provider = %active.name,
+                    version = notif.version,
+                    "CdcRuntime: a commit was announced without its CDC rows while this stream \
+                     was running (its provider was not registered at the commit); halting \
+                     rather than checkpointing past the gap",
+                );
+                halt(active, "commit announced without its CDC rows");
+            }
+            return;
+        }
         // FU-4: the broadcaster pre-materializes the mutation RecordBatch
         // when at least one `CdcOutputProvider` is registered (see
-        // `Transaction::commit`). `None` here means either there were
-        // zero rows or the broadcaster ran without CDC subscribers
-        // (race: provider registered between the snapshot and now —
-        // discover_new_providers above picks them up for the *next*
-        // commit). Fall back to an empty batch matching the canonical
-        // event-row schema so downstream filters see consistent
-        // column types.
+        // `Transaction::commit`), so `None` here means zero rows. Fall back
+        // to an empty batch matching the canonical event-row schema so
+        // downstream filters see consistent column types.
         // #233 Tier 1: a commit whose mutations could not be materialized must
         // not be delivered as an empty batch and checkpointed past — that is a
         // silent feed hole with the LSN range advanced over it. Halt instead,
@@ -1089,6 +1126,7 @@ mod tests {
             causal_version: version - 1,
             mutations: None,
             mutations_failed: false,
+            cdc_active: true,
             mutation_stream: None,
             dropped_before: 0,
         })
@@ -1555,6 +1593,62 @@ mod tests {
                 "deliver 7..8 rows=0",
                 "checkpoint 8",
             ]
+        );
+        shutdown.shutdown_async().await.unwrap();
+    }
+
+    /// A commit announced without CDC rows (no output was registered when it
+    /// decided) is not delivered to, nor checkpointed by, a provider that
+    /// registers before the runtime reaches it: that provider's feed starts at
+    /// the next commit, the first it actually receives.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_provider_registered_after_a_commit_without_cdc_rows_starts_after_it() {
+        let log: Log = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let registry = Arc::new(PluginRegistry::new());
+        let (tx, rx) = broadcast::channel(16);
+        let shutdown = ShutdownHandle::new(Duration::from_secs(10));
+        let runtime = CdcRuntime::spawn_with_sidecar(&registry, rx, None, &shutdown);
+        // Registered after the commit below decided not to capture rows, and
+        // before the runtime receives its notification.
+        let caps = CapabilitySet::from_iter_of([Capability::Cdc]);
+        let mut r = PluginRegistrar::new(PluginId::new("late"), &caps, &registry);
+        r.cdc_output(Arc::new(Recorder {
+            log: Arc::clone(&log),
+        }))
+        .unwrap();
+        r.commit_to_registry().unwrap();
+        let mut uncaptured = (*commit(5)).clone();
+        uncaptured.cdc_active = false;
+        tx.send(Arc::new(uncaptured)).unwrap();
+        tx.send(commit(6)).unwrap();
+        wait_for(&log, 2).await;
+        assert_eq!(*log.lock(), ["deliver 5..6 rows=0", "checkpoint 6"]);
+        assert_eq!(runtime.halted_stream_count(), 0);
+        shutdown.shutdown_async().await.unwrap();
+    }
+
+    /// A stream already running when a commit was announced without CDC rows
+    /// halts instead of checkpointing past the rows it missed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_running_stream_halts_on_a_commit_without_cdc_rows() {
+        let (runtime, tx, log, shutdown) = recorder_runtime();
+        let mut uncaptured = (*commit(5)).clone();
+        uncaptured.cdc_active = false;
+        tx.send(Arc::new(uncaptured)).unwrap();
+        tx.send(commit(6)).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while runtime.halted_stream_count() == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the stream did not halt");
+        // Give the driver the chance to (wrongly) deliver commit 6.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            log.lock().is_empty(),
+            "delivered past the gap: {:?}",
+            log.lock()
         );
         shutdown.shutdown_async().await.unwrap();
     }

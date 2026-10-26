@@ -100,6 +100,7 @@ impl<'a> InnerLocyBuilder<'a> {
     pub async fn run(self) -> Result<LocyResult> {
         let engine = crate::api::impl_locy::LocyEngine {
             counters: std::sync::Arc::new(uni_store::QueryCounters::new()),
+            statement_memory: Default::default(),
             db: self.db,
             tx_l0_override: None,
             locy_l0: None,
@@ -112,6 +113,8 @@ impl<'a> InnerLocyBuilder<'a> {
             max_memory: None,
             // Nor a principal: it is authorized as the anonymous one.
             principal: None,
+            // No handle either: `Auto` evaluates in full here.
+            handle: None,
         };
         engine
             .evaluate_with_config(&self.program, &self.config)
@@ -390,6 +393,7 @@ impl<'a> TxLocyBuilder<'a> {
     pub async fn run(self) -> Result<LocyResult> {
         let engine = crate::api::impl_locy::LocyEngine {
             counters: std::sync::Arc::new(uni_store::QueryCounters::new()),
+            statement_memory: Default::default(),
             db: &self.tx.db,
             tx_l0_override: Some(self.tx.tx_l0.clone()),
             locy_l0: Some(self.tx.tx_l0.clone()),
@@ -398,6 +402,8 @@ impl<'a> TxLocyBuilder<'a> {
             cancel: self.tx.cancel_scope(self.cancellation_token.clone()),
             max_memory: self.max_memory,
             principal: self.tx.principal.clone(),
+            // A transaction's state cannot be held past the call.
+            handle: None,
         };
         self.tx
             .with_locy_scope(engine.evaluate_with_config(&self.program, &self.config))
@@ -409,6 +415,7 @@ impl<'a> TxLocyBuilder<'a> {
     pub async fn profile(self) -> Result<(LocyResult, crate::api::locy_result::LocyProfileOutput)> {
         let engine = crate::api::impl_locy::LocyEngine {
             counters: std::sync::Arc::new(uni_store::QueryCounters::new()),
+            statement_memory: Default::default(),
             db: &self.tx.db,
             tx_l0_override: Some(self.tx.tx_l0.clone()),
             locy_l0: Some(self.tx.tx_l0.clone()),
@@ -417,6 +424,8 @@ impl<'a> TxLocyBuilder<'a> {
             cancel: self.tx.cancel_scope(self.cancellation_token.clone()),
             max_memory: self.max_memory,
             principal: self.tx.principal.clone(),
+            // A transaction's state cannot be held past the call.
+            handle: None,
         };
         let explain = crate::api::locy_result::LocyExplainOutput::from_compiled(
             &engine.compile_only(&self.program)?,

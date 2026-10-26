@@ -133,7 +133,7 @@ async fn command_noninterference_fold() -> Result<()> {
         "CREATE RULE tot AS MATCH (x:N)-[e:E]->(y:N) FOLD s = SUM(e.w) YIELD KEY x, s\n",
         "tot",
         "QUERY tot RETURN x.name AS x, s",
-        &["s=12.0 x=a"],
+        &["s=12 x=a"],
     )
     .await
 }
@@ -212,7 +212,7 @@ async fn command_noninterference_inside_assume() -> Result<()> {
     let query = "QUERY tot RETURN x.name AS x, s";
     let assume = |body: &str| format!("ASSUME {{ CREATE (:N {{name: 'z'}}) }} THEN {{ {body} }}");
     let baseline = last_query(FAN, &format!("{rules}{}", assume(query))).await?;
-    assert_eq!(baseline, ["s=12.0 x=a"], "control");
+    assert_eq!(baseline, ["s=12 x=a"], "control");
     for command in commands("tot") {
         let after = last_query(FAN, &format!("{rules}{command}\n{}", assume(query))).await?;
         assert_eq!(

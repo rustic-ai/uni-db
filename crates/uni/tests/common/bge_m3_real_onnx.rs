@@ -57,7 +57,10 @@ fn spec() -> ModelAliasSpec {
         provider_id: "local/onnx".to_string(),
         model_id: "aapot/bge-m3-onnx".to_string(),
         revision: None,
-        warmup: WarmupPolicy::Lazy,
+        // Eager: the ~2.1 GB download and load happen while the runtime
+        // builds, not inside the first auto-embedding write, where they ran
+        // into the 30 s query timeout on a cold cache (measured 2026-10-22).
+        warmup: WarmupPolicy::Eager,
         required: false,
         timeout: None,
         load_timeout: None,

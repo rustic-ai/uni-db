@@ -116,9 +116,13 @@ impl ResultNormalizer {
     }
 
     /// Extract a u64 ID from a Value (Int or parseable String).
+    ///
+    /// An integer is read as id bits (`Value::as_id_bits`): an ephemeral
+    /// endpoint (`uni.create.vNode`) is negative, and refusing it turned a
+    /// `uni.create.vEdge` between virtual nodes into an error.
     fn value_to_u64(value: &Value) -> Option<u64> {
         match value {
-            Value::Int(i) => u64::try_from(*i).ok(),
+            Value::Int(_) => value.as_id_bits(),
             Value::String(s) => s.parse().ok(),
             _ => None,
         }

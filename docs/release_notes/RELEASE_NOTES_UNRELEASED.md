@@ -7,7 +7,52 @@ the version it ships in.
 
 ## ⚠️ Behaviour and API changes
 
+**Identity expressions use signed IDs consistently.** A virtual node's
+`id(node)` returned a negative integer, but `id(node) < 0` returned false
+because the comparison used its unsigned storage bits. Node and relationship
+IDs now use the same signed representation inside expressions, through WITH,
+and after collecting and unwinding entities. `elementId` uses that signed
+integer's string representation too. Ordinary unsigned property values keep
+their existing numeric conversion behavior.
+
+**Schemaless full-text searches use BM25.** `uni.fts.query` previously ranked
+an undeclared text property by word overlap, giving every single-word match
+the same `0.5` score. It now computes BM25 over the visible documents with the
+same tokenizer as a declared property without an index. Buffered updates,
+deletes and replacements are applied before computing statistics, so flushing
+does not change the scores. Existing schemaless filter restrictions remain.
+
+**Procedure metrics include inner queries.** A declared procedure could
+return rows while reporting zero scanned rows. Its inner queries, including
+nested and per-row calls, now share the statement's counters. Hosts created
+by the simple executor and graph projection resolver also inherit the
+statement's memory pool, so their inner queries use its configured limit.
+
 ### Results that change
+
+**A `QUERY` that pins a node KEY derives only what its goal reaches, by
+default (#307).** `QUERY supertype WHERE c.sid = 'C15999'` derived every
+concept's closure before filtering it (1,552 ms against 53 ms goal-directed at
+16k concepts, with identical rows). `LocyConfig::goal_directed` has a new
+mode, `GoalDirected::Auto`, and it is the default (it was `Off`): qualifying
+top-level `QUERY` commands are answered by the magic-sets rewrite, and a rule
+only such goals needed is not evaluated with the program but derived on the
+first read of the result's derived facts, against the snapshot the
+evaluation read, so those facts are what `Off` gives. Programs with a write
+command or `EXPLAIN RULE`, and every evaluation inside a transaction, are
+evaluated in full. Visible differences: `stats.derived_nodes` and `profile()`
+count the work actually done; the first read of the derived facts can take
+time and fail (a timeout, a closed database), caching nothing on failure;
+`warnings()` (Python: `warnings`) includes the warnings deriving such rules
+raised once they were derived, while the `warnings` field keeps the
+evaluation's own; `stats.derived_nodes` keeps counting what the evaluation
+derived; a session evaluation that left rules out reads a pinned snapshot
+throughout, and holds it until the facts are read or the result dropped; a
+rule left out of an evaluation cut short is listed in
+`incomplete.skipped_rules`. `GoalDirected::Off` restores the old behaviour.
+In `On` and `Auto` alike, an interrupted evaluation's diagnostics now name the
+program's rules: a generated copy or magic rule (such as
+`__locy_gdm1_reachable_bf`) is reported as the rule it was generated from.
 
 **Commits are announced in commit order, with their own version.** A commit's
 version was re-read, and its notification sent, after the writer's commit lock
@@ -1586,6 +1631,27 @@ its own, other sessions see it at once, rolling the transaction back keeps it,
 and the transaction's own reads do not see it. The rustdoc now says so.
 
 ### API changes
+
+**`LocyResult` derived facts are read through async accessors (#307,
+breaking).** The public field `uni_locy::LocyResult::derived` is gone (also
+through `uni_db::locy::LocyResult`'s `Deref`), and so is the synchronous
+`derived_facts(rule)`. Use `result.derived_rules().await?` (every rule, a
+`&RuleFacts`) or `result.derived_rule(name).await?` (`Option<&Vec<FactRow>>`):
+they are async and fallible because a rule the default `GoalDirected::Auto`
+left out is derived on that first read. `evaluated_rules()` is the synchronous
+view of what the evaluation itself derived, `lazily_derived_rules()` names the
+rest, `lazy_derived()` exposes the deferred derivation
+(`uni_locy::LazyDerived`, `DerivedMaterializer`). A `LocyResult` is built with
+`LocyResult::with_derived(..)` (and `with_lazy_derived`) instead of a struct
+literal. `GoalDirected` has the new variant `Auto` (the `Default`); an
+exhaustive `match` must handle it. New: `uni_locy::magic::{AutoFallback,
+auto_fallback, materialization_program}`,
+`GoalDirectedReport::generated_rule_origins`, `uni_locy::Materialized`; `uni_db::locy` re-exports
+`FactRow`, `RuleFacts` and `LazyDerived`. Python: `LocyResult.derived` keeps
+its shape (a dict) and becomes a getter that derives left-out rules on first
+access, blocking; `await result.derived_async()` is the non-blocking form for
+async code; `goal_directed` accepts `"auto"`, which `LocyConfig.goal_directed`
+reports by default.
 
 **Commit events** (`uni-store`, `uni-plugin-host`, `uni-bulk`, `uni-common`).
 `CommitNotification` has a new field, `mutation_stream: Option<u64>` (`None`

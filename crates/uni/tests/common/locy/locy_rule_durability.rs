@@ -71,7 +71,7 @@ async fn rules_survive_close_and_reopen() -> Result<()> {
         // And it remains invocable via a goal query.
         let result = db.session().locy("QUERY reach WHERE a.name = 'A'").await?;
         assert!(
-            result.derived.contains_key("reach"),
+            result.derived_rules().await.unwrap().contains_key("reach"),
             "QUERY reach should resolve after restart"
         );
     }
@@ -131,7 +131,7 @@ async fn reregister_same_name_supersedes_prior_source() -> Result<()> {
     // The rebuilt registry is functional, and removal is unambiguous because
     // the superseded source was dropped.
     let result = db.session().locy("QUERY reach WHERE a.name = 'A'").await?;
-    assert!(result.derived.contains_key("reach"));
+    assert!(result.derived_rules().await.unwrap().contains_key("reach"));
     assert!(db.rules().remove("reach").await?);
     assert_eq!(
         db.rules().count(),

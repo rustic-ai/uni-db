@@ -1800,6 +1800,10 @@ impl<'a> QueryBuilder<'a> {
     }
 
     /// Profile the query execution, returning results with profiling output.
+    ///
+    /// Runs under the same limits as [`Self::fetch_all`]: `timeout`,
+    /// `max_memory`, the cancellation token and the session's own
+    /// cancellation scope all apply.
     pub async fn profile(self) -> Result<(QueryResult, ProfileOutput)> {
         let params = self.session.merge_params(self.params);
         self.session.run_query_guards(&self.cypher, &params)?;
@@ -1808,9 +1812,12 @@ impl<'a> QueryBuilder<'a> {
         uni_query::scoped_with_session_context(
             session_pr,
             session_principal,
-            self.session
-                .db
-                .profile_internal(&self.cypher, params, self.max_memory),
+            self.session.db.profile_internal(
+                &self.cypher,
+                params,
+                self.session.cancel_scope(self.cancellation_token),
+                crate::api::impl_query::QueryOverrides::new(self.timeout, self.max_memory),
+            ),
         )
         .await
     }

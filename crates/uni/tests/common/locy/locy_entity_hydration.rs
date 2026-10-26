@@ -117,7 +117,9 @@ async fn locy_entity_hydration_unreturned_rule_is_hydrated_once() -> Result<()> 
         // The contract the optimisation must keep: the unreturned rule is in
         // the result, every fact hydrated to a node of the right vertex.
         let facts = big
-            .derived_facts("allv")
+            .derived_rule("allv")
+            .await
+            .unwrap()
             .ok_or_else(|| anyhow::anyhow!("allv missing from derived"))?;
         ensure!(
             facts.len() == n,
@@ -287,13 +289,15 @@ async fn assert_matches_cypher(session: &Session, entity: &Value, context: &str)
 }
 
 /// Every KEY column of every rule holds a hydrated entity, never a raw ID.
-fn assert_keys_hydrated(
+async fn assert_keys_hydrated(
     result: &uni_db::locy::LocyResult,
     rule_keys: &[(&str, &[&str])],
 ) -> Result<()> {
     for (rule, keys) in rule_keys {
         let facts = result
-            .derived_facts(rule)
+            .derived_rule(rule)
+            .await
+            .unwrap()
             .ok_or_else(|| anyhow::anyhow!("rule {rule} missing from derived"))?;
         ensure!(
             !facts.is_empty(),
@@ -407,7 +411,7 @@ async fn assert_result_matches_cypher(
     context: &str,
 ) -> Result<usize> {
     let mut entities = Vec::new();
-    for rows in result.derived.values() {
+    for rows in result.derived_rules().await.unwrap().values() {
         rows_entities(rows, &mut entities);
     }
     for cr in &result.command_results {
@@ -445,7 +449,7 @@ async fn locy_entity_hydration_values_match_cypher() -> Result<()> {
         "warnings: {:?}",
         result.warnings()
     );
-    assert_keys_hydrated(&result, RICH_KEYS)?;
+    assert_keys_hydrated(&result, RICH_KEYS).await?;
     let checked = assert_result_matches_cypher(&session, &result, "session").await?;
     ensure!(checked > 20, "only {checked} entities checked");
 
@@ -460,10 +464,11 @@ async fn locy_entity_hydration_values_match_cypher() -> Result<()> {
         "warnings: {:?}",
         result.warnings()
     );
-    assert_keys_hydrated(&result, RICH_KEYS)?;
+    assert_keys_hydrated(&result, RICH_KEYS).await?;
+    let derived = result.derived_rules().await?;
     let names = |rule: &str, key: &str| -> Vec<String> {
-        result
-            .derived_facts(rule)
+        derived
+            .get(rule)
             .into_iter()
             .flatten()
             .filter_map(|row| match row.get(key) {
@@ -484,7 +489,7 @@ async fn locy_entity_hydration_values_match_cypher() -> Result<()> {
         "deleted vertex resurrected"
     );
     let mut entities = Vec::new();
-    for rows in result.derived.values() {
+    for rows in result.derived_rules().await.unwrap().values() {
         rows_entities(rows, &mut entities);
     }
     for e in &entities {
@@ -536,11 +541,13 @@ async fn locy_entity_hydration_values_match_cypher() -> Result<()> {
         "warnings: {:?}",
         result.warnings()
     );
-    assert_keys_hydrated(&result, RICH_KEYS)?;
+    assert_keys_hydrated(&result, RICH_KEYS).await?;
     let checked = assert_result_matches_cypher(&forked, &result, "fork").await?;
     ensure!(checked > 20, "only {checked} entities checked on the fork");
     let fork_b = result
-        .derived_facts("pn")
+        .derived_rule("pn")
+        .await
+        .unwrap()
         .into_iter()
         .flatten()
         .find_map(|row| match row.get("p") {
@@ -579,7 +586,7 @@ async fn locy_entity_hydration_commands_keep_hydrated_values() -> Result<()> {
         .with_config(config())
         .run()
         .await?;
-    assert_keys_hydrated(&result, RICH_KEYS)?;
+    assert_keys_hydrated(&result, RICH_KEYS).await?;
     let rows = assume_query_rows(&result)?;
     let mut hyp = None;
     for row in &rows {
@@ -605,7 +612,7 @@ async fn locy_entity_hydration_commands_keep_hydrated_values() -> Result<()> {
     );
     // Everything except the hypothetical node is a real entity Cypher can read.
     let mut entities = Vec::new();
-    for rows in result.derived.values() {
+    for rows in result.derived_rules().await.unwrap().values() {
         rows_entities(rows, &mut entities);
     }
     rows_entities(
@@ -627,7 +634,7 @@ async fn locy_entity_hydration_commands_keep_hydrated_values() -> Result<()> {
         .with_config(config())
         .run()
         .await?;
-    assert_keys_hydrated(&result, RICH_KEYS)?;
+    assert_keys_hydrated(&result, RICH_KEYS).await?;
     ensure!(
         result
             .command_results
@@ -652,7 +659,7 @@ async fn locy_entity_hydration_commands_keep_hydrated_values() -> Result<()> {
         "warnings: {:?}",
         result.warnings()
     );
-    assert_keys_hydrated(&result, RICH_KEYS)?;
+    assert_keys_hydrated(&result, RICH_KEYS).await?;
     ensure!(
         result
             .command_results
@@ -718,7 +725,9 @@ async fn locy_entity_hydration_edges_read_only_the_listed_edges() -> Result<()> 
                 let (nodes, _) = run(&db, &rel_program(seed_only, false)).await?;
                 let (edges, _) = run(&db, &rel_program(seed_only, true)).await?;
                 let rows = edges
-                    .derived_facts("rl")
+                    .derived_rule("rl")
+                    .await
+                    .unwrap()
                     .ok_or_else(|| anyhow::anyhow!("rl missing"))?;
                 ensure!(rows.len() == facts, "rl derived {} facts", rows.len());
                 for row in rows {
@@ -857,9 +866,11 @@ const EDGE_RULES: &str = "\
 CREATE RULE er AS MATCH (x:P)-[r]->(y:P) YIELD KEY x, KEY r, KEY y \n\
 QUERY er RETURN x, r, y";
 
-fn edges_of(result: &uni_db::locy::LocyResult) -> Result<Vec<uni_db::Edge>> {
+async fn edges_of(result: &uni_db::locy::LocyResult) -> Result<Vec<uni_db::Edge>> {
     let facts = result
-        .derived_facts("er")
+        .derived_rule("er")
+        .await
+        .unwrap()
         .ok_or_else(|| anyhow::anyhow!("er missing"))?;
     facts
         .iter()
@@ -907,7 +918,7 @@ async fn locy_entity_hydration_edges_match_cypher() -> Result<()> {
         "warnings: {:?}",
         result.warnings()
     );
-    let hydrated = sorted(edges_of(&result)?);
+    let hydrated = sorted(edges_of(&result).await?);
     ensure!(hydrated.len() == 8, "er derived {} edges", hydrated.len());
     let cypher = sorted(cypher_edges(session.query(ALL).await?.rows())?);
     ensure!(
@@ -950,7 +961,7 @@ async fn locy_entity_hydration_edges_match_cypher() -> Result<()> {
         "tx warnings: {:?}",
         result.warnings()
     );
-    let hydrated = sorted(edges_of(&result)?);
+    let hydrated = sorted(edges_of(&result).await?);
     let cypher = sorted(cypher_edges(tx.query(ALL).await?.rows())?);
     ensure!(
         hydrated.len() == 7,
@@ -988,7 +999,7 @@ async fn locy_entity_hydration_edges_match_cypher() -> Result<()> {
         db.flush().await?;
     }
     let result = tx.locy_with(EDGE_RULES).with_config(config()).run().await?;
-    let hydrated = sorted(edges_of(&result)?);
+    let hydrated = sorted(edges_of(&result).await?);
     let cypher = sorted(cypher_edges(tx.query(ALL).await?.rows())?);
     ensure!(
         hydrated == cypher,
@@ -1020,7 +1031,7 @@ async fn locy_entity_hydration_edges_match_cypher() -> Result<()> {
         "fork warnings: {:?}",
         result.warnings()
     );
-    let hydrated = sorted(edges_of(&result)?);
+    let hydrated = sorted(edges_of(&result).await?);
     let cypher = sorted(cypher_edges(forked.query(ALL).await?.rows())?);
     ensure!(
         hydrated == cypher,
@@ -1082,7 +1093,7 @@ async fn locy_entity_hydration_edge_read_conflicts() -> Result<()> {
     edge_graph(&db).await?;
     let tx = db.session().tx().await?;
     let result = tx.locy_with(EDGE_RULES).with_config(config()).run().await?;
-    ensure!(edges_of(&result)?.len() == 8);
+    ensure!(edges_of(&result).await?.len() == 8);
     {
         let other = db.session().tx().await?;
         other

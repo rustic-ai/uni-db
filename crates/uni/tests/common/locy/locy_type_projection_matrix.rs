@@ -246,7 +246,7 @@ async fn matrix_s4_schemaless_key_round_trips_typed_in_derived() -> Result<()> {
         let program = "CREATE RULE r AS MATCH (n:M) YIELD KEY n.val AS v";
         let result = db.session().locy(program).await?;
         let empty = vec![];
-        let derived = result.derived_facts("r").unwrap_or(&empty);
+        let derived = result.derived_rule("r").await.unwrap().unwrap_or(&empty);
         assert_column_non_null(derived, "v");
         assert_column_typed(derived, "v", case.tag);
     }
@@ -265,7 +265,9 @@ async fn matrix_s5_schemaless_derived_and_query_agree() -> Result<()> {
         let result = db.session().locy(program).await?;
         let empty = vec![];
         let derived = result
-            .derived_facts("r")
+            .derived_rule("r")
+            .await
+            .unwrap()
             .unwrap_or(&empty)
             .first()
             .and_then(|row| row.get("v").cloned());
@@ -292,7 +294,7 @@ async fn matrix_s6_schemad_key_round_trips_typed_in_derived() -> Result<()> {
         let program = "CREATE RULE r AS MATCH (n:M) YIELD KEY n.val AS v";
         let result = db.session().locy(program).await?;
         let empty = vec![];
-        let derived = result.derived_facts("r").unwrap_or(&empty);
+        let derived = result.derived_rule("r").await.unwrap().unwrap_or(&empty);
         assert_column_non_null(derived, "v");
         assert_column_typed(derived, "v", case.tag);
     }
@@ -336,7 +338,7 @@ async fn matrix_s7_large_utf8_expressions_round_trip_on_both_surfaces() -> Resul
         let result = db.session().locy(&program).await?;
         let empty = vec![];
 
-        let derived = result.derived_facts("r").unwrap_or(&empty);
+        let derived = result.derived_rule("r").await.unwrap().unwrap_or(&empty);
         assert_column_non_null(derived, "v");
         assert_column_typed(derived, "v", TypeTag::Str);
 

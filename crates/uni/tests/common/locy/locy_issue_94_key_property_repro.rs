@@ -59,7 +59,11 @@ async fn variant_a_property_key_with_colliding_alias() -> Result<()> {
     "#;
     let result = session.locy(program).await?;
     let empty = vec![];
-    let facts = result.derived_facts("reachable").unwrap_or(&empty);
+    let facts = result
+        .derived_rule("reachable")
+        .await
+        .unwrap()
+        .unwrap_or(&empty);
     assert_eq!(
         int_pairs(facts, "a", "b"),
         expected_pairs(),
@@ -82,7 +86,11 @@ async fn variant_a2_property_key_noncolliding_alias_preserves_int() -> Result<()
     "#;
     let result = session.locy(program).await?;
     let empty = vec![];
-    let facts = result.derived_facts("reachable").unwrap_or(&empty);
+    let facts = result
+        .derived_rule("reachable")
+        .await
+        .unwrap()
+        .unwrap_or(&empty);
     assert!(!facts.is_empty(), "expected derived facts");
     for row in facts {
         assert!(
@@ -110,7 +118,11 @@ async fn variant_b_bare_property_keys_decollide() -> Result<()> {
     "#;
     let result = session.locy(program).await?;
     let empty = vec![];
-    let facts = result.derived_facts("reachable").unwrap_or(&empty);
+    let facts = result
+        .derived_rule("reachable")
+        .await
+        .unwrap()
+        .unwrap_or(&empty);
     assert!(!facts.is_empty(), "expected derived facts");
     for row in facts {
         assert!(

@@ -94,7 +94,7 @@ async fn observe_locy(session: &Session, program: &str) -> anyhow::Result<LocyOb
         .await
         .map_err(|e| anyhow::anyhow!("{e}\n  program: {program}"))?;
     let mut relations = BTreeMap::new();
-    for (name, facts) in &result.derived {
+    for (name, facts) in result.derived_rules().await.unwrap() {
         let mut rows: Vec<String> = facts
             .iter()
             .map(|fact| {

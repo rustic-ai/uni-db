@@ -115,7 +115,7 @@ Fix: sanitize upstream scores or disable strict mode while investigating the sou
 
 Cause: multiple MNOR/MPROD proof paths reuse the same evidence; the independence assumption is violated.
 
-Fix: enable `exact_probability = true` for exact per-group results via BDD evaluation, or accept the independence approximation and inspect `warnings` / `_approximate` markers to understand which groups are affected.
+Fix: enable `exact_probability = true` for exact per-group results via BDD evaluation, or accept the independence approximation and inspect `warnings` / `_approximate` markers to understand which groups are affected. Exact mode then reports the informational `SharedDependencyResolved` instead; if the warning persists in exact mode, its `probability.resolution` is `fallback` and `reason` says why (see BDD Limit Exceeded below).
 
 ### BDD Limit Exceeded (`BddLimitExceeded`)
 

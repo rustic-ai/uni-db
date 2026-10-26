@@ -14,6 +14,7 @@ pub mod created_updated_at_test;
 pub mod delta_test;
 pub mod embedding_stack_overflow_test;
 pub mod incoming_after_bulk_load;
+pub mod label_declare_backfill_resilience;
 pub mod lance_cache_sizing;
 pub mod manual_compaction_l1_runs;
 pub mod multi_label_delete;

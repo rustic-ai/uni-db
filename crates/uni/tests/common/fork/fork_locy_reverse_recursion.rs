@@ -111,7 +111,12 @@ async fn reach_on_fork_after_set(db: &Uni, program: &str) -> Result<HashSet<i64>
     }
     let result = forked.locy(program).await?;
     let empty = vec![];
-    let facts = result.derived.get("reach").unwrap_or(&empty);
+    let facts = result
+        .derived_rules()
+        .await
+        .unwrap()
+        .get("reach")
+        .unwrap_or(&empty);
     Ok(reach_ids(facts))
 }
 
@@ -189,7 +194,14 @@ async fn reach(db: &Uni, mode: Mode, program: &str) -> Result<HashSet<i64>> {
     };
     let result = session.locy(program).await?;
     let empty = vec![];
-    Ok(reach_ids(result.derived.get("reach").unwrap_or(&empty)))
+    Ok(reach_ids(
+        result
+            .derived_rules()
+            .await
+            .unwrap()
+            .get("reach")
+            .unwrap_or(&empty),
+    ))
 }
 
 /// The full {untyped, typed} × {base, fork-no-SET, fork+SET} × {forward, reverse}
@@ -250,7 +262,13 @@ async fn cypher_vs_rule_reverse_parity_on_typed_fork_set() -> Result<()> {
         )
         .await?;
     let empty = vec![];
-    let rule_bs = reach_ids(rule.derived.get("radj").unwrap_or(&empty));
+    let rule_bs = reach_ids(
+        rule.derived_rules()
+            .await
+            .unwrap()
+            .get("radj")
+            .unwrap_or(&empty),
+    );
 
     assert_eq!(
         cypher_bs,
@@ -284,7 +302,14 @@ async fn typed_fork_create_reverse_reach_is_complete() -> Result<()> {
     }
     let result = forked.locy(REVERSE_REACH).await?;
     let empty = vec![];
-    let ids = reach_ids(result.derived.get("reach").unwrap_or(&empty));
+    let ids = reach_ids(
+        result
+            .derived_rules()
+            .await
+            .unwrap()
+            .get("reach")
+            .unwrap_or(&empty),
+    );
     assert_eq!(
         ids,
         HashSet::from([1, 2, 3]),

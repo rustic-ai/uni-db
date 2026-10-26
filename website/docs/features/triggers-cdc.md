@@ -355,7 +355,11 @@ and each stream is checkpointed once, after the last. See
   - A database opened from a remote object-store URI has no local data path
     and persists no CDC checkpoints.
 - **Late registration.** A provider added after the database is open is
-  started at the next commit. Earlier commits are not backfilled.
+  started at the next commit it can be given rows for. Earlier commits are
+  not backfilled. A commit made while no CDC output was registered captures
+  no rows. A provider that registers after such a commit, but before the
+  driver reaches it, starts after that commit and does not checkpoint past
+  it: its first checkpoint is the first commit it received.
 
 No CDC provider is registered by default. For tests, the built-in in-memory
 provider is opt-in:
@@ -424,6 +428,26 @@ A transaction commit that is abandoned after its commit point (its `commit()`
 future dropped, or failing, before the notification goes out) is announced with
 `mutations_failed: true` instead of not at all, so CDC halts rather than skip
 it.
+
+## Crash recovery
+
+A commit is durable once it is written to the write-ahead log, and announced
+(its commit notification sent, its after-phase triggers fired) just after. If
+the process dies in between, the next open announces it:
+
+- before `build()` returns, ahead of any commit made through the handle, with
+  `tx_id` `"wal-recovery-<lsn>"` and `session_id` `"wal-recovery"`;
+- with the same events the commit would have produced: each write is
+  classified (create, update, delete) and its pre-image read against the state
+  the commit was made on;
+- only to consumers that exist during the open: built-in triggers and triggers
+  declared with `uni.plugin.declareTrigger`. Before-phase triggers do not run;
+  the commit is already durable.
+
+Delivery is at least once: a crash just after a commit was announced can
+announce it again at the next open. A database closed normally, by
+`shutdown()` or by dropping it, records which commits were announced, so a
+clean reopen announces nothing twice.
 
 ## Forks
 

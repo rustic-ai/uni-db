@@ -11,16 +11,172 @@ pub type FactRow = HashMap<String, Value>;
 /// Every rule's facts, keyed by rule name.
 pub type RuleFacts = HashMap<String, Vec<FactRow>>;
 
+/// Derives the rules an evaluation left out, in the state it read.
+///
+/// Implemented by the evaluator that built the [`LocyResult`]: it holds what
+/// the evaluation read (the pinned snapshot, the program, the configuration)
+/// so the rules can be derived after the evaluation returned, with the facts
+/// full evaluation would have derived.
+#[async_trait::async_trait]
+pub trait DerivedMaterializer: Send + Sync {
+    /// Derives `rules`, returning (at least) their facts keyed by rule name,
+    /// and the runtime warnings the derivation raised.
+    async fn materialize(&self, rules: &[String]) -> uni_common::Result<Materialized>;
+}
+
+/// What a [`DerivedMaterializer`] derived.
+#[derive(Debug, Clone, Default)]
+pub struct Materialized {
+    /// The derived rules' facts, keyed by rule name (it may hold more rules
+    /// than were asked for; only those are kept).
+    pub facts: RuleFacts,
+    /// The runtime warnings the derivation raised. Only those naming a rule
+    /// that was asked for are kept: the rest name rules the evaluation itself
+    /// derived, and reported, already.
+    pub warnings: Vec<RuntimeWarning>,
+}
+
+/// The rules an evaluation left out, derived on first access and cached.
+///
+/// Under [`crate::GoalDirected::Auto`] a rule that only goal-directed `QUERY`
+/// commands needed is not evaluated. Its facts are derived by
+/// [`Self::materialize`] the first time they are asked for — one evaluation
+/// of every left-out rule, against the snapshot the evaluation read, under
+/// the same configuration and limits — and cached. A failed derivation caches
+/// nothing. The snapshot is released once the facts are cached, or when the
+/// last clone of the result is dropped.
+#[derive(Clone)]
+pub struct LazyDerived {
+    inner: std::sync::Arc<LazyInner>,
+}
+
+struct LazyInner {
+    rules: Vec<String>,
+    materializer: std::sync::Mutex<Option<std::sync::Arc<dyn DerivedMaterializer>>>,
+    derived: tokio::sync::OnceCell<Materialized>,
+}
+
+impl LazyDerived {
+    /// Rules `rules`, derived by `materializer` on first access.
+    pub fn new(rules: Vec<String>, materializer: std::sync::Arc<dyn DerivedMaterializer>) -> Self {
+        Self {
+            inner: std::sync::Arc::new(LazyInner {
+                rules,
+                materializer: std::sync::Mutex::new(Some(materializer)),
+                derived: tokio::sync::OnceCell::new(),
+            }),
+        }
+    }
+
+    /// The left-out rules, by catalog name.
+    pub fn rules(&self) -> &[String] {
+        &self.inner.rules
+    }
+
+    /// The left-out rules' facts, when already derived.
+    pub fn get(&self) -> Option<&RuleFacts> {
+        self.inner.derived.get().map(|m| &m.facts)
+    }
+
+    /// The runtime warnings deriving the left-out rules raised, once they
+    /// were derived; `None` before.
+    pub fn warnings(&self) -> Option<&[RuntimeWarning]> {
+        self.inner.derived.get().map(|m| m.warnings.as_slice())
+    }
+
+    /// The left-out rules' facts, derived now when not yet cached.
+    ///
+    /// Concurrent callers share one derivation.
+    ///
+    /// # Errors
+    ///
+    /// The derivation's error; nothing is cached, so a later call retries.
+    pub async fn materialize(&self) -> uni_common::Result<&RuleFacts> {
+        let inner = &self.inner;
+        let derived = inner
+            .derived
+            .get_or_try_init(|| async {
+                let materializer = inner
+                    .materializer
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+                    // Taken only once the facts are cached, so never missing
+                    // here.
+                    .ok_or_else(|| {
+                        uni_common::UniError::Internal(anyhow::anyhow!(
+                            "lazily derived rules lost their materializer before being derived"
+                        ))
+                    })?;
+                let mut derived = materializer.materialize(&inner.rules).await?;
+                derived.facts.retain(|name, _| inner.rules.contains(name));
+                derived
+                    .warnings
+                    .retain(|w| inner.rules.contains(&w.rule_name));
+                Ok::<_, uni_common::UniError>(derived)
+            })
+            .await?;
+        // Cached: the snapshot the materializer pins is no longer needed.
+        inner
+            .materializer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        Ok(&derived.facts)
+    }
+}
+
+impl std::fmt::Debug for LazyDerived {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LazyDerived")
+            .field("rules", &self.inner.rules)
+            .field("materialized", &self.inner.derived.initialized())
+            .finish()
+    }
+}
+
 /// The result of evaluating a compiled Locy program.
+///
+/// Every rule's facts are read through [`Self::derived_rules`] or
+/// [`Self::derived_rule`]. They hold every rule's full relation, as the
+/// program stood before its first command, whatever
+/// [`crate::GoalDirected`] mode answered its `QUERY` commands — with one
+/// exception: [`crate::GoalDirected::On`] leaves out rules only rewritten
+/// goals needed.
+///
+/// Under the default [`crate::GoalDirected::Auto`], a rule the evaluation
+/// left out because only goal-directed `QUERY` commands needed it is derived
+/// on first access instead, against the same pinned snapshot the evaluation
+/// read, and cached; see [`LazyDerived`]. Hence the accessors are `async`
+/// and fallible. [`Self::evaluated_rules`] is the synchronous view of what
+/// the evaluation itself derived.
 #[derive(Debug, Clone)]
 pub struct LocyResult {
-    /// Derived facts per rule name.
-    pub derived: HashMap<String, Vec<FactRow>>,
+    /// The facts of every rule the evaluation derived.
+    derived: RuleFacts,
+    /// The rules the evaluation left out, derived on first access.
+    lazy: Option<LazyDerived>,
+    /// `derived` together with the lazily derived rules, built on the first
+    /// [`Self::derived_rules`] call that needs them.
+    complete: tokio::sync::OnceCell<RuleFacts>,
+    /// `warnings` together with those the lazily derived rules raised, built
+    /// on the first [`Self::warnings`] call after they were derived.
+    all_warnings: std::sync::OnceLock<Vec<RuntimeWarning>>,
     /// Execution statistics.
+    ///
+    /// These count the work the evaluation did. Under
+    /// [`crate::GoalDirected::Auto`] that excludes the rules it left out
+    /// ([`Self::lazily_derived_rules`]): `derived_nodes` counts the facts of
+    /// [`Self::evaluated_rules`], and deriving the left-out rules later does
+    /// not change it.
     pub stats: LocyStats,
     /// Results from Phase 4 commands.
     pub command_results: Vec<CommandResult>,
-    /// Runtime warnings collected during evaluation.
+    /// Runtime warnings the evaluation itself raised.
+    ///
+    /// Those raised while deriving the rules the evaluation left out are not
+    /// here: [`Self::warnings`] includes them once those rules were derived
+    /// (by [`Self::derived_rules`] or [`Self::derived_rule`]).
     pub warnings: Vec<RuntimeWarning>,
     /// Compile-time warnings carried over from `CompiledProgram.warnings`.
     /// Phase C C4: surfaces `UncalibratedNeuralPredicate` /
@@ -56,7 +212,7 @@ pub enum CommandResult {
         /// Every rule's facts in the hypothetical state the body's first
         /// command reads: after the block's mutations, before any body
         /// command, the parent program's rules and the body's own. The same
-        /// point the program's [`LocyResult::derived`] is taken at, before
+        /// point the program's [`LocyResult::derived_rules`] captures, before
         /// its first command.
         derived: RuleFacts,
     },
@@ -354,6 +510,9 @@ impl DerivedFactSet {
 pub struct LocyStats {
     pub strata_evaluated: usize,
     pub total_iterations: usize,
+    /// Facts the evaluation derived, over every rule it evaluated. Rules a
+    /// goal-directed evaluation left out and derives on first access
+    /// (`LocyResult::lazily_derived_rules`) are not counted, then or after.
     pub derived_nodes: usize,
     pub derived_edges: usize,
     pub evaluation_time: Duration,
@@ -382,9 +541,107 @@ pub struct LocyStats {
 }
 
 impl LocyResult {
-    /// Get derived facts for a specific rule.
-    pub fn derived_facts(&self, rule: &str) -> Option<&Vec<FactRow>> {
-        self.derived.get(rule)
+    /// A result holding `derived`, every other field empty.
+    ///
+    /// The evaluator sets the remaining public fields and, when it left rules
+    /// out, attaches them with [`Self::with_lazy_derived`].
+    #[must_use]
+    pub fn with_derived(derived: RuleFacts) -> Self {
+        Self {
+            derived,
+            lazy: None,
+            complete: tokio::sync::OnceCell::new(),
+            all_warnings: std::sync::OnceLock::new(),
+            stats: LocyStats::default(),
+            command_results: Vec::new(),
+            warnings: Vec::new(),
+            compile_warnings: Vec::new(),
+            approximate_groups: HashMap::new(),
+            derived_fact_set: None,
+            incomplete: None,
+        }
+    }
+
+    /// Attaches the rules the evaluation left out, derived on first access.
+    #[must_use]
+    pub fn with_lazy_derived(mut self, lazy: LazyDerived) -> Self {
+        self.lazy = Some(lazy);
+        self.complete = tokio::sync::OnceCell::new();
+        self.all_warnings = std::sync::OnceLock::new();
+        self
+    }
+
+    /// Every rule's facts, keyed by rule name.
+    ///
+    /// The facts the program derived before its first command, for every
+    /// rule of the program. Rules the evaluation left out under
+    /// [`crate::GoalDirected::Auto`] are derived now, on the first call that
+    /// needs them, and cached (see [`LazyDerived`]); later calls return the
+    /// cached map.
+    ///
+    /// # Errors
+    ///
+    /// The error deriving the left-out rules raised — a timeout, a memory
+    /// bound, a cancellation. Nothing is cached then, so a later call tries
+    /// again.
+    pub async fn derived_rules(&self) -> uni_common::Result<&RuleFacts> {
+        let Some(lazy) = &self.lazy else {
+            return Ok(&self.derived);
+        };
+        let lazy_facts = lazy.materialize().await?;
+        Ok(self
+            .complete
+            .get_or_init(|| async {
+                let mut all = self.derived.clone();
+                all.extend(lazy_facts.iter().map(|(k, v)| (k.clone(), v.clone())));
+                all
+            })
+            .await)
+    }
+
+    /// One rule's facts, or `None` when the program has no such rule.
+    ///
+    /// The rule is looked up by its catalog name. A rule the evaluation left
+    /// out is derived on first access, as for [`Self::derived_rules`], but
+    /// without copying the evaluated rules into a combined map.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::derived_rules`].
+    pub async fn derived_rule(&self, rule: &str) -> uni_common::Result<Option<&Vec<FactRow>>> {
+        if let Some(facts) = self.derived.get(rule) {
+            return Ok(Some(facts));
+        }
+        match &self.lazy {
+            Some(lazy) if lazy.rules().iter().any(|r| r == rule) => {
+                Ok(lazy.materialize().await?.get(rule))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The facts of every rule the evaluation itself derived.
+    ///
+    /// Equal to [`Self::derived_rules`] unless the evaluation left rules out
+    /// ([`Self::lazily_derived_rules`]); those are absent here.
+    pub fn evaluated_rules(&self) -> &RuleFacts {
+        &self.derived
+    }
+
+    /// Consumes the result, returning [`Self::evaluated_rules`].
+    pub fn into_evaluated_rules(self) -> RuleFacts {
+        self.derived
+    }
+
+    /// The rules the evaluation left out and [`Self::derived_rules`] derives
+    /// on first access; empty when every rule was evaluated.
+    pub fn lazily_derived_rules(&self) -> &[String] {
+        self.lazy.as_ref().map_or(&[], LazyDerived::rules)
+    }
+
+    /// The left-out rules' deferred evaluation, when there is one.
+    pub fn lazy_derived(&self) -> Option<&LazyDerived> {
+        self.lazy.as_ref()
     }
 
     /// Get rows from the first row-producing command result.
@@ -433,13 +690,27 @@ impl LocyResult {
         &self.command_results
     }
 
+    /// Runtime warnings: the evaluation's own ([`Self::warnings`] field),
+    /// followed, once the rules the evaluation left out were derived, by
+    /// those their derivation raised.
+    ///
+    /// Before that first derivation the left-out rules' warnings do not
+    /// exist yet; read [`Self::derived_rules`] (or the rule) first to see
+    /// every warning a full evaluation raises.
     pub fn warnings(&self) -> &[RuntimeWarning] {
-        &self.warnings
+        match self.lazy.as_ref().and_then(LazyDerived::warnings) {
+            Some(extra) if !extra.is_empty() => self.all_warnings.get_or_init(|| {
+                let mut all = self.warnings.clone();
+                all.extend(extra.iter().cloned());
+                all
+            }),
+            _ => &self.warnings,
+        }
     }
 
     /// Check whether a specific warning code was emitted.
     pub fn has_warning(&self, code: &RuntimeWarningCode) -> bool {
-        self.warnings.iter().any(|w| w.code == *code)
+        self.warnings().iter().any(|w| w.code == *code)
     }
 
     /// True when the evaluation was cut short by a timeout or iteration
@@ -525,16 +796,8 @@ mod tests {
         row.insert("alpha".into(), Value::Int(2));
         row.insert("mu".into(), Value::Int(3));
 
-        let result = LocyResult {
-            derived: HashMap::new(),
-            stats: LocyStats::default(),
-            command_results: vec![CommandResult::Query(vec![row])],
-            warnings: Vec::new(),
-            compile_warnings: Vec::new(),
-            approximate_groups: HashMap::new(),
-            derived_fact_set: None,
-            incomplete: None,
-        };
+        let mut result = LocyResult::with_derived(HashMap::new());
+        result.command_results = vec![CommandResult::Query(vec![row])];
 
         let cols = result
             .columns()
@@ -550,16 +813,9 @@ mod tests {
     }
 
     fn result_of(command_results: Vec<CommandResult>) -> LocyResult {
-        LocyResult {
-            derived: HashMap::new(),
-            stats: LocyStats::default(),
-            command_results,
-            warnings: Vec::new(),
-            compile_warnings: Vec::new(),
-            approximate_groups: HashMap::new(),
-            derived_fact_set: None,
-            incomplete: None,
-        }
+        let mut result = LocyResult::with_derived(HashMap::new());
+        result.command_results = command_results;
+        result
     }
 
     /// `rows()` descends depth first into ASSUME results: a DERIVE is not
@@ -652,5 +908,101 @@ mod tests {
         assert!(mods[0]["modification"]["ChangeProperty"].is_object());
         assert!(mods[1]["modification"]["RemoveEdge"].is_object());
         assert!(mods[2]["modification"]["AddEdge"].is_object());
+    }
+}
+
+#[cfg(test)]
+mod lazy_derived_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    fn warning(rule: &str) -> RuntimeWarning {
+        RuntimeWarning {
+            code: RuntimeWarningCode::SharedProbabilisticDependency,
+            message: format!("from {rule}"),
+            rule_name: rule.to_string(),
+            variable_count: None,
+            key_group: None,
+            probability: None,
+        }
+    }
+
+    fn row(v: i64) -> FactRow {
+        [("k".to_string(), Value::Int(v))].into()
+    }
+
+    /// Fails the first `failures` derivations, then derives `lazy` (one fact)
+    /// and `dep`, warning for both.
+    struct Fake {
+        calls: AtomicUsize,
+        failures: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl DerivedMaterializer for Fake {
+        async fn materialize(&self, _rules: &[String]) -> uni_common::Result<Materialized> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) < self.failures {
+                return Err(uni_common::UniError::Timeout { timeout_ms: 1 });
+            }
+            Ok(Materialized {
+                facts: HashMap::from([
+                    ("lazy".to_string(), vec![row(1)]),
+                    ("dep".to_string(), vec![row(2)]),
+                ]),
+                warnings: vec![warning("lazy"), warning("dep")],
+            })
+        }
+    }
+
+    fn result(failures: usize) -> (LocyResult, Arc<Fake>) {
+        let fake = Arc::new(Fake {
+            calls: AtomicUsize::new(0),
+            failures,
+        });
+        let mut result =
+            LocyResult::with_derived(HashMap::from([("dep".to_string(), vec![row(2)])]))
+                .with_lazy_derived(LazyDerived::new(vec!["lazy".to_string()], fake.clone()));
+        result.warnings = vec![warning("dep")];
+        (result, fake)
+    }
+
+    /// The left-out rule's warnings join `warnings()` once it was derived;
+    /// a warning for a rule the evaluation derived itself is not repeated.
+    #[tokio::test]
+    async fn warnings_of_lazily_derived_rules_appear_once_derived() {
+        let (result, _) = result(0);
+        let rules = |r: &LocyResult| -> Vec<String> {
+            r.warnings().iter().map(|w| w.rule_name.clone()).collect()
+        };
+        assert_eq!(rules(&result), ["dep"]);
+        let all = result.derived_rules().await.unwrap();
+        assert_eq!(all["lazy"], vec![row(1)]);
+        assert_eq!(rules(&result), ["dep", "lazy"]);
+        assert_eq!(
+            result.warnings.len(),
+            1,
+            "the field keeps the evaluation's own"
+        );
+    }
+
+    /// A failed derivation surfaces its error and caches nothing; the next
+    /// read derives again and succeeds.
+    #[tokio::test]
+    async fn a_failed_derivation_caches_nothing_and_is_retried() {
+        let (result, fake) = result(1);
+        let err = result.derived_rule("lazy").await.unwrap_err();
+        assert!(matches!(err, uni_common::UniError::Timeout { .. }), "{err}");
+        assert!(result.lazy_derived().unwrap().get().is_none());
+        assert_eq!(result.warnings().len(), 1);
+        assert_eq!(
+            result.derived_rule("lazy").await.unwrap(),
+            Some(&vec![row(1)])
+        );
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
+        // Cached now: no third derivation.
+        result.derived_rules().await.unwrap();
+        assert_eq!(fake.calls.load(Ordering::SeqCst), 2);
     }
 }

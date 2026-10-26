@@ -8,10 +8,12 @@
 //!
 //! # Supported Expressions
 //!
-//! Currently supports:
-//! - Literal lists: `UNWIND [1, 2, 3] AS x`
-//! - Variable references: `UNWIND list AS item` (where `list` is a column)
-//! - Property access: `UNWIND n.items AS item`
+//! The operator evaluates columns, parameters and constant literals itself.
+//! The planner (`plan_unwind`) computes every other expression — a function
+//! call, a property access, a CASE, a comprehension — into a hidden column
+//! with the expression compiler first, so UNWIND agrees with `WITH` and
+//! `RETURN` on what an expression means. An expression reaching the
+//! operator's evaluator unsupported is an error, never an empty list.
 //!
 //! # Example
 //!
@@ -419,7 +421,44 @@ struct Pending {
     /// Elements of `row - 1`'s list not yet emitted, and that row's index.
     /// A list longer than `chunk_size` spans several chunks, so the position
     /// within it has to survive the poll that emitted the last one.
-    rest: Option<(usize, std::vec::IntoIter<Value>)>,
+    rest: Option<(usize, ListRest)>,
+}
+
+/// The not-yet-emitted remainder of one row's list.
+enum ListRest {
+    /// Elements the operator's own evaluator already decoded.
+    Decoded(std::vec::IntoIter<Value>),
+    /// One row of an Arrow `List` column, decoded an element at a time.
+    ///
+    /// The planner computes every non-trivial UNWIND expression into such a
+    /// column, so the list is already resident in the batch, which is charged.
+    /// Decoding it whole as well would hold it twice — `range(0, 24999)` is
+    /// 200 KB as Arrow and over a megabyte as `Value`s.
+    Arrow { values: ArrayRef, next: usize },
+}
+
+impl ListRest {
+    fn next_value(&mut self) -> DFResult<Option<Value>> {
+        match self {
+            Self::Decoded(items) => Ok(items.next()),
+            Self::Arrow { values, next } => {
+                if *next >= values.len() {
+                    return Ok(None);
+                }
+                let value = arrow_to_json_value(values.as_ref(), *next)?;
+                *next += 1;
+                Ok(Some(value))
+            }
+        }
+    }
+
+    /// Bytes held outside the input batch.
+    fn retained_bytes(&self) -> usize {
+        match self {
+            Self::Decoded(items) => items.len() * std::mem::size_of::<Value>(),
+            Self::Arrow { .. } => 0,
+        }
+    }
 }
 
 impl GraphUnwindStream {
@@ -450,7 +489,7 @@ impl GraphUnwindStream {
         loop {
             if let Some((row_idx, items)) = pending.rest.as_mut() {
                 let row_idx = *row_idx;
-                for item in items.by_ref() {
+                while let Some(item) = items.next_value()? {
                     expansions.push((row_idx, item));
                     if expansions.len() >= self.chunk_size {
                         return Ok((expansions, false));
@@ -465,9 +504,13 @@ impl GraphUnwindStream {
 
             let row_idx = pending.row;
             pending.row += 1;
+            if let Some(values) = self.arrow_list_row(&pending.batch, row_idx) {
+                pending.rest = Some((row_idx, ListRest::Arrow { values, next: 0 }));
+                continue;
+            }
             match self.evaluate_expr_for_row(&pending.batch, row_idx)? {
                 Value::List(items) => {
-                    pending.rest = Some((row_idx, items.into_iter()));
+                    pending.rest = Some((row_idx, ListRest::Decoded(items.into_iter())));
                 }
                 Value::Null => {
                     // UNWIND on null produces no rows (Cypher semantics)
@@ -481,6 +524,19 @@ impl GraphUnwindStream {
                 }
             }
         }
+    }
+
+    /// The elements of `row`, when the expression is a column of Arrow
+    /// `List`s and the row is not null.
+    fn arrow_list_row(&self, batch: &RecordBatch, row: usize) -> Option<ArrayRef> {
+        let Expr::Variable(name) = &self.expr else {
+            return None;
+        };
+        let list = batch
+            .column_by_name(name)?
+            .as_any()
+            .downcast_ref::<arrow_array::ListArray>()?;
+        (!list.is_null(row)).then(|| list.value(row))
     }
 
     /// Evaluate the expression for a specific row.
@@ -646,10 +702,13 @@ impl GraphUnwindStream {
                         }
                         crate::query::expr_eval::eval_split(&eval_args).map_err(exec_err)
                     }
-                    _ => {
-                        // Unsupported function - return empty list
-                        Ok(Value::List(vec![]))
-                    }
+                    // Answering `[]` here made `UNWIND labels(n)` produce no
+                    // rows. The planner computes every such expression with
+                    // the expression compiler before this operator sees it;
+                    // reaching this arm is a planner bug, so say so.
+                    _ => Err(exec_err(format!(
+                        "UNWIND cannot evaluate function '{name}' itself; it must be pre-computed"
+                    ))),
                 }
             }
 
@@ -689,8 +748,12 @@ impl GraphUnwindStream {
                 }
             }
 
-            // Unsupported expressions return null
-            _ => Ok(Value::Null),
+            // Was `NULL`, i.e. zero rows, for a CASE, a list comprehension, a
+            // slice, ... — see the function arm above.
+            other => Err(exec_err(format!(
+                "UNWIND cannot evaluate '{}' itself; it must be pre-computed",
+                other.to_string_repr()
+            ))),
         }
     }
 
@@ -861,7 +924,7 @@ impl Stream for GraphUnwindStream {
                     + pending
                         .rest
                         .as_ref()
-                        .map_or(0, |(_, it)| it.len() * std::mem::size_of::<Value>());
+                        .map_or(0, |(_, it)| it.retained_bytes());
                 if let Err(e) = self.charge(want) {
                     return Poll::Ready(Some(Err(e)));
                 }

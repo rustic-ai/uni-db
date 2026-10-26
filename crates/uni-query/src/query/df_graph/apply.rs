@@ -21,7 +21,8 @@
 
 use crate::query::df_graph::common::{
     arrow_err, collect_all_partitions, compute_plan_properties, execute_subplan,
-    execute_subplan_with_outer_row, extract_row_params, operator_reservation,
+    execute_subplan_with_outer_row, execute_subplan_with_properties, extract_row_params,
+    operator_reservation,
 };
 use crate::query::df_graph::{GraphExecutionContext, MutationContext};
 use crate::query::planner::LogicalPlan;
@@ -107,6 +108,11 @@ pub struct GraphApplyExec {
 
     /// Execution metrics.
     metrics: ExecutionPlanMetricsSet,
+
+    /// Property requirements the outer plan places on the variables a
+    /// node-yielding procedure sub-plan binds. `Some` exactly when the
+    /// subquery is such a call; see [`GraphApplyExec::with_subplan_properties`].
+    subplan_properties: Option<Arc<HashMap<String, std::collections::HashSet<String>>>>,
 }
 
 impl fmt::Debug for GraphApplyExec {
@@ -151,7 +157,21 @@ impl GraphApplyExec {
             properties,
             mutation_ctx,
             metrics: ExecutionPlanMetricsSet::new(),
+            subplan_properties: None,
         }
+    }
+
+    /// Plan each row's procedure sub-plan with `properties` — the properties
+    /// the clauses after the `CALL` read from the node it yields. The output
+    /// schema was typed from the same set, so every row carries the columns
+    /// the schema names.
+    #[must_use]
+    pub fn with_subplan_properties(
+        mut self,
+        properties: HashMap<String, std::collections::HashSet<String>>,
+    ) -> Self {
+        self.subplan_properties = Some(Arc::new(properties));
+        self
     }
 }
 
@@ -218,6 +238,7 @@ impl ExecutionPlan for GraphApplyExec {
         let kept_input_indices = self.kept_input_indices.clone();
         let kept_input_overrides = self.kept_input_overrides.clone();
         let mutation_ctx = self.mutation_ctx.clone();
+        let subplan_properties = self.subplan_properties.clone();
 
         let fut = async move {
             run_apply(
@@ -233,6 +254,7 @@ impl ExecutionPlan for GraphApplyExec {
                 &kept_input_indices,
                 &kept_input_overrides,
                 mutation_ctx.as_ref(),
+                subplan_properties.as_deref(),
             )
             .await
         };
@@ -507,6 +529,7 @@ async fn run_apply(
     kept_input_indices: &[usize],
     kept_input_overrides: &[Option<(String, String)>],
     mutation_ctx: Option<&Arc<MutationContext>>,
+    subplan_properties: Option<&HashMap<String, std::collections::HashSet<String>>>,
 ) -> DFResult<RecordBatch> {
     let apply_start = std::time::Instant::now();
     let is_proc_call = is_procedure_call(subquery_plan);
@@ -613,7 +636,20 @@ async fn run_apply(
         } else {
             // Cache miss: execute subplan
             let subplan_start = std::time::Instant::now();
-            let sub_batches = if is_proc_call {
+            let sub_batches = if let (true, Some(props)) = (is_proc_call, subplan_properties) {
+                execute_subplan_with_properties(
+                    subquery_plan,
+                    &sub_params,
+                    &sub_outer_values,
+                    graph_ctx,
+                    session_ctx,
+                    storage,
+                    schema_info,
+                    mutation_ctx,
+                    props,
+                )
+                .await?
+            } else if is_proc_call {
                 execute_subplan(
                     subquery_plan,
                     &sub_params,

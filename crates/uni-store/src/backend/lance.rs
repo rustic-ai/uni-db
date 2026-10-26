@@ -2030,6 +2030,96 @@ mod tests {
     use arrow_schema::{DataType, Field};
     use tempfile::TempDir;
 
+    /// Pins a Lance 11 defect: a scan whose fragment reads were spawned on a
+    /// runtime that is then dropped, polled afterwards, panics in Lance
+    /// (`io/exec/filtered_read.rs`: `.map(|thread_result| thread_result.unwrap())`
+    /// over the cancelled `SpawnedTask`) instead of returning an error.
+    ///
+    /// Uni drives the scan that outlives its caller's runtime -- a bulk load's
+    /// event read-back -- on the IO runtime instead (`uni_bulk`'s
+    /// `ScanFeed`). When this starts failing, Lance has fixed the unwrap.
+    #[test]
+    fn lance_scan_polled_after_its_runtime_is_dropped_panics_in_lance() {
+        use futures::StreamExt;
+        let tmp = TempDir::new().unwrap();
+        let uri = tmp.path().join("t.lance").to_string_lossy().to_string();
+        let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
+            "v",
+            DataType::Int64,
+            false,
+        )]));
+        let rt_write = tokio::runtime::Runtime::new().unwrap();
+        rt_write.block_on(async {
+            let batches: Vec<_> = (0..64i64)
+                .map(|i| {
+                    Ok(RecordBatch::try_new(
+                        schema.clone(),
+                        vec![Arc::new(Int64Array::from(vec![i]))],
+                    )
+                    .unwrap())
+                })
+                .collect();
+            let params = lance::dataset::WriteParams {
+                max_rows_per_file: 1,
+                max_rows_per_group: 1,
+                ..Default::default()
+            };
+            lance::Dataset::write(
+                arrow_array::RecordBatchIterator::new(batches, schema.clone()),
+                &uri,
+                Some(params),
+            )
+            .await
+            .unwrap();
+        });
+        let ds = rt_write.block_on(lance::Dataset::open(&uri)).unwrap();
+        assert_eq!(
+            ds.get_fragments().len(),
+            64,
+            "premise: one fragment per row"
+        );
+
+        for mode in ["first-batch", "single-poll"] {
+            let rt1 = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let mut stream = rt1.block_on(async { ds.scan().try_into_stream().await.unwrap() });
+            rt1.block_on(async {
+                if mode == "first-batch" {
+                    stream.next().await.unwrap().unwrap();
+                } else {
+                    let _ = futures::poll!(stream.next());
+                }
+            });
+            drop(rt1);
+            let rt2 = tokio::runtime::Runtime::new().unwrap();
+            let outcome = rt2.block_on(async move {
+                tokio::spawn(async move {
+                    let mut rows = 0usize;
+                    while let Some(batch) = stream.next().await {
+                        match batch {
+                            Ok(b) => rows += b.num_rows(),
+                            Err(e) => return Err(e.to_string()),
+                        }
+                    }
+                    Ok(rows)
+                })
+                .await
+            });
+            let panic = outcome.expect_err(mode).into_panic();
+            let message = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or_default();
+            assert!(
+                message.contains("JoinError::Cancelled"),
+                "[{mode}] expected Lance's unwrap of a cancelled read, got: {message}"
+            );
+        }
+    }
+
     async fn create_test_backend() -> (TempDir, LanceDbBackend) {
         let temp_dir = TempDir::new().unwrap();
         let uri = temp_dir.path().to_str().unwrap();

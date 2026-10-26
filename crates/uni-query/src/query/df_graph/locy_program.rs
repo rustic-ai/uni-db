@@ -971,6 +971,7 @@ async fn run_program(
                         rule_name: rule.name.clone(),
                         variable_count: None,
                         key_group: None,
+                        probability: None,
                     });
                     already.insert(rule.name.clone());
                 }
@@ -1000,7 +1001,7 @@ async fn run_program(
         }
 
         // Write cross-stratum facts into registry handles for strata we depend on
-        write_cross_stratum_facts(&registry, &derived_store, stratum);
+        write_cross_stratum_facts(&registry, &derived_store, stratum)?;
 
         // Profiling (profile() path only): time this stratum and collect its
         // per-rule, per-iteration detail. `None` → zero overhead on `run()`.
@@ -1374,7 +1375,7 @@ async fn run_program(
                 }
 
                 // Write facts into registry handles for later strata
-                write_facts_to_registry(&registry, &rule.name, &facts);
+                write_facts_to_registry(&registry, &rule.name, &facts)?;
                 if !facts_are_per_path(rule) {
                     super::locy_fixpoint::debug_assert_facts_are_rows(&rule.name, &facts);
                 }
@@ -1631,11 +1632,16 @@ async fn run_program(
 // ---------------------------------------------------------------------------
 
 /// Write already-evaluated facts into registry handles for cross-stratum IS-refs.
+///
+/// # Errors
+///
+/// Fails when a referenced rule's facts do not have its declared columns
+/// (see [`write_facts_to_registry`]).
 fn write_cross_stratum_facts(
     registry: &DerivedScanRegistry,
     derived_store: &DerivedStore,
     stratum: &LocyStratum,
-) {
+) -> DFResult<()> {
     // For each rule in this stratum, find IS-refs to rules in other strata
     for rule in &stratum.rules {
         for clause in &rule.clauses {
@@ -1645,37 +1651,62 @@ fn write_cross_stratum_facts(
                 // registry. Module-aware: inside `MODULE m` the referring rule
                 // names `adult` while the store holds `m.adult`.
                 if let Some(facts) = derived_store.get_module_aware(&is_ref.rule_name) {
-                    write_facts_to_registry(registry, &is_ref.rule_name, facts);
+                    write_facts_to_registry(registry, &is_ref.rule_name, facts)?;
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// Write facts into non-self-ref registry handles for a given rule.
-fn write_facts_to_registry(registry: &DerivedScanRegistry, rule_name: &str, facts: &[RecordBatch]) {
+///
+/// Each batch is re-stamped with the scan's schema, which may name a column
+/// per reference (an aliased occurrence), so only the columns' count and
+/// types must agree with it.
+///
+/// # Errors
+///
+/// Fails, naming the rule and both schemas, when a fact batch does not have
+/// the rule's declared columns. This fell back to the batch's own schema,
+/// which every scan of the relation then re-stamped with the declared one
+/// and failed on with a bare Arrow error (`number of columns(3) must match
+/// number of fields(2)`, issue #314) — or, where the types happened to
+/// line up, read a fact one column wider than declared.
+fn write_facts_to_registry(
+    registry: &DerivedScanRegistry,
+    rule_name: &str,
+    facts: &[RecordBatch],
+) -> DFResult<()> {
     let entries = registry.entries_for_rule(rule_name);
     for entry in entries {
         if !entry.is_self_ref {
-            let mut guard = entry.data.write();
-            *guard = if facts.is_empty() || facts.iter().all(|b| b.num_rows() == 0) {
+            let batches = if facts.is_empty() || facts.iter().all(|b| b.num_rows() == 0) {
                 vec![RecordBatch::new_empty(Arc::clone(&entry.schema))]
             } else {
-                // Try to re-wrap batches with the entry's schema for column name
-                // alignment. If the types don't match (e.g. inferred Float64 vs
-                // actual Utf8 from schema mode), fall back to the batch's own
-                // schema to avoid silent data loss.
                 facts
                     .iter()
                     .filter(|b| b.num_rows() > 0)
                     .map(|b| {
+                        super::locy_fixpoint::check_fact_columns(
+                            rule_name,
+                            &entry.schema,
+                            &b.schema(),
+                        )?;
                         RecordBatch::try_new(Arc::clone(&entry.schema), b.columns().to_vec())
-                            .unwrap_or_else(|_| b.clone())
+                            .map_err(|e| {
+                                datafusion::error::DataFusionError::Internal(format!(
+                                    "rule '{rule_name}': its facts cannot be read as declared \
+                                     ({e})"
+                                ))
+                            })
                     })
-                    .collect()
+                    .collect::<DFResult<Vec<_>>>()?
             };
+            *entry.data.write() = batches;
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1953,9 +1984,10 @@ fn convert_fold_bindings(
 
 /// Parse a fold aggregate expression into (canonical_name, input_column_name).
 ///
-/// Normalizes grammar aliases to canonical names: `MSUM`→`SUM`, `MMAX`→`MAX`,
+/// Normalizes grammar aliases to canonical names: `MMAX`→`MAX`,
 /// `MMIN`→`MIN`, `MCOUNT`→`COUNT`. The zero-arg `COUNT()`/`MCOUNT()` form
-/// returns the `COUNTALL` sentinel. `MNOR`/`MPROD` are already canonical.
+/// returns the `COUNTALL` sentinel. `MSUM`/`MNOR`/`MPROD` are already
+/// canonical (`MSUM` takes numbers only, so it is not `SUM`).
 fn parse_fold_aggregate(expr: &Expr) -> DFResult<(smol_str::SmolStr, String)> {
     match expr {
         Expr::FunctionCall { name, args, .. } => {
@@ -1968,7 +2000,10 @@ fn parse_fold_aggregate(expr: &Expr) -> DFResult<(smol_str::SmolStr, String)> {
             }
 
             let canonical = match upper.as_str() {
-                "SUM" | "MSUM" => smol_str::SmolStr::new_static("SUM"),
+                "SUM" => smol_str::SmolStr::new_static("SUM"),
+                // Its own aggregate: numbers only, where `SUM` also adds
+                // durations.
+                "MSUM" => smol_str::SmolStr::new_static("MSUM"),
                 "MAX" | "MMAX" => smol_str::SmolStr::new_static("MAX"),
                 "MIN" | "MMIN" => smol_str::SmolStr::new_static("MIN"),
                 "COUNT" | "MCOUNT" => smol_str::SmolStr::new_static("COUNT"),
@@ -2149,6 +2184,62 @@ mod tests {
             )),
         );
         assert!(cut_by_deadline(&wrapped, true, &flag));
+    }
+
+    /// Facts that do not have the rule's declared columns are refused, naming
+    /// the rule and both schemas, and nothing is written; facts that do are
+    /// re-stamped with the scan's (aliased) names. The write fell back to the
+    /// batch's own schema, so a model-backed rule's facts, one feature
+    /// column wider than declared, reached every scan of the relation, which
+    /// then failed with a bare Arrow error (issue #314).
+    #[test]
+    fn write_facts_to_registry_refuses_facts_unlike_the_declared_columns() {
+        use super::super::locy_fixpoint::{DerivedScanEntry, DerivedScanView};
+        let declared = Arc::new(ArrowSchema::new(vec![
+            Field::new("__isref0_n", DataType::UInt64, true),
+            Field::new("__isref0_probability", DataType::Float64, true),
+        ]));
+        let data = Arc::new(RwLock::new(Vec::new()));
+        let mut registry = DerivedScanRegistry::new();
+        registry.add(DerivedScanEntry {
+            scan_index: 0,
+            rule_name: "predicted".to_string(),
+            is_self_ref: false,
+            view: DerivedScanView::Contributions,
+            exclusive: false,
+            data: Arc::clone(&data),
+            schema: Arc::clone(&declared),
+        });
+        let wide = RecordBatch::try_new(
+            Arc::new(ArrowSchema::new(vec![
+                Field::new("n", DataType::UInt64, true),
+                Field::new("probability", DataType::Float64, true),
+                Field::new("__feat_n_route_days", DataType::Int64, true),
+            ])),
+            vec![
+                Arc::new(arrow_array::UInt64Array::from(vec![1u64])),
+                Arc::new(arrow_array::Float64Array::from(vec![0.7])),
+                Arc::new(Int64Array::from(vec![8])),
+            ],
+        )
+        .unwrap();
+        let outcome = format!(
+            "{:?}",
+            write_facts_to_registry(&registry, "predicted", std::slice::from_ref(&wide))
+        );
+        assert!(
+            outcome.contains("rule 'predicted'")
+                && outcome.contains("__isref0_probability: Float64")
+                && outcome.contains("__feat_n_route_days: Int64"),
+            "{outcome}"
+        );
+        assert!(data.read().is_empty(), "nothing is written: {outcome}");
+
+        let narrow = wide.project(&[0, 1]).unwrap();
+        write_facts_to_registry(&registry, "predicted", &[narrow]).unwrap();
+        let written = data.read();
+        assert_eq!(written.len(), 1);
+        assert_eq!(written[0].schema(), declared);
     }
 
     #[test]

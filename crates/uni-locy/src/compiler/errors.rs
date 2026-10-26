@@ -49,6 +49,18 @@ pub enum LocyCompileError {
     )]
     UngroupedFoldYield { rule: String, column: String },
 
+    /// An aggregate function call in a rule's YIELD item or ALONG binding.
+    ///
+    /// A rule aggregates through FOLD alone: a YIELD or ALONG expression is
+    /// evaluated per row, where an aggregate has no group. It used to reach
+    /// the physical planner and fail there with "Physical plan does not
+    /// support logical expression AggregateFunction".
+    #[error(
+        "InvalidAggregation - aggregation function in the {position} of rule '{rule}'. \
+         A rule aggregates through FOLD: write `FOLD total = SUM(x)` and yield `total`"
+    )]
+    AggregateOutsideFold { rule: String, position: String },
+
     /// A QUERY references a variable its rule does not yield.
     ///
     /// The QUERY is evaluated over the rule's derived facts, so a variable

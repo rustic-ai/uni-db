@@ -177,11 +177,13 @@ pub struct LocyConfig {
     pub params: HashMap<String, Value>,
     /// Whether `QUERY` commands are answered goal-directed (magic sets).
     ///
-    /// Defaults to [`GoalDirected::Off`]. With [`GoalDirected::On`], a
-    /// `QUERY` whose WHERE binds a node KEY column of its rule to a literal or
-    /// parameter derives only the facts that goal can reach, and rules only
-    /// such goals needed are not evaluated, so they are absent from
-    /// `LocyResult::derived`. Answers are unchanged; constructs the rewrite
+    /// Defaults to [`GoalDirected::Auto`]: a `QUERY` whose WHERE binds a node
+    /// KEY column of its rule to a literal or parameter derives only the facts
+    /// that goal can reach, and a rule only such goals needed is derived on
+    /// first access to the result's derived facts, against the snapshot the
+    /// evaluation read, so those facts are what [`GoalDirected::Off`] gives.
+    /// With [`GoalDirected::On`] such rules are absent from the derived facts
+    /// instead. Answers are unchanged in every mode; constructs the rewrite
     /// cannot prove answer-preserving fall back to full evaluation. See
     /// [`crate::magic`].
     pub goal_directed: GoalDirected,
@@ -277,7 +279,7 @@ impl Default for LocyConfig {
             classifier_cache_max: 100_000,
             classifier_provenance_store: None,
             params: HashMap::new(),
-            goal_directed: GoalDirected::Off,
+            goal_directed: GoalDirected::Auto,
         }
     }
 }

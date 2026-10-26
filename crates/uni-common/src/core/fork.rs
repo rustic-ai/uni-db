@@ -209,6 +209,18 @@ pub struct SchemaDelta {
     /// Properties added to existing labels or edge types.
     #[serde(default)]
     pub added_properties: Vec<PropertyAddition>,
+
+    /// Names of schemaless (undeclared) edge types the fork's writes interned.
+    ///
+    /// A schemaless edge type gets its numeric id from the in-memory
+    /// `SchemalessEdgeTypeRegistry`; a fork's registry lives only in its
+    /// merged schema, which is never saved to primary's catalog. Without this
+    /// list a reopened fork rebuilds its registry from primary alone, so its
+    /// flushed edges of a fork-only type are invisible to an untyped match.
+    /// Only the NAME is recorded: ids are reassigned on reopen, because
+    /// primary may have handed the fork's old id to a different name since.
+    #[serde(default)]
+    pub added_schemaless_edge_types: Vec<String>,
 }
 
 impl SchemaDelta {
@@ -224,6 +236,7 @@ impl SchemaDelta {
         self.added_labels.is_empty()
             && self.added_edge_types.is_empty()
             && self.added_properties.is_empty()
+            && self.added_schemaless_edge_types.is_empty()
     }
 
     /// Compose `self` atop `base`: returns `base ⊕ self`.
@@ -267,10 +280,19 @@ impl SchemaDelta {
             properties.insert((add.owner.clone(), add.property.clone()), add.clone());
         }
 
+        // Schemaless edge-type names: a set union, base order first.
+        let mut schemaless = base.added_schemaless_edge_types.clone();
+        for name in &self.added_schemaless_edge_types {
+            if !schemaless.contains(name) {
+                schemaless.push(name.clone());
+            }
+        }
+
         SchemaDelta {
             added_labels: labels.into_iter().collect(),
             added_edge_types: edge_types.into_iter().collect(),
             added_properties: properties.into_values().collect(),
+            added_schemaless_edge_types: schemaless,
         }
     }
 }
@@ -411,6 +433,29 @@ mod tests {
         let merged = SchemaDelta::empty().merge_atop(&base);
         assert_eq!(merged.added_labels.len(), 1);
         assert_eq!(merged.added_labels[0].0, "A");
+    }
+
+    #[test]
+    fn schemaless_edge_types_count_toward_is_empty_and_union_on_merge() {
+        let base = SchemaDelta {
+            added_schemaless_edge_types: vec!["A".into(), "B".into()],
+            ..Default::default()
+        };
+        assert!(!base.is_empty());
+        let top = SchemaDelta {
+            added_schemaless_edge_types: vec!["B".into(), "C".into()],
+            ..Default::default()
+        };
+        let merged = top.merge_atop(&base);
+        assert_eq!(merged.added_schemaless_edge_types, vec!["A", "B", "C"]);
+    }
+
+    /// An overlay persisted before the field existed still loads.
+    #[test]
+    fn schema_delta_without_schemaless_field_deserializes() {
+        let json = r#"{"added_labels":[],"added_edge_types":[],"added_properties":[]}"#;
+        let d: SchemaDelta = serde_json::from_str(json).unwrap();
+        assert!(d.added_schemaless_edge_types.is_empty());
     }
 
     #[test]

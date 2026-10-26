@@ -773,3 +773,65 @@ async fn only_conforming_declared_types_are_rechecked() {
         vec![e]
     );
 }
+
+/// D3: a load's read-back scan, started on one runtime, finishes after that
+/// runtime is dropped. A Lance scan polled on the runtime that spawned its
+/// fragment reads would instead die with it -- or, polled once that runtime
+/// is gone, panic in Lance on the reads' `JoinError::Cancelled` (pinned by
+/// `uni-store`'s `lance_scan_polled_after_its_runtime_is_dropped_panics_in_lance`).
+#[test]
+fn a_scan_feed_survives_the_runtime_that_started_it() {
+    const ROWS: usize = 200;
+    let setup = tokio::runtime::Runtime::new().unwrap();
+    let fx = setup.block_on(async {
+        let fx = Fixture::new(true).await;
+        // One fragment per insert: more than Lance reads ahead.
+        let mut bulk = fx.bulk();
+        for part in 0..ROWS as i64 / 4 {
+            bulk.insert_vertices("P", (part * 4..part * 4 + 4).map(props).collect::<Vec<_>>())
+                .await
+                .unwrap();
+        }
+        bulk.commit().await.unwrap();
+        fx
+    });
+    let data = fx
+        ._dir
+        .path()
+        .join(format!("{}.lance", table_names::main_vertex_table_name()))
+        .join("data");
+    let fragments = std::fs::read_dir(&data).map_or(0, |d| d.count());
+    assert!(fragments > 16, "premise: {fragments} fragment files");
+
+    let request = ScanRequest::all(table_names::main_vertex_table_name())
+        .with_columns(vec!["_vid".to_string()]);
+    let first = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (mut feed, mut rows) = first.block_on(async {
+        let mut feed =
+            crate::events::ScanFeed::open(Arc::clone(&fx.backend.storage), request).unwrap();
+        let batch = feed.next().await.expect("a first batch").unwrap();
+        (feed, batch.num_rows())
+    });
+    drop(first);
+
+    let second = tokio::runtime::Runtime::new().unwrap();
+    let rest = second.block_on(async move {
+        tokio::spawn(async move {
+            let mut n = 0;
+            while let Some(batch) = feed.next().await {
+                n += batch?.num_rows();
+            }
+            anyhow::Ok(n)
+        })
+        .await
+    });
+    match rest {
+        Ok(Ok(n)) => rows += n,
+        other => panic!("the scan did not survive the runtime that started it: {other:?}"),
+    }
+    assert_eq!(rows, ROWS);
+    drop(setup);
+}

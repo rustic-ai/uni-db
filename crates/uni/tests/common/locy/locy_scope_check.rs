@@ -304,7 +304,7 @@ async fn scope_check_accepts_what_is_visible() -> Result<()> {
                 "{TOT}CREATE RULE all AS MATCH (x:N) WHERE x IS tot FOLD z = MSUM(s) YIELD KEY x, z\n\
                  QUERY all RETURN z"
             ),
-            Rows(&["z=12.0"]),
+            Rows(&["z=12"]),
         ),
         (
             "a $param in WHERE and in a post-FOLD WHERE",
@@ -312,7 +312,7 @@ async fn scope_check_accepts_what_is_visible() -> Result<()> {
             "CREATE RULE p AS MATCH (x:N)-[e:E]->(y:N) WHERE e.w >= $min \
              FOLD s = SUM(e.w) WHERE s >= $min YIELD KEY x, s\nQUERY p RETURN s"
                 .into(),
-            Rows(&["s=7.0"]),
+            Rows(&["s=7"]),
         ),
         (
             "prev directly in a recursive ALONG, its name in YIELD and BEST BY",
@@ -339,7 +339,7 @@ async fn scope_check_accepts_what_is_visible() -> Result<()> {
             "CREATE RULE p AS MATCH (x:N)-[e:E]->(y:N) FOLD total = SUM(e.w) WHERE total > 1 \
              YIELD KEY x.name AS nm, total AS sum_out\nQUERY p RETURN nm, sum_out"
                 .into(),
-            Rows(&["nm=a sum_out=12.0"]),
+            Rows(&["nm=a sum_out=12"]),
         ),
         (
             "local variables of an EXISTS subquery and a comprehension",

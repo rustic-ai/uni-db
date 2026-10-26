@@ -15,6 +15,10 @@ name: Nightly
 #            is here and not in pr.yml (that lane runs the three cheap crates).
 #   - bench: criterion benches with results uploaded as artifacts for
 #            manual trend comparison (no external regression service).
+#   - ignored-sweep: every other #[ignore]'d test in the workspace -- the ones
+#            no lane above selects by name -- so none goes unrun. Probes,
+#            repros, recall and model-backed tests among them; the exceptions
+#            are registered with a reason in scripts/ci/ignored_tests.py.
 #
 # No untrusted input is interpolated into run commands (cron +
 # workflow_dispatch only).
@@ -108,6 +112,56 @@ jobs:
           cargo nextest run --profile soak -p uni-db -p uni-store -p uni-locy-oracle \
             --run-ignored ignored-only \
             -E '(test(/soak/) | test(/stress/)) and not test(/dqp::/)'
+
+  # Every #[ignore]'d test that no other lane runs. Lanes select ignored tests
+  # by name, and on 2026-10-22 85 of 165 matched none: correctness tests, a
+  # test whose API had rotted, and a probe whose first run exposed a drop
+  # deadlock. This job runs all of them except those a dedicated lane already
+  # runs and those registered on-demand-only, both listed in
+  # `scripts/ci/ignored_tests.py`, which builds the filter -- so a new ignored
+  # test lands here by default. Measured locally (22 cores, debug, soak
+  # profile): the slowest is trigger_edge_probe_cost_1m at about 13 minutes,
+  # and the rest run alongside it. Model-backed tests download their models
+  # (no token is configured).
+  ignored-sweep:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: Ignored-test sweep
+    runs-on: ${{ vars.CI_RUNNER_XLARGE64 || 'ubuntu-xlarge' }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, wasm32-wasip2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold protobuf-compiler
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci"
+          cache-on-failure: true
+          save-if: false
+
+      - name: Build WASM plugin fixtures
+        run: ./scripts/build-wasm-fixtures.sh
+
+      - name: Run every ignored test no other lane runs
+        run: |
+          cargo nextest run --profile soak --workspace --no-fail-fast \
+            --exclude uni-tck --exclude uni-python --exclude uni-python-onnx \
+            --exclude uni-python-cuda --exclude uni-python-metal \
+            --exclude uni-python-onnx-cuda --exclude uni-python-onnx-metal \
+            --run-ignored ignored-only \
+            -E "$(python3 scripts/ci/ignored_tests.py sweep-filter)"
 
   cloud:
     if: github.repository == 'rustic-ai/uni-db'
@@ -359,31 +413,27 @@ jobs:
           save-if: false
 
       # Each case runs the same query down two execution paths and compares the
-      # result bags, so 10000 cases is 20000 queries per soak and 160000 across
-      # the eight — comfortably past the >=100k-queries/night target on its own.
+      # result bags, so 10000 cases is 20000 queries per soak — the eight lever
+      # soaks alone are 160000, comfortably past the >=100k-queries/night target.
       #
       # Sized down from 20000 by measurement, not caution. At 20000 the four
       # soaks that existed then measured 85.4 minutes serial on a 22-core box,
       # and four heavy tests contending would have pushed the slowest toward this
       # job's 60-minute timeout.
       #
-      # Re-measured after Phase 4 took the count from four soaks to eight, in
-      # this exact configuration — all eight concurrently at DQP_CASES=10000 on
-      # 22 cores: **29.9 minutes wall-clock**, slowest test 29.9 min against the
-      # 54-minute per-test ceiling. So 10000 still holds, with margin, and this
-      # box is more contended than the 64-core runner.
-      #
-      # Phase 5 added a ninth soak (`flush_pushdown_soak`), and it is **not**
-      # included in the 29.9-minute figure above. Measured only at smoke volume:
-      # 500 cases in 18 s, so 10000 extrapolates to roughly 6 minutes — well
-      # inside the slowest test's 29.9, and these run concurrently, so the
-      # wall-clock bound should be unchanged. That is an extrapolation, not a
-      # measurement; if this job starts approaching the ceiling, re-measure the
-      # set rather than assuming this line was right.
+      # Re-measured 2026-10-22 with the set as it is now — thirteen soaks
+      # (the four levers x plain/aggregate, flush pushdown and wide, cert, and
+      # the two topo soaks), all concurrently at DQP_CASES=10000 on 22 cores:
+      # **35.2 minutes wall-clock**, slowest test `topo_small_batches_soak` at
+      # 34.5 min against the 54-minute per-test ceiling and this job's 60-minute
+      # timeout. The per-test figures are in `.config/nextest.toml`. The earlier
+      # 29.9-minute figure covered only the first eight and was extrapolated for
+      # the rest; this one is measured. The box is more contended than the
+      # 64-core runner.
       #
       # The response to approaching a ceiling is to cut the volume or
       # investigate, not to raise the ceiling again.
-      - name: DQP soak (four levers x plain, aggregate and pushdown cases)
+      - name: DQP soaks (levers, pushdown, wide, cert, topo)
         env:
           DQP_CASES: 10000
         run: |

@@ -67,16 +67,21 @@ async fn engine_rows(generated: &Generated, rel: &str) -> Result<Vec<Tuple>> {
     let result = db.session().locy(&generated.program_text).await?;
     let key_cols = &generated.key_schema[rel];
 
-    let rows = result.derived.get(rel).map_or_else(Vec::new, |rows| {
-        rows.iter()
-            .map(|row| {
-                key_cols
-                    .iter()
-                    .map(|c| key_to_id(&row[c]))
-                    .collect::<Tuple>()
-            })
-            .collect()
-    });
+    let rows = result
+        .derived_rules()
+        .await
+        .unwrap()
+        .get(rel)
+        .map_or_else(Vec::new, |rows| {
+            rows.iter()
+                .map(|row| {
+                    key_cols
+                        .iter()
+                        .map(|c| key_to_id(&row[c]))
+                        .collect::<Tuple>()
+                })
+                .collect()
+        });
     Ok(rows)
 }
 
@@ -226,17 +231,22 @@ async fn incomplete_eval_errors_never_silent_short() -> Result<()> {
     match outcome {
         Ok(result) => {
             let key_cols = &g.key_schema["reaches"];
-            let n = result.derived.get("reaches").map_or(0, |rows| {
-                rows.iter()
-                    .map(|row| {
-                        key_cols
-                            .iter()
-                            .map(|c| key_to_id(&row[c]))
-                            .collect::<Tuple>()
-                    })
-                    .collect::<HashSet<_>>()
-                    .len()
-            });
+            let n = result
+                .derived_rules()
+                .await
+                .unwrap()
+                .get("reaches")
+                .map_or(0, |rows| {
+                    rows.iter()
+                        .map(|row| {
+                            key_cols
+                                .iter()
+                                .map(|c| key_to_id(&row[c]))
+                                .collect::<Tuple>()
+                        })
+                        .collect::<HashSet<_>>()
+                        .len()
+                });
             assert_eq!(n, expected, "completed but short — silent partial (G14)!");
         }
         Err(UniError::LocyIncomplete { detail }) => {

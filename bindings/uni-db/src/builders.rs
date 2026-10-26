@@ -1862,16 +1862,25 @@ impl PyTxQueryBuilder {
         let tx = tx_ref.inner.as_ref().ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Transaction already completed")
         })?;
-        let mut builder = tx.execute_with(&self.cypher);
+        // `query_with(..).execute()`, not `execute_with(..)`: the same Rust
+        // builder as this one's other terminals, so every option set here
+        // reaches it. `timeout` and `max_memory` used to be dropped.
+        let mut builder = tx.query_with(&self.cypher);
         for (k, v) in &self.params {
             let val = convert::py_object_to_value(py, v)?;
             builder = builder.param(k, val);
+        }
+        if let Some(t) = self.timeout_secs {
+            builder = builder.timeout(std::time::Duration::from_secs_f64(t));
+        }
+        if let Some(m) = self.max_memory {
+            builder = builder.max_memory(m);
         }
         if let Some(ref ct) = self.cancellation_token {
             builder = builder.cancellation_token(ct.inner.clone());
         }
         let result = py
-            .detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(builder.run()))
+            .detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(builder.execute()))
             .map_err(crate::exceptions::uni_error_to_pyerr)?;
         convert::execute_result_to_py(py, result)
     }
@@ -1889,6 +1898,9 @@ impl PyTxQueryBuilder {
         }
         if let Some(t) = self.timeout_secs {
             builder = builder.timeout(std::time::Duration::from_secs_f64(t));
+        }
+        if let Some(m) = self.max_memory {
+            builder = builder.max_memory(m);
         }
         if let Some(ref ct) = self.cancellation_token {
             builder = builder.cancellation_token(ct.inner.clone());
@@ -1912,6 +1924,33 @@ pub struct PyTxExecuteBuilder {
     pub(crate) cypher: String,
     pub(crate) params: HashMap<String, Py<PyAny>>,
     pub(crate) timeout_secs: Option<f64>,
+    pub(crate) max_memory: Option<usize>,
+    pub(crate) cancellation_token: Option<crate::types::PyCancellationToken>,
+}
+
+impl PyTxExecuteBuilder {
+    /// Build the Rust `ExecuteBuilder` carrying every option set here.
+    fn rust_builder<'t>(
+        &self,
+        py: Python,
+        tx: &'t ::uni_db::Transaction,
+    ) -> PyResult<::uni_db::ExecuteBuilder<'t>> {
+        let mut builder = tx.execute_with(&self.cypher);
+        for (k, v) in &self.params {
+            let val = convert::py_object_to_value(py, v)?;
+            builder = builder.param(k, val);
+        }
+        if let Some(t) = self.timeout_secs {
+            builder = builder.timeout(std::time::Duration::from_secs_f64(t));
+        }
+        if let Some(m) = self.max_memory {
+            builder = builder.max_memory(m);
+        }
+        if let Some(ref ct) = self.cancellation_token {
+            builder = builder.cancellation_token(ct.inner.clone());
+        }
+        Ok(builder)
+    }
 }
 
 #[pymethods]
@@ -1928,20 +1967,28 @@ impl PyTxExecuteBuilder {
         slf
     }
 
+    /// Cap the memory this mutation may reserve, in bytes.
+    fn max_memory(mut slf: PyRefMut<'_, Self>, bytes: usize) -> PyRefMut<'_, Self> {
+        slf.max_memory = Some(bytes);
+        slf
+    }
+
+    /// Attach a cancellation token for cooperative cancellation.
+    fn cancellation_token(
+        mut slf: PyRefMut<'_, Self>,
+        token: crate::types::PyCancellationToken,
+    ) -> PyRefMut<'_, Self> {
+        slf.cancellation_token = Some(token);
+        slf
+    }
+
     /// Execute the mutation.
     fn run(&self, py: Python) -> PyResult<crate::types::PyExecuteResult> {
         let tx_ref = self.tx.borrow(py);
         let tx = tx_ref.inner.as_ref().ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Transaction already completed")
         })?;
-        let mut builder = tx.execute_with(&self.cypher);
-        for (k, v) in &self.params {
-            let val = convert::py_object_to_value(py, v)?;
-            builder = builder.param(k, val);
-        }
-        if let Some(t) = self.timeout_secs {
-            builder = builder.timeout(std::time::Duration::from_secs_f64(t));
-        }
+        let builder = self.rust_builder(py, tx)?;
         let result = py
             .detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(builder.run()))
             .map_err(crate::exceptions::uni_error_to_pyerr)?;
@@ -1961,14 +2008,7 @@ impl PyTxExecuteBuilder {
         let tx = tx_ref.inner.as_ref().ok_or_else(|| {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("Transaction already completed")
         })?;
-        let mut builder = tx.execute_with(&self.cypher);
-        for (k, v) in &self.params {
-            let val = convert::py_object_to_value(py, v)?;
-            builder = builder.param(k, val);
-        }
-        if let Some(t) = self.timeout_secs {
-            builder = builder.timeout(std::time::Duration::from_secs_f64(t));
-        }
+        let builder = self.rust_builder(py, tx)?;
         let (result, profile) = py
             .detach(|| pyo3_async_runtimes::tokio::get_runtime().block_on(builder.profile()))
             .map_err(crate::exceptions::uni_error_to_pyerr)?;

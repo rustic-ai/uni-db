@@ -76,6 +76,19 @@ impl UidIndex {
         mappings: &[(UniId, Vid)],
         version: u64,
     ) -> Result<()> {
+        let stamped: Vec<(UniId, Vid, u64)> = mappings
+            .iter()
+            .map(|(uid, vid)| (*uid, *vid, version))
+            .collect();
+        self.write_mappings_at_versions(&stamped).await
+    }
+
+    /// Append UID→vid mappings, each stamped with its own version.
+    ///
+    /// For a writer that carries rows of many versions in one append, such as
+    /// a label backfill copying each vertex at the version it was flushed at.
+    /// See [`Self::write_mapping_versioned`] for what the version decides.
+    pub async fn write_mappings_at_versions(&self, mappings: &[(UniId, Vid, u64)]) -> Result<()> {
         // Upgrade a pre-`_version` table in place so the append schema matches.
         self.migrate_schema_if_legacy().await?;
 
@@ -85,16 +98,18 @@ impl UidIndex {
         let mut vids = Vec::with_capacity(mappings.len());
         let mut uid_hex_builder = StringBuilder::new();
 
-        for (uid, vid) in mappings {
+        let mut versions = Vec::with_capacity(mappings.len());
+        for (uid, vid, version) in mappings {
             uid_builder.append_value(uid.as_bytes()).unwrap();
             vids.push(vid.as_u64());
             uid_hex_builder.append_value(uid_to_hex(uid));
+            versions.push(*version);
         }
 
         let uid_array = uid_builder.finish();
         let vid_array = UInt64Array::from(vids);
         let uid_hex_array = uid_hex_builder.finish();
-        let version_array = UInt64Array::from(vec![version; mappings.len()]);
+        let version_array = UInt64Array::from(versions);
 
         let batch = RecordBatch::try_new(
             schema.clone(),

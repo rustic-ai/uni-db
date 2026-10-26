@@ -80,6 +80,7 @@ The jobs a Rust change can actually move. Run these first:
 
 ```bash
 export RUSTC_WRAPPER=""
+python3 scripts/ci/static_guards.py --with-fuzz-lock   # seconds; see "Static Guards" below
 cargo fmt --all -- --check
 cargo deny check                      # no build, seconds; the advisory DB floats,
                                       # so this can go red with no change to the repo
@@ -97,6 +98,13 @@ cargo nextest run --workspace --no-fail-fast \
   --exclude uni-python-cuda --exclude uni-python-metal \
   --exclude uni-python-onnx-cuda --exclude uni-python-onnx-metal
 ```
+
+The static guards are in the quick path although they are pure Python: a Rust
+change moves them too. A new Rust builder method or `UniConfig` field trips the
+parity guard; a dependency added to `uni-common`, `uni-store`, `uni-cypher` or
+`uni-btic` makes `fuzz/Cargo.lock` stale; a binding change makes the generated
+Python API reference stale. PR #318's first CI run failed on the last two after
+every lane above was green.
 
 The full job list follows.
 
@@ -127,6 +135,7 @@ change to this repo** — see §5.
 # working dir: fuzz (subshell, so a failure does not leave you outside the repo root)
 ( cd fuzz
 # The fuzz crate's own lockfile must be current; the job checks it first.
+# (`static_guards.py --with-fuzz-lock` runs the same check, on stable.)
 cargo +nightly metadata --locked --format-version 1 > /dev/null
 for target in cypher_parse locy_parse wal_decode btic_decode; do
   # Corpus-dir order is load-bearing. libFuzzer writes newly-discovered inputs
@@ -143,6 +152,13 @@ for target in cypher_parse locy_parse wal_decode btic_decode; do
     "$target" "corpus/$target" $seeds -- -max_total_time=30 -timeout=10
 done )
 ```
+`fuzz/` is a separate workspace with its own tracked `Cargo.lock`, which no
+ordinary build updates. When the lock check fails (a crate the fuzz targets reach
+gained a dependency), refresh it with
+`cargo update --workspace --manifest-path fuzz/Cargo.toml` and commit
+`fuzz/Cargo.lock`. Never run a bare `cargo update` there: it re-resolves every
+dependency, which is the 2026-09-14 aws-smithy break the tracked lock prevents.
+
 `--target x86_64-unknown-linux-gnu` is load-bearing: without it a musl-built
 cargo-fuzz statically links libc, which AddressSanitizer rejects outright.
 
@@ -370,16 +386,21 @@ suite or clippy can catch this class, so this is the cheapest high-value check
 in the runbook — there is no reason to skip it.
 
 ```bash
-python3 scripts/ci/check_wheel_variant_features.py
-python3 scripts/ci/check_version_consistency.py   # pyproject == workspace; no hardcoded __version__
-python3 scripts/ci/check_documented_counts.py     # every documented count claim: plugin
-                                                  # surfaces, graph algorithms, both TCK
-                                                  # suites' feature files + scenario totals,
-                                                  # and the skill reference pages
-python3 scripts/gen_python_api_reference.py --check  # generated symbol page is current
-python3 scripts/ci/check_doc_symbols.py           # documented Python methods exist in __init__.pyi
-python3 scripts/ci/check_rust_python_parity.py    # every UniConfig field reachable from Python
+python3 scripts/ci/static_guards.py                  # exactly the pr.yml job
+python3 scripts/ci/static_guards.py --with-fuzz-lock # + fuzz/Cargo.lock is current
 ```
+
+`scripts/ci/static_guards.py` is the job's only list of guards: `pr.yml` runs
+it, so this section cannot drift from it. It runs every guard even after a
+failure and prints each failing one's output and fix. The guards: wheel-variant
+plugin features; Python version consistency (pyproject == workspace, no
+hardcoded `__version__`); documented counts (plugin surfaces, graph algorithms,
+both TCK suites' feature files and scenario totals, the skill reference pages);
+the generated Python API reference is current; documented Python methods exist
+in `__init__.pyi`; Rust ↔ Python parity (config fields, error variants, and the
+query, Locy, bulk-writer and appender builders); the ignored-test registry
+(`scripts/ci/ignored_tests.py`: the nightly sweep's dedicated-lane filters still
+match their workflows, and every on-demand entry names a real `#[ignore]`d test).
 
 If `gen_python_api_reference.py --check` fails, regenerate rather than hand-editing:
 `python3 scripts/gen_python_api_reference.py`. The page is generated from
@@ -545,6 +566,26 @@ complete list.
 ```bash
 cargo metadata --format-version=1 --manifest-path bindings/uni-db-cuda/Cargo.toml > /dev/null
 ```
+
+---
+
+### Ignored-test sweep (nightly.yml) — every `#[ignore]`d test no other lane runs
+
+```bash
+cargo nextest run --profile soak --workspace --no-fail-fast \
+  --exclude uni-tck --exclude uni-python --exclude uni-python-onnx \
+  --exclude uni-python-cuda --exclude uni-python-metal \
+  --exclude uni-python-onnx-cuda --exclude uni-python-onnx-metal \
+  --run-ignored ignored-only -E "$(python3 scripts/ci/ignored_tests.py sweep-filter)"
+```
+
+Not a PR or main-push job, but the one place most ignored tests run: probes,
+repros, recall benches and the model-backed tests. A new `#[ignore]`d test runs
+here by default; one that cannot run unattended goes into `ON_DEMAND` in
+`scripts/ci/ignored_tests.py` with the reason. The model-backed tests download
+into `.uni_cache/` (override with `UNI_CACHE_DIR`). `--profile soak` is
+required: the 1M-row trigger probes take 8–13 minutes in a debug build, past
+the default profile's 180 s ceiling.
 
 ---
 

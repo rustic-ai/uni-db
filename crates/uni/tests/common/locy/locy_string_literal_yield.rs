@@ -94,7 +94,9 @@ async fn both_surfaces(db: &Uni, yield_expr: &str) -> Result<(Option<Value>, Opt
     let result = db.session().locy(&program).await?;
     let empty = vec![];
     let derived = result
-        .derived_facts("t")
+        .derived_rule("t")
+        .await
+        .unwrap()
         .unwrap_or(&empty)
         .first()
         .and_then(|r| r.get("a").cloned());

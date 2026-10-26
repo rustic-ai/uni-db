@@ -64,7 +64,9 @@ async fn test_native_transitive_closure() -> Result<()> {
         .await?;
 
     let reachable = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("reachable")
         .expect("rule 'reachable' missing");
     // A→B, B→C, A→C (transitive)
@@ -106,7 +108,9 @@ async fn test_native_fold_sum() -> Result<()> {
         .await?;
 
     let spending = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("spending")
         .expect("rule 'spending' missing");
     assert_eq!(
@@ -147,7 +151,9 @@ async fn test_native_best_by() -> Result<()> {
         .await?;
 
     let cheapest = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("cheapest")
         .expect("rule 'cheapest' missing");
     // BEST BY groups by KEY columns (a, b); each (a,b) pair is unique,
@@ -187,7 +193,9 @@ async fn test_native_priority() -> Result<()> {
         .await?;
 
     let classify = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("classify")
         .expect("rule 'classify' missing");
     // A (risk=0.8) gets 'high' via P2, B (risk=0.2) gets 'low' via P1
@@ -225,12 +233,19 @@ async fn test_native_multi_stratum() -> Result<()> {
         .run()
         .await?;
 
-    let base = result.derived.get("base").expect("rule 'base' missing");
+    let base = result
+        .derived_rules()
+        .await
+        .unwrap()
+        .get("base")
+        .expect("rule 'base' missing");
     // base: direct edges only → A→B, B→C
     assert_eq!(base.len(), 2, "expected 2 base facts, got {}", base.len());
 
     let extended = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("extended")
         .expect("rule 'extended' missing");
     // extended: same as transitive closure via IS base → A→B, B→C, A→C
@@ -277,7 +292,9 @@ async fn test_native_along() -> Result<()> {
         .await?;
 
     let shortest = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .get("shortest")
         .expect("rule 'shortest' missing");
     // A→B (cost=5), B→C (cost=3), A→C (cost=8, via A→B→C, not direct 20)

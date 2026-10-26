@@ -224,6 +224,8 @@ async fn locy_value_types_along() -> Result<()> {
         .iter()
         .find_map(|c| c.as_query())
         .expect("a QUERY");
-    assert_eq!(rows[0].get("c0"), Some(&Value::Float(7.0)));
+    // An integer ALONG value sums to an integer, as Cypher's `sum` does (issue
+    // #316); it was the float `7.0`.
+    assert_eq!(rows[0].get("c0"), Some(&Value::Int(7)));
     Ok(())
 }

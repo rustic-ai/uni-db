@@ -113,10 +113,12 @@ CREATE RULE roll AS
 "#;
 
 /// Extracts the rolled-up cost for `sku` from the `roll` relation.
-fn cost_of(result: &uni_db::locy::LocyResult, sku: &str) -> Option<f64> {
+async fn cost_of(result: &uni_db::locy::LocyResult, sku: &str) -> Option<f64> {
     let empty = vec![];
     result
-        .derived_facts("roll")
+        .derived_rule("roll")
+        .await
+        .unwrap()
         .unwrap_or(&empty)
         .iter()
         .find(|row| match row.get("p") {
@@ -154,7 +156,7 @@ async fn issue_159_recursive_fold_with_distinct_values_is_correct() -> Result<()
     ];
     let db = build(&edges, &costs).await?;
     let result = db.session().locy(ROLLUP).await?;
-    let top = cost_of(&result, "TOP").expect("TOP must be derived");
+    let top = cost_of(&result, "TOP").await.expect("TOP must be derived");
     assert!(
         (top - 15.0).abs() < 1e-9,
         "distinct child costs must sum: got {top}, want 15.0"
@@ -178,7 +180,7 @@ async fn issue_159_non_recursive_fold_over_equal_values_is_correct() -> Result<(
         );
         let result = db.session().locy(&program).await?;
         let empty = vec![];
-        let facts = result.derived_facts("flat").unwrap_or(&empty);
+        let facts = result.derived_rule("flat").await.unwrap().unwrap_or(&empty);
         let v = facts
             .first()
             .and_then(|row| match row.get("v") {
@@ -219,7 +221,7 @@ async fn issue_159_recursive_fold_must_not_dedup_equal_values() -> Result<()> {
 
         let db = build(&edges_ref, &costs_ref).await?;
         let result = db.session().locy(ROLLUP).await?;
-        let top = cost_of(&result, "TOP").expect("TOP must be derived");
+        let top = cost_of(&result, "TOP").await.expect("TOP must be derived");
         assert!(
             (top - n as f64).abs() < 1e-9,
             "N={n}: {n} children of cost 1.0 must roll up to {n}, got {top} — \
@@ -278,7 +280,9 @@ CREATE RULE expl AS
         _ => None,
     };
     let mut qtys: Vec<f64> = result
-        .derived_facts("expl")
+        .derived_rule("expl")
+        .await
+        .unwrap()
         .unwrap_or(&empty)
         .iter()
         .filter(|row| {

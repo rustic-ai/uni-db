@@ -403,6 +403,12 @@ impl<'s, 'a> QueryBuilderSync<'s, 'a> {
         self
     }
 
+    /// Attach a cancellation token for cooperative query cancellation.
+    pub fn cancellation_token(mut self, token: tokio_util::sync::CancellationToken) -> Self {
+        self.inner = self.inner.cancellation_token(token);
+        self
+    }
+
     /// Execute the query and fetch all results.
     pub fn fetch_all(self) -> Result<QueryResult> {
         self.rt.block_on(self.inner.fetch_all())
@@ -607,6 +613,12 @@ impl<'t, 'a> ExecuteBuilderSync<'t, 'a> {
         self
     }
 
+    /// Cap the memory this mutation may reserve, in bytes.
+    pub fn max_memory(mut self, bytes: usize) -> Self {
+        self.inner = self.inner.max_memory(bytes);
+        self
+    }
+
     /// Execute the mutation and return affected row count with detailed stats.
     pub fn run(self) -> Result<ExecuteResult> {
         self.rt.block_on(self.inner.run())
@@ -653,6 +665,24 @@ impl<'t, 'a> TxQueryBuilderSync<'t, 'a> {
     /// Bind a parameter.
     pub fn param(mut self, name: &str, value: impl Into<Value>) -> Self {
         self.inner = self.inner.param(name, value);
+        self
+    }
+
+    /// Set maximum execution time for this statement.
+    pub fn timeout(mut self, duration: std::time::Duration) -> Self {
+        self.inner = self.inner.timeout(duration);
+        self
+    }
+
+    /// Cap the memory this statement may reserve, in bytes.
+    pub fn max_memory(mut self, bytes: usize) -> Self {
+        self.inner = self.inner.max_memory(bytes);
+        self
+    }
+
+    /// Attach a cancellation token for cooperative cancellation.
+    pub fn cancellation_token(mut self, token: tokio_util::sync::CancellationToken) -> Self {
+        self.inner = self.inner.cancellation_token(token);
         self
     }
 

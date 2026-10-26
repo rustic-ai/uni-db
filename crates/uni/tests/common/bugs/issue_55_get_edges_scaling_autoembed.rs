@@ -6,7 +6,14 @@
 //! Imported verbatim from the customer's `uniko-store` repro at
 //! `uniko2/crates/uniko-store/tests/get_edges_scaling_autoembed_repro.rs`.
 //!
-//! Run: cargo nextest run -p uni-db --test issue_55_get_edges_scaling_autoembed --run-ignored all
+//! A measurement probe: it asserts each round's edge count and prints the
+//! latency growth, asserting none. Runs in the nightly ignored-test sweep
+//! (`scripts/ci/ignored_tests.py`); to run it alone:
+//!
+//! ```text
+//! cargo nextest run -p uni-db --test integration --run-ignored ignored-only --no-capture \
+//!   -E 'test(repro_get_edges_scales_with_autoembed)'
+//! ```
 
 use std::time::Instant;
 
@@ -131,7 +138,8 @@ async fn measure_get_edges(db: &Uni, node_id: i64) -> (usize, f64) {
 }
 
 #[tokio::test]
-#[ignore] // Requires ONNX model cached in .uni_cache/
+#[ignore = "measurement probe: issue #55 get_edges scaling under auto-embed; loads an ONNX \
+            embedding model; run explicitly"]
 async fn repro_get_edges_scales_with_autoembed() {
     let db = setup_db().await;
 

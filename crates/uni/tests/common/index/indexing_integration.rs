@@ -2,157 +2,81 @@
 // Copyright 2024-2026 Dragonscale Team
 
 use anyhow::Result;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tempfile::tempdir;
-use uni_db::core::schema::{DataType, SchemaManager};
-use uni_db::query::executor::Executor;
-use uni_db::unival;
+use serde_json::json;
+use uni_db::{Uni, Value};
+use uni_xervo::api::{ModelAliasSpec, ModelTask, WarmupPolicy};
 
-use uni_db::query::planner::QueryPlanner;
-use uni_db::runtime::property_manager::PropertyManager;
-use uni_db::runtime::writer::Writer;
-use uni_db::storage::manager::StorageManager;
+/// The Candle `all-MiniLM-L6-v2` text-embedding model, registered as `alias`.
+fn minilm_alias(alias: &str) -> ModelAliasSpec {
+    ModelAliasSpec {
+        alias: alias.to_string(),
+        task: ModelTask::Embed,
+        provider_id: "local/candle".to_string(),
+        model_id: "all-MiniLM-L6-v2".to_string(),
+        revision: None,
+        warmup: WarmupPolicy::Lazy,
+        required: false,
+        timeout: None,
+        load_timeout: None,
+        retry: None,
+        options: json!({}),
+    }
+}
 
+/// A vertex written without its vector gets one from the index's embedding
+/// alias, visible in the creating statement, and the vector index finds it.
+///
+/// Rewritten 2026-10-22 against the public API: the original drove the
+/// planner and executor by hand with an index DDL that named a provider and
+/// model inline (`embedding: { provider, model, source }`), which the engine
+/// has since replaced with a catalog alias. No lane ran it, so it failed with
+/// `embedding.alias is required` until the nightly ignored-test sweep did.
 #[tokio::test]
-#[ignore] // Requires model download from HuggingFace Hub
+#[ignore = "downloads the all-MiniLM-L6-v2 Candle model from the HuggingFace Hub"]
 async fn test_auto_embedding_and_vector_search() -> Result<()> {
-    let _ = env_logger::builder().is_test(true).try_init();
-    // 1. Setup
-    let dir = tempdir()?;
-    let base_path = dir.path().to_str().unwrap();
-    let schema_path = dir.path().join("schema.json");
+    const CONTENT: &str = "This is a test document about graphs and vectors.";
+    let db = Uni::temporary()
+        .xervo_catalog(vec![minilm_alias("embed/default")])
+        .build()
+        .await?;
 
-    let schema_manager = SchemaManager::load(&schema_path).await?;
-
-    // Add Label and Properties
-    let _label_id = schema_manager.add_label("Document")?;
-    schema_manager.add_property("Document", "content", DataType::String, false)?;
-    // We expect "embedding" to be added automatically? No, we must define it in schema usually?
-    // Auto-embedding logic inserts it into properties. Writer checks if property exists in schema?
-    // Writer uses L0. L0 does not enforce schema strictly, but Flush to L1 does build record batch based on schema.
-    // So we MUST add the embedding property to schema for persistence to work.
-    schema_manager.add_property(
-        "Document",
-        "embedding",
-        DataType::Vector { dimensions: 384 },
-        true,
-    )?; // Nullable initially? Or not?
-    // Auto-embedding runs BEFORE insert. So property will be present.
-
-    schema_manager.save().await?;
-    let schema_manager = Arc::new(schema_manager);
-
-    let storage = Arc::new(StorageManager::new(base_path, schema_manager.clone()).await?);
-    let writer = Arc::new(
-        Writer::new(storage.clone(), schema_manager.clone(), 0)
-            .await
-            .unwrap(),
-    );
-
-    // 2. Create Vector Index with Embedding Config via DDL
-    // We use Planner and Executor to run DDL
-    // Using Candle as the default embedding provider
-    let ddl = r#"
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE LABEL Document (content STRING)").await?;
+    tx.execute(
+        r#"
         CREATE VECTOR INDEX doc_embed_idx
-        FOR (d:Document) ON d.embedding
+        FOR (d:Document) ON (d.embedding)
         OPTIONS {
-            type: 'hnsw',
-            embedding: {
-                provider: 'Candle',
-                model: 'all-MiniLM-L6-v2',
-                source: ['content']
-            }
+            metric: 'cosine',
+            embedding: { alias: 'embed/default', source: ['content'] }
         }
-    "#;
-
-    {
-        let query = uni_cypher::parse(ddl)?;
-        let planner = QueryPlanner::new(schema_manager.schema());
-        let plan = planner.plan(query)?;
-
-        let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
-        let executor = Executor::new_with_writer(storage.clone(), writer.clone());
-        let params = HashMap::new();
-
-        executor.execute(plan, &prop_manager, &params).await?;
+    "#,
+    )
+    .await?;
+    // Written without `embedding`: the write embeds `content`, and the
+    // creating statement already sees the vector.
+    let created = tx
+        .query(&format!(
+            "CREATE (d:Document {{content: '{CONTENT}'}}) RETURN d.embedding AS e"
+        ))
+        .await?;
+    let embedding = created.rows()[0].value("e").cloned();
+    match embedding {
+        Some(Value::Vector(v)) => assert_eq!(v.len(), 384, "all-MiniLM-L6-v2 is 384-d"),
+        Some(Value::List(v)) => assert_eq!(v.len(), 384, "all-MiniLM-L6-v2 is 384-d"),
+        other => panic!("expected the auto-generated embedding, got {other:?}"),
     }
+    tx.commit().await?;
+    db.flush().await?;
 
-    // 3. Insert Vertex (Auto-Embedding)
-    // We insert a vertex with 'content' but NO 'embedding'.
-    let insert_query = r#"
-        CREATE (d:Document { content: "This is a test document about graphs and vectors." })
-        RETURN d.embedding
-    "#;
-    // Note: RETURN d.embedding might return null if read immediately after create in same statement if not handled?
-    // Logic: execute_create_pattern inserts to Writer. Writer.insert_vertex calls process_embeddings.
-    // So embedding should be in L0 immediately.
-
-    {
-        let query = uni_cypher::parse(insert_query)?;
-        let planner = QueryPlanner::new(schema_manager.schema());
-        let plan = planner.plan(query)?;
-
-        let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
-        let executor = Executor::new_with_writer(storage.clone(), writer.clone());
-        let params = HashMap::new();
-
-        let results = executor.execute(plan, &prop_manager, &params).await?;
-
-        assert_eq!(results.len(), 1);
-        let embedding_val = results[0].get("d.embedding").unwrap();
-
-        // Verify embedding is generated
-        assert!(embedding_val.is_list());
-        let vec = embedding_val.as_array().unwrap();
-        assert_eq!(vec.len(), 384); // AllMiniLML6V2 is 384 dim
-    }
-
-    // 4. Flush to persist
-    {
-        let w: &uni_store::Writer = writer.as_ref();
-        w.flush_to_l1(None).await?;
-    }
-
-    // 5. Vector Search
-    // We search using a similar concept
-    let _search_query = r#"
-        MATCH (d:Document)
-        WHERE vector_similarity(d.embedding, [0.0, 0.0, 0.0]) > 0.0
-        RETURN d.content
-    "#;
-    // Note: We need a valid query vector of size 384. [0.0, 0.0...] won't work in Parser/Planner if it expects array literal.
-    // Planner parses list. `parse_vector` expects numbers.
-    // Constructing a 384-float array in query string is tedious.
-    // Use parameter!
-
-    // `~=` is the top-K index search; a `vector_similarity(...) > t`
-    // threshold would keep the document only if its cosine with `$q` passed.
-    let search_query_param = r#"
-        MATCH (d:Document)
-        WHERE d.embedding ~= $q
-        RETURN d.content
-    "#;
-
-    let mut params = HashMap::new();
-    let zero_vec: Vec<f32> = vec![0.01; 384]; // non-zero to avoid div/0 in cosine?
-    params.insert("q".to_string(), unival!(zero_vec));
-
-    {
-        let query = uni_cypher::parse(search_query_param)?;
-        let planner = QueryPlanner::new(schema_manager.schema());
-        let plan = planner.plan(query)?;
-
-        let prop_manager = PropertyManager::new(storage.clone(), schema_manager.clone(), 100);
-        let executor = Executor::new_with_writer(storage.clone(), writer.clone());
-
-        let results = executor.execute(plan, &prop_manager, &params).await?;
-
-        // The only document is the top-1 neighbour.
-        assert_eq!(results.len(), 1);
-        let content = results[0].get("d.content").unwrap().as_str().unwrap();
-        assert_eq!(content, "This is a test document about graphs and vectors.");
-    }
-
+    // `~=` is the top-K index search: the only document is the nearest.
+    let found = db
+        .session()
+        .query_with("MATCH (d:Document) WHERE d.embedding ~= $q RETURN d.content AS c")
+        .param("q", Value::Vector(vec![0.01; 384]))
+        .fetch_all()
+        .await?;
+    assert_eq!(found.rows().len(), 1);
+    assert_eq!(found.rows()[0].get::<String>("c")?, CONTENT);
     Ok(())
 }

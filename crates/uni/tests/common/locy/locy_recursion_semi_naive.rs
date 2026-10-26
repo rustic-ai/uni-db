@@ -517,7 +517,7 @@ async fn recursion_semi_naive_yield_arithmetic_keeps_integers() -> Result<()> {
             .map(|r| r.get("d").cloned().unwrap_or(Value::Null))
             .collect();
         assert_eq!(got, want, "YIELD {yield_expr}");
-        let derived: Vec<Value> = result.derived["r"]
+        let derived: Vec<Value> = result.derived_rules().await.unwrap()["r"]
             .iter()
             .map(|row| row.get("d").cloned().unwrap_or(Value::Null))
             .collect();

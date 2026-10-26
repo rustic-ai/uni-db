@@ -93,6 +93,16 @@ async fn sum_avg_take_numbers_or_durations_in_cypher() -> Result<()> {
         ("UNWIND [1, 2.5] AS x RETURN sum(x)", Value::Float(3.5)),
         ("UNWIND [1, 2] AS x RETURN avg(x)", Value::Float(1.5)),
         ("UNWIND [] AS x RETURN sum(x)", Value::Int(0)),
+        // Integers stay exact past 2^53, and continue as a float past the
+        // 64-bit range rather than wrapping (Neo4j's `sum`).
+        (
+            "UNWIND [9007199254740992, 1] AS x RETURN sum(x)",
+            Value::Int(9_007_199_254_740_993),
+        ),
+        (
+            "UNWIND [9223372036854775807, 1] AS x RETURN sum(x)",
+            Value::Float(9.223_372_036_854_776e18),
+        ),
         ("UNWIND [] AS x RETURN avg(x)", Value::Null),
     ];
     let mut failures = Vec::new();
@@ -198,6 +208,10 @@ async fn sum_avg_take_numbers_or_durations_in_a_window() -> Result<()> {
         (
             "UNWIND [1, 2] AS x RETURN sum(x) OVER () AS v",
             vec![Value::Int(3); 2],
+        ),
+        (
+            "UNWIND [9223372036854775807, 1] AS x RETURN sum(x) OVER () AS v",
+            vec![Value::Float(9.223_372_036_854_776e18); 2],
         ),
     ];
     let mut failures = Vec::new();

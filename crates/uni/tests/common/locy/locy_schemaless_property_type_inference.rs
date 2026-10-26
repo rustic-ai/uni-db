@@ -82,7 +82,9 @@ async fn derived_value(db: &Uni, program: &str, rule: &str, column: &str) -> Res
     let result = db.session().locy(program).await?;
     let empty = vec![];
     Ok(result
-        .derived_facts(rule)
+        .derived_rule(rule)
+        .await
+        .unwrap()
         .unwrap_or(&empty)
         .first()
         .and_then(|row| row.get(column).cloned()))
@@ -156,7 +158,9 @@ async fn schemaless_property_derived_and_query_must_agree() -> Result<()> {
     let result = db.session().locy(&program).await?;
     let empty = vec![];
     let derived = result
-        .derived_facts("tags")
+        .derived_rule("tags")
+        .await
+        .unwrap()
         .unwrap_or(&empty)
         .first()
         .and_then(|r| r.get("tag").cloned());
@@ -192,7 +196,9 @@ async fn schemaless_prob_property_stays_numeric() -> Result<()> {
     let result = db.session().locy(program).await?;
     let empty = vec![];
     let r = result
-        .derived_facts("risky")
+        .derived_rule("risky")
+        .await
+        .unwrap()
         .unwrap_or(&empty)
         .first()
         .and_then(|row| row.get("r").cloned());
@@ -234,7 +240,9 @@ async fn typed_bytes_property_round_trips_through_derived() -> Result<()> {
     let result = db.session().locy(program).await?;
     let empty = vec![];
     let got = result
-        .derived_facts("blobs")
+        .derived_rule("blobs")
+        .await
+        .unwrap()
         .unwrap_or(&empty)
         .first()
         .and_then(|row| row.get("p").cloned());
@@ -273,7 +281,9 @@ async fn partially_declared_schema_undeclared_label_round_trips() -> Result<()> 
     let result = db.session().locy(program).await?;
     let empty = vec![];
     let derived = result
-        .derived_facts("tags")
+        .derived_rule("tags")
+        .await
+        .unwrap()
         .unwrap_or(&empty)
         .first()
         .and_then(|r| r.get("tag").cloned());

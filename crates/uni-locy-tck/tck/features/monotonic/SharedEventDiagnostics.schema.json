@@ -1,0 +1,33 @@
+{
+  "edge_types": {
+    "DEPENDS_ON": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "Facility": {
+      "id": 1
+    },
+    "Supplier": {
+      "id": 2
+    }
+  },
+  "properties": {
+    "Facility": {
+      "id": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "Supplier": {
+      "id": {
+        "nullable": true,
+        "type": "String"
+      }
+    }
+  },
+  "schema_version": 1
+}

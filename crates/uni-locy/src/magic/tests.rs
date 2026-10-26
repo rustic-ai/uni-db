@@ -334,3 +334,72 @@ fn explain_derive_and_assume_are_not_rewritten() {
     assert!(report.goals.is_empty());
     assert_eq!(evaluated(&program), ["reach"]);
 }
+
+/// `Auto` is the default, and rewrites exactly as `On` does: deriving the
+/// rules it leaves out is the runtime's part.
+#[test]
+fn auto_is_the_default_and_rewrites_as_on() {
+    assert_eq!(GoalDirected::default(), GoalDirected::Auto);
+    assert_eq!(
+        crate::LocyConfig::default().goal_directed,
+        GoalDirected::Auto
+    );
+    let src = format!(
+        "{TC_RIGHT}CREATE RULE hub AS MATCH (v:N)-[:E]->(:N) YIELD KEY v\n\
+         QUERY reach WHERE a.name = 'x' RETURN b"
+    );
+    let (on, on_report) = rewrite(&src, GoalDirected::On);
+    let (auto, auto_report) = rewrite(&src, GoalDirected::Auto);
+    assert_eq!(auto_report, on_report);
+    assert_eq!(evaluated(&auto), evaluated(&on));
+    assert_eq!(query_rule(&auto), query_rule(&on));
+    assert!(!evaluated(&auto).contains(&"reach".to_string()));
+}
+
+/// The program-level cases where `Auto` evaluates in full.
+#[test]
+fn auto_fallback_names_writes_and_provenance() {
+    let read = format!("{TC_RIGHT}QUERY reach WHERE a.name = 'x' RETURN b");
+    assert_eq!(auto_fallback(&compiled(&read)), None);
+
+    let cypher_read = format!("{read}\nMATCH (n:N) RETURN count(n) AS c");
+    assert_eq!(auto_fallback(&compiled(&cypher_read)), None);
+
+    let cypher_write = format!("{read}\nMATCH (n:N) SET n.seen = true");
+    assert_eq!(
+        auto_fallback(&compiled(&cypher_write)),
+        Some(AutoFallback::WriteCommand)
+    );
+
+    let derive = "CREATE RULE link AS MATCH (a:N)-[:E]->(b:N) DERIVE (a)-[:LINK]->(b)\n\
+                  DERIVE link";
+    assert_eq!(
+        auto_fallback(&compiled(derive)),
+        Some(AutoFallback::WriteCommand)
+    );
+
+    let explain = format!("{read}\nEXPLAIN RULE reach WHERE a.name = 'x'");
+    assert_eq!(
+        auto_fallback(&compiled(&explain)),
+        Some(AutoFallback::Provenance)
+    );
+}
+
+/// The program that derives left-out rules keeps them and what they
+/// reference, and nothing else: no unrelated rule, no command.
+#[test]
+fn materialization_program_keeps_the_rules_and_their_dependencies() {
+    let src = format!(
+        "{TC_RIGHT}CREATE RULE hub AS MATCH (v:N)-[:E]->(:N) YIELD KEY v\n\
+         CREATE RULE fan AS MATCH (a:N) WHERE a IS reach TO b FOLD k = COUNT(b) YIELD KEY a, k\n\
+         QUERY fan WHERE a.name = 'x' RETURN k"
+    );
+    let program = compiled(&src);
+    let fan = materialization_program(&program, &["fan".to_string()]);
+    assert_eq!(evaluated(&fan), ["fan", "reach"]);
+    assert!(fan.commands.is_empty());
+    let reach = materialization_program(&program, &["reach".to_string()]);
+    assert_eq!(evaluated(&reach), ["reach"]);
+    // The catalog is kept whole: a reference resolves as it did.
+    assert_eq!(reach.rule_catalog.len(), program.rule_catalog.len());
+}

@@ -66,6 +66,10 @@ pub struct QueryCounters {
     planning_nanos: AtomicU64,
     shortest_path_searches: AtomicU64,
     shortest_path_adjacency_reads: AtomicU64,
+    /// Bytes currently reserved from the query's DataFusion memory pools.
+    reserved_bytes: AtomicU64,
+    /// High-water mark of `reserved_bytes`.
+    peak_reserved_bytes: AtomicU64,
 }
 
 /// Which kind of index a search consulted.
@@ -322,6 +326,46 @@ impl QueryCounters {
         self.shortest_path_adjacency_reads.load(Ordering::Relaxed)
     }
 
+    /// Records `n` bytes newly reserved from one of the query's memory pools,
+    /// raising the high-water mark if the total now exceeds it.
+    ///
+    /// Called by the pool wrapper on every successful grow, from every pool the
+    /// query builds — its own plan's and each execution-time sub-plan's — so
+    /// the running total is what the whole query holds at once, not what one
+    /// pool holds.
+    pub fn add_reserved_bytes(&self, n: usize) {
+        let n = n as u64;
+        let now = self.reserved_bytes.fetch_add(n, Ordering::Relaxed) + n;
+        self.peak_reserved_bytes.fetch_max(now, Ordering::Relaxed);
+    }
+
+    /// Records `n` bytes returned to one of the query's memory pools.
+    pub fn sub_reserved_bytes(&self, n: usize) {
+        let n = n as u64;
+        // Saturating: a shrink is always paired with an earlier grow through
+        // the same wrapper, so this never clamps in practice, but a statistic
+        // must not wrap to 2^64 if that pairing is ever broken.
+        let mut cur = self.reserved_bytes.load(Ordering::Relaxed);
+        while let Err(actual) = self.reserved_bytes.compare_exchange_weak(
+            cur,
+            cur.saturating_sub(n),
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            cur = actual;
+        }
+    }
+
+    /// The most bytes the query held reserved from its memory pools at once.
+    ///
+    /// This is *reserved* memory: what operators asked the pool for. It is not
+    /// RSS. An operator that allocates without reserving is invisible here,
+    /// exactly as it is invisible to `max_query_memory`, so this figure is the
+    /// one that ceiling is compared against.
+    pub fn peak_reserved_bytes(&self) -> u64 {
+        self.peak_reserved_bytes.load(Ordering::Relaxed)
+    }
+
     /// Folds another counter set into this one.
     ///
     /// Used where a query fans out into sub-executions that each carry their own
@@ -357,6 +401,13 @@ impl QueryCounters {
         self.shortest_path_searches
             .fetch_add(other.shortest_path_searches(), Ordering::Relaxed);
         self.add_shortest_path_adjacency_reads(other.shortest_path_adjacency_reads());
+        // Every reservation a statement makes goes through its one memory pool,
+        // which records into the statement's own set, so the set being merged
+        // in (a scan-local one, the only production caller) never holds
+        // reservations and this is a no-op there. For two sets that did, the
+        // max is a lower bound: their peaks need not have coincided.
+        self.peak_reserved_bytes
+            .fetch_max(other.peak_reserved_bytes(), Ordering::Relaxed);
     }
 
     /// Resets every counter to zero, for reuse across executions.
@@ -379,6 +430,8 @@ impl QueryCounters {
         self.shortest_path_searches.store(0, Ordering::Relaxed);
         self.shortest_path_adjacency_reads
             .store(0, Ordering::Relaxed);
+        self.reserved_bytes.store(0, Ordering::Relaxed);
+        self.peak_reserved_bytes.store(0, Ordering::Relaxed);
     }
 
     /// A by-value copy of every counter, for handing across a crate boundary.
@@ -577,5 +630,26 @@ mod tests {
             crate::runtime::counters::CounterSnapshot::default(),
             "a counter is missing from reset"
         );
+    }
+
+    #[test]
+    fn reserved_bytes_track_the_concurrent_high_water_mark() {
+        let c = QueryCounters::new();
+        c.add_reserved_bytes(100);
+        c.add_reserved_bytes(50);
+        c.sub_reserved_bytes(120);
+        c.add_reserved_bytes(60);
+        // Peak is the most held at once (150), not the sum of grows (210) and
+        // not the final level (90).
+        assert_eq!(c.peak_reserved_bytes(), 150);
+        c.sub_reserved_bytes(1_000);
+        c.add_reserved_bytes(10);
+        assert_eq!(
+            c.peak_reserved_bytes(),
+            150,
+            "an over-shrink must clamp at zero rather than wrap"
+        );
+        c.reset();
+        assert_eq!(c.peak_reserved_bytes(), 0);
     }
 }

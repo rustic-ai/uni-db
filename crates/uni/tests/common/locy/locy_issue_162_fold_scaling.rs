@@ -97,7 +97,12 @@ async fn measure(depth: usize) -> Result<(usize, usize, usize)> {
             }
         }
     }
-    let facts = result.derived_facts("build").map(|v| v.len()).unwrap_or(0);
+    let facts = result
+        .derived_rule("build")
+        .await
+        .unwrap()
+        .map(|v| v.len())
+        .unwrap_or(0);
     Ok((fold_work, iterations, facts))
 }
 

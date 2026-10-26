@@ -1686,12 +1686,7 @@ impl AsyncTransaction {
 
     /// Create a mutation builder for this transaction.
     fn execute_with(&self, cypher: &str) -> AsyncTxExecuteBuilder {
-        AsyncTxExecuteBuilder {
-            inner: self.inner.clone(),
-            cypher: cypher.to_string(),
-            params: HashMap::new(),
-            timeout_secs: None,
-        }
+        AsyncTxExecuteBuilder::new(self.inner.clone(), cypher.to_string())
     }
 
     /// Create a Locy evaluation builder for this transaction.
@@ -3639,15 +3634,31 @@ impl AsyncSessionQueryBuilder {
     }
 
     /// Profile the query execution, returning results with profiling output.
+    ///
+    /// Forwards `timeout`, `max_memory` and the cancellation token, as the
+    /// sync `SessionQueryBuilder.profile` does; this twin used to forward
+    /// only the parameters.
     fn profile<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let rust_params = convert::convert_params_ref(py, &self.params)?;
         let inner = self.inner.clone();
         let cypher = self.cypher.clone();
+        let timeout_secs = self.timeout_secs;
+        let max_memory = self.max_memory;
+        let cancel_token = self.cancellation_token.as_ref().map(|t| t.inner.clone());
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.lock().await;
             let mut builder = guard.query_with(&cypher);
             for (k, v) in rust_params {
                 builder = builder.param(k, v);
+            }
+            if let Some(t) = timeout_secs {
+                builder = builder.timeout(std::time::Duration::from_secs_f64(t));
+            }
+            if let Some(m) = max_memory {
+                builder = builder.max_memory(m);
+            }
+            if let Some(ct) = cancel_token {
+                builder = builder.cancellation_token(ct);
             }
             let (results, profile) = builder
                 .profile()
@@ -4020,22 +4031,21 @@ impl AsyncTxQueryBuilder {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.lock().await;
             let tx = active_tx(&guard)?;
-            let mut builder = tx.execute_with(&cypher);
+            let mut builder = tx.query_with(&cypher);
             for (k, v) in rust_params {
-                builder = builder.param(k, v);
+                builder = builder.param(&k, v);
             }
             if let Some(t) = timeout_secs {
                 builder = builder.timeout(std::time::Duration::from_secs_f64(t));
             }
-            // No `max_memory` here: this terminal routes to `ExecuteBuilder`,
-            // the mutation builder, which has no memory override on either side
-            // of the language boundary.
-            let _ = max_memory;
+            if let Some(m) = max_memory {
+                builder = builder.max_memory(m);
+            }
             if let Some(ct) = cancel_token {
                 builder = builder.cancellation_token(ct);
             }
             let result = builder
-                .run()
+                .execute()
                 .await
                 .map_err(crate::exceptions::uni_error_to_pyerr)?;
             Python::attach(|py| {
@@ -4090,6 +4100,43 @@ pub struct AsyncTxExecuteBuilder {
     cypher: String,
     params: HashMap<String, Py<PyAny>>,
     timeout_secs: Option<f64>,
+    max_memory: Option<usize>,
+    cancellation_token: Option<crate::types::PyCancellationToken>,
+}
+
+impl AsyncTxExecuteBuilder {
+    pub(crate) fn new(
+        inner: Arc<tokio::sync::Mutex<Option<::uni_db::Transaction>>>,
+        cypher: String,
+    ) -> Self {
+        Self {
+            inner,
+            cypher,
+            params: HashMap::new(),
+            timeout_secs: None,
+            max_memory: None,
+            cancellation_token: None,
+        }
+    }
+}
+
+/// Apply an execute builder's options to the Rust `ExecuteBuilder`.
+fn apply_execute_options(
+    mut builder: ::uni_db::ExecuteBuilder<'_>,
+    timeout_secs: Option<f64>,
+    max_memory: Option<usize>,
+    cancel_token: Option<tokio_util::sync::CancellationToken>,
+) -> ::uni_db::ExecuteBuilder<'_> {
+    if let Some(t) = timeout_secs {
+        builder = builder.timeout(std::time::Duration::from_secs_f64(t));
+    }
+    if let Some(m) = max_memory {
+        builder = builder.max_memory(m);
+    }
+    if let Some(ct) = cancel_token {
+        builder = builder.cancellation_token(ct);
+    }
+    builder
 }
 
 #[pymethods]
@@ -4106,12 +4153,29 @@ impl AsyncTxExecuteBuilder {
         slf
     }
 
+    /// Cap the memory this mutation may reserve, in bytes.
+    fn max_memory(mut slf: PyRefMut<'_, Self>, bytes: usize) -> PyRefMut<'_, Self> {
+        slf.max_memory = Some(bytes);
+        slf
+    }
+
+    /// Attach a cancellation token for cooperative cancellation.
+    fn cancellation_token(
+        mut slf: PyRefMut<'_, Self>,
+        token: crate::types::PyCancellationToken,
+    ) -> PyRefMut<'_, Self> {
+        slf.cancellation_token = Some(token);
+        slf
+    }
+
     /// Execute the mutation (returns awaitable ExecuteResult).
     fn run<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let rust_params = convert::convert_params_ref(py, &self.params)?;
         let inner = self.inner.clone();
         let cypher = self.cypher.clone();
         let timeout_secs = self.timeout_secs;
+        let max_memory = self.max_memory;
+        let cancel_token = self.cancellation_token.as_ref().map(|t| t.inner.clone());
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.lock().await;
             let tx = active_tx(&guard)?;
@@ -4119,9 +4183,7 @@ impl AsyncTxExecuteBuilder {
             for (k, v) in rust_params {
                 builder = builder.param(k, v);
             }
-            if let Some(t) = timeout_secs {
-                builder = builder.timeout(std::time::Duration::from_secs_f64(t));
-            }
+            let builder = apply_execute_options(builder, timeout_secs, max_memory, cancel_token);
             let result = builder
                 .run()
                 .await
@@ -4142,6 +4204,8 @@ impl AsyncTxExecuteBuilder {
         let inner = self.inner.clone();
         let cypher = self.cypher.clone();
         let timeout_secs = self.timeout_secs;
+        let max_memory = self.max_memory;
+        let cancel_token = self.cancellation_token.as_ref().map(|t| t.inner.clone());
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let guard = inner.lock().await;
             let tx = active_tx(&guard)?;
@@ -4149,9 +4213,7 @@ impl AsyncTxExecuteBuilder {
             for (k, v) in rust_params {
                 builder = builder.param(k, v);
             }
-            if let Some(t) = timeout_secs {
-                builder = builder.timeout(std::time::Duration::from_secs_f64(t));
-            }
+            let builder = apply_execute_options(builder, timeout_secs, max_memory, cancel_token);
             let (result, profile) = builder
                 .profile()
                 .await

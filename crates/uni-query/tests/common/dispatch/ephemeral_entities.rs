@@ -383,3 +383,158 @@ async fn vnode_typed_yield_round_trips_through_cypher_expression() {
         .unwrap_or_else(|| panic!("got column is non-numeric: {got:?}"));
     assert!((n - 42.0).abs() < f64::EPSILON, "expected 42, got {got:?}");
 }
+
+// ───────────────────── ephemeral entities as values ─────────────────────
+//
+// A virtual node is a node (APOC: `apoc.create.vNode` returns a Node with a
+// negative id). Its id has the ephemeral bit — the sign bit — set, so it
+// travels as a negative `Int64`, and the entity recognisers that required a
+// non-negative id read the yielded `{_vid, _labels, ...}` struct as a plain
+// map: `YIELD node RETURN node` returned a Map.
+
+/// Plan and run `cypher` against a fresh, empty store.
+async fn run_cypher(cypher: &str) -> Vec<std::collections::HashMap<String, uni_common::Value>> {
+    use uni_query::query::executor::Executor;
+    use uni_query::query::planner::QueryPlanner;
+
+    let tmp = tempdir().expect("tempdir");
+    let schema_manager = Arc::new(
+        SchemaManager::load(&tmp.path().join("schema.json"))
+            .await
+            .expect("schema"),
+    );
+    let storage = Arc::new(
+        StorageManager::new(
+            tmp.path().join("storage").to_str().unwrap(),
+            Arc::clone(&schema_manager),
+        )
+        .await
+        .expect("storage"),
+    );
+    let executor = Executor::new(Arc::clone(&storage));
+    let planner = QueryPlanner::new(storage.schema_manager().schema());
+    let plan = planner
+        .plan(uni_cypher::parse(cypher).expect("parse"))
+        .expect("plan");
+    let prop_manager = Arc::new(uni_store::runtime::property_manager::PropertyManager::new(
+        Arc::clone(&storage),
+        storage.schema_manager_arc(),
+        100,
+    ));
+    executor
+        .execute(plan, &prop_manager, &std::collections::HashMap::new())
+        .await
+        .expect("execute")
+}
+
+#[tokio::test]
+async fn vnode_yields_a_node_with_a_negative_id() {
+    let rows = run_cypher(
+        "CALL uni.create.vNode(['Ghost'], {answer: 42}) YIELD node \
+         RETURN node, labels(node) AS l, id(node) AS i",
+    )
+    .await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    let node = match row.get("node") {
+        Some(uni_common::Value::Node(n)) => n,
+        other => panic!("`node` should be a Node, got {other:?}"),
+    };
+    assert!(node.vid.is_ephemeral(), "{node:?}");
+    assert_eq!(node.labels, vec!["Ghost".to_string()]);
+    assert_eq!(
+        row.get("l"),
+        Some(&uni_common::Value::List(vec![uni_common::Value::String(
+            "Ghost".into()
+        )]))
+    );
+    match row.get("i") {
+        Some(uni_common::Value::Int(i)) => {
+            assert!(*i < 0, "an ephemeral id reads as negative: {i}");
+            #[allow(clippy::cast_sign_loss)]
+            let bits = *i as u64;
+            assert_eq!(bits, node.vid.as_u64(), "id(node) is the node's vid bits");
+        }
+        other => panic!("id(node) should be an integer, got {other:?}"),
+    }
+}
+
+/// A virtual relationship between two virtual nodes.
+///
+/// The second `CALL` runs after another clause, so it is planned as a
+/// per-row `Apply` sub-plan. Its output was typed by a logical walk that saw a
+/// node yield as one `Utf8` column, so `id(b)` failed to plan with
+/// `No field named "b._vid"`.
+#[tokio::test]
+async fn vedge_between_vnodes_connects_them() {
+    let rows = run_cypher(
+        "CALL uni.create.vNode(['A'], {}) YIELD node AS a \
+         CALL uni.create.vNode(['B'], {k: 2}) YIELD node AS b \
+         CALL uni.create.vEdge(id(a), 'T', {}, id(b)) YIELD edge \
+         RETURN a, b, edge, labels(b) AS lb, b.k AS bk, id(a) <> id(b) AS distinct_ids",
+    )
+    .await;
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let row = &rows[0];
+    let (a, b) = match (row.get("a"), row.get("b")) {
+        (Some(uni_common::Value::Node(a)), Some(uni_common::Value::Node(b))) => (a, b),
+        other => panic!("`a` and `b` should be Nodes, got {other:?}"),
+    };
+    assert!(a.vid.is_ephemeral() && b.vid.is_ephemeral(), "{a:?} {b:?}");
+    assert_eq!(b.labels, vec!["B".to_string()]);
+    assert_eq!(
+        row.get("lb"),
+        Some(&uni_common::Value::List(vec![uni_common::Value::String(
+            "B".into()
+        )]))
+    );
+    assert_eq!(row.get("bk"), Some(&uni_common::Value::Int(2)));
+    assert_eq!(
+        row.get("distinct_ids"),
+        Some(&uni_common::Value::Bool(true))
+    );
+    match row.get("edge") {
+        Some(uni_common::Value::Edge(e)) => {
+            assert!(e.eid.is_ephemeral(), "{e:?}");
+            assert_eq!((e.src, e.dst), (a.vid, b.vid), "{e:?}");
+            assert_eq!(e.edge_type, "T");
+        }
+        other => panic!("`edge` should be an Edge, got {other:?}"),
+    }
+}
+
+/// A node-yielding `CALL` per input row: each row gets its own node, with the
+/// property and labels it was minted with.
+#[tokio::test]
+async fn vnode_called_per_unwound_row() {
+    let rows = run_cypher(
+        "UNWIND [1, 2, 3] AS i \
+         CALL uni.create.vNode(['V'], {i: i}) YIELD node \
+         RETURN i, node.i AS ni, labels(node) AS l, id(node) AS id, node \
+         ORDER BY i",
+    )
+    .await;
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    let mut ids = std::collections::HashSet::new();
+    for (k, row) in rows.iter().enumerate() {
+        let i = i64::try_from(k).unwrap() + 1;
+        assert_eq!(row.get("i"), Some(&uni_common::Value::Int(i)), "{row:?}");
+        assert_eq!(row.get("ni"), Some(&uni_common::Value::Int(i)), "{row:?}");
+        assert_eq!(
+            row.get("l"),
+            Some(&uni_common::Value::List(vec![uni_common::Value::String(
+                "V".into()
+            )]))
+        );
+        match (row.get("id"), row.get("node")) {
+            (Some(uni_common::Value::Int(id)), Some(uni_common::Value::Node(n))) => {
+                assert!(*id < 0, "{row:?}");
+                assert!(n.vid.is_ephemeral(), "{row:?}");
+                assert_eq!(n.properties.get("i"), Some(&uni_common::Value::Int(i)));
+                ids.insert(*id);
+            }
+            other => panic!("expected an id and a Node, got {other:?}"),
+        }
+    }
+    assert_eq!(ids.len(), 3, "each row should mint its own node");
+}

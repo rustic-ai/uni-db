@@ -477,7 +477,9 @@ Returned by `tx.execute_with(cypher)`.
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `.param(name, value)` | self | Bind a parameter |
-| `.timeout(seconds)` | self | Set execution timeout |
+| `.timeout(seconds)` | self | Set execution timeout (replaces the database `query_timeout`, up or down) |
+| `.max_memory(bytes)` | self | Cap the memory the mutation may reserve |
+| `.cancellation_token(token)` | self | Attach a cancellation token |
 | `.run()` | `ExecuteResult` | Execute the mutation |
 | `.profile()` | `(ExecuteResult, ProfileOutput)` | Execute the mutation with profiling |
 

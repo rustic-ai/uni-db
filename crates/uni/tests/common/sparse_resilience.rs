@@ -400,15 +400,8 @@ async fn sparse_corrupt_wal_tail_skipped_on_reopen() -> Result<()> {
         drop(db);
     }
 
-    // Simulate a torn write: overwrite the highest-LSN WAL segment with garbage.
-    let wal_dir = std::path::PathBuf::from(h.uri()).join("wal");
-    let mut segments: Vec<std::path::PathBuf> = std::fs::read_dir(&wal_dir)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "wal"))
-        .collect();
-    segments.sort();
-    let tail = segments.last().expect("at least one WAL segment");
-    std::fs::write(tail, b"torn-by-power-loss")?;
+    // Simulate a torn write of the last commit's WAL segment.
+    h.tear_wal_tail()?;
 
     let db = h.open().await?;
     assert_eq!(

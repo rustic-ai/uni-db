@@ -101,10 +101,11 @@ fn fork_smoke() {
     );
 }
 
-/// Nightly volume, ~32 min. Runs in its own job (see `nightly.yml`) because a
-/// single lever at this volume takes roughly as long as the heaviest existing
-/// metamorphic soak, and needs its own per-test ceiling — see the
-/// `test(fork_soak)` override in `.config/nextest.toml`.
+/// Nightly volume. Runs in the nightly `dqp` job with the other DQP soaks
+/// (`nightly.yml`, filter `test(/metamorphic::dqp::/) and test(soak)`), whose
+/// per-test ceiling is the DQP soak override in `.config/nextest.toml`: a
+/// single lever at this volume takes roughly as long as the heaviest
+/// metamorphic soak, so it cannot share the `metamorphic` job's.
 #[test]
 #[ignore = "soak: DQP primary-vs-fork at nightly volume"]
 fn fork_soak() {

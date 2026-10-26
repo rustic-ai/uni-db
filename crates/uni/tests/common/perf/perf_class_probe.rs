@@ -417,7 +417,9 @@ async fn lc(
     };
     let rows = result.rows().map_or(0, |r| r.len());
     let mut facts: Vec<String> = result
-        .derived
+        .derived_rules()
+        .await
+        .unwrap()
         .iter()
         .map(|(k, v)| format!("{k}:{}", v.len()))
         .collect();
@@ -607,7 +609,9 @@ async fn perf_class_probe_locy_anchor() -> Result<()> {
         let big = format!("CREATE RULE allv AS MATCH (e:E) YIELD KEY e \n{small}");
         if let Some(r) = lc(&db, "A3 small + unreturned allv", n, &big, false).await? {
             let kind = r
-                .derived_facts("allv")
+                .derived_rule("allv")
+                .await
+                .unwrap()
                 .and_then(|v| v.first())
                 .and_then(|row| row.get("e"))
                 .map(|v| match v {
@@ -618,7 +622,7 @@ async fn perf_class_probe_locy_anchor() -> Result<()> {
                 .unwrap_or("none");
             eprintln!(
                 "A3|N={n}|allv rows={} KEY e hydrated as {kind}",
-                r.derived_facts("allv").map_or(0, |v| v.len())
+                r.derived_rule("allv").await.unwrap().map_or(0, |v| v.len())
             );
         }
         lc(&db, "A3 ctl allv alone (no hydrate diff)", n, "CREATE RULE allv AS MATCH (e:E) YIELD KEY e \nQUERY allv WHERE e.uid = 'c0_0' RETURN e.uid AS uid", false).await?;
@@ -1063,7 +1067,12 @@ async fn perf_class_probe_best_by_merge() -> Result<()> {
                     .await?;
                 let wall = t.elapsed().as_secs_f64() * 1000.0;
                 let (merge_ms, merge_rows) = op_totals(&profile, op);
-                let facts = result.derived.get("d").map_or(0, Vec::len);
+                let facts = result
+                    .derived_rules()
+                    .await
+                    .unwrap()
+                    .get("d")
+                    .map_or(0, Vec::len);
                 eprintln!(
                     "BB|{tag}|width={width}|round={round}|facts={facts}|iterations={}|wall_ms={wall:.1}|{op}_ms={merge_ms:.1}|{op}_rows={merge_rows}",
                     result.stats.total_iterations,
@@ -1162,7 +1171,12 @@ async fn perf_class_probe_nonlinear_full_scan() -> Result<()> {
             eprintln!(
                 "NL|len={len}|noise_facts={}|round={round}|facts={}|iterations={}|recursive_iters_ms={rec_ms:.1}|hashjoin_ms={:.1}|hashjoin_rows={}|derivedscan_rows={}|total_ms={:.1}",
                 noise * noise,
-                result.derived.get("tc").map_or(0, Vec::len),
+                result
+                    .derived_rules()
+                    .await
+                    .unwrap()
+                    .get("tc")
+                    .map_or(0, Vec::len),
                 result.stats.total_iterations,
                 join.0,
                 join.1,

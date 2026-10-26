@@ -1,0 +1,51 @@
+{
+  "edge_types": {
+    "ORDERS": {
+      "dst_labels": [],
+      "id": 1,
+      "src_labels": []
+    },
+    "USES": {
+      "dst_labels": [],
+      "id": 2,
+      "src_labels": []
+    }
+  },
+  "indexes": [],
+  "labels": {
+    "Customer": {
+      "id": 1
+    },
+    "Requirement": {
+      "id": 2
+    },
+    "Supply": {
+      "id": 3
+    }
+  },
+  "properties": {
+    "Customer": {
+      "id": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "Requirement": {
+      "id": {
+        "nullable": true,
+        "type": "String"
+      }
+    },
+    "Supply": {
+      "id": {
+        "nullable": true,
+        "type": "String"
+      },
+      "route_days": {
+        "nullable": true,
+        "type": "Int64"
+      }
+    }
+  },
+  "schema_version": 1
+}

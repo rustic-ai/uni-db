@@ -12,6 +12,8 @@
 //! bound keys. The goals the rewrite actually rewrote are counted (through
 //! `rewrite_goal_directed` on the compiled program), and a run must rewrite
 //! enough of them, including recursive ones, to not pass by falling back.
+//! The default mode (`Auto`) must answer as Off does too, and publish the
+//! derived facts Off publishes, deriving the rules it left out on access.
 
 // Rust guideline compliant
 
@@ -54,6 +56,8 @@ struct GoalReport {
     fallbacks: BTreeMap<String, usize>,
     /// Goals whose rewritten answer differs from the full one.
     rewrite_mismatches: usize,
+    /// Cases where Auto left a rule out, to be derived on access.
+    auto_left_out: usize,
 }
 
 fn key_count(g: &Generated, rel: &str) -> usize {
@@ -160,12 +164,20 @@ fn render(g: &Generated, goals: &[Goal]) -> (Vec<String>, HashMap<String, Value>
     (lines, params)
 }
 
+/// Each QUERY's rows, and every rule's facts canonicalized, with the number
+/// of rules the evaluation left out to derive on access.
+type ModeRun = (
+    Vec<Vec<HashMap<String, Value>>>,
+    BTreeMap<String, Vec<String>>,
+    usize,
+);
+
 async fn query_rows(
     db: &Uni,
     text: &str,
     params: &HashMap<String, Value>,
     mode: GoalDirected,
-) -> std::result::Result<Vec<Vec<HashMap<String, Value>>>, String> {
+) -> std::result::Result<ModeRun, String> {
     let config = LocyConfig {
         goal_directed: mode,
         params: params.clone(),
@@ -178,14 +190,27 @@ async fn query_rows(
         .run()
         .await
         .map_err(|e| format!("{e:#}"))?;
-    Ok(result
+    let answers = result
         .command_results
         .iter()
         .filter_map(|c| match c {
             CommandResult::Query(rows) => Some(rows.clone()),
             _ => None,
         })
-        .collect())
+        .collect();
+    let left_out = result.lazily_derived_rules().len();
+    let derived = result
+        .derived_rules()
+        .await
+        .map_err(|e| format!("derived: {e:#}"))?
+        .iter()
+        .map(|(name, rows)| {
+            let mut v: Vec<String> = rows.iter().map(canonical_row).collect();
+            v.sort();
+            (name.clone(), v)
+        })
+        .collect();
+    Ok((answers, derived, left_out))
 }
 
 async fn run_goal_case(g: &Generated, seed: u64) -> Result<GoalReport> {
@@ -235,9 +260,10 @@ async fn run_goal_case(g: &Generated, seed: u64) -> Result<GoalReport> {
     }
 
     let mut by_mode: Vec<Option<Vec<Vec<String>>>> = Vec::new();
-    for mode in [GoalDirected::Off, GoalDirected::On] {
+    let mut derived_by_mode: Vec<Option<BTreeMap<String, Vec<String>>>> = Vec::new();
+    for mode in [GoalDirected::Off, GoalDirected::On, GoalDirected::Auto] {
         let got = query_rows(&db, &text, &params, mode).await;
-        by_mode.push(got.as_ref().ok().map(|answers| {
+        by_mode.push(got.as_ref().ok().map(|(answers, _, _)| {
             answers
                 .iter()
                 .map(|rows| {
@@ -247,6 +273,14 @@ async fn run_goal_case(g: &Generated, seed: u64) -> Result<GoalReport> {
                 })
                 .collect()
         }));
+        derived_by_mode.push(got.as_ref().ok().map(|(_, d, _)| d.clone()));
+        if mode == GoalDirected::Auto
+            && let Ok((_, _, left_out)) = &got
+            && *left_out > 0
+        {
+            report.auto_left_out += 1;
+        }
+        let got = got.map(|(answers, _, _)| answers);
         match got {
             Err(e) => report.divergences.push(Divergence::new(
                 Check::GoalDirected,
@@ -285,19 +319,33 @@ async fn run_goal_case(g: &Generated, seed: u64) -> Result<GoalReport> {
             }
         }
     }
-    // The rewrite's own contract: on equals off, row for row, whatever the
-    // oracle says about either.
-    if let [Some(off), Some(on)] = by_mode.as_slice() {
-        for (i, (a, b)) in off.iter().zip(on).enumerate() {
-            if a != b {
-                report.rewrite_mismatches += 1;
-                report.divergences.push(Divergence::new(
-                    Check::GoalDirected,
-                    &goals[i].rel,
-                    format!("On != Off for {}: on {b:?} off {a:?}", lines[i]),
-                ));
+    // The rewrite's own contract: on and auto equal off, row for row,
+    // whatever the oracle says about either.
+    if let [Some(off), rest @ ..] = by_mode.as_slice() {
+        for (name, other) in ["On", "Auto"].iter().zip(rest) {
+            let Some(other) = other else { continue };
+            for (i, (a, b)) in off.iter().zip(other).enumerate() {
+                if a != b {
+                    report.rewrite_mismatches += 1;
+                    report.divergences.push(Divergence::new(
+                        Check::GoalDirected,
+                        &goals[i].rel,
+                        format!("{name} != Off for {}: {b:?} off {a:?}", lines[i]),
+                    ));
+                }
             }
         }
+    }
+    // Auto publishes exactly Off's derived facts.
+    if let [Some(off), _, Some(auto)] = derived_by_mode.as_slice()
+        && off != auto
+    {
+        report.rewrite_mismatches += 1;
+        report.divergences.push(Divergence::new(
+            Check::GoalDirected,
+            "*",
+            format!("Auto derived != Off derived: auto {auto:?} off {off:?}"),
+        ));
     }
     Ok(report)
 }
@@ -357,6 +405,7 @@ fn drive_goal_programs(cases: u32) {
         totals.rewritten_recursive += report.rewritten_recursive;
         totals.rewritten_non_empty += report.rewritten_non_empty;
         totals.rewrite_mismatches += report.rewrite_mismatches;
+        totals.auto_left_out += report.auto_left_out;
         for (k, v) in &report.fallbacks {
             *totals.fallbacks.entry(k.clone()).or_default() += v;
         }
@@ -366,7 +415,8 @@ fn drive_goal_programs(cases: u32) {
     }
     eprintln!(
         "[oracle:goal] {cases} cases in {:.1?}: goals {}, rewritten {} ({} recursive, {} non-empty), \
-         fallbacks {:?}, on != off {}, cases diverging from the oracle {}",
+         fallbacks {:?}, on/auto != off {}, cases where auto left rules out {}, \
+         cases diverging from the oracle {}",
         started.elapsed(),
         totals.goals,
         totals.rewritten,
@@ -374,6 +424,7 @@ fn drive_goal_programs(cases: u32) {
         totals.rewritten_non_empty,
         totals.fallbacks,
         totals.rewrite_mismatches,
+        totals.auto_left_out,
         failing.len()
     );
     let mut by_rel: BTreeMap<String, usize> = BTreeMap::new();
@@ -416,6 +467,11 @@ fn drive_goal_programs(cases: u32) {
         totals.rewritten_non_empty * 100 >= 10 * n,
         "seed={seed}: only {} of {n} rewritten goals have a non-empty answer",
         totals.rewritten_non_empty
+    );
+    // Auto's derived-facts check is vacuous unless it left rules out.
+    assert!(
+        totals.auto_left_out > 0,
+        "seed={seed}: Auto left no rule out in {cases} cases"
     );
 }
 

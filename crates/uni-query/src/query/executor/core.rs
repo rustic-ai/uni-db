@@ -363,6 +363,12 @@ pub struct Executor {
     /// a cached executor template, and a shared handle would accumulate one
     /// query's counts into the next one's result.
     pub(crate) counters: Arc<uni_store::QueryCounters>,
+    /// The statement's DataFusion memory pool, built on first use and shared
+    /// by every physical plan the statement builds.
+    ///
+    /// Fresh per clone, like `counters`; shared on purpose through
+    /// [`Self::share_statement_with`] and [`Self::set_statement_memory`].
+    pub(crate) statement_memory: StatementMemory,
     /// Private transaction L0 buffer for query context and mutations.
     /// Used by Transaction to route reads and writes through a private L0 buffer
     /// without requiring the writer lock at transaction-creation time.
@@ -412,6 +418,49 @@ impl std::fmt::Debug for Executor {
     }
 }
 
+/// The memory pool one statement draws on, shared by every executor and
+/// physical plan the statement builds.
+///
+/// A statement can build several physical plans: the executor's own, the
+/// sub-plans its fallback interpreter runs, the per-row plans of a mutation,
+/// and the inner query of every procedure it calls. Each used to get a pool of
+/// its own sized at the full `max_query_memory`, so a statement could hold
+/// several times the limit at once. One pool per statement makes the limit a
+/// limit, and makes the pool's reserved total the statement's exact reserved
+/// memory.
+///
+/// Built lazily, by the first plan, from that executor's `max_query_memory`.
+#[derive(Clone, Default)]
+pub struct StatementMemory(
+    Arc<std::sync::OnceLock<Arc<dyn datafusion::execution::memory_pool::MemoryPool>>>,
+);
+
+impl std::fmt::Debug for StatementMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("StatementMemory")
+            .field(&self.0.get().map(|p| p.reserved()))
+            .finish()
+    }
+}
+
+impl StatementMemory {
+    /// A slot already holding `pool`, for an executor that runs inside a
+    /// statement whose pool exists (a procedure's inner query).
+    pub fn with_pool(pool: Arc<dyn datafusion::execution::memory_pool::MemoryPool>) -> Self {
+        let slot = std::sync::OnceLock::new();
+        let _ = slot.set(pool);
+        Self(Arc::new(slot))
+    }
+
+    /// The pool, building it with `init` if no plan has yet.
+    pub(crate) fn get_or_init(
+        &self,
+        init: impl FnOnce() -> Arc<dyn datafusion::execution::memory_pool::MemoryPool>,
+    ) -> Arc<dyn datafusion::execution::memory_pool::MemoryPool> {
+        Arc::clone(self.0.get_or_init(init))
+    }
+}
+
 impl Clone for Executor {
     /// Clone an `Executor`, sharing all Arc-backed state but installing a
     /// fresh `warnings` accumulator. Warnings are query-scoped; aliasing
@@ -432,6 +481,8 @@ impl Clone for Executor {
             warnings: Arc::new(std::sync::Mutex::new(Vec::new())),
             // Fresh counters per clone, same reason.
             counters: Arc::new(uni_store::QueryCounters::new()),
+            // Fresh per clone, same reason.
+            statement_memory: StatementMemory::default(),
             transaction_l0_override: self.transaction_l0_override.clone(),
             id_reservoir: self.id_reservoir.clone(),
             custom_function_registry: self.custom_function_registry.clone(),
@@ -447,6 +498,11 @@ impl Clone for Executor {
 impl Executor {
     /// Create a read-only executor backed by the given storage manager.
     pub fn new(storage: Arc<StorageManager>) -> Self {
+        // A declaration judges the values a property already holds by the
+        // write path's rule; see `uni_store::storage::declared_values`.
+        uni_store::storage::declared_values::install_coercion(
+            crate::query::executor::write::coerce_declared_value,
+        );
         // M4: auto-wire the host plugin registry so low-level test
         // setups that bypass `Uni::build` still see `uni.schema.*` and
         // `uni.algo.*` procedures (which no longer have hardcoded
@@ -465,6 +521,7 @@ impl Executor {
             xervo_runtime: None,
             warnings: Arc::new(std::sync::Mutex::new(Vec::new())),
             counters: Arc::new(uni_store::QueryCounters::new()),
+            statement_memory: StatementMemory::default(),
             transaction_l0_override: None,
             id_reservoir: None,
             custom_function_registry: None,
@@ -588,6 +645,30 @@ impl Executor {
     /// that did not happen.
     pub fn set_counters(&mut self, counters: Arc<uni_store::QueryCounters>) {
         self.counters = counters;
+    }
+
+    /// Draw on `memory`, another executor's statement pool, instead of a pool
+    /// of this executor's own.
+    ///
+    /// Pair with [`Self::set_counters`] wherever one statement builds several
+    /// executors (a Locy evaluation's re-entries): sharing the counters without
+    /// the pool would report one statement's peak while enforcing one budget
+    /// per executor.
+    pub fn set_statement_memory(&mut self, memory: StatementMemory) {
+        self.statement_memory = memory;
+    }
+
+    /// This executor's statement-memory slot, for handing to another executor
+    /// of the same statement.
+    pub fn statement_memory(&self) -> StatementMemory {
+        self.statement_memory.clone()
+    }
+
+    /// Share `other`'s counters and memory pool: make this executor part of
+    /// the same statement.
+    pub(crate) fn share_statement_with(&mut self, other: &Executor) {
+        self.counters = Arc::clone(&other.counters);
+        self.statement_memory = other.statement_memory.clone();
     }
 
     /// Snapshot the counters into the shape `QueryMetrics` wants.
@@ -1100,7 +1181,13 @@ pub struct ProfileOutput {
     pub runtime_stats: Vec<OperatorStats>,
     /// Wall-clock time for the entire execution in milliseconds.
     pub total_time_ms: u64,
-    /// Peak memory used during execution in bytes.
+    /// Most bytes the query held reserved from its DataFusion memory pools at
+    /// once, summed across every physical plan it built (sub-plans included).
+    ///
+    /// This is *reserved* memory, the quantity `max_query_memory` bounds, not
+    /// process RSS: an operator that allocates without reserving through the
+    /// pool (#242) does not appear in it. A query whose operators reserve
+    /// nothing — a DDL statement, a plain scan returning few rows — reads `0`.
     pub peak_memory_bytes: usize,
     /// Logical planning time in milliseconds (Cypher AST to logical plan).
     ///
@@ -1129,7 +1216,13 @@ pub struct OperatorStats {
     pub actual_rows: usize,
     /// Wall-clock time spent in this operator in milliseconds.
     pub time_ms: f64,
-    /// Memory allocated by this operator in bytes.
+    /// Memory reserved by this operator in bytes.
+    ///
+    /// Always `0` for now. Reservations are made by named consumers
+    /// (`ExternalSorter[0]`, `GraphScanExec[3]`, ...) whose names do not map
+    /// one-to-one onto plan nodes — two sorts in one plan register the same
+    /// name — so a per-operator figure would be a guess. The query-level
+    /// [`ProfileOutput::peak_memory_bytes`] is measured.
     pub memory_bytes: usize,
     /// Number of index cache hits (if applicable).
     pub index_hits: Option<usize>,
@@ -1244,7 +1337,10 @@ impl Executor {
                 explain: explain_output,
                 runtime_stats: stats,
                 total_time_ms: total_time.as_millis() as u64,
-                peak_memory_bytes: 0,
+                // Every pool this query built reports into its counters; see
+                // `peak_pool`.
+                peak_memory_bytes: usize::try_from(self.counters.peak_reserved_bytes())
+                    .unwrap_or(usize::MAX),
                 // Filled in by the API layer, which owns logical planning.
                 logical_planning_ms: 0.0,
                 physical_planning_ms: self
