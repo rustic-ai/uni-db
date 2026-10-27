@@ -1,0 +1,225 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 2K of event 'cpu-clock:u'
+# Event count (approx.): 4569138240
+#
+# Overhead  Command          Shared Object                           Symbol                                                                                                                                                                                                                                                                                                                                                                            
+# ........  ...............  ......................................  ..................................................................................................................................................................................................................................................................................................................................................................................
+#
+    43.90%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] collection_candidates::kernels::sparse_tree
+            |          
+            |--15.75%--<u32 as core::cmp::Ord>::cmp (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<u32> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::search_node::<u32> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<u32> (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<u32, f32>>::entry (inlined)
+            |          collection_candidates::kernels::sparse_tree
+            |          0xa
+            |          
+            |--10.92%--<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<u32> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::search_node::<u32> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<u32> (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<u32, f32>>::entry (inlined)
+            |          collection_candidates::kernels::sparse_tree
+            |          0xa
+            |          
+            |--4.43%--<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::keys (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<u32> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::search_node::<u32> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<u32> (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<u32, f32>>::entry (inlined)
+            |          collection_candidates::kernels::sparse_tree
+            |          0xa
+            |          
+            |--2.76%--<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::force (inlined)
+            |          <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>, alloc::collections::btree::node::marker::Edge>>::force (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<u32> (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<u32, f32>>::entry (inlined)
+            |          collection_candidates::kernels::sparse_tree
+            |          0xa
+            |          
+            |--2.28%--<alloc::collections::btree::map::BTreeMap<u32, f32>>::entry (inlined)
+            |          collection_candidates::kernels::sparse_tree
+            |          0xa
+            |          
+            |--1.71%--collection_candidates::kernels::sparse_tree
+            |          0xa
+            |          
+            |--1.71%--<alloc::collections::btree::map::IntoIter<u32, f32> as core::ops::drop::Drop>::drop (inlined)
+            |          core::ptr::drop_glue::<alloc::collections::btree::map::IntoIter<u32, f32>> (inlined)
+            |          core::mem::drop::<alloc::collections::btree::map::IntoIter<u32, f32>> (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<u32, f32> as core::ops::drop::Drop>::drop (inlined)
+            |          core::ptr::drop_glue::<alloc::collections::btree::map::BTreeMap<u32, f32>> (inlined)
+            |          collection_candidates::kernels::sparse_tree
+            |          0xa
+            |          
+            |--1.32%--<core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<u32>> as core::iter::traits::iterator::Iterator>::next (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<u32> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::search_node::<u32> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<u32> (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<u32, f32>>::entry (inlined)
+            |          collection_candidates::kernels::sparse_tree
+            |          0xa
+            |          
+            |--1.10%--<core::ptr::non_null::NonNull<u32> as core::cmp::PartialEq>::eq (inlined)
+            |          <core::slice::iter::Iter<u32> as core::iter::traits::iterator::Iterator>::next (inlined)
+            |          <core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<u32>> as core::iter::traits::iterator::Iterator>::next (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<u32> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::search_node::<u32> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<u32> (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<u32, f32>>::entry (inlined)
+            |          collection_candidates::kernels::sparse_tree
+            |          0xa
+            |          
+             --1.05%--core::ptr::read::<core::ptr::non_null::NonNull<alloc::collections::btree::node::LeafNode<u32, f32>>> (inlined)
+                       <*const core::ptr::non_null::NonNull<alloc::collections::btree::node::LeafNode<u32, f32>>>::read (inlined)
+                       <core::mem::maybe_uninit::MaybeUninit<core::ptr::non_null::NonNull<alloc::collections::btree::node::LeafNode<u32, f32>>>>::assume_init_read (inlined)
+                       <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::Internal>, alloc::collections::btree::node::marker::Edge>>::descend (inlined)
+                       <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<u32> (inlined)
+                       <alloc::collections::btree::map::BTreeMap<u32, f32>>::entry (inlined)
+                       collection_candidates::kernels::sparse_tree
+                       0xa
+
+    13.20%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <alloc::collections::btree::map::entry::Entry<u32, f32>>::or_default
+            |          
+            |--10.57%--<alloc::collections::btree::map::entry::Entry<u32, f32>>::or_default
+            |          
+             --2.59%--<alloc::collections::btree::map::entry::VacantEntry<u32, f32>>::insert_entry (inlined)
+                       <alloc::collections::btree::map::entry::VacantEntry<u32, f32>>::insert (inlined)
+                       <alloc::collections::btree::map::entry::Entry<u32, f32>>::or_default
+
+     9.08%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <alloc::collections::btree::map::Iter<u32, f32> as core::iter::traits::iterator::Iterator>::next
+            |          
+            |--1.89%--<core::option::Option<core::ptr::non_null::NonNull<alloc::collections::btree::node::InternalNode<u32, f32>>>>::as_ref (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::ascend (inlined)
+            |          <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::next_kv (inlined)
+            |          <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::next_unchecked::{closure#0} (inlined)
+            |          alloc::collections::btree::mem::replace::<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>, (&u32, &f32), <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::next_unchecked::{closure#0}> (inlined)
+            |          <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::next_unchecked (inlined)
+            |          <alloc::collections::btree::navigate::LazyLeafRange<alloc::collections::btree::node::marker::Immut, u32, f32>>::next_unchecked (inlined)
+            |          <alloc::collections::btree::map::Iter<u32, f32> as core::iter::traits::iterator::Iterator>::next
+            |          0x2
+            |          
+            |--1.62%--<alloc::collections::btree::map::Iter<u32, f32> as core::iter::traits::iterator::Iterator>::next
+            |          
+            |--1.32%--<alloc::collections::btree::navigate::LazyLeafRange<alloc::collections::btree::node::marker::Immut, u32, f32>>::init_front (inlined)
+            |          <alloc::collections::btree::navigate::LazyLeafRange<alloc::collections::btree::node::marker::Immut, u32, f32>>::next_unchecked (inlined)
+            |          <alloc::collections::btree::map::Iter<u32, f32> as core::iter::traits::iterator::Iterator>::next
+            |          0x2
+            |          
+             --1.14%--core::ptr::write::<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>> (inlined)
+                       alloc::collections::btree::mem::replace::<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>, (&u32, &f32), <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::next_unchecked::{closure#0}> (inlined)
+                       <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::next_unchecked (inlined)
+                       <alloc::collections::btree::navigate::LazyLeafRange<alloc::collections::btree::node::marker::Immut, u32, f32>>::next_unchecked (inlined)
+                       <alloc::collections::btree::map::Iter<u32, f32> as core::iter::traits::iterator::Iterator>::next
+                       0x2
+
+     8.99%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<u32, f32>>::insert_entry::{closure#0}>
+            |          
+             --2.32%--<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<u32, f32>>::insert_entry::{closure#0}>
+
+     6.84%  collection_cand  libc.so.6                               [.] __memmove_avx_unaligned_erms
+            |
+            ---__memmove_avx_unaligned_erms
+               |          
+               |--3.82%--core::ptr::copy::<core::mem::maybe_uninit::MaybeUninit<u32>> (inlined)
+               |          alloc::collections::btree::node::slice_insert::<u32> (inlined)
+               |          |          
+               |           --3.29%--<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_fit (inlined)
+               |                     <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert::<alloc::alloc::Global> (inlined)
+               |                     <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<u32, f32>>::insert_entry::{closure#0}>
+               |          
+                --1.89%--core::ptr::copy::<core::mem::maybe_uninit::MaybeUninit<f32>> (inlined)
+                          alloc::collections::btree::node::slice_insert::<f32> (inlined)
+                          |          
+                           --1.54%--<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_fit (inlined)
+                                     <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert::<alloc::alloc::Global> (inlined)
+                                     <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<u32, f32>>::insert_entry::{closure#0}>
+
+     5.70%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <alloc::collections::btree::map::IntoIter<u64, alloc::collections::btree::set_val::SetValZST>>::dying_next
+            |          
+             --3.42%--<alloc::collections::btree::map::IntoIter<u64, alloc::collections::btree::set_val::SetValZST>>::dying_next
+                       |          
+                        --1.75%--<alloc::collections::btree::map::IntoIter<u32, f32> as core::ops::drop::Drop>::drop (inlined)
+                                  core::ptr::drop_glue::<alloc::collections::btree::map::IntoIter<u32, f32>> (inlined)
+                                  core::mem::drop::<alloc::collections::btree::map::IntoIter<u32, f32>> (inlined)
+                                  <alloc::collections::btree::map::BTreeMap<u32, f32> as core::ops::drop::Drop>::drop (inlined)
+                                  core::ptr::drop_glue::<alloc::collections::btree::map::BTreeMap<u32, f32>> (inlined)
+                                  collection_candidates::kernels::sparse_tree
+                                  0xa
+
+     3.20%  collection_cand  libc.so.6                               [.] _int_malloc
+            |
+            ---_int_malloc
+               __libc_malloc2
+               alloc::alloc::alloc (inlined)
+               <alloc::alloc::Global>::alloc_impl_runtime (inlined)
+               <alloc::alloc::Global>::alloc_impl (inlined)
+               <alloc::alloc::Global as core::alloc::Allocator>::allocate (inlined)
+               |          
+                --3.11%--<alloc::boxed::Box<alloc::collections::btree::node::LeafNode<u32, f32>>>::try_new_uninit_in (inlined)
+                          <alloc::boxed::Box<alloc::collections::btree::node::LeafNode<u32, f32>>>::new_uninit_in (inlined)
+                          <alloc::collections::btree::node::LeafNode<u32, f32>>::new::<alloc::alloc::Global> (inlined)
+                          <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::KV>>::split::<alloc::alloc::Global> (inlined)
+                          <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert::<alloc::alloc::Global> (inlined)
+                          <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<u32, f32>>::insert_entry::{closure#0}>
+
+     2.37%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <alloc::vec::Vec<f32> as alloc::vec::spec_from_iter::SpecFromIter<f32, core::iter::adapters::copied::Copied<alloc::collections::btree::map::Values<u32, f32>>>>::from_iter
+     1.89%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <alloc::vec::Vec<u32> as alloc::vec::spec_from_iter::SpecFromIter<u32, core::iter::adapters::copied::Copied<alloc::collections::btree::map::Keys<u32, f32>>>>::from_iter
+     1.32%  collection_cand  libc.so.6                               [.] cfree@GLIBC_2.2.5
+            |
+            ---cfree@GLIBC_2.2.5
+               alloc::alloc::dealloc_nonnull (inlined)
+               <alloc::alloc::Global>::deallocate_impl_runtime (inlined)
+               <alloc::alloc::Global>::deallocate_impl (inlined)
+               <alloc::alloc::Global as core::alloc::Allocator>::deallocate (inlined)
+               <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::deallocate_and_ascend::<alloc::alloc::Global> (inlined)
+               |          
+                --1.27%--<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::deallocating_next::<alloc::alloc::Global> (inlined)
+                          <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::deallocating_next_unchecked::<alloc::alloc::Global>::{closure#0} (inlined)
+                          alloc::collections::btree::mem::replace::<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>, alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>, alloc::collections::btree::node::marker::KV>, <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::deallocating_next_unchecked<alloc::alloc::Global>::{closure#0}> (inlined)
+                          <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::deallocating_next_unchecked::<alloc::alloc::Global> (inlined)
+                          <alloc::collections::btree::navigate::LazyLeafRange<alloc::collections::btree::node::marker::Dying, u32, f32>>::deallocating_next_unchecked::<alloc::alloc::Global> (inlined)
+                          <alloc::collections::btree::map::IntoIter<u64, alloc::collections::btree::set_val::SetValZST>>::dying_next
+                          <alloc::collections::btree::map::IntoIter<u32, f32> as core::ops::drop::Drop>::drop (inlined)
+                          core::ptr::drop_glue::<alloc::collections::btree::map::IntoIter<u32, f32>> (inlined)
+                          core::mem::drop::<alloc::collections::btree::map::IntoIter<u32, f32>> (inlined)
+                          <alloc::collections::btree::map::BTreeMap<u32, f32> as core::ops::drop::Drop>::drop (inlined)
+                          core::ptr::drop_glue::<alloc::collections::btree::map::BTreeMap<u32, f32>> (inlined)
+                          collection_candidates::kernels::sparse_tree
+                          0xa
+
+     1.10%  collection_cand  libc.so.6                               [.] _int_free_create_chunk
+            |
+            ---_int_free_create_chunk
+               _int_free_merge_chunk
+               |          
+                --1.05%--_int_free_chunk
+                          alloc::alloc::dealloc_nonnull (inlined)
+                          <alloc::alloc::Global>::deallocate_impl_runtime (inlined)
+                          <alloc::alloc::Global>::deallocate_impl (inlined)
+                          <alloc::alloc::Global as core::alloc::Allocator>::deallocate (inlined)
+                          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>>::deallocate_and_ascend::<alloc::alloc::Global> (inlined)
+                          |          
+                           --1.01%--<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::deallocating_next::<alloc::alloc::Global> (inlined)
+                                     <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::deallocating_next_unchecked::<alloc::alloc::Global>::{closure#0} (inlined)
+                                     alloc::collections::btree::mem::replace::<alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>, alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, u32, f32, alloc::collections::btree::node::marker::LeafOrInternal>, alloc::collections::btree::node::marker::KV>, <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::deallocating_next_unchecked<alloc::alloc::Global>::{closure#0}> (inlined)
+                                     <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Dying, u32, f32, alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::deallocating_next_unchecked::<alloc::alloc::Global> (inlined)
+                                     <alloc::collections::btree::navigate::LazyLeafRange<alloc::collections::btree::node::marker::Dying, u32, f32>>::deallocating_next_unchecked::<alloc::alloc::Global> (inlined)
+                                     <alloc::collections::btree::map::IntoIter<u64, alloc::collections::btree::set_val::SetValZST>>::dying_next
+                                     <alloc::collections::btree::map::IntoIter<u32, f32> as core::ops::drop::Drop>::drop (inlined)
+                                     core::ptr::drop_glue::<alloc::collections::btree::map::IntoIter<u32, f32>> (inlined)
+                                     core::mem::drop::<alloc::collections::btree::map::IntoIter<u32, f32>> (inlined)
+                                     <alloc::collections::btree::map::BTreeMap<u32, f32> as core::ops::drop::Drop>::drop (inlined)
+                                     core::ptr::drop_glue::<alloc::collections::btree::map::BTreeMap<u32, f32>> (inlined)
+                                     collection_candidates::kernels::sparse_tree
+                                     0xa
+
+
+
+#
+# (Tip: To compare scalability of two workload samples use perf diff -c ratio file1 file2)
+#

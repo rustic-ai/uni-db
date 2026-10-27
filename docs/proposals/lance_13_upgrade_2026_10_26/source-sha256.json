@@ -1,0 +1,20 @@
+{
+  "Cargo.toml": "b2f8bf4d949b9c5a3aa7d2f8faf8963480e8dbd23c6507cde481f9431fbd80b1",
+  "Cargo.lock": "1352e02deac4d51f3e9ebed12dfefcbfbfafe3f11013babeec8aa4355c5272df",
+  "fuzz/Cargo.lock": "f575286135b5d90225457cab3165e2802970f61e981406551b3649f097ace4b5",
+  "crates/uni/Cargo.toml": "28f4db6252195f903a5dfcfaea307b3898b83b5898f745efc39b04d87fbd6ac9",
+  "crates/uni-store/Cargo.toml": "df5033b6de87ad54f901f6164e37dcfd5ec0088472c0fef1a2618da2cf578a74",
+  "crates/uni-plugin-host/Cargo.toml": "a27aa8daa85efd01f3ae23654e873fb271db404d83de222ccccb83e6cd5f32c0",
+  "crates/uni-plugin-pyo3/Cargo.toml": "c4f01a2360ea45574e7d9431dfa6fb692c8222c8c966eee594d4cb55a2d9ddfd",
+  "crates/uni-plugin-wasm/Cargo.toml": "c6fddf1c96f5a3ec30fe35f7b5e0047b9d2a0e4f6a6024edd2b95c001b03a339",
+  "crates/uni-plugin-wasm-rt/Cargo.toml": "c826818cf463e6e19f047a40a339191176d2036c0e0490d4c65eb1c27a0a5474",
+  "crates/uni-store/src/backend/lance.rs": "9b5e2d021ff20fafee4291998ae0561fdff1c8c9ebc32a453277ca74db6fef64",
+  "crates/uni-store/src/backend/lance_directory.rs": "4a5f25a2bb1cad69e3ee700e1fe2fab1dc05c643cb48bd38faad10ee4b3e53ca",
+  "crates/uni-store/src/backend/lance_branch.rs": "b5ffe467f11f16992d345306468d566ed53b10779bf06e4ebffac5d9ffb849b7",
+  "crates/uni-store/src/storage/manager.rs": "097970326294f82ea62e3ca622e11fa1c4e8bf43a1186ab8c2808c420cb47649",
+  "crates/uni-store/tests/common/storage/lance_version_policy.rs": "3e1f7625a7d6045005c20daa0c07bd17e2aba6c94e035e966d9ee7bbb00a76fd",
+  "crates/uni-store/tests/common/storage/mod.rs": "5f638133e33a65b81f5f9cdebd9e6ba83b270f8e4e364e56b129441fda2e244e",
+  "docs/UNI_BLACK_BOOK.md": "eff6946f722cbb6631c0a193b95ed46b01016cafba287672d5f4fa7c98960ee6",
+  "docs/release_notes/RELEASE_NOTES_UNRELEASED.md": "1d9442e73021dffe841750e497e93818bfb8e464b7829b0c32e30b29ccf9e515",
+  "docs/proposals/lance_13_upgrade_2026_10_26.md": "87317854b5c3be3da1d82c62281a129b993ed3d0436c246839ee478992a1315f"
+}

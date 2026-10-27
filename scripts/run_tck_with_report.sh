@@ -41,6 +41,9 @@
 
 set -e
 
+# Preserve nextest failures while still producing reports for every mode.
+TEST_RUN_STATUS=0
+
 cd "$(dirname "$0")/.."
 
 compliance_mode_dir() {
@@ -148,7 +151,7 @@ run_for_mode() {
     # Run tests via nextest (--no-fail-fast to collect all results)
     UNI_TCK_SCHEMA_MODE="$mode" \
     UNI_TCK_NEXTEST_RESULTS_DIR="$raw_results_dir" \
-    cargo nextest run -p uni-tck --test tck --no-fail-fast "${filter_args[@]}" || true
+    cargo nextest run -p uni-tck --test tck --no-fail-fast "${filter_args[@]}" || TEST_RUN_STATUS=$?
 
     echo ""
     echo "📊 Aggregating results..."
@@ -195,3 +198,5 @@ else
     MODE=$(normalize_mode "${UNI_TCK_SCHEMA_MODE:-schemaless}") || exit 1
     run_for_mode "$MODE" "$FILTER_ARG"
 fi
+
+exit "$TEST_RUN_STATUS"

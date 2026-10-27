@@ -1,0 +1,187 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 960  of event 'cpu-clock:u'
+# Event count (approx.): 1923847680
+#
+# Overhead  Command          Shared Object                           Symbol                                                                                                                                                                                                                                                                                                                                                                                        
+# ........  ...............  ......................................  ..............................................................................................................................................................................................................................................................................................................................................................................................
+#
+    36.04%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <collection_candidates::kernels::IntPropertyIndex>::build
+            |          
+            |--10.94%--core::core_arch::x86::sse2::_mm_movemask_epi8 (inlined)
+            |          <hashbrown::control::group::sse2::Group>::match_tag (inlined)
+            |          <hashbrown::raw::RawTableInner>::find_inner (inlined)
+            |          |          
+            |          |--9.58%--<hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::find::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}> (inlined)
+            |          |          <hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::get::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}> (inlined)
+            |          |          <hashbrown::map::HashMap<alloc::string::String, uni_common::value::Value, std::hash::random::RandomState>>::get::<str> (inlined)
+            |          |          <std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>::get::<str> (inlined)
+            |          |          <collection_candidates::kernels::IntPropertyIndex>::build::{closure#0} (inlined)
+            |          |          <core::option::Option<&std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>>::and_then::<&uni_common::value::Value, <collection_candidates::kernels::IntPropertyIndex>::build::{closure#0}> (inlined)
+            |          |          <collection_candidates::kernels::IntPropertyIndex>::build
+            |          |          
+            |           --1.35%--<hashbrown::raw::RawTable<(uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>)>>::find::<hashbrown::map::equivalent_key<uni_common::core::id::Vid, uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>::{closure#0}> (inlined)
+            |                     <hashbrown::raw::RawTable<(uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>)>>::get::<hashbrown::map::equivalent_key<uni_common::core::id::Vid, uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>::{closure#0}> (inlined)
+            |                     <hashbrown::map::HashMap<uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>, std::hash::random::RandomState>>::get::<uni_common::core::id::Vid> (inlined)
+            |                     <std::collections::hash::map::HashMap<uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>>::get::<uni_common::core::id::Vid> (inlined)
+            |                     <collection_candidates::kernels::IntPropertyIndex>::build
+            |          
+            |--10.83%--<hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::find::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}>::{closure#0} (inlined)
+            |          <hashbrown::raw::RawTableInner>::find_inner (inlined)
+            |          <hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::find::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}> (inlined)
+            |          <hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::get::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}> (inlined)
+            |          <hashbrown::map::HashMap<alloc::string::String, uni_common::value::Value, std::hash::random::RandomState>>::get::<str> (inlined)
+            |          <std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>::get::<str> (inlined)
+            |          <collection_candidates::kernels::IntPropertyIndex>::build::{closure#0} (inlined)
+            |          <core::option::Option<&std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>>::and_then::<&uni_common::value::Value, <collection_candidates::kernels::IntPropertyIndex>::build::{closure#0}> (inlined)
+            |          <collection_candidates::kernels::IntPropertyIndex>::build
+            |          
+            |--6.98%--<collection_candidates::kernels::IntPropertyIndex>::build
+            |          |          
+            |           --6.88%--0x1430868522400b1
+            |          
+             --1.04%--<hashbrown::control::tag::Tag>::full (inlined)
+                       <hashbrown::raw::RawTableInner>::find_inner (inlined)
+
+    17.71%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <alloc::collections::btree::map::BTreeMap<(i64, u64), ()>>::insert
+            |          
+            |--4.17%--<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<(i64, u64)> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_node::<(i64, u64)> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<(i64, u64)> (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<(i64, u64), ()>>::entry (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<(i64, u64), ()>>::insert
+            |          _int_malloc
+            |          
+            |--3.65%--<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::keys (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<(i64, u64)> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_node::<(i64, u64)> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<(i64, u64)> (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<(i64, u64), ()>>::entry (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<(i64, u64), ()>>::insert
+            |          |          
+            |           --1.98%--_int_malloc
+            |          
+            |--2.71%--<i64 as core::cmp::Ord>::cmp (inlined)
+            |          <(i64, u64) as core::cmp::Ord>::cmp (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<(i64, u64)> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_node::<(i64, u64)> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<(i64, u64)> (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<(i64, u64), ()>>::entry (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<(i64, u64), ()>>::insert
+            |          _int_malloc
+            |          
+            |--2.29%--<core::ptr::non_null::NonNull<(i64, u64)>>::add (inlined)
+            |          <core::slice::iter::Iter<(i64, u64)> as core::iter::traits::iterator::Iterator>::next (inlined)
+            |          <core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<(i64, u64)>> as core::iter::traits::iterator::Iterator>::next (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<(i64, u64)> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_node::<(i64, u64)> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<(i64, u64)> (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<(i64, u64), ()>>::entry (inlined)
+            |          <alloc::collections::btree::map::BTreeMap<(i64, u64), ()>>::insert
+            |          _int_malloc
+            |          
+             --1.46%--<(i64, u64) as core::cmp::Ord>::cmp (inlined)
+                       <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<(i64, u64)> (inlined)
+                       <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_node::<(i64, u64)> (inlined)
+                       <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree::<(i64, u64)> (inlined)
+                       <alloc::collections::btree::map::BTreeMap<(i64, u64), ()>>::entry (inlined)
+                       <alloc::collections::btree::map::BTreeMap<(i64, u64), ()>>::insert
+                       _int_malloc
+
+     7.19%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <hashbrown::raw::RawTable<(u64, uni_common::value::Value)>>::reserve_rehash::<hashbrown::map::make_hasher<u64, uni_common::value::Value, std::hash::random::RandomState>::{closure#0}>
+            |          
+             --4.06%--core::ptr::copy_nonoverlapping::<u8> (inlined)
+                       <hashbrown::raw::RawTableInner>::resize_inner::<alloc::alloc::Global> (inlined)
+                       <hashbrown::raw::RawTableInner>::reserve_rehash_inner::<alloc::alloc::Global> (inlined)
+                       <hashbrown::raw::RawTable<(u64, uni_common::value::Value)>>::reserve_rehash::<hashbrown::map::make_hasher<u64, uni_common::value::Value, std::hash::random::RandomState>::{closure#0}>
+                       <hashbrown::raw::RawTable<(u64, uni_common::value::Value)>>::reserve::<hashbrown::map::make_hasher<u64, uni_common::value::Value, std::hash::random::RandomState>::{closure#0}> (inlined)
+                       <hashbrown::raw::RawTable<(u64, uni_common::value::Value)>>::find_or_find_insert_index::<hashbrown::map::equivalent_key<u64, u64, uni_common::value::Value>::{closure#0}, hashbrown::map::make_hasher<u64, uni_common::value::Value, std::hash::random::RandomState>::{closure#0}> (inlined)
+                       <hashbrown::map::HashMap<u64, uni_common::value::Value, std::hash::random::RandomState>>::insert
+                       0x11430868522400ac
+
+     6.25%  collection_cand  libc.so.6                               [.] __memcmp_avx2_movbe
+            |
+            ---__memcmp_avx2_movbe
+               <u8 as core::slice::cmp::SlicePartialEq<u8>>::equal_same_length (inlined)
+               <[u8] as core::cmp::PartialEq>::eq (inlined)
+               <&[u8] as core::cmp::PartialEq>::eq (inlined)
+               <str as core::cmp::PartialEq>::eq (inlined)
+               <&str as core::cmp::PartialEq>::eq (inlined)
+               <str as hashbrown::Equivalent<alloc::string::String>>::equivalent (inlined)
+               hashbrown::map::equivalent_key::<str, alloc::string::String, uni_common::value::Value>::{closure#0} (inlined)
+               <hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::find::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}>::{closure#0} (inlined)
+               <hashbrown::raw::RawTableInner>::find_inner (inlined)
+               <hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::find::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}> (inlined)
+               <hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::get::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}> (inlined)
+               <hashbrown::map::HashMap<alloc::string::String, uni_common::value::Value, std::hash::random::RandomState>>::get::<str> (inlined)
+               <std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>::get::<str> (inlined)
+               <collection_candidates::kernels::IntPropertyIndex>::build::{closure#0} (inlined)
+               <core::option::Option<&std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>>::and_then::<&uni_common::value::Value, <collection_candidates::kernels::IntPropertyIndex>::build::{closure#0}> (inlined)
+               <collection_candidates::kernels::IntPropertyIndex>::build
+
+     4.38%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <hashbrown::map::HashMap<u64, uni_common::value::Value, std::hash::random::RandomState>>::insert
+            |          
+             --1.35%--core::ptr::write::<(u64, uni_common::value::Value)> (inlined)
+                       <*mut (u64, uni_common::value::Value)>::write (inlined)
+                       <hashbrown::raw::Bucket<(u64, uni_common::value::Value)>>::write (inlined)
+                       <hashbrown::raw::RawTable<(u64, uni_common::value::Value)>>::insert_tagged_at_index (inlined)
+                       <hashbrown::raw::RawTable<(u64, uni_common::value::Value)>>::insert_at_index (inlined)
+                       <hashbrown::map::HashMap<u64, uni_common::value::Value, std::hash::random::RandomState>>::insert
+
+     4.17%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+            |          
+             --3.02%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+                       |          
+                        --1.15%--0x77a2ec60be66b580
+
+     3.85%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+            |          
+             --1.25%--core::intrinsics::rotate_left::<u64> (inlined)
+                       <u64>::rotate_left (inlined)
+                       <core::hash::sip::Sip13Rounds as core::hash::sip::Sip>::d_rounds (inlined)
+                       <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::finish (inlined)
+                       <core::hash::sip::SipHasher13 as core::hash::Hasher>::finish (inlined)
+                       <std::hash::random::DefaultHasher as core::hash::Hasher>::finish (inlined)
+                       <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+
+     3.65%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <alloc::collections::btree::map::entry::VacantEntry<(i64, u64), ()>>::insert_entry
+            |          
+             --3.54%--<alloc::collections::btree::map::entry::VacantEntry<(i64, u64), ()>>::insert_entry
+                       |          
+                        --3.44%--<alloc::collections::btree::map::entry::VacantEntry<(i64, u64), ()>>::insert (inlined)
+                                  <alloc::collections::btree::map::BTreeMap<(i64, u64), ()>>::insert
+                                  _int_malloc
+
+     2.29%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+     2.19%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<(i64, u64), ()>>::insert_entry::{closure#0}>
+     2.08%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+     1.98%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+            |          
+             --1.46%--<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+
+     1.25%  collection_cand  libc.so.6                               [.] __memmove_avx_unaligned_erms
+            |
+            ---__memmove_avx_unaligned_erms
+               |          
+                --1.15%--core::ptr::copy::<core::mem::maybe_uninit::MaybeUninit<(i64, u64)>> (inlined)
+                          alloc::collections::btree::node::slice_insert::<(i64, u64)> (inlined)
+                          <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_fit (inlined)
+                          <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert::<alloc::alloc::Global> (inlined)
+                          <alloc::collections::btree::node::Handle<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Mut, (i64, u64), (), alloc::collections::btree::node::marker::Leaf>, alloc::collections::btree::node::marker::Edge>>::insert_recursing::<alloc::alloc::Global, <alloc::collections::btree::map::entry::VacantEntry<(i64, u64), ()>>::insert_entry::{closure#0}>
+                          |          
+                           --1.04%--systrim.constprop.0
+
+     1.15%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] core::ptr::drop_glue::<uni_common::value::Value>
+            |
+            ---core::ptr::drop_glue::<uni_common::value::Value>
+
+     1.04%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <alloc::collections::btree::map::IntoIter<(i64, u64), ()>>::dying_next
+     1.04%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <collection_candidates::kernels::IntPropertyIndex>::replace
+
+
+#
+# (Tip: To separate samples by time use perf report --sort time,overhead,sym)
+#

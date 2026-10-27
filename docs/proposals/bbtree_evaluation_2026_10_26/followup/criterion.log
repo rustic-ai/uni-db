@@ -1,0 +1,637 @@
+Benchmarking collection/sparse_value/tree/dupfalse/16
+Benchmarking collection/sparse_value/tree/dupfalse/16: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/tree/dupfalse/16: Collecting 20 samples in estimated 1.0000 s (2.6M iterations)
+Benchmarking collection/sparse_value/tree/dupfalse/16: Analyzing
+collection/sparse_value/tree/dupfalse/16
+                        time:   [393.65 ns 395.42 ns 397.84 ns]
+                        thrpt:  [40.217 Melem/s 40.463 Melem/s 40.645 Melem/s]
+                 change:
+                        time:   [+0.5550% +1.2630% +1.9357%] (p = 0.00 < 0.05)
+                        thrpt:  [−1.8989% −1.2472% −0.5520%]
+                        Change within noise threshold.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+Benchmarking collection/sparse_value/sort/dupfalse/16
+Benchmarking collection/sparse_value/sort/dupfalse/16: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/sort/dupfalse/16: Collecting 20 samples in estimated 1.0000 s (6.4M iterations)
+Benchmarking collection/sparse_value/sort/dupfalse/16: Analyzing
+collection/sparse_value/sort/dupfalse/16
+                        time:   [155.18 ns 155.84 ns 156.47 ns]
+                        thrpt:  [102.25 Melem/s 102.67 Melem/s 103.11 Melem/s]
+                 change:
+                        time:   [−19.963% −19.178% −18.391%] (p = 0.00 < 0.05)
+                        thrpt:  [+22.535% +23.729% +24.943%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking collection/sparse_value/tree/duptrue/16
+Benchmarking collection/sparse_value/tree/duptrue/16: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/tree/duptrue/16: Collecting 20 samples in estimated 1.0000 s (7.2M iterations)
+Benchmarking collection/sparse_value/tree/duptrue/16: Analyzing
+collection/sparse_value/tree/duptrue/16
+                        time:   [139.85 ns 140.44 ns 141.12 ns]
+                        thrpt:  [113.38 Melem/s 113.92 Melem/s 114.41 Melem/s]
+                 change:
+                        time:   [−1.5939% −1.0711% −0.5753%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.5786% +1.0827% +1.6197%]
+                        Change within noise threshold.
+Benchmarking collection/sparse_value/sort/duptrue/16
+Benchmarking collection/sparse_value/sort/duptrue/16: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/sort/duptrue/16: Collecting 20 samples in estimated 1.0000 s (6.9M iterations)
+Benchmarking collection/sparse_value/sort/duptrue/16: Analyzing
+collection/sparse_value/sort/duptrue/16
+                        time:   [145.85 ns 146.43 ns 147.11 ns]
+                        thrpt:  [108.76 Melem/s 109.27 Melem/s 109.70 Melem/s]
+                 change:
+                        time:   [−14.277% −13.864% −13.457%] (p = 0.00 < 0.05)
+                        thrpt:  [+15.549% +16.095% +16.655%]
+                        Performance has improved.
+Benchmarking collection/sparse_value/tree/dupfalse/128
+Benchmarking collection/sparse_value/tree/dupfalse/128: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/tree/dupfalse/128: Collecting 20 samples in estimated 1.0005 s (283k iterations)
+Benchmarking collection/sparse_value/tree/dupfalse/128: Analyzing
+collection/sparse_value/tree/dupfalse/128
+                        time:   [3.5315 µs 3.5451 µs 3.5622 µs]
+                        thrpt:  [35.933 Melem/s 36.106 Melem/s 36.245 Melem/s]
+                 change:
+                        time:   [−1.0218% −0.3612% +0.3021%] (p = 0.31 > 0.05)
+                        thrpt:  [−0.3012% +0.3625% +1.0324%]
+                        No change in performance detected.
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) high mild
+  3 (15.00%) high severe
+Benchmarking collection/sparse_value/sort/dupfalse/128
+Benchmarking collection/sparse_value/sort/dupfalse/128: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/sort/dupfalse/128: Collecting 20 samples in estimated 1.0002 s (921k iterations)
+Benchmarking collection/sparse_value/sort/dupfalse/128: Analyzing
+collection/sparse_value/sort/dupfalse/128
+                        time:   [1.0833 µs 1.0898 µs 1.0998 µs]
+                        thrpt:  [116.39 Melem/s 117.45 Melem/s 118.16 Melem/s]
+                 change:
+                        time:   [−34.469% −33.913% −33.274%] (p = 0.00 < 0.05)
+                        thrpt:  [+49.866% +51.316% +52.600%]
+                        Performance has improved.
+Benchmarking collection/sparse_value/tree/duptrue/128
+Benchmarking collection/sparse_value/tree/duptrue/128: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/tree/duptrue/128: Collecting 20 samples in estimated 1.0001 s (686k iterations)
+Benchmarking collection/sparse_value/tree/duptrue/128: Analyzing
+collection/sparse_value/tree/duptrue/128
+                        time:   [1.4536 µs 1.4608 µs 1.4682 µs]
+                        thrpt:  [87.180 Melem/s 87.621 Melem/s 88.058 Melem/s]
+                 change:
+                        time:   [+4.7877% +5.7130% +6.5769%] (p = 0.00 < 0.05)
+                        thrpt:  [−6.1710% −5.4042% −4.5689%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking collection/sparse_value/sort/duptrue/128
+Benchmarking collection/sparse_value/sort/duptrue/128: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/sort/duptrue/128: Collecting 20 samples in estimated 1.0002 s (875k iterations)
+Benchmarking collection/sparse_value/sort/duptrue/128: Analyzing
+collection/sparse_value/sort/duptrue/128
+                        time:   [1.0485 µs 1.0510 µs 1.0546 µs]
+                        thrpt:  [121.37 Melem/s 121.78 Melem/s 122.07 Melem/s]
+                 change:
+                        time:   [−36.290% −34.361% −33.194%] (p = 0.00 < 0.05)
+                        thrpt:  [+49.687% +52.350% +56.962%]
+                        Performance has improved.
+Benchmarking collection/sparse_value/tree/dupfalse/1024
+Benchmarking collection/sparse_value/tree/dupfalse/1024: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/tree/dupfalse/1024: Collecting 20 samples in estimated 1.0023 s (22k iterations)
+Benchmarking collection/sparse_value/tree/dupfalse/1024: Analyzing
+collection/sparse_value/tree/dupfalse/1024
+                        time:   [46.141 µs 46.477 µs 46.828 µs]
+                        thrpt:  [21.867 Melem/s 22.032 Melem/s 22.193 Melem/s]
+                 change:
+                        time:   [+4.7355% +5.5326% +6.3066%] (p = 0.00 < 0.05)
+                        thrpt:  [−5.9324% −5.2426% −4.5214%]
+                        Performance has regressed.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking collection/sparse_value/sort/dupfalse/1024
+Benchmarking collection/sparse_value/sort/dupfalse/1024: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/sort/dupfalse/1024: Collecting 20 samples in estimated 1.0003 s (106k iterations)
+Benchmarking collection/sparse_value/sort/dupfalse/1024: Analyzing
+collection/sparse_value/sort/dupfalse/1024
+                        time:   [9.3952 µs 9.4559 µs 9.5264 µs]
+                        thrpt:  [107.49 Melem/s 108.29 Melem/s 108.99 Melem/s]
+                 change:
+                        time:   [−39.929% −39.396% −38.940%] (p = 0.00 < 0.05)
+                        thrpt:  [+63.774% +65.006% +66.469%]
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+Benchmarking collection/sparse_value/tree/duptrue/1024
+Benchmarking collection/sparse_value/tree/duptrue/1024: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/tree/duptrue/1024: Collecting 20 samples in estimated 1.0039 s (49k iterations)
+Benchmarking collection/sparse_value/tree/duptrue/1024: Analyzing
+collection/sparse_value/tree/duptrue/1024
+                        time:   [20.759 µs 21.161 µs 21.539 µs]
+                        thrpt:  [47.541 Melem/s 48.391 Melem/s 49.328 Melem/s]
+                 change:
+                        time:   [+12.190% +13.631% +15.240%] (p = 0.00 < 0.05)
+                        thrpt:  [−13.224% −11.996% −10.865%]
+                        Performance has regressed.
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+Benchmarking collection/sparse_value/sort/duptrue/1024
+Benchmarking collection/sparse_value/sort/duptrue/1024: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/sort/duptrue/1024: Collecting 20 samples in estimated 1.0015 s (112k iterations)
+Benchmarking collection/sparse_value/sort/duptrue/1024: Analyzing
+collection/sparse_value/sort/duptrue/1024
+                        time:   [8.9038 µs 8.9169 µs 8.9315 µs]
+                        thrpt:  [114.65 Melem/s 114.84 Melem/s 115.01 Melem/s]
+                 change:
+                        time:   [−43.336% −43.141% −42.945%] (p = 0.00 < 0.05)
+                        thrpt:  [+75.269% +75.873% +76.478%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking collection/sparse_value/tree/dupfalse/4096
+Benchmarking collection/sparse_value/tree/dupfalse/4096: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/tree/dupfalse/4096: Collecting 20 samples in estimated 1.0059 s (3780 iterations)
+Benchmarking collection/sparse_value/tree/dupfalse/4096: Analyzing
+collection/sparse_value/tree/dupfalse/4096
+                        time:   [265.60 µs 266.92 µs 268.19 µs]
+                        thrpt:  [15.273 Melem/s 15.345 Melem/s 15.421 Melem/s]
+                 change:
+                        time:   [+2.0539% +2.4142% +2.7628%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.6885% −2.3573% −2.0126%]
+                        Performance has regressed.
+Found 5 outliers among 20 measurements (25.00%)
+  1 (5.00%) low mild
+  3 (15.00%) high mild
+  1 (5.00%) high severe
+Benchmarking collection/sparse_value/sort/dupfalse/4096
+Benchmarking collection/sparse_value/sort/dupfalse/4096: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/sort/dupfalse/4096: Collecting 20 samples in estimated 1.0003 s (25k iterations)
+Benchmarking collection/sparse_value/sort/dupfalse/4096: Analyzing
+collection/sparse_value/sort/dupfalse/4096
+                        time:   [40.121 µs 40.528 µs 41.006 µs]
+                        thrpt:  [99.889 Melem/s 101.06 Melem/s 102.09 Melem/s]
+                 change:
+                        time:   [−47.931% −47.510% −47.109%] (p = 0.00 < 0.05)
+                        thrpt:  [+89.066% +90.513% +92.052%]
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking collection/sparse_value/tree/duptrue/4096
+Benchmarking collection/sparse_value/tree/duptrue/4096: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/tree/duptrue/4096: Collecting 20 samples in estimated 1.0028 s (6300 iterations)
+Benchmarking collection/sparse_value/tree/duptrue/4096: Analyzing
+collection/sparse_value/tree/duptrue/4096
+                        time:   [158.03 µs 158.29 µs 158.54 µs]
+                        thrpt:  [25.836 Melem/s 25.877 Melem/s 25.920 Melem/s]
+                 change:
+                        time:   [+2.4864% +2.6703% +2.8671%] (p = 0.00 < 0.05)
+                        thrpt:  [−2.7872% −2.6008% −2.4260%]
+                        Performance has regressed.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) low mild
+Benchmarking collection/sparse_value/sort/duptrue/4096
+Benchmarking collection/sparse_value/sort/duptrue/4096: Warming up for 200.00 ms
+Benchmarking collection/sparse_value/sort/duptrue/4096: Collecting 20 samples in estimated 1.0076 s (25k iterations)
+Benchmarking collection/sparse_value/sort/duptrue/4096: Analyzing
+collection/sparse_value/sort/duptrue/4096
+                        time:   [39.777 µs 39.887 µs 39.975 µs]
+                        thrpt:  [102.46 Melem/s 102.69 Melem/s 102.97 Melem/s]
+                 change:
+                        time:   [−47.499% −47.157% −46.716%] (p = 0.00 < 0.05)
+                        thrpt:  [+87.672% +89.239% +90.473%]
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+
+Benchmarking collection/canonical_value/tree_build_hash/4
+Benchmarking collection/canonical_value/tree_build_hash/4: Warming up for 200.00 ms
+Benchmarking collection/canonical_value/tree_build_hash/4: Collecting 20 samples in estimated 1.0001 s (1.8M iterations)
+Benchmarking collection/canonical_value/tree_build_hash/4: Analyzing
+collection/canonical_value/tree_build_hash/4
+                        time:   [551.15 ns 558.41 ns 569.04 ns]
+                        change: [−16.715% −15.447% −14.211%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/canonical_value/vec_build_hash/4
+Benchmarking collection/canonical_value/vec_build_hash/4: Warming up for 200.00 ms
+Benchmarking collection/canonical_value/vec_build_hash/4: Collecting 20 samples in estimated 1.0000 s (2.3M iterations)
+Benchmarking collection/canonical_value/vec_build_hash/4: Analyzing
+collection/canonical_value/vec_build_hash/4
+                        time:   [426.10 ns 430.29 ns 434.46 ns]
+                        change: [−20.357% −19.370% −18.379%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 20 measurements (20.00%)
+  3 (15.00%) high mild
+  1 (5.00%) high severe
+Benchmarking collection/canonical_value/bbtree_build_hash/4
+Benchmarking collection/canonical_value/bbtree_build_hash/4: Warming up for 200.00 ms
+Benchmarking collection/canonical_value/bbtree_build_hash/4: Collecting 20 samples in estimated 1.0001 s (1.4M iterations)
+Benchmarking collection/canonical_value/bbtree_build_hash/4: Analyzing
+collection/canonical_value/bbtree_build_hash/4
+                        time:   [673.90 ns 675.10 ns 676.93 ns]
+                        change: [−24.386% −23.660% −22.961%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low severe
+  2 (10.00%) high severe
+Benchmarking collection/canonical_value/tree_build_hash/16
+Benchmarking collection/canonical_value/tree_build_hash/16: Warming up for 200.00 ms
+Benchmarking collection/canonical_value/tree_build_hash/16: Collecting 20 samples in estimated 1.0003 s (402k iterations)
+Benchmarking collection/canonical_value/tree_build_hash/16: Analyzing
+collection/canonical_value/tree_build_hash/16
+                        time:   [2.3233 µs 2.3532 µs 2.3945 µs]
+                        change: [−16.039% −14.856% −13.574%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/canonical_value/vec_build_hash/16
+Benchmarking collection/canonical_value/vec_build_hash/16: Warming up for 200.00 ms
+Benchmarking collection/canonical_value/vec_build_hash/16: Collecting 20 samples in estimated 1.0001 s (536k iterations)
+Benchmarking collection/canonical_value/vec_build_hash/16: Analyzing
+collection/canonical_value/vec_build_hash/16
+                        time:   [1.8722 µs 1.8985 µs 1.9176 µs]
+                        change: [−18.004% −17.575% −17.016%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high severe
+Benchmarking collection/canonical_value/bbtree_build_hash/16
+Benchmarking collection/canonical_value/bbtree_build_hash/16: Warming up for 200.00 ms
+Benchmarking collection/canonical_value/bbtree_build_hash/16: Collecting 20 samples in estimated 1.0006 s (346k iterations)
+Benchmarking collection/canonical_value/bbtree_build_hash/16: Analyzing
+collection/canonical_value/bbtree_build_hash/16
+                        time:   [2.7826 µs 2.7943 µs 2.8090 µs]
+                        change: [−27.110% −26.144% −25.254%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/canonical_value/tree_build_hash/64
+Benchmarking collection/canonical_value/tree_build_hash/64: Warming up for 200.00 ms
+Benchmarking collection/canonical_value/tree_build_hash/64: Collecting 20 samples in estimated 1.0014 s (80k iterations)
+Benchmarking collection/canonical_value/tree_build_hash/64: Analyzing
+collection/canonical_value/tree_build_hash/64
+                        time:   [12.106 µs 12.235 µs 12.409 µs]
+                        change: [−9.9624% −8.9429% −8.0643%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 20 measurements (20.00%)
+  4 (20.00%) low severe
+Benchmarking collection/canonical_value/vec_build_hash/64
+Benchmarking collection/canonical_value/vec_build_hash/64: Warming up for 200.00 ms
+Benchmarking collection/canonical_value/vec_build_hash/64: Collecting 20 samples in estimated 1.0004 s (103k iterations)
+Benchmarking collection/canonical_value/vec_build_hash/64: Analyzing
+collection/canonical_value/vec_build_hash/64
+                        time:   [9.6873 µs 9.7656 µs 9.8440 µs]
+                        change: [−13.591% −12.669% −11.800%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/canonical_value/bbtree_build_hash/64
+Benchmarking collection/canonical_value/bbtree_build_hash/64: Warming up for 200.00 ms
+Benchmarking collection/canonical_value/bbtree_build_hash/64: Collecting 20 samples in estimated 1.0020 s (76k iterations)
+Benchmarking collection/canonical_value/bbtree_build_hash/64: Analyzing
+collection/canonical_value/bbtree_build_hash/64
+                        time:   [12.865 µs 12.931 µs 13.015 µs]
+                        change: [−17.896% −17.349% −16.846%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+
+Benchmarking collection/l0_index/scan/2000
+Benchmarking collection/l0_index/scan/2000: Warming up for 200.00 ms
+Benchmarking collection/l0_index/scan/2000: Collecting 20 samples in estimated 1.0168 s (9660 iterations)
+Benchmarking collection/l0_index/scan/2000: Analyzing
+collection/l0_index/scan/2000
+                        time:   [104.56 µs 105.47 µs 106.39 µs]
+                        change: [−5.3296% −4.7215% −4.0365%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 20 measurements (20.00%)
+  1 (5.00%) high mild
+  3 (15.00%) high severe
+Benchmarking collection/l0_index/query/2000
+Benchmarking collection/l0_index/query/2000: Warming up for 200.00 ms
+Benchmarking collection/l0_index/query/2000: Collecting 20 samples in estimated 1.0000 s (1.9M iterations)
+Benchmarking collection/l0_index/query/2000: Analyzing
+collection/l0_index/query/2000
+                        time:   [533.85 ns 535.71 ns 538.24 ns]
+                        change: [−10.311% −9.2072% −8.1039%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+Benchmarking collection/l0_index/build_plus_query/2000
+Benchmarking collection/l0_index/build_plus_query/2000: Warming up for 200.00 ms
+Benchmarking collection/l0_index/build_plus_query/2000: Collecting 20 samples in estimated 1.0231 s (3360 iterations)
+Benchmarking collection/l0_index/build_plus_query/2000: Analyzing
+collection/l0_index/build_plus_query/2000
+                        time:   [304.05 µs 310.08 µs 315.39 µs]
+                        change: [−8.8208% −8.0233% −6.9838%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+Benchmarking collection/l0_index/replace/2000
+Benchmarking collection/l0_index/replace/2000: Warming up for 200.00 ms
+Benchmarking collection/l0_index/replace/2000: Collecting 20 samples in estimated 1.0000 s (5.9M iterations)
+Benchmarking collection/l0_index/replace/2000: Analyzing
+collection/l0_index/replace/2000
+                        time:   [169.76 ns 169.92 ns 170.14 ns]
+                        change: [−4.8243% −4.4073% −4.0216%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking collection/l0_index/scan/8000
+Benchmarking collection/l0_index/scan/8000: Warming up for 200.00 ms
+Benchmarking collection/l0_index/scan/8000: Collecting 20 samples in estimated 1.0561 s (1680 iterations)
+Benchmarking collection/l0_index/scan/8000: Analyzing
+collection/l0_index/scan/8000
+                        time:   [627.23 µs 635.36 µs 641.78 µs]
+                        change: [−5.6341% −4.9670% −4.2846%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 5 outliers among 20 measurements (25.00%)
+  2 (10.00%) low mild
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+Benchmarking collection/l0_index/query/8000
+Benchmarking collection/l0_index/query/8000: Warming up for 200.00 ms
+Benchmarking collection/l0_index/query/8000: Collecting 20 samples in estimated 1.0000 s (3.0M iterations)
+Benchmarking collection/l0_index/query/8000: Analyzing
+collection/l0_index/query/8000
+                        time:   [337.07 ns 339.60 ns 343.32 ns]
+                        change: [−13.774% −12.389% −10.828%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high severe
+Benchmarking collection/l0_index/build_plus_query/8000
+Benchmarking collection/l0_index/build_plus_query/8000: Warming up for 200.00 ms
+Benchmarking collection/l0_index/build_plus_query/8000: Collecting 20 samples in estimated 1.4190 s (630 iterations)
+Benchmarking collection/l0_index/build_plus_query/8000: Analyzing
+collection/l0_index/build_plus_query/8000
+                        time:   [2.1702 ms 2.2511 ms 2.3330 ms]
+                        change: [−8.0595% −5.6551% −3.3862%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  2 (10.00%) high mild
+  1 (5.00%) high severe
+Benchmarking collection/l0_index/replace/8000
+Benchmarking collection/l0_index/replace/8000: Warming up for 200.00 ms
+Benchmarking collection/l0_index/replace/8000: Collecting 20 samples in estimated 1.0000 s (5.2M iterations)
+Benchmarking collection/l0_index/replace/8000: Analyzing
+collection/l0_index/replace/8000
+                        time:   [193.74 ns 194.09 ns 194.49 ns]
+                        change: [−3.7055% −3.1018% −2.5515%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking collection/l0_index/scan/32000
+Benchmarking collection/l0_index/scan/32000: Warming up for 200.00 ms
+
+Warning: Unable to complete 20 samples in 1.0s. You may wish to increase target time to 1.6s, enable flat sampling, or reduce sample count to 10.
+Benchmarking collection/l0_index/scan/32000: Collecting 20 samples in estimated 1.6383 s (210 iterations)
+Benchmarking collection/l0_index/scan/32000: Analyzing
+collection/l0_index/scan/32000
+                        time:   [6.4741 ms 7.2390 ms 8.3389 ms]
+                        change: [−7.1145% +1.6015% +13.576%] (p = 0.77 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking collection/l0_index/query/32000
+Benchmarking collection/l0_index/query/32000: Warming up for 200.00 ms
+Benchmarking collection/l0_index/query/32000: Collecting 20 samples in estimated 1.0000 s (3.4M iterations)
+Benchmarking collection/l0_index/query/32000: Analyzing
+collection/l0_index/query/32000
+                        time:   [297.31 ns 297.86 ns 298.63 ns]
+                        change: [−11.210% −10.420% −9.7207%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  3 (15.00%) high severe
+Benchmarking collection/l0_index/build_plus_query/32000
+Benchmarking collection/l0_index/build_plus_query/32000: Warming up for 200.00 ms
+Benchmarking collection/l0_index/build_plus_query/32000: Collecting 20 samples in estimated 1.1271 s (60 iterations)
+Benchmarking collection/l0_index/build_plus_query/32000: Analyzing
+collection/l0_index/build_plus_query/32000
+                        time:   [18.737 ms 19.346 ms 19.995 ms]
+                        change: [−6.2602% −2.4954% +1.3225%] (p = 0.20 > 0.05)
+                        No change in performance detected.
+Benchmarking collection/l0_index/replace/32000
+Benchmarking collection/l0_index/replace/32000: Warming up for 200.00 ms
+Benchmarking collection/l0_index/replace/32000: Collecting 20 samples in estimated 1.0000 s (4.3M iterations)
+Benchmarking collection/l0_index/replace/32000: Analyzing
+collection/l0_index/replace/32000
+                        time:   [232.65 ns 233.99 ns 236.02 ns]
+                        change: [−4.6108% −3.1667% −1.6094%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+
+Benchmarking collection/interval_mixed/tree/randomfalse/16
+Benchmarking collection/interval_mixed/tree/randomfalse/16: Warming up for 200.00 ms
+Benchmarking collection/interval_mixed/tree/randomfalse/16: Collecting 20 samples in estimated 1.0001 s (1.1M iterations)
+Benchmarking collection/interval_mixed/tree/randomfalse/16: Analyzing
+collection/interval_mixed/tree/randomfalse/16
+                        time:   [878.69 ns 884.00 ns 891.13 ns]
+                        change: [−14.025% −13.586% −13.029%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking collection/interval_mixed/vec/randomfalse/16
+Benchmarking collection/interval_mixed/vec/randomfalse/16: Warming up for 200.00 ms
+Benchmarking collection/interval_mixed/vec/randomfalse/16: Collecting 20 samples in estimated 1.0001 s (1.5M iterations)
+Benchmarking collection/interval_mixed/vec/randomfalse/16: Analyzing
+collection/interval_mixed/vec/randomfalse/16
+                        time:   [654.63 ns 657.06 ns 660.53 ns]
+                        change: [−10.155% −9.0884% −8.1353%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/interval_mixed/tree/randomtrue/16
+Benchmarking collection/interval_mixed/tree/randomtrue/16: Warming up for 200.00 ms
+Benchmarking collection/interval_mixed/tree/randomtrue/16: Collecting 20 samples in estimated 1.0002 s (1.2M iterations)
+Benchmarking collection/interval_mixed/tree/randomtrue/16: Analyzing
+collection/interval_mixed/tree/randomtrue/16
+                        time:   [823.87 ns 832.88 ns 841.89 ns]
+                        change: [−12.736% −12.021% −11.317%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking collection/interval_mixed/vec/randomtrue/16
+Benchmarking collection/interval_mixed/vec/randomtrue/16: Warming up for 200.00 ms
+Benchmarking collection/interval_mixed/vec/randomtrue/16: Collecting 20 samples in estimated 1.0000 s (1.5M iterations)
+Benchmarking collection/interval_mixed/vec/randomtrue/16: Analyzing
+collection/interval_mixed/vec/randomtrue/16
+                        time:   [669.38 ns 670.03 ns 670.72 ns]
+                        change: [−11.197% −10.719% −10.185%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking collection/interval_mixed/tree/randomfalse/1024
+Benchmarking collection/interval_mixed/tree/randomfalse/1024: Warming up for 200.00 ms
+Benchmarking collection/interval_mixed/tree/randomfalse/1024: Collecting 20 samples in estimated 1.0062 s (5460 iterations)
+Benchmarking collection/interval_mixed/tree/randomfalse/1024: Analyzing
+collection/interval_mixed/tree/randomfalse/1024
+                        time:   [181.61 µs 182.83 µs 183.98 µs]
+                        change: [−6.2774% −5.6308% −4.9779%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high mild
+Benchmarking collection/interval_mixed/vec/randomfalse/1024
+Benchmarking collection/interval_mixed/vec/randomfalse/1024: Warming up for 200.00 ms
+Benchmarking collection/interval_mixed/vec/randomfalse/1024: Collecting 20 samples in estimated 1.0110 s (12k iterations)
+Benchmarking collection/interval_mixed/vec/randomfalse/1024: Analyzing
+collection/interval_mixed/vec/randomfalse/1024
+                        time:   [87.454 µs 87.519 µs 87.596 µs]
+                        change: [−8.0800% −7.7124% −7.4143%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/interval_mixed/tree/randomtrue/1024
+Benchmarking collection/interval_mixed/tree/randomtrue/1024: Warming up for 200.00 ms
+Benchmarking collection/interval_mixed/tree/randomtrue/1024: Collecting 20 samples in estimated 1.0088 s (5670 iterations)
+Benchmarking collection/interval_mixed/tree/randomtrue/1024: Analyzing
+collection/interval_mixed/tree/randomtrue/1024
+                        time:   [177.78 µs 178.35 µs 178.84 µs]
+                        change: [−9.2204% −8.8818% −8.5729%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/interval_mixed/vec/randomtrue/1024
+Benchmarking collection/interval_mixed/vec/randomtrue/1024: Warming up for 200.00 ms
+Benchmarking collection/interval_mixed/vec/randomtrue/1024: Collecting 20 samples in estimated 1.0119 s (8400 iterations)
+Benchmarking collection/interval_mixed/vec/randomtrue/1024: Analyzing
+collection/interval_mixed/vec/randomtrue/1024
+                        time:   [120.28 µs 120.43 µs 120.58 µs]
+                        change: [−3.8413% −3.4844% −3.1644%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/interval_mixed/tree/randomfalse/16384
+Benchmarking collection/interval_mixed/tree/randomfalse/16384: Warming up for 200.00 ms
+Benchmarking collection/interval_mixed/tree/randomfalse/16384: Collecting 20 samples in estimated 1.4737 s (420 iterations)
+Benchmarking collection/interval_mixed/tree/randomfalse/16384: Analyzing
+collection/interval_mixed/tree/randomfalse/16384
+                        time:   [3.4754 ms 3.4810 ms 3.4865 ms]
+                        change: [−8.0664% −7.5966% −7.1798%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/interval_mixed/vec/randomfalse/16384
+Benchmarking collection/interval_mixed/vec/randomfalse/16384: Warming up for 200.00 ms
+Benchmarking collection/interval_mixed/vec/randomfalse/16384: Collecting 20 samples in estimated 1.2159 s (630 iterations)
+Benchmarking collection/interval_mixed/vec/randomfalse/16384: Analyzing
+collection/interval_mixed/vec/randomfalse/16384
+                        time:   [1.8929 ms 1.8994 ms 1.9070 ms]
+                        change: [−4.7954% −4.2717% −3.8210%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/interval_mixed/tree/randomtrue/16384
+Benchmarking collection/interval_mixed/tree/randomtrue/16384: Warming up for 200.00 ms
+Benchmarking collection/interval_mixed/tree/randomtrue/16384: Collecting 20 samples in estimated 1.7742 s (420 iterations)
+Benchmarking collection/interval_mixed/tree/randomtrue/16384: Analyzing
+collection/interval_mixed/tree/randomtrue/16384
+                        time:   [4.2317 ms 4.2408 ms 4.2555 ms]
+                        change: [−6.2162% −5.9028% −5.5666%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) high mild
+  1 (5.00%) high severe
+Benchmarking collection/interval_mixed/vec/randomtrue/16384
+Benchmarking collection/interval_mixed/vec/randomtrue/16384: Warming up for 200.00 ms
+Benchmarking collection/interval_mixed/vec/randomtrue/16384: Collecting 20 samples in estimated 1.2065 s (80 iterations)
+Benchmarking collection/interval_mixed/vec/randomtrue/16384: Analyzing
+collection/interval_mixed/vec/randomtrue/16384
+                        time:   [15.090 ms 15.154 ms 15.243 ms]
+                        change: [−0.6386% −0.1965% +0.4086%] (p = 0.53 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 20 measurements (10.00%)
+  1 (5.00%) low mild
+  1 (5.00%) high severe
+
+Benchmarking collection/immutable_open/hash_rebuild/2000
+Benchmarking collection/immutable_open/hash_rebuild/2000: Warming up for 200.00 ms
+Benchmarking collection/immutable_open/hash_rebuild/2000: Collecting 20 samples in estimated 1.0041 s (48k iterations)
+Benchmarking collection/immutable_open/hash_rebuild/2000: Analyzing
+collection/immutable_open/hash_rebuild/2000
+                        time:   [20.477 µs 20.495 µs 20.520 µs]
+                        change: [−11.942% −11.351% −10.792%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 20 measurements (15.00%)
+  1 (5.00%) high mild
+  2 (10.00%) high severe
+Benchmarking collection/immutable_open/bbtree_rebuild/2000
+Benchmarking collection/immutable_open/bbtree_rebuild/2000: Warming up for 200.00 ms
+Benchmarking collection/immutable_open/bbtree_rebuild/2000: Collecting 20 samples in estimated 1.0022 s (72k iterations)
+Benchmarking collection/immutable_open/bbtree_rebuild/2000: Analyzing
+collection/immutable_open/bbtree_rebuild/2000
+                        time:   [13.791 µs 13.817 µs 13.848 µs]
+                        change: [−38.756% −38.538% −38.321%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/immutable_open/validated_open/2000
+Benchmarking collection/immutable_open/validated_open/2000: Warming up for 200.00 ms
+Benchmarking collection/immutable_open/validated_open/2000: Collecting 20 samples in estimated 1.0000 s (2.4M iterations)
+Benchmarking collection/immutable_open/validated_open/2000: Analyzing
+collection/immutable_open/validated_open/2000
+                        time:   [421.32 ns 422.52 ns 424.14 ns]
+                        change: [−3.8723% −3.4160% −2.9736%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/immutable_open/trusted_open/2000
+Benchmarking collection/immutable_open/trusted_open/2000: Warming up for 200.00 ms
+Benchmarking collection/immutable_open/trusted_open/2000: Collecting 20 samples in estimated 1.0000 s (5.0M iterations)
+Benchmarking collection/immutable_open/trusted_open/2000: Analyzing
+collection/immutable_open/trusted_open/2000
+                        time:   [192.63 ns 194.07 ns 195.63 ns]
+                        change: [−0.4423% +0.4465% +1.3008%] (p = 0.33 > 0.05)
+                        No change in performance detected.
+Benchmarking collection/immutable_open/hash_rebuild/8000
+Benchmarking collection/immutable_open/hash_rebuild/8000: Warming up for 200.00 ms
+Benchmarking collection/immutable_open/hash_rebuild/8000: Collecting 20 samples in estimated 1.0037 s (12k iterations)
+Benchmarking collection/immutable_open/hash_rebuild/8000: Analyzing
+collection/immutable_open/hash_rebuild/8000
+                        time:   [84.185 µs 84.736 µs 85.493 µs]
+                        change: [−9.8422% −9.1541% −8.5149%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking collection/immutable_open/bbtree_rebuild/8000
+Benchmarking collection/immutable_open/bbtree_rebuild/8000: Warming up for 200.00 ms
+Benchmarking collection/immutable_open/bbtree_rebuild/8000: Collecting 20 samples in estimated 1.0002 s (18k iterations)
+Benchmarking collection/immutable_open/bbtree_rebuild/8000: Analyzing
+collection/immutable_open/bbtree_rebuild/8000
+                        time:   [54.789 µs 54.986 µs 55.357 µs]
+                        change: [−38.325% −37.791% −37.295%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/immutable_open/validated_open/8000
+Benchmarking collection/immutable_open/validated_open/8000: Warming up for 200.00 ms
+Benchmarking collection/immutable_open/validated_open/8000: Collecting 20 samples in estimated 1.0001 s (1.3M iterations)
+Benchmarking collection/immutable_open/validated_open/8000: Analyzing
+collection/immutable_open/validated_open/8000
+                        time:   [792.34 ns 794.74 ns 797.44 ns]
+                        change: [−8.8350% −8.4625% −8.0648%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/immutable_open/trusted_open/8000
+Benchmarking collection/immutable_open/trusted_open/8000: Warming up for 200.00 ms
+Benchmarking collection/immutable_open/trusted_open/8000: Collecting 20 samples in estimated 1.0000 s (5.1M iterations)
+Benchmarking collection/immutable_open/trusted_open/8000: Analyzing
+collection/immutable_open/trusted_open/8000
+                        time:   [193.68 ns 195.42 ns 197.11 ns]
+                        change: [+0.4181% +1.4027% +2.3582%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+Benchmarking collection/immutable_open/hash_rebuild/32000
+Benchmarking collection/immutable_open/hash_rebuild/32000: Warming up for 200.00 ms
+Benchmarking collection/immutable_open/hash_rebuild/32000: Collecting 20 samples in estimated 1.0735 s (2940 iterations)
+Benchmarking collection/immutable_open/hash_rebuild/32000: Analyzing
+collection/immutable_open/hash_rebuild/32000
+                        time:   [361.54 µs 363.92 µs 366.22 µs]
+                        change: [−8.4552% −7.7693% −7.0694%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/immutable_open/bbtree_rebuild/32000
+Benchmarking collection/immutable_open/bbtree_rebuild/32000: Warming up for 200.00 ms
+Benchmarking collection/immutable_open/bbtree_rebuild/32000: Collecting 20 samples in estimated 1.0318 s (4620 iterations)
+Benchmarking collection/immutable_open/bbtree_rebuild/32000: Analyzing
+collection/immutable_open/bbtree_rebuild/32000
+                        time:   [220.96 µs 221.51 µs 222.08 µs]
+                        change: [−39.474% −38.983% −38.657%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking collection/immutable_open/validated_open/32000
+Benchmarking collection/immutable_open/validated_open/32000: Warming up for 200.00 ms
+Benchmarking collection/immutable_open/validated_open/32000: Collecting 20 samples in estimated 1.0001 s (505k iterations)
+Benchmarking collection/immutable_open/validated_open/32000: Analyzing
+collection/immutable_open/validated_open/32000
+                        time:   [1.9697 µs 1.9770 µs 1.9837 µs]
+                        change: [−13.299% −12.902% −12.501%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 20 measurements (5.00%)
+  1 (5.00%) high mild
+Benchmarking collection/immutable_open/trusted_open/32000
+Benchmarking collection/immutable_open/trusted_open/32000: Warming up for 200.00 ms
+Benchmarking collection/immutable_open/trusted_open/32000: Collecting 20 samples in estimated 1.0000 s (5.1M iterations)
+Benchmarking collection/immutable_open/trusted_open/32000: Analyzing
+collection/immutable_open/trusted_open/32000
+                        time:   [193.02 ns 194.99 ns 196.79 ns]
+                        change: [+1.3380% +2.0640% +2.7473%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+

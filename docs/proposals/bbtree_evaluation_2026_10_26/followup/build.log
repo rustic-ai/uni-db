@@ -1,0 +1,6 @@
+   Compiling bbtree v0.1.5
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 29.40s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+  Executable benches/collection_candidates.rs (target/debug/deps/collection_candidates-e16a25ee9d65d605)

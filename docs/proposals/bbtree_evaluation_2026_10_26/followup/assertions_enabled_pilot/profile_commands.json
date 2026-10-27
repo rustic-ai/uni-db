@@ -1,0 +1,206 @@
+[
+  {
+    "name": "sparse_tree",
+    "size": 1024,
+    "repetitions": 100000,
+    "command": [
+      "perf",
+      "stat",
+      "-x,",
+      "-o",
+      "docs/proposals/bbtree_evaluation_2026_10_26/followup/sparse_tree.stat.csv",
+      "-e",
+      "cycles,instructions,cache-misses,branch-misses",
+      "taskset",
+      "-c",
+      "1",
+      "/home/rohit/work/dragonscale/uni/target/debug/deps/collection_candidates-3b8d8972c71bce5f"
+    ],
+    "returncode": 0
+  },
+  {
+    "name": "sparse_sort",
+    "size": 1024,
+    "repetitions": 100000,
+    "command": [
+      "perf",
+      "stat",
+      "-x,",
+      "-o",
+      "docs/proposals/bbtree_evaluation_2026_10_26/followup/sparse_sort.stat.csv",
+      "-e",
+      "cycles,instructions,cache-misses,branch-misses",
+      "taskset",
+      "-c",
+      "1",
+      "/home/rohit/work/dragonscale/uni/target/debug/deps/collection_candidates-3b8d8972c71bce5f"
+    ],
+    "returncode": 0
+  },
+  {
+    "name": "canonical_tree",
+    "size": 8000,
+    "repetitions": 1000000,
+    "command": [
+      "perf",
+      "stat",
+      "-x,",
+      "-o",
+      "docs/proposals/bbtree_evaluation_2026_10_26/followup/canonical_tree.stat.csv",
+      "-e",
+      "cycles,instructions,cache-misses,branch-misses",
+      "taskset",
+      "-c",
+      "1",
+      "/home/rohit/work/dragonscale/uni/target/debug/deps/collection_candidates-3b8d8972c71bce5f"
+    ],
+    "returncode": 0
+  },
+  {
+    "name": "canonical_vec",
+    "size": 8000,
+    "repetitions": 1000000,
+    "command": [
+      "perf",
+      "stat",
+      "-x,",
+      "-o",
+      "docs/proposals/bbtree_evaluation_2026_10_26/followup/canonical_vec.stat.csv",
+      "-e",
+      "cycles,instructions,cache-misses,branch-misses",
+      "taskset",
+      "-c",
+      "1",
+      "/home/rohit/work/dragonscale/uni/target/debug/deps/collection_candidates-3b8d8972c71bce5f"
+    ],
+    "returncode": 0
+  },
+  {
+    "name": "l0_scan",
+    "size": 8000,
+    "repetitions": 5000,
+    "command": [
+      "perf",
+      "stat",
+      "-x,",
+      "-o",
+      "docs/proposals/bbtree_evaluation_2026_10_26/followup/l0_scan.stat.csv",
+      "-e",
+      "cycles,instructions,cache-misses,branch-misses",
+      "taskset",
+      "-c",
+      "1",
+      "/home/rohit/work/dragonscale/uni/target/debug/deps/collection_candidates-3b8d8972c71bce5f"
+    ],
+    "returncode": 0
+  },
+  {
+    "name": "l0_index_query",
+    "size": 8000,
+    "repetitions": 1000000,
+    "command": [
+      "perf",
+      "stat",
+      "-x,",
+      "-o",
+      "docs/proposals/bbtree_evaluation_2026_10_26/followup/l0_index_query.stat.csv",
+      "-e",
+      "cycles,instructions,cache-misses,branch-misses",
+      "taskset",
+      "-c",
+      "1",
+      "/home/rohit/work/dragonscale/uni/target/debug/deps/collection_candidates-3b8d8972c71bce5f"
+    ],
+    "returncode": 0
+  },
+  {
+    "name": "l0_index_build",
+    "size": 8000,
+    "repetitions": 1000,
+    "command": [
+      "perf",
+      "stat",
+      "-x,",
+      "-o",
+      "docs/proposals/bbtree_evaluation_2026_10_26/followup/l0_index_build.stat.csv",
+      "-e",
+      "cycles,instructions,cache-misses,branch-misses",
+      "taskset",
+      "-c",
+      "1",
+      "/home/rohit/work/dragonscale/uni/target/debug/deps/collection_candidates-3b8d8972c71bce5f"
+    ],
+    "returncode": 0
+  },
+  {
+    "name": "interval_tree",
+    "size": 16384,
+    "repetitions": 500,
+    "command": [
+      "perf",
+      "stat",
+      "-x,",
+      "-o",
+      "docs/proposals/bbtree_evaluation_2026_10_26/followup/interval_tree.stat.csv",
+      "-e",
+      "cycles,instructions,cache-misses,branch-misses",
+      "taskset",
+      "-c",
+      "1",
+      "/home/rohit/work/dragonscale/uni/target/debug/deps/collection_candidates-3b8d8972c71bce5f"
+    ],
+    "returncode": 0
+  },
+  {
+    "name": "interval_vec",
+    "size": 16384,
+    "repetitions": 500,
+    "command": [
+      "perf",
+      "stat",
+      "-x,",
+      "-o",
+      "docs/proposals/bbtree_evaluation_2026_10_26/followup/interval_vec.stat.csv",
+      "-e",
+      "cycles,instructions,cache-misses,branch-misses",
+      "taskset",
+      "-c",
+      "1",
+      "/home/rohit/work/dragonscale/uni/target/debug/deps/collection_candidates-3b8d8972c71bce5f"
+    ],
+    "returncode": 0
+  },
+  {
+    "record": "sparse_tree",
+    "size": 1024,
+    "repetitions": 100000,
+    "returncode": 0,
+    "data": "/tmp/uni-collection-sparse_tree.data"
+  },
+  {
+    "record": "sparse_sort",
+    "size": 1024,
+    "repetitions": 100000,
+    "returncode": 0,
+    "data": "/tmp/uni-collection-sparse_sort.data"
+  },
+  {
+    "record": "l0_scan",
+    "size": 8000,
+    "repetitions": 5000,
+    "returncode": 0,
+    "data": "/tmp/uni-collection-l0_scan.data"
+  },
+  {
+    "record": "l0_index_build",
+    "size": 8000,
+    "repetitions": 1000,
+    "returncode": 0,
+    "data": "/tmp/uni-collection-l0_index_build.data"
+  },
+  {
+    "record": "e2e",
+    "returncode": 0,
+    "data": "/tmp/uni-collection-e2e.data"
+  }
+]

@@ -292,9 +292,7 @@ locy_yield_item = {
 // PROB annotation on yield items: marks column as containing probability values.
 // Forms: `expr AS alias PROB`, `expr AS PROB`, `expr PROB`
 prob_projection = {
-    expression ~ AS ~ alias_identifier ~ PROB
-    | expression ~ AS ~ PROB
-    | expression ~ PROB
+    expression ~ (AS ~ (alias_identifier ~ PROB | PROB) | PROB)
 }
 
 key_projection = { KEY ~ expression ~ (AS ~ alias_identifier)? }

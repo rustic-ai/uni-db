@@ -1,0 +1,10 @@
+# started on Mon Oct 26 01:18:52 2026
+
+5350921545,,cpu_atom/cycles/,1199896,0.00,,
+15318605301,,cpu_core/cycles/,3181094460,99.00,,
+6803359053,,cpu_atom/instructions/,1199896,0.00,,
+27887094502,,cpu_core/instructions/,3181094460,99.00,,
+27009412,,cpu_atom/cache-misses/,1199896,0.00,,
+4976748,,cpu_core/cache-misses/,3181094460,99.00,,
+32525867,,cpu_atom/branch-misses/,1199896,0.00,,
+27542620,,cpu_core/branch-misses/,3181094460,99.00,,

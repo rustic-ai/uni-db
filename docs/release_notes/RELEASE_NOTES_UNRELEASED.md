@@ -1,5 +1,10 @@
 # uni-db — unreleased
 
+Upgraded the Rust storage backend to Lance 13.0.0 and Arrow/Parquet 58.4.1,
+with DataFusion remaining at the latest compatible 54.1.0. New datasets
+continue to use file format 2.1; appends and overwrites preserve an existing
+dataset's format. The dependency upgrade does not opt databases into format 2.2.
+
 Repository and wheel builds now route older transitive zstd requirements through
 private compatibility facades to patched zstd 0.14.3, zstd-safe 8.2.0 and
 zstd-sys 2.1.2. This fixes reused-context data leakage, seekable output lengths

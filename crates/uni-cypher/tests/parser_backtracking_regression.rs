@@ -46,7 +46,7 @@
 
 use std::time::{Duration, Instant};
 
-/// Run `parse_locy(input)` on a worker thread and fail if it does not finish
+/// Run both parser entry points on a worker thread and fail if they do not finish
 /// within `budget`. Using a thread (rather than a bare wall-clock assertion on
 /// the calling thread) means a regression to exponential time fails cleanly
 /// instead of hanging the whole test binary.
@@ -54,6 +54,7 @@ fn assert_parses_within(input: &str, budget: Duration) {
     let owned = input.to_string();
     let handle = std::thread::spawn(move || {
         let start = Instant::now();
+        let _ = uni_cypher::parse(&owned);
         let _ = uni_cypher::parse_locy(&owned);
         start.elapsed()
     });
@@ -305,6 +306,128 @@ fn malformed_in_led_lists_are_still_refused() {
         assert!(
             uni_cypher::parse_expression(q).is_err(),
             "expected {q:?} to be refused"
+        );
+    }
+}
+
+// The 2026-10-27 Cypher fuzz timeout also exposes valid list literals: their
+// pattern-comprehension reading descends into nested properties before failing.
+#[test]
+fn nested_list_map_projections_parse_fast() {
+    let q = format!("RETURN {}1{}", "[(a {k: ".repeat(40), "})]".repeat(40));
+    assert_parses_within(&q, Duration::from_secs(5));
+    assert!(uni_cypher::parse(&q).is_ok());
+}
+
+#[test]
+fn cypher_list_pattern_timeout_artifact_parses_fast() {
+    let input = include_str!("data/cypher_list_pattern_timeout.cypher");
+    assert_parses_within(input, Duration::from_secs(5));
+    assert!(uni_cypher::parse(input).is_err());
+}
+
+#[test]
+fn pattern_comprehension_lookahead_preserves_nested_and_quoted_pipes() {
+    for q in [
+        "RETURN [(a)-->(b) | b]",
+        "RETURN [p = (a)-->(b) WHERE a.x > 1 | p]",
+        "RETURN [(a {k: [1, 2]})-->(b) | b]",
+        "RETURN [(a:`a|b` {k: '])|['})-->(b) | b]",
+        "RETURN [(a {k: 1}) /* ) ] | */ -->(b) | b]",
+        "RETURN [(a)-->(b) WHERE b.x IN [x IN [1, 2] | x] | b]",
+        "RETURN [(a)-->(b) | [(b)-->(c) | c]]",
+        "RETURN [(a WHERE a.x > 1)-->(b) | b]",
+        "RETURN [(a {k: 1} WHERE a.x > 1)-->(b) | b]",
+    ] {
+        assert!(uni_cypher::parse(q).is_ok(), "expected {q:?} to parse");
+    }
+    for q in [
+        "RETURN [(a {k: 1})]",
+        "RETURN [(a {k: '|'})]",
+        "RETURN [1, [2]]",
+    ] {
+        assert!(uni_cypher::parse(q).is_ok(), "expected {q:?} to parse");
+    }
+    for q in ["RETURN [(a)-->(b) |]", "RETURN [(a)-->(b) WHERE | b]"] {
+        assert!(uni_cypher::parse(q).is_err(), "expected {q:?} to fail");
+    }
+}
+
+// ── 2026-10-27 (second pass): CREATE pattern & pattern_ahead / rel_predicate ──
+
+#[test]
+fn cypher_create_pattern_timeout_artifact_parses_fast() {
+    let input = include_str!("data/cypher_create_pattern_timeout.cypher");
+    assert_parses_within(input, Duration::from_secs(5));
+    assert!(uni_cypher::parse(input).is_err());
+}
+
+#[test]
+fn nested_paren_map_subtraction_and_comparison_parse_fast() {
+    // Previously `pattern_ahead` checked only for a bare `-` or `<` after the
+    // closing `)` of a `(`-led primary expression, so `(a {k: ...}) - 1`,
+    // `(a {k: ...}) < 1`, `(a {k: ...})--(1)` (subtraction of `-1`), and
+    // comments/backtick identifiers containing `)-` inside `(a {k: ...})`
+    // matched `pattern_ahead`, parsed the nested map as `node_pattern`, failed
+    // on the relationship/target node, and re-parsed the whole interior via
+    // `"(" ~ expression ~ ")"`.
+    for tail in [") - 1", ") < 1", ") <= 1", ") <> 1", ")--(1)", ")"] {
+        let open = if tail == ")" {
+            "(a {/*)-*/ `)-`: "
+        } else {
+            "(a {k: "
+        };
+        let q = format!(
+            "RETURN {}1{}",
+            open.repeat(40),
+            format!("}}{tail}").repeat(40)
+        );
+        assert_parses_within(&q, Duration::from_secs(5));
+        assert!(uni_cypher::parse(&q).is_ok(), "expected {q:?} to parse");
+    }
+}
+
+#[test]
+fn nested_rel_predicate_properties_without_where_parse_fast() {
+    // `rel_predicate` previously tried `properties ~ WHERE ~ expression` before
+    // `properties`, re-parsing relationship property maps whenever `WHERE` was
+    // omitted.
+    let q = format!(
+        "RETURN {}1{}",
+        "[(a)-[r {k: ".repeat(30),
+        "}]->(b) | b]".repeat(30)
+    );
+    assert_parses_within(&q, Duration::from_secs(5));
+    assert!(uni_cypher::parse(&q).is_ok());
+}
+
+#[test]
+fn probability_projection_keeps_shorthand_and_explicit_aliases() {
+    use uni_cypher::locy_ast::{LocyStatement, RuleOutput};
+
+    for (projection, expected_alias, is_prob) in [
+        ("p AS PROB", Some("p"), true),
+        ("p PROB", Some("p"), true),
+        ("p AS score PROB", Some("score"), true),
+        ("n.p AS PROB", Some("p"), true),
+        ("p AS PROB PROB", Some("PROB"), true),
+        ("p AS score", Some("score"), false),
+        ("p AS PROBfoo", Some("PROBfoo"), false),
+    ] {
+        let source = format!("CREATE RULE r AS MATCH (n) YIELD {projection}");
+        let program = uni_cypher::parse_locy(&source).expect("parse rule");
+        let LocyStatement::Rule(rule) = &program.statements[0] else {
+            panic!("expected rule");
+        };
+        let RuleOutput::Yield(output) = &rule.output else {
+            panic!("expected YIELD");
+        };
+        assert_eq!(output.items.len(), 1);
+        assert_eq!(output.items[0].is_prob, is_prob, "{projection}");
+        assert_eq!(
+            output.items[0].alias.as_deref(),
+            expected_alias,
+            "{projection}"
         );
     }
 }

@@ -1,0 +1,16 @@
+{
+  "active_executable_and_maps_check": "passed",
+  "profiles": [
+    {
+      "root": "target/ci-remaining/tsan",
+      "files": 14632,
+      "logical_bytes": 17091281291
+    },
+    {
+      "root": "target/release",
+      "files": 9167,
+      "logical_bytes": 20504962225
+    }
+  ],
+  "reason": "Reclaim disk space after successful benchmark and ThreadSanitizer lanes; raw test logs and measured samples retained; source files untouched."
+}

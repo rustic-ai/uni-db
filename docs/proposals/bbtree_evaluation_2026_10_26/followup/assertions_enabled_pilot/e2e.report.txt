@@ -1,0 +1,55 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 1K of event 'cpu-clock:u'
+# Event count (approx.): 2032064112
+#
+# Overhead  Command          Shared Object                           Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
+# ........  ...............  ......................................  .............................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+#
+    42.01%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] uni_store::runtime::columnar_scan::l0_prefilter_candidates::<alloc::vec::Vec<u64>>
+    10.26%  collection_cand  libc.so.6                               [.] __memcmp_avx2_movbe
+            |
+            ---__memcmp_avx2_movbe
+
+     3.75%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] keccak::backends::soft::keccak_p::<u64, 24>
+     3.55%  collection_cand  libc.so.6                               [.] __memmove_avx_unaligned_erms
+            |
+            ---__memmove_avx_unaligned_erms
+
+     1.58%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <alloc::string::String as core::clone::Clone>::clone
+     1.58%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&str>
+     1.28%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     1.08%  collection_cand  libc.so.6                               [.] __libc_malloc2
+            |
+            ---__libc_malloc2
+
+     0.99%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] <uni_store::runtime::writer::Writer>::flush_stream_l1::{closure#0}
+     0.99%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] uni_store::runtime::columnar_scan::l0_value_may_equal
+     0.99%  collection_cand  libc.so.6                               [.] _int_free_chunk
+            |
+            ---_int_free_chunk
+
+     0.99%  lance-cpu        collection_candidates-3b8d8972c71bce5f  [.] fsst::fsst::compress::<i32>
+     0.89%  collection_cand  libc.so.6                               [.] cfree@GLIBC_2.2.5
+            |
+            ---cfree@GLIBC_2.2.5
+
+     0.79%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] alloc::fmt::format::format_inner
+     0.69%  collection_cand  libc.so.6                               [.] _int_malloc
+            |
+            ---_int_malloc
+               __libc_malloc2
+
+     0.69%  collection_cand  libc.so.6                               [.] malloc
+            |
+            ---malloc
+
+     0.59%  collection_cand  collection_candidates-3b8d8972c71bce5f  [.] uni_store::runtime::occ::is_crdt_carveout
+
+
+#
+# (Tip: Show user configuration overrides: perf config --user --list)
+#

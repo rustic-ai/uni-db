@@ -1063,9 +1063,15 @@ pub async fn create_dataset_then_branch<R>(
 where
     R: arrow_array::RecordBatchReader + Send + 'static,
 {
-    Dataset::write(initial_batches, uri, None)
-        .await
-        .with_context(|| format!("create lance dataset at {uri}"))?;
+    Dataset::write(
+        initial_batches,
+        uri,
+        Some(super::lance_directory::write_params(
+            lance::dataset::WriteMode::Create,
+        )),
+    )
+    .await
+    .with_context(|| format!("create lance dataset at {uri}"))?;
     let parent_v = current_version(uri).await?;
     create_branch(uri, branch, parent_v)
         .await

@@ -1,0 +1,22 @@
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 7m 57s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running benches/ssi_commit_overhead.rs (target/release/deps/ssi_commit_overhead-1c9bd8273887ca5a)
+Benchmarking ssi_commit_overhead/small_commit
+Benchmarking ssi_commit_overhead/small_commit: Warming up for 3.0000 s
+Benchmarking ssi_commit_overhead/small_commit: Collecting 100 samples in estimated 5.1654 s (2000 iterations)
+Benchmarking ssi_commit_overhead/small_commit: Analyzing
+ssi_commit_overhead/small_commit
+                        time:   [2.1444 ms 2.1733 ms 2.2034 ms]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking ssi_commit_overhead/read_heavy_commit
+Benchmarking ssi_commit_overhead/read_heavy_commit: Warming up for 3.0000 s
+Benchmarking ssi_commit_overhead/read_heavy_commit: Collecting 100 samples in estimated 5.0843 s (1000 iterations)
+Benchmarking ssi_commit_overhead/read_heavy_commit: Analyzing
+ssi_commit_overhead/read_heavy_commit
+                        time:   [5.2305 ms 5.3120 ms 5.3962 ms]
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high mild
+

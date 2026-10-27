@@ -52,6 +52,11 @@ and `docs/proposals/test_harness_and_benchmarks_2026-08-11.md` §7.1 has the
 argument: wall-clock in CI cannot carry a threshold, so instruction counts are
 the only thing gated, and only on targets that passed a qualification pilot.
 
+The vertex-ID lookup benchmark also checks that it returns exactly one row with
+the selected fixture vertex's name. These assertions run outside the Callgrind
+measurement window: an empty or incorrect result must fail the benchmark rather
+than masquerade as cheaper query execution.
+
 **An implausible improvement now fails the gate (#230).** A local run of
 *unchanged* code measured 25–56% below the CI-generated `iai-baseline.json` and
 `iai_gate.py` reported "all 5 gated targets within 2.0%", because every

@@ -1,0 +1,32 @@
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 7m 57s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running benches/concurrent_mutations.rs (target/release/deps/concurrent_mutations-721a67585af48ec8)
+Benchmarking concurrent_creates/sessions/1
+Benchmarking concurrent_creates/sessions/1: Warming up for 3.0000 s
+Benchmarking concurrent_creates/sessions/1: Collecting 10 samples in estimated 20.879 s (1155 iterations)
+Benchmarking concurrent_creates/sessions/1: Analyzing
+concurrent_creates/sessions/1
+                        time:   [13.925 ms 14.067 ms 14.190 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking concurrent_creates/sessions/4
+Benchmarking concurrent_creates/sessions/4: Warming up for 3.0000 s
+Benchmarking concurrent_creates/sessions/4: Collecting 10 samples in estimated 20.353 s (440 iterations)
+Benchmarking concurrent_creates/sessions/4: Analyzing
+concurrent_creates/sessions/4
+                        time:   [40.290 ms 41.291 ms 42.825 ms]
+Benchmarking concurrent_creates/sessions/12
+Benchmarking concurrent_creates/sessions/12: Warming up for 3.0000 s
+Benchmarking concurrent_creates/sessions/12: Collecting 10 samples in estimated 24.523 s (165 iterations)
+Benchmarking concurrent_creates/sessions/12: Analyzing
+concurrent_creates/sessions/12
+                        time:   [132.77 ms 136.08 ms 138.54 ms]
+Benchmarking concurrent_creates/sessions/24
+Benchmarking concurrent_creates/sessions/24: Warming up for 3.0000 s
+Benchmarking concurrent_creates/sessions/24: Collecting 10 samples in estimated 31.431 s (110 iterations)
+Benchmarking concurrent_creates/sessions/24: Analyzing
+concurrent_creates/sessions/24
+                        time:   [273.95 ms 278.88 ms 282.42 ms]
+

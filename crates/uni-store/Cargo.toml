@@ -11,7 +11,7 @@ autotests = false
 
 [features]
 default = ["lance-backend"]
-lance-backend = ["dep:lance", "dep:lance-index", "dep:lance-linalg"]
+lance-backend = ["dep:lance", "dep:lance-index", "dep:lance-linalg", "dep:lance-object-store"]
 # NOTE: SSI/OCC (snapshot-isolation reads, write/read-set conflict detection,
 # serializable MERGE, FOR UPDATE) is no longer a compile-time feature. It is
 # always compiled and toggled at runtime via `UniConfig::ssi_enabled`
@@ -69,6 +69,8 @@ arc-swap = { workspace = true }
 uni-xervo = { workspace = true }
 
 object_store = { workspace = true }
+# Lance 13 uses 0.14; DataFusion 54 and Uni retain 0.13. Keep the boundary local.
+lance-object-store = { package = "object_store", version = "0.14", default-features = false, optional = true }
 url = { workspace = true }
 sha3 = "0.12"
 tokio-util = { workspace = true }

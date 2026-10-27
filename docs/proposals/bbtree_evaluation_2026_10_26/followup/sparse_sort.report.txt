@@ -1,0 +1,179 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 434  of event 'cpu-clock:u'
+# Event count (approx.): 869739472
+#
+# Overhead  Command          Shared Object                           Symbol                                                                                                                                                                                                                                                                         
+# ........  ...............  ......................................  ...............................................................................................................................................................................................................................................................................
+#
+    31.34%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] core::slice::sort::stable::quicksort::quicksort::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          
+            |--11.98%--<core::slice::sort::stable::quicksort::PartitionState<(u32, f32)>>::partition_one (inlined)
+            |          core::slice::sort::stable::quicksort::stable_partition::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |          core::slice::sort::stable::quicksort::quicksort::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          |          
+            |          |--3.69%--0x4b407306
+            |          |          0xfffffffffffff
+            |          |          
+            |          |--3.69%--0x3
+            |          |          
+            |           --1.15%--core::slice::sort::stable::drift::stable_quicksort::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |                     core::slice::sort::stable::drift::sort::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |                     0xfffffffffffffffe
+            |          
+            |--7.14%--core::ptr::copy_nonoverlapping::<(u32, f32)> (inlined)
+            |          |          
+            |          |--3.69%--<core::slice::sort::stable::quicksort::PartitionState<(u32, f32)>>::partition_one (inlined)
+            |          |          core::slice::sort::stable::quicksort::stable_partition::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |          |          core::slice::sort::stable::quicksort::quicksort::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          |          
+            |           --3.46%--core::slice::sort::stable::quicksort::stable_partition::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |                     core::slice::sort::stable::quicksort::quicksort::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |                     |          
+            |                      --1.15%--core::slice::sort::stable::drift::stable_quicksort::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |                                core::slice::sort::stable::drift::sort::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |                                0xfffffffffffffffe
+            |          
+            |--5.53%--<u32 as core::cmp::PartialOrd>::lt (inlined)
+            |          <[(u32, f32)]>::sort_by_key::<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0} (inlined)
+            |          core::slice::sort::stable::quicksort::stable_partition::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |          core::slice::sort::stable::quicksort::quicksort::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          |          
+            |          |--1.61%--0x4b407306
+            |          |          0xfffffffffffff
+            |          |          
+            |           --1.15%--0x3
+            |          
+            |--2.53%--<*mut (u32, f32)>::sub (inlined)
+            |          <core::slice::sort::stable::quicksort::PartitionState<(u32, f32)>>::partition_one (inlined)
+            |          core::slice::sort::stable::quicksort::stable_partition::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |          core::slice::sort::stable::quicksort::quicksort::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          
+            |--1.38%--core::slice::sort::stable::quicksort::stable_partition::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |          core::slice::sort::stable::quicksort::quicksort::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          
+             --1.38%--<core::ops::range::Range<usize> as core::iter::range::RangeIteratorImpl>::spec_next (inlined)
+                       <core::ops::range::Range<usize> as core::iter::traits::iterator::Iterator>::next (inlined)
+                       core::slice::sort::stable::quicksort::stable_partition::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+                       core::slice::sort::stable::quicksort::quicksort::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+
+    26.50%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] core::slice::sort::shared::smallsort::small_sort_general_with_scratch::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          
+            |--8.53%--core::ptr::copy_nonoverlapping::<(u32, f32)> (inlined)
+            |          |          
+            |          |--5.76%--core::slice::sort::shared::smallsort::insert_tail::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |          |          core::slice::sort::shared::smallsort::small_sort_general_with_scratch::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          |          
+            |           --1.84%--core::slice::sort::shared::smallsort::merge_down::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |                     core::slice::sort::shared::smallsort::bidirectional_merge::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |                     core::slice::sort::shared::smallsort::small_sort_general_with_scratch::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          
+            |--4.15%--<u32 as core::cmp::PartialOrd>::lt (inlined)
+            |          <[(u32, f32)]>::sort_by_key::<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0} (inlined)
+            |          |          
+            |          |--1.84%--core::slice::sort::shared::smallsort::merge_down::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |          |          core::slice::sort::shared::smallsort::bidirectional_merge::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |          |          core::slice::sort::shared::smallsort::small_sort_general_with_scratch::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          |          
+            |           --1.61%--core::slice::sort::shared::smallsort::merge_up::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |                     core::slice::sort::shared::smallsort::bidirectional_merge::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |                     core::slice::sort::shared::smallsort::small_sort_general_with_scratch::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          
+            |--3.46%--core::slice::sort::shared::smallsort::merge_down::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |          core::slice::sort::shared::smallsort::bidirectional_merge::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |          core::slice::sort::shared::smallsort::small_sort_general_with_scratch::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          
+            |--3.00%--core::slice::sort::shared::smallsort::insert_tail::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |          core::slice::sort::shared::smallsort::small_sort_general_with_scratch::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          
+             --2.07%--<*const (u32, f32)>::wrapping_offset (inlined)
+                       |          
+                        --1.84%--<*const (u32, f32)>::wrapping_sub (inlined)
+                                  core::slice::sort::shared::smallsort::merge_down::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+                                  core::slice::sort::shared::smallsort::bidirectional_merge::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+                                  core::slice::sort::shared::smallsort::small_sort_general_with_scratch::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+
+    15.21%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] collection_candidates::kernels::sparse_sort
+            |          
+            |--4.38%--<alloc::vec::Vec<u32>>::push_mut (inlined)
+            |          <alloc::vec::Vec<u32>>::push (inlined)
+            |          collection_candidates::kernels::sparse_sort
+            |          
+            |--3.92%--collection_candidates::kernels::sparse_sort
+            |          
+            |--1.84%--core::ptr::read::<(u32, f32)> (inlined)
+            |          <core::ptr::non_null::NonNull<(u32, f32)>>::read (inlined)
+            |          <alloc::vec::into_iter::IntoIter<(u32, f32)> as core::iter::traits::iterator::Iterator>::next (inlined)
+            |          collection_candidates::kernels::sparse_sort
+            |          
+            |--1.84%--<alloc::vec::Vec<f32>>::push_mut (inlined)
+            |          <alloc::vec::Vec<f32>>::push (inlined)
+            |          collection_candidates::kernels::sparse_sort
+            |          
+            |--1.15%--<u32 as core::cmp::PartialEq>::eq (inlined)
+            |          <&u32 as core::cmp::PartialEq>::eq (inlined)
+            |          <core::option::Option<&u32> as core::cmp::PartialEq>::eq (inlined)
+            |          collection_candidates::kernels::sparse_sort
+            |          
+             --1.15%--<alloc::raw_vec::RawVecInner>::non_null::<f32> (inlined)
+                       <alloc::raw_vec::RawVecInner>::ptr::<f32> (inlined)
+                       <alloc::raw_vec::RawVec<f32>>::ptr (inlined)
+                       <alloc::vec::Vec<f32>>::as_mut_ptr (inlined)
+                       <alloc::vec::Vec<f32>>::push_mut (inlined)
+                       <alloc::vec::Vec<f32>>::push (inlined)
+                       collection_candidates::kernels::sparse_sort
+
+     8.76%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <alloc::vec::Vec<(u32, f32)> as alloc::vec::spec_from_iter::SpecFromIter<(u32, f32), core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}>>>::from_iter
+            |          
+            |--3.23%--<core::slice::iter::Iter<(u32, f32)> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::copied::copy_try_fold<(u32, f32), (), core::ops::control_flow::ControlFlow<(u32, f32)>, core::iter::traits::iterator::Iterator::find::check<(u32, f32), &mut collection_candidates::kernels::sparse_sort::{closure#0}>::{closure#0}>::{closure#0}, core::ops::control_flow::ControlFlow<(u32, f32)>> (inlined)
+            |          <core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::find::check<(u32, f32), &mut collection_candidates::kernels::sparse_sort::{closure#0}>::{closure#0}, core::ops::control_flow::ControlFlow<(u32, f32)>> (inlined)
+            |          <core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>> as core::iter::traits::iterator::Iterator>::find::<&mut collection_candidates::kernels::sparse_sort::{closure#0}> (inlined)
+            |          <core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}> as core::iter::traits::iterator::Iterator>::next (inlined)
+            |          <alloc::vec::Vec<(u32, f32)>>::extend_desugared::<core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}>> (inlined)
+            |          <alloc::vec::Vec<(u32, f32)> as alloc::vec::spec_extend::SpecExtend<(u32, f32), core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}>>>::spec_extend (inlined)
+            |          <alloc::vec::Vec<(u32, f32)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(u32, f32), core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}>>>::from_iter (inlined)
+            |          <alloc::vec::Vec<(u32, f32)> as alloc::vec::spec_from_iter::SpecFromIter<(u32, f32), core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}>>>::from_iter
+            |          
+            |--3.00%--<alloc::vec::Vec<(u32, f32)>>::extend_desugared::<core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}>> (inlined)
+            |          <alloc::vec::Vec<(u32, f32)> as alloc::vec::spec_extend::SpecExtend<(u32, f32), core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}>>>::spec_extend (inlined)
+            |          <alloc::vec::Vec<(u32, f32)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(u32, f32), core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}>>>::from_iter (inlined)
+            |          <alloc::vec::Vec<(u32, f32)> as alloc::vec::spec_from_iter::SpecFromIter<(u32, f32), core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}>>>::from_iter
+            |          
+             --1.15%--<core::ptr::non_null::NonNull<(u32, f32)> as core::cmp::PartialEq>::eq (inlined)
+                       <core::slice::iter::Iter<(u32, f32)> as core::iter::traits::iterator::Iterator>::next (inlined)
+                       <core::slice::iter::Iter<(u32, f32)> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::adapters::copied::copy_try_fold<(u32, f32), (), core::ops::control_flow::ControlFlow<(u32, f32)>, core::iter::traits::iterator::Iterator::find::check<(u32, f32), &mut collection_candidates::kernels::sparse_sort::{closure#0}>::{closure#0}>::{closure#0}, core::ops::control_flow::ControlFlow<(u32, f32)>> (inlined)
+                       <core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>> as core::iter::traits::iterator::Iterator>::try_fold::<(), core::iter::traits::iterator::Iterator::find::check<(u32, f32), &mut collection_candidates::kernels::sparse_sort::{closure#0}>::{closure#0}, core::ops::control_flow::ControlFlow<(u32, f32)>> (inlined)
+                       <core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>> as core::iter::traits::iterator::Iterator>::find::<&mut collection_candidates::kernels::sparse_sort::{closure#0}> (inlined)
+                       <core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}> as core::iter::traits::iterator::Iterator>::next (inlined)
+                       <alloc::vec::Vec<(u32, f32)>>::extend_desugared::<core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}>> (inlined)
+                       <alloc::vec::Vec<(u32, f32)> as alloc::vec::spec_extend::SpecExtend<(u32, f32), core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}>>>::spec_extend (inlined)
+                       <alloc::vec::Vec<(u32, f32)> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<(u32, f32), core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}>>>::from_iter (inlined)
+                       <alloc::vec::Vec<(u32, f32)> as alloc::vec::spec_from_iter::SpecFromIter<(u32, f32), core::iter::adapters::filter::Filter<core::iter::adapters::copied::Copied<core::slice::iter::Iter<(u32, f32)>>, collection_candidates::kernels::sparse_sort::{closure#0}>>>::from_iter
+
+     6.68%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] core::slice::sort::shared::smallsort::sort8_stable::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          
+            |--1.61%--core::slice::sort::shared::smallsort::sort4_stable::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+            |          core::slice::sort::shared::smallsort::sort8_stable::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+            |          
+            |--1.61%--core::ptr::copy_nonoverlapping::<(u32, f32)> (inlined)
+            |          
+             --1.61%--<u32 as core::cmp::PartialOrd>::lt (inlined)
+                       <[(u32, f32)]>::sort_by_key::<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0} (inlined)
+
+     2.76%  collection_cand  libc.so.6                               [.] __memmove_avx_unaligned_erms
+            |
+            ---__memmove_avx_unaligned_erms
+               core::ptr::copy_nonoverlapping::<(u32, f32)> (inlined)
+               core::slice::sort::stable::quicksort::stable_partition::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}> (inlined)
+               core::slice::sort::stable::quicksort::quicksort::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+
+     2.53%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] core::slice::sort::shared::pivot::median3_rec::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+     1.84%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] core::slice::sort::stable::drift::sort::<(u32, f32), <[(u32, f32)]>::sort_by_key<u32, collection_candidates::kernels::sparse_sort::{closure#1}>::{closure#0}>
+
+
+#
+# (Tip: Use parent filter to see specific call path: perf report -p <regex>)
+#

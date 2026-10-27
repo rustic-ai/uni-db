@@ -1,17 +1,19 @@
 # TCK Compliance Report
 
-**Generated:** 2026-10-26 15:22:41
-**Results:** `results_20261026_152241.json`
-**Compared to:** `results_20261023_212337.json`
+**Generated:** 2026-10-27 11:28:47
+**Results:** `results_20261027_112847.json`
+**Compared to:** `results_20261027_110317.json`
 
 ## Summary
 
 | Metric | Current | Previous | Delta |
 |--------|---------|----------|-------|
 | Scenarios | 558 | 558 |  |
-| Passed | 558 | 558 |  |
-| Failed | 0 | 0 |  |
-| Pass Rate | 100.0% | 100.0% | ➡️ +0.0pp |
+| Passed | 558 | 554 | +4 |
+| Failed | 0 | 4 | -4 |
+| Pass Rate | 100.0% | 99.3% | 📈 +0.7pp |
+
+**🟢 Fixed:** 4 scenarios now passing
 
 ## Feature Breakdown
 
@@ -32,7 +34,7 @@
 | ✅ CommandSequencing | 5 | 5 | 0 | 100% |  |
 | ✅ CompositePatterns | 27 | 27 | 0 | 100% |  |
 | ✅ ConformalCalibration | 2 | 2 | 0 | 100% |  |
-| ✅ CreateModel | 3 | 3 | 0 | 100% |  |
+| ✅ CreateModel | 3 | 3 | 0 | 100% | +33pp |
 | ✅ CrossGroupCorrelation | 7 | 7 | 0 | 100% |  |
 | ✅ CypherFunctions | 9 | 9 | 0 | 100% |  |
 | ✅ DeriveEdges | 9 | 9 | 0 | 100% |  |
@@ -53,7 +55,7 @@
 | ✅ InvokeModel | 4 | 4 | 0 | 100% |  |
 | ✅ IsNotFoldQueryMatrix | 20 | 20 | 0 | 100% |  |
 | ✅ MathematicalReference | 12 | 12 | 0 | 100% |  |
-| ✅ MaxMinProbViterbi | 5 | 5 | 0 | 100% |  |
+| ✅ MaxMinProbViterbi | 5 | 5 | 0 | 100% | +60pp |
 | ✅ ModelRelationComposition | 2 | 2 | 0 | 100% |  |
 | ✅ ModuleComposition | 8 | 8 | 0 | 100% |  |
 | ✅ MonotonicAggregation | 36 | 36 | 0 | 100% |  |
@@ -93,6 +95,15 @@
 | ✅ TripleCombinations | 5 | 5 | 0 | 100% |  |
 | ✅ Validate | 4 | 4 | 0 | 100% |  |
 | ✅ YieldValueColumns | 7 | 7 | 0 | 100% |  |
+
+## 🟢 Newly Passing
+
+Scenarios that were failing but are now passing:
+
+- **CreateModel** — CREATE MODEL coexists with a non-invoking CREATE RULE (line 45)
+- **MaxMinProbViterbi** — MNOR under MaxMinProb returns max-of-inputs and warns (line 14)
+- **MaxMinProbViterbi** — MPROD under MaxMinProb returns min-of-inputs and warns (line 47)
+- **MaxMinProbViterbi** — Out-of-range input under MaxMinProb + strict fails fast (line 138)
 
 ## Failed Scenarios
 

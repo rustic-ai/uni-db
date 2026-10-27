@@ -39,6 +39,7 @@ enum Idx {
 #[derive(Debug, PartialEq, Clone)]
 struct Counts {
     set_rows: usize,
+    set_distinct: usize,
     new_rows: usize,
     new_distinct: usize,
     old_rows: usize,
@@ -49,6 +50,7 @@ struct Counts {
 
 const EXPECTED: Counts = Counts {
     set_rows: N as usize,
+    set_distinct: N as usize,
     new_rows: N as usize,
     new_distinct: N as usize,
     old_rows: 0,
@@ -139,7 +141,7 @@ async fn arm(base: Base, idx: Idx, mid_tx_flush: bool) -> Result<Counts> {
         .param("new", "new")
         .fetch_all()
         .await?;
-    let (set_rows, _) = vids(&set);
+    let (set_rows, set_distinct) = vids(&set);
     if mid_tx_flush {
         // Moves the committed base rows from L0 to L1 while the tx is open.
         db.flush().await?;
@@ -158,6 +160,7 @@ async fn arm(base: Base, idx: Idx, mid_tx_flush: bool) -> Result<Counts> {
 
     Ok(Counts {
         set_rows,
+        set_distinct,
         new_rows,
         new_distinct,
         old_rows,
@@ -325,6 +328,7 @@ async fn stress_once(idx: Idx, n: i64, round: usize) -> Result<Option<String>> {
         && new_distinct == nn
         && old_rows == 0
         && orc_new == nn
+        && orc_new_d == nn
         && after_rows == nn
         && after_distinct == nn;
     println!("{} {line}", if ok { "OK  " } else { "FAIL" });
@@ -626,5 +630,381 @@ async fn issue_311_idle_flushes_do_not_throttle_a_transaction() -> Result<()> {
         runs_before + 1,
         "the flush of the committed SET is a generation"
     );
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RekeyWrite {
+    Set,
+    SetMap,
+    Merge,
+}
+
+/// String identities, a small execution batch, and a still smaller cursor page
+/// reproduce the application's types while forcing reads across batch boundaries.
+async fn expanded_fixture(idx: Idx, multi_label: bool) -> Result<Uni> {
+    let db = Uni::in_memory()
+        .config(UniConfig {
+            strict_schema: true,
+            auto_flush_interval: None,
+            auto_flush_threshold: usize::MAX,
+            execution_batch_size: Some(257),
+            batch_size: 37,
+            ..Default::default()
+        })
+        .build()
+        .await?;
+    for label in if multi_label {
+        vec!["Concept", "Member"]
+    } else {
+        vec!["Concept"]
+    } {
+        db.schema()
+            .label(label)
+            .property("sid", DataType::String)
+            .property("view", DataType::String)
+            .property("payload", DataType::Int)
+            .apply()
+            .await?;
+    }
+    let labels = if multi_label {
+        "Concept:Member"
+    } else {
+        "Concept"
+    };
+    let tx = db.session().tx().await?;
+    tx.execute_with(&format!(
+        "UNWIND range(0, $n - 1) AS i CREATE (:{labels} \
+         {{sid: toString(i), view: 'old', payload: 0}})"
+    ))
+    .param("n", N)
+    .run()
+    .await?;
+    tx.commit().await?;
+    db.flush().await?;
+    for label in if multi_label {
+        vec!["Concept", "Member"]
+    } else {
+        vec!["Concept"]
+    } {
+        // MERGE has a stable indexed identity in both the view-index and
+        // no-view-index arms. The oracle below never filters on either property.
+        db.schema()
+            .label(label)
+            .index("sid", IndexType::Scalar(ScalarType::Hash))
+            .apply()
+            .await?;
+        if idx == Idx::BTree {
+            db.schema()
+                .label(label)
+                .index("view", IndexType::Scalar(ScalarType::BTree))
+                .apply()
+                .await?;
+        }
+    }
+    Ok(db)
+}
+
+fn identities(rows: &[uni_db::Row]) -> Result<Vec<(i64, String)>> {
+    let mut pairs = rows
+        .iter()
+        .map(|r| Ok((r.get::<i64>("vid")?, r.get::<String>("sid")?)))
+        .collect::<Result<Vec<_>>>()?;
+    pairs.sort_unstable();
+    Ok(pairs)
+}
+
+fn assert_identities(actual: &[(i64, String)], expected: &[(i64, String)], stage: &str) {
+    let distinct: HashSet<_> = actual.iter().collect();
+    assert_eq!(
+        actual.len(),
+        distinct.len(),
+        "{stage}: duplicate identities"
+    );
+    assert!(
+        actual == expected,
+        "{stage}: identity mismatch (actual={}, expected={}); first differences: {:?}",
+        actual.len(),
+        expected.len(),
+        actual
+            .iter()
+            .zip(expected)
+            .filter(|(a, b)| a != b)
+            .take(5)
+            .collect::<Vec<_>>()
+    );
+}
+
+async fn streamed_pairs(
+    tx: &uni_db::Transaction,
+    label: &str,
+    view: &str,
+) -> Result<Vec<(i64, String)>> {
+    let mut cursor = tx
+        .query_with(&format!(
+            "MATCH (n:{label}) WHERE n.view = $view RETURN id(n) AS vid, n.sid AS sid"
+        ))
+        .param("view", view)
+        .cursor()
+        .await?;
+    let mut rows = Vec::new();
+    let mut batches = 0;
+    while let Some(batch) = cursor.next_batch().await {
+        rows.extend(batch?);
+        batches += 1;
+        tokio::task::yield_now().await;
+    }
+    if rows.len() > 37 {
+        assert!(
+            batches > 1,
+            "streaming control: more than one page must be consumed"
+        );
+    }
+    identities(&rows)
+}
+
+async fn expanded_rekey_arm(idx: Idx, multi_label: bool, write: RekeyWrite) -> Result<()> {
+    println!("expanded arm: idx={idx:?}, multi_label={multi_label}, write={write:?}");
+    let db = expanded_fixture(idx, multi_label).await?;
+    let s = db.session();
+    let baseline = s
+        .query("MATCH (n:Concept) RETURN id(n) AS vid, n.sid AS sid")
+        .await?;
+    let expected = identities(baseline.rows())?;
+    assert_eq!(expected.len(), N as usize);
+    let tx = s.tx().await?;
+    let indexed = tx
+        .query("MATCH (n:Concept) WHERE n.view = 'old' RETURN id(n) AS vid, n.sid AS sid")
+        .await?;
+    assert_identities(&identities(indexed.rows())?, &expected, "before rewrite");
+    if idx == Idx::BTree {
+        assert!(
+            indexed.metrics().index_scans > 0,
+            "control: BTree must actually be consulted"
+        );
+    }
+    let query = match write {
+        RekeyWrite::Set => {
+            "MATCH (n:Concept) WHERE n.view = 'old' SET n.view = 'new' RETURN id(n) AS vid, n.sid AS sid"
+        }
+        RekeyWrite::SetMap => {
+            "MATCH (n:Concept) WHERE n.view = 'old' SET n += {view: 'new', payload: 1} RETURN id(n) AS vid, n.sid AS sid"
+        }
+        RekeyWrite::Merge => {
+            "UNWIND range(0, $n - 1) AS i MERGE (n:Concept {sid: toString(i)}) ON MATCH SET n.view = 'new' RETURN id(n) AS vid, n.sid AS sid"
+        }
+    };
+    let changed = tx.query_with(query).param("n", N).fetch_all().await?;
+    assert_identities(&identities(changed.rows())?, &expected, "write RETURN");
+    db.flush().await?;
+    for label in if multi_label {
+        vec!["Concept", "Member"]
+    } else {
+        vec!["Concept"]
+    } {
+        assert_identities(
+            &streamed_pairs(&tx, label, "new").await?,
+            &expected,
+            &format!(
+                "streamed new key label={label} idx={idx:?} multi={multi_label} write={write:?}"
+            ),
+        );
+        assert!(
+            streamed_pairs(&tx, label, "old").await?.is_empty(),
+            "old key leaked after rewrite"
+        );
+    }
+    let oracle = tx
+        .query("MATCH (n:Concept) RETURN id(n) AS vid, n.sid AS sid, n.view AS view")
+        .await?;
+    assert_identities(&identities(oracle.rows())?, &expected, "unfiltered oracle");
+    assert!(
+        oracle
+            .rows()
+            .iter()
+            .all(|r| r.get::<String>("view").unwrap() == "new")
+    );
+    tx.commit().await?;
+    db.flush().await?;
+    for label in if multi_label {
+        vec!["Concept", "Member"]
+    } else {
+        vec!["Concept"]
+    } {
+        let after = s
+            .query(&format!(
+                "MATCH (n:{label}) WHERE n.view = 'new' RETURN id(n) AS vid, n.sid AS sid"
+            ))
+            .await?;
+        assert_identities(
+            &identities(after.rows())?,
+            &expected,
+            "after commit and flush",
+        );
+        assert!(
+            s.query(&format!(
+                "MATCH (n:{label}) WHERE n.view = 'old' RETURN n.sid"
+            ))
+            .await?
+            .rows()
+            .is_empty()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn issue_311_multilabel_merge_map_and_stream_matrix() -> Result<()> {
+    for idx in [Idx::None, Idx::BTree] {
+        for multi_label in [false, true] {
+            for write in [RekeyWrite::Set, RekeyWrite::SetMap, RekeyWrite::Merge] {
+                expanded_rekey_arm(idx, multi_label, write)
+                    .await
+                    .with_context(|| {
+                        format!("idx={idx:?}, multi_label={multi_label}, write={write:?}")
+                    })?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Nextest isolates test cases in processes. Explicitly use multiple stores in
+/// this one process to cover the report's shared-process parallelism as well.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn issue_311_parallel_stores_rekey_in_one_process() -> Result<()> {
+    tokio::try_join!(
+        expanded_rekey_arm(Idx::BTree, true, RekeyWrite::Set),
+        expanded_rekey_arm(Idx::BTree, true, RekeyWrite::SetMap),
+        expanded_rekey_arm(Idx::BTree, true, RekeyWrite::Merge),
+        expanded_rekey_arm(Idx::None, true, RekeyWrite::Set),
+    )?;
+    Ok(())
+}
+
+/// Commit another session's writes and flush while a re-key reader has only
+/// consumed its first page. A serialization abort is permitted by the public
+/// contract; missing/duplicate rows and partially published writes are not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn issue_311_other_writer_commits_during_streamed_read() -> Result<()> {
+    for idx in [Idx::None, Idx::BTree] {
+        let db = std::sync::Arc::new(expanded_fixture(idx, true).await?);
+        let s = db.session();
+        let seed = s.tx().await?;
+        seed.execute("CREATE (:Concept:Member {sid: 'noise', view: 'noise', payload: 0})")
+            .await?;
+        seed.commit().await?;
+        db.flush().await?;
+        let baseline = s
+            .query("MATCH (n:Concept) WHERE n.view = 'old' RETURN id(n) AS vid, n.sid AS sid")
+            .await?;
+        let expected = identities(baseline.rows())?;
+        assert_eq!(expected.len(), N as usize);
+        let tx = s.tx().await?;
+        let changed = tx.query("MATCH (n:Concept) WHERE n.view = 'old' SET n.view = 'new' RETURN id(n) AS vid, n.sid AS sid").await?;
+        assert_identities(
+            &identities(changed.rows())?,
+            &expected,
+            "concurrent write RETURN",
+        );
+        let mut cursor = tx
+            .query_with("MATCH (n:Concept) WHERE n.view = 'new' RETURN id(n) AS vid, n.sid AS sid")
+            .cursor()
+            .await?;
+        let mut rows = cursor.next_batch().await.context("missing first page")??;
+        assert!(
+            !rows.is_empty() && rows.len() < N as usize,
+            "control: pause a partially consumed cursor"
+        );
+        let writer_db = db.clone();
+        tokio::spawn(async move {
+            let writer = writer_db.session().tx().await?;
+            writer.execute("MATCH (n:Concept) WHERE n.sid = 'noise' SET n.view = 'noise-new', n.payload = 1").await?;
+            writer.commit().await?;
+            writer_db.flush().await?;
+            anyhow::Ok(())
+        }).await??;
+        while let Some(batch) = cursor.next_batch().await {
+            rows.extend(batch?);
+            tokio::task::yield_now().await;
+        }
+        drop(cursor);
+        assert_identities(
+            &identities(&rows)?,
+            &expected,
+            "cursor spanning another commit and flush",
+        );
+        for label in ["Concept", "Member"] {
+            assert_identities(
+                &streamed_pairs(&tx, label, "new").await?,
+                &expected,
+                "own re-key after another commit",
+            );
+            assert!(streamed_pairs(&tx, label, "old").await?.is_empty());
+        }
+        let noise = tx
+            .query("MATCH (n:Concept) WHERE n.sid = 'noise' RETURN n.view AS view")
+            .await?;
+        assert_eq!(noise.rows().len(), 1);
+        assert_eq!(
+            noise.rows()[0].get::<String>("view")?,
+            "noise",
+            "transaction lost its pinned snapshot"
+        );
+        match tx.commit().await {
+            Ok(_) => println!("idx={idx:?}: disjoint re-key committed"),
+            Err(uni_db::UniError::SerializationConflict { .. }) => {
+                // Check that the aborted write did not publish, then retry on
+                // the current snapshot as the API instructs.
+                let old = s
+                    .query(
+                        "MATCH (n:Concept) WHERE n.view = 'old' RETURN id(n) AS vid, n.sid AS sid",
+                    )
+                    .await?;
+                assert_identities(
+                    &identities(old.rows())?,
+                    &expected,
+                    "serialization abort restored original rows",
+                );
+                assert!(
+                    s.query("MATCH (n:Concept) WHERE n.view = 'new' RETURN n")
+                        .await?
+                        .rows()
+                        .is_empty()
+                );
+                let retry = s.tx().await?;
+                retry
+                    .execute("MATCH (n:Concept) WHERE n.view = 'old' SET n.view = 'new'")
+                    .await?;
+                retry.commit().await?;
+                println!("idx={idx:?}: serialization abort followed by successful retry");
+            }
+            Err(error) => return Err(error.into()),
+        }
+        db.flush().await?;
+        for label in ["Concept", "Member"] {
+            let after = s
+                .query(&format!(
+                    "MATCH (n:{label}) WHERE n.view = 'new' RETURN id(n) AS vid, n.sid AS sid"
+                ))
+                .await?;
+            assert_identities(
+                &identities(after.rows())?,
+                &expected,
+                "post-commit indexed result",
+            );
+            assert!(
+                s.query(&format!("MATCH (n:{label}) WHERE n.view = 'old' RETURN n"))
+                    .await?
+                    .rows()
+                    .is_empty()
+            );
+        }
+        let noise = s
+            .query("MATCH (n:Concept) WHERE n.sid = 'noise' RETURN n.view AS view")
+            .await?;
+        assert_eq!(noise.rows().len(), 1);
+        assert_eq!(noise.rows()[0].get::<String>("view")?, "noise-new");
+    }
     Ok(())
 }

@@ -1,0 +1,127 @@
+Testing collection/sparse_value/tree/dupfalse/16
+Success
+Testing collection/sparse_value/sort/dupfalse/16
+Success
+Testing collection/sparse_value/tree/duptrue/16
+Success
+Testing collection/sparse_value/sort/duptrue/16
+Success
+Testing collection/sparse_value/tree/dupfalse/128
+Success
+Testing collection/sparse_value/sort/dupfalse/128
+Success
+Testing collection/sparse_value/tree/duptrue/128
+Success
+Testing collection/sparse_value/sort/duptrue/128
+Success
+Testing collection/sparse_value/tree/dupfalse/1024
+Success
+Testing collection/sparse_value/sort/dupfalse/1024
+Success
+Testing collection/sparse_value/tree/duptrue/1024
+Success
+Testing collection/sparse_value/sort/duptrue/1024
+Success
+Testing collection/sparse_value/tree/dupfalse/4096
+Success
+Testing collection/sparse_value/sort/dupfalse/4096
+Success
+Testing collection/sparse_value/tree/duptrue/4096
+Success
+Testing collection/sparse_value/sort/duptrue/4096
+Success
+
+Testing collection/canonical_value/tree_build_hash/4
+Success
+Testing collection/canonical_value/vec_build_hash/4
+Success
+Testing collection/canonical_value/bbtree_build_hash/4
+Success
+Testing collection/canonical_value/tree_build_hash/16
+Success
+Testing collection/canonical_value/vec_build_hash/16
+Success
+Testing collection/canonical_value/bbtree_build_hash/16
+Success
+Testing collection/canonical_value/tree_build_hash/64
+Success
+Testing collection/canonical_value/vec_build_hash/64
+Success
+Testing collection/canonical_value/bbtree_build_hash/64
+Success
+
+Testing collection/l0_index/scan/2000
+Success
+Testing collection/l0_index/query/2000
+Success
+Testing collection/l0_index/build_plus_query/2000
+Success
+Testing collection/l0_index/replace/2000
+Success
+Testing collection/l0_index/scan/8000
+Success
+Testing collection/l0_index/query/8000
+Success
+Testing collection/l0_index/build_plus_query/8000
+Success
+Testing collection/l0_index/replace/8000
+Success
+Testing collection/l0_index/scan/32000
+Success
+Testing collection/l0_index/query/32000
+Success
+Testing collection/l0_index/build_plus_query/32000
+Success
+Testing collection/l0_index/replace/32000
+Success
+
+Testing collection/interval_mixed/tree/randomfalse/16
+Success
+Testing collection/interval_mixed/vec/randomfalse/16
+Success
+Testing collection/interval_mixed/tree/randomtrue/16
+Success
+Testing collection/interval_mixed/vec/randomtrue/16
+Success
+Testing collection/interval_mixed/tree/randomfalse/1024
+Success
+Testing collection/interval_mixed/vec/randomfalse/1024
+Success
+Testing collection/interval_mixed/tree/randomtrue/1024
+Success
+Testing collection/interval_mixed/vec/randomtrue/1024
+Success
+Testing collection/interval_mixed/tree/randomfalse/16384
+Success
+Testing collection/interval_mixed/vec/randomfalse/16384
+Success
+Testing collection/interval_mixed/tree/randomtrue/16384
+Success
+Testing collection/interval_mixed/vec/randomtrue/16384
+Success
+
+Testing collection/immutable_open/hash_rebuild/2000
+Success
+Testing collection/immutable_open/bbtree_rebuild/2000
+Success
+Testing collection/immutable_open/validated_open/2000
+Success
+Testing collection/immutable_open/trusted_open/2000
+Success
+Testing collection/immutable_open/hash_rebuild/8000
+Success
+Testing collection/immutable_open/bbtree_rebuild/8000
+Success
+Testing collection/immutable_open/validated_open/8000
+Success
+Testing collection/immutable_open/trusted_open/8000
+Success
+Testing collection/immutable_open/hash_rebuild/32000
+Success
+Testing collection/immutable_open/bbtree_rebuild/32000
+Success
+Testing collection/immutable_open/validated_open/32000
+Success
+Testing collection/immutable_open/trusted_open/32000
+Success
+

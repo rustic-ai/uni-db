@@ -410,26 +410,14 @@ fn build_set_item(pair: Pair<Rule>) -> Result<SetItem, ParseError> {
                     })
                 }
                 Rule::node_labels => {
-                    // `node_labels` now wraps `node_label_disjunction |
-                    // node_label_conjunction`; drill one level deeper.
-                    //
-                    // SET only accepts conjunction (`SET n:A:B`). The
-                    // disjunction syntax `SET n:A|B` is not legal Cypher
-                    // — previously this code blindly flattened both into
-                    // a single label list, silently turning a parse-time
-                    // error into a semantic miscompile (acting as if the
-                    // user had written conjunction).
-                    let inner_pair = next
-                        .into_inner()
-                        .next()
-                        .expect("node_labels always wraps a child rule");
-                    if matches!(inner_pair.as_rule(), Rule::node_label_disjunction) {
+                    let has_pipe = next.clone().into_inner().any(|t| t.as_rule() == Rule::pipe);
+                    if has_pipe {
                         return Err(ParseError::new(format!(
                             "SET `{}:A|B` is not valid Cypher; use `SET {0}:A:B` to assign multiple labels",
                             first.as_str()
                         )));
                     }
-                    let labels = inner_pair
+                    let labels = next
                         .into_inner()
                         .filter(|t| {
                             matches!(t.as_rule(), Rule::identifier | Rule::identifier_or_keyword)
@@ -478,18 +466,7 @@ fn build_remove_item(pair: Pair<Rule>) -> Result<RemoveItem, ParseError> {
         Rule::identifier => {
             let id = ident(&first);
             let labels_pair = inner.next().unwrap();
-            // `node_labels` now wraps `node_label_disjunction |
-            // node_label_conjunction`; drill one level deeper to reach
-            // the actual identifier list. REMOVE n:A only ever appears
-            // as conjunction (no `|` separator allowed semantically),
-            // but accept either child rule for parser robustness — the
-            // semantics here is "remove these labels", regardless of
-            // operator.
-            let labels_inner = labels_pair
-                .into_inner()
-                .next()
-                .expect("node_labels always wraps disjunction or conjunction");
-            let labels = labels_inner
+            let labels = labels_pair
                 .into_inner()
                 .filter(|t| matches!(t.as_rule(), Rule::identifier | Rule::identifier_or_keyword))
                 // Strip backticks (consistent with the SET branch) so `REMOVE
@@ -829,34 +806,41 @@ fn build_comparison_chain(first: Expr, tails: Vec<ComparisonTail>) -> Result<Exp
     Ok(final_expr)
 }
 
-/// Accumulate a label onto an expression, merging with existing LabelCheck if present.
-fn accumulate_label(expr: Expr, label: String) -> Expr {
-    match expr {
-        Expr::LabelCheck { expr, mut labels } => {
-            labels.push(label);
-            Expr::LabelCheck { expr, labels }
-        }
-        _ => Expr::LabelCheck {
-            expr: Box::new(expr),
-            labels: vec![label],
-        },
-    }
-}
-
 /// A label predicate `n:A` (stacking onto a preceding `:B` as `n:B:A`), or a
-/// disjunction `n:A|B`, lowered to `n:A OR n:B`. A disjunction was a parse
-/// error in an expression, though a pattern accepted it. Mixing the two
-/// (`n:A:B|C`) is refused, as GQL refuses it.
+/// disjunction `n:A|B` (kept as a multi-label `Expr::LabelCheck` with OR
+/// semantics, matching how the planner evaluates `Expr::LabelCheck` and
+/// avoiding cloning `left` per disjunct, which would blow up exponentially on
+/// nested `((x:A|B):C|D)`). Mixing conjunction and disjunction (`n:A:B|C` or
+/// `n:A|B:C`) is refused, as GQL refuses it.
 fn label_predicate(left: Expr, first: Pair<Rule>, rest: Pairs<Rule>) -> Result<Expr, ParseError> {
     let mut labels = vec![normalize_identifier(first.as_str())];
-    labels.extend(
-        rest.filter(|p| p.as_rule() == Rule::identifier_or_keyword)
-            .map(|p| normalize_identifier(p.as_str())),
-    );
-    if labels.len() == 1 {
-        return Ok(accumulate_label(left, labels.remove(0)));
+    let mut saw_pipe = false;
+    let mut saw_conjunction = matches!(left, Expr::LabelCheck { .. });
+    for p in rest {
+        match p.as_rule() {
+            Rule::pipe => saw_pipe = true,
+            Rule::identifier_or_keyword => {
+                if !saw_pipe {
+                    saw_conjunction = true;
+                }
+                labels.push(normalize_identifier(p.as_str()));
+            }
+            _ => {}
+        }
     }
-    if matches!(left, Expr::LabelCheck { .. }) {
+    if !saw_pipe {
+        return Ok(labels.into_iter().fold(left, |expr, label| match expr {
+            Expr::LabelCheck { expr, mut labels } => {
+                labels.push(label);
+                Expr::LabelCheck { expr, labels }
+            }
+            _ => Expr::LabelCheck {
+                expr: Box::new(expr),
+                labels: vec![label],
+            },
+        }));
+    }
+    if saw_conjunction {
         return Err(ParseError::new(
             "InvalidLabelExpression: a label conjunction (`:A:B`) cannot be combined \
              with a disjunction (`|`)"
@@ -1858,24 +1842,18 @@ fn build_node_pattern(pair: Pair<Rule>) -> Result<NodePattern, ParseError> {
         match p.as_rule() {
             Rule::identifier => variable = Some(ident(&p)),
             Rule::node_labels => {
-                // `node_labels` wraps either node_label_disjunction or
-                // node_label_conjunction (see grammar/cypher.pest).
-                let inner = p
-                    .into_inner()
-                    .next()
-                    .expect("node_labels always wraps disjunction or conjunction");
-                let names: Vec<String> = inner
-                    .clone()
+                let has_pipe = p.clone().into_inner().any(|t| t.as_rule() == Rule::pipe);
+                let names: Vec<String> = p
                     .into_inner()
                     .filter(|t| {
                         matches!(t.as_rule(), Rule::identifier | Rule::identifier_or_keyword)
                     })
                     .map(|t| normalize_identifier(t.as_str()))
                     .collect();
-                labels = match inner.as_rule() {
-                    Rule::node_label_disjunction => LabelExpr::Disjunction(names),
-                    Rule::node_label_conjunction => LabelExpr::Conjunction(names),
-                    other => unreachable!("unexpected child of node_labels: {other:?}"),
+                labels = if has_pipe {
+                    LabelExpr::Disjunction(names)
+                } else {
+                    LabelExpr::Conjunction(names)
                 };
             }
             Rule::node_predicate => {

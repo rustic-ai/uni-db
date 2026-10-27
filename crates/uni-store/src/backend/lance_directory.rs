@@ -44,9 +44,22 @@ use lance::dataset::{DEFAULT_INDEX_CACHE_SIZE, DEFAULT_METADATA_CACHE_SIZE};
 use lance::dataset::{WriteMode, WriteParams};
 use lance::io::{ObjectStore, ObjectStoreParams, ObjectStoreRegistry, StorageOptionsAccessor};
 use lance::session::{CacheSpec, Session};
-use object_store::path::Path as ObjectPath;
+use lance_object_store::path::Path as ObjectPath;
 
 use super::types::BackendCacheUsage;
+
+/// Keep newly created or rebuilt Uni datasets on the Lance 11 stable format.
+/// Appends inherit the existing dataset's format, including older databases.
+pub(crate) fn write_params(mode: WriteMode) -> WriteParams {
+    WriteParams {
+        mode,
+        data_storage_version: match mode {
+            WriteMode::Append => None,
+            _ => Some("2.1".parse().expect("Lance supports file format 2.1")),
+        },
+        ..Default::default()
+    }
+}
 
 /// Directory suffix marking a Lance dataset. Matches lancedb's
 /// `LANCE_EXTENSION`.
@@ -348,14 +361,13 @@ impl LanceDirectory {
     #[must_use]
     pub fn write_params(&self, mode: WriteMode) -> WriteParams {
         WriteParams {
-            mode,
             store_params: self.storage_options.clone().map(|opts| ObjectStoreParams {
                 storage_options_accessor: Some(Arc::new(
                     StorageOptionsAccessor::with_static_options(opts),
                 )),
                 ..Default::default()
             }),
-            ..Default::default()
+            ..write_params(mode)
         }
     }
 

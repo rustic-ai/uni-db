@@ -1,0 +1,20 @@
+[
+  {
+    "environment": "db312",
+    "native": "/home/rohit/work/dragonscale/uni/target/ci-remaining/db312/lib/python3.12/site-packages/uni_db/_uni_db.abi3.so",
+    "sha256": "44058900d47cebc6cfdd7c8b43789deb4c539ad971a0a05e9a2d832bacd3ced1",
+    "lance_13_source_paths": true
+  },
+  {
+    "environment": "ogm312",
+    "native": "/home/rohit/work/dragonscale/uni/target/ci-remaining/ogm312/lib/python3.12/site-packages/uni_db/_uni_db.abi3.so",
+    "sha256": "44058900d47cebc6cfdd7c8b43789deb4c539ad971a0a05e9a2d832bacd3ced1",
+    "lance_13_source_paths": true
+  },
+  {
+    "environment": "ogm314",
+    "native": "/home/rohit/work/dragonscale/uni/target/ci-remaining/ogm314/lib/python3.14/site-packages/uni_db/_uni_db.abi3.so",
+    "sha256": "44058900d47cebc6cfdd7c8b43789deb4c539ad971a0a05e9a2d832bacd3ced1",
+    "lance_13_source_paths": true
+  }
+]

@@ -1,0 +1,41 @@
+────────────
+ Nextest run ID 0e597fae-ce25-4668-9a08-10bcf919e0aa with nextest profile: soak
+    Starting 1 test across 1 binary (4042 tests skipped)
+       START [         ] (1/1) uni-db::integration metamorphic::binding::binding_guard_soak
+
+running 1 test
+proptest: FileFailurePersistence::SourceParallel set, but no source file known
+test metamorphic::binding::binding_guard_soak has been running for over 60 seconds
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+[metamorphic:binding] completed_cases=1000
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+[metamorphic:binding] completed_cases=2000
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+[metamorphic:binding] completed_cases=3000
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>720.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+[metamorphic:binding] completed_cases=4000
+        SLOW [>840.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+[metamorphic:binding] completed_cases=5000
+        SLOW [>960.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>1080.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+[metamorphic:binding] completed_cases=6000
+        SLOW [>1200.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+[metamorphic:binding] completed_cases=7000
+        SLOW [>1320.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>1440.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+[metamorphic:binding] completed_cases=8000
+        SLOW [>1560.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+[metamorphic:binding] completed_cases=9000
+        SLOW [>1680.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>1800.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+[metamorphic:binding] completed_cases=10000
+[metamorphic:binding] cases=10000 permuted=7000 variants=87730 non_empty=67112
+test metamorphic::binding::binding_guard_soak ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4042 filtered out; finished in 1805.79s
+
+        PASS [1805.814s] (1/1) uni-db::integration metamorphic::binding::binding_guard_soak
+────────────
+     Summary [1805.824s] 1 test run: 1 passed (1 slow), 4042 skipped

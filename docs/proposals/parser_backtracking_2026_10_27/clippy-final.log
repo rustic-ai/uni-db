@@ -1,0 +1,12 @@
+    Checking uni-cypher v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cypher)
+    Checking uni-query-functions v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query-functions)
+    Checking uni-locy v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy)
+    Checking uni-plugin-custom v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-custom)
+    Checking uni-query v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query)
+    Checking uni-plugin-host v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-host)
+    Checking uni-fork v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-fork)
+    Checking uni-bulk v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-bulk)
+    Checking uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.21s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

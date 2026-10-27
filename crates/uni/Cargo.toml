@@ -74,7 +74,7 @@ log = { workspace = true }
 metrics = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
-arrow-ipc = "58.3.0"
+arrow-ipc = "58.4.1"
 serde_bytes = "0.11"
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 uuid = { workspace = true }
@@ -107,6 +107,7 @@ rand = { workspace = true }
 # access flows through uni-xervo's provider facades.
 
 [dev-dependencies]
+bbtree = { version = "=0.1.5", features = ["file"] }
 criterion = "0.8"
 mimalloc = { version = "0.1", default-features = false }
 # Also a normal dependency (for production `fail_point!` markers); listed here
@@ -152,6 +153,10 @@ harness = false
 
 [[bench]]
 name = "micro_benchmarks"
+harness = false
+
+[[bench]]
+name = "collection_candidates"
 harness = false
 
 [[bench]]

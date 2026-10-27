@@ -1,0 +1,13 @@
+ok  a degenerate `summary: 0` does not mask a real `totals:`
+ok  per-thread files are summed
+ok  off-main-thread work is attributed separately
+ok  thread count is recorded
+ok  a file with no thread infix is counted as thread 1
+ok  `summary:` is still read when there is no `totals:`
+ok  a thread that genuinely collected nothing contributes 0
+ok  a cost line too short for Ir is an error, not a zero
+ok  a degenerate `summary:` with no `totals:` refuses too
+ok  a benchmark collecting zero is reported on stderr
+ok  an iai dir with no callgrind output fails
+
+all iai_collect self-checks passed

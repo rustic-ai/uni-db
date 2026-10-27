@@ -1,0 +1,341 @@
+[package]
+name = "uni-db"
+description = "Embedded graph database with OpenCypher queries, vector search, and columnar storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+
+[dependencies]
+uni-common = { workspace = true }
+uni-store = { workspace = true }
+# `fail_point!` markers in production paths (e.g. the nested-fork branch-point
+# seam in `api/fork.rs`). Inert and zero-cost unless the `failpoints` feature is
+# enabled (which turns on `fail/failpoints`); linked so the macro always
+# resolves. Mirrors uni-store's `fail` dependency.
+fail = "0.5"
+uni-algo = { workspace = true }
+uni-query = { workspace = true }
+uni-query-functions = { workspace = true }
+uni-crdt = { workspace = true }
+uni-bulk = { workspace = true }
+uni-fork = { workspace = true }
+# `local_dynamic_tls`: mimalloc's C lib defaults to the initial-exec TLS
+# model, which requires static-TLS surplus reserved at program startup.
+# That surplus is tiny and unavailable when `uni-db` is built as a
+# `dlopen`-loaded cdylib (the `bindings/uni-db` Python extension sets
+# `MiMalloc` as its `#[global_allocator]`), so loading fails with
+# "cannot allocate memory in static TLS block". The local-dynamic model
+# resolves TLS at access time and loads cleanly under dlopen.
+mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"], optional = true }
+uni-plugin = { workspace = true }
+uni-plugin-host = { workspace = true }
+uni-plugin-builtin = { workspace = true }
+uni-plugin-apoc-core = { workspace = true, optional = true }
+uni-plugin-custom = { workspace = true }
+# Optional Extism (bytes-in/bytes-out WASM) loader. Behind the
+# `extism-plugins` feature so the routine `Uni` build doesn't pay the
+# wasmtime+extism compile cost.
+uni-plugin-extism = { workspace = true, optional = true }
+# Optional Component Model (typed WIT contracts) loader. Behind
+# `wasm-plugins` so the routine build doesn't pay the wasmtime cost.
+uni-plugin-wasm = { workspace = true, optional = true }
+# Rhai (host-embedded scripting) loader. Pure Rust, no C toolchain or
+# WASM wrapper, so it's part of the default feature set — unlike the
+# WASM loaders which gate their wasmtime weight behind opt-in features.
+uni-plugin-rhai = { workspace = true, optional = true }
+# PyO3 (live Python callables) loader. Off by default — pulls in
+# libpython linkage on the host. Embedders building Python extensions
+# (e.g. `bindings/uni-db`) enable this via the `pyo3-plugins` feature.
+uni-plugin-pyo3 = { workspace = true, optional = true, features = ["pyo3"] }
+# We do NOT inherit the workspace `pyo3` features list — the workspace
+# enables `extension-module` (correct for `bindings/uni-db`, which is
+# loaded by Python and must not link libpython itself). For standalone
+# `cargo test -p uni-db --features pyo3-plugins` we want libpython
+# linked, which requires omitting `extension-module` and adding
+# `auto-initialize`. When `bindings/uni-db` builds this crate with
+# `pyo3-plugins` enabled, Cargo unifies features — bindings still
+# applies `extension-module` from its own pyo3 dep, and
+# `auto-initialize` becomes a no-op there.
+pyo3 = { version = "0.29", optional = true, features = ["abi3-py310", "auto-initialize"] }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+log = { workspace = true }
+metrics = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-ipc = "58.3.0"
+serde_bytes = "0.11"
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+uuid = { workspace = true }
+object_store = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
+uni-xervo = { workspace = true }
+uni-cypher = { workspace = true }
+uni-locy = { workspace = true }
+async-trait = { workspace = true }
+parking_lot = { workspace = true }
+datafusion = { workspace = true }
+tokio-util = { workspace = true }
+scopeguard = "1"
+tempfile = { workspace = true }
+dashmap = "6.2"
+smol_str = "0.3"
+# M11: OpenTelemetry layer for the `observability` module. Embedders
+# opt in via `crate::observability::init_otel_subscriber(...)`; nothing
+# is auto-installed (would conflict with embedders' own subscribers).
+tracing-subscriber = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", features = ["grpc-tonic"] }
+# Jittered backoff for `Session::transact_with_retry` (api/retry.rs).
+rand = { workspace = true }
+# Note: uni-db has no direct ort / tokenizers / hf-hub / ndarray consumers
+# after the LocalOnnxRerankerProvider hoist into uni-xervo (0.5.2). All ONNX
+# access flows through uni-xervo's provider facades.
+
+[dev-dependencies]
+bbtree = { version = "=0.1.5", features = ["file"] }
+criterion = "0.8"
+mimalloc = { version = "0.1", default-features = false }
+# Also a normal dependency (for production `fail_point!` markers); listed here
+# so integration tests can drive `fail::cfg` under `--features failpoints`.
+fail = "0.5"
+rand = { workspace = true }
+arrow = { workspace = true }
+parquet = { workspace = true }
+csv = { workspace = true }
+env_logger = { workspace = true }
+tracing-subscriber = { workspace = true }
+# Test-only: hooks_bridge_test.rs constructs `SmolStr` keys for the
+# phased `ParseContext::with_params` builder (M5e v1.1 ABI surface).
+smol_str = "0.3"
+# Dev-only: structural-sharing map for the L0 snapshot strategy bench. Not a
+# production dependency until the benchmark decision selects strategy B.
+imbl = "7"
+# Capture emitted `metrics` counters in-process so SSI resilience/stress tests
+# can assert on freeze/abort/conflict telemetry. Pairs with `metrics = "0.22"`.
+metrics-util = "0.20"
+# Randomized workload generation for the SSI invariant-oracle + chaos tests.
+proptest = { workspace = true }
+iai-callgrind = "0.16.1"
+# Process CPU clock (`CLOCK_PROCESS_CPUTIME_ID`) for the perf tests whose bounds
+# are on work done rather than wall time; see `tests/common/perf/cpu_clock.rs`.
+libc = "0.2"
+
+[[bench]]
+name = "algo_benchmarks"
+harness = false
+
+[[bench]]
+name = "mcts_batched"
+harness = false
+
+[[bench]]
+name = "mode_b_seq_random_access"
+harness = false
+
+[[bench]]
+name = "comprehensive"
+harness = false
+
+[[bench]]
+name = "micro_benchmarks"
+harness = false
+
+[[bench]]
+name = "collection_candidates"
+harness = false
+
+[[bench]]
+name = "mutation_benchmarks"
+harness = false
+
+[[bench]]
+name = "fork_diff_promote"
+harness = false
+
+[[bench]]
+name = "concurrent_mutations"
+harness = false
+
+[[bench]]
+name = "l0_snapshot_bench"
+harness = false
+
+# SSI/OCC performance benches (Phase 5). SSI is always compiled; each bench
+# toggles `UniConfig::ssi_enabled` to compare the on/off arms.
+[[bench]]
+name = "ssi_read_tax"
+harness = false
+
+[[bench]]
+name = "ssi_commit_overhead"
+harness = false
+
+[[bench]]
+name = "commit_throughput"
+harness = false
+
+[[bench]]
+name = "ssi_freeze"
+harness = false
+
+[[bench]]
+name = "ssi_contention"
+harness = false
+
+[[bench]]
+name = "schemaless_traversal"
+harness = false
+
+[[bench]]
+name = "sparse_retrieval"
+harness = false
+
+[[bench]]
+name = "dense_retrieval"
+harness = false
+
+# ann-benchmarks protocol: recall@10 vs QPS on SIFT-1M, against SIFT's own
+# ground truth. Separate from `dense_retrieval` because that bench measures
+# single-query latency on a synthetic corpus against an oracle we compute;
+# this one measures a Pareto curve on a real corpus against external truth.
+# Needs the pinned fixtures -- see docs/fixtures.md.
+[[bench]]
+name = "ann_pareto"
+harness = false
+
+# LDBC SNB Interactive: loads SF1 from the pinned CSV fixtures and runs the 14
+# complex reads. Doubles as a correctness benchmark — the results are compared
+# against a second engine running LDBC's official Cypher unmodified. Needs the
+# `ldbc-sf1-*` fixtures; see docs/fixtures.md.
+[[bench]]
+name = "ldbc_snb"
+harness = false
+
+[[bench]]
+name = "multivec_retrieval"
+harness = false
+
+# Phase 0B instruction-count qualification pilot (docs/proposals/
+# test_harness_implementation_plan_2026-08-12.md). Requires `valgrind` and an
+# `iai-callgrind-runner` at exactly the `iai-callgrind` dev-dependency version.
+# Not a gate: it decides which targets *can* be gated.
+[[bench]]
+name = "hot_paths_iai"
+harness = false
+
+[[example]]
+name = "locomo_profile"
+required-features = ["provider-onnx"]
+
+[[example]]
+name = "locomo_hybrid"
+required-features = ["provider-onnx"]
+
+[[example]]
+name = "hybrid_multiindex_repro"
+
+[[example]]
+name = "projection_leak_repro"
+
+[features]
+default = [
+    "lance-backend",
+    "apoc-core",
+    "rhai-plugins",
+    "provider-candle",
+    "provider-mistralrs",
+    "provider-onnx",
+    "provider-openai",
+    "provider-gemini",
+    "provider-vertexai",
+    "provider-mistral",
+    "provider-anthropic",
+    "provider-voyageai",
+    "provider-cohere",
+    "provider-azure-openai",
+    "provider-llamacpp",
+]
+lance-backend = ["uni-store/lance-backend"]
+# APOC-equivalent built-in procedures and scalar functions implemented in
+# Rust (apoc.bitwise.*, future apoc.text/coll/math/refactor/schema/atomic).
+# Default-on. Library embedders who don't want APOC content disable it.
+apoc-core = ["dep:uni-plugin-apoc-core"]
+# Enables `Uni::load_wasm_extism` — load Extism-shaped WASM plugins at
+# runtime. Pulls in `wasmtime` + `extism-sdk`; off by default.
+extism-plugins = ["dep:uni-plugin-extism"]
+# Enables `Uni::load_wasm_component` — load Component Model WASM
+# plugins at runtime. Pulls in wasmtime 41 + cranelift; off by default.
+wasm-plugins = ["dep:uni-plugin-wasm"]
+# Enables `Uni::load_rhai_plugin` — load Rhai-script plugins at runtime.
+# Rhai is pure-Rust, no C toolchain or WASM wrapper; on by default.
+rhai-plugins = ["dep:uni-plugin-rhai"]
+# Enables `Uni::load_python_plugin` — load PyO3 live-callable plugins at
+# runtime. Off by default because it pulls in libpython. Embedders
+# building Python extensions enable this transitively; standalone Rust
+# embedders typically leave it off.
+pyo3-plugins = ["dep:uni-plugin-pyo3", "dep:pyo3"]
+snapshot-internals = []
+storage-internals = []
+# NOTE: SSI/OCC is always compiled and toggled at runtime via
+# `UniConfig::ssi_enabled` (default `true`); it is no longer a cargo feature.
+# Forwards commit-path fault injection (uni-store `fail_point!` markers) so the
+# crash-recovery resilience tests can simulate a crash at a precise point.
+# `fail/failpoints` activates this crate's own `fail_point!` markers (e.g. the
+# nested-fork branch-point seam in `api/fork.rs`). Test-only.
+failpoints = ["fail/failpoints", "uni-store/failpoints"]
+provider-candle = ["uni-xervo/provider-candle"]
+provider-mistralrs = ["uni-xervo/provider-mistralrs"]
+provider-openai = ["uni-xervo/provider-openai"]
+provider-gemini = ["uni-xervo/provider-gemini"]
+provider-vertexai = ["uni-xervo/provider-vertexai"]
+provider-mistral = ["uni-xervo/provider-mistral"]
+provider-anthropic = ["uni-xervo/provider-anthropic"]
+provider-voyageai = ["uni-xervo/provider-voyageai"]
+provider-cohere = ["uni-xervo/provider-cohere"]
+provider-azure-openai = ["uni-xervo/provider-azure-openai"]
+# Embeddings served by a llama.cpp server. Distinct from `provider-openai`
+# even where the HTTP shape looks similar: this one truncates against
+# llama.cpp's own `/tokenize`, and llama.cpp rejects embedding input longer
+# than the model's context window rather than truncating it itself.
+provider-llamacpp = ["uni-xervo/provider-llamacpp"]
+# ONNX + GPU surface — mirrors uni-xervo's 0.9.0 three-axis model
+# (provider × linking × acceleration). See
+# `../../../uni-xervo/docs/migrations/0.9.0-feature-surface.md`. The
+# previous 9-feature gpu-* surface (gpu-tensorrt, gpu-coreml, gpu-rocm,
+# gpu-directml, gpu-openvino, gpu-qnn, gpu-wgpu) is retired — those EPs
+# remain reachable via `provider-onnx-dynamic` + `ORT_DYLIB_PATH`. The
+# native ONNX Embed task on local/onnx (xervo 0.8.0) replaces the retired
+# provider-fastembed; FastEmbed alias strings still work unchanged.
+provider-onnx = ["uni-xervo/provider-onnx"]
+provider-onnx-dynamic = ["uni-xervo/provider-onnx-dynamic"]
+gpu-cuda = ["uni-xervo/gpu-cuda"]
+gpu-metal = ["uni-xervo/gpu-metal"]
+
+# Re-export mimalloc so consumers can opt in to the fast allocator without
+# adding a separate dep:
+#
+#   [dependencies]
+#   uni-db = { version = "...", features = ["mimalloc"] }
+#
+#   // in main.rs:
+#   #[global_allocator]
+#   static GLOBAL: uni_db::MiMalloc = uni_db::MiMalloc;
+#
+# Measured ~3x throughput on heavily-allocating workloads (e.g. many small
+# CREATE statements). See benches/concurrent_mutations.rs for the gate.
+mimalloc = ["dep:mimalloc"]

@@ -1,0 +1,13 @@
+{
+  "command": [
+    "timeout",
+    "20s",
+    "/home/rohit/work/dragonscale/uni/fuzz/target/x86_64-unknown-linux-gnu/release/cypher_parse",
+    "/home/rohit/work/dragonscale/uni/fuzz/artifacts/cypher_parse/timeout-4beef42e11561005a43746afc219e61e1e4ce953",
+    "-runs=1",
+    "-timeout=10"
+  ],
+  "exit_code": 70,
+  "seconds": 12.033892631530762,
+  "input_bytes": 1633
+}

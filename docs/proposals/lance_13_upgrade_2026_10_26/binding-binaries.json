@@ -1,0 +1,14 @@
+{
+  "old": {
+    "bytes": 2829365377,
+    "lance_11_source_paths": true,
+    "lance_13_source_paths": false,
+    "sha256": "f80567cf96d8bd61dceb7c7d7569b8f517c1c7e6918e7054e857e06cee76e92e"
+  },
+  "new": {
+    "bytes": 2950099073,
+    "lance_11_source_paths": false,
+    "lance_13_source_paths": true,
+    "sha256": "5159ea0a5f126aecb06b9f03c6fc35e6d2aaaa5d3e7c611f7a90b9dfaba79374"
+  }
+}

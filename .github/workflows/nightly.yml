@@ -279,7 +279,15 @@ jobs:
         run: |
           for target in cypher_parse locy_parse wal_decode btic_decode; do
             echo "::group::fuzz $target"
-            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$target" -- -max_total_time=300 -timeout=10
+            # Keep discovered inputs in the writable corpus and replay the
+            # curated regressions too (including parser timeout artifacts).
+            mkdir -p "corpus/$target"
+            corpora=("corpus/$target")
+            if [ -d "seeds/$target" ]; then
+              corpora+=("seeds/$target")
+            fi
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu \
+              "$target" "${corpora[@]}" -- -max_total_time=300 -timeout=10
             echo "::endgroup::"
           done
 
@@ -334,7 +342,7 @@ jobs:
 
   metamorphic:
     if: github.repository == 'rustic-ai/uni-db'
-    name: Metamorphic Query Oracles (TLP + NoREC)
+    name: Metamorphic Query Oracles
     runs-on: ${{ vars.CI_RUNNER_XLARGE64 || 'ubuntu-xlarge' }}
     timeout-minutes: 60
     steps:
@@ -358,27 +366,58 @@ jobs:
           cache-on-failure: true
           save-if: false
 
-      # High-volume soak of the TLP + NoREC + structural query-correctness
-      # oracles (crates/uni/tests/common/metamorphic/). Each soak test builds the
-      # seed db ONCE and shares it read-only across all cases (see
-      # metamorphic::drive), so per-case cost is just a few sub-millisecond reads.
-      #
-      # Budget sizing: the four soak tests run concurrently (wall-clock = slowest).
-      # The heaviest is `structural` at ~7 queries/case; at 50k cases it runs
-      # ~25 min, comfortably inside the soak profile's 40-min per-test kill
-      # (.config/nextest.toml: 120s × terminate-after 20) with margin for CI
-      # variance. 50k cases × (4+4+2+7) queries ≈ 850k metamorphic queries/night,
-      # ~8.5× the Phase-1 exit target of ≥100k queries/night. The smoke tier runs
-      # per-PR (pr.yml metamorphic-smoke); only the #[ignore]'d soaks run here.
-      # `not test(/dqp::/)` — the DQP soak runs in its own job below, at its own
-      # volume via DQP_CASES. Without the exclusion it would run twice.
-      - name: Metamorphic soak (TLP + NoREC + structural)
+      # The seven non-binding suites retain 50k cases each. Binding has its
+      # own sharded job below; DQP also has a dedicated job and case budget.
+      - name: Metamorphic soak
         env:
           METAMORPHIC_CASES: 50000
         run: |
           cargo nextest run --profile soak -p uni-db --test integration \
             --run-ignored ignored-only \
-            -E 'test(/metamorphic::/) and test(soak) and not test(/dqp::/)'
+            -E 'test(/metamorphic::/) and test(soak) and not test(/dqp::/) and not test(/binding::/)'
+
+  # Binding executes 24-27 queries/case. An isolated 1k-case run took 113s,
+  # projecting ~94 min for 50k cases. Five independent 10k-case jobs (~19 min
+  # each) retain the full 50k volume within the unchanged 40-min test limit.
+  metamorphic-binding:
+    if: github.repository == 'rustic-ai/uni-db'
+    name: Binding oracle (shard ${{ matrix.shard }})
+    runs-on: ${{ vars.CI_RUNNER_XLARGE64 || 'ubuntu-xlarge' }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mold protobuf-compiler
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ci"
+          cache-on-failure: true
+          save-if: false
+
+      - name: Binding soak (10k cases)
+        env:
+          METAMORPHIC_CASES: 10000
+          # Distinct across jobs and nights; a rerun replays the same cases.
+          PROPTEST_RNG_SEED: ${{ github.run_id }}${{ matrix.shard }}
+        run: |
+          cargo nextest run --profile soak -p uni-db --test integration \
+            --run-ignored ignored-only \
+            -E 'test(metamorphic::binding::binding_guard_soak)'
 
   # DQP — differential query plans. Separate from the metamorphic job above
   # because a single lever at nightly volume takes roughly as long as that job's

@@ -1,0 +1,135 @@
+E2E_INDEX_BUILD,n=2000,ns=406092
+E2E_SAMPLE,range,n=2000,ns=2333421,rows_scanned=16,l0_reads=16
+OP,range,n=2000,OperatorStats { operator: "GraphScanExec", actual_rows: 16, time_ms: 0.397262, memory_bytes: 0, index_hits: Some(0), index_misses: None }
+OP,range,n=2000,OperatorStats { operator: "FilterExec", actual_rows: 16, time_ms: 0.004577, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=2000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=2000,OperatorStats { operator: "AggregateExec", actual_rows: 1, time_ms: 0.004708, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=2000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=2000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.000562, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=2000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=2000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.000302, memory_bytes: 0, index_hits: None, index_misses: None }
+E2E_SAMPLE,range,n=2000,ns=2118503,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=2000,ns=1825091,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=2000,ns=1746491,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=2000,ns=1729526,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=2000,ns=1711502,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=2000,ns=1654794,rows_scanned=16,l0_reads=16
+E2E_MEDIAN,range,n=2000,ns=1746491
+E2E_SAMPLE,range_index_hint,n=2000,ns=2141745,rows_scanned=16,l0_reads=16
+OP,range_index_hint,n=2000,OperatorStats { operator: "GraphScanExec", actual_rows: 16, time_ms: 0.2392, memory_bytes: 0, index_hits: Some(0), index_misses: None }
+OP,range_index_hint,n=2000,OperatorStats { operator: "FilterExec", actual_rows: 16, time_ms: 0.041587, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=2000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=2000,OperatorStats { operator: "AggregateExec", actual_rows: 1, time_ms: 0.002513, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=2000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=2000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.000527, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=2000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=2000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.000143, memory_bytes: 0, index_hits: None, index_misses: None }
+E2E_SAMPLE,range_index_hint,n=2000,ns=2098968,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=2000,ns=2090361,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=2000,ns=2027973,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=2000,ns=2001225,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=2000,ns=1994418,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=2000,ns=2003056,rows_scanned=16,l0_reads=16
+E2E_MEDIAN,range_index_hint,n=2000,ns=2027973
+E2E_SAMPLE,correlated,n=2000,ns=7211590,rows_scanned=8,l0_reads=8
+OP,correlated,n=2000,OperatorStats { operator: "GraphApplyExec", actual_rows: 128, time_ms: 4.152066, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,correlated,n=2000,OperatorStats { operator: "AggregateExec", actual_rows: 1, time_ms: 0.018587, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,correlated,n=2000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.004126, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,correlated,n=2000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.000202, memory_bytes: 0, index_hits: None, index_misses: None }
+E2E_SAMPLE,correlated,n=2000,ns=6577741,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=2000,ns=6247281,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=2000,ns=6176415,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=2000,ns=6137544,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=2000,ns=6197342,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=2000,ns=6332619,rows_scanned=8,l0_reads=8
+E2E_MEDIAN,correlated,n=2000,ns=6247281
+E2E_INDEX_BUILD,n=8000,ns=2204966
+E2E_SAMPLE,range,n=8000,ns=3091258,rows_scanned=16,l0_reads=16
+OP,range,n=8000,OperatorStats { operator: "GraphScanExec", actual_rows: 16, time_ms: 1.291088, memory_bytes: 0, index_hits: Some(0), index_misses: None }
+OP,range,n=8000,OperatorStats { operator: "FilterExec", actual_rows: 16, time_ms: 0.003783, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=8000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=8000,OperatorStats { operator: "AggregateExec", actual_rows: 1, time_ms: 0.003374, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=8000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=8000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.000658, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=8000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=8000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.000238, memory_bytes: 0, index_hits: None, index_misses: None }
+E2E_SAMPLE,range,n=8000,ns=2968363,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=8000,ns=3027186,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=8000,ns=2870400,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=8000,ns=2621793,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=8000,ns=2563804,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=8000,ns=2543790,rows_scanned=16,l0_reads=16
+E2E_MEDIAN,range,n=8000,ns=2870400
+E2E_SAMPLE,range_index_hint,n=8000,ns=4200556,rows_scanned=16,l0_reads=16
+OP,range_index_hint,n=8000,OperatorStats { operator: "GraphScanExec", actual_rows: 16, time_ms: 1.953409, memory_bytes: 0, index_hits: Some(0), index_misses: None }
+OP,range_index_hint,n=8000,OperatorStats { operator: "FilterExec", actual_rows: 16, time_ms: 0.053444, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=8000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=8000,OperatorStats { operator: "AggregateExec", actual_rows: 1, time_ms: 0.003807, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=8000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=8000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.000784, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=8000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=8000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.000229, memory_bytes: 0, index_hits: None, index_misses: None }
+E2E_SAMPLE,range_index_hint,n=8000,ns=4349538,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=8000,ns=4028846,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=8000,ns=3607966,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=8000,ns=3403001,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=8000,ns=3207620,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=8000,ns=3336062,rows_scanned=16,l0_reads=16
+E2E_MEDIAN,range_index_hint,n=8000,ns=3607966
+E2E_SAMPLE,correlated,n=8000,ns=13985018,rows_scanned=8,l0_reads=8
+OP,correlated,n=8000,OperatorStats { operator: "GraphApplyExec", actual_rows: 128, time_ms: 10.959322, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,correlated,n=8000,OperatorStats { operator: "AggregateExec", actual_rows: 1, time_ms: 0.018988, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,correlated,n=8000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.003595, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,correlated,n=8000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.000201, memory_bytes: 0, index_hits: None, index_misses: None }
+E2E_SAMPLE,correlated,n=8000,ns=14499058,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=8000,ns=13288071,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=8000,ns=15656417,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=8000,ns=22909756,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=8000,ns=19780020,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=8000,ns=16179585,rows_scanned=8,l0_reads=8
+E2E_MEDIAN,correlated,n=8000,ns=15656417
+E2E_INDEX_BUILD,n=32000,ns=17355598
+E2E_SAMPLE,range,n=32000,ns=13681359,rows_scanned=16,l0_reads=16
+OP,range,n=32000,OperatorStats { operator: "GraphScanExec", actual_rows: 16, time_ms: 11.131119, memory_bytes: 0, index_hits: Some(0), index_misses: None }
+OP,range,n=32000,OperatorStats { operator: "FilterExec", actual_rows: 16, time_ms: 0.005237, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=32000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=32000,OperatorStats { operator: "AggregateExec", actual_rows: 1, time_ms: 0.008218, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=32000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=32000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.001701, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=32000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range,n=32000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.000794, memory_bytes: 0, index_hits: None, index_misses: None }
+E2E_SAMPLE,range,n=32000,ns=17299164,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=32000,ns=16877477,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=32000,ns=17466994,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=32000,ns=16772798,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=32000,ns=15335007,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range,n=32000,ns=15138504,rows_scanned=16,l0_reads=16
+E2E_MEDIAN,range,n=32000,ns=16772798
+E2E_SAMPLE,range_index_hint,n=32000,ns=14077908,rows_scanned=16,l0_reads=16
+OP,range_index_hint,n=32000,OperatorStats { operator: "GraphScanExec", actual_rows: 16, time_ms: 11.507052, memory_bytes: 0, index_hits: Some(0), index_misses: None }
+OP,range_index_hint,n=32000,OperatorStats { operator: "FilterExec", actual_rows: 16, time_ms: 0.061207, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=32000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=32000,OperatorStats { operator: "AggregateExec", actual_rows: 1, time_ms: 0.005542, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=32000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=32000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.001201, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=32000,OperatorStats { operator: "DeadlineGuardExec", actual_rows: 0, time_ms: 0.0, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,range_index_hint,n=32000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.000274, memory_bytes: 0, index_hits: None, index_misses: None }
+E2E_SAMPLE,range_index_hint,n=32000,ns=15774447,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=32000,ns=15565326,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=32000,ns=18375918,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=32000,ns=18724202,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=32000,ns=18474111,rows_scanned=16,l0_reads=16
+E2E_SAMPLE,range_index_hint,n=32000,ns=18285227,rows_scanned=16,l0_reads=16
+E2E_MEDIAN,range_index_hint,n=32000,ns=18285227
+E2E_SAMPLE,correlated,n=32000,ns=125652786,rows_scanned=8,l0_reads=8
+OP,correlated,n=32000,OperatorStats { operator: "GraphApplyExec", actual_rows: 128, time_ms: 122.139243, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,correlated,n=32000,OperatorStats { operator: "AggregateExec", actual_rows: 1, time_ms: 0.024252, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,correlated,n=32000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.005659, memory_bytes: 0, index_hits: None, index_misses: None }
+OP,correlated,n=32000,OperatorStats { operator: "ProjectionExec", actual_rows: 1, time_ms: 0.000459, memory_bytes: 0, index_hits: None, index_misses: None }
+E2E_SAMPLE,correlated,n=32000,ns=98215083,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=32000,ns=95514824,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=32000,ns=101250338,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=32000,ns=112908338,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=32000,ns=111733740,rows_scanned=8,l0_reads=8
+E2E_SAMPLE,correlated,n=32000,ns=100336147,rows_scanned=8,l0_reads=8
+E2E_MEDIAN,correlated,n=32000,ns=101250338

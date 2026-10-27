@@ -1,0 +1,83 @@
+   Compiling uni-common v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-common)
+   Compiling uni-plugin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin)
+   Compiling uni-cypher v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cypher)
+   Compiling uni-locy-oracle v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy-oracle)
+   Compiling uni-crdt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-crdt)
+   Compiling uni-plugin-apoc-core v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-apoc-core)
+   Compiling uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+   Compiling uni-locy v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy)
+   Compiling uni-plugin-custom v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-custom)
+   Compiling uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+   Compiling uni-query-functions v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query-functions)
+   Compiling uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+   Compiling uni-query v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query)
+   Compiling uni-plugin-rhai v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-rhai)
+   Compiling uni-plugin-host v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-host)
+   Compiling uni-fork v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-fork)
+   Compiling uni-bulk v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-bulk)
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5m 12s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 7ea7c3ae-13ef-44e9-9072-060be19305ba with nextest profile: soak
+    Starting 22 tests across 9 binaries (4957 tests skipped)
+        PASS [   4.078s] ( 1/22) uni-db::integration perf::update_microbench_stress::update_microbench_stress
+        PASS [   9.356s] ( 2/22) uni-db::integration metamorphic::sparse::sparse_oracle_soak
+        PASS [  10.194s] ( 3/22) uni-db::integration metamorphic::multi::multi_oracle_soak
+        PASS [  10.436s] ( 4/22) uni-db::integration metamorphic::dense::dense_oracle_soak
+        PASS [  11.218s] ( 5/22) uni-db::integration metamorphic::norec::norec_law_soak
+        PASS [  14.054s] ( 6/22) uni-db::integration metamorphic::tlp::tlp_agg_law_soak
+        PASS [  14.487s] ( 7/22) uni-db::integration metamorphic::tlp::tlp_row_law_soak
+        PASS [  17.630s] ( 8/22) uni-db::integration ssi_stress::soak_mixed_workload
+        PASS [  17.867s] ( 9/22) uni-db::integration bugs::issue_311_tx_index_rekey::issue_311_tx_index_rekey_concurrent_flush_stress
+        PASS [  22.414s] (10/22) uni-db::integration metamorphic::structural::structural_laws_soak
+        PASS [  28.858s] (11/22) uni-db::integration cypher_write::mutation_stress_test::test_stress_delete_10k_nodes
+        PASS [  28.897s] (12/22) uni-db::integration cypher_write::mutation_stress_test::test_stress_create_10k_nodes
+        PASS [  29.429s] (13/22) uni-db::integration cypher_write::mutation_stress_test::test_stress_mixed_mutations_10k
+        PASS [  29.860s] (14/22) uni-db::integration cypher_write::mutation_stress_test::test_stress_set_10k_nodes
+        PASS [  58.849s] (15/22) uni-db::integration metamorphic::binding::binding_guard_soak
+        PASS [  59.899s] (16/22) uni-db::integration fork::fork_writes_soak::fork_writes_soak
+        SLOW [>120.000s] (─────────) uni-db::integration cypher_write::mutation_stress_test::test_stress_merge_10k_ops
+        SLOW [>120.000s] (─────────) uni-locy-oracle::differential goal::goal_directed_queries_soak
+        SLOW [>120.000s] (─────────) uni-locy-oracle::differential assume::assume_soak
+        SLOW [>120.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>120.000s] (─────────) uni-db::integration cypher_write::mutation_stress_test::test_stress_create_edges_5k
+        SLOW [>120.000s] (─────────) uni-locy-oracle::differential closure_is_set_soak
+        PASS [ 158.899s] (17/22) uni-db::integration cypher_write::mutation_stress_test::test_stress_create_edges_5k
+        SLOW [>240.000s] (─────────) uni-locy-oracle::differential goal::goal_directed_queries_soak
+        SLOW [>240.000s] (─────────) uni-db::integration cypher_write::mutation_stress_test::test_stress_merge_10k_ops
+        SLOW [>240.000s] (─────────) uni-locy-oracle::differential assume::assume_soak
+        SLOW [>240.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>240.000s] (─────────) uni-locy-oracle::differential closure_is_set_soak
+        PASS [ 289.409s] (18/22) uni-db::integration cypher_write::mutation_stress_test::test_stress_merge_10k_ops
+        PASS [ 342.582s] (19/22) uni-locy-oracle::differential goal::goal_directed_queries_soak
+        SLOW [>360.000s] (─────────) uni-locy-oracle::differential assume::assume_soak
+        SLOW [>360.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>360.000s] (─────────) uni-locy-oracle::differential closure_is_set_soak
+        PASS [ 382.486s] (20/22) uni-locy-oracle::differential closure_is_set_soak
+        SLOW [>480.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>480.000s] (─────────) uni-locy-oracle::differential assume::assume_soak
+        SLOW [>600.000s] (─────────) uni-locy-oracle::differential assume::assume_soak
+        SLOW [>600.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>720.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>720.000s] (─────────) uni-locy-oracle::differential assume::assume_soak
+        SLOW [>840.000s] (─────────) uni-locy-oracle::differential assume::assume_soak
+        SLOW [>840.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        PASS [ 846.783s] (21/22) uni-locy-oracle::differential assume::assume_soak
+        SLOW [>960.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>1080.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>1200.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>1320.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>1440.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>1560.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>1680.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>1800.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>1920.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>2040.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>2160.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>2280.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        SLOW [>2400.000s] (─────────) uni-locy-oracle::differential random::random_programs_soak
+        PASS [2405.068s] (22/22) uni-locy-oracle::differential random::random_programs_soak
+────────────
+     Summary [2405.089s] 22 tests run: 22 passed (6 slow), 4957 skipped

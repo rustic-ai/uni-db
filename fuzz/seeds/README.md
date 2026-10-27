@@ -17,7 +17,7 @@ curated regression inputs under several hundred generated files. (Measured:
 hundreds of untracked files rather than anything louder.
 
 Seeds also cover **timeouts**, not just crashes. Exponential backtracking in the
-grammar is the failure this corpus has caught three times, and a 30-second blind run
+grammar is the failure this corpus has caught four times, and a 30-second blind run
 rediscovers it only by luck — the nightly found the second instance three times
 in eight nights.
 
@@ -42,3 +42,20 @@ in eight nights.
 - `cypher_parse/nested-valid-in-led-literal` — the same defect through a
   **valid** query, `RETURN [x IN [x IN ... [1], 1], 1]` at depth 16 (10.3 s
   pre-fix).
+
+- `{cypher_parse,locy_parse}/list-pattern-properties-timeout` — the 1,633-byte
+  2026-10-27 Cypher artifact. Pattern-comprehension and list-literal alternatives
+  reparsed nested node properties; `node_predicate` also parsed properties twice
+  when no `WHERE` followed. Both front-ends share these rules.
+- `{cypher_parse,locy_parse}/nested-list-map-projection` — a valid nested literal,
+  `RETURN [(a {k: [(a {k: 1})]})]`, extended to depth 40. Depth 10 (118 bytes)
+  already took over six seconds through both the Lance 11 and Lance 13 bindings.
+- `{cypher_parse,locy_parse}/create-pattern-properties-timeout`,
+  `{cypher_parse,locy_parse}/create-pattern-properties-slow` — the 1,791-byte
+  timeout and 1,254-byte slow unit from the follow-up `cypher_parse` run
+  (2026-10-27): `pattern_ahead` accepted any `-` or `<` after `)` and did not
+  skip comments or backtick-quoted identifiers inside `balanced_parens`, while
+  `rel_predicate` tried `properties ~ WHERE ~ expression` before `properties`.
+- `{cypher_parse,locy_parse}/nested-paren-map-subtraction` — valid nested map
+  projections followed by `- 1` (`RETURN (a {k: (a {k: ... 1}) - 1}) - 1`) at
+  depth 40, exercising the `pattern_ahead` false-positive path on valid syntax.

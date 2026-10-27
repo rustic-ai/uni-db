@@ -1,0 +1,394 @@
+{
+  "active": "complete",
+  "results": [
+    {
+      "name": "iai-measure-fixed",
+      "command": [
+        "bash",
+        "scripts/perf/iai_pilot.sh",
+        "5"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {},
+      "exit_code": 0,
+      "elapsed_seconds": 613.676,
+      "log": "/tmp/uni-failure-triage/iai-measure-fixed.log",
+      "log_sha256": "f83cf6bdbc1d3cec27180c5cb3db4d50ccee77c6a86aa5f61bafbdd096eff2ac"
+    },
+    {
+      "name": "iai-compare-fixed",
+      "command": [
+        "python3",
+        "scripts/perf/iai_gate.py",
+        "--baseline",
+        "docs/perf/iai-baseline.json",
+        "--current",
+        "target/iai-pilot",
+        "--fail-pct",
+        "2",
+        "--warn-pct",
+        "1",
+        "--fail-improve-pct",
+        "50",
+        "--markdown"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {},
+      "exit_code": 1,
+      "elapsed_seconds": 0.04,
+      "log": "/tmp/uni-failure-triage/iai-compare-fixed.log",
+      "log_sha256": "ff5088793b95d427efa3b9bcc1a155ce07951b8060184874648ee7f115b3fbe2"
+    },
+    {
+      "name": "fuzz-cypher_parse-fixed",
+      "command": [
+        "cargo",
+        "+nightly",
+        "fuzz",
+        "run",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "cypher_parse",
+        "corpus/cypher_parse",
+        "seeds/cypher_parse",
+        "--",
+        "-max_total_time=300",
+        "-timeout=10"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni/fuzz",
+      "env": {},
+      "exit_code": 0,
+      "elapsed_seconds": 301.0,
+      "log": "/tmp/uni-failure-triage/fuzz-cypher_parse-fixed.log",
+      "log_sha256": "31e0fbe0f63a81e19e87fa8fe87ca6a9d26a8ea070afa39559388b9dfcc4de32"
+    },
+    {
+      "name": "fuzz-locy_parse-fixed",
+      "command": [
+        "cargo",
+        "+nightly",
+        "fuzz",
+        "run",
+        "--target",
+        "x86_64-unknown-linux-gnu",
+        "locy_parse",
+        "corpus/locy_parse",
+        "seeds/locy_parse",
+        "--",
+        "-max_total_time=300",
+        "-timeout=10"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni/fuzz",
+      "env": {},
+      "exit_code": 0,
+      "elapsed_seconds": 301.0,
+      "log": "/tmp/uni-failure-triage/fuzz-locy_parse-fixed.log",
+      "log_sha256": "6886688ba41fdb786fb9b0e8d6ae79a8b1214a76118e4a73fdbb5ed9440b5d79"
+    },
+    {
+      "name": "parser-fix-tests",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "uni-cypher",
+        "--test",
+        "integration",
+        "-E",
+        "test(/parser_backtracking_regression/)"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {},
+      "exit_code": 0,
+      "elapsed_seconds": 1.511,
+      "log": "/tmp/uni-failure-triage/parser-fix-tests.log",
+      "log_sha256": "388ba8cd7fedec721baf45068cace26402eeaad9bf1e205a95d4e291df20f8c7"
+    },
+    {
+      "name": "cypher-all",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "uni-cypher"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {},
+      "exit_code": 0,
+      "elapsed_seconds": 2.79,
+      "log": "/tmp/uni-failure-triage/cypher-all.log",
+      "log_sha256": "be55747f920eb15b04ff5c609ea64050c9bad3fd2c107c072b20a69fea85ff6d"
+    },
+    {
+      "name": "binding-binary-metadata",
+      "command": [
+        "cargo",
+        "nextest",
+        "list",
+        "-p",
+        "uni-db",
+        "--test",
+        "integration",
+        "--list-type",
+        "binaries-only",
+        "--message-format",
+        "json"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {},
+      "exit_code": 0,
+      "elapsed_seconds": 45.718,
+      "log": "/tmp/uni-failure-triage/binding-binary-metadata.log",
+      "log_sha256": "5d5f8509dba5e508a3eba8fdec318d72018542f7230eaea96694651aa9fcaacc"
+    },
+    {
+      "name": "metamorphic-smoke-fixed",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "--cargo-metadata",
+        "/tmp/uni-failure-triage/cargo-metadata.json",
+        "--binaries-metadata",
+        "/tmp/uni-failure-triage/binaries-metadata.json",
+        "--profile",
+        "soak",
+        "-E",
+        "test(/metamorphic::/) and not test(/dqp::/)"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {
+        "METAMORPHIC_CASES": "64",
+        "PROPTEST_RNG_SEED": "427"
+      },
+      "exit_code": 0,
+      "elapsed_seconds": 12.074,
+      "log": "/tmp/uni-failure-triage/metamorphic-smoke-fixed.log",
+      "log_sha256": "d5e03749a96bf0d07b69a5e471778462da686606384e16a353010c6285f166be"
+    },
+    {
+      "name": "binding-shard-2",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "--cargo-metadata",
+        "/tmp/uni-failure-triage/cargo-metadata.json",
+        "--binaries-metadata",
+        "/tmp/uni-failure-triage/binaries-metadata.json",
+        "--profile",
+        "soak",
+        "--run-ignored",
+        "ignored-only",
+        "-E",
+        "test(metamorphic::binding::binding_guard_soak)",
+        "--no-capture"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {
+        "METAMORPHIC_CASES": "10000",
+        "PROPTEST_RNG_SEED": "428"
+      },
+      "exit_code": 0,
+      "elapsed_seconds": 1442.354,
+      "log": "/tmp/uni-failure-triage/binding-shard-2.log",
+      "log_sha256": "f0c909f9329a0e23ce4ab48db34789de6021ce66a11107349667474e056f16fb"
+    },
+    {
+      "name": "binding-shard-1",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "--cargo-metadata",
+        "/tmp/uni-failure-triage/cargo-metadata.json",
+        "--binaries-metadata",
+        "/tmp/uni-failure-triage/binaries-metadata.json",
+        "--profile",
+        "soak",
+        "--run-ignored",
+        "ignored-only",
+        "-E",
+        "test(metamorphic::binding::binding_guard_soak)",
+        "--no-capture"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {
+        "METAMORPHIC_CASES": "10000",
+        "PROPTEST_RNG_SEED": "427"
+      },
+      "exit_code": 0,
+      "elapsed_seconds": 1446.357,
+      "log": "/tmp/uni-failure-triage/binding-shard-1.log",
+      "log_sha256": "cead90e633cdb0e8157749b2318517d97d6696c5da04e3258d3aa6f5ee8a02ed"
+    },
+    {
+      "name": "binding-shard-3",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "--cargo-metadata",
+        "/tmp/uni-failure-triage/cargo-metadata.json",
+        "--binaries-metadata",
+        "/tmp/uni-failure-triage/binaries-metadata.json",
+        "--profile",
+        "soak",
+        "--run-ignored",
+        "ignored-only",
+        "-E",
+        "test(metamorphic::binding::binding_guard_soak)",
+        "--no-capture"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {
+        "METAMORPHIC_CASES": "10000",
+        "PROPTEST_RNG_SEED": "429"
+      },
+      "exit_code": 0,
+      "elapsed_seconds": 1448.356,
+      "log": "/tmp/uni-failure-triage/binding-shard-3.log",
+      "log_sha256": "461e5546a8340ed9cb11bdcacc3a10f49193b12a0c721b5b06dcb9c30e86e617"
+    },
+    {
+      "name": "binding-shard-5",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "--cargo-metadata",
+        "/tmp/uni-failure-triage/cargo-metadata.json",
+        "--binaries-metadata",
+        "/tmp/uni-failure-triage/binaries-metadata.json",
+        "--profile",
+        "soak",
+        "--run-ignored",
+        "ignored-only",
+        "-E",
+        "test(metamorphic::binding::binding_guard_soak)",
+        "--no-capture"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {
+        "METAMORPHIC_CASES": "10000",
+        "PROPTEST_RNG_SEED": "431"
+      },
+      "exit_code": 0,
+      "elapsed_seconds": 1806.431,
+      "log": "/tmp/uni-failure-triage/binding-shard-5.log",
+      "log_sha256": "537efa54939c82ee31d3bcea6c85679f0b0cc11e0feead0edc23de1b553b19ef"
+    },
+    {
+      "name": "binding-shard-4",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "--cargo-metadata",
+        "/tmp/uni-failure-triage/cargo-metadata.json",
+        "--binaries-metadata",
+        "/tmp/uni-failure-triage/binaries-metadata.json",
+        "--profile",
+        "soak",
+        "--run-ignored",
+        "ignored-only",
+        "-E",
+        "test(metamorphic::binding::binding_guard_soak)",
+        "--no-capture"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {
+        "METAMORPHIC_CASES": "10000",
+        "PROPTEST_RNG_SEED": "430"
+      },
+      "exit_code": 0,
+      "elapsed_seconds": 1808.433,
+      "log": "/tmp/uni-failure-triage/binding-shard-4.log",
+      "log_sha256": "e8d51ec91c5ce4d4af7b44f2fbef93a679e2569be5d5cbc684596d4fcd04f311"
+    },
+    {
+      "name": "cypher-tck-fixed",
+      "command": [
+        "bash",
+        "scripts/run_tck_with_report.sh",
+        "--both"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {},
+      "exit_code": 0,
+      "elapsed_seconds": 175.09,
+      "log": "/tmp/uni-failure-triage/cypher-tck-fixed.log",
+      "log_sha256": "dfb5ce9f426865dcd7b561fa66f7ce14b36b4d9fab5077a71df04c6e0a44432f"
+    },
+    {
+      "name": "locy-tck-fixed",
+      "command": [
+        "bash",
+        "scripts/run_locy_tck_with_report.sh",
+        "--both"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {},
+      "exit_code": 0,
+      "elapsed_seconds": 21.612,
+      "log": "/tmp/uni-failure-triage/locy-tck-fixed.log",
+      "log_sha256": "b3397b25a4294c6113fc14e407166404da06df924f22a92acef661abf50d212e"
+    },
+    {
+      "name": "clippy-fixes",
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "uni-cypher",
+        "-p",
+        "uni-db",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {},
+      "exit_code": 0,
+      "elapsed_seconds": 252.897,
+      "log": "/tmp/uni-failure-triage/clippy-fixes.log",
+      "log_sha256": "00cfca675ff2f39a658343dd818a9d7ecff19361885bc565d7c89c68f0f57daa"
+    },
+    {
+      "name": "fmt-fixes",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {},
+      "exit_code": 0,
+      "elapsed_seconds": 3.996,
+      "log": "/tmp/uni-failure-triage/fmt-fixes.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "static-guards-fixed",
+      "command": [
+        "python3",
+        "scripts/ci/static_guards.py",
+        "--with-fuzz-lock"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "env": {},
+      "exit_code": 0,
+      "elapsed_seconds": 1.945,
+      "log": "/tmp/uni-failure-triage/static-guards-fixed.log",
+      "log_sha256": "ea3271fec7f11e729708d08141f72f2e50ef16397e7c58583ff637779eba30dc"
+    }
+  ],
+  "historical": true,
+  "superseded_by": "ci-completion-validation.json",
+  "interpretation_note": "The Locy TCK wrapper returned 0 despite four failed scenarios per mode. Use the final completion manifest for corrected grammar and suite outcomes."
+}

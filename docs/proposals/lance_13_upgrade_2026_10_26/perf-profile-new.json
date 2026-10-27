@@ -1,0 +1,68 @@
+{
+  "point": {
+    "index_usage": [
+      {
+        "label_or_type": "Item",
+        "property": "key",
+        "index_type": "BTREE",
+        "used": true,
+        "reason": "BTREE index point lookup pushed into Lance scan"
+      }
+    ],
+    "operators": [
+      {
+        "operator": "GraphScanExec",
+        "actual_rows": 1,
+        "time_ms": 14.288388,
+        "memory_bytes": 0,
+        "index_hits": 1
+      },
+      {
+        "operator": "FilterExec",
+        "actual_rows": 1,
+        "time_ms": 0.017252,
+        "memory_bytes": 0
+      },
+      {
+        "operator": "ProjectionExec",
+        "actual_rows": 1,
+        "time_ms": 0.001964,
+        "memory_bytes": 0
+      }
+    ],
+    "rows": 1
+  },
+  "range": {
+    "index_usage": [
+      {
+        "label_or_type": "Item",
+        "property": "key",
+        "index_type": "BTREE",
+        "used": true,
+        "reason": "BTREE index range / prefix / null scan pushed into Lance scan"
+      }
+    ],
+    "operators": [
+      {
+        "operator": "GraphScanExec",
+        "actual_rows": 200,
+        "time_ms": 2.57685,
+        "memory_bytes": 0,
+        "index_hits": 1
+      },
+      {
+        "operator": "FilterExec",
+        "actual_rows": 200,
+        "time_ms": 0.005091,
+        "memory_bytes": 0
+      },
+      {
+        "operator": "ProjectionExec",
+        "actual_rows": 200,
+        "time_ms": 0.001278,
+        "memory_bytes": 0
+      }
+    ],
+    "rows": 200
+  }
+}

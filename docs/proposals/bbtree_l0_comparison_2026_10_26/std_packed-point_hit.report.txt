@@ -1,0 +1,514 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 74  of event 'cpu-clock:u'
+# Event count (approx.): 148296592
+#
+# Overhead  Command          Shared Object                           Symbol                                                                                                                                                                                                                                                                                                                                                                                              
+# ........  ...............  ......................................  ....................................................................................................................................................................................................................................................................................................................................................................................................
+#
+    13.51%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_leaf_edges_spanning_range::<u128, core::ops::range::RangeInclusive<u128>>
+            |          
+            |--4.05%--<u128 as core::cmp::Ord>::cmp (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<u128> (inlined)
+            |          |          
+            |          |--2.70%--<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_upper_bound_index::<u128> (inlined)
+            |          |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree_for_bifurcation::<u128, core::ops::range::RangeInclusive<u128>> (inlined)
+            |          |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_leaf_edges_spanning_range::<u128, core::ops::range::RangeInclusive<u128>>
+            |          |          0x886194f322d32106
+            |          |          
+            |           --1.35%--<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_lower_bound_index::<u128> (inlined)
+            |                     <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree_for_bifurcation::<u128, core::ops::range::RangeInclusive<u128>> (inlined)
+            |                     <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_leaf_edges_spanning_range::<u128, core::ops::range::RangeInclusive<u128>>
+            |                     0x886194f322d32106
+            |          
+            |--2.70%--<core::slice::iter::Iter<u128> as core::iter::traits::iterator::Iterator>::next (inlined)
+            |          <core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<u128>> as core::iter::traits::iterator::Iterator>::next (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<u128> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_upper_bound_index::<u128> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree_for_bifurcation::<u128, core::ops::range::RangeInclusive<u128>> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_leaf_edges_spanning_range::<u128, core::ops::range::RangeInclusive<u128>>
+            |          0x886194f322d32106
+            |          
+            |--1.35%--<core::ptr::non_null::NonNull<u128> as core::cmp::PartialEq>::eq (inlined)
+            |          <core::slice::iter::Iter<u128> as core::iter::traits::iterator::Iterator>::next (inlined)
+            |          <core::iter::adapters::enumerate::Enumerate<core::slice::iter::Iter<u128>> as core::iter::traits::iterator::Iterator>::next (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<u128> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_upper_bound_index::<u128> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree_for_bifurcation::<u128, core::ops::range::RangeInclusive<u128>> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_leaf_edges_spanning_range::<u128, core::ops::range::RangeInclusive<u128>>
+            |          0x886194f322d32106
+            |          
+            |--1.35%--<core::ops::range::RangeInclusive<u128> as core::ops::range::RangeBounds<u128>>::end_bound (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree_for_bifurcation::<u128, core::ops::range::RangeInclusive<u128>> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_leaf_edges_spanning_range::<u128, core::ops::range::RangeInclusive<u128>>
+            |          0x886194f322d32106
+            |          
+            |--1.35%--<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree_for_bifurcation::<u128, core::ops::range::RangeInclusive<u128>> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_leaf_edges_spanning_range::<u128, core::ops::range::RangeInclusive<u128>>
+            |          0x886194f322d32106
+            |          
+            |--1.35%--<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::keys (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_key_index::<u128> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_lower_bound_index::<u128> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::search_tree_for_bifurcation::<u128, core::ops::range::RangeInclusive<u128>> (inlined)
+            |          <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_leaf_edges_spanning_range::<u128, core::ops::range::RangeInclusive<u128>>
+            |          0x886194f322d32106
+            |          
+             --1.35%--<alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, u128, (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_leaf_edges_spanning_range::<u128, core::ops::range::RangeInclusive<u128>>
+                       0x886194f322d32106
+
+    12.16%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates
+            |          
+            |--5.41%--<std::collections::hash::set::HashSet<u64> as core::iter::traits::collect::FromIterator<u64>>::from_iter::<core::iter::adapters::copied::Copied<core::iter::adapters::filter::Filter<std::collections::hash::set::Iter<u64>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#4}>>> (inlined)
+            |          <core::iter::adapters::copied::Copied<core::iter::adapters::filter::Filter<std::collections::hash::set::Iter<u64>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#4}>> as core::iter::traits::iterator::Iterator>::collect::<std::collections::hash::set::HashSet<u64>> (inlined)
+            |          <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates
+            |          
+            |--1.35%--<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::new (inlined)
+            |          <core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}> as core::iter::traits::iterator::Iterator>::filter::<<collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}> (inlined)
+            |          <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates
+            |          
+            |--1.35%--<collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates
+            |          
+            |--1.35%--<alloc::vec::Vec<i64> as core::iter::traits::collect::FromIterator<i64>>::from_iter::<core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<uni_common::value::Value>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#2}::{closure#0}>, core::option::Option<core::convert::Infallible>>> (inlined)
+            |          <core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<uni_common::value::Value>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#2}::{closure#0}>, core::option::Option<core::convert::Infallible>> as core::iter::traits::iterator::Iterator>::collect::<alloc::vec::Vec<i64>> (inlined)
+            |          <core::option::Option<alloc::vec::Vec<i64>> as core::iter::traits::collect::FromIterator<core::option::Option<i64>>>::from_iter::<core::iter::adapters::map::Map<core::slice::iter::Iter<uni_common::value::Value>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#2}::{closure#0}>>::{closure#0} (inlined)
+            |          core::iter::adapters::try_process::<core::iter::adapters::map::Map<core::slice::iter::Iter<uni_common::value::Value>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#2}::{closure#0}>, i64, core::option::Option<core::convert::Infallible>, <core::option::Option<alloc::vec::Vec<i64>> as core::iter::traits::collect::FromIterator<core::option::Option<i64>>>::from_iter<core::iter::adapters::map::Map<core::slice::iter::Iter<uni_common::value::Value>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#2}::{closure#0}>>::{closure#0}, alloc::vec::Vec<i64>> (inlined)
+            |          <core::option::Option<alloc::vec::Vec<i64>> as core::iter::traits::collect::FromIterator<core::option::Option<i64>>>::from_iter::<core::iter::adapters::map::Map<core::slice::iter::Iter<uni_common::value::Value>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#2}::{closure#0}>> (inlined)
+            |          <core::iter::adapters::map::Map<core::slice::iter::Iter<uni_common::value::Value>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#2}::{closure#0}> as core::iter::traits::iterator::Iterator>::collect::<core::option::Option<alloc::vec::Vec<i64>>> (inlined)
+            |          <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#2} (inlined)
+            |          <core::option::Option<&alloc::vec::Vec<uni_common::value::Value>>>::map::<core::option::Option<alloc::vec::Vec<i64>>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#2}> (inlined)
+            |          <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates
+            |          
+            |--1.35%--<alloc::collections::btree::navigate::LeafRange<alloc::collections::btree::node::marker::Immut, u128, ()>>::next_checked (inlined)
+            |          <alloc::collections::btree::map::Range<u128, ()> as core::iter::traits::iterator::Iterator>::next (inlined)
+            |          <alloc::collections::btree::map::Range<u128, ()> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::map::map_fold<(&u128, &()), u64, (), <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}, core::iter::adapters::filter::filter_fold<u64, (), <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}, core::iter::adapters::map::map_fold<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Ite
+            |          <core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::filter::filter_fold<u64, (), <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}, core::iter::adapters::map::map_fold<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Iterator::for_each::call<(u64,
+            |          <core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::map::map_fold<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Iterator::for_each::call<(u64, ()), <hashbr
+            |          <core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>, <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::traits::iterator::Iterator::for_each::call<(u64, ()), <hashbrown::map::HashMap<u64, (
+            |          <core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>, <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}> as core::iter::traits::iterator::Iterator>::for_each::<<hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as core::iter::traits::collect:
+            |          <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as core::iter::traits::collect::Extend<(u64, ())>>::extend::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>, <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}>> (inlined)
+            |          <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend::<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>> (inlined)
+            |          <std::collections::hash::set::HashSet<u64> as core::iter::traits::collect::Extend<u64>>::extend::<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>> (inlined)
+            |          <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates
+            |          
+             --1.35%--<alloc::collections::btree::map::BTreeMap<u128, ()>>::range::<u128, core::ops::range::RangeInclusive<u128>> (inlined)
+                       <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids (inlined)
+                       <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates
+
+    12.16%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+            |          
+            |--4.05%--core::intrinsics::rotate_left::<u64> (inlined)
+            |          <u64>::rotate_left (inlined)
+            |          |          
+            |          |--2.70%--<core::hash::sip::Sip13Rounds as core::hash::sip::Sip>::d_rounds (inlined)
+            |          |          <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::finish (inlined)
+            |          |          <core::hash::sip::SipHasher13 as core::hash::Hasher>::finish (inlined)
+            |          |          <std::hash::random::DefaultHasher as core::hash::Hasher>::finish (inlined)
+            |          |          <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+            |          |          
+            |           --1.35%--<core::hash::sip::Sip13Rounds as core::hash::sip::Sip>::c_rounds (inlined)
+            |                     <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::finish (inlined)
+            |                     <core::hash::sip::SipHasher13 as core::hash::Hasher>::finish (inlined)
+            |                     <std::hash::random::DefaultHasher as core::hash::Hasher>::finish (inlined)
+            |                     <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+            |          
+            |--2.70%--<std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+            |          |          
+            |          |--1.35%--0x7ffe
+            |          |          
+            |           --1.35%--0xffe
+            |          
+            |--2.70%--<core::hash::sip::Sip13Rounds as core::hash::sip::Sip>::d_rounds (inlined)
+            |          <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::finish (inlined)
+            |          <core::hash::sip::SipHasher13 as core::hash::Hasher>::finish (inlined)
+            |          <std::hash::random::DefaultHasher as core::hash::Hasher>::finish (inlined)
+            |          <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+            |          |          
+            |          |--1.35%--0x7ffe
+            |          |          
+            |           --1.35%--0x3ffe
+            |          
+            |--1.35%--<core::hash::sip::SipHasher13 as core::hash::Hasher>::write (inlined)
+            |          <std::hash::random::DefaultHasher as core::hash::Hasher>::write (inlined)
+            |          <std::hash::random::DefaultHasher as core::hash::Hasher>::write_u64 (inlined)
+            |          <u64 as core::hash::Hash>::hash::<std::hash::random::DefaultHasher> (inlined)
+            |          <uni_common::core::id::Eid as core::hash::Hash>::hash::<std::hash::random::DefaultHasher> (inlined)
+            |          <&uni_common::core::id::Eid as core::hash::Hash>::hash::<std::hash::random::DefaultHasher> (inlined)
+            |          <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+            |          0x4675d6b19289d783
+            |          
+             --1.35%--<core::hash::sip::Sip13Rounds as core::hash::sip::Sip>::c_rounds (inlined)
+                       <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::finish (inlined)
+                       <core::hash::sip::SipHasher13 as core::hash::Hasher>::finish (inlined)
+                       <std::hash::random::DefaultHasher as core::hash::Hasher>::finish (inlined)
+                       <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+
+    10.81%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::build
+            |          
+            |--5.41%--<collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::build
+            |          
+            |--4.05%--<hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::find::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}>::{closure#0} (inlined)
+            |          <hashbrown::raw::RawTableInner>::find_inner (inlined)
+            |          <hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::find::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}> (inlined)
+            |          <hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::get::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}> (inlined)
+            |          <hashbrown::map::HashMap<alloc::string::String, uni_common::value::Value, std::hash::random::RandomState>>::get::<str> (inlined)
+            |          <std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>::get::<str> (inlined)
+            |          <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::build::{closure#0} (inlined)
+            |          <core::option::Option<&std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>>::and_then::<&uni_common::value::Value, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::build::{closure#0}> (inlined)
+            |          <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::build
+            |          0x351abbd4e2f76cc0
+            |          
+             --1.35%--core::core_arch::x86::sse2::_mm_movemask_epi8 (inlined)
+                       <hashbrown::control::group::sse2::Group>::match_tag (inlined)
+                       <hashbrown::raw::RawTableInner>::find_inner (inlined)
+                       <hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::find::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}> (inlined)
+                       <hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::get::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}> (inlined)
+                       <hashbrown::map::HashMap<alloc::string::String, uni_common::value::Value, std::hash::random::RandomState>>::get::<str> (inlined)
+                       <std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>::get::<str> (inlined)
+                       <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::build::{closure#0} (inlined)
+                       <core::option::Option<&std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>>::and_then::<&uni_common::value::Value, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::build::{closure#0}> (inlined)
+                       <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::build
+                       0x351abbd4e2f76cc0
+
+     8.11%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState>>::insert
+            |          
+            |--2.70%--<hashbrown::raw::RawTableInner>::record_item_insert_at (inlined)
+            |          <hashbrown::raw::RawTable<(u64, ())>>::insert_tagged_at_index (inlined)
+            |          <hashbrown::raw::RawTable<(u64, ())>>::insert_at_index (inlined)
+            |          <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState>>::insert
+            |          <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as core::iter::traits::collect::Extend<(u64, ())>>::extend::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>, <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}>>::{closure#0} (inlined)
+            |          core::iter::traits::iterator::Iterator::for_each::call::<(u64, ()), <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as core::iter::traits::collect::Extend<(u64, ())>>::extend<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>, <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::
+            |          core::iter::adapters::map::map_fold::<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Iterator::for_each::call<(u64, ()), <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as core::iter::traits::collect::Extend<(u64, ())>>::extend<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::ke
+            |          core::iter::adapters::filter::filter_fold::<u64, (), <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}, core::iter::adapters::map::map_fold<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Iterator::for_each::call<(u64, ()), <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as core::iter::traits::collect::Extend<(u64, ())>>::extend<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections:
+            |          core::iter::adapters::map::map_fold::<(&u128, &()), u64, (), <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}, core::iter::adapters::filter::filter_fold<u64, (), <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}, core::iter::adapters::map::map_fold<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Iterator::for_each::call<(u64, ()), <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as 
+            |          <alloc::collections::btree::map::Range<u128, ()> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::map::map_fold<(&u128, &()), u64, (), <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}, core::iter::adapters::filter::filter_fold<u64, (), <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}, core::iter::adapters::map::map_fold<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Ite
+            |          <core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::filter::filter_fold<u64, (), <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}, core::iter::adapters::map::map_fold<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Iterator::for_each::call<(u64,
+            |          <core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::map::map_fold<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Iterator::for_each::call<(u64, ()), <hashbr
+            |          <core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>, <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::traits::iterator::Iterator::for_each::call<(u64, ()), <hashbrown::map::HashMap<u64, (
+            |          <core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>, <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}> as core::iter::traits::iterator::Iterator>::for_each::<<hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as core::iter::traits::collect:
+            |          <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as core::iter::traits::collect::Extend<(u64, ())>>::extend::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>, <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}>> (inlined)
+            |          <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend::<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>> (inlined)
+            |          <std::collections::hash::set::HashSet<u64> as core::iter::traits::collect::Extend<u64>>::extend::<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>> (inlined)
+            |          <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates
+            |          
+            |--2.70%--<hashbrown::control::tag::Tag>::full (inlined)
+            |          <hashbrown::raw::RawTableInner>::find_or_find_insert_index_inner (inlined)
+            |          <hashbrown::raw::RawTable<(u64, ())>>::find_or_find_insert_index::<hashbrown::map::equivalent_key<u64, u64, ()>::{closure#0}, hashbrown::map::make_hasher<u64, (), std::hash::random::RandomState>::{closure#0}> (inlined)
+            |          <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState>>::insert
+            |          0x5
+            |          
+            |--1.35%--core::core_arch::x86::sse2::_mm_movemask_epi8 (inlined)
+            |          <hashbrown::control::group::sse2::Group>::match_tag (inlined)
+            |          <hashbrown::raw::RawTableInner>::find_or_find_insert_index_inner (inlined)
+            |          <hashbrown::raw::RawTable<(u64, ())>>::find_or_find_insert_index::<hashbrown::map::equivalent_key<u64, u64, ()>::{closure#0}, hashbrown::map::make_hasher<u64, (), std::hash::random::RandomState>::{closure#0}> (inlined)
+            |          <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState>>::insert
+            |          0x5
+            |          
+             --1.35%--<hashbrown::control::tag::Tag>::is_full (inlined)
+                       <hashbrown::raw::RawTableInner>::is_bucket_full (inlined)
+                       <hashbrown::raw::RawTableInner>::fix_insert_index (inlined)
+                       <hashbrown::raw::RawTableInner>::find_or_find_insert_index_inner (inlined)
+                       <hashbrown::raw::RawTable<(u64, ())>>::find_or_find_insert_index::<hashbrown::map::equivalent_key<u64, u64, ()>::{closure#0}, hashbrown::map::make_hasher<u64, (), std::hash::random::RandomState>::{closure#0}> (inlined)
+                       <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState>>::insert
+
+     8.11%  collection_cand  libc.so.6                               [.] cfree@GLIBC_2.2.5
+            |
+            ---cfree@GLIBC_2.2.5
+               |          
+               |--4.05%--std::sys::alloc::unix::dealloc (inlined)
+               |          <std::alloc::System as core::alloc::Allocator>::deallocate (inlined)
+               |          <std::alloc::System as core::alloc::global::GlobalAlloc>::dealloc (inlined)
+               |          <collection_candidates::l0_comparison::Meter as core::alloc::global::GlobalAlloc>::dealloc (inlined)
+               |          __rustc::__rust_dealloc (inlined)
+               |          alloc::alloc::dealloc_nonnull (inlined)
+               |          <alloc::alloc::Global>::deallocate_impl_runtime (inlined)
+               |          <alloc::alloc::Global>::deallocate_impl (inlined)
+               |          <alloc::alloc::Global as core::alloc::Allocator>::deallocate (inlined)
+               |          <hashbrown::raw::RawTableInner>::free_buckets::<alloc::alloc::Global> (inlined)
+               |          <hashbrown::raw::RawTableInner>::drop_inner_table::<(u64, ()), alloc::alloc::Global> (inlined)
+               |          <hashbrown::raw::RawTable<(u64, ())> as core::ops::drop::Drop>::drop (inlined)
+               |          core::ptr::drop_glue::<hashbrown::raw::RawTable<(u64, ())>> (inlined)
+               |          core::ptr::drop_glue::<hashbrown::map::HashMap<u64, (), std::hash::random::RandomState>> (inlined)
+               |          core::ptr::drop_glue::<hashbrown::set::HashSet<u64, std::hash::random::RandomState>> (inlined)
+               |          core::ptr::drop_glue::<std::collections::hash::set::HashSet<u64>> (inlined)
+               |          core::ptr::drop_glue::<core::option::Option<std::collections::hash::set::HashSet<u64>>> (inlined)
+               |          collection_candidates::l0_comparison::profile::<collection_candidates::kernels::StdPackedKeys>::{closure#0} (inlined)
+               |          collection_candidates::l0_comparison::timed::<collection_candidates::l0_comparison::profile<collection_candidates::kernels::StdPackedKeys>::{closure#0}> (inlined)
+               |          collection_candidates::l0_comparison::profile::<collection_candidates::kernels::StdPackedKeys>
+               |          
+                --4.05%--alloc::alloc::dealloc_nonnull (inlined)
+                          <alloc::alloc::Global>::deallocate_impl_runtime (inlined)
+                          <alloc::alloc::Global>::deallocate_impl (inlined)
+                          <alloc::alloc::Global as core::alloc::Allocator>::deallocate (inlined)
+                          <alloc::raw_vec::RawVecInner>::deallocate (inlined)
+                          <alloc::raw_vec::RawVec<u8> as core::ops::drop::Drop>::drop (inlined)
+                          core::ptr::drop_glue::<alloc::raw_vec::RawVec<u8>> (inlined)
+                          core::ptr::drop_glue::<alloc::vec::Vec<u8>> (inlined)
+                          core::ptr::drop_glue::<alloc::string::String> (inlined)
+                          core::ptr::drop_glue::<(alloc::string::String, uni_common::value::Value)> (inlined)
+                          core::ptr::drop_in_place::<(alloc::string::String, uni_common::value::Value)> (inlined)
+                          <*mut (alloc::string::String, uni_common::value::Value)>::drop_in_place (inlined)
+                          <hashbrown::raw::Bucket<(alloc::string::String, uni_common::value::Value)>>::drop (inlined)
+                          <hashbrown::raw::RawTableInner>::drop_elements::<(alloc::string::String, uni_common::value::Value)> (inlined)
+                          <hashbrown::raw::RawTableInner>::drop_inner_table::<(alloc::string::String, uni_common::value::Value), alloc::alloc::Global>
+
+     5.41%  collection_cand  libc.so.6                               [.] malloc
+            |
+            ---malloc
+               std::sys::alloc::unix::alloc (inlined)
+               <std::alloc::System>::alloc_impl (inlined)
+               <std::alloc::System as core::alloc::Allocator>::allocate (inlined)
+               <std::alloc::System as core::alloc::global::GlobalAlloc>::alloc (inlined)
+               <collection_candidates::l0_comparison::Meter as core::alloc::global::GlobalAlloc>::alloc (inlined)
+               __rustc::__rust_alloc
+               |          
+                --2.70%--alloc::alloc::alloc (inlined)
+                          <alloc::alloc::Global>::alloc_impl_runtime (inlined)
+                          <alloc::alloc::Global>::alloc_impl (inlined)
+                          <alloc::alloc::Global as core::alloc::Allocator>::allocate (inlined)
+                          <alloc::raw_vec::RawVecInner>::try_allocate_in (inlined)
+                          <alloc::raw_vec::RawVecInner>::with_capacity_in (inlined)
+                          <alloc::raw_vec::RawVec<i64>>::with_capacity_in (inlined)
+                          <alloc::vec::Vec<i64>>::with_capacity_in (inlined)
+                          <alloc::vec::Vec<i64>>::with_capacity (inlined)
+                          <alloc::vec::Vec<i64> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<i64, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<uni_common::value::Value>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::BbPackedKeys>>::candidates::{closure#2}::{closure#0}>, core::option::Option<core::convert::Infallible>>>>::from_iter (inlined)
+                          <alloc::vec::Vec<i64> as alloc::vec::spec_from_iter::SpecFromIter<i64, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<uni_common::value::Value>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#2}::{closure#0}>, core::option::Option<core::convert::Infallible>>>>::from_iter
+
+     4.05%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <uni_store::runtime::l0::L0Buffer>::insert_vertex_with_labels_impl
+            |          
+            |--2.70%--core::core_arch::x86::sse2::_mm_movemask_epi8 (inlined)
+            |          <hashbrown::control::group::sse2::Group>::match_tag (inlined)
+            |          <hashbrown::raw::RawTableInner>::find_inner (inlined)
+            |          |          
+            |          |--1.35%--<hashbrown::raw::RawTable<(uni_common::core::id::Vid, i64)>>::find::<<hashbrown::map::HashMap<uni_common::core::id::Vid, i64, std::hash::random::RandomState>>::rustc_entry::{closure#0}> (inlined)
+            |          |          <hashbrown::map::HashMap<uni_common::core::id::Vid, i64, std::hash::random::RandomState>>::rustc_entry (inlined)
+            |          |          <std::collections::hash::map::HashMap<uni_common::core::id::Vid, i64>>::entry (inlined)
+            |          |          <uni_store::runtime::l0::L0Buffer>::apply_vertex_write (inlined)
+            |          |          <uni_store::runtime::l0::L0Buffer>::insert_vertex_with_labels_impl
+            |          |          0x3eeb
+            |          |          
+            |           --1.35%--<hashbrown::raw::RawTable<(uni_common::core::id::Vid, alloc::vec::Vec<alloc::string::String>)>>::find::<<hashbrown::map::HashMap<uni_common::core::id::Vid, alloc::vec::Vec<alloc::string::String>, std::hash::random::RandomState>>::rustc_entry::{closure#0}> (inlined)
+            |                     <hashbrown::map::HashMap<uni_common::core::id::Vid, alloc::vec::Vec<alloc::string::String>, std::hash::random::RandomState>>::rustc_entry (inlined)
+            |                     <std::collections::hash::map::HashMap<uni_common::core::id::Vid, alloc::vec::Vec<alloc::string::String>>>::entry (inlined)
+            |                     <uni_store::runtime::l0::L0Buffer>::apply_vertex_write (inlined)
+            |                     <uni_store::runtime::l0::L0Buffer>::insert_vertex_with_labels_impl
+            |                     0x4c4b
+            |          
+             --1.35%--core::ptr::write::<alloc::string::String> (inlined)
+                       <alloc::vec::Vec<alloc::string::String>>::push_mut (inlined)
+                       <alloc::vec::Vec<alloc::string::String>>::push (inlined)
+                       <uni_store::runtime::l0::L0Buffer>::append_unique_labels (inlined)
+                       <uni_store::runtime::l0::L0Buffer>::apply_vertex_write (inlined)
+                       <uni_store::runtime::l0::L0Buffer>::insert_vertex_with_labels_impl
+                       0x31b5
+
+     2.70%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <alloc::vec::Vec<i64> as alloc::vec::spec_from_iter::SpecFromIter<i64, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<uni_common::value::Value>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#2}::{closure#0}>, core::option::Option<core::convert::Infallible>>>>::from_iter
+            |          
+            |--1.35%--<alloc::vec::Vec<i64> as alloc::vec::spec_from_iter::SpecFromIter<i64, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<uni_common::value::Value>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#2}::{closure#0}>, core::option::Option<core::convert::Infallible>>>>::from_iter
+            |          
+             --1.35%--<alloc::raw_vec::RawVecInner>::try_allocate_in (inlined)
+                       <alloc::raw_vec::RawVecInner>::with_capacity_in (inlined)
+                       <alloc::raw_vec::RawVec<i64>>::with_capacity_in (inlined)
+                       <alloc::vec::Vec<i64>>::with_capacity_in (inlined)
+                       <alloc::vec::Vec<i64>>::with_capacity (inlined)
+                       <alloc::vec::Vec<i64> as alloc::vec::spec_from_iter_nested::SpecFromIterNested<i64, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<uni_common::value::Value>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::BbPackedKeys>>::candidates::{closure#2}::{closure#0}>, core::option::Option<core::convert::Infallible>>>>::from_iter (inlined)
+                       <alloc::vec::Vec<i64> as alloc::vec::spec_from_iter::SpecFromIter<i64, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<uni_common::value::Value>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#2}::{closure#0}>, core::option::Option<core::convert::Infallible>>>>::from_iter
+
+     2.70%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+            |
+            ---<core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+               |          
+                --1.35%--<core::hash::sip::SipHasher13 as core::hash::Hasher>::write (inlined)
+                          <std::hash::random::DefaultHasher as core::hash::Hasher>::write (inlined)
+                          <std::hash::random::DefaultHasher as core::hash::Hasher>::write_u64 (inlined)
+                          <u64 as core::hash::Hash>::hash::<std::hash::random::DefaultHasher> (inlined)
+                          <uni_common::core::id::Eid as core::hash::Hash>::hash::<std::hash::random::DefaultHasher> (inlined)
+                          <&uni_common::core::id::Eid as core::hash::Hash>::hash::<std::hash::random::DefaultHasher> (inlined)
+                          <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+
+     2.70%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::map::HashMap<u64, uni_common::value::Value, std::hash::random::RandomState>>::insert
+            |          
+            |--1.35%--<hashbrown::raw::RawTableInner>::find_insert_index_in_group (inlined)
+            |          <hashbrown::raw::RawTableInner>::find_or_find_insert_index_inner (inlined)
+            |          <hashbrown::raw::RawTable<(u64, uni_common::value::Value)>>::find_or_find_insert_index::<hashbrown::map::equivalent_key<u64, u64, uni_common::value::Value>::{closure#0}, hashbrown::map::make_hasher<u64, uni_common::value::Value, std::hash::random::RandomState>::{closure#0}> (inlined)
+            |          <hashbrown::map::HashMap<u64, uni_common::value::Value, std::hash::random::RandomState>>::insert
+            |          
+             --1.35%--<hashbrown::control::tag::Tag>::full (inlined)
+                       <hashbrown::raw::RawTableInner>::find_or_find_insert_index_inner (inlined)
+                       <hashbrown::raw::RawTable<(u64, uni_common::value::Value)>>::find_or_find_insert_index::<hashbrown::map::equivalent_key<u64, u64, uni_common::value::Value>::{closure#0}, hashbrown::map::make_hasher<u64, uni_common::value::Value, std::hash::random::RandomState>::{closure#0}> (inlined)
+                       <hashbrown::map::HashMap<u64, uni_common::value::Value, std::hash::random::RandomState>>::insert
+                       0x351abbd4e2f76cbf
+
+     2.70%  collection_cand  libc.so.6                               [.] unlink_chunk.isra.0
+            |
+            ---unlink_chunk.isra.0
+               _int_free_merge_chunk
+               _int_free_chunk
+               alloc::alloc::dealloc_nonnull (inlined)
+               <alloc::alloc::Global>::deallocate_impl_runtime (inlined)
+               <alloc::alloc::Global>::deallocate_impl (inlined)
+               <alloc::alloc::Global as core::alloc::Allocator>::deallocate (inlined)
+               <alloc::raw_vec::RawVecInner>::deallocate (inlined)
+               <alloc::raw_vec::RawVec<u8> as core::ops::drop::Drop>::drop (inlined)
+               core::ptr::drop_glue::<alloc::raw_vec::RawVec<u8>> (inlined)
+               core::ptr::drop_glue::<alloc::vec::Vec<u8>> (inlined)
+               |          
+               |--1.35%--core::ptr::drop_glue::<alloc::string::String> (inlined)
+               |          core::ptr::drop_glue::<(alloc::string::String, uni_common::value::Value)> (inlined)
+               |          core::ptr::drop_in_place::<(alloc::string::String, uni_common::value::Value)> (inlined)
+               |          <*mut (alloc::string::String, uni_common::value::Value)>::drop_in_place (inlined)
+               |          <hashbrown::raw::Bucket<(alloc::string::String, uni_common::value::Value)>>::drop (inlined)
+               |          <hashbrown::raw::RawTableInner>::drop_elements::<(alloc::string::String, uni_common::value::Value)> (inlined)
+               |          <hashbrown::raw::RawTableInner>::drop_inner_table::<(alloc::string::String, uni_common::value::Value), alloc::alloc::Global>
+               |          
+                --1.35%--core::ptr::drop_glue::<[alloc::vec::Vec<u8>]> (inlined)
+                          core::ptr::drop_in_place::<[alloc::vec::Vec<u8>]> (inlined)
+                          <*mut [alloc::vec::Vec<u8>]>::drop_in_place (inlined)
+                          <alloc::vec::Vec<alloc::vec::Vec<u8>> as core::ops::drop::Drop>::drop (inlined)
+                          core::ptr::drop_glue::<alloc::vec::Vec<alloc::vec::Vec<u8>>> (inlined)
+                          core::ptr::drop_glue::<(uni_common::core::id::Vid, alloc::vec::Vec<alloc::vec::Vec<u8>>)> (inlined)
+                          core::ptr::drop_in_place::<(uni_common::core::id::Vid, alloc::vec::Vec<alloc::vec::Vec<u8>>)> (inlined)
+                          <*mut (uni_common::core::id::Vid, alloc::vec::Vec<alloc::vec::Vec<u8>>)>::drop_in_place (inlined)
+                          <hashbrown::raw::Bucket<(uni_common::core::id::Vid, alloc::vec::Vec<alloc::vec::Vec<u8>>)>>::drop (inlined)
+                          <hashbrown::raw::RawTableInner>::drop_elements::<(uni_common::core::id::Vid, alloc::vec::Vec<alloc::vec::Vec<u8>>)> (inlined)
+                          <hashbrown::raw::RawTableInner>::drop_inner_table::<(uni_common::core::id::Vid, alloc::vec::Vec<alloc::vec::Vec<u8>>), alloc::alloc::Global>
+
+     1.35%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::map::HashMap<uni_common::core::id::Vid, (), rustc_hash::FxBuildHasher>>::insert
+            |
+            ---core::core_arch::x86::sse2::_mm_movemask_epi8 (inlined)
+               <hashbrown::control::group::sse2::Group>::match_tag (inlined)
+               <hashbrown::control::group::sse2::Group>::match_empty (inlined)
+               <hashbrown::raw::RawTableInner>::find_or_find_insert_index_inner (inlined)
+               <hashbrown::raw::RawTable<(uni_common::core::id::Vid, ())>>::find_or_find_insert_index::<hashbrown::map::equivalent_key<uni_common::core::id::Vid, uni_common::core::id::Vid, ()>::{closure#0}, hashbrown::map::make_hasher<uni_common::core::id::Vid, (), rustc_hash::FxBuildHasher>::{closure#0}> (inlined)
+               <hashbrown::map::HashMap<uni_common::core::id::Vid, (), rustc_hash::FxBuildHasher>>::insert
+               <uni_store::runtime::l0::L0Buffer>::apply_vertex_write (inlined)
+               <uni_store::runtime::l0::L0Buffer>::insert_vertex_with_labels_impl
+               0x598a
+
+     1.35%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::raw::RawTable<(u64, ())>>::reserve_rehash::<hashbrown::map::make_hasher<u64, (), std::hash::random::RandomState>::{closure#0}>
+            |
+            ---core::ptr::swap_chunk::<8> (inlined)
+               core::ptr::swap_nonoverlapping_bytes::swap_nonoverlapping_chunks::<8> (inlined)
+               core::ptr::swap_nonoverlapping_bytes (inlined)
+               core::ptr::swap_nonoverlapping::runtime::<hashbrown::raw::RawTableInner> (inlined)
+               core::ptr::swap_nonoverlapping::<hashbrown::raw::RawTableInner> (inlined)
+               core::intrinsics::typed_swap_nonoverlapping::<hashbrown::raw::RawTableInner> (inlined)
+               core::mem::swap::<hashbrown::raw::RawTableInner> (inlined)
+               <hashbrown::raw::RawTableInner>::resize_inner::<alloc::alloc::Global> (inlined)
+               <hashbrown::raw::RawTableInner>::reserve_rehash_inner::<alloc::alloc::Global> (inlined)
+               <hashbrown::raw::RawTable<(u64, ())>>::reserve_rehash::<hashbrown::map::make_hasher<u64, (), std::hash::random::RandomState>::{closure#0}>
+               <hashbrown::raw::RawTable<(u64, ())>>::reserve::<hashbrown::map::make_hasher<u64, (), std::hash::random::RandomState>::{closure#0}> (inlined)
+               <hashbrown::raw::RawTable<(u64, ())>>::find_or_find_insert_index::<hashbrown::map::equivalent_key<u64, u64, ()>::{closure#0}, hashbrown::map::make_hasher<u64, (), std::hash::random::RandomState>::{closure#0}> (inlined)
+               <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState>>::insert
+               <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as core::iter::traits::collect::Extend<(u64, ())>>::extend::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>, <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}>>::{closure#0} (inlined)
+               core::iter::traits::iterator::Iterator::for_each::call::<(u64, ()), <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as core::iter::traits::collect::Extend<(u64, ())>>::extend<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>, <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::
+               core::iter::adapters::map::map_fold::<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Iterator::for_each::call<(u64, ()), <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as core::iter::traits::collect::Extend<(u64, ())>>::extend<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::ke
+               core::iter::adapters::filter::filter_fold::<u64, (), <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}, core::iter::adapters::map::map_fold<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Iterator::for_each::call<(u64, ()), <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as core::iter::traits::collect::Extend<(u64, ())>>::extend<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections:
+               core::iter::adapters::map::map_fold::<(&u128, &()), u64, (), <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}, core::iter::adapters::filter::filter_fold<u64, (), <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}, core::iter::adapters::map::map_fold<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Iterator::for_each::call<(u64, ()), <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as 
+               <alloc::collections::btree::map::Range<u128, ()> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::map::map_fold<(&u128, &()), u64, (), <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}, core::iter::adapters::filter::filter_fold<u64, (), <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}, core::iter::adapters::map::map_fold<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Ite
+               <core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::filter::filter_fold<u64, (), <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}, core::iter::adapters::map::map_fold<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Iterator::for_each::call<(u64,
+               <core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::adapters::map::map_fold<u64, (u64, ()), (), <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}, core::iter::traits::iterator::Iterator::for_each::call<(u64, ()), <hashbr
+               <core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>, <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}> as core::iter::traits::iterator::Iterator>::fold::<(), core::iter::traits::iterator::Iterator::for_each::call<(u64, ()), <hashbrown::map::HashMap<u64, (
+               <core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>, <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}> as core::iter::traits::iterator::Iterator>::for_each::<<hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as core::iter::traits::collect:
+               <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState> as core::iter::traits::collect::Extend<(u64, ())>>::extend::<core::iter::adapters::map::Map<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>, <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>>::{closure#0}>> (inlined)
+               <hashbrown::set::HashSet<u64, std::hash::random::RandomState> as core::iter::traits::collect::Extend<u64>>::extend::<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>> (inlined)
+               <std::collections::hash::set::HashSet<u64> as core::iter::traits::collect::Extend<u64>>::extend::<core::iter::adapters::filter::Filter<core::iter::adapters::map::Map<alloc::collections::btree::map::Range<u128, ()>, <collection_candidates::kernels::StdPackedKeys as collection_candidates::kernels::OrderedKeys>::vids::{closure#0}>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#1}>> (inlined)
+               <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates
+
+     1.35%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::raw::RawTable<(uni_common::core::id::Vid, (alloc::vec::Vec<uni_common::core::id::Vid>, alloc::vec::Vec<uni_common::core::id::Eid>))>>::reserve_rehash::<hashbrown::map::make_hasher<uni_common::core::id::Vid, (alloc::vec::Vec<uni_common::core::id::Vid>, alloc::vec::Vec<uni_common::core::id::Eid>), std::hash::random::RandomState>::{closure#0}>
+            |
+            ---core::ptr::copy_nonoverlapping::<u8> (inlined)
+               <hashbrown::raw::RawTableInner>::resize_inner::<alloc::alloc::Global> (inlined)
+               <hashbrown::raw::RawTableInner>::reserve_rehash_inner::<alloc::alloc::Global> (inlined)
+               <hashbrown::raw::RawTable<(uni_common::core::id::Vid, (alloc::vec::Vec<uni_common::core::id::Vid>, alloc::vec::Vec<uni_common::core::id::Eid>))>>::reserve_rehash::<hashbrown::map::make_hasher<uni_common::core::id::Vid, (alloc::vec::Vec<uni_common::core::id::Vid>, alloc::vec::Vec<uni_common::core::id::Eid>), std::hash::random::RandomState>::{closure#0}>
+               <hashbrown::raw::RawTable<(uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>)>>::reserve::<hashbrown::map::make_hasher<uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>, std::hash::random::RandomState>::{closure#0}> (inlined)
+               <hashbrown::map::HashMap<uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>, std::hash::random::RandomState>>::reserve (inlined)
+               <hashbrown::map::HashMap<uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>, std::hash::random::RandomState>>::rustc_entry (inlined)
+               <std::collections::hash::map::HashMap<uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>>::entry (inlined)
+               <uni_store::runtime::l0::L0Buffer>::apply_vertex_write (inlined)
+               <uni_store::runtime::l0::L0Buffer>::insert_vertex_with_labels_impl
+               0x1bff
+
+     1.35%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::raw::RawTableInner>::drop_inner_table::<(alloc::string::String, uni_common::value::Value), alloc::alloc::Global>
+            |
+            ---<*const u8>::add (inlined)
+               <hashbrown::raw::RawIterRange<(alloc::string::String, uni_common::value::Value)>>::new (inlined)
+               <hashbrown::raw::RawTableInner>::iter::<(alloc::string::String, uni_common::value::Value)> (inlined)
+               <hashbrown::raw::RawTableInner>::drop_elements::<(alloc::string::String, uni_common::value::Value)> (inlined)
+               <hashbrown::raw::RawTableInner>::drop_inner_table::<(alloc::string::String, uni_common::value::Value), alloc::alloc::Global>
+
+     1.35%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::raw::RawTableInner>::drop_inner_table::<(uni_common::core::id::Vid, alloc::vec::Vec<alloc::vec::Vec<u8>>), alloc::alloc::Global>
+            |
+            ---<alloc::raw_vec::RawVecInner>::deallocate (inlined)
+               <alloc::raw_vec::RawVec<alloc::vec::Vec<u8>> as core::ops::drop::Drop>::drop (inlined)
+               core::ptr::drop_glue::<alloc::raw_vec::RawVec<alloc::vec::Vec<u8>>> (inlined)
+               core::ptr::drop_glue::<alloc::vec::Vec<alloc::vec::Vec<u8>>> (inlined)
+               core::ptr::drop_glue::<(uni_common::core::id::Vid, alloc::vec::Vec<alloc::vec::Vec<u8>>)> (inlined)
+               core::ptr::drop_in_place::<(uni_common::core::id::Vid, alloc::vec::Vec<alloc::vec::Vec<u8>>)> (inlined)
+               <*mut (uni_common::core::id::Vid, alloc::vec::Vec<alloc::vec::Vec<u8>>)>::drop_in_place (inlined)
+               <hashbrown::raw::Bucket<(uni_common::core::id::Vid, alloc::vec::Vec<alloc::vec::Vec<u8>>)>>::drop (inlined)
+               <hashbrown::raw::RawTableInner>::drop_elements::<(uni_common::core::id::Vid, alloc::vec::Vec<alloc::vec::Vec<u8>>)> (inlined)
+               <hashbrown::raw::RawTableInner>::drop_inner_table::<(uni_common::core::id::Vid, alloc::vec::Vec<alloc::vec::Vec<u8>>), alloc::alloc::Global>
+
+     1.35%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+            |
+            ---core::intrinsics::unlikely (inlined)
+               <usize>::checked_add (inlined)
+               <hashbrown::raw::TableLayout>::calculate_layout_for (inlined)
+               <hashbrown::raw::RawTableInner>::new_uninitialized::<alloc::alloc::Global> (inlined)
+               <hashbrown::raw::RawTableInner>::fallible_with_capacity::<alloc::alloc::Global>
+               0xfeffffffffffffff
+
+     1.35%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+            |
+            ---<u64>::wrapping_add (inlined)
+               <core::hash::sip::Sip13Rounds as core::hash::sip::Sip>::c_rounds (inlined)
+               <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::finish (inlined)
+               <core::hash::sip::SipHasher13 as core::hash::Hasher>::finish (inlined)
+               <std::hash::random::DefaultHasher as core::hash::Hasher>::finish (inlined)
+               <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+
+     1.35%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] collection_candidates::fixture
+            |
+            ---core::ptr::copy_nonoverlapping::<u8> (inlined)
+               <[u8]>::repeat (inlined)
+               <str>::repeat (inlined)
+               collection_candidates::fixture
+
+     1.35%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] collection_candidates::l0_comparison::profile::<collection_candidates::kernels::StdPackedKeys>
+            |
+            ---core::hint::black_box::<core::option::Option<std::collections::hash::set::HashSet<u64>>> (inlined)
+               collection_candidates::l0_comparison::profile::<collection_candidates::kernels::StdPackedKeys>::{closure#0} (inlined)
+               collection_candidates::l0_comparison::timed::<collection_candidates::l0_comparison::profile<collection_candidates::kernels::StdPackedKeys>::{closure#0}> (inlined)
+               collection_candidates::l0_comparison::profile::<collection_candidates::kernels::StdPackedKeys>
+
+     1.35%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] core::ptr::drop_glue::<uni_common::value::Value>
+            |
+            ---core::ptr::drop_glue::<uni_common::value::Value>
+               0x7ffffffffffffff0
+               0x55a7f3bcbf8f
+
+     1.35%  collection_cand  ld-linux-x86-64.so.2                    [.] check_match
+            |
+            ---check_match
+               do_lookup_x
+               _dl_lookup_symbol_x
+               resolve_map (inlined)
+               elf_machine_rela (inlined)
+               elf_dynamic_do_Rela (inlined)
+               _dl_relocate_object_no_relro
+               _dl_relocate_object
+               dl_main
+               _dl_sysdep_start
+               _dl_start_final (inlined)
+               _dl_start
+               _start
+
+
+
+#
+# (Tip: For latency profiling, try: perf record/report --latency)
+#

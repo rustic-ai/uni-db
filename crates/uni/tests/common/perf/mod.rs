@@ -1,5 +1,6 @@
 // Process CPU clock for bounds on work done rather than wall time.
 pub mod anchored_lookup_test;
+pub mod collection_candidates;
 pub mod cpu_clock;
 pub mod iai_wallclock;
 pub mod l0_load_probe;

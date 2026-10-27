@@ -1,0 +1,71 @@
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 7m 59s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running benches/commit_throughput.rs (target/release/deps/commit_throughput-521b56e01c6f80f8)
+Benchmarking commit_throughput/wal_on/1
+Benchmarking commit_throughput/wal_on/1: Warming up for 3.0000 s
+Benchmarking commit_throughput/wal_on/1: Collecting 10 samples in estimated 15.333 s (1320 iterations)
+Benchmarking commit_throughput/wal_on/1: Analyzing
+commit_throughput/wal_on/1
+                        time:   [10.581 ms 10.757 ms 10.866 ms]
+                        thrpt:  [2.3008 Kelem/s 2.3240 Kelem/s 2.3628 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking commit_throughput/wal_on/4
+Benchmarking commit_throughput/wal_on/4: Warming up for 3.0000 s
+Benchmarking commit_throughput/wal_on/4: Collecting 10 samples in estimated 15.596 s (660 iterations)
+Benchmarking commit_throughput/wal_on/4: Analyzing
+commit_throughput/wal_on/4
+                        time:   [20.158 ms 20.549 ms 20.802 ms]
+                        thrpt:  [4.8073 Kelem/s 4.8664 Kelem/s 4.9607 Kelem/s]
+Benchmarking commit_throughput/wal_on/12
+Benchmarking commit_throughput/wal_on/12: Warming up for 3.0000 s
+Benchmarking commit_throughput/wal_on/12: Collecting 10 samples in estimated 18.647 s (275 iterations)
+Benchmarking commit_throughput/wal_on/12: Analyzing
+commit_throughput/wal_on/12
+                        time:   [59.060 ms 60.380 ms 61.485 ms]
+                        thrpt:  [4.8792 Kelem/s 4.9686 Kelem/s 5.0796 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking commit_throughput/wal_on/24
+Benchmarking commit_throughput/wal_on/24: Warming up for 3.0000 s
+Benchmarking commit_throughput/wal_on/24: Collecting 10 samples in estimated 20.008 s (165 iterations)
+Benchmarking commit_throughput/wal_on/24: Analyzing
+commit_throughput/wal_on/24
+                        time:   [120.71 ms 123.25 ms 125.64 ms]
+                        thrpt:  [4.7757 Kelem/s 4.8683 Kelem/s 4.9705 Kelem/s]
+
+Benchmarking commit_throughput/wal_off/1
+Benchmarking commit_throughput/wal_off/1: Warming up for 3.0000 s
+Benchmarking commit_throughput/wal_off/1: Collecting 10 samples in estimated 15.820 s (880 iterations)
+Benchmarking commit_throughput/wal_off/1: Analyzing
+commit_throughput/wal_off/1
+                        time:   [15.000 ms 15.640 ms 16.033 ms]
+                        thrpt:  [1.5593 Kelem/s 1.5984 Kelem/s 1.6667 Kelem/s]
+Benchmarking commit_throughput/wal_off/4
+Benchmarking commit_throughput/wal_off/4: Warming up for 3.0000 s
+Benchmarking commit_throughput/wal_off/4: Collecting 10 samples in estimated 15.753 s (550 iterations)
+Benchmarking commit_throughput/wal_off/4: Analyzing
+commit_throughput/wal_off/4
+                        time:   [25.663 ms 25.999 ms 26.284 ms]
+                        thrpt:  [3.8046 Kelem/s 3.8463 Kelem/s 3.8967 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking commit_throughput/wal_off/12
+Benchmarking commit_throughput/wal_off/12: Warming up for 3.0000 s
+Benchmarking commit_throughput/wal_off/12: Collecting 10 samples in estimated 15.851 s (220 iterations)
+Benchmarking commit_throughput/wal_off/12: Analyzing
+commit_throughput/wal_off/12
+                        time:   [65.998 ms 68.038 ms 70.507 ms]
+                        thrpt:  [4.2549 Kelem/s 4.4093 Kelem/s 4.5456 Kelem/s]
+Benchmarking commit_throughput/wal_off/24
+Benchmarking commit_throughput/wal_off/24: Warming up for 3.0000 s
+Benchmarking commit_throughput/wal_off/24: Collecting 10 samples in estimated 16.887 s (110 iterations)
+Benchmarking commit_throughput/wal_off/24: Analyzing
+commit_throughput/wal_off/24
+                        time:   [141.46 ms 143.28 ms 145.06 ms]
+                        thrpt:  [4.1362 Kelem/s 4.1876 Kelem/s 4.2415 Kelem/s]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low severe
+

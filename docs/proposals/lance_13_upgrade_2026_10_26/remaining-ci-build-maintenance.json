@@ -1,0 +1,9 @@
+{
+  "build_pause_seconds": 211.437,
+  "pause_scope": "Sweep build only, before test execution; all processes resumed at normal priority.",
+  "example_binaries_recompressed": 47,
+  "compression_errors": 0,
+  "directory_compression_preference_restored": true,
+  "selection": "Full workflow command, package exclusions, filter and case counts retained.",
+  "default_binding_sha256": "5159ea0a5f126aecb06b9f03c6fc35e6d2aaaa5d3e7c611f7a90b9dfaba79374"
+}

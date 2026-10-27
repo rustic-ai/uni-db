@@ -32,6 +32,15 @@ against existing asserting coverage in `locy_is_ref_binding.rs`,
 The stale SLG wording and P2 handoff statuses were corrected. Existing
 compliance artifacts and the website lockfile were left alone.
 
+## Subsequent investigation of #310, #311 and #317
+
+See [the follow-up evidence](issues_310_311_317_followup.md). Expanded #311
+coverage reproduced a separate multi-label keyed-MERGE label-loss defect,
+with a local binding fix; the original intermittent ordinary-SET report
+remains unconfirmed. The revised [#317 hypothetical-query design](locy_business_actions_317.md)
+withdraws the catalog/Action abstraction; native correlation is proposed, not implemented. The initial findings below preserve their
+historical assessment.
+
 ## Findings and order of work
 
 | Order | Item | Assessment | Next action and completion criterion |

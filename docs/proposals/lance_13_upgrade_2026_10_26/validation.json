@@ -1,0 +1,331 @@
+{
+  "status": "not_all_ci_green",
+  "environment": "Linux CPU, foreground commands at normal priority; Cargo build/test lanes serialized",
+  "cargo_build_jobs": 6,
+  "rustc_wrapper": "",
+  "nextest_summaries": {
+    "format-tests": [
+      "Summary [   0.025s] 3 tests run: 3 passed, 832 skipped"
+    ],
+    "workspace-host-tests": [
+      "Summary [ 325.150s] 8647 tests run: 8647 passed (18 slow), 137 skipped"
+    ],
+    "pyo3-loader": [
+      "Summary [   0.188s] 35 tests run: 35 passed, 0 skipped"
+    ],
+    "cloud-store": [
+      "Summary [   0.545s] 17 tests run: 17 passed, 368 skipped"
+    ],
+    "cloud-hybrid": [
+      "Summary [   0.887s] 1 test run: 1 passed, 4042 skipped"
+    ],
+    "cypher-tck": [
+      "Summary [  66.206s] 3925 tests run: 3925 passed, 1 skipped",
+      "Summary [  66.832s] 3925 tests run: 3925 passed, 1 skipped"
+    ],
+    "locy-tck": [
+      "Summary [   4.611s] 558 tests run: 558 passed, 0 skipped",
+      "Summary [   4.762s] 558 tests run: 558 passed, 0 skipped"
+    ],
+    "failpoints": [
+      "Summary [  15.307s] 246 tests run: 246 passed, 4831 skipped"
+    ]
+  },
+  "pytest": {
+    "uni-db": {
+      "passed": 1148,
+      "skipped": 15
+    },
+    "uni-pydantic": {
+      "passed": 317
+    }
+  },
+  "checks": {
+    "cargo_fmt": "passed",
+    "repository_static_guards": 8,
+    "cargo_deny": [
+      "advisories",
+      "bans",
+      "licenses",
+      "sources"
+    ],
+    "python_ruff": "passed",
+    "python_ruff_format": "passed",
+    "python_stubtest": "passed",
+    "lance_11_to_13_to_11_fixture": "passed",
+    "fresh_lance_13_database_read_by_lance_11": "passed",
+    "paired_performance_smoke": "passed",
+    "actual_index_hits_with_both_bindings": "passed"
+  },
+  "lanes": [
+    {
+      "lane": "binding-build",
+      "command": [
+        "/home/rohit/work/dragonscale/uni/bindings/uni-db/.venv/bin/maturin",
+        "develop"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni/bindings/uni-db",
+      "exit_code": 0,
+      "elapsed_seconds": 662.55
+    },
+    {
+      "lane": "forward-compatibility",
+      "command": [
+        "/home/rohit/work/dragonscale/uni/bindings/uni-db/.venv/bin/python",
+        "/tmp/uni-lance-upgrade/verify.py",
+        "mutate"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "exit_code": 0,
+      "elapsed_seconds": 0.631
+    },
+    {
+      "lane": "rollback-compatibility",
+      "command": [
+        "/home/rohit/work/dragonscale/uni/bindings/uni-db/.venv/bin/python",
+        "/tmp/uni-lance-upgrade/verify.py",
+        "rollback"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "exit_code": 0,
+      "elapsed_seconds": 0.203
+    },
+    {
+      "lane": "perf-old",
+      "command": [
+        "/home/rohit/work/dragonscale/uni/bindings/uni-db/.venv/bin/python",
+        "/tmp/uni-lance-upgrade/perf.py",
+        "old"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "exit_code": 0,
+      "elapsed_seconds": 3.381
+    },
+    {
+      "lane": "perf-new",
+      "command": [
+        "/home/rohit/work/dragonscale/uni/bindings/uni-db/.venv/bin/python",
+        "/tmp/uni-lance-upgrade/perf.py",
+        "new"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "exit_code": 0,
+      "elapsed_seconds": 3.259
+    },
+    {
+      "lane": "python-tests",
+      "command": [
+        "/home/rohit/work/dragonscale/uni/bindings/uni-db/.venv/bin/python",
+        "-m",
+        "pytest",
+        "tests/",
+        "-q",
+        "-n",
+        "auto"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni/bindings/uni-db",
+      "exit_code": 0,
+      "elapsed_seconds": 88.494
+    },
+    {
+      "lane": "pydantic-tests",
+      "command": [
+        "/home/rohit/work/dragonscale/uni/bindings/uni-pydantic/.venv/bin/python",
+        "-m",
+        "pytest",
+        "tests/",
+        "-q",
+        "-n",
+        "auto"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni/bindings/uni-pydantic",
+      "exit_code": 0,
+      "elapsed_seconds": 2.489
+    },
+    {
+      "lane": "pyo3-loader",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "uni-plugin-pyo3",
+        "--features",
+        "pyo3"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "exit_code": 0,
+      "elapsed_seconds": 500.155
+    },
+    {
+      "lane": "cloud-store",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "uni-store",
+        "--test",
+        "integration",
+        "--run-ignored",
+        "all",
+        "-E",
+        "test(/^cloud_integration_test::/)"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "exit_code": 0,
+      "elapsed_seconds": 9.105
+    },
+    {
+      "lane": "cloud-hybrid",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "uni-db",
+        "--test",
+        "integration",
+        "--run-ignored",
+        "all",
+        "-E",
+        "test(/^hybrid_localstack_e2e::/)"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "exit_code": 0,
+      "elapsed_seconds": 686.612
+    },
+    {
+      "lane": "cypher-tck",
+      "command": [
+        "bash",
+        "scripts/run_tck_with_report.sh",
+        "--both"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "exit_code": 0,
+      "elapsed_seconds": 758.891
+    },
+    {
+      "lane": "locy-tck",
+      "command": [
+        "bash",
+        "scripts/run_locy_tck_with_report.sh",
+        "--both"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "exit_code": 0,
+      "elapsed_seconds": 20.897
+    },
+    {
+      "lane": "failpoints",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "uni-db",
+        "-p",
+        "uni-store",
+        "--features",
+        "failpoints",
+        "--run-ignored",
+        "all",
+        "-E",
+        "test(/resilience|recovery|durability|crash_harness/)"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "exit_code": 0,
+      "elapsed_seconds": 801.921
+    },
+    {
+      "lane": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--exclude",
+        "uni-tck",
+        "--exclude",
+        "uni-python-cuda",
+        "--exclude",
+        "uni-python-metal",
+        "--exclude",
+        "uni-python-onnx-cuda",
+        "--exclude",
+        "uni-python-onnx-metal",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": "/home/rohit/work/dragonscale/uni",
+      "exit_code": 0,
+      "elapsed_seconds": 277.02
+    }
+  ],
+  "workspace_command": [
+    "cargo",
+    "nextest",
+    "run",
+    "--workspace",
+    "--no-fail-fast",
+    "--exclude",
+    "uni-tck",
+    "--exclude",
+    "uni-python",
+    "--exclude",
+    "uni-python-onnx",
+    "--exclude",
+    "uni-python-cuda",
+    "--exclude",
+    "uni-python-metal",
+    "--exclude",
+    "uni-python-onnx-cuda",
+    "--exclude",
+    "uni-python-onnx-metal"
+  ],
+  "initial_workspace_attempt": {
+    "passed": 8644,
+    "failed": 3,
+    "resolution": "Two sandbox-denied TCP listeners passed with host access. The Lance runtime-drop probe was adapted to recognize a propagated task-cancellation error, then the full workspace passed."
+  },
+  "limitations": [
+    "Development-build performance smoke: 5000 rows, three repetitions, fixed old/new order; no production-scale speedup claim.",
+    "Cross-version fixture excludes inherited-fork FTS/vector queries; Lance 11 already failed the inherited FTS path. Primary search results and fork row/edge isolation were compared.",
+    "CUDA/Metal wheel variants and live Azure/GCP credentials were not tested.",
+    "Cargo emitted a proc-macro-error2 2.0.1 future-incompatibility notice after the passing Clippy gate."
+  ],
+  "cleanup": {
+    "localstack": "Task-owned LocalStack 4.13.1 container removed after both S3 lanes passed.",
+    "completed_test_executables": 18,
+    "scope": "Only inventoried executables generated during this upgrade were removed for disk space; sources, libraries, native bindings and evidence retained."
+  },
+  "initial_upgrade_validation_status": "passed",
+  "remaining_ci": {
+    "status": "completed_with_failures",
+    "manifest": "remaining-ci-validation.json",
+    "checks": 66,
+    "passed": 63,
+    "failed": 3,
+    "confirmed_failures": [
+      "fuzz-nightly-cypher_parse",
+      "iai-compare",
+      "metamorphic-soak"
+    ],
+    "pending": []
+  },
+  "follow_up_ci_completion": {
+    "status": "completed_with_strict_iai_alert",
+    "manifest": "../parser_backtracking_2026_10_27/ci-completion-validation.json",
+    "resolved": [
+      "parser timeouts",
+      "binding soak budget",
+      "Locy AS PROB regression",
+      "TCK report failure propagation"
+    ],
+    "remaining": [
+      "strict IAI baseline comparison requires CI qualification"
+    ]
+  }
+}

@@ -306,7 +306,7 @@ comparison_tail = {
     | IS ~ NOT? ~ NULL
     | IS ~ UNIQUE
     | IS ~ ":" ~ identifier_or_keyword ~ (pipe ~ ":"? ~ identifier_or_keyword)*  // IS :Label[|Label]
-    | ":" ~ identifier_or_keyword ~ (pipe ~ ":"? ~ identifier_or_keyword)*       // Bare :Label[|Label]
+    | (":" ~ identifier_or_keyword)+ ~ (pipe ~ ":"? ~ identifier_or_keyword)*    // Bare :Label[:Label|Label]
     | IN ~ additive_expression
     | CONTAINS ~ additive_expression
     | STARTS ~ WITH ~ additive_expression
@@ -391,12 +391,56 @@ primary_expression = {
 // the parser descending into an interior it is about to discard.
 pattern_expression = { &pattern_ahead ~ node_pattern ~ (relationship_pattern ~ node_pattern)+ }
 
-// Scan to the `)` that closes this `(`, then require the `-` or `<` that every
-// `relationship_pattern` alternative begins with. String literals are consumed
-// whole via `string`, so a bracket inside one cannot unbalance the scan, and
-// `string` already handles backslash escapes.
-pattern_ahead = @{ balanced_parens ~ ws_or_comment* ~ ("<" | "-") }
-balanced_parens = @{ "(" ~ (balanced_parens | string | !("(" | ")") ~ ANY)* ~ ")" }
+// Scan to the `)` that closes this `(`, then require the full chain of
+// `(relationship_pattern ~ node_pattern)+` to be lexically present. Each node
+// and relationship header is validated up to its properties/WHERE clause so
+// that expressions like `({k: ...}.k)-->(b)` or `(a {k: ...})--(1)` (subtraction
+// of `-1`) do not pass the lookahead, fail after parsing the first node's
+// nested properties, and re-parse the interior via `"(" ~ expression ~ ")"`.
+pattern_ahead = @{
+    node_ahead ~ (ws_or_comment* ~ rel_ahead ~ ws_or_comment* ~ node_ahead)+
+}
+node_ahead = @{
+    "(" ~ ws_or_comment*
+    ~ (identifier ~ ws_or_comment*)?
+    ~ (node_labels ~ ws_or_comment*)?
+    ~ (
+        (balanced_braces | parameter) ~ ws_or_comment* ~ (WHERE ~ ws_or_comment* ~ balanced_group_body)?
+        | WHERE ~ ws_or_comment* ~ balanced_group_body
+    )?
+    ~ ")"
+}
+rel_ahead = @{
+    "<-" ~ ws_or_comment* ~ rel_detail_ahead ~ ws_or_comment* ~ ("->" | "-")
+    | "-" ~ ws_or_comment* ~ rel_detail_ahead ~ ws_or_comment* ~ ("->" | "-")
+    | "<-->"
+    | "<--"
+    | "-->"
+    | "--"
+}
+rel_detail_ahead = @{
+    "[" ~ ws_or_comment*
+    ~ (identifier ~ ws_or_comment*)?
+    ~ (relationship_types ~ ws_or_comment*)?
+    ~ (range_literal ~ ws_or_comment*)?
+    ~ (
+        (balanced_braces | parameter) ~ ws_or_comment* ~ (WHERE ~ ws_or_comment* ~ balanced_group_body)?
+        | WHERE ~ ws_or_comment* ~ balanced_group_body
+    )?
+    ~ "]"
+}
+balanced_parens = @{
+    "(" ~ balanced_group_body ~ ")"
+}
+balanced_brackets = @{
+    "[" ~ balanced_group_body ~ "]"
+}
+balanced_braces = @{
+    "{" ~ balanced_group_body ~ "}"
+}
+balanced_group_body = @{
+    (balanced_parens | balanced_brackets | balanced_braces | string | escaped_name | COMMENT | !("(" | ")" | "[" | "]" | "{" | "}" | "'" | "\"" | "`") ~ ANY)*
+}
 ws_or_comment = @{
     " " | "\t" | "\n" | "\r"
     | "//" ~ (!"\n" ~ ANY)*
@@ -416,9 +460,47 @@ ws_or_comment = @{
 // `[x IN [x IN ... [1], 1], 1]`, a valid query, took 2.6 s at depth 14.
 list_expression = {
     "[" ~ "]"                                                 // Empty list
-    | "[" ~ pattern_comprehension_body ~ "]"                  // Pattern comprehension
+    | "[" ~ &pattern_comprehension_ahead ~ pattern_comprehension_body ~ "]" // Pattern comprehension
     | "[" ~ list_comprehension_body ~ "]"                     // List comprehension, or a literal led by `x IN src`
     | "[" ~ !(identifier ~ IN) ~ expression ~ ("," ~ expression)* ~ "]" // List literal
+}
+
+// A pattern comprehension begins with `(id =)? (shortestPath(...) | (...))` and
+// needs a comprehension separator `|` (not a `:Label|Label` disjunction pipe)
+// after the pattern path and optional WHERE clause. Check this lexically before
+// parsing a node's properties: otherwise a list literal such as
+// [(a {k: [(a {k: 1})]})], [(a {k: ...}):A|B], or [(a {k: ...})-->(b), c:A|B]
+// reparses its entire interior at every level.
+pattern_comprehension_ahead = @{
+    ws_or_comment*
+    ~ (identifier ~ ws_or_comment* ~ "=" ~ ws_or_comment*)?
+    ~ (
+        (^"shortestpath" | ^"allshortestpaths") ~ ws_or_comment* ~ balanced_parens
+        | pattern_element_ahead+
+    )
+    ~ ws_or_comment*
+    ~ (WHERE ~ ws_or_comment* ~ comprehension_scan_token+)?
+    ~ "|"
+}
+pattern_element_ahead = @{
+    ws_or_comment*
+    ~ (
+        node_ahead ~ (ws_or_comment* ~ rel_ahead ~ ws_or_comment* ~ node_ahead)*
+        | "(" ~ ws_or_comment* ~ (identifier ~ ws_or_comment* ~ "=" ~ ws_or_comment*)? ~ node_ahead ~ balanced_group_body ~ ")" ~ (ws_or_comment* ~ ("+" | "*" | balanced_braces))?
+    )
+}
+comprehension_scan_token = _{
+    string | escaped_name | COMMENT | comprehension_scan_group | comprehension_label_pipe
+    | !("(" | ")" | "[" | "]" | "{" | "}" | "|" | "'" | "\"" | "`") ~ ANY
+}
+comprehension_label_pipe = _{
+    ":" ~ ws_or_comment* ~ identifier_or_keyword
+    ~ (ws_or_comment* ~ "|" ~ ws_or_comment* ~ (":" ~ ws_or_comment*)? ~ identifier_or_keyword)+
+}
+comprehension_scan_group = _{
+    "(" ~ (comprehension_scan_token | "|")* ~ ")"
+    | "[" ~ (comprehension_scan_token | "|")* ~ "]"
+    | "{" ~ (comprehension_scan_token | "|")* ~ "}"
 }
 
 // Pattern comprehension: [p = (n)-->(m) WHERE ... | expr] or [(n)-->(m) | expr]
@@ -518,14 +600,17 @@ node_pattern = {
 }
 
 node_predicate = {
-    properties ~ WHERE ~ expression
+    properties ~ (WHERE ~ expression)?
     | WHERE ~ expression
-    | properties
 }
 
-node_labels = { node_label_disjunction | node_label_conjunction }
-node_label_disjunction = { ":" ~ identifier_or_keyword ~ (pipe ~ ":"? ~ identifier_or_keyword)+ }
-node_label_conjunction = { (":" ~ identifier_or_keyword)+ }
+node_labels = {
+    ":" ~ identifier_or_keyword
+    ~ (
+        (pipe ~ ":"? ~ identifier_or_keyword)+
+        | (":" ~ identifier_or_keyword)*
+    )
+}
 
 relationship_pattern = {
     arrow_left ~ "[" ~ relationship_detail ~ "]" ~ arrow_right // <-[]->, bidirectional with detail
@@ -543,9 +628,8 @@ relationship_detail = {
 }
 
 rel_predicate = {
-    properties ~ WHERE ~ expression
+    properties ~ (WHERE ~ expression)?
     | WHERE ~ expression
-    | properties
 }
 
 relationship_types = { ":" ~ identifier_or_keyword ~ (pipe ~ ":"? ~ identifier_or_keyword)* }

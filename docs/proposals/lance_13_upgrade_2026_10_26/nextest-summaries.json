@@ -1,0 +1,28 @@
+{
+  "format-tests": [
+    "Summary [   0.025s] 3 tests run: 3 passed, 832 skipped"
+  ],
+  "workspace-host-tests": [
+    "Summary [ 325.150s] 8647 tests run: 8647 passed (18 slow), 137 skipped"
+  ],
+  "pyo3-loader": [
+    "Summary [   0.188s] 35 tests run: 35 passed, 0 skipped"
+  ],
+  "cloud-store": [
+    "Summary [   0.545s] 17 tests run: 17 passed, 368 skipped"
+  ],
+  "cloud-hybrid": [
+    "Summary [   0.887s] 1 test run: 1 passed, 4042 skipped"
+  ],
+  "cypher-tck": [
+    "Summary [  66.206s] 3925 tests run: 3925 passed, 1 skipped",
+    "Summary [  66.832s] 3925 tests run: 3925 passed, 1 skipped"
+  ],
+  "locy-tck": [
+    "Summary [   4.611s] 558 tests run: 558 passed, 0 skipped",
+    "Summary [   4.762s] 558 tests run: 558 passed, 0 skipped"
+  ],
+  "failpoints": [
+    "Summary [  15.307s] 246 tests run: 246 passed, 4831 skipped"
+  ]
+}

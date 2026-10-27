@@ -1,0 +1,6 @@
+# started on Mon Oct 26 09:35:51 2026
+
+762312647,,cpu_core/cycles/,171966669,100.00,,
+2371657510,,cpu_core/instructions/,171966669,100.00,,
+4005878,,cpu_core/cache-misses/,171966669,100.00,,
+473206,,cpu_core/branch-misses/,171966669,100.00,,

@@ -1,0 +1,20 @@
+== iai-callgrind pilot: 5 runs ==
+[ 1/ 5] wrote /home/rohit/work/dragonscale/uni/target/iai-pilot/run-01.json (9 benchmarks)
+[ 2/ 5] wrote /home/rohit/work/dragonscale/uni/target/iai-pilot/run-02.json (9 benchmarks)
+[ 3/ 5] wrote /home/rohit/work/dragonscale/uni/target/iai-pilot/run-03.json (9 benchmarks)
+[ 4/ 5] wrote /home/rohit/work/dragonscale/uni/target/iai-pilot/run-04.json (9 benchmarks)
+[ 5/ 5] wrote /home/rohit/work/dragonscale/uni/target/iai-pilot/run-05.json (9 benchmarks)
+
+== per-target coefficient of variation ==
+
+Stability is half the gate. CV < 1.0% is necessary, not sufficient: run the injected-regression correlation leg before gating any target.
+target                                                         n        mean Ir      CV %  off-thr %  stable
+baselines::baseline_noop.noop                                  5          4,002    0.0000        0.0  yes   [4,002 .. 4,002]
+baselines::baseline_session_only.session_only                  5        184,486    0.1687        0.0  yes   [184,101 .. 184,859]
+read_paths::expand_batch_one_hop_warm.warm                     5     18,680,123    0.1259        0.1  yes   [18,652,289 .. 18,704,090]
+read_paths::hnsw_top10_search.top10                            5     18,730,213    0.1251        6.2  yes   [18,698,476 .. 18,763,829]
+read_paths::parse_and_plan_cold.cold                           5      8,372,326    1.3691        0.4  NO   [8,239,957 .. 8,463,884]
+read_paths::property_read_across_l0_l1.l0_over_l1              5     11,828,041    0.2368        0.4  yes   [11,805,568 .. 11,874,790]
+read_paths::vertex_lookup_by_id.by_id                          5      9,572,342    0.1802        0.7  yes   [9,550,788 .. 9,596,161]
+write_paths::l0_to_l1_flush.l0_to_l1                           5     56,771,173    0.6940       60.4  yes   [56,443,735 .. 57,223,515]
+write_paths::transaction_commit_wal_on.wal_on                  5      2,022,657   19.3935        0.9  NO   [1,735,468 .. 2,465,670]

@@ -1,0 +1,30 @@
+{
+  "binding": "/home/rohit/work/dragonscale/uni/bindings/uni-db",
+  "rows": 5000,
+  "repeats": [
+    {
+      "ingest_flush_seconds": 0.3872334440238774,
+      "point_seconds_per_query": 0.004057819722220302,
+      "range_seconds_per_query": 0.005242577358148992,
+      "scan_seconds_per_query": 0.012638201280497014
+    },
+    {
+      "ingest_flush_seconds": 0.38610311900265515,
+      "point_seconds_per_query": 0.004596060323528946,
+      "range_seconds_per_query": 0.006378430598415434,
+      "scan_seconds_per_query": 0.014660645918920636
+    },
+    {
+      "ingest_flush_seconds": 0.3950372759718448,
+      "point_seconds_per_query": 0.0036416650377213955,
+      "range_seconds_per_query": 0.0053663079580292105,
+      "scan_seconds_per_query": 0.013078890959732234
+    }
+  ],
+  "medians": {
+    "ingest_flush_seconds": 0.3872334440238774,
+    "point_seconds_per_query": 0.004057819722220302,
+    "range_seconds_per_query": 0.0053663079580292105,
+    "scan_seconds_per_query": 0.013078890959732234
+  }
+}

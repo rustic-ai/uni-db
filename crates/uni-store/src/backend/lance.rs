@@ -209,9 +209,26 @@ impl LanceDbBackend {
             batches.push(RecordBatch::new_empty(schema.clone()));
         }
         let uri = self.directory.dataset_uri(table);
-        let params = self.directory.write_params(mode);
+        let mut params = self.directory.write_params(mode);
+        // Resolve once, as Dataset::write does internally. Existing datasets
+        // retain their exact format; only absent datasets use Uni's 2.1 policy.
+        let destination = match self.directory.open(table).await {
+            Ok(dataset) => {
+                params.data_storage_version = None;
+                lance::dataset::WriteDestination::Dataset(Arc::new(dataset))
+            }
+            Err(error) if crate::store_utils::is_dataset_not_found(&error) => {
+                params.data_storage_version =
+                    super::lance_directory::write_params(lance::dataset::WriteMode::Create)
+                        .data_storage_version;
+                lance::dataset::WriteDestination::Uri(&uri)
+            }
+            Err(error) => return Err(error),
+        };
         let reader = arrow_array::RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
-        lance::Dataset::write(reader, &uri, Some(params))
+        lance::dataset::InsertBuilder::new(destination)
+            .with_params(&params)
+            .execute_stream(Box::new(reader))
             .await
             .map_err(|e| anyhow!("Write to '{}' ({:?}) failed: {}", table, mode, e))?;
         Ok(())
@@ -2030,12 +2047,12 @@ mod tests {
     use arrow_schema::{DataType, Field};
     use tempfile::TempDir;
 
-    /// Pins Lance 11's cancelled-runtime defect: the scan panics on a
+    /// Pins Lance's cancelled-runtime defect: the scan errors, panics on a
     /// cancelled SpawnedTask, or hangs during cancellation/read-back. Probe
     /// each mode in a child so the latter cannot hang this test process.
     ///
     /// Uni keeps bulk event read-back on its IO runtime (`uni_bulk::ScanFeed`).
-    /// A normal result or error here means the upstream behavior changed.
+    /// Successful read-back here means the upstream behavior changed.
     #[test]
     fn lance_scan_polled_after_its_runtime_is_dropped_fails_in_lance() {
         const CHILD_MODE: &str = "UNI_LANCE_RUNTIME_DROP_CHILD_MODE";
@@ -2077,7 +2094,7 @@ mod tests {
                     status.success() && output.contains("test result: ok. 1 passed;"),
                     "[{mode}] unexpected probe failure: {output}"
                 );
-                eprintln!("[{mode}] reproduced Lance's cancelled-task panic");
+                eprintln!("[{mode}] reproduced Lance's cancelled-task failure");
             } else {
                 // Only a hang after the cancellation boundary witnesses this
                 // defect. Fixture setup or an initial read timing out is a failure.
@@ -2157,16 +2174,27 @@ mod tests {
                 })
                 .await
             });
-            let panic = outcome.expect_err(mode).into_panic();
-            let message = panic
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| panic.downcast_ref::<&str>().copied())
-                .unwrap_or_default();
-            assert!(
-                message.contains("JoinError::Cancelled"),
-                "[{mode}] expected Lance's unwrap of a cancelled read, got: {message}"
-            );
+            match outcome {
+                // Lance 13 propagates cancellation from the decoder as an
+                // error on some read paths. The scan still cannot resume.
+                Ok(Err(message)) => assert!(
+                    message.contains("task") && message.contains("was cancelled"),
+                    "[{mode}] expected a cancelled read, got: {message}"
+                ),
+                Err(error) => {
+                    let panic = error.into_panic();
+                    let message = panic
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| panic.downcast_ref::<&str>().copied())
+                        .unwrap_or_default();
+                    assert!(
+                        message.contains("JoinError::Cancelled"),
+                        "[{mode}] expected Lance's unwrap of a cancelled read, got: {message}"
+                    );
+                }
+                Ok(Ok(rows)) => panic!("[{mode}] scan resumed successfully ({rows} rows)"),
+            }
         }
     }
 

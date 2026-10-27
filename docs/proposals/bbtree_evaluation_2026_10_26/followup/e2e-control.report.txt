@@ -1,0 +1,61 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 979  of event 'cpu-clock:u'
+# Event count (approx.): 1961923832
+#
+# Overhead  Command          Shared Object                           Symbol                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
+# ........  ...............  ......................................  ...............................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................................
+#
+    37.08%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] uni_store::runtime::columnar_scan::l0_prefilter_candidates::<alloc::vec::Vec<u64>>
+    12.46%  collection_cand  libc.so.6                               [.] __memcmp_avx2_movbe
+            |
+            ---__memcmp_avx2_movbe
+
+     4.39%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] keccak::backends::soft::keccak_p::<u64, 24>
+     2.66%  collection_cand  libc.so.6                               [.] __memmove_avx_unaligned_erms
+            |
+            ---__memmove_avx_unaligned_erms
+
+     1.84%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <alloc::string::String as core::clone::Clone>::clone
+     1.33%  collection_cand  libc.so.6                               [.] _int_free_chunk
+            |
+            ---_int_free_chunk
+
+     1.02%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] uni_store::runtime::columnar_scan::l0_value_may_equal
+     1.02%  collection_cand  libc.so.6                               [.] __libc_malloc2
+            |
+            ---__libc_malloc2
+
+     1.02%  collection_cand  libc.so.6                               [.] cfree@GLIBC_2.2.5
+            |
+            ---cfree@GLIBC_2.2.5
+
+     0.92%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     0.92%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <uni_store::runtime::writer::Writer>::flush_stream_l1::{closure#0}
+     0.82%  lance-cpu        collection_candidates-e16a25ee9d65d605  [.] fsst::fsst::compress::<i32>
+     0.72%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+     0.72%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] uni_store::runtime::columnar_scan::l0_prefilter_candidates::<[u64; 0]>
+     0.61%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <collection_candidates::kernels::IntPropertyIndex>::build
+     0.61%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <pest::parser_state::ParserState<uni_cypher::grammar::Rule>>::inc_call_check_limit
+     0.61%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <uni_store::runtime::l0::L0Buffer>::insert_vertex_with_labels_impl
+     0.61%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] alloc::fmt::format::format_inner
+     0.51%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] uni_store::runtime::occ::is_crdt_carveout
+     0.51%  collection_cand  libc.so.6                               [.] _int_free_create_chunk
+            |
+            ---_int_free_create_chunk
+               _int_free_merge_chunk
+               _int_free_chunk
+
+     0.51%  collection_cand  libc.so.6                               [.] _int_malloc
+            |
+            ---_int_malloc
+               __libc_malloc2
+
+
+
+#
+# (Tip: Boolean options have negative forms, e.g.: perf report --no-children)
+#

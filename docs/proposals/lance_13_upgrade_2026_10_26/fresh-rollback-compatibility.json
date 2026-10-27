@@ -1,0 +1,13 @@
+{
+  "checks": "Lance 11 reads fresh Lance 13 database and BTree index",
+  "rows": [
+    {
+      "count": 5000
+    }
+  ],
+  "point": [
+    {
+      "value": "value-2500"
+    }
+  ]
+}

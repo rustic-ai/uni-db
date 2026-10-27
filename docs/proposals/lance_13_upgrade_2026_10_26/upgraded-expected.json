@@ -1,0 +1,118 @@
+{
+  "primary": {
+    "people": [
+      {
+        "name": "Alice",
+        "age": 30
+      },
+      {
+        "name": "Bob",
+        "age": 40
+      },
+      {
+        "name": "Later",
+        "age": 70
+      },
+      {
+        "name": "Upgraded",
+        "age": 99
+      }
+    ],
+    "edges": [
+      {
+        "src": "Alice",
+        "dst": "Bob",
+        "since": 2020
+      }
+    ],
+    "loose": [
+      {
+        "name": "schemaless"
+      }
+    ],
+    "fts": [
+      {
+        "title": "Doc0"
+      },
+      {
+        "title": "Doc1"
+      }
+    ],
+    "vector": [
+      {
+        "title": "Doc0"
+      },
+      {
+        "title": "Doc1"
+      }
+    ]
+  },
+  "fork": {
+    "people": [
+      {
+        "name": "Alice",
+        "age": 30
+      },
+      {
+        "name": "Bob",
+        "age": 40
+      },
+      {
+        "name": "Fork",
+        "age": 50
+      },
+      {
+        "name": "ForkUpgrade",
+        "age": 99
+      }
+    ],
+    "edges": [
+      {
+        "src": "Alice",
+        "dst": "Bob",
+        "since": 2020
+      }
+    ],
+    "loose": [
+      {
+        "name": "schemaless"
+      }
+    ]
+  },
+  "child": {
+    "people": [
+      {
+        "name": "Alice",
+        "age": 30
+      },
+      {
+        "name": "Bob",
+        "age": 40
+      },
+      {
+        "name": "Child",
+        "age": 60
+      },
+      {
+        "name": "ChildUpgrade",
+        "age": 99
+      },
+      {
+        "name": "Fork",
+        "age": 50
+      }
+    ],
+    "edges": [
+      {
+        "src": "Alice",
+        "dst": "Bob",
+        "since": 2020
+      }
+    ],
+    "loose": [
+      {
+        "name": "schemaless"
+      }
+    ]
+  }
+}

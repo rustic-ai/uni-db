@@ -27,7 +27,7 @@ uni-algo = { workspace = true, optional = true }
 arrow = { workspace = true, features = ["ffi"] }
 arrow-array = { workspace = true, features = ["ffi"] }
 arrow-schema = { workspace = true, features = ["ffi"] }
-arrow-data = { version = "58.3.0", features = ["ffi"] }
+arrow-data = { version = "58.4.1", features = ["ffi"] }
 datafusion = { workspace = true }
 parking_lot = { workspace = true }
 tracing = { workspace = true }

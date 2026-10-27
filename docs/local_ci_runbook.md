@@ -329,6 +329,11 @@ result.**
 cargo nextest run -p uni-tck --test tck
 ```
 
+For compliance artifacts, use `scripts/run_tck_with_report.sh --both` and
+`scripts/run_locy_tck_with_report.sh --both`. These wrappers finish reporting
+both modes and then return a nonzero status if either nextest run failed.
+Report generation alone does not establish that the suite passed.
+
 ### Python Tests
 ```bash
 # uni-db  (working dir: bindings/uni-db)

@@ -138,19 +138,19 @@ serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0"
 thiserror = "2"
-arrow = { version = "58.3.0", features = ["prettyprint"] }
-arrow-array = "58.3.0"
-arrow-schema = "58.3.0"
-arrow-row = "58.3.0"
-lance = { version = "11.0.0", default-features = false, features = ["aws", "azure", "gcp"] }
+arrow = { version = "58.4.1", features = ["prettyprint"] }
+arrow-array = "58.4.1"
+arrow-schema = "58.4.1"
+arrow-row = "58.4.1"
+lance = { version = "13.0.0", default-features = false, features = ["aws", "azure", "gcp"] }
 # Pinned here, not in the crate that uses them: `lance-index` and `lance-linalg`
 # must move in lockstep with `lance`. Left as bare version strings in
 # `crates/uni-store/Cargo.toml` they resolve independently, and a bump of `lance`
 # alone still produces a clean lockfile carrying TWO complete lance trees (and
 # two datafusions, since lance pins datafusion exactly). That surfaces as
 # "expected `RecordBatch`, found `RecordBatch`", never as a version error.
-lance-index = { version = "11.0.0" }
-lance-linalg = { version = "11.0.0" }
+lance-index = { version = "13.0.0" }
+lance-linalg = { version = "13.0.0" }
 futures = "0.3"
 async-trait = "0.1"
 tracing = "0.1"
@@ -180,7 +180,7 @@ rand = "0.10"
 ordered-float = "5"
 rayon = "1.12"
 csv = "1.4"
-parquet = "58.3.0"
+parquet = "58.4.1"
 regex = "1.12"
 regex-syntax = "0.8"
 regex-automata = "0.4"

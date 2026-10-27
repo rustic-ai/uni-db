@@ -1,0 +1,16 @@
+{
+  "compliance_reports/schemaless": {
+    "passed": 3925,
+    "skipped": 1
+  },
+  "compliance_reports/schema": {
+    "passed": 3925,
+    "skipped": 1
+  },
+  "locy_compliance_reports/schemaless": {
+    "passed": 558
+  },
+  "locy_compliance_reports/schema": {
+    "passed": 558
+  }
+}

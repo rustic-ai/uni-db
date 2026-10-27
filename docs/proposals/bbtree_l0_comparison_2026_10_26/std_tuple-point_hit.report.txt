@@ -1,0 +1,160 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 66  of event 'cpu-clock:u'
+# Event count (approx.): 132264528
+#
+# Overhead  Command          Shared Object                           Symbol                                                                                                                                                                                                                                                                                                                                                                                              
+# ........  ...............  ......................................  ....................................................................................................................................................................................................................................................................................................................................................................................................
+#
+    16.67%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <alloc::collections::btree::node::NodeRef<alloc::collections::btree::node::marker::Immut, (i64, u64), (), alloc::collections::btree::node::marker::LeafOrInternal>>::find_leaf_edges_spanning_range::<(i64, u64), core::ops::range::RangeInclusive<(i64, u64)>>
+    15.15%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdKeys>>::candidates
+     7.58%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdKeys>>::build
+     4.55%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <alloc::vec::Vec<i64> as alloc::vec::spec_from_iter::SpecFromIter<i64, core::iter::adapters::GenericShunt<core::iter::adapters::map::Map<core::slice::iter::Iter<uni_common::value::Value>, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdPackedKeys>>::candidates::{closure#2}::{closure#0}>, core::option::Option<core::convert::Infallible>>>>::from_iter
+     4.55%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::map::HashMap<u64, (), std::hash::random::RandomState>>::insert
+     4.55%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::raw::RawTableInner>::drop_inner_table::<(alloc::string::String, uni_common::value::Value), alloc::alloc::Global>
+     4.55%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+            |          
+             --1.52%--core::intrinsics::rotate_left::<u64> (inlined)
+                       <u64>::rotate_left (inlined)
+                       <core::hash::sip::Sip13Rounds as core::hash::sip::Sip>::d_rounds (inlined)
+                       <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::finish (inlined)
+                       <core::hash::sip::SipHasher13 as core::hash::Hasher>::finish (inlined)
+                       <std::hash::random::DefaultHasher as core::hash::Hasher>::finish (inlined)
+                       <std::hash::random::RandomState as core::hash::BuildHasher>::hash_one::<&uni_common::core::id::Eid>
+                       0x54
+                       0xf3810c3a834ec428
+
+     4.55%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <uni_store::runtime::l0::L0Buffer>::insert_vertex_with_labels_impl
+            |          
+            |--1.52%--core::ptr::write::<alloc::string::String> (inlined)
+            |          <alloc::vec::Vec<alloc::string::String>>::push_mut (inlined)
+            |          <alloc::vec::Vec<alloc::string::String>>::push (inlined)
+            |          <uni_store::runtime::l0::L0Buffer>::append_unique_labels (inlined)
+            |          <uni_store::runtime::l0::L0Buffer>::apply_vertex_write (inlined)
+            |          <uni_store::runtime::l0::L0Buffer>::insert_vertex_with_labels_impl
+            |          0x7ce8
+            |          
+            |--1.52%--core::core_arch::x86::sse2::_mm_movemask_epi8 (inlined)
+            |          <hashbrown::control::group::sse2::Group>::match_tag (inlined)
+            |          <hashbrown::raw::RawTableInner>::find_inner (inlined)
+            |          <hashbrown::raw::RawTable<(uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>)>>::find::<<hashbrown::map::HashMap<uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>, std::hash::random::RandomState>>::rustc_entry::{closure#0}> (inlined)
+            |          <hashbrown::map::HashMap<uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>, std::hash::random::RandomState>>::rustc_entry (inlined)
+            |          <std::collections::hash::map::HashMap<uni_common::core::id::Vid, std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>>::entry (inlined)
+            |          <uni_store::runtime::l0::L0Buffer>::apply_vertex_write (inlined)
+            |          <uni_store::runtime::l0::L0Buffer>::insert_vertex_with_labels_impl
+            |          
+             --1.52%--<core::num::nonzero::NonZero<u16>>::trailing_zeros (inlined)
+                       <hashbrown::control::bitmask::BitMask>::nonzero_trailing_zeros (inlined)
+                       <hashbrown::control::bitmask::BitMask>::lowest_set_bit (inlined)
+                       <hashbrown::control::bitmask::BitMaskIter as core::iter::traits::iterator::Iterator>::next (inlined)
+                       <hashbrown::raw::RawTableInner>::find_inner (inlined)
+                       <hashbrown::raw::RawTable<(uni_common::core::id::Vid, alloc::vec::Vec<alloc::string::String>)>>::find::<<hashbrown::map::HashMap<uni_common::core::id::Vid, alloc::vec::Vec<alloc::string::String>, std::hash::random::RandomState>>::rustc_entry::{closure#0}> (inlined)
+                       <hashbrown::map::HashMap<uni_common::core::id::Vid, alloc::vec::Vec<alloc::string::String>, std::hash::random::RandomState>>::rustc_entry (inlined)
+                       <std::collections::hash::map::HashMap<uni_common::core::id::Vid, alloc::vec::Vec<alloc::string::String>>>::entry (inlined)
+                       <uni_store::runtime::l0::L0Buffer>::apply_vertex_write (inlined)
+                       <uni_store::runtime::l0::L0Buffer>::insert_vertex_with_labels_impl
+                       0x4626
+
+     4.55%  collection_cand  libc.so.6                               [.] __memcmp_avx2_movbe
+            |
+            ---__memcmp_avx2_movbe
+               |          
+                --1.52%--<u8 as core::slice::cmp::SlicePartialEq<u8>>::equal_same_length (inlined)
+                          <[u8] as core::cmp::PartialEq>::eq (inlined)
+                          <&[u8] as core::cmp::PartialEq>::eq (inlined)
+                          <str as core::cmp::PartialEq>::eq (inlined)
+                          <&str as core::cmp::PartialEq>::eq (inlined)
+                          <str as hashbrown::Equivalent<alloc::string::String>>::equivalent (inlined)
+                          hashbrown::map::equivalent_key::<str, alloc::string::String, uni_common::value::Value>::{closure#0} (inlined)
+                          <hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::find::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}>::{closure#0} (inlined)
+                          <hashbrown::raw::RawTableInner>::find_inner (inlined)
+                          <hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::find::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}> (inlined)
+                          <hashbrown::raw::RawTable<(alloc::string::String, uni_common::value::Value)>>::get::<hashbrown::map::equivalent_key<str, alloc::string::String, uni_common::value::Value>::{closure#0}> (inlined)
+                          <hashbrown::map::HashMap<alloc::string::String, uni_common::value::Value, std::hash::random::RandomState>>::get::<str> (inlined)
+                          <std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>::get::<str> (inlined)
+                          <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdKeys>>::build::{closure#0} (inlined)
+                          <core::option::Option<&std::collections::hash::map::HashMap<alloc::string::String, uni_common::value::Value>>>::and_then::<&uni_common::value::Value, <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdKeys>>::build::{closure#0}> (inlined)
+                          <collection_candidates::kernels::PropertyIndex<collection_candidates::kernels::StdKeys>>::build
+                          .LCPI277_0 (inlined)
+
+     3.03%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <alloc::collections::btree::navigate::LeafRange<alloc::collections::btree::node::marker::Immut, (i64, u64), ()>>::perform_next_checked::<<alloc::collections::btree::navigate::LeafRange<alloc::collections::btree::node::marker::Immut, (i64, u64), ()>>::next_checked::{closure#0}, (&(i64, u64), &())>
+     3.03%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::raw::RawTable<(u64, ())>>::reserve_rehash::<hashbrown::map::make_hasher<u64, (), std::hash::random::RandomState>::{closure#0}>
+     3.03%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::raw::RawTable<(uni_common::core::id::Vid, ())>>::reserve_rehash::<hashbrown::map::make_hasher<uni_common::core::id::Vid, (), std::hash::random::RandomState>::{closure#0}>
+            |          
+            |--1.52%--core::intrinsics::unlikely (inlined)
+            |          <hashbrown::raw::RawTableInner>::fix_insert_index (inlined)
+            |          <hashbrown::raw::RawTableInner>::find_insert_index (inlined)
+            |          <hashbrown::raw::RawTableInner>::prepare_insert_index (inlined)
+            |          <hashbrown::raw::RawTableInner>::resize_inner::<alloc::alloc::Global> (inlined)
+            |          <hashbrown::raw::RawTableInner>::reserve_rehash_inner::<alloc::alloc::Global> (inlined)
+            |          <hashbrown::raw::RawTable<(uni_common::core::id::Vid, ())>>::reserve_rehash::<hashbrown::map::make_hasher<uni_common::core::id::Vid, (), std::hash::random::RandomState>::{closure#0}>
+            |          <hashbrown::raw::RawTable<(uni_common::core::id::Vid, ())>>::reserve::<hashbrown::map::make_hasher<uni_common::core::id::Vid, (), std::hash::random::RandomState>::{closure#0}> (inlined)
+            |          <hashbrown::raw::RawTable<(uni_common::core::id::Vid, ())>>::find_or_find_insert_index::<hashbrown::map::equivalent_key<uni_common::core::id::Vid, uni_common::core::id::Vid, ()>::{closure#0}, hashbrown::map::make_hasher<uni_common::core::id::Vid, (), std::hash::random::RandomState>::{closure#0}> (inlined)
+            |          <hashbrown::map::HashMap<uni_common::core::id::Vid, (), std::hash::random::RandomState>>::insert
+            |          
+             --1.52%--<hashbrown::raw::RawTableInner>::find_insert_index_in_group (inlined)
+                       <hashbrown::raw::RawTableInner>::find_insert_index (inlined)
+                       <hashbrown::raw::RawTableInner>::prepare_insert_index (inlined)
+                       <hashbrown::raw::RawTableInner>::resize_inner::<alloc::alloc::Global> (inlined)
+                       <hashbrown::raw::RawTableInner>::reserve_rehash_inner::<alloc::alloc::Global> (inlined)
+                       <hashbrown::raw::RawTable<(uni_common::core::id::Vid, ())>>::reserve_rehash::<hashbrown::map::make_hasher<uni_common::core::id::Vid, (), std::hash::random::RandomState>::{closure#0}>
+                       <hashbrown::raw::RawTable<(uni_common::core::id::Vid, ())>>::reserve::<hashbrown::map::make_hasher<uni_common::core::id::Vid, (), std::hash::random::RandomState>::{closure#0}> (inlined)
+                       <hashbrown::raw::RawTable<(uni_common::core::id::Vid, ())>>::find_or_find_insert_index::<hashbrown::map::equivalent_key<uni_common::core::id::Vid, uni_common::core::id::Vid, ()>::{closure#0}, hashbrown::map::make_hasher<uni_common::core::id::Vid, (), std::hash::random::RandomState>::{closure#0}> (inlined)
+                       <hashbrown::map::HashMap<uni_common::core::id::Vid, (), std::hash::random::RandomState>>::insert
+
+     3.03%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] __rustc::__rust_no_alloc_shim_is_unstable_v2
+     3.03%  collection_cand  libc.so.6                               [.] __memset_avx2_unaligned_erms
+            |
+            ---__memset_avx2_unaligned_erms
+
+     3.03%  collection_cand  libc.so.6                               [.] cfree@GLIBC_2.2.5
+            |
+            ---cfree@GLIBC_2.2.5
+
+     3.03%  collection_cand  libc.so.6                               [.] unlink_chunk.isra.0
+            |
+            ---unlink_chunk.isra.0
+               |          
+               |--1.52%--_int_free_merge_chunk
+               |          _int_free_chunk
+               |          
+                --1.52%--_int_free_create_chunk
+                          _int_free_merge_chunk
+                          _int_free_chunk
+
+     1.52%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <alloc::collections::btree::map::entry::VacantEntry<(i64, u64), ()>>::insert_entry
+     1.52%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     1.52%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <core::hash::sip::Hasher<core::hash::sip::Sip13Rounds> as core::hash::Hasher>::write
+     1.52%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::map::HashMap<alloc::string::String, std::collections::hash::set::HashSet<uni_common::core::id::Vid>, std::hash::random::RandomState>>::rustc_entry
+            |
+            ---<hashbrown::raw::RawTable<(alloc::string::String, std::collections::hash::set::HashSet<uni_common::core::id::Vid>)>>::find::<<hashbrown::map::HashMap<alloc::string::String, std::collections::hash::set::HashSet<uni_common::core::id::Vid>, std::hash::random::RandomState>>::rustc_entry::{closure#0}>::{closure#0} (inlined)
+               <hashbrown::raw::RawTableInner>::find_inner (inlined)
+               <hashbrown::raw::RawTable<(alloc::string::String, std::collections::hash::set::HashSet<uni_common::core::id::Vid>)>>::find::<<hashbrown::map::HashMap<alloc::string::String, std::collections::hash::set::HashSet<uni_common::core::id::Vid>, std::hash::random::RandomState>>::rustc_entry::{closure#0}> (inlined)
+               <hashbrown::map::HashMap<alloc::string::String, std::collections::hash::set::HashSet<uni_common::core::id::Vid>, std::hash::random::RandomState>>::rustc_entry
+
+     1.52%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::map::HashMap<uni_common::core::id::Vid, (), rustc_hash::FxBuildHasher>>::insert
+            |
+            ---<hashbrown::raw::RawTableInner>::record_item_insert_at (inlined)
+               <hashbrown::raw::RawTable<(uni_common::core::id::Vid, ())>>::insert_tagged_at_index (inlined)
+               <hashbrown::raw::RawTable<(uni_common::core::id::Vid, ())>>::insert_at_index (inlined)
+               <hashbrown::map::HashMap<uni_common::core::id::Vid, (), rustc_hash::FxBuildHasher>>::insert
+               0xffffffff
+
+     1.52%  collection_cand  collection_candidates-e16a25ee9d65d605  [.] <hashbrown::raw::RawTable<(u64, uni_common::value::Value)>>::reserve_rehash::<hashbrown::map::make_hasher<u64, uni_common::value::Value, std::hash::random::RandomState>::{closure#0}>
+     1.52%  collection_cand  libc.so.6                               [.] _int_free_merge_chunk
+            |
+            ---_int_free_merge_chunk
+               _int_free_chunk
+
+     1.52%  collection_cand  libc.so.6                               [.] malloc
+            |
+            ---malloc
+
+
+
+#
+# (Tip: To group events which need to be collected together for accuracy use {}: perf record -e {cycles,branches}' ...)
+#

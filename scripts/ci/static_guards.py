@@ -92,6 +92,11 @@ GUARDS: list[tuple[str, list[str], str]] = [
         "update scripts/ci/ignored_tests.py (a lane filter changed, or an "
         "on-demand entry names a test that is gone)",
     ),
+    (
+        "TCK report exit status",
+        [sys.executable, "scripts/ci/test_tck_report_exit_status.py"],
+        "preserve nextest failures while generating TCK reports for both modes",
+    ),
 ]
 
 FUZZ_LOCK: tuple[str, list[str], str] = (

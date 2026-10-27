@@ -1,0 +1,153 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.26s
+────────────
+ Nextest run ID f938b2fa-4946-4ac3-9a2a-02360ceb2e9a with nextest profile: default
+    Starting 147 tests across 2 binaries
+        PASS [   0.006s] (  1/147) uni-cypher grammar::tests::test_invalid_number_literal_error_code_decimal_alpha
+        PASS [   0.006s] (  2/147) uni-cypher grammar::tests::test_backtick_escaped_reserved_keyword
+        PASS [   0.007s] (  3/147) uni-cypher grammar::tests::test_invalid_relationship_pattern_missing_star_error_code
+        PASS [   0.006s] (  4/147) uni-cypher grammar::tests::test_unary_minus_double
+        PASS [   0.007s] (  5/147) uni-cypher grammar::tests::test_expression_parsing
+        PASS [   0.007s] (  6/147) uni-cypher grammar::tests::test_invalid_number_literal_error_code_hex_prefix_only
+        PASS [   0.007s] (  7/147) uni-cypher grammar::tests::test_stacked_predicates_contains_ends_with
+        PASS [   0.007s] (  8/147) uni-cypher grammar::tests::test_ambiguous_cases
+        PASS [   0.007s] (  9/147) uni-cypher grammar::tests::test_map_key_starting_with_number_stays_unexpected_syntax
+        PASS [   0.007s] ( 10/147) uni-cypher grammar::tests::test_stacked_predicates_in
+        PASS [   0.004s] ( 11/147) uni-cypher grammar::tests::test_unary_minus_single
+        PASS [   0.004s] ( 12/147) uni-cypher grammar::walker::show_constraints_tests::show_constraints_on_label_does_not_panic
+        PASS [   0.005s] ( 13/147) uni-cypher grammar::tests::test_unary_minus_plus
+        PASS [   0.006s] ( 14/147) uni-cypher grammar::tests::test_unary_minus_i64_min
+        PASS [   0.005s] ( 15/147) uni-cypher grammar::tests::test_unary_plus_identity
+        PASS [   0.006s] ( 16/147) uni-cypher grammar::tests::test_unary_plus_minus
+        PASS [   0.006s] ( 17/147) uni-cypher grammar::walker::show_constraints_tests::show_constraints_on_edge_type
+        PASS [   0.006s] ( 18/147) uni-cypher locy_tests::test_create_model_all_output_types
+        PASS [   0.014s] ( 19/147) uni-cypher grammar::tests::test_invalid_unicode_character_error_code
+        PASS [   0.014s] ( 20/147) uni-cypher grammar::tests::test_label_stacking_allowed
+        PASS [   0.008s] ( 21/147) uni-cypher locy_tests::test_create_model_minimal
+        PASS [   0.009s] ( 22/147) uni-cypher locy_tests::test_create_model_independent_annotation
+        PASS [   0.009s] ( 23/147) uni-cypher locy_tests::test_create_model_multi_input
+        PASS [   0.008s] ( 24/147) uni-cypher locy_tests::test_locy_abduce_query_positive
+        PASS [   0.009s] ( 25/147) uni-cypher locy_tests::test_locy_abduce_query
+        PASS [   0.011s] ( 26/147) uni-cypher locy_tests::test_create_model_full_with_calibration_version
+        PASS [   0.009s] ( 27/147) uni-cypher locy_tests::test_locy_along_clause
+        PASS [   0.016s] ( 28/147) uni-cypher grammar::walker::show_constraints_tests::show_constraints_without_target
+        PASS [   0.024s] ( 29/147) uni-cypher grammar::tests::test_stacked_predicates_starts_with
+        PASS [   0.024s] ( 30/147) uni-cypher grammar::tests::test_non_reserved_keyword_allowed
+        PASS [   0.025s] ( 31/147) uni-cypher grammar::tests::test_symbol_in_number_stays_unexpected_syntax
+        PASS [   0.025s] ( 32/147) uni-cypher grammar::tests::test_unary_double_minus_overflow
+        PASS [   0.025s] ( 33/147) uni-cypher grammar::tests::test_stacked_predicates_is_null_is_not_null
+        PASS [   0.025s] ( 34/147) uni-cypher grammar::tests::test_range_chaining_allowed
+        PASS [   0.012s] ( 35/147) uni-cypher locy_tests::test_locy_assume_block
+        PASS [   0.018s] ( 36/147) uni-cypher grammar::tests::test_unary_minus_triple
+        PASS [   0.025s] ( 37/147) uni-cypher grammar::tests::test_reserved_keyword_as_variable_name
+        PASS [   0.025s] ( 38/147) uni-cypher grammar::tests::test_reserved_keyword_return_as_variable
+        PASS [   0.011s] ( 39/147) uni-cypher locy_tests::test_locy_best_by_desc
+        PASS [   0.025s] ( 40/147) uni-cypher grammar::tests::test_list_expressions
+        PASS [   0.012s] ( 41/147) uni-cypher locy_tests::test_locy_best_by_clause
+        PASS [   0.027s] ( 42/147) uni-cypher grammar::tests::test_unary_minus_folds_float_literals
+        PASS [   0.008s] ( 43/147) uni-cypher locy_tests::test_locy_derive_command_no_where
+        PASS [   0.009s] ( 44/147) uni-cypher locy_tests::test_locy_derive_command
+        PASS [   0.010s] ( 45/147) uni-cypher locy_tests::test_locy_cypher_passthrough_match_return
+        PASS [   0.011s] ( 46/147) uni-cypher locy_tests::test_locy_cypher_passthrough_create
+        PASS [   0.011s] ( 47/147) uni-cypher locy_tests::test_locy_cypher_passthrough_union
+        PASS [   0.012s] ( 48/147) uni-cypher locy_tests::test_locy_create_rule_minimal
+        PASS [   0.008s] ( 49/147) uni-cypher locy_tests::test_locy_derive_new_backward
+        PASS [   0.009s] ( 50/147) uni-cypher locy_tests::test_locy_derive_forward
+        PASS [   0.012s] ( 51/147) uni-cypher locy_tests::test_locy_cypher_passthrough_multi_clause
+        PASS [   0.013s] ( 52/147) uni-cypher locy_tests::test_locy_complex_rule_all_clauses
+        PASS [   0.009s] ( 53/147) uni-cypher locy_tests::test_locy_derive_merge
+        PASS [   0.010s] ( 54/147) uni-cypher locy_tests::test_locy_explain_rule
+        PASS [   0.011s] ( 55/147) uni-cypher locy_tests::test_locy_is_reference_tuple
+        PASS [   0.011s] ( 56/147) uni-cypher locy_tests::test_locy_is_reference_binary
+        PASS [   0.011s] ( 57/147) uni-cypher locy_tests::test_locy_goal_query
+        PASS [   0.011s] ( 58/147) uni-cypher locy_tests::test_locy_goal_query_no_return
+        PASS [   0.009s] ( 59/147) uni-cypher locy_tests::test_locy_module_multiple_uses
+        PASS [   0.012s] ( 60/147) uni-cypher locy_tests::test_locy_fold_clause
+        PASS [   0.011s] ( 61/147) uni-cypher locy_tests::test_locy_is_reference_unary
+        PASS [   0.012s] ( 62/147) uni-cypher locy_tests::test_locy_is_not_reference
+        PASS [   0.011s] ( 63/147) uni-cypher locy_tests::test_locy_mixed_where_conditions
+        PASS [   0.012s] ( 64/147) uni-cypher locy_tests::test_locy_fold_plugin_namespaced_aggregate
+        PASS [   0.010s] ( 65/147) uni-cypher locy_tests::test_locy_not_is_reference_prefix
+        PASS [   0.010s] ( 66/147) uni-cypher locy_tests::test_locy_rule_priority
+        PASS [   0.011s] ( 67/147) uni-cypher locy_tests::test_locy_module_use
+        PASS [   0.010s] ( 68/147) uni-cypher pattern_requirements::tests::a_disjunction_requires_only_one_of_its_members
+        PASS [   0.011s] ( 69/147) uni-cypher pattern_requirements::tests::a_conjunction_requires_every_member
+        PASS [   0.012s] ( 70/147) uni-cypher locy_tests::test_locy_yield_key_with_alias
+        PASS [   0.011s] ( 71/147) uni-cypher locy_tests::test_locy_yield_with_key
+        PASS [   0.011s] ( 72/147) uni-cypher locy_tests::test_locy_yield_key_with_property
+        PASS [   0.011s] ( 73/147) uni-cypher pattern_requirements::tests::a_match_pattern_requires_its_labels_and_edge_types
+        PASS [   0.011s] ( 74/147) uni-cypher pattern_requirements::tests::a_zero_length_variable_hop_requires_no_edge
+        PASS [   0.011s] ( 75/147) uni-cypher pattern_requirements::tests::a_pattern_comprehension_inside_an_expression_is_reached
+        PASS [   0.009s] ( 76/147) uni-cypher pattern_requirements::tests::an_unparseable_query_is_an_error_not_an_empty_requirement_set
+        PASS [   0.010s] ( 77/147) uni-cypher pattern_requirements::tests::an_exists_subquery_requires_nothing
+        PASS [   0.010s] ( 78/147) uni-cypher tests::test_parse_timestamp_as_of
+        PASS [   0.010s] ( 79/147) uni-cypher tests::test_parse_no_time_travel
+        PASS [   0.010s] ( 80/147) uni-cypher tests::test_parse_version_as_of
+        PASS [   0.011s] ( 81/147) uni-cypher pattern_requirements::tests::an_optional_match_requires_nothing
+        PASS [   0.011s] ( 82/147) uni-cypher pattern_requirements::tests::create_and_merge_patterns_require_nothing
+        PASS [   0.011s] ( 83/147) uni-cypher tests::test_parse_or_relationship_types
+        PASS [   0.012s] ( 84/147) uni-cypher pattern_requirements::tests::results_are_deduplicated_and_stable
+        PASS [   0.010s] ( 85/147) uni-cypher tests::test_parse_version_as_of_with_union
+        PASS [   0.010s] ( 86/147) uni-cypher tests::test_parse_vlp_relationship_variable
+        PASS [   0.009s] ( 87/147) uni-cypher::integration parse_depth_limit::deeply_nested_parenthesized_pattern_error_not_overflow
+        PASS [   0.009s] ( 88/147) uni-cypher::integration parse_depth_limit::deeply_nested_case_error_not_overflow
+        PASS [   0.009s] ( 89/147) uni-cypher::integration parse_depth_limit::deeply_nested_lists_error_not_overflow
+        PASS [   0.009s] ( 90/147) uni-cypher::integration parse_depth_limit::deeply_nested_maps_error_not_overflow
+        PASS [   0.009s] ( 91/147) uni-cypher::integration parse_depth_limit::deeply_nested_parens_error_not_overflow
+        PASS [   0.010s] ( 92/147) uni-cypher::integration docs_snippets::fstring_templates_are_filled_before_parsing
+        PASS [   0.013s] ( 93/147) uni-cypher::integration parse_depth_limit::moderately_nested_expression_still_parses
+        PASS [   0.021s] ( 94/147) uni-cypher tests::test_comprehension_with_complex_where
+        PASS [   0.013s] ( 95/147) uni-cypher::integration parser_backtracking_regression::malformed_in_led_lists_are_still_refused
+        PASS [   0.015s] ( 96/147) uni-cypher::integration parser_backtracking_regression::list_comprehensions_still_parse_as_comprehensions
+        PASS [   0.019s] ( 97/147) uni-cypher::integration parser_backtracking_regression::in_led_list_literals_build_the_same_ast
+        PASS [   0.019s] ( 98/147) uni-cypher::integration parser_backtracking_regression::index_and_slice_surface_still_parses
+        PASS [   0.010s] ( 99/147) uni-cypher::integration path_quantifier_range::caret_bound_errors_not_panics
+        PASS [   0.015s] (100/147) uni-cypher::integration parser_backtracking_regression::pattern_and_parenthesis_surface_still_parses
+        PASS [   0.014s] (101/147) uni-cypher::integration path_quantifier_range::bounded_range_min_and_max
+        PASS [   0.018s] (102/147) uni-cypher::integration parser_backtracking_regression::pattern_comprehension_lookahead_preserves_nested_and_quoted_pipes
+        PASS [   0.007s] (103/147) uni-cypher::integration path_quantifier_range::negative_bound_errors_not_panics
+        PASS [   0.008s] (104/147) uni-cypher::integration path_quantifier_range::hex_bound_errors_not_panics
+        PASS [   0.011s] (105/147) uni-cypher::integration path_quantifier_range::exact_count_is_min_eq_max
+        PASS [   0.017s] (106/147) uni-cypher::integration path_quantifier_range::empty_lower_bound_is_max_not_min
+        PASS [   0.011s] (107/147) uni-cypher::integration path_quantifier_range::overflow_bound_errors_not_panics
+        PASS [   0.014s] (108/147) uni-cypher::integration path_quantifier_range::open_upper_bound_min_only
+        PASS [   0.011s] (109/147) uni-cypher::integration path_quantifier_range::relationship_form_variable_length_unaffected
+        PASS [   0.009s] (110/147) uni-cypher::integration repro_backtick_property_name::map_projection_selectors_are_unquoted
+        PASS [   0.009s] (111/147) uni-cypher::integration repro_backtick_property_name::property_access_stays_unquoted
+        PASS [   0.012s] (112/147) uni-cypher::integration repro_backtick_property_name::map_literal_keys_are_unquoted
+        PASS [   0.031s] (113/147) uni-cypher::integration parser_backtracking_regression::stacked_unmatched_brackets_parse_fast
+        PASS [   0.011s] (114/147) uni-cypher::integration repro_backtick_property_name::set_target_property_is_unquoted
+        PASS [   0.032s] (115/147) uni-cypher::integration parser_backtracking_regression::unclosed_nested_comprehension_sources_parse_fast
+        PASS [   0.012s] (116/147) uni-cypher::integration repro_escaped_identifier::ddl_names_carry_escaped_backticks
+        PASS [   0.010s] (117/147) uni-cypher::integration repro_escaped_identifier::doubled_backtick_does_not_collapse_or_split
+        PASS [   0.011s] (118/147) uni-cypher::integration repro_escaped_identifier::doubled_backtick_is_an_escaped_backtick
+        PASS [   0.008s] (119/147) uni-cypher::integration repro_map_key_not_unescaped::map_key_backslash_n_is_decoded
+        PASS [   0.009s] (120/147) uni-cypher::integration repro_locy_derive_backtick_label::derive_backtick_label_and_edge_strip_backticks
+        PASS [   0.008s] (121/147) uni-cypher::integration repro_nesting_guard_end_evasion::control_abs_nesting_is_rejected_by_guard
+        PASS [   0.009s] (122/147) uni-cypher::integration repro_map_key_not_unescaped::map_key_doubled_quote_is_collapsed
+        PASS [   0.012s] (123/147) uni-cypher::integration repro_escaped_identifier::locy_identifiers_unescape
+        PASS [   0.049s] (124/147) uni-cypher::integration parser_backtracking_regression::fuzz_timeout_artifact_parses_fast
+        PASS [   0.009s] (125/147) uni-cypher::integration repro_nesting_guard_end_evasion::end_nesting_deep_is_rejected_not_overflowing
+        PASS [   0.051s] (126/147) uni-cypher::integration parser_backtracking_regression::list_comprehension_fuzz_artifact_parses_fast
+        PASS [   0.014s] (127/147) uni-cypher::integration repro_escaped_identifier::quoted_ddl_names_equal_bare_names
+        PASS [   0.009s] (128/147) uni-cypher::integration repro_nesting_guard_end_evasion::end_nesting_is_rejected_by_guard
+        PASS [   0.050s] (129/147) uni-cypher::integration parser_backtracking_regression::stacked_paren_brace_map_keys_parse_fast
+        PASS [   0.011s] (130/147) uni-cypher::integration repro_parse_expression_trailing_garbage::trailing_and_is_an_error
+        PASS [   0.011s] (131/147) uni-cypher::integration repro_parse_expression_trailing_garbage::garbage_suffix_is_an_error
+        PASS [   0.011s] (132/147) uni-cypher::integration repro_parse_expression_trailing_garbage::second_assignment_is_an_error
+        PASS [   0.010s] (133/147) uni-cypher::integration repro_remove_label_backtick::remove_backtick_label_strips_backticks
+        PASS [   0.011s] (134/147) uni-cypher::integration repro_parse_expression_trailing_garbage::well_formed_expression_still_parses
+        PASS [   0.023s] (135/147) uni-cypher::integration repro_escaped_identifier::quoted_variables_equal_bare_variables
+        PASS [   0.013s] (136/147) uni-cypher::integration tck_test_suite::test_invalid_tck_queries
+        PASS [   0.070s] (137/147) uni-cypher::integration parser_backtracking_regression::deeply_nested_valid_map_patterns_parse_fast
+        PASS [   0.089s] (138/147) uni-cypher::integration parser_backtracking_regression::cypher_create_pattern_timeout_artifact_parses_fast
+        PASS [   0.085s] (139/147) uni-cypher::integration parser_backtracking_regression::nested_rel_predicate_properties_without_where_parse_fast
+        PASS [   0.106s] (140/147) uni-cypher::integration parser_backtracking_regression::deeply_nested_valid_in_led_literals_parse_fast
+        PASS [   0.108s] (141/147) uni-cypher::integration parser_backtracking_regression::nested_list_map_projections_parse_fast
+        PASS [   0.120s] (142/147) uni-cypher::integration parser_backtracking_regression::cypher_list_pattern_timeout_artifact_parses_fast
+        PASS [   0.422s] (143/147) uni-cypher::integration parser_backtracking_regression::nested_paren_map_subtraction_and_comparison_parse_fast
+        PASS [   0.442s] (144/147) uni-cypher::integration docs_snippets::documented_snippets_parse
+        PASS [   0.539s] (145/147) uni-cypher::integration docs_snippets::embedded_cypher_literals_parse
+        PASS [   1.767s] (146/147) uni-cypher::integration tck_test_suite::test_valid_tck_queries
+        PASS [   1.828s] (147/147) uni-cypher::integration tck_test_suite::test_tck_statistics
+────────────
+     Summary [   1.925s] 147 tests run: 147 passed, 0 skipped

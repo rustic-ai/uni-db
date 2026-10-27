@@ -1,0 +1,25 @@
+   Compiling uni-cypher v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cypher)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.52s
+────────────
+ Nextest run ID c1d38122-632c-4f64-b4a1-6b6542d1330f with nextest profile: default
+    Starting 18 tests across 1 binary (42 tests skipped)
+        PASS [   0.012s] ( 1/18) uni-cypher::integration parser_backtracking_regression::index_and_slice_surface_still_parses
+        PASS [   0.017s] ( 2/18) uni-cypher::integration parser_backtracking_regression::in_led_list_literals_build_the_same_ast
+        PASS [   0.020s] ( 3/18) uni-cypher::integration parser_backtracking_regression::pattern_and_parenthesis_surface_still_parses
+        PASS [   0.022s] ( 4/18) uni-cypher::integration parser_backtracking_regression::malformed_in_led_lists_are_still_refused
+        PASS [   0.023s] ( 5/18) uni-cypher::integration parser_backtracking_regression::list_comprehensions_still_parse_as_comprehensions
+        PASS [   0.025s] ( 6/18) uni-cypher::integration parser_backtracking_regression::pattern_comprehension_lookahead_preserves_nested_and_quoted_pipes
+        PASS [   0.026s] ( 7/18) uni-cypher::integration parser_backtracking_regression::fuzz_timeout_artifact_parses_fast
+        PASS [   0.036s] ( 8/18) uni-cypher::integration parser_backtracking_regression::stacked_unmatched_brackets_parse_fast
+        PASS [   0.037s] ( 9/18) uni-cypher::integration parser_backtracking_regression::unclosed_nested_comprehension_sources_parse_fast
+        PASS [   0.046s] (10/18) uni-cypher::integration parser_backtracking_regression::deeply_nested_valid_map_patterns_parse_fast
+        PASS [   0.046s] (11/18) uni-cypher::integration parser_backtracking_regression::stacked_paren_brace_map_keys_parse_fast
+        PASS [   0.058s] (12/18) uni-cypher::integration parser_backtracking_regression::list_comprehension_fuzz_artifact_parses_fast
+        PASS [   0.085s] (13/18) uni-cypher::integration parser_backtracking_regression::cypher_create_pattern_timeout_artifact_parses_fast
+        PASS [   0.090s] (14/18) uni-cypher::integration parser_backtracking_regression::nested_rel_predicate_properties_without_where_parse_fast
+        PASS [   0.103s] (15/18) uni-cypher::integration parser_backtracking_regression::deeply_nested_valid_in_led_literals_parse_fast
+        PASS [   0.115s] (16/18) uni-cypher::integration parser_backtracking_regression::nested_list_map_projections_parse_fast
+        PASS [   0.120s] (17/18) uni-cypher::integration parser_backtracking_regression::cypher_list_pattern_timeout_artifact_parses_fast
+        PASS [   0.332s] (18/18) uni-cypher::integration parser_backtracking_regression::nested_paren_map_subtraction_and_comparison_parse_fast
+────────────
+     Summary [   0.333s] 18 tests run: 18 passed, 42 skipped

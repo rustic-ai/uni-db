@@ -1,0 +1,56 @@
+{
+  "baselines::baseline_noop.noop": {
+    "instructions": 4002,
+    "main_thread": 4002,
+    "other_threads": 0,
+    "threads": 1
+  },
+  "baselines::baseline_session_only.session_only": {
+    "instructions": 184659,
+    "main_thread": 184659,
+    "other_threads": 0,
+    "threads": 10
+  },
+  "read_paths::expand_batch_one_hop_warm.warm": {
+    "instructions": 18684289,
+    "main_thread": 18658404,
+    "other_threads": 25885,
+    "threads": 10
+  },
+  "read_paths::hnsw_top10_search.top10": {
+    "instructions": 18762572,
+    "main_thread": 17602878,
+    "other_threads": 1159694,
+    "threads": 36
+  },
+  "read_paths::parse_and_plan_cold.cold": {
+    "instructions": 8251015,
+    "main_thread": 8219767,
+    "other_threads": 31248,
+    "threads": 10
+  },
+  "read_paths::property_read_across_l0_l1.l0_over_l1": {
+    "instructions": 11833906,
+    "main_thread": 11762871,
+    "other_threads": 71035,
+    "threads": 12
+  },
+  "read_paths::vertex_lookup_by_id.by_id": {
+    "instructions": 9564478,
+    "main_thread": 9502229,
+    "other_threads": 62249,
+    "threads": 10
+  },
+  "write_paths::l0_to_l1_flush.l0_to_l1": {
+    "instructions": 56521455,
+    "main_thread": 22462073,
+    "other_threads": 34059382,
+    "threads": 10
+  },
+  "write_paths::transaction_commit_wal_on.wal_on": {
+    "instructions": 1696954,
+    "main_thread": 1681401,
+    "other_threads": 15553,
+    "threads": 10
+  }
+}

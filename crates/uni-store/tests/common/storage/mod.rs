@@ -5,6 +5,7 @@ pub mod extid_index_test;
 pub mod json_index_test;
 pub mod lance_backtick_column_probe;
 pub mod lance_merge_insert_probe;
+pub mod lance_version_policy;
 pub mod overflow_json_tests;
 pub mod snapshot_manager_test;
 pub mod storage_at_fork;

@@ -1,0 +1,10 @@
+# started on Mon Oct 26 01:00:40 2026
+
+<not counted>,,cpu_atom/cycles/,0,0.00,,
+36559596800,,cpu_core/cycles/,7649465464,100.00,,
+<not counted>,,cpu_atom/instructions/,0,0.00,,
+62095267548,,cpu_core/instructions/,7649465464,100.00,,
+<not counted>,,cpu_atom/cache-misses/,0,0.00,,
+2170966,,cpu_core/cache-misses/,7649465464,100.00,,
+<not counted>,,cpu_atom/branch-misses/,0,0.00,,
+14897963,,cpu_core/branch-misses/,7649465464,100.00,,

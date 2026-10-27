@@ -1,0 +1,22 @@
+{
+  "comparison": {
+    "expand": {
+      "historical_lance11_median": 20435755,
+      "original_lance13_median": 18692366,
+      "delta_pct": -8.531072133131367
+    },
+    "hnsw": {
+      "historical_lance11_median": 19570448,
+      "original_lance13_median": 18730693,
+      "delta_pct": -4.290933963289955
+    },
+    "lookup": {
+      "historical_lance11_median": 10622697,
+      "original_lance13_median": 9575537,
+      "delta_pct": -9.857760227934588
+    }
+  },
+  "limitation": "Same-host historical runs, not a fresh controlled one-variable experiment. Original sample JSONs from Lance 11 were overwritten by later pilot runs; raw build/collector/gate logs retained.",
+  "lance11_lookup_cv_pct": 0.1519,
+  "original_lance13_lookup_cv_pct": 0.1802
+}

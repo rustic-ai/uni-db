@@ -1,0 +1,6 @@
+FAIL: read_paths::vertex_lookup_by_id.by_id -53.84% -- an improvement past --fail-improve-pct 50.0 is a collection failure until someone shows otherwise
+| target | baseline Ir | current Ir | delta | |
+|---|---:|---:|---:|---|
+| `read_paths::expand_batch_one_hop_warm.warm` | 31,073,913 | 18,648,813 | -39.99% | ok |
+| `read_paths::hnsw_top10_search.top10` | 27,552,983 | 18,746,740 | -31.96% | ok |
+| `read_paths::vertex_lookup_by_id.by_id` | 20,721,018 | 9,564,478 | -53.84% | FAIL |

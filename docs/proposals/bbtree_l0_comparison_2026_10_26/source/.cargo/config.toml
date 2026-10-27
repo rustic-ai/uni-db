@@ -1,0 +1,125 @@
+[env]
+# Stack Overflow Fix for Debug Builds
+#
+# Problem: Algorithm integration tests (algo_edge_cases, algo_integration) fail with
+# "thread has overflowed its stack" in debug builds. The default stack size (typically
+# 2MB on Linux) is insufficient for the deeply nested async state machines generated
+# by the query executor and algorithm procedures.
+#
+# Root Cause: Rust async functions compile to state machines where all local variables
+# across await points are stored in the future's state. In debug builds, these aren't
+# optimized, resulting in very large stack frames. The algo execution path involves:
+#   Executor::execute -> execute_procedure -> AlgoProcedure::execute ->
+#   ProjectionBuilder::build -> multiple async Lance/Arrow operations
+#
+# This chain creates futures with large captured state that exceed the default stack.
+#
+# Solution: Increase minimum stack size to 8MB for test threads.
+#
+# Note: This only affects debug builds. Release builds optimize the state machines
+# and don't exhibit this issue. A more permanent fix would involve boxing large
+# futures in the hot path, but that adds runtime overhead.
+RUST_MIN_STACK = "8388608"
+
+[target.'cfg(target_os = "linux")']
+# `--icf=safe` folds byte-identical function bodies into one copy -- generic
+# monomorphization emits a lot of them (`Vec<u64>` and `Vec<i64>` operations
+# compile to the same instructions). The machine code is unchanged, only
+# deduplicated, so there is no codegen cost; measured flat on hot_paths_iai.
+# `safe` skips functions whose addresses are taken, so function-pointer
+# identity still holds -- `--icf=all` folds ~3.6 MiB more but can make two
+# distinct `fn` pointers compare equal, which is not worth it for the delta.
+# `--gc-sections` drops unreferenced sections.
+#
+# Measured on lib_uni_db.so via `--profile dist` (opt-level=3, thin LTO, cgu=1):
+#   baseline                     225.8 MiB   peakRSS 10.0 GiB
+#   --icf=safe --gc-sections     222.4 MiB   peakRSS 10.1 GiB   <- chosen
+#   --icf=all  --gc-sections     218.8 MiB   peakRSS 10.3 GiB
+#
+# Cargo has no per-profile rustflags, so this applies to dev and test builds
+# too. Both mold flags are linker-only; GNU ld does not support `--icf`, which
+# is why this lives in the linux block next to the mold selection rather than
+# in a shared rustflags array.
+rustflags = [
+    "-C", "link-arg=-fuse-ld=mold",
+    "-C", "link-arg=-Wl,--icf=safe",
+    "-C", "link-arg=-Wl,--gc-sections",
+]
+
+[profile.dev]
+debug = 1  # Line tables only - saves ~50% debug info size
+
+[profile.dev.package."*"]
+opt-level = 2  # Optimize dependencies even in dev builds
+
+# Inner-loop profile: like dev, but no debug info and more codegen-units for
+# parallelism. Use with `cargo build --profile dev-fast` when you don't need
+# a debugger (e.g. iterating on a compile error or a quick smoke test).
+[profile.dev-fast]
+inherits = "dev"
+debug = 0
+codegen-units = 256
+incremental = true
+
+# Release tuning: ThinLTO + 16 codegen units gives near-fat-LTO performance
+# without the wall-clock cost of fat-LTO + codegen-units=1 (which should be
+# reserved for publishable wheels via a separate `--profile dist`).
+#
+# `strip` matters more here than it looks: release builds carry little debug
+# info (~30 MiB) but a ~132 MiB symbol table, a consequence of monomorphizing
+# across 500+ dependency crates. `strip = "debuginfo"` reclaims almost none of
+# it; only "symbols" does. Measured on lib_uni_db.so: 536 MiB -> 375 MiB.
+# The cost is unsymbolicated panic backtraces — panic *messages* still reach
+# Python through PyO3, only frame names are lost. Build without this profile
+# (or with `strip = "none"`) when you need a symbolicated backtrace.
+[profile.release]
+lto = "thin"
+codegen-units = 16
+strip = "symbols"
+
+# Publishable-wheel profile — the `--profile dist` the note above refers to.
+# NB: named `dist`, not `publish` — Cargo reserves `publish` as a profile name
+# and errors out on it, which is likely why this profile never got written.
+# Fat LTO across a single codegen unit lets LLVM inline and dead-strip across
+# crate boundaries, which matters here because ~94% of .text comes from
+# dependencies rather than our own code. Inherits `strip = "symbols"` from
+# release. `codegen-units` is the real size lever here, not the LTO mode.
+# Measured on `-p uni-python` (WASM off), lib_uni_db.so / peak rustc RSS / wall:
+#   thin cgu=16 (= release)  ~368 MiB   --        15m40s
+#   thin cgu=4                289.0 MiB  11.0 GiB  12m37s
+#   thin cgu=1                238.4 MiB  11.7 GiB  19m26s   <- chosen
+#   fat  cgu=1                219.6 MiB  15.8+ GiB 36m48s   <- rejected, see below
+# `lto = "fat"` buys only 18.8 MiB over thin but pushes peak RSS past 15.8 GiB,
+# which OOMs the 14 GB macos-latest-xlarge metal job. cgu=4 saves just 0.7 GiB
+# over cgu=1 while giving back 50 MiB — peak RSS floors around 11 GiB for the
+# ThinLTO link regardless of codegen-units, so cgu=1 is strictly the better
+# trade. 11.7 GiB is ~84% of the 14 GB metal runner: if that job ever OOMs,
+# move it to `--release` rather than raising codegen-units.
+# Used by .github/workflows/release-wheels.yml; keep the two in sync.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
+
+# Benchmark profile — release optimization, but with symbols kept.
+#
+# `bench` inherits from `release`, which sets `strip = "symbols"` above for wheel
+# size. That is right for shipped artifacts and wrong for benchmarks: a stripped
+# binary has no symbol table, so any profiler that resolves functions by name
+# cannot find them.
+#
+# This is not a theoretical concern. Under `iai-callgrind`, Callgrind collects
+# with `--collect-atstart=no` and toggles collection on entry to the benchmark
+# function *by name*. With symbols stripped the toggle never matches, Callgrind
+# reports `Collected: 0`, and iai-callgrind prints `Ok. 7 without regressions` —
+# a green run that measured nothing at all. Discovered in Phase 0B; see
+# docs/perf/iai-qualification-2026-08-12.md.
+#
+# `debug = 1` (line tables) is enough for symbolication and costs far less than
+# full debug info. Applies to every bench target, so `perf`/`valgrind` on the
+# Criterion benches get readable stacks too.
+[profile.bench]
+inherits = "release"
+strip = "none"
+debug = 1
+

@@ -558,18 +558,25 @@ fn parse_and_plan_cold(ctx: GraphCtx) -> usize {
 #[bench::by_id(graph_ctx())]
 fn vertex_lookup_by_id(ctx: GraphCtx) -> usize {
     let vid = ctx.vid;
-    measured(|| {
+    let r = measured(|| {
         ctx.rt.block_on(async {
-            let r = ctx
-                .session
+            ctx.session
                 .query_with("MATCH (p:Person) WHERE id(p) = $vid RETURN p.name AS c0")
                 .param("vid", unival!(vid.as_u64() as i64))
                 .fetch_all()
                 .await
-                .expect("query");
-            black_box(r.len())
+                .expect("query")
         })
-    })
+    });
+    // Check outside the measured window: an empty/wrong result must never look
+    // like an instruction-count improvement, and validation is not query cost.
+    assert_eq!(r.len(), 1, "id lookup must find the fixture vertex");
+    assert_eq!(
+        r.rows()[0].get::<String>("c0").expect("person name"),
+        format!("p{}", PERSONS / 2),
+        "id lookup must return the selected fixture vertex",
+    );
+    black_box(r.len())
 }
 
 // EXPECT: qualifies (CPU-dominant).

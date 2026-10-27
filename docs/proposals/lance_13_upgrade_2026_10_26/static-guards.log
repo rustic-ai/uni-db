@@ -1,0 +1,10 @@
+ok    wheel-variant plugin features (0.0s)
+ok    Python version consistency (0.0s)
+ok    documented counts (0.5s)
+ok    generated Python API reference (0.1s)
+ok    documented Python symbols (0.1s)
+ok    Rust <-> Python parity (0.1s)
+ok    ignored-test registry (1.0s)
+ok    fuzz/Cargo.lock is current (0.4s)
+
+all 8 static checks passed

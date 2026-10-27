@@ -1,0 +1,1091 @@
+warning: unused workspace dependency `candle-transformers`
+   --> Cargo.toml:207:1
+    |
+207 | candle-transformers = "0.10"
+    | ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `cargo::unused_workspace_dependencies` is set to `warn` by default
+help: consider removing the workspace dependency `candle-transformers`
+warning: unused workspace dependency `hf-hub`
+   --> Cargo.toml:209:1
+    |
+209 | hf-hub = "0.5"
+    | ^^^^^^
+    |
+help: consider removing the workspace dependency `hf-hub`
+warning: unused workspace dependency `ordered-float`
+   --> Cargo.toml:180:1
+    |
+180 | ordered-float = "5"
+    | ^^^^^^^^^^^^^
+    |
+help: consider removing the workspace dependency `ordered-float`
+warning: unused workspace dependency `pyo3`
+   --> Cargo.toml:188:1
+    |
+188 | pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
+    | ^^^^
+    |
+help: consider removing the workspace dependency `pyo3`
+warning: unused workspace dependency `pyo3-async-runtimes`
+   --> Cargo.toml:189:1
+    |
+189 | pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
+    | ^^^^^^^^^^^^^^^^^^^
+    |
+help: consider removing the workspace dependency `pyo3-async-runtimes`
+warning: unused workspace dependency `tokenizers`
+   --> Cargo.toml:210:1
+    |
+210 | tokenizers = "0.23"
+    | ^^^^^^^^^^
+    |
+help: consider removing the workspace dependency `tokenizers`
+warning: unused workspace dependency `uni-cli`
+   --> Cargo.toml:109:1
+    |
+109 | uni-cli = { path = "crates/uni-cli", version = "4.2.0" }
+    | ^^^^^^^
+    |
+help: consider removing the workspace dependency `uni-cli`
+warning: unused field `rust-version` in `workspace.package`
+  --> Cargo.toml:94:1
+   |
+94 | rust-version = "1.96"
+   | ^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_workspace_package_fields` is set to `warn` by default
+help: consider removing the field `workspace.package.rust-version`
+warning: workspace (manifest) generated 8 warnings
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded addr2line v0.27.1
+  Downloaded gimli v0.34.0
+   Compiling compiler_builtins v0.1.160 (/home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins)
+   Compiling core v0.0.0 (/home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core)
+   Compiling libc v0.2.189
+   Compiling object v0.39.1
+   Compiling std v0.0.0 (/home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std)
+   Compiling test v0.0.0 (/home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/test)
+   Compiling quote v1.0.45
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling serde_core v1.0.228
+   Compiling libc v0.2.186
+   Compiling serde v1.0.228
+   Compiling autocfg v1.5.1
+   Compiling libm v0.2.16
+   Compiling syn v2.0.117
+   Compiling find-msvc-tools v0.1.9
+   Compiling jobserver v0.1.34
+   Compiling num-traits v0.2.19
+   Compiling shlex v2.0.1
+   Compiling portable-atomic v1.13.1
+   Compiling cc v1.2.64
+   Compiling zerocopy v0.8.52
+   Compiling version_check v0.9.5
+   Compiling zmij v1.0.21
+   Compiling pkg-config v0.3.33
+   Compiling parking_lot_core v0.9.12
+   Compiling serde_json v1.0.150
+   Compiling getrandom v0.3.4
+   Compiling once_cell v1.21.4
+   Compiling generic-array v0.14.7
+   Compiling cfg-if v1.0.4
+   Compiling syn v3.0.6
+   Compiling crunchy v0.2.4
+   Compiling getrandom v0.2.17
+   Compiling tiny-keccak v2.0.2
+   Compiling synstructure v0.13.2
+   Compiling crossbeam-utils v0.8.21
+   Compiling const-random-macro v0.1.16
+   Compiling memchr v2.8.2
+   Compiling thiserror v2.0.18
+   Compiling httparse v1.10.1
+   Compiling cmake v0.1.58
+   Compiling dunce v1.0.5
+   Compiling fs_extra v1.3.0
+   Compiling icu_normalizer_data v2.3.0
+   Compiling icu_properties_data v2.3.0
+   Compiling ring v0.17.14
+   Compiling aws-lc-sys v0.45.0
+   Compiling aws-lc-rs v1.18.1
+   Compiling crc32fast v1.5.0
+   Compiling anyhow v1.0.104
+   Compiling getrandom v0.4.2
+   Compiling rustls v0.23.46
+   Compiling zstd-sys v2.1.2+zstd.1.5.7
+   Compiling rustc-std-workspace-core v1.99.0 (/home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/rustc-std-workspace-core)
+   Compiling alloc v0.0.0 (/home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/alloc)
+   Compiling adler2 v2.0.1
+   Compiling memchr v2.8.3
+   Compiling unwind v0.0.0 (/home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/unwind)
+   Compiling rustc-demangle v0.1.28
+   Compiling rustc-literal-escaper v0.0.8
+   Compiling ahash v0.8.12
+   Compiling vcpkg v0.2.15
+   Compiling rustc-std-workspace-alloc v1.99.0 (/home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/rustc-std-workspace-alloc)
+   Compiling gimli v0.34.0
+   Compiling miniz_oxide v0.9.1
+   Compiling addr2line v0.27.1
+   Compiling std_detect v0.1.5 (/home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std_detect)
+   Compiling hashbrown v0.17.1
+   Compiling panic_unwind v0.0.0 (/home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/panic_unwind)
+   Compiling panic_abort v0.0.0 (/home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/panic_abort)
+   Compiling openssl-sys v0.9.117
+   Compiling zstd-safe v8.2.0
+   Compiling paste v1.0.15
+   Compiling liblzma-sys v0.4.6
+   Compiling serde_derive v1.0.228
+   Compiling zerocopy-derive v0.8.52
+   Compiling rustc-std-workspace-std v1.99.0 (/home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/rustc-std-workspace-std)
+   Compiling getopts v0.2.24
+   Compiling proc_macro v0.0.0 (/home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/proc_macro)
+   Compiling itoa v1.0.18
+   Compiling smallvec v1.15.2
+   Compiling equivalent v1.0.2
+   Compiling allocator-api2 v0.2.21
+   Compiling foldhash v0.2.0
+   Compiling bytes v1.11.1
+   Compiling indexmap v2.14.0
+   Compiling log v0.4.32
+   Compiling pin-project-lite v0.2.17
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling futures-core v0.3.32
+   Compiling num-integer v0.1.46
+   Compiling parking_lot v0.12.5
+   Compiling futures-sink v0.3.32
+   Compiling errno v0.3.14
+   Compiling bitflags v2.13.0
+   Compiling signal-hook-registry v1.4.8
+   Compiling slab v0.4.12
+   Compiling futures-channel v0.3.32
+   Compiling zeroize v1.9.0
+   Compiling futures-io v0.3.32
+   Compiling futures-task v0.3.32
+   Compiling bytemuck_derive v1.10.2
+   Compiling futures-macro v0.3.32
+   Compiling ppv-lite86 v0.2.21
+   Compiling typenum v1.20.1
+   Compiling socket2 v0.6.4
+   Compiling mio v1.2.1
+   Compiling tokio-macros v2.7.0
+   Compiling http v1.4.2
+   Compiling subtle v2.6.1
+   Compiling rand_core v0.9.5
+   Compiling rand_core v0.6.4
+   Compiling stable_deref_trait v1.2.1
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.4
+   Compiling percent-encoding v2.3.2
+   Compiling rand_chacha v0.3.1
+   Compiling either v1.16.0
+   Compiling rand v0.8.6
+   Compiling futures-util v0.3.32
+   Compiling tracing-core v0.1.36
+   Compiling zerofrom-derive v0.1.7
+   Compiling bytemuck v1.25.0
+   Compiling tokio v1.53.3
+   Compiling ryu v1.0.23
+   Compiling tracing-attributes v0.1.31
+   Compiling yoke-derive v0.8.2
+   Compiling tracing v0.1.44
+   Compiling fnv v1.0.7
+   Compiling crypto-common v0.1.7
+   Compiling const-oid v0.9.6
+   Compiling http-body v1.0.1
+   Compiling block-buffer v0.10.4
+   Compiling zerovec-derive v0.11.6
+   Compiling digest v0.10.7
+   Compiling displaydoc v0.2.6
+   Compiling base64 v0.22.1
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.3
+   Compiling writeable v0.6.4
+   Compiling form_urlencoded v1.2.2
+   Compiling http-body-util v0.1.3
+   Compiling litemap v0.8.2
+   Compiling const-random v0.1.18
+   Compiling tokio-util v0.7.18
+   Compiling utf8_iter v1.0.4
+   Compiling thiserror-impl v2.0.18
+   Compiling rand_distr v0.5.1
+   Compiling half v2.7.1
+   Compiling num-complex v0.4.6
+   Compiling rustls-pki-types v1.14.1
+   Compiling try-lock v0.2.5
+   Compiling atomic-waker v1.1.2
+   Compiling tower-service v0.3.3
+   Compiling h2 v0.4.18
+   Compiling want v0.3.1
+   Compiling ipnet v2.12.0
+   Compiling zerotrie v0.2.5
+   Compiling untrusted v0.9.0
+   Compiling zerovec v0.11.8
+   Compiling hyper v1.10.1
+   Compiling tinystr v0.8.4
+   Compiling icu_locale_core v2.3.0
+   Compiling potential_utf v0.1.5
+   Compiling icu_provider v2.3.1
+   Compiling icu_collections v2.3.0
+   Compiling hyper-util v0.1.20
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling openssl-probe v0.2.1
+   Compiling simd-adler32 v0.3.9
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling rand_core v0.10.1
+   Compiling siphasher v1.0.3
+   Compiling sync_wrapper v1.0.2
+   Compiling cpufeatures v0.3.0
+   Compiling url v2.5.8
+   Compiling tower-layer v0.3.3
+   Compiling tower v0.5.3
+   Compiling encoding_rs v0.8.35
+   Compiling regex-syntax v0.8.11
+   Compiling miniz_oxide v0.8.9
+   Compiling webpki-roots v1.0.10
+   Compiling futures-executor v0.3.32
+   Compiling num-bigint v0.4.6
+   Compiling aho-corasick v1.1.4
+   Compiling zlib-rs v0.6.3
+   Compiling flate2 v1.1.9
+   Compiling rustls-native-certs v0.8.4
+   Compiling regex-automata v0.4.14
+   Compiling zstd v0.14.3
+   Compiling futures v0.3.32
+   Compiling zstd v0.13.3 (/home/rohit/work/dragonscale/uni/compat/zstd)
+   Compiling iana-time-zone v0.1.65
+   Compiling openssl v0.10.81
+   Compiling chrono v0.4.45
+   Compiling libbz2-rs-sys v0.2.5
+   Compiling openssl-macros v0.1.1
+   Compiling bzip2 v0.6.1
+   Compiling zstd-safe v7.2.4 (/home/rohit/work/dragonscale/uni/compat/zstd-safe)
+   Compiling compression-core v0.4.32
+   Compiling uuid v1.23.3
+   Compiling mime v0.3.17
+   Compiling regex v1.12.4
+   Compiling serde_urlencoded v0.7.1
+   Compiling hybrid-array v0.4.12
+   Compiling unicode-width v0.2.2
+   Compiling byteorder v1.5.0
+   Compiling itertools v0.14.0
+   Compiling cmov v0.5.4
+   Compiling unicode-segmentation v1.13.3
+   Compiling ctutils v0.4.4
+   Compiling block-buffer v0.12.1
+   Compiling crypto-common v0.2.2
+   Compiling const-oid v0.10.2
+   Compiling foreign-types-shared v0.1.1
+   Compiling foreign-types v0.3.2
+   Compiling digest v0.11.3
+   Compiling arrow-schema v58.4.1
+   Compiling semver v1.0.28
+   Compiling native-tls v0.2.18
+   Compiling rustc_version v0.4.1
+   Compiling async-trait v0.1.92
+   Compiling phf_shared v0.12.1
+   Compiling unicase v2.9.0
+   Compiling chrono-tz v0.10.4
+   Compiling seq-macro v0.3.6
+   Compiling mime_guess v2.0.5
+   Compiling phf v0.12.1
+   Compiling arrow-buffer v58.4.1
+   Compiling liblzma v0.4.6
+   Compiling compression-codecs v0.4.38
+   Compiling arrow-data v58.4.1
+   Compiling async-compression v0.4.42
+   Compiling tower-http v0.6.11
+   Compiling tokio-native-tls v0.3.1
+   Compiling arrow-array v58.4.1
+   Compiling hyper-tls v0.6.0
+   Compiling sha2 v0.11.0
+   Compiling hex v0.4.3
+   Compiling arrayvec v0.7.6
+   Compiling same-file v1.0.6
+   Compiling lexical-util v1.0.7
+   Compiling walkdir v2.5.0
+   Compiling object v0.37.3
+   Compiling crossbeam-epoch v0.9.20
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-write-integer v1.0.6
+   Compiling chacha20 v0.10.2
+   Compiling lexical-write-float v1.0.6
+   Compiling rand v0.10.1
+   Compiling lexical-parse-float v1.0.6
+   Compiling arrow-select v58.4.1
+   Compiling humantime v2.3.0
+   Compiling spin v0.9.9
+   Compiling lazy_static v1.5.0
+   Compiling lexical-core v1.0.6
+   Compiling arrow-ord v58.4.1
+   Compiling flatbuffers v25.12.19
+   Compiling comfy-table v7.2.2
+   Compiling ar_archive_writer v0.5.2
+   Compiling atoi v2.0.0
+   Compiling csv-core v0.1.13
+   Compiling psm v0.1.31
+   Compiling csv v1.4.0
+   Compiling arrow-cast v58.4.1
+   Compiling md-5 v0.10.6
+   Compiling twox-hash v2.1.2
+   Compiling quick-xml v0.39.4
+   Compiling rustls-webpki v0.103.16
+   Compiling pin-project-internal v1.1.13
+   Compiling lz4_flex v0.13.1
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.12.28
+   Compiling pin-project v1.1.13
+   Compiling object_store v0.13.2
+   Compiling fastrand v2.4.1
+   Compiling alloc-no-stdlib v2.0.4
+   Compiling stacker v0.1.24
+   Compiling rustix v1.1.4
+   Compiling alloc-stdlib v0.2.2
+   Compiling arrow-ipc v58.4.1
+   Compiling arrow-row v58.4.1
+   Compiling md-5 v0.11.0
+   Compiling simdutf8 v0.1.5
+   Compiling cpufeatures v0.2.17
+   Compiling linux-raw-sys v0.12.1
+   Compiling snap v1.1.1
+   Compiling brotli-decompressor v5.0.1
+   Compiling ordered-float v3.9.2
+   Compiling hashbrown v0.14.5
+   Compiling integer-encoding v3.0.4
+   Compiling recursive-proc-macro-impl v0.1.1
+   Compiling thrift v0.23.0
+   Compiling brotli v8.0.3
+   Compiling recursive v0.1.1
+   Compiling arrow-json v58.4.1
+   Compiling arrow-csv v58.4.1
+   Compiling arrow-string v58.4.1
+   Compiling arrow-arith v58.4.1
+   Compiling sqlparser_derive v0.5.0
+   Compiling arrow v58.4.1
+   Compiling parquet v58.4.1
+   Compiling foldhash v0.1.5
+   Compiling hashbrown v0.15.5
+   Compiling ident_case v1.0.1
+   Compiling heck v0.5.0
+   Compiling sha2 v0.10.9
+   Compiling datafusion-doc v54.1.0
+   Compiling rayon-core v1.13.0
+   Compiling crossbeam-deque v0.8.6
+   Compiling tempfile v3.27.0
+   Compiling sqlparser v0.62.0
+   Compiling fixedbitset v0.5.7
+   Compiling base64ct v1.8.3
+   Compiling strsim v0.11.1
+   Compiling petgraph v0.8.3
+   Compiling dashmap v6.2.1
+   Compiling rayon v1.12.0
+   Compiling datafusion-macros v54.1.0
+   Compiling block-padding v0.3.3
+   Compiling arrayref v0.3.9
+   Compiling blake3 v1.8.5
+   Compiling rustversion v1.0.22
+   Compiling inout v0.1.4
+   Compiling jiff v0.2.28
+   Compiling constant_time_eq v0.4.2
+   Compiling prost-derive v0.14.4
+   Compiling cipher v0.4.4
+   Compiling blake2 v0.10.6
+   Compiling base64 v0.23.1
+   Compiling signature v2.2.0
+   Compiling pem-rfc7468 v0.7.0
+   Compiling hmac v0.13.0
+   Compiling hmac v0.12.1
+   Compiling pbkdf2 v0.12.2
+   Compiling der v0.7.10
+   Compiling datafusion-common v54.1.0
+   Compiling salsa20 v0.10.2
+   Compiling num_cpus v1.17.0
+   Compiling scrypt v0.11.0
+   Compiling spki v0.7.3
+   Compiling aes v0.8.4
+   Compiling cbc v0.1.2
+   Compiling datafusion-expr-common v54.1.0
+   Compiling datafusion-physical-expr-common v54.1.0
+   Compiling datafusion-functions-window-common v54.1.0
+   Compiling datafusion-functions-aggregate-common v54.1.0
+   Compiling datafusion-expr v54.1.0
+   Compiling pkcs5 v0.7.1
+   Compiling num-bigint-dig v0.8.6
+   Compiling pkcs8 v0.10.2
+   Compiling num-iter v0.1.45
+   Compiling datafusion-physical-expr v54.1.0
+   Compiling datafusion-execution v54.1.0
+   Compiling datafusion-functions v54.1.0
+   Compiling pkcs1 v0.7.5
+   Compiling rsa v0.9.10
+   Compiling sha1 v0.11.0
+   Compiling mea v0.6.4
+   Compiling powerfmt v0.2.0
+   Compiling deranged v0.5.8
+   Compiling reqsign-core v3.3.1
+   Compiling http v0.2.12
+   Compiling hashbrown v0.16.1
+   Compiling time-core v0.1.8
+   Compiling outref v0.5.2
+   Compiling vsimd v0.8.0
+   Compiling num-conv v0.2.2
+   Compiling time v0.3.47
+   Compiling base64-simd v0.8.0
+   Compiling http-body v0.4.6
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling crossbeam-channel v0.5.15
+   Compiling bytes-utils v0.1.4
+   Compiling nom v8.0.0
+   Compiling pin-utils v0.1.0
+   Compiling aws-smithy-types v1.5.0
+   Compiling reqwest v0.13.4
+   Compiling darling_core v0.20.11
+   Compiling phf_shared v0.13.1
+   Compiling datafusion-common-runtime v54.1.0
+   Compiling aws-smithy-async v1.2.14
+   Compiling aws-smithy-runtime-api-macros v1.0.0
+   Compiling prettyplease v0.2.37
+   Compiling aws-smithy-runtime-api v1.12.3
+   Compiling datafusion-physical-plan v54.1.0
+   Compiling phf_generator v0.13.1
+   Compiling darling_macro v0.20.11
+   Compiling prost v0.14.4
+   Compiling quick-xml v0.41.0
+   Compiling new_debug_unreachable v1.0.6
+   Compiling bigdecimal v0.4.10
+   Compiling datafusion-session v54.1.0
+   Compiling darling v0.20.11
+   Compiling prost-types v0.14.4
+   Compiling datafusion-physical-expr-adapter v54.1.0
+   Compiling datafusion-functions-aggregate v54.1.0
+   Compiling raw-cpuid v11.6.0
+   Compiling quick-xml v0.42.0
+   Compiling glob v0.3.3
+   Compiling asyncband v0.7.3
+   Compiling multimap v0.10.1
+   Compiling prost-build v0.14.4
+   Compiling opendal-core v0.59.5
+   Compiling datafusion-datasource v54.1.0
+   Compiling datafusion-functions-nested v54.1.0
+   Compiling ordered-float v5.3.0
+   Compiling pulp v0.22.2
+   Compiling datafusion-sql v54.1.0
+   Compiling darling_core v0.23.0
+   Compiling concurrent-queue v2.5.0
+   Compiling pulp-wasm-simd-flag v0.1.0
+   Compiling bitflags v1.3.2
+   Compiling reborrow v0.5.5
+   Compiling parking v2.2.1
+   Compiling spin v0.10.1
+   Compiling cfg_aliases v0.2.1
+   Compiling dyn-stack-macros v0.1.3
+   Compiling dyn-stack v0.13.2
+   Compiling nix v0.31.3
+   Compiling crc-fast v1.10.0
+   Compiling event-listener v5.4.1
+   Compiling tokio-stream v0.1.18
+   Compiling static_assertions v1.1.0
+   Compiling gemm-common v0.19.0
+   Compiling event-listener-strategy v0.5.4
+   Compiling darling_macro v0.23.0
+   Compiling derive_builder_core v0.20.2
+   Compiling phf_codegen v0.13.1
+   Compiling darling v0.23.0
+   Compiling dlv-list v0.5.2
+   Compiling minimal-lexical v0.2.1
+   Compiling data-encoding v2.11.0
+   Compiling esaxx-rs v0.1.10
+   Compiling nom v7.1.3
+   Compiling ordered-multimap v0.7.3
+   Compiling symphonia-core v0.5.5
+   Compiling aws-smithy-schema v0.1.0
+   Compiling arc-swap v1.9.1
+   Compiling castaway v0.2.4
+   Compiling sha1 v0.10.6
+   Compiling itertools v0.15.0
+   Compiling base64 v0.13.1
+   Compiling utf-8 v0.7.6
+   Compiling ethnum v1.5.3
+   Compiling fast-float2 v0.2.3
+   Compiling monostate-impl v0.1.18
+   Compiling onig_sys v69.9.3
+   Compiling macro_rules_attribute-proc_macro v0.2.2
+   Compiling macro_rules_attribute v0.2.2
+   Compiling monostate v0.1.18
+   Compiling object_store v0.14.2
+   Compiling derive_builder_macro v0.20.2
+   Compiling derive_builder v0.20.2
+   Compiling jsonb v0.5.6
+   Compiling spm_precompiled v0.1.4
+   Compiling compact_str v0.9.1
+   Compiling rust-ini v0.21.3
+   Compiling serde_with_macros v3.21.0
+   Compiling async-lock v3.4.2
+   Compiling phf_macros v0.13.1
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-credential-types v1.2.14
+   Compiling rayon-cond v0.4.0
+   Compiling snafu-derive v0.9.1
+   Compiling aws-types v1.3.16
+   Compiling num-rational v0.4.2
+   Compiling unicode-normalization-alignments v0.1.12
+   Compiling dary_heap v0.3.9
+   Compiling rustc-hash v2.1.2
+   Compiling unicode_categories v0.1.1
+   Compiling tagptr v0.2.0
+   Compiling equator-macro v0.4.2
+   Compiling moka v0.12.15
+   Compiling phf v0.13.1
+   Compiling reqsign-aws-core v3.1.1
+   Compiling serde_with v3.21.0
+   Compiling equator v0.4.2
+   Compiling lance-arrow v13.0.0
+   Compiling symphonia-metadata v0.5.5
+   Compiling string_cache_codegen v0.6.1
+   Compiling aws-smithy-observability v0.2.6
+   Compiling aws-smithy-http-client v1.1.13
+   Compiling quick_cache v0.6.24
+   Compiling reqsign-file-read-tokio v3.0.6
+   Compiling roaring v0.11.4
+   Compiling snafu v0.9.1
+   Compiling urlencoding v2.1.3
+   Compiling precomputed-hash v0.1.1
+   Compiling lance-derive v13.0.0
+   Compiling matrixmultiply v0.3.10
+   Compiling aws-smithy-runtime v1.11.3
+   Compiling lance-core v13.0.0
+   Compiling web_atoms v0.2.4
+   Compiling onig v6.5.3
+   Compiling aligned-vec v0.6.4
+   Compiling reqsign-aws-v4 v3.3.0
+   Compiling aws-sigv4 v1.4.5
+   Compiling gemm-f32 v0.19.0
+   Compiling datafusion-catalog v54.1.0
+   Compiling datafusion-pruning v54.1.0
+   Compiling thread-tree v0.3.3
+   Compiling pem v4.0.0
+   Compiling option-ext v0.2.0
+   Compiling anstyle v1.0.14
+   Compiling rawpointer v0.2.1
+   Compiling dirs-sys v0.5.0
+   Compiling reqsign-azure-storage v3.2.1
+   Compiling gemm-f16 v0.19.0
+   Compiling aws-runtime v1.7.4
+   Compiling v_frame v0.3.9
+   Compiling string_cache v0.9.0
+   Compiling aws-smithy-json v0.62.7
+   Compiling gemm-c64 v0.19.0
+   Compiling gemm-c32 v0.19.0
+   Compiling gemm-f64 v0.19.0
+   Compiling opendal-service-azure-common v0.59.5
+   Compiling as-slice v0.2.1
+   Compiling regex-lite v0.1.9
+   Compiling bit-vec v0.8.0
+   Compiling winnow v1.0.3
+   Compiling typed-path v0.12.3
+   Compiling utf8parse v0.2.2
+   Compiling built v0.8.1
+   Compiling av-scenechange v0.14.1
+   Compiling rav1e v0.8.1
+   Compiling zip v7.2.0
+   Compiling anstyle-parse v1.0.0
+   Compiling toml_parser v1.1.5+spec-1.1.0
+   Compiling data-encoding-macro-internal v0.1.18
+   Compiling bit-set v0.8.0
+   Compiling aligned v0.4.3
+   Compiling gemm v0.19.0
+   Compiling dirs v6.0.0
+   Compiling datafusion-functions-table v54.1.0
+   Compiling datafusion-catalog-listing v54.1.0
+   Compiling datafusion-datasource-parquet v54.1.0
+   Compiling datafusion-physical-optimizer v54.1.0
+   Compiling reqsign-google v3.1.1
+   Compiling tokenizers v0.22.2
+   Compiling symphonia-utils-xiph v0.5.5
+   Compiling datafusion-datasource-json v54.1.0
+   Compiling datafusion-datasource-arrow v54.1.0
+   Compiling datafusion-datasource-csv v54.1.0
+   Compiling safetensors v0.7.0
+   Compiling datafusion-optimizer v54.1.0
+   Compiling datafusion-functions-window v54.1.0
+   Compiling backon v1.6.0
+   Compiling sharded-slab v0.1.7
+   Compiling socks v0.3.4
+   Compiling matchers v0.2.0
+   Compiling opentelemetry v0.32.0
+   Compiling float8 v0.7.0
+   Compiling tracing-log v0.2.0
+   Compiling memmap2 v0.9.10
+   Compiling serde_spanned v1.1.1
+   Compiling no_std_io2 v0.9.4
+   Compiling thread_local v1.1.9
+   Compiling quick-error v2.0.1
+   Compiling link-section v0.19.3
+   Compiling y4m v0.8.0
+   Compiling anstyle-query v1.1.5
+   Compiling colorchoice v1.0.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling toml_writer v1.1.3+spec-1.1.0
+   Compiling xmlparser v0.13.6
+   Compiling nu-ansi-term v0.50.3
+   Compiling const-str v0.4.3
+   Compiling winnow v0.7.15
+   Compiling arg_enum_proc_macro v0.3.4
+   Compiling match-lookup v0.1.2
+   Compiling derive_more-impl v2.1.1
+   Compiling profiling-procmacros v1.0.18
+   Compiling pastey v0.1.1
+   Compiling syn v1.0.109
+   Compiling linktime-proc-macro v0.2.3
+   Compiling profiling v1.0.18
+   Compiling base256emoji v1.0.2
+   Compiling tracing-subscriber v0.3.23
+   Compiling aws-smithy-xml v0.60.15
+   Compiling ctor v1.0.13
+   Compiling anstream v1.0.0
+   Compiling bitstream-io v4.10.0
+   Compiling candle-core v0.10.2
+   Compiling opendal-layer-retry v0.59.5
+   Compiling datafusion v54.1.0
+   Compiling opendal-service-gcs v0.59.5
+   Compiling data-encoding-macro v0.1.20
+   Compiling opendal-service-azblob v0.59.5
+   Compiling opendal-service-azdls v0.59.5
+   Compiling av1-grain v0.2.5
+   Compiling opendal-service-s3 v0.59.5
+   Compiling aws-smithy-query v0.60.15
+   Compiling opendal-http-transport-reqwest v0.59.5
+   Compiling opendal-layer-logging v0.59.5
+   Compiling opendal-layer-concurrent-limit v0.59.5
+   Compiling opendal-layer-timeout v0.59.5
+   Compiling phf_shared v0.11.3
+   Compiling maybe-rayon v0.1.1
+   Compiling safe_arch v0.7.4
+   Compiling rmp v0.8.15
+   Compiling imgref v1.12.2
+   Compiling base-x v0.2.11
+   Compiling mac v0.1.1
+   Compiling zune-core v0.5.1
+   Compiling weezl v0.1.12
+   Compiling num-derive v0.4.2
+   Compiling serde_repr v0.1.20
+   Compiling lz4-sys v1.11.1+lz4-1.10.0
+   Compiling simd_helpers v0.1.0
+   Compiling noop_proc_macro v0.3.0
+   Compiling io-uring v0.7.12
+   Compiling signal-hook v0.3.18
+   Compiling lance-namespace-reqwest-client v0.13.0
+   Compiling pem-rfc7468 v1.0.0
+   Compiling zune-jpeg v0.5.15
+   Compiling futf v0.1.5
+   Compiling multibase v0.9.2
+   Compiling rmp-serde v1.3.1
+   Compiling loop9 v0.1.5
+   Compiling wide v0.7.33
+   Compiling phf_generator v0.11.3
+   Compiling opendal v0.59.5
+   Compiling aws-sdk-sts v1.106.0
+   Compiling aws-sdk-ssooidc v1.103.0
+   Compiling aws-sdk-sso v1.101.0
+   Compiling terminal_size v0.4.4
+   Compiling avif-serialize v0.8.9
+   Compiling curve25519-dalek v4.1.3
+   Compiling console v0.15.11
+   Compiling uni-btic v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-btic)
+   Compiling webpki-roots v0.26.11
+   Compiling uni-sparse-vector v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-sparse-vector)
+   Compiling fdeflate v0.3.7
+   Compiling zune-inflate v0.2.54
+   Compiling fail v0.5.1
+   Compiling ulid v1.2.1
+   Compiling pxfm v0.1.29
+   Compiling strength_reduce v0.2.4
+   Compiling dtoa v1.0.11
+   Compiling stfu8 v0.2.7
+   Compiling number_prefix v0.4.0
+   Compiling lebe v0.5.3
+   Compiling color_quant v1.1.0
+   Compiling rgb v0.8.53
+   Compiling fax v0.2.7
+   Compiling clap_lex v1.1.0
+   Compiling std_prelude v0.2.12
+   Compiling byteorder-lite v0.1.0
+   Compiling bit_field v0.10.3
+   Compiling strsim v0.10.0
+   Compiling icu_locale_fallback_data v2.3.0
+   Compiling ureq-proto v0.6.0
+   Compiling darling_core v0.11.0
+   Compiling exr v1.74.0
+   Compiling image-webp v0.2.4
+   Compiling path_abs v0.5.1
+   Compiling moxcms v0.8.1
+   Compiling clap_builder v4.6.0
+   Compiling ravif v0.13.0
+   Compiling tiff v0.11.3
+   Compiling gif v0.14.2
+   Compiling indicatif v0.17.11
+   Compiling dtoa-short v0.3.5
+   Compiling transpose v0.2.3
+   Compiling uni-common v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-common)
+   Compiling png v0.18.1
+   Compiling ureq v2.12.1
+   Compiling aws-config v1.8.18
+   Compiling webpki-root-certs v1.0.10
+   Compiling object_store_opendal v0.60.5
+   Compiling phf_macros v0.11.3
+   Compiling tendril v0.4.3
+   Compiling lance-namespace v13.0.0
+   Compiling der v0.8.2
+   Compiling derive_more v2.1.1
+   Compiling candle-nn v0.10.2
+   Compiling tendril v0.5.0
+   Compiling selectors v0.33.0
+   Compiling stop-words v0.9.0
+   Compiling lance-encoding v13.0.0
+   Compiling clap_derive v4.6.1
+   Compiling strum_macros v0.28.0
+   Compiling qoi v0.4.1
+   Compiling primal-check v0.3.4
+   Compiling mio v0.8.11
+   Compiling nibble_vec v0.1.0
+   Compiling approx v0.5.1
+   Compiling vob v3.0.6
+   Compiling bit-vec v0.6.3
+   Compiling extended v0.1.0
+   Compiling cssparser-macros v0.6.1
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling utf8-zero v0.8.1
+   Compiling icu_segmenter_data v2.3.0
+   Compiling ref-cast v1.0.25
+   Compiling cssparser v0.36.0
+   Compiling ureq v3.3.0
+   Compiling clap v4.6.1
+   Compiling symphonia-format-riff v0.5.5
+   Compiling bit-set v0.5.3
+   Compiling simba v0.9.1
+   Compiling signal-hook-mio v0.2.5
+   Compiling rustfft v6.4.1
+   Compiling strum v0.28.0
+   Compiling image v0.25.10
+   Compiling phf v0.11.3
+   Compiling markup5ever v0.38.0
+   Compiling lance-io v13.0.0
+   Compiling markup5ever v0.36.1
+   Compiling lz4 v1.28.1
+   Compiling hf-hub v0.4.3
+   Compiling darling_macro v0.11.0
+   Compiling lance-bitpacking v13.0.0
+   Compiling symphonia-format-isomp4 v0.5.5
+   Compiling symphonia-codec-vorbis v0.5.5
+   Compiling symphonia-format-ogg v0.5.5
+   Compiling symphonia-bundle-flac v0.5.5
+   Compiling fancy-regex v0.14.0
+   Compiling symphonia-bundle-mp3 v0.5.5
+   Compiling tungstenite v0.28.0
+   Compiling symphonia-codec-pcm v0.5.5
+   Compiling stop-words v0.10.0
+   Compiling lance-file v13.0.0
+   Compiling cached_proc_macro v0.25.0
+   Compiling ed25519 v2.2.3
+   Compiling toktrie v1.7.6
+   Compiling fsst v13.0.0
+   Compiling fxhash v0.2.1
+   Compiling console v0.16.3
+   Compiling rand_distr v0.4.3
+   Compiling servo_arc v0.4.3
+   Compiling hyperloglogplus v0.4.1
+   Compiling packedvec v1.2.5
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling cached_proc_macro_types v0.1.1
+   Compiling tinyvec_macros v0.1.1
+   Compiling smallvec v2.0.0-alpha.12
+   Compiling xxhash-rust v0.8.15
+   Compiling web-time v1.1.0
+   Compiling unit-prefix v0.5.2
+   Compiling memo-map v0.3.3
+   Compiling arraydeque v0.5.1
+   Compiling ref-cast-impl v1.0.25
+   Compiling utoipa-gen v5.5.0
+   Compiling serde_derive_internals v0.29.1
+   Compiling mistralrs-quant v0.8.1
+   Compiling lzma-rust2 v0.15.8
+   Compiling hmac-sha256 v1.1.14
+   Compiling radium v0.7.0
+   Compiling llguidance v1.7.6
+   Compiling Inflector v0.11.4
+   Compiling ort-sys v2.0.0-rc.12
+   Compiling schemars_derive v1.2.1
+   Compiling saphyr-parser-bw v0.0.605
+   Compiling minijinja v2.20.0
+   Compiling indicatif v0.18.4
+   Compiling cached v0.56.0
+   Compiling tinyvec v1.11.0
+   Compiling toml v1.1.6+spec-1.1.0
+   Compiling sparsevec v0.2.2
+   Compiling utoipa v5.5.0
+   Compiling nalgebra v0.33.3
+   Compiling ed25519-dalek v2.2.0
+   Compiling symphonia v0.5.5
+   Compiling tokio-tungstenite v0.28.0
+   Compiling tokenizers v0.21.4
+   Compiling icu_locale_fallback v2.3.0
+   Compiling darling v0.11.0
+   Compiling html5ever v0.36.1
+   Compiling realfft v3.5.0
+   Compiling html5ever v0.38.0
+   Compiling cron v0.16.0
+   Compiling derivre v0.3.12
+   Compiling crossterm v0.25.0
+   Compiling fancy-regex v0.13.0
+   Compiling cfgrammar v0.14.2
+   Compiling tracing-opentelemetry v0.33.0
+   Compiling annotate-snippets v0.12.16
+   Compiling lance-select v13.0.0
+   Compiling lance-table v13.0.0
+   Compiling lance-datafusion v13.0.0
+   Compiling strum_macros v0.27.2
+   Compiling bstr v1.12.1
+   Compiling encoding_rs_io v0.1.7
+   Compiling rust-mcp-schema v0.9.6
+   Compiling serde_plain v1.0.2
+   Compiling rust-stemmers v1.2.0
+   Compiling toml_datetime v0.7.5+spec-1.1.0
+   Compiling smol_str v0.3.6
+   Compiling endian-type v0.2.0
+   Compiling tap v1.0.1
+   Compiling deunicode v1.6.2
+   Compiling unchecked-index v0.2.2
+   Compiling dyn-clone v1.0.20
+   Compiling hound v3.5.1
+   Compiling defmac v0.1.3
+   Compiling rustc-hash v1.1.0
+   Compiling ego-tree v0.10.0
+   Compiling nohash-hasher v0.2.0
+   Compiling apodize v1.0.0
+   Compiling async-recursion v1.1.1
+   Compiling lance-linalg v13.0.0
+   Compiling uuid v0.8.2
+   Compiling doctest-file v1.1.1
+   Compiling mistralrs-core v0.8.1
+   Compiling fst v0.4.7
+   Compiling libsais-rs v0.2.2
+   Compiling interprocess v2.4.2
+   Compiling mistralrs-mcp v0.8.1
+   Compiling strum v0.27.2
+   Compiling variantly v0.4.0
+   Compiling mistralrs-audio v0.8.1
+   Compiling serde-saphyr v0.0.16
+   Compiling scraper v0.25.0
+   Compiling openai-harmony v0.0.8
+   Compiling galil-seiferas v0.1.5
+   Compiling schemars v1.2.1
+   Compiling bm25 v2.3.2
+   Compiling wyz v0.5.1
+   Compiling radix_trie v0.3.0
+   Compiling uni-plugin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin)
+   Compiling toml v0.9.12+spec-1.1.0
+   Compiling icu_segmenter v2.3.0
+   Compiling lrtable v0.14.2
+   Compiling tqdm v0.8.0
+   Compiling html2text v0.16.7
+   Compiling rubato v0.16.2
+   Compiling toktrie_hf_tokenizers v1.7.6
+   Compiling statrs v0.18.0
+   Compiling unicode-normalization v0.1.25
+   Compiling minijinja-contrib v2.20.0
+   Compiling mistralrs-vision v0.8.1
+   Compiling lance-index v13.0.0
+   Compiling rapidhash v4.4.1
+   Compiling tokio-rayon v2.1.0
+   Compiling lance-arrow-scalar v58.0.0
+   Compiling rand_isaac v0.4.0
+   Compiling serde-big-array v0.5.1
+   Compiling sysinfo v0.36.1
+   Compiling utf8-ranges v1.0.5
+   Compiling rangemap v1.7.1
+   Compiling frostem v1.20260821.6
+   Compiling as-any v0.3.2
+   Compiling funty v2.0.0
+   Compiling derive-new v0.7.0
+   Compiling ucd-trie v0.1.7
+   Compiling akin v0.4.0
+   Compiling pest v2.8.6
+   Compiling bitvec v1.0.1
+   Compiling lance-tokenizer v13.0.0
+   Compiling lance-arrow-stats v58.0.0
+   Compiling metrics v0.24.6
+   Compiling lance-index-core v13.0.0
+   Compiling fancy-regex v0.17.0
+   Compiling ndarray v0.16.1
+   Compiling ndarray v0.17.2
+   Compiling mistralrs-macros v0.8.1
+   Compiling async-channel v2.5.0
+   Compiling lance v13.0.0
+   Compiling crossbeam-queue v0.3.12
+   Compiling daachorse v1.0.1
+   Compiling uni-xervo v0.18.1
+   Compiling tokenizers v0.23.1
+   Compiling mistralrs v0.8.1
+   Compiling ort v2.0.0-rc.12
+   Compiling candle-transformers v0.10.2
+   Compiling hf-hub v0.5.0
+   Compiling pest_meta v2.8.6
+   Compiling crossbeam-skiplist v0.1.3
+   Compiling keccak v0.2.0
+   Compiling permutation v0.4.1
+   Compiling async_cell v0.2.3
+   Compiling sponge-cursor v0.1.0
+   Compiling sha3 v0.12.0
+   Compiling pest_generator v2.8.6
+   Compiling uni-crdt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-crdt)
+   Compiling lru v0.18.2
+   Compiling pest_derive v2.8.6
+   Compiling async-stream-impl v0.3.6
+   Compiling async-stream v0.3.6
+   Compiling uni-cypher v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cypher)
+   Compiling hyper-timeout v0.5.2
+   Compiling tonic v0.14.6
+   Compiling uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+   Compiling tonic-prost v0.14.6
+   Compiling uni-locy v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy)
+   Compiling biodivine-lib-bdd v0.6.3
+   Compiling uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+   Compiling uni-query-functions v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query-functions)
+   Compiling uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+   Compiling opentelemetry_sdk v0.32.1
+   Compiling smartstring v1.0.1
+   Compiling verus_syn v0.0.0-2026-08-02-0125
+   Compiling verus_prettyplease v0.0.0-2026-08-09-0044
+   Compiling opentelemetry-proto v0.32.0
+   Compiling uni-query v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query)
+   Compiling tonic-types v0.14.6
+   Compiling opentelemetry-http v0.32.0
+   Compiling uni-sidecar v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-sidecar)
+   Compiling uni-plugin-custom v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-custom)
+   Compiling opentelemetry-otlp v0.32.0
+   Compiling thin-vec v0.2.18
+   Compiling serde_bytes v0.11.19
+   Compiling plotters-backend v0.3.7
+   Compiling ciborium-io v0.2.2
+   Compiling rhai_codegen v3.2.0
+   Compiling alloca v0.4.0
+   Compiling libmimalloc-sys v0.1.49
+   Compiling proc-macro-error-attr2 v2.0.0
+   Compiling iai-callgrind-runner v0.16.1
+   Compiling vstd v0.0.0-2026-08-30-0159
+   Compiling convert_case v0.4.0
+   Compiling verus_builtin_macros v0.0.0-2026-08-30-0159
+   Compiling rhai v1.25.1
+   Compiling uni-plugin-host v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-host)
+   Compiling proc-macro-error2 v2.0.1
+   Compiling ciborium-ll v0.2.2
+   Compiling plotters-svg v0.3.7
+   Compiling verus_state_machines_macros v0.0.0-2026-08-02-0125
+   Compiling itertools v0.13.0
+   Compiling rand_xoshiro v0.7.0
+   Compiling wait-timeout v0.2.1
+   Compiling endian-type v0.1.2
+   Compiling quick-error v1.2.3
+   Compiling cast v0.3.0
+   Compiling verus_builtin v0.0.0-2026-08-30-0159
+   Compiling iai-callgrind v0.16.1
+   Compiling criterion-plot v0.8.2
+   Compiling rusty-fork v0.3.1
+   Compiling radix_trie v0.2.1
+   Compiling iai-callgrind-macros v0.6.1
+   Compiling plotters v0.3.7
+   Compiling ciborium v0.2.2
+   Compiling uni-bulk v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-bulk)
+   Compiling uni-plugin-rhai v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-rhai)
+   Compiling uni-fork v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-fork)
+   Compiling uni-plugin-apoc-core v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-apoc-core)
+   Compiling quanta v0.12.6
+   Compiling env_filter v1.0.1
+   Compiling rand_xorshift v0.4.0
+   Compiling tinytemplate v1.2.1
+   Compiling bincode v1.3.3
+   Compiling page_size v0.6.0
+   Compiling imbl-sized-chunks v0.2.0
+   Compiling sketches-ddsketch v0.3.1
+   Compiling oorandom v11.1.5
+   Compiling unarray v0.1.4
+   Compiling archery v1.2.2
+   Compiling anes v0.1.6
+   Compiling imbl v7.0.2
+   Compiling criterion v0.8.2
+   Compiling proptest v1.11.0
+   Compiling bbtree v0.1.5
+   Compiling metrics-util v0.20.4
+   Compiling env_logger v0.11.10
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+   Compiling mimalloc v0.1.52
+warning: overflow evaluating the requirement `Pin<Box<{async block@crates/uni/src/api/impl_locy.rs:3609:5: 3609:10}>>: CoerceUnsized<Pin<Box<dyn futures::Future<Output = Result<uni_locy::Materialized, UniError>> + std::marker::Send>>>`
+    --> crates/uni/src/api/impl_locy.rs:3609:5
+     |
+3609 |     async fn materialize(&self, _rules: &[String]) -> Result<uni_locy::Materialized> {
+     |     ^^^^^
+     |
+     = note: which requires `Box<{async block@crates/uni/src/api/impl_locy.rs:3609:5: 3609:10}>: CoerceUnsized<Box<dyn futures::Future<Output = Result<uni_locy::Materialized, UniError>> + std::marker::Send>>`
+     = note: which requires `{async block@crates/uni/src/api/impl_locy.rs:3609:5: 3609:10}: Unsize<dyn futures::Future<Output = Result<uni_locy::Materialized, UniError>> + std::marker::Send>`
+     = note: which requires `{async block@crates/uni/src/api/impl_locy.rs:3609:5: 3609:10}: std::marker::Send`
+     = note: which requires `{coroutine witness@crates/uni/src/api/impl_locy.rs:3609:5: 3609:10}: std::marker::Send`
+     = note: which requires `impl futures::Future<Output = <{async block@crates/uni/src/api/impl_locy.rs:3639:19: 3639:24} as futures::Future>::Output>: std::marker::Send`
+     = note: which requires `{async fn body of maybe_scope_with_principal<{async block@crates/uni/src/api/impl_locy.rs:3639:19: 3639:24}>()}: std::marker::Send`
+     = note: which requires `{coroutine witness@maybe_scope_with_principal<{async block@crates/uni/src/api/impl_locy.rs:3639:19: 3639:24}>::{closure#0}}: std::marker::Send`
+     = note: which requires `TaskLocalFuture<Arc<Principal>, {async block@crates/uni/src/api/impl_locy.rs:3639:19: 3639:24}>: std::marker::Send`
+     = note: which requires `std::option::Option<{async block@crates/uni/src/api/impl_locy.rs:3639:19: 3639:24}>: std::marker::Send`
+     = note: which requires `{async block@crates/uni/src/api/impl_locy.rs:3639:19: 3639:24}: std::marker::Send`
+     = note: which requires `{coroutine witness@crates/uni/src/api/impl_locy.rs:3639:19: 3639:24}: std::marker::Send`
+     = note: which requires `std::future::PollFn<{closure@/home/rohit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.3/src/macros/select.rs:664:46: 664:50}>: std::marker::Send`
+     = note: which requires `{closure@/home/rohit/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tokio-1.53.3/src/macros/select.rs:664:46: 664:50}: std::marker::Send`
+     = note: which requires `(&mut u8, &mut (impl futures::Future<Output = ()>, impl futures::Future<Output = Result<locy_result::LocyResult, UniError>>)): std::marker::Send`
+     = note: which requires `&mut (impl futures::Future<Output = ()>, impl futures::Future<Output = Result<locy_result::LocyResult, UniError>>): std::marker::Send`
+     = note: and so on...
+     = help: consider adding a manual `impl` of auto traits like `Send` for intermediate types, if auto traits are involved
+     = help: or consider increasing the recursion limit by adding a `#![recursion_limit = "256"]` attribute to your crate (`uni_db`)
+     = note: this lint is attached to the whole crate and can't be disabled on a per-function basis
+     = warning: this was previously accepted by the compiler but is being phased out; it will become a hard error in a future release!
+     = note: for more information, see issue #159228 <https://github.com/rust-lang/rust/issues/159228>
+     = note: `#[warn(recursion_depth_exceeding_limit)]` (part of `#[warn(future_incompatible)]`) on by default
+
+warning: `uni-db` (lib) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16m 16s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+warning: warning: saw package ID `path+file:///home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/std#0.0.0` which wasn't produced by cargo metadata
+warning: warning: saw package ID `registry+https://github.com/rust-lang/crates.io-index#object@0.39.1` which wasn't produced by cargo metadata
+warning: warning: saw package ID `path+file:///home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/test#0.0.0` which wasn't produced by cargo metadata
+warning: warning: saw package ID `path+file:///home/rohit/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/compiler-builtins/compiler-builtins#compiler_builtins@0.1.160` which wasn't produced by cargo metadata
+warning: warning: saw package ID `registry+https://github.com/rust-lang/crates.io-index#libc@0.2.189` which wasn't produced by cargo metadata
+────────────
+ Nextest run ID 828065d5-b95a-48a4-bbc2-c7027c73105f with nextest profile: default
+    Starting 22 tests across 1 binary (4021 tests skipped)
+        PASS [   0.728s] ( 1/22) uni-db::integration ssi_invariants::bank_transfers_conserve_and_stay_non_negative
+        PASS [   0.599s] ( 2/22) uni-db::integration ssi_invariants::counter_convergence_single_hot_key
+        PASS [   2.555s] ( 3/22) uni-db::integration ssi_invariants::prop_counter_convergence
+        PASS [   1.025s] ( 4/22) uni-db::integration ssi_occ_e2e::atomic_increment_many_writers_converges
+        PASS [   0.161s] ( 5/22) uni-db::integration ssi_occ_e2e::atomic_increment_two_writers_converges
+        PASS [   0.166s] ( 6/22) uni-db::integration ssi_occ_e2e::concurrent_merge_same_key_yields_one_node
+        PASS [   0.132s] ( 7/22) uni-db::integration ssi_occ_e2e::disjoint_writers_both_commit
+        PASS [   0.137s] ( 8/22) uni-db::integration ssi_occ_e2e::edge_read_antidependency_aborts
+        PASS [   0.113s] ( 9/22) uni-db::integration ssi_occ_e2e::non_retriable_error_surfaces_without_retry
+        PASS [   1.586s] (10/22) uni-db::integration ssi_occ_e2e::read_only_queries_never_abort_under_writes
+        PASS [   0.152s] (11/22) uni-db::integration ssi_occ_e2e::read_only_transaction_is_not_a_pivot
+        PASS [   0.122s] (12/22) uni-db::integration ssi_occ_e2e::retry_exhaustion_returns_conflict
+        PASS [   0.121s] (13/22) uni-db::integration ssi_occ_e2e::scan_read_antidependency_aborts
+        PASS [   0.135s] (14/22) uni-db::integration ssi_occ_e2e::scan_read_disjoint_key_no_false_abort
+        PASS [   0.125s] (15/22) uni-db::integration ssi_occ_e2e::schemaless_traversal_antidependency_aborts
+        PASS [   0.134s] (16/22) uni-db::integration ssi_occ_e2e::schemaless_traversal_pushdown_ignores_unrelated_vertices
+        PASS [   0.140s] (17/22) uni-db::integration ssi_occ_e2e::traversal_antidependency_aborts
+        PASS [   0.143s] (18/22) uni-db::integration ssi_occ_e2e::vid_lookup_join_records_reads_via_fallback
+        PASS [   0.354s] (19/22) uni-db::integration ssi_stress::hot_key_for_update_no_retry_converges
+        PASS [   0.429s] (20/22) uni-db::integration ssi_stress::hot_key_ssi_retry_converges
+        PASS [   0.590s] (21/22) uni-db::integration ssi_stress::mixed_olap_oltp_no_deadlock
+        PASS [   0.673s] (22/22) uni-db::integration ssi_stress::writer_scaling_converges
+────────────
+     Summary [  10.332s] 22 tests run: 22 passed, 4021 skipped

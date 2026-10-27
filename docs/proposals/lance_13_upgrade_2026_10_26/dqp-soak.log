@@ -1,0 +1,127 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.39s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID a7483ed1-f6ad-4644-873d-cd9a447a504a with nextest profile: soak
+    Starting 13 tests across 1 binary (4030 tests skipped)
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_pushdown_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dqp::pinned_lever::pinned_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dqp::pinned_lever::pinned_agg_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_wide_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dqp::fork_lever::fork_agg_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dqp::fork_lever::fork_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_agg_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dqp::cert::cert_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_agg_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_pushdown_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_agg_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dqp::fork_lever::fork_agg_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_wide_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dqp::pinned_lever::pinned_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dqp::pinned_lever::pinned_agg_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_agg_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dqp::fork_lever::fork_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dqp::cert::cert_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_pushdown_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dqp::cert::cert_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dqp::pinned_lever::pinned_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_agg_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_agg_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dqp::fork_lever::fork_agg_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dqp::pinned_lever::pinned_agg_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dqp::fork_lever::fork_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_wide_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        PASS [ 365.350s] ( 1/13) uni-db::integration metamorphic::dqp::fork_lever::fork_agg_soak
+        PASS [ 396.583s] ( 2/13) uni-db::integration metamorphic::dqp::flush_lever::flush_agg_soak
+        PASS [ 396.841s] ( 3/13) uni-db::integration metamorphic::dqp::pinned_lever::pinned_agg_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_pushdown_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_wide_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::dqp::pinned_lever::pinned_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::dqp::cert::cert_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_agg_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::dqp::fork_lever::fork_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        PASS [ 485.800s] ( 4/13) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_agg_soak
+        PASS [ 502.475s] ( 5/13) uni-db::integration metamorphic::dqp::flush_lever::flush_pushdown_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::dqp::fork_lever::fork_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::dqp::pinned_lever::pinned_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::dqp::cert::cert_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_wide_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        SLOW [>720.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>720.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_soak
+        SLOW [>720.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        SLOW [>720.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_wide_soak
+        SLOW [>720.000s] (─────────) uni-db::integration metamorphic::dqp::pinned_lever::pinned_soak
+        SLOW [>720.000s] (─────────) uni-db::integration metamorphic::dqp::cert::cert_soak
+        SLOW [>720.000s] (─────────) uni-db::integration metamorphic::dqp::fork_lever::fork_soak
+        SLOW [>720.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        PASS [ 743.334s] ( 6/13) uni-db::integration metamorphic::dqp::flush_lever::flush_wide_soak
+        SLOW [>840.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        SLOW [>840.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>840.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_soak
+        SLOW [>840.000s] (─────────) uni-db::integration metamorphic::dqp::fork_lever::fork_soak
+        SLOW [>840.000s] (─────────) uni-db::integration metamorphic::dqp::pinned_lever::pinned_soak
+        SLOW [>840.000s] (─────────) uni-db::integration metamorphic::dqp::cert::cert_soak
+        SLOW [>840.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        SLOW [>960.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_soak
+        SLOW [>960.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        SLOW [>960.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>960.000s] (─────────) uni-db::integration metamorphic::dqp::cert::cert_soak
+        SLOW [>960.000s] (─────────) uni-db::integration metamorphic::dqp::fork_lever::fork_soak
+        SLOW [>960.000s] (─────────) uni-db::integration metamorphic::dqp::pinned_lever::pinned_soak
+        SLOW [>960.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        PASS [ 968.198s] ( 7/13) uni-db::integration metamorphic::dqp::cert::cert_soak
+        SLOW [>1080.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>1080.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_soak
+        SLOW [>1080.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        SLOW [>1080.000s] (─────────) uni-db::integration metamorphic::dqp::pinned_lever::pinned_soak
+        SLOW [>1080.000s] (─────────) uni-db::integration metamorphic::dqp::fork_lever::fork_soak
+        SLOW [>1080.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        SLOW [>1200.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        SLOW [>1200.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>1200.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_soak
+        SLOW [>1200.000s] (─────────) uni-db::integration metamorphic::dqp::fork_lever::fork_soak
+        SLOW [>1200.000s] (─────────) uni-db::integration metamorphic::dqp::pinned_lever::pinned_soak
+        SLOW [>1200.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        PASS [1279.352s] ( 8/13) uni-db::integration metamorphic::dqp::fork_lever::fork_soak
+        PASS [1297.401s] ( 9/13) uni-db::integration metamorphic::dqp::pinned_lever::pinned_soak
+        SLOW [>1320.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_soak
+        SLOW [>1320.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        SLOW [>1320.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>1320.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        PASS [1422.771s] (10/13) uni-db::integration metamorphic::dqp::flush_lever::flush_soak
+        SLOW [>1440.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>1440.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        SLOW [>1440.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        SLOW [>1560.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        SLOW [>1560.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>1560.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        SLOW [>1680.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>1680.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        SLOW [>1680.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        PASS [1702.500s] (11/13) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_soak
+        PASS [1739.441s] (12/13) uni-db::integration metamorphic::dqp::topo::topo_small_batches_soak
+        SLOW [>1800.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        SLOW [>1920.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_soak
+        PASS [1944.446s] (13/13) uni-db::integration metamorphic::dqp::topo::topo_soak
+────────────
+     Summary [1944.455s] 13 tests run: 13 passed (13 slow), 4030 skipped

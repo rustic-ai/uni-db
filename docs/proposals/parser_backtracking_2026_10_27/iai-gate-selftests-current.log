@@ -1,0 +1,14 @@
+ok  a collapsed measurement fails
+ok  and the summary does not claim +0.00%
+ok  a regression fails
+ok  an unchanged run passes
+ok  and reports both directions and its scope
+ok  a 30% improvement passes under a 50% bound
+ok  --allow-foreign-machine downgrades the collapse
+ok  and the summary says improvement checking was off
+ok  and a regression still fails with it
+ok  a baseline naming no runners is still checked
+ok  a baseline naming unmatchable shards is still checked
+ok  --fail-improve-pct must exceed --fail-pct
+
+all iai_gate self-checks passed

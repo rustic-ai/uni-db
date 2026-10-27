@@ -22,7 +22,7 @@ uni-algo = { workspace = true }
 arrow = { workspace = true }
 arrow-array = { workspace = true }
 arrow-schema = { workspace = true }
-arrow-ipc = "58.3.0"
+arrow-ipc = "58.4.1"
 parking_lot = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }

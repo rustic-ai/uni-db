@@ -1,0 +1,50 @@
+{
+  "sample_count": 25,
+  "targets": {
+    "baselines::baseline_noop.noop": {
+      "upstream_median": 4002,
+      "committed_baseline": 4002,
+      "matches": true
+    },
+    "baselines::baseline_session_only.session_only": {
+      "upstream_median": 108047,
+      "committed_baseline": 108047,
+      "matches": true
+    },
+    "read_paths::expand_batch_one_hop_warm.warm": {
+      "upstream_median": 31073913,
+      "committed_baseline": 31073913,
+      "matches": true
+    },
+    "read_paths::hnsw_top10_search.top10": {
+      "upstream_median": 27552983,
+      "committed_baseline": 27552983,
+      "matches": true
+    },
+    "read_paths::parse_and_plan_cold.cold": {
+      "upstream_median": 20100015,
+      "committed_baseline": 20100015,
+      "matches": true
+    },
+    "read_paths::property_read_across_l0_l1.l0_over_l1": {
+      "upstream_median": 24029608,
+      "committed_baseline": 24029608,
+      "matches": true
+    },
+    "read_paths::vertex_lookup_by_id.by_id": {
+      "upstream_median": 20721018,
+      "committed_baseline": 20721018,
+      "matches": true
+    },
+    "write_paths::l0_to_l1_flush.l0_to_l1": {
+      "upstream_median": 60832090,
+      "committed_baseline": 60832090,
+      "matches": true
+    },
+    "write_paths::transaction_commit_wal_on.wal_on": {
+      "upstream_median": 10611974,
+      "committed_baseline": 10611974,
+      "matches": true
+    }
+  }
+}

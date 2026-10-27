@@ -1,0 +1,10 @@
+{
+  "Cargo.lock": "43d7c2350a7ef072ef6bb75930f6083d2eba4e87bd346803d21c305fe7e762fc",
+  "crates/uni/Cargo.toml": "4b610c3780416969a153c93e973c8fd73ddc3a43fcbbe403d75eae0e679a63f4",
+  "crates/uni/benches/collection_candidates.rs": "48b40088c44c7dbf224a29b507610d9ceab103c44c89a968c5d4dfad7eaa68fa",
+  "crates/uni/benches/support/collection_candidates.rs": "176af2255ebbbb81188f9f76d0c95968b35a84970fc1daa0f165a63c050eb347",
+  "crates/uni/benches/support/l0_comparison.rs": "2cacd196c682326043beb43ccc16919f19c420dd7b8cf8591c223e8b781c303a",
+  "crates/uni/tests/common/perf/collection_candidates.rs": "b1d20bfa9da0da524361ed42007f5d77adf297828dc4b304915c6aec799d151b",
+  "crates/uni/tests/common/perf/mod.rs": "3ce740041f1e1e093529c6f51fb97b625b8e52b334213776e91a3a72a29f5805",
+  ".cargo/config.toml": "9e5e1a22d93976b549f497ce2f0702f0fc8b3a42958fa29f29e0d605c115b8ad"
+}

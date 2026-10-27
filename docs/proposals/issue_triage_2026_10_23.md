@@ -160,6 +160,10 @@ produces Float64.
 
 ### #311: not reproduced
 
+Later investigation: [expanded cases and a distinct keyed-MERGE label-loss fix](issues_310_311_317_followup.md). The ordinary-SET report remains unconfirmed;
+the shapes listed below were untested at this original triage, not the current
+coverage boundary.
+
 Agent built an 18-arm deterministic matrix: base {flushed, unflushed, half} ×
 mid-tx flush × index {none, BTree, Hash}. It also ran concurrent-flush stress
 up to N=20 000 and 36 re-key cycles. All exact, on both `main` and 4.1.1.
@@ -183,4 +187,4 @@ in the slim ONNX wheels.
 **#315.** Blocked on #313 shipping. The `shared_probabilistic_dependency`
 warning fires even when exact mode resolved the dependency.
 
-**#317.** Additive language feature (L).
+**#317.** Additive feature (L). The revised [constrained hypothetical-query proposal](locy_business_actions_317.md) uses ordinary rules and ASSUME, with native per-row correlation as the proposed extension; it is not implemented.

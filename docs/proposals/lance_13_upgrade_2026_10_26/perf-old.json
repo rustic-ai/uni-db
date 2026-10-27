@@ -1,0 +1,30 @@
+{
+  "binding": "/tmp/uni-lance-upgrade/old-binding",
+  "rows": 5000,
+  "repeats": [
+    {
+      "ingest_flush_seconds": 0.4063905189977959,
+      "point_seconds_per_query": 0.0038727960782125592,
+      "range_seconds_per_query": 0.005516321882605552,
+      "scan_seconds_per_query": 0.012977120918221771
+    },
+    {
+      "ingest_flush_seconds": 0.39656782895326614,
+      "point_seconds_per_query": 0.0040360163990408185,
+      "range_seconds_per_query": 0.006351996841840446,
+      "scan_seconds_per_query": 0.014543329756706953
+    },
+    {
+      "ingest_flush_seconds": 0.4211290800012648,
+      "point_seconds_per_query": 0.004160505356267095,
+      "range_seconds_per_query": 0.005680742561817169,
+      "scan_seconds_per_query": 0.014208620600402355
+    }
+  ],
+  "medians": {
+    "ingest_flush_seconds": 0.4063905189977959,
+    "point_seconds_per_query": 0.0040360163990408185,
+    "range_seconds_per_query": 0.005680742561817169,
+    "scan_seconds_per_query": 0.014208620600402355
+  }
+}

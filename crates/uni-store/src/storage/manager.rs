@@ -375,7 +375,7 @@ pub(crate) async fn write_dataset_with_lance_conflict_retry(
     mode: lance::dataset::WriteMode,
 ) -> anyhow::Result<lance::Dataset> {
     // The attempt future is boxed, which is load-bearing rather than stylistic.
-    // Unboxed, each retry layer nests `lance::Dataset::write`'s anonymous future
+    // Unboxed, each retry layer nests Lance's anonymous write future
     // inside this one, inside the `#[instrument]`ed flush future above it, and
     // the trait solver gives up proving `Send` while unrolling Lance's internal
     // moka cache types — `E0275`, reported against
@@ -390,11 +390,28 @@ pub(crate) async fn write_dataset_with_lance_conflict_retry(
         let batches = batches.clone();
         Box::pin(async move {
             let reader = arrow_array::RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
-            let params = lance::dataset::WriteParams {
-                mode,
-                ..Default::default()
+            let mut params = crate::backend::lance_directory::write_params(mode);
+            let destination = match lance::Dataset::open(uri).await {
+                Ok(dataset) => {
+                    params.data_storage_version = None;
+                    lance::dataset::WriteDestination::Dataset(Arc::new(dataset))
+                }
+                Err(error) => {
+                    let error = anyhow::Error::from(error);
+                    if !crate::store_utils::is_dataset_not_found(&error) {
+                        return Err(error);
+                    }
+                    params.data_storage_version = crate::backend::lance_directory::write_params(
+                        lance::dataset::WriteMode::Create,
+                    )
+                    .data_storage_version;
+                    lance::dataset::WriteDestination::Uri(uri)
+                }
             };
-            Ok(lance::Dataset::write(Box::new(reader), uri, Some(params)).await?)
+            Ok(lance::dataset::InsertBuilder::new(destination)
+                .with_params(&params)
+                .execute_stream(Box::new(reader))
+                .await?)
         })
     })
     .await

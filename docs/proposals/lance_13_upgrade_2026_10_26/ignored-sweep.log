@@ -1,0 +1,134 @@
+   Compiling uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+   Compiling uni-locy v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy)
+   Compiling uni-cypher v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cypher)
+   Compiling uni-crdt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-crdt)
+   Compiling uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+   Compiling uni-query-functions v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query-functions)
+   Compiling uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+   Compiling uni-query v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query)
+   Compiling uni-plugin-rhai v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-rhai)
+   Compiling uni-plugin-extism v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-extism)
+   Compiling uni-plugin-wasm v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-wasm)
+   Compiling uni-plugin-host v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-host)
+   Compiling uni-fork v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-fork)
+   Compiling uni-bulk v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-bulk)
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+   Compiling uni-locy-tck v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy-tck)
+   Compiling uni-cli v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cli)
+   Compiling uni-locy-oracle v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy-oracle)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9m 20s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 357390f0-00e2-440c-ad4c-4a72a9eed527 with nextest profile: soak
+    Starting 86 tests across 75 binaries (8698 tests skipped)
+        PASS [   0.440s] ( 1/86) uni-db::integration fork::fork_drop_cleanup::drop_fork_keeps_tombstone_on_branch_delete_failure_then_recovers
+        PASS [   0.609s] ( 2/86) uni-db::integration locy::locy_anchor_target_cross_stratum::p4_edge_insert_from_anchor_observation
+        PASS [   1.083s] ( 3/86) uni-db::integration fork::fork_nested_perf::depth_5_read_latency_within_5x_baseline
+        PASS [   1.089s] ( 4/86) uni-db::integration bugs::issue53_unwind_match_perf::unwind_match_string_property_perf
+        PASS [   1.551s] ( 5/86) uni-db::integration bugs::issue53_unwind_match_perf::unwind_match_id_perf
+        PASS [   1.387s] ( 6/86) uni-db::integration metamorphic::dqp::compaction_lever::fragmented_vs_compacted_replay
+        PASS [   1.898s] ( 7/86) uni-db::integration metamorphic::dqp::delete_lever::before_vs_after_delete_replay
+        PASS [   1.396s] ( 8/86) uni-db::integration metamorphic::dqp::flush_lever::l0_union_vs_flushed_replay
+        PASS [   1.133s] ( 9/86) uni-db::integration metamorphic::dqp::index_lever::index_absent_vs_present_replay
+        PASS [   2.265s] (10/86) uni-db::integration metamorphic::dqp::feasibility::dqp_feasibility_probe_runtime_flavor
+        PASS [   3.485s] (11/86) uni-db::integration locy::locy_anchor_target_cross_stratum::anchor_p4_probe
+        PASS [   3.503s] (12/86) uni-db::integration bugs::vid_lookup_join_payoff::measure_left_outer_payoff
+        PASS [   3.585s] (13/86) uni-db::integration bugs::vid_lookup_join_payoff::measure_vid_lookup_join_payoff
+        PASS [   1.146s] (14/86) uni-db::integration perf::issue_312_matched_node_prop_fanout::issue_312_charge_ladder
+        PASS [   1.508s] (15/86) uni-db::integration perf::issue_312_matched_node_prop_fanout::issue_312_profile
+        PASS [   4.957s] (16/86) uni-db::integration bugs::issue47_repro_standalone::create_edge_latency_grows
+        PASS [   5.217s] (17/86) uni-db::integration bugs::issue69_unwind_merge_perf::merge_batched_perf_profile
+        PASS [   6.494s] (18/86) uni-db::integration fork::fork_index_recall_bench::fork_local_vector_recall_at_10
+        PASS [   3.689s] (19/86) uni-db::integration perf::in_list_column_runs::column_list_runs_timing_probe
+        PASS [   4.577s] (20/86) uni-db::integration perf::issue_312_matched_node_prop_fanout::issue_312_timing_table
+        PASS [   4.505s] (21/86) uni-db::integration perf::issue_312_matched_node_prop_fanout::issue_312_traverse_table
+        PASS [   4.019s] (22/86) uni-db::integration perf::l0_load_probe::l0_load_probe
+        PASS [   8.186s] (23/86) uni-db::integration locy::locy_entity_hydration::locy_entity_hydration_probe
+        PASS [   8.669s] (24/86) uni-db::integration bge_m3_real_onnx::real_bge_m3_multivector_roundtrips
+        PASS [   3.767s] (25/86) uni-db::integration perf::perf_class_probe::perf_class_probe_cypher
+        PASS [   8.753s] (26/86) uni-db::integration bugs::issue47_profile::profile_edge_creation
+        PASS [   8.368s] (27/86) uni-db::integration perf::iai_wallclock::iai_wallclock_pilot
+        PASS [   2.890s] (28/86) uni-db::integration perf::test_bulk_insert_performance::test_bulk_insert_with_constraints
+        PASS [   3.579s] (29/86) uni-db::integration perf::test_100k_lookup::test_100k_property_lookup
+        PASS [   3.089s] (30/86) uni-db::integration perf::test_bulk_insert_performance::test_bulk_insert_performance
+        PASS [   6.184s] (31/86) uni-db::integration perf::perf_class_probe::perf_class_probe_recursion
+        PASS [   7.956s] (32/86) uni-db::integration perf::perf_class_probe::perf_class_probe_locy_anchor
+        PASS [  13.322s] (33/86) uni-db::integration bugs::issue47_instrumented::instrumented_node_edge_ingestion
+        PASS [  13.379s] (34/86) uni-db::integration bugs::issue47_edge_latency::issue47_edge_latency_growth
+        PASS [   2.742s] (35/86) uni-db::integration perf::test_count_performance::test_count_scaling
+        PASS [   7.659s] (36/86) uni-db::integration perf::profiler_blind_spots::vlp_property_map_timing_probe
+        PASS [   9.170s] (37/86) uni-db::integration perf::profiler_blind_spots::vlp_property_map_deep_walk_timing_probe
+        PASS [  14.691s] (38/86) uni-db::integration perf::issue_312_matched_node_prop_fanout::issue_312_scaling_table
+        PASS [  10.257s] (39/86) uni-db::integration bge_m3_real_onnx::real_bge_m3_muvera_multivector
+        PASS [   7.032s] (40/86) uni-db::integration vector_recall::recall_flat_is_exact
+        PASS [   7.649s] (41/86) uni-db::integration vector_recall::recall_hnsw_sq
+        PASS [   6.853s] (42/86) uni-db::integration vector_recall::recall_ivf_pq
+        PASS [   6.407s] (43/86) uni-db::integration vector_recall::recall_ivf_rq
+        PASS [  12.180s] (44/86) uni-db::integration ssi_for_update::for_update_lock_timeout_is_retriable_and_recovers
+        PASS [   6.673s] (45/86) uni-db::integration vector_recall::recall_ivf_sq
+        PASS [   6.272s] (46/86) uni-db::integration bge_m3_real_onnx::real_bge_m3_reopen
+        PASS [   2.972s] (47/86) uni-query-functions java_regex::tests::stack_budget
+        PASS [   0.594s] (48/86) uni-db::integration bugs::issue43_insert_latency_diagnostic::issue43_control_no_embed
+        PASS [  19.532s] (49/86) uni-db::integration perf::perf_class_probe::perf_class_probe_nonlinear_full_scan
+        PASS [   4.251s] (50/86) uni-query-functions java_regex::tests::throughput
+        PASS [  27.958s] (51/86) uni-db::integration locy::locy_issue_301_fixpoint_delta::issue_301_fixpoint_delta_probe
+        PASS [  14.971s] (52/86) uni-db::integration vector_recall::recall_hnsw_pq
+        PASS [   9.782s] (53/86) uni-db::integration vector_recall::recall_multivector_maxsim_ivf_pq
+        PASS [  30.552s] (54/86) uni-db::integration index::range_prefix_null_pushdown::f1_pushdown_probe
+        PASS [  31.240s] (55/86) uni-db::integration locy::locy_issue_307_query_goal_pruning::issue_307_query_where_cost_vs_relation
+        PASS [   6.884s] (56/86) uni-db::integration bugs::issue43_insert_latency_diagnostic::issue43_embed_only_no_db
+        PASS [  12.259s] (57/86) uni-store storage::adjacency_manager::tests::get_neighbors_cost
+        PASS [  28.034s] (58/86) uni-db::integration perf::perf_class_probe::perf_class_probe_timing
+        PASS [   5.741s] (59/86) uni-db::integration bugs::issue43_insert_latency_diagnostic::tests::issue43_baseline_auto_embed_latency
+        PASS [   5.055s] (60/86) uni-db::integration bugs::issue43_insert_latency_diagnostic::tests::issue43_early_manual_flush
+        PASS [   2.710s] (61/86) uni-db::integration bugs::issue43_insert_latency_diagnostic::tests::issue43_flush_then_measure
+        PASS [  49.450s] (62/86) uni-db::integration bugs::issue_311_tx_index_rekey::issue_311_tx_index_rekey_repeated_cycles
+        PASS [   4.959s] (63/86) uni-db::integration bugs::issue43_insert_latency_diagnostic::tests::issue43_forced_early_flush
+        PASS [   4.634s] (64/86) uni-db::integration bugs::issue43_insert_latency_diagnostic::tests::issue43_no_auto_flush
+        PASS [  56.348s] (65/86) uni-db::integration cypher_path::shortest_path_many_targets::path_output_timing_probe
+        PASS [   3.970s] (66/86) uni-db::integration bugs::issue43_insert_latency_diagnostic::tests::issue43_timed_breakdown
+        PASS [  50.147s] (67/86) uni-query-functions java_regex::tests::limit_timing
+        PASS [  13.292s] (68/86) uni-db::integration bugs::issue43_repro::tests::issue43_full_repro
+        PASS [  10.649s] (69/86) uni-db::integration bugs::issue43_repro::tests::issue43_prepared_query
+        PASS [   9.109s] (70/86) uni-db::integration bugs::issue49_datetime_autoembed_latency::tests::autoembed_datetime_causes_on_growth
+        SLOW [>120.000s] (─────────) uni-db::integration connectors::cdc_runtime_e2e::w2_residual_memory_growth_observation
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dqp::feasibility::dqp_feasibility_measure_tiers
+        SLOW [>120.000s] (─────────) uni-db::integration perf::perf_class_probe::perf_class_probe_best_by_merge
+        PASS [ 115.711s] (71/86) uni-db::integration triggers::trigger_vertex_probe_cost::trigger_vertex_probe_cost_100k
+        SLOW [>120.000s] (─────────) uni-db::integration triggers::trigger_edge_probe_cost::trigger_edge_probe_cost_100k
+        SLOW [>120.000s] (─────────) uni-db::integration triggers::trigger_edge_probe_cost::trigger_edge_probe_cost_1m
+        SLOW [>120.000s] (─────────) uni-db::integration triggers::trigger_vertex_probe_cost::trigger_vertex_probe_cost_1m
+        PASS [ 174.770s] (72/86) uni-db::integration triggers::trigger_edge_probe_cost::trigger_edge_probe_cost_100k
+        SLOW [>120.000s] (─────────) uni-db::integration bugs::issue_55_get_edges_scaling_autoembed::repro_get_edges_scales_with_autoembed
+        PASS [ 143.854s] (73/86) uni-db::integration bugs::issue_55_get_edges_scaling_autoembed::repro_get_edges_scales_with_autoembed
+        SLOW [>240.000s] (─────────) uni-db::integration connectors::cdc_runtime_e2e::w2_residual_memory_growth_observation
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dqp::feasibility::dqp_feasibility_measure_tiers
+        SLOW [>240.000s] (─────────) uni-db::integration perf::perf_class_probe::perf_class_probe_best_by_merge
+        SLOW [>240.000s] (─────────) uni-db::integration triggers::trigger_edge_probe_cost::trigger_edge_probe_cost_1m
+        SLOW [>240.000s] (─────────) uni-db::integration triggers::trigger_vertex_probe_cost::trigger_vertex_probe_cost_1m
+        PASS [  32.720s] (74/86) uni-db::integration bugs::issue_55_observed_in_growth::repro_observed_in_query_time_grows
+        PASS [   0.266s] (75/86) uni-db::integration index::indexing_integration::test_auto_embedding_and_vector_search
+        PASS [   0.448s] (76/86) uni-db::integration storage::embedding_stack_overflow_test::fastembed_tests::test_fastembed_multiple_embeddings
+        PASS [   0.475s] (77/86) uni-db::integration storage::embedding_stack_overflow_test::fastembed_tests::test_fastembed_no_stack_overflow
+        PASS [   0.242s] (78/86) uni-db::integration storage::embedding_stack_overflow_test::test_candle_embedding_basic
+        PASS [   0.356s] (79/86) uni-db::integration storage::embedding_stack_overflow_test::test_candle_multiple_embeddings
+        PASS [   1.346s] (80/86) uni-db::integration vector_search::similar_to_integration::auto_embed_tests::test_similar_to_auto_embed_in_where
+        PASS [   1.261s] (81/86) uni-db::integration vector_search::similar_to_integration::auto_embed_tests::test_similar_to_auto_embed_string_query
+        SLOW [>360.000s] (─────────) uni-db::integration connectors::cdc_runtime_e2e::w2_residual_memory_growth_observation
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dqp::feasibility::dqp_feasibility_measure_tiers
+        SLOW [>360.000s] (─────────) uni-db::integration perf::perf_class_probe::perf_class_probe_best_by_merge
+        SLOW [>360.000s] (─────────) uni-db::integration triggers::trigger_edge_probe_cost::trigger_edge_probe_cost_1m
+        SLOW [>360.000s] (─────────) uni-db::integration triggers::trigger_vertex_probe_cost::trigger_vertex_probe_cost_1m
+        PASS [ 439.935s] (82/86) uni-db::integration perf::perf_class_probe::perf_class_probe_best_by_merge
+        PASS [ 451.591s] (83/86) uni-db::integration metamorphic::dqp::feasibility::dqp_feasibility_measure_tiers
+        SLOW [>480.000s] (─────────) uni-db::integration connectors::cdc_runtime_e2e::w2_residual_memory_growth_observation
+        SLOW [>480.000s] (─────────) uni-db::integration triggers::trigger_edge_probe_cost::trigger_edge_probe_cost_1m
+        SLOW [>480.000s] (─────────) uni-db::integration triggers::trigger_vertex_probe_cost::trigger_vertex_probe_cost_1m
+        PASS [ 543.910s] (84/86) uni-db::integration connectors::cdc_runtime_e2e::w2_residual_memory_growth_observation
+        PASS [ 547.320s] (85/86) uni-db::integration triggers::trigger_vertex_probe_cost::trigger_vertex_probe_cost_1m
+        SLOW [>600.000s] (─────────) uni-db::integration triggers::trigger_edge_probe_cost::trigger_edge_probe_cost_1m
+        SLOW [>720.000s] (─────────) uni-db::integration triggers::trigger_edge_probe_cost::trigger_edge_probe_cost_1m
+        PASS [ 747.846s] (86/86) uni-db::integration triggers::trigger_edge_probe_cost::trigger_edge_probe_cost_1m
+────────────
+     Summary [ 759.681s] 86 tests run: 86 passed (7 slow), 8698 skipped

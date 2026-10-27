@@ -1,0 +1,9 @@
+{
+  "Cargo.lock": "43d7c2350a7ef072ef6bb75930f6083d2eba4e87bd346803d21c305fe7e762fc",
+  "crates/uni/Cargo.toml": "4b610c3780416969a153c93e973c8fd73ddc3a43fcbbe403d75eae0e679a63f4",
+  "crates/uni/benches/collection_candidates.rs": "20de027f8ef3c0bc16dcfaab64c192c93ece43c041d13a22df871a018c371f87",
+  "crates/uni/benches/support/collection_candidates.rs": "8e1ac5d246d8abfcd1edfaf1a98ee04c6815a76247508ffa8fca7670d4c94783",
+  "crates/uni/tests/common/perf/collection_candidates.rs": "9b58e83003226a23cfbaefd42bf03d459411218cef2c77c808dbe27b5e98423d",
+  "crates/uni/tests/common/perf/mod.rs": "3ce740041f1e1e093529c6f51fb97b625b8e52b334213776e91a3a72a29f5805",
+  "docs/proposals/bbtree_followup_2026_10_26.md": "76ebbec39b657673ce11be04e1d85fffc507aafc6126a6385b5aa4de688c6119"
+}

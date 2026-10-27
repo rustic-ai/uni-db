@@ -132,7 +132,7 @@ fn rename_bag(bag: &RowBag, map: &BTreeMap<String, String>) -> RowBag {
 async fn check_binding(db: &Uni, bc: &BindingCase, tally: &Tally) -> anyhow::Result<()> {
     let map = renaming(bc.renaming);
     let variants = variants(&bc.case);
-    tally.cases.fetch_add(1, Ordering::Relaxed);
+    let case_number = tally.cases.fetch_add(1, Ordering::Relaxed) + 1;
     if variants.iter().any(|q| permutes_any(q, &bc.perm)) {
         tally.permuted.fetch_add(1, Ordering::Relaxed);
     }
@@ -160,6 +160,11 @@ async fn check_binding(db: &Uni, bc: &BindingCase, tally: &Tally) -> anyhow::Res
                 render(&renamed),
             );
         }
+    }
+    // Leave completed-case checkpoints in nextest's captured failure output,
+    // so a timeout reports how much of the workload actually finished.
+    if case_number.is_multiple_of(1_000) {
+        eprintln!("[metamorphic:binding] completed_cases={case_number}");
     }
     Ok(())
 }

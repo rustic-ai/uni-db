@@ -1,0 +1,6 @@
+# started on Mon Oct 26 09:35:55 2026
+
+1422325359,,cpu_core/cycles/,308151605,99.00,,
+2330408792,,cpu_core/instructions/,308151605,99.00,,
+3621968,,cpu_core/cache-misses/,308151605,99.00,,
+13506409,,cpu_core/branch-misses/,308151605,99.00,,

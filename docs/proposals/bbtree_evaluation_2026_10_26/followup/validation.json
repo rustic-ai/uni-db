@@ -1,0 +1,13 @@
+{
+  "criterion_cells": 61,
+  "samples_per_cell": 20,
+  "criterion_samples": 1220,
+  "public_query_samples": 84,
+  "selected_tests_passed": 5,
+  "final_benchmark_smoke_cases_passed": 61,
+  "cargo_fmt_check": "passed",
+  "local_report_links": "passed",
+  "hardware_counter_loops": 9,
+  "cpu_recordings": 6,
+  "production_behavior_changed": false
+}

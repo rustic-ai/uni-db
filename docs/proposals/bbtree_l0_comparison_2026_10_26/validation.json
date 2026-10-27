@@ -1,0 +1,17 @@
+{
+  "selected_tests_passed": 7,
+  "benchmark_smoke_cells_passed": 61,
+  "main_timing_observations": 2560,
+  "main_summary_cells": 160,
+  "main_process_runs": 2,
+  "rounds_per_main_process": 8,
+  "sustained_churn_process_runs": 32,
+  "replacements_per_sustained_process": 1000000,
+  "memory_passes": 32,
+  "hardware_counter_runs": 12,
+  "cpu_recordings": 8,
+  "format_check": "passed",
+  "source_snapshot_hashes": "verified",
+  "local_report_links": "verified",
+  "production_code_changed": false
+}

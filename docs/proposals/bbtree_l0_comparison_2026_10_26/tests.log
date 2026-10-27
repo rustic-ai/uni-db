@@ -1,0 +1,59 @@
+warning: ignoring --test-threads because --no-capture is specified
+    Blocking waiting for file lock on build directory
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 40s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 256cf465-1ccf-4215-814c-5c0db01bf5c2 with nextest profile: default
+    Starting 6 tests across 1 binary (4016 tests skipped)
+       START [         ] (1/6) uni-db::integration perf::collection_candidates::collection_backend_mutation_equivalence
+
+running 1 test
+test perf::collection_candidates::collection_backend_mutation_equivalence ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4021 filtered out; finished in 0.11s
+
+        PASS [   0.125s] (1/6) uni-db::integration perf::collection_candidates::collection_backend_mutation_equivalence
+       START [         ] (2/6) uni-db::integration perf::collection_candidates::collection_canonical_values_survive_hash_collisions
+
+running 1 test
+test perf::collection_candidates::collection_canonical_values_survive_hash_collisions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4021 filtered out; finished in 0.00s
+
+        PASS [   0.018s] (2/6) uni-db::integration perf::collection_candidates::collection_canonical_values_survive_hash_collisions
+       START [         ] (3/6) uni-db::integration perf::collection_candidates::collection_index_replacements_and_interval_interleavings
+
+running 1 test
+test perf::collection_candidates::collection_index_replacements_and_interval_interleavings ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4021 filtered out; finished in 0.00s
+
+        PASS [   0.019s] (3/6) uni-db::integration perf::collection_candidates::collection_index_replacements_and_interval_interleavings
+       START [         ] (4/6) uni-db::integration perf::collection_candidates::collection_int_index_matches_visibility_prefilter
+
+running 1 test
+test perf::collection_candidates::collection_int_index_matches_visibility_prefilter ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4021 filtered out; finished in 0.08s
+
+        PASS [   0.096s] (4/6) uni-db::integration perf::collection_candidates::collection_int_index_matches_visibility_prefilter
+       START [         ] (5/6) uni-db::integration perf::collection_candidates::collection_sparse_preserves_bits_and_sum_order
+
+running 1 test
+test perf::collection_candidates::collection_sparse_preserves_bits_and_sum_order ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4021 filtered out; finished in 0.02s
+
+        PASS [   0.042s] (5/6) uni-db::integration perf::collection_candidates::collection_sparse_preserves_bits_and_sum_order
+       START [         ] (6/6) uni-db::integration storage::collection_types_test::test_collection_types_storage_and_query
+
+running 1 test
+test storage::collection_types_test::test_collection_types_storage_and_query ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4021 filtered out; finished in 0.05s
+
+        PASS [   0.065s] (6/6) uni-db::integration storage::collection_types_test::test_collection_types_storage_and_query
+────────────
+     Summary [   0.374s] 6 tests run: 6 passed, 4016 skipped

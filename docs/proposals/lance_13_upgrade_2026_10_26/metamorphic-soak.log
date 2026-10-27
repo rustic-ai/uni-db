@@ -1,0 +1,98 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.46s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 10262003-4e6d-4145-8eaa-4e9702a2846f with nextest profile: soak
+    Starting 8 tests across 1 binary (4035 tests skipped)
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::dense::dense_oracle_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::norec::norec_law_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::sparse::sparse_oracle_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_agg_law_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::multi::multi_oracle_soak
+        SLOW [>120.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_row_law_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::multi::multi_oracle_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::norec::norec_law_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::dense::dense_oracle_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::sparse::sparse_oracle_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_agg_law_soak
+        SLOW [>240.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_row_law_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_agg_law_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::dense::dense_oracle_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::multi::multi_oracle_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::norec::norec_law_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::sparse::sparse_oracle_soak
+        SLOW [>360.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_row_law_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::sparse::sparse_oracle_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::multi::multi_oracle_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_agg_law_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::dense::dense_oracle_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::norec::norec_law_soak
+        SLOW [>480.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_row_law_soak
+        PASS [ 510.782s] (1/8) uni-db::integration metamorphic::sparse::sparse_oracle_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::norec::norec_law_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::multi::multi_oracle_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_agg_law_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::dense::dense_oracle_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>600.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_row_law_soak
+        PASS [ 627.687s] (2/8) uni-db::integration metamorphic::multi::multi_oracle_soak
+        PASS [ 643.699s] (3/8) uni-db::integration metamorphic::dense::dense_oracle_soak
+        PASS [ 654.990s] (4/8) uni-db::integration metamorphic::norec::norec_law_soak
+        SLOW [>720.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>720.000s] (─────────) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>720.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_agg_law_soak
+        SLOW [>720.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_row_law_soak
+        SLOW [>840.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_agg_law_soak
+        SLOW [>840.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>840.000s] (─────────) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>840.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_row_law_soak
+        SLOW [>960.000s] (─────────) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>960.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_agg_law_soak
+        SLOW [>960.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>960.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_row_law_soak
+        SLOW [>1080.000s] (─────────) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>1080.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_row_law_soak
+        SLOW [>1080.000s] (─────────) uni-db::integration metamorphic::tlp::tlp_agg_law_soak
+        SLOW [>1080.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        PASS [1102.077s] (5/8) uni-db::integration metamorphic::tlp::tlp_agg_law_soak
+        PASS [1113.445s] (6/8) uni-db::integration metamorphic::tlp::tlp_row_law_soak
+        SLOW [>1200.000s] (─────────) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>1200.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>1320.000s] (─────────) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>1320.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>1440.000s] (─────────) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>1440.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>1560.000s] (─────────) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>1560.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>1680.000s] (─────────) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>1680.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        PASS [1710.410s] (7/8) uni-db::integration metamorphic::structural::structural_laws_soak
+        SLOW [>1800.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>1920.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>2040.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>2160.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+        SLOW [>2280.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+ TERMINATING [>2400.000s] (─────────) uni-db::integration metamorphic::binding::binding_guard_soak
+     TIMEOUT [2400.031s] (8/8) uni-db::integration metamorphic::binding::binding_guard_soak
+  stdout ───
+
+    running 1 test
+    test metamorphic::binding::binding_guard_soak has been running for over 60 seconds
+  stderr ───
+    proptest: FileFailurePersistence::SourceParallel set, but no source file known
+
+    (test timed out)
+
+────────────
+     Summary [2400.038s] 8 tests run: 7 passed (7 slow), 1 timed out, 4035 skipped
+     TIMEOUT [2400.031s] (8/8) uni-db::integration metamorphic::binding::binding_guard_soak
+error: test run failed

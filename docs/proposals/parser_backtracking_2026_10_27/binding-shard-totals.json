@@ -1,0 +1,42 @@
+[
+  {
+    "shard": 1,
+    "cases": 10000,
+    "permuted": 6994,
+    "variants": 87675,
+    "non_empty": 67499,
+    "query_executions": 263025
+  },
+  {
+    "shard": 2,
+    "cases": 10000,
+    "permuted": 7019,
+    "variants": 87734,
+    "non_empty": 67542,
+    "query_executions": 263202
+  },
+  {
+    "shard": 3,
+    "cases": 10000,
+    "permuted": 7019,
+    "variants": 87754,
+    "non_empty": 67449,
+    "query_executions": 263262
+  },
+  {
+    "shard": 4,
+    "cases": 10000,
+    "permuted": 7004,
+    "variants": 87744,
+    "non_empty": 67264,
+    "query_executions": 263232
+  },
+  {
+    "shard": 5,
+    "cases": 10000,
+    "permuted": 7000,
+    "variants": 87730,
+    "non_empty": 67112,
+    "query_executions": 263190
+  }
+]

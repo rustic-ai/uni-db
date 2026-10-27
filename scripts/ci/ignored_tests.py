@@ -45,7 +45,12 @@ DEDICATED_LANES: list[tuple[str, str, str]] = [
     ),
     (
         ".github/workflows/nightly.yml",  # metamorphic
-        "test(/metamorphic::/) and test(soak) and not test(/dqp::/)",
+        "test(/metamorphic::/) and test(soak) and not test(/dqp::/) and not test(/binding::/)",
+        "binary_id(uni-db::integration)",
+    ),
+    (
+        ".github/workflows/nightly.yml",  # binding (five 10k-case shards)
+        "test(metamorphic::binding::binding_guard_soak)",
         "binary_id(uni-db::integration)",
     ),
     (
