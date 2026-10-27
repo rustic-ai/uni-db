@@ -1,0 +1,96 @@
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.93s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 0a5883ec-59cc-43c3-8b66-f2a2ab4cf1b1 with nextest profile: default
+    Starting 5 tests across 1 binary (4022 tests skipped)
+        PASS [   0.036s] (1/5) uni-db::integration bugs::repro_locy_tx_neural_preview::create_model_rejected_on_tx_path_despite_preview_default
+        FAIL [   0.068s] (2/5) uni-db::integration review_20261026::review_empty_fork_must_not_see_later_primary_rows
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_empty_fork_must_not_see_later_primary_rows ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_empty_fork_must_not_see_later_primary_rows
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4026 filtered out; finished in 0.05s
+
+  stderr ───
+
+    thread 'review_20261026::review_empty_fork_must_not_see_later_primary_rows' (407) panicked at /tmp/uni-review-regressions.rs:25:5:
+    post-fork primary data leaked: [Row { columns: ["name"], values: [String("primary-later")] }]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.079s] (3/5) uni-db::integration review_20261026::review_empty_label_on_populated_fork_must_stay_empty
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_empty_label_on_populated_fork_must_stay_empty ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_empty_label_on_populated_fork_must_stay_empty
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4026 filtered out; finished in 0.06s
+
+  stderr ───
+
+    thread 'review_20261026::review_empty_label_on_populated_fork_must_stay_empty' (406) panicked at /tmp/uni-review-regressions.rs:44:5:
+    post-fork primary label data leaked: [Row { columns: ["name"], values: [String("primary-later")] }]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.084s] (4/5) uni-db::integration review_20261026::review_fork_cosine_top_one_matches_primary
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_fork_cosine_top_one_matches_primary ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_fork_cosine_top_one_matches_primary
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4026 filtered out; finished in 0.06s
+
+  stderr ───
+
+    thread 'review_20261026::review_fork_cosine_top_one_matches_primary' (404) panicked at /tmp/uni-review-regressions.rs:66:5:
+    assertion `left == right` failed: fork chose wrong candidate: [Row { columns: ["name", "distance"], values: [String("l2-best"), Float(0.00496286153793335)] }]
+      left: "l2-best"
+     right: "cosine-best"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [  16.440s] (5/5) uni-db::integration review_20261026::review_recursive_cte_must_not_succeed_with_truncated_closure
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_recursive_cte_must_not_succeed_with_truncated_closure ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_recursive_cte_must_not_succeed_with_truncated_closure
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4026 filtered out; finished in 16.42s
+
+  stderr ───
+    recursive CTE returned [Row { columns: ["c", "last"], values: [Int(1001), Int(1000)] }]
+
+    thread 'review_20261026::review_recursive_cte_must_not_succeed_with_truncated_closure' (405) panicked at /tmp/uni-review-regressions.rs:89:13:
+    assertion `left == right` failed: successful closure must include all reachable nodes
+      left: 1001
+     right: 1002
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [  16.447s] 5 tests run: 1 passed, 4 failed, 4022 skipped
+        FAIL [   0.068s] (2/5) uni-db::integration review_20261026::review_empty_fork_must_not_see_later_primary_rows
+        FAIL [   0.079s] (3/5) uni-db::integration review_20261026::review_empty_label_on_populated_fork_must_stay_empty
+        FAIL [   0.084s] (4/5) uni-db::integration review_20261026::review_fork_cosine_top_one_matches_primary
+        FAIL [  16.440s] (5/5) uni-db::integration review_20261026::review_recursive_cte_must_not_succeed_with_truncated_closure
+error: test run failed

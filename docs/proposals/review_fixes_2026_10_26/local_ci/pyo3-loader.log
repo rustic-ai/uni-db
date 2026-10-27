@@ -1,0 +1,143 @@
+   Compiling tokio v1.53.3
+   Compiling quick_cache v0.6.24
+   Compiling pyo3-build-config v0.29.3
+   Compiling pyo3-ffi v0.29.3
+   Compiling pyo3 v0.29.3
+   Compiling tokio-util v0.7.18
+   Compiling tokio-rustls v0.26.4
+   Compiling tower v0.5.3
+   Compiling async-compression v0.4.42
+   Compiling aws-smithy-async v1.2.14
+   Compiling aws-smithy-runtime-api v1.12.3
+   Compiling datafusion-common-runtime v54.1.0
+   Compiling opendal-core v0.58.2
+   Compiling h2 v0.4.18
+   Compiling tower-http v0.6.11
+   Compiling hyper v1.10.1
+   Compiling hyper-util v0.1.20
+   Compiling aws-smithy-schema v0.1.0
+   Compiling hyper-rustls v0.27.9
+   Compiling aws-credential-types v1.2.14
+   Compiling reqwest v0.12.28
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-smithy-http-client v1.1.13
+   Compiling aws-smithy-observability v0.2.6
+   Compiling reqsign-file-read-tokio v3.0.6
+   Compiling aws-sigv4 v1.4.5
+   Compiling aws-types v1.3.16
+   Compiling aws-smithy-runtime v1.11.3
+   Compiling object_store v0.13.2
+   Compiling aws-runtime v1.7.4
+   Compiling aws-smithy-json v0.62.7
+   Compiling parquet v58.3.0
+   Compiling opendal-service-azure-common v0.58.2
+   Compiling reqwest v0.13.4
+   Compiling tokio-stream v0.1.18
+   Compiling reqsign-google v3.1.1
+   Compiling backon v1.6.0
+   Compiling opendal-layer-retry v0.58.2
+   Compiling opendal-service-gcs v0.58.2
+   Compiling datafusion-common v54.1.0
+   Compiling opendal-http-transport-reqwest v0.58.2
+   Compiling datafusion-expr-common v54.1.0
+   Compiling datafusion-physical-expr-common v54.1.0
+   Compiling datafusion-functions-window-common v54.1.0
+   Compiling datafusion-functions-aggregate-common v54.1.0
+   Compiling datafusion-expr v54.1.0
+   Compiling opendal-service-azdls v0.58.2
+   Compiling datafusion-physical-expr v54.1.0
+   Compiling datafusion-execution v54.1.0
+   Compiling datafusion-functions v54.1.0
+   Compiling datafusion-functions-aggregate v54.1.0
+   Compiling datafusion-physical-plan v54.1.0
+   Compiling datafusion-session v54.1.0
+   Compiling datafusion-physical-expr-adapter v54.1.0
+   Compiling datafusion-datasource v54.1.0
+   Compiling datafusion-functions-nested v54.1.0
+   Compiling datafusion-sql v54.1.0
+   Compiling lance-core v11.0.0
+   Compiling datafusion-catalog v54.1.0
+   Compiling datafusion-pruning v54.1.0
+   Compiling datafusion-datasource-parquet v54.1.0
+   Compiling datafusion-physical-optimizer v54.1.0
+   Compiling datafusion-datasource-csv v54.1.0
+   Compiling datafusion-functions-table v54.1.0
+   Compiling datafusion-catalog-listing v54.1.0
+   Compiling datafusion-datasource-arrow v54.1.0
+   Compiling datafusion-datasource-json v54.1.0
+   Compiling datafusion-functions-window v54.1.0
+   Compiling datafusion-optimizer v54.1.0
+   Compiling opendal-service-azblob v0.58.2
+   Compiling opendal-service-s3 v0.58.2
+   Compiling opendal-layer-concurrent-limit v0.58.2
+   Compiling opendal-layer-timeout v0.58.2
+   Compiling opendal-layer-logging v0.58.2
+   Compiling datafusion v54.1.0
+   Compiling opendal v0.58.2
+   Compiling aws-sdk-ssooidc v1.103.0
+   Compiling aws-sdk-sts v1.106.0
+   Compiling aws-sdk-sso v1.101.0
+   Compiling lance-namespace-reqwest-client v0.11.1
+   Compiling aws-config v1.8.18
+   Compiling lance-namespace v11.0.0
+   Compiling object_store_opendal v0.58.0
+   Compiling lance-io v11.0.0
+   Compiling lance-select v11.0.0
+   Compiling lance-encoding v11.0.0
+   Compiling lance-file v11.0.0
+   Compiling uni-common v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-common)
+   Compiling uni-plugin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin)
+   Compiling lance-index-core v11.0.0
+   Compiling lance-datafusion v11.0.0
+   Compiling lance-table v11.0.0
+   Compiling lance-linalg v11.0.0
+   Compiling uni-crdt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-crdt)
+   Compiling lance-index v11.0.0
+   Compiling uni-xervo v0.18.1
+   Compiling uni-plugin-conformance v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-conformance)
+   Compiling lance v11.0.0
+   Compiling uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+   Compiling uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+   Compiling uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+   Compiling uni-plugin-pyo3 v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-pyo3)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7m 26s
+────────────
+ Nextest run ID fe96c9c8-1560-4381-b7b3-d7b969d481e2 with nextest profile: default
+    Starting 35 tests across 4 binaries
+        PASS [   0.025s] ( 1/35) uni-plugin-pyo3 adapter_scalar::tests::scalar_python_exception_maps_to_fnerror
+        PASS [   0.031s] ( 2/35) uni-plugin-pyo3 adapter_procedure::tests::procedure_yields_recordbatch
+        PASS [   0.031s] ( 3/35) uni-plugin-pyo3 arrow_bridge::tests::datatype_mismatch_detected
+        PASS [   0.031s] ( 4/35) uni-plugin-pyo3 adapter_aggregate::tests::agg_empty_evaluate_returns_null
+        PASS [   0.033s] ( 5/35) uni-plugin-pyo3 adapter_aggregate::tests::agg_sum_single_partition
+        PASS [   0.035s] ( 6/35) uni-plugin-pyo3 adapter_aggregate::tests::agg_sum_two_partitions_matches
+        PASS [   0.036s] ( 7/35) uni-plugin-pyo3 adapter_procedure::tests::procedure_python_exception_surfaces
+        PASS [   0.037s] ( 8/35) uni-plugin-pyo3 adapter_aggregate::tests::agg_state_roundtrips_through_json
+        PASS [   0.037s] ( 9/35) uni-plugin-pyo3 adapter_scalar::tests::scalar_row_propagates_nulls
+        PASS [   0.039s] (10/35) uni-plugin-pyo3 adapter_procedure::tests::procedure_handles_missing_yield_keys_as_null
+        PASS [   0.039s] (11/35) uni-plugin-pyo3 adapter_scalar::tests::scalar_row_two_floats_add
+        PASS [   0.026s] (12/35) uni-plugin-pyo3 graph_compute::tests::an_unknown_attribute_earns_its_composition_recipe
+        PASS [   0.040s] (13/35) uni-plugin-pyo3 adapter_scalar::tests::missing_callable_errors
+        PASS [   0.030s] (14/35) uni-plugin-pyo3 graph_compute::tests::budget_accessors_return_values_from_python
+        PASS [   0.019s] (15/35) uni-plugin-pyo3 graph_compute::tests::op_strings_are_not_parsed_in_this_loader
+        PASS [   0.025s] (16/35) uni-plugin-pyo3 loader::tests::loader_empty_module_errors
+        PASS [   0.024s] (17/35) uni-plugin-pyo3 loader::tests::loader_parse_error_surfaces
+        PASS [   0.048s] (18/35) uni-plugin-pyo3 graph_compute::tests::every_declared_optional_arity_is_callable_from_python
+        PASS [   0.027s] (19/35) uni-plugin-pyo3 loader::tests::loader_set_plugin_id_overrides_default
+        PASS [   0.026s] (20/35) uni-plugin-pyo3::conformance conformance_probes_have_stable_ids
+        PASS [   0.064s] (21/35) uni-plugin-pyo3 arrow_bridge::tests::object_without_protocol_yields_error
+        PASS [   0.028s] (22/35) uni-plugin-pyo3 loader::tests::loader_unknown_type_name_rejected
+        PASS [   0.031s] (23/35) uni-plugin-pyo3 loader::tests::loader_registers_decorated_scalar
+        PASS [   0.030s] (24/35) uni-plugin-pyo3 plugin_handle::tests::handle_carries_loader_outcome
+        PASS [   0.038s] (25/35) uni-plugin-pyo3 loader::tests::loader_denies_ungranted_caps
+        PASS [   0.030s] (26/35) uni-plugin-pyo3::repro_set_determinism_noop set_determinism_is_a_silent_noop
+        PASS [   0.044s] (27/35) uni-plugin-pyo3 graph_compute::tests::every_in_process_kernel_is_reachable_from_python
+        PASS [   0.033s] (28/35) uni-plugin-pyo3::conformance conformance_suite_passes_on_python_plugin
+        PASS [   0.038s] (29/35) uni-plugin-pyo3::repro_empty_state_merge empty_partition_state_is_noop_in_merge
+        PASS [   0.229s] (30/35) uni-plugin-pyo3 arrow_bridge::tests::pyo3_arrow_roundtrip_with_nulls
+        PASS [   0.229s] (31/35) uni-plugin-pyo3 arrow_bridge::tests::pyo3_arrow_roundtrip_utf8
+        PASS [   0.230s] (32/35) uni-plugin-pyo3 arrow_bridge::tests::pyo3_arrow_roundtrip_float64
+        PASS [   0.231s] (33/35) uni-plugin-pyo3 arrow_bridge::tests::pyo3_arrow_roundtrip_int64
+        PASS [   0.235s] (34/35) uni-plugin-pyo3 adapter_scalar::tests::scalar_vec_returns_wrong_length_errors
+        PASS [   0.260s] (35/35) uni-plugin-pyo3 adapter_scalar::tests::scalar_vec_two_floats_add
+────────────
+     Summary [   0.260s] 35 tests run: 35 passed, 0 skipped

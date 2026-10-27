@@ -1,11 +1,43 @@
 # uni-db — unreleased
 
+Repository and wheel builds now route older transitive zstd requirements through
+private compatibility facades to patched zstd 0.14.3, zstd-safe 8.2.0 and
+zstd-sys 2.1.2. This fixes reused-context data leakage, seekable output lengths
+past EOF, and malformed legacy-frame output handling without adding advisory
+exceptions. Cargo root patches do not propagate to applications using published
+Rust crates; see [compatibility scope](../../compat/README.md).
+
 Changes on `main` since 4.2.0 that are not yet in a release. Rename this file to
 the version it ships in.
 
 ---
 
 ## ⚠️ Behaviour and API changes
+
+**Storage and query boundary corrections.** Concurrent UNIQUE, NodeKey,
+external-ID and MERGE key claims remain protected after a competing commit
+flushes. Forks retain the empty view of datasets absent at their creation,
+including across first writes, nested forks and reopen. Anonymous MERGE performs
+intra-statement deduplication and registers commit guards like named MERGE.
+Fork cardinality refreshes preserve primary's shared count cache, and concurrent
+key-conflict diagnostics identify the key kind, including `ext_id`.
+Dense vector search replenishes candidates invalidated by buffered replacements,
+deletions or label changes, and fork scans receive the requested metric.
+`WITH RECURSIVE` reports an iteration-limit error when its 1,000-round budget
+ends without convergence; it previously returned successful partial results.
+
+**Buffered deletion and recursive traversal scaling.** Key retirement uses
+reverse ownership maps, and graph edge removal updates adjacency positions in
+constant time. These eliminate quadratic work in large buffered delete commits.
+Recursive frontier membership in leading MATCH clauses drives VID-restricted
+scans instead of a full label scan every round.
+
+**Keyed MERGE preserves every label of a matched node.** Matching an existing
+`A:B` node with `MERGE (n:A {key: ...})` previously bound only `A`, so
+`labels(n)` omitted `B` and an `ON MATCH SET` property update could remove
+`B` from subsequent reads. Keyed node and relationship-endpoint fast paths
+now retain the complete visible label set, including earlier changes in the
+transaction while excluding another session's later relabels.
 
 **Identity expressions use signed IDs consistently.** A virtual node's
 `id(node)` returned a negative integer, but `id(node) < 0` returned false

@@ -1,0 +1,70 @@
+   Compiling itertools v0.14.0
+   Compiling serde_json v1.0.150
+   Compiling snafu-derive v0.9.1
+   Compiling data-encoding-macro-internal v0.1.18
+    Checking bit-vec v0.8.0
+    Checking uni-btic v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-btic)
+    Checking uni-sparse-vector v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-sparse-vector)
+    Checking wide v0.7.33
+   Compiling derive_more-impl v2.1.1
+    Checking uni-sidecar v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-sidecar)
+    Checking bit-set v0.8.0
+    Checking fancy-regex v0.14.0
+    Checking fancy-regex v0.17.0
+    Checking data-encoding-macro v0.1.20
+    Checking multibase v0.9.2
+    Checking uni-common v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-common)
+    Checking tokenizers v0.21.4
+    Checking candle-transformers v0.10.2
+    Checking simba v0.9.1
+   Compiling prost-derive v0.14.4
+   Compiling stop-words v0.9.0
+   Compiling stop-words v0.10.0
+    Checking bm25 v2.3.2
+    Checking lance-tokenizer v11.0.0
+    Checking derive_more v2.1.1
+    Checking selectors v0.33.0
+    Checking uni-plugin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin)
+    Checking uni-cypher v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cypher)
+    Checking nalgebra v0.33.3
+    Checking scraper v0.25.0
+    Checking snafu v0.9.1
+    Checking toktrie_hf_tokenizers v1.7.6
+   Compiling prost v0.14.4
+    Checking lance-core v11.0.0
+    Checking prost-types v0.14.4
+    Checking tonic-prost v0.14.6
+    Checking opentelemetry-proto v0.32.0
+    Checking uni-crdt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-crdt)
+    Checking uni-plugin-apoc-core v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-apoc-core)
+   Compiling prost-build v0.14.4
+    Checking tonic-types v0.14.6
+    Checking opentelemetry-otlp v0.32.0
+    Checking lance-namespace v11.0.0
+    Checking lance-select v11.0.0
+    Checking lance-linalg v11.0.0
+    Checking lance-io v11.0.0
+    Checking statrs v0.18.0
+   Compiling lance-encoding v11.0.0
+   Compiling lance-file v11.0.0
+   Compiling lance-table v11.0.0
+   Compiling lance-datafusion v11.0.0
+   Compiling lance-index v11.0.0
+   Compiling lance v11.0.0
+    Checking mistralrs-core v0.8.1
+    Checking uni-locy v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy)
+    Checking uni-plugin-custom v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-custom)
+    Checking lance-index-core v11.0.0
+    Checking mistralrs v0.8.1
+    Checking uni-xervo v0.18.1
+    Checking uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+    Checking uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+    Checking uni-query-functions v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query-functions)
+    Checking uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+    Checking uni-query v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query)
+    Checking uni-plugin-rhai v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-rhai)
+    Checking uni-plugin-host v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-host)
+    Checking uni-fork v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-fork)
+    Checking uni-bulk v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-bulk)
+    Checking uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2m 13s

@@ -1928,6 +1928,13 @@ impl Writer {
                 {
                     use crate::runtime::occ::Conflict;
                     match &conflict {
+                        Conflict::Key { .. } => {
+                            metrics::counter!("uni_ssi_constraint_conflicts_total").increment(1);
+                            return Err(uni_common::UniError::ConstraintConflict {
+                                message: conflict.to_string(),
+                            }
+                            .into());
+                        }
                         Conflict::WriteWrite { .. } => metrics::counter!(
                             "uni_ssi_serialization_conflicts_total",
                             "kind" => "write_write",
@@ -4042,7 +4049,9 @@ impl Writer {
         // Boxed: the row write is a deep future, and callers nest it in
         // their own (`async_trait`, timeouts), which overflowed the
         // compiler's auto-trait recursion limit.
-        Box::pin(self.write_vertex_row(vid, properties, labels, tx_l0, true)).await
+        let write: futures::future::BoxFuture<'_, Result<Properties>> =
+            Box::pin(self.write_vertex_row(vid, properties, labels, tx_l0, true));
+        write.await
     }
 
     /// Rewrite an existing vertex's full row (`SET`, `REMOVE`, a `MERGE`
@@ -4062,7 +4071,9 @@ impl Writer {
         // Boxed: the row write is a deep future, and callers nest it in
         // their own (`async_trait`, timeouts), which overflowed the
         // compiler's auto-trait recursion limit.
-        Box::pin(self.write_vertex_row(vid, properties, labels, tx_l0, false)).await
+        let write: futures::future::BoxFuture<'_, Result<Properties>> =
+            Box::pin(self.write_vertex_row(vid, properties, labels, tx_l0, false));
+        write.await
     }
 
     /// Body of [`Self::insert_vertex_with_labels`] (`create`) and
@@ -6509,6 +6520,16 @@ impl Writer {
         let mut dataset_versions = BTreeMap::new();
         let mut parent_branch_versions = BTreeMap::new();
         for name in candidate_dataset_names {
+            // Resolve after flushing: the flush may have created a parent's
+            // first branch for a formerly absent dataset.
+            let parent_branch = self
+                .storage
+                .fork_scope()
+                .and_then(|s| s.branch_for(name))
+                .or_else(|| parent_branches.get(name).cloned());
+            if self.storage.fork_scope().is_some() && parent_branch.is_none() {
+                continue;
+            }
             if !branching.table_exists(name).await? {
                 continue;
             }
@@ -6521,9 +6542,9 @@ impl Writer {
             // `flush_lock`, after `flush_inline_under_lock`) is what makes the
             // nested fork's branch point atomic w.r.t. a concurrent parent
             // commit+flush (the D2 fix).
-            if let Some(parent_branch) = parent_branches.get(name) {
+            if let Some(parent_branch) = parent_branch {
                 let branch_version = branching
-                    .current_version_on_branch(name, parent_branch)
+                    .current_version_on_branch(name, &parent_branch)
                     .await?;
                 parent_branch_versions.insert(name.clone(), branch_version);
             }

@@ -1,0 +1,5 @@
+{
+  "command": "cargo metadata --format-version=1 --manifest-path bindings/uni-db-cuda/Cargo.toml",
+  "status": 0,
+  "cuda_package_present": true
+}

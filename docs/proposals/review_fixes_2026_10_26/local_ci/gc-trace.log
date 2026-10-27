@@ -1,0 +1,401 @@
+   Compiling serde v1.0.228
+   Compiling tracing v0.1.44
+   Compiling futures-executor v0.3.32
+   Compiling ahash v0.8.12
+   Compiling rustls v0.23.46
+   Compiling rand v0.10.1
+   Compiling futures v0.3.32
+   Compiling tempfile v3.27.0
+   Compiling smallvec v1.15.2
+   Compiling chrono v0.4.45
+   Compiling serde_urlencoded v0.7.1
+   Compiling parking_lot_core v0.9.12
+   Compiling icu_normalizer v2.3.0
+   Compiling quick-xml v0.39.4
+   Compiling parking_lot v0.12.5
+   Compiling tokio v1.53.3
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling chrono-tz v0.10.4
+   Compiling url v2.5.8
+   Compiling dashmap v6.2.1
+   Compiling num-bigint-dig v0.8.6
+   Compiling quick-xml v0.41.0
+   Compiling arrow-array v58.3.0
+   Compiling rsa v0.9.10
+   Compiling tokio-util v0.7.18
+   Compiling tokio-rustls v0.26.4
+   Compiling h2 v0.4.18
+   Compiling tower v0.5.3
+   Compiling arrow-select v58.3.0
+   Compiling async-compression v0.4.42
+   Compiling tower-http v0.6.11
+   Compiling hyper v1.10.1
+   Compiling hyper-util v0.1.20
+   Compiling arrow-ord v58.3.0
+   Compiling arrow-ipc v58.3.0
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.12.28
+   Compiling arrow-cast v58.3.0
+   Compiling object_store v0.13.2
+   Compiling arrow-row v58.3.0
+   Compiling arrow-csv v58.3.0
+   Compiling arrow-json v58.3.0
+   Compiling arrow-string v58.3.0
+   Compiling arrow-arith v58.3.0
+   Compiling arrow v58.3.0
+   Compiling parquet v58.3.0
+   Compiling datafusion-common v54.1.0
+   Compiling datafusion-expr-common v54.1.0
+   Compiling datafusion-physical-expr-common v54.1.0
+   Compiling reqsign-core v3.3.1
+   Compiling aws-smithy-async v1.2.14
+   Compiling aws-smithy-runtime-api v1.12.3
+   Compiling datafusion-functions-window-common v54.1.0
+   Compiling datafusion-functions-aggregate-common v54.1.0
+   Compiling datafusion-expr v54.1.0
+   Compiling datafusion-common-runtime v54.1.0
+   Compiling opendal-core v0.58.2
+   Compiling datafusion-physical-expr v54.1.0
+   Compiling datafusion-execution v54.1.0
+   Compiling datafusion-functions v54.1.0
+   Compiling datafusion-functions-aggregate v54.1.0
+   Compiling aws-smithy-schema v0.1.0
+   Compiling jsonb v0.5.6
+   Compiling datafusion-physical-plan v54.1.0
+   Compiling datafusion-physical-expr-adapter v54.1.0
+   Compiling datafusion-functions-nested v54.1.0
+   Compiling datafusion-session v54.1.0
+   Compiling datafusion-datasource v54.1.0
+   Compiling datafusion-sql v54.1.0
+   Compiling aws-credential-types v1.2.14
+   Compiling aws-smithy-http v0.63.6
+   Compiling hashbrown v0.16.1
+   Compiling moka v0.12.15
+   Compiling quick_cache v0.6.24
+   Compiling reqsign-aws-core v3.1.1
+   Compiling lance-arrow v11.0.0
+   Compiling aws-smithy-http-client v1.1.13
+   Compiling aws-smithy-observability v0.2.6
+   Compiling reqsign-file-read-tokio v3.0.6
+   Compiling lance-core v11.0.0
+   Compiling aws-smithy-runtime v1.11.3
+   Compiling reqsign-aws-v4 v3.3.0
+   Compiling aws-types v1.3.16
+   Compiling aws-sigv4 v1.4.5
+   Compiling reqsign-azure-storage v3.2.1
+   Compiling aws-runtime v1.7.4
+   Compiling aws-smithy-json v0.62.7
+   Compiling opendal-service-azure-common v0.58.2
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling reqwest v0.13.4
+   Compiling reqsign-google v3.1.1
+   Compiling datafusion-catalog v54.1.0
+   Compiling datafusion-pruning v54.1.0
+   Compiling backon v1.6.0
+   Compiling opendal-layer-retry v0.58.2
+   Compiling opendal-http-transport-reqwest v0.58.2
+   Compiling opendal-service-gcs v0.58.2
+   Compiling opendal-service-s3 v0.58.2
+   Compiling opendal-service-azdls v0.58.2
+   Compiling opendal-service-azblob v0.58.2
+   Compiling opendal-layer-timeout v0.58.2
+   Compiling opendal-layer-logging v0.58.2
+   Compiling opendal-layer-concurrent-limit v0.58.2
+   Compiling tokio-stream v0.1.18
+   Compiling lance-namespace-reqwest-client v0.11.1
+   Compiling datafusion-datasource-json v54.1.0
+   Compiling opendal v0.58.2
+   Compiling aws-sdk-sts v1.106.0
+   Compiling datafusion-physical-optimizer v54.1.0
+   Compiling datafusion-datasource-parquet v54.1.0
+   Compiling aws-sdk-sso v1.101.0
+   Compiling datafusion-functions-table v54.1.0
+   Compiling datafusion-catalog-listing v54.1.0
+   Compiling aws-sdk-ssooidc v1.103.0
+   Compiling datafusion-datasource-arrow v54.1.0
+   Compiling datafusion-datasource-csv v54.1.0
+   Compiling datafusion-optimizer v54.1.0
+   Compiling datafusion-functions-window v54.1.0
+   Compiling path_abs v0.5.1
+   Compiling datafusion v54.1.0
+   Compiling aws-config v1.8.18
+   Compiling lance-namespace v11.0.0
+   Compiling object_store_opendal v0.58.0
+   Compiling matrixmultiply v0.3.10
+   Compiling lance-io v11.0.0
+   Compiling fsst v11.0.0
+   Compiling hyperloglogplus v0.4.1
+   Compiling lance-encoding v11.0.0
+   Compiling lance-select v11.0.0
+   Compiling lance-file v11.0.0
+   Compiling rmp-serde v1.3.1
+   Compiling icu_segmenter v2.3.0
+   Compiling lance-arrow-scalar v58.0.0
+   Compiling fail v0.5.1
+   Compiling uni-btic v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-btic)
+   Compiling uni-sparse-vector v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-sparse-vector)
+   Compiling ulid v1.2.1
+   Compiling cron v0.16.0
+   Compiling lance-table v11.0.0
+   Compiling lance-datafusion v11.0.0
+   Compiling lance-index-core v11.0.0
+   Compiling lance-tokenizer v11.0.0
+   Compiling uni-common v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-common)
+   Compiling lance-arrow-stats v58.0.0
+   Compiling lance-linalg v11.0.0
+   Compiling ndarray v0.16.1
+   Compiling uni-plugin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin)
+   Compiling lance-index v11.0.0
+   Compiling ndarray v0.17.2
+   Compiling uni-crdt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-crdt)
+   Compiling async-stream-impl v0.3.6
+   Compiling uni-xervo v0.18.1
+   Compiling async-stream v0.3.6
+   Compiling rusty-fork v0.3.1
+   Compiling alloca v0.4.0
+   Compiling clap_builder v4.6.0
+   Compiling smartstring v1.0.1
+   Compiling proptest v1.11.0
+   Compiling ciborium-ll v0.2.2
+   Compiling thin-vec v0.2.18
+   Compiling opentelemetry v0.32.0
+   Compiling itertools v0.13.0
+   Compiling lance v11.0.0
+   Compiling rhai_codegen v3.2.0
+   Compiling criterion-plot v0.8.2
+   Compiling tracing-subscriber v0.3.23
+   Compiling rhai v1.25.1
+   Compiling ciborium v0.2.2
+   Compiling clap v4.6.1
+   Compiling tinytemplate v1.2.1
+   Compiling page_size v0.6.0
+   Compiling criterion v0.8.2
+   Compiling tracing-opentelemetry v0.33.0
+   Compiling opentelemetry_sdk v0.32.1
+   Compiling uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+   Compiling uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+   Compiling uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+   Compiling uni-plugin-rhai v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-rhai)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8m 21s
+────────────
+ Nextest run ID 27725404-4d87-4630-9958-923f510e9a4d with nextest profile: default
+    Starting 216 tests across 6 binaries (188 tests skipped)
+        PASS [   0.007s] (  1/216) uni-plugin-builtin algorithms::graph_compute::arena::tests::linking_past_the_branching_limit_fails_closed
+        PASS [   0.007s] (  2/216) uni-plugin-builtin algorithms::graph_compute::arena::tests::parent_tracking_survives_linking
+        PASS [   0.007s] (  3/216) uni-plugin-builtin algorithms::graph_compute::arena::tests::freezing_produces_dense_edge_numbering
+        PASS [   0.008s] (  4/216) uni-plugin-builtin algorithms::graph_compute::arena::tests::out_of_range_slots_are_rejected_not_silently_clamped
+        PASS [   0.008s] (  5/216) uni-plugin-builtin algorithms::graph_compute::composition_recipes::recipe_abs_is_max_against_the_negation
+        PASS [   0.008s] (  6/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::a2_masked_expand_equals_expand_on_the_masked_subgraph
+        PASS [   0.009s] (  7/216) uni-plugin-builtin algorithms::graph_compute::arena::tests::backup_propagates_delta_up_the_root_path
+        PASS [   0.009s] (  8/216) uni-plugin-builtin algorithms::graph_compute::composition_recipes::recipe_pow_repeats_multiplication
+        PASS [   0.009s] (  9/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::a1_edge_tensor_lifecycle_and_kind_errors
+        PASS [   0.010s] ( 10/216) uni-plugin-builtin algorithms::graph_compute::composition_recipes::every_published_recipe_has_a_proof
+        PASS [   0.010s] ( 11/216) uni-plugin-builtin algorithms::graph_compute::arena::tests::alloc_is_all_or_nothing_at_the_capacity_edge
+        PASS [   0.011s] ( 12/216) uni-plugin-builtin algorithms::graph_compute::composition_recipes::select_blend_poisons_on_a_nan_in_the_unselected_branch
+        PASS [   0.009s] ( 13/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::a5_typed_and_edge_shaped_tensors_roundtrip
+        PASS [   0.009s] ( 14/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::all_pairs_overlap_topk_keeps_highest
+        PASS [   0.009s] ( 15/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::a3_masked_spmv_matches_a_naive_masked_matrix_vector_oracle
+        PASS [   0.009s] ( 16/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::all_pairs_overlap_counts_triangles_on_complete_graph
+        PASS [   0.009s] ( 17/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::an_arena_can_be_frozen_and_aggregated_over
+        PASS [   0.009s] ( 18/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::an_arena_column_can_be_emitted_against_a_matching_projection
+        PASS [   0.019s] ( 19/216) uni-plugin-builtin algorithms::graph_compute::composition_recipes::recipe_select_blends_on_a_mask
+        PASS [   0.010s] ( 20/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::arena_tensors_do_not_combine_with_graph_tensors
+        PASS [   0.010s] ( 21/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::an_arena_seeded_from_a_projection_grows_into_it
+        PASS [   0.011s] ( 22/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::at_abm_sir_matches_a_native_reference_and_is_reproducible
+        PASS [   0.020s] ( 23/216) uni-plugin-builtin algorithms::graph_compute::composition_recipes::recipe_relu_gates_on_its_own_sign
+        PASS [   0.020s] ( 24/216) uni-plugin-builtin algorithms::graph_compute::composition_recipes::recipe_normalize_names_its_norm
+        PASS [   0.011s] ( 25/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::arena_batching_gives_no_budget_discount
+        PASS [   0.021s] ( 26/216) uni-plugin-builtin algorithms::graph_compute::composition_recipes::recipe_gt_builds_a_zero_one_mask
+        PASS [   0.021s] ( 27/216) uni-plugin-builtin algorithms::graph_compute::composition_recipes::recipe_step_thresholds_against_a_constant
+        PASS [   0.021s] ( 28/216) uni-plugin-builtin algorithms::graph_compute::composition_recipes::recipe_clip_is_min_of_max
+        PASS [   0.022s] ( 29/216) uni-plugin-builtin algorithms::graph_compute::composition_recipes::the_comparison_recipe_charges_three_passes
+        PASS [   0.022s] ( 30/216) uni-plugin-builtin algorithms::graph_compute::composition_recipes::recipe_sub_covers_both_positions
+        PASS [   0.022s] ( 31/216) uni-plugin-builtin algorithms::graph_compute::composition_recipes::recipe_ceil_is_the_negated_floor_of_the_negation
+        PASS [   0.025s] ( 32/216) uni-plugin-builtin algorithms::graph_compute::conformance::tests::all_conformance_probes_pass_on_this_host
+        PASS [   0.009s] ( 33/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::budget_bounds_readonly_reduce_and_l1diff_loops
+        PASS [   0.019s] ( 34/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::a4_segmented_reduce_is_deterministic_and_matches_a_fixed_order_oracle
+        PASS [   0.013s] ( 35/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::budget_accessors_are_free_and_track_the_meter
+        PASS [   0.019s] ( 36/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::at_arena_batched_descent_matches_an_independent_oracle
+        PASS [   0.010s] ( 37/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::edge_from_nodes_rejects_a_value_it_cannot_gather
+        PASS [   0.011s] ( 38/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::compare_on_edges_feeds_spmv_masked
+        PASS [   0.012s] ( 39/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::compare_matches_the_scalar_oracle
+        PASS [   0.012s] ( 40/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::degenerate_sampling_probabilities_are_exact_and_seed_independent
+        PASS [   0.010s] ( 41/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::emit_accumulates_across_calls
+        PASS [   0.013s] ( 42/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::cross_graph_operands_error_instead_of_panicking
+        PASS [   0.011s] ( 43/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::emit_rejects_a_ragged_column_from_a_later_call
+        PASS [   0.012s] ( 44/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::edge_from_nodes_gathers_endpoint_values_onto_edges
+        PASS [   0.011s] ( 45/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::emit_validates_against_declared_columns
+        PASS [   0.012s] ( 46/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::emit_walks_egresses_ordered_sequences
+        PASS [   0.016s] ( 47/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::budget_exhaustion_stops_runaway_expand
+        PASS [   0.018s] ( 48/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::at_flow_batched_max_flow_matches_a_native_oracle
+        PASS [   0.015s] ( 49/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::edge_set_algebra_errors_instead_of_panicking
+        PASS [   0.019s] ( 50/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::compare_agrees_with_the_composition_it_replaces
+        PASS [   0.016s] ( 51/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::every_graph_taking_kernel_rejects_a_foreign_operand
+        PASS [   0.012s] ( 52/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::expired_deadline_aborts_with_timeout
+        PASS [   0.012s] ( 53/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::expand_sampled_rejects_a_short_probability_tensor
+        PASS [   0.019s] ( 54/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::e5_ppr_is_deterministic_across_runs
+        PASS [   0.009s] ( 55/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::f2_wcc_matches_union_find
+        PASS [   0.015s] ( 56/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::ewise_preserves_edge_shape_through_to_a_consumer
+        PASS [   0.009s] ( 57/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::frozen_arena_is_an_ordinary_graph_to_every_mode_a_kernel
+        PASS [   0.011s] ( 58/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::f1_reachability_matches_naive_bfs
+        PASS [   0.010s] ( 59/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::f64_kernels_reject_i64_with_shape_mismatch
+        PASS [   0.009s] ( 60/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::h1_forged_handle_is_typed_error_not_panic
+        PASS [   0.012s] ( 61/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::f3_bellman_ford_matches_naive
+        PASS [   0.011s] ( 62/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::f5_eigenvector_matches_power_iteration_oracle
+        PASS [   0.012s] ( 63/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::f11_temporal_reachability_matches_naive_time_respecting_bfs
+        PASS [   0.010s] ( 64/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::f7_kcore_matches_naive_peeling
+        PASS [   0.009s] ( 65/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::h2_use_after_free_is_stale
+        PASS [   0.010s] ( 66/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::freeing_a_bound_graph_does_not_mint_budget
+        PASS [   0.012s] ( 67/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::h3_cross_session_handle_rejected
+        PASS [   0.018s] ( 68/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::f10_independent_cascade_matches_a_naive_seeded_oracle
+        PASS [   0.011s] ( 69/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::h6_freeing_all_handles_reclaims_arena
+        PASS [   0.010s] ( 70/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::h7_kernels_are_pure
+        PASS [   0.010s] ( 71/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::handle_kind_tag_is_stable
+        PASS [   0.018s] ( 72/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::f4_ppr_matches_power_iteration_oracle
+        PASS [   0.014s] ( 73/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::h4_kind_mismatch_is_typed_error
+        PASS [   0.009s] ( 74/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::m5_in_out_direction_duality
+        PASS [   0.012s] ( 75/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::interp_evaluates_a_table_function_with_clamped_ends
+        PASS [   0.009s] ( 76/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::m6_mask_shrinking_never_grows_the_reachable_set
+        PASS [   0.012s] ( 77/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::interp_rejects_a_curve_it_cannot_evaluate
+        PASS [   0.011s] ( 78/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::m3_reachability_is_monotone_under_edge_addition
+        PASS [   0.010s] ( 79/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::m7_edge_tensor_and_masked_reach_are_relabel_invariant
+        PASS [   0.010s] ( 80/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::neighborhood_overlap_adamic_adar_matches_naive
+        PASS [   0.011s] ( 81/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::next_bucket_selects_the_distance_band
+        PASS [   0.012s] ( 82/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::m4_spmv_mask_fuses_with_filter
+        PASS [   0.012s] ( 83/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::output_kernels_reject_or_relabel_by_the_values_own_graph
+        PASS [   0.012s] ( 84/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::neighborhood_overlap_matches_naive_jaccard
+        PASS [   0.012s] ( 85/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::pin_d4b_sample_edges_matches_the_per_edge_counter_hash_oracle
+        PASS [   0.011s] ( 86/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::ppr_non_convergence_is_iteration_limit_not_silent
+        PASS [   0.020s] ( 87/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::m1_ppr_is_relabel_invariant
+        PASS [   0.013s] ( 88/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::pin_d4b_sample_edges_is_bitwise_reproducible_across_sessions
+        PASS [   0.011s] ( 89/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::random_walks_are_deterministic_and_visit_only_reachable
+        PASS [   0.014s] ( 90/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::p0_8_kernels_charge_their_exact_work
+        PASS [   0.011s] ( 91/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::repro_nan_sample_edges_must_reject_a_nan_probability
+        PASS [   0.012s] ( 92/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::repro_d1e_map_to_set_on_an_edge_tensor_must_yield_an_edge_mask
+        PASS [   0.012s] ( 93/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::repro_ew_ewise_must_reject_mixed_vertex_and_edge_shapes
+        PASS [   0.015s] ( 94/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::ragged_egress_labels_rows_with_the_values_own_projection
+        PASS [   0.024s] ( 95/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::m2_ppr_mass_is_conserved
+        PASS [   0.012s] ( 96/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::reqd13_native_mod_survives_where_the_floor_composition_collapses
+        PASS [   0.012s] ( 97/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::reqd13_floor_matches_the_ieee_oracle
+        PASS [   0.012s] ( 98/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::repro_prov_tensors_must_not_cross_projections
+        PASS [   0.013s] ( 99/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::reqd13_scalar_mod_is_one_op_and_agrees_with_the_tensor_form
+        PASS [   0.017s] (100/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::rekey_moves_a_value_between_projections_only_when_they_correspond
+        PASS [   0.012s] (101/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::reqd1_compare_and_select_are_composable_from_shipped_kernels
+        PASS [   0.013s] (102/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::reqd4_edge_mask_window_is_an_exact_selector_without_sampling
+        PASS [   0.015s] (103/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::reqd13_rem_floor_matches_numpy_on_every_edge
+        PASS [   0.019s] (104/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::repeated_arena_freezing_reclaims_its_budget
+        PASS [   0.011s] (105/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::set_to_map_carries_the_sets_provenance
+        PASS [   0.011s] (106/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::the_documented_budget_formula_matches_the_code
+        PASS [   0.010s] (107/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::weighted_in_direction_spmv_does_not_panic
+        PASS [   0.010s] (108/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::budget_accessors_are_reachable_via_json
+        PASS [   0.012s] (109/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::the_arena_spmv_hint_composition_actually_runs
+        PASS [   0.011s] (110/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::untracked_provenance_unifies_rather_than_conflicting
+        PASS [   0.018s] (111/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::s2_sample_matches_the_per_slot_counter_hash_oracle
+        PASS [   0.009s] (112/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::emit_column_length_mismatch_is_named_not_opaque
+        PASS [   0.009s] (113/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::expand_both_unions_out_and_in_neighbors
+        PASS [   0.010s] (114/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::emit_accepts_both_the_batch_and_single_column_wire_forms
+        PASS [   0.014s] (115/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::sets_carry_provenance_across_equal_sized_graphs
+        PASS [   0.021s] (116/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::s5_sample_charges_one_work_unit_per_element
+        PASS [   0.020s] (117/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::s5_sample_fails_closed_when_the_budget_is_drained
+        PASS [   0.012s] (118/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::expand_both_without_reverse_fails_loud
+        PASS [   0.011s] (119/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::expand_sampled_fuses_draw_and_expand_over_json
+        PASS [   0.017s] (120/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::crossing_count_is_graph_size_invariant
+        PASS [   0.009s] (121/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::map_and_ewise_floor_mod_over_json
+        PASS [   0.009s] (122/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::map_and_ewise_sqrt_exp_div_over_json
+        PASS [   0.009s] (123/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::new_kernels_reachable_via_json
+        PASS [   0.009s] (124/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::unresolved_ops_are_typed_by_cause
+        PASS [   0.009s] (125/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::sample_edges_undirected_fires_pairs_as_a_unit
+        PASS [   0.012s] (126/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::unknown_session_is_typed_error_not_panic
+        PASS [   0.014s] (127/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::the_host_supplied_kernels_refuse_the_json_path_with_a_reason
+        PASS [   0.017s] (128/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::malformed_json_is_typed_error_not_panic
+        PASS [   0.015s] (129/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::reach_fixpoint_bfs_over_json
+        PASS [   0.033s] (130/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::s3_distinct_iterations_yield_decorrelated_masks
+        PASS [   0.009s] (131/216) uni-plugin-builtin algorithms::graph_compute::handle::tests::max_generation_fits_field
+        PASS [   0.013s] (132/216) uni-plugin-builtin algorithms::graph_compute::error::tests::a_traced_guest_abort_round_trips_too
+        PASS [   0.010s] (133/216) uni-plugin-builtin algorithms::graph_compute::handle::tests::fields_are_independent
+        PASS [   0.008s] (134/216) uni-plugin-builtin algorithms::graph_compute::handle::tests::unknown_kind_tag_is_none
+        PASS [   0.013s] (135/216) uni-plugin-builtin algorithms::graph_compute::error::tests::a_traced_abort_still_round_trips_to_a_typed_outcome
+        PASS [   0.013s] (136/216) uni-plugin-builtin algorithms::graph_compute::error::tests::a_handle_fault_is_not_an_incomplete_outcome
+        PASS [   0.012s] (137/216) uni-plugin-builtin algorithms::graph_compute::error::tests::an_untraced_abort_is_unchanged
+        PASS [   0.010s] (138/216) uni-plugin-builtin algorithms::graph_compute::handle::tests::pack_unpack_roundtrips_all_fields
+        PASS [   0.016s] (139/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::walk_egress_and_adamic_adar_reachable_via_json
+        PASS [   0.012s] (140/216) uni-plugin-builtin algorithms::graph_compute::kernel_id::kernel_catalog_contract::every_kernel_has_a_unique_name_that_round_trips
+        PASS [   0.009s] (141/216) uni-plugin-builtin algorithms::graph_compute::op_parse::tests::every_op_name_is_unique_and_round_trips
+        PASS [   0.010s] (142/216) uni-plugin-builtin algorithms::graph_compute::kernel_id::kernel_catalog_contract::unknown_names_do_not_resolve
+        PASS [   0.010s] (143/216) uni-plugin-builtin algorithms::graph_compute::op_parse::tests::every_recipe_appears_in_the_published_reference
+        PASS [   0.009s] (144/216) uni-plugin-builtin algorithms::graph_compute::op_parse::tests::method_recipe_lookup_round_trips
+        PASS [   0.009s] (145/216) uni-plugin-builtin algorithms::graph_compute::op_parse::tests::method_recipes_only_name_real_kernels
+        PASS [   0.010s] (146/216) uni-plugin-builtin algorithms::graph_compute::op_parse::tests::no_recipe_shadows_a_real_op_name
+        PASS [   0.046s] (147/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::s1_sample_is_bitwise_reproducible_across_sessions
+        PASS [   0.014s] (148/216) uni-plugin-builtin algorithms::graph_compute::kernel_id::kernel_catalog_contract::the_host_supplied_bucket_is_actually_used
+        PASS [   0.011s] (149/216) uni-plugin-builtin algorithms::graph_compute::op_parse::tests::recipes_are_scoped_by_family
+        PASS [   0.009s] (150/216) uni-plugin-builtin algorithms::graph_compute::op_parse::tests::recipes_only_name_real_kernels
+        PASS [   0.011s] (151/216) uni-plugin-builtin algorithms::graph_compute::op_parse::tests::no_method_recipe_shadows_a_real_kernel
+        PASS [   0.009s] (152/216) uni-plugin-builtin algorithms::graph_compute::op_parse::tests::recipes_only_quote_real_op_names
+        PASS [   0.012s] (153/216) uni-plugin-builtin algorithms::graph_compute::op_parse::tests::method_recipes_only_quote_real_op_names
+        PASS [   0.010s] (154/216) uni-plugin-builtin algorithms::graph_compute::op_parse::tests::rejection_carries_the_recipe_and_the_vocabulary
+        PASS [   0.009s] (155/216) uni-plugin-builtin algorithms::graph_compute::op_parse::tests::the_published_kernel_count_is_the_real_one
+        PASS [   0.008s] (156/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::arena_cap_rejects_an_oversized_batch
+        PASS [   0.009s] (157/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::adversarial_growth_halts_at_the_arena_cap
+        PASS [   0.035s] (158/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::session_ids_are_unguessable_not_sequential
+        PASS [   0.008s] (159/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::at_mcts_lite_seeded_rollouts_are_reproducible
+        PASS [   0.009s] (160/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::batching_gives_no_budget_discount
+        PASS [   0.008s] (161/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::q2_scratch_growth_charges_the_arena_cap
+        PASS [   0.011s] (162/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::budget_exhaustion_mid_batch_fails_closed
+        PASS [   0.011s] (163/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::out_of_range_slot_is_a_typed_error_not_a_panic
+        PASS [   0.010s] (164/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::q1_every_random_access_op_charges_the_budget
+        PASS [   0.011s] (165/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::neighbors_and_fields_roundtrip
+        PASS [   0.011s] (166/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::q4_seeded_sampling_is_reproducible
+        PASS [   0.013s] (167/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::guest_json_dispatch_drives_the_scratch_graph
+        PASS [   0.047s] (168/216) uni-plugin-builtin algorithms::graph_compute::dispatch::tests::json_dispatch_runs_ppr_end_to_end
+        PASS [   0.011s] (169/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::scratch_registry_manages_isolated_guest_sessions
+        PASS [   0.011s] (170/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::unknown_batch_handle_is_arg_validation
+        PASS [   0.010s] (171/216) uni-plugin-builtin algorithms::graph_compute::table::tests::epoch_stamped_into_handles
+        PASS [   0.015s] (172/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::q3_scratch_graphs_are_isolated_by_construction
+        PASS [   0.009s] (173/216) uni-plugin-builtin algorithms::graph_compute::table::tests::insert_get_free_roundtrip
+        PASS [   0.015s] (174/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::q6_registration_rejects_an_interpreted_body
+        PASS [   0.011s] (175/216) uni-plugin-builtin algorithms::graph_compute::table::tests::h6_double_free_and_stale_rejected
+        PASS [   0.064s] (176/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::s4_sample_marginal_is_bernoulli_p
+        PASS [   0.011s] (177/216) uni-plugin-builtin algorithms::graph_compute::table::tests::the_trace_is_invisible_when_off
+        PASS [   0.012s] (178/216) uni-plugin-builtin algorithms::graph_compute::table::tests::the_trace_is_bounded_and_rides_every_handle_error
+        PASS [   0.011s] (179/216) uni-plugin-builtin algorithms::graph_compute::tests::a_raised_budget_still_fails_closed
+        PASS [   0.010s] (180/216) uni-plugin-builtin algorithms::graph_compute::tests::a_zero_grant_is_floored_to_one
+        PASS [   0.009s] (181/216) uni-plugin-builtin algorithms::graph_compute::tests::grant_above_size_budget_is_honored
+        PASS [   0.014s] (182/216) uni-plugin-builtin algorithms::graph_compute::tests::a_grant_below_the_default_still_lowers_the_ceiling
+        PASS [   0.009s] (183/216) uni-plugin-builtin algorithms::graph_compute::tests::chunked_charge_bounds_overshoot
+        PASS [   0.009s] (184/216) uni-plugin-builtin algorithms::graph_compute::tests::default_budget_from_edges_is_finite_and_capped
+        PASS [   0.012s] (185/216) uni-plugin-builtin algorithms::graph_compute::tests::arena_cap_enforced_at_allocation
+        PASS [   0.017s] (186/216) uni-plugin-builtin algorithms::graph_compute::table::tests::the_env_var_is_what_switches_tracing
+        PASS [   0.029s] (187/216) uni-plugin-builtin algorithms::graph_compute::scratch::tests::at_mcts_full_program_authored_against_the_guest_abi
+        PASS [   0.010s] (188/216) uni-plugin-builtin algorithms::graph_compute::tests::resolve_is_the_single_clamp_helper
+        PASS [   0.011s] (189/216) uni-plugin-builtin algorithms::graph_compute::tests::arena_free_reclaims
+        PASS [   0.010s] (190/216) uni-plugin-builtin algorithms::graph_compute::tests::session_epochs_fail_closed_when_exhausted
+        PASS [   0.010s] (191/216) uni-plugin-builtin algorithms::graph_compute::tests::ungranted_invocation_gets_the_size_budget_default
+        PASS [   0.012s] (192/216) uni-plugin-builtin algorithms::graph_compute::tests::arena_handle_cap_enforced
+        PASS [   0.012s] (193/216) uni-plugin-builtin algorithms::graph_compute::tests::session_epochs_never_hand_out_zero
+        PASS [   0.010s] (194/216) uni-plugin-builtin algorithms::graph_compute::value::tests::scalar_coercion
+        PASS [   0.009s] (195/216) uni-plugin-builtin algorithms::graph_compute::value::tests::tensor_arrow_backing_is_zero_copy_slice
+        PASS [   0.010s] (196/216) uni-plugin-builtin algorithms::graph_compute::tests::work_budget_exhaustion_is_hard_error
+        PASS [   0.009s] (197/216) uni-plugin-rhai graph_compute::tests::arena_kernels_resolve_and_refuse_with_a_typed_slice_error
+        PASS [   0.007s] (198/216) uni-plugin-rhai graph_compute::tests::op_strings_are_not_parsed_in_this_loader
+        PASS [   0.008s] (199/216) uni-plugin-rhai graph_compute::tests::every_in_process_kernel_is_reachable_from_rhai
+        PASS [   0.010s] (200/216) uni-plugin-builtin algorithms::graph_compute::value::tests::vertex_set_empty_and_contains
+        PASS [   0.010s] (201/216) uni-plugin-rhai graph_compute::tests::budget_accessors_work_from_a_guest_script
+        PASS [   0.009s] (202/216) uni-plugin-rhai graph_compute::tests::every_published_recipe_resolves_through_this_loader
+        PASS [   0.011s] (203/216) uni-plugin-rhai graph_compute::tests::an_unknown_kernel_name_earns_its_composition_recipe
+        PASS [   0.007s] (204/216) uni-plugin-rhai graph_compute::tests::reqd1_compare_and_select_compose_through_the_rhai_guest_surface
+        PASS [   0.008s] (205/216) uni-plugin-rhai graph_compute::tests::rejections_reach_the_guest_with_a_composition_recipe
+        PASS [   0.015s] (206/216) uni-plugin-builtin algorithms::graph_compute::tests::work_budget_charges_and_reports_remaining
+        PASS [   0.012s] (207/216) uni-plugin-rhai graph_compute::tests::every_declared_optional_arity_resolves_through_this_loader
+        PASS [   0.010s] (208/216) uni-plugin-rhai graph_compute::tests::probing_for_a_scoped_graph_names_the_feature_that_replaced_it
+        PASS [   0.013s] (209/216) uni-plugin-builtin algorithms::graph_compute::value::tests::vertex_set_ops_and_iteration
+        PASS [   0.007s] (210/216) uni-plugin-rhai graph_compute::tests::the_trace_reaches_a_rhai_guest
+        PASS [   0.113s] (211/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::i64_spmv_counts_paths_exactly_beyond_f64
+        PASS [   0.054s] (212/216) uni-plugin-builtin algorithms::graph_compute::table::tests::h5_generation_wrap_retires_slot
+        PASS [   0.224s] (213/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::at_grid_reliability_monte_carlo_matches_closed_form
+        PASS [   0.427s] (214/216) uni-plugin-rhai graph_compute::tests::guest_authored_mcts_meets_the_absolute_throughput_floor
+        PASS [   0.603s] (215/216) uni-plugin-builtin algorithms::graph_compute::differential_tests::typed_session_access_matches_the_json_path_and_isolates_panics
+        PASS [   0.585s] (216/216) uni-plugin-builtin algorithms::graph_compute::handle::tests::pack_panics_on_generation_overflow
+────────────
+     Summary [   0.671s] 216 tests run: 216 passed, 188 skipped

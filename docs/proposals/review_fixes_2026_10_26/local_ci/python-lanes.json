@@ -1,0 +1,83 @@
+[
+  {
+    "lane": "python-db-sync",
+    "command": [
+      "uv",
+      "sync",
+      "--group",
+      "dev"
+    ],
+    "status": 0,
+    "seconds": 0.09
+  },
+  {
+    "lane": "python-db-build",
+    "command": [
+      "uv",
+      "run",
+      "maturin",
+      "develop"
+    ],
+    "status": 0,
+    "seconds": 8854.55
+  },
+  {
+    "lane": "python-db-stubs",
+    "command": [
+      "uv",
+      "run",
+      "python",
+      "-m",
+      "mypy.stubtest",
+      "uni_db",
+      "--mypy-config-file",
+      "stubtest-mypy.ini",
+      "--allowlist",
+      "stubtest-allowlist.txt",
+      "--ignore-unused-allowlist",
+      "--ignore-positional-only",
+      "--ignore-disjoint-bases"
+    ],
+    "status": 0,
+    "seconds": 1.66
+  },
+  {
+    "lane": "python-db-tests",
+    "command": [
+      "uv",
+      "run",
+      "pytest",
+      "tests/",
+      "-v",
+      "-n",
+      "auto"
+    ],
+    "status": 0,
+    "seconds": 89.93
+  },
+  {
+    "lane": "python-pydantic-sync",
+    "command": [
+      "uv",
+      "sync",
+      "--group",
+      "dev"
+    ],
+    "status": 0,
+    "seconds": 0.05
+  },
+  {
+    "lane": "python-pydantic-tests",
+    "command": [
+      "uv",
+      "run",
+      "pytest",
+      "tests/",
+      "-v",
+      "-n",
+      "auto"
+    ],
+    "status": 0,
+    "seconds": 2.47
+  }
+]

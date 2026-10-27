@@ -1,0 +1,180 @@
+[
+  {
+    "lane": "clippy-final",
+    "command": [
+      "cargo",
+      "clippy",
+      "--workspace",
+      "--exclude",
+      "uni-tck",
+      "--exclude",
+      "uni-python-cuda",
+      "--exclude",
+      "uni-python-metal",
+      "--exclude",
+      "uni-python-onnx-cuda",
+      "--exclude",
+      "uni-python-onnx-metal",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "status": 0,
+    "seconds": 3823.95
+  },
+  {
+    "lane": "rustdoc",
+    "command": [
+      "cargo",
+      "doc",
+      "--no-deps",
+      "--workspace",
+      "--exclude",
+      "uni-python",
+      "--exclude",
+      "uni-tck",
+      "--exclude",
+      "uni-python-onnx",
+      "--exclude",
+      "uni-python-cuda",
+      "--exclude",
+      "uni-python-metal",
+      "--exclude",
+      "uni-python-onnx-cuda",
+      "--exclude",
+      "uni-python-onnx-metal"
+    ],
+    "status": 0,
+    "seconds": 219.73
+  },
+  {
+    "lane": "loom",
+    "command": [
+      "cargo",
+      "nextest",
+      "run",
+      "-p",
+      "uni-store",
+      "--features",
+      "loom",
+      "--test",
+      "occ_model"
+    ],
+    "status": 0,
+    "seconds": 459.25
+  },
+  {
+    "lane": "metamorphic",
+    "command": [
+      "cargo",
+      "nextest",
+      "run",
+      "-p",
+      "uni-db",
+      "--test",
+      "integration",
+      "-E",
+      "test(/metamorphic::/) and not test(soak)"
+    ],
+    "status": 0,
+    "seconds": 704.51
+  },
+  {
+    "lane": "gc-trace",
+    "command": [
+      "cargo",
+      "nextest",
+      "run",
+      "-p",
+      "uni-plugin-builtin",
+      "-p",
+      "uni-plugin-rhai",
+      "-E",
+      "test(graph_compute)"
+    ],
+    "status": 0,
+    "seconds": 502.53
+  },
+  {
+    "lane": "failpoints",
+    "command": [
+      "cargo",
+      "nextest",
+      "run",
+      "-p",
+      "uni-db",
+      "-p",
+      "uni-store",
+      "--features",
+      "failpoints",
+      "--run-ignored",
+      "all",
+      "-E",
+      "test(/resilience|recovery|durability|crash_harness/)"
+    ],
+    "status": 0,
+    "seconds": 714.22
+  },
+  {
+    "lane": "recovery-default",
+    "command": [
+      "cargo",
+      "nextest",
+      "run",
+      "-p",
+      "uni-store",
+      "-E",
+      "test(/resilience|recovery/)"
+    ],
+    "status": 0,
+    "seconds": 494.23
+  },
+  {
+    "lane": "cloud-store",
+    "command": [
+      "cargo",
+      "nextest",
+      "run",
+      "-p",
+      "uni-store",
+      "--test",
+      "integration",
+      "--run-ignored",
+      "all",
+      "-E",
+      "test(/^cloud_integration_test::/)"
+    ],
+    "status": 0,
+    "seconds": 1.83
+  },
+  {
+    "lane": "cloud-hybrid",
+    "command": [
+      "cargo",
+      "nextest",
+      "run",
+      "-p",
+      "uni-db",
+      "--test",
+      "integration",
+      "--run-ignored",
+      "all",
+      "-E",
+      "test(/^hybrid_localstack_e2e::/)"
+    ],
+    "status": 0,
+    "seconds": 2.44
+  },
+  {
+    "lane": "onnx-wheel-check",
+    "command": [
+      "cargo",
+      "check",
+      "-p",
+      "uni-python-onnx"
+    ],
+    "status": 0,
+    "seconds": 265.4
+  }
+]

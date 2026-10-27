@@ -48,3 +48,7 @@ path = "fuzz_targets/btic_decode.rs"
 test = false
 doc = false
 bench = false
+
+[patch.crates-io]
+zstd = { path = "../compat/zstd" }
+zstd-safe = { path = "../compat/zstd-safe" }

@@ -1,0 +1,15 @@
+{
+  "command": [
+    "cargo",
+    "nextest",
+    "run",
+    "--manifest-path",
+    "/home/rohit/work/dragonscale/uni/Cargo.toml",
+    "-p",
+    "uni-plugin-pyo3",
+    "--features",
+    "pyo3"
+  ],
+  "status": 0,
+  "seconds": 447.16
+}

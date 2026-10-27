@@ -1,0 +1,2341 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.8, pytest-9.1.1, pluggy-1.6.0 -- /home/rohit/work/dragonscale/uni/bindings/uni-db/.venv/bin/python
+cachedir: .pytest_cache
+hypothesis profile 'default'
+rootdir: /home/rohit/work/dragonscale/uni/bindings/uni-db
+configfile: pyproject.toml
+plugins: xdist-3.8.0, asyncio-1.4.0, hypothesis-6.168.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+created: 22/22 workers
+22 workers [1163 items]
+
+scheduling tests via LoadScheduling
+
+tests/test_async_bulk.py::test_async_appender_builder_skip_before_triggers[False]
+tests/test_async_e2e_crud.py::test_match_vertex_by_property
+tests/test_async_basic.py::test_async_multiple_queries
+tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[session.fetch_all]
+tests/test_async_e2e_admin.py::test_async_database_builder_with_cache_size
+tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[tx.fetch_all]
+tests/test_async_e2e_queries.py::test_min_max_aggregation
+tests/test_async_e2e_queries.py::test_return_aliases
+tests/test_arm_parity.py::test_the_async_twins_match[max_memory-AsyncSessionLocyBuilder]
+tests/test_async_cypher_features.py::TestAsyncExplainProfile::test_explain_includes_index_usage
+tests/test_async_cypher_features.py::TestAsyncOrderingAndLimits::test_limit
+tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[tx.profile]
+tests/test_advanced.py::TestAdvanced::test_transaction_commit
+tests/test_async_e2e_errors.py::test_type_mismatch_in_property
+tests/test_arm_parity.py::test_execute_builders_expose_every_option[timeout-AsyncTxExecuteBuilder]
+[gw2] [  0%] PASSED tests/test_arm_parity.py::test_execute_builders_expose_every_option[timeout-AsyncTxExecuteBuilder]
+tests/test_arm_parity.py::test_execute_builders_expose_every_option[max_memory-TxExecuteBuilder]
+tests/test_async_e2e_bulk.py::test_bulk_stats_attributes
+tests/test_async_e2e_sessions.py::test_session_get_nonexistent_returns_none
+tests/test_async_e2e_transactions.py::test_context_manager_with_explicit_commit
+tests/test_async_e2e_locy.py::test_query_after_derive_reads_the_derived_edges[session]
+tests/test_async_e2e_locy.py::test_basic_rule_evaluation
+[gw2] [  0%] PASSED tests/test_arm_parity.py::test_execute_builders_expose_every_option[max_memory-TxExecuteBuilder]
+tests/test_arm_parity.py::test_execute_builders_expose_every_option[max_memory-AsyncTxExecuteBuilder]
+tests/test_async_e2e_schema.py::test_schema_builder_label_apply_shortcut
+[gw2] [  0%] PASSED tests/test_arm_parity.py::test_execute_builders_expose_every_option[max_memory-AsyncTxExecuteBuilder]
+tests/test_async_builder.py::TestAsyncInMemory::test_in_memory_database
+[gw1] [  0%] PASSED tests/test_arm_parity.py::test_the_async_twins_match[max_memory-AsyncSessionLocyBuilder]
+tests/test_arm_parity.py::test_execute_builders_expose_every_option[cancellation_token-TxExecuteBuilder]
+[gw2] [  0%] PASSED tests/test_arm_parity.py::test_execute_builders_expose_every_option[cancellation_token-TxExecuteBuilder]
+tests/test_arm_parity.py::test_execute_builders_expose_every_option[cancellation_token-AsyncTxExecuteBuilder]
+tests/test_arm_parity.py::test_the_async_twins_match[max_memory-AsyncTxLocyBuilder]
+[gw2] [  0%] PASSED tests/test_arm_parity.py::test_execute_builders_expose_every_option[cancellation_token-AsyncTxExecuteBuilder]
+tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[execute_with.profile]
+[gw1] [  0%] PASSED tests/test_arm_parity.py::test_the_async_twins_match[max_memory-AsyncTxLocyBuilder]
+tests/test_arm_parity.py::test_the_async_twins_match[profile-AsyncSessionQueryBuilder]
+[gw1] [  0%] PASSED tests/test_arm_parity.py::test_the_async_twins_match[profile-AsyncSessionQueryBuilder]
+tests/test_arm_parity.py::test_the_async_twins_match[profile-AsyncTxQueryBuilder]
+[gw1] [  0%] PASSED tests/test_arm_parity.py::test_the_async_twins_match[profile-AsyncTxQueryBuilder]
+tests/test_arm_parity.py::test_the_async_twins_match[profile-AsyncSessionLocyBuilder]
+[gw1] [  0%] PASSED tests/test_arm_parity.py::test_the_async_twins_match[profile-AsyncSessionLocyBuilder]
+tests/test_arm_parity.py::test_the_async_twins_match[profile-AsyncTxLocyBuilder]
+[gw1] [  0%] PASSED tests/test_arm_parity.py::test_the_async_twins_match[profile-AsyncTxLocyBuilder]
+tests/test_arm_parity.py::test_tx_max_memory_refuses_a_query_that_does_not_fit
+[gw14] [  1%] PASSED tests/test_async_e2e_errors.py::test_type_mismatch_in_property
+tests/test_async_e2e_errors.py::test_operations_on_committed_bulk_writer_raise_error
+[gw21] [  1%] PASSED tests/test_async_e2e_sessions.py::test_session_get_nonexistent_returns_none
+[gw11] [  1%] PASSED tests/test_async_e2e_admin.py::test_async_database_builder_with_cache_size
+tests/test_async_e2e_sessions.py::test_session_query
+tests/test_async_e2e_admin.py::test_async_database_builder_with_parallelism
+[gw0] [  1%] PASSED tests/test_advanced.py::TestAdvanced::test_transaction_commit
+tests/test_advanced.py::TestAdvanced::test_transaction_rollback
+[gw6] [  1%] PASSED tests/test_async_basic.py::test_async_multiple_queries
+tests/test_async_basic.py::test_async_query_with_builder
+[gw19] [  1%] PASSED tests/test_async_e2e_schema.py::test_schema_builder_label_apply_shortcut
+tests/test_async_e2e_schema.py::test_schema_builder_nullable_properties
+[gw20] [  1%] PASSED tests/test_async_e2e_transactions.py::test_context_manager_with_explicit_commit
+tests/test_async_e2e_transactions.py::test_context_manager_auto_rollback_on_exception
+[gw11] [  1%] PASSED tests/test_async_e2e_admin.py::test_async_database_builder_with_parallelism
+tests/test_async_e2e_admin.py::test_async_database_builder_chained_options
+[gw0] [  1%] PASSED tests/test_advanced.py::TestAdvanced::test_transaction_rollback
+tests/test_advanced.py::TestAdvanced::test_vector_index
+[gw12] [  1%] PASSED tests/test_async_e2e_bulk.py::test_bulk_stats_attributes
+[gw9] [  1%] PASSED tests/test_async_bulk.py::test_async_appender_builder_skip_before_triggers[False]
+tests/test_async_cancel.py::test_cancellation_token_fires_while_op_holds_guard
+tests/test_async_e2e_bulk.py::test_bulk_writer_abort
+[gw0] [  1%] PASSED tests/test_advanced.py::TestAdvanced::test_vector_index
+tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[max_memory-SessionQueryBuilder]
+[gw0] [  2%] PASSED tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[max_memory-SessionQueryBuilder]
+tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[max_memory-TxQueryBuilder]
+[gw20] [  2%] PASSED tests/test_async_e2e_transactions.py::test_context_manager_auto_rollback_on_exception
+[gw0] [  2%] PASSED tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[max_memory-TxQueryBuilder]
+tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[max_memory-SessionLocyBuilder]
+[gw0] [  2%] PASSED tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[max_memory-SessionLocyBuilder]
+tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[max_memory-TxLocyBuilder]
+tests/test_async_e2e_transactions.py::test_double_commit_raises_error
+[gw0] [  2%] PASSED tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[max_memory-TxLocyBuilder]
+tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[profile-SessionQueryBuilder]
+[gw0] [  2%] PASSED tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[profile-SessionQueryBuilder]
+tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[profile-TxQueryBuilder]
+[gw0] [  2%] PASSED tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[profile-TxQueryBuilder]
+[gw10] [  2%] PASSED tests/test_async_cypher_features.py::TestAsyncOrderingAndLimits::test_limit
+tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[profile-SessionLocyBuilder]
+[gw0] [  2%] PASSED tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[profile-SessionLocyBuilder]
+tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[profile-TxLocyBuilder]
+[gw0] [  2%] PASSED tests/test_arm_parity.py::test_every_arm_and_scope_exposes_the_knob[profile-TxLocyBuilder]
+tests/test_arm_parity.py::test_the_async_twins_match[max_memory-AsyncSessionQueryBuilder]
+[gw14] [  2%] PASSED tests/test_async_e2e_errors.py::test_operations_on_committed_bulk_writer_raise_error
+[gw11] [  3%] PASSED tests/test_async_e2e_admin.py::test_async_database_builder_chained_options
+[gw0] [  3%] PASSED tests/test_arm_parity.py::test_the_async_twins_match[max_memory-AsyncSessionQueryBuilder]
+tests/test_arm_parity.py::test_the_async_twins_match[max_memory-AsyncTxQueryBuilder]
+tests/test_async_cypher_features.py::TestAsyncOrderingAndLimits::test_skip
+[gw0] [  3%] PASSED tests/test_arm_parity.py::test_the_async_twins_match[max_memory-AsyncTxQueryBuilder]
+tests/test_async_e2e_admin.py::test_async_database_convenience_open
+tests/test_async_fork.py::test_async_parent_writes_after_fork_invisible_no_flush
+tests/test_async_e2e_errors.py::test_operations_on_aborted_bulk_writer_raise_error
+[gw20] [  3%] PASSED tests/test_async_e2e_transactions.py::test_double_commit_raises_error
+tests/test_async_e2e_transactions.py::test_double_rollback_raises_error
+[gw1] [  3%] PASSED tests/test_arm_parity.py::test_tx_max_memory_refuses_a_query_that_does_not_fit
+[gw3] [  3%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[tx.profile]
+tests/test_arm_parity.py::test_tx_max_memory_leaves_a_fitting_query_alone
+tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[execute_with.profile]
+[gw4] [  3%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[session.fetch_all]
+tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[session.profile]
+[gw14] [  3%] PASSED tests/test_async_e2e_errors.py::test_operations_on_aborted_bulk_writer_raise_error
+tests/test_async_e2e_errors.py::test_double_commit_on_transaction_raises_error
+[gw11] [  3%] PASSED tests/test_async_e2e_admin.py::test_async_database_convenience_open
+tests/test_async_e2e_admin.py::test_async_database_convenience_temporary
+[gw2] [  3%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[execute_with.profile]
+tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[execute_with.run]
+[gw6] [  3%] PASSED tests/test_async_basic.py::test_async_query_with_builder
+tests/test_async_basic.py::test_async_query_with_timeout
+[gw19] [  3%] PASSED tests/test_async_e2e_schema.py::test_schema_builder_nullable_properties
+[gw14] [  4%] PASSED tests/test_async_e2e_errors.py::test_double_commit_on_transaction_raises_error
+tests/test_async_e2e_schema.py::test_schema_builder_vector_with_index
+tests/test_async_e2e_errors.py::test_double_rollback_on_transaction_raises_error
+[gw8] [  4%] PASSED tests/test_async_builder.py::TestAsyncInMemory::test_in_memory_database
+tests/test_async_builder.py::TestAsyncBackwardCompatibility::test_async_database_open
+[gw20] [  4%] PASSED tests/test_async_e2e_transactions.py::test_double_rollback_raises_error
+tests/test_async_e2e_transactions.py::test_operations_after_commit_raise_error
+[gw7] [  4%] PASSED tests/test_async_cypher_features.py::TestAsyncExplainProfile::test_explain_includes_index_usage
+[gw11] [  4%] PASSED tests/test_async_e2e_admin.py::test_async_database_convenience_temporary
+tests/test_async_cypher_features.py::TestAsyncExplainProfile::test_profile_returns_results_and_stats
+tests/test_async_e2e_admin.py::test_explain
+[gw14] [  4%] PASSED tests/test_async_e2e_errors.py::test_double_rollback_on_transaction_raises_error
+tests/test_async_e2e_errors.py::test_operations_after_transaction_commit_raise_error
+[gw19] [  4%] PASSED tests/test_async_e2e_schema.py::test_schema_builder_vector_with_index
+[gw13] [  4%] PASSED tests/test_async_e2e_crud.py::test_match_vertex_by_property
+tests/test_async_e2e_crud.py::test_match_with_where_clause
+tests/test_async_e2e_schema.py::test_schema_builder_edge_type_with_properties
+[gw20] [  4%] PASSED tests/test_async_e2e_transactions.py::test_operations_after_commit_raise_error
+tests/test_async_e2e_transactions.py::test_operations_after_rollback_raise_error
+[gw14] [  4%] PASSED tests/test_async_e2e_errors.py::test_operations_after_transaction_commit_raise_error
+[gw6] [  4%] PASSED tests/test_async_basic.py::test_async_query_with_timeout
+tests/test_async_builder.py::TestAsyncUniBuilderOpenModes::test_create_new_database
+tests/test_async_e2e_errors.py::test_operations_after_transaction_rollback_raise_error
+[gw10] [  4%] PASSED tests/test_async_cypher_features.py::TestAsyncOrderingAndLimits::test_skip
+tests/test_async_cypher_features.py::TestAsyncPatternMatching::test_simple_relationship_match
+[gw20] [  5%] PASSED tests/test_async_e2e_transactions.py::test_operations_after_rollback_raise_error
+tests/test_async_e2e_transactions.py::test_tx_execute_builder_profile_returns_execute_result_and_profile
+[gw11] [  5%] PASSED tests/test_async_e2e_admin.py::test_explain
+tests/test_async_e2e_admin.py::test_profile
+[gw14] [  5%] PASSED tests/test_async_e2e_errors.py::test_operations_after_transaction_rollback_raise_error
+tests/test_async_e2e_errors.py::test_commit_after_rollback_raises_error
+[gw19] [  5%] PASSED tests/test_async_e2e_schema.py::test_schema_builder_edge_type_with_properties
+tests/test_async_e2e_schema.py::test_label_exists_and_edge_type_exists
+[gw5] [  5%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[tx.fetch_all]
+tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[tx.profile]
+[gw19] [  5%] PASSED tests/test_async_e2e_schema.py::test_label_exists_and_edge_type_exists
+tests/test_async_e2e_schema.py::test_list_labels_and_edge_types
+[gw14] [  5%] PASSED tests/test_async_e2e_errors.py::test_commit_after_rollback_raises_error
+tests/test_async_e2e_errors.py::test_rollback_after_commit_raises_error
+[gw3] [  5%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[execute_with.profile]
+[gw4] [  5%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[session.profile]
+tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[execute_with.run]
+[gw6] [  5%] PASSED tests/test_async_builder.py::TestAsyncUniBuilderOpenModes::test_create_new_database
+tests/test_async_builder.py::TestAsyncUniBuilderOpenModes::test_create_fails_if_exists
+tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[tx.cursor]
+[gw20] [  5%] PASSED tests/test_async_e2e_transactions.py::test_tx_execute_builder_profile_returns_execute_result_and_profile
+[gw12] [  6%] PASSED tests/test_async_e2e_bulk.py::test_bulk_writer_abort
+[gw18] [  6%] PASSED tests/test_async_e2e_queries.py::test_return_aliases
+tests/test_async_e2e_transactions.py::test_tx_execute_builder_profile_with_params
+[gw17] [  6%] PASSED tests/test_async_e2e_queries.py::test_min_max_aggregation
+tests/test_async_e2e_bulk.py::test_ops_after_abort_raise_error
+tests/test_async_e2e_queries.py::test_query_with_builder_param_and_run
+[gw14] [  6%] PASSED tests/test_async_e2e_errors.py::test_rollback_after_commit_raises_error
+tests/test_async_e2e_queries.py::test_group_by_with_aggregation
+[gw15] [  6%] PASSED tests/test_async_e2e_locy.py::test_basic_rule_evaluation
+tests/test_async_e2e_indexes.py::test_verify_preexisting_indexes
+[gw11] [  6%] PASSED tests/test_async_e2e_admin.py::test_profile
+tests/test_async_e2e_locy.py::test_stats_returned
+tests/test_async_e2e_admin.py::test_explain_with_complex_query
+[gw7] [  6%] PASSED tests/test_async_cypher_features.py::TestAsyncExplainProfile::test_profile_returns_results_and_stats
+tests/test_async_cypher_features.py::TestAsyncExplainProfile::test_profile_operator_stats
+[gw19] [  6%] PASSED tests/test_async_e2e_schema.py::test_list_labels_and_edge_types
+[gw21] [  6%] PASSED tests/test_async_e2e_sessions.py::test_session_query
+[gw2] [  6%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[execute_with.run]
+tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[session.cursor]
+tests/test_async_e2e_schema.py::test_get_label_info
+[gw20] [  6%] PASSED tests/test_async_e2e_transactions.py::test_tx_execute_builder_profile_with_params
+tests/test_async_e2e_sessions.py::test_session_execute
+tests/test_async_e2e_vector.py::test_async_muvera_index_create_and_query
+[gw12] [  6%] PASSED tests/test_async_e2e_bulk.py::test_ops_after_abort_raise_error
+[gw8] [  7%] PASSED tests/test_async_builder.py::TestAsyncBackwardCompatibility::test_async_database_open
+[gw6] [  7%] PASSED tests/test_async_builder.py::TestAsyncUniBuilderOpenModes::test_create_fails_if_exists
+tests/test_async_builder.py::TestAsyncUniBuilderOpenModes::test_open_existing_database
+tests/test_async_bulk.py::test_async_bulk_writer_builder
+tests/test_async_e2e_bulk.py::test_convenience_bulk_insert_vertices
+[gw11] [  7%] PASSED tests/test_async_e2e_admin.py::test_explain_with_complex_query
+tests/test_async_e2e_admin.py::test_profile_with_aggregation
+[gw8] [  7%] PASSED tests/test_async_bulk.py::test_async_bulk_writer_builder
+tests/test_async_bulk.py::test_async_bulk_insert_vertices
+[gw9] [  7%] PASSED tests/test_async_cancel.py::test_cancellation_token_fires_while_op_holds_guard
+tests/test_async_cancel.py::test_tx_cancel_does_not_block_behind_inflight_op
+[gw1] [  7%] PASSED tests/test_arm_parity.py::test_tx_max_memory_leaves_a_fitting_query_alone
+[gw16] [  7%] PASSED tests/test_async_e2e_locy.py::test_query_after_derive_reads_the_derived_edges[session]
+tests/test_arm_parity.py::test_tx_profile_returns_real_operator_stats
+[gw13] [  7%] PASSED tests/test_async_e2e_crud.py::test_match_with_where_clause
+tests/test_async_e2e_locy.py::test_query_after_derive_reads_the_derived_edges[tx]
+tests/test_async_e2e_crud.py::test_set_property_on_vertex
+[gw21] [  7%] PASSED tests/test_async_e2e_sessions.py::test_session_execute
+tests/test_async_e2e_sessions.py::test_session_variables_persist_across_queries
+[gw10] [  7%] PASSED tests/test_async_cypher_features.py::TestAsyncPatternMatching::test_simple_relationship_match
+tests/test_async_cypher_features.py::TestAsyncPatternMatching::test_relationship_type_filter
+[gw4] [  7%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[tx.cursor]
+[gw3] [  7%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[execute_with.run]
+tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[tx.execute]
+tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[session.cursor]
+[gw11] [  8%] PASSED tests/test_async_e2e_admin.py::test_profile_with_aggregation
+tests/test_async_e2e_bulk.py::test_create_bulk_writer_with_builder
+[gw2] [  8%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[session.cursor]
+tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[session.fetch_all]
+[gw12] [  8%] PASSED tests/test_async_e2e_bulk.py::test_convenience_bulk_insert_vertices
+[gw8] [  8%] PASSED tests/test_async_bulk.py::test_async_bulk_insert_vertices
+[gw7] [  8%] PASSED tests/test_async_cypher_features.py::TestAsyncExplainProfile::test_profile_operator_stats
+[gw19] [  8%] PASSED tests/test_async_e2e_schema.py::test_get_label_info
+tests/test_async_e2e_bulk.py::test_convenience_bulk_insert_edges
+tests/test_async_bulk.py::test_async_bulk_insert_edges
+tests/test_async_cypher_features.py::TestAsyncQueryWithParameters::test_query_with_string_param
+tests/test_async_e2e_schema.py::test_get_schema
+[gw14] [  8%] PASSED tests/test_async_e2e_indexes.py::test_verify_preexisting_indexes
+[gw11] [  8%] PASSED tests/test_async_e2e_bulk.py::test_create_bulk_writer_with_builder
+tests/test_async_e2e_indexes.py::test_create_additional_scalar_index
+tests/test_async_e2e_bulk.py::test_bulk_insert_vertices
+[gw18] [  8%] PASSED tests/test_async_e2e_queries.py::test_query_with_builder_param_and_run
+[gw0] [  8%] PASSED tests/test_async_fork.py::test_async_parent_writes_after_fork_invisible_no_flush
+tests/test_async_fork_diff_promote.py::test_async_diff_fork_primary_empty_on_fresh_fork
+tests/test_async_e2e_queries.py::test_query_with_builder_timeout
+[gw13] [  8%] PASSED tests/test_async_e2e_crud.py::test_set_property_on_vertex
+[gw1] [  9%] PASSED tests/test_arm_parity.py::test_tx_profile_returns_real_operator_stats
+tests/test_async_e2e_crud.py::test_set_property_on_edge
+tests/test_arm_parity.py::test_profile_honours_max_memory
+[gw17] [  9%] PASSED tests/test_async_e2e_queries.py::test_group_by_with_aggregation
+tests/test_async_e2e_queries.py::test_order_by_asc
+[gw18] [  9%] PASSED tests/test_async_e2e_queries.py::test_query_with_builder_timeout
+tests/test_async_e2e_queries.py::test_explain
+[gw19] [  9%] PASSED tests/test_async_e2e_schema.py::test_get_schema
+[gw7] [  9%] PASSED tests/test_async_cypher_features.py::TestAsyncQueryWithParameters::test_query_with_string_param
+tests/test_async_e2e_schema.py::test_save_and_load_schema
+[gw15] [  9%] PASSED tests/test_async_e2e_locy.py::test_stats_returned
+tests/test_async_cypher_features.py::TestAsyncQueryWithParameters::test_query_with_int_param
+tests/test_async_e2e_locy.py::test_query_command
+[gw5] [  9%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[tx.profile]
+tests/test_arm_parity.py::test_builder_timeout_above_the_configured_one_is_honoured
+[gw6] [  9%] PASSED tests/test_async_builder.py::TestAsyncUniBuilderOpenModes::test_open_existing_database
+tests/test_async_builder.py::TestAsyncUniBuilderOpenModes::test_open_existing_fails_if_not_exists
+[gw4] [  9%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[tx.execute]
+[gw6] [  9%] PASSED tests/test_async_builder.py::TestAsyncUniBuilderOpenModes::test_open_existing_fails_if_not_exists
+tests/test_async_builder.py::TestAsyncUniBuilderOpenModes::test_open_creates_if_needed
+tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[tx.fetch_all]
+[gw2] [  9%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[session.fetch_all]
+tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[session.profile]
+[gw21] [  9%] PASSED tests/test_async_e2e_sessions.py::test_session_variables_persist_across_queries
+tests/test_async_e2e_sparse.py::test_sparse_vector_type_constructors
+[gw21] [ 10%] PASSED tests/test_async_e2e_sparse.py::test_sparse_vector_type_constructors
+tests/test_async_e2e_sparse.py::test_sparse_typed_ingestion_roundtrips
+[gw5] [ 10%] PASSED tests/test_arm_parity.py::test_builder_timeout_above_the_configured_one_is_honoured
+tests/test_arm_parity.py::test_async_session_profile_forwards_its_options
+[gw8] [ 10%] PASSED tests/test_async_bulk.py::test_async_bulk_insert_edges
+tests/test_async_bulk.py::test_async_bulk_writer_abort
+[gw3] [ 10%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[session.cursor]
+tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[session.fetch_all]
+[gw12] [ 10%] PASSED tests/test_async_e2e_bulk.py::test_convenience_bulk_insert_edges
+[gw8] [ 10%] PASSED tests/test_async_bulk.py::test_async_bulk_writer_abort
+[gw10] [ 10%] PASSED tests/test_async_cypher_features.py::TestAsyncPatternMatching::test_relationship_type_filter
+tests/test_async_bulk.py::test_async_bulk_stats_attributes
+tests/test_async_e2e_bulk.py::test_large_batch_insert
+tests/test_async_cypher_features.py::TestAsyncPatternMatching::test_variable_length_path
+[gw19] [ 10%] PASSED tests/test_async_e2e_schema.py::test_save_and_load_schema
+tests/test_async_e2e_schema.py::test_data_types_e2e
+[gw1] [ 10%] PASSED tests/test_arm_parity.py::test_profile_honours_max_memory
+[gw7] [ 10%] PASSED tests/test_async_cypher_features.py::TestAsyncQueryWithParameters::test_query_with_int_param
+[gw14] [ 10%] PASSED tests/test_async_e2e_indexes.py::test_create_additional_scalar_index
+tests/test_arm_parity.py::test_both_arms_carry_metrics
+tests/test_async_cypher_features.py::TestAsyncQueryWithParameters::test_query_with_multiple_params
+[gw0] [ 11%] PASSED tests/test_async_fork_diff_promote.py::test_async_diff_fork_primary_empty_on_fresh_fork
+tests/test_async_e2e_indexes.py::test_create_vector_index
+tests/test_async_fork_diff_promote.py::test_async_diff_fork_primary_reports_added_rows
+[gw21] [ 11%] PASSED tests/test_async_e2e_sparse.py::test_sparse_typed_ingestion_roundtrips
+[gw13] [ 11%] PASSED tests/test_async_e2e_crud.py::test_set_property_on_edge
+tests/test_async_e2e_sparse.py::test_sparse_query_ranks_self_match_first
+tests/test_async_e2e_crud.py::test_delete_vertex
+[gw19] [ 11%] PASSED tests/test_async_e2e_schema.py::test_data_types_e2e
+tests/test_async_e2e_schema.py::test_schema_builder_complex_workflow
+[gw8] [ 11%] PASSED tests/test_async_bulk.py::test_async_bulk_stats_attributes
+[gw11] [ 11%] PASSED tests/test_async_e2e_bulk.py::test_bulk_insert_vertices
+[gw6] [ 11%] PASSED tests/test_async_builder.py::TestAsyncUniBuilderOpenModes::test_open_creates_if_needed
+tests/test_async_builder.py::TestAsyncUniBuilderOpenModes::test_open_reuses_existing
+tests/test_async_bulk.py::test_async_bulk_writer_builder_config
+tests/test_async_e2e_bulk.py::test_bulk_insert_edges
+[gw20] [ 11%] PASSED tests/test_async_e2e_vector.py::test_async_muvera_index_create_and_query
+tests/test_async_e2e_vector.py::test_basic_vector_search_knn
+[gw4] [ 11%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[tx.fetch_all]
+tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[tx.profile]
+[gw2] [ 11%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[session.profile]
+tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[tx.cursor]
+[gw21] [ 11%] PASSED tests/test_async_e2e_sparse.py::test_sparse_query_ranks_self_match_first
+[gw18] [ 11%] PASSED tests/test_async_e2e_queries.py::test_explain
+[gw17] [ 12%] PASSED tests/test_async_e2e_queries.py::test_order_by_asc
+[gw7] [ 12%] PASSED tests/test_async_cypher_features.py::TestAsyncQueryWithParameters::test_query_with_multiple_params
+[gw5] [ 12%] PASSED tests/test_arm_parity.py::test_async_session_profile_forwards_its_options
+[gw9] [ 12%] PASSED tests/test_async_cancel.py::test_tx_cancel_does_not_block_behind_inflight_op
+tests/test_async_e2e_sparse.py::test_sparse_query_param_as_dict
+tests/test_arm_parity.py::test_async_tx_execute_forwards_max_memory
+[gw16] [ 12%] PASSED tests/test_async_e2e_locy.py::test_query_after_derive_reads_the_derived_edges[tx]
+tests/test_async_e2e_queries.py::test_profile
+tests/test_async_e2e_queries.py::test_order_by_desc
+tests/test_async_cypher_features.py::TestAsyncAggregations::test_count_aggregation
+tests/test_async_cancel.py::test_tx_query_builder_exposes_cancellation_token
+[gw8] [ 12%] PASSED tests/test_async_bulk.py::test_async_bulk_writer_builder_config
+tests/test_async_e2e_persistence.py::test_data_persists_after_reopen
+tests/test_async_bulk.py::test_async_bulk_insert_vertices_convenience
+[gw19] [ 12%] PASSED tests/test_async_e2e_schema.py::test_schema_builder_complex_workflow
+tests/test_async_e2e_sessions.py::test_session_with_single_variable
+[gw10] [ 12%] PASSED tests/test_async_cypher_features.py::TestAsyncPatternMatching::test_variable_length_path
+tests/test_async_cypher_features.py::TestAsyncPatternMatching::test_bidirectional_relationship
+[gw14] [ 12%] PASSED tests/test_async_e2e_indexes.py::test_create_vector_index
+tests/test_async_e2e_indexes.py::test_indexed_queries_return_correct_results
+[gw12] [ 12%] PASSED tests/test_async_e2e_bulk.py::test_large_batch_insert
+[gw13] [ 12%] PASSED tests/test_async_e2e_crud.py::test_delete_vertex
+tests/test_async_e2e_bulk.py::test_data_correctness_after_bulk_insert
+[gw3] [ 12%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[session.fetch_all]
+tests/test_async_e2e_crud.py::test_delete_edge
+tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[session.profile]
+[gw15] [ 13%] PASSED tests/test_async_e2e_locy.py::test_query_command
+tests/test_async_e2e_locy.py::test_recursive_rule
+[gw0] [ 13%] PASSED tests/test_async_fork_diff_promote.py::test_async_diff_fork_primary_reports_added_rows
+tests/test_async_fork_diff_promote.py::test_async_diff_forks_between_siblings
+[gw7] [ 13%] PASSED tests/test_async_cypher_features.py::TestAsyncAggregations::test_count_aggregation
+tests/test_async_cypher_features.py::TestAsyncAggregations::test_sum_aggregation
+[gw8] [ 13%] PASSED tests/test_async_bulk.py::test_async_bulk_insert_vertices_convenience
+tests/test_async_bulk.py::test_async_bulk_insert_edges_convenience
+[gw4] [ 13%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[tx.profile]
+[gw21] [ 13%] PASSED tests/test_async_e2e_sparse.py::test_sparse_query_param_as_dict
+tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[execute_with.profile]
+[gw1] [ 13%] PASSED tests/test_arm_parity.py::test_both_arms_carry_metrics
+tests/test_async_e2e_sparse.py::test_sparse_datatype_helper_equivalence
+[gw19] [ 13%] PASSED tests/test_async_e2e_sessions.py::test_session_with_single_variable
+[gw12] [ 13%] PASSED tests/test_async_e2e_bulk.py::test_data_correctness_after_bulk_insert
+tests/test_arm_parity.py::test_locy_metrics_document_which_fields_are_unmeasured
+tests/test_async_e2e_sessions.py::test_session_with_multiple_variables
+[gw11] [ 13%] PASSED tests/test_async_e2e_bulk.py::test_bulk_insert_edges
+tests/test_async_e2e_crud.py::test_create_single_vertex_and_read
+[gw21] [ 13%] PASSED tests/test_async_e2e_sparse.py::test_sparse_datatype_helper_equivalence
+tests/test_async_e2e_transactions.py::test_begin_commit_data_persists
+tests/test_async_e2e_bulk.py::test_builder_config_options
+[gw14] [ 14%] PASSED tests/test_async_e2e_indexes.py::test_indexed_queries_return_correct_results
+[gw21] [ 14%] PASSED tests/test_async_e2e_transactions.py::test_begin_commit_data_persists
+tests/test_async_python_plugin.py::test_session_scoped_plugin_invisible_to_other_session
+tests/test_async_e2e_transactions.py::test_begin_rollback_data_reverted
+[gw7] [ 14%] PASSED tests/test_async_cypher_features.py::TestAsyncAggregations::test_sum_aggregation
+[gw9] [ 14%] PASSED tests/test_async_cancel.py::test_tx_query_builder_exposes_cancellation_token
+tests/test_async_cancel.py::test_tx_builder_token_aborts_fetch_all
+[gw5] [ 14%] PASSED tests/test_arm_parity.py::test_async_tx_execute_forwards_max_memory
+tests/test_arm_parity.py::test_profile_reports_a_measured_peak
+tests/test_async_cypher_features.py::TestAsyncAggregations::test_avg_aggregation
+[gw14] [ 14%] PASSED tests/test_async_python_plugin.py::test_session_scoped_plugin_invisible_to_other_session
+tests/test_async_schema_builder.py::TestAsyncSchemaCreation::test_create_label_and_properties
+[gw2] [ 14%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[tx.cursor]
+[gw3] [ 14%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[session.profile]
+[gw21] [ 14%] PASSED tests/test_async_e2e_transactions.py::test_begin_rollback_data_reverted
+tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[tx.cursor]
+tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[tx.execute]
+[gw19] [ 14%] PASSED tests/test_async_e2e_sessions.py::test_session_with_multiple_variables
+[gw12] [ 14%] PASSED tests/test_async_e2e_crud.py::test_create_single_vertex_and_read
+tests/test_async_e2e_transactions.py::test_transaction_query_with_params
+[gw10] [ 14%] PASSED tests/test_async_cypher_features.py::TestAsyncPatternMatching::test_bidirectional_relationship
+tests/test_async_sessions.py::test_async_session_query
+tests/test_async_e2e_crud.py::test_create_vertex_with_all_properties
+[gw6] [ 15%] PASSED tests/test_async_builder.py::TestAsyncUniBuilderOpenModes::test_open_reuses_existing
+tests/test_async_e2e_admin.py::test_async_database_builder_temporary
+tests/test_async_builder.py::TestAsyncUniBuilderOpenModes::test_temporary_database
+[gw21] [ 15%] PASSED tests/test_async_e2e_transactions.py::test_transaction_query_with_params
+tests/test_async_e2e_transactions.py::test_multiple_operations_in_one_transaction
+[gw17] [ 15%] PASSED tests/test_async_e2e_queries.py::test_order_by_desc
+[gw10] [ 15%] PASSED tests/test_async_e2e_admin.py::test_async_database_builder_temporary
+tests/test_async_e2e_admin.py::test_async_database_builder_in_memory
+tests/test_async_e2e_queries.py::test_limit
+[gw1] [ 15%] PASSED tests/test_arm_parity.py::test_locy_metrics_document_which_fields_are_unmeasured
+tests/test_arm_parity.py::test_execute_builders_expose_every_option[timeout-TxExecuteBuilder]
+[gw13] [ 15%] PASSED tests/test_async_e2e_crud.py::test_delete_edge
+[gw1] [ 15%] PASSED tests/test_arm_parity.py::test_execute_builders_expose_every_option[timeout-TxExecuteBuilder]
+tests/test_async_e2e_vector.py::test_create_vector_index_l2
+tests/test_async_e2e_crud.py::test_delete_vertex_with_cascading_edge_removal
+[gw10] [ 15%] PASSED tests/test_async_e2e_admin.py::test_async_database_builder_in_memory
+tests/test_async_e2e_admin.py::test_async_database_builder_open_new_path
+[gw7] [ 15%] PASSED tests/test_async_cypher_features.py::TestAsyncAggregations::test_avg_aggregation
+tests/test_async_cypher_features.py::TestAsyncAggregations::test_min_max_aggregation
+[gw6] [ 15%] PASSED tests/test_async_builder.py::TestAsyncUniBuilderOpenModes::test_temporary_database
+tests/test_async_builder.py::TestAsyncUniBuilderConfiguration::test_cache_size
+[gw21] [ 15%] PASSED tests/test_async_e2e_transactions.py::test_multiple_operations_in_one_transaction
+[gw19] [ 15%] PASSED tests/test_async_sessions.py::test_async_session_query
+tests/test_btic.py::TestBticConstruction::test_month
+[gw21] [ 16%] PASSED tests/test_btic.py::TestBticConstruction::test_month
+tests/test_async_sessions.py::test_async_session_execute
+tests/test_btic.py::TestBticConstruction::test_day
+[gw21] [ 16%] PASSED tests/test_btic.py::TestBticConstruction::test_day
+tests/test_btic.py::TestBticConstruction::test_range
+[gw21] [ 16%] PASSED tests/test_btic.py::TestBticConstruction::test_range
+[gw9] [ 16%] PASSED tests/test_async_cancel.py::test_tx_builder_token_aborts_fetch_all
+tests/test_async_cancel.py::test_tx_builder_token_aborts_cursor
+[gw0] [ 16%] PASSED tests/test_async_fork_diff_promote.py::test_async_diff_forks_between_siblings
+tests/test_async_fork_diff_promote.py::test_async_promote_inserts_fork_only_vertices
+tests/test_btic.py::TestBticConstruction::test_approximate
+[gw21] [ 16%] PASSED tests/test_btic.py::TestBticConstruction::test_approximate
+tests/test_btic.py::TestBticConstruction::test_uncertain
+[gw21] [ 16%] PASSED tests/test_btic.py::TestBticConstruction::test_uncertain
+tests/test_btic.py::TestBticConstruction::test_bce
+[gw21] [ 16%] PASSED tests/test_btic.py::TestBticConstruction::test_bce
+tests/test_btic.py::TestBticConstruction::test_unbounded_right
+[gw21] [ 16%] PASSED tests/test_btic.py::TestBticConstruction::test_unbounded_right
+tests/test_btic.py::TestBticConstruction::test_fully_unbounded
+[gw21] [ 16%] PASSED tests/test_btic.py::TestBticConstruction::test_fully_unbounded
+tests/test_btic.py::TestBticConstruction::test_invalid_literal
+[gw21] [ 16%] PASSED tests/test_btic.py::TestBticConstruction::test_invalid_literal
+[gw5] [ 17%] PASSED tests/test_arm_parity.py::test_profile_reports_a_measured_peak
+tests/test_btic.py::TestBticConstruction::test_from_raw_roundtrip
+[gw21] [ 17%] PASSED tests/test_btic.py::TestBticConstruction::test_from_raw_roundtrip
+tests/test_bug_bulk_edge_create_repro.py::test_bug_b_sequential_edge_txs_preserve_each_other
+[gw14] [ 17%] PASSED tests/test_async_schema_builder.py::TestAsyncSchemaCreation::test_create_label_and_properties
+tests/test_async_basic.py::test_async_open_and_query
+[gw10] [ 17%] PASSED tests/test_async_e2e_admin.py::test_async_database_builder_open_new_path
+tests/test_async_e2e_admin.py::test_async_database_builder_create_new_path
+tests/test_async_schema_builder.py::TestAsyncSchemaCreation::test_create_label_with_nullable
+[gw8] [ 17%] PASSED tests/test_async_bulk.py::test_async_bulk_insert_edges_convenience
+tests/test_async_bulk.py::test_async_bulk_writer_skip_before_triggers[True]
+[gw15] [ 17%] PASSED tests/test_async_e2e_locy.py::test_recursive_rule
+[gw3] [ 17%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[tx.cursor]
+[gw11] [ 17%] PASSED tests/test_async_e2e_bulk.py::test_builder_config_options
+tests/test_async_e2e_locy.py::test_multi_rule_program
+tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[tx.execute]
+[gw10] [ 17%] PASSED tests/test_async_e2e_admin.py::test_async_database_builder_create_new_path
+tests/test_async_graph_types.py::TestAsyncEdge::test_edge_from_query
+tests/test_async_e2e_admin.py::test_async_database_builder_create_fails_on_existing
+[gw16] [ 17%] PASSED tests/test_async_e2e_persistence.py::test_data_persists_after_reopen
+tests/test_async_e2e_persistence.py::test_schema_persists_across_reopens
+[gw12] [ 17%] PASSED tests/test_async_e2e_crud.py::test_create_vertex_with_all_properties
+tests/test_async_e2e_crud.py::test_create_vertex_with_nullable_property_omitted
+[gw10] [ 17%] PASSED tests/test_async_e2e_admin.py::test_async_database_builder_create_fails_on_existing
+[gw5] [ 18%] PASSED tests/test_async_basic.py::test_async_open_and_query
+tests/test_async_e2e_admin.py::test_async_database_builder_open_existing_fails_on_missing
+tests/test_async_basic.py::test_async_temporary
+[gw10] [ 18%] PASSED tests/test_async_e2e_admin.py::test_async_database_builder_open_existing_fails_on_missing
+tests/test_async_e2e_admin.py::test_async_database_builder_open_existing_succeeds
+[gw20] [ 18%] PASSED tests/test_async_e2e_vector.py::test_basic_vector_search_knn
+[gw7] [ 18%] PASSED tests/test_async_cypher_features.py::TestAsyncAggregations::test_min_max_aggregation
+tests/test_async_e2e_vector.py::test_vector_search_ordered_by_distance
+tests/test_async_cypher_features.py::TestAsyncAggregations::test_group_by_aggregation
+[gw14] [ 18%] PASSED tests/test_async_schema_builder.py::TestAsyncSchemaCreation::test_create_label_with_nullable
+[gw2] [ 18%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[tx.execute]
+[gw5] [ 18%] PASSED tests/test_async_basic.py::test_async_temporary
+tests/test_async_basic.py::test_async_query_with_params
+tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[tx.fetch_all]
+tests/test_async_schema_builder.py::TestAsyncSchemaCreation::test_create_edge_type
+[gw8] [ 18%] PASSED tests/test_async_bulk.py::test_async_bulk_writer_skip_before_triggers[True]
+[gw6] [ 18%] PASSED tests/test_async_builder.py::TestAsyncUniBuilderConfiguration::test_cache_size
+tests/test_async_builder.py::TestAsyncUniBuilderConfiguration::test_parallelism
+tests/test_async_bulk.py::test_async_bulk_writer_skip_before_triggers[False]
+[gw9] [ 18%] PASSED tests/test_async_cancel.py::test_tx_builder_token_aborts_cursor
+[gw14] [ 18%] PASSED tests/test_async_schema_builder.py::TestAsyncSchemaCreation::test_create_edge_type
+tests/test_async_cancel.py::test_transaction_cancel_aborts_its_own_queries
+tests/test_async_schema_builder.py::TestAsyncSchemaCreation::test_create_multiple_labels_and_edges
+[gw1] [ 19%] PASSED tests/test_async_e2e_vector.py::test_create_vector_index_l2
+[gw11] [ 19%] PASSED tests/test_async_graph_types.py::TestAsyncEdge::test_edge_from_query
+[gw16] [ 19%] PASSED tests/test_async_e2e_persistence.py::test_schema_persists_across_reopens
+tests/test_async_fork.py::test_fork_basic_create_drop
+[gw19] [ 19%] PASSED tests/test_async_sessions.py::test_async_session_execute
+tests/test_async_e2e_persistence.py::test_indexes_persist_across_reopens
+[gw18] [ 19%] PASSED tests/test_async_e2e_queries.py::test_profile
+tests/test_async_graph_types.py::TestAsyncEdge::test_edge_attributes
+tests/test_async_sessions.py::test_async_session_set_multiple_variables
+tests/test_async_e2e_schema.py::test_create_labels_via_builder
+[gw4] [ 19%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[execute_with.profile]
+[gw14] [ 19%] PASSED tests/test_async_schema_builder.py::TestAsyncSchemaCreation::test_create_multiple_labels_and_edges
+[gw5] [ 19%] PASSED tests/test_async_basic.py::test_async_query_with_params
+tests/test_async_basic.py::test_async_execute_returns_count
+tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[execute_with.run]
+tests/test_async_schema_builder.py::TestAsyncSchemaQueries::test_label_exists
+[gw18] [ 19%] PASSED tests/test_async_e2e_schema.py::test_create_labels_via_builder
+tests/test_async_e2e_schema.py::test_create_edge_types_via_builder
+[gw11] [ 19%] PASSED tests/test_async_graph_types.py::TestAsyncEdge::test_edge_attributes
+[gw3] [ 19%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[tx.execute]
+[gw5] [ 19%] PASSED tests/test_async_basic.py::test_async_execute_returns_count
+tests/test_async_graph_types.py::TestAsyncPath::test_path_from_query
+tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[tx.fetch_all]
+tests/test_async_basic.py::test_async_flush
+[gw14] [ 20%] PASSED tests/test_async_schema_builder.py::TestAsyncSchemaQueries::test_label_exists
+[gw8] [ 20%] PASSED tests/test_async_bulk.py::test_async_bulk_writer_skip_before_triggers[False]
+tests/test_async_schema_builder.py::TestAsyncSchemaQueries::test_edge_type_exists
+[gw6] [ 20%] PASSED tests/test_async_builder.py::TestAsyncUniBuilderConfiguration::test_parallelism
+tests/test_async_bulk.py::test_async_appender_builder_skip_before_triggers[True]
+tests/test_async_builder.py::TestAsyncUniBuilderConfiguration::test_chained_configuration
+[gw7] [ 20%] PASSED tests/test_async_cypher_features.py::TestAsyncAggregations::test_group_by_aggregation
+[gw13] [ 20%] PASSED tests/test_async_e2e_crud.py::test_delete_vertex_with_cascading_edge_removal
+tests/test_async_cypher_features.py::TestAsyncOrderingAndLimits::test_order_by_asc
+[gw0] [ 20%] PASSED tests/test_async_fork_diff_promote.py::test_async_promote_inserts_fork_only_vertices
+tests/test_async_fork_diff_promote.py::test_async_promote_edges_lands_both_endpoints_and_edge
+[gw14] [ 20%] PASSED tests/test_async_schema_builder.py::TestAsyncSchemaQueries::test_edge_type_exists
+[gw18] [ 20%] PASSED tests/test_async_e2e_schema.py::test_create_edge_types_via_builder
+tests/test_async_schema_builder.py::TestAsyncSchemaQueries::test_list_labels
+tests/test_async_e2e_crud.py::test_merge_vertex_upsert
+tests/test_async_e2e_schema.py::test_add_properties_basic_types
+[gw17] [ 20%] PASSED tests/test_async_e2e_queries.py::test_limit
+tests/test_async_e2e_queries.py::test_skip_and_limit
+[gw11] [ 20%] PASSED tests/test_async_graph_types.py::TestAsyncPath::test_path_from_query
+tests/test_async_graph_types.py::TestAsyncPath::test_path_interleaved_indexing
+[gw14] [ 20%] PASSED tests/test_async_schema_builder.py::TestAsyncSchemaQueries::test_list_labels
+[gw9] [ 20%] PASSED tests/test_async_cancel.py::test_transaction_cancel_aborts_its_own_queries
+tests/test_async_cancel.py::test_session_cancel_aborts_plain_query
+tests/test_async_schema_builder.py::TestAsyncSchemaQueries::test_list_edge_types
+[gw14] [ 21%] PASSED tests/test_async_schema_builder.py::TestAsyncSchemaQueries::test_list_edge_types
+tests/test_async_schema_builder.py::TestAsyncSchemaQueries::test_get_label_info
+[gw12] [ 21%] PASSED tests/test_async_e2e_crud.py::test_create_vertex_with_nullable_property_omitted
+tests/test_async_e2e_crud.py::test_create_multiple_vertices
+[gw11] [ 21%] PASSED tests/test_async_graph_types.py::TestAsyncPath::test_path_interleaved_indexing
+tests/test_async_graph_types.py::TestAsyncMixedReturn::test_mixed_return
+[gw18] [ 21%] PASSED tests/test_async_e2e_schema.py::test_add_properties_basic_types
+[gw14] [ 21%] PASSED tests/test_async_schema_builder.py::TestAsyncSchemaQueries::test_get_label_info
+[gw8] [ 21%] PASSED tests/test_async_bulk.py::test_async_appender_builder_skip_before_triggers[True]
+tests/test_btic.py::TestBticConstruction::test_from_raw_invalid
+tests/test_async_e2e_schema.py::test_nullable_properties
+tests/test_bulk_commit_outcome.py::test_async_load_id_and_applied_check
+[gw8] [ 21%] PASSED tests/test_btic.py::TestBticConstruction::test_from_raw_invalid
+[gw5] [ 21%] PASSED tests/test_async_basic.py::test_async_flush
+tests/test_btic.py::TestBticProperties::test_lo_hi_meta
+tests/test_async_basic.py::test_async_explain
+[gw8] [ 21%] PASSED tests/test_btic.py::TestBticProperties::test_lo_hi_meta
+tests/test_btic.py::TestBticProperties::test_duration_ms
+[gw8] [ 21%] PASSED tests/test_btic.py::TestBticProperties::test_duration_ms
+tests/test_btic.py::TestBticProperties::test_duration_ms_unbounded
+[gw8] [ 21%] PASSED tests/test_btic.py::TestBticProperties::test_duration_ms_unbounded
+tests/test_btic.py::TestBticProperties::test_is_instant
+[gw8] [ 22%] PASSED tests/test_btic.py::TestBticProperties::test_is_instant
+tests/test_btic.py::TestBticProperties::test_granularity
+[gw8] [ 22%] PASSED tests/test_btic.py::TestBticProperties::test_granularity
+tests/test_btic.py::TestBticProperties::test_certainty_definite
+[gw8] [ 22%] PASSED tests/test_btic.py::TestBticProperties::test_certainty_definite
+tests/test_btic.py::TestBticPredicates::test_overlaps
+[gw8] [ 22%] PASSED tests/test_btic.py::TestBticPredicates::test_overlaps
+tests/test_btic.py::TestBticPredicates::test_disjoint
+[gw8] [ 22%] PASSED tests/test_btic.py::TestBticPredicates::test_disjoint
+[gw16] [ 22%] PASSED tests/test_async_e2e_persistence.py::test_indexes_persist_across_reopens
+tests/test_async_e2e_persistence.py::test_multiple_reopen_cycles
+[gw15] [ 22%] PASSED tests/test_async_e2e_locy.py::test_multi_rule_program
+tests/test_btic.py::TestBticPredicates::test_contains
+[gw8] [ 22%] PASSED tests/test_btic.py::TestBticPredicates::test_contains
+tests/test_config_merge_and_validation.py::test_unknown_config_key_is_refused[commit_timeout-5.0]
+[gw10] [ 22%] PASSED tests/test_async_e2e_admin.py::test_async_database_builder_open_existing_succeeds
+tests/test_btic.py::TestBticE2E::test_btic_parameter
+[gw2] [ 22%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_max_memory[tx.fetch_all]
+tests/test_async_e2e_vector.py::test_vector_search_with_threshold
+[gw8] [ 22%] PASSED tests/test_config_merge_and_validation.py::test_unknown_config_key_is_refused[commit_timeout-5.0]
+tests/test_config_merge_and_validation.py::test_a_valid_key_alongside_an_invalid_one_still_refuses
+tests/test_async_e2e_locy.py::test_config_override
+[gw8] [ 22%] PASSED tests/test_config_merge_and_validation.py::test_a_valid_key_alongside_an_invalid_one_still_refuses
+tests/test_config_merge_and_validation.py::test_every_accepted_key_is_accepted
+[gw18] [ 23%] PASSED tests/test_async_e2e_schema.py::test_nullable_properties
+[gw7] [ 23%] PASSED tests/test_async_cypher_features.py::TestAsyncOrderingAndLimits::test_order_by_asc
+[gw19] [ 23%] PASSED tests/test_async_sessions.py::test_async_session_set_multiple_variables
+[gw5] [ 23%] PASSED tests/test_async_basic.py::test_async_explain
+tests/test_async_basic.py::test_async_builder
+[gw3] [ 23%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[tx.fetch_all]
+tests/test_async_e2e_schema.py::test_vector_properties
+tests/test_async_cypher_features.py::TestAsyncOrderingAndLimits::test_order_by_desc
+tests/test_async_sessions.py::test_async_session_get_nonexistent
+tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[tx.profile]
+[gw8] [ 23%] PASSED tests/test_config_merge_and_validation.py::test_every_accepted_key_is_accepted
+tests/test_config_merge_and_validation.py::test_config_does_not_discard_an_earlier_setter
+[gw11] [ 23%] PASSED tests/test_async_graph_types.py::TestAsyncMixedReturn::test_mixed_return
+[gw18] [ 23%] PASSED tests/test_async_e2e_schema.py::test_vector_properties
+[gw5] [ 23%] PASSED tests/test_async_basic.py::test_async_builder
+tests/test_async_e2e_schema.py::test_list_properties
+tests/test_builder.py::TestUniBuilderOpenModes::test_open_existing_database
+tests/test_async_python_plugin.py::test_load_python_plugin_returns_metadata
+[gw8] [ 23%] PASSED tests/test_config_merge_and_validation.py::test_config_does_not_discard_an_earlier_setter
+tests/test_config_merge_and_validation.py::test_a_setter_after_config_also_survives
+[gw9] [ 23%] PASSED tests/test_async_cancel.py::test_session_cancel_aborts_plain_query
+tests/test_async_cancel.py::test_uncancelled_transaction_still_works
+[gw8] [ 23%] PASSED tests/test_config_merge_and_validation.py::test_a_setter_after_config_also_survives
+tests/test_config_merge_and_validation.py::test_repeated_config_calls_accumulate
+[gw11] [ 24%] PASSED tests/test_async_python_plugin.py::test_load_python_plugin_returns_metadata
+tests/test_async_python_plugin.py::test_load_python_plugin_invokable_through_cypher
+[gw13] [ 24%] PASSED tests/test_async_e2e_crud.py::test_merge_vertex_upsert
+tests/test_async_e2e_crud.py::test_merge_edge
+[gw10] [ 24%] PASSED tests/test_btic.py::TestBticE2E::test_btic_parameter
+[gw6] [ 24%] PASSED tests/test_async_builder.py::TestAsyncUniBuilderConfiguration::test_chained_configuration
+[gw8] [ 24%] PASSED tests/test_config_merge_and_validation.py::test_repeated_config_calls_accumulate
+tests/test_config_merge_and_validation.py::test_the_last_write_to_one_setting_wins
+tests/test_async_transactions.py::test_async_transaction_double_rollback_raises
+tests/test_btic.py::TestBticE2E::test_btic_set_parameter
+[gw11] [ 24%] PASSED tests/test_async_python_plugin.py::test_load_python_plugin_invokable_through_cypher
+tests/test_async_python_plugin.py::test_load_python_plugin_rejects_bad_module
+[gw8] [ 24%] PASSED tests/test_config_merge_and_validation.py::test_the_last_write_to_one_setting_wins
+tests/test_config_merge_and_validation.py::test_vector_knn_default_k_sizes_an_unlimited_search
+[gw6] [ 24%] PASSED tests/test_async_transactions.py::test_async_transaction_double_rollback_raises
+tests/test_async_vector.py::test_async_basic_vector_search
+[gw18] [ 24%] PASSED tests/test_async_e2e_schema.py::test_list_properties
+[gw11] [ 24%] PASSED tests/test_async_python_plugin.py::test_load_python_plugin_rejects_bad_module
+[gw12] [ 24%] PASSED tests/test_async_e2e_crud.py::test_create_multiple_vertices
+tests/test_async_python_plugin.py::test_scalar_fn_decorator_registers_and_invokes
+tests/test_async_e2e_schema.py::test_schema_builder_single_label
+[gw19] [ 25%] PASSED tests/test_async_sessions.py::test_async_session_get_nonexistent
+tests/test_async_e2e_crud.py::test_create_edge_between_vertices
+tests/test_async_transactions.py::test_async_transaction_commit
+[gw11] [ 25%] PASSED tests/test_async_python_plugin.py::test_scalar_fn_decorator_registers_and_invokes
+tests/test_async_python_plugin.py::test_finalize_plugin_with_no_decorators_errors
+[gw18] [ 25%] PASSED tests/test_async_e2e_schema.py::test_schema_builder_single_label
+[gw7] [ 25%] PASSED tests/test_async_cypher_features.py::TestAsyncOrderingAndLimits::test_order_by_desc
+tests/test_async_e2e_schema.py::test_schema_builder_multiple_labels_and_edges
+[gw11] [ 25%] PASSED tests/test_async_python_plugin.py::test_finalize_plugin_with_no_decorators_errors
+tests/test_btic.py::TestBticPredicates::test_contains_point
+tests/test_async_python_plugin.py::test_multiple_scalars_in_one_finalize
+[gw7] [ 25%] PASSED tests/test_btic.py::TestBticPredicates::test_contains_point
+tests/test_btic.py::TestBticPredicates::test_before_after
+[gw8] [ 25%] PASSED tests/test_config_merge_and_validation.py::test_vector_knn_default_k_sizes_an_unlimited_search
+[gw7] [ 25%] PASSED tests/test_btic.py::TestBticPredicates::test_before_after
+tests/test_btic.py::TestBticPredicates::test_meets
+tests/test_config_merge_and_validation.py::test_vector_knn_default_k_larger_than_the_label_does_not_warn
+[gw7] [ 25%] PASSED tests/test_btic.py::TestBticPredicates::test_meets
+tests/test_btic.py::TestBticPredicates::test_adjacent
+[gw7] [ 25%] PASSED tests/test_btic.py::TestBticPredicates::test_adjacent
+tests/test_btic.py::TestBticSetOps::test_intersection
+[gw7] [ 25%] PASSED tests/test_btic.py::TestBticSetOps::test_intersection
+tests/test_btic.py::TestBticSetOps::test_intersection_disjoint
+[gw19] [ 25%] PASSED tests/test_async_transactions.py::test_async_transaction_commit
+[gw14] [ 26%] PASSED tests/test_bulk_commit_outcome.py::test_async_load_id_and_applied_check
+[gw7] [ 26%] PASSED tests/test_btic.py::TestBticSetOps::test_intersection_disjoint
+tests/test_btic.py::TestBticSetOps::test_span
+tests/test_async_transactions.py::test_async_transaction_rollback
+[gw7] [ 26%] PASSED tests/test_btic.py::TestBticSetOps::test_span
+tests/test_bulk_commit_outcome.py::test_commit_outcome_exceptions_are_distinct_uni_errors[UniBulkCommitIncompleteError]
+[gw14] [ 26%] PASSED tests/test_bulk_commit_outcome.py::test_commit_outcome_exceptions_are_distinct_uni_errors[UniBulkCommitIncompleteError]
+tests/test_btic.py::TestBticSetOps::test_gap
+[gw7] [ 26%] PASSED tests/test_btic.py::TestBticSetOps::test_gap
+tests/test_btic.py::TestBticSetOps::test_gap_overlapping
+[gw7] [ 26%] PASSED tests/test_btic.py::TestBticSetOps::test_gap_overlapping
+tests/test_btic.py::TestBticDunders::test_repr
+[gw7] [ 26%] PASSED tests/test_btic.py::TestBticDunders::test_repr
+tests/test_bulk_commit_outcome.py::test_commit_outcome_exceptions_are_distinct_uni_errors[UniBulkCommitOutcomeUnknownError]
+[gw14] [ 26%] PASSED tests/test_bulk_commit_outcome.py::test_commit_outcome_exceptions_are_distinct_uni_errors[UniBulkCommitOutcomeUnknownError]
+tests/test_bulk_commit_outcome.py::test_fork_session_answers_for_its_own_loads
+[gw3] [ 26%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_timeout[tx.profile]
+tests/test_btic.py::TestBticDunders::test_str
+[gw7] [ 26%] PASSED tests/test_btic.py::TestBticDunders::test_str
+tests/test_e2e_admin.py::test_database_builder_in_memory
+[gw17] [ 26%] PASSED tests/test_async_e2e_queries.py::test_skip_and_limit
+tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[execute_with.profile]
+tests/test_async_e2e_queries.py::test_optional_match
+[gw18] [ 26%] PASSED tests/test_async_e2e_schema.py::test_schema_builder_multiple_labels_and_edges
+tests/test_bulk_writer.py::TestBulkWriter::test_bulk_writer_deferred_indexes
+[gw7] [ 27%] PASSED tests/test_e2e_admin.py::test_database_builder_in_memory
+tests/test_e2e_admin.py::test_database_builder_open_new_path
+[gw19] [ 27%] PASSED tests/test_async_transactions.py::test_async_transaction_rollback
+tests/test_async_transactions.py::test_async_transaction_context_manager_commit
+[gw11] [ 27%] PASSED tests/test_async_python_plugin.py::test_multiple_scalars_in_one_finalize
+tests/test_cypher_features.py::TestQueryWithParameters::test_query_with_int_param
+[gw9] [ 27%] PASSED tests/test_async_cancel.py::test_uncancelled_transaction_still_works
+tests/test_async_cancel.py::test_async_tx_query_builder_exposes_cancellation_token
+[gw7] [ 27%] PASSED tests/test_e2e_admin.py::test_database_builder_open_new_path
+tests/test_e2e_admin.py::test_database_builder_create_new_path
+[gw4] [ 27%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[execute_with.run]
+[gw8] [ 27%] PASSED tests/test_config_merge_and_validation.py::test_vector_knn_default_k_larger_than_the_label_does_not_warn
+tests/test_config_merge_and_validation.py::test_lance_cache_caps_reach_the_storage_engine
+[gw10] [ 27%] PASSED tests/test_btic.py::TestBticE2E::test_btic_set_parameter
+[gw19] [ 27%] PASSED tests/test_async_transactions.py::test_async_transaction_context_manager_commit
+tests/test_async_transactions.py::test_async_transaction_context_manager_rollback_on_error
+tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[session.cursor]
+tests/test_btic.py::TestBticE2E::test_schema_with_btic_datatype
+[gw14] [ 27%] PASSED tests/test_bulk_commit_outcome.py::test_fork_session_answers_for_its_own_loads
+tests/test_bulk_commit_outcome.py::test_async_fork_session_answers_for_its_own_loads
+[gw5] [ 27%] PASSED tests/test_builder.py::TestUniBuilderOpenModes::test_open_existing_database
+tests/test_builder.py::TestUniBuilderOpenModes::test_open_existing_fails_if_not_exists
+[gw5] [ 28%] PASSED tests/test_builder.py::TestUniBuilderOpenModes::test_open_existing_fails_if_not_exists
+[gw18] [ 28%] PASSED tests/test_bulk_writer.py::TestBulkWriter::test_bulk_writer_deferred_indexes
+tests/test_builder.py::TestUniBuilderOpenModes::test_open_creates_if_needed
+tests/test_bulk_writer.py::TestBulkWriter::test_bulk_writer_skip_before_triggers[True]
+[gw0] [ 28%] PASSED tests/test_async_fork_diff_promote.py::test_async_promote_edges_lands_both_endpoints_and_edge
+[gw9] [ 28%] PASSED tests/test_async_cancel.py::test_async_tx_query_builder_exposes_cancellation_token
+tests/test_async_fork_diff_promote.py::test_async_promote_with_options_reports_new_fields
+tests/test_async_cancel.py::test_query_timeout_raises_uni_timeout_error
+[gw6] [ 28%] PASSED tests/test_async_vector.py::test_async_basic_vector_search
+[gw7] [ 28%] PASSED tests/test_e2e_admin.py::test_database_builder_create_new_path
+tests/test_e2e_admin.py::test_database_builder_create_fails_on_existing
+tests/test_async_vector.py::test_async_vector_search_with_k
+[gw10] [ 28%] PASSED tests/test_btic.py::TestBticE2E::test_schema_with_btic_datatype
+[gw19] [ 28%] PASSED tests/test_async_transactions.py::test_async_transaction_context_manager_rollback_on_error
+tests/test_async_transactions.py::test_async_transaction_query_with_params
+tests/test_btic.py::TestBticE2E::test_delete_vertex_with_btic
+[gw7] [ 28%] PASSED tests/test_e2e_admin.py::test_database_builder_create_fails_on_existing
+tests/test_e2e_admin.py::test_database_builder_open_existing_fails_on_missing
+[gw7] [ 28%] PASSED tests/test_e2e_admin.py::test_database_builder_open_existing_fails_on_missing
+tests/test_e2e_admin.py::test_database_builder_open_existing_succeeds
+[gw19] [ 28%] PASSED tests/test_async_transactions.py::test_async_transaction_query_with_params
+tests/test_async_transactions.py::test_async_transaction_double_commit_raises
+[gw11] [ 28%] PASSED tests/test_cypher_features.py::TestQueryWithParameters::test_query_with_int_param
+[gw15] [ 29%] PASSED tests/test_async_e2e_locy.py::test_config_override
+[gw18] [ 29%] PASSED tests/test_bulk_writer.py::TestBulkWriter::test_bulk_writer_skip_before_triggers[True]
+tests/test_bulk_writer.py::TestBulkWriter::test_bulk_writer_skip_before_triggers[False]
+tests/test_cypher_features.py::TestQueryWithParameters::test_query_with_multiple_params
+tests/test_async_e2e_locy.py::test_empty_program_raises
+[gw12] [ 29%] PASSED tests/test_async_e2e_crud.py::test_create_edge_between_vertices
+[gw14] [ 29%] PASSED tests/test_bulk_commit_outcome.py::test_async_fork_session_answers_for_its_own_loads
+tests/test_async_e2e_crud.py::test_create_edge_with_properties
+tests/test_bulk_writer.py::TestBulkWriter::test_bulk_writer_builder
+[gw19] [ 29%] PASSED tests/test_async_transactions.py::test_async_transaction_double_commit_raises
+tests/test_cypher_features.py::TestOrderingAndLimits::test_limit
+[gw3] [ 29%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[execute_with.profile]
+[gw13] [ 29%] PASSED tests/test_async_e2e_crud.py::test_merge_edge
+tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[execute_with.run]
+tests/test_async_e2e_crud.py::test_match_and_return_multiple_properties
+[gw14] [ 29%] PASSED tests/test_bulk_writer.py::TestBulkWriter::test_bulk_writer_builder
+[gw16] [ 29%] PASSED tests/test_async_e2e_persistence.py::test_multiple_reopen_cycles
+tests/test_async_e2e_persistence.py::test_large_dataset_persistence
+tests/test_bulk_writer.py::TestBulkWriter::test_bulk_insert_vertices
+[gw9] [ 29%] PASSED tests/test_async_cancel.py::test_query_timeout_raises_uni_timeout_error
+tests/test_async_cypher_features.py::TestAsyncExplainProfile::test_explain_returns_plan
+[gw6] [ 29%] PASSED tests/test_async_vector.py::test_async_vector_search_with_k
+[gw20] [ 30%] PASSED tests/test_async_e2e_vector.py::test_vector_search_ordered_by_distance
+[gw18] [ 30%] PASSED tests/test_bulk_writer.py::TestBulkWriter::test_bulk_writer_skip_before_triggers[False]
+tests/test_async_vector.py::test_async_vector_search_with_threshold
+tests/test_bulk_writer.py::TestBulkWriter::test_appender_builder_skip_before_triggers[True]
+tests/test_async_e2e_vector.py::test_vector_search_vid_and_distance
+[gw11] [ 30%] PASSED tests/test_cypher_features.py::TestQueryWithParameters::test_query_with_multiple_params
+[gw5] [ 30%] PASSED tests/test_builder.py::TestUniBuilderOpenModes::test_open_creates_if_needed
+tests/test_builder.py::TestUniBuilderOpenModes::test_open_reuses_existing
+tests/test_cypher_features.py::TestAggregations::test_count_aggregation
+[gw7] [ 30%] PASSED tests/test_e2e_admin.py::test_database_builder_open_existing_succeeds
+tests/test_e2e_admin.py::test_builder_with_cache_size
+[gw10] [ 30%] PASSED tests/test_btic.py::TestBticE2E::test_delete_vertex_with_btic
+tests/test_btic.py::TestBticE2E::test_remove_btic_property
+[gw19] [ 30%] PASSED tests/test_cypher_features.py::TestOrderingAndLimits::test_limit
+[gw17] [ 30%] PASSED tests/test_async_e2e_queries.py::test_optional_match
+tests/test_cypher_features.py::TestOrderingAndLimits::test_skip
+[gw7] [ 30%] PASSED tests/test_e2e_admin.py::test_builder_with_cache_size
+tests/test_e2e_admin.py::test_builder_with_parallelism
+tests/test_async_e2e_queries.py::test_union_queries
+[gw18] [ 30%] PASSED tests/test_bulk_writer.py::TestBulkWriter::test_appender_builder_skip_before_triggers[True]
+tests/test_bulk_writer.py::TestBulkWriter::test_appender_builder_skip_before_triggers[False]
+[gw2] [ 30%] PASSED tests/test_async_e2e_vector.py::test_vector_search_with_threshold
+[gw7] [ 30%] PASSED tests/test_e2e_admin.py::test_builder_with_parallelism
+tests/test_e2e_admin.py::test_builder_with_multiple_configs
+[gw0] [ 31%] PASSED tests/test_async_fork_diff_promote.py::test_async_promote_with_options_reports_new_fields
+tests/test_async_graph_types.py::TestAsyncNode::test_node_from_query
+tests/test_async_e2e_vector.py::test_vector_search_fetch_nodes
+[gw7] [ 31%] PASSED tests/test_e2e_admin.py::test_builder_with_multiple_configs
+tests/test_e2e_bulk.py::test_convenience_bulk_insert_vertices
+[gw11] [ 31%] PASSED tests/test_cypher_features.py::TestAggregations::test_count_aggregation
+tests/test_cypher_features.py::TestAggregations::test_sum_aggregation
+[gw0] [ 31%] PASSED tests/test_async_graph_types.py::TestAsyncNode::test_node_from_query
+tests/test_async_graph_types.py::TestAsyncNode::test_node_attributes
+[gw13] [ 31%] PASSED tests/test_async_e2e_crud.py::test_match_and_return_multiple_properties
+tests/test_async_e2e_crud.py::test_create_with_parameterized_queries
+[gw9] [ 31%] PASSED tests/test_async_cypher_features.py::TestAsyncExplainProfile::test_explain_returns_plan
+[gw3] [ 31%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[execute_with.run]
+tests/test_async_cypher_features.py::TestAsyncExplainProfile::test_explain_includes_cost_estimates
+[gw14] [ 31%] PASSED tests/test_bulk_writer.py::TestBulkWriter::test_bulk_insert_vertices
+tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[session.cursor]
+tests/test_bulk_writer.py::TestBulkWriter::test_bulk_insert_edges
+[gw19] [ 31%] PASSED tests/test_cypher_features.py::TestOrderingAndLimits::test_skip
+[gw10] [ 31%] PASSED tests/test_btic.py::TestBticE2E::test_remove_btic_property
+tests/test_cypher_features.py::TestPatternMatching::test_simple_relationship_match
+[gw4] [ 31%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[session.cursor]
+tests/test_btic.py::TestBticE2E::test_transaction_rollback_with_btic
+[gw12] [ 31%] PASSED tests/test_async_e2e_crud.py::test_create_edge_with_properties
+tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[session.fetch_all]
+tests/test_btic.py::TestBticDunders::test_equality
+[gw12] [ 32%] PASSED tests/test_btic.py::TestBticDunders::test_equality
+tests/test_btic.py::TestBticDunders::test_inequality
+[gw0] [ 32%] PASSED tests/test_async_graph_types.py::TestAsyncNode::test_node_attributes
+[gw12] [ 32%] PASSED tests/test_btic.py::TestBticDunders::test_inequality
+tests/test_btic.py::TestBticDunders::test_hash
+[gw12] [ 32%] PASSED tests/test_btic.py::TestBticDunders::test_hash
+tests/test_btic.py::TestBticDunders::test_ordering
+[gw6] [ 32%] PASSED tests/test_async_vector.py::test_async_vector_search_with_threshold
+[gw15] [ 32%] PASSED tests/test_async_e2e_locy.py::test_empty_program_raises
+[gw12] [ 32%] PASSED tests/test_btic.py::TestBticDunders::test_ordering
+tests/test_btic.py::TestPyValueBtic::test_value_btic_constructor
+[gw12] [ 32%] PASSED tests/test_btic.py::TestPyValueBtic::test_value_btic_constructor
+tests/test_btic.py::TestPyValueBtic::test_value_btic_invalid
+[gw18] [ 32%] PASSED tests/test_bulk_writer.py::TestBulkWriter::test_appender_builder_skip_before_triggers[False]
+tests/test_async_graph_types.py::TestAsyncNode::test_node_dict_access
+tests/test_async_vector.py::test_async_vector_search_fetch_nodes
+[gw7] [ 32%] PASSED tests/test_e2e_bulk.py::test_convenience_bulk_insert_vertices
+[gw12] [ 32%] PASSED tests/test_btic.py::TestPyValueBtic::test_value_btic_invalid
+tests/test_btic.py::TestPyValueBtic::test_value_btic_to_python
+[gw12] [ 33%] PASSED tests/test_btic.py::TestPyValueBtic::test_value_btic_to_python
+tests/test_btic.py::TestPyValueBtic::test_value_btic_repr
+tests/test_async_e2e_locy.py::test_error_on_invalid_program
+[gw12] [ 33%] PASSED tests/test_btic.py::TestPyValueBtic::test_value_btic_repr
+tests/test_btic.py::TestDataTypeBtic::test_datatype_btic
+[gw12] [ 33%] PASSED tests/test_btic.py::TestDataTypeBtic::test_datatype_btic
+tests/test_btic.py::TestBticE2E::test_create_and_return_btic
+tests/test_bulk_writer.py::TestBulkStats::test_bulk_stats_attributes
+tests/test_e2e_bulk.py::test_convenience_bulk_insert_edges
+[gw21] [ 33%] PASSED tests/test_bug_bulk_edge_create_repro.py::test_bug_b_sequential_edge_txs_preserve_each_other
+tests/test_bug_bulk_edge_create_repro.py::test_bug_c_per_row_match_create_in_one_tx_baseline
+[gw0] [ 33%] PASSED tests/test_async_graph_types.py::TestAsyncNode::test_node_dict_access
+[gw12] [ 33%] PASSED tests/test_btic.py::TestBticE2E::test_create_and_return_btic
+tests/test_async_graph_types.py::TestAsyncNode::test_node_deprecated_keys
+tests/test_btic.py::TestBticE2E::test_match_return_btic
+[gw11] [ 33%] PASSED tests/test_cypher_features.py::TestAggregations::test_sum_aggregation
+[gw10] [ 33%] PASSED tests/test_btic.py::TestBticE2E::test_transaction_rollback_with_btic
+tests/test_cypher_features.py::TestAggregations::test_avg_aggregation
+tests/test_btic.py::TestBticE2E::test_btic_in_where_filter
+[gw0] [ 33%] PASSED tests/test_async_graph_types.py::TestAsyncNode::test_node_deprecated_keys
+tests/test_e2e_crud.py::TestMergeOperations::test_merge_vertex_creates_when_not_exists
+[gw5] [ 33%] PASSED tests/test_builder.py::TestUniBuilderOpenModes::test_open_reuses_existing
+tests/test_builder.py::TestUniBuilderOpenModes::test_temporary_database
+[gw3] [ 33%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_honours_cancellation_token[session.cursor]
+[gw17] [ 33%] PASSED tests/test_async_e2e_queries.py::test_union_queries
+tests/test_e2e_crud.py::test_underscore_property_reads_back[True-Person]
+tests/test_async_e2e_queries.py::test_with_clause
+[gw6] [ 34%] PASSED tests/test_async_vector.py::test_async_vector_search_fetch_nodes
+[gw10] [ 34%] PASSED tests/test_btic.py::TestBticE2E::test_btic_in_where_filter
+[gw11] [ 34%] PASSED tests/test_cypher_features.py::TestAggregations::test_avg_aggregation
+[gw18] [ 34%] PASSED tests/test_bulk_writer.py::TestBulkStats::test_bulk_stats_attributes
+tests/test_config_merge_and_validation.py::test_unknown_config_key_is_refused[quer_timeout-5.0]
+tests/test_async_vector.py::test_async_vector_match_attributes
+[gw18] [ 34%] PASSED tests/test_config_merge_and_validation.py::test_unknown_config_key_is_refused[quer_timeout-5.0]
+tests/test_bug_adr_real_ingest_repro.py::test_bug_adr_multi_tx_real_data_preserves_all_edges
+tests/test_cypher_features.py::TestAggregations::test_min_max_aggregation
+tests/test_config_merge_and_validation.py::test_unknown_config_key_is_refused[totally_not_a_real_key-123]
+[gw18] [ 34%] PASSED tests/test_config_merge_and_validation.py::test_unknown_config_key_is_refused[totally_not_a_real_key-123]
+tests/test_config_merge_and_validation.py::test_unknown_config_key_is_refused[ssi_enabled-False]
+[gw18] [ 34%] PASSED tests/test_config_merge_and_validation.py::test_unknown_config_key_is_refused[ssi_enabled-False]
+tests/test_e2e_crud.py::TestVertexCRUD::test_create_vertex_with_all_properties
+[gw12] [ 34%] PASSED tests/test_btic.py::TestBticE2E::test_match_return_btic
+[gw19] [ 34%] PASSED tests/test_cypher_features.py::TestPatternMatching::test_simple_relationship_match
+tests/test_e2e_errors.py::test_bulk_writer_double_commit
+tests/test_cypher_features.py::TestPatternMatching::test_relationship_type_filter
+[gw0] [ 34%] PASSED tests/test_e2e_crud.py::TestMergeOperations::test_merge_vertex_creates_when_not_exists
+[gw9] [ 34%] PASSED tests/test_async_cypher_features.py::TestAsyncExplainProfile::test_explain_includes_cost_estimates
+tests/test_e2e_crud.py::TestMergeOperations::test_merge_vertex_matches_when_exists
+tests/test_e2e_bulk.py::test_create_bulk_writer_with_builder
+[gw9] [ 34%] PASSED tests/test_e2e_bulk.py::test_create_bulk_writer_with_builder
+[gw18] [ 35%] PASSED tests/test_e2e_crud.py::TestVertexCRUD::test_create_vertex_with_all_properties
+[gw7] [ 35%] PASSED tests/test_e2e_bulk.py::test_convenience_bulk_insert_edges
+[gw13] [ 35%] PASSED tests/test_async_e2e_crud.py::test_create_with_parameterized_queries
+[gw5] [ 35%] PASSED tests/test_builder.py::TestUniBuilderOpenModes::test_temporary_database
+tests/test_e2e_bulk.py::test_bulk_insert_vertices
+tests/test_builder.py::TestUniBuilderConfiguration::test_cache_size
+tests/test_e2e_crud.py::TestVertexCRUD::test_create_vertex_with_nullable_property_omitted
+tests/test_e2e_bulk.py::test_large_batch_insert
+tests/test_async_e2e_errors.py::test_invalid_cypher_syntax_raises_exception
+[gw13] [ 35%] PASSED tests/test_async_e2e_errors.py::test_invalid_cypher_syntax_raises_exception
+[gw18] [ 35%] PASSED tests/test_e2e_crud.py::TestVertexCRUD::test_create_vertex_with_nullable_property_omitted
+tests/test_async_e2e_errors.py::test_query_on_non_existent_label
+tests/test_e2e_crud.py::TestVertexCRUD::test_create_multiple_vertices
+[gw14] [ 35%] PASSED tests/test_bulk_writer.py::TestBulkWriter::test_bulk_insert_edges
+[gw11] [ 35%] PASSED tests/test_cypher_features.py::TestAggregations::test_min_max_aggregation
+[gw13] [ 35%] PASSED tests/test_async_e2e_errors.py::test_query_on_non_existent_label
+tests/test_cypher_features.py::TestAggregations::test_group_by_aggregation
+tests/test_bulk_writer.py::TestBulkWriter::test_bulk_writer_abort
+tests/test_e2e_locy.py::test_query_command
+[gw14] [ 35%] PASSED tests/test_bulk_writer.py::TestBulkWriter::test_bulk_writer_abort
+tests/test_e2e_admin.py::test_explain_returns_plan_info
+[gw15] [ 35%] PASSED tests/test_async_e2e_locy.py::test_error_on_invalid_program
+[gw9] [ 36%] PASSED tests/test_e2e_bulk.py::test_bulk_insert_vertices
+tests/test_async_e2e_locy.py::test_derived_facts_structure
+tests/test_e2e_bulk.py::test_bulk_insert_edges
+[gw12] [ 36%] PASSED tests/test_e2e_errors.py::test_bulk_writer_double_commit
+[gw5] [ 36%] PASSED tests/test_builder.py::TestUniBuilderConfiguration::test_cache_size
+tests/test_builder.py::TestUniBuilderConfiguration::test_parallelism
+[gw0] [ 36%] PASSED tests/test_e2e_crud.py::TestMergeOperations::test_merge_vertex_matches_when_exists
+[gw4] [ 36%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[session.fetch_all]
+tests/test_e2e_errors.py::test_bulk_writer_double_abort
+[gw14] [ 36%] PASSED tests/test_e2e_admin.py::test_explain_returns_plan_info
+tests/test_e2e_admin.py::test_profile_returns_results_and_stats
+tests/test_e2e_crud.py::TestMergeOperations::test_merge_edge
+tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[session.profile]
+[gw20] [ 36%] PASSED tests/test_async_e2e_vector.py::test_vector_search_vid_and_distance
+[gw12] [ 36%] PASSED tests/test_e2e_errors.py::test_bulk_writer_double_abort
+tests/test_e2e_errors.py::test_bulk_writer_commit_after_abort
+tests/test_async_e2e_vector.py::test_vector_search_with_k
+[gw6] [ 36%] PASSED tests/test_async_vector.py::test_async_vector_match_attributes
+[gw18] [ 36%] PASSED tests/test_e2e_crud.py::TestVertexCRUD::test_create_multiple_vertices
+tests/test_basic.py::TestUni::test_basic_query
+tests/test_e2e_crud.py::TestVertexCRUD::test_create_company_vertex
+[gw14] [ 36%] PASSED tests/test_e2e_admin.py::test_profile_returns_results_and_stats
+tests/test_e2e_admin.py::test_explain_complex_query
+[gw12] [ 36%] PASSED tests/test_e2e_errors.py::test_bulk_writer_commit_after_abort
+tests/test_e2e_errors.py::test_bulk_writer_abort_after_commit
+[gw19] [ 37%] PASSED tests/test_cypher_features.py::TestPatternMatching::test_relationship_type_filter
+tests/test_cypher_features.py::TestPatternMatching::test_variable_length_path
+[gw14] [ 37%] PASSED tests/test_e2e_admin.py::test_explain_complex_query
+tests/test_e2e_admin.py::test_profile_with_filters
+[gw12] [ 37%] PASSED tests/test_e2e_errors.py::test_bulk_writer_abort_after_commit
+tests/test_e2e_errors.py::test_transaction_rollback_after_commit
+[gw6] [ 37%] PASSED tests/test_basic.py::TestUni::test_basic_query
+tests/test_basic.py::TestUni::test_list_and_map
+[gw5] [ 37%] PASSED tests/test_builder.py::TestUniBuilderConfiguration::test_parallelism
+tests/test_builder.py::TestUniBuilderConfiguration::test_chained_configuration
+[gw12] [ 37%] PASSED tests/test_e2e_errors.py::test_transaction_rollback_after_commit
+[gw11] [ 37%] PASSED tests/test_cypher_features.py::TestAggregations::test_group_by_aggregation
+[gw14] [ 37%] PASSED tests/test_e2e_admin.py::test_profile_with_filters
+tests/test_cypher_features.py::TestOrderingAndLimits::test_order_by_asc
+tests/test_e2e_admin.py::test_explain_on_empty_database
+tests/test_e2e_errors.py::test_transaction_commit_after_rollback
+[gw2] [ 37%] PASSED tests/test_async_e2e_vector.py::test_vector_search_fetch_nodes
+tests/test_async_e2e_vector.py::test_fetch_nodes_returns_properties_and_distance
+[gw6] [ 37%] PASSED tests/test_basic.py::TestUni::test_list_and_map
+tests/test_basic.py::TestUni::test_params
+[gw14] [ 37%] PASSED tests/test_e2e_admin.py::test_explain_on_empty_database
+tests/test_e2e_admin.py::test_profile_on_empty_results
+[gw3] [ 38%] PASSED tests/test_e2e_crud.py::test_underscore_property_reads_back[True-Person]
+[gw12] [ 38%] PASSED tests/test_e2e_errors.py::test_transaction_commit_after_rollback
+tests/test_e2e_crud.py::test_underscore_property_reads_back[True-Loose]
+tests/test_e2e_errors.py::test_empty_cypher_query
+[gw18] [ 38%] PASSED tests/test_e2e_crud.py::TestVertexCRUD::test_create_company_vertex
+[gw12] [ 38%] PASSED tests/test_e2e_errors.py::test_empty_cypher_query
+[gw14] [ 38%] PASSED tests/test_e2e_admin.py::test_profile_on_empty_results
+tests/test_e2e_crud.py::TestEdgeCRUD::test_create_edge_between_vertices
+tests/test_e2e_admin.py::test_database_builder_chaining
+tests/test_e2e_errors.py::test_malformed_property_access
+[gw7] [ 38%] PASSED tests/test_e2e_bulk.py::test_large_batch_insert
+[gw17] [ 38%] PASSED tests/test_async_e2e_queries.py::test_with_clause
+[gw9] [ 38%] PASSED tests/test_e2e_bulk.py::test_bulk_insert_edges
+tests/test_e2e_bulk.py::test_verify_data_correctness_after_bulk_insert
+tests/test_async_e2e_queries.py::test_variable_length_paths
+tests/test_e2e_bulk.py::test_bulk_writer_with_defer_vector_indexes
+[gw6] [ 38%] PASSED tests/test_basic.py::TestUni::test_params
+tests/test_btic.py::TestBticConstruction::test_year
+[gw6] [ 38%] PASSED tests/test_btic.py::TestBticConstruction::test_year
+tests/test_e2e_persistence.py::test_data_persists_across_reopens
+[gw12] [ 38%] PASSED tests/test_e2e_errors.py::test_malformed_property_access
+[gw14] [ 38%] PASSED tests/test_e2e_admin.py::test_database_builder_chaining
+tests/test_e2e_admin.py::test_open_vs_create_vs_open_existing
+tests/test_e2e_locy.py::test_assume_fold_query
+[gw11] [ 39%] PASSED tests/test_cypher_features.py::TestOrderingAndLimits::test_order_by_asc
+tests/test_cypher_features.py::TestOrderingAndLimits::test_order_by_desc
+[gw13] [ 39%] PASSED tests/test_e2e_locy.py::test_query_command
+tests/test_e2e_locy.py::test_recursive_rule
+[gw9] [ 39%] PASSED tests/test_e2e_bulk.py::test_bulk_writer_with_defer_vector_indexes
+tests/test_e2e_bulk.py::test_bulk_writer_with_defer_scalar_indexes
+[gw0] [ 39%] PASSED tests/test_e2e_crud.py::TestMergeOperations::test_merge_edge
+tests/test_e2e_crud.py::TestParameterizedQueries::test_create_with_string_parameter
+[gw19] [ 39%] PASSED tests/test_cypher_features.py::TestPatternMatching::test_variable_length_path
+[gw5] [ 39%] PASSED tests/test_builder.py::TestUniBuilderConfiguration::test_chained_configuration
+tests/test_builder.py::TestBackwardCompatibility::test_database_constructor
+tests/test_cypher_features.py::TestPatternMatching::test_bidirectional_relationship
+[gw15] [ 39%] PASSED tests/test_async_e2e_locy.py::test_derived_facts_structure
+tests/test_async_e2e_locy.py::test_param_binding_query_where
+[gw18] [ 39%] PASSED tests/test_e2e_crud.py::TestEdgeCRUD::test_create_edge_between_vertices
+tests/test_e2e_crud.py::TestEdgeCRUD::test_create_edge_with_properties
+[gw9] [ 39%] PASSED tests/test_e2e_bulk.py::test_bulk_writer_with_defer_scalar_indexes
+tests/test_e2e_bulk.py::test_bulk_writer_with_batch_size
+[gw12] [ 39%] PASSED tests/test_e2e_locy.py::test_assume_fold_query
+tests/test_e2e_locy.py::test_assume_returns_one_result_per_body_command
+[gw11] [ 39%] PASSED tests/test_cypher_features.py::TestOrderingAndLimits::test_order_by_desc
+tests/test_e2e_crud.py::TestQueryOperations::test_match_with_where_clause
+[gw0] [ 39%] PASSED tests/test_e2e_crud.py::TestParameterizedQueries::test_create_with_string_parameter
+[gw6] [ 40%] PASSED tests/test_e2e_persistence.py::test_data_persists_across_reopens
+tests/test_e2e_persistence.py::test_schema_persists_across_reopens
+[gw3] [ 40%] PASSED tests/test_e2e_crud.py::test_underscore_property_reads_back[True-Loose]
+tests/test_e2e_crud.py::TestParameterizedQueries::test_query_with_parameters
+[gw14] [ 40%] PASSED tests/test_e2e_admin.py::test_open_vs_create_vs_open_existing
+tests/test_e2e_locy_derive_visibility.py::test_tx_trailing_cypher_sees_derive_edges
+tests/test_e2e_errors.py::test_invalid_cypher_syntax
+[gw4] [ 40%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[session.profile]
+[gw3] [ 40%] PASSED tests/test_e2e_errors.py::test_invalid_cypher_syntax
+tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[tx.cursor]
+tests/test_e2e_errors.py::test_query_non_existent_label
+[gw3] [ 40%] PASSED tests/test_e2e_errors.py::test_query_non_existent_label
+tests/test_e2e_errors.py::test_type_mismatch_in_property
+[gw9] [ 40%] PASSED tests/test_e2e_bulk.py::test_bulk_writer_with_batch_size
+tests/test_e2e_bulk.py::test_bulk_writer_with_async_indexes
+[gw7] [ 40%] PASSED tests/test_e2e_bulk.py::test_verify_data_correctness_after_bulk_insert
+tests/test_e2e_bulk.py::test_multiple_vertex_labels_in_single_writer
+[gw12] [ 40%] PASSED tests/test_e2e_locy.py::test_assume_returns_one_result_per_body_command
+tests/test_e2e_locy.py::test_assume_rows_and_locy_result_rows_descend_depth_first
+[gw3] [ 40%] PASSED tests/test_e2e_errors.py::test_type_mismatch_in_property
+[gw21] [ 40%] PASSED tests/test_bug_bulk_edge_create_repro.py::test_bug_c_per_row_match_create_in_one_tx_baseline
+tests/test_bug_bulk_edge_create_repro.py::test_bug_c_per_row_match_create_above_suspected_ceiling
+tests/test_e2e_errors.py::test_type_mismatch_string_into_int_field
+[gw0] [ 41%] PASSED tests/test_e2e_crud.py::TestParameterizedQueries::test_query_with_parameters
+tests/test_e2e_crud.py::TestParameterizedQueries::test_create_edge_with_parameters
+[gw11] [ 41%] PASSED tests/test_e2e_crud.py::TestQueryOperations::test_match_with_where_clause
+[gw5] [ 41%] PASSED tests/test_builder.py::TestBackwardCompatibility::test_database_constructor
+tests/test_bulk_commit_outcome.py::test_load_id_and_applied_check_survive_reopen
+tests/test_e2e_crud.py::TestQueryOperations::test_match_return_multiple_properties
+[gw3] [ 41%] PASSED tests/test_e2e_errors.py::test_type_mismatch_string_into_int_field
+[gw14] [ 41%] PASSED tests/test_e2e_locy_derive_visibility.py::test_tx_trailing_cypher_sees_derive_edges
+[gw19] [ 41%] PASSED tests/test_cypher_features.py::TestPatternMatching::test_bidirectional_relationship
+tests/test_e2e_errors.py::test_operations_on_committed_bulk_writer
+tests/test_e2e_locy_derive_visibility.py::test_session_derive_apply_then_query_sees_edges
+[gw18] [ 41%] PASSED tests/test_e2e_crud.py::TestEdgeCRUD::test_create_edge_with_properties
+tests/test_cypher_features.py::TestQuotedIdentifiers::test_escaped_names_round_trip
+[gw17] [ 41%] PASSED tests/test_async_e2e_queries.py::test_variable_length_paths
+tests/test_e2e_crud.py::TestEdgeCRUD::test_create_works_at_edge_with_role
+tests/test_async_e2e_queries.py::test_where_with_logical_operators
+[gw3] [ 41%] PASSED tests/test_e2e_errors.py::test_operations_on_committed_bulk_writer
+tests/test_e2e_errors.py::test_operations_on_aborted_bulk_writer
+[gw20] [ 41%] PASSED tests/test_async_e2e_vector.py::test_vector_search_with_k
+[gw13] [ 41%] PASSED tests/test_e2e_locy.py::test_recursive_rule
+[gw14] [ 41%] PASSED tests/test_e2e_locy_derive_visibility.py::test_session_derive_apply_then_query_sees_edges
+[gw12] [ 42%] PASSED tests/test_e2e_locy.py::test_assume_rows_and_locy_result_rows_descend_depth_first
+[gw9] [ 42%] PASSED tests/test_e2e_bulk.py::test_bulk_writer_with_async_indexes
+tests/test_async_schema_builder.py::TestAsyncDataTypes::test_string_type
+tests/test_e2e_locy_derive_visibility.py::test_session_derive_without_apply_does_not_persist
+tests/test_e2e_locy_derive_visibility.py::test_session_trailing_cypher_sees_derive_edges
+tests/test_e2e_locy.py::test_profile_recursive
+[gw3] [ 42%] PASSED tests/test_e2e_errors.py::test_operations_on_aborted_bulk_writer
+tests/test_e2e_bulk.py::test_bulk_writer_with_all_config_options
+tests/test_e2e_errors.py::test_double_commit_on_transaction
+[gw7] [ 42%] PASSED tests/test_e2e_bulk.py::test_multiple_vertex_labels_in_single_writer
+tests/test_e2e_bulk.py::test_bulk_insert_with_empty_data
+[gw3] [ 42%] PASSED tests/test_e2e_errors.py::test_double_commit_on_transaction
+tests/test_e2e_errors.py::test_double_rollback_on_transaction
+[gw12] [ 42%] PASSED tests/test_e2e_locy_derive_visibility.py::test_session_trailing_cypher_sees_derive_edges
+[gw14] [ 42%] PASSED tests/test_e2e_locy_derive_visibility.py::test_session_derive_without_apply_does_not_persist
+tests/test_e2e_locy_derive_visibility.py::test_session_trailing_cypher_after_derive_counts_edges
+[gw11] [ 42%] PASSED tests/test_e2e_crud.py::TestQueryOperations::test_match_return_multiple_properties
+tests/test_e2e_locy_derive_visibility.py::test_query_after_derive_reads_the_derived_edges[session]
+[gw19] [ 42%] PASSED tests/test_cypher_features.py::TestQuotedIdentifiers::test_escaped_names_round_trip
+tests/test_cypher_features.py::TestQuotedIdentifiers::test_declaring_an_unstorable_property_name_is_refused
+[gw7] [ 42%] PASSED tests/test_e2e_bulk.py::test_bulk_insert_with_empty_data
+tests/test_e2e_crud.py::TestUpdateOperations::test_set_property_on_vertex
+[gw15] [ 42%] PASSED tests/test_async_e2e_locy.py::test_param_binding_query_where
+tests/test_e2e_bulk.py::test_bulk_insert_edges_without_properties
+tests/test_async_e2e_locy.py::test_param_binding_integer
+[gw3] [ 42%] PASSED tests/test_e2e_errors.py::test_double_rollback_on_transaction
+tests/test_e2e_errors.py::test_operations_after_transaction_commit
+[gw2] [ 43%] PASSED tests/test_async_e2e_vector.py::test_fetch_nodes_returns_properties_and_distance
+[gw19] [ 43%] PASSED tests/test_cypher_features.py::TestQuotedIdentifiers::test_declaring_an_unstorable_property_name_is_refused
+tests/test_e2e_admin.py::test_database_builder_temporary
+[gw5] [ 43%] PASSED tests/test_bulk_commit_outcome.py::test_load_id_and_applied_check_survive_reopen
+tests/test_async_e2e_vector.py::test_cosine_metric_index
+tests/test_e2e_indexes.py::test_create_additional_scalar_index
+[gw9] [ 43%] PASSED tests/test_e2e_bulk.py::test_bulk_writer_with_all_config_options
+[gw20] [ 43%] PASSED tests/test_async_schema_builder.py::TestAsyncDataTypes::test_string_type
+[gw12] [ 43%] PASSED tests/test_e2e_locy_derive_visibility.py::test_session_trailing_cypher_after_derive_counts_edges
+[gw0] [ 43%] PASSED tests/test_e2e_crud.py::TestParameterizedQueries::test_create_edge_with_parameters
+[gw14] [ 43%] PASSED tests/test_e2e_locy_derive_visibility.py::test_query_after_derive_reads_the_derived_edges[session]
+tests/test_e2e_bulk.py::test_bulk_stats_attributes
+tests/test_async_schema_builder.py::TestAsyncDataTypes::test_int_type
+tests/test_e2e_locy_derive_visibility.py::test_session_trailing_cypher_joins_derived_and_existing
+[gw6] [ 43%] PASSED tests/test_e2e_persistence.py::test_schema_persists_across_reopens
+tests/test_e2e_locy_derive_visibility.py::test_query_after_derive_reads_the_derived_edges[tx]
+tests/test_e2e_persistence.py::test_indexes_persist_across_reopens
+[gw19] [ 43%] PASSED tests/test_e2e_admin.py::test_database_builder_temporary
+tests/test_e2e_crud.py::TestParameterizedQueries::test_update_with_parameters
+tests/test_e2e_queries.py::TestDistinctAndAliases::test_return_aliases
+[gw3] [ 43%] PASSED tests/test_e2e_errors.py::test_operations_after_transaction_commit
+tests/test_e2e_errors.py::test_operations_after_transaction_rollback
+[gw3] [ 44%] PASSED tests/test_e2e_errors.py::test_operations_after_transaction_rollback
+tests/test_e2e_queries.py::TestOrderingAndLimits::test_order_by_asc
+[gw14] [ 44%] PASSED tests/test_e2e_locy_derive_visibility.py::test_query_after_derive_reads_the_derived_edges[tx]
+tests/test_e2e_locy_derive_visibility.py::test_cypher_write_command_then_query[session]
+[gw12] [ 44%] PASSED tests/test_e2e_locy_derive_visibility.py::test_session_trailing_cypher_joins_derived_and_existing
+tests/test_e2e_locy_derive_visibility.py::test_session_query_then_derive_then_cypher
+[gw18] [ 44%] PASSED tests/test_e2e_crud.py::TestEdgeCRUD::test_create_works_at_edge_with_role
+tests/test_e2e_crud.py::TestQueryOperations::test_match_vertex_by_property
+[gw11] [ 44%] PASSED tests/test_e2e_crud.py::TestUpdateOperations::test_set_property_on_vertex
+[gw20] [ 44%] PASSED tests/test_async_schema_builder.py::TestAsyncDataTypes::test_int_type
+tests/test_e2e_crud.py::TestUpdateOperations::test_set_nullable_property_on_vertex
+[gw2] [ 44%] PASSED tests/test_async_e2e_vector.py::test_cosine_metric_index
+tests/test_async_schema_builder.py::TestAsyncDataTypes::test_float_type
+tests/test_async_e2e_vector.py::test_vector_search_with_graph_traversal
+[gw12] [ 44%] PASSED tests/test_e2e_locy_derive_visibility.py::test_session_query_then_derive_then_cypher
+[gw14] [ 44%] PASSED tests/test_e2e_locy_derive_visibility.py::test_cypher_write_command_then_query[session]
+tests/test_e2e_queries.py::TestParameterizedQueries::test_query_with_int_param
+tests/test_e2e_locy_derive_visibility.py::test_cypher_write_command_then_query[tx]
+[gw7] [ 44%] PASSED tests/test_e2e_bulk.py::test_bulk_insert_edges_without_properties
+tests/test_e2e_crud.py::TestVertexCRUD::test_create_single_vertex_and_read_back
+[gw17] [ 44%] PASSED tests/test_async_e2e_queries.py::test_where_with_logical_operators
+tests/test_async_e2e_queries.py::test_where_with_comparisons
+[gw6] [ 44%] PASSED tests/test_e2e_persistence.py::test_indexes_persist_across_reopens
+tests/test_e2e_persistence.py::test_vector_indexes_persist_across_reopens
+[gw13] [ 45%] PASSED tests/test_e2e_locy.py::test_profile_recursive
+[gw7] [ 45%] PASSED tests/test_e2e_crud.py::TestVertexCRUD::test_create_single_vertex_and_read_back
+tests/test_e2e_locy.py::test_multi_rule_program
+tests/test_e2e_queries.py::TestExplainAndProfile::test_profile_returns_results_and_stats
+[gw18] [ 45%] PASSED tests/test_e2e_crud.py::TestQueryOperations::test_match_vertex_by_property
+[gw4] [ 45%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[tx.cursor]
+tests/test_e2e_locy.py::test_param_binding_with_config
+[gw14] [ 45%] PASSED tests/test_e2e_locy_derive_visibility.py::test_cypher_write_command_then_query[tx]
+tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[tx.execute]
+tests/test_e2e_queries.py::TestAdvancedCypher::test_variable_length_path_1_to_2
+[gw5] [ 45%] PASSED tests/test_e2e_indexes.py::test_create_additional_scalar_index
+[gw9] [ 45%] PASSED tests/test_e2e_bulk.py::test_bulk_stats_attributes
+tests/test_e2e_indexes.py::test_create_additional_vector_index
+tests/test_e2e_bulk.py::test_bulk_writer_abort
+[gw0] [ 45%] PASSED tests/test_e2e_crud.py::TestParameterizedQueries::test_update_with_parameters
+[gw20] [ 45%] PASSED tests/test_async_schema_builder.py::TestAsyncDataTypes::test_float_type
+[gw15] [ 45%] PASSED tests/test_async_e2e_locy.py::test_param_binding_integer
+tests/test_e2e_crud.py::TestParameterizedQueries::test_delete_with_parameters
+tests/test_async_schema_builder.py::TestAsyncDataTypes::test_bool_type
+tests/test_async_e2e_locy.py::test_session_profile
+[gw11] [ 45%] PASSED tests/test_e2e_crud.py::TestUpdateOperations::test_set_nullable_property_on_vertex
+tests/test_e2e_crud.py::TestUpdateOperations::test_set_property_on_edge
+[gw19] [ 46%] PASSED tests/test_e2e_queries.py::TestDistinctAndAliases::test_return_aliases
+tests/test_e2e_queries.py::TestQueryBuilder::test_query_with_param_fetch_all
+[gw6] [ 46%] PASSED tests/test_e2e_persistence.py::test_vector_indexes_persist_across_reopens
+tests/test_e2e_persistence.py::test_multiple_reopen_cycles
+[gw20] [ 46%] PASSED tests/test_async_schema_builder.py::TestAsyncDataTypes::test_bool_type
+tests/test_async_schema_builder.py::TestAsyncSchemaBuilder::test_schema_builder_label
+[gw0] [ 46%] PASSED tests/test_e2e_crud.py::TestParameterizedQueries::test_delete_with_parameters
+tests/test_e2e_crud.py::test_underscore_property_reads_back[False-Person]
+[gw9] [ 46%] PASSED tests/test_e2e_bulk.py::test_bulk_writer_abort
+tests/test_e2e_bulk.py::test_operations_after_abort_raise_error
+[gw7] [ 46%] PASSED tests/test_e2e_queries.py::TestExplainAndProfile::test_profile_returns_results_and_stats
+[gw0] [ 46%] PASSED tests/test_e2e_crud.py::test_underscore_property_reads_back[False-Person]
+tests/test_e2e_crud.py::test_underscore_property_reads_back[False-Loose]
+tests/test_e2e_queries.py::TestExplainAndProfile::test_profile_operator_stats
+[gw9] [ 46%] PASSED tests/test_e2e_bulk.py::test_operations_after_abort_raise_error
+[gw3] [ 46%] PASSED tests/test_e2e_queries.py::TestOrderingAndLimits::test_order_by_asc
+[gw18] [ 46%] PASSED tests/test_e2e_locy.py::test_param_binding_with_config
+[gw12] [ 46%] PASSED tests/test_e2e_queries.py::TestParameterizedQueries::test_query_with_int_param
+tests/test_e2e_persistence.py::test_restore_snapshot_refused_while_forks_exist
+[gw13] [ 46%] PASSED tests/test_e2e_locy.py::test_multi_rule_program
+tests/test_e2e_locy.py::test_mnor_basic
+tests/test_e2e_queries.py::TestParameterizedQueries::test_query_with_multiple_params
+tests/test_e2e_queries.py::TestOrderingAndLimits::test_order_by_desc
+tests/test_e2e_locy.py::test_config_override
+[gw20] [ 47%] PASSED tests/test_async_schema_builder.py::TestAsyncSchemaBuilder::test_schema_builder_label
+[gw17] [ 47%] PASSED tests/test_async_e2e_queries.py::test_where_with_comparisons
+tests/test_async_schema_builder.py::TestAsyncSchemaBuilder::test_schema_builder_edge_type
+[gw14] [ 47%] PASSED tests/test_e2e_queries.py::TestAdvancedCypher::test_variable_length_path_1_to_2
+tests/test_async_e2e_queries.py::test_distinct
+tests/test_e2e_queries.py::TestAdvancedCypher::test_variable_length_path_1_to_3
+[gw0] [ 47%] PASSED tests/test_e2e_crud.py::test_underscore_property_reads_back[False-Loose]
+[gw20] [ 47%] PASSED tests/test_async_schema_builder.py::TestAsyncSchemaBuilder::test_schema_builder_edge_type
+tests/test_e2e_schema.py::test_schema_builder_single_label
+tests/test_async_schema_builder.py::TestAsyncSchemaBuilder::test_schema_builder_label_apply_shortcut
+[gw5] [ 47%] PASSED tests/test_e2e_indexes.py::test_create_additional_vector_index
+[gw18] [ 47%] PASSED tests/test_e2e_locy.py::test_mnor_basic
+[gw20] [ 47%] PASSED tests/test_async_schema_builder.py::TestAsyncSchemaBuilder::test_schema_builder_label_apply_shortcut
+tests/test_e2e_locy.py::test_mprod_basic
+[gw0] [ 47%] PASSED tests/test_e2e_schema.py::test_schema_builder_single_label
+tests/test_e2e_indexes.py::test_indexed_queries_return_correct_results
+tests/test_async_schema_builder.py::TestAsyncSchemaBuilder::test_schema_builder_nullable_property
+tests/test_e2e_schema.py::test_schema_builder_multiple_labels_edge_types
+[gw11] [ 47%] PASSED tests/test_e2e_crud.py::TestUpdateOperations::test_set_property_on_edge
+tests/test_e2e_crud.py::TestDeleteOperations::test_delete_edge
+[gw0] [ 47%] PASSED tests/test_e2e_schema.py::test_schema_builder_multiple_labels_edge_types
+tests/test_e2e_schema.py::test_schema_builder_label_apply_shortcut
+[gw6] [ 47%] PASSED tests/test_e2e_persistence.py::test_multiple_reopen_cycles
+[gw18] [ 48%] PASSED tests/test_e2e_locy.py::test_mprod_basic
+tests/test_e2e_persistence.py::test_relationships_persist_across_reopens
+tests/test_e2e_locy.py::test_is_not_prob_complement
+[gw0] [ 48%] PASSED tests/test_e2e_schema.py::test_schema_builder_label_apply_shortcut
+tests/test_e2e_schema.py::test_schema_builder_nullable_properties
+[gw15] [ 48%] PASSED tests/test_async_e2e_locy.py::test_session_profile
+[gw0] [ 48%] PASSED tests/test_e2e_schema.py::test_schema_builder_nullable_properties
+tests/test_async_e2e_locy.py::test_tx_profile
+[gw4] [ 48%] PASSED tests/test_arm_parity.py::test_every_sync_terminal_runs_under_a_roomy_ceiling[tx.execute]
+tests/test_e2e_schema.py::test_schema_builder_vector_with_index
+[gw19] [ 48%] PASSED tests/test_e2e_queries.py::TestQueryBuilder::test_query_with_param_fetch_all
+tests/test_e2e_rule_durability.py::test_duplicate_registration_is_idempotent
+tests/test_e2e_queries.py::TestQueryBuilder::test_query_with_multiple_params
+[gw0] [ 48%] PASSED tests/test_e2e_schema.py::test_schema_builder_vector_with_index
+[gw20] [ 48%] PASSED tests/test_async_schema_builder.py::TestAsyncSchemaBuilder::test_schema_builder_nullable_property
+tests/test_e2e_schema.py::test_schema_builder_edge_type_with_properties
+tests/test_async_schema_builder.py::TestAsyncSchemaBuilder::test_schema_builder_edge_type_with_properties
+[gw18] [ 48%] PASSED tests/test_e2e_locy.py::test_is_not_prob_complement
+tests/test_e2e_locy.py::test_fold_query_node_properties
+[gw20] [ 48%] PASSED tests/test_async_schema_builder.py::TestAsyncSchemaBuilder::test_schema_builder_edge_type_with_properties
+tests/test_async_sessions.py::test_async_session_set_and_get_variable
+[gw2] [ 48%] PASSED tests/test_async_e2e_vector.py::test_vector_search_with_graph_traversal
+[gw4] [ 49%] PASSED tests/test_e2e_rule_durability.py::test_duplicate_registration_is_idempotent
+tests/test_e2e_rule_durability.py::test_clear_persists_empty
+tests/test_async_e2e_vector.py::test_vector_search_with_filter_expression
+[gw7] [ 49%] PASSED tests/test_e2e_queries.py::TestExplainAndProfile::test_profile_operator_stats
+tests/test_e2e_queries.py::TestEdgeCases::test_empty_result_set
+[gw18] [ 49%] PASSED tests/test_e2e_locy.py::test_fold_query_node_properties
+tests/test_e2e_locy.py::test_composite_key_is_not
+[gw4] [ 49%] PASSED tests/test_e2e_rule_durability.py::test_clear_persists_empty
+tests/test_e2e_rule_durability.py::test_async_db_rules_survive_restart
+[gw12] [ 49%] PASSED tests/test_e2e_queries.py::TestParameterizedQueries::test_query_with_multiple_params
+[gw9] [ 49%] PASSED tests/test_e2e_persistence.py::test_restore_snapshot_refused_while_forks_exist
+tests/test_e2e_queries.py::TestAggregations::test_count_aggregation
+tests/test_e2e_persistence.py::test_admin_procedures_refused_by_query_run_by_run
+[gw5] [ 49%] PASSED tests/test_e2e_indexes.py::test_indexed_queries_return_correct_results
+tests/test_e2e_indexes.py::test_index_on_edge_type_properties
+[gw14] [ 49%] PASSED tests/test_e2e_queries.py::TestAdvancedCypher::test_variable_length_path_1_to_3
+[gw13] [ 49%] PASSED tests/test_e2e_locy.py::test_config_override
+tests/test_e2e_queries.py::TestWhereClause::test_where_and
+[gw4] [ 49%] PASSED tests/test_e2e_rule_durability.py::test_async_db_rules_survive_restart
+[gw17] [ 49%] PASSED tests/test_async_e2e_queries.py::test_distinct
+tests/test_e2e_schema.py::test_create_label_via_builder
+tests/test_e2e_locy.py::test_empty_program_raises
+[gw8] [ 49%] PASSED tests/test_config_merge_and_validation.py::test_lance_cache_caps_reach_the_storage_engine
+tests/test_config_merge_and_validation.py::test_lance_cache_keys_default_to_none
+tests/test_e2e_schema.py::test_get_label_info
+[gw6] [ 50%] PASSED tests/test_e2e_persistence.py::test_relationships_persist_across_reopens
+tests/test_e2e_persistence.py::test_complex_graph_persists
+[gw11] [ 50%] PASSED tests/test_e2e_crud.py::TestDeleteOperations::test_delete_edge
+[gw3] [ 50%] PASSED tests/test_e2e_queries.py::TestOrderingAndLimits::test_order_by_desc
+[gw18] [ 50%] PASSED tests/test_e2e_locy.py::test_composite_key_is_not
+[gw20] [ 50%] PASSED tests/test_async_sessions.py::test_async_session_set_and_get_variable
+tests/test_e2e_locy.py::test_mnor_edge_cases
+tests/test_e2e_crud.py::TestDeleteOperations::test_delete_vertex
+tests/test_e2e_queries.py::TestOrderingAndLimits::test_limit
+tests/test_e2e_schema.py::test_data_type_list_int_e2e
+[gw8] [ 50%] PASSED tests/test_config_merge_and_validation.py::test_lance_cache_keys_default_to_none
+[gw0] [ 50%] PASSED tests/test_e2e_schema.py::test_schema_builder_edge_type_with_properties
+[gw4] [ 50%] PASSED tests/test_e2e_schema.py::test_create_label_via_builder
+tests/test_config_merge_and_validation.py::test_regex_backtrack_limit_raises_the_typed_error
+[gw17] [ 50%] PASSED tests/test_e2e_schema.py::test_get_label_info
+tests/test_e2e_schema.py::test_create_edge_type_via_builder
+tests/test_e2e_schema.py::test_label_exists_edge_type_exists
+tests/test_e2e_schema.py::test_get_schema
+[gw0] [ 50%] PASSED tests/test_e2e_schema.py::test_label_exists_edge_type_exists
+[gw4] [ 50%] PASSED tests/test_e2e_schema.py::test_create_edge_type_via_builder
+tests/test_e2e_schema.py::test_list_labels_list_edge_types
+tests/test_e2e_schema.py::test_add_properties_via_builder
+[gw17] [ 50%] PASSED tests/test_e2e_schema.py::test_get_schema
+[gw18] [ 51%] PASSED tests/test_e2e_locy.py::test_mnor_edge_cases
+tests/test_e2e_sessions.py::test_session_query
+tests/test_e2e_schema.py::test_save_schema_load_schema
+[gw4] [ 51%] PASSED tests/test_e2e_schema.py::test_add_properties_via_builder
+[gw0] [ 51%] PASSED tests/test_e2e_schema.py::test_list_labels_list_edge_types
+tests/test_e2e_schema.py::test_add_nullable_properties_via_builder
+tests/test_e2e_transactions.py::test_multiple_operations_in_one_transaction
+[gw4] [ 51%] PASSED tests/test_e2e_schema.py::test_add_nullable_properties_via_builder
+tests/test_e2e_schema.py::test_add_vector_property_via_builder
+[gw19] [ 51%] PASSED tests/test_e2e_queries.py::TestQueryBuilder::test_query_with_multiple_params
+tests/test_e2e_queries.py::TestQueryBuilder::test_query_with_params_dict
+[gw20] [ 51%] PASSED tests/test_e2e_schema.py::test_data_type_list_int_e2e
+[gw4] [ 51%] PASSED tests/test_e2e_schema.py::test_add_vector_property_via_builder
+tests/test_e2e_schema.py::test_nullable_property_with_null_value_e2e
+tests/test_e2e_schema.py::test_add_list_properties_via_builder
+[gw0] [ 51%] PASSED tests/test_e2e_transactions.py::test_multiple_operations_in_one_transaction
+[gw17] [ 51%] PASSED tests/test_e2e_schema.py::test_save_schema_load_schema
+tests/test_e2e_transactions.py::test_transaction_isolation_changes_visible_inside_tx
+tests/test_e2e_schema.py::test_data_type_string_e2e
+[gw4] [ 51%] PASSED tests/test_e2e_schema.py::test_add_list_properties_via_builder
+tests/test_e2e_transactions.py::test_operations_after_rollback_raise_error
+[gw11] [ 51%] PASSED tests/test_e2e_crud.py::TestDeleteOperations::test_delete_vertex
+[gw0] [ 52%] PASSED tests/test_e2e_transactions.py::test_transaction_isolation_changes_visible_inside_tx
+[gw15] [ 52%] PASSED tests/test_async_e2e_locy.py::test_tx_profile
+tests/test_e2e_transactions.py::test_transaction_commit_makes_changes_visible_outside
+tests/test_e2e_crud.py::TestDeleteOperations::test_delete_vertex_with_cascading_edge_removal
+tests/test_e2e_sessions.py::test_session_execute_delete
+[gw4] [ 52%] PASSED tests/test_e2e_transactions.py::test_operations_after_rollback_raise_error
+tests/test_e2e_transactions.py::test_rollback_after_partial_writes
+[gw12] [ 52%] PASSED tests/test_e2e_queries.py::TestAggregations::test_count_aggregation
+[gw13] [ 52%] PASSED tests/test_e2e_locy.py::test_empty_program_raises
+tests/test_e2e_queries.py::TestAggregations::test_sum_aggregation
+[gw0] [ 52%] PASSED tests/test_e2e_transactions.py::test_transaction_commit_makes_changes_visible_outside
+tests/test_e2e_locy.py::test_error_on_invalid_program
+tests/test_e2e_transactions.py::test_double_commit_raises_error
+[gw7] [ 52%] PASSED tests/test_e2e_queries.py::TestEdgeCases::test_empty_result_set
+[gw5] [ 52%] PASSED tests/test_e2e_indexes.py::test_index_on_edge_type_properties
+tests/test_e2e_queries.py::TestEdgeCases::test_nullable_property_filter
+tests/test_e2e_indexes.py::test_multiple_indexes_same_label
+[gw0] [ 52%] PASSED tests/test_e2e_transactions.py::test_double_commit_raises_error
+[gw20] [ 52%] PASSED tests/test_e2e_schema.py::test_nullable_property_with_null_value_e2e
+tests/test_e2e_transactions.py::test_double_rollback_raises_error
+tests/test_e2e_schema.py::test_multiple_data_types_combined
+[gw17] [ 52%] PASSED tests/test_e2e_schema.py::test_data_type_string_e2e
+tests/test_e2e_schema.py::test_data_type_int_e2e
+[gw0] [ 52%] PASSED tests/test_e2e_transactions.py::test_double_rollback_raises_error
+[gw9] [ 53%] PASSED tests/test_e2e_persistence.py::test_admin_procedures_refused_by_query_run_by_run
+tests/test_e2e_transactions.py::test_operations_after_commit_raise_error
+tests/test_e2e_persistence.py::test_async_session_run_restores
+[gw0] [ 53%] PASSED tests/test_e2e_transactions.py::test_operations_after_commit_raise_error
+tests/test_e2e_vector.py::test_vector_search_empty_results
+[gw14] [ 53%] PASSED tests/test_e2e_queries.py::TestWhereClause::test_where_and
+[gw3] [ 53%] PASSED tests/test_e2e_queries.py::TestOrderingAndLimits::test_limit
+tests/test_e2e_queries.py::TestWhereClause::test_where_or
+[gw4] [ 53%] PASSED tests/test_e2e_transactions.py::test_rollback_after_partial_writes
+[gw0] [ 53%] PASSED tests/test_e2e_vector.py::test_vector_search_empty_results
+tests/test_e2e_queries.py::TestOrderingAndLimits::test_skip_and_limit
+tests/test_e2e_transactions.py::test_tx_execute_builder_profile_returns_execute_result_and_profile
+tests/test_e2e_vector.py::test_vector_search_k_larger_than_dataset
+[gw20] [ 53%] PASSED tests/test_e2e_schema.py::test_multiple_data_types_combined
+[gw4] [ 53%] PASSED tests/test_e2e_transactions.py::test_tx_execute_builder_profile_returns_execute_result_and_profile
+tests/test_e2e_sessions.py::test_session_with_single_variable
+[gw18] [ 53%] PASSED tests/test_e2e_sessions.py::test_session_query
+tests/test_e2e_transactions.py::test_tx_execute_builder_profile_with_params
+[gw6] [ 53%] PASSED tests/test_e2e_persistence.py::test_complex_graph_persists
+tests/test_e2e_sessions.py::test_session_query_with_params
+tests/test_e2e_persistence.py::test_empty_database_persists
+[gw17] [ 53%] PASSED tests/test_e2e_schema.py::test_data_type_int_e2e
+[gw2] [ 53%] PASSED tests/test_async_e2e_vector.py::test_vector_search_with_filter_expression
+[gw19] [ 54%] PASSED tests/test_e2e_queries.py::TestQueryBuilder::test_query_with_params_dict
+tests/test_e2e_schema.py::test_data_type_float_e2e
+tests/test_async_e2e_vector.py::test_vector_search_empty_results
+tests/test_e2e_queries.py::TestQueryBuilder::test_query_with_timeout
+[gw4] [ 54%] PASSED tests/test_e2e_transactions.py::test_tx_execute_builder_profile_with_params
+tests/test_e2e_vector.py::test_basic_vector_search_knn
+[gw2] [ 54%] PASSED tests/test_async_e2e_vector.py::test_vector_search_empty_results
+tests/test_async_e2e_vector.py::test_vector_search_k_larger_than_dataset
+[gw6] [ 54%] PASSED tests/test_e2e_persistence.py::test_empty_database_persists
+tests/test_e2e_persistence.py::test_restore_snapshot_rewinds_data
+[gw8] [ 54%] PASSED tests/test_config_merge_and_validation.py::test_regex_backtrack_limit_raises_the_typed_error
+tests/test_cypher_features.py::TestExplainProfile::test_explain_returns_plan
+[gw5] [ 54%] PASSED tests/test_e2e_indexes.py::test_multiple_indexes_same_label
+[gw17] [ 54%] PASSED tests/test_e2e_schema.py::test_data_type_float_e2e
+tests/test_e2e_indexes.py::test_get_label_info_details
+tests/test_e2e_schema.py::test_data_type_bool_e2e
+[gw12] [ 54%] PASSED tests/test_e2e_queries.py::TestAggregations::test_sum_aggregation
+tests/test_e2e_queries.py::TestAggregations::test_avg_aggregation
+[gw11] [ 54%] PASSED tests/test_e2e_crud.py::TestDeleteOperations::test_delete_vertex_with_cascading_edge_removal
+tests/test_e2e_vector.py::test_vector_search_vid_and_distance
+[gw15] [ 54%] PASSED tests/test_e2e_sessions.py::test_session_execute_delete
+[gw13] [ 54%] PASSED tests/test_e2e_locy.py::test_error_on_invalid_program
+tests/test_e2e_locy.py::test_derived_facts_structure
+tests/test_e2e_sessions.py::test_multiple_independent_sessions
+[gw7] [ 55%] PASSED tests/test_e2e_queries.py::TestEdgeCases::test_nullable_property_filter
+tests/test_e2e_queries.py::TestEdgeCases::test_nullable_property_not_null
+[gw9] [ 55%] PASSED tests/test_e2e_persistence.py::test_async_session_run_restores
+tests/test_e2e_persistence.py::test_delete_snapshot_releases_and_keeps_others
+[gw17] [ 55%] PASSED tests/test_e2e_schema.py::test_data_type_bool_e2e
+[gw5] [ 55%] PASSED tests/test_e2e_indexes.py::test_get_label_info_details
+tests/test_e2e_schema.py::test_data_type_vector_e2e
+tests/test_e2e_locy.py::test_basic_rule_evaluation
+[gw19] [ 55%] PASSED tests/test_e2e_queries.py::TestQueryBuilder::test_query_with_timeout
+[gw18] [ 55%] PASSED tests/test_e2e_sessions.py::test_session_query_with_params
+tests/test_e2e_queries.py::TestQueryBuilder::test_query_with_max_memory
+[gw14] [ 55%] PASSED tests/test_e2e_queries.py::TestWhereClause::test_where_or
+tests/test_e2e_sessions.py::test_session_execute
+[gw20] [ 55%] PASSED tests/test_e2e_sessions.py::test_session_with_single_variable
+tests/test_e2e_queries.py::TestWhereClause::test_where_not
+tests/test_e2e_sessions.py::test_session_with_multiple_variables
+[gw8] [ 55%] PASSED tests/test_cypher_features.py::TestExplainProfile::test_explain_returns_plan
+tests/test_cypher_features.py::TestExplainProfile::test_explain_includes_cost_estimates
+[gw17] [ 55%] PASSED tests/test_e2e_schema.py::test_data_type_vector_e2e
+tests/test_e2e_schema.py::test_data_type_list_string_e2e
+[gw3] [ 55%] PASSED tests/test_e2e_queries.py::TestOrderingAndLimits::test_skip_and_limit
+tests/test_e2e_queries.py::TestAdvancedCypher::test_optional_match
+[gw9] [ 55%] PASSED tests/test_e2e_persistence.py::test_delete_snapshot_releases_and_keeps_others
+tests/test_e2e_persistence.py::test_restore_snapshot_rewinds_the_schema
+[gw15] [ 56%] PASSED tests/test_e2e_sessions.py::test_multiple_independent_sessions
+tests/test_e2e_sessions.py::test_session_with_aggregations
+[gw17] [ 56%] PASSED tests/test_e2e_schema.py::test_data_type_list_string_e2e
+tests/test_fork.py::test_fork_schema_label_strict
+[gw12] [ 56%] PASSED tests/test_e2e_queries.py::TestAggregations::test_avg_aggregation
+tests/test_e2e_queries.py::TestAggregations::test_min_max_aggregation
+[gw4] [ 56%] PASSED tests/test_e2e_vector.py::test_basic_vector_search_knn
+[gw13] [ 56%] PASSED tests/test_e2e_locy.py::test_derived_facts_structure
+[gw0] [ 56%] PASSED tests/test_e2e_vector.py::test_vector_search_k_larger_than_dataset
+[gw8] [ 56%] PASSED tests/test_cypher_features.py::TestExplainProfile::test_explain_includes_cost_estimates
+[gw7] [ 56%] PASSED tests/test_e2e_queries.py::TestEdgeCases::test_nullable_property_not_null
+tests/test_e2e_locy.py::test_param_binding_query_where
+tests/test_e2e_vector.py::test_vector_search_ordered_by_distance
+tests/test_e2e_vector.py::test_vector_search_threshold_excludes_distant_results
+tests/test_cypher_features.py::TestExplainProfile::test_explain_includes_index_usage
+tests/test_e2e_queries.py::TestEdgeCases::test_relationship_property_filter
+[gw6] [ 56%] PASSED tests/test_e2e_persistence.py::test_restore_snapshot_rewinds_data
+tests/test_fork.py::test_nested_fork_chain
+[gw18] [ 56%] PASSED tests/test_e2e_sessions.py::test_session_execute
+tests/test_e2e_sessions.py::test_session_variables_persist_across_queries
+[gw5] [ 56%] PASSED tests/test_e2e_locy.py::test_basic_rule_evaluation
+tests/test_e2e_locy.py::test_stats_returned
+[gw20] [ 57%] PASSED tests/test_e2e_sessions.py::test_session_with_multiple_variables
+tests/test_e2e_sessions.py::test_session_get_nonexistent_returns_none
+[gw19] [ 57%] PASSED tests/test_e2e_queries.py::TestQueryBuilder::test_query_with_max_memory
+[gw14] [ 57%] PASSED tests/test_e2e_queries.py::TestWhereClause::test_where_not
+tests/test_e2e_queries.py::TestExplainAndProfile::test_explain_returns_plan
+[gw11] [ 57%] PASSED tests/test_e2e_vector.py::test_vector_search_vid_and_distance
+tests/test_e2e_queries.py::TestWhereClause::test_where_comparisons
+[gw17] [ 57%] PASSED tests/test_fork.py::test_fork_schema_label_strict
+tests/test_fork.py::test_fork_schema_on_primary_session_errors
+tests/test_e2e_vector.py::test_vector_search_with_k
+[gw2] [ 57%] PASSED tests/test_async_e2e_vector.py::test_vector_search_k_larger_than_dataset
+tests/test_async_e2e_vector.py::test_vector_search_threshold_excludes_distant_results
+[gw17] [ 57%] PASSED tests/test_fork.py::test_fork_schema_on_primary_session_errors
+tests/test_fork.py::test_fork_info_returns_none_for_missing
+[gw17] [ 57%] PASSED tests/test_fork.py::test_fork_info_returns_none_for_missing
+tests/test_fork.py::test_fork_inherits_unflushed_single_node
+[gw15] [ 57%] PASSED tests/test_e2e_sessions.py::test_session_with_aggregations
+[gw3] [ 57%] PASSED tests/test_e2e_queries.py::TestAdvancedCypher::test_optional_match
+tests/test_e2e_queries.py::TestAdvancedCypher::test_union_queries
+[gw9] [ 57%] PASSED tests/test_e2e_persistence.py::test_restore_snapshot_rewinds_the_schema
+tests/test_e2e_persistence.py::test_async_delete_snapshot
+tests/test_e2e_sessions.py::test_session_set_chaining
+[gw8] [ 57%] PASSED tests/test_cypher_features.py::TestExplainProfile::test_explain_includes_index_usage
+tests/test_cypher_features.py::TestExplainProfile::test_profile_returns_results_and_stats
+[gw12] [ 58%] PASSED tests/test_e2e_queries.py::TestAggregations::test_min_max_aggregation
+tests/test_e2e_queries.py::TestAggregations::test_group_by_aggregation
+[gw17] [ 58%] PASSED tests/test_fork.py::test_fork_inherits_unflushed_single_node
+tests/test_fork.py::test_fork_inherits_unflushed_many_nodes
+[gw13] [ 58%] PASSED tests/test_e2e_locy.py::test_param_binding_query_where
+tests/test_e2e_locy.py::test_param_binding_rule_where
+[gw7] [ 58%] PASSED tests/test_e2e_queries.py::TestEdgeCases::test_relationship_property_filter
+tests/test_e2e_queries.py::TestEdgeCases::test_complex_path_pattern
+[gw9] [ 58%] PASSED tests/test_e2e_persistence.py::test_async_delete_snapshot
+tests/test_e2e_queries.py::TestParameterizedQueries::test_query_with_string_param
+[gw5] [ 58%] PASSED tests/test_e2e_locy.py::test_stats_returned
+tests/test_fork.py::test_fork_inherits_unflushed_relationship
+[gw6] [ 58%] PASSED tests/test_fork.py::test_nested_fork_chain
+[gw18] [ 58%] PASSED tests/test_e2e_sessions.py::test_session_variables_persist_across_queries
+tests/test_fork.py::test_drop_fork_refuses_with_children
+[gw16] [ 58%] PASSED tests/test_async_e2e_persistence.py::test_large_dataset_persistence
+tests/test_e2e_sessions.py::test_session_with_complex_types
+tests/test_async_e2e_queries.py::test_parameterized_query_string_param
+[gw20] [ 58%] PASSED tests/test_e2e_sessions.py::test_session_get_nonexistent_returns_none
+tests/test_e2e_vector.py::test_muvera_index_is_hidden_from_user_columns
+[gw17] [ 58%] PASSED tests/test_fork.py::test_fork_inherits_unflushed_many_nodes
+tests/test_fork_diff_promote.py::test_diff_fork_primary_reports_added_rows
+[gw15] [ 58%] PASSED tests/test_e2e_sessions.py::test_session_set_chaining
+tests/test_e2e_sessions.py::test_session_with_relationship_queries
+[gw19] [ 59%] PASSED tests/test_e2e_queries.py::TestExplainAndProfile::test_explain_returns_plan
+[gw0] [ 59%] PASSED tests/test_e2e_vector.py::test_vector_search_threshold_excludes_distant_results
+[gw14] [ 59%] PASSED tests/test_e2e_queries.py::TestWhereClause::test_where_comparisons
+tests/test_e2e_queries.py::TestExplainAndProfile::test_explain_includes_cost_estimates
+tests/test_e2e_vector.py::test_vector_search_chained_constraints
+tests/test_e2e_queries.py::TestDistinctAndAliases::test_distinct
+[gw8] [ 59%] PASSED tests/test_cypher_features.py::TestExplainProfile::test_profile_returns_results_and_stats
+tests/test_cypher_features.py::TestExplainProfile::test_profile_operator_stats
+[gw3] [ 59%] PASSED tests/test_e2e_queries.py::TestAdvancedCypher::test_union_queries
+tests/test_e2e_queries.py::TestAdvancedCypher::test_with_clause
+[gw4] [ 59%] PASSED tests/test_e2e_vector.py::test_vector_search_ordered_by_distance
+tests/test_execute_counters_and_throttle.py::test_uncommitted_writes_in_transaction_is_typed
+[gw4] [ 59%] PASSED tests/test_execute_counters_and_throttle.py::test_uncommitted_writes_in_transaction_is_typed
+[gw20] [ 59%] PASSED tests/test_e2e_vector.py::test_muvera_index_is_hidden_from_user_columns
+tests/test_execute_counters_and_throttle.py::test_write_stalled_with_compaction_disabled
+tests/test_execute_counters_and_throttle.py::test_counters_follow_tck_side_effects
+[gw6] [ 59%] PASSED tests/test_fork.py::test_drop_fork_refuses_with_children
+tests/test_fork.py::test_cascade_subtree_in_use
+[gw17] [ 59%] PASSED tests/test_fork_diff_promote.py::test_diff_fork_primary_reports_added_rows
+tests/test_fork_diff_promote.py::test_diff_forks_between_two_siblings
+[gw20] [ 59%] PASSED tests/test_execute_counters_and_throttle.py::test_counters_follow_tck_side_effects
+tests/test_execute_counters_and_throttle.py::test_throttle_metrics_are_exposed
+[gw20] [ 60%] PASSED tests/test_execute_counters_and_throttle.py::test_throttle_metrics_are_exposed
+tests/test_execute_counters_and_throttle.py::test_edge_endpoint_violation_is_typed
+[gw12] [ 60%] PASSED tests/test_e2e_queries.py::TestAggregations::test_group_by_aggregation
+[gw20] [ 60%] PASSED tests/test_execute_counters_and_throttle.py::test_edge_endpoint_violation_is_typed
+tests/test_execute_counters_and_throttle.py::test_parameter_missing_is_typed
+tests/test_fork_diff_promote.py::test_promote_options_and_conflict_policy
+[gw12] [ 60%] PASSED tests/test_fork_diff_promote.py::test_promote_options_and_conflict_policy
+tests/test_fork_diff_promote.py::test_promote_with_options_reports_new_fields
+[gw8] [ 60%] PASSED tests/test_cypher_features.py::TestExplainProfile::test_profile_operator_stats
+[gw18] [ 60%] PASSED tests/test_e2e_sessions.py::test_session_with_complex_types
+[gw7] [ 60%] PASSED tests/test_e2e_queries.py::TestEdgeCases::test_complex_path_pattern
+[gw13] [ 60%] PASSED tests/test_e2e_locy.py::test_param_binding_rule_where
+tests/test_cypher_features.py::TestQueryWithParameters::test_query_with_string_param
+tests/test_e2e_sessions.py::test_session_execute_update
+tests/test_e2e_queries.py::TestSchemaOnEmptyDb::test_create_and_query_on_empty_db
+[gw2] [ 60%] PASSED tests/test_async_e2e_vector.py::test_vector_search_threshold_excludes_distant_results
+[gw20] [ 60%] PASSED tests/test_execute_counters_and_throttle.py::test_parameter_missing_is_typed
+tests/test_execute_counters_and_throttle.py::test_parameter_missing_names_every_parameter
+tests/test_e2e_locy.py::test_param_binding_integer
+[gw9] [ 60%] PASSED tests/test_e2e_queries.py::TestParameterizedQueries::test_query_with_string_param
+tests/test_async_e2e_vector.py::test_vector_search_chained_constraints
+[gw16] [ 60%] PASSED tests/test_async_e2e_queries.py::test_parameterized_query_string_param
+tests/test_graph_types.py::TestNode::test_node_attributes
+[gw15] [ 61%] PASSED tests/test_e2e_sessions.py::test_session_with_relationship_queries
+tests/test_async_e2e_queries.py::test_parameterized_query_int_param
+tests/test_e2e_sessions.py::test_session_query_returns_empty_list
+[gw9] [ 61%] PASSED tests/test_graph_types.py::TestNode::test_node_attributes
+[gw11] [ 61%] PASSED tests/test_e2e_vector.py::test_vector_search_with_k
+tests/test_graph_types.py::TestNode::test_node_dict_access
+[gw5] [ 61%] PASSED tests/test_fork.py::test_fork_inherits_unflushed_relationship
+tests/test_fork.py::test_fork_with_block_tx_unflushed
+tests/test_e2e_vector.py::test_vector_search_with_threshold
+[gw19] [ 61%] PASSED tests/test_e2e_queries.py::TestExplainAndProfile::test_explain_includes_cost_estimates
+[gw9] [ 61%] PASSED tests/test_graph_types.py::TestNode::test_node_dict_access
+[gw3] [ 61%] PASSED tests/test_e2e_queries.py::TestAdvancedCypher::test_with_clause
+tests/test_graph_types.py::TestNode::test_node_iteration
+tests/test_e2e_queries.py::TestExplainAndProfile::test_explain_includes_index_usage
+tests/test_graph_types.py::TestEdge::test_edge_repr
+[gw20] [ 61%] PASSED tests/test_execute_counters_and_throttle.py::test_parameter_missing_names_every_parameter
+tests/test_graph_types.py::TestPath::test_path_iteration
+[gw7] [ 61%] PASSED tests/test_e2e_queries.py::TestSchemaOnEmptyDb::test_create_and_query_on_empty_db
+tests/test_e2e_rule_durability.py::test_db_rules_survive_restart
+[gw9] [ 61%] PASSED tests/test_graph_types.py::TestNode::test_node_iteration
+[gw4] [ 61%] PASSED tests/test_execute_counters_and_throttle.py::test_write_stalled_with_compaction_disabled
+tests/test_execute_counters_and_throttle.py::test_nested_config_rejects_unknown_keys
+tests/test_graph_types.py::TestNode::test_node_keyerror
+[gw4] [ 61%] PASSED tests/test_execute_counters_and_throttle.py::test_nested_config_rejects_unknown_keys
+tests/test_fork.py::test_fork_basic_create_drop
+[gw14] [ 62%] PASSED tests/test_e2e_queries.py::TestDistinctAndAliases::test_distinct
+tests/test_graph_types.py::TestNode::test_node_bool_always_true
+[gw8] [ 62%] PASSED tests/test_cypher_features.py::TestQueryWithParameters::test_query_with_string_param
+[gw7] [ 62%] PASSED tests/test_e2e_rule_durability.py::test_db_rules_survive_restart
+[gw9] [ 62%] PASSED tests/test_graph_types.py::TestNode::test_node_keyerror
+tests/test_issue_137_vector_dims.py::test_wrong_dim_write_raises
+tests/test_locy_goal_directed.py::test_async_on_mode_omits_rules_only_goals_needed[dict]
+tests/test_graph_types.py::TestNode::test_node_deprecated_keys
+[gw14] [ 62%] PASSED tests/test_graph_types.py::TestNode::test_node_bool_always_true
+tests/test_graph_types.py::TestNode::test_node_id_is_vid
+[gw8] [ 62%] PASSED tests/test_issue_137_vector_dims.py::test_wrong_dim_write_raises
+[gw3] [ 62%] PASSED tests/test_graph_types.py::TestEdge::test_edge_repr
+tests/test_issue_137_vector_dims.py::test_correct_dim_write_and_shutdown_clean
+[gw9] [ 62%] PASSED tests/test_graph_types.py::TestNode::test_node_deprecated_keys
+tests/test_graph_types.py::TestEdge::test_edge_id_is_eid
+tests/test_graph_types.py::TestNode::test_node_equality_and_hash
+[gw17] [ 62%] PASSED tests/test_fork_diff_promote.py::test_diff_forks_between_two_siblings
+tests/test_fork_diff_promote.py::test_promote_inserts_fork_only_vertices
+[gw20] [ 62%] PASSED tests/test_graph_types.py::TestPath::test_path_iteration
+[gw14] [ 62%] PASSED tests/test_graph_types.py::TestNode::test_node_id_is_vid
+tests/test_graph_types.py::TestPath::test_path_index_out_of_range
+tests/test_graph_types.py::TestEdge::test_edge_from_query
+[gw9] [ 63%] PASSED tests/test_graph_types.py::TestNode::test_node_equality_and_hash
+tests/test_graph_types.py::TestNode::test_node_repr
+[gw3] [ 63%] PASSED tests/test_graph_types.py::TestEdge::test_edge_id_is_eid
+tests/test_graph_types.py::TestPath::test_path_from_query
+[gw5] [ 63%] PASSED tests/test_fork.py::test_fork_with_block_tx_unflushed
+tests/test_fork.py::test_parent_writes_after_fork_invisible_no_flush
+[gw14] [ 63%] PASSED tests/test_graph_types.py::TestEdge::test_edge_from_query
+tests/test_graph_types.py::TestEdge::test_edge_attributes
+[gw9] [ 63%] PASSED tests/test_graph_types.py::TestNode::test_node_repr
+[gw20] [ 63%] PASSED tests/test_graph_types.py::TestPath::test_path_index_out_of_range
+tests/test_graph_types.py::TestPath::test_path_repr
+tests/test_locy_goal_directed.py::test_default_reports_off_warnings_once_derived
+[gw3] [ 63%] PASSED tests/test_graph_types.py::TestPath::test_path_from_query
+[gw16] [ 63%] PASSED tests/test_async_e2e_queries.py::test_parameterized_query_int_param
+tests/test_graph_types.py::TestPath::test_path_attributes
+tests/test_async_e2e_queries.py::test_parameterized_query_multiple_params
+[gw12] [ 63%] PASSED tests/test_fork_diff_promote.py::test_promote_with_options_reports_new_fields
+tests/test_fork_diff_promote.py::test_promote_merge_delete_promotion
+[gw14] [ 63%] PASSED tests/test_graph_types.py::TestEdge::test_edge_attributes
+[gw0] [ 63%] PASSED tests/test_e2e_vector.py::test_vector_search_chained_constraints
+tests/test_graph_types.py::TestEdge::test_edge_dict_access
+[gw15] [ 63%] PASSED tests/test_e2e_sessions.py::test_session_query_returns_empty_list
+tests/test_e2e_vector.py::test_vector_search_different_dimensions
+[gw8] [ 64%] PASSED tests/test_issue_137_vector_dims.py::test_correct_dim_write_and_shutdown_clean
+tests/test_e2e_transactions.py::test_begin_and_commit
+[gw20] [ 64%] PASSED tests/test_graph_types.py::TestPath::test_path_repr
+tests/test_issue_137_vector_dims.py::test_wrong_dim_query_raises
+tests/test_graph_types.py::TestMixedReturn::test_mixed_return_types
+[gw13] [ 64%] PASSED tests/test_e2e_locy.py::test_param_binding_integer
+[gw3] [ 64%] PASSED tests/test_graph_types.py::TestPath::test_path_attributes
+tests/test_graph_types.py::TestPath::test_path_len
+[gw18] [ 64%] PASSED tests/test_e2e_sessions.py::test_session_execute_update
+tests/test_locy_goal_directed.py::test_mode_is_case_insensitive[dict]
+tests/test_locy_goal_directed.py::test_answers_equal_across_modes[dict]
+[gw8] [ 64%] PASSED tests/test_issue_137_vector_dims.py::test_wrong_dim_query_raises
+[gw14] [ 64%] PASSED tests/test_graph_types.py::TestEdge::test_edge_dict_access
+tests/test_graph_types.py::TestEdge::test_edge_deprecated_keys
+[gw15] [ 64%] PASSED tests/test_e2e_transactions.py::test_begin_and_commit
+[gw20] [ 64%] PASSED tests/test_graph_types.py::TestMixedReturn::test_mixed_return_types
+tests/test_e2e_transactions.py::test_begin_and_rollback
+[gw19] [ 64%] PASSED tests/test_e2e_queries.py::TestExplainAndProfile::test_explain_includes_index_usage
+tests/test_graph_types.py::TestMixedReturn::test_node_and_scalar_mixed
+[gw3] [ 64%] PASSED tests/test_graph_types.py::TestPath::test_path_len
+tests/test_locy_goal_directed.py::test_unknown_mode_is_rejected[of]
+tests/test_graph_types.py::TestPath::test_path_interleaved_indexing
+[gw14] [ 65%] PASSED tests/test_graph_types.py::TestEdge::test_edge_deprecated_keys
+[gw20] [ 65%] PASSED tests/test_graph_types.py::TestMixedReturn::test_node_and_scalar_mixed
+tests/test_graph_types.py::TestEdge::test_edge_equality_and_hash
+tests/test_locy_runtime_warnings.py::test_ordinary_mode_warns_with_structured_diagnostic
+[gw3] [ 65%] PASSED tests/test_graph_types.py::TestPath::test_path_interleaved_indexing
+[gw5] [ 65%] PASSED tests/test_fork.py::test_parent_writes_after_fork_invisible_no_flush
+tests/test_fork.py::test_fork_the_writing_session_unflushed
+tests/test_locy_timeout_and_refusals.py::test_the_database_default_still_bounds_an_unconfigured_program
+tests/test_issue_137_vector_dims.py::test_redeclare_identical_is_idempotent
+[gw17] [ 65%] PASSED tests/test_fork_diff_promote.py::test_promote_inserts_fork_only_vertices
+tests/test_fork_diff_promote.py::test_promote_pattern_constructors
+[gw17] [ 65%] PASSED tests/test_fork_diff_promote.py::test_promote_pattern_constructors
+tests/test_fork_diff_promote.py::test_promote_edges_lands_both_endpoints_and_edge
+[gw14] [ 65%] PASSED tests/test_graph_types.py::TestEdge::test_edge_equality_and_hash
+[gw19] [ 65%] PASSED tests/test_locy_goal_directed.py::test_unknown_mode_is_rejected[of]
+tests/test_locy_goal_directed.py::test_non_string_mode_is_rejected
+[gw19] [ 65%] PASSED tests/test_locy_goal_directed.py::test_non_string_mode_is_rejected
+tests/test_locy_goal_directed.py::test_tx_locy_builder_honours_the_mode
+tests/test_locy_timeout_and_refusals.py::test_a_locy_timeout_is_uni_timeout_error
+[gw9] [ 65%] PASSED tests/test_locy_goal_directed.py::test_default_reports_off_warnings_once_derived
+[gw8] [ 65%] PASSED tests/test_issue_137_vector_dims.py::test_redeclare_identical_is_idempotent
+tests/test_locy_goal_directed.py::test_async_derived_async_returns_every_rule
+tests/test_issue_137_vector_dims.py::test_redeclare_different_dim_raises
+[gw15] [ 65%] PASSED tests/test_e2e_transactions.py::test_begin_and_rollback
+[gw20] [ 66%] PASSED tests/test_locy_runtime_warnings.py::test_ordinary_mode_warns_with_structured_diagnostic
+tests/test_locy_runtime_warnings.py::test_exact_mode_reports_resolution_as_status
+tests/test_e2e_transactions.py::test_transaction_query_with_parameters
+[gw8] [ 66%] PASSED tests/test_issue_137_vector_dims.py::test_redeclare_different_dim_raises
+[gw2] [ 66%] PASSED tests/test_async_e2e_vector.py::test_vector_search_chained_constraints
+[gw15] [ 66%] PASSED tests/test_e2e_transactions.py::test_transaction_query_with_parameters
+tests/test_neural_classifier.py::test_register_classifier_via_dict_config
+tests/test_async_e2e_vector.py::test_vector_search_different_dimensions
+[gw0] [ 66%] PASSED tests/test_e2e_vector.py::test_vector_search_different_dimensions
+[gw7] [ 66%] PASSED tests/test_locy_goal_directed.py::test_async_on_mode_omits_rules_only_goals_needed[dict]
+tests/test_locy_goal_directed.py::test_async_on_mode_omits_rules_only_goals_needed[object]
+tests/test_e2e_vector.py::test_muvera_index_create_and_query
+[gw20] [ 66%] PASSED tests/test_locy_runtime_warnings.py::test_exact_mode_reports_resolution_as_status
+tests/test_locy_runtime_warnings.py::test_exact_mode_fallback_warns_with_reason_and_limits
+[gw13] [ 66%] PASSED tests/test_locy_goal_directed.py::test_mode_is_case_insensitive[dict]
+tests/test_locy_goal_directed.py::test_mode_is_case_insensitive[object]
+[gw15] [ 66%] PASSED tests/test_neural_classifier.py::test_register_classifier_via_dict_config
+tests/test_neural_classifier.py::test_register_classifier_rejects_non_callable
+[gw15] [ 66%] PASSED tests/test_neural_classifier.py::test_register_classifier_rejects_non_callable
+tests/test_neural_classifier.py::test_dict_form_rejects_non_callable_value
+[gw19] [ 66%] PASSED tests/test_locy_goal_directed.py::test_tx_locy_builder_honours_the_mode
+tests/test_locy_goal_directed.py::test_tx_locy_default_publishes_every_rule
+[gw18] [ 66%] PASSED tests/test_locy_goal_directed.py::test_answers_equal_across_modes[dict]
+tests/test_locy_goal_directed.py::test_answers_equal_across_modes[object]
+[gw5] [ 67%] PASSED tests/test_fork.py::test_fork_the_writing_session_unflushed
+tests/test_issue_137_vector_dims.py::test_bulk_insert_wrong_dim_raises
+tests/test_fork.py::test_nested_unflushed_chain
+[gw15] [ 67%] PASSED tests/test_neural_classifier.py::test_dict_form_rejects_non_callable_value
+tests/test_neural_classifier.py::test_missing_classifier_alias_fails_at_invocation
+[gw11] [ 67%] PASSED tests/test_e2e_vector.py::test_vector_search_with_threshold
+[gw20] [ 67%] PASSED tests/test_locy_runtime_warnings.py::test_exact_mode_fallback_warns_with_reason_and_limits
+[gw16] [ 67%] PASSED tests/test_async_e2e_queries.py::test_parameterized_query_multiple_params
+tests/test_locy_runtime_warnings.py::test_classifier_relation_consumed_through_is
+tests/test_e2e_vector.py::test_vector_search_fetch_nodes
+tests/test_async_e2e_queries.py::test_count_aggregation
+[gw19] [ 67%] PASSED tests/test_locy_goal_directed.py::test_tx_locy_default_publishes_every_rule
+tests/test_locy_goal_directed.py::test_async_answers_equal_across_modes[dict]
+[gw15] [ 67%] PASSED tests/test_neural_classifier.py::test_missing_classifier_alias_fails_at_invocation
+tests/test_planning_and_search_metrics.py::test_ephemeral_id_expressions_use_signed_identity
+[gw20] [ 67%] PASSED tests/test_locy_runtime_warnings.py::test_classifier_relation_consumed_through_is
+tests/test_planning_and_search_metrics.py::test_async_query_metrics
+[gw12] [ 67%] PASSED tests/test_fork_diff_promote.py::test_promote_merge_delete_promotion
+tests/test_fork_index_smoke.py::test_forked_session_query_results_match_primary_plus_fork_writes
+[gw13] [ 67%] PASSED tests/test_locy_goal_directed.py::test_mode_is_case_insensitive[object]
+tests/test_locy_goal_directed.py::test_locy_config_reports_the_mode
+[gw9] [ 67%] PASSED tests/test_locy_goal_directed.py::test_async_derived_async_returns_every_rule
+[gw13] [ 68%] PASSED tests/test_locy_goal_directed.py::test_locy_config_reports_the_mode
+tests/test_locy_goal_directed.py::test_unknown_mode_is_rejected[yes]
+[gw13] [ 68%] PASSED tests/test_locy_goal_directed.py::test_unknown_mode_is_rejected[yes]
+[gw2] [ 68%] PASSED tests/test_async_e2e_vector.py::test_vector_search_different_dimensions
+tests/test_locy_goal_directed.py::test_unknown_mode_is_rejected[]
+tests/test_locy_max_slg_depth_deprecated.py::test_setting_max_slg_depth_in_the_constructor_warns
+[gw9] [ 68%] PASSED tests/test_locy_max_slg_depth_deprecated.py::test_setting_max_slg_depth_in_the_constructor_warns
+[gw13] [ 68%] PASSED tests/test_locy_goal_directed.py::test_unknown_mode_is_rejected[]
+tests/test_locy_max_slg_depth_deprecated.py::test_setting_max_slg_depth_in_a_config_dict_warns
+tests/test_locy_goal_directed.py::test_unknown_mode_is_rejected[magic]
+[gw13] [ 68%] PASSED tests/test_locy_goal_directed.py::test_unknown_mode_is_rejected[magic]
+tests/test_planning_and_search_metrics.py::test_subquery_executions_track_correlation
+[gw14] [ 68%] PASSED tests/test_locy_timeout_and_refusals.py::test_a_locy_timeout_is_uni_timeout_error
+tests/test_plugin_conformance.py::test_rhai_scalar_granted_registers_and_invokes
+tests/test_locy_timeout_and_refusals.py::test_a_locy_memory_refusal_is_uni_memory_limit_exceeded_error
+[gw9] [ 68%] PASSED tests/test_locy_max_slg_depth_deprecated.py::test_setting_max_slg_depth_in_a_config_dict_warns
+tests/test_locy_max_slg_depth_deprecated.py::test_a_config_without_it_does_not_warn
+[gw15] [ 68%] PASSED tests/test_planning_and_search_metrics.py::test_ephemeral_id_expressions_use_signed_identity
+tests/test_planning_and_search_metrics.py::test_declared_procedure_inherits_scan_counters
+[gw13] [ 68%] PASSED tests/test_plugin_conformance.py::test_rhai_scalar_granted_registers_and_invokes
+tests/test_plugin_conformance.py::test_rhai_scalar_denied_does_not_register
+[gw18] [ 68%] PASSED tests/test_locy_goal_directed.py::test_answers_equal_across_modes[object]
+tests/test_locy_goal_directed.py::test_on_mode_omits_rules_only_goals_needed[dict]
+[gw9] [ 68%] PASSED tests/test_locy_max_slg_depth_deprecated.py::test_a_config_without_it_does_not_warn
+tests/test_plugin_conformance.py::test_rhai_projection_scopes_to_labels
+[gw13] [ 69%] PASSED tests/test_plugin_conformance.py::test_rhai_scalar_denied_does_not_register
+tests/test_plugin_conformance.py::test_rhai_algorithm_granted_matches_native
+[gw8] [ 69%] PASSED tests/test_issue_137_vector_dims.py::test_bulk_insert_wrong_dim_raises
+[gw15] [ 69%] PASSED tests/test_planning_and_search_metrics.py::test_declared_procedure_inherits_scan_counters
+tests/test_planning_and_search_metrics.py::test_schemaless_fts_uses_document_statistics
+tests/test_neural_provenance_explain.py::test_neural_provenance_exposed_on_derivations
+[gw17] [ 69%] PASSED tests/test_fork_diff_promote.py::test_promote_edges_lands_both_endpoints_and_edge
+tests/test_neural_classifier.py::test_classifier_exception_surfaces_with_alias
+[gw13] [ 69%] PASSED tests/test_plugin_conformance.py::test_rhai_algorithm_granted_matches_native
+[gw17] [ 69%] PASSED tests/test_neural_classifier.py::test_classifier_exception_surfaces_with_alias
+tests/test_neural_classifier.py::test_classifier_arity_mismatch_surfaces
+[gw7] [ 69%] PASSED tests/test_locy_goal_directed.py::test_async_on_mode_omits_rules_only_goals_needed[object]
+tests/test_plugin_conformance.py::test_rhai_algorithm_denied_does_not_register
+tests/test_locy_goal_directed.py::test_async_default_derived_equals_off
+[gw12] [ 69%] PASSED tests/test_fork_index_smoke.py::test_forked_session_query_results_match_primary_plus_fork_writes
+tests/test_graph_compute_plugin.py::TestGraphComputePlugin::test_guest_algorithm_requires_capability
+[gw3] [ 69%] PASSED tests/test_locy_timeout_and_refusals.py::test_the_database_default_still_bounds_an_unconfigured_program
+tests/test_locy_timeout_and_refusals.py::test_an_explicit_timeout_above_the_database_default_is_honoured
+[gw15] [ 69%] PASSED tests/test_planning_and_search_metrics.py::test_schemaless_fts_uses_document_statistics
+[gw16] [ 69%] PASSED tests/test_async_e2e_queries.py::test_count_aggregation
+tests/test_plugin_conformance.py::test_builtin_gcpagerank_callable_from_python
+[gw17] [ 69%] PASSED tests/test_neural_classifier.py::test_classifier_arity_mismatch_surfaces
+tests/test_neural_classifier.py::test_classifier_nan_output_surfaces
+tests/test_async_e2e_queries.py::test_sum_aggregation
+[gw13] [ 70%] PASSED tests/test_plugin_conformance.py::test_rhai_algorithm_denied_does_not_register
+[gw18] [ 70%] PASSED tests/test_locy_goal_directed.py::test_on_mode_omits_rules_only_goals_needed[dict]
+tests/test_plugin_conformance.py::test_rhai_property_tensor_not_projected_errors
+tests/test_locy_goal_directed.py::test_on_mode_omits_rules_only_goals_needed[object]
+[gw5] [ 70%] PASSED tests/test_fork.py::test_nested_unflushed_chain
+tests/test_fork.py::test_fork_matches_target_endpoint_label_schemaless
+[gw17] [ 70%] PASSED tests/test_neural_classifier.py::test_classifier_nan_output_surfaces
+tests/test_neural_classifier.py::test_classifier_out_of_range_output_surfaces
+[gw12] [ 70%] PASSED tests/test_graph_compute_plugin.py::TestGraphComputePlugin::test_guest_algorithm_requires_capability
+tests/test_graph_compute_plugin.py::TestGraphComputePlugin::test_guest_ppr_registers_and_matches_native
+[gw15] [ 70%] PASSED tests/test_plugin_conformance.py::test_builtin_gcpagerank_callable_from_python
+tests/test_plugin_conformance.py::test_pyo3_aggregate_granted_registers
+[gw19] [ 70%] PASSED tests/test_locy_goal_directed.py::test_async_answers_equal_across_modes[dict]
+tests/test_locy_goal_directed.py::test_async_answers_equal_across_modes[object]
+[gw15] [ 70%] PASSED tests/test_plugin_conformance.py::test_pyo3_aggregate_granted_registers
+[gw8] [ 70%] PASSED tests/test_neural_provenance_explain.py::test_neural_provenance_exposed_on_derivations
+tests/test_neural_provenance_explain.py::test_scalar_int_yield_column_is_not_enriched_to_node
+tests/test_plugin_conformance.py::test_pyo3_aggregate_denied_does_not_register
+[gw0] [ 70%] PASSED tests/test_e2e_vector.py::test_muvera_index_create_and_query
+tests/test_planning_and_search_metrics.py::test_vector_search_reports_through_python
+[gw15] [ 70%] PASSED tests/test_plugin_conformance.py::test_pyo3_aggregate_denied_does_not_register
+[gw2] [ 71%] PASSED tests/test_planning_and_search_metrics.py::test_subquery_executions_track_correlation
+[gw17] [ 71%] PASSED tests/test_neural_classifier.py::test_classifier_out_of_range_output_surfaces
+tests/test_neural_classifier.py::test_multiple_classifiers_register_independently
+tests/test_plugin_conformance.py::test_pyo3_aggregate_invokes_through_cypher
+[gw14] [ 71%] PASSED tests/test_locy_timeout_and_refusals.py::test_a_locy_memory_refusal_is_uni_memory_limit_exceeded_error
+tests/test_locy_timeout_and_refusals.py::test_a_broken_program_is_still_uni_query_error
+tests/test_planning_and_search_metrics.py::test_shortest_path_searches_count_sources
+[gw14] [ 71%] PASSED tests/test_locy_timeout_and_refusals.py::test_a_broken_program_is_still_uni_query_error
+[gw12] [ 71%] PASSED tests/test_graph_compute_plugin.py::TestGraphComputePlugin::test_guest_ppr_registers_and_matches_native
+tests/test_graph_types.py::TestNode::test_node_from_query
+tests/test_neural_classifier.py::test_register_classifier_via_method_then_run_locy
+[gw20] [ 71%] PASSED tests/test_planning_and_search_metrics.py::test_async_query_metrics
+[gw15] [ 71%] PASSED tests/test_plugin_conformance.py::test_pyo3_aggregate_invokes_through_cypher
+[gw8] [ 71%] PASSED tests/test_neural_provenance_explain.py::test_scalar_int_yield_column_is_not_enriched_to_node
+tests/test_neural_provenance_explain.py::test_edge_binding_where_filter_works_via_mode_a
+tests/test_planning_and_search_metrics.py::test_async_profile_reports_planning
+tests/test_plugin_conformance.py::test_pyo3_procedure_granted_registers_and_invokes
+[gw9] [ 71%] PASSED tests/test_plugin_conformance.py::test_rhai_projection_scopes_to_labels
+[gw7] [ 71%] PASSED tests/test_locy_goal_directed.py::test_async_default_derived_equals_off
+[gw12] [ 71%] PASSED tests/test_graph_types.py::TestNode::test_node_from_query
+[gw15] [ 71%] PASSED tests/test_plugin_conformance.py::test_pyo3_procedure_granted_registers_and_invokes
+tests/test_plugin_conformance.py::test_rhai_projection_binds_edge_weight_property
+tests/test_locy_goal_directed.py::test_async_unknown_mode_is_rejected
+tests/test_probe.py::test_probe_returns_required_keys
+[gw17] [ 72%] PASSED tests/test_neural_classifier.py::test_multiple_classifiers_register_independently
+[gw15] [ 72%] PASSED tests/test_probe.py::test_probe_returns_required_keys
+tests/test_probe.py::test_probe_always_checks_extension
+tests/test_plugin_conformance.py::test_wasm_scalar_denied_blocks[extism-geo]
+tests/test_plugin_conformance.py::test_wasm_algorithm_denied_blocks[extism-graph]
+[gw15] [ 72%] PASSED tests/test_probe.py::test_probe_always_checks_extension
+[gw12] [ 72%] SKIPPED tests/test_plugin_conformance.py::test_wasm_algorithm_denied_blocks[extism-graph]
+tests/test_plugin_conformance.py::test_wasm_hostfn_network_gates_load[wasm-net]
+[gw17] [ 72%] SKIPPED tests/test_plugin_conformance.py::test_wasm_scalar_denied_blocks[extism-geo]
+tests/test_plugin_conformance.py::test_wasm_algorithm_granted_matches_native[wasm-graph]
+tests/test_probe.py::test_probe_checks_have_required_keys
+[gw15] [ 72%] PASSED tests/test_probe.py::test_probe_checks_have_required_keys
+[gw12] [ 72%] SKIPPED tests/test_plugin_conformance.py::test_wasm_hostfn_network_gates_load[wasm-net]
+tests/test_plugin_conformance.py::test_wasm_hostfn_network_gates_load[extism-net]
+[gw12] [ 72%] SKIPPED tests/test_plugin_conformance.py::test_wasm_hostfn_network_gates_load[extism-net]
+tests/test_probe.py::test_format_report_includes_variant_and_platform
+[gw17] [ 72%] SKIPPED tests/test_plugin_conformance.py::test_wasm_algorithm_granted_matches_native[wasm-graph]
+tests/test_plugin_conformance.py::test_wasm_algorithm_granted_matches_native[extism-graph]
+[gw17] [ 72%] SKIPPED tests/test_plugin_conformance.py::test_wasm_algorithm_granted_matches_native[extism-graph]
+[gw15] [ 72%] PASSED tests/test_probe.py::test_format_report_includes_variant_and_platform
+tests/test_probe.py::test_format_report_marks_each_check_with_status
+tests/test_plugin_conformance.py::test_rhai_strict_grant_rejects_non_grantable[Auth]
+[gw15] [ 73%] PASSED tests/test_probe.py::test_format_report_marks_each_check_with_status
+tests/test_probe.py::test_detect_metal_off_macos_returns_na
+tests/test_plugin_conformance.py::test_wasm_algorithm_denied_blocks[wasm-graph]
+[gw15] [ 73%] PASSED tests/test_probe.py::test_detect_metal_off_macos_returns_na
+tests/test_probe.py::test_recommend_per_host_profile[Darwin-arm64-False-uni-db-metal]
+[gw17] [ 73%] SKIPPED tests/test_plugin_conformance.py::test_wasm_algorithm_denied_blocks[wasm-graph]
+tests/test_probe.py::test_recommend_per_host_profile[Windows-x86_64-True-uni-db-cuda]
+[gw15] [ 73%] PASSED tests/test_probe.py::test_recommend_per_host_profile[Darwin-arm64-False-uni-db-metal]
+tests/test_probe.py::test_recommend_per_host_profile[Darwin-aarch64-False-uni-db-metal]
+[gw17] [ 73%] PASSED tests/test_probe.py::test_recommend_per_host_profile[Windows-x86_64-True-uni-db-cuda]
+tests/test_probe.py::test_recommend_per_host_profile[Windows-x86_64-False-uni-db]
+[gw15] [ 73%] PASSED tests/test_probe.py::test_recommend_per_host_profile[Darwin-aarch64-False-uni-db-metal]
+tests/test_property_name_collision.py::test_colliding_property_names_reach_python[flushed]
+[gw12] [ 73%] PASSED tests/test_plugin_conformance.py::test_rhai_strict_grant_rejects_non_grantable[Auth]
+tests/test_probe.py::test_recommend_per_host_profile[Darwin-x86_64-False-uni-db]
+[gw8] [ 73%] PASSED tests/test_neural_provenance_explain.py::test_edge_binding_where_filter_works_via_mode_a
+tests/test_planning_and_search_metrics.py::test_query_metrics_count_physical_planning
+[gw12] [ 73%] PASSED tests/test_probe.py::test_recommend_per_host_profile[Darwin-x86_64-False-uni-db]
+tests/test_probe.py::test_recommend_per_host_profile[Linux-x86_64-True-uni-db-cuda]
+[gw12] [ 73%] PASSED tests/test_probe.py::test_recommend_per_host_profile[Linux-x86_64-True-uni-db-cuda]
+tests/test_probe.py::test_recommend_per_host_profile[Linux-x86_64-False-uni-db]
+[gw12] [ 73%] PASSED tests/test_probe.py::test_recommend_per_host_profile[Linux-x86_64-False-uni-db]
+tests/test_probe.py::test_recommend_per_host_profile[Linux-aarch64-False-uni-db]
+[gw17] [ 73%] PASSED tests/test_probe.py::test_recommend_per_host_profile[Windows-x86_64-False-uni-db]
+tests/test_property_name_collision.py::test_colliding_property_names_reach_python[l0]
+[gw12] [ 74%] PASSED tests/test_probe.py::test_recommend_per_host_profile[Linux-aarch64-False-uni-db]
+tests/test_python_plugin.py::TestPythonPluginDecorator::test_multiple_scalars_in_one_finalize
+[gw18] [ 74%] PASSED tests/test_locy_goal_directed.py::test_on_mode_omits_rules_only_goals_needed[object]
+tests/test_locy_goal_directed.py::test_default_derived_equals_off
+[gw12] [ 74%] PASSED tests/test_python_plugin.py::TestPythonPluginDecorator::test_multiple_scalars_in_one_finalize
+tests/test_python_plugin.py::TestPythonPluginDecorator::test_scalar_fn_decorator_registers_and_invokes
+[gw14] [ 74%] PASSED tests/test_neural_classifier.py::test_register_classifier_via_method_then_run_locy
+tests/test_plugin_conformance.py::test_rhai_strict_grant_rejects_non_grantable[MemoryBytes]
+[gw13] [ 74%] PASSED tests/test_plugin_conformance.py::test_rhai_property_tensor_not_projected_errors
+[gw11] [ 74%] PASSED tests/test_e2e_vector.py::test_vector_search_fetch_nodes
+tests/test_plugin_conformance.py::test_rhai_projection_cypher_graphref
+[gw14] [ 74%] PASSED tests/test_plugin_conformance.py::test_rhai_strict_grant_rejects_non_grantable[MemoryBytes]
+tests/test_e2e_vector.py::test_fetch_nodes_returns_properties_and_distance
+tests/test_plugin_conformance.py::test_rhai_strict_grant_rejects_non_grantable[NotARealCapability]
+[gw7] [ 74%] PASSED tests/test_locy_goal_directed.py::test_async_unknown_mode_is_rejected
+[gw12] [ 74%] PASSED tests/test_python_plugin.py::TestPythonPluginDecorator::test_scalar_fn_decorator_registers_and_invokes
+tests/test_python_plugin.py::TestPythonPluginSessionIsolation::test_session_scoped_plugin_invisible_to_other_session
+tests/test_locy_goal_directed.py::test_async_tx_locy_builder_honours_the_mode
+[gw17] [ 74%] PASSED tests/test_property_name_collision.py::test_colliding_property_names_reach_python[l0]
+tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_fetch_all
+[gw14] [ 74%] PASSED tests/test_plugin_conformance.py::test_rhai_strict_grant_rejects_non_grantable[NotARealCapability]
+tests/test_probe.py::test_variant_classifier_cuda
+[gw14] [ 74%] PASSED tests/test_probe.py::test_variant_classifier_cuda
+tests/test_probe.py::test_variant_classifier_metal
+[gw14] [ 75%] PASSED tests/test_probe.py::test_variant_classifier_metal
+tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_context_manager
+[gw5] [ 75%] PASSED tests/test_fork.py::test_fork_matches_target_endpoint_label_schemaless
+tests/test_fork_diff_promote.py::test_diff_fork_primary_empty_on_fresh_fork
+[gw12] [ 75%] PASSED tests/test_python_plugin.py::TestPythonPluginSessionIsolation::test_session_scoped_plugin_invisible_to_other_session
+tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_iterator
+[gw18] [ 75%] PASSED tests/test_locy_goal_directed.py::test_default_derived_equals_off
+tests/test_locy_goal_directed.py::test_default_derives_left_out_rules_in_the_evaluated_snapshot
+[gw16] [ 75%] PASSED tests/test_async_e2e_queries.py::test_sum_aggregation
+tests/test_async_e2e_queries.py::test_avg_aggregation
+[gw19] [ 75%] PASSED tests/test_locy_goal_directed.py::test_async_answers_equal_across_modes[object]
+tests/test_plugin_conformance.py::test_pyo3_procedure_denied_does_not_register
+[gw19] [ 75%] PASSED tests/test_plugin_conformance.py::test_pyo3_procedure_denied_does_not_register
+[gw2] [ 75%] PASSED tests/test_planning_and_search_metrics.py::test_shortest_path_searches_count_sources
+tests/test_plugin_conformance.py::test_wasm_scalar_granted_registers_and_invokes[wasm-geo]
+[gw19] [ 75%] SKIPPED tests/test_plugin_conformance.py::test_wasm_scalar_granted_registers_and_invokes[wasm-geo]
+tests/test_plugin_conformance.py::test_wasm_scalar_granted_registers_and_invokes[extism-geo]
+[gw19] [ 75%] SKIPPED tests/test_plugin_conformance.py::test_wasm_scalar_granted_registers_and_invokes[extism-geo]
+tests/test_planning_and_search_metrics.py::test_shortest_path_adjacency_reads_bounded_by_the_search
+tests/test_plugin_conformance.py::test_wasm_scalar_denied_blocks[wasm-geo]
+[gw19] [ 75%] SKIPPED tests/test_plugin_conformance.py::test_wasm_scalar_denied_blocks[wasm-geo]
+tests/test_repro_convert_correctness.py::test_unsupported_param_type_raises[value0]
+[gw20] [ 76%] PASSED tests/test_planning_and_search_metrics.py::test_async_profile_reports_planning
+[gw9] [ 76%] PASSED tests/test_plugin_conformance.py::test_rhai_projection_binds_edge_weight_property
+tests/test_planning_and_search_metrics.py::test_async_execute_result_metrics_dict
+[gw19] [ 76%] PASSED tests/test_repro_convert_correctness.py::test_unsupported_param_type_raises[value0]
+tests/test_repro_convert_correctness.py::test_unsupported_param_type_raises[value1]
+tests/test_plugin_conformance.py::test_native_gcpagerank_honors_projection_config
+[gw7] [ 76%] PASSED tests/test_locy_goal_directed.py::test_async_tx_locy_builder_honours_the_mode
+[gw8] [ 76%] PASSED tests/test_planning_and_search_metrics.py::test_query_metrics_count_physical_planning
+tests/test_locy_goal_directed.py::test_async_tx_locy_default_publishes_every_rule
+[gw19] [ 76%] PASSED tests/test_repro_convert_correctness.py::test_unsupported_param_type_raises[value1]
+tests/test_python_plugin.py::TestPythonPluginSourceLoad::test_load_python_plugin_rejects_bad_module
+tests/test_repro_convert_correctness.py::test_unsupported_param_type_raises[value2]
+[gw15] [ 76%] PASSED tests/test_property_name_collision.py::test_colliding_property_names_reach_python[flushed]
+tests/test_property_name_collision.py::test_copy_to_csv_carries_undeclared_properties
+[gw19] [ 76%] PASSED tests/test_repro_convert_correctness.py::test_unsupported_param_type_raises[value2]
+tests/test_repro_gil_mutex_deadlocks.py::test_commit_stream_close_during_iteration_no_deadlock
+[gw8] [ 76%] PASSED tests/test_python_plugin.py::TestPythonPluginSourceLoad::test_load_python_plugin_rejects_bad_module
+tests/test_python_plugin.py::TestPythonPluginSourceLoad::test_load_python_plugin_returns_metadata
+[gw8] [ 76%] PASSED tests/test_python_plugin.py::TestPythonPluginSourceLoad::test_load_python_plugin_returns_metadata
+[gw15] [ 76%] PASSED tests/test_property_name_collision.py::test_copy_to_csv_carries_undeclared_properties
+tests/test_python_plugin.py::TestPythonPluginDecorator::test_finalize_plugin_with_no_decorators_errors
+tests/test_python_plugin.py::TestPythonPluginSourceLoad::test_load_python_plugin_invokable_through_cypher
+[gw8] [ 76%] PASSED tests/test_python_plugin.py::TestPythonPluginDecorator::test_finalize_plugin_with_no_decorators_errors
+tests/test_repro_prepared_locy_repr_panic.py::test_prepared_locy_repr_no_truncation_for_short_program
+[gw15] [ 77%] PASSED tests/test_python_plugin.py::TestPythonPluginSourceLoad::test_load_python_plugin_invokable_through_cypher
+tests/test_repro_xervo_role_mapping.py::test_unknown_role_is_rejected[tool]
+[gw15] [ 77%] PASSED tests/test_repro_xervo_role_mapping.py::test_unknown_role_is_rejected[tool]
+tests/test_repro_xervo_role_mapping.py::test_unknown_role_is_rejected[ user]
+[gw13] [ 77%] PASSED tests/test_plugin_conformance.py::test_rhai_projection_cypher_graphref
+[gw8] [ 77%] PASSED tests/test_repro_prepared_locy_repr_panic.py::test_prepared_locy_repr_no_truncation_for_short_program
+tests/test_repro_xervo_role_mapping.py::test_valid_role_reaches_runtime_and_fails_on_no_model
+tests/test_plugin_conformance.py::test_rhai_projection_named_graphref
+[gw18] [ 77%] PASSED tests/test_locy_goal_directed.py::test_default_derives_left_out_rules_in_the_evaluated_snapshot
+[gw8] [ 77%] PASSED tests/test_repro_xervo_role_mapping.py::test_valid_role_reaches_runtime_and_fails_on_no_model
+tests/test_repro_xervo_role_mapping.py::test_unknown_role_is_rejected[System]
+tests/test_query_cursor.py::TestAsyncQueryCursor::test_async_cursor_fetch_many
+[gw15] [ 77%] PASSED tests/test_repro_xervo_role_mapping.py::test_unknown_role_is_rejected[ user]
+tests/test_repro_xervo_role_mapping.py::test_unknown_role_is_rejected[USER]
+[gw14] [ 77%] PASSED tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_context_manager
+[gw8] [ 77%] PASSED tests/test_repro_xervo_role_mapping.py::test_unknown_role_is_rejected[System]
+tests/test_repro_xervo_role_mapping.py::test_unknown_role_is_rejected[human]
+tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_empty_result
+[gw17] [ 77%] PASSED tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_fetch_all
+tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_fetch_one
+[gw5] [ 77%] PASSED tests/test_fork_diff_promote.py::test_diff_fork_primary_empty_on_fresh_fork
+tests/test_query_cursor.py::TestSyncQueryCursor::test_query_builder_cursor
+[gw2] [ 77%] PASSED tests/test_planning_and_search_metrics.py::test_shortest_path_adjacency_reads_bounded_by_the_search
+[gw20] [ 78%] PASSED tests/test_planning_and_search_metrics.py::test_async_execute_result_metrics_dict
+[gw12] [ 78%] PASSED tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_iterator
+tests/test_planning_and_search_metrics.py::test_shortest_path_searches_zero_without_shortest_path
+[gw15] [ 78%] PASSED tests/test_repro_xervo_role_mapping.py::test_unknown_role_is_rejected[USER]
+tests/test_retry.py::test_bare_conflict_raises_transaction_conflict
+tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_columns
+tests/test_planning_and_search_metrics.py::test_async_locy_profile_iterations_carry_planning
+[gw8] [ 78%] PASSED tests/test_repro_xervo_role_mapping.py::test_unknown_role_is_rejected[human]
+[gw16] [ 78%] PASSED tests/test_async_e2e_queries.py::test_avg_aggregation
+tests/test_retry.py::test_retriable_exceptions_exported
+[gw8] [ 78%] PASSED tests/test_retry.py::test_retriable_exceptions_exported
+tests/test_retry.py::test_non_retriable_error_propagates_immediately
+[gw7] [ 78%] PASSED tests/test_locy_goal_directed.py::test_async_tx_locy_default_publishes_every_rule
+tests/test_query_cursor.py::TestAsyncQueryCursor::test_async_query_builder_cursor
+tests/test_repro_convert_correctness.py::test_tz_aware_time_converts
+[gw9] [ 78%] PASSED tests/test_plugin_conformance.py::test_native_gcpagerank_honors_projection_config
+tests/test_plugin_conformance.py::test_rhai_node_and_edge_property_tensors
+[gw15] [ 78%] PASSED tests/test_retry.py::test_bare_conflict_raises_transaction_conflict
+[gw0] [ 78%] PASSED tests/test_planning_and_search_metrics.py::test_vector_search_reports_through_python
+tests/test_retry.py::test_transact_with_retry_single_thread
+tests/test_planning_and_search_metrics.py::test_execute_result_metrics_dict_matches_the_class
+[gw7] [ 78%] PASSED tests/test_repro_convert_correctness.py::test_tz_aware_time_converts
+tests/test_repro_convert_correctness.py::test_datetime_microsecond_precision_exact
+[gw8] [ 79%] PASSED tests/test_retry.py::test_non_retriable_error_propagates_immediately
+[gw7] [ 79%] PASSED tests/test_repro_convert_correctness.py::test_datetime_microsecond_precision_exact
+tests/test_retry.py::test_execute_with_retry
+tests/test_repro_gil_mutex_deadlocks.py::test_prepared_query_shared_across_threads_no_deadlock
+[gw11] [ 79%] PASSED tests/test_e2e_vector.py::test_fetch_nodes_returns_properties_and_distance
+tests/test_e2e_vector.py::test_cosine_metric_index
+[gw2] [ 79%] PASSED tests/test_planning_and_search_metrics.py::test_shortest_path_searches_zero_without_shortest_path
+tests/test_planning_and_search_metrics.py::test_lance_iops_count_flushed_reads
+[gw13] [ 79%] PASSED tests/test_plugin_conformance.py::test_rhai_projection_named_graphref
+[gw15] [ 79%] PASSED tests/test_retry.py::test_transact_with_retry_single_thread
+[gw8] [ 79%] PASSED tests/test_retry.py::test_execute_with_retry
+tests/test_plugin_conformance.py::test_pyo3_scalar_source_load_invokes
+tests/test_rhai_plugin.py::TestRhaiPlugin::test_load_rhai_plugin_rejects_bad_grant
+tests/test_retry.py::test_prepared_execute_preserves_typed_uni_error
+[gw8] [ 79%] PASSED tests/test_rhai_plugin.py::TestRhaiPlugin::test_load_rhai_plugin_rejects_bad_grant
+tests/test_rhai_plugin.py::TestRhaiPlugin::test_load_rhai_plugin_rejects_bad_script
+[gw15] [ 79%] PASSED tests/test_retry.py::test_prepared_execute_preserves_typed_uni_error
+tests/test_rhai_plugin.py::TestRhaiPlugin::test_load_rhai_plugin_explicit_grants
+[gw13] [ 79%] PASSED tests/test_plugin_conformance.py::test_pyo3_scalar_source_load_invokes
+[gw18] [ 79%] PASSED tests/test_query_cursor.py::TestAsyncQueryCursor::test_async_cursor_fetch_many
+tests/test_schema_builder.py::TestSchemaBuilder::test_edge_type_builder
+[gw9] [ 79%] PASSED tests/test_plugin_conformance.py::test_rhai_node_and_edge_property_tensors
+tests/test_query_cursor.py::TestAsyncQueryCursor::test_async_cursor_async_for
+[gw17] [ 80%] PASSED tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_fetch_one
+[gw14] [ 80%] PASSED tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_empty_result
+[gw8] [ 80%] PASSED tests/test_rhai_plugin.py::TestRhaiPlugin::test_load_rhai_plugin_rejects_bad_script
+tests/test_schema_builder.py::TestSchemaQueries::test_label_exists
+tests/test_retry.py::test_async_transact_with_retry
+tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_with_params
+[gw11] [ 80%] PASSED tests/test_e2e_vector.py::test_cosine_metric_index
+tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_fetch_many
+[gw13] [ 80%] PASSED tests/test_schema_builder.py::TestSchemaBuilder::test_edge_type_builder
+tests/test_e2e_vector.py::test_vector_search_with_graph_traversal
+tests/test_schema_builder.py::TestSchemaBuilder::test_chained_schema_building
+[gw0] [ 80%] PASSED tests/test_planning_and_search_metrics.py::test_execute_result_metrics_dict_matches_the_class
+[gw8] [ 80%] PASSED tests/test_schema_builder.py::TestSchemaQueries::test_label_exists
+tests/test_schema_builder.py::TestSchemaQueries::test_edge_type_exists
+tests/test_planning_and_search_metrics.py::test_profile_reports_planning
+[gw15] [ 80%] PASSED tests/test_rhai_plugin.py::TestRhaiPlugin::test_load_rhai_plugin_explicit_grants
+tests/test_schema_builder.py::TestSchemaQueries::test_list_labels
+[gw13] [ 80%] PASSED tests/test_schema_builder.py::TestSchemaBuilder::test_chained_schema_building
+[gw12] [ 80%] PASSED tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_columns
+tests/test_schema_builder.py::TestDataTypes::test_bool_type
+tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_close
+[gw9] [ 80%] PASSED tests/test_retry.py::test_async_transact_with_retry
+[gw15] [ 80%] PASSED tests/test_schema_builder.py::TestSchemaQueries::test_list_labels
+[gw8] [ 81%] PASSED tests/test_schema_builder.py::TestSchemaQueries::test_edge_type_exists
+tests/test_retry.py::test_nonprepared_execute_maps_to_typed_uni_error
+tests/test_schema_builder.py::TestSchemaQueries::test_list_edge_types
+tests/test_session_scratch.py::test_scratch_commit_is_refused
+[gw16] [ 81%] PASSED tests/test_query_cursor.py::TestAsyncQueryCursor::test_async_query_builder_cursor
+tests/test_repro_arrow_double_free.py::test_write_batch_does_not_double_free
+[gw5] [ 81%] PASSED tests/test_query_cursor.py::TestSyncQueryCursor::test_query_builder_cursor
+[gw15] [ 81%] PASSED tests/test_schema_builder.py::TestSchemaQueries::test_list_edge_types
+tests/test_query_cursor.py::TestAsyncQueryCursor::test_async_cursor_fetch_all
+tests/test_session_scratch.py::test_async_abduce_inside_assume_body_matches_scratch
+[gw9] [ 81%] PASSED tests/test_retry.py::test_nonprepared_execute_maps_to_typed_uni_error
+tests/test_session_scratch.py::test_async_scratch_commit_is_refused
+[gw20] [ 81%] PASSED tests/test_planning_and_search_metrics.py::test_async_locy_profile_iterations_carry_planning
+[gw8] [ 81%] PASSED tests/test_session_scratch.py::test_scratch_commit_is_refused
+tests/test_session_scratch.py::test_abduce_over_hypothetical_change_in_scratch
+tests/test_retry.py::test_transact_with_retry_no_lost_updates_under_contention
+[gw2] [ 81%] PASSED tests/test_planning_and_search_metrics.py::test_lance_iops_count_flushed_reads
+tests/test_schema_builder.py::TestSchemaBuilder::test_label_builder_nullable
+[gw13] [ 81%] PASSED tests/test_schema_builder.py::TestDataTypes::test_bool_type
+[gw9] [ 81%] PASSED tests/test_session_scratch.py::test_async_scratch_commit_is_refused
+tests/test_session_scratch.py::test_async_abduce_over_hypothetical_change_in_scratch
+tests/test_session_scratch.py::test_scratch_reads_own_writes_and_discards_them
+[gw8] [ 81%] PASSED tests/test_session_scratch.py::test_abduce_over_hypothetical_change_in_scratch
+tests/test_sessions.py::TestSession::test_session_query
+[gw15] [ 82%] PASSED tests/test_session_scratch.py::test_async_abduce_inside_assume_body_matches_scratch
+tests/test_sessions.py::TestSession::test_session_set_and_get_variable
+[gw13] [ 82%] PASSED tests/test_session_scratch.py::test_scratch_reads_own_writes_and_discards_them
+tests/test_sessions.py::TestSession::test_session_set_multiple_variables
+[gw2] [ 82%] PASSED tests/test_schema_builder.py::TestSchemaBuilder::test_label_builder_nullable
+tests/test_schema_builder.py::TestSchemaBuilder::test_label_builder_with_index
+[gw2] [ 82%] PASSED tests/test_schema_builder.py::TestSchemaBuilder::test_label_builder_with_index
+tests/test_shutdown_scratch_dir.py::test_async_shutdown_leaves_nothing
+[gw18] [ 82%] PASSED tests/test_query_cursor.py::TestAsyncQueryCursor::test_async_cursor_async_for
+tests/test_query_cursor.py::TestAsyncQueryCursor::test_async_cursor_context_manager
+[gw15] [ 82%] PASSED tests/test_sessions.py::TestSession::test_session_set_and_get_variable
+tests/test_shutdown_scratch_dir.py::test_sync_context_manager_leaves_nothing
+[gw13] [ 82%] PASSED tests/test_sessions.py::TestSession::test_session_set_multiple_variables
+[gw20] [ 82%] PASSED tests/test_retry.py::test_transact_with_retry_no_lost_updates_under_contention
+[gw17] [ 82%] PASSED tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_fetch_many
+tests/test_sessions.py::TestSession::test_session_get_nonexistent
+tests/test_retry.py::test_retry_exhaustion_reraises
+tests/test_schema_builder.py::TestDataTypes::test_int_type
+[gw14] [ 82%] PASSED tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_with_params
+[gw9] [ 82%] PASSED tests/test_session_scratch.py::test_async_abduce_over_hypothetical_change_in_scratch
+tests/test_shutdown_scratch_dir.py::test_sync_shutdown_leaves_nothing
+tests/test_schema_builder.py::TestSchemaQueries::test_get_label_info
+[gw12] [ 82%] PASSED tests/test_query_cursor.py::TestSyncQueryCursor::test_cursor_close
+[gw0] [ 83%] PASSED tests/test_planning_and_search_metrics.py::test_profile_reports_planning
+tests/test_session_scratch.py::test_abduce_inside_assume_body_matches_scratch
+tests/test_planning_and_search_metrics.py::test_tx_profile_reports_planning
+[gw8] [ 83%] PASSED tests/test_sessions.py::TestSession::test_session_query
+tests/test_sessions.py::TestSession::test_session_execute
+[gw14] [ 83%] PASSED tests/test_schema_builder.py::TestSchemaQueries::test_get_label_info
+[gw5] [ 83%] PASSED tests/test_query_cursor.py::TestAsyncQueryCursor::test_async_cursor_fetch_all
+tests/test_schema_builder.py::TestDataTypes::test_string_type
+[gw20] [ 83%] PASSED tests/test_retry.py::test_retry_exhaustion_reraises
+tests/test_query_cursor.py::TestAsyncQueryCursor::test_async_cursor_fetch_one
+tests/test_stub_drift.py::test_stub_documents_every_runtime_class
+[gw13] [ 83%] PASSED tests/test_sessions.py::TestSession::test_session_get_nonexistent
+tests/test_stateful_crud.py::test_flush_does_not_resurrect_a_detached_edge
+[gw17] [ 83%] PASSED tests/test_schema_builder.py::TestDataTypes::test_int_type
+tests/test_schema_builder.py::TestDataTypes::test_float_type
+[gw20] [ 83%] PASSED tests/test_stub_drift.py::test_stub_documents_every_runtime_class
+tests/test_sync_async_parity.py::test_every_async_class_is_paired_or_declared
+[gw20] [ 83%] PASSED tests/test_sync_async_parity.py::test_every_async_class_is_paired_or_declared
+tests/test_sync_async_parity.py::test_sync_async_method_parity[CommitStream-AsyncCommitStream]
+[gw20] [ 83%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[CommitStream-AsyncCommitStream]
+[gw14] [ 83%] PASSED tests/test_schema_builder.py::TestDataTypes::test_string_type
+tests/test_sync_async_parity.py::test_sync_async_method_parity[Compaction-AsyncCompaction]
+[gw20] [ 84%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[Compaction-AsyncCompaction]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[EdgeTypeBuilder-AsyncEdgeTypeBuilder]
+tests/test_stub_drift.py::test_stub_has_no_phantom_members
+[gw20] [ 84%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[EdgeTypeBuilder-AsyncEdgeTypeBuilder]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[ForkBuilder-AsyncForkBuilder]
+[gw20] [ 84%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[ForkBuilder-AsyncForkBuilder]
+[gw8] [ 84%] PASSED tests/test_sessions.py::TestSession::test_session_execute
+tests/test_sync_async_parity.py::test_sync_async_method_parity[Indexes-AsyncIndexes]
+[gw20] [ 84%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[Indexes-AsyncIndexes]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[LabelBuilder-AsyncLabelBuilder]
+[gw20] [ 84%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[LabelBuilder-AsyncLabelBuilder]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[QueryCursor-AsyncQueryCursor]
+[gw20] [ 84%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[QueryCursor-AsyncQueryCursor]
+tests/test_stub_drift.py::test_stub_has_no_phantom_classes
+tests/test_sync_async_parity.py::test_sync_async_method_parity[RuleRegistry-AsyncRuleRegistry]
+[gw20] [ 84%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[RuleRegistry-AsyncRuleRegistry]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[Session-AsyncSession]
+[gw20] [ 84%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[Session-AsyncSession]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[SessionLocyBuilder-AsyncSessionLocyBuilder]
+[gw20] [ 84%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[SessionLocyBuilder-AsyncSessionLocyBuilder]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[SessionQueryBuilder-AsyncSessionQueryBuilder]
+[gw20] [ 84%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[SessionQueryBuilder-AsyncSessionQueryBuilder]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[SessionTemplate-AsyncSessionTemplate]
+[gw20] [ 84%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[SessionTemplate-AsyncSessionTemplate]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[SessionTemplateBuilder-AsyncSessionTemplateBuilder]
+[gw20] [ 85%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[SessionTemplateBuilder-AsyncSessionTemplateBuilder]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[StreamingAppender-AsyncStreamingAppender]
+[gw20] [ 85%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[StreamingAppender-AsyncStreamingAppender]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[Transaction-AsyncTransaction]
+[gw20] [ 85%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[Transaction-AsyncTransaction]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[TransactionBuilder-AsyncTransactionBuilder]
+[gw12] [ 85%] PASSED tests/test_session_scratch.py::test_abduce_inside_assume_body_matches_scratch
+[gw20] [ 85%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[TransactionBuilder-AsyncTransactionBuilder]
+[gw14] [ 85%] PASSED tests/test_stub_drift.py::test_stub_has_no_phantom_members
+tests/test_session_scratch.py::test_async_scratch_reads_own_writes_and_discards_them
+tests/test_sync_async_parity.py::test_sync_async_method_parity[TxAppenderBuilder-AsyncTxAppenderBuilder]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[ForkSchemaBuilder-AsyncForkSchemaBuilder]
+[gw20] [ 85%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[TxAppenderBuilder-AsyncTxAppenderBuilder]
+[gw14] [ 85%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[ForkSchemaBuilder-AsyncForkSchemaBuilder]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[TxBulkWriterBuilder-AsyncTxBulkWriterBuilder]
+[gw20] [ 85%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[TxBulkWriterBuilder-AsyncTxBulkWriterBuilder]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[TxQueryBuilder-AsyncTxQueryBuilder]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[TxLocyBuilder-AsyncTxLocyBuilder]
+[gw14] [ 85%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[TxLocyBuilder-AsyncTxLocyBuilder]
+[gw20] [ 85%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[TxQueryBuilder-AsyncTxQueryBuilder]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[Uni-AsyncUni]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[UniBuilder-AsyncUniBuilder]
+[gw20] [ 85%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[UniBuilder-AsyncUniBuilder]
+[gw14] [ 86%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[Uni-AsyncUni]
+tests/test_sync_async_parity.py::test_async_query_builder_removed
+tests/test_sync_async_parity.py::test_sync_async_method_parity[Xervo-AsyncXervo]
+[gw20] [ 86%] PASSED tests/test_sync_async_parity.py::test_async_query_builder_removed
+[gw11] [ 86%] PASSED tests/test_e2e_vector.py::test_vector_search_with_graph_traversal
+tests/test_sync_async_parity.py::test_async_load_rhai_plugin_returns_metadata
+[gw14] [ 86%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[Xervo-AsyncXervo]
+tests/test_sync_async_parity.py::test_async_load_rhai_plugin_explicit_grants
+tests/test_e2e_vector.py::test_vector_search_with_filter_expression
+[gw20] [ 86%] PASSED tests/test_sync_async_parity.py::test_async_load_rhai_plugin_returns_metadata
+tests/test_sync_async_parity.py::test_async_load_rhai_plugin_rejects_bad_grant
+[gw8] [ 86%] PASSED tests/test_stub_drift.py::test_stub_has_no_phantom_classes
+[gw12] [ 86%] PASSED tests/test_session_scratch.py::test_async_scratch_reads_own_writes_and_discards_them
+tests/test_sync_async_parity.py::test_sync_async_method_parity[SchemaBuilder-AsyncSchemaBuilder]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[TxExecuteBuilder-AsyncTxExecuteBuilder]
+[gw8] [ 86%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[SchemaBuilder-AsyncSchemaBuilder]
+[gw12] [ 86%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[TxExecuteBuilder-AsyncTxExecuteBuilder]
+tests/test_sync_async_parity.py::test_async_session_template_builds_async_session
+[gw14] [ 86%] PASSED tests/test_sync_async_parity.py::test_async_load_rhai_plugin_explicit_grants
+tests/test_sync_async_parity.py::test_sync_cursor_raises_typed_error
+tests/test_sync_async_parity.py::test_async_load_rhai_plugin_rejects_bad_script
+[gw17] [ 86%] PASSED tests/test_schema_builder.py::TestDataTypes::test_float_type
+[gw18] [ 87%] PASSED tests/test_query_cursor.py::TestAsyncQueryCursor::test_async_cursor_context_manager
+[gw20] [ 87%] PASSED tests/test_sync_async_parity.py::test_async_load_rhai_plugin_rejects_bad_grant
+tests/test_sync_async_parity.py::test_sync_async_method_parity[BulkWriter-AsyncBulkWriter]
+tests/test_stateful_crud.py::TestGraphMachine::runTest
+[gw17] [ 87%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[BulkWriter-AsyncBulkWriter]
+tests/test_sync_async_parity.py::test_async_appender_builder_configures_and_builds
+tests/test_temporary_teardown.py::test_temporary_database_leaves_nothing_behind_on_clean_exit
+[gw14] [ 87%] PASSED tests/test_sync_async_parity.py::test_async_load_rhai_plugin_rejects_bad_script
+tests/test_sync_async_parity.py::test_async_cursor_raises_same_error_class_as_sync[aiter]
+[gw12] [ 87%] PASSED tests/test_sync_async_parity.py::test_sync_cursor_raises_typed_error
+tests/test_sync_async_parity.py::test_async_cursor_raises_same_error_class_as_sync[fetch_many]
+[gw0] [ 87%] PASSED tests/test_planning_and_search_metrics.py::test_tx_profile_reports_planning
+[gw8] [ 87%] PASSED tests/test_sync_async_parity.py::test_async_session_template_builds_async_session
+tests/test_sync_async_parity.py::test_async_cursor_raises_same_error_class_as_sync[fetch_one]
+tests/test_planning_and_search_metrics.py::test_locy_profile_iterations_carry_planning
+[gw12] [ 87%] PASSED tests/test_sync_async_parity.py::test_async_cursor_raises_same_error_class_as_sync[fetch_many]
+[gw13] [ 87%] PASSED tests/test_stateful_crud.py::test_flush_does_not_resurrect_a_detached_edge
+[gw8] [ 87%] PASSED tests/test_sync_async_parity.py::test_async_cursor_raises_same_error_class_as_sync[fetch_one]
+tests/test_sync_async_parity.py::test_sync_async_method_parity[ApplyBuilder-AsyncApplyBuilder]
+[gw13] [ 87%] PASSED tests/test_sync_async_parity.py::test_sync_async_method_parity[ApplyBuilder-AsyncApplyBuilder]
+tests/test_unidb_repros_montecarlo.py::test_locy_result_is_context_independent
+tests/test_unidb_repros_montecarlo.py::test_plugin_scalar_accepts_raw_int_property
+tests/test_unidb_repros_montecarlo.py::test_rhai_aggregate_callable_in_cypher
+[gw14] [ 87%] PASSED tests/test_sync_async_parity.py::test_async_cursor_raises_same_error_class_as_sync[aiter]
+tests/test_unidb_repros_montecarlo.py::test_and_between_is_predicates_matches_comma
+[gw5] [ 88%] PASSED tests/test_query_cursor.py::TestAsyncQueryCursor::test_async_cursor_fetch_one
+[gw8] [ 88%] PASSED tests/test_unidb_repros_montecarlo.py::test_rhai_aggregate_callable_in_cypher
+tests/test_value_conversion.py::test_scalar_variants_do_not_become_none
+tests/test_sync_async_parity.py::test_pair_discovery_is_not_vacuous
+[gw5] [ 88%] PASSED tests/test_sync_async_parity.py::test_pair_discovery_is_not_vacuous
+tests/test_value_conversion.py::test_bytes_variant_does_not_become_none
+[gw13] [ 88%] PASSED tests/test_unidb_repros_montecarlo.py::test_plugin_scalar_accepts_raw_int_property
+tests/test_value_conversion.py::test_list_and_map_variants_do_not_become_none
+[gw20] [ 88%] PASSED tests/test_sync_async_parity.py::test_async_appender_builder_configures_and_builds
+tests/test_sync_async_parity.py::test_async_cursor_still_stops_iteration_when_exhausted
+[gw8] [ 88%] PASSED tests/test_value_conversion.py::test_scalar_variants_do_not_become_none
+tests/test_value_conversion.py::test_vector_variant_does_not_become_none
+[gw13] [ 88%] PASSED tests/test_value_conversion.py::test_list_and_map_variants_do_not_become_none
+tests/test_wasm_plugin.py::TestWasmPlugin::test_load_wasm_extism
+[gw13] [ 88%] SKIPPED tests/test_wasm_plugin.py::TestWasmPlugin::test_load_wasm_extism
+tests/test_wasm_plugin.py::test_async_load_wasm_extism
+[gw13] [ 88%] SKIPPED tests/test_wasm_plugin.py::test_async_load_wasm_extism
+tests/test_xervo_api.py::TestXervoTypeNames::test_message_class_name
+[gw13] [ 88%] PASSED tests/test_xervo_api.py::TestXervoTypeNames::test_message_class_name
+[gw5] [ 88%] PASSED tests/test_value_conversion.py::test_bytes_variant_does_not_become_none
+tests/test_xervo_api.py::TestXervoTypeNames::test_token_usage_class_name
+[gw12] [ 88%] PASSED tests/test_unidb_repros_montecarlo.py::test_locy_result_is_context_independent
+tests/test_wasm_plugin.py::TestWasmPlugin::test_load_wasm_component
+[gw13] [ 89%] PASSED tests/test_xervo_api.py::TestXervoTypeNames::test_token_usage_class_name
+[gw5] [ 89%] SKIPPED tests/test_wasm_plugin.py::TestWasmPlugin::test_load_wasm_component
+tests/test_unidb_repros_montecarlo.py::test_plugin_scalar_non_numeric_property_errors_clearly
+tests/test_xervo_api.py::TestXervoTypeNames::test_generation_result_class_name
+[gw13] [ 89%] PASSED tests/test_xervo_api.py::TestXervoTypeNames::test_generation_result_class_name
+tests/test_xervo_api.py::TestXervoTypeNames::test_generation_options_removed
+tests/test_xervo_api.py::TestMessageApi::test_message_user_factory
+[gw5] [ 89%] PASSED tests/test_xervo_api.py::TestXervoTypeNames::test_generation_options_removed
+[gw13] [ 89%] PASSED tests/test_xervo_api.py::TestMessageApi::test_message_user_factory
+tests/test_xervo_api.py::TestMessageApi::test_message_assistant_factory
+tests/test_xervo_api.py::TestMessageApi::test_message_system_factory
+[gw5] [ 89%] PASSED tests/test_xervo_api.py::TestMessageApi::test_message_assistant_factory
+[gw13] [ 89%] PASSED tests/test_xervo_api.py::TestMessageApi::test_message_system_factory
+[gw8] [ 89%] PASSED tests/test_value_conversion.py::test_vector_variant_does_not_become_none
+tests/test_xervo_api.py::TestMessageApi::test_message_repr
+[gw5] [ 89%] PASSED tests/test_xervo_api.py::TestMessageApi::test_message_repr
+tests/test_wasm_plugin.py::test_async_load_wasm_component
+tests/test_xervo_api.py::TestBuilderChaining::test_cloud_config_returns_self
+tests/test_xervo_api.py::TestBuilderChaining::test_config_returns_self
+[gw5] [ 89%] PASSED tests/test_xervo_api.py::TestBuilderChaining::test_cloud_config_returns_self
+[gw8] [ 89%] SKIPPED tests/test_wasm_plugin.py::test_async_load_wasm_component
+tests/test_xervo_api.py::TestAsyncBuilderChaining::test_config_returns_self
+tests/test_xervo_api.py::TestBuilderChaining::test_config_chain_with_other_methods
+[gw8] [ 90%] PASSED tests/test_xervo_api.py::TestBuilderChaining::test_config_chain_with_other_methods
+[gw12] [ 90%] PASSED tests/test_unidb_repros_montecarlo.py::test_plugin_scalar_non_numeric_property_errors_clearly
+tests/test_xervo_api.py::TestGenerateDictMessages::test_generate_accepts_message_objects
+[gw20] [ 90%] PASSED tests/test_sync_async_parity.py::test_async_cursor_still_stops_iteration_when_exhausted
+[gw5] [ 90%] PASSED tests/test_xervo_api.py::TestAsyncBuilderChaining::test_config_returns_self
+tests/test_xervo_api.py::TestMessageApi::test_message_constructor
+[gw12] [ 90%] PASSED tests/test_xervo_api.py::TestMessageApi::test_message_constructor
+tests/test_wasm_plugin.py::TestWasmPlugin::test_wasm_methods_exist
+tests/test_xervo_api.py::TestAsyncBuilderChaining::test_config_chain_with_other_methods
+tests/test_xervo_api.py::TestGenerateDictMessages::test_generate_accepts_mixed
+[gw20] [ 90%] SKIPPED tests/test_wasm_plugin.py::TestWasmPlugin::test_wasm_methods_exist
+[gw13] [ 90%] PASSED tests/test_xervo_api.py::TestBuilderChaining::test_config_returns_self
+tests/test_xervo_api.py::TestGenerateDictMessages::test_generate_rejects_bad_type
+tests/test_xervo_api.py::TestAsyncBuilderChaining::test_cloud_config_returns_self
+[gw13] [ 90%] PASSED tests/test_xervo_api.py::TestAsyncBuilderChaining::test_cloud_config_returns_self
+tests/test_xervo_api.py::TestGenerateText::test_generate_text_with_options
+[gw8] [ 90%] PASSED tests/test_xervo_api.py::TestGenerateDictMessages::test_generate_accepts_message_objects
+tests/test_xervo_api.py::TestGenerateDictMessages::test_generate_accepts_dicts
+[gw5] [ 90%] PASSED tests/test_xervo_api.py::TestAsyncBuilderChaining::test_config_chain_with_other_methods
+[gw20] [ 90%] PASSED tests/test_xervo_api.py::TestGenerateDictMessages::test_generate_rejects_bad_type
+[gw16] [ 90%] PASSED tests/test_repro_arrow_double_free.py::test_write_batch_does_not_double_free
+tests/test_xervo_api.py::TestGenerateDictMessages::test_generate_rejects_dict_missing_role
+[gw12] [ 91%] PASSED tests/test_xervo_api.py::TestGenerateDictMessages::test_generate_accepts_mixed
+tests/test_repro_convert_correctness.py::test_naive_datetime_preserves_wall_clock
+[gw3] [ 91%] PASSED tests/test_locy_timeout_and_refusals.py::test_an_explicit_timeout_above_the_database_default_is_honoured
+tests/test_locy_timeout_and_refusals.py::test_with_config_does_not_discard_an_explicit_timeout
+tests/test_xervo_api.py::TestGenerateText::test_generate_text_exists
+tests/test_xervo_api.py::TestGenerateDictMessages::test_generate_rejects_dict_missing_content
+[gw13] [ 91%] PASSED tests/test_xervo_api.py::TestGenerateText::test_generate_text_with_options
+[gw8] [ 91%] PASSED tests/test_xervo_api.py::TestGenerateDictMessages::test_generate_accepts_dicts
+tests/test_xervo_api.py::TestAsyncGenerateDictMessages::test_generate_accepts_message_objects
+[gw5] [ 91%] PASSED tests/test_xervo_api.py::TestGenerateDictMessages::test_generate_rejects_dict_missing_role
+[gw12] [ 91%] PASSED tests/test_xervo_api.py::TestGenerateDictMessages::test_generate_rejects_dict_missing_content
+tests/test_xervo_api.py::TestAsyncGenerateDictMessages::test_generate_accepts_dicts
+tests/test_xervo_api.py::TestAsyncGenerateDictMessages::test_generate_accepts_mixed
+[gw20] [ 91%] PASSED tests/test_xervo_api.py::TestGenerateText::test_generate_text_exists
+tests/test_xervo_api.py::TestAsyncGenerateDictMessages::test_generate_rejects_dict_missing_content
+tests/test_xervo_api.py::TestAsyncGenerateDictMessages::test_generate_rejects_dict_missing_role
+[gw14] [ 91%] PASSED tests/test_unidb_repros_montecarlo.py::test_and_between_is_predicates_matches_comma
+tests/test_value_conversion.py::test_temporal_variant_does_not_become_none
+[gw13] [ 91%] PASSED tests/test_xervo_api.py::TestAsyncGenerateDictMessages::test_generate_accepts_message_objects
+[gw20] [ 91%] PASSED tests/test_xervo_api.py::TestAsyncGenerateDictMessages::test_generate_rejects_dict_missing_role
+[gw12] [ 91%] PASSED tests/test_xervo_api.py::TestAsyncGenerateDictMessages::test_generate_rejects_dict_missing_content
+[gw8] [ 92%] PASSED tests/test_xervo_api.py::TestAsyncGenerateDictMessages::test_generate_accepts_dicts
+tests/test_xervo_api.py::TestAsyncGenerateText::test_generate_text_exists
+tests/test_xervo_runtime_sharing.py::test_one_runtime_backs_two_databases
+tests/test_xervo_runtime_sharing.py::test_a_separately_built_runtime_is_a_distinct_object
+tests/test_xervo_api.py::TestAsyncGenerateText::test_generate_text_with_options
+[gw5] [ 92%] PASSED tests/test_xervo_api.py::TestAsyncGenerateDictMessages::test_generate_accepts_mixed
+[gw13] [ 92%] PASSED tests/test_xervo_api.py::TestAsyncGenerateText::test_generate_text_exists
+[gw14] [ 92%] PASSED tests/test_value_conversion.py::test_temporal_variant_does_not_become_none
+tests/test_xervo_runtime_sharing.py::test_handles_are_hashable_by_identity
+tests/test_xervo_runtime_sharing.py::test_runtime_is_constructible_standalone
+[gw8] [ 92%] PASSED tests/test_xervo_api.py::TestAsyncGenerateText::test_generate_text_with_options
+tests/test_xervo_runtime_sharing.py::test_raw_runtime_is_none_without_xervo
+[gw16] [ 92%] PASSED tests/test_repro_convert_correctness.py::test_naive_datetime_preserves_wall_clock
+tests/test_xervo_api.py::TestAsyncGenerateDictMessages::test_generate_rejects_bad_type
+tests/test_xervo_runtime_sharing.py::test_catalog_supersedes_a_previously_set_runtime
+[gw16] [ 92%] PASSED tests/test_xervo_api.py::TestAsyncGenerateDictMessages::test_generate_rejects_bad_type
+[gw13] [ 92%] PASSED tests/test_xervo_runtime_sharing.py::test_raw_runtime_is_none_without_xervo
+tests/test_xervo_runtime_sharing.py::test_sync_and_async_share_one_handle_type
+tests/use_cases/test_all_use_cases.py::TestUseCases::test_document_knowledge_graph
+[gw5] [ 92%] PASSED tests/test_xervo_runtime_sharing.py::test_runtime_is_constructible_standalone
+tests/test_xervo_runtime_sharing.py::test_async_constructor_and_builder
+[gw14] [ 92%] PASSED tests/test_xervo_runtime_sharing.py::test_handles_are_hashable_by_identity
+tests/test_xervo_runtime_sharing.py::test_an_invalid_catalog_raises
+[gw14] [ 92%] PASSED tests/test_xervo_runtime_sharing.py::test_an_invalid_catalog_raises
+tests/use_cases/test_all_use_cases.py::TestUseCases::test_recommendation
+[gw0] [ 92%] PASSED tests/test_planning_and_search_metrics.py::test_locy_profile_iterations_carry_planning
+tests/test_unidb_repros_montecarlo.py::test_native_stdev_and_variance_in_cypher
+[gw12] [ 93%] PASSED tests/test_xervo_runtime_sharing.py::test_one_runtime_backs_two_databases
+tests/test_xervo_runtime_sharing.py::test_round_trip_from_a_catalog_built_database
+[gw20] [ 93%] PASSED tests/test_xervo_runtime_sharing.py::test_a_separately_built_runtime_is_a_distinct_object
+tests/test_xervo_runtime_sharing.py::test_runtime_supersedes_a_previously_set_catalog
+[gw0] [ 93%] PASSED tests/test_unidb_repros_montecarlo.py::test_native_stdev_and_variance_in_cypher
+[gw13] [ 93%] PASSED tests/test_xervo_runtime_sharing.py::test_sync_and_async_share_one_handle_type
+[gw5] [ 93%] PASSED tests/test_xervo_runtime_sharing.py::test_async_constructor_and_builder
+tests/use_cases/test_all_use_cases.py::TestUseCases::test_supply_chain
+tests/use_cases/test_all_use_cases.py::TestUseCases::test_rag
+tests/use_cases/test_all_use_cases.py::TestUseCases::test_identity_provenance
+[gw8] [ 93%] PASSED tests/test_xervo_runtime_sharing.py::test_catalog_supersedes_a_previously_set_runtime
+tests/use_cases/test_all_use_cases.py::TestUseCases::test_ecommerce_recommendation
+[gw16] [ 93%] PASSED tests/use_cases/test_all_use_cases.py::TestUseCases::test_document_knowledge_graph
+tests/use_cases/test_all_use_cases.py::TestUseCases::test_fraud_detection
+[gw11] [ 93%] PASSED tests/test_e2e_vector.py::test_vector_search_with_filter_expression
+tests/test_sync_async_parity.py::test_async_appender_appends_and_persists
+[gw12] [ 93%] PASSED tests/test_xervo_runtime_sharing.py::test_round_trip_from_a_catalog_built_database
+tests/use_cases/test_async_all_use_cases.py::test_supply_chain
+[gw20] [ 93%] PASSED tests/test_xervo_runtime_sharing.py::test_runtime_supersedes_a_previously_set_catalog
+tests/use_cases/test_async_all_use_cases.py::test_recommendation
+[gw7] [ 93%] PASSED tests/test_repro_gil_mutex_deadlocks.py::test_prepared_query_shared_across_threads_no_deadlock
+tests/test_rhai_plugin.py::TestRhaiPlugin::test_load_rhai_plugin_returns_metadata
+[gw14] [ 93%] PASSED tests/use_cases/test_all_use_cases.py::TestUseCases::test_recommendation
+tests/use_cases/test_all_use_cases.py::TestUseCases::test_regional_sales_analytics
+[gw13] [ 94%] PASSED tests/use_cases/test_all_use_cases.py::TestUseCases::test_identity_provenance
+tests/use_cases/test_async_all_use_cases.py::test_regional_sales_analytics
+[gw11] [ 94%] PASSED tests/test_sync_async_parity.py::test_async_appender_appends_and_persists
+tests/use_cases/test_async_all_use_cases.py::test_identity_provenance
+[gw7] [ 94%] PASSED tests/test_rhai_plugin.py::TestRhaiPlugin::test_load_rhai_plugin_returns_metadata
+tests/test_schema_builder.py::TestSchemaBuilder::test_label_builder_basic
+[gw5] [ 94%] PASSED tests/use_cases/test_all_use_cases.py::TestUseCases::test_rag
+tests/use_cases/test_async_all_use_cases.py::test_fraud_detection
+[gw8] [ 94%] PASSED tests/use_cases/test_all_use_cases.py::TestUseCases::test_ecommerce_recommendation
+tests/use_cases/test_async_all_use_cases.py::test_document_knowledge_graph
+[gw16] [ 94%] PASSED tests/use_cases/test_all_use_cases.py::TestUseCases::test_fraud_detection
+tests/use_cases/test_async_all_use_cases.py::test_ecommerce_recommendation
+[gw19] [ 94%] PASSED tests/test_repro_gil_mutex_deadlocks.py::test_commit_stream_close_during_iteration_no_deadlock
+tests/test_repro_gil_mutex_deadlocks.py::test_shared_cursor_next_row_no_deadlock
+[gw7] [ 94%] PASSED tests/test_schema_builder.py::TestSchemaBuilder::test_label_builder_basic
+[gw0] [ 94%] PASSED tests/use_cases/test_all_use_cases.py::TestUseCases::test_supply_chain
+tests/use_cases/test_async_all_use_cases.py::test_rag
+[gw20] [ 94%] PASSED tests/use_cases/test_async_all_use_cases.py::test_recommendation
+[gw12] [ 94%] PASSED tests/use_cases/test_async_all_use_cases.py::test_supply_chain
+[gw2] [ 95%] PASSED tests/test_shutdown_scratch_dir.py::test_async_shutdown_leaves_nothing
+[gw9] [ 95%] PASSED tests/test_shutdown_scratch_dir.py::test_sync_shutdown_leaves_nothing
+[gw11] [ 95%] PASSED tests/use_cases/test_async_all_use_cases.py::test_identity_provenance
+tests/test_stub_drift.py::test_stub_documents_every_runtime_member
+tests/test_shutdown_scratch_dir.py::test_async_context_manager_leaves_nothing
+[gw13] [ 95%] PASSED tests/use_cases/test_async_all_use_cases.py::test_regional_sales_analytics
+[gw14] [ 95%] PASSED tests/use_cases/test_all_use_cases.py::TestUseCases::test_regional_sales_analytics
+[gw9] [ 95%] PASSED tests/test_stub_drift.py::test_stub_documents_every_runtime_member
+[gw15] [ 95%] PASSED tests/test_shutdown_scratch_dir.py::test_sync_context_manager_leaves_nothing
+tests/test_stateful_crud.py::test_delete_before_flush_survives_the_next_flush
+[gw8] [ 95%] PASSED tests/use_cases/test_async_all_use_cases.py::test_document_knowledge_graph
+[gw5] [ 95%] PASSED tests/use_cases/test_async_all_use_cases.py::test_fraud_detection
+[gw16] [ 95%] PASSED tests/use_cases/test_async_all_use_cases.py::test_ecommerce_recommendation
+[gw15] [ 95%] PASSED tests/test_stateful_crud.py::test_delete_before_flush_survives_the_next_flush
+[gw0] [ 95%] PASSED tests/use_cases/test_async_all_use_cases.py::test_rag
+[gw19] [ 96%] PASSED tests/test_repro_gil_mutex_deadlocks.py::test_shared_cursor_next_row_no_deadlock
+tests/test_repro_prepared_locy_repr_panic.py::test_prepared_locy_repr_truncates_on_char_boundary
+[gw19] [ 96%] PASSED tests/test_repro_prepared_locy_repr_panic.py::test_prepared_locy_repr_truncates_on_char_boundary
+[gw3] [ 96%] PASSED tests/test_locy_timeout_and_refusals.py::test_with_config_does_not_discard_an_explicit_timeout
+tests/test_locy_timeout_and_refusals.py::test_a_timeout_given_in_the_config_is_honoured
+[gw2] [ 96%] PASSED tests/test_shutdown_scratch_dir.py::test_async_context_manager_leaves_nothing
+[gw10] [ 96%] PASSED tests/test_bug_adr_real_ingest_repro.py::test_bug_adr_multi_tx_real_data_preserves_all_edges
+tests/test_bug_bulk_edge_create_repro.py::test_bug_a_baseline_small_match_create
+[gw10] [ 96%] PASSED tests/test_bug_bulk_edge_create_repro.py::test_bug_a_baseline_small_match_create
+tests/test_bug_bulk_edge_create_repro.py::test_bug_a_match_create_above_suspected_ceiling
+[gw3] [ 96%] PASSED tests/test_locy_timeout_and_refusals.py::test_a_timeout_given_in_the_config_is_honoured
+[gw10] [ 96%] PASSED tests/test_bug_bulk_edge_create_repro.py::test_bug_a_match_create_above_suspected_ceiling
+tests/test_bug_bulk_edge_create_repro.py::test_bug_a_locate_ceiling_diagnostic
+[gw10] [ 96%] PASSED tests/test_bug_bulk_edge_create_repro.py::test_bug_a_locate_ceiling_diagnostic
+tests/test_e2e_errors.py::test_missing_required_property
+[gw10] [ 96%] PASSED tests/test_e2e_errors.py::test_missing_required_property
+tests/test_e2e_errors.py::test_bulk_writer_insert_after_commit
+[gw10] [ 96%] PASSED tests/test_e2e_errors.py::test_bulk_writer_insert_after_commit
+tests/test_e2e_errors.py::test_bulk_writer_insert_edges_after_abort
+[gw10] [ 96%] PASSED tests/test_e2e_errors.py::test_bulk_writer_insert_edges_after_abort
+tests/test_e2e_errors.py::test_storage_column_property_name_refused[overflow_json]
+[gw10] [ 97%] PASSED tests/test_e2e_errors.py::test_storage_column_property_name_refused[overflow_json]
+tests/test_e2e_errors.py::test_storage_column_property_name_refused[_vid]
+[gw10] [ 97%] PASSED tests/test_e2e_errors.py::test_storage_column_property_name_refused[_vid]
+tests/test_e2e_errors.py::test_storage_column_property_name_refused[_deleted]
+[gw10] [ 97%] PASSED tests/test_e2e_errors.py::test_storage_column_property_name_refused[_deleted]
+tests/test_e2e_errors.py::test_storage_column_property_name_refused[_created_at]
+[gw10] [ 97%] PASSED tests/test_e2e_errors.py::test_storage_column_property_name_refused[_created_at]
+tests/test_e2e_indexes.py::test_verify_pre_existing_indexes
+[gw10] [ 97%] PASSED tests/test_e2e_indexes.py::test_verify_pre_existing_indexes
+[gw18] [ 97%] PASSED tests/test_stateful_crud.py::TestGraphMachine::runTest
+tests/test_temporary_teardown.py::test_uri_exposes_the_scratch_directory_root
+[gw18] [ 97%] PASSED tests/test_temporary_teardown.py::test_uri_exposes_the_scratch_directory_root
+[gw1] [ 97%] PASSED tests/test_async_fork.py::test_fork_basic_create_drop
+tests/test_async_fork.py::test_fork_isolation_from_primary
+[gw1] [ 97%] PASSED tests/test_async_fork.py::test_fork_isolation_from_primary
+tests/test_async_fork.py::test_nested_fork_chain
+[gw1] [ 97%] PASSED tests/test_async_fork.py::test_nested_fork_chain
+tests/test_async_fork.py::test_drop_fork_refuses_with_children
+[gw17] [ 97%] PASSED tests/test_temporary_teardown.py::test_temporary_database_leaves_nothing_behind_on_clean_exit
+tests/test_unidb_repros_montecarlo.py::test_grouped_three_key_recursion_reaches_fixpoint
+[gw17] [ 98%] PASSED tests/test_unidb_repros_montecarlo.py::test_grouped_three_key_recursion_reaches_fixpoint
+[gw1] [ 98%] PASSED tests/test_async_fork.py::test_drop_fork_refuses_with_children
+tests/test_async_fork.py::test_fork_ttl_sweeper_drops_expired
+[gw1] [ 98%] PASSED tests/test_async_fork.py::test_fork_ttl_sweeper_drops_expired
+tests/test_async_fork.py::test_fork_budget_blocks_at_cap
+[gw1] [ 98%] PASSED tests/test_async_fork.py::test_fork_budget_blocks_at_cap
+tests/test_async_fork.py::test_fork_tag_roundtrip
+[gw1] [ 98%] PASSED tests/test_async_fork.py::test_fork_tag_roundtrip
+tests/test_async_fork.py::test_fork_schema_label_strict
+[gw1] [ 98%] PASSED tests/test_async_fork.py::test_fork_schema_label_strict
+tests/test_async_fork.py::test_async_fork_inherits_unflushed_single_node
+[gw1] [ 98%] PASSED tests/test_async_fork.py::test_async_fork_inherits_unflushed_single_node
+tests/test_async_fork.py::test_async_fork_inherits_unflushed_relationship
+[gw1] [ 98%] PASSED tests/test_async_fork.py::test_async_fork_inherits_unflushed_relationship
+[gw4] [ 98%] PASSED tests/test_fork.py::test_fork_basic_create_drop
+tests/test_fork.py::test_fork_isolation_from_primary
+[gw4] [ 98%] PASSED tests/test_fork.py::test_fork_isolation_from_primary
+tests/test_fork.py::test_fork_open_or_create
+[gw4] [ 98%] PASSED tests/test_fork.py::test_fork_open_or_create
+[gw21] [ 98%] PASSED tests/test_bug_bulk_edge_create_repro.py::test_bug_c_per_row_match_create_above_suspected_ceiling
+tests/test_bug_bulk_edge_create_repro.py::test_bug_c_locate_per_row_ceiling_diagnostic
+[gw6] [ 99%] PASSED tests/test_fork.py::test_cascade_subtree_in_use
+tests/test_fork.py::test_fork_ttl_sweeper_drops_expired
+[gw6] [ 99%] PASSED tests/test_fork.py::test_fork_ttl_sweeper_drops_expired
+tests/test_fork.py::test_fork_without_ttl_survives_sweeper
+[gw6] [ 99%] PASSED tests/test_fork.py::test_fork_without_ttl_survives_sweeper
+tests/test_fork.py::test_fork_budget_blocks_at_cap
+[gw6] [ 99%] PASSED tests/test_fork.py::test_fork_budget_blocks_at_cap
+tests/test_fork.py::test_fork_tag_roundtrip
+[gw6] [ 99%] PASSED tests/test_fork.py::test_fork_tag_roundtrip
+tests/test_fork.py::test_tag_unknown_fork_raises_not_found
+[gw6] [ 99%] PASSED tests/test_fork.py::test_tag_unknown_fork_raises_not_found
+[gw21] [ 99%] PASSED tests/test_bug_bulk_edge_create_repro.py::test_bug_c_locate_per_row_ceiling_diagnostic
+tests/test_bug_bulk_edge_create_repro.py::test_bug_b_many_small_edge_txs_preserve_each_other
+[gw21] [ 99%] PASSED tests/test_bug_bulk_edge_create_repro.py::test_bug_b_many_small_edge_txs_preserve_each_other
+tests/test_bug_sync_heterogeneous_ingest_repro.py::test_bug_d_heterogeneous_single_tx_ingest_no_drop
+[gw21] [ 99%] PASSED tests/test_bug_sync_heterogeneous_ingest_repro.py::test_bug_d_heterogeneous_single_tx_ingest_no_drop
+tests/test_bug_sync_heterogeneous_ingest_repro.py::test_bug_e_multi_edge_tx_first_batch_preserved
+[gw21] [ 99%] PASSED tests/test_bug_sync_heterogeneous_ingest_repro.py::test_bug_e_multi_edge_tx_first_batch_preserved
+tests/test_builder.py::TestUniBuilderOpenModes::test_create_new_database
+[gw21] [ 99%] PASSED tests/test_builder.py::TestUniBuilderOpenModes::test_create_new_database
+tests/test_builder.py::TestUniBuilderOpenModes::test_create_fails_if_exists
+[gw21] [100%] PASSED tests/test_builder.py::TestUniBuilderOpenModes::test_create_fails_if_exists
+
+================= 1148 passed, 15 skipped in 89.57s (0:01:29) ==================

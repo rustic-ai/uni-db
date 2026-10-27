@@ -1,0 +1,15 @@
+{
+  "review_date": "2026-10-26",
+  "algorithm": "SHA-256",
+  "files": {
+    "crates/uni-store/src/runtime/writer.rs": "a0c1c247c4d89e39db5dc766a0d562705e593baee3ba00764e875e047445c51e",
+    "crates/uni-store/src/runtime/l0_manager.rs": "120fa13fc623305e80269a8fe51f0dca37b47a35a39e568e4dbdae08bbf453a7",
+    "crates/uni/src/api/fork.rs": "6223a2ada967dc2ca227bded20edca0489746293a92629e218dd2342b520bb50",
+    "crates/uni-store/src/backend/branched.rs": "502e6d8ca4b6b4c3b02a59d248252a5045da6f7a2d331677c5e29cbd3dcecec5",
+    "crates/uni-query/src/query/executor/write.rs": "9392d82ebd9af0b6c2fb11f65ac627e8740f6b7dadff18d5b7a3d039a1b00a37",
+    "crates/uni-store/src/storage/manager.rs": "4789534606bdf098b0c51bc43647421dcf611a1bfaa6df6d9d733552e0d45b72",
+    "crates/uni-store/src/backend/lance_branch.rs": "a258092114b81f72a00d8182791e8ca3d7c169e78818849e1fffcdd521334548",
+    "crates/uni-store/src/backend/lance.rs": "84d63619134d9a7b209a21ec64aa0f39f33ddaebfa0cd6f467356555a974c467",
+    "crates/uni-query/src/query/df_graph/recursive_cte.rs": "4e78866a1691fcf22722833bff82c4bf6418a126131daeb198d00877d4938001"
+  }
+}

@@ -1,0 +1,350 @@
+[
+  {
+    "case": "graph_disjoint_remove_edges",
+    "variant": "",
+    "n": 1000,
+    "samples": 3,
+    "wall_ms_median": 0.046,
+    "cpu_ms_median": 0.045
+  },
+  {
+    "case": "graph_star_remove_edges",
+    "variant": "",
+    "n": 1000,
+    "samples": 3,
+    "wall_ms_median": 0.048,
+    "cpu_ms_median": 0.048
+  },
+  {
+    "case": "graph_disjoint_remove_edges",
+    "variant": "",
+    "n": 4000,
+    "samples": 3,
+    "wall_ms_median": 0.207,
+    "cpu_ms_median": 0.207
+  },
+  {
+    "case": "graph_star_remove_edges",
+    "variant": "",
+    "n": 4000,
+    "samples": 3,
+    "wall_ms_median": 0.155,
+    "cpu_ms_median": 0.155
+  },
+  {
+    "case": "graph_disjoint_remove_edges",
+    "variant": "",
+    "n": 16000,
+    "samples": 3,
+    "wall_ms_median": 1.084,
+    "cpu_ms_median": 1.081
+  },
+  {
+    "case": "graph_star_remove_edges",
+    "variant": "",
+    "n": 16000,
+    "samples": 3,
+    "wall_ms_median": 0.901,
+    "cpu_ms_median": 0.899
+  },
+  {
+    "case": "l0_delete_no_keys",
+    "variant": "",
+    "n": 1000,
+    "samples": 3,
+    "wall_ms_median": 0.124,
+    "cpu_ms_median": 0.124
+  },
+  {
+    "case": "l0_delete_unique",
+    "variant": "",
+    "n": 1000,
+    "samples": 3,
+    "wall_ms_median": 0.226,
+    "cpu_ms_median": 0.226
+  },
+  {
+    "case": "l0_delete_no_keys",
+    "variant": "",
+    "n": 4000,
+    "samples": 3,
+    "wall_ms_median": 0.524,
+    "cpu_ms_median": 0.524
+  },
+  {
+    "case": "l0_delete_unique",
+    "variant": "",
+    "n": 4000,
+    "samples": 3,
+    "wall_ms_median": 0.963,
+    "cpu_ms_median": 0.961
+  },
+  {
+    "case": "l0_delete_no_keys",
+    "variant": "",
+    "n": 16000,
+    "samples": 3,
+    "wall_ms_median": 2.475,
+    "cpu_ms_median": 2.47
+  },
+  {
+    "case": "l0_delete_unique",
+    "variant": "",
+    "n": 16000,
+    "samples": 3,
+    "wall_ms_median": 4.777,
+    "cpu_ms_median": 4.736
+  },
+  {
+    "case": "public_delete_edges_execute",
+    "variant": "false",
+    "n": 1000,
+    "samples": 3,
+    "wall_ms_median": 14.753,
+    "cpu_ms_median": 14.737
+  },
+  {
+    "case": "public_delete_edges_commit",
+    "variant": "false",
+    "n": 1000,
+    "samples": 3,
+    "wall_ms_median": 0.954,
+    "cpu_ms_median": 0.948
+  },
+  {
+    "case": "public_delete_edges_execute",
+    "variant": "true",
+    "n": 1000,
+    "samples": 3,
+    "wall_ms_median": 12.304,
+    "cpu_ms_median": 12.259
+  },
+  {
+    "case": "public_delete_edges_commit",
+    "variant": "true",
+    "n": 1000,
+    "samples": 3,
+    "wall_ms_median": 0.855,
+    "cpu_ms_median": 0.861
+  },
+  {
+    "case": "public_delete_edges_execute",
+    "variant": "false",
+    "n": 4000,
+    "samples": 3,
+    "wall_ms_median": 63.409,
+    "cpu_ms_median": 63.109
+  },
+  {
+    "case": "public_delete_edges_commit",
+    "variant": "false",
+    "n": 4000,
+    "samples": 3,
+    "wall_ms_median": 4.214,
+    "cpu_ms_median": 4.246
+  },
+  {
+    "case": "public_delete_edges_execute",
+    "variant": "true",
+    "n": 4000,
+    "samples": 3,
+    "wall_ms_median": 51.991,
+    "cpu_ms_median": 51.824
+  },
+  {
+    "case": "public_delete_edges_commit",
+    "variant": "true",
+    "n": 4000,
+    "samples": 3,
+    "wall_ms_median": 4.359,
+    "cpu_ms_median": 4.354
+  },
+  {
+    "case": "public_delete_edges_execute",
+    "variant": "false",
+    "n": 16000,
+    "samples": 3,
+    "wall_ms_median": 332.216,
+    "cpu_ms_median": 331.117
+  },
+  {
+    "case": "public_delete_edges_commit",
+    "variant": "false",
+    "n": 16000,
+    "samples": 3,
+    "wall_ms_median": 25.076,
+    "cpu_ms_median": 24.868
+  },
+  {
+    "case": "public_delete_edges_execute",
+    "variant": "true",
+    "n": 16000,
+    "samples": 3,
+    "wall_ms_median": 261.381,
+    "cpu_ms_median": 260.174
+  },
+  {
+    "case": "public_delete_edges_commit",
+    "variant": "true",
+    "n": 16000,
+    "samples": 3,
+    "wall_ms_median": 23.765,
+    "cpu_ms_median": 23.575
+  },
+  {
+    "case": "public_delete_execute",
+    "variant": "false",
+    "n": 1000,
+    "samples": 3,
+    "wall_ms_median": 6.892,
+    "cpu_ms_median": 6.817
+  },
+  {
+    "case": "public_delete_commit",
+    "variant": "false",
+    "n": 1000,
+    "samples": 3,
+    "wall_ms_median": 1.025,
+    "cpu_ms_median": 1.052
+  },
+  {
+    "case": "public_delete_execute",
+    "variant": "true",
+    "n": 1000,
+    "samples": 3,
+    "wall_ms_median": 6.947,
+    "cpu_ms_median": 6.877
+  },
+  {
+    "case": "public_delete_commit",
+    "variant": "true",
+    "n": 1000,
+    "samples": 3,
+    "wall_ms_median": 1.245,
+    "cpu_ms_median": 1.304
+  },
+  {
+    "case": "public_delete_execute",
+    "variant": "false",
+    "n": 4000,
+    "samples": 3,
+    "wall_ms_median": 27.305,
+    "cpu_ms_median": 27.137
+  },
+  {
+    "case": "public_delete_commit",
+    "variant": "false",
+    "n": 4000,
+    "samples": 3,
+    "wall_ms_median": 5.123,
+    "cpu_ms_median": 5.155
+  },
+  {
+    "case": "public_delete_execute",
+    "variant": "true",
+    "n": 4000,
+    "samples": 3,
+    "wall_ms_median": 28.588,
+    "cpu_ms_median": 28.413
+  },
+  {
+    "case": "public_delete_commit",
+    "variant": "true",
+    "n": 4000,
+    "samples": 3,
+    "wall_ms_median": 6.095,
+    "cpu_ms_median": 6.069
+  },
+  {
+    "case": "public_delete_execute",
+    "variant": "false",
+    "n": 16000,
+    "samples": 3,
+    "wall_ms_median": 151.392,
+    "cpu_ms_median": 150.827
+  },
+  {
+    "case": "public_delete_commit",
+    "variant": "false",
+    "n": 16000,
+    "samples": 3,
+    "wall_ms_median": 40.681,
+    "cpu_ms_median": 40.701
+  },
+  {
+    "case": "public_delete_execute",
+    "variant": "true",
+    "n": 16000,
+    "samples": 3,
+    "wall_ms_median": 163.251,
+    "cpu_ms_median": 162.617
+  },
+  {
+    "case": "public_delete_commit",
+    "variant": "true",
+    "n": 16000,
+    "samples": 3,
+    "wall_ms_median": 48.791,
+    "cpu_ms_median": 48.665
+  },
+  {
+    "case": "cte",
+    "variant": "",
+    "n": 100,
+    "samples": 3,
+    "wall_ms_median": 45.162,
+    "cpu_ms_median": 44.798,
+    "rows_scanned": 300,
+    "l0_reads": 300
+  },
+  {
+    "case": "vlp",
+    "variant": "",
+    "n": 100,
+    "samples": 3,
+    "wall_ms_median": 2.179,
+    "cpu_ms_median": 2.168,
+    "rows_scanned": 100,
+    "l0_reads": 100
+  },
+  {
+    "case": "cte",
+    "variant": "",
+    "n": 300,
+    "samples": 3,
+    "wall_ms_median": 127.742,
+    "cpu_ms_median": 126.604,
+    "rows_scanned": 900,
+    "l0_reads": 900
+  },
+  {
+    "case": "vlp",
+    "variant": "",
+    "n": 300,
+    "samples": 3,
+    "wall_ms_median": 2.845,
+    "cpu_ms_median": 2.833,
+    "rows_scanned": 300,
+    "l0_reads": 300
+  },
+  {
+    "case": "cte",
+    "variant": "",
+    "n": 900,
+    "samples": 3,
+    "wall_ms_median": 377.151,
+    "cpu_ms_median": 374.563,
+    "rows_scanned": 2700,
+    "l0_reads": 2700
+  },
+  {
+    "case": "vlp",
+    "variant": "",
+    "n": 900,
+    "samples": 3,
+    "wall_ms_median": 4.65,
+    "cpu_ms_median": 4.623,
+    "rows_scanned": 900,
+    "l0_reads": 900
+  }
+]

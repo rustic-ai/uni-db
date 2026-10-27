@@ -7,9 +7,8 @@
 //! 1. Routes vertex-data reads through Lance branches via the (branch-aware)
 //!    `StorageBackend` — `VertexDataset` no longer opens on-disk data itself.
 //! 2. Sees fork-point data — primary writes after fork creation are invisible
-//! 3. Returns the primary (un-branched) dataset when no branch is recorded
-//!    for that name (graceful fallback for new labels created post-fork —
-//!    the actual on-the-fly branch creation lands in Phase 2)
+//! 3. Keeps a dataset absent when no branch is recorded for that name,
+//!    independently of primary's current data and cached cardinality.
 
 // Rust guideline compliant
 
@@ -230,10 +229,14 @@ async fn append_rows(uri: &str) {
 /// So no result assertion can distinguish "declined and read whole" from
 /// "sized and walked", and the guard has to be checked where the decision is
 /// made. The third case below is what makes this more than a session-level
-/// flag: a fork that never wrote `Other` still gets a cheap count for it, which
-/// a coarser "any fork declines" guard would fail.
+/// flag: an unmapped `Other` table has a known empty flushed view, which a
+/// coarser "any fork declines" guard would fail to report.
 #[tokio::test]
 async fn vertex_row_count_declines_only_for_a_branched_table() {
+    use uni_common::core::id::Vid;
+    use uni_store::runtime::l0::L0Buffer;
+    use uni_store::storage::cardinality::CardinalityKey;
+
     let dir = TempDir::new().unwrap();
     let storage_path = dir.path().join("storage");
     let storage_str = storage_path.to_str().unwrap();
@@ -266,6 +269,11 @@ async fn vertex_row_count_declines_only_for_a_branched_table() {
         storage.vertex_row_count("Person").await.unwrap(),
         Some(3),
         "primary must answer from metadata"
+    );
+    let other_key = CardinalityKey::Vertex("Other".into());
+    assert_eq!(
+        storage.refresh_row_count(&other_key).await.unwrap(),
+        Some(3)
     );
 
     let store: Arc<dyn ObjectStore> =
@@ -302,13 +310,20 @@ async fn vertex_row_count_declines_only_for_a_branched_table() {
          rather than handed a number that cost a full scan to produce"
     );
 
-    // Scoped to the table, not the session: `Other` was never written through
-    // the fork, so it has no branch and counting it is as cheap as on primary.
+    // No mapping means absent, even though primary has three rows.
     assert_eq!(
         forked.vertex_row_count("Other").await.unwrap(),
-        Some(3),
-        "a fork must still get the bound for tables it has not branched"
+        Some(0),
+        "an absent fork table has a cheap zero count"
     );
+    assert_eq!(forked.cached_row_count(&other_key, None), Some(0));
+    assert_eq!(forked.refresh_row_count(&other_key).await.unwrap(), Some(0));
+    assert_eq!(storage.cached_row_count(&other_key, None), Some(3));
+
+    let mut pending = L0Buffer::new(0, None);
+    pending.insert_vertex_with_labels(Vid::new(99), Default::default(), &["Other".into()]);
+    assert_eq!(forked.cached_row_count(&other_key, Some(&pending)), Some(1));
+    assert_eq!(storage.cached_row_count(&other_key, None), Some(3));
 }
 
 /// A fork-scoped reader declines the cached count for a branched table (#260).

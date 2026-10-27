@@ -1,0 +1,377 @@
+   Compiling tokio-util v0.7.18
+   Compiling async-compression v0.4.42
+   Compiling datafusion-common-runtime v54.1.0
+   Compiling aws-smithy-async v1.2.14
+   Compiling opendal-core v0.58.2
+   Compiling reqsign-file-read-tokio v3.0.6
+   Compiling reqsign-google v3.1.1
+   Compiling fail v0.5.1
+   Compiling aws-smithy-runtime-api v1.12.3
+   Compiling h2 v0.4.18
+   Compiling tower v0.5.3
+   Compiling tower-http v0.6.11
+   Compiling tokio-stream v0.1.18
+   Compiling aws-smithy-schema v0.1.0
+   Compiling aws-credential-types v1.2.14
+   Compiling hyper v1.10.1
+   Compiling aws-smithy-http v0.63.6
+   Compiling aws-smithy-observability v0.2.6
+   Compiling hyper-util v0.1.20
+   Compiling aws-sigv4 v1.4.5
+   Compiling hyper-rustls v0.27.9
+   Compiling hyper-tls v0.6.0
+   Compiling reqwest v0.13.4
+   Compiling reqwest v0.12.28
+   Compiling aws-smithy-http-client v1.1.13
+   Compiling aws-types v1.3.16
+   Compiling aws-smithy-runtime v1.11.3
+   Compiling object_store v0.13.2
+   Compiling aws-runtime v1.7.4
+   Compiling parquet v58.3.0
+   Compiling aws-smithy-json v0.62.7
+   Compiling opendal-service-azure-common v0.58.2
+   Compiling opendal-service-azdls v0.58.2
+   Compiling opendal-service-azblob v0.58.2
+   Compiling datafusion-common v54.1.0
+   Compiling opendal-http-transport-reqwest v0.58.2
+   Compiling opendal-layer-timeout v0.58.2
+   Compiling datafusion-expr-common v54.1.0
+   Compiling datafusion-physical-expr-common v54.1.0
+   Compiling datafusion-functions-window-common v54.1.0
+   Compiling datafusion-functions-aggregate-common v54.1.0
+   Compiling datafusion-expr v54.1.0
+   Compiling opendal-layer-logging v0.58.2
+   Compiling opendal-layer-retry v0.58.2
+   Compiling opendal-layer-concurrent-limit v0.58.2
+   Compiling opendal-service-gcs v0.58.2
+   Compiling datafusion-physical-expr v54.1.0
+   Compiling datafusion-execution v54.1.0
+   Compiling datafusion-functions-window v54.1.0
+   Compiling datafusion-functions v54.1.0
+   Compiling datafusion-functions-aggregate v54.1.0
+   Compiling datafusion-physical-plan v54.1.0
+   Compiling datafusion-session v54.1.0
+   Compiling datafusion-physical-expr-adapter v54.1.0
+   Compiling datafusion-datasource v54.1.0
+   Compiling datafusion-functions-nested v54.1.0
+   Compiling datafusion-sql v54.1.0
+   Compiling lance-core v11.0.0
+   Compiling datafusion-pruning v54.1.0
+   Compiling datafusion-catalog v54.1.0
+   Compiling datafusion-datasource-parquet v54.1.0
+   Compiling datafusion-physical-optimizer v54.1.0
+   Compiling datafusion-datasource-arrow v54.1.0
+   Compiling datafusion-datasource-json v54.1.0
+   Compiling datafusion-datasource-csv v54.1.0
+   Compiling datafusion-optimizer v54.1.0
+   Compiling opendal-service-s3 v0.58.2
+   Compiling opendal v0.58.2
+   Compiling aws-sdk-sts v1.106.0
+   Compiling datafusion-functions-table v54.1.0
+   Compiling datafusion-catalog-listing v54.1.0
+   Compiling aws-sdk-sso v1.101.0
+   Compiling datafusion v54.1.0
+   Compiling aws-sdk-ssooidc v1.103.0
+   Compiling lance-namespace-reqwest-client v0.11.1
+   Compiling lance-namespace v11.0.0
+   Compiling aws-config v1.8.18
+   Compiling object_store_opendal v0.58.0
+   Compiling uni-common v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-common)
+   Compiling lance-io v11.0.0
+   Compiling hf-hub v0.4.3
+   Compiling lance-encoding v11.0.0
+   Compiling tokio-tungstenite v0.28.0
+   Compiling lance-select v11.0.0
+   Compiling openai-harmony v0.0.8
+   Compiling lance-file v11.0.0
+   Compiling uni-plugin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin)
+   Compiling mistralrs-mcp v0.8.1
+   Compiling mistralrs-quant v0.8.1
+   Compiling lance-table v11.0.0
+   Compiling lance-datafusion v11.0.0
+   Compiling mistralrs-core v0.8.1
+   Compiling lance-linalg v11.0.0
+   Compiling lance-index-core v11.0.0
+   Compiling tokenizers v0.23.1
+   Compiling lance-index v11.0.0
+   Compiling hf-hub v0.5.0
+   Compiling mistralrs v0.8.1
+   Compiling uni-xervo v0.18.1
+   Compiling lance v11.0.0
+   Compiling uni-crdt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-crdt)
+   Compiling uni-cypher v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cypher)
+   Compiling hyper-timeout v0.5.2
+   Compiling tonic v0.14.6
+   Compiling tonic-prost v0.14.6
+   Compiling uni-locy v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy)
+   Compiling opentelemetry_sdk v0.32.1
+   Compiling opentelemetry-proto v0.32.0
+   Compiling tonic-types v0.14.6
+   Compiling opentelemetry-http v0.32.0
+   Compiling uni-plugin-custom v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-custom)
+   Compiling opentelemetry-otlp v0.32.0
+   Compiling uni-plugin-apoc-core v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-apoc-core)
+   Compiling uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+   Compiling uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+   Compiling uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+   Compiling uni-query-functions v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query-functions)
+   Compiling uni-query v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query)
+   Compiling uni-plugin-rhai v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-rhai)
+   Compiling uni-plugin-host v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-host)
+   Compiling uni-fork v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-fork)
+   Compiling uni-bulk v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-bulk)
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11m 38s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID d18f5616-7ba9-4d52-a1dd-a2a6d3b29c5d with nextest profile: default
+    Starting 246 tests across 7 binaries (4827 tests skipped)
+        PASS [   0.027s] (  1/246) uni-db::integration bugs::test_issue_72_version_recovery::test_snapshot_manager_has_any_manifests
+        PASS [   0.037s] (  2/246) uni-db::integration bugs::test_issue_72_version_recovery::test_wal_has_segments
+        PASS [   0.038s] (  3/246) uni-db::integration bugs::repro_233_periodic_cancel_durability::periodic_cancel_removes_the_persisted_row
+        PASS [   0.041s] (  4/246) uni-db::integration bugs::test_issue_72_version_recovery::test_fresh_database_starts_at_version_zero
+        PASS [   0.062s] (  5/246) uni-db::integration bugs::bug_bulk_flush_intent_abandon_repro::active_recovery_retains_marker_when_rollback_fails
+        PASS [   0.081s] (  6/246) uni-db::integration bugs::collect_plan_vars_join_recovery::bindzerolengthpath_cross_match_equi_join_is_hash_join
+        PASS [   0.082s] (  7/246) uni-db::integration bugs::collect_plan_vars_join_recovery::allshortestpaths_cross_match_equi_join_is_hash_join
+        PASS [   0.095s] (  8/246) uni-db::integration bugs::test_issue_72_version_recovery::test_wal_without_manifest_fails_loudly
+        PASS [   0.097s] (  9/246) uni-db::integration bugs::test_issue_72_version_recovery::test_lost_latest_pointer_recovers_from_manifest
+        PASS [   0.121s] ( 10/246) uni-db::integration bugs::collect_plan_vars_join_recovery::shortestpath_cross_match_equi_join_is_hash_join
+        PASS [   0.135s] ( 11/246) uni-db::integration bugs::collect_plan_vars_join_recovery::vectorknn_cross_match_equi_join_is_hash_join
+        PASS [   0.163s] ( 12/246) uni-db::integration bulk_dual_write_resilience::bulk_edges_reach_main_edges_before_any_delta_resilience
+        PASS [   0.171s] ( 13/246) uni-db::integration bugs::collect_plan_vars_join_recovery::bindpath_cross_match_equi_join_is_hash_join
+        PASS [   0.327s] ( 14/246) uni-db::integration bulk_isolation_resilience::bulk_commit_mid_publish_failure_leaves_no_partial_load_live_resilience
+        PASS [   0.373s] ( 15/246) uni-db::integration bulk_isolation_resilience::bulk_commit_failure_after_publish_never_invites_a_double_load_resilience
+        PASS [   0.396s] ( 16/246) uni-db::integration bulk_isolation_resilience::bulk_commit_mid_publish_failure_never_invites_a_double_load_resilience
+        PASS [   0.373s] ( 17/246) uni-db::integration bulk_isolation_resilience::bulk_commit_schema_save_failure_after_publish_is_a_warning_resilience
+        PASS [   0.505s] ( 18/246) uni-db::integration bulk_isolation_resilience::bulk_abort_keeps_concurrent_committed_writes_resilience
+        PASS [   0.544s] ( 19/246) uni-db::integration bulk_isolation_resilience::bulk_commit_recovered_after_commit_point_returns_ok_with_warnings_resilience
+        PASS [   0.316s] ( 20/246) uni-db::integration bulk_isolation_resilience::compaction_keeps_flush_generations_that_land_during_the_pass_resilience
+        PASS [   0.724s] ( 21/246) uni-db::integration bulk_isolation_resilience::bulk_commit_persistent_failure_after_commit_point_is_incomplete_resilience
+        PASS [   0.669s] ( 22/246) uni-db::integration bulk_isolation_resilience::bulk_incomplete_load_survives_cleanup_of_aged_staged_files_resilience
+        PASS [   0.733s] ( 23/246) uni-db::integration bulk_isolation_resilience::bulk_commit_failure_before_commit_point_applies_nothing_resilience
+        PASS [   0.028s] ( 24/246) uni-db::integration compaction_resilience::compaction_abort_child
+        PASS [   0.791s] ( 25/246) uni-db::integration bulk_isolation_resilience::bulk_abort_after_compaction_leaves_no_dangling_edges_resilience
+        PASS [   0.807s] ( 26/246) uni-db::integration bulk_isolation_resilience::ceilings_captured_mid_publish_exclude_the_load_resilience
+        PASS [   0.662s] ( 27/246) uni-db::integration bulk_isolation_resilience::fork_bulk_load_incomplete_is_completed_at_fork_reopen_resilience
+        PASS [   1.055s] ( 28/246) uni-db::integration bulk_isolation_resilience::bulk_commit_marker_write_failure_is_decided_by_read_back_resilience
+        PASS [   0.612s] ( 29/246) uni-db::integration bulk_isolation_resilience::recovery_rechecks_declared_endpoints_after_wal_replay_resilience
+        PASS [   0.808s] ( 30/246) uni-db::integration bulk_isolation_resilience::fork_capture_racing_a_publish_start_is_retried_resilience
+        PASS [   0.676s] ( 31/246) uni-db::integration bulk_isolation_resilience::redrive_publish_rechecks_declared_endpoints_resilience
+        PASS [   0.911s] ( 32/246) uni-db::integration bulk_isolation_resilience::fork_created_mid_publish_waits_for_the_whole_load_resilience
+        PASS [   0.022s] ( 33/246) uni-db::integration dense_resilience::dense_abort_child
+        PASS [   1.386s] ( 34/246) uni-db::integration bulk_isolation_resilience::bulk_publish_failure_keeps_later_commits_resilience
+        PASS [   1.399s] ( 35/246) uni-db::integration bulk_isolation_resilience::bulk_recovery_interrupted_completes_exactly_once_resilience
+        PASS [   1.497s] ( 36/246) uni-db::integration bulk_isolation_resilience::bulk_publish_crash_keeps_commits_made_inside_the_publish_resilience
+        PASS [   1.478s] ( 37/246) uni-db::integration bulk_isolation_resilience::bulk_redrive_stops_with_the_database_resilience
+        PASS [   1.547s] ( 38/246) uni-db::integration bulk_isolation_resilience::bulk_two_interrupted_publishes_both_reconciled_resilience
+        PASS [   0.258s] ( 39/246) uni-db::integration dense_resilience::dense_corrupt_wal_tail_skipped_on_reopen
+        PASS [   1.684s] ( 40/246) uni-db::integration bulk_isolation_resilience::bulk_publish_failure_reconciled_after_another_load_commits_resilience
+        PASS [   1.862s] ( 41/246) uni-db::integration bulk_isolation_resilience::bulk_commit_is_invisible_until_every_table_is_published_resilience
+        PASS [   1.368s] ( 42/246) uni-db::integration bulk_isolation_resilience::fork_refused_while_a_publish_stays_incomplete_resilience
+        PASS [   1.861s] ( 43/246) uni-db::integration bulk_isolation_resilience::bulk_committed_recovery_keeps_a_later_snapshot_resilience
+        PASS [   0.048s] ( 44/246) uni-db::integration first_flush_resilience::first_flush_abort_child
+        PASS [   0.027s] ( 45/246) uni-db::integration first_flush_resilience::first_flush_edge_abort_child
+        PASS [   0.217s] ( 46/246) uni-db::integration first_flush_resilience::crash_before_first_flush_keeps_edges
+        PASS [   0.129s] ( 47/246) uni-db::integration first_flush_resilience::crash_before_first_flush_vertices_only_control
+        PASS [   0.145s] ( 48/246) uni-db::integration first_flush_resilience::crash_before_first_flush_still_opens
+        PASS [   0.210s] ( 49/246) uni-db::integration first_flush_resilience::crash_before_first_flush_keeps_timestamps
+        PASS [   0.342s] ( 50/246) uni-db::integration first_flush_resilience::crash_after_a_flush_recovers
+        PASS [   1.375s] ( 51/246) uni-db::integration bulk_isolation_resilience::uncommitted_bulk_load_invisible_across_compaction_resilience
+        PASS [   2.156s] ( 52/246) uni-db::integration bulk_isolation_resilience::bulk_publish_crash_after_compaction_completes_consistently_resilience
+        PASS [   2.208s] ( 53/246) uni-db::integration bulk_isolation_resilience::bulk_incomplete_load_is_redriven_in_the_background_resilience
+        PASS [   0.046s] ( 54/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_abort_child
+        PASS [   0.295s] ( 55/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_abort_after_begin_create_rolls_back
+        PASS [   0.251s] ( 56/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_abort_before_finish_drop_recovers
+        PASS [   0.301s] ( 57/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_abort_after_begin_drop_recovers
+        PASS [   0.363s] ( 58/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_abort_after_allocator_rolls_back
+        PASS [   0.358s] ( 59/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_abort_after_artifacts_leaves_no_residue
+        PASS [   0.389s] ( 60/246) uni-db::integration first_flush_resilience::recovery_merges_flushed_and_replayed_edges_without_duplicating
+        PASS [   0.290s] ( 61/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_abort_between_finish_create_puts_is_usable
+        PASS [   0.296s] ( 62/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_abort_mid_delete_loop_keeps_the_tombstone
+        PASS [   1.398s] ( 63/246) uni-db::integration crash_harness::tests::a_child_whose_seam_is_never_reached_fails_loudly
+        PASS [   0.033s] ( 64/246) uni-db::integration fork::fork_durability::fork_durability_abort_child
+        PASS [   1.192s] ( 65/246) uni-db::integration dense_resilience::dense_committed_value_survives_crash_recovery
+        PASS [   0.348s] ( 66/246) uni-db::integration fork::fork_durability::fork_abort_before_truncate_no_double_apply
+        PASS [   0.203s] ( 67/246) uni-db::integration fork::fork_durability::fork_committed_writes_survive_db_reopen_exactly_once
+        PASS [   1.323s] ( 68/246) uni-db::integration dense_resilience::dense_crash_before_wal_recovers_nothing
+        PASS [   0.152s] ( 69/246) uni-db::integration fork::fork_nested_recovery::fork_create_failure_cleans_up_partial_branches_in_process
+        PASS [   0.168s] ( 70/246) uni-db::integration fork::fork_nested_recovery::cascade_surfaces_delete_failures_and_stays_recoverable
+        PASS [   1.387s] ( 71/246) uni-db::integration dense_resilience::dense_crash_during_flush_loses_no_committed_data
+        PASS [   0.343s] ( 72/246) uni-db::integration fork::fork_durability::fork_flush_does_not_poison_primary_catalog_latest
+        PASS [   0.233s] ( 73/246) uni-db::integration graph_algo::read_only_l0_recovery::read_only_reopen_graph_compute_projects_replayed_rows
+        PASS [   0.253s] ( 74/246) uni-db::integration graph_algo::read_only_l0_recovery::read_only_reopen_sees_wal_replayed_rows
+        PASS [   0.257s] ( 75/246) uni-db::integration fork::fork_nested_recovery::nested_fork_create_crash_rolls_back_leaf_only
+        PASS [   0.081s] ( 76/246) uni-db::integration locy::locy_rule_durability::duplicate_registration_is_idempotent
+        PASS [   0.102s] ( 77/246) uni-db::integration locy::locy_rule_durability::clear_persists_empty
+        PASS [   0.272s] ( 78/246) uni-db::integration graph_algo::read_only_l0_recovery::read_only_reopen_still_rejects_writes
+        PASS [   0.101s] ( 79/246) uni-db::integration locy::locy_rule_durability::missing_catalog_opens_clean
+        PASS [   0.222s] ( 80/246) uni-db::integration locy::locy_lazy_derived_resilience::a_failed_deferred_derivation_caches_nothing_and_retries
+        PASS [   0.111s] ( 81/246) uni-db::integration locy::locy_rule_durability::non_compiling_persisted_rule_fails_or_skips
+        PASS [   0.127s] ( 82/246) uni-db::integration locy::locy_rule_durability::remove_persists_and_rejects_multi_rule_sources
+        PASS [   0.102s] ( 83/246) uni-db::integration locy::locy_rule_durability::reregister_same_name_supersedes_prior_source
+        PASS [   0.042s] ( 84/246) uni-db::integration multivector_resilience::multivector_abort_child
+        PASS [   2.399s] ( 85/246) uni-db::integration crash_harness::tests::a_child_that_does_not_abort_fails_loudly
+        PASS [   1.207s] ( 86/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_crash_after_begin_create_rolls_back
+        PASS [   0.231s] ( 87/246) uni-db::integration multivector_resilience::multivector_abort_before_wal_recovers_nothing
+        PASS [   1.255s] ( 88/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_crash_mid_delete_loop_keeps_the_tombstone
+        PASS [   0.265s] ( 89/246) uni-db::integration locy::locy_rule_durability::rules_survive_close_and_reopen
+        PASS [   1.346s] ( 90/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_crash_after_begin_drop_recovers
+        PASS [   0.222s] ( 91/246) uni-db::integration multivector_resilience::multivector_abort_during_flush_loses_no_committed_data
+        PASS [   1.426s] ( 92/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_crash_after_allocator_rolls_back
+        PASS [   1.352s] ( 93/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_crash_before_finish_drop_recovers
+        PASS [   0.203s] ( 94/246) uni-db::integration multivector_resilience::multivector_corrupt_wal_tail_skipped_on_reopen
+        PASS [   0.290s] ( 95/246) uni-db::integration multivector_resilience::multivector_abort_committed_value_survives_recovery
+        PASS [   1.377s] ( 96/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_crash_between_finish_create_puts_is_usable
+        PASS [   1.441s] ( 97/246) uni-db::integration fork::fork_2pc_recovery_matrix::fork_2pc_crash_after_artifacts_leaves_no_residue
+        PASS [   0.032s] ( 98/246) uni-db::integration sparse_resilience::sparse_abort_child
+        PASS [   0.191s] ( 99/246) uni-db::integration recovery_index_no_rebuild::dense_vector_recovered_delta_queryable_without_rebuild
+        PASS [   0.198s] (100/246) uni-db::integration recovery_index_no_rebuild::dense_vector_recovered_delete_hides_doc_without_rebuild
+        PASS [   0.201s] (101/246) uni-db::integration recovery_index_no_rebuild::scalar_recovered_delta_queryable_without_rebuild
+        PASS [   0.209s] (102/246) uni-db::integration recovery_index_no_rebuild::fulltext_recovered_delta_queryable_without_rebuild
+        PASS [   0.195s] (103/246) uni-db::integration recovery_index_no_rebuild::scalar_recovered_update_overrides_stale_entry_without_rebuild
+        PASS [   0.219s] (104/246) uni-db::integration recovery_index_no_rebuild::scalar_recovered_delete_hides_doc_without_rebuild
+        PASS [   0.223s] (105/246) uni-db::integration sparse_resilience::sparse_abort_before_wal_recovers_nothing
+        PASS [   0.262s] (106/246) uni-db::integration sparse_resilience::sparse_abort_committed_value_survives_recovery
+        PASS [   1.448s] (107/246) uni-db::integration fork::fork_durability::fork_flush_crash_before_truncate_no_double_apply
+        PASS [   0.173s] (108/246) uni-db::integration sparse_resilience::sparse_corrupt_wal_tail_skipped_on_reopen
+        PASS [   0.244s] (109/246) uni-db::integration sparse_resilience::sparse_abort_during_flush_loses_no_committed_data
+        PASS [   0.066s] (110/246) uni-db::integration ssi_resilience::abort_leaves_no_residue
+        PASS [   0.224s] (111/246) uni-db::integration ssi_resilience::abort_after_merge_is_atomic
+        PASS [   0.596s] (112/246) uni-db::integration multivector_resilience::stalled_multivec_flush_stream_recovers_not_wedges
+        PASS [   0.194s] (113/246) uni-db::integration ssi_resilience::abort_after_validate_recovers_nothing
+        PASS [   0.220s] (114/246) uni-db::integration ssi_resilience::abort_after_wal_flush_is_atomic
+        PASS [   0.197s] (115/246) uni-db::integration ssi_resilience::abort_during_flush_preserves_committed_unflushed_commit
+        PASS [   0.131s] (116/246) uni-db::integration ssi_resilience::conflict_detection_resumes_after_reopen
+        PASS [   0.147s] (117/246) uni-db::integration ssi_resilience::committed_write_survives_reopen
+        PASS [   0.132s] (118/246) uni-db::integration ssi_resilience::corrupt_wal_tail_does_not_block_reopen
+        PASS [   0.045s] (119/246) uni-db::integration ssi_resilience::ssi_abort_child
+        PASS [   0.580s] (120/246) uni-db::integration sparse_resilience::stalled_sparse_flush_stream_recovers_not_wedges
+        PASS [   0.165s] (121/246) uni-db::integration ssi_resilience::validation_aborted_tx_leaves_no_trace_through_reopen
+        PASS [   1.167s] (122/246) uni-db::integration multivector_resilience::multivector_committed_value_survives_crash_recovery
+        PASS [   0.035s] (123/246) uni-db::integration storage::label_declare_backfill_resilience::label_declare_abort_child
+        PASS [   1.158s] (124/246) uni-db::integration multivector_resilience::multivector_crash_before_wal_recovers_nothing
+        PASS [   0.293s] (125/246) uni-db::integration storage::label_declare_backfill_resilience::commit_after_declare_then_crash_keeps_label_rows
+        PASS [   0.293s] (126/246) uni-db::integration storage::label_declare_backfill_resilience::commit_during_declare_then_crash_keeps_label_rows
+        PASS [   0.025s] (127/246) uni-db::integration storage::schema_ddl_widen_resilience::ddl_widen_abort_child
+        PASS [   1.030s] (128/246) uni-db::integration sparse_resilience::sparse_committed_value_survives_crash_recovery
+        PASS [   0.244s] (129/246) uni-db::integration storage::schema_ddl_widen_resilience::commit_after_add_property_then_crash_keeps_label_readable
+        PASS [   1.298s] (130/246) uni-db::integration multivector_resilience::multivector_crash_during_flush_loses_no_committed_data
+        PASS [   0.191s] (131/246) uni-db::integration storage::schema_ddl_widen_resilience::commit_during_add_property_then_crash_keeps_label_readable
+        PASS [   0.025s] (132/246) uni-db::integration storage::snapshot_restore_rewinds::resilience::restore_abort_child
+        PASS [   1.172s] (133/246) uni-db::integration sparse_resilience::sparse_crash_during_flush_loses_no_committed_data
+        PASS [   1.210s] (134/246) uni-db::integration sparse_resilience::sparse_crash_before_wal_recovers_nothing
+        PASS [   0.023s] (135/246) uni-db::integration triggers::bulk_events_delivery_resilience::crash::bulk_events_abort_child
+        PASS [   1.150s] (136/246) uni-db::integration ssi_resilience::crash_after_merge_is_atomic
+        PASS [   0.557s] (137/246) uni-db::integration storage::snapshot_restore_rewinds::resilience::fork_created_across_a_restore_is_rolled_back
+        PASS [   1.191s] (138/246) uni-db::integration ssi_resilience::crash_after_wal_flush_is_atomic
+        PASS [   1.185s] (139/246) uni-db::integration ssi_resilience::crash_during_flush_preserves_committed_unflushed_commit
+        PASS [   0.164s] (140/246) uni-db::integration triggers::bulk_events_delivery_resilience::crash::recovered_fork_load_fires_triggers_when_the_fork_opens_resilience
+        PASS [   0.571s] (141/246) uni-db::integration storage::snapshot_restore_rewinds::resilience::restore_interrupted_by_a_crash_completes_on_reopen
+        PASS [   0.688s] (142/246) uni-db::integration storage::snapshot_restore_rewinds::resilience::delete_refused_while_a_restore_runs
+        PASS [   0.437s] (143/246) uni-db::integration triggers::bulk_events_delivery_resilience::crash::crash_during_the_opens_delivery_delivers_at_the_next_open_resilience
+        PASS [   0.707s] (144/246) uni-db::integration storage::snapshot_restore_rewinds::resilience::index_build_racing_a_restore_cannot_outlive_the_rewind
+        PASS [   0.070s] (145/246) uni-db::integration triggers::commit_order_resilience::commit_paused_before_notify_is_still_announced_first_resilience
+        PASS [   1.494s] (146/246) uni-db::integration ssi_resilience::crash_after_validate_recovers_nothing
+        PASS [   0.416s] (147/246) uni-db::integration triggers::bulk_events_delivery_resilience::crash::recovered_load_delivers_its_events_at_open_resilience
+        PASS [   0.411s] (148/246) uni-db::integration triggers::bulk_events_delivery_resilience::dropped_commit_awaiting_its_announcement_still_delivers_resilience
+        PASS [   0.374s] (149/246) uni-db::integration triggers::commit_order_resilience::concurrent_commits_are_announced_in_version_order
+        PASS [   0.016s] (150/246) uni-db::integration triggers::wal_recovery_announce_resilience::crash::wal_recovery_abort_child
+        PASS [   0.996s] (151/246) uni-db::integration triggers::bulk_events::redriven_load_emits_when_it_becomes_visible_resilience
+        PASS [   0.568s] (152/246) uni-db::integration triggers::bulk_events_delivery_resilience::transaction_abandoned_after_commit_point_halts_cdc_not_a_hole_resilience
+        PASS [   0.089s] (153/246) uni-db::integration value_fidelity::btic_survives_wal_recovery
+        PASS [   0.106s] (154/246) uni-db::integration value_fidelity::dense_vector_survives_wal_recovery
+        PASS [   0.054s] (155/246) uni-store storage::manager::label_backfill_tests::recovery_backfills_marked_declared_labels_and_clears_markers
+        PASS [   0.102s] (156/246) uni-db::integration value_fidelity::multivector_survives_wal_recovery
+        PASS [   0.033s] (157/246) uni-store::integration cloud::s3_compatibility_test::test_id_allocator_recovery
+        PASS [   0.953s] (158/246) uni-db::integration triggers::bulk_events_delivery_resilience::dropped_commit_mid_delivery_still_delivers_every_event_resilience
+        PASS [   0.587s] (159/246) uni-db::integration triggers::wal_recovery_announce_resilience::crash::an_unannounced_commit_is_announced_at_open_resilience
+        PASS [   0.182s] (160/246) uni-store::integration compaction_resilience::compact_all_with_multi_src_label_edge_type
+        PASS [   1.132s] (161/246) uni-db::integration triggers::wal_recovery_announce_resilience::a_dropped_database_does_not_announce_its_commits_again_resilience
+        PASS [   1.168s] (162/246) uni-db::integration triggers::wal_recovery_announce_resilience::a_shut_down_database_does_not_announce_its_commits_again_resilience
+        PASS [   0.165s] (163/246) uni-store::integration compaction_resilience::main_edges_read_failure_in_the_invariant_check_is_an_error
+        PASS [   1.021s] (164/246) uni-db::integration triggers::wal_recovery_announce_resilience::dropping_a_database_mid_flush_on_a_current_thread_runtime_returns_resilience
+        PASS [   1.463s] (165/246) uni-db::integration triggers::bulk_events_runtime_drop_resilience::a_delivery_mid_scan_survives_its_runtime_being_dropped_resilience
+        PASS [   0.292s] (166/246) uni-store::integration flush_resilience::crdt_increments_merge_across_flush_window
+        PASS [   0.077s] (167/246) uni-store::integration flush_resilience::failed_rotate_does_not_wedge_flush_finalizer
+        PASS [   0.284s] (168/246) uni-store::integration flush_resilience::edge_to_vertex_tombstoned_in_flush_window_rejected
+        PASS [   0.270s] (169/246) uni-store::integration flush_resilience::extid_check_covers_flush_window
+        PASS [   0.291s] (170/246) uni-store::integration flush_resilience::extid_commit_probe_covers_flush_window
+        PASS [   0.031s] (171/246) uni-store::integration fork_recovery::fork_branch::branch_scan_isolated_from_post_fork_primary_writes
+        PASS [   0.026s] (172/246) uni-store::integration fork_recovery::fork_branch::branch_scan_reads_parent_rows_via_base_paths
+        PASS [   0.028s] (173/246) uni-store::integration fork_recovery::fork_branch::branch_scan_respects_filter_and_projection
+        PASS [   0.024s] (174/246) uni-store::integration fork_recovery::fork_branch::primary_scan_unaffected_by_branch_field_default
+        PASS [   0.024s] (175/246) uni-store::integration fork_recovery::fork_branch_writes::create_dataset_then_branch_yields_writable_fork
+        PASS [   0.026s] (176/246) uni-store::integration fork_recovery::fork_branch_writes::delete_from_branch_removes_only_on_branch
+        PASS [   0.286s] (177/246) uni-store::integration flush_resilience::nontx_delete_not_lost_across_rotation
+        PASS [   0.027s] (178/246) uni-store::integration fork_recovery::fork_branch_writes::replace_branch_tip_overwrites_branch_only
+        PASS [   0.035s] (179/246) uni-store::integration fork_recovery::fork_branch_writes::write_to_branch_appends_only_to_branch
+        PASS [   0.031s] (180/246) uni-store::integration fork_recovery::fork_branch_writes::writes_on_one_branch_invisible_to_sibling_branches
+        PASS [   1.674s] (181/246) uni-db::integration triggers::wal_recovery_announce_resilience::crash::a_recovered_update_is_announced_as_an_update_resilience
+        PASS [   0.045s] (182/246) uni-store::integration fork_recovery::lance_branch_retention::cleanup_old_versions_does_not_delete_branch_referenced_fragments
+        PASS [   0.046s] (183/246) uni-store::integration fork_recovery::lance_branch_retention::cleanup_then_branch_drop_recovers_disk
+        PASS [   0.023s] (184/246) uni-store::integration fork_recovery::recovery_fork_create::pending_entry_with_no_branches_is_rolled_back
+        PASS [   0.311s] (185/246) uni-store::integration flush_resilience::unique_constraint_hole_during_flush_window
+        PASS [   0.031s] (186/246) uni-store::integration fork_recovery::recovery_fork_create::pending_entry_with_partial_branches_force_deletes_them
+        PASS [   0.385s] (187/246) uni-store::integration flush_resilience::stale_property_cache_window_after_flush
+        PASS [   0.031s] (188/246) uni-store::integration fork_recovery::recovery_fork_create_fault::partial_create_branch_rolls_back_on_recovery
+        PASS [   0.031s] (189/246) uni-store::integration fork_recovery::recovery_fork_drop::delete_branch_handles_zombie_shallow_clone
+        PASS [   0.023s] (190/246) uni-store::integration fork_recovery::recovery_fork_drop::orphan_tombstone_with_no_registry_entry_is_swept
+        PASS [   0.036s] (191/246) uni-store::integration fork_recovery::recovery_fork_drop::recover_forks_is_idempotent
+        PASS [   0.023s] (192/246) uni-store::integration fork_recovery::recovery_fork_wal::primary_wal_unaffected_by_fork_wal_segments
+        PASS [   0.035s] (193/246) uni-store::integration fork_recovery::recovery_fork_drop::tombstoned_drop_completes_on_recovery
+        PASS [   0.023s] (194/246) uni-store::integration fork_recovery::recovery_fork_wal::replay_with_no_persisted_mutations_is_noop
+        PASS [   0.034s] (195/246) uni-store::integration fork_recovery::recovery_fork_wal::fork_wal_replay_restores_persisted_mutations
+        PASS [   0.114s] (196/246) uni-store::integration property_scan_failure_resilience::all_edge_props_scan_failure_is_an_error
+        PASS [   0.112s] (197/246) uni-store::integration property_scan_failure_resilience::batch_vertex_props_scan_failure_is_an_error
+        PASS [   0.118s] (198/246) uni-store::integration property_scan_failure_resilience::batch_edge_props_scan_failure_is_an_error
+        PASS [   0.120s] (199/246) uni-store::integration property_scan_failure_resilience::all_vertex_props_scan_failure_is_an_error
+        PASS [   0.018s] (200/246) uni-store::integration storage::wal_durability_test::test_edge_type_name_wal_roundtrip
+        PASS [   0.026s] (201/246) uni-store::integration storage::extid_index_test::extid_uniqueness_survives_wal_recovery
+        PASS [   0.028s] (202/246) uni-store::integration storage::wal_durability_test::commit_writes_each_mutation_to_wal_exactly_once
+        PASS [   0.018s] (203/246) uni-store::integration storage::wal_durability_test::test_replay_delete_preserves_labels_for_flush
+        PASS [   0.161s] (204/246) uni-store::integration property_scan_failure_resilience::batch_edge_props_for_type_scan_failure_is_an_error
+        PASS [   0.021s] (205/246) uni-store::integration storage::wal_durability_test::test_replay_restores_vertex_labels
+        PASS [   0.017s] (206/246) uni-store::integration storage::wal_durability_test::test_wal_checksum_mismatch_detected
+        PASS [   0.021s] (207/246) uni-store::integration storage::wal_durability_test::test_wal_concurrent_flushes
+        PASS [   0.019s] (208/246) uni-store::integration storage::wal_durability_test::test_wal_corrupt_middle_segment_fails_recovery
+        PASS [   0.016s] (209/246) uni-store::integration storage::wal_durability_test::test_wal_corrupt_only_segment_is_tolerated_tail
+        PASS [   0.018s] (210/246) uni-store::integration storage::wal_durability_test::test_wal_delete_vertex_labels_round_trip
+        PASS [   0.013s] (211/246) uni-store::integration storage::wal_durability_test::test_wal_empty_segment_file_is_corrupt_tail
+        PASS [   0.019s] (212/246) uni-store::integration storage::wal_durability_test::test_wal_delete_vertex_mutation
+        PASS [   0.016s] (213/246) uni-store::integration storage::wal_durability_test::test_wal_edge_mutations
+        PASS [   0.019s] (214/246) uni-store::integration storage::wal_durability_test::test_wal_empty_flush
+        PASS [   0.017s] (215/246) uni-store::integration storage::wal_durability_test::test_wal_legacy_raw_json_segment_replays
+        PASS [   0.021s] (216/246) uni-store::integration storage::wal_durability_test::test_wal_flushed_lsn_tracking
+        PASS [   0.021s] (217/246) uni-store::integration storage::wal_durability_test::test_wal_initialize_from_existing
+        PASS [   0.022s] (218/246) uni-store::integration storage::wal_durability_test::test_wal_full_truncate
+        PASS [   0.016s] (219/246) uni-store::integration storage::wal_durability_test::test_wal_lsn_ordering
+        PASS [   0.015s] (220/246) uni-store::integration storage::wal_durability_test::test_wal_serde_backward_compat_missing_labels
+        PASS [   0.017s] (221/246) uni-store::integration storage::wal_durability_test::test_wal_replay_since_high_water_mark
+        PASS [   0.018s] (222/246) uni-store::integration storage::wal_durability_test::test_wal_serde_backward_compat_missing_edge_type_name
+        PASS [   0.016s] (223/246) uni-store::integration storage::wal_durability_test::test_wal_serde_backward_compat_missing_timestamps
+        PASS [   0.018s] (224/246) uni-store::integration storage::wal_durability_test::test_wal_set_vertex_labels_round_trip_replace
+        PASS [   0.020s] (225/246) uni-store::integration storage::wal_durability_test::test_wal_timestamps_round_trip
+        PASS [   0.020s] (226/246) uni-store::integration storage::wal_durability_test::test_wal_truncate_before_high_water_mark
+        PASS [   0.150s] (227/246) uni-store::integration property_scan_failure_resilience::vertex_prop_scan_failure_is_an_error
+        PASS [   0.024s] (228/246) uni-store::integration storage::wal_durability_test::test_wal_truncated_tail_segment_skipped
+        PASS [   0.031s] (229/246) uni-store::integration storage::wal_durability_test::unique_constraint_survives_wal_recovery
+        PASS [   1.512s] (230/246) uni-store::integration compaction_resilience::cancelled_compaction_leaves_store_consistent_at_every_safe_point
+        PASS [   5.097s] (231/246) uni-db::integration locy::locy_budget_resilience::a_command_finishing_past_the_deadline_is_reported
+        PASS [   2.015s] (232/246) uni-store::integration compaction_resilience::adj_redo_after_replace_preserves_the_edge_set
+        PASS [   2.000s] (233/246) uni-store::integration compaction_resilience::adj_redo_does_not_wipe_an_edge_reinserted_after_the_crash
+        PASS [   1.673s] (234/246) uni-store::integration compaction_resilience::direction_skew_leaves_both_directions_agreeing
+        PASS [   3.866s] (235/246) uni-db::integration storage::snapshot_restore_rewinds::resilience::catalog_save_racing_a_restore_cannot_resurrect_the_old_catalog
+        PASS [   3.610s] (236/246) uni-db::integration triggers::wal_recovery_announce_resilience::crash::a_flush_does_not_overtake_an_unannounced_commit_resilience
+        PASS [   5.210s] (237/246) uni-db::integration storage::schema_ddl_widen_resilience::commit_during_alter_add_property_then_crash_keeps_label_readable
+        PASS [  10.337s] (238/246) uni-db::integration dense_resilience::dense_abort_during_flush_loses_no_committed_data
+        PASS [  10.367s] (239/246) uni-db::integration dense_resilience::dense_abort_committed_value_survives_recovery
+        PASS [  11.097s] (240/246) uni-db::integration compaction_resilience::crash_between_fwd_and_bwd_leaves_directions_agreeing
+        PASS [  11.140s] (241/246) uni-db::integration dense_resilience::dense_abort_before_wal_recovers_nothing
+        PASS [  11.459s] (242/246) uni-db::integration compaction_resilience::crash_between_labels_keeps_multi_label_vertex_consistent
+        PASS [  12.648s] (243/246) uni-db::integration compaction_resilience::crash_after_adj_replace_before_delta_clear_preserves_edge_set
+        PASS [  12.839s] (244/246) uni-db::integration compaction_resilience::crash_after_vertex_replace_does_not_resurrect_deleted_vertex
+        PASS [  13.136s] (245/246) uni-db::integration compaction_resilience::crash_after_compact_files_leaves_indexes_usable
+        PASS [  10.103s] (246/246) uni-db::integration ssi_resilience::long_transaction_past_registry_capacity_aborts
+────────────
+     Summary [  14.424s] 246 tests run: 246 passed, 4827 skipped

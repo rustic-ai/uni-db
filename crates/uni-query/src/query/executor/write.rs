@@ -2090,8 +2090,25 @@ impl Executor {
     /// bare `Value::Int(vid)` is not a valid node binding for those consumers.
     /// It said the same thing while producing a `Value::Map` and MATCH produced
     /// a `Value::Node`, which is the divergence this closes.
-    fn build_node_map(vid: Vid, label: &str, props: uni_common::Properties) -> Value {
-        Self::bind_node(vid, std::slice::from_ref(&label.to_string()), props)
+    fn bind_matched_node(
+        &self,
+        vid: Vid,
+        matched_label: &str,
+        props: uni_common::Properties,
+        ctx: Option<&QueryContext>,
+        persisted_labels: &HashMap<Vid, Vec<String>>,
+    ) -> Result<Value> {
+        // The pattern names one required label, not the node's whole set.
+        // Own/intra-statement label changes override the snapshot-visible
+        // labels fetched once for the persisted matches. The live label index
+        // is not authoritative for a transaction's pinned query context.
+        let labels = ctx
+            .and_then(|ctx| l0_visibility::get_vertex_labels_optional(vid, ctx))
+            .or_else(|| persisted_labels.get(&vid).cloned())
+            .ok_or_else(|| {
+                anyhow!("MERGE matched {matched_label} vertex {vid:?} without visible labels")
+            })?;
+        Ok(Self::bind_node(vid, &labels, props))
     }
 
     /// The one node binding: MERGE and CREATE built the same shape twice.
@@ -2152,6 +2169,7 @@ impl Executor {
         mut row: HashMap<String, Value>,
         key_props: &HashMap<String, Value>,
         persisted: &HashMap<MergeKey, Vec<Vid>>,
+        persisted_labels: &HashMap<Vid, Vec<String>>,
         key_tuple: &MergeKey,
         existing: &mut HashMap<MergeKey, Vec<Vid>>,
         on_match: Option<&SetClause>,
@@ -2207,8 +2225,23 @@ impl Executor {
             let seed_props = self
                 .on_create_seed_props(on_create, &row, prop_manager, params, ctx)
                 .await?;
+            // Anonymous MERGE still needs a creation identity for dedup and
+            // commit guards. Keep its temporary binding out of the result row.
+            let mut create_pattern = Cow::Borrowed(path_pattern);
+            let mut created_var = node
+                .variable
+                .clone()
+                .unwrap_or_else(|| "__merge_created".into());
+            if node.variable.is_none() {
+                while row.contains_key(&created_var) {
+                    created_var.push('_');
+                }
+                if let PatternElement::Node(n) = &mut create_pattern.to_mut().paths[0].elements[0] {
+                    n.variable = Some(created_var.clone());
+                }
+            }
             self.execute_create_pattern(
-                path_pattern,
+                &create_pattern,
                 &mut row,
                 writer,
                 prop_manager,
@@ -2223,8 +2256,7 @@ impl Executor {
             // fresh vid has nothing in storage, so ON CREATE SET's lazy read
             // resolves from the L0 row the create just wrote instead of
             // issuing a per-row storage scan that finds nothing.
-            if let Some(var) = &node.variable
-                && let Some(val) = row.get(var)
+            if let Some(val) = row.get(&created_var)
                 && let Ok(vid) = Self::vid_from_value(val)
             {
                 existing.entry(key_tuple.clone()).or_default().push(vid);
@@ -2246,6 +2278,9 @@ impl Executor {
                         uni_store::runtime::l0::serialize_constraint_key(label, &key_values);
                     tx_l0.write().insert_merge_guard_key(guard_key, vid);
                 }
+            }
+            if node.variable.is_none() {
+                row.remove(&created_var);
             }
             if let Some(set) = on_create {
                 self.execute_set_items_locked(
@@ -2298,7 +2333,10 @@ impl Executor {
                     } else {
                         HashMap::new()
                     };
-                    m.insert(var.clone(), Self::build_node_map(vid, label, props));
+                    m.insert(
+                        var.clone(),
+                        self.bind_matched_node(vid, label, props, ctx, persisted_labels)?,
+                    );
                 }
                 if let Some(set) = on_match {
                     self.execute_set_items_locked(
@@ -2325,7 +2363,10 @@ impl Executor {
                         ctx,
                     )
                     .await?;
-                    m.insert(var.clone(), Self::build_node_map(vid, label, props));
+                    m.insert(
+                        var.clone(),
+                        self.bind_matched_node(vid, label, props, ctx, persisted_labels)?,
+                    );
                 }
                 Self::bind_path_variables(path_pattern, &mut m, temp_vars)?;
                 out.push(m);
@@ -2385,6 +2426,7 @@ impl Executor {
         // evaluating them ahead of any creates cannot observe earlier rows.
         let mut row_fast: Vec<Option<(HashMap<String, Value>, MergeKey)>> = Vec::new();
         let mut fast_persisted: HashMap<MergeKey, Vec<Vid>> = HashMap::new();
+        let mut fast_labels: HashMap<Vid, Vec<String>> = HashMap::new();
         // Statement-level property prefetch for the fast path (review perf
         // residual): every persisted match's full row is batch-read ONCE, so
         // the per-row ON MATCH SET read and the post-SET rebind resolve as
@@ -2438,6 +2480,41 @@ impl Executor {
                 .merge_lookup_persisted_batch(label, &key_names, &unique_keys)
                 .await?;
             fast_persisted = persisted;
+            // Resolve complete labels in bounded batches under the same L1
+            // visibility as property reads. Executor storage may be live even
+            // while QueryContext carries a transaction ceiling; its in-memory
+            // label index can therefore contain a later relabel.
+            let visibility = ctx
+                .and_then(|ctx| ctx.l1_visibility.clone())
+                .unwrap_or_else(|| self.storage.row_visibility());
+            let vids: Vec<Vid> = fast_persisted
+                .values()
+                .flatten()
+                .copied()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            for chunk in vids.chunks(Self::MERGE_SCAN_CHUNK) {
+                fast_labels.extend(
+                    uni_store::storage::MainVertexDataset::find_batch_labels_by_vids_counted(
+                        self.storage.backend(),
+                        chunk,
+                        &visibility,
+                        Some(&self.counters),
+                    )
+                    .await?,
+                );
+            }
+            // A live lookup can nominate a vertex created/relabelled after
+            // the pin. It is a match only if the visible label set carries
+            // this pattern's label; L0 overlays remain authoritative.
+            for vids in fast_persisted.values_mut() {
+                vids.retain(|vid| {
+                    ctx.and_then(|ctx| l0_visibility::get_vertex_labels_optional(*vid, ctx))
+                        .or_else(|| fast_labels.get(vid).cloned())
+                        .is_some_and(|labels| labels.iter().any(|name| name == label))
+                });
+            }
             if self.merge_label_prefetch_safe(label) {
                 let mut pf = Prefetch::default();
                 if !schemaless_props.is_empty() {
@@ -2538,6 +2615,7 @@ impl Executor {
                         row,
                         key_props,
                         &fast_persisted,
+                        &fast_labels,
                         key_tuple,
                         &mut fast_existing,
                         on_match,
@@ -2626,7 +2704,13 @@ impl Executor {
                             .await?;
                             row.insert(
                                 shape.keyed.variable.clone().unwrap_or_default(),
-                                Self::build_node_map(vid, &shape.keyed_label, props),
+                                self.bind_matched_node(
+                                    vid,
+                                    &shape.keyed_label,
+                                    props,
+                                    ctx,
+                                    &fast_labels,
+                                )?,
                             );
                             if let Some(rel_var) = shape.rel_var.as_deref() {
                                 self.bind_matched_edge(

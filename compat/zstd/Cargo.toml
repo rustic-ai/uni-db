@@ -1,0 +1,27 @@
+[package]
+name = "zstd"
+version = "0.13.3"
+edition = "2021"
+license = "BSD-3-Clause"
+publish = false
+description = "Compatibility re-export of security-patched zstd 0.14.3"
+
+[dependencies]
+patched = { package = "zstd", version = "=0.14.3", default-features = false }
+
+[features]
+default = ["legacy", "arrays", "zdict_builder"]
+bindgen = ["patched/bindgen"]
+debug = ["patched/debug"]
+legacy = ["patched/legacy"]
+pkg-config = ["patched/pkg-config"]
+wasm = ["patched/wasm"]
+zstdmt = ["patched/zstdmt"]
+experimental = ["patched/experimental"]
+thin = ["patched/thin"]
+arrays = ["patched/arrays"]
+no_asm = ["patched/no_asm"]
+doc-cfg = ["patched/doc-cfg"]
+zdict_builder = ["patched/zdict_builder"]
+fat-lto = ["patched/fat-lto"]
+thin-lto = ["patched/thin-lto"]

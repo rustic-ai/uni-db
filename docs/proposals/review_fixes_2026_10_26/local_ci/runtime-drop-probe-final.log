@@ -1,0 +1,35 @@
+   Compiling uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+   Compiling uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+   Compiling uni-query-functions v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query-functions)
+   Compiling uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+   Compiling uni-query v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query)
+   Compiling uni-plugin-rhai v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-rhai)
+   Compiling uni-plugin-extism v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-extism)
+   Compiling uni-plugin-wasm v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-wasm)
+   Compiling uni-plugin-host v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-host)
+   Compiling uni-fork v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-fork)
+   Compiling uni-bulk v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-bulk)
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+   Compiling uni-locy-tck v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy-tck)
+   Compiling uni-cli v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cli)
+   Compiling uni-locy-oracle v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy-oracle)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2m 33s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID d6a723b2-0e18-4e13-94ae-9a0b10069f9f with nextest profile: default
+    Starting 1 test across 73 binaries (8774 tests skipped)
+        PASS [   2.268s] (1/1) uni-store backend::lance::tests::lance_scan_polled_after_its_runtime_is_dropped_fails_in_lance
+────────────
+     Summary [   2.281s] 1 test run: 1 passed, 8774 skipped
+        PASS [   2.268s] (1/1) uni-store backend::lance::tests::lance_scan_polled_after_its_runtime_is_dropped_fails_in_lance
+  stdout ───
+
+    running 1 test
+    test backend::lance::tests::lance_scan_polled_after_its_runtime_is_dropped_fails_in_lance ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 449 filtered out; finished in 2.26s
+
+  stderr ───
+    [first-batch] reproduced Lance's cancelled-task panic
+    [single-poll] reproduced Lance's cancelled-task panic

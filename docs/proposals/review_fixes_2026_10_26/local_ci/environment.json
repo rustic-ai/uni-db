@@ -1,0 +1,10 @@
+{
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "nextest": "cargo-nextest 0.9.124 (f5ca9bb5e 2026-01-25)\nrelease: 0.9.124\ncommit-hash: f5ca9bb5e2dcab19513018df985563c7206c1bce\ncommit-date: 2026-01-25\nhost: x86_64-unknown-linux-gnu",
+  "python-db": "Python 3.14.8",
+  "python-pydantic": "Python 3.14.8",
+  "build_jobs": 6,
+  "rustc_wrapper": "",
+  "execution": "Cargo lanes serialized through test execution; some elapsed lane durations include intentional waits and suspensions"
+}

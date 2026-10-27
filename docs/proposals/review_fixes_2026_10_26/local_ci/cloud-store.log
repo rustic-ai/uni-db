@@ -1,0 +1,23 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.32s
+────────────
+ Nextest run ID 9fbff46c-1e98-4683-a577-ab4070633e6f with nextest profile: default
+    Starting 17 tests across 1 binary (365 tests skipped)
+        PASS [   0.010s] ( 1/17) uni-store::integration cloud_integration_test::test_cloud_storage_config_gcs
+        PASS [   0.010s] ( 2/17) uni-store::integration cloud_integration_test::test_inmemory_cross_store_copy
+        PASS [   0.011s] ( 3/17) uni-store::integration cloud_integration_test::test_cloud_storage_config_s3
+        PASS [   0.010s] ( 4/17) uni-store::integration cloud_integration_test::test_copy_store_prefix_to_root
+        PASS [   0.011s] ( 5/17) uni-store::integration cloud_integration_test::test_copy_store_prefix_inmemory
+        PASS [   0.011s] ( 6/17) uni-store::integration cloud_integration_test::test_cloud_storage_config_azure
+        PASS [   0.014s] ( 7/17) uni-store::integration cloud_integration_test::test_build_store_from_local_path
+        PASS [   0.014s] ( 8/17) uni-store::integration cloud_integration_test::test_copy_store_prefix_empty_source
+        PASS [   0.014s] ( 9/17) uni-store::integration cloud_integration_test::test_build_store_from_file_url
+        PASS [   0.014s] (10/17) uni-store::integration cloud_integration_test::test_copy_store_prefix
+        PASS [   0.015s] (11/17) uni-store::integration cloud_integration_test::test_copy_store_prefix_large_files
+        PASS [   0.020s] (12/17) uni-store::integration cloud_integration_test::test_is_cloud_url_detection
+        PASS [   0.020s] (13/17) uni-store::integration cloud_integration_test::test_inmemory_simulated_backup_flow
+        PASS [   0.020s] (14/17) uni-store::integration cloud_integration_test::test_inmemory_store_basic_operations
+        PASS [   0.660s] (15/17) uni-store::integration cloud_integration_test::test_s3_url_parsing
+        PASS [   0.673s] (16/17) uni-store::integration cloud_integration_test::test_s3_basic_operations
+        PASS [   0.685s] (17/17) uni-store::integration cloud_integration_test::test_s3_copy_prefix
+────────────
+     Summary [   0.686s] 17 tests run: 17 passed, 365 skipped

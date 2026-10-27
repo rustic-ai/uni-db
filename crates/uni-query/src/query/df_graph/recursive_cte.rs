@@ -312,6 +312,8 @@ async fn run_cte_loop(
     // `Value` has a canonical `Hash`/`Eq`, so content-equal rows dedup.
     let mut seen: HashSet<Value> = working_values.iter().cloned().collect();
 
+    let mut converged = working_values.is_empty();
+
     // 2. Iterate
     for _iteration in 0..MAX_ITERATIONS {
         if working_values.is_empty() {
@@ -345,6 +347,7 @@ async fn run_cte_loop(
         let next_values = batches_to_values(&recursive_batches)?;
 
         if next_values.is_empty() {
+            converged = true;
             break;
         }
 
@@ -357,11 +360,18 @@ async fn run_cte_loop(
             .collect();
 
         if new_values.is_empty() {
+            converged = true;
             break;
         }
 
         result_values.extend(new_values.clone());
         working_values = new_values;
+    }
+
+    if !converged {
+        return Err(datafusion::error::DataFusionError::Execution(format!(
+            "Recursive CTE {cte_name} exceeded its iteration limit ({MAX_ITERATIONS})"
+        )));
     }
 
     // 3. Build output: single row with a LargeList<Int64> column of VIDs.

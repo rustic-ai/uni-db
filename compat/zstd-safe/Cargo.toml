@@ -1,0 +1,32 @@
+[package]
+name = "zstd-safe"
+version = "7.2.4"
+edition = "2021"
+license = "BSD-3-Clause"
+publish = false
+description = "Compatibility re-export of security-patched zstd-safe 8.2.0"
+
+[dependencies]
+patched = { package = "zstd-safe", version = "=8.2.0", default-features = false }
+
+[features]
+default = ["legacy", "arrays", "zdict_builder"]
+bindgen = ["patched/bindgen"]
+debug = ["patched/debug"]
+experimental = ["patched/experimental"]
+legacy = ["patched/legacy"]
+pkg-config = ["patched/pkg-config"]
+std = ["patched/std"]
+zstdmt = ["patched/zstdmt"]
+thin = ["patched/thin"]
+arrays = ["patched/arrays"]
+no_asm = ["patched/no_asm"]
+doc-cfg = ["patched/doc-cfg"]
+zdict_builder = ["patched/zdict_builder"]
+seekable = ["patched/seekable"]
+fat-lto = ["patched/fat-lto"]
+thin-lto = ["patched/thin-lto"]
+
+# Exercise seekable and legacy safety fixes in workspace tests only.
+[dev-dependencies]
+patched = { package = "zstd-safe", version = "=8.2.0", default-features = false, features = ["std", "seekable", "legacy"] }

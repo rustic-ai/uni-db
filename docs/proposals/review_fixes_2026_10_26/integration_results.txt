@@ -1,0 +1,831 @@
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.76s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID c39ca42a-baca-4088-8571-ab5abe1e56a2 with nextest profile: default
+    Starting 821 tests across 1 binary (3221 tests skipped)
+        PASS [   0.039s] (  1/821) uni-db::integration bge_m3_hybrid_3way::hybrid_3way_multivector_roundtrips_pre_flush
+        PASS [   0.039s] (  2/821) uni-db::integration bge_m3_hybrid_3way::multivector_via_cypher_create_literal_pre_flush
+        PASS [   0.060s] (  3/821) uni-db::integration bge_m3_hybrid_3way::multivector_via_cypher_create_literal
+        PASS [   0.064s] (  4/821) uni-db::integration bge_m3_hybrid_3way::hybrid_3way_multivector_roundtrips
+        PASS [   0.066s] (  5/821) uni-db::integration binary_vector_ddl_type::binary_vector_ddl_lowercase_and_list_input
+        PASS [   0.067s] (  6/821) uni-db::integration bge_m3_hybrid_3way::hybrid_3way_multivector_tokens_undeclared
+        PASS [   0.070s] (  7/821) uni-db::integration binary_vector_ddl_type::binary_vector_ddl_type_roundtrips
+        PASS [   0.062s] (  8/821) uni-db::integration bugs::bug_merge_on_create_not_null::merge_on_create_set_supplies_not_null_property
+        PASS [   0.050s] (  9/821) uni-db::integration bugs::bug_rc2_merge_phantom_and_atomic_set::atomic_set_without_retry_is_sound_but_needs_retry_to_reach_n
+        PASS [   0.053s] ( 10/821) uni-db::integration bugs::bug_rc2_merge_phantom_and_atomic_set::concurrent_merge_without_constraint_converges_with_retry
+        PASS [   0.079s] ( 11/821) uni-db::integration binary_vector_ddl_type::binary_vector_distance_hamming_jaccard
+        PASS [   0.120s] ( 12/821) uni-db::integration bge_m3_hybrid_3way::hybrid_3way_multivector_deferred_batch
+        PASS [   0.042s] ( 13/821) uni-db::integration bugs::bug_vector_query_l0_scores::test_vector_query_sees_l0_data_without_flush
+        PASS [   0.095s] ( 14/821) uni-db::integration bugs::bug_rc2_merge_phantom_and_atomic_set::concurrent_merge_without_constraint_no_duplicate
+        PASS [   0.079s] ( 15/821) uni-db::integration bugs::bug_vector_query_l0_scores::test_vector_query_score_consistency_with_and_without_index
+        PASS [   0.074s] ( 16/821) uni-db::integration bugs::bug_vector_query_l0_scores::test_vector_query_scores_without_hnsw_index
+        PASS [   0.088s] ( 17/821) uni-db::integration bugs::collect_plan_vars_join_recovery::vectorknn_cross_match_equi_join_is_hash_join
+        PASS [   0.057s] ( 18/821) uni-db::integration bugs::delete_sees_tx_local_edges::delete_sees_tx_local_edges_allows_after_edge_deleted
+        PASS [   0.044s] ( 19/821) uni-db::integration bugs::delete_sees_tx_local_edges::delete_sees_tx_local_edges_control_committed_edge
+        PASS [   0.046s] ( 20/821) uni-db::integration bugs::delete_sees_tx_local_edges::delete_sees_tx_local_edges_detach_removes_them
+        PASS [   0.174s] ( 21/821) uni-db::integration bugs::bug_rc3_merge_general_path_perf::relationship_merge_fastpath_is_idempotent
+        PASS [   0.045s] ( 22/821) uni-db::integration bugs::delete_sees_tx_local_edges::delete_sees_tx_local_edges_rejects_connected_node
+        PASS [   0.112s] ( 23/821) uni-db::integration bugs::deleted_vertex_label_resurrection::deleted_person_not_seen_via_exists
+        PASS [   0.106s] ( 24/821) uni-db::integration bugs::deleted_vertex_label_resurrection::deleted_person_not_seen_via_pattern_comprehension
+        PASS [   0.104s] ( 25/821) uni-db::integration bugs::deleted_vertex_label_resurrection::deleted_person_not_seen_via_traversal
+        PASS [   0.097s] ( 26/821) uni-db::integration bugs::fts_sees_current_text::fts_sees_current_text_vector_after_flushed_update
+        PASS [   0.250s] ( 27/821) uni-db::integration bugs::declared_endpoint_narrowing::declared_endpoint_narrowing_fork_trusts_only_earlier_verification
+        PASS [   0.137s] ( 28/821) uni-db::integration bugs::ext_id_on_labelled_nodes::ext_id_on_labelled_nodes_merge_matches_flushed_vertex
+        PASS [   0.063s] ( 29/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_batch_mixed_key_types
+        PASS [   0.081s] ( 30/821) uni-db::integration bugs::graph_project_in_transaction::graph_project_in_clean_transaction_builds_from_its_snapshot
+        PASS [   0.091s] ( 31/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_batch_int_float_key_grouping
+        PASS [   0.048s] ( 32/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_intrabatch_duplicate_key_accumulates_three
+        PASS [   0.094s] ( 33/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_declared_deleted_after_flush_recreates
+        PASS [   0.060s] ( 34/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_intrabatch_duplicate_key_accumulates_two
+        PASS [   0.052s] ( 35/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_matches_prior_statement_same_tx
+        PASS [   0.123s] ( 36/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_declared_key_rewritten_after_flush_creates_new
+        PASS [   0.039s] ( 37/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_non_indexed_key_still_correct
+        PASS [   0.056s] ( 38/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_multi_match_updates_all
+        PASS [   0.074s] ( 39/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_mixed_batch
+        PASS [   0.058s] ( 40/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_on_match_reads_committed_state
+        PASS [   0.086s] ( 41/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_on_match_after_flush
+        PASS [   0.044s] ( 42/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_return_preserves_input_order
+        PASS [   0.074s] ( 43/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_schemaless_deleted_after_flush_recreates
+        PASS [   0.088s] ( 44/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_on_match_set_null_after_flush
+        PASS [   0.051s] ( 45/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_unique_constraint_dedups
+        PASS [   0.074s] ( 46/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_schemaless_on_match_set_after_flush
+        PASS [   0.035s] ( 47/821) uni-db::integration bugs::issue_137_vector_dim_enforcement::issue_137_bulk_insert_wrong_dim_rejected
+        PASS [   0.093s] ( 48/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_schemaless_flushed_no_duplicates
+        PASS [   0.037s] ( 49/821) uni-db::integration bugs::issue_137_vector_dim_enforcement::issue_137_redeclare_dim_change_rejected
+        PASS [   0.066s] ( 50/821) uni-db::integration bugs::issue_137_vector_dim_enforcement::issue_137_multivector_token_dims_enforced
+        PASS [   0.090s] ( 51/821) uni-db::integration bugs::issue_137_vector_dim_enforcement::issue_137_correct_dim_write_persists_and_shutdown_clean
+        PASS [   0.039s] ( 52/821) uni-db::integration bugs::issue_137_vector_dim_enforcement::issue_137_wrong_dim_create_rejected
+        PASS [   0.039s] ( 53/821) uni-db::integration bugs::issue_137_vector_dim_enforcement::issue_137_wrong_dim_set_rejected
+        PASS [   0.112s] ( 54/821) uni-db::integration bugs::issue_137_vector_dim_enforcement::issue_137_fork_promote_vectors_flush_cleanly
+        PASS [   0.086s] ( 55/821) uni-db::integration bugs::issue_137_vector_dim_enforcement::issue_137_wrong_dim_query_errors
+        PASS [   0.465s] ( 56/821) uni-db::integration bugs::issue69_unwind_merge_perf::merge_batch_over_chunk_limit
+        PASS [   0.157s] ( 57/821) uni-db::integration bugs::issue_175_vector_fts_consulted::a_filtered_fts_query_is_not_starved_by_excluded_rows
+        PASS [   0.362s] ( 58/821) uni-db::integration bugs::issue_131_locy_iter_cross_join::issue_131_recursive_iter_is_not_quadratic
+        PASS [   0.378s] ( 59/821) uni-db::integration bugs::issue_175_vector_fts_consulted::a_flat_index_counts_as_consulted
+        PASS [   0.383s] ( 60/821) uni-db::integration bugs::issue_175_vector_fts_consulted::a_prefiltered_query_over_an_indexed_vector_still_counts
+        PASS [   0.373s] ( 61/821) uni-db::integration bugs::issue_175_vector_fts_consulted::a_scalar_prefilter_is_not_a_vector_index
+        PASS [   0.352s] ( 62/821) uni-db::integration bugs::issue_175_vector_fts_consulted::a_vector_query_over_an_ivf_index_consults_it
+        PASS [   0.407s] ( 63/821) uni-db::integration bugs::issue_175_vector_fts_consulted::a_vector_query_without_an_index_consults_none
+        PASS [   0.376s] ( 64/821) uni-db::integration bugs::issue_175_vector_fts_consulted::an_fts_query_without_an_index_consults_none
+        PASS [   0.354s] ( 65/821) uni-db::integration bugs::issue_175_vector_fts_consulted::an_index_built_before_ingest_is_not_consulted
+        PASS [   0.398s] ( 66/821) uni-db::integration bugs::issue_175_vector_fts_consulted::an_fts_query_over_an_inverted_index_consults_it
+        PASS [   0.050s] ( 67/821) uni-db::integration bugs::issue_225_merge_bound_anchor::issue_225_a_named_relationship_is_still_bound
+        PASS [   0.761s] ( 68/821) uni-db::integration bugs::issue_175_vector_fts_consulted::a_vector_search_does_not_move_the_scalar_counter
+        PASS [   0.411s] ( 69/821) uni-db::integration bugs::issue_225_merge_bound_anchor::issue_225_a_keyed_far_endpoint_keeps_a_fast_path
+        PASS [   0.437s] ( 70/821) uni-db::integration bugs::issue_225_merge_bound_anchor::issue_225_a_matched_named_relationship_stays_on_the_fast_path
+        PASS [   0.699s] ( 71/821) uni-db::integration bugs::issue_175_vector_fts_consulted::the_vector_counter_is_not_a_constant
+        PASS [   0.826s] ( 72/821) uni-db::integration bugs::issue_175_vector_fts_consulted::the_fts_counter_is_not_a_constant
+        PASS [   0.485s] ( 73/821) uni-db::integration bugs::issue_225_merge_bound_anchor::issue_225_both_spellings_of_the_same_link_cost_alike
+        PASS [   0.175s] ( 74/821) uni-db::integration bugs::issue_312_write_endpoint_fanout::a_named_merge_path_keeps_every_property
+        PASS [   0.044s] ( 75/821) uni-db::integration bugs::merge_path_binding::a_merged_path_keeps_its_anonymous_node
+        PASS [   0.489s] ( 76/821) uni-db::integration bugs::issue_225_merge_bound_anchor::issue_225_naming_the_relationship_keeps_the_fast_path
+        PASS [   0.229s] ( 77/821) uni-db::integration bugs::issue_312_write_endpoint_fanout::merge_on_match_set_reads_the_endpoint_property
+        PASS [   0.062s] ( 78/821) uni-db::integration bugs::merge_path_binding::a_merged_path_measures_and_binds_like_a_matched_one
+        PASS [   0.042s] ( 79/821) uni-db::integration bugs::merge_path_binding::length_of_a_path_counts_relationships
+        PASS [   0.062s] ( 80/821) uni-db::integration bugs::merge_path_binding::length_rejects_a_value_with_no_length
+        PASS [   0.064s] ( 81/821) uni-db::integration bugs::merge_path_binding::nodes_and_relationships_reject_a_non_path
+        PASS [   0.053s] ( 82/821) uni-db::integration bugs::merge_path_binding::nodes_and_relationships_return_a_paths_parts
+        PASS [   0.255s] ( 83/821) uni-db::integration bugs::issue_57_match_label_hash_index::pushed_filter_ignores_deleted_versions
+        PASS [   0.118s] ( 84/821) uni-db::integration bugs::merge_per_row_counters::a_scanning_merge_reports_the_rows_it_scanned
+        PASS [   2.371s] ( 85/821) uni-db::integration bugs::bug_rc3_merge_general_path_perf::relationship_merge_should_match_bulk_create_fastpath
+        PASS [   0.184s] ( 86/821) uni-db::integration bugs::merge_per_row_counters::merge_reports_the_rows_its_per_row_plans_scanned
+        PASS [   0.081s] ( 87/821) uni-db::integration bugs::repro_fork_index_kind_collision::two_fork_index_kinds_on_one_column_coexist
+        PASS [   0.601s] ( 88/821) uni-db::integration bugs::procedure_reads_in_transaction_on_fork::procedure_reads_in_transaction_on_fork_list_the_forks_schema
+        PASS [   0.516s] ( 89/821) uni-db::integration bugs::procedure_reads_in_transaction_on_fork::procedure_reads_in_transaction_on_fork_project_the_forks_graph
+        PASS [   0.046s] ( 90/821) uni-db::integration bugs::repro_issue_157_registry_rule_leak::a_recursive_registered_rule_still_reaches_its_fixpoint
+        PASS [   0.056s] ( 91/821) uni-db::integration bugs::repro_issue_166_family_dropped_edge_predicates::merge_honours_anonymous_relationship_property_map
+        PASS [   0.080s] ( 92/821) uni-db::integration bugs::repro_issue_169_readonly_fork_incoherent::fork_of_readonly_parent_is_coherent_across_languages
+        PASS [   0.085s] ( 93/821) uni-db::integration bugs::repro_issue_169_readonly_fork_incoherent::fork_of_readonly_parent_reads_base_union_fork_local
+        PASS [   0.078s] ( 94/821) uni-db::integration bugs::repro_issue_169_readonly_fork_incoherent::fork_of_readwrite_parent_reads_base_union_fork_local
+        PASS [   0.093s] ( 95/821) uni-db::integration bugs::repro_issue_181_flush_resurrects_detached_edge::detach_delete_survives_a_flush
+        PASS [   0.077s] ( 96/821) uni-db::integration bugs::repro_issue_181_flush_resurrects_detached_edge::relationship_delete_survives_a_flush
+        PASS [   0.054s] ( 97/821) uni-db::integration bugs::repro_issue_182_delete_before_first_flush::delete_before_first_flush_does_not_error
+        PASS [   0.051s] ( 98/821) uni-db::integration bugs::repro_issue_182_delete_before_first_flush::delete_before_first_flush_with_declared_label_does_not_error
+        PASS [   0.073s] ( 99/821) uni-db::integration bugs::repro_issue_182_delete_before_first_flush::delete_before_first_flush_leaves_the_store_usable
+        PASS [   0.086s] (100/821) uni-db::integration bugs::repro_issue_304_declare_populated_label::issue_304_fork_declared_label_keeps_flushed_nodes
+        PASS [   0.097s] (101/821) uni-db::integration bugs::repro_issue_304_declare_populated_label::issue_304_deleted_before_declaration_stays_deleted
+        PASS [   0.038s] (102/821) uni-db::integration bugs::repro_registry_monotonicity_oracle::recursive_fold_over_a_non_monotone_aggregate_is_still_rejected
+        PASS [   0.040s] (103/821) uni-db::integration bugs::repro_registry_monotonicity_oracle::recursive_fold_over_a_registry_monotone_aggregate_compiles
+        PASS [   0.075s] (104/821) uni-db::integration bugs::schemaless_search_after_flush::undeclared_label::finds_flushed_vectors
+        PASS [   0.081s] (105/821) uni-db::integration bugs::schemaless_search_after_flush::undeclared_label::ignores_deleted_rows
+        PASS [   0.075s] (106/821) uni-db::integration bugs::schemaless_search_after_flush::undeclared_property::finds_flushed_vectors
+        PASS [   0.020s] (107/821) uni-db::integration bugs::test_issue_72_version_recovery::test_snapshot_manager_has_any_manifests
+        PASS [   0.101s] (108/821) uni-db::integration bugs::schemaless_search_after_flush::undeclared_property::ignores_deleted_rows
+        PASS [   0.059s] (109/821) uni-db::integration bugs::test_python_repro::test_execute_delete_returns_affected_rows
+        PASS [   1.364s] (110/821) uni-db::integration bugs::procedure_reads_in_transaction::procedure_reads_in_transaction_see_the_transactions_deletes
+        PASS [   0.115s] (111/821) uni-db::integration bugs::traverse_labels_after_flush::t4_fork_single_hop_labels
+        PASS [   0.102s] (112/821) uni-db::integration bugs::underscore_property_reads::underscore_property_reads_merge_on_undeclared_key_after_flush
+        PASS [   0.015s] (113/821) uni-db::integration crdt::crdt_distributed_tests::merge_order_independence::test_crdt_merge_commutativity
+        PASS [   0.072s] (114/821) uni-db::integration bugs::unique_key_reuse::unique_key_reuse_after_unflushed_delete
+        PASS [   0.019s] (115/821) uni-db::integration crdt::crdt_distributed_tests::merge_order_independence::test_l0_buffer_merge_order_independent
+        PASS [   0.020s] (116/821) uni-db::integration crdt::crdt_distributed_tests::stress::test_gset_stress_merge
+        PASS [   0.029s] (117/821) uni-db::integration crdt::crdt_distributed_tests::stress::test_vector_clock_stress
+        PASS [   0.061s] (118/821) uni-db::integration crdt::crdt_e2e_tests::lww_map_lifecycle::test_lww_map_per_key_merge
+        PASS [   0.064s] (119/821) uni-db::integration crdt::crdt_e2e_tests::rga_lifecycle::test_rga_sequence_merge
+        PASS [   0.158s] (120/821) uni-db::integration bugs::vid_lookup_join_reachability::vid_lookup_probe_reads_are_in_the_ssi_read_set
+        PASS [   0.064s] (121/821) uni-db::integration crdt::crdt_e2e_tests::vector_clock_lifecycle::test_vector_clock_pointwise_max
+        PASS [   0.050s] (122/821) uni-db::integration crdt::crdt_merge_logic_test::an_unflushed_string_form_crdt_reads_back_through_scan_and_traversal
+        PASS [   0.070s] (123/821) uni-db::integration crdt::crdt_merge_logic_test::test_gcounter_merge_on_write
+        PASS [   0.057s] (124/821) uni-db::integration crdt::crdt_merge_on_write_test::test_crdt_merge_on_write
+        PASS [   0.073s] (125/821) uni-db::integration crdt::crdt_merge_logic_test::test_gset_merge_on_read
+        PASS [   0.059s] (126/821) uni-db::integration cypher_path::cypher_match_vlp_regression::test_tck_match8_2_merge_optional_count
+        PASS [   1.683s] (127/821) uni-db::integration bugs::repro_fork_sweeper_shutdown::sweeper_self_terminates_after_first_productive_tick
+        PASS [   0.289s] (128/821) uni-db::integration cypher_path::vlp_property_map_oracle::merge_with_a_non_constant_map_matches_and_creates_on_it
+        PASS [   0.040s] (129/821) uni-db::integration cypher_read::entity_function_binding_shapes_test::type_of_a_merge_bound_relationship
+        PASS [   0.221s] (130/821) uni-db::integration cypher_read::mixed_numeric_list_param_test::vector_readers_accept_a_mixed_numeric_list
+        PASS [   0.084s] (131/821) uni-db::integration cypher_read::mixed_numeric_list_param_test::vector_writes_accept_a_mixed_numeric_list
+        PASS [   0.094s] (132/821) uni-db::integration cypher_read::numeric_exact_comparison_test::merge_keys_are_exact_at_the_i64_boundary
+        PASS [   0.158s] (133/821) uni-db::integration cypher_read::procedure_call_df_test::test_vector_distance_survives_match_where
+        PASS [   0.084s] (134/821) uni-db::integration cypher_read::procedure_call_df_test::test_vector_query_composite_empty_results
+        PASS [   0.074s] (135/821) uni-db::integration cypher_read::procedure_call_df_test::test_vector_query_composite_multiple_yields
+        PASS [   0.790s] (136/821) uni-db::integration cypher_read::edge_source_scan_test::edge_source_scan_pinned_snapshot
+        PASS [   0.093s] (137/821) uni-db::integration cypher_read::procedure_call_df_test::test_vector_query_composite_with_match
+        PASS [   0.093s] (138/821) uni-db::integration cypher_read::procedure_call_df_test::test_vector_query_composite_yield_alias
+        PASS [   0.047s] (139/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_anchor_no_match
+        PASS [   0.096s] (140/821) uni-db::integration cypher_read::procedure_call_df_test::test_vector_search_match_bound_target
+        PASS [   1.276s] (141/821) uni-db::integration cypher_path::shortest_path_many_targets::many_target_shortest_paths_on_a_fork_match_the_oracle
+        PASS [   0.060s] (142/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_branching_tree
+        PASS [   0.065s] (143/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_cycle_terminates
+        PASS [   0.058s] (144/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_diamond_deduplication
+        PASS [   0.067s] (145/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_deep_chain
+        PASS [   0.052s] (146/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_disconnected_graph
+        PASS [   0.045s] (147/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_leaf_start
+        PASS [   0.057s] (148/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_float_properties
+        PASS [   0.057s] (149/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_linear_chain
+        PASS [   1.389s] (150/821) uni-db::integration cypher_read::edge_source_scan_test::edge_source_scan_flushed_mixed_and_deleted
+        PASS [   0.056s] (151/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_mid_chain_start
+        PASS [   0.052s] (152/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_multi_label_graph
+        PASS [   0.040s] (153/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_no_recursive_edges
+        PASS [   0.062s] (154/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_multiple_anchor_roots
+        PASS [   0.043s] (155/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_self_loop
+        PASS [   0.049s] (156/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_reverse_traversal
+        PASS [   0.066s] (157/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_specific_edge_type
+        PASS [   0.053s] (158/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_string_properties
+        PASS [   0.058s] (159/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_with_count
+        PASS [   0.052s] (160/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_with_limit
+        PASS [   0.051s] (161/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_with_skip
+        PASS [   0.048s] (162/821) uni-db::integration cypher_read::start_end_node_test::start_and_end_node_work_on_a_merge_bound_relationship
+        PASS [   0.115s] (163/821) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_wide_fan_out
+        PASS [   0.036s] (164/821) uni-db::integration cypher_write::cypher_create::test_delete_connected_node_without_detach_fails
+        PASS [   0.050s] (165/821) uni-db::integration cypher_write::create_set_fusion_test::set_map_merge_does_not_fuse
+        PASS [   0.027s] (166/821) uni-db::integration cypher_write::cypher_merge_actions::test_cypher_merge_actions
+        PASS [   0.042s] (167/821) uni-db::integration cypher_write::cypher_merge::test_cypher_merge_relationship
+        PASS [   0.060s] (168/821) uni-db::integration cypher_write::cypher_delete::test_cypher_delete
+        PASS [   0.043s] (169/821) uni-db::integration cypher_write::cypher_merge_optional_regression::test_merge_optional_match_count
+        PASS [   0.041s] (170/821) uni-db::integration cypher_write::cypher_merge_optional_regression::test_optional_match_both_bound_no_edge
+        PASS [   0.045s] (171/821) uni-db::integration cypher_write::delete_vertex_test::test_delete_vertex_persistence
+        PASS [   0.040s] (172/821) uni-db::integration cypher_write::delete_vertex_test::test_delete_vertex_properties_not_accessible
+        PASS [   0.049s] (173/821) uni-db::integration cypher_write::df_mutation_test::test_df_delete_read_your_write
+        PASS [   0.090s] (174/821) uni-db::integration cypher_write::declared_value_coercion_l0::a_vector_indexes_like_a_list
+        PASS [   0.059s] (175/821) uni-db::integration cypher_write::edge_endpoint_enforcement::create_and_merge_enforce_declared_endpoints
+        PASS [   0.046s] (176/821) uni-db::integration cypher_write::merge_failclosed_test::merge_matches_across_int_float_key
+        PASS [   0.091s] (177/821) uni-db::integration cypher_write::label_write_shared_vertex::label_write_merge_on_match_after_set
+        PASS [   0.044s] (178/821) uni-db::integration cypher_write::merge_failclosed_test::merge_matches_across_label_case
+        PASS [   0.059s] (179/821) uni-db::integration cypher_write::merge_keyed_endpoint_semantics::an_unlinked_node_with_the_same_key_is_not_reused
+        PASS [   0.052s] (180/821) uni-db::integration cypher_write::merge_keyed_endpoint_semantics::on_create_set_applies_once
+        PASS [   0.192s] (181/821) uni-db::integration cypher_write::label_write_shared_vertex::label_write_keyed_merge_uses_visible_labels
+        PASS [   0.055s] (182/821) uni-db::integration cypher_write::merge_keyed_endpoint_semantics::the_same_key_from_two_sources_creates_two_nodes
+        PASS [   0.065s] (183/821) uni-db::integration cypher_write::merge_keyed_endpoint_semantics::the_same_row_twice_creates_one_node_and_one_edge
+        PASS [   0.115s] (184/821) uni-db::integration cypher_write::merge_keyed_endpoint_semantics::re_running_matches_rather_than_creating
+        PASS [   0.109s] (185/821) uni-db::integration cypher_write::partial_lance_delete_test::b1_delete_via_merge_insert_round_trip
+        PASS [   0.087s] (186/821) uni-db::integration cypher_write::partial_lance_delete_test::b2_delete_then_create_same_id
+        PASS [   0.079s] (187/821) uni-db::integration cypher_write::partial_lance_delete_test::b3_delete_after_partial_set
+        PASS [   3.657s] (188/821) uni-db::integration bugs::procedure_reads_in_transaction_on_fork::procedure_reads_in_transaction_on_fork_see_the_forks_data
+        PASS [   0.445s] (189/821) uni-db::integration cypher_write::label_write_shared_vertex::label_write_keyed_merge_preserves_all_matched_labels
+        PASS [   0.098s] (190/821) uni-db::integration cypher_write::partial_lance_delete_test::b4_delete_with_index_lookup
+        PASS [   0.098s] (191/821) uni-db::integration cypher_write::partial_lance_edges_test::a4_partial_edge_set_then_delete
+        PASS [   0.040s] (192/821) uni-db::integration cypher_write::set_projection_test::f4b_set_property_then_variable_merge
+        PASS [   0.071s] (193/821) uni-db::integration cypher_write::partial_lance_writes_test::t1d_partial_set_preserves_sparse_vector
+        PASS [   0.080s] (194/821) uni-db::integration cypher_write::partial_lance_writes_test::t1c_partial_set_preserves_multivector
+        PASS [   0.086s] (195/821) uni-db::integration cypher_write::partial_lance_writes_test::t8_partial_set_then_delete
+        PASS [   0.036s] (196/821) uni-db::integration cypher_write::set_projection_test::f6a_merge_on_match_set_round_trips
+        PASS [   0.040s] (197/821) uni-db::integration cypher_write::set_projection_test::f6b_merge_on_create_set_round_trips
+        PASS [   0.041s] (198/821) uni-db::integration cypher_write::set_projection_test::h3b_set_vector_property_directly_round_trips
+        PASS [   0.039s] (199/821) uni-db::integration cypher_write::set_projection_test::l2c_call_subquery_merge_on_create_round_trips
+        PASS [   0.046s] (200/821) uni-db::integration cypher_write::set_projection_test::l2c2_call_subquery_merge_on_match_round_trips
+        PASS [   0.230s] (201/821) uni-db::integration cypher_write::partial_lance_delete_test::b5_delete_preserves_other_rows
+        PASS [   0.060s] (202/821) uni-db::integration cypher_write::set_projection_test::l2d_call_subquery_delete_round_trips
+        PASS [   0.062s] (203/821) uni-db::integration cypher_write::set_projection_test::l2n2_recursive_cte_recursive_set_round_trips
+        PASS [   0.044s] (204/821) uni-db::integration cypher_write::set_projection_test::l4_vector_knn_then_set_round_trips
+        PASS [   0.050s] (205/821) uni-db::integration cypher_write::set_projection_test::l2n3_recursive_cte_read_only_unaffected
+        PASS [   0.055s] (206/821) uni-db::integration cypher_write::set_projection_test::l2n_recursive_cte_anchor_set_round_trips
+        PASS [   0.049s] (207/821) uni-db::integration e2e::api_integration::test_parameterized_delete
+        PASS [   0.107s] (208/821) uni-db::integration dense_index::dense_snapshot_isolates_reader_from_concurrent_insert
+        PASS [   0.090s] (209/821) uni-db::integration e2e::e2e_comprehensive_test::clause_tests::test_delete_node
+        PASS [   0.061s] (210/821) uni-db::integration e2e::e2e_comprehensive_test::clause_tests::test_merge_create_when_not_exists
+        PASS [   0.102s] (211/821) uni-db::integration e2e::e2e_comprehensive_test::clause_tests::test_detach_delete
+        PASS [   0.148s] (212/821) uni-db::integration dense_index::dense_index_via_cypher_create_vector_index
+        PASS [   0.027s] (213/821) uni-db::integration e2e::subgraph_loading::test_subgraph_loading_merge_logic
+        PASS [   0.068s] (214/821) uni-db::integration e2e::e2e_comprehensive_test::crdt_type_tests::test_crdt_vector_clock
+        PASS [   0.076s] (215/821) uni-db::integration e2e::e2e_comprehensive_test::clause_tests::test_merge_match_when_exists
+        PASS [   0.053s] (216/821) uni-db::integration embedding_alias_capability::reopen_accepts_hybrid_alias_on_vector_index
+        PASS [   0.075s] (217/821) uni-db::integration e2e::e2e_comprehensive_test::data_type_tests::test_vector_type
+        PASS [   0.064s] (218/821) uni-db::integration embedding_alias_capability::reopen_accepts_multivector_on_multivector_task
+        PASS [   0.081s] (219/821) uni-db::integration fork::fork_budget::budget_blocks_creation_at_cap
+        PASS [   0.073s] (220/821) uni-db::integration fork::fork_budget::budget_releases_slot_after_drop
+        PASS [   0.110s] (221/821) uni-db::integration fork::fork_async_flush_identity::fork_async_flush_finalizes_under_fork_identity
+        PASS [   0.076s] (222/821) uni-db::integration fork::fork_bulk_load::fork_bulk_load_does_not_leak_fork_schema_to_primary
+        PASS [   0.142s] (223/821) uni-db::integration fork::fork_budget::unbounded_budget_default
+        PASS [   0.032s] (224/821) uni-db::integration fork::fork_cancel::child_cancel_does_not_affect_parent
+        PASS [   0.106s] (225/821) uni-db::integration fork::fork_bulk_load::fork_bulk_load_failed_publish_leaves_primary_intact_at_reopen
+        PASS [   0.159s] (226/821) uni-db::integration fork::fork_bulk_load::fork_bulk_load_commit_publishes_on_the_fork_only
+        PASS [   0.047s] (227/821) uni-db::integration fork::fork_cancel::nested_fork_cancellation_cascades_through_levels
+        PASS [   0.037s] (228/821) uni-db::integration fork::fork_cancel::parent_cancel_cascades_to_forked_child
+        PASS [   0.041s] (229/821) uni-db::integration fork::fork_cancel::sibling_forks_have_independent_cancellation
+        PASS [   0.085s] (230/821) uni-db::integration fork::fork_concurrent_writers::cross_fork_writes_are_isolated
+        PASS [   0.110s] (231/821) uni-db::integration fork::fork_concurrent_writers::concurrent_same_name_forks_share_inner
+        PASS [   0.073s] (232/821) uni-db::integration fork::fork_concurrent_writers::dropping_all_sessions_releases_inner
+        PASS [   0.197s] (233/821) uni-db::integration fork::fork_bulk_load::fork_bulk_load_interrupted_leaves_primary_intact_at_reopen
+        PASS [   0.329s] (234/821) uni-db::integration fork::fork_bulk_load::fork_bulk_load_abort_discards_everything
+        PASS [   0.065s] (235/821) uni-db::integration fork::fork_concurrent_writers::same_fork_sessions_share_l0_visibility
+        PASS [   0.065s] (236/821) uni-db::integration fork::fork_custom_functions::fork_udf_does_not_leak_to_other_uni_instance
+        PASS [   0.051s] (237/821) uni-db::integration fork::fork_custom_functions::fork_udf_visible_on_primary
+        PASS [   0.043s] (238/821) uni-db::integration fork::fork_custom_functions::primary_udf_visible_on_fork_after_registration
+        PASS [   0.127s] (239/821) uni-db::integration fork::fork_diff::diff_fork_primary_is_empty_when_fork_has_no_writes
+        PASS [   0.119s] (240/821) uni-db::integration fork::fork_diff::diff_fork_primary_reports_added_rows_only
+        PASS [   0.293s] (241/821) uni-db::integration fork::fork_creation_concurrency::sixteen_concurrent_forks_distinct_names_within_2x_serial
+        PASS [   0.127s] (242/821) uni-db::integration fork::fork_diff::diff_idempotent_when_both_sides_are_same_fork
+        PASS [   0.182s] (243/821) uni-db::integration fork::fork_diff::diff_inversion_swaps_added_deleted
+        PASS [   0.134s] (244/821) uni-db::integration fork::fork_diff_schemaless_306::issue_306_promote_from_fork_schemaless
+        PASS [   0.280s] (245/821) uni-db::integration fork::fork_diff_schemaless_306::issue_306_fork_flush_with_fork_only_schemaless_edge_type
+        PASS [   0.101s] (246/821) uni-db::integration fork::fork_diff_schemaless_306::issue_306_promote_schemaless_label_vertices_only
+        PASS [   0.491s] (247/821) uni-db::integration fork::fork_diff_schemaless_306::issue_306_diff_fork_primary_schemaless_vs_declared
+        PASS [   0.137s] (248/821) uni-db::integration fork::fork_diff_uid::diff_honors_ext_id
+        PASS [   0.260s] (249/821) uni-db::integration fork::fork_diff_uid::diff_distinguishes_parallel_edges
+        PASS [   0.154s] (250/821) uni-db::integration fork::fork_diff_uid::diff_pairs_by_uid_across_unrelated_forks
+        PASS [   0.065s] (251/821) uni-db::integration fork::fork_drop_cleanup::drop_fork_removes_wal_dir_and_id_allocator
+        PASS [   0.230s] (252/821) uni-db::integration fork::fork_diff_uid::diff_inversion_holds_under_uid_identity
+        PASS [   0.072s] (253/821) uni-db::integration fork::fork_drop_inflight::drop_fork_after_commit_succeeds
+        PASS [   0.065s] (254/821) uni-db::integration fork::fork_drop_inflight::drop_fork_with_uncommitted_tx_errors_inflight
+        PASS [   0.100s] (255/821) uni-db::integration fork::fork_durability::fork_committed_writes_survive_db_reopen_exactly_once
+        PASS [   0.165s] (256/821) uni-db::integration fork::fork_durability::fork_flush_does_not_poison_primary_catalog_latest
+        PASS [   0.065s] (257/821) uni-db::integration fork::fork_error_audit::audit_fork_already_exists
+        PASS [   0.061s] (258/821) uni-db::integration fork::fork_error_audit::audit_fork_budget_exceeded
+        PASS [   0.072s] (259/821) uni-db::integration fork::fork_error_audit::audit_fork_has_children
+        PASS [   1.871s] (260/821) uni-db::integration fork::fork_create_concurrent_writes::fork_point_atomic_under_concurrent_parent_writes_sync_flush
+        PASS [   0.067s] (261/821) uni-db::integration fork::fork_error_audit::audit_fork_inflight_tx
+        PASS [   2.184s] (262/821) uni-db::integration fork::fork_create_concurrent_writes::fork_point_atomic_under_concurrent_parent_writes_async_flush
+        PASS [   0.049s] (263/821) uni-db::integration fork::fork_error_audit::audit_fork_not_found
+        PASS [   0.656s] (264/821) uni-db::integration fork::fork_error_audit::audit_fork_lifecycle
+        PASS [   0.075s] (265/821) uni-db::integration fork::fork_flush_known_labels::fork_flush_main_vertices_table_succeeds
+        PASS [   0.068s] (266/821) uni-db::integration fork::fork_fragment_warn::primary_writer_does_not_emit_fork_warn
+        PASS [   0.035s] (267/821) uni-db::integration fork::fork_hooks::fork_hooks_do_not_inherit_from_parent
+        PASS [   0.225s] (268/821) uni-db::integration fork::fork_index_auto_build::auto_builder_schedules_scalar_fork_index
+        PASS [   0.149s] (269/821) uni-db::integration fork::fork_index_bm25::fork_fts_ranking_survives_a_fork_flush
+        PASS [   8.101s] (270/821) uni-db::integration bugs::issue_312_write_endpoint_fanout::merge_over_a_wide_matched_node_fits_the_pool
+        PASS [   0.174s] (271/821) uni-db::integration fork::fork_index_bm25::fork_local_fts_auto_built_for_new_rows
+        PASS [   0.093s] (272/821) uni-db::integration fork::fork_index_bm25::fork_local_fts_honors_deleted_filter
+        PASS [   0.085s] (273/821) uni-db::integration fork::fork_index_bm25::fork_local_fts_index_returns_fused_results
+        PASS [   0.084s] (274/821) uni-db::integration fork::fork_index_btree::fork_local_btree_index_is_observed_by_planner
+        PASS [   0.084s] (275/821) uni-db::integration fork::fork_index_multivector::fork_multivector_branch_scan_fork_flushed
+        PASS [   0.076s] (276/821) uni-db::integration fork::fork_index_multivector::fork_multivector_dimension_mismatch_errors
+        PASS [  10.238s] (277/821) uni-db::integration bugs::declared_endpoint_narrowing::declared_endpoint_narrowing_older_snapshots_distrust_later_verification
+        PASS [   0.098s] (278/821) uni-db::integration fork::fork_index_multivector::fork_multivector_fused_ranking
+        PASS [   0.119s] (279/821) uni-db::integration fork::fork_index_multivector::fork_multivector_isolation_both_ways
+        PASS [   0.079s] (280/821) uni-db::integration fork::fork_index_multivector::fork_multivector_l0_fused_with_inherited
+        PASS [   0.085s] (281/821) uni-db::integration fork::fork_index_multivector::fork_multivector_no_longer_bails
+        PASS [   0.081s] (282/821) uni-db::integration fork::fork_index_multivector::fork_multivector_threshold_min_similarity
+        PASS [   0.101s] (283/821) uni-db::integration fork::fork_index_multivector::fork_multivector_override_inherited
+        PASS [   0.087s] (284/821) uni-db::integration fork::fork_index_multivector::fork_multivector_tombstone_isolated
+        PASS [   0.070s] (285/821) uni-db::integration fork::fork_index_sorted::fork_local_sorted_index_is_observed_by_planner
+        PASS [   0.114s] (286/821) uni-db::integration fork::fork_index_multivector::nested_fork_multivector_resolves_through_ancestors
+        PASS [   0.115s] (287/821) uni-db::integration fork::fork_index_sparse::nested_fork_sparse_resolves_through_ancestors
+        PASS [   0.097s] (288/821) uni-db::integration fork::fork_index_sparse::sparse_fork_honors_deleted_filter
+        PASS [   0.110s] (289/821) uni-db::integration fork::fork_index_sparse::sparse_fork_isolation_both_ways
+        PASS [   0.197s] (290/821) uni-db::integration fork::fork_index_sparse::sparse_fork_auto_built_for_new_rows
+        PASS [   0.085s] (291/821) uni-db::integration fork::fork_index_sparse::sparse_fork_local_returns_fused_results
+        PASS [   0.106s] (292/821) uni-db::integration fork::fork_index_vector::fork_local_vector_honors_deleted_filter
+        PASS [   0.030s] (293/821) uni-db::integration fork::fork_index_vid_uid::build_fork_local_index_on_primary_session_errors
+        PASS [   0.112s] (294/821) uni-db::integration fork::fork_index_vector::fork_local_vector_index_returns_fused_results
+        PASS [   0.112s] (295/821) uni-db::integration fork::fork_index_vector::nested_fork_vector_resolves_through_ancestors
+        PASS [   0.073s] (296/821) uni-db::integration fork::fork_index_vid_uid::fork_local_vid_uid_index_is_observed_by_planner
+        PASS [   0.126s] (297/821) uni-db::integration fork::fork_locy_reverse_recursion::cypher_vs_rule_reverse_parity_on_typed_fork_set
+        PASS [   0.139s] (298/821) uni-db::integration fork::fork_locy_reverse_recursion::typed_fork_create_reverse_reach_is_complete
+        PASS [   0.128s] (299/821) uni-db::integration fork::fork_locy_reverse_recursion::typed_fork_set_forward_reach_is_complete
+        PASS [   0.139s] (300/821) uni-db::integration fork::fork_locy_reverse_recursion::typed_fork_set_reverse_reach_is_complete
+        PASS [   0.047s] (301/821) uni-db::integration fork::fork_locy_rules::fork_and_primary_each_see_own_plus_inherited
+        PASS [   0.149s] (302/821) uni-db::integration fork::fork_locy_reverse_recursion::untyped_fork_set_reverse_reach_is_complete
+        PASS [   0.038s] (303/821) uni-db::integration fork::fork_locy_rules::fork_inherits_primary_db_rules_at_fork_point
+        PASS [   0.037s] (304/821) uni-db::integration fork::fork_locy_rules::fork_local_rules_do_not_leak_to_primary
+        PASS [   0.038s] (305/821) uni-db::integration fork::fork_locy_rules::primary_rules_added_after_fork_are_invisible_to_fork
+        PASS [   0.096s] (306/821) uni-db::integration fork::fork_locy_rules::fork_locy_derive_over_inherited_unflushed_l0
+        PASS [   0.095s] (307/821) uni-db::integration fork::fork_mutate_inherited::fork_delete_inherited_survives_flush_and_reopen
+        PASS [   0.079s] (308/821) uni-db::integration fork::fork_mutate_inherited::fork_deletes_inherited_vertex
+        PASS [   0.089s] (309/821) uni-db::integration fork::fork_mutate_inherited::fork_sets_property_on_inherited_vertex
+        PASS [   0.087s] (310/821) uni-db::integration fork::fork_nested::drop_fork_cascade_removes_whole_subtree
+        PASS [   0.074s] (311/821) uni-db::integration fork::fork_nested::drop_fork_refuses_when_children_exist
+        PASS [   0.097s] (312/821) uni-db::integration fork::fork_nested::issue_103_nested_fork_schemaless_edge_reads_inherited
+        PASS [   0.092s] (313/821) uni-db::integration fork::fork_nested::nested_fork_chain_resolves_through_both_ancestors
+        PASS [   0.088s] (314/821) uni-db::integration fork::fork_nested::nested_fork_snapshot_isolation_at_each_level
+        PASS [   1.104s] (315/821) uni-db::integration fork::fork_locy_reverse_recursion::reach_matrix_all_cells_complete
+        PASS [   0.073s] (316/821) uni-db::integration fork::fork_nested::nested_fork_strict_schema_composition
+        PASS [   0.101s] (317/821) uni-db::integration fork::fork_nested::nested_sibling_forks_are_isolated
+        PASS [   0.055s] (318/821) uni-db::integration fork::fork_new_label::fork_dynamic_branch_persists_across_reopen
+        PASS [   0.039s] (319/821) uni-db::integration fork::fork_new_label::fork_writes_to_label_without_fork_point_dataset
+        PASS [   0.030s] (320/821) uni-db::integration fork::fork_params::fork_params_do_not_inherit_from_parent
+        PASS [   0.072s] (321/821) uni-db::integration fork::fork_partial_mutation_inherited::a0_fork_reads_inherited_edge_unmutated
+        PASS [   0.138s] (322/821) uni-db::integration fork::fork_no_primary_blocking::long_fork_creation_does_not_block_primary_reads
+        PASS [   0.058s] (323/821) uni-db::integration fork::fork_partial_mutation_inherited::a2_fork_node_set_inherited_control
+        PASS [   0.085s] (324/821) uni-db::integration fork::fork_partial_mutation_inherited::a1_fork_edge_set_inherited_no_flush
+        PASS [   0.081s] (325/821) uni-db::integration fork::fork_partial_mutation_inherited::a3_fork_edge_set_inherited_with_flush
+        PASS [   0.079s] (326/821) uni-db::integration fork::fork_partial_mutation_inherited::a4_fork_edge_remove_inherited
+        PASS [   0.087s] (327/821) uni-db::integration fork::fork_partial_mutation_inherited::a5_fork_edge_merge_on_match_inherited
+        PASS [   0.072s] (328/821) uni-db::integration fork::fork_pin::forked_session_pin_and_refresh
+        PASS [   0.133s] (329/821) uni-db::integration fork::fork_promote::promote_conflict_skip
+        PASS [   0.149s] (330/821) uni-db::integration fork::fork_promote::promote_conflict_overwrite
+        PASS [   4.847s] (331/821) uni-db::integration fork::fork_drop_open_race::fork_open_never_races_drop_into_use_after_delete
+        PASS [   0.101s] (332/821) uni-db::integration fork::fork_promote::promote_default_is_idempotent_for_unchanged_ext_id_row
+        PASS [   0.101s] (333/821) uni-db::integration fork::fork_promote::promote_default_is_insert_only_twin
+        PASS [   0.115s] (334/821) uni-db::integration fork::fork_promote::promote_dedupes_uid_conflict
+        PASS [   0.099s] (335/821) uni-db::integration fork::fork_promote::promote_delete_skips_no_ext_id
+        PASS [   0.102s] (336/821) uni-db::integration fork::fork_promote::promote_inserts_fork_only_vertices
+        PASS [   0.124s] (337/821) uni-db::integration fork::fork_promote::promote_delete_promotion_removes_fork_deleted_row
+        PASS [   0.104s] (338/821) uni-db::integration fork::fork_promote::promote_respects_where_clause
+        PASS [   0.164s] (339/821) uni-db::integration fork::fork_promote::promote_merge_idempotent
+        PASS [   0.143s] (340/821) uni-db::integration fork::fork_promote::promote_upsert_idempotent_after_flush
+        PASS [   0.110s] (341/821) uni-db::integration fork::fork_promote::promote_upsert_updates_existing_by_ext_id
+        PASS [   0.141s] (342/821) uni-db::integration fork::fork_promote_edges::promote_edges_lands_both_endpoints_and_edge
+        PASS [   0.153s] (343/821) uni-db::integration fork::fork_promote_edges::promote_edges_dedupes_existing_edge
+        PASS [   0.103s] (344/821) uni-db::integration fork::fork_promote_edges::promote_edges_skips_when_endpoint_absent_on_primary
+        PASS [   0.143s] (345/821) uni-db::integration fork::fork_promote_edges::promote_multi_edges_with_different_props
+        PASS [   0.076s] (346/821) uni-db::integration fork::fork_read_only::fork_persists_across_reopen
+        PASS [   0.080s] (347/821) uni-db::integration fork::fork_read_only::fork_sees_fork_point_state_after_primary_writes
+        PASS [   0.030s] (348/821) uni-db::integration fork::fork_read_only::forked_session_tx_now_succeeds_post_phase2
+        PASS [   0.395s] (349/821) uni-db::integration fork::fork_promote_ext_id_reuse::promote_upsert_updates_the_live_vertex_of_a_reused_ext_id
+        PASS [   0.096s] (350/821) uni-db::integration fork::fork_read_only::forks_remain_independent_when_primary_label_grows
+        PASS [   0.040s] (351/821) uni-db::integration fork::fork_read_only::list_and_info_round_trip
+        PASS [   0.038s] (352/821) uni-db::integration fork::fork_read_only::must_create_variant_rejects_on_existing_succeeds_on_fresh
+        PASS [   0.081s] (353/821) uni-db::integration fork::fork_schema_evolution::fork_continues_writing_after_primary_schema_grows
+        PASS [   0.109s] (354/821) uni-db::integration fork::fork_schema_evolution::cypher_alter_add_property_widens_primary_and_forks
+        PASS [   0.078s] (355/821) uni-db::integration fork::fork_schema_evolution::fork_created_after_the_declaration_needs_no_widening
+        PASS [   0.106s] (356/821) uni-db::integration fork::fork_schema_evolution::fork_with_an_existing_branch_accepts_a_property_added_on_primary
+        PASS [   0.121s] (357/821) uni-db::integration fork::fork_schema_evolution::nested_fork_accepts_a_property_added_on_primary
+        PASS [   0.089s] (358/821) uni-db::integration fork::fork_schema_evolution::primary_schema_add_label_does_not_break_v1_fork
+        PASS [   0.028s] (359/821) uni-db::integration fork::fork_schema_hardening::schema_definition_rejects_unsafe_names
+        PASS [   0.051s] (360/821) uni-db::integration fork::fork_schema_hardening::schemaless_unsafe_name_errors_cleanly
+        PASS [   0.132s] (361/821) uni-db::integration fork::fork_schema_hardening::fork_origin_id_collision_is_benign
+        PASS [   0.139s] (362/821) uni-db::integration fork::fork_schemaless_edge_types::fork_minted_schemaless_id_reused_by_primary_keeps_its_name
+        PASS [   0.111s] (363/821) uni-db::integration fork::fork_schemaless_edge_types::fork_only_schemaless_edges_survive_database_reopen
+        PASS [   0.068s] (364/821) uni-db::integration fork::fork_schemaless_edge_types::promote_of_fork_declared_types_missing_on_primary_is_refused
+        PASS [   0.125s] (365/821) uni-db::integration fork::fork_schemaless_edge_types::promote_schemaless_edge_type_with_endpoints
+        PASS [   0.236s] (366/821) uni-db::integration fork::fork_schemaless_edge_types::reopened_fork_writes_supersede_rows_the_fork_already_flushed
+        PASS [   0.237s] (367/821) uni-db::integration fork::fork_schemaless_edge_types::replayed_fork_edge_delete_resolves_its_type_by_name
+        PASS [   0.121s] (368/821) uni-db::integration fork::fork_schemaless_edge_types::schemaless_edge_type_is_isolated_at_the_fork_point
+        PASS [   0.066s] (369/821) uni-db::integration fork::fork_strict_schema::fork_local_edge_type_passes_strict_validation_on_fork_only
+        PASS [   0.061s] (370/821) uni-db::integration fork::fork_strict_schema::fork_local_label_passes_strict_validation_on_fork_only
+        PASS [   0.027s] (371/821) uni-db::integration fork::fork_strict_schema::fork_schema_on_primary_session_errors
+        PASS [   0.074s] (372/821) uni-db::integration fork::fork_strict_schema::fork_local_label_survives_restart
+        PASS [   0.057s] (373/821) uni-db::integration fork::fork_strict_schema::sibling_sessions_see_overlay_growth_immediately
+        PASS [   0.059s] (374/821) uni-db::integration fork::fork_tag::tag_fork_pre_check_prevents_partial_retag
+        PASS [   0.028s] (375/821) uni-db::integration fork::fork_tag::tag_fork_unknown_fork_errors
+        PASS [   0.067s] (376/821) uni-db::integration fork::fork_tag::tag_list_untag_roundtrip
+        PASS [   0.090s] (377/821) uni-db::integration fork::fork_target_endpoint_label::fork_matches_target_endpoint_label_schemaless
+        PASS [   0.085s] (378/821) uni-db::integration fork::fork_target_endpoint_label::fork_rejects_wrong_target_endpoint_label_schemaless
+        PASS [   0.460s] (379/821) uni-db::integration fork::fork_ttl::disabled_sweeper_keeps_expired_forks
+        PASS [  13.498s] (380/821) uni-db::integration bugs::issue_311_tx_index_rekey::issue_311_multilabel_merge_map_and_stream_matrix
+        PASS [   0.864s] (381/821) uni-db::integration fork::fork_ttl::default_ttl_applies_when_builder_has_no_override
+        PASS [   0.070s] (382/821) uni-db::integration fork::fork_unflushed_l0::fork_count_equals_parent_count_no_flush
+        PASS [   0.062s] (383/821) uni-db::integration fork::fork_unflushed_l0::fork_inherits_unflushed_many_nodes_unwind
+        PASS [   0.074s] (384/821) uni-db::integration fork::fork_unflushed_l0::fork_inherits_unflushed_on_the_fly_label
+        PASS [   0.560s] (385/821) uni-db::integration fork::fork_ttl::fork_without_ttl_survives_sweeper
+        PASS [   0.090s] (386/821) uni-db::integration fork::fork_unflushed_l0::fork_inherits_unflushed_relationship_and_endpoints
+        PASS [   0.070s] (387/821) uni-db::integration fork::fork_unflushed_l0::fork_inherits_unflushed_single_node
+        PASS [   0.064s] (388/821) uni-db::integration fork::fork_unflushed_l0::fork_the_writing_session_sees_own_unflushed_writes
+        PASS [   0.063s] (389/821) uni-db::integration fork::fork_unflushed_l0::in_memory_db_never_flushes_fork_sees_l0
+        PASS [   0.085s] (390/821) uni-db::integration fork::fork_unflushed_l0::nested_unflushed_chain_primary_fork_a_fork_b
+        PASS [   0.075s] (391/821) uni-db::integration fork::fork_unflushed_l0::parent_writes_after_fork_invisible_no_initial_flush
+        PASS [   0.863s] (392/821) uni-db::integration fork::fork_ttl::fork_ttl_expires_and_sweeper_drops
+        PASS [   0.075s] (393/821) uni-db::integration fork::fork_unflushed_l0::reopen_existing_fork_does_not_pull_new_parent_l0
+        PASS [   0.104s] (394/821) uni-db::integration fork::fork_use_cases::use_case_3_1_rule_developer_loop
+        PASS [   0.092s] (395/821) uni-db::integration fork::fork_use_cases::use_case_3_5_nested_forks
+        PASS [   0.166s] (396/821) uni-db::integration fork::fork_use_cases::use_case_3_3_write_audit_publish
+        PASS [   0.176s] (397/821) uni-db::integration fork::fork_use_cases::use_case_3_4_side_by_side_scenarios
+        PASS [   0.036s] (398/821) uni-db::integration fork::fork_validation::fork_rejects_invalid_names
+        PASS [   0.051s] (399/821) uni-db::integration fork::fork_use_cases::use_case_3_6_fork_local_schema_overlay
+        PASS [   0.084s] (400/821) uni-db::integration fork::fork_writes::fork_and_primary_writes_remain_isolated_under_interleaving
+        PASS [   0.065s] (401/821) uni-db::integration fork::fork_writes::forked_tx_commit_lands_on_fork_branch
+        PASS [   0.065s] (402/821) uni-db::integration fork::fork_writes::with_block_tx_unflushed_fork_visibility
+        PASS [   0.270s] (403/821) uni-db::integration fork::fork_watch::sibling_forks_have_isolated_watches
+        PASS [   0.108s] (404/821) uni-db::integration graph_algo::graph_compute_l0_ladder::probe_fork_graph_compute_projects_the_same_as_its_parent
+        PASS [   0.022s] (405/821) uni-db::integration index::adjacency_snapshot_isolation::test_separate_adjacency_managers_for_snapshots
+        PASS [   0.103s] (406/821) uni-db::integration graph_algo::projection_contract::pinned_snapshot_projection_is_legitimately_l0_free
+        PASS [   0.019s] (407/821) uni-db::integration index::adjacency_snapshot_isolation::test_snapshot_isolation_with_warm
+        PASS [   0.054s] (408/821) uni-db::integration index::multi_label_crud_test::delete_tests::test_delete_cleanup_bidirectional_index
+        PASS [   0.073s] (409/821) uni-db::integration index::multi_label_crud_test::delete_tests::test_delete_and_recreate
+        PASS [   0.469s] (410/821) uni-db::integration fork::fork_watch::fork_watch_isolated_from_primary
+        PASS [   0.067s] (411/821) uni-db::integration index::multi_label_crud_test::delete_tests::test_delete_multi_label_vertex
+        PASS [   0.038s] (412/821) uni-db::integration l0_snapshot_e2e::freeze_fires_only_under_contention
+        PASS [   0.084s] (413/821) uni-db::integration index::multi_label_crud_test::delete_tests::test_detach_delete_multi_label
+        PASS [   0.037s] (414/821) uni-db::integration l0_snapshot_e2e::snapshot_preserves_read_your_writes
+        PASS [   0.040s] (415/821) uni-db::integration l0_snapshot_e2e::snapshot_isolates_tx_reads_from_concurrent_commit
+        PASS [   0.038s] (416/821) uni-db::integration l0_snapshot_e2e::snapshots_pinned_at_different_points_are_independent
+        PASS [   0.042s] (417/821) uni-db::integration loaders::m4_host_procedures_dispatch::call_uni_vector_query_via_plugin_succeeds
+        PASS [   0.066s] (418/821) uni-db::integration l0_snapshot_e2e::snapshot_stable_across_many_commits
+        PASS [   0.039s] (419/821) uni-db::integration locy::btic_cypher_test::test_btic_merge_on_match_set
+        PASS [   0.047s] (420/821) uni-db::integration locy::btic_cypher_test::test_btic_delete_vertex
+        PASS [   0.113s] (421/821) uni-db::integration locy::locy_assume_body_sequencing::derive_then_recursive_rule
+        PASS [   0.115s] (422/821) uni-db::integration locy::locy_goal_directed::auto_derives_left_out_rules_in_the_evaluated_snapshot
+        PASS [   0.035s] (423/821) uni-db::integration locy::locy_integration::test_evaluate_non_recursive
+        PASS [   0.046s] (424/821) uni-db::integration locy::locy_integration::test_evaluate_recursive_transitive_closure
+        PASS [   0.039s] (425/821) uni-db::integration locy::locy_integration::test_non_recursive_reports_iterations
+        PASS [   0.063s] (426/821) uni-db::integration locy::locy_issue_159_recursive_fold_dedup::issue_159_along_must_not_collapse_equal_valued_paths
+        PASS [   0.055s] (427/821) uni-db::integration locy::locy_issue_159_recursive_fold_dedup::issue_159_fold_in_recursive_path_is_detected_at_compile_time
+        PASS [   0.070s] (428/821) uni-db::integration locy::locy_issue_159_recursive_fold_dedup::issue_159_non_recursive_fold_over_equal_values_is_correct
+        PASS [   0.061s] (429/821) uni-db::integration locy::locy_issue_159_recursive_fold_dedup::issue_159_recursive_fold_with_distinct_values_is_correct
+        PASS [   0.052s] (430/821) uni-db::integration locy::locy_issue_160_query_derived_parity::issue_160_recursive_rule_queried_directly_must_agree
+        PASS [   0.193s] (431/821) uni-db::integration locy::locy_issue_159_recursive_fold_dedup::issue_159_recursive_fold_must_not_dedup_equal_values
+        PASS [   0.053s] (432/821) uni-db::integration locy::locy_issue_162_shape_matrix::issue_162_having_is_not_applied_to_the_per_iteration_snapshot
+        PASS [   0.107s] (433/821) uni-db::integration locy::locy_issue_294_parallel_edge_fold::issue_294_recursive_fold_agrees_with_non_recursive_on_multigraph
+        PASS [   0.190s] (434/821) uni-db::integration locy::locy_issue_162_shape_matrix::issue_162_cyclic_recursive_fold_terminates
+        PASS [   0.057s] (435/821) uni-db::integration locy::locy_issue_294_parallel_edge_fold::issue_294_recursive_msum_counts_both_parallel_edges
+        PASS [   0.104s] (436/821) uni-db::integration locy::locy_issue_308_explain_recursive_children::issue_308_depth_four_chain_expands_to_the_base_fact
+        PASS [  10.074s] (437/821) uni-db::integration fork::fork_drop_inflight::drop_fork_with_alive_session_no_tx_still_errors_inuse
+        PASS [   0.100s] (438/821) uni-db::integration locy::locy_issue_308_explain_recursive_children::issue_308_recursive_derivation_lists_its_supporting_fact
+        PASS [   0.050s] (439/821) uni-db::integration locy::locy_issue_314_classifier_relation_is::issue_314_recursive_model_backed_rule
+        PASS [   0.058s] (440/821) uni-db::integration locy::locy_numeric_exact::locy_numeric_exact_recursive_best_by_orders_by_value
+        PASS [   0.061s] (441/821) uni-db::integration locy::locy_numeric_exact::locy_numeric_exact_recursive_best_by_displaces_by_value
+        PASS [   0.052s] (442/821) uni-db::integration locy::locy_profile::profile_non_recursive_single_iteration
+        PASS [   0.049s] (443/821) uni-db::integration locy::locy_profile::profile_recursive_transitive_closure
+        PASS [   0.047s] (444/821) uni-db::integration locy::locy_single_engine::single_engine_collect_folds_in_a_recursive_rule
+        PASS [   0.060s] (445/821) uni-db::integration locy::locy_proof_probability::a_recursive_derivation_weighs_its_edge_times_what_it_references
+        PASS [   0.044s] (446/821) uni-db::integration locy::locy_snapshot_context_independence::session_and_tx_locy_agree_when_quiescent
+        PASS [   0.059s] (447/821) uni-db::integration locy::locy_snapshot_context_independence::tx_locy_query_is_snapshot_isolated_session_is_live
+        PASS [   0.051s] (448/821) uni-db::integration locy::locy_snapshot_context_independence::tx_locy_with_builder_is_snapshot_isolated
+        PASS [   0.038s] (449/821) uni-db::integration locy::locy_ssi_read_set::cypher_rmw_control_conflicts
+        PASS [   0.051s] (450/821) uni-db::integration locy::locy_ssi_read_set::fresh_apply_succeeds_by_default
+        PASS [   0.042s] (451/821) uni-db::integration locy::locy_ssi_read_set::locy_rmw_conflicts_like_cypher
+        PASS [   0.050s] (452/821) uni-db::integration locy::locy_ssi_read_set::stale_apply_rejected_by_default
+        PASS [   0.621s] (453/821) uni-db::integration locy::locy_issue_301_fixpoint_delta::issue_301_recursive_cost_tracks_frontier_not_relation
+        PASS [   0.050s] (454/821) uni-db::integration locy::locy_tx_prepared_and_params::tx_prepared_program_reads_the_transactions_snapshot
+        PASS [   0.054s] (455/821) uni-db::integration locy::locy_type_projection_matrix::matrix_bytes_and_vector_round_trip_typed
+        PASS [   0.053s] (456/821) uni-db::integration locy::locy_value_types::locy_value_types_recursive_max
+        PASS [   0.055s] (457/821) uni-db::integration map_ddl_type::map_string_vector_roundtrips
+        PASS [  10.073s] (458/821) uni-db::integration fork::fork_error_audit::audit_fork_in_use
+        PASS [   0.075s] (459/821) uni-db::integration metamorphic::dqp::counters::a_plain_transaction_is_not_counted_as_a_snapshot_read
+        PASS [   0.088s] (460/821) uni-db::integration metamorphic::dqp::counters::branch_scans_fire_on_a_pristine_fork_and_never_on_primary
+        PASS [   0.102s] (461/821) uni-db::integration metamorphic::dqp::counters::branch_scans_zero_for_a_table_the_fork_has_no_branch_for
+        PASS [   1.539s] (462/821) uni-db::integration locy::locy_anchor_target_cross_stratum::p4_anchored_reads_stay_in_the_ssi_read_set
+        PASS [   0.088s] (463/821) uni-db::integration metamorphic::dqp::counters::snapshot_reads_zero_when_live_and_nonzero_when_pinned
+        PASS [   0.499s] (464/821) uni-db::integration metamorphic::dqp::compaction_lever::tests::a_transition_that_merges_nothing_is_rejected
+        PASS [   0.532s] (465/821) uni-db::integration metamorphic::dqp::delete_lever::tests::a_transition_that_deletes_nothing_is_rejected
+        PASS [   0.734s] (466/821) uni-db::integration metamorphic::dqp::delete_lever::tests::containment_rejects_a_transition_that_adds_rows
+        PASS [   1.767s] (467/821) uni-db::integration locy::locy_toplevel_sequencing::derive_then_recursive_rule
+        PASS [   0.259s] (468/821) uni-db::integration metamorphic::dqp::identity::pristine_fork_preserves_vids_of_inherited_rows
+        PASS [   1.469s] (469/821) uni-db::integration metamorphic::dqp::delete_lever::tests::most_cases_in_a_batch_activate
+        PASS [   0.352s] (470/821) uni-db::integration metamorphic::dqp::transition_probe::probe_delete_transition
+        PASS [   0.114s] (471/821) uni-db::integration multivector_index::test_create_vector_index_metric_from_options
+        PASS [   0.676s] (472/821) uni-db::integration metamorphic::dqp::locy_levers::locy_through_the_fork_lever
+        PASS [   1.939s] (473/821) uni-db::integration metamorphic::dqp::delete_lever::tests::multiple_batches_each_transition
+        PASS [   0.120s] (474/821) uni-db::integration multivector_index::test_multivector_inline_vector_similarity
+        PASS [   0.126s] (475/821) uni-db::integration multivector_index::test_multivector_query_no_index_cosine
+        PASS [   0.406s] (476/821) uni-db::integration multivector_index::test_multivector_all_index_types_build
+        PASS [   0.222s] (477/821) uni-db::integration multivector_index::test_multivector_query_ivf_pq_refine
+        PASS [   0.109s] (478/821) uni-db::integration multivector_index::test_pq_subvectors_validation_errors
+        PASS [   0.069s] (479/821) uni-db::integration multivector_l0::test_flush_equivalence
+        PASS [   0.046s] (480/821) uni-db::integration multivector_l0::test_inline_predicate_sees_l0
+        PASS [   0.073s] (481/821) uni-db::integration multivector_l0::test_l0_delete_and_create_together
+        PASS [   0.036s] (482/821) uni-db::integration multivector_l0::test_l0_dimension_mismatch_errors
+        PASS [   0.037s] (483/821) uni-db::integration multivector_l0::test_l0_empty_tokens_score_zero
+        PASS [   0.034s] (484/821) uni-db::integration multivector_l0::test_l0_malformed_flat_query_errors
+        PASS [   0.046s] (485/821) uni-db::integration multivector_l0::test_l0_only_no_flush_no_index
+        PASS [   0.040s] (486/821) uni-db::integration multivector_l0::test_l0_threshold_is_min_similarity
+        PASS [   0.202s] (487/821) uni-db::integration multivector_l0::test_index_plus_l0_merge
+        PASS [   0.068s] (488/821) uni-db::integration multivector_l0::test_l0_update_last_writer_wins
+        PASS [   0.069s] (489/821) uni-db::integration multivector_l0::test_l0_tombstone_hides_flushed_doc
+        PASS [   0.070s] (490/821) uni-db::integration multivector_l0::test_mixed_l0_and_flushed
+        PASS [   0.060s] (491/821) uni-db::integration multivector_maxsim::test_maxsim_declared_via_cypher_ddl
+        PASS [   0.062s] (492/821) uni-db::integration multivector_maxsim::test_maxsim_cypher_value_tokens
+        PASS [   0.070s] (493/821) uni-db::integration multivector_maxsim::test_maxsim_dimension_mismatch_errors
+        PASS [   0.068s] (494/821) uni-db::integration multivector_maxsim::test_maxsim_malformed_query_errors
+        PASS [   0.075s] (495/821) uni-db::integration multivector_maxsim::test_maxsim_empty_tokens_scores_zero
+        PASS [   0.070s] (496/821) uni-db::integration multivector_maxsim::test_maxsim_metric_option_dot
+        PASS [   0.070s] (497/821) uni-db::integration multivector_maxsim::test_maxsim_rerank_missing_query_errors
+        PASS [   0.069s] (498/821) uni-db::integration multivector_maxsim::test_maxsim_rerank_reorders_results
+        PASS [   0.031s] (499/821) uni-db::integration multivector_maxsim::test_schemaless_nested_list_rejected
+        PASS [   0.070s] (500/821) uni-db::integration multivector_maxsim::test_maxsim_via_hybrid_search
+        PASS [   0.072s] (501/821) uni-db::integration multivector_muvera::dense_default_ann_is_ivf_pq_on_both_paths
+        PASS [   0.136s] (502/821) uni-db::integration multivector_muvera::muvera_backfill_then_query_ranks_target_first
+        PASS [   0.180s] (503/821) uni-db::integration multivector_muvera::dense_ivfpq_via_schema_builder_path
+        PASS [   0.161s] (504/821) uni-db::integration multivector_muvera::muvera_create_before_ingest
+        PASS [   0.093s] (505/821) uni-db::integration multivector_muvera::muvera_internal_column_hidden
+        PASS [   0.141s] (506/821) uni-db::integration multivector_muvera::muvera_fork_fallback
+        PASS [   0.116s] (507/821) uni-db::integration multivector_muvera::muvera_l0_and_flushed_mix
+        PASS [   0.188s] (508/821) uni-db::integration multivector_muvera::muvera_ivf_pq_inner
+        PASS [   0.164s] (509/821) uni-db::integration multivector_muvera::muvera_persists_across_reopen
+        PASS [   0.083s] (510/821) uni-db::integration multivector_muvera::muvera_show_indexes_hides_internal
+        PASS [   0.165s] (511/821) uni-db::integration multivector_muvera::muvera_update_and_tombstone
+        PASS [   0.130s] (512/821) uni-db::integration multivector_muvera::muvera_via_schema_builder_path
+        PASS [   0.160s] (513/821) uni-db::integration multivector_muvera::muvera_via_procedure_createindex
+        PASS [   0.072s] (514/821) uni-db::integration multivector_muvera::muvera_wrong_dim_token_does_not_wedge_flush
+        PASS [   0.086s] (515/821) uni-db::integration multivector_resilience::multivector_corrupt_wal_tail_skipped_on_reopen
+        PASS [   0.086s] (516/821) uni-db::integration perf::query_limits_test::a_tx_cursor_reads_the_transactions_snapshot_like_fetch_all
+        PASS [   0.125s] (517/821) uni-db::integration multivector_snapshot::multivector_snapshot_isolates_reader_from_concurrent_insert
+        PASS [   0.037s] (518/821) uni-db::integration plan_shape::proofs::a_non_recursive_rule_avoids_the_fixpoint_operator
+        PASS [   0.103s] (519/821) uni-db::integration plan_shape::proofs::a_delete_runs_the_delete_mutation
+        PASS [   0.053s] (520/821) uni-db::integration plan_shape::proofs::a_recursive_rule_runs_the_fixpoint_operator
+        PASS [   0.109s] (521/821) uni-db::integration plan_shape::proofs::a_merge_runs_the_merge_mutation
+        PASS [   0.059s] (522/821) uni-db::integration plan_shape::proofs::a_with_recursive_runs_the_recursive_cte
+        PASS [   0.038s] (523/821) uni-db::integration plugin::plugin_virtual_label_dispatch::delete_virtual_vertex_errors
+        PASS [   0.041s] (524/821) uni-db::integration plugin::plugin_virtual_label_dispatch::merge_against_virtual_label_errors
+        PASS [   0.068s] (525/821) uni-db::integration plan_shape::proofs::an_approx_eq_predicate_runs_the_vector_knn
+        PASS [   0.044s] (526/821) uni-db::integration plugin::plugin_virtual_label_dispatch::native_label_set_and_delete_still_work
+        PASS [   0.107s] (527/821) uni-db::integration recovery_index_no_rebuild::dense_vector_recovered_delta_queryable_without_rebuild
+        PASS [   0.110s] (528/821) uni-db::integration recovery_index_no_rebuild::dense_vector_recovered_delete_hides_doc_without_rebuild
+        PASS [   0.104s] (529/821) uni-db::integration recovery_index_no_rebuild::scalar_recovered_delete_hides_doc_without_rebuild
+        PASS [   0.058s] (530/821) uni-db::integration review_regressions::review_anonymous_merge_must_deduplicate_within_statement
+        PASS [   0.077s] (531/821) uni-db::integration review_regressions::review_anonymous_merge_concurrency_with_and_without_flush
+        PASS [   0.063s] (532/821) uni-db::integration review_regressions::review_empty_fork_must_not_see_later_primary_rows
+        PASS [   0.161s] (533/821) uni-db::integration review_regressions::review_edge_and_node_key_conflicts_survive_flush
+        PASS [   0.079s] (534/821) uni-db::integration review_regressions::review_empty_label_on_populated_fork_must_stay_empty
+        PASS [   0.249s] (535/821) uni-db::integration review_regressions::review_branch_metrics_for_inherited_and_fork_local_vectors
+        PASS [   0.073s] (536/821) uni-db::integration review_regressions::review_ext_id_guard_must_survive_concurrent_flush
+        PASS [   0.082s] (537/821) uni-db::integration review_regressions::review_fork_cosine_top_one_matches_primary
+        PASS [   0.068s] (538/821) uni-db::integration review_regressions::review_merge_guard_must_survive_concurrent_flush
+        PASS [   0.220s] (539/821) uni-db::integration review_regressions::review_fork_absence_survives_first_write_nesting_and_reopen
+        PASS [   0.100s] (540/821) uni-db::integration review_regressions::review_persisted_unique_owner_is_enforced_after_reopen
+        PASS [  10.033s] (541/821) uni-db::integration fork::fork_read_only::drop_fork_in_use_blocks_until_session_released
+        PASS [   0.068s] (542/821) uni-db::integration review_regressions::review_unique_constraint_must_survive_concurrent_flush
+        PASS [   0.190s] (543/821) uni-db::integration review_regressions::review_recursive_frontier_avoids_unrelated_label_rows
+        PASS [   0.133s] (544/821) uni-db::integration review_regressions::review_vector_delete_must_refill_disk_candidates
+        PASS [   0.133s] (545/821) uni-db::integration review_regressions::review_vector_label_removal_must_exclude_old_hit
+        PASS [   0.145s] (546/821) uni-db::integration review_regressions::review_vector_update_must_refill_disk_candidates
+        PASS [   0.081s] (547/821) uni-db::integration runtime::background_task_lifecycle_test::fork_worker_is_counted_and_stopped_by_primary_shutdown
+        PASS [   0.275s] (548/821) uni-db::integration review_regressions::review_vector_many_shadowed_candidates_in_private_and_committed_overlays
+        PASS [   0.075s] (549/821) uni-db::integration runtime::background_task_lifecycle_test::fork_worker_stops_when_the_fork_is_dropped
+        PASS [   0.068s] (550/821) uni-db::integration runtime::norn_gap_coverage::test_merge_composite_key_coverage
+        PASS [   0.072s] (551/821) uni-db::integration runtime::norn_gap_coverage::test_vector_match_operator_coverage
+        PASS [   0.030s] (552/821) uni-db::integration session_tx::session_read_only::test_session_query_rejects_delete
+        PASS [   0.106s] (553/821) uni-db::integration session_tx::edge_constraint_enforcement_test::edge_unique_value_reusable_after_delete
+        PASS [   0.031s] (554/821) uni-db::integration session_tx::session_read_only::test_session_query_rejects_merge
+        PASS [   0.038s] (555/821) uni-db::integration session_tx::strict_schema_test::strict_rejects_unknown_edge_type_on_merge
+        PASS [   0.032s] (556/821) uni-db::integration session_tx::strict_schema_test::strict_rejects_unknown_label_on_merge
+        PASS [   0.061s] (557/821) uni-db::integration sparse_ddl_type::sparse_vector_ddl_lowercase_and_empty
+        PASS [   0.068s] (558/821) uni-db::integration sparse_ddl_type::sparse_vector_ddl_type_roundtrips
+        PASS [   0.113s] (559/821) uni-db::integration sparse_index::sparse_index_via_cypher_create_vector_index
+        PASS [   0.122s] (560/821) uni-db::integration sparse_index::sparse_recovered_delete_hides_doc_without_rebuild
+        PASS [   0.991s] (561/821) uni-db::integration review_regressions::review_recursive_cte_must_not_succeed_with_truncated_closure
+        PASS [   0.040s] (562/821) uni-db::integration ssi_default_semantics::concurrent_writes_do_not_conflict_without_ssi
+        PASS [   0.041s] (563/821) uni-db::integration ssi_default_semantics::for_update_is_noop_without_ssi
+        PASS [   0.108s] (564/821) uni-db::integration sparse_index::sparse_snapshot_isolates_reader_from_concurrent_insert
+        PASS [   0.038s] (565/821) uni-db::integration ssi_edge_pinning::a_post_snapshot_edge_does_not_reach_a_post_snapshot_vertex
+        PASS [   0.049s] (566/821) uni-db::integration ssi_default_semantics::write_skew_not_prevented_without_ssi
+        PASS [   0.098s] (567/821) uni-db::integration ssi_edge_pinning::an_edge_committed_after_begin_is_invisible
+        PASS [   0.054s] (568/821) uni-db::integration ssi_for_update::for_update_lock_map_does_not_leak
+        PASS [   0.046s] (569/821) uni-db::integration ssi_for_update::for_update_lock_released_after_commit
+        PASS [   0.216s] (570/821) uni-db::integration ssi_edge_pinning::edge_scans_properties_and_deletes_are_pinned
+        PASS [   0.232s] (571/821) uni-db::integration ssi_edge_pinning::property_reads_are_pinned_across_a_flush
+        PASS [   0.034s] (572/821) uni-db::integration ssi_for_update::for_update_read_sees_latest_committed
+        PASS [   0.063s] (573/821) uni-db::integration ssi_for_update::for_update_rmw_no_retry_converges
+        PASS [   0.145s] (574/821) uni-db::integration ssi_for_update::for_update_multi_key_opposite_order_no_deadlock
+        PASS [   0.039s] (575/821) uni-db::integration ssi_for_update::for_update_unsupported_pattern_does_not_block
+        PASS [   0.347s] (576/821) uni-db::integration ssi_for_update::for_update_lock_released_after_rollback
+        PASS [   0.038s] (577/821) uni-db::integration ssi_for_update::read_before_for_update_keeps_begin_snapshot
+        PASS [   0.041s] (578/821) uni-db::integration ssi_hermitage::g1a_dirty_read_is_prevented
+        PASS [   0.042s] (579/821) uni-db::integration ssi_hermitage::g1b_intermediate_read_is_prevented
+        PASS [   0.339s] (580/821) uni-db::integration ssi_for_update::for_update_serializes_concurrent_transactions
+        PASS [   0.041s] (581/821) uni-db::integration ssi_hermitage::g1c_circular_information_flow_is_prevented
+        PASS [   0.053s] (582/821) uni-db::integration ssi_hermitage::g2_item_write_skew_is_prevented
+        PASS [   0.345s] (583/821) uni-db::integration ssi_for_update::for_update_via_parameterized_builder_acquires_lock
+        PASS [   0.057s] (584/821) uni-db::integration ssi_hermitage::otv_atomic_visibility
+        PASS [   0.051s] (585/821) uni-db::integration ssi_hermitage::p4_lost_update_is_prevented
+        PASS [   0.044s] (586/821) uni-db::integration ssi_hermitage::pmp_predicate_phantom_is_not_prevented
+        PASS [   0.165s] (587/821) uni-db::integration ssi_invariants::bank_transfers_conserve_and_stay_non_negative
+        PASS [   0.145s] (588/821) uni-db::integration ssi_invariants::counter_convergence_single_hot_key
+        PASS [   0.065s] (589/821) uni-db::integration ssi_l1_pinning::for_update_repin_sees_latest_l1
+        PASS [   0.084s] (590/821) uni-db::integration ssi_l1_pinning::merge_sees_in_transaction_edge_under_pin
+        PASS [   0.089s] (591/821) uni-db::integration ssi_l1_pinning::mid_tx_flush_does_not_leak_into_locy
+        PASS [   0.084s] (592/821) uni-db::integration ssi_l1_pinning::mid_tx_flush_does_not_leak_new_rows
+        PASS [   0.072s] (593/821) uni-db::integration ssi_l1_pinning::ssi_disabled_keeps_live_reads
+        PASS [   0.048s] (594/821) uni-db::integration ssi_occ_e2e::atomic_increment_two_writers_converges
+        PASS [   0.061s] (595/821) uni-db::integration ssi_occ_e2e::concurrent_merge_same_key_yields_one_node
+        PASS [   0.035s] (596/821) uni-db::integration ssi_occ_e2e::disjoint_writers_both_commit
+        PASS [   0.053s] (597/821) uni-db::integration ssi_occ_e2e::edge_read_antidependency_aborts
+        PASS [   0.036s] (598/821) uni-db::integration ssi_occ_e2e::non_retriable_error_surfaces_without_retry
+        PASS [   0.292s] (599/821) uni-db::integration ssi_occ_e2e::atomic_increment_many_writers_converges
+        PASS [   0.039s] (600/821) uni-db::integration ssi_occ_e2e::read_only_transaction_is_not_a_pivot
+        PASS [   0.035s] (601/821) uni-db::integration ssi_occ_e2e::retry_exhaustion_returns_conflict
+        PASS [   0.042s] (602/821) uni-db::integration ssi_occ_e2e::scan_read_antidependency_aborts
+        PASS [   0.050s] (603/821) uni-db::integration ssi_occ_e2e::scan_read_disjoint_key_no_false_abort
+        PASS [   0.040s] (604/821) uni-db::integration ssi_occ_e2e::schemaless_traversal_antidependency_aborts
+        PASS [   0.052s] (605/821) uni-db::integration ssi_occ_e2e::schemaless_traversal_pushdown_ignores_unrelated_vertices
+        PASS [   0.305s] (606/821) uni-db::integration ssi_occ_e2e::read_only_queries_never_abort_under_writes
+        PASS [   0.047s] (607/821) uni-db::integration ssi_occ_e2e::traversal_antidependency_aborts
+        PASS [   0.051s] (608/821) uni-db::integration ssi_occ_e2e::vid_lookup_join_records_reads_via_fallback
+        PASS [   2.891s] (609/821) uni-db::integration review_regressions::review_recursive_budget_boundary_reports_exhaustion
+        PASS [   0.962s] (610/821) uni-db::integration ssi_invariants::prop_counter_convergence
+        PASS [   0.071s] (611/821) uni-db::integration ssi_read_path_matrix::aggregation_input
+        PASS [   0.064s] (612/821) uni-db::integration ssi_read_path_matrix::filtered_non_key_scan
+        PASS [   0.060s] (613/821) uni-db::integration ssi_read_path_matrix::full_label_scan
+        PASS [   0.054s] (614/821) uni-db::integration ssi_read_path_matrix::optional_match
+        PASS [   0.064s] (615/821) uni-db::integration ssi_read_path_matrix::keyed_point_read
+        PASS [   0.045s] (616/821) uni-db::integration ssi_read_path_matrix::sparse_query_records_matches
+        PASS [   0.057s] (617/821) uni-db::integration ssi_read_path_matrix::sparse_query_disjoint_label_no_false_abort
+        PASS [   0.058s] (618/821) uni-db::integration ssi_read_path_matrix::union_branches
+        PASS [   0.067s] (619/821) uni-db::integration ssi_read_path_matrix::typed_one_hop_traversal
+        PASS [   0.045s] (620/821) uni-db::integration ssi_read_path_matrix::vector_knn_records_matches
+        PASS [   0.054s] (621/821) uni-db::integration ssi_read_path_matrix::variable_length_traversal
+        PASS [   0.041s] (622/821) uni-db::integration ssi_resilience::abort_leaves_no_residue
+        PASS [   0.070s] (623/821) uni-db::integration ssi_read_path_matrix::with_pipeline
+        PASS [   0.069s] (624/821) uni-db::integration ssi_resilience::committed_write_survives_reopen
+        PASS [   0.082s] (625/821) uni-db::integration ssi_resilience::conflict_detection_resumes_after_reopen
+        PASS [   0.075s] (626/821) uni-db::integration ssi_resilience::corrupt_wal_tail_does_not_block_reopen
+        PASS [   0.087s] (627/821) uni-db::integration ssi_resilience::validation_aborted_tx_leaves_no_trace_through_reopen
+        PASS [   0.084s] (628/821) uni-db::integration ssi_stress::hot_key_for_update_no_retry_converges
+        PASS [   0.110s] (629/821) uni-db::integration ssi_stress::hot_key_ssi_retry_converges
+        PASS [   0.043s] (630/821) uni-db::integration ssi_telemetry::conflict_increments_serialization_counter
+        PASS [   0.045s] (631/821) uni-db::integration ssi_telemetry::contended_commit_freezes_once
+        PASS [   0.147s] (632/821) uni-db::integration ssi_stress::mixed_olap_oltp_no_deadlock
+        PASS [   0.042s] (633/821) uni-db::integration ssi_write_set_matrix::delete_vs_delete
+        PASS [   0.043s] (634/821) uni-db::integration ssi_telemetry::uncontended_commit_does_not_freeze
+        PASS [   0.040s] (635/821) uni-db::integration ssi_write_set_matrix::edge_set_vs_edge_set
+        PASS [   0.041s] (636/821) uni-db::integration ssi_write_set_matrix::edge_set_vs_edge_delete
+        PASS [   0.145s] (637/821) uni-db::integration ssi_telemetry::contention_drives_retries
+        PASS [   0.210s] (638/821) uni-db::integration ssi_stress::writer_scaling_converges
+        PASS [   0.048s] (639/821) uni-db::integration ssi_write_set_matrix::label_add_persists_after_commit
+        PASS [   0.044s] (640/821) uni-db::integration ssi_write_set_matrix::label_remove_persists_after_commit
+        PASS [   0.045s] (641/821) uni-db::integration ssi_write_set_matrix::merge_same_unique_key_conflicts
+        PASS [   0.071s] (642/821) uni-db::integration ssi_write_set_matrix::label_change_survives_reopen
+        PASS [   0.046s] (643/821) uni-db::integration ssi_write_set_matrix::property_set_does_not_wipe_labels
+        PASS [   0.039s] (644/821) uni-db::integration ssi_write_set_matrix::set_vs_detach_delete
+        PASS [   0.047s] (645/821) uni-db::integration ssi_write_set_matrix::set_vs_label_add
+        PASS [   0.041s] (646/821) uni-db::integration ssi_write_set_matrix::set_vs_label_remove
+        PASS [   0.041s] (647/821) uni-db::integration ssi_write_set_matrix::set_vs_set
+        PASS [   0.084s] (648/821) uni-db::integration storage::async_flush_basic::async_flush_fork_drop_drains_pending
+        PASS [   0.073s] (649/821) uni-db::integration storage::bulk_snapshot_hwm::a_snapshot_before_a_bulk_load_does_not_contain_it
+        PASS [   0.034s] (650/821) uni-db::integration storage::compaction_out_of_order_test::test_insert_delete_insert_sequence
+        PASS [   0.097s] (651/821) uni-db::integration storage::bulk_snapshot_hwm::pinning_the_bulk_snapshot_shows_the_load
+        PASS [   0.071s] (652/821) uni-db::integration storage::bulk_snapshot_hwm::the_bulk_snapshot_holds_older_l0_rows_from_the_start
+        PASS [   0.176s] (653/821) uni-db::integration storage::bulk_snapshot_hwm::ceilings_captured_while_a_load_is_staged_exclude_it
+        PASS [   0.088s] (654/821) uni-db::integration storage::multi_label_delete::a_label_anchored_delete_is_correct_before_the_flush
+        PASS [   0.093s] (655/821) uni-db::integration storage::multi_label_delete::a_label_anchored_delete_survives_a_flush
+        PASS [   0.091s] (656/821) uni-db::integration storage::multi_label_delete::a_plain_property_update_keeps_every_label
+        PASS [   0.079s] (657/821) uni-db::integration storage::multi_label_delete::labels_function_reports_every_label_after_a_flush
+        PASS [   0.090s] (658/821) uni-db::integration storage::multi_label_delete::removing_a_label_through_one_anchor_keeps_the_others
+        PASS [   0.107s] (659/821) uni-db::integration storage::multi_label_delete::setting_a_label_through_one_anchor_keeps_the_others
+        PASS [   0.079s] (660/821) uni-db::integration storage::persistence_restart_test::test_edge_to_concurrently_deleted_endpoint_does_not_ghost_commit
+        PASS [   0.053s] (661/821) uni-db::integration storage::shutdown_test::a_fork_writes_past_an_interrupted_first_create
+        PASS [   0.061s] (662/821) uni-db::integration storage::snapshot_integration::test_snapshot_creation_on_flush
+        PASS [   0.169s] (663/821) uni-db::integration storage::multi_label_delete::unanchored_and_fully_anchored_deletes_survive_a_flush
+        PASS [   0.316s] (664/821) uni-db::integration storage::snapshot_restore_rewinds::deletion::delete_procedure_and_refusals
+        PASS [   0.340s] (665/821) uni-db::integration storage::snapshot_restore_rewinds::forks::restore_refused_while_forks_exist
+        PASS [   0.404s] (666/821) uni-db::integration storage::snapshot_restore_rewinds::deletion::deleted_snapshot_versions_are_reclaimed_and_others_still_restore
+        PASS [   0.513s] (667/821) uni-db::integration storage::snapshot_restore_rewinds::restore_after_compaction_past_retention
+        PASS [   0.306s] (668/821) uni-db::integration storage::snapshot_restore_rewinds::restore_refusals
+        PASS [   0.431s] (669/821) uni-db::integration storage::snapshot_restore_rewinds::restore_procedure_rewinds_flushed_and_unflushed_writes
+        PASS [   0.245s] (670/821) uni-db::integration storage::snapshot_restore_rewinds::restore_refuses_a_restore_point_without_a_catalog
+        PASS [   0.116s] (671/821) uni-db::integration storage::snapshot_test::test_snapshot_edge_isolation
+        PASS [   0.583s] (672/821) uni-db::integration storage::snapshot_restore_rewinds::restore_procedure_rewinds_the_catalog
+        PASS [   0.094s] (673/821) uni-db::integration storage::snapshot_test::test_snapshot_property_isolation
+        PASS [   0.031s] (674/821) uni-db::integration storage::snapshot_test::test_time_travel_no_snapshot_error
+        PASS [   0.104s] (675/821) uni-db::integration storage::snapshot_test::test_snapshots_and_time_travel
+        PASS [   0.050s] (676/821) uni-db::integration storage::snapshot_test::test_time_travel_rejects_writes
+        PASS [   0.426s] (677/821) uni-db::integration storage::snapshot_restore_rewinds::restore_snapshot_rewinds_flushed_and_unflushed_writes
+        PASS [   0.188s] (678/821) uni-db::integration storage::snapshot_test::test_timestamp_as_of_happy_path
+        PASS [   0.564s] (679/821) uni-db::integration storage::snapshot_restore_rewinds::restore_rewinds_the_catalog
+        PASS [   0.380s] (680/821) uni-db::integration storage::versioned_read_after_delete::fork_cut_before_a_delete_keeps_the_vertex
+        PASS [   0.332s] (681/821) uni-db::integration storage::versioned_read_after_delete::pinned_snapshot_keeps_a_label_removed_later
+        PASS [   0.465s] (682/821) uni-db::integration storage::versioned_read_after_delete::pinned_flush_manifest_keeps_a_vertex_deleted_later
+        PASS [   0.733s] (683/821) uni-db::integration storage::versioned_read_after_delete::pinned_flush_manifest_survives_compaction
+        PASS [   0.397s] (684/821) uni-db::integration storage::versioned_read_after_delete::pinned_snapshot_of_unflushed_seed_keeps_a_vertex_deleted_later
+        PASS [   0.447s] (685/821) uni-db::integration storage::versioned_read_after_delete::pinned_snapshot_survives_compaction
+        PASS [   0.683s] (686/821) uni-db::integration storage::versioned_read_after_delete::pinned_snapshot_keeps_a_vertex_deleted_later
+        PASS [  20.075s] (687/821) uni-db::integration fork::fork_error_audit::audit_fork_subtree_in_use
+        PASS [   0.263s] (688/821) uni-db::integration storage::versioned_read_after_delete::reopened_label_index_holds_each_vertex_newest_labels
+        PASS [   0.291s] (689/821) uni-db::integration storage::versioned_read_after_delete::transaction_begun_before_a_compaction_keeps_the_vertex
+        PASS [   0.252s] (690/821) uni-db::integration storage::versioned_read_after_delete::transaction_begun_before_a_flushed_delete_keeps_the_vertex
+        PASS [   0.089s] (691/821) uni-db::integration triggers::trigger_edge_pre_image::delete_edge_carries_pre_image
+        PASS [   0.509s] (692/821) uni-db::integration storage::versioned_read_after_delete::snapshot_of_compacted_store_survives_compaction
+        PASS [   0.107s] (693/821) uni-db::integration triggers::trigger_edge_pre_image::detach_delete_endpoint_carries_edge_pre_images
+        PASS [   0.104s] (694/821) uni-db::integration triggers::trigger_edge_pre_image::merge_on_match_set_carries_edge_pre_image
+        PASS [   0.064s] (695/821) uni-db::integration value_fidelity::dense_vector_projection_round_trips
+        PASS [   0.069s] (696/821) uni-db::integration value_fidelity::dense_vector_survives_wal_recovery
+        PASS [   0.057s] (697/821) uni-db::integration value_fidelity::multivector_projection_round_trips
+        PASS [   0.145s] (698/821) uni-db::integration triggers::trigger_edge_pre_image::schemaless_edge_set_and_delete_carry_pre_image
+        PASS [   0.032s] (699/821) uni-db::integration vector_search::cypher_vector::test_cypher_vector_search
+        PASS [   0.061s] (700/821) uni-db::integration value_fidelity::multivector_survives_wal_recovery
+        PASS [   0.068s] (701/821) uni-db::integration vector_search::fts_integration::test_fts_analyzer_persists_across_reopen
+        PASS [   0.059s] (702/821) uni-db::integration vector_search::fts_integration::test_fts_auto_build_on_create_index
+        PASS [   0.075s] (703/821) uni-db::integration vector_search::fts_integration::test_fts_analyzer_stemming_and_stopwords
+        PASS [   0.061s] (704/821) uni-db::integration vector_search::fts_integration::test_fts_query
+        PASS [   0.075s] (705/821) uni-db::integration vector_search::fts_integration::test_fts_query_score_increases_with_relevance
+        PASS [   0.090s] (706/821) uni-db::integration vector_search::fts_integration::test_fts_query_sees_l0_writes
+        PASS [   0.081s] (707/821) uni-db::integration vector_search::hybrid_query::hybrid_two_way_dbsf_ranks_dual_relevant_first
+        PASS [   0.088s] (708/821) uni-db::integration vector_search::hybrid_query::hybrid_two_way_relative_score_ranks_dual_relevant_first
+        PASS [   0.077s] (709/821) uni-db::integration vector_search::hybrid_query::hybrid_two_way_rrf_ranks_dual_relevant_first
+        PASS [   0.076s] (710/821) uni-db::integration vector_search::hybrid_query::hybrid_two_way_weighted_favors_vector
+        PASS [   0.048s] (711/821) uni-db::integration vector_search::hybrid_query::test_hybrid_vector_graph_query
+        PASS [   0.077s] (712/821) uni-db::integration vector_search::inverted_index_test::test_inverted_index
+        PASS [   0.069s] (713/821) uni-db::integration vector_search::inverted_index_test::test_inverted_index_edge_cases
+        PASS [   0.099s] (714/821) uni-db::integration vector_search::inverted_index_test::test_inverted_index_incremental_updates
+        PASS [   1.041s] (715/821) uni-db::integration triggers::trigger_dispatch::async_fire_on_a_fork_is_awaited_by_drop
+        PASS [   1.036s] (716/821) uni-db::integration triggers::trigger_dispatch::async_fire_on_a_fork_is_counted_and_awaited_by_shutdown
+        PASS [   0.641s] (717/821) uni-db::integration vector_search::knn_limit_semantics::flat::unflushed
+        PASS [   0.977s] (718/821) uni-db::integration vector_search::knn_limit_semantics::flat::flushed
+        PASS [   0.980s] (719/821) uni-db::integration vector_search::knn_limit_semantics::hnsw::flushed
+        PASS [   0.692s] (720/821) uni-db::integration vector_search::knn_limit_semantics::hnsw::unflushed
+        PASS [   1.401s] (721/821) uni-db::integration vector_search::knn_limit_semantics::default_k_comes_from_config
+        PASS [   0.069s] (722/821) uni-db::integration vector_search::similar_to_integration::metric_tests::test_similar_to_cosine_unchanged
+        PASS [   0.090s] (723/821) uni-db::integration vector_search::similar_to_integration::metric_tests::test_similar_to_dot_metric
+        PASS [   0.074s] (724/821) uni-db::integration vector_search::similar_to_integration::metric_tests::test_similar_to_l2_metric
+        PASS [   0.062s] (725/821) uni-db::integration vector_search::similar_to_integration::metric_tests::test_similar_to_multi_source_mixed_metrics
+        PASS [  20.085s] (726/821) uni-db::integration fork::fork_nested::drop_fork_cascade_refuses_when_subtree_in_use
+        PASS [   0.346s] (727/821) uni-db::integration vector_search::knn_limit_semantics::knn_is_never_moved_below_a_limit
+        PASS [   0.071s] (728/821) uni-db::integration vector_search::similar_to_integration::metric_tests::test_similar_to_rrf_emits_warning
+        PASS [   0.084s] (729/821) uni-db::integration vector_search::similar_to_integration::similar_to_null_embedding_yields_null_not_error
+        PASS [   0.077s] (730/821) uni-db::integration vector_search::similar_to_integration::test_procedures_unchanged
+        PASS [   0.090s] (731/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_fts
+        PASS [   0.082s] (732/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_fts_in_where
+        PASS [   0.078s] (733/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_fts_k_option
+        PASS [   0.043s] (734/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_fts_without_flush
+        PASS [   0.086s] (735/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_in_locy_fold
+        PASS [   0.080s] (736/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_in_locy_where
+        PASS [   0.110s] (737/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_in_locy_along
+        PASS [   0.068s] (738/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_in_order_by
+        PASS [   0.077s] (739/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_in_locy_yield
+        PASS [   0.807s] (740/821) uni-db::integration vector_search::knn_limit_semantics::ivf_flat::unflushed
+        PASS [   0.074s] (741/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_in_where
+        PASS [   0.085s] (742/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_multi_source_default_rrf
+        PASS [   0.079s] (743/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_multi_source_in_where
+        PASS [   0.069s] (744/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_multi_source_type_mismatch
+        PASS [   0.079s] (745/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_multi_source_weighted
+        PASS [   0.063s] (746/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_string_no_fts_index
+        PASS [   0.070s] (747/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_queries_length_mismatch
+        PASS [   0.072s] (748/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_type_mismatch_fts_vector
+        PASS [   0.100s] (749/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_multi_source_weighted_fts_heavy
+        PASS [   0.073s] (750/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_vector_vector
+        PASS [   0.076s] (751/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_weights_length_mismatch
+        PASS [   1.302s] (752/821) uni-db::integration vector_search::knn_limit_semantics::ivf_flat::flushed
+        PASS [   0.079s] (753/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_weights_sum_not_one
+        PASS [   0.085s] (754/821) uni-db::integration vector_search::similar_to_integration::test_similar_to_with_parameter
+        PASS [   0.034s] (755/821) uni-db::integration vector_search::vector_index_options_test::default_sub_vectors_is_dimension_aware_for_wide_embeddings
+        PASS [   0.033s] (756/821) uni-db::integration vector_search::vector_index_options_test::test_auto_embed_string_query_requires_xervo_runtime
+        PASS [   0.066s] (757/821) uni-db::integration vector_search::similar_to_integration::test_vector_similarity_matches_similar_to
+        PASS [   0.031s] (758/821) uni-db::integration vector_search::vector_index_options_test::test_ddl_procedure_algorithm_ivf_sq
+        PASS [   0.034s] (759/821) uni-db::integration vector_search::vector_index_options_test::test_ddl_procedure_algorithm_hnsw_pq
+        PASS [   0.081s] (760/821) uni-db::integration vector_search::similar_to_integration::test_vector_similarity_still_works
+        PASS [   0.036s] (761/821) uni-db::integration vector_search::vector_index_options_test::test_ddl_procedure_default_algorithm_is_ivf_pq
+        PASS [   0.031s] (762/821) uni-db::integration vector_search::vector_index_options_test::test_procedure_api_embedding_alias_config
+        PASS [   0.033s] (763/821) uni-db::integration vector_search::vector_index_options_test::test_reopen_fails_fast_when_schema_has_alias_but_catalog_missing
+        PASS [   0.025s] (764/821) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_hnsw
+        PASS [   0.034s] (765/821) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_flat
+        PASS [   0.028s] (766/821) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_hnsw_pq
+        PASS [   0.074s] (767/821) uni-db::integration vector_search::vector_index_options_test::test_l1_metric_nearest_differs_from_l2
+        PASS [   0.033s] (768/821) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_hnsw_flat
+        PASS [   0.028s] (769/821) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_ivf_flat
+        PASS [   0.029s] (770/821) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_hnsw_sq
+        PASS [   0.024s] (771/821) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_ivf_rq_4bit
+        PASS [   0.032s] (772/821) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_ivf_pq
+        PASS [   0.035s] (773/821) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_ivf_rq
+        PASS [   0.035s] (774/821) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_ivf_sq
+        PASS [   0.043s] (775/821) uni-db::integration vector_search::vector_index_options_test::test_uni_xervo_facade_exposed_when_catalog_configured
+        PASS [   0.027s] (776/821) uni-db::integration vector_search::vector_index_options_test::test_vector_index_preserves_embedding_alias_config
+        PASS [   0.065s] (777/821) uni-db::integration vector_search::vector_index_options_test::test_vector_match_operator_with_embedding_alias_config
+        PASS [   0.094s] (778/821) uni-db::integration vector_search::vector_index_options_test::test_vector_e2e_lifecycle_create_insert_flush_query_delete_query
+        PASS [   0.099s] (779/821) uni-db::integration vector_search::vector_index_options_test::test_vector_query_flat
+        PASS [   0.093s] (780/821) uni-db::integration vector_search::vector_index_options_test::test_vector_query_hnsw_flat
+        PASS [   0.119s] (781/821) uni-db::integration vector_search::vector_index_options_test::test_vector_query_hnsw_pq
+        PASS [   0.106s] (782/821) uni-db::integration vector_search::vector_index_options_test::test_vector_query_hnsw_sq
+        PASS [   0.090s] (783/821) uni-db::integration vector_search::vector_index_options_test::test_vector_query_ivf_flat
+        PASS [   0.095s] (784/821) uni-db::integration vector_search::vector_index_options_test::test_vector_query_ivf_rq
+        PASS [   0.106s] (785/821) uni-db::integration vector_search::vector_index_options_test::test_vector_query_ivf_pq
+        PASS [   0.092s] (786/821) uni-db::integration vector_search::vector_index_options_test::test_vector_query_ivf_sq
+        PASS [   0.087s] (787/821) uni-db::integration vector_search::vector_index_slice::vector_index_slice_on_both_evaluators
+        PASS [   0.119s] (788/821) uni-db::integration vector_search::vector_index_options_test::test_vector_query_ivf_rq_4bit
+        PASS [   2.864s] (789/821) uni-db::integration vector_search::knn_limit_semantics::fork_ranks_local_and_inherited_rows
+        PASS [   0.683s] (790/821) uni-db::integration vector_search::vector_predicate_exactness::approx_eq_takes_any_constant_query_vector
+        PASS [   8.751s] (791/821) uni-db::integration vector_search::vector_predicate_exactness::flat_cosine::flushed
+        PASS [   8.826s] (792/821) uni-db::integration vector_search::vector_predicate_exactness::flat_dot::unflushed
+        PASS [   0.327s] (793/821) uni-db::integration vector_search::vector_predicate_exactness::fork_reads_the_predicate_exactly
+        PASS [   9.471s] (794/821) uni-db::integration vector_search::vector_predicate_exactness::flat_dot::flushed
+        PASS [   9.095s] (795/821) uni-db::integration vector_search::vector_predicate_exactness::flat_l2::flushed
+        PASS [   8.878s] (796/821) uni-db::integration vector_search::vector_predicate_exactness::flat_l2::unflushed
+        PASS [   9.702s] (797/821) uni-db::integration vector_search::vector_predicate_exactness::flat_cosine::unflushed
+        PASS [   8.842s] (798/821) uni-db::integration vector_search::vector_predicate_exactness::hnsw_cosine::flushed
+        PASS [   8.475s] (799/821) uni-db::integration vector_search::vector_predicate_exactness::ivf_flat_cosine::unflushed
+        PASS [   8.925s] (800/821) uni-db::integration vector_search::vector_predicate_exactness::hnsw_dot::flushed
+        PASS [   8.914s] (801/821) uni-db::integration vector_search::vector_predicate_exactness::hnsw_dot::unflushed
+        PASS [   9.605s] (802/821) uni-db::integration vector_search::vector_predicate_exactness::hnsw_cosine::unflushed
+        PASS [   0.072s] (803/821) uni-db::integration vector_search::vector_query_enhancements::test_vector_search_all_yield_types
+        PASS [   0.065s] (804/821) uni-db::integration vector_search::vector_query_enhancements::test_vector_search_combined_filter_and_threshold
+        PASS [   9.327s] (805/821) uni-db::integration vector_search::vector_predicate_exactness::ivf_flat_cosine::flushed
+        PASS [   0.093s] (806/821) uni-db::integration vector_search::vector_query_enhancements::test_vector_search_conditional_loading
+        PASS [   0.075s] (807/821) uni-db::integration vector_search::vector_query_enhancements::test_vector_search_null_filter_and_threshold
+        PASS [   0.063s] (808/821) uni-db::integration vector_search::vector_query_enhancements::test_vector_search_score_normalization
+        PASS [   0.075s] (809/821) uni-db::integration vector_search::vector_query_enhancements::test_vector_search_with_filter
+        PASS [   0.069s] (810/821) uni-db::integration vector_search::vector_query_enhancements::test_vector_search_with_threshold
+        PASS [   0.030s] (811/821) uni-db::integration vector_search::vector_search::test_l0_tombstone_hides_flushed_vertex
+        PASS [   0.039s] (812/821) uni-db::integration vector_search::vector_search::test_l0_updated_embedding_wins
+        PASS [   0.086s] (813/821) uni-db::integration vector_search::vector_query_enhancements::test_vector_search_yield_order
+        PASS [   0.025s] (814/821) uni-db::integration vector_search::vector_search::test_vector_search
+        PASS [   0.027s] (815/821) uni-db::integration vector_search::vector_search::test_l0_vertex_appears_in_vector_search
+        PASS [   8.559s] (816/821) uni-db::integration vector_search::vector_predicate_exactness::ivf_flat_l2::flushed
+        PASS [   8.292s] (817/821) uni-db::integration vector_search::vector_predicate_exactness::ivf_flat_l2::unflushed
+        PASS [  10.603s] (818/821) uni-db::integration vector_search::vector_predicate_exactness::schemaless::unflushed
+        PASS [  15.843s] (819/821) uni-db::integration vector_search::vector_predicate_exactness::schemaless::flushed
+        PASS [  58.778s] (820/821) uni-db::integration metamorphic::dqp::fork_lever::fork_smoke
+        SLOW [> 60.000s] (─────────) uni-db::integration metamorphic::dqp::delete_lever::delete_smoke
+        PASS [  60.309s] (821/821) uni-db::integration metamorphic::dqp::delete_lever::delete_smoke
+────────────
+     Summary [  78.858s] 821 tests run: 821 passed (1 slow), 3221 skipped

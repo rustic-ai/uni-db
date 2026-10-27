@@ -1,0 +1,578 @@
+WARNING: Ignoring `RUSTC_WRAPPER` environment variable, Miri does not support wrapping.
+   Compiling libc v0.2.186
+   Compiling cfg-if v1.0.4
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling getrandom v0.3.4
+   Compiling autocfg v1.5.1
+   Compiling rustix v1.1.4
+   Compiling syn v2.0.117
+   Compiling getrandom v0.4.2
+   Compiling num-traits v0.2.19
+   Compiling zerocopy v0.8.52
+   Compiling rand_core v0.9.5
+   Compiling errno v0.3.14
+   Compiling linux-raw-sys v0.12.1
+   Compiling serde_core v1.0.228
+   Compiling bitflags v2.13.0
+   Compiling serde v1.0.228
+   Compiling once_cell v1.21.4
+   Compiling thiserror v2.0.18
+   Compiling fastrand v2.4.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling tempfile v3.27.0
+   Compiling wait-timeout v0.2.1
+   Compiling iana-time-zone v0.1.65
+   Compiling bit-vec v0.8.0
+   Compiling quick-error v1.2.3
+   Compiling fnv v1.0.7
+   Compiling rusty-fork v0.3.1
+   Compiling bit-set v0.8.0
+   Compiling chrono v0.4.45
+   Compiling rand_chacha v0.9.0
+   Compiling rand v0.9.4
+   Compiling rand_xorshift v0.4.0
+   Compiling unarray v0.1.4
+   Compiling regex-syntax v0.8.11
+   Compiling proptest v1.11.0
+   Compiling thiserror-impl v2.0.18
+   Compiling serde_derive v1.0.228
+   Compiling uni-btic v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-btic)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.66s
+     Running unittests src/lib.rs (target/miri/x86_64-unknown-linux-gnu/debug/deps/uni_btic-f8073151194fe7b7)
+
+running 94 tests
+test btic::tests::build_meta_roundtrip ... ok
+test btic::tests::display_finite_interval ... ok
+test btic::tests::inv1_lo_ge_hi_rejected ... ok
+test btic::tests::inv5_bad_granularity_rejected ... ok
+test btic::tests::inv6_sentinel_metadata_must_be_zero ... ok
+test btic::tests::ordering_hi_second ... ok
+test btic::tests::ordering_lo_first ... ok
+test btic::tests::ordering_meta_third ... ok
+test btic::tests::unbounded_intervals ... ok
+test btic::tests::valid_instant_at_epoch ... ok
+test certainty::tests::least_certain_picks_higher ... ok
+test certainty::tests::roundtrip_all_codes ... ok
+test encode::tests::invalid_length_rejected ... ok
+test encode::tests::memcmp_matches_ord ... ok
+test encode::tests::roundtrip_basic ... ok
+test encode::tests::roundtrip_negative_lo ... ok
+test encode::tests::roundtrip_sentinel_lo ... ok
+test granularity::tests::finer_picks_lower_code ... ok
+test granularity::tests::name_roundtrip ... ok
+test granularity::tests::reserved_codes_rejected ... ok
+test granularity::tests::roundtrip_all_codes ... ok
+test parse::tests::approximate_bce ... ok
+test parse::tests::bce_date ... ok
+test parse::tests::certainty_approximate ... ok
+test parse::tests::certainty_uncertain ... ok
+test parse::tests::certainty_unknown ... ok
+test parse::tests::day_1985_03_15 ... ok
+test parse::tests::empty_literal_rejected ... ok
+test parse::tests::epoch_instant ... ok
+test parse::tests::fully_unbounded ... ok
+test parse::tests::invalid_literal_rejected ... ok
+test parse::tests::left_unbounded ... ok
+test parse::tests::minute_granularity ... ok
+test parse::tests::mixed_certainty_solidus ... ok
+test parse::tests::mixed_granularity_solidus ... ok
+test parse::tests::month_march_1985 ... ok
+test parse::tests::multibyte_utf8_near_bce_suffix_is_rejected_not_panicking ... ok
+test parse::tests::right_unbounded ... ok
+test parse::tests::second_granularity ... ok
+test parse::tests::two_bound_solidus ... ok
+test parse::tests::year_1985 ... ok
+test predicates::tests::adjacent_forward ... ok
+test predicates::tests::adjacent_gap ... ok
+test predicates::tests::after_basic ... ok
+test predicates::tests::before_adjacent ... ok
+test predicates::tests::before_overlapping ... ok
+test predicates::tests::before_with_gap ... ok
+test predicates::tests::btic_equals_different_bounds ... ok
+test predicates::tests::btic_equals_different_meta ... ok
+test predicates::tests::btic_equals_same ... ok
+test predicates::tests::contains_equal ... ok
+test predicates::tests::contains_point_basic ... ok
+test predicates::tests::contains_point_instant ... ok
+test predicates::tests::contains_shared_hi ... ok
+test predicates::tests::contains_shared_lo ... ok
+test predicates::tests::contains_strict ... ok
+test predicates::tests::disjoint_adjacent ... ok
+test predicates::tests::disjoint_overlapping ... ok
+test predicates::tests::disjoint_with_gap ... ok
+test predicates::tests::during_shared_bound_not_during ... ok
+test predicates::tests::during_true ... ok
+test predicates::tests::finishes_equal_not_finishes ... ok
+test predicates::tests::finishes_true ... ok
+test predicates::tests::meets_gap ... ok
+test predicates::tests::meets_overlap ... ok
+test predicates::tests::meets_true ... ok
+test predicates::tests::overlaps_adjacent_not_overlapping ... ok
+test predicates::tests::overlaps_basic ... ok
+test predicates::tests::overlaps_contained ... ok
+test predicates::tests::overlaps_disjoint ... ok
+test predicates::tests::overlaps_same_interval ... ok
+test predicates::tests::starts_equal_not_starts ... ok
+test predicates::tests::starts_true ... ok
+test set_ops::tests::gap_adjacent_returns_none ... ok
+test set_ops::tests::gap_contained_returns_none ... ok
+test set_ops::tests::gap_disjoint_reversed ... ok
+test set_ops::tests::gap_disjoint_with_space ... ok
+test set_ops::tests::gap_granularity_inherited ... ok
+test set_ops::tests::gap_overlapping_returns_none ... ok
+test set_ops::tests::intersection_adjacent_is_none ... ok
+test set_ops::tests::intersection_certainty_inherited ... ok
+test set_ops::tests::intersection_contained ... ok
+test set_ops::tests::intersection_disjoint ... ok
+test set_ops::tests::intersection_equal_bounds_finer_granularity ... ok
+test set_ops::tests::intersection_granularity_inherited ... ok
+test set_ops::tests::intersection_identical ... ok
+test set_ops::tests::intersection_overlapping ... ok
+test set_ops::tests::intersection_with_sentinel ... ok
+test set_ops::tests::span_contained ... ok
+test set_ops::tests::span_disjoint ... ok
+test set_ops::tests::span_granularity_inherited ... ok
+test set_ops::tests::span_identical ... ok
+test set_ops::tests::span_overlapping ... ok
+test set_ops::tests::span_with_sentinel ... ok
+
+test result: ok. 94 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.27s
+
+     Running tests/bug_repros.rs (target/miri/x86_64-unknown-linux-gnu/debug/deps/bug_repros-ac454ce51b1b1319)
+
+running 2 tests
+test repro_duration_ms_overflow_on_wide_valid_interval ... ok
+test repro_hour_granularity_datetime_never_parses ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+
+     Running tests/test_vectors.rs (target/miri/x86_64-unknown-linux-gnu/debug/deps/test_vectors-ebdfb328991f50bd)
+
+running 7 tests
+test b1_unix_epoch_instant ... ok
+test b2_year_1985 ... ok
+test b3_neg_inf_to_march_1985 ... ok
+test b4_500_bce_approximate ... ok
+test b5_fully_unbounded ... ok
+test b6_mixed_granularity ... ok
+test b7_ongoing_event ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.12s
+
+WARNING: Ignoring `RUSTC_WRAPPER` environment variable, Miri does not support wrapping.
+   Compiling uni-sparse-vector v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-sparse-vector)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.41s
+     Running unittests src/lib.rs (target/miri/x86_64-unknown-linux-gnu/debug/deps/uni_sparse_vector-7a01af6a45cbb55b)
+
+running 25 tests
+test encode::tests::decode_revalidates_invariants ... ok
+test encode::tests::roundtrip_basic ... ok
+test encode::tests::roundtrip_empty ... ok
+test encode::tests::trailing_bytes_rejected ... ok
+test encode::tests::truncated_header_rejected ... ok
+test encode::tests::truncated_payload_rejected ... ok
+test ops::tests::dot_disjoint_is_zero ... ok
+test ops::tests::dot_full_overlap ... ok
+test ops::tests::dot_is_commutative ... ok
+test ops::tests::dot_partial_overlap ... ok
+test ops::tests::dot_with_empty_is_zero ... ok
+test ops::tests::l2_norm_basic ... ok
+test ops::tests::prune_k_ge_len_is_identity ... ok
+test ops::tests::prune_k_zero_is_empty ... ok
+test ops::tests::prune_keeps_largest_magnitude ... ok
+test ops::tests::prune_preserves_dot_on_kept_terms ... ok
+test sparse::tests::from_pairs_empty ... ok
+test sparse::tests::from_pairs_sorts_and_sums_duplicates ... ok
+test sparse::tests::iter_yields_pairs_in_order ... ok
+test sparse::tests::new_accepts_empty ... ok
+test sparse::tests::new_accepts_sorted_finite ... ok
+test sparse::tests::new_rejects_duplicate_indices ... ok
+test sparse::tests::new_rejects_length_mismatch ... ok
+test sparse::tests::new_rejects_nan_and_inf ... ok
+test sparse::tests::new_rejects_unsorted ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.92s
+
+     Running tests/proptest.rs (target/miri/x86_64-unknown-linux-gnu/debug/deps/proptest-efd9aeb5ad97ab0c)
+
+running 8 tests
+test dot_is_commutative ... ok
+test dot_matches_reference ... ok
+test encode_decode_roundtrip ... ok
+test encoded_length_is_exact ... ok
+test from_pairs_yields_valid_sorted_unique ... ok
+test prune_is_valid_subset ... ok
+test self_dot_equals_l2_norm_squared ... ok
+test truncating_any_byte_is_rejected ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 196.56s
+
+WARNING: Ignoring `RUSTC_WRAPPER` environment variable, Miri does not support wrapping.
+   Compiling smallvec v1.15.2
+   Compiling stable_deref_trait v1.2.1
+   Compiling syn v2.0.117
+   Compiling syn v3.0.6
+   Compiling errno v0.3.14
+   Compiling pin-project-lite v0.2.17
+   Compiling parking_lot_core v0.9.12
+   Compiling bytes v1.11.1
+   Compiling futures-core v0.3.32
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling once_cell v1.21.4
+   Compiling itoa v1.0.18
+   Compiling parking_lot v0.12.5
+   Compiling signal-hook-registry v1.4.8
+   Compiling socket2 v0.6.4
+   Compiling getrandom v0.2.17
+   Compiling mio v1.2.1
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v2.0.1
+   Compiling cc v1.2.64
+   Compiling writeable v0.6.4
+   Compiling futures-sink v0.3.32
+   Compiling litemap v0.8.2
+   Compiling http v1.4.2
+   Compiling synstructure v0.13.2
+   Compiling ring v0.17.14
+   Compiling utf8_iter v1.0.4
+   Compiling icu_properties_data v2.3.0
+   Compiling slab v0.4.12
+   Compiling icu_normalizer_data v2.3.0
+   Compiling percent-encoding v2.3.2
+   Compiling zeroize v1.9.0
+   Compiling version_check v0.9.5
+   Compiling generic-array v0.14.7
+   Compiling rustls-pki-types v1.14.1
+   Compiling http-body v1.0.1
+   Compiling tracing-core v0.1.36
+   Compiling hashbrown v0.17.1
+   Compiling equivalent v1.0.2
+   Compiling httparse v1.10.1
+   Compiling futures-task v0.3.32
+   Compiling untrusted v0.9.0
+   Compiling indexmap v2.14.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling typenum v1.20.1
+   Compiling try-lock v0.2.5
+   Compiling atomic-waker v1.1.2
+   Compiling tower-service v0.3.3
+   Compiling rustls v0.23.46
+   Compiling want v0.3.1
+   Compiling rustls-webpki v0.103.16
+   Compiling form_urlencoded v1.2.2
+   Compiling futures-channel v0.3.32
+   Compiling subtle v2.6.1
+   Compiling syn v1.0.109
+   Compiling rand_core v0.10.1
+   Compiling getrandom v0.4.2
+   Compiling sync_wrapper v1.0.2
+   Compiling tower-layer v0.3.3
+   Compiling base64 v0.22.1
+   Compiling ipnet v2.12.0
+   Compiling zmij v1.0.21
+   Compiling openssl-probe v0.2.1
+   Compiling rustls-native-certs v0.8.4
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling rand_core v0.6.4
+   Compiling data-encoding v2.11.0
+   Compiling memchr v2.8.2
+   Compiling log v0.4.32
+   Compiling cpufeatures v0.3.0
+   Compiling serde_json v1.0.150
+   Compiling ryu v1.0.23
+   Compiling chacha20 v0.10.2
+   Compiling rand_chacha v0.3.1
+   Compiling digest v0.10.7
+   Compiling rand_chacha v0.9.0
+   Compiling data-encoding-macro-internal v0.1.18
+   Compiling http-body-util v0.1.3
+   Compiling anyhow v1.0.104
+   Compiling same-file v1.0.6
+   Compiling const-str v0.4.3
+   Compiling either v1.16.0
+   Compiling itertools v0.14.0
+   Compiling walkdir v2.5.0
+   Compiling data-encoding-macro v0.1.20
+   Compiling rand v0.9.4
+   Compiling md-5 v0.10.6
+   Compiling rand v0.8.6
+   Compiling rand v0.10.1
+   Compiling rmp v0.8.15
+   Compiling base-x v0.2.11
+   Compiling humantime v2.3.0
+   Compiling rustix v1.1.4
+   Compiling fail v0.5.1
+   Compiling arrow-schema v58.3.0
+   Compiling rustc-hash v2.1.2
+   Compiling tempfile v3.27.0
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.6
+   Compiling tokio-macros v2.7.0
+   Compiling serde_derive v1.0.228
+   Compiling tracing-attributes v0.1.31
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.8
+   Compiling tinystr v0.8.4
+   Compiling icu_locale_core v2.3.0
+   Compiling potential_utf v0.1.5
+   Compiling zerotrie v0.2.5
+   Compiling tokio v1.53.3
+   Compiling icu_provider v2.3.1
+   Compiling icu_collections v2.3.0
+   Compiling futures-macro v0.3.32
+   Compiling tokio-util v0.7.18
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling thiserror-impl v2.0.18
+   Compiling futures-util v0.3.32
+   Compiling tracing v0.1.44
+   Compiling h2 v0.4.18
+   Compiling tower v0.5.3
+   Compiling url v2.5.8
+   Compiling hyper v1.10.1
+   Compiling tokio-rustls v0.26.4
+   Compiling tower-http v0.6.11
+   Compiling match-lookup v0.1.2
+   Compiling serde v1.0.228
+   Compiling chrono v0.4.45
+   Compiling hyper-util v0.1.20
+   Compiling serde_urlencoded v0.7.1
+   Compiling hyper-rustls v0.27.9
+   Compiling quick-xml v0.39.4
+   Compiling reqwest v0.12.28
+   Compiling async-trait v0.1.92
+   Compiling base256emoji v1.0.2
+   Compiling multibase v0.9.2
+   Compiling rmp-serde v1.3.1
+   Compiling ulid v1.2.1
+   Compiling thiserror v2.0.18
+   Compiling uni-btic v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-btic)
+   Compiling uni-sparse-vector v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-sparse-vector)
+   Compiling object_store v0.13.2
+   Compiling uni-common v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-common)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 02s
+     Running unittests src/lib.rs (target/miri/x86_64-unknown-linux-gnu/debug/deps/uni_common-4f769d790536bdcb)
+
+running 187 tests
+test api::error::tests::deterministic_errors_are_not_retriable ... ok
+test api::error::tests::edge_endpoint_violation_round_trips_through_its_message ... ok
+test api::error::tests::graph_compute_incomplete_reason_code_round_trips ... ok
+test api::error::tests::graph_compute_incomplete_tag_round_trips ... ok
+test api::error::tests::retriable_errors_are_contention_failures ... ok
+test api::error::tests::untagged_message_yields_no_incomplete ... ok
+test api::error::tests::write_stalled_round_trips_through_its_message ... ok
+test config::security_tests::file_sandbox::test_deployment_mode_defaults ... ok
+test config::security_tests::file_sandbox::test_is_potentially_insecure ... ok
+test config::security_tests::file_sandbox::test_sandbox_disabled_allows_all_paths ... ok
+test config::security_tests::file_sandbox::test_sandbox_enabled_with_no_paths_rejects ... ok
+test config::security_tests::file_sandbox::test_sandbox_rejects_outside_path ... ok
+test config::security_tests::file_sandbox::test_security_warning_when_disabled ... ok
+test core::check_constraint::tests::a_compound_expression_still_takes_the_documented_permissive_path ... ok
+test core::check_constraint::tests::bare_property_name_is_accepted ... ok
+test core::check_constraint::tests::incomparable_operands_error ... ok
+test core::check_constraint::tests::large_integers_compare_exactly ... ok
+test core::check_constraint::tests::non_numeric_equality_stays_strict ... ok
+test core::check_constraint::tests::number_wrapper_target_is_not_special_cased ... ok
+test core::check_constraint::tests::numeric_equality_coerces_across_int_and_float ... ok
+test core::check_constraint::tests::operator_spacing_does_not_decide_whether_a_constraint_is_enforced ... ok
+test core::check_constraint::tests::ordering_operators ... ok
+test core::check_constraint::tests::unsupported_shapes_allow_the_write ... ok
+test core::edge_type::tests::test_max_local_id ... ok
+test core::edge_type::tests::test_schema_type ... ok
+test core::edge_type::tests::test_schemaless_type ... ok
+test core::edge_type::tests::test_zero_local_id ... ok
+test core::fork::tests::fork_id_roundtrip ... ok
+test core::fork::tests::fork_info_serde_roundtrip ... ok
+test core::fork::tests::merge_atop_dedupes_properties_by_owner_and_name ... ok
+test core::fork::tests::merge_atop_empty_base_is_self ... ok
+test core::fork::tests::merge_atop_empty_self_is_base ... ok
+test core::fork::tests::merge_atop_self_wins_on_collision ... ok
+test core::fork::tests::merge_atop_unions_disjoint_labels_and_edge_types ... ok
+test core::fork::tests::registry_file_default_empty ... ok
+test core::fork::tests::schema_delta_default_is_empty ... ok
+test core::fork::tests::schema_delta_without_schemaless_field_deserializes ... ok
+test core::fork::tests::schemaless_edge_types_count_toward_is_empty_and_union_on_merge ... ok
+test core::id::tests::security_tests::test_uni_id_rejects_wrong_encoding ... ok
+test core::id::tests::security_tests::test_uni_id_rejects_wrong_length ... ok
+test core::id::tests::test_dense_idx ... ok
+test core::id::tests::test_eid_basic ... ok
+test core::id::tests::test_eid_from_str ... ok
+test core::id::tests::test_eid_invalid ... ok
+test core::id::tests::test_uni_id_multibase ... ok
+test core::id::tests::test_vid_basic ... ok
+test core::id::tests::test_vid_from_str ... ok
+test core::id::tests::test_vid_invalid ... ok
+test core::schema::index_types::same_config_tests::configuration_differences_are_reported ... ok
+test core::schema::index_types::same_config_tests::metadata_differences_are_ignored ... ok
+test core::schema::tests::add_internal_property_reports_newly_added ... ok
+test core::schema::tests::binary_metrics_are_binary_and_route_correctly ... ok
+test core::schema::tests::binary_vector_metrics_exact ... ok
+test core::schema::tests::check_binary_vector_value_guards ... ok
+test core::schema::tests::float_compute_distance_rejects_binary_metric - should panic ... ok
+test core::schema::tests::repr_names_cover_the_variants_a_catch_all_used_to_hide ... ok
+test core::schema::tests::scoped_property_meta_reads_only_the_labels_in_scope ... ok
+test core::schema::tests::test_add_index_is_upsert_by_name ... ok
+test core::schema::tests::test_check_vector_dims_matrix ... ok
+test core::schema::tests::test_datatype_accepts_matrix ... ok
+test core::schema::tests::test_declare_property_idempotent_and_conflicting ... ok
+test core::schema::tests::test_generated_column_name_case_insensitive ... ok
+test core::schema::tests::test_get_or_assign_edge_type_id_concurrent ... ok
+test core::schema::tests::test_index_metadata_serde_backward_compat ... ok
+test core::schema::tests::test_index_metadata_serde_roundtrip ... ok
+test core::schema::tests::test_load_dedups_bloated_indexes ... ok
+test core::schema::tests::test_new_schemaless_edge_type_bumps_schema_version ... ok
+test core::schema::tests::test_normalize_function_names ... ok
+test core::schema::tests::test_reserved_property_names_rejected ... ok
+test core::schema::tests::test_schema_management ... ok
+test core::schema::tests::test_update_index_metadata ... ok
+test core::schema::tests::test_vector_index_for_property_skips_non_online ... ok
+test core::schema::tests::validate_schema_element_name_rejects_unsafe ... ok
+test core::schema::tests::with_overlay_empty_clones_primary_in_isolation ... ok
+test core::schema::tests::with_overlay_interns_schemaless_edge_type_names ... ok
+test core::schema::tests::with_overlay_merges_added_labels_and_edge_types ... ok
+test cypher_sum::tests::an_overflowing_sum_is_rounded_once ... ok
+test cypher_sum::tests::anything_else_is_an_error ... ok
+test cypher_sum::tests::average_over_nothing_is_null ... ok
+test cypher_sum::tests::durations_sum_and_average ... ok
+test cypher_sum::tests::integers_are_exact_until_they_overflow ... ok
+test cypher_sum::tests::numbers_sum_as_cypher_does ... ok
+test cypher_sum::tests::state_round_trips ... ok
+test cypher_value_codec::extract_map_entry_raw_tells_absent_from_corrupt::a_corrupt_map_payload_is_an_error ... ok
+test cypher_value_codec::extract_map_entry_raw_tells_absent_from_corrupt::a_non_map_blob_is_ok_none ... ok
+test cypher_value_codec::extract_map_entry_raw_tells_absent_from_corrupt::a_present_key_returns_its_bytes ... ok
+test cypher_value_codec::extract_map_entry_raw_tells_absent_from_corrupt::an_absent_key_is_ok_none ... ok
+test cypher_value_codec::handle_tests::a_handle_blob_does_not_grow_with_the_value ... ok
+test cypher_value_codec::handle_tests::a_handle_nested_in_a_list_or_map_resolves ... ok
+test cypher_value_codec::handle_tests::a_handle_registered_on_one_thread_resolves_on_another ... ok
+test cypher_value_codec::handle_tests::a_handle_round_trips_to_the_interned_value ... ok
+test cypher_value_codec::handle_tests::a_handle_whose_scope_ended_fails_loudly ... ok
+test cypher_value_codec::handle_tests::materialize_replaces_a_handle_and_leaves_other_bytes_alone ... ok
+test cypher_value_codec::handle_tests::materialized_bytes_outlive_the_scope ... ok
+test cypher_value_codec::handle_tests::scopes_do_not_release_each_others_ids ... ok
+test cypher_value_codec::tests::encode_canonicalizes_non_canonical_sparse_without_panicking ... ok
+test cypher_value_codec::tests::fast_decode_separates_a_wrong_tag_from_a_corrupt_payload ... ok
+test cypher_value_codec::tests::test_fast_decode_bool ... ok
+test cypher_value_codec::tests::test_fast_decode_float ... ok
+test cypher_value_codec::tests::test_fast_decode_int ... ok
+test cypher_value_codec::tests::test_fast_decode_string ... ok
+test cypher_value_codec::tests::test_int_float_distinction ... ok
+test cypher_value_codec::tests::test_is_null ... ok
+test cypher_value_codec::tests::test_peek_tag ... ok
+test cypher_value_codec::tests::test_round_trip_binary_vector ... ok
+test cypher_value_codec::tests::test_round_trip_bool ... ok
+test cypher_value_codec::tests::test_round_trip_btic_epoch_instant ... ok
+test cypher_value_codec::tests::test_round_trip_btic_unbounded ... ok
+test cypher_value_codec::tests::test_round_trip_btic_with_certainty ... ok
+test cypher_value_codec::tests::test_round_trip_btic_year_1985 ... ok
+test cypher_value_codec::tests::test_round_trip_bytes ... ok
+test cypher_value_codec::tests::test_round_trip_edge ... ok
+test cypher_value_codec::tests::test_round_trip_float ... ok
+test cypher_value_codec::tests::test_round_trip_int ... ok
+test cypher_value_codec::tests::test_round_trip_list ... ok
+test cypher_value_codec::tests::test_round_trip_map ... ok
+test cypher_value_codec::tests::test_round_trip_nested_list ... ok
+test cypher_value_codec::tests::test_round_trip_node ... ok
+test cypher_value_codec::tests::test_round_trip_null ... ok
+test cypher_value_codec::tests::test_round_trip_path ... ok
+test cypher_value_codec::tests::test_round_trip_sparse_vector ... ok
+test cypher_value_codec::tests::test_round_trip_sparse_vector_empty ... ok
+test cypher_value_codec::tests::test_round_trip_sparse_vector_nested_in_map ... ok
+test cypher_value_codec::tests::test_round_trip_string ... ok
+test cypher_value_codec::tests::test_round_trip_vector ... ok
+test graph::simple_graph::position_regressions::mixed_removal_keeps_swapped_positions_and_upserts_consistent ... ok
+test graph::simple_graph::tests::test_add_remove_edge ... ok
+test graph::simple_graph::tests::test_add_remove_vertex ... ok
+test graph::simple_graph::tests::test_edge_iteration ... ok
+test graph::simple_graph::tests::test_edge_lookup_o1 ... ok
+test graph::simple_graph::tests::test_neighbor_iteration_after_deletion ... ok
+test graph::simple_graph::tests::test_remove_vertex_with_edges ... ok
+test sync::tests::test_acquire_mutex_success ... ok
+test sync::tests::test_acquire_read_success ... ok
+test sync::tests::test_acquire_write_success ... ok
+test sync::tests::test_poisoned_mutex_returns_error ... ok
+test value::canonical_string_tests::a_map_renders_the_same_however_it_was_built ... ok
+test value::canonical_string_tests::a_string_cannot_forge_structure ... ok
+test value::canonical_string_tests::an_entity_renders_by_identity_alone ... ok
+test value::canonical_string_tests::different_kinds_do_not_share_a_rendering ... ok
+test value::canonical_string_tests::nested_maps_are_canonical_at_every_depth ... ok
+test value::tests::an_unsigned_value_does_not_wrap ... ok
+test value::tests::cmp_i64_f64_exact_above_2p53 ... ok
+test value::tests::cmp_i64_f64_extremes_and_infinities ... ok
+test value::tests::cmp_i64_f64_small_and_fractional ... ok
+test value::tests::entity_identity::a_null_property_exists_on_a_map_but_not_on_an_entity ... ok
+test value::tests::entity_identity::a_system_field_reads_from_either_encoding ... ok
+test value::tests::entity_identity::a_value_set_dedups_one_entity_across_encodings ... ok
+test value::tests::entity_identity::an_edge_answers_its_system_fields ... ok
+test value::tests::entity_identity::an_edge_is_not_the_vertex_of_the_same_number ... ok
+test value::tests::entity_identity::an_ephemeral_id_names_an_entity ... ok
+test value::tests::entity_identity::assigning_null_removes_a_property_from_an_entity ... ok
+test value::tests::entity_identity::canonicalising_drops_null_properties ... ok
+test value::tests::entity_identity::canonicalising_is_a_no_op_for_everything_else ... ok
+test value::tests::entity_identity::canonicalising_makes_the_two_encodings_encode_alike ... ok
+test value::tests::entity_identity::edge_endpoints_agree_across_encodings ... ok
+test value::tests::entity_identity::edge_endpoints_are_independently_optional ... ok
+test value::tests::entity_identity::edge_endpoints_declines_non_edges ... ok
+test value::tests::entity_identity::entity_ref_is_a_usable_key ... ok
+test value::tests::entity_identity::non_entities_stay_non_entities ... ok
+test value::tests::entity_identity::property_names_agree_across_encodings ... ok
+test value::tests::entity_identity::setting_labels_reaches_either_encoding ... ok
+test value::tests::entity_identity::setting_properties_reaches_either_encoding ... ok
+test value::tests::entity_identity::the_debug_rendered_id_spellings_resolve ... ok
+test value::tests::entity_identity::the_locy_endpoint_spelling_reads_as_an_edge ... ok
+test value::tests::entity_identity::the_two_edge_encodings_agree ... ok
+test value::tests::entity_identity::the_two_vertex_encodings_agree ... ok
+test value::tests::entity_identity::value_equality_compares_entities_by_identity ... ok
+test value::tests::entity_identity::value_hash_agrees_with_equality_across_encodings ... ok
+test value::tests::property_container::a_flattened_entity_keeps_a_map_valued_properties_property ... ok
+test value::tests::property_container::plain_maps_and_all_props ... ok
+test value::tests::property_container::serialised_entities_nest_their_properties ... ok
+test value::tests::test_accessor_methods ... ok
+test value::tests::test_int_float_distinction_preserved ... ok
+test value::tests::test_serde_json_roundtrip ... ok
+test value::tests::test_temporal_display_datetime_with_timezone_name ... ok
+test value::tests::test_temporal_display_fractional_trailing_zeros_stripped ... ok
+test value::tests::test_temporal_display_offset_second_precision ... ok
+test value::tests::test_temporal_display_zero_seconds_omitted ... ok
+test value::tests::test_unival_macro ... ok
+test value::tests::type_name::covers_the_variant_a_catch_all_used_to_hide ... ok
+test value::tests::value_hash_eq_contract_float_signed_zero ... ok
+test vector_index_opts::tests::default_is_ivf_pq_for_both_paths ... ok
+test vector_index_opts::tests::default_sub_vectors_targets_32x_and_always_divides ... ok
+test vector_index_opts::tests::metric_parsing ... ok
+test vector_index_opts::tests::muvera_defaults_and_inner ... ok
+test vector_index_opts::tests::named_types_map ... ok
+
+test result: ok. 187 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 388.46s
+
+     Running tests/repro_rename_property_bypass.rs (target/miri/x86_64-unknown-linux-gnu/debug/deps/repro_rename_property_bypass-4c10117e1d5a463f)
+
+running 2 tests
+test rename_property_bypasses_leading_underscore_rule ... ok
+test rename_property_bypasses_reserved_storage_column_guard ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.49s
+
+     Running tests/repro_temporal_date_display_panic.rs (target/miri/x86_64-unknown-linux-gnu/debug/deps/repro_temporal_date_display_panic-d7215b90b33b1f31)
+
+running 1 test
+test date_display_panics_on_out_of_range_days ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+     Running tests/repro_value_eq_nan_not_reflexive.rs (target/miri/x86_64-unknown-linux-gnu/debug/deps/repro_value_eq_nan_not_reflexive-11fcc6d541f0aefd)
+
+running 3 tests
+test hashset_dedup_works_for_nan_vector ... ok
+test sparse_vector_nan_is_eq_reflexive ... ok
+test vector_nan_is_eq_reflexive ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.34s

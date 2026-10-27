@@ -1,0 +1,13 @@
+   Compiling zstd-safe v7.2.4 (/home/rohit/work/dragonscale/uni/compat/zstd-safe)
+   Compiling zstd v0.13.3 (/home/rohit/work/dragonscale/uni/compat/zstd)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.45s
+────────────
+ Nextest run ID 7207c67d-26b2-47ab-b257-405a150ce3d3 with nextest profile: default
+    Starting 5 tests across 2 binaries
+        PASS [   0.003s] (1/5) zstd-safe tests::seekable_offsets_past_end_leave_vector_empty
+        PASS [   0.003s] (2/5) zstd tests::reused_encoder_does_not_leak_abandoned_input
+        PASS [   0.003s] (3/5) zstd tests::bulk_and_dictionary_round_trips
+        PASS [   0.003s] (4/5) zstd-safe tests::corrupt_legacy_frame_does_not_expose_uninitialized_output
+        PASS [   0.003s] (5/5) zstd tests::reused_decoder_discards_previous_output
+────────────
+     Summary [   0.004s] 5 tests run: 5 passed, 0 skipped

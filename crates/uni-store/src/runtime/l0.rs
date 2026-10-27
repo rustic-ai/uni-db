@@ -336,6 +336,7 @@ pub struct L0Buffer {
     /// registers a key). Tombstoned with the owning vid; transient (not rebuilt
     /// on recovery).
     pub merge_guard_index: HashMap<Vec<u8>, Vid>,
+    merge_keys_by_vid: HashMap<Vid, Vec<Vec<u8>>>,
     /// Per-edge-constraint index for O(1) unique edge-key checks. Mirrors
     /// [`constraint_index`](Self::constraint_index) but keyed to a live edge's
     /// `Eid` (built by [`serialize_constraint_key`] with the edge-type name as the
@@ -343,6 +344,7 @@ pub struct L0Buffer {
     /// `Unique`/`NodeKey` constraints, tombstoned in `apply_edge_deletion`, and
     /// rebuilt from live edge properties on recovery.
     pub edge_constraint_index: HashMap<Vec<u8>, Eid>,
+    edge_keys_by_eid: HashMap<Eid, Vec<Vec<u8>>>,
     /// Reverse index `ext_id` → owning vid for O(1) global ext_id uniqueness
     /// checks (`Writer::check_extid_globally_unique` previously scanned every
     /// `vertex_properties` map per insert — O(n²) ingest). Maintained by the
@@ -462,6 +464,8 @@ impl Clone for L0Buffer {
             constraint_keys_by_vid: self.constraint_keys_by_vid.clone(),
             edge_constraint_index: self.edge_constraint_index.clone(),
             merge_guard_index: self.merge_guard_index.clone(),
+            merge_keys_by_vid: self.merge_keys_by_vid.clone(),
+            edge_keys_by_eid: self.edge_keys_by_eid.clone(),
             extid_index: self.extid_index.clone(),
             // A statement scope belongs to the buffer it was opened on.
             statement_depth: 0,
@@ -806,6 +810,8 @@ impl L0Buffer {
             constraint_keys_by_vid: HashMap::new(),
             edge_constraint_index: HashMap::new(),
             merge_guard_index: HashMap::new(),
+            merge_keys_by_vid: HashMap::new(),
+            edge_keys_by_eid: HashMap::new(),
             extid_index: HashMap::new(),
             statement_depth: 0,
             statement_write_admitted: false,
@@ -1168,6 +1174,7 @@ impl L0Buffer {
                 self.edge_versions.insert(eid, version);
                 self.edge_endpoints.remove(&eid);
                 self.edge_properties.remove(&eid);
+                self.retire_edge_constraint_keys(eid);
                 self.graph.remove_edge(eid);
                 self.mutation_count += 1;
                 self.mutation_stats.relationships_deleted += 1;
@@ -1196,11 +1203,18 @@ impl L0Buffer {
         }
 
         // Remove constraint index entries for this vertex
-        self.constraint_index.retain(|_, v| *v != vid);
-        self.constraint_keys_by_vid.remove(&vid);
+        for key in self.constraint_keys_by_vid.remove(&vid).unwrap_or_default() {
+            if self.constraint_index.get(&key) == Some(&vid) {
+                self.constraint_index.remove(&key);
+            }
+        }
         // Same for the implicit MERGE guard, so a later re-MERGE of a deleted
         // node's key does not false-conflict with the stale entry.
-        self.merge_guard_index.retain(|_, v| *v != vid);
+        for key in self.merge_keys_by_vid.remove(&vid).unwrap_or_default() {
+            if self.merge_guard_index.get(&key) == Some(&vid) {
+                self.merge_guard_index.remove(&key);
+            }
+        }
 
         // 64 bytes per edge tombstone + 8 for vertex tombstone
         self.estimated_size += cascaded_edges_count * 72 + 8;
@@ -1448,7 +1462,7 @@ impl L0Buffer {
         self.edge_versions.insert(eid, version);
         // Drop any unique-constraint keys this edge owned so a later edge may
         // reuse the value (mirrors `apply_vertex_deletion`).
-        self.edge_constraint_index.retain(|_, e| *e != eid);
+        self.retire_edge_constraint_keys(eid);
         self.graph.remove_edge(eid);
         self.mutation_count += 1;
         if newly_deleted {
@@ -1617,9 +1631,21 @@ impl L0Buffer {
             .is_some_and(|&v| v != exclude_vid)
     }
 
+    fn retire_edge_constraint_keys(&mut self, eid: Eid) {
+        for key in self.edge_keys_by_eid.remove(&eid).unwrap_or_default() {
+            if self.edge_constraint_index.get(&key) == Some(&eid) {
+                self.edge_constraint_index.remove(&key);
+            }
+        }
+    }
+
     /// Insert an edge unique-constraint key into the index (edge analogue of
     /// [`insert_constraint_key`](Self::insert_constraint_key)).
     pub fn insert_edge_constraint_key(&mut self, key: Vec<u8>, eid: Eid) {
+        let keys = self.edge_keys_by_eid.entry(eid).or_default();
+        if !keys.contains(&key) {
+            keys.push(key.clone());
+        }
         self.edge_constraint_index.insert(key, eid);
     }
 
@@ -1634,6 +1660,10 @@ impl L0Buffer {
 
     /// Register a MERGE-create's key into the implicit phantom guard.
     pub fn insert_merge_guard_key(&mut self, key: Vec<u8>, vid: Vid) {
+        let keys = self.merge_keys_by_vid.entry(vid).or_default();
+        if !keys.contains(&key) {
+            keys.push(key.clone());
+        }
         self.merge_guard_index.insert(key, vid);
     }
 
@@ -1853,12 +1883,12 @@ impl L0Buffer {
         // Merge the implicit MERGE-key guard so a committed MERGE-create is
         // visible to a concurrent transaction's commit-time re-probe.
         for (key, vid) in &other.merge_guard_index {
-            self.merge_guard_index.insert(key.clone(), *vid);
+            self.insert_merge_guard_key(key.clone(), *vid);
         }
 
         // Merge the edge unique-constraint index (parallel to `constraint_index`).
         for (key, eid) in &other.edge_constraint_index {
-            self.edge_constraint_index.insert(key.clone(), *eid);
+            self.insert_edge_constraint_key(key.clone(), *eid);
         }
 
         // Carry deferred-embedding markers from the tx L0 into the main L0 so the
@@ -2915,5 +2945,36 @@ mod tests {
             "now_nanos() returned {}, expected < 4.1e18",
             now
         );
+    }
+}
+
+#[cfg(test)]
+mod key_retirement_regressions {
+    use super::*;
+
+    #[test]
+    fn reverse_keys_preserve_reassigned_owners_and_cascade_retirement() {
+        let mut l0 = L0Buffer::new(0, None);
+        let a = Vid::new(1);
+        let b = Vid::new(2);
+        l0.insert_vertex(a, Default::default());
+        l0.insert_vertex(b, Default::default());
+        let key = serialize_constraint_key("Item", &[("key".into(), Value::Int(1))]);
+        l0.insert_constraint_key(key.clone(), a);
+        l0.insert_constraint_key(key.clone(), b);
+        l0.insert_merge_guard_key(key.clone(), a);
+        l0.insert_merge_guard_key(key.clone(), b);
+        let edge = Eid::new(3);
+        l0.insert_edge(a, b, 1, edge, Default::default(), None)
+            .unwrap();
+        l0.insert_edge_constraint_key(key.clone(), edge);
+        let mut l0 = l0.clone();
+        l0.delete_vertex(a).unwrap();
+        assert_eq!(l0.constraint_index.get(&key), Some(&b));
+        assert_eq!(l0.merge_guard_index.get(&key), Some(&b));
+        assert!(l0.edge_constraint_index.is_empty());
+        l0.delete_vertex(b).unwrap();
+        assert!(l0.constraint_index.is_empty());
+        assert!(l0.merge_guard_index.is_empty());
     }
 }

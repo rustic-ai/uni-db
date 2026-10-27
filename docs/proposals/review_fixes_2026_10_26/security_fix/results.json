@@ -1,0 +1,45 @@
+{
+  "cargo_deny": "advisories ok, bans ok, licenses ok, sources ok",
+  "new_advisory_ignores": 0,
+  "implementation_versions": {
+    "zstd": "0.14.3",
+    "zstd-safe": "8.2.0",
+    "zstd-sys": "2.1.2+zstd.1.5.7"
+  },
+  "compat_tests": {
+    "passed": 5,
+    "skipped": 0
+  },
+  "consumer_tests": {
+    "passed": 224,
+    "skipped_by_filter_or_default_tier": 4809,
+    "packages": [
+      "uni-db",
+      "uni-store",
+      "uni-plugin-wasm",
+      "uni-plugin-extism"
+    ],
+    "filter": "test(review_regressions) | test(parquet) | test(storage_at_fork) | test(extid) | test(wal) | test(round_trip)"
+  },
+  "clippy": "compat crates, all targets, warnings denied: pass",
+  "no_std": "zstd-safe compatibility crate, no default features: pass",
+  "formatting": "pass",
+  "static_guards": {
+    "passed": 8,
+    "includes_fuzz_lock": true
+  },
+  "publish_list": "25 publishable crates unchanged; pass",
+  "feature_names_preserved": {
+    "zstd": 15,
+    "zstd-safe": 16
+  },
+  "execution": "foreground commands, inherited normal priority; host compiler/linker nice=0 verified",
+  "scope": "repository and fuzz root builds; Cargo patches are not inherited by published Rust crate consumers",
+  "not_counted": "Optional separate full plugin-suite rerun was stopped during a redundant rebuild; not a passing test result. The full workspace and Python suites were not rerun for this dependency change.",
+  "staged_snapshot": {
+    "cargo_deny": "all four checks pass",
+    "root_and_fuzz_metadata": "locked offline resolution passes",
+    "root_lock_sha256": "a01e06d5732d6b7e0974eb76919029b54ac387df34e0e00edb7bf5d810f74738",
+    "scope": "focused commit excludes pre-existing unrelated lockfile drift"
+  }
+}

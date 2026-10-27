@@ -1,0 +1,21 @@
+workspace.log
+        FAIL [   2.701s] (1773/8638) uni-db::integration cypher_read::constant_in_list_test::constant_in_list_cost_is_linear
+    thread 'cypher_read::constant_in_list_test::constant_in_list_cost_is_linear' (378354) panicked at crates/uni/tests/common/cypher_read/constant_in_list_test.rs:347:5:
+    IN grew 7.4x for 4x rows and list; linear control grew 2.9x
+        FAIL [   1.074s] (8627/8638) uni-store::integration storage::extid_index_test::concurrent_commits_same_extid_conflict
+    thread 'storage::extid_index_test::concurrent_commits_same_extid_conflict' (472404) panicked at crates/uni-store/tests/common/storage/extid_index_test.rs:226:5:
+    abort should name the ext_id conflict, got: Constraint conflict: key conflict with commit sequence 1
+        FAIL [   1.529s] (8628/8638) uni-store::integration storage::storage_at_fork::vertex_row_count_declines_only_for_a_branched_table
+    thread 'storage::storage_at_fork::vertex_row_count_declines_only_for_a_branched_table' (472589) panicked at crates/uni-store/tests/common/storage/storage_at_fork.rs:307:5:
+      left: Some(0)
+     right: Some(3)
+     Summary [ 353.380s] 8638 tests run: 8635 passed (20 slow), 3 failed, 137 skipped
+        FAIL [   2.701s] (1773/8638) uni-db::integration cypher_read::constant_in_list_test::constant_in_list_cost_is_linear
+        FAIL [   1.074s] (8627/8638) uni-store::integration storage::extid_index_test::concurrent_commits_same_extid_conflict
+        FAIL [   1.529s] (8628/8638) uni-store::integration storage::storage_at_fork::vertex_row_count_declines_only_for_a_branched_table
+
+workspace-final.log
+     TIMEOUT [ 180.010s] (8638/8638) uni-store backend::lance::tests::lance_scan_polled_after_its_runtime_is_dropped_panics_in_lance
+    (test timed out)
+     Summary [ 426.860s] 8638 tests run: 8637 passed (18 slow), 1 timed out, 137 skipped
+     TIMEOUT [ 180.010s] (8638/8638) uni-store backend::lance::tests::lance_scan_polled_after_its_runtime_is_dropped_panics_in_lance

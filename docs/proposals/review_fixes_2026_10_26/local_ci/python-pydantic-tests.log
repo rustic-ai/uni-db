@@ -1,0 +1,648 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.8, pytest-9.1.1, pluggy-1.6.0 -- /home/rohit/work/dragonscale/uni/bindings/uni-pydantic/.venv/bin/python
+cachedir: .pytest_cache
+rootdir: /home/rohit/work/dragonscale/uni/bindings/uni-pydantic
+configfile: pyproject.toml
+plugins: asyncio-1.4.0, xdist-3.8.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+created: 16/16 workers
+16 workers [317 items]
+
+scheduling tests via LoadScheduling
+
+tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_all
+tests/test_async_queries.py::TestAsyncQueryBuilderImmutability::test_filter_returns_new_builder
+tests/test_integration.py::TestEdgeCRUD::test_create_and_get_edge
+tests/test_async_session.py::TestAsyncSessionCRUD::test_get_by_vid
+tests/test_async_session.py::TestAsyncEagerLoad::test_entity_without_relations_does_not_lazy_load
+tests/test_async_session.py::TestAsyncBulkAdd::test_bulk_add
+tests/test_integration.py::TestSessionCRUD::test_update_converts_vector_and_btic_values
+tests/test_integration.py::TestSessionCRUD::test_add_multiple
+tests/test_async_queries.py::TestAsyncSearchScoreSurfacing::test_async_vector_scores
+tests/test_integration.py::TestBulkAdd::test_bulk_add_failure_before_commit_point_is_bulk_load_error
+tests/test_async_session.py::TestAsyncSessionCRUD::test_delete_entity
+tests/test_btic_integration.py::TestBticPydanticIntegration::test_create_event_none_btic
+tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_exists
+tests/test_async_session.py::TestAsyncLifecycleHooks::test_before_create_hook
+tests/test_integration.py::TestBulkAdd::test_bulk_add_empty
+tests/test_async_session.py::TestAsyncCypherResultType::test_node_of_other_label_is_not_coerced
+[gw3] [  0%] PASSED tests/test_async_queries.py::TestAsyncSearchScoreSurfacing::test_async_vector_scores
+tests/test_async_queries.py::TestAsyncSearchScoreSurfacing::test_async_sparse_scores
+[gw3] [  0%] PASSED tests/test_async_queries.py::TestAsyncSearchScoreSurfacing::test_async_sparse_scores
+tests/test_async_session.py::TestAsyncSessionCRUD::test_add_and_commit
+[gw2] [  0%] PASSED tests/test_async_queries.py::TestAsyncQueryBuilderImmutability::test_filter_returns_new_builder
+[gw14] [  1%] PASSED tests/test_integration.py::TestBulkAdd::test_bulk_add_empty
+tests/test_async_queries.py::TestAsyncQueryBuilderImmutability::test_limit_returns_new_builder
+[gw15] [  1%] PASSED tests/test_integration.py::TestBulkAdd::test_bulk_add_failure_before_commit_point_is_bulk_load_error
+tests/test_integration.py::TestBulkAdd::test_bulk_add_is_one_load
+tests/test_integration.py::TestQueryBuilder::test_query_all
+[gw2] [  1%] PASSED tests/test_async_queries.py::TestAsyncQueryBuilderImmutability::test_limit_returns_new_builder
+tests/test_async_queries.py::TestAsyncQueryBuilderImmutability::test_chaining
+[gw2] [  2%] PASSED tests/test_async_queries.py::TestAsyncQueryBuilderImmutability::test_chaining
+tests/test_async_queries.py::TestAsyncSearchScoreSurfacing::test_async_hybrid_scores
+[gw2] [  2%] PASSED tests/test_async_queries.py::TestAsyncSearchScoreSurfacing::test_async_hybrid_scores
+tests/test_integration.py::TestSchemaSync::test_sync_is_idempotent
+[gw2] [  2%] PASSED tests/test_integration.py::TestSchemaSync::test_sync_is_idempotent
+tests/test_integration.py::TestRelationships::test_create_edge
+[gw6] [  3%] PASSED tests/test_async_session.py::TestAsyncBulkAdd::test_bulk_add
+[gw12] [  3%] PASSED tests/test_integration.py::TestSessionCRUD::test_add_multiple
+tests/test_integration.py::TestSessionCRUD::test_get_by_vid
+[gw3] [  3%] PASSED tests/test_async_session.py::TestAsyncSessionCRUD::test_add_and_commit
+tests/test_async_session.py::TestAsyncBulkAdd::test_bulk_add_propagates_committed_outcomes[UniBulkCommitIncompleteError]
+tests/test_async_session.py::TestAsyncSessionCRUD::test_add_multiple
+[gw7] [  4%] PASSED tests/test_async_session.py::TestAsyncLifecycleHooks::test_before_create_hook
+[gw9] [  4%] PASSED tests/test_btic_integration.py::TestBticPydanticIntegration::test_create_event_none_btic
+[gw4] [  4%] PASSED tests/test_async_session.py::TestAsyncSessionCRUD::test_get_by_vid
+[gw0] [  5%] PASSED tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_all
+tests/test_btic_integration.py::TestBticPydanticIntegration::test_btic_roundtrip_properties
+tests/test_async_session.py::TestAsyncHydrationDoesNotDropRows::test_falsy_instance_is_not_dropped
+tests/test_async_session.py::TestAsyncSessionCRUD::test_get_by_property
+tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_filter
+[gw6] [  5%] PASSED tests/test_async_session.py::TestAsyncBulkAdd::test_bulk_add_propagates_committed_outcomes[UniBulkCommitIncompleteError]
+tests/test_async_session.py::TestAsyncBulkAdd::test_bulk_add_propagates_committed_outcomes[UniBulkCommitOutcomeUnknownError]
+[gw10] [  5%] PASSED tests/test_async_session.py::TestAsyncCypherResultType::test_node_of_other_label_is_not_coerced
+tests/test_async_session.py::TestAsyncCypherResultType::test_labelled_map_of_other_label_is_not_returned
+[gw1] [  5%] PASSED tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_exists
+[gw14] [  6%] PASSED tests/test_integration.py::TestBulkAdd::test_bulk_add_is_one_load
+tests/test_integration.py::TestBulkAdd::test_bulk_add_propagates_committed_outcomes[UniBulkCommitIncompleteError]
+[gw13] [  6%] PASSED tests/test_integration.py::TestSessionCRUD::test_update_converts_vector_and_btic_values
+tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_limit
+[gw15] [  6%] PASSED tests/test_integration.py::TestQueryBuilder::test_query_all
+[gw6] [  7%] PASSED tests/test_async_session.py::TestAsyncBulkAdd::test_bulk_add_propagates_committed_outcomes[UniBulkCommitOutcomeUnknownError]
+tests/test_integration.py::TestSessionCRUD::test_delete_entity
+tests/test_async_session.py::TestAsyncTransaction::test_transaction_commit
+tests/test_integration.py::TestQueryBuilder::test_query_filter
+[gw14] [  7%] PASSED tests/test_integration.py::TestBulkAdd::test_bulk_add_propagates_committed_outcomes[UniBulkCommitIncompleteError]
+tests/test_integration.py::TestBulkAdd::test_bulk_add_propagates_committed_outcomes[UniBulkCommitOutcomeUnknownError]
+[gw7] [  7%] PASSED tests/test_async_session.py::TestAsyncHydrationDoesNotDropRows::test_falsy_instance_is_not_dropped
+[gw14] [  8%] PASSED tests/test_integration.py::TestBulkAdd::test_bulk_add_propagates_committed_outcomes[UniBulkCommitOutcomeUnknownError]
+tests/test_integration.py::TestHydrationDoesNotDropRows::test_valid_rows_are_unaffected
+[gw5] [  8%] PASSED tests/test_async_session.py::TestAsyncSessionCRUD::test_delete_entity
+tests/test_async_session.py::TestAsyncHydrationDoesNotDropRows::test_hydration_bug_is_not_swallowed
+tests/test_async_session.py::TestAsyncContextManager::test_async_context_manager
+[gw6] [  8%] PASSED tests/test_async_session.py::TestAsyncTransaction::test_transaction_commit
+tests/test_integration.py::TestMultiVectorField::test_list_vector_roundtrip
+[gw3] [  9%] PASSED tests/test_async_session.py::TestAsyncSessionCRUD::test_add_multiple
+tests/test_integration.py::TestQueryBuilder::test_query_count
+[gw11] [  9%] PASSED tests/test_integration.py::TestEdgeCRUD::test_create_and_get_edge
+[gw9] [  9%] PASSED tests/test_btic_integration.py::TestBticPydanticIntegration::test_btic_roundtrip_properties
+tests/test_integration.py::TestEdgeCRUD::test_delete_edge
+[gw7] [ 10%] PASSED tests/test_async_session.py::TestAsyncHydrationDoesNotDropRows::test_hydration_bug_is_not_swallowed
+tests/test_btic_integration.py::TestBticPydanticIntegration::test_model_validation_invalid_btic
+[gw0] [ 10%] PASSED tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_filter
+[gw9] [ 10%] PASSED tests/test_btic_integration.py::TestBticPydanticIntegration::test_model_validation_invalid_btic
+tests/test_integration.py::TestSessionCRUD::test_add_and_commit
+tests/test_async_session.py::TestAsyncEagerLoad::test_eager_load_yields_models
+tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_first
+[gw12] [ 11%] PASSED tests/test_integration.py::TestSessionCRUD::test_get_by_vid
+tests/test_integration.py::TestSessionCRUD::test_get_by_property
+[gw10] [ 11%] PASSED tests/test_async_session.py::TestAsyncCypherResultType::test_labelled_map_of_other_label_is_not_returned
+tests/test_btic_integration.py::TestBticPydanticIntegration::test_create_event_with_btic
+[gw5] [ 11%] PASSED tests/test_async_session.py::TestAsyncContextManager::test_async_context_manager
+tests/test_async_session.py::TestAsyncEdgeCRUD::test_create_edge
+[gw6] [ 11%] PASSED tests/test_integration.py::TestMultiVectorField::test_list_vector_roundtrip
+tests/test_integration.py::TestTypedMapProperty::test_typed_map_roundtrip
+[gw15] [ 12%] PASSED tests/test_integration.py::TestQueryBuilder::test_query_filter
+tests/test_integration.py::TestQueryBuilder::test_query_first
+[gw13] [ 12%] PASSED tests/test_integration.py::TestSessionCRUD::test_delete_entity
+tests/test_integration.py::TestContextManager::test_session_context_manager
+[gw6] [ 12%] PASSED tests/test_integration.py::TestTypedMapProperty::test_typed_map_roundtrip
+tests/test_integration.py::TestHydrationDoesNotDropRows::test_falsy_instance_is_not_dropped
+[gw4] [ 13%] PASSED tests/test_async_session.py::TestAsyncSessionCRUD::test_get_by_property
+tests/test_async_session.py::TestAsyncSessionCRUD::test_update_entity
+[gw9] [ 13%] PASSED tests/test_integration.py::TestSessionCRUD::test_add_and_commit
+tests/test_integration.py::TestCypherResultType::test_unlabelled_map_is_a_projection_of_result_type
+[gw8] [ 13%] PASSED tests/test_async_session.py::TestAsyncEagerLoad::test_entity_without_relations_does_not_lazy_load
+[gw0] [ 14%] PASSED tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_first
+tests/test_async_session.py::TestAsyncExplainAndProfileReachTheBuilder::test_explain_returns_a_plan
+[gw6] [ 14%] PASSED tests/test_integration.py::TestHydrationDoesNotDropRows::test_falsy_instance_is_not_dropped
+tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_count
+tests/test_integration.py::TestHydrationDoesNotDropRows::test_hydration_bug_is_not_swallowed
+[gw2] [ 14%] PASSED tests/test_integration.py::TestRelationships::test_create_edge
+[gw14] [ 15%] PASSED tests/test_integration.py::TestHydrationDoesNotDropRows::test_valid_rows_are_unaffected
+tests/test_integration.py::TestTransaction::test_transaction_commit
+[gw8] [ 15%] PASSED tests/test_async_session.py::TestAsyncExplainAndProfileReachTheBuilder::test_explain_returns_a_plan
+[gw10] [ 15%] PASSED tests/test_btic_integration.py::TestBticPydanticIntegration::test_create_event_with_btic
+tests/test_integration.py::TestEagerLoadHydratesModels::test_to_many_yields_models_not_dicts
+[gw12] [ 16%] PASSED tests/test_integration.py::TestSessionCRUD::test_get_by_property
+tests/test_async_session.py::TestAsyncExplainAndProfileReachTheBuilder::test_profile_returns_results_and_stats
+tests/test_btic_integration.py::TestBticPydanticIntegration::test_create_event_with_string_coercion
+tests/test_integration.py::TestSessionCRUD::test_update_entity
+[gw3] [ 16%] PASSED tests/test_integration.py::TestQueryBuilder::test_query_count
+[gw6] [ 16%] PASSED tests/test_integration.py::TestHydrationDoesNotDropRows::test_hydration_bug_is_not_swallowed
+[gw2] [ 17%] PASSED tests/test_integration.py::TestTransaction::test_transaction_commit
+tests/test_integration.py::TestQueryBuilder::test_query_exists
+[gw13] [ 17%] PASSED tests/test_integration.py::TestContextManager::test_session_context_manager
+tests/test_integration.py::TestHydrationDoesNotDropRows::test_validation_failure_warns_instead_of_vanishing
+tests/test_integration.py::TestTransaction::test_transaction_rollback_on_error
+[gw10] [ 17%] PASSED tests/test_btic_integration.py::TestBticPydanticIntegration::test_create_event_with_string_coercion
+tests/test_integration.py::TestContextManager::test_session_close
+tests/test_models.py::TestUniEdge::test_edge_from_to
+[gw8] [ 17%] PASSED tests/test_async_session.py::TestAsyncExplainAndProfileReachTheBuilder::test_profile_returns_results_and_stats
+[gw10] [ 18%] PASSED tests/test_models.py::TestUniEdge::test_edge_from_to
+tests/test_async_session.py::TestAsyncCypherResultType::test_return_node_hydrates_result_type
+tests/test_models.py::TestUniEdge::test_edge_to_properties
+[gw11] [ 18%] PASSED tests/test_integration.py::TestEdgeCRUD::test_delete_edge
+[gw10] [ 18%] PASSED tests/test_models.py::TestUniEdge::test_edge_to_properties
+tests/test_models.py::TestUniEdge::test_edge_from_edge_result
+[gw5] [ 19%] PASSED tests/test_async_session.py::TestAsyncEdgeCRUD::test_create_edge
+[gw10] [ 19%] PASSED tests/test_models.py::TestUniEdge::test_edge_from_edge_result
+[gw13] [ 19%] PASSED tests/test_integration.py::TestContextManager::test_session_close
+tests/test_integration.py::TestEdgeCRUD::test_update_edge
+tests/test_models.py::TestLifecycleHooks::test_before_create_hook
+[gw15] [ 20%] PASSED tests/test_integration.py::TestQueryBuilder::test_query_first
+[gw6] [ 20%] PASSED tests/test_integration.py::TestHydrationDoesNotDropRows::test_validation_failure_warns_instead_of_vanishing
+[gw10] [ 20%] PASSED tests/test_models.py::TestLifecycleHooks::test_before_create_hook
+tests/test_queries.py::TestPropertyProxy::test_equality
+tests/test_async_session.py::TestAsyncEdgeCRUD::test_delete_edge
+tests/test_models.py::TestLifecycleHooks::test_after_create_hook
+[gw13] [ 21%] PASSED tests/test_queries.py::TestPropertyProxy::test_equality
+tests/test_queries.py::TestPropertyProxy::test_inequality
+[gw2] [ 21%] PASSED tests/test_integration.py::TestTransaction::test_transaction_rollback_on_error
+[gw13] [ 21%] PASSED tests/test_queries.py::TestPropertyProxy::test_inequality
+tests/test_queries.py::TestPropertyProxy::test_less_than
+[gw10] [ 22%] PASSED tests/test_models.py::TestLifecycleHooks::test_after_create_hook
+tests/test_queries.py::TestPropertyProxy::test_greater_than
+tests/test_models.py::TestUniNode::test_from_properties
+[gw10] [ 22%] PASSED tests/test_queries.py::TestPropertyProxy::test_greater_than
+[gw13] [ 22%] PASSED tests/test_queries.py::TestPropertyProxy::test_less_than
+tests/test_models.py::TestUniNode::test_dirty_tracking_after_set
+tests/test_queries.py::TestPropertyProxy::test_greater_than_or_equal
+[gw10] [ 23%] PASSED tests/test_queries.py::TestPropertyProxy::test_greater_than_or_equal
+tests/test_queries.py::TestPropertyProxy::test_in_list
+[gw10] [ 23%] PASSED tests/test_queries.py::TestPropertyProxy::test_in_list
+tests/test_queries.py::TestPropertyProxy::test_less_than_or_equal
+tests/test_integration.py::TestLifecycleHooks::test_before_create_hook
+[gw13] [ 23%] PASSED tests/test_queries.py::TestPropertyProxy::test_less_than_or_equal
+[gw6] [ 23%] PASSED tests/test_models.py::TestUniNode::test_dirty_tracking_after_set
+tests/test_queries.py::TestPropertyProxy::test_not_in_list
+tests/test_queries.py::TestPropertyProxy::test_like_pattern
+[gw15] [ 24%] PASSED tests/test_models.py::TestUniNode::test_from_properties
+tests/test_models.py::TestUniNode::test_dirty_tracking_mark_clean
+[gw13] [ 24%] PASSED tests/test_queries.py::TestPropertyProxy::test_like_pattern
+[gw10] [ 24%] PASSED tests/test_queries.py::TestPropertyProxy::test_not_in_list
+tests/test_queries.py::TestPropertyProxy::test_ends_with
+tests/test_models.py::TestUniNode::test_from_properties_with_id_and_label
+tests/test_queries.py::TestPropertyProxy::test_is_null
+[gw10] [ 25%] PASSED tests/test_queries.py::TestPropertyProxy::test_ends_with
+[gw9] [ 25%] PASSED tests/test_integration.py::TestCypherResultType::test_unlabelled_map_is_a_projection_of_result_type
+tests/test_queries.py::TestPropertyProxy::test_contains
+[gw13] [ 25%] PASSED tests/test_queries.py::TestPropertyProxy::test_is_null
+tests/test_queries.py::TestPropertyProxy::test_is_not_null
+[gw13] [ 26%] PASSED tests/test_queries.py::TestPropertyProxy::test_is_not_null
+[gw10] [ 26%] PASSED tests/test_queries.py::TestPropertyProxy::test_contains
+tests/test_queries.py::TestFilterExpr::test_equality_cypher
+[gw10] [ 26%] PASSED tests/test_queries.py::TestFilterExpr::test_equality_cypher
+[gw6] [ 27%] PASSED tests/test_models.py::TestUniNode::test_dirty_tracking_mark_clean
+[gw15] [ 27%] PASSED tests/test_models.py::TestUniNode::test_from_properties_with_id_and_label
+tests/test_models.py::TestUniNode::test_from_properties_does_not_mutate_input
+tests/test_models.py::TestUniNode::test_validation
+tests/test_queries.py::TestPropertyProxy::test_starts_with
+[gw13] [ 27%] PASSED tests/test_queries.py::TestPropertyProxy::test_starts_with
+tests/test_queries.py::TestFilterExpr::test_in_cypher
+[gw13] [ 28%] PASSED tests/test_queries.py::TestFilterExpr::test_in_cypher
+tests/test_queries.py::TestFilterExpr::test_comparison_cypher
+[gw10] [ 28%] PASSED tests/test_queries.py::TestFilterExpr::test_comparison_cypher
+tests/test_queries.py::TestQueryBuilderImmutability::test_filter_by_returns_new_builder
+tests/test_queries.py::TestFilterExpr::test_is_null_cypher
+[gw13] [ 28%] PASSED tests/test_queries.py::TestFilterExpr::test_is_null_cypher
+[gw6] [ 29%] PASSED tests/test_models.py::TestUniNode::test_validation
+[gw10] [ 29%] PASSED tests/test_queries.py::TestQueryBuilderImmutability::test_filter_by_returns_new_builder
+tests/test_queries.py::TestFilterExpr::test_starts_with_cypher
+[gw13] [ 29%] PASSED tests/test_queries.py::TestFilterExpr::test_starts_with_cypher
+tests/test_queries.py::TestQueryBuilderImmutability::test_limit_returns_new_builder
+tests/test_integration.py::TestCypherResultType::test_node_column_is_found_after_scalar_columns
+[gw15] [ 29%] PASSED tests/test_models.py::TestUniNode::test_from_properties_does_not_mutate_input
+tests/test_models.py::TestUniNode::test_is_persisted
+[gw10] [ 30%] PASSED tests/test_queries.py::TestQueryBuilderImmutability::test_limit_returns_new_builder
+tests/test_queries.py::TestQueryBuilderImmutability::test_skip_returns_new_builder
+[gw10] [ 30%] PASSED tests/test_queries.py::TestQueryBuilderImmutability::test_skip_returns_new_builder
+tests/test_models.py::TestFilterDSL::test_model_getattr_returns_property_proxy
+tests/test_queries.py::TestQueryBuilderImmutability::test_filter_returns_new_builder
+[gw13] [ 30%] PASSED tests/test_queries.py::TestQueryBuilderImmutability::test_filter_returns_new_builder
+tests/test_queries.py::TestQueryBuilderCypherGeneration::test_basic_match
+tests/test_queries.py::TestQueryBuilderImmutability::test_order_by_returns_new_builder
+[gw6] [ 31%] PASSED tests/test_models.py::TestFilterDSL::test_model_getattr_returns_property_proxy
+tests/test_queries.py::TestQueryBuilderImmutability::test_distinct_returns_new_builder
+[gw1] [ 31%] PASSED tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_limit
+[gw13] [ 31%] PASSED tests/test_queries.py::TestQueryBuilderCypherGeneration::test_basic_match
+tests/test_queries.py::TestQueryBuilderCypherGeneration::test_filter_match
+[gw10] [ 32%] PASSED tests/test_queries.py::TestQueryBuilderImmutability::test_order_by_returns_new_builder
+tests/test_queries.py::TestQueryBuilderCypherGeneration::test_distinct
+[gw10] [ 32%] PASSED tests/test_queries.py::TestQueryBuilderCypherGeneration::test_distinct
+tests/test_queries.py::TestQueryBuilderCypherGeneration::test_vector_search_cypher
+[gw15] [ 32%] PASSED tests/test_models.py::TestUniNode::test_is_persisted
+[gw10] [ 33%] PASSED tests/test_queries.py::TestQueryBuilderCypherGeneration::test_vector_search_cypher
+[gw13] [ 33%] PASSED tests/test_queries.py::TestQueryBuilderCypherGeneration::test_filter_match
+tests/test_queries.py::TestQueryBuilderCypherGeneration::test_limit_skip
+[gw13] [ 33%] PASSED tests/test_queries.py::TestQueryBuilderCypherGeneration::test_limit_skip
+tests/test_models.py::TestUniNode::test_dirty_tracking_clean_after_init
+tests/test_queries.py::TestQueryBuilderCypherGeneration::test_vector_search_with_threshold
+tests/test_queries.py::TestQueryBuilderCypherGeneration::test_order_by
+[gw10] [ 34%] PASSED tests/test_queries.py::TestQueryBuilderCypherGeneration::test_vector_search_with_threshold
+tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_delete
+[gw13] [ 34%] PASSED tests/test_queries.py::TestQueryBuilderCypherGeneration::test_order_by
+tests/test_queries.py::TestQueryBuilderCypherGeneration::test_vector_search_rejects_bad_property
+tests/test_queries.py::TestHybridSearchCypher::test_two_way_weighted_alpha
+[gw15] [ 34%] PASSED tests/test_models.py::TestUniNode::test_dirty_tracking_clean_after_init
+tests/test_queries.py::TestQueryBuilderCypherGeneration::test_sparse_search_cypher_from_dict
+[gw13] [ 35%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_two_way_weighted_alpha
+tests/test_queries.py::TestHybridSearchCypher::test_three_way_weights
+[gw15] [ 35%] PASSED tests/test_queries.py::TestQueryBuilderCypherGeneration::test_sparse_search_cypher_from_dict
+tests/test_queries.py::TestQueryBuilderCypherGeneration::test_sparse_search_cypher_from_pair
+[gw10] [ 35%] PASSED tests/test_queries.py::TestQueryBuilderCypherGeneration::test_vector_search_rejects_bad_property
+tests/test_queries.py::TestQueryBuilderCypherGeneration::test_sparse_search_rejects_bad_property
+[gw13] [ 35%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_three_way_weights
+[gw10] [ 36%] PASSED tests/test_queries.py::TestQueryBuilderCypherGeneration::test_sparse_search_rejects_bad_property
+[gw15] [ 36%] PASSED tests/test_queries.py::TestQueryBuilderCypherGeneration::test_sparse_search_cypher_from_pair
+[gw6] [ 36%] PASSED tests/test_queries.py::TestQueryBuilderImmutability::test_distinct_returns_new_builder
+tests/test_queries.py::TestHybridSearchCypher::test_three_way_precomputed_rrf
+tests/test_queries.py::TestQueryBuilderCypherGeneration::test_sparse_search_with_threshold
+tests/test_queries.py::TestHybridSearchCypher::test_dense_auto_embed
+tests/test_queries.py::TestQueryBuilderImmutability::test_timeout_returns_new_builder
+[gw10] [ 37%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_three_way_precomputed_rrf
+tests/test_queries.py::TestHybridSearchCypher::test_bad_weights_length_raises
+[gw15] [ 37%] PASSED tests/test_queries.py::TestQueryBuilderCypherGeneration::test_sparse_search_with_threshold
+tests/test_queries.py::TestHybridSearchCypher::test_query_text_overrides_fts
+[gw6] [ 37%] PASSED tests/test_queries.py::TestQueryBuilderImmutability::test_timeout_returns_new_builder
+tests/test_queries.py::TestQueryBuilderImmutability::test_max_memory_returns_new_builder
+[gw13] [ 38%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_dense_auto_embed
+tests/test_queries.py::TestHybridSearchCypher::test_sparse_arm_requires_both
+[gw13] [ 38%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_sparse_arm_requires_both
+tests/test_queries.py::TestHybridSearchCypher::test_filter_positional_bound
+[gw10] [ 38%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_bad_weights_length_raises
+tests/test_queries.py::TestHybridSearchCypher::test_property_proxy_resolves
+[gw10] [ 39%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_property_proxy_resolves
+[gw15] [ 39%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_query_text_overrides_fts
+[gw13] [ 39%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_filter_positional_bound
+tests/test_queries.py::TestHybridSearchCypher::test_model_filter_chain_appends_where
+tests/test_queries.py::TestHybridSearchCypher::test_rrf_k_and_over_fetch_emitted
+[gw15] [ 40%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_rrf_k_and_over_fetch_emitted
+[gw10] [ 40%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_model_filter_chain_appends_where
+tests/test_queries.py::TestHybridSearchCypher::test_weighted_three_sources_no_weights_ok
+tests/test_queries.py::TestHybridSearchCypher::test_no_sources_raises
+[gw6] [ 40%] PASSED tests/test_queries.py::TestQueryBuilderImmutability::test_max_memory_returns_new_builder
+tests/test_queries.py::TestHybridSearchCypher::test_limit_emitted
+[gw10] [ 41%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_weighted_three_sources_no_weights_ok
+tests/test_queries.py::TestHybridSearchCypher::test_injection_property_name_raises
+[gw13] [ 41%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_no_sources_raises
+tests/test_queries.py::TestHybridSearchCypher::test_invalid_sparse_query_type_raises
+[gw13] [ 41%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_invalid_sparse_query_type_raises
+tests/test_queries.py::TestQueryBuilderImmutability::test_chaining_preserves_immutability
+[gw10] [ 41%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_injection_property_name_raises
+tests/test_queries.py::TestHybridSearchCypher::test_hybrid_search_returns_new_builder
+[gw6] [ 42%] PASSED tests/test_queries.py::TestQueryBuilderImmutability::test_chaining_preserves_immutability
+tests/test_queries.py::TestSearchScoreSurfacing::test_missing_arm_is_none
+[gw13] [ 42%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_hybrid_search_returns_new_builder
+[gw15] [ 42%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_limit_emitted
+tests/test_queries.py::TestSearchScoreSurfacing::test_vector_search_hydrates_with_scores
+[gw6] [ 43%] PASSED tests/test_queries.py::TestSearchScoreSurfacing::test_missing_arm_is_none
+tests/test_queries.py::TestSearchScoreSurfacing::test_hybrid_scores_surfaced
+[gw15] [ 43%] PASSED tests/test_queries.py::TestSearchScoreSurfacing::test_vector_search_hydrates_with_scores
+tests/test_queries.py::TestHybridSearchCypher::test_non_tuple_sparse_raises
+tests/test_queries.py::TestSearchScoreSurfacing::test_non_search_query_has_no_scores
+tests/test_queries.py::TestSearchScoreSurfacing::test_sparse_search_hydrates_with_scores
+[gw10] [ 43%] PASSED tests/test_queries.py::TestHybridSearchCypher::test_non_tuple_sparse_raises
+tests/test_queries.py::TestPropertyValidation::test_valid_property
+[gw6] [ 44%] PASSED tests/test_queries.py::TestSearchScoreSurfacing::test_non_search_query_has_no_scores
+[gw10] [ 44%] PASSED tests/test_queries.py::TestPropertyValidation::test_valid_property
+[gw13] [ 44%] PASSED tests/test_queries.py::TestSearchScoreSurfacing::test_hybrid_scores_surfaced
+tests/test_queries.py::TestPropertyValidation::test_property_not_on_model
+tests/test_queries.py::TestSearchScoreSurfacing::test_empty_results
+[gw6] [ 45%] PASSED tests/test_queries.py::TestPropertyValidation::test_property_not_on_model
+tests/test_queries.py::TestPropertyValidation::test_invalid_property_name_format
+[gw15] [ 45%] PASSED tests/test_queries.py::TestSearchScoreSurfacing::test_sparse_search_hydrates_with_scores
+tests/test_queries.py::TestPropertyValidation::test_system_property_always_valid
+[gw13] [ 45%] PASSED tests/test_queries.py::TestSearchScoreSurfacing::test_empty_results
+[gw6] [ 46%] PASSED tests/test_queries.py::TestPropertyValidation::test_system_property_always_valid
+[gw10] [ 46%] PASSED tests/test_queries.py::TestPropertyValidation::test_invalid_property_name_format
+tests/test_queries.py::TestPropertyValidation::test_filter_by_validates_properties
+tests/test_queries.py::TestQueryBuilderUnit::test_multiple_filters
+tests/test_queries.py::TestSearchScoreSurfacing::test_score_field_no_collision
+tests/test_queries.py::TestSearchScoreSurfacing::test_first_carries_scores
+[gw6] [ 46%] PASSED tests/test_queries.py::TestQueryBuilderUnit::test_multiple_filters
+[gw10] [ 47%] PASSED tests/test_queries.py::TestPropertyValidation::test_filter_by_validates_properties
+tests/test_relationships.py::TestRelationshipConfig::test_default_direction
+[gw6] [ 47%] PASSED tests/test_relationships.py::TestRelationshipConfig::test_default_direction
+[gw15] [ 47%] PASSED tests/test_queries.py::TestSearchScoreSurfacing::test_score_field_no_collision
+tests/test_queries.py::TestQueryBuilderUnit::test_filter_expr_creation
+[gw10] [ 47%] PASSED tests/test_queries.py::TestQueryBuilderUnit::test_filter_expr_creation
+tests/test_relationships.py::TestRelationshipDescriptor::test_descriptor_creation
+tests/test_relationships.py::TestRelationshipConfig::test_custom_direction
+[gw15] [ 48%] PASSED tests/test_relationships.py::TestRelationshipConfig::test_custom_direction
+tests/test_relationships.py::TestRelationshipMarker::test_marker_creation
+[gw6] [ 48%] PASSED tests/test_relationships.py::TestRelationshipMarker::test_marker_creation
+[gw13] [ 48%] PASSED tests/test_queries.py::TestSearchScoreSurfacing::test_first_carries_scores
+tests/test_relationships.py::TestRelationshipConfig::test_eager_loading
+[gw13] [ 49%] PASSED tests/test_relationships.py::TestRelationshipConfig::test_eager_loading
+tests/test_relationships.py::TestRelationshipConfig::test_edge_model
+[gw4] [ 49%] PASSED tests/test_async_session.py::TestAsyncSessionCRUD::test_update_entity
+[gw10] [ 49%] PASSED tests/test_relationships.py::TestRelationshipDescriptor::test_descriptor_creation
+tests/test_relationships.py::TestRelationshipMarker::test_relationship_function_returns_marker
+[gw6] [ 50%] PASSED tests/test_relationships.py::TestRelationshipMarker::test_relationship_function_returns_marker
+tests/test_relationships.py::TestRelationshipInModels::test_incoming_relationship
+[gw15] [ 50%] PASSED tests/test_relationships.py::TestRelationshipConfig::test_edge_model
+tests/test_relationships.py::TestRelationshipConfig::test_cascade_delete
+tests/test_relationships.py::TestRelationshipDescriptor::test_class_level_access_returns_descriptor
+tests/test_relationships.py::TestRelationshipDescriptor::test_descriptor_single_relationship
+[gw13] [ 50%] PASSED tests/test_relationships.py::TestRelationshipConfig::test_cascade_delete
+tests/test_relationships.py::TestRelationshipInModels::test_multiple_relationships
+[gw6] [ 51%] PASSED tests/test_relationships.py::TestRelationshipInModels::test_incoming_relationship
+[gw10] [ 51%] PASSED tests/test_relationships.py::TestRelationshipDescriptor::test_descriptor_single_relationship
+tests/test_relationships.py::TestRelationshipInModels::test_relationship_with_edge_model
+tests/test_relationships.py::TestRelationshipInModels::test_bidirectional_relationship
+tests/test_async_session.py::TestAsyncSessionCRUD::test_update_converts_vector_and_btic_values
+[gw13] [ 51%] PASSED tests/test_relationships.py::TestRelationshipInModels::test_multiple_relationships
+[gw6] [ 52%] PASSED tests/test_relationships.py::TestRelationshipInModels::test_bidirectional_relationship
+tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_relationships_are_discovered[native-annotations]
+tests/test_relationships.py::TestRelationshipInModels::test_relationship_to_different_type
+[gw10] [ 52%] PASSED tests/test_relationships.py::TestRelationshipInModels::test_relationship_with_edge_model
+[gw8] [ 52%] PASSED tests/test_async_session.py::TestAsyncCypherResultType::test_return_node_hydrates_result_type
+tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_relationships_are_discovered[future-annotations]
+[gw13] [ 52%] PASSED tests/test_relationships.py::TestRelationshipInModels::test_relationship_to_different_type
+[gw15] [ 53%] PASSED tests/test_relationships.py::TestRelationshipDescriptor::test_class_level_access_returns_descriptor
+tests/test_relationships.py::TestRelationshipInModels::test_outgoing_relationship
+[gw0] [ 53%] PASSED tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_count
+tests/test_models.py::TestFilterDSL::test_model_getattr_filter_expr
+tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_relationship_shape_is_captured[native-annotations]
+[gw10] [ 53%] PASSED tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_relationships_are_discovered[future-annotations]
+[gw15] [ 54%] PASSED tests/test_relationships.py::TestRelationshipInModels::test_outgoing_relationship
+[gw8] [ 54%] PASSED tests/test_models.py::TestFilterDSL::test_model_getattr_filter_expr
+tests/test_models.py::TestFilterDSL::test_model_getattr_equality
+tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_schema_declares_edges_not_json_properties[native-annotations]
+tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_schema_declares_edges_not_json_properties[future-annotations]
+[gw8] [ 54%] PASSED tests/test_models.py::TestFilterDSL::test_model_getattr_equality
+tests/test_models.py::TestFilterDSL::test_model_getattr_invalid_raises
+tests/test_models.py::TestUniNode::test_optional_fields
+[gw8] [ 55%] PASSED tests/test_models.py::TestFilterDSL::test_model_getattr_invalid_raises
+[gw2] [ 55%] PASSED tests/test_integration.py::TestLifecycleHooks::test_before_create_hook
+tests/test_models.py::TestUniEdge::test_basic_edge
+[gw6] [ 55%] PASSED tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_relationships_are_discovered[native-annotations]
+[gw0] [ 56%] PASSED tests/test_models.py::TestUniNode::test_optional_fields
+tests/test_models.py::TestUniNode::test_default_values
+[gw13] [ 56%] PASSED tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_relationship_shape_is_captured[native-annotations]
+tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_relationships_are_not_pydantic_fields[future-annotations]
+tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_to_many_loads_every_target[future-annotations]
+[gw8] [ 56%] PASSED tests/test_models.py::TestUniEdge::test_basic_edge
+[gw0] [ 57%] PASSED tests/test_models.py::TestUniNode::test_default_values
+[gw10] [ 57%] PASSED tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_schema_declares_edges_not_json_properties[future-annotations]
+tests/test_models.py::TestUniNode::test_default_factory
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[Bio | None-expected1]
+[gw15] [ 57%] PASSED tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_schema_declares_edges_not_json_properties[native-annotations]
+tests/test_models.py::TestRelationshipDeclaration::test_basic_relationship
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[Book-expected0]
+[gw8] [ 58%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[Bio | None-expected1]
+tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_to_many_loads_every_target[native-annotations]
+[gw2] [ 58%] PASSED tests/test_models.py::TestRelationshipDeclaration::test_basic_relationship
+[gw0] [ 58%] PASSED tests/test_models.py::TestUniNode::test_default_factory
+tests/test_models.py::TestRelationshipDeclaration::test_incoming_relationship
+[gw10] [ 58%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[Book-expected0]
+[gw6] [ 59%] PASSED tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_relationships_are_not_pydantic_fields[future-annotations]
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[typing.Optional[Bio]-expected4]
+[gw2] [ 59%] PASSED tests/test_models.py::TestRelationshipDeclaration::test_incoming_relationship
+tests/test_models.py::TestRelationshipDeclaration::test_bidirectional_relationship
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[Union[Bio, None]-expected5]
+[gw8] [ 59%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[typing.Optional[Bio]-expected4]
+tests/test_models.py::TestUniNode::test_vector_field
+[gw10] [ 60%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[Union[Bio, None]-expected5]
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[None | Bio-expected2]
+[gw6] [ 60%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[None | Bio-expected2]
+[gw2] [ 60%] PASSED tests/test_models.py::TestRelationshipDeclaration::test_bidirectional_relationship
+[gw0] [ 61%] PASSED tests/test_models.py::TestUniNode::test_vector_field
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[List[Book]-expected7]
+[gw8] [ 61%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[List[Book]-expected7]
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[typing.List[Book]-expected8]
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[list[Book] | None-expected10]
+tests/test_models.py::TestRelationshipDeclaration::test_optional_single_relationship
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[list['Book']-expected9]
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[Optional[list[Book]]-expected11]
+[gw9] [ 61%] PASSED tests/test_integration.py::TestCypherResultType::test_node_column_is_found_after_scalar_columns
+[gw6] [ 62%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[list[Book] | None-expected10]
+[gw0] [ 62%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[list['Book']-expected9]
+[gw2] [ 62%] PASSED tests/test_models.py::TestRelationshipDeclaration::test_optional_single_relationship
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[Union[Book, Bio]-expected13]
+[gw8] [ 63%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[Optional[list[Book]]-expected11]
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[not valid (-expected14]
+[gw6] [ 63%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[Union[Book, Bio]-expected13]
+tests/test_schema_sync.py::TestSchemaGenerator::test_register_node_model
+tests/test_schema_sync.py::TestSchemaGenerator::test_register_edge_model
+tests/test_integration.py::test_repr_treats_id_zero_as_saved
+[gw2] [ 63%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[not valid (-expected14]
+[gw0] [ 64%] PASSED tests/test_schema_sync.py::TestSchemaGenerator::test_register_node_model
+[gw10] [ 64%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[typing.List[Book]-expected8]
+tests/test_schema_sync.py::TestSchemaGenerator::test_generate_basic_schema
+tests/test_schema_sync.py::TestSchemaGenerator::test_register_multiple
+[gw8] [ 64%] PASSED tests/test_schema_sync.py::TestSchemaGenerator::test_register_edge_model
+tests/test_schema_sync.py::TestSchemaGenerator::test_generate_nullable_field
+[gw9] [ 64%] PASSED tests/test_integration.py::test_repr_treats_id_zero_as_saved
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[list[tuple[Person, Edge]]-expected12]
+tests/test_models.py::TestUniNode::test_basic_model
+tests/test_schema_sync.py::TestSchemaGenerator::test_generate_indexed_field
+[gw0] [ 65%] PASSED tests/test_schema_sync.py::TestSchemaGenerator::test_generate_basic_schema
+[gw10] [ 65%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[list[tuple[Person, Edge]]-expected12]
+[gw6] [ 65%] PASSED tests/test_schema_sync.py::TestSchemaGenerator::test_register_multiple
+[gw2] [ 66%] PASSED tests/test_schema_sync.py::TestSchemaGenerator::test_generate_nullable_field
+[gw12] [ 66%] PASSED tests/test_integration.py::TestSessionCRUD::test_update_entity
+tests/test_schema_sync.py::TestSchemaGenerator::test_generate_list_vector_field
+[gw9] [ 66%] PASSED tests/test_models.py::TestUniNode::test_basic_model
+[gw8] [ 67%] PASSED tests/test_schema_sync.py::TestSchemaGenerator::test_generate_indexed_field
+tests/test_schema_sync.py::TestSchemaGenerator::test_generate_unique_field
+tests/test_schema_sync.py::TestSchemaGenerator::test_generate_vector_field
+[gw0] [ 67%] PASSED tests/test_schema_sync.py::TestSchemaGenerator::test_generate_list_vector_field
+tests/test_models.py::TestUniNode::test_custom_label
+tests/test_schema_sync.py::TestSchemaGenerator::test_generate_fulltext_field
+tests/test_schema_sync.py::TestSchemaGenerator::test_generate_vector_with_metric
+tests/test_models.py::TestFieldConfiguration::test_index_field
+[gw9] [ 67%] PASSED tests/test_models.py::TestUniNode::test_custom_label
+[gw6] [ 68%] PASSED tests/test_schema_sync.py::TestSchemaGenerator::test_generate_unique_field
+[gw10] [ 68%] PASSED tests/test_schema_sync.py::TestSchemaGenerator::test_generate_vector_with_metric
+tests/test_schema_sync.py::TestSchemaGenerator::test_generate_edge_schema
+[gw12] [ 68%] PASSED tests/test_models.py::TestFieldConfiguration::test_index_field
+[gw8] [ 69%] PASSED tests/test_schema_sync.py::TestSchemaGenerator::test_generate_fulltext_field
+tests/test_schema_sync.py::TestPropertySchema::test_property_schema_defaults
+[gw2] [ 69%] PASSED tests/test_schema_sync.py::TestSchemaGenerator::test_generate_vector_field
+tests/test_schema_sync.py::TestSchemaGenerator::test_generate_relationship_creates_edge_type
+[gw9] [ 69%] PASSED tests/test_schema_sync.py::TestPropertySchema::test_property_schema_defaults
+tests/test_models.py::TestFieldConfiguration::test_unique_field
+tests/test_schema_sync.py::TestLabelSchema::test_label_schema_defaults
+[gw0] [ 70%] PASSED tests/test_schema_sync.py::TestSchemaGenerator::test_generate_edge_schema
+tests/test_schema_sync.py::TestGenerateSchema::test_generate_schema_function
+tests/test_schema_sync.py::TestEdgeTypeSchema::test_edge_type_schema_defaults
+tests/test_types.py::TestSparseVector::test_not_confused_with_dense_vector
+[gw12] [ 70%] PASSED tests/test_models.py::TestFieldConfiguration::test_unique_field
+[gw9] [ 70%] PASSED tests/test_types.py::TestSparseVector::test_not_confused_with_dense_vector
+[gw10] [ 70%] PASSED tests/test_schema_sync.py::TestLabelSchema::test_label_schema_defaults
+[gw8] [ 71%] PASSED tests/test_schema_sync.py::TestEdgeTypeSchema::test_edge_type_schema_defaults
+[gw7] [ 71%] PASSED tests/test_async_session.py::TestAsyncEagerLoad::test_eager_load_yields_models
+[gw6] [ 71%] PASSED tests/test_schema_sync.py::TestSchemaGenerator::test_generate_relationship_creates_edge_type
+tests/test_models.py::TestFieldConfiguration::test_fulltext_field
+tests/test_types.py::TestSparseVector::test_subscript_and_caching
+tests/test_types.py::TestSparseVector::test_from_dict_canonicalizes
+[gw1] [ 72%] PASSED tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_delete
+tests/test_types.py::TestSparseVector::test_optional_sparse_vector
+tests/test_types.py::TestSparseVector::test_emits_sparse_vector_type_string
+tests/test_types.py::TestVector::test_vector_subscript_caching
+[gw0] [ 72%] PASSED tests/test_types.py::TestSparseVector::test_subscript_and_caching
+[gw2] [ 72%] PASSED tests/test_schema_sync.py::TestGenerateSchema::test_generate_schema_function
+[gw9] [ 73%] PASSED tests/test_types.py::TestSparseVector::test_from_dict_canonicalizes
+[gw10] [ 73%] PASSED tests/test_types.py::TestSparseVector::test_optional_sparse_vector
+[gw8] [ 73%] PASSED tests/test_types.py::TestVector::test_vector_subscript_caching
+tests/test_types.py::TestVector::test_vector_equality
+[gw6] [ 74%] PASSED tests/test_types.py::TestSparseVector::test_emits_sparse_vector_type_string
+[gw12] [ 74%] PASSED tests/test_models.py::TestFieldConfiguration::test_fulltext_field
+tests/test_models.py::TestFieldConfiguration::test_fulltext_field_default_tokenizer
+[gw9] [ 74%] PASSED tests/test_types.py::TestVector::test_vector_equality
+[gw12] [ 75%] PASSED tests/test_models.py::TestFieldConfiguration::test_fulltext_field_default_tokenizer
+[gw3] [ 75%] PASSED tests/test_integration.py::TestQueryBuilder::test_query_exists
+tests/test_integration.py::TestExplainAndProfileReachTheBuilder::test_explain_returns_a_plan
+tests/test_types.py::TestVector::test_vector_from_vector_instance
+tests/test_types.py::TestVector::test_vector_dimension_validation
+[gw8] [ 75%] PASSED tests/test_types.py::TestVector::test_vector_dimension_validation
+tests/test_types.py::TestVector::test_vector_invalid_dimensions
+[gw0] [ 76%] PASSED tests/test_types.py::TestVector::test_vector_invalid_dimensions
+tests/test_types.py::TestVector::test_vector_isinstance
+tests/test_types.py::TestVector::test_vector_instance_creation
+[gw10] [ 76%] PASSED tests/test_types.py::TestVector::test_vector_instance_creation
+tests/test_types.py::TestVector::test_vector_subscript
+[gw2] [ 76%] PASSED tests/test_types.py::TestVector::test_vector_subscript
+tests/test_models.py::TestFieldConfiguration::test_vector_metric
+[gw6] [ 76%] PASSED tests/test_types.py::TestVector::test_vector_isinstance
+[gw12] [ 77%] PASSED tests/test_models.py::TestFieldConfiguration::test_vector_metric
+tests/test_types.py::TestBtic::test_btic_from_string
+tests/test_types.py::TestBtic::test_btic_equality
+tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_update
+tests/test_integration.py::TestQueryBuilder::test_query_limit
+tests/test_types.py::TestBtic::test_btic_invalid
+[gw9] [ 77%] PASSED tests/test_types.py::TestVector::test_vector_from_vector_instance
+tests/test_types.py::TestBtic::test_btic_hash
+tests/test_types.py::TestBtic::test_btic_isinstance
+[gw10] [ 77%] PASSED tests/test_types.py::TestBtic::test_btic_from_string
+[gw6] [ 78%] PASSED tests/test_types.py::TestBtic::test_btic_hash
+[gw0] [ 78%] PASSED tests/test_types.py::TestBtic::test_btic_invalid
+[gw2] [ 78%] PASSED tests/test_types.py::TestBtic::test_btic_equality
+tests/test_types.py::TestBtic::test_btic_formats
+[gw8] [ 79%] PASSED tests/test_types.py::TestBtic::test_btic_formats
+tests/test_types.py::TestGetVectorDimensions::test_vector_type
+tests/test_types.py::TestIsOptional::test_non_optional_types
+tests/test_types.py::TestGetVectorDimensions::test_non_vector_type
+tests/test_types.py::TestIsOptional::test_optional_types
+[gw10] [ 79%] PASSED tests/test_types.py::TestGetVectorDimensions::test_vector_type
+[gw12] [ 79%] PASSED tests/test_types.py::TestBtic::test_btic_isinstance
+[gw2] [ 80%] PASSED tests/test_types.py::TestGetVectorDimensions::test_non_vector_type
+[gw6] [ 80%] PASSED tests/test_types.py::TestIsOptional::test_non_optional_types
+[gw7] [ 80%] PASSED tests/test_integration.py::TestExplainAndProfileReachTheBuilder::test_explain_returns_a_plan
+tests/test_types.py::TestBtic::test_btic_properties
+[gw9] [ 81%] PASSED tests/test_types.py::TestBtic::test_btic_properties
+tests/test_types.py::TestIsOptional::test_union_types
+[gw0] [ 81%] PASSED tests/test_types.py::TestIsOptional::test_union_types
+[gw8] [ 81%] PASSED tests/test_types.py::TestIsOptional::test_optional_types
+tests/test_types.py::TestIsListType::test_list_types
+tests/test_types.py::TestPythonTypeToUni::test_basic_types
+tests/test_types.py::TestIsListType::test_non_list_types
+tests/test_types.py::TestUnwrapAnnotated::test_non_annotated_type
+tests/test_types.py::TestUnwrapAnnotated::test_annotated_type
+tests/test_types.py::TestPythonTypeToUni::test_datetime_types
+[gw9] [ 82%] PASSED tests/test_types.py::TestIsListType::test_non_list_types
+[gw12] [ 82%] PASSED tests/test_types.py::TestIsListType::test_list_types
+[gw10] [ 82%] PASSED tests/test_types.py::TestUnwrapAnnotated::test_annotated_type
+[gw8] [ 82%] PASSED tests/test_types.py::TestPythonTypeToUni::test_datetime_types
+tests/test_integration.py::TestExplainAndProfileReachTheBuilder::test_profile_returns_results_and_stats
+[gw6] [ 83%] PASSED tests/test_types.py::TestUnwrapAnnotated::test_non_annotated_type
+tests/test_types.py::TestPythonTypeToUni::test_btic_type
+[gw0] [ 83%] PASSED tests/test_types.py::TestPythonTypeToUni::test_btic_type
+tests/test_types.py::TestPythonTypeToUni::test_optional_types
+[gw12] [ 83%] PASSED tests/test_types.py::TestPythonTypeToUni::test_optional_types
+[gw2] [ 84%] PASSED tests/test_types.py::TestPythonTypeToUni::test_basic_types
+tests/test_types.py::TestPythonTypeToUni::test_vector_type
+tests/test_types.py::TestPythonTypeToUni::test_btic_optional
+tests/test_types.py::TestPythonTypeToUni::test_unsupported_type
+[gw9] [ 84%] PASSED tests/test_types.py::TestPythonTypeToUni::test_vector_type
+tests/test_types.py::TestPythonTypeToUni::test_list_types
+[gw10] [ 84%] PASSED tests/test_types.py::TestPythonTypeToUni::test_btic_optional
+tests/test_types.py::TestPythonTypeToUni::test_forward_reference_names_the_reference[string]
+tests/test_types.py::TestPythonTypeToUni::test_list_vector_type
+[gw8] [ 85%] PASSED tests/test_types.py::TestPythonTypeToUni::test_unsupported_type
+[gw0] [ 85%] PASSED tests/test_types.py::TestPythonTypeToUni::test_list_vector_type
+tests/test_types.py::TestPythonTypeToUni::test_dict_type
+tests/test_types.py::TestUniToPythonType::test_basic_types
+[gw12] [ 85%] PASSED tests/test_types.py::TestPythonTypeToUni::test_forward_reference_names_the_reference[string]
+[gw6] [ 86%] PASSED tests/test_types.py::TestPythonTypeToUni::test_list_types
+tests/test_types.py::TestPythonTypeToUni::test_forward_reference_names_the_reference[ForwardRef]
+tests/test_types.py::TestUniToPythonType::test_vector_type
+[gw2] [ 86%] PASSED tests/test_types.py::TestPythonTypeToUni::test_dict_type
+[gw10] [ 86%] PASSED tests/test_types.py::TestPythonTypeToUni::test_forward_reference_names_the_reference[ForwardRef]
+tests/test_types.py::TestUniToPythonType::test_list_type
+tests/test_types.py::TestPythonToDbValue::test_datetime_passthrough
+[gw0] [ 87%] PASSED tests/test_types.py::TestUniToPythonType::test_list_type
+[gw9] [ 87%] PASSED tests/test_types.py::TestUniToPythonType::test_basic_types
+[gw12] [ 87%] PASSED tests/test_types.py::TestPythonToDbValue::test_datetime_passthrough
+[gw8] [ 88%] PASSED tests/test_types.py::TestUniToPythonType::test_vector_type
+tests/test_types.py::TestUniToPythonType::test_btic_type
+[gw6] [ 88%] PASSED tests/test_types.py::TestUniToPythonType::test_btic_type
+tests/test_types.py::TestPythonToDbValue::test_timedelta_passthrough
+tests/test_types.py::TestPythonToDbValue::test_none_passthrough
+tests/test_types.py::TestPythonToDbValue::test_date_passthrough
+tests/test_types.py::TestPythonToDbValue::test_time_passthrough
+tests/test_types.py::TestPythonToDbValue::test_list_vector_roundtrip
+tests/test_types.py::TestPythonToDbValue::test_string_passthrough
+[gw10] [ 88%] PASSED tests/test_types.py::TestPythonToDbValue::test_timedelta_passthrough
+tests/test_types.py::TestPythonToDbValue::test_vector_to_list
+[gw2] [ 88%] PASSED tests/test_types.py::TestPythonToDbValue::test_date_passthrough
+[gw12] [ 89%] PASSED tests/test_types.py::TestPythonToDbValue::test_list_vector_roundtrip
+[gw9] [ 89%] PASSED tests/test_types.py::TestPythonToDbValue::test_time_passthrough
+[gw6] [ 89%] PASSED tests/test_types.py::TestPythonToDbValue::test_string_passthrough
+[gw0] [ 90%] PASSED tests/test_types.py::TestPythonToDbValue::test_none_passthrough
+[gw8] [ 90%] PASSED tests/test_types.py::TestPythonToDbValue::test_vector_to_list
+tests/test_types.py::TestPythonToDbValue::test_db_to_python_btic
+tests/test_types.py::TestPythonToDbValue::test_db_to_python_vector
+tests/test_types.py::TestPythonToDbValue::test_btic_passthrough
+[gw2] [ 90%] PASSED tests/test_types.py::TestPythonToDbValue::test_db_to_python_vector
+[gw9] [ 91%] PASSED tests/test_types.py::TestPythonToDbValue::test_db_to_python_btic
+[gw10] [ 91%] PASSED tests/test_types.py::TestPythonToDbValue::test_btic_passthrough
+[gw7] [ 91%] PASSED tests/test_integration.py::TestExplainAndProfileReachTheBuilder::test_profile_returns_results_and_stats
+tests/test_integration.py::TestCypherResultType::test_return_node_hydrates_result_type
+[gw11] [ 92%] PASSED tests/test_integration.py::TestEdgeCRUD::test_update_edge
+tests/test_integration.py::TestBulkAdd::test_bulk_add
+[gw5] [ 92%] PASSED tests/test_async_session.py::TestAsyncEdgeCRUD::test_delete_edge
+tests/test_models.py::TestUniNode::test_property_fields
+[gw5] [ 92%] PASSED tests/test_models.py::TestUniNode::test_property_fields
+tests/test_models.py::TestUniNode::test_relationship_fields
+[gw5] [ 93%] PASSED tests/test_models.py::TestUniNode::test_relationship_fields
+tests/test_models.py::TestUniNode::test_to_properties
+[gw5] [ 93%] PASSED tests/test_models.py::TestUniNode::test_to_properties
+tests/test_models.py::TestUniNode::test_to_properties_includes_none
+[gw5] [ 93%] PASSED tests/test_models.py::TestUniNode::test_to_properties_includes_none
+[gw14] [ 94%] PASSED tests/test_integration.py::TestEagerLoadHydratesModels::test_to_many_yields_models_not_dicts
+tests/test_integration.py::TestEagerLoadHydratesModels::test_to_one_yields_a_model_not_a_list
+[gw7] [ 94%] PASSED tests/test_integration.py::TestCypherResultType::test_return_node_hydrates_result_type
+tests/test_integration.py::TestCypherResultType::test_node_of_other_label_is_not_coerced
+[gw1] [ 94%] PASSED tests/test_async_queries.py::TestAsyncQueryBuilder::test_query_update
+[gw4] [ 94%] PASSED tests/test_async_session.py::TestAsyncSessionCRUD::test_update_converts_vector_and_btic_values
+[gw11] [ 95%] PASSED tests/test_integration.py::TestBulkAdd::test_bulk_add
+tests/test_types.py::TestBtic::test_btic_from_btic_instance
+tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_relationships_are_not_pydantic_fields[native-annotations]
+[gw3] [ 95%] PASSED tests/test_integration.py::TestQueryBuilder::test_query_limit
+[gw1] [ 95%] PASSED tests/test_types.py::TestBtic::test_btic_from_btic_instance
+tests/test_integration.py::TestSchemaSync::test_sync_creates_label
+[gw4] [ 96%] PASSED tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_relationships_are_not_pydantic_fields[native-annotations]
+tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_relationship_shape_is_captured[future-annotations]
+[gw4] [ 96%] PASSED tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_relationship_shape_is_captured[future-annotations]
+[gw3] [ 96%] PASSED tests/test_integration.py::TestSchemaSync::test_sync_creates_label
+tests/test_integration.py::TestSchemaSync::test_sync_creates_edge_type
+[gw3] [ 97%] PASSED tests/test_integration.py::TestSchemaSync::test_sync_creates_edge_type
+[gw13] [ 97%] PASSED tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_to_many_loads_every_target[future-annotations]
+[gw7] [ 97%] PASSED tests/test_integration.py::TestCypherResultType::test_node_of_other_label_is_not_coerced
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[Optional[Bio]-expected3]
+tests/test_integration.py::TestCypherResultType::test_labelled_map_of_other_label_is_not_returned
+[gw13] [ 98%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[Optional[Bio]-expected3]
+[gw15] [ 98%] PASSED tests/test_relationships.py::TestRelationshipsUnderLazyAnnotations::test_to_many_loads_every_target[native-annotations]
+tests/test_relationships.py::TestStringAnnotationShape::test_shape[list[Book]-expected6]
+[gw15] [ 98%] PASSED tests/test_relationships.py::TestStringAnnotationShape::test_shape[list[Book]-expected6]
+[gw7] [ 99%] PASSED tests/test_integration.py::TestCypherResultType::test_labelled_map_of_other_label_is_not_returned
+[gw14] [ 99%] PASSED tests/test_integration.py::TestEagerLoadHydratesModels::test_to_one_yields_a_model_not_a_list
+tests/test_integration.py::TestEagerLoadHydratesModels::test_eager_and_lazy_agree
+[gw14] [ 99%] PASSED tests/test_integration.py::TestEagerLoadHydratesModels::test_eager_and_lazy_agree
+tests/test_integration.py::TestEagerLoadHydratesModels::test_no_related_rows_is_still_well_typed
+[gw14] [100%] PASSED tests/test_integration.py::TestEagerLoadHydratesModels::test_no_related_rows_is_still_well_typed
+
+============================= 317 passed in 2.19s ==============================

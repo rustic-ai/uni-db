@@ -1,0 +1,85 @@
+   Compiling reqwest v0.12.28
+   Compiling arrow v58.3.0
+   Compiling reqwest v0.13.4
+   Compiling opendal-http-transport-reqwest v0.58.2
+   Compiling object_store v0.13.2
+   Compiling lance-namespace-reqwest-client v0.11.1
+   Compiling opendal v0.58.2
+   Compiling parquet v58.3.0
+   Compiling object_store_opendal v0.58.0
+   Compiling uni-common v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-common)
+   Compiling datafusion-common v54.1.0
+   Compiling datafusion-expr-common v54.1.0
+   Compiling datafusion-physical-expr-common v54.1.0
+   Compiling datafusion-functions-aggregate-common v54.1.0
+   Compiling datafusion-functions-window-common v54.1.0
+   Compiling datafusion-expr v54.1.0
+   Compiling datafusion-physical-expr v54.1.0
+   Compiling datafusion-execution v54.1.0
+   Compiling datafusion-functions v54.1.0
+   Compiling datafusion-functions-aggregate v54.1.0
+   Compiling datafusion-functions-window v54.1.0
+   Compiling datafusion-physical-plan v54.1.0
+   Compiling datafusion-physical-expr-adapter v54.1.0
+   Compiling datafusion-functions-nested v54.1.0
+   Compiling datafusion-session v54.1.0
+   Compiling datafusion-datasource v54.1.0
+   Compiling datafusion-sql v54.1.0
+   Compiling lance-core v11.0.0
+   Compiling datafusion-catalog v54.1.0
+   Compiling datafusion-pruning v54.1.0
+   Compiling datafusion-physical-optimizer v54.1.0
+   Compiling datafusion-datasource-parquet v54.1.0
+   Compiling datafusion-datasource-csv v54.1.0
+   Compiling datafusion-datasource-arrow v54.1.0
+   Compiling datafusion-datasource-json v54.1.0
+   Compiling datafusion-optimizer v54.1.0
+   Compiling lance-namespace v11.0.0
+   Compiling lance-io v11.0.0
+   Compiling lance-encoding v11.0.0
+   Compiling datafusion-functions-table v54.1.0
+   Compiling datafusion-catalog-listing v54.1.0
+   Compiling lance-select v11.0.0
+   Compiling lance-file v11.0.0
+   Compiling lance-linalg v11.0.0
+   Compiling datafusion v54.1.0
+   Compiling lance-table v11.0.0
+   Compiling lance-index-core v11.0.0
+   Compiling lance-datafusion v11.0.0
+   Compiling uni-plugin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin)
+   Compiling uni-crdt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-crdt)
+   Compiling lance-index v11.0.0
+   Compiling lance v11.0.0
+   Compiling uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8m 12s
+────────────
+ Nextest run ID 03e4f2fe-ba5f-408d-b4a8-c193ec4a56b9 with nextest profile: default
+    Starting 26 tests across 3 binaries (806 tests skipped)
+        PASS [   0.012s] ( 1/26) uni-store::integration cloud::s3_compatibility_test::test_id_allocator_recovery
+        PASS [   0.015s] ( 2/26) uni-store::integration fork_recovery::recovery_fork_create::pending_entry_with_no_branches_is_rolled_back
+        PASS [   0.017s] ( 3/26) uni-store::integration fork_recovery::recovery_fork_wal::fork_wal_replay_restores_persisted_mutations
+        PASS [   0.019s] ( 4/26) uni-store::integration fork_recovery::fork_branch::branch_scan_reads_parent_rows_via_base_paths
+        PASS [   0.021s] ( 5/26) uni-store::integration fork_recovery::fork_branch::branch_scan_respects_filter_and_projection
+        PASS [   0.022s] ( 6/26) uni-store::integration fork_recovery::fork_branch_writes::write_to_branch_appends_only_to_branch
+        PASS [   0.023s] ( 7/26) uni-store::integration fork_recovery::fork_branch::branch_scan_isolated_from_post_fork_primary_writes
+        PASS [   0.023s] ( 8/26) uni-store::integration fork_recovery::fork_branch_writes::create_dataset_then_branch_yields_writable_fork
+        PASS [   0.023s] ( 9/26) uni-store::integration fork_recovery::fork_branch_writes::replace_branch_tip_overwrites_branch_only
+        PASS [   0.019s] (10/26) uni-store::integration fork_recovery::recovery_fork_wal::primary_wal_unaffected_by_fork_wal_segments
+        PASS [   0.015s] (11/26) uni-store::integration storage::wal_durability_test::test_wal_corrupt_middle_segment_fails_recovery
+        PASS [   0.032s] (12/26) uni-store::integration fork_recovery::recovery_fork_drop::orphan_tombstone_with_no_registry_entry_is_swept
+        PASS [   0.020s] (13/26) uni-store::integration fork_recovery::recovery_fork_wal::replay_with_no_persisted_mutations_is_noop
+        PASS [   0.033s] (14/26) uni-store::integration fork_recovery::fork_branch::primary_scan_unaffected_by_branch_field_default
+        PASS [   0.034s] (15/26) uni-store::integration fork_recovery::recovery_fork_create::pending_entry_with_partial_branches_force_deletes_them
+        PASS [   0.035s] (16/26) uni-store::integration fork_recovery::recovery_fork_drop::delete_branch_handles_zombie_shallow_clone
+        PASS [   0.035s] (17/26) uni-store::integration fork_recovery::recovery_fork_drop::recover_forks_is_idempotent
+        PASS [   0.021s] (18/26) uni-store::integration storage::extid_index_test::extid_uniqueness_survives_wal_recovery
+        PASS [   0.036s] (19/26) uni-store::integration fork_recovery::lance_branch_retention::cleanup_then_branch_drop_recovers_disk
+        PASS [   0.037s] (20/26) uni-store::integration fork_recovery::fork_branch_writes::delete_from_branch_removes_only_on_branch
+        PASS [   0.037s] (21/26) uni-store::integration fork_recovery::lance_branch_retention::cleanup_old_versions_does_not_delete_branch_referenced_fragments
+        PASS [   0.037s] (22/26) uni-store::integration fork_recovery::fork_branch_writes::writes_on_one_branch_invisible_to_sibling_branches
+        PASS [   0.037s] (23/26) uni-store::integration fork_recovery::recovery_fork_drop::tombstoned_drop_completes_on_recovery
+        PASS [   0.024s] (24/26) uni-store::integration fork_recovery::recovery_fork_create_fault::partial_create_branch_rolls_back_on_recovery
+        PASS [   0.020s] (25/26) uni-store::integration storage::wal_durability_test::unique_constraint_survives_wal_recovery
+        PASS [   0.043s] (26/26) uni-store storage::manager::label_backfill_tests::recovery_backfills_marked_declared_labels_and_clears_markers
+────────────
+     Summary [   0.045s] 26 tests run: 26 passed, 806 skipped

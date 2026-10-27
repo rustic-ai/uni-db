@@ -1,0 +1,22 @@
+[
+  {
+    "lane": "cypher-tck",
+    "command": [
+      "bash",
+      "scripts/run_tck_with_report.sh",
+      "--both"
+    ],
+    "status": 0,
+    "seconds": 8074.37
+  },
+  {
+    "lane": "locy-tck",
+    "command": [
+      "bash",
+      "scripts/run_locy_tck_with_report.sh",
+      "--both"
+    ],
+    "status": 0,
+    "seconds": 20.06
+  }
+]

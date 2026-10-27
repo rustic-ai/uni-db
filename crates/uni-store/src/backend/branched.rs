@@ -39,6 +39,7 @@ pub struct BranchedBackend {
     /// silently reading or writing primary — a fork whose isolation quietly
     /// evaporated is far worse than one that refuses to start.
     branching: Option<Arc<dyn ForkBranching>>,
+    branch_creation: tokio::sync::Mutex<()>,
 }
 
 impl BranchedBackend {
@@ -50,6 +51,7 @@ impl BranchedBackend {
             inner,
             scope,
             branching,
+            branch_creation: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -106,29 +108,13 @@ impl BranchedBackend {
         if let Some(b) = self.scope.branch_for(table_name) {
             return Ok(b);
         }
-        let branching = self.branching()?;
-        if !branching.table_exists(table_name).await? {
-            anyhow::bail!(
-                "ensure_branch_for_existing('{table_name}'): dataset not on \
-                 primary either; use create_table/create_empty_table"
-            );
-        }
-        let parent_v = branching.current_version(table_name).await?;
-        let branch_name = format!("fork_{}_{}", self.scope.fork_id(), table_name);
-        branching
-            .create_branch(table_name, &branch_name, parent_v)
-            .await?;
-        // Persist + record. Persistence first so a crash between the
-        // Lance commit and the in-memory register leaves the on-disk
-        // record consistent with what reads will resolve.
-        self.scope
-            .registry()
-            .register_dataset_branch(self.scope.fork_id(), table_name, &branch_name)
+        let schema = self
+            .inner
+            .get_table_schema(table_name)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no schema for absent fork table {table_name}"))?;
+        self.ensure_branch_for_new(table_name, schema, Vec::new())
             .await
-            .map_err(|e| anyhow::anyhow!("persist dynamic branch: {e}"))?;
-        self.scope
-            .register_dynamic_branch(table_name.to_string(), branch_name.clone());
-        Ok(branch_name)
     }
 
     /// Phase 2 Day 10: ensure a branch exists, creating both the
@@ -142,18 +128,22 @@ impl BranchedBackend {
         schema: Arc<ArrowSchema>,
         initial_batches: Vec<RecordBatch>,
     ) -> Result<String> {
+        let _creation = self.branch_creation.lock().await;
         if let Some(b) = self.scope.branch_for(table_name) {
             return Ok(b);
         }
         let branching = self.branching()?;
         let branch_name = format!("fork_{}_{}", self.scope.fork_id(), table_name);
         if branching.table_exists(table_name).await? {
-            // Dataset exists on primary but no branch yet — branch from
-            // the current parent version. Treat the supplied batches
-            // (if any) as the first writes on the new branch.
+            // No mapping means absent in this fork's snapshot. Create a
+            // private empty tip before publishing the mapping, even if main
+            // has acquired rows since the fork point.
             let parent_v = branching.current_version(table_name).await?;
             branching
                 .create_branch(table_name, &branch_name, parent_v)
+                .await?;
+            branching
+                .replace_branch_tip(table_name, &branch_name, Vec::new(), schema.clone())
                 .await?;
             if !initial_batches.is_empty() {
                 let arrow_schema = initial_batches[0].schema();
@@ -256,10 +246,16 @@ impl StorageBackend for BranchedBackend {
     // ── Reads — branch-aware ─────────────────────────────────────────
 
     async fn scan(&self, request: ScanRequest) -> Result<Vec<RecordBatch>> {
+        if self.scope.branch_for(&request.table_name).is_none() {
+            return Ok(Vec::new());
+        }
         self.inner.scan(self.apply_branch(request)).await
     }
 
     async fn scan_stream(&self, request: ScanRequest) -> Result<RecordBatchStream> {
+        if self.scope.branch_for(&request.table_name).is_none() {
+            return Ok(Box::pin(futures::stream::empty()));
+        }
         self.inner.scan_stream(self.apply_branch(request)).await
     }
 
@@ -271,7 +267,7 @@ impl StorageBackend for BranchedBackend {
         k: usize,
         filter: FilterExpr,
         unstored: Vec<(u64, String)>,
-        counters: Option<Arc<crate::runtime::counters::QueryCounters>>,
+        _counters: Option<Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<TextSearch> {
         if let Some(branch) = self.scope.branch_for(table) {
             return self
@@ -281,9 +277,10 @@ impl StorageBackend for BranchedBackend {
                 )
                 .await;
         }
-        self.inner
-            .full_text_search_with_unstored(table, column, query, k, filter, unstored, counters)
-            .await
+        Ok(TextSearch {
+            stored: Vec::new(),
+            unstored: super::score_documents(column, query, unstored, || Ok(())).await?,
+        })
     }
 
     fn filter_batch(&self, batch: &RecordBatch, filter: &FilterExpr) -> Result<Vec<bool>> {
@@ -302,7 +299,7 @@ impl StorageBackend for BranchedBackend {
             let batches = self.inner.scan(request).await?;
             Ok(batches.iter().map(|b| b.num_rows()).sum())
         } else {
-            self.inner.count_rows(table_name, filter).await
+            Ok(0)
         }
     }
 
@@ -323,42 +320,38 @@ impl StorageBackend for BranchedBackend {
         metric: DistanceMetric,
         filter: FilterExpr,
         opts: VectorQueryOpts,
-        counters: Option<std::sync::Arc<crate::runtime::counters::QueryCounters>>,
+        _counters: Option<std::sync::Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<Vec<RecordBatch>> {
         // Phase 5b: when the fork has a branch for this dataset,
         // route through Lance's per-branch nearest-K — its
         // `base_paths` chain on the branch surfaces both fork-local
         // and parent-inherited rows in one scan, naturally fused.
-        // When no branch exists (label never written through the
-        // fork), delegate to primary's vector_search.
+        // A table with no recorded branch is absent in this snapshot.
         //
-        // The `metric` parameter is honored implicitly: Lance picks the
-        // metric from the index built on the column. The `filter` (M6) is
+        // The requested metric and the `filter` (M6) are
         // threaded into the branch scan so the user predicate, the
         // `_deleted = false` guard, and the version HWM pin are all
         // honored — matching the non-branch path's semantics.
         if let Some(branch) = self.scope.branch_for(table) {
             return self
                 .branching()?
-                .vector_search_on_branch(table, &branch, column, query, k, &filter, opts)
+                .vector_search_on_branch(table, &branch, column, query, k, metric, &filter, opts)
                 .await;
         }
-        self.inner
-            .vector_search(table, column, query, k, metric, filter, opts, counters)
-            .await
+        Ok(Vec::new())
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn multivector_search(
         &self,
         table: &str,
-        column: &str,
-        query: &[Vec<f32>],
-        k: usize,
-        metric: DistanceMetric,
-        filter: FilterExpr,
-        opts: VectorQueryOpts,
-        counters: Option<std::sync::Arc<crate::runtime::counters::QueryCounters>>,
+        _column: &str,
+        _query: &[Vec<f32>],
+        _k: usize,
+        _metric: DistanceMetric,
+        _filter: FilterExpr,
+        _opts: VectorQueryOpts,
+        _counters: Option<std::sync::Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<Vec<RecordBatch>> {
         // Multi-vector retrieval over a forked/branched dataset has no Lance ANN
         // path — there is no per-branch multi-vector `nearest` (and lancedb
@@ -374,9 +367,7 @@ impl StorageBackend for BranchedBackend {
                  StorageManager::multivector_search (branch scan + MaxSim re-rank)"
             );
         }
-        self.inner
-            .multivector_search(table, column, query, k, metric, filter, opts, counters)
-            .await
+        Ok(Vec::new())
     }
 
     async fn full_text_search(
@@ -386,7 +377,7 @@ impl StorageBackend for BranchedBackend {
         query: &str,
         k: usize,
         filter: FilterExpr,
-        counters: Option<std::sync::Arc<crate::runtime::counters::QueryCounters>>,
+        _counters: Option<std::sync::Arc<crate::runtime::counters::QueryCounters>>,
     ) -> Result<Vec<RecordBatch>> {
         // Phase 5b: same per-branch routing as vector_search. Lance's
         // FTS query on a branch surfaces fork-local + parent-inherited
@@ -398,9 +389,7 @@ impl StorageBackend for BranchedBackend {
                 .full_text_search_on_branch(table, &branch, column, query, k, &filter)
                 .await;
         }
-        self.inner
-            .full_text_search(table, column, query, k, filter, counters)
-            .await
+        Ok(Vec::new())
     }
 
     // ── Lifecycle / writes — Phase 2 routes to the fork's branches ──
@@ -412,11 +401,17 @@ impl StorageBackend for BranchedBackend {
     // creation for new labels).
 
     async fn table_names(&self) -> Result<Vec<String>> {
-        self.inner.table_names().await
+        Ok(self
+            .inner
+            .table_names()
+            .await?
+            .into_iter()
+            .filter(|name| self.scope.branch_for(name).is_some())
+            .collect())
     }
 
     async fn table_exists(&self, name: &str) -> Result<bool> {
-        self.inner.table_exists(name).await
+        Ok(self.scope.branch_for(name).is_some())
     }
 
     async fn create_table(&self, name: &str, batches: Vec<RecordBatch>) -> Result<()> {
@@ -476,15 +471,12 @@ impl StorageBackend for BranchedBackend {
         // scan paths project an explicit column list, which hard-errors on a
         // column the branch has never seen. Widen the branch itself.
         //
-        // When the fork has no branch for this table yet, `ensure_branch_for_existing`
-        // cuts one from primary's *current* version, which already carries any
-        // widening primary has had. When primary has no dataset either, there
-        // is nothing to widen: the first write materializes it from the full
-        // declared schema via `ensure_branch_for_new`.
-        let branch = match self.ensure_branch_for_existing(table_name).await {
-            Ok(b) => b,
-            Err(_) => return Ok(()),
-        };
+        // An unbranched table is absent in this snapshot; there is nothing to
+        // widen until a first write materializes its private empty branch.
+        if self.scope.branch_for(table_name).is_none() {
+            return Ok(());
+        }
+        let branch = self.ensure_branch_for_existing(table_name).await?;
         self.branching()?
             .evolve_branch_schema(table_name, &branch, add, relax_nullable)
             .await

@@ -1,0 +1,458 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling libc v0.2.186
+   Compiling serde v1.0.228
+   Compiling once_cell v1.21.4
+   Compiling scopeguard v1.2.0
+   Compiling serde_json v1.0.150
+   Compiling stable_deref_trait v1.2.1
+   Compiling getrandom v0.3.4
+   Compiling indexmap v2.14.0
+   Compiling either v1.16.0
+   Compiling rustls v0.23.46
+   Compiling num-bigint v0.4.6
+   Compiling lock_api v0.4.14
+   Compiling num-complex v0.4.6
+   Compiling ahash v0.8.12
+   Compiling simd-adler32 v0.3.9
+   Compiling memchr v2.8.2
+   Compiling rustix v1.1.4
+   Compiling hashbrown v0.15.5
+   Compiling aho-corasick v1.1.4
+   Compiling tracing-core v0.1.36
+   Compiling miniz_oxide v0.8.9
+   Compiling itertools v0.14.0
+   Compiling sha2 v0.10.9
+   Compiling arrayvec v0.7.6
+   Compiling bytes-utils v0.1.4
+   Compiling bytes v1.11.1
+   Compiling object v0.37.3
+   Compiling flate2 v1.1.9
+   Compiling syn v2.0.117
+   Compiling syn v3.0.6
+   Compiling petgraph v0.8.3
+   Compiling jobserver v0.1.34
+   Compiling errno v0.3.14
+   Compiling mio v1.2.1
+   Compiling signal-hook-registry v1.4.8
+   Compiling socket2 v0.6.4
+   Compiling getrandom v0.2.17
+   Compiling cc v1.2.64
+   Compiling getrandom v0.4.2
+   Compiling arrow-schema v58.3.0
+   Compiling uuid v1.23.3
+   Compiling rand_core v0.9.5
+   Compiling rand v0.10.1
+   Compiling regex-automata v0.4.14
+   Compiling rand_core v0.6.4
+   Compiling cmake v0.1.58
+   Compiling signature v2.2.0
+   Compiling scrypt v0.11.0
+   Compiling tempfile v3.27.0
+   Compiling aws-smithy-types v1.5.0
+   Compiling pkcs5 v0.7.1
+   Compiling regex-syntax v0.8.11
+   Compiling ar_archive_writer v0.5.2
+   Compiling pkcs8 v0.10.2
+   Compiling synstructure v0.13.2
+   Compiling pkcs1 v0.7.5
+   Compiling prettyplease v0.2.37
+   Compiling bigdecimal v0.4.10
+   Compiling const-random-macro v0.1.16
+   Compiling const-random v0.1.18
+   Compiling num_cpus v1.17.0
+   Compiling regex v1.12.4
+   Compiling dlv-list v0.5.2
+   Compiling ordered-float v5.3.0
+   Compiling ordered-multimap v0.7.3
+   Compiling hashbrown v0.16.1
+   Compiling rust-ini v0.21.3
+   Compiling darling_core v0.23.0
+   Compiling serde_core v1.0.228
+   Compiling aws-smithy-query v0.60.15
+   Compiling matrixmultiply v0.3.10
+   Compiling io-uring v0.7.12
+   Compiling data-encoding v2.11.0
+   Compiling rayon v1.12.0
+   Compiling aws-lc-sys v0.45.0
+   Compiling ring v0.17.14
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling liblzma-sys v0.4.6
+   Compiling psm v0.1.31
+   Compiling stacker v0.1.24
+   Compiling blake3 v1.8.5
+   Compiling lz4-sys v1.11.1+lz4-1.10.0
+   Compiling lance-linalg v11.0.0
+   Compiling dirs-sys v0.5.0
+   Compiling ed25519 v2.2.3
+   Compiling dirs v6.0.0
+   Compiling libsais-rs v0.2.2
+   Compiling ndarray v0.16.1
+   Compiling wait-timeout v0.2.1
+   Compiling uni-xervo v0.18.1
+   Compiling rusty-fork v0.3.1
+   Compiling quanta v0.12.6
+   Compiling ndarray v0.17.2
+   Compiling stop-words v0.10.0
+   Compiling rand_xoshiro v0.7.0
+   Compiling rand_xorshift v0.4.0
+   Compiling serde_derive v1.0.228
+   Compiling zerocopy-derive v0.8.52
+   Compiling futures-macro v0.3.32
+   Compiling tokio-macros v2.7.0
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.6
+   Compiling tracing-attributes v0.1.31
+   Compiling bytemuck_derive v1.10.2
+   Compiling thiserror-impl v2.0.18
+   Compiling liblzma v0.4.6
+   Compiling async-trait v0.1.92
+   Compiling recursive-proc-macro-impl v0.1.1
+   Compiling futures-util v0.3.32
+   Compiling sqlparser_derive v0.5.0
+   Compiling pin-project-internal v1.1.13
+   Compiling bytemuck v1.25.0
+   Compiling datafusion-macros v54.1.0
+   Compiling futures-executor v0.3.32
+   Compiling recursive v0.1.1
+   Compiling prost-derive v0.14.4
+   Compiling futures v0.3.32
+   Compiling aws-smithy-runtime-api-macros v1.0.0
+   Compiling snafu-derive v0.9.1
+   Compiling zerocopy v0.8.52
+   Compiling roaring v0.11.4
+   Compiling tracing v0.1.44
+   Compiling lance-derive v11.0.0
+   Compiling darling_macro v0.23.0
+   Compiling serde_repr v0.1.20
+   Compiling zerofrom v0.1.8
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.8
+   Compiling ppv-lite86 v0.2.21
+   Compiling zerotrie v0.2.5
+   Compiling half v2.7.1
+   Compiling rand_chacha v0.9.0
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.5
+   Compiling icu_locale_core v2.3.0
+   Compiling icu_collections v2.3.0
+   Compiling arrow-buffer v58.3.0
+   Compiling rand v0.9.4
+   Compiling thiserror v2.0.18
+   Compiling sqlparser v0.62.0
+   Compiling rand_chacha v0.3.1
+   Compiling darling v0.23.0
+   Compiling serde_with_macros v3.21.0
+   Compiling smallvec v1.15.2
+   Compiling chrono v0.4.45
+   Compiling parking_lot_core v0.9.12
+   Compiling icu_provider v2.3.1
+   Compiling arrow-data v58.3.0
+   Compiling parking_lot v0.12.5
+   Compiling icu_normalizer v2.3.0
+   Compiling tokio v1.53.3
+   Compiling icu_properties v2.3.0
+   Compiling chrono-tz v0.10.4
+   Compiling serde_urlencoded v0.7.1
+   Compiling twox-hash v2.1.2
+   Compiling quick-xml v0.39.4
+   Compiling pin-project v1.1.13
+   Compiling dashmap v6.2.1
+   Compiling lz4_flex v0.13.1
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling rand v0.8.6
+   Compiling quick-xml v0.41.0
+   Compiling jsonb v0.5.6
+   Compiling url v2.5.8
+   Compiling num-bigint-dig v0.8.6
+   Compiling prost v0.14.4
+   Compiling rsa v0.9.10
+   Compiling prost-types v0.14.4
+   Compiling quick_cache v0.6.24
+   Compiling tokio-util v0.7.18
+   Compiling tower v0.5.3
+   Compiling reqsign-core v3.3.1
+   Compiling aws-smithy-async v1.2.14
+   Compiling h2 v0.4.18
+   Compiling aws-smithy-runtime-api v1.12.3
+   Compiling datafusion-common-runtime v54.1.0
+   Compiling opendal-core v0.58.2
+   Compiling prost-build v0.14.4
+   Compiling aws-smithy-schema v0.1.0
+   Compiling aws-credential-types v1.2.14
+   Compiling arrow-array v58.3.0
+   Compiling aws-smithy-http v0.63.6
+   Compiling snafu v0.9.1
+   Compiling aws-smithy-observability v0.2.6
+   Compiling reqsign-aws-core v3.1.1
+   Compiling reqsign-file-read-tokio v3.0.6
+   Compiling moka v0.12.15
+   Compiling aws-sigv4 v1.4.5
+   Compiling hyper v1.10.1
+   Compiling aws-types v1.3.16
+   Compiling reqsign-aws-v4 v3.3.0
+   Compiling opendal-service-azure-common v0.58.2
+   Compiling hyper-util v0.1.20
+   Compiling arrow-select v58.3.0
+   Compiling arrow-row v58.3.0
+   Compiling arrow-arith v58.3.0
+   Compiling aws-smithy-json v0.62.7
+   Compiling reqsign-azure-storage v3.2.1
+   Compiling reqsign-google v3.1.1
+   Compiling backon v1.6.0
+   Compiling arrow-ord v58.3.0
+   Compiling arrow-string v58.3.0
+   Compiling opendal-layer-retry v0.58.2
+   Compiling opendal-service-azdls v0.58.2
+   Compiling opendal-service-gcs v0.58.2
+   Compiling opendal-service-azblob v0.58.2
+   Compiling arrow-cast v58.3.0
+   Compiling opendal-service-s3 v0.58.2
+   Compiling opendal-layer-timeout v0.58.2
+   Compiling opendal-layer-logging v0.58.2
+   Compiling opendal-layer-concurrent-limit v0.58.2
+   Compiling arrow-json v58.3.0
+   Compiling arrow-csv v58.3.0
+   Compiling serde_with v3.21.0
+   Compiling tokio-stream v0.1.18
+   Compiling lance-encoding v11.0.0
+   Compiling path_abs v0.5.1
+   Compiling data-encoding-macro-internal v0.1.18
+   Compiling match-lookup v0.1.2
+   Compiling data-encoding-macro v0.1.20
+   Compiling lz4 v1.28.1
+   Compiling lance-file v11.0.0
+   Compiling fsst v11.0.0
+   Compiling zstd-safe v7.2.4
+   Compiling zstd v0.13.3
+   Compiling compression-codecs v0.4.38
+   Compiling async-compression v0.4.42
+   Compiling arrow-ipc v58.3.0
+   Compiling hyperloglogplus v0.4.1
+   Compiling tower-http v0.6.11
+   Compiling lance-datafusion v11.0.0
+   Compiling base256emoji v1.0.2
+   Compiling multibase v0.9.2
+   Compiling lance-table v11.0.0
+   Compiling fail v0.5.1
+   Compiling uni-btic v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-btic)
+   Compiling arrow v58.3.0
+   Compiling icu_locale_fallback v2.3.0
+   Compiling ulid v1.2.1
+   Compiling rmp-serde v1.3.1
+   Compiling uni-sparse-vector v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-sparse-vector)
+   Compiling phf_macros v0.11.3
+   Compiling curve25519-dalek-derive v0.1.1
+   Compiling async-recursion v1.1.1
+   Compiling icu_segmenter v2.3.0
+   Compiling lance-arrow-scalar v58.0.0
+   Compiling lance-index v11.0.0
+   Compiling lance-tokenizer v11.0.0
+   Compiling lance-arrow-stats v58.0.0
+   Compiling lance v11.0.0
+   Compiling nibble_vec v0.1.0
+   Compiling rand_distr v0.5.1
+   Compiling radix_trie v0.2.1
+   Compiling metrics-util v0.20.4
+   Compiling proptest v1.11.0
+   Compiling phf v0.11.3
+   Compiling cron v0.16.0
+   Compiling curve25519-dalek v4.1.3
+   Compiling ed25519-dalek v2.2.0
+   Compiling lance-arrow v11.0.0
+   Compiling aws-lc-rs v1.18.1
+   Compiling rustls-webpki v0.103.16
+   Compiling tokio-rustls v0.26.4
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.12.28
+   Compiling aws-smithy-http-client v1.1.13
+   Compiling reqwest v0.13.4
+   Compiling aws-smithy-runtime v1.11.3
+   Compiling object_store v0.13.2
+   Compiling lance-namespace-reqwest-client v0.11.1
+   Compiling opendal-http-transport-reqwest v0.58.2
+   Compiling opendal v0.58.2
+   Compiling aws-runtime v1.7.4
+   Compiling aws-sdk-sts v1.106.0
+   Compiling aws-sdk-sso v1.101.0
+   Compiling aws-sdk-ssooidc v1.103.0
+   Compiling aws-config v1.8.18
+   Compiling parquet v58.3.0
+   Compiling object_store_opendal v0.58.0
+   Compiling uni-common v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-common)
+   Compiling datafusion-common v54.1.0
+   Compiling datafusion-expr-common v54.1.0
+   Compiling datafusion-physical-expr-common v54.1.0
+   Compiling datafusion-functions-window-common v54.1.0
+   Compiling datafusion-functions-aggregate-common v54.1.0
+   Compiling datafusion-expr v54.1.0
+   Compiling datafusion-physical-expr v54.1.0
+   Compiling datafusion-execution v54.1.0
+   Compiling datafusion-functions v54.1.0
+   Compiling datafusion-functions-aggregate v54.1.0
+   Compiling datafusion-optimizer v54.1.0
+   Compiling datafusion-functions-window v54.1.0
+   Compiling datafusion-physical-plan v54.1.0
+   Compiling datafusion-physical-expr-adapter v54.1.0
+   Compiling datafusion-functions-nested v54.1.0
+   Compiling datafusion-sql v54.1.0
+   Compiling datafusion-session v54.1.0
+   Compiling datafusion-datasource v54.1.0
+   Compiling lance-core v11.0.0
+   Compiling datafusion-catalog v54.1.0
+   Compiling datafusion-pruning v54.1.0
+   Compiling datafusion-physical-optimizer v54.1.0
+   Compiling datafusion-datasource-parquet v54.1.0
+   Compiling datafusion-datasource-json v54.1.0
+   Compiling datafusion-datasource-csv v54.1.0
+   Compiling datafusion-datasource-arrow v54.1.0
+   Compiling lance-namespace v11.0.0
+   Compiling lance-io v11.0.0
+   Compiling lance-select v11.0.0
+   Compiling datafusion-functions-table v54.1.0
+   Compiling datafusion-catalog-listing v54.1.0
+   Compiling datafusion v54.1.0
+   Compiling lance-index-core v11.0.0
+   Compiling uni-plugin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin)
+   Compiling uni-crdt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-crdt)
+   Compiling uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8m 21s
+────────────
+ Nextest run ID fd48410a-cb48-4454-8535-75b6f3cd4287 with nextest profile: default
+    Starting 130 tests across 2 binaries (520 tests skipped)
+        PASS [   0.003s] (  1/130) uni-common graph::simple_graph::tests::test_edge_iteration
+        PASS [   0.004s] (  2/130) uni-common graph::simple_graph::tests::test_add_remove_edge
+        PASS [   0.004s] (  3/130) uni-common cypher_value_codec::extract_map_entry_raw_tells_absent_from_corrupt::an_absent_key_is_ok_none
+        PASS [   0.004s] (  4/130) uni-common graph::simple_graph::tests::test_edge_lookup_o1
+        PASS [   0.005s] (  5/130) uni-common graph::simple_graph::position_regressions::mixed_removal_keeps_swapped_positions_and_upserts_consistent
+        PASS [   0.005s] (  6/130) uni-common cypher_value_codec::extract_map_entry_raw_tells_absent_from_corrupt::a_present_key_returns_its_bytes
+        PASS [   0.005s] (  7/130) uni-common graph::simple_graph::tests::test_add_remove_vertex
+        PASS [   0.010s] (  8/130) uni-store backend::eval::tests::large_integers_compare_exactly_against_floats
+        PASS [   0.013s] (  9/130) uni-store backend::eval::tests::in_list_with_null_renders_as_explicit_unknown
+        PASS [   0.010s] ( 10/130) uni-store backend::eval::tests::raw_and_cross_domain_refuse_loudly
+        PASS [   0.011s] ( 11/130) uni-store backend::eval::tests::null_yields_unknown_not_false
+        PASS [   0.015s] ( 12/130) uni-common graph::simple_graph::tests::test_neighbor_iteration_after_deletion
+        PASS [   0.016s] ( 13/130) uni-common graph::simple_graph::tests::test_remove_vertex_with_edges
+        PASS [   0.014s] ( 14/130) uni-store backend::eval::tests::scalar_from_value_excludes_null_so_producers_keep_bailing
+        PASS [   0.015s] ( 15/130) uni-store backend::eval::tests::wildcard_pattern_refuses_in_sql_but_evaluates_exactly
+        PASS [   0.016s] ( 16/130) uni-store backend::eval::tests::sql_pushable_drops_an_or_whole_never_one_branch
+        PASS [   0.018s] ( 17/130) uni-store backend::eval::tests::u64_sentinels_survive_the_int_domain
+        PASS [   0.015s] ( 18/130) uni-store backend::eval::tests::nan_is_unordered_so_every_comparison_is_unknown
+        PASS [   0.026s] ( 19/130) uni-store backend::eval::tests::apostrophes_round_trip_through_the_single_escaper
+        PASS [   0.016s] ( 20/130) uni-store backend::fts_analyzer::tests::analyzer_full_config_maps_fields
+        PASS [   0.017s] ( 21/130) uni-store backend::eval::tests::empty_in_is_false_and_renders
+        PASS [   0.027s] ( 22/130) uni-store backend::eval::tests::in_with_null_is_unknown_only_on_miss
+        PASS [   0.029s] ( 23/130) uni-store backend::eval::tests::not_and_of_two_in_lists_with_null_agrees_with_lance
+        PASS [   0.029s] ( 24/130) uni-store backend::eval::tests::mixed_numeric_compares_by_value_not_representation
+        PASS [   0.015s] ( 25/130) uni-store backend::fts_analyzer::tests::analyzer_unsupported_stopword_language_ok_when_disabled
+        PASS [   0.018s] ( 26/130) uni-store backend::fts_analyzer::tests::custom_passthrough_preserves_name
+        PASS [   0.018s] ( 27/130) uni-store backend::fts_analyzer::tests::analyzer_unsupported_stopword_language_rejected
+        PASS [   0.018s] ( 28/130) uni-store backend::fts_analyzer::tests::analyzer_unsupported_stopword_language_ok_with_custom_list
+        PASS [   0.021s] ( 29/130) uni-store backend::fts_analyzer::tests::analyzer_ngram_base_forces_position_off_and_validates
+        PASS [   0.031s] ( 30/130) uni-store backend::eval::tests::rendered_compare_narrows_a_real_scan
+        PASS [   0.016s] ( 31/130) uni-store backend::fts_analyzer::tests::ngram_forces_position_off
+        PASS [   0.015s] ( 32/130) uni-store backend::fts_analyzer::tests::ngram_min_greater_than_max_rejected
+        PASS [   0.039s] ( 33/130) uni-store backend::eval::tests::not_and_of_two_multi_value_in_lists_agrees_with_lance
+        PASS [   0.015s] ( 34/130) uni-store backend::fts_analyzer::tests::whitespace_maps_to_whitespace
+        PASS [   0.016s] ( 35/130) uni-store backend::fts_analyzer::tests::standard_maps_to_simple
+        PASS [   0.022s] ( 36/130) uni-store backend::fts_analyzer::tests::ngram_min_zero_rejected
+        PASS [   0.023s] ( 37/130) uni-store backend::lance::tests::staged_append_is_invisible_until_published
+        PASS [   0.018s] ( 38/130) uni-store backend::lance::tests::test_get_table_schema
+        PASS [   0.026s] ( 39/130) uni-store backend::lance::tests::held_staged_files_survive_cleanup
+        PASS [   0.018s] ( 40/130) uni-store backend::lance::tests::test_replace_table_atomic
+        PASS [   0.027s] ( 41/130) uni-store backend::lance::tests::lance_directory_listing_matches_lancedb
+        PASS [   0.020s] ( 42/130) uni-store backend::lance::tests::test_recover_staging
+        PASS [   0.020s] ( 43/130) uni-store backend::lance::tests::test_cache_invalidation
+        PASS [   0.025s] ( 44/130) uni-store backend::lance::tests::test_scan_propagates_errors_but_tolerates_missing_table
+        PASS [   0.027s] ( 45/130) uni-store backend::lance::tests::test_version_and_rollback
+        PASS [   0.031s] ( 46/130) uni-store backend::lance::tests::test_scan_with_filter
+        PASS [   0.032s] ( 47/130) uni-store backend::lance::tests::test_table_lifecycle
+        PASS [   0.028s] ( 48/130) uni-store backend::lance::tests::test_write_append_and_overwrite
+        PASS [   0.042s] ( 49/130) uni-store backend::lance::tests::staged_record_publishes_exactly_once
+        PASS [   0.020s] ( 50/130) uni-store backend::lance_branch::tests::current_version_returns_positive_value
+        PASS [   0.019s] ( 51/130) uni-store backend::lance_branch::tests::delete_missing_branch_is_force_safe
+        PASS [   0.021s] ( 52/130) uni-store backend::lance_branch::tests::create_open_list_delete_roundtrip
+        PASS [   0.023s] ( 53/130) uni-store backend::lance_branch::tests::create_list_delete_tag_roundtrip
+        PASS [   0.021s] ( 54/130) uni-store backend::lance_branch::tests::parent_writes_after_branch_invisible_to_branch
+        PASS [   0.037s] ( 55/130) uni-store backend::lance_branch::tests::create_branch_from_chains_through_parent
+        PASS [   0.076s] ( 56/130) uni-store backend::eval::tests::i64_min_operand_renders_and_agrees_with_eval
+        PASS [   0.040s] ( 57/130) uni-store backend::lance_branch::tests::create_branch_not_idempotent_at_same_version
+        PASS [   0.013s] ( 58/130) uni-store runtime::l0::tests::merge_and_clone_leave_the_identity_memo_charge_out
+        PASS [   0.011s] ( 59/130) uni-store runtime::l0::tests::test_l0_buffer_edge_type_filter
+        PASS [   0.012s] ( 60/130) uni-store runtime::l0::tests::replay_reconstructs_what_the_live_vertex_write_produced
+        PASS [   0.012s] ( 61/130) uni-store runtime::l0::tests::replay_reconstructs_what_the_live_edge_write_produced
+        PASS [   0.015s] ( 62/130) uni-store backend::table_names::tests::adjacency_table_name_is_canonical
+        PASS [   0.018s] ( 63/130) uni-store backend::lance_fts::tests::schemaless_bm25_checks_budget_during_statistics
+        PASS [   0.013s] ( 64/130) uni-store runtime::l0::tests::test_edge_type_mapping_survives_multiple_replays
+        PASS [   0.030s] ( 65/130) uni-store backend::lance_branch::tests::phase249_spike_add_column_preserves_scalar_index
+        PASS [   0.017s] ( 66/130) uni-store runtime::l0::key_retirement_regressions::reverse_keys_preserve_reassigned_owners_and_cascade_retirement
+        PASS [   0.041s] ( 67/130) uni-store backend::lance_branch::tests::create_tag_pins_version_at_call_time
+        PASS [   0.043s] ( 68/130) uni-store backend::lance_branch::tests::current_version_on_branch_tracks_branch_tip
+        PASS [   0.069s] ( 69/130) uni-store backend::lance::tests::lock_table_for_write_provides_mutual_exclusion
+        PASS [   0.015s] ( 70/130) uni-store runtime::l0::tests::test_l0_buffer_incoming_edges
+        PASS [   0.013s] ( 71/130) uni-store runtime::l0::tests::test_l0_buffer_ops
+        PASS [   0.013s] ( 72/130) uni-store runtime::l0::tests::test_replay_mutations_backward_compat_empty_labels
+        PASS [   0.036s] ( 73/130) uni-store backend::lance_branch::tests::phase5a_spike_per_branch_index
+        PASS [   0.017s] ( 74/130) uni-store runtime::l0::tests::test_merge_created_at_not_overwritten_for_existing_vertex
+        PASS [   0.017s] ( 75/130) uni-store runtime::l0::tests::test_merge_empty_props_edge
+        PASS [   0.016s] ( 76/130) uni-store runtime::l0::tests::test_merge_preserves_vertex_timestamps
+        PASS [   0.017s] ( 77/130) uni-store runtime::l0::tests::test_merge_preserves_edge_timestamps
+        PASS [   0.016s] ( 78/130) uni-store runtime::l0::tests::test_now_nanos_returns_nanosecond_range
+        PASS [   0.040s] ( 79/130) uni-store backend::lance_branch::tests::phase249_spike_stale_handle_widening_conflicts
+        PASS [   0.020s] ( 80/130) uni-store runtime::l0::tests::test_l0_buffer_multiple_edges
+        PASS [   0.014s] ( 81/130) uni-store runtime::l0::tests::test_replay_mutations_combined_labels_and_edge_types
+        PASS [   0.019s] ( 82/130) uni-store runtime::l0::tests::test_replay_crdt_merge
+        PASS [   0.013s] ( 83/130) uni-store runtime::l0::tests::test_replay_mutations_preserves_edge_type_name
+        PASS [   0.017s] ( 84/130) uni-store runtime::l0::tests::test_replay_mutations_preserves_delete_vertex_labels
+        PASS [   0.048s] ( 85/130) uni-store backend::lance_branch::tests::phase249_spike_add_nullable_column_on_branch
+        PASS [   0.016s] ( 86/130) uni-store runtime::l0::tests::test_replay_mutations_preserves_vertex_labels
+        PASS [   0.089s] ( 87/130) uni-store backend::lance::tests::lance_scan_polled_after_its_runtime_is_dropped_panics_in_lance
+        PASS [   0.012s] ( 88/130) uni-store runtime::l0_manager::snapshot_tests::clone_freeze_isolates_pinned_snapshot
+        PASS [   0.014s] ( 89/130) uni-store runtime::l0::tests::validate_merge_allows_edge_when_endpoint_reinserted
+        PASS [   0.015s] ( 90/130) uni-store runtime::l0::tests::validate_merge_rejects_edge_to_tombstoned_endpoint
+        PASS [   0.014s] ( 91/130) uni-store runtime::l0_manager::snapshot_tests::snapshot_isolated_from_later_writes
+        PASS [   0.011s] ( 92/130) uni-store runtime::l0_visibility::tests::test_lookup_vertex_prop_in_main_l0
+        PASS [   0.012s] ( 93/130) uni-store runtime::l0_visibility::tests::test_keyed_reads_noop_without_read_set
+        PASS [   0.016s] ( 94/130) uni-store runtime::l0_visibility::tests::test_accumulate_vertex_props
+        PASS [   0.016s] ( 95/130) uni-store runtime::l0_visibility::tests::l0_edge_lookup_records_every_requested_eid
+        PASS [   0.018s] ( 96/130) uni-store runtime::l0_manager::snapshot_tests::pin_marks_current_generation
+        PASS [   0.017s] ( 97/130) uni-store runtime::l0_visibility::tests::test_is_vertex_deleted_empty_ctx
+        PASS [   0.024s] ( 98/130) uni-store runtime::l0::tests::validate_merge_allows_edge_to_live_endpoints
+        PASS [   0.097s] ( 99/130) uni-store backend::lance::tests::probe_compaction_moves_lance_io_counts
+        PASS [   0.018s] (100/130) uni-store runtime::l0_visibility::tests::test_is_vertex_deleted_in_main_l0
+        PASS [   0.013s] (101/130) uni-store runtime::l0_visibility::tests::test_transaction_l0_takes_precedence
+        PASS [   0.018s] (102/130) uni-store runtime::l0_visibility::tests::test_keyed_reads_recorded_in_ssi_read_set
+        PASS [   0.014s] (103/130) uni-store runtime::occ::key_history_regressions::key_claims_conflict_across_distinct_ids_and_history_truncation
+        PASS [   0.014s] (104/130) uni-store runtime::occ::tests::crdt_carveout_overwrite_allows_new_vertex
+        PASS [   0.017s] (105/130) uni-store runtime::occ::tests::commit_at_or_before_read_seq_is_ignored
+        PASS [   0.016s] (106/130) uni-store runtime::occ::tests::commit_bumps_sequence_and_records
+        PASS [   0.015s] (107/130) uni-store runtime::occ::tests::crdt_carveout_overwrite_detects_variant_mismatch
+        PASS [   0.014s] (108/130) uni-store runtime::occ::tests::crdt_only_write_without_labels_is_carved_out
+        PASS [   0.019s] (109/130) uni-store runtime::occ::tests::crdt_carveout_overwrite_allows_same_variant
+        PASS [   0.020s] (110/130) uni-store runtime::occ::tests::crdt_carveout_overwrite_ignores_conflictable_writes
+        PASS [   0.016s] (111/130) uni-store runtime::occ::tests::long_lived_reader_within_retained_history_does_not_abort
+        PASS [   0.017s] (112/130) uni-store runtime::occ::tests::intersects_detects_overlapping_edges
+        PASS [   0.015s] (113/130) uni-store runtime::occ::tests::mixed_crdt_and_lww_write_is_conflictable
+        PASS [   0.018s] (114/130) uni-store runtime::occ::tests::disjoint_writes_do_not_conflict
+        PASS [   0.014s] (115/130) uni-store runtime::occ::tests::read_write_antidependency_detected
+        PASS [   0.018s] (116/130) uni-store runtime::occ::tests::fence_aborts_earlier_readers_only
+        PASS [   0.015s] (117/130) uni-store runtime::occ::tests::overlapping_write_after_read_seq_conflicts
+        PASS [   0.020s] (118/130) uni-store runtime::occ::tests::crdt_write_with_labels_stays_conflictable
+        PASS [   0.016s] (119/130) uni-store runtime::occ::tests::non_crdt_write_without_labels_is_conflictable
+        PASS [   0.015s] (120/130) uni-store runtime::occ::tests::plain_map_value_is_not_mistaken_for_crdt
+        PASS [   0.014s] (121/130) uni-store runtime::occ::tests::tombstoned_vertex_is_conflictable
+        PASS [   0.019s] (122/130) uni-store runtime::occ::tests::overlapping_edge_write_after_read_seq_conflicts
+        PASS [   0.014s] (123/130) uni-store runtime::occ::tests::truncated_history_aborts_conservatively
+        PASS [   0.014s] (124/130) uni-store runtime::occ::tests::truncated_history_aborts_read_set_txn_conservatively
+        PASS [   0.080s] (125/130) uni-store backend::lance_branch::tests::phase5b_spike_per_branch_vector
+        PASS [   0.020s] (126/130) uni-store storage::main_edge::tests::test_edge_key_reads_respect_tombstone_winner
+        PASS [   0.027s] (127/130) uni-store storage::main_vertex::tests::test_vertex_key_reads_respect_tombstone_winner
+        PASS [   0.208s] (128/130) uni-store backend::eval::tests::awkward_column_names_still_reach_a_btree_index
+        PASS [   0.256s] (129/130) uni-store backend::eval::tests::awkward_column_names_agree_with_lance
+        PASS [   0.253s] (130/130) uni-store backend::eval::tests::eval_agrees_with_lance_sql
+────────────
+     Summary [   0.263s] 130 tests run: 130 passed, 520 skipped

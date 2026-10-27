@@ -1,0 +1,4 @@
+   Compiling zstd-sys v2.1.2+zstd.1.5.7
+   Compiling zstd-safe v8.2.0
+    Checking zstd-safe v7.2.4 (/home/rohit/work/dragonscale/uni/compat/zstd-safe)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.36s

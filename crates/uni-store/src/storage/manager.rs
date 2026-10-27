@@ -3562,15 +3562,16 @@ impl StorageManager {
             CardinalityKey::Vertex(label) => table_names::vertex_table_name(label),
             CardinalityKey::EdgeType(_) => table_names::main_edge_table_name().to_string(),
         };
-        if self
-            .fork_scope()
-            .and_then(|scope| scope.branch_for(&table_name))
-            .is_some()
-        {
-            return None;
-        }
-
-        let flushed = self.cardinality.get(key)?;
+        let flushed = if let Some(scope) = self.fork_scope() {
+            if scope.branch_for(&table_name).is_some() {
+                return None;
+            }
+            // Unmapped tables are absent in this fork. Its buffered rows
+            // still contribute below, independently of primary's cache.
+            0
+        } else {
+            self.cardinality.get(key)?
+        };
         let Some(l0) = l0 else {
             return Some(flushed);
         };
@@ -3596,7 +3597,8 @@ impl StorageManager {
     /// `None` without caching anything when this view cannot answer for the
     /// primary — the same fork and pin conditions the sync reader declines on,
     /// so a fork's count can never be written into the shared cache and read
-    /// back later as primary's.
+    /// back later as primary's. An unmapped fork table returns its known zero
+    /// count without storing it in that shared cache.
     ///
     /// # Errors
     ///
@@ -3619,12 +3621,10 @@ impl StorageManager {
                 Some(FilterExpr::equals("type", Scalar::Str(etype.clone()))),
             ),
         };
-        if self
-            .fork_scope()
-            .and_then(|scope| scope.branch_for(&table_name))
-            .is_some()
-        {
-            return Ok(None);
+        if let Some(scope) = self.fork_scope() {
+            // Never publish a fork's count into the shared primary cache,
+            // including the empty view of an unmapped table.
+            return Ok(scope.branch_for(&table_name).is_none().then_some(0));
         }
         if !backend.table_exists(&table_name).await? {
             self.cardinality.put(key.clone(), 0);
@@ -4648,7 +4648,28 @@ impl StorageManager {
             let fetch_k = if matches!(metric, DistanceMetric::L1) {
                 backend.count_rows(&name, None).await.unwrap_or(k).max(k)
             } else {
-                k
+                // Each buffered VID can shadow at most one latest disk row.
+                // Fetch enough unaffected neighbors even when every shadowed
+                // row precedes them. This is a data-dependent bound, not a
+                // fixed over-fetch factor.
+                let mut shadowed = HashSet::new();
+                if let Some(ctx) = ctx {
+                    for buffer in l0_buffers_in_precedence(ctx) {
+                        let buffer = buffer.read();
+                        shadowed.extend(buffer.vertex_properties.iter().filter_map(
+                            |(vid, props)| {
+                                let relevant = buffer.vertex_labels.get(vid).is_none_or(|labels| {
+                                    labels.is_empty() || labels.iter().any(|l| l == label)
+                                });
+                                (relevant && (props.contains_key(property) || filter.is_some()))
+                                    .then_some(*vid)
+                            },
+                        ));
+                        shadowed.extend(buffer.vertex_tombstones.iter().copied());
+                        shadowed.extend(buffer.vertex_label_overwrites.iter().copied());
+                    }
+                }
+                k.saturating_add(shadowed.len())
             };
 
             // Cap the *work* a defaulted refine may do, now that `fetch_k` is
@@ -4677,8 +4698,12 @@ impl StorageManager {
                     .await?;
                 let returned: usize = raw.iter().map(|b| b.num_rows()).sum();
                 let (kept, dropped) = self.keep_latest_row_versions(&name, raw, hwm).await?;
-                if dropped == 0 || returned < fetch || fetch >= fetch_k.saturating_mul(8) {
+                let kept_rows: usize = kept.iter().map(|b| b.num_rows()).sum();
+                if dropped == 0 || kept_rows >= fetch_k || returned < fetch || fetch == usize::MAX {
                     break kept;
+                }
+                if let Some(ctx) = ctx {
+                    ctx.check_timeout()?;
                 }
                 fetch = fetch.saturating_mul(2);
             };
@@ -5869,6 +5894,7 @@ fn merge_l0_into_vector_results(
     let mut l0_candidates: HashMap<Vid, f32> = HashMap::new();
     // Tombstoned VIDs across all L0 buffers.
     let mut tombstoned: HashSet<Vid> = HashSet::new();
+    let mut label_membership = HashMap::new();
 
     for buf_arc in &buffers {
         let buf = buf_arc.read();
@@ -5878,11 +5904,27 @@ fn merge_l0_into_vector_results(
             tombstoned.insert(vid);
         }
 
+        for vid in &buf.vertex_label_overwrites {
+            label_membership.insert(
+                *vid,
+                buf.vertex_labels
+                    .get(vid)
+                    .is_some_and(|labels| labels.iter().any(|l| l == label)),
+            );
+        }
+
         // Scan vertices with the target label.
         for (&vid, labels) in &buf.vertex_labels {
             deadline.tick()?;
-            if !labels.iter().any(|l| l == label) {
+            if buf.vertex_tombstones.contains(&vid) || !labels.iter().any(|l| l == label) {
                 continue;
+            }
+            if let Some(props) = buf.vertex_properties.get(&vid)
+                && props.contains_key(property)
+                && extract_embedding_from_props(props, property).is_none()
+            {
+                l0_candidates.remove(&vid);
+                tombstoned.insert(vid);
             }
             if let Some(props) = buf.vertex_properties.get(&vid)
                 && let Some(emb) = extract_embedding_from_props(props, property)
@@ -5908,6 +5950,11 @@ fn merge_l0_into_vector_results(
     // A vertex whose current (unflushed) row fails the search's filter is out,
     // however its flushed row scored: drop it exactly like a tombstone.
     tombstoned.extend(excluded.iter().copied());
+    tombstoned.extend(
+        label_membership
+            .into_iter()
+            .filter_map(|(vid, member)| (!member).then_some(vid)),
+    );
 
     // If no L0 activity affects this search, skip merge.
     if l0_candidates.is_empty() && tombstoned.is_empty() {

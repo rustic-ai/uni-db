@@ -1,0 +1,47 @@
+"""Run the review probes through Uni's existing integration test binary.
+
+The temporary module registration is removed after nextest exits, including on
+test failure. No Git commands are used. The reviewed source fails all 11 probes.
+"""
+
+import json
+import os
+from pathlib import Path
+import subprocess
+
+
+def main() -> int:
+    evidence_dir = Path(__file__).resolve().parent
+    root = evidence_dir.parents[2]
+    integration = root / "crates/uni/tests/integration.rs"
+    test_path = os.path.relpath(evidence_dir / "regressions.rs", integration.parent)
+    registration = (
+        "\n// Temporary codebase review probes.\n"
+        f"#[path = {json.dumps(test_path)}]\n"
+        "mod review_20261026;\n"
+    )
+    source = integration.read_text()
+    if "mod review_20261026;" in source:
+        raise SystemExit("Review probes are already registered; refusing to duplicate them.")
+
+    integration.write_text(source + registration)
+    try:
+        result = subprocess.run(
+            [
+                "cargo", "nextest", "run", "-p", "uni-db", "--test", "integration",
+                "-E", "test(review_20261026)", "--no-fail-fast",
+            ],
+            cwd=root,
+            env={**os.environ, "RUSTC_WRAPPER": ""},
+            check=False,
+        )
+        return result.returncode
+    finally:
+        current = integration.read_text()
+        if current.count(registration) != 1:
+            raise RuntimeError("Temporary registration changed; inspect integration.rs manually.")
+        integration.write_text(current.replace(registration, ""))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,25 @@
+{
+  "status": 0,
+  "targets": [
+    {
+      "name": "cypher_parse",
+      "runs": 6311,
+      "seconds": 35
+    },
+    {
+      "name": "locy_parse",
+      "runs": 27625,
+      "seconds": 31
+    },
+    {
+      "name": "wal_decode",
+      "runs": 1062676,
+      "seconds": 31
+    },
+    {
+      "name": "btic_decode",
+      "runs": 11336352,
+      "seconds": 31
+    }
+  ]
+}

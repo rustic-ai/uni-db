@@ -2030,19 +2030,68 @@ mod tests {
     use arrow_schema::{DataType, Field};
     use tempfile::TempDir;
 
-    /// Pins a Lance 11 defect: a scan whose fragment reads were spawned on a
-    /// runtime that is then dropped, polled afterwards, panics in Lance
-    /// (`io/exec/filtered_read.rs`: `.map(|thread_result| thread_result.unwrap())`
-    /// over the cancelled `SpawnedTask`) instead of returning an error.
+    /// Pins Lance 11's cancelled-runtime defect: the scan panics on a
+    /// cancelled SpawnedTask, or hangs during cancellation/read-back. Probe
+    /// each mode in a child so the latter cannot hang this test process.
     ///
-    /// Uni drives the scan that outlives its caller's runtime -- a bulk load's
-    /// event read-back -- on the IO runtime instead (`uni_bulk`'s
-    /// `ScanFeed`). When this starts failing, Lance has fixed the unwrap.
+    /// Uni keeps bulk event read-back on its IO runtime (`uni_bulk::ScanFeed`).
+    /// A normal result or error here means the upstream behavior changed.
     #[test]
-    fn lance_scan_polled_after_its_runtime_is_dropped_panics_in_lance() {
-        use futures::StreamExt;
+    fn lance_scan_polled_after_its_runtime_is_dropped_fails_in_lance() {
+        const CHILD_MODE: &str = "UNI_LANCE_RUNTIME_DROP_CHILD_MODE";
+        const CHILD_DATASET: &str = "UNI_LANCE_RUNTIME_DROP_CHILD_DATASET";
+        if let Ok(mode) = std::env::var(CHILD_MODE) {
+            assert!(["first-batch", "single-poll"].contains(&mode.as_str()));
+            reproduce_cancelled_lance_scan(&mode, &std::env::var(CHILD_DATASET).unwrap());
+            return;
+        }
+
         let tmp = TempDir::new().unwrap();
-        let uri = tmp.path().join("t.lance").to_string_lossy().to_string();
+        let test_name = std::thread::current().name().unwrap().to_owned();
+        for mode in ["first-batch", "single-poll"] {
+            let path = tmp.path().join(mode);
+            let log = std::fs::File::create(&path).unwrap();
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &test_name, "--nocapture"])
+                .env(CHILD_MODE, mode)
+                .env(CHILD_DATASET, tmp.path().join(format!("{mode}.lance")))
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break Some(status);
+                }
+                if std::time::Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            };
+            let output = std::fs::read_to_string(path).unwrap();
+            if let Some(status) = status {
+                assert!(
+                    status.success() && output.contains("test result: ok. 1 passed;"),
+                    "[{mode}] unexpected probe failure: {output}"
+                );
+                eprintln!("[{mode}] reproduced Lance's cancelled-task panic");
+            } else {
+                // Only a hang after the cancellation boundary witnesses this
+                // defect. Fixture setup or an initial read timing out is a failure.
+                assert!(
+                    output.contains("LANCE_RUNTIME_DROP_CANCELLATION_STARTED"),
+                    "[{mode}] probe stalled before runtime cancellation: {output}"
+                );
+                eprintln!("[{mode}] reproduced a stall after Lance runtime cancellation");
+            }
+        }
+    }
+
+    fn reproduce_cancelled_lance_scan(mode: &str, uri: &str) {
+        use futures::StreamExt;
         let schema = Arc::new(arrow_schema::Schema::new(vec![Field::new(
             "v",
             DataType::Int64,
@@ -2066,20 +2115,20 @@ mod tests {
             };
             lance::Dataset::write(
                 arrow_array::RecordBatchIterator::new(batches, schema.clone()),
-                &uri,
+                uri,
                 Some(params),
             )
             .await
             .unwrap();
         });
-        let ds = rt_write.block_on(lance::Dataset::open(&uri)).unwrap();
+        let ds = rt_write.block_on(lance::Dataset::open(uri)).unwrap();
         assert_eq!(
             ds.get_fragments().len(),
             64,
             "premise: one fragment per row"
         );
 
-        for mode in ["first-batch", "single-poll"] {
+        {
             let rt1 = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -2092,6 +2141,7 @@ mod tests {
                     let _ = futures::poll!(stream.next());
                 }
             });
+            eprintln!("LANCE_RUNTIME_DROP_CANCELLATION_STARTED");
             drop(rt1);
             let rt2 = tokio::runtime::Runtime::new().unwrap();
             let outcome = rt2.block_on(async move {

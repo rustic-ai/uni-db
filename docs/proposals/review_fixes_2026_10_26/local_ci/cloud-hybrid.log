@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.47s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 2c065556-8b4a-40a2-85a7-fb7345032bd6 with nextest profile: default
+    Starting 1 test across 1 binary (4041 tests skipped)
+        PASS [   1.313s] (1/1) uni-db::integration hybrid_localstack_e2e::test_hybrid_localstack_from_zero_e2e
+────────────
+     Summary [   1.319s] 1 test run: 1 passed, 4041 skipped

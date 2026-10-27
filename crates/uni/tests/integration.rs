@@ -208,3 +208,6 @@ mod value_fidelity;
 mod vector_recall;
 #[path = "common/xervo_provider_registration.rs"]
 mod xervo_provider_registration;
+
+#[path = "common/review_regressions.rs"]
+mod review_regressions;

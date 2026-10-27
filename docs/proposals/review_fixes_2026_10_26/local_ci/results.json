@@ -1,0 +1,444 @@
+{
+  "scope": "Local CI for the current workspace; no commit or push performed in this turn",
+  "checks": [
+    {
+      "name": "static guards",
+      "status": "passed",
+      "log": "static.log",
+      "notes": "All 8 guards including fuzz lockfile"
+    },
+    {
+      "name": "Rust formatting",
+      "status": "passed",
+      "log": "fmt.log",
+      "notes": "cargo fmt --all -- --check"
+    },
+    {
+      "name": "initial workspace Clippy",
+      "status": "passed",
+      "log": "clippy.log",
+      "notes": "All CI targets; final rerun below checks the updated lockfile"
+    },
+    {
+      "name": "Miri",
+      "status": "passed",
+      "log": "miri.log",
+      "notes": "329 tests passed across the 3 configured crates"
+    },
+    {
+      "name": "documentation site",
+      "status": "passed",
+      "log": "site.log",
+      "notes": "Notebook conversion and strict site build"
+    },
+    {
+      "name": "generated notebooks",
+      "status": "passed",
+      "log": null,
+      "notes": "All 4 freshness checks"
+    },
+    {
+      "name": "Python lint",
+      "status": "passed",
+      "log": null,
+      "notes": "Both bindings: Ruff formatting and lint"
+    },
+    {
+      "name": "performance gate self-tests",
+      "status": "passed",
+      "log": null,
+      "notes": "iai_gate.py and iai_collect.py self-tests"
+    },
+    {
+      "name": "publish list",
+      "status": "passed",
+      "log": "publish-list.log",
+      "notes": "All 25 crates in dependency order"
+    },
+    {
+      "name": "supply chain",
+      "status": "failed",
+      "log": "deny-final.log",
+      "notes": "3 remaining advisories: RUSTSEC-2026-0391, RUSTSEC-2026-0398, RUSTSEC-2026-0403. No risk exceptions added."
+    },
+    {
+      "lane": "clippy-final",
+      "command": [
+        "cargo",
+        "clippy",
+        "--workspace",
+        "--exclude",
+        "uni-tck",
+        "--exclude",
+        "uni-python-cuda",
+        "--exclude",
+        "uni-python-metal",
+        "--exclude",
+        "uni-python-onnx-cuda",
+        "--exclude",
+        "uni-python-onnx-metal",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "status": 0,
+      "seconds": 3823.95
+    },
+    {
+      "lane": "rustdoc",
+      "command": [
+        "cargo",
+        "doc",
+        "--no-deps",
+        "--workspace",
+        "--exclude",
+        "uni-python",
+        "--exclude",
+        "uni-tck",
+        "--exclude",
+        "uni-python-onnx",
+        "--exclude",
+        "uni-python-cuda",
+        "--exclude",
+        "uni-python-metal",
+        "--exclude",
+        "uni-python-onnx-cuda",
+        "--exclude",
+        "uni-python-onnx-metal"
+      ],
+      "status": 0,
+      "seconds": 219.73
+    },
+    {
+      "lane": "loom",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "uni-store",
+        "--features",
+        "loom",
+        "--test",
+        "occ_model"
+      ],
+      "status": 0,
+      "seconds": 459.25
+    },
+    {
+      "lane": "metamorphic",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "uni-db",
+        "--test",
+        "integration",
+        "-E",
+        "test(/metamorphic::/) and not test(soak)"
+      ],
+      "status": 0,
+      "seconds": 704.51
+    },
+    {
+      "lane": "gc-trace",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "uni-plugin-builtin",
+        "-p",
+        "uni-plugin-rhai",
+        "-E",
+        "test(graph_compute)"
+      ],
+      "status": 0,
+      "seconds": 502.53
+    },
+    {
+      "lane": "failpoints",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "uni-db",
+        "-p",
+        "uni-store",
+        "--features",
+        "failpoints",
+        "--run-ignored",
+        "all",
+        "-E",
+        "test(/resilience|recovery|durability|crash_harness/)"
+      ],
+      "status": 0,
+      "seconds": 714.22
+    },
+    {
+      "lane": "recovery-default",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "uni-store",
+        "-E",
+        "test(/resilience|recovery/)"
+      ],
+      "status": 0,
+      "seconds": 494.23
+    },
+    {
+      "lane": "cloud-store",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "uni-store",
+        "--test",
+        "integration",
+        "--run-ignored",
+        "all",
+        "-E",
+        "test(/^cloud_integration_test::/)"
+      ],
+      "status": 0,
+      "seconds": 1.83
+    },
+    {
+      "lane": "cloud-hybrid",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "uni-db",
+        "--test",
+        "integration",
+        "--run-ignored",
+        "all",
+        "-E",
+        "test(/^hybrid_localstack_e2e::/)"
+      ],
+      "status": 0,
+      "seconds": 2.44
+    },
+    {
+      "lane": "onnx-wheel-check",
+      "command": [
+        "cargo",
+        "check",
+        "-p",
+        "uni-python-onnx"
+      ],
+      "status": 0,
+      "seconds": 265.4
+    },
+    {
+      "lane": "python-db-sync",
+      "command": [
+        "uv",
+        "sync",
+        "--group",
+        "dev"
+      ],
+      "status": 0,
+      "seconds": 0.09
+    },
+    {
+      "lane": "python-db-build",
+      "command": [
+        "uv",
+        "run",
+        "maturin",
+        "develop"
+      ],
+      "status": 0,
+      "seconds": 8854.55
+    },
+    {
+      "lane": "python-db-stubs",
+      "command": [
+        "uv",
+        "run",
+        "python",
+        "-m",
+        "mypy.stubtest",
+        "uni_db",
+        "--mypy-config-file",
+        "stubtest-mypy.ini",
+        "--allowlist",
+        "stubtest-allowlist.txt",
+        "--ignore-unused-allowlist",
+        "--ignore-positional-only",
+        "--ignore-disjoint-bases"
+      ],
+      "status": 0,
+      "seconds": 1.66
+    },
+    {
+      "lane": "python-db-tests",
+      "command": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/",
+        "-v",
+        "-n",
+        "auto"
+      ],
+      "status": 0,
+      "seconds": 89.93
+    },
+    {
+      "lane": "python-pydantic-sync",
+      "command": [
+        "uv",
+        "sync",
+        "--group",
+        "dev"
+      ],
+      "status": 0,
+      "seconds": 0.05
+    },
+    {
+      "lane": "python-pydantic-tests",
+      "command": [
+        "uv",
+        "run",
+        "pytest",
+        "tests/",
+        "-v",
+        "-n",
+        "auto"
+      ],
+      "status": 0,
+      "seconds": 2.47
+    },
+    {
+      "lane": "cypher-tck",
+      "command": [
+        "bash",
+        "scripts/run_tck_with_report.sh",
+        "--both"
+      ],
+      "status": 0,
+      "seconds": 8074.37
+    },
+    {
+      "lane": "locy-tck",
+      "command": [
+        "bash",
+        "scripts/run_locy_tck_with_report.sh",
+        "--both"
+      ],
+      "status": 0,
+      "seconds": 20.06
+    },
+    {
+      "name": "workspace",
+      "summary": [
+        "     Summary [ 353.380s] 8638 tests run: 8635 passed (20 slow), 3 failed, 137 skipped"
+      ],
+      "log": "workspace.log"
+    },
+    {
+      "name": "workspace-final",
+      "summary": [
+        "     Summary [ 426.860s] 8638 tests run: 8637 passed (18 slow), 1 timed out, 137 skipped"
+      ],
+      "log": "workspace-final.log"
+    },
+    {
+      "name": "workspace-green",
+      "summary": [
+        "     Summary [ 319.228s] 8638 tests run: 8638 passed (18 slow), 137 skipped"
+      ],
+      "log": "workspace-green.log"
+    },
+    {
+      "name": "fuzz",
+      "summary": [
+        "Done 6311 runs in 35 second(s)",
+        "Done 27625 runs in 31 second(s)",
+        "Done 1062676 runs in 31 second(s)",
+        "Done 11336352 runs in 31 second(s)"
+      ],
+      "log": "fuzz.log"
+    },
+    {
+      "name": "Clippy current source",
+      "status": "passed",
+      "log": "clippy-current.log"
+    },
+    {
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "--manifest-path",
+        "/home/rohit/work/dragonscale/uni/Cargo.toml",
+        "-p",
+        "uni-plugin-pyo3",
+        "--features",
+        "pyo3"
+      ],
+      "status": 0,
+      "seconds": 447.16,
+      "name": "pyo3-loader"
+    },
+    {
+      "status": 0,
+      "targets": [
+        {
+          "name": "cypher_parse",
+          "runs": 6311,
+          "seconds": 35
+        },
+        {
+          "name": "locy_parse",
+          "runs": 27625,
+          "seconds": 31
+        },
+        {
+          "name": "wal_decode",
+          "runs": 1062676,
+          "seconds": 31
+        },
+        {
+          "name": "btic_decode",
+          "runs": 11336352,
+          "seconds": 31
+        }
+      ],
+      "name": "fuzz-result"
+    },
+    {
+      "command": "cargo metadata --format-version=1 --manifest-path bindings/uni-db-cuda/Cargo.toml",
+      "status": 0,
+      "cuda_package_present": true,
+      "name": "cuda-metadata-result"
+    },
+    {
+      "name": "Python3.14 typing",
+      "status": "passed",
+      "log": "python-pydantic-mypy.log"
+    }
+  ],
+  "unrun_lanes": [
+    "CI-runner calibrated instruction-count performance gate",
+    "Flagship notebook execution",
+    "ONNX reranker feature-matrix tests",
+    "Python 3.14 wheel lane",
+    "Python WASM feature wheel lane"
+  ],
+  "overall_status": "blocked_supply_chain",
+  "selected_validation_complete": true,
+  "note": "workspace and workspace-final are historical failed attempts; workspace-green is the verified passing final workspace run. Feature lanes are recorded only after completion. Elapsed times can include deliberate waits or suspensions.",
+  "pending_lanes": []
+}

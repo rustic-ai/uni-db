@@ -1,0 +1,12 @@
+{
+  "Cargo.toml": "226a7b30e2fabd205e645de866a616d8ba4af00cbb04627f62a8ebd91072f8cc",
+  "Cargo.lock": "4f7e50a02a94ed6cee364d85c1a486dde96a7f2240bada827f9b695c02bf23c5",
+  "fuzz/Cargo.toml": "02f247e0c5bc0de23f5cb2b5df7651387ee9135d058cd7cd80cbf9f302726998",
+  "fuzz/Cargo.lock": "32dc9905a93b1f551f4a2a7819c5e2b82e64378cd233a3ee2a75a6f597ca62eb",
+  "compat/zstd/Cargo.toml": "0300caf9a779052b1795c8b6a92199bba4fc5d5df7a5c5c5c76b5ab7f9c5bfee",
+  "compat/zstd/src/lib.rs": "551074fc723d09c365ccfe45b9e35b1bd2b5b92c8224614081e347b7aae800d2",
+  "compat/zstd-safe/Cargo.toml": "fbe4c2a388178aee0be714ffda5a8afdc678700b5b49aebd4e26288941deae87",
+  "compat/zstd-safe/src/lib.rs": "68e72ce0cba37a22e74e750e0eaa720012b985eb0711ae4bd26358f9b6aa2ede",
+  "crates/uni/tests/common/review_regressions.rs": "5929c14e8ce654392ddf41610c8b822f5b3dca7d455978a776a5995d2f735bb9",
+  "deny.toml": "ce942aa45a9d567253c69d941f941fd117ee219ad078a388177b54d9f165abe5"
+}

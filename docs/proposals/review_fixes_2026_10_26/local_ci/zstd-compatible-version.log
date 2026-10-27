@@ -1,0 +1,27 @@
+    Updating crates.io index
+zstd #zstd #zstandard #compression
+Binding for the zstd compression library.
+version: 0.13.3 (latest 0.14.3)
+license: MIT
+rust-version: 1.64
+documentation: https://docs.rs/zstd
+repository: https://github.com/gyscos/zstd-rs
+crates.io: https://crates.io/crates/zstd/0.13.3
+features:
+ +default       = [legacy, arrays, zdict_builder]
+  arrays        = [zstd-safe/arrays]
+  legacy        = [zstd-safe/legacy]
+  zdict_builder = [zstd-safe/zdict_builder]
+  bindgen       = [zstd-safe/bindgen]
+  debug         = [zstd-safe/debug]
+  doc-cfg       = []
+  experimental  = [zstd-safe/experimental]
+  fat-lto       = [zstd-safe/fat-lto]
+  no_asm        = [zstd-safe/no_asm]
+  pkg-config    = [zstd-safe/pkg-config]
+  thin          = [zstd-safe/thin]
+  thin-lto      = [zstd-safe/thin-lto]
+  wasm          = []
+  zstdmt        = [zstd-safe/zstdmt]
+dependencies:
+ +zstd-safe@7.1.0

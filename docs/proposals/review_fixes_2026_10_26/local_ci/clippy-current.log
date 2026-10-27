@@ -1,0 +1,21 @@
+    Checking uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+    Checking uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+    Checking uni-query-functions v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query-functions)
+    Checking uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+    Checking uni-plugin-pyo3 v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-pyo3)
+    Checking uni-plugin-rhai v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-rhai)
+    Checking uni-plugin-wasm v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-wasm)
+    Checking uni-plugin-extism v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-extism)
+    Checking uni-query v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query)
+    Checking uni-plugin-host v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-host)
+    Checking uni-fork v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-fork)
+    Checking uni-bulk v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-bulk)
+    Checking uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Checking uni-locy-tck v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy-tck)
+    Checking uni-cli v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cli)
+    Checking uni-python-onnx v4.2.0 (/home/rohit/work/dragonscale/uni/bindings/uni-db-onnx)
+    Checking uni-python v4.2.0 (/home/rohit/work/dragonscale/uni/bindings/uni-db)
+    Checking uni-locy-oracle v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy-oracle)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 20.34s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

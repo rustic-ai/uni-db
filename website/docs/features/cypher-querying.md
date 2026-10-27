@@ -51,6 +51,19 @@ returned to the caller; `elementId(entity)` is its string representation.
 
 ## Semantics Worth Knowing
 
+- **MERGE preserves other labels.** Matching `(n:A {key: ...})` against an
+  existing `A:B` node keeps both labels, including through `ON MATCH SET`
+  property updates and when returning `labels(n)`.
+
+- **Anonymous MERGE deduplicates too.** Repeated identical inputs to
+  `MERGE (:Account {key: 'same'})` find the node created earlier in the statement,
+  just as a named pattern does. Concurrent conflicting MERGE creates can require
+  a transaction retry, including when the competing write has flushed.
+- **Recursive queries report budget exhaustion.** `WITH RECURSIVE` has a
+  1,000-round iteration budget. If convergence has not been established within
+  that budget, the query reports an iteration-limit error instead of returning
+  a successful partial result.
+
 - **Parameters must be supplied.** A query that references `$x` without a
   value for `x` fails with `UniError::ParameterMissing { names }` before it
   reads or writes anything -- including `CREATE`, `SET`, `MERGE` and Locy

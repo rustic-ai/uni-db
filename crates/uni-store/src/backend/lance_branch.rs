@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use crate::backend::branching::ForkBranching;
-use crate::backend::types::{FilterExpr, TextSearch, VectorQueryOpts};
+use crate::backend::types::{DistanceMetric, FilterExpr, TextSearch, VectorQueryOpts};
 use anyhow::{Context, Result};
 use arrow_schema::{Field, Schema as ArrowSchema};
 use lance::Dataset;
@@ -282,6 +282,7 @@ pub async fn vector_search_on_branch(
     column: &str,
     query: &[f32],
     k: usize,
+    metric: DistanceMetric,
     filter: &FilterExpr,
     opts: VectorQueryOpts,
 ) -> Result<Vec<arrow_array::RecordBatch>> {
@@ -299,6 +300,14 @@ pub async fn vector_search_on_branch(
     scanner
         .nearest(column, &key, k)
         .map_err(|e| anyhow::anyhow!("vector_search_on_branch nearest({column}, k={k}): {e}"))?;
+    scanner.distance_metric(match metric {
+        DistanceMetric::L2 => lance_linalg::distance::MetricType::L2,
+        DistanceMetric::Cosine => lance_linalg::distance::MetricType::Cosine,
+        DistanceMetric::Dot => lance_linalg::distance::MetricType::Dot,
+    });
+    if let Some(ef) = opts.ef {
+        scanner.ef(ef);
+    }
     if let Some(n) = opts.nprobes {
         scanner.nprobes(n);
     }
@@ -1410,6 +1419,7 @@ impl ForkBranching for LanceBranching {
         column: &str,
         query: &[f32],
         k: usize,
+        metric: DistanceMetric,
         filter: &FilterExpr,
         opts: VectorQueryOpts,
     ) -> Result<Vec<arrow_array::RecordBatch>> {
@@ -1419,6 +1429,7 @@ impl ForkBranching for LanceBranching {
             column,
             query,
             k,
+            metric,
             filter,
             opts,
         )

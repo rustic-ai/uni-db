@@ -1,5 +1,7 @@
 [workspace]
 members = [
+    "compat/zstd",
+    "compat/zstd-safe",
     "crates/uni-common",
     "crates/uni-btic",
     "crates/uni-sparse-vector",
@@ -206,3 +208,9 @@ candle-transformers = "0.10"
 tokio-util = { version = "0.7", features = ["rt"] }
 hf-hub = "0.5"
 tokenizers = "0.23"
+
+# Forward older transitive requirements to the patched upstream implementations.
+# See compat/README.md for scope, tests, and removal criteria.
+[patch.crates-io]
+zstd = { path = "compat/zstd" }
+zstd-safe = { path = "compat/zstd-safe" }

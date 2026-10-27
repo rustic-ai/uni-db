@@ -9,6 +9,11 @@ Forks are **named, durable, isolated branches** of the graph. A fork lets a sess
 
 Forks are a sibling of [snapshots](snapshots-time-travel.md). Where a snapshot is a read-only point-in-time view, a fork is a *named*, *durable*, *writable* parallel timeline.
 
+A dataset absent when a fork is created stays absent in that fork even if
+primary later populates it. The fork's first write to that dataset starts from
+its own empty view. Vector search uses the configured distance metric on both
+primary and fork data.
+
 ## Status
 
 Forks are **shipped and GA** in both Rust and Python. The full surface is available: writable and nestable forks; lifecycle controls (TTL, budget, Lance tags, parent→child cancellation, pin/refresh on forked sessions); and diff + promotion for write-audit-publish workflows. The Python bindings (`Session.fork`/`fork_schema`, `Uni.list_forks`/`drop_fork`/`drop_fork_cascade`/`tag_fork`/`diff_fork_primary`/`promote_from_fork`) mirror the Rust API one-to-one.

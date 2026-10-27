@@ -2223,6 +2223,7 @@ L0Buffer {
 - Property effects are recorded by the executor, which holds the old row: `Writer::record_property_effects` → `L0Buffer::record_property_effect(entity, old, new)`. A property is the TCK's triple (entity, key, value): add = `+1` set, remove = `+1` removed, overwrite with a different value = both, same value = nothing.
 - Label changes (`SET n:L`, `REMOVE n:L`) are recorded where the executor writes the label set (`record_labels_added` / `record_labels_removed`), per node and only when the set changes. They counted nothing before.
 - A label write is a delta against the vertex's *current* labels (`Executor::current_vertex_labels`: the L0 chain, transaction buffer first; then the row's binding, which no write of the statement can have outdated when no L0 holds the vertex; then the `VidLabelsIndex`). `L0Buffer::set_vertex_labels` replaces the whole set, and the executor used to compute that set from the row's binding — a snapshot from match time — so a second binding of the same vertex (another variable of the row, or the same variable in a later row) rebuilt the set from labels that no longer held: `SET a:X SET b:Y` on one vertex stored `[A, Y]`, `REMOVE a:B REMOVE b:C` stored `[A, B]`. Property writes (`SET n.p`, `SET n = / += map`, `REMOVE n.p`) pass the same current labels: `L0Buffer::apply_vertex_write` appends the labels it is given, so a stale binding put back a label removed a moment earlier. After a label write every binding of the vertex in the row takes the new set (`Executor::set_labels_on_bindings`), so `RETURN a, b` projects it for both, as openCypher's by-reference node binding requires.
+- Keyed MERGE fast paths bind the matched node's **complete** labels, from the query's L0 chain or a bounded batch of main-table label lookups under `QueryContext::l1_visibility` (falling back to the storage view's row visibility). The pattern's one required label is not the full set: binding only `A` for an existing `A:B` node made `MERGE (n:A {key: ...}) ON MATCH SET ...` drop `B`, and plain MERGE returned incomplete `labels(n)`. Both keyed-node and keyed-endpoint relationship paths use `Executor::bind_matched_node`; labels are fetched once per persisted batch, independently of the CRDT property-prefetch gate. The live in-memory label index is not authoritative when the context carries a snapshot ceiling. The current-label write rule above assumes a complete match binding.
 - A statement's net effect: an `l0::StatementScope` (opened per statement and per bulk batch, see Write Throttling) remembers the vertices and edges the statement created. A change to one of them adjusts the create's counts instead of adding new ones (`CREATE (n {x: 1}) SET n.x = 2` is `+properties 1`, as TCK Set1 [6] expects).
 - Counters follow Neo4j's `QueryStatistics`, not the TCK's side effects. openCypher specifies no execution counters, and `uni-tck` computes `+labels`, `-properties`, ... itself by diffing the graph (`world.rs`, `capture_before` / `capture_after`), so the TCK never reads `ExecuteResult`. Hence: a deleted entity's properties are not counted in `properties_removed` (Neo4j has no such counter; counting them was measured at 1.6–2.3x on a 20k-node `DETACH DELETE`, debug build), and labels count per node (`labelsAdded`), not as labels newly in use across the graph. Pinned by `cypher_write::execute_counters_matrix::deleting_counts_entities_not_their_properties`.
 - A delete counts once (wave Q): `L0Buffer::apply_vertex_deletion` / `apply_edge_deletion` bump `nodes_deleted` / `relationships_deleted` only when the tombstone is new, so an entity named twice in one `DELETE` (or deleted by name and again by `DETACH`) is one deletion. `DETACH DELETE n, m` with `m = n` used to report `nodes_deleted 2`.
@@ -3074,6 +3075,13 @@ ORDER BY age DESC
 ```
 
 ### WITH RECURSIVE
+
+Recursive CTEs deduplicate visited values and have a 1,000-round iteration
+budget. Exhausting that budget before proving convergence returns an explicit
+iteration-limit error; successful results are never silently truncated. Node
+membership in the CTE frontier in leading MATCH clauses is planned as a
+parameterized VID restriction, allowing the existing scan to visit only frontier
+nodes rather than rescanning the label each round.
 
 Recursive common table expressions:
 
@@ -4515,6 +4523,13 @@ graph TB
 ```
 
 ## Vector Search
+
+Dense search widens disk candidates by the number of distinct buffered VIDs
+that can shadow them, then reconciles replacements, deletions, current label
+membership, and predicates across pending, committed, and transaction buffers.
+This bound preserves exact-path top-k after buffered mutations without relying
+on a fixed over-fetch factor. ANN recall remains approximate. Fork scanners
+receive the requested distance metric explicitly, including on flat scans.
 
 <!-- doctest: skip -->
 ```cypher
@@ -6646,6 +6661,15 @@ stateDiagram-v2
    fsync'd on local filesystems).
 3. **Merge** of the private L0 into the main L0, then the write-set is
    recorded for future validators.
+
+The bounded OCC history records logical key claims as well as item IDs:
+vertex and edge constraint keys, implicit MERGE keys, and external IDs. These
+claims remain available after the owning L0 buffer finishes flushing. A writer
+whose read point predates retained history aborts conservatively. Key conflicts
+between distinct item IDs return `ConstraintConflict` before durable WAL commit.
+Deletion retires owned keys through reverse maps; graph edge deletion updates
+adjacency positions with swap removal rather than repeatedly filtering a hub's
+whole vector. Neighbor iteration order is unspecified.
 
 The whole step (lock acquisition included) is bounded by
 `UniConfig.commit_timeout` (default 5 s); exceeding it returns
@@ -8924,6 +8948,16 @@ There is intentionally **no global `PluginConfig` for grants or resource limits*
 # Part XVI: Forks
 
 Forks are **named, durable, isolated branches** of the graph. Where a snapshot is a read-only point-in-time view (Part XII), a fork is a *named*, *durable*, *writable* parallel timeline. A session that holds a fork sees its own version of the database — committed mutations land on the fork's Lance branches without touching primary; new labels and edge types can live fork-locally; the fork survives process restarts.
+
+The persisted dataset-to-branch map also defines absence: an unmapped dataset is
+empty in that fork's snapshot, even if primary materializes it later. Its first
+fork write creates an empty private tip before publishing the mapping through
+`ForkRegistryHandle`. Nested fork capture resolves newly created parent branches
+after flushing the parent, and inherits only datasets present at that captured
+point. No branch creation runs while holding the global commit lock.
+Cardinality reads use zero for an unmapped table's flushed rows and add fork L0
+rows when requested. Fork counts never enter the shared primary cardinality
+cache, including when refreshing the known empty view of an unmapped table.
 
 ## Why Forks Exist
 

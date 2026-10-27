@@ -195,3 +195,88 @@ async fn label_write_every_binding_projects_final_labels() -> Result<()> {
     }
     Ok(())
 }
+
+/// A keyed MERGE pattern names one required label, not the node's entire label
+/// set. Fast-path bindings must retain the other labels for RETURN and SET.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn label_write_keyed_merge_preserves_all_matched_labels() -> Result<()> {
+    for flushed in [false, true] {
+        for query in [
+            "MERGE (n:A {x: 0}) RETURN labels(n) AS l",
+            "MERGE (n:A {x: 0}) ON MATCH SET n.x = 7 RETURN labels(n) AS l",
+            "MATCH (a:A {x: 0}) MERGE (a)-[:R]->(n:A {x: 0}) SET n.x = 7 RETURN labels(n) AS l",
+        ] {
+            let db = one_vertex("A:B", false).await?;
+            run(&db, "MATCH (n:A) CREATE (n)-[:R]->(n)").await?;
+            if flushed {
+                db.flush().await?;
+            }
+            let tx = db.session().tx().await?;
+            let result = tx.query(query).await?;
+            assert_eq!(result.rows().len(), 1);
+            let mut labels: Vec<String> = result.rows()[0].get("l")?;
+            labels.sort();
+            assert_eq!(labels, ["A", "B"], "flushed={flushed}, query={query}");
+            tx.commit().await?;
+            db.flush().await?;
+            assert_eq!(
+                labels_of_only(&db).await?,
+                ["A", "B"],
+                "flushed={flushed}, query={query}"
+            );
+            assert_eq!(
+                db.session()
+                    .query("MATCH (n:B) RETURN n")
+                    .await?
+                    .rows()
+                    .len(),
+                1
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Full labels must come from the writing transaction's view: its own relabel
+/// wins over the persisted index, and another session's relabel stays hidden.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn label_write_keyed_merge_uses_visible_labels() -> Result<()> {
+    for flushed in [false, true] {
+        let db = one_vertex("A:B", flushed).await?;
+        let tx = db.session().tx().await?;
+        tx.execute("MATCH (n:A) REMOVE n:B SET n:C").await?;
+        let result = tx
+            .query("MERGE (n:A {x: 0}) ON MATCH SET n.x = 7 RETURN labels(n) AS l")
+            .await?;
+        let mut labels: Vec<String> = result.rows()[0].get("l")?;
+        labels.sort();
+        assert_eq!(
+            labels,
+            ["A", "C"],
+            "flushed={flushed}: own label changes lost"
+        );
+        tx.commit().await?;
+        db.flush().await?;
+        assert_eq!(labels_of_only(&db).await?, ["A", "C"]);
+    }
+
+    let db = one_vertex("A:B", true).await?;
+    let tx = db.session().tx().await?;
+    run(&db, "MATCH (n:A) REMOVE n:B SET n:C").await?;
+    db.flush().await?;
+    let result = tx
+        .query("MERGE (n:A {x: 0}) ON MATCH SET n.x = 7 RETURN labels(n) AS l")
+        .await?;
+    assert_eq!(result.rows().len(), 1);
+    let mut labels: Vec<String> = result.rows()[0].get("l")?;
+    labels.sort();
+    assert_eq!(
+        labels,
+        ["A", "B"],
+        "a post-snapshot label change leaked into MERGE"
+    );
+    tx.rollback();
+    assert_eq!(labels_of_only(&db).await?, ["A", "C"]);
+    assert_eq!(x_of_only(&db).await?, 0);
+    Ok(())
+}

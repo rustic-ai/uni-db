@@ -9843,8 +9843,53 @@ impl QueryPlanner {
                     with_recursive.name.clone(),
                     VariableType::Scalar,
                 ));
+                let mut recursive_query = *right.clone();
+                // The frontier is a runtime parameter, not another row variable.
+                // Express leading MATCH node membership as a VID predicate so
+                // ordinary filter pushdown drives the scan from those IDs.
+                if let Query::Single(statement) = &mut recursive_query {
+                    for clause in &mut statement.clauses {
+                        // Stop at a scope-changing clause: the CTE name or
+                        // node bindings may be shadowed by WITH/UNWIND/CALL.
+                        let Clause::Match(m) = clause else {
+                            break;
+                        };
+                        let nodes: HashSet<String> = m
+                            .pattern
+                            .paths
+                            .iter()
+                            .flat_map(|p| p.elements.iter())
+                            .filter_map(|e| match e {
+                                PatternElement::Node(n) => n.variable.clone(),
+                                _ => None,
+                            })
+                            .collect();
+                        if nodes.contains(&with_recursive.name) {
+                            break;
+                        }
+                        fn bind_frontier(expr: Expr, name: &str, nodes: &HashSet<String>) -> Expr {
+                            if let Expr::In { expr: item, list } = &expr
+                                && matches!(list.as_ref(), Expr::Variable(v) if v == name)
+                                && let Expr::Variable(v) = item.as_ref()
+                                && nodes.contains(v)
+                            {
+                                return Expr::In {
+                                    expr: Box::new(Expr::Property(item.clone(), "_vid".into())),
+                                    list: Box::new(Expr::Parameter(name.to_string())),
+                                };
+                            }
+                            expr.map_children_in_scope(&mut |child| {
+                                bind_frontier(child, name, nodes)
+                            })
+                        }
+                        m.where_clause = m
+                            .where_clause
+                            .take()
+                            .map(|e| bind_frontier(e, &with_recursive.name, &nodes));
+                    }
+                }
                 let recursive_plan =
-                    self.rewrite_and_plan_typed(*right.clone(), &recursive_scope)?;
+                    self.rewrite_and_plan_typed(recursive_query, &recursive_scope)?;
 
                 Ok(LogicalPlan::RecursiveCTE {
                     cte_name: with_recursive.name.clone(),

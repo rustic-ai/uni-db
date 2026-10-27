@@ -1,0 +1,25 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded arrow-ipc v58.4.1
+arrow-ipc #arrow
+Support for the Arrow IPC format
+version: 58.4.1 (latest 60.0.0)
+license: Apache-2.0
+rust-version: 1.85
+documentation: https://docs.rs/arrow-ipc/58.4.1
+repository: https://github.com/apache/arrow-rs
+crates.io: https://crates.io/crates/arrow-ipc/58.4.1
+features:
+ +default  = []
+  lz4      = [lz4_flex]
+  lz4_flex = [dep:lz4_flex]
+  zstd     = [dep:zstd]
+dependencies:
+ +arrow-array@58.4.1
+ +arrow-buffer@58.4.1
+ +arrow-data@58.4.1
+ +arrow-schema@58.4.1
+ +arrow-select@58.4.1
+ +flatbuffers@25.2.10
+  lz4_flex@0.13
+  zstd@0.13.0

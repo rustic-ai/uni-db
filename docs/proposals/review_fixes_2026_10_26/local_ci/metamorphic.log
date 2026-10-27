@@ -1,0 +1,204 @@
+   Compiling compression-codecs v0.4.38
+   Compiling arrow-ipc v58.3.0
+   Compiling async-compression v0.4.42
+   Compiling tower-http v0.6.11
+   Compiling reqwest v0.12.28
+   Compiling reqwest v0.13.4
+   Compiling arrow v58.3.0
+   Compiling object_store v0.13.2
+   Compiling opendal-http-transport-reqwest v0.58.2
+   Compiling lance-arrow v11.0.0
+   Compiling opendal v0.58.2
+   Compiling lance-namespace-reqwest-client v0.11.1
+   Compiling hf-hub v0.4.3
+   Compiling mistralrs-quant v0.8.1
+   Compiling parquet v58.3.0
+   Compiling uni-common v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-common)
+   Compiling datafusion-common v54.1.0
+   Compiling object_store_opendal v0.58.0
+   Compiling datafusion-expr-common v54.1.0
+   Compiling datafusion-physical-expr-common v54.1.0
+   Compiling datafusion-functions-window-common v54.1.0
+   Compiling datafusion-functions-aggregate-common v54.1.0
+   Compiling datafusion-expr v54.1.0
+   Compiling openai-harmony v0.0.8
+   Compiling datafusion-physical-expr v54.1.0
+   Compiling datafusion-execution v54.1.0
+   Compiling datafusion-functions v54.1.0
+   Compiling datafusion-functions-aggregate v54.1.0
+   Compiling datafusion-physical-plan v54.1.0
+   Compiling datafusion-session v54.1.0
+   Compiling datafusion-physical-expr-adapter v54.1.0
+   Compiling datafusion-datasource v54.1.0
+   Compiling datafusion-functions-nested v54.1.0
+   Compiling datafusion-sql v54.1.0
+   Compiling lance-core v11.0.0
+   Compiling datafusion-pruning v54.1.0
+   Compiling datafusion-catalog v54.1.0
+   Compiling datafusion-datasource-parquet v54.1.0
+   Compiling datafusion-physical-optimizer v54.1.0
+   Compiling datafusion-datasource-arrow v54.1.0
+   Compiling datafusion-datasource-csv v54.1.0
+   Compiling datafusion-datasource-json v54.1.0
+   Compiling datafusion-functions-window v54.1.0
+   Compiling datafusion-catalog-listing v54.1.0
+   Compiling datafusion-functions-table v54.1.0
+   Compiling datafusion-optimizer v54.1.0
+   Compiling lance-namespace v11.0.0
+   Compiling lance-io v11.0.0
+   Compiling datafusion v54.1.0
+   Compiling lance-select v11.0.0
+   Compiling lance-encoding v11.0.0
+   Compiling mistralrs-mcp v0.8.1
+   Compiling lance-file v11.0.0
+   Compiling lance-table v11.0.0
+   Compiling mistralrs-core v0.8.1
+   Compiling uni-plugin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin)
+   Compiling lance-datafusion v11.0.0
+   Compiling lance-index-core v11.0.0
+   Compiling lance-linalg v11.0.0
+   Compiling lance-index v11.0.0
+   Compiling tokenizers v0.23.1
+   Compiling mistralrs v0.8.1
+   Compiling hf-hub v0.5.0
+   Compiling uni-xervo v0.18.1
+   Compiling lance v11.0.0
+   Compiling uni-crdt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-crdt)
+   Compiling uni-cypher v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cypher)
+   Compiling uni-locy v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy)
+   Compiling opentelemetry-http v0.32.0
+   Compiling opentelemetry-otlp v0.32.0
+   Compiling uni-plugin-custom v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-custom)
+   Compiling uni-plugin-apoc-core v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-apoc-core)
+   Compiling uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+   Compiling uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+   Compiling uni-query-functions v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query-functions)
+   Compiling uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+   Compiling uni-query v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query)
+   Compiling uni-plugin-rhai v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-rhai)
+   Compiling uni-plugin-host v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-host)
+   Compiling uni-bulk v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-bulk)
+   Compiling uni-fork v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-fork)
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9m 57s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID cdec1da1-06b3-4aba-8b61-cf933708b9dc with nextest profile: default
+    Starting 105 tests across 1 binary (3937 tests skipped)
+        PASS [   0.022s] (  1/105) uni-db::integration metamorphic::dqp::cert::guards::the_narrowing_floor_is_not_vacuous
+        PASS [   0.023s] (  2/105) uni-db::integration metamorphic::dqp::admissibility::only_large_tiers_carry_the_selectivity_floor
+        PASS [   0.028s] (  3/105) uni-db::integration metamorphic::dqp::admissibility::the_kinds_are_mutually_exclusive
+        PASS [   0.039s] (  4/105) uni-db::integration metamorphic::dqp::admissibility::each_kind_admits_its_own_generator
+        PASS [   0.041s] (  5/105) uni-db::integration metamorphic::dqp::admissibility::float_aggregate_is_inadmissible_for_the_integer_kind
+        PASS [   0.042s] (  6/105) uni-db::integration metamorphic::dqp::admissibility::float_aggregate_classifier_discriminates
+        PASS [   0.048s] (  7/105) uni-db::integration metamorphic::dqp::admissibility::int_aggregate_generator_never_emits_a_float_aggregate
+        PASS [   0.053s] (  8/105) uni-db::integration metamorphic::dqp::admissibility::selectivity_floor_guarantees_a_base_filter
+        PASS [   0.120s] (  9/105) uni-db::integration metamorphic::binding::targeted::rename_bag_follows_the_columns
+        PASS [   0.123s] ( 10/105) uni-db::integration metamorphic::dqp::counters::a_plain_transaction_is_not_counted_as_a_snapshot_read
+        PASS [   0.126s] ( 11/105) uni-db::integration metamorphic::dqp::counters::profile_returns_real_metrics
+        PASS [   0.154s] ( 12/105) uni-db::integration metamorphic::dqp::counters::cache_miss_reports_real_parse_and_plan_time
+        PASS [   0.155s] ( 13/105) uni-db::integration metamorphic::binding::targeted::ordered_limit_tells_alias_from_property
+        PASS [   0.173s] ( 14/105) uni-db::integration metamorphic::dqp::counters::branch_scans_fire_on_a_pristine_fork_and_never_on_primary
+        PASS [   0.162s] ( 15/105) uni-db::integration metamorphic::dqp::counters::counters_do_not_accumulate_across_queries
+        PASS [   0.205s] ( 16/105) uni-db::integration metamorphic::dqp::counters::branch_scans_zero_for_a_table_the_fork_has_no_branch_for
+        PASS [   0.178s] ( 17/105) uni-db::integration metamorphic::dqp::counters::rows_scanned_exceeds_rows_returned_under_a_filter
+        PASS [   0.200s] ( 18/105) uni-db::integration metamorphic::dqp::counters::l0_reads_zero_when_flushed_and_nonzero_when_dirty
+        PASS [   0.182s] ( 19/105) uni-db::integration metamorphic::dqp::counters::snapshot_reads_zero_when_live_and_nonzero_when_pinned
+        PASS [   0.190s] ( 20/105) uni-db::integration metamorphic::dqp::counters::session_total_rows_scanned_accumulates
+        PASS [   0.093s] ( 21/105) uni-db::integration metamorphic::dqp::feasibility::plan_cache_hit_is_observable_only_via_session_metrics_on_the_read_path
+        PASS [   0.616s] ( 22/105) uni-db::integration metamorphic::dqp::feasibility::dqp_audit_witness_observability
+        PASS [   1.780s] ( 23/105) uni-db::integration metamorphic::dqp::compaction_lever::tests::a_transition_that_merges_nothing_is_rejected
+        PASS [   1.954s] ( 24/105) uni-db::integration metamorphic::dqp::delete_lever::tests::a_transition_that_deletes_nothing_is_rejected
+        PASS [   2.347s] ( 25/105) uni-db::integration metamorphic::dqp::delete_lever::tests::containment_rejects_a_transition_that_adds_rows
+        PASS [   1.976s] ( 26/105) uni-db::integration metamorphic::dqp::flush_lever::tests::large_tier_is_refused
+        PASS [   2.633s] ( 27/105) uni-db::integration metamorphic::dqp::driver::tests::per_case_row_budget_fires
+        PASS [   3.104s] ( 28/105) uni-db::integration metamorphic::dqp::compaction_lever::tests::every_case_in_a_batch_activates
+        PASS [   3.013s] ( 29/105) uni-db::integration metamorphic::dqp::delete_lever::tests::most_cases_in_a_batch_activate
+        PASS [   0.707s] ( 30/105) uni-db::integration metamorphic::dqp::identity::bare_variable_projection_compares_equal_across_a_pristine_fork
+        PASS [   3.083s] ( 31/105) uni-db::integration metamorphic::dqp::delete_lever::tests::multiple_batches_each_transition
+        PASS [   0.476s] ( 32/105) uni-db::integration metamorphic::dqp::identity::pristine_fork_preserves_vids_of_inherited_rows
+        PASS [   3.348s] ( 33/105) uni-db::integration metamorphic::dqp::driver::tests::run_row_budget_fires
+        PASS [   3.394s] ( 34/105) uni-db::integration metamorphic::dqp::driver::tests::activation_floor_rejects_a_vacuous_lever
+        PASS [   3.288s] ( 35/105) uni-db::integration metamorphic::dqp::flush_lever::tests::every_case_in_a_batch_activates
+        PASS [   0.501s] ( 36/105) uni-db::integration metamorphic::dqp::pinned_lever::tests::a_write_during_the_run_is_detected_and_rejects_the_run
+        PASS [   1.316s] ( 37/105) uni-db::integration metamorphic::dqp::index_lever::tests::every_case_in_a_batch_activates
+        PASS [   1.707s] ( 38/105) uni-db::integration metamorphic::dqp::identity::edge_shape_projection_compares_equal_across_a_pristine_fork
+        PASS [   0.485s] ( 39/105) uni-db::integration metamorphic::dqp::pinned_lever::tests::invariants_hold_on_a_quiet_database
+        PASS [   1.430s] ( 40/105) uni-db::integration metamorphic::dqp::locy_levers::locy_through_the_fork_lever
+        PASS [   0.445s] ( 41/105) uni-db::integration metamorphic::dqp::pinned_lever::tests::the_high_water_mark_moves_when_the_database_does
+        PASS [   1.764s] ( 42/105) uni-db::integration metamorphic::dqp::index_lever::tests::multiple_batches_each_transition
+        PASS [   0.383s] ( 43/105) uni-db::integration metamorphic::dqp::plan_cache_lever::tests::the_cache_witness_discriminates
+        PASS [   0.042s] ( 44/105) uni-db::integration metamorphic::dqp::seed::tests::dqp_fixtures_disable_the_background_flush_timer
+        PASS [   0.439s] ( 45/105) uni-db::integration metamorphic::dqp::plan_cache_lever::tests::the_lever_activates_on_its_own_sides
+        PASS [   5.428s] ( 46/105) uni-db::integration metamorphic::dqp::compaction_lever::tests::multiple_batches_each_transition
+        PASS [   0.484s] ( 47/105) uni-db::integration metamorphic::dqp::seed::tests::indexed_fixture_reaches_the_pushdown_path
+        PASS [   0.853s] ( 48/105) uni-db::integration metamorphic::dqp::seed::tests::btree_fixture_pushes_ranges_to_its_index
+        PASS [   0.850s] ( 49/105) uni-db::integration metamorphic::dqp::seed::tests::indexed_fixture_registers_its_index
+        PASS [   0.032s] ( 50/105) uni-db::integration metamorphic::dqp::stateful::tests::batch_generation_is_reproducible_from_its_coordinates
+        PASS [   0.030s] ( 51/105) uni-db::integration metamorphic::dqp::stateful::tests::batch_size_matches_the_measured_budget
+        PASS [   0.034s] ( 52/105) uni-db::integration metamorphic::dqp::stateful::tests::different_coordinates_produce_different_cases
+        PASS [   0.026s] ( 53/105) uni-db::integration metamorphic::dqp::stateful::tests::seed_expansion_diffuses_both_inputs
+        PASS [   2.439s] ( 54/105) uni-db::integration metamorphic::dqp::locy_levers::locy_through_the_pinned_lever
+        PASS [   0.544s] ( 55/105) uni-db::integration metamorphic::dqp::seed::tests::tiny_tier_has_expected_shape_and_selectivity
+        PASS [   0.533s] ( 56/105) uni-db::integration metamorphic::dqp::seed::tests::typed_fixture_plans_a_typed_traverse
+        PASS [   4.280s] ( 57/105) uni-db::integration metamorphic::dqp::flush_lever::tests::multiple_batches_each_transition
+        PASS [   0.242s] ( 58/105) uni-db::integration metamorphic::dqp::topo::tests::topo_fixture_half_unflushed_spans_l0
+        PASS [   0.309s] ( 59/105) uni-db::integration metamorphic::dqp::topo::tests::topo_disagreement_is_reported
+        PASS [   6.390s] ( 60/105) uni-db::integration metamorphic::dense::dense_oracle_smoke
+        PASS [   0.426s] ( 61/105) uni-db::integration metamorphic::dqp::topo::tests::topo_fixture_has_its_shapes
+        PASS [   1.656s] ( 62/105) uni-db::integration metamorphic::dqp::seed::tests::schema_mode_does_not_change_the_data
+        PASS [   3.775s] ( 63/105) uni-db::integration metamorphic::dqp::locy_levers::locy_through_the_flush_lever
+        PASS [   0.581s] ( 64/105) uni-db::integration metamorphic::dqp::transition_probe::index_transition_is_observable_for_hash_equality_only
+        PASS [   0.890s] ( 65/105) uni-db::integration metamorphic::dqp::transition_probe::compaction_is_observable_at_run_level_only
+        PASS [   0.513s] ( 66/105) uni-db::integration metamorphic::dqp::transition_probe::logical_plan_does_not_show_index_selection
+        PASS [   0.728s] ( 67/105) uni-db::integration metamorphic::dqp::transition_probe::probe_delete_transition
+        PASS [   0.673s] ( 68/105) uni-db::integration metamorphic::dqp::transition_probe::probe_flush_transition
+        PASS [   1.225s] ( 69/105) uni-db::integration metamorphic::dqp::transition_probe::probe_compaction_actually_compacts
+        PASS [   0.615s] ( 70/105) uni-db::integration metamorphic::dqp::transition_probe::probe_plan_cache_transition
+        PASS [   0.595s] ( 71/105) uni-db::integration metamorphic::dqp::vid_determinism::the_experiment_is_measuring_real_vids
+        PASS [   0.449s] ( 72/105) uni-db::integration metamorphic::dqp::vid_determinism::vid_assignment_survives_a_flush
+        PASS [   0.824s] ( 73/105) uni-db::integration metamorphic::dqp::vid_determinism::vid_assignment_is_deterministic_across_identical_builds
+        PASS [   2.056s] ( 74/105) uni-db::integration metamorphic::dqp::vid_determinism::vid_assignment_survives_a_config_change
+        PASS [   2.054s] ( 75/105) uni-db::integration metamorphic::dqp::vid_determinism::vid_determinism_is_stable_across_repeats
+        PASS [   5.329s] ( 76/105) uni-db::integration metamorphic::dqp::tier3_probe::probe_which_tier3_knobs_are_observable
+        PASS [   0.304s] ( 77/105) uni-db::integration metamorphic::norec::targeted::barrier_matches_optimized_and_filters
+        PASS [   0.351s] ( 78/105) uni-db::integration metamorphic::seed::tests::seed_has_expected_cardinalities_and_real_nulls
+        PASS [   5.674s] ( 79/105) uni-db::integration metamorphic::dqp::tier3_probe::tier3_knobs_are_result_neutral
+        PASS [   0.158s] ( 80/105) uni-db::integration metamorphic::structural::targeted::structural_laws_hold_on_a_concrete_query
+        PASS [   0.217s] ( 81/105) uni-db::integration metamorphic::tlp::targeted::null_partition_is_nonvacuous
+        PASS [   0.145s] ( 82/105) uni-db::integration metamorphic::tlp::targeted::oracle_detects_missing_null_partition
+        PASS [   7.719s] ( 83/105) uni-db::integration metamorphic::dqp::stateful::tests::a_failure_reproduces_from_its_printed_coordinates
+        PASS [   6.257s] ( 84/105) uni-db::integration metamorphic::multi::multi_oracle_smoke
+        PASS [   6.933s] ( 85/105) uni-db::integration metamorphic::norec::norec_law_smoke
+        PASS [   6.257s] ( 86/105) uni-db::integration metamorphic::sparse::sparse_oracle_smoke
+        PASS [  12.289s] ( 87/105) uni-db::integration metamorphic::dqp::transition_probe::probe_flush_witness_over_generated_cases
+        PASS [   8.154s] ( 88/105) uni-db::integration metamorphic::tlp::tlp_agg_law_smoke
+        PASS [   9.156s] ( 89/105) uni-db::integration metamorphic::structural::structural_laws_smoke
+        PASS [   7.425s] ( 90/105) uni-db::integration metamorphic::tlp::tlp_row_law_smoke
+        PASS [  21.797s] ( 91/105) uni-db::integration metamorphic::binding::binding_guard_smoke
+        PASS [  25.327s] ( 92/105) uni-db::integration metamorphic::dqp::cert::cert_pushdown_smoke
+        PASS [  28.717s] ( 93/105) uni-db::integration metamorphic::dqp::flush_lever::flush_pushdown_smoke
+        PASS [  29.026s] ( 94/105) uni-db::integration metamorphic::dqp::flush_lever::flush_pushdown_btree_smoke
+        PASS [  26.179s] ( 95/105) uni-db::integration metamorphic::dqp::index_lever::index_pushdown_smoke
+        PASS [  54.404s] ( 96/105) uni-db::integration metamorphic::dqp::cert::cert_smoke
+        SLOW [> 60.000s] (─────────) uni-db::integration metamorphic::dqp::compaction_lever::compaction_smoke
+        SLOW [> 60.000s] (─────────) uni-db::integration metamorphic::dqp::delete_lever::delete_smoke
+        SLOW [> 60.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_smoke
+        SLOW [> 60.000s] (─────────) uni-db::integration metamorphic::dqp::flush_lever::flush_wide_smoke
+        SLOW [> 60.000s] (─────────) uni-db::integration metamorphic::dqp::fork_lever::fork_smoke
+        SLOW [> 60.000s] (─────────) uni-db::integration metamorphic::dqp::pinned_lever::pinned_smoke
+        SLOW [> 60.000s] (─────────) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_smoke
+        SLOW [> 60.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_rewrites_flushed
+        SLOW [> 60.000s] (─────────) uni-db::integration metamorphic::dqp::topo::topo_rewrites_unflushed_small_batches
+        PASS [  60.392s] ( 97/105) uni-db::integration metamorphic::dqp::topo::topo_rewrites_unflushed_small_batches
+        PASS [  70.133s] ( 98/105) uni-db::integration metamorphic::dqp::flush_lever::flush_wide_smoke
+        PASS [  74.863s] ( 99/105) uni-db::integration metamorphic::dqp::fork_lever::fork_smoke
+        PASS [  74.276s] (100/105) uni-db::integration metamorphic::dqp::pinned_lever::pinned_smoke
+        PASS [  80.088s] (101/105) uni-db::integration metamorphic::dqp::delete_lever::delete_smoke
+        PASS [  84.303s] (102/105) uni-db::integration metamorphic::dqp::flush_lever::flush_smoke
+        PASS [  86.032s] (103/105) uni-db::integration metamorphic::dqp::compaction_lever::compaction_smoke
+        PASS [  92.433s] (104/105) uni-db::integration metamorphic::dqp::topo::topo_rewrites_flushed
+        PASS [ 102.026s] (105/105) uni-db::integration metamorphic::dqp::plan_cache_lever::plan_cache_smoke
+────────────
+     Summary [ 106.515s] 105 tests run: 105 passed (9 slow), 3937 skipped

@@ -1,0 +1,203 @@
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 20.35s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 82af2cda-0228-4f8c-95a5-be23f9dbe412 with nextest profile: default
+    Starting 9 tests across 1 binary (4024 tests skipped)
+        FAIL [   0.047s] (1/9) uni-db::integration review_20261026::review_merge_guard_must_survive_concurrent_flush
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_merge_guard_must_survive_concurrent_flush ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_merge_guard_must_survive_concurrent_flush
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4032 filtered out; finished in 0.03s
+
+  stderr ───
+    mode=merge, flush=false, second_commit=Ok(CommitResult { mutations_committed: 1, rules_promoted: 0, version: 2, started_at_version: 0, wal_lsn: 2, duration: 5.709169ms, rule_promotion_errors: [] }), rows=[Row { columns: ["key", "id"], values: [String("same"), Int(0)] }, Row { columns: ["key", "id"], values: [String("same"), Int(16)] }]
+
+    thread 'review_20261026::review_merge_guard_must_survive_concurrent_flush' (410) panicked at /tmp/uni-review-regressions.rs:169:5:
+    no-flush control must reject
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.067s] (2/9) uni-db::integration review_20261026::review_empty_fork_must_not_see_later_primary_rows
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_empty_fork_must_not_see_later_primary_rows ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_empty_fork_must_not_see_later_primary_rows
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4032 filtered out; finished in 0.05s
+
+  stderr ───
+
+    thread 'review_20261026::review_empty_fork_must_not_see_later_primary_rows' (416) panicked at /tmp/uni-review-regressions.rs:25:5:
+    post-fork primary data leaked: [Row { columns: ["name"], values: [String("primary-later")] }]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.081s] (3/9) uni-db::integration review_20261026::review_ext_id_guard_must_survive_concurrent_flush
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_ext_id_guard_must_survive_concurrent_flush ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_ext_id_guard_must_survive_concurrent_flush
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4032 filtered out; finished in 0.06s
+
+  stderr ───
+    mode=ext_id, flush=false, second_commit=Err(ConstraintConflict { message: "ext_id 'same' already committed by a concurrent transaction" }), rows=[Row { columns: ["key", "id"], values: [String("same"), Int(0)] }]
+    mode=ext_id, flush=true, second_commit=Ok(CommitResult { mutations_committed: 1, rules_promoted: 0, version: 2, started_at_version: 0, wal_lsn: 2, duration: 21.247963ms, rule_promotion_errors: [] }), rows=[Row { columns: ["key", "id"], values: [String("same"), Int(0)] }, Row { columns: ["key", "id"], values: [String("same"), Int(16)] }]
+
+    thread 'review_20261026::review_ext_id_guard_must_survive_concurrent_flush' (407) panicked at /tmp/uni-review-regressions.rs:177:5:
+    flush must not allow duplicate ext_id
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.085s] (4/9) uni-db::integration review_20261026::review_unique_constraint_must_survive_concurrent_flush
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_unique_constraint_must_survive_concurrent_flush ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_unique_constraint_must_survive_concurrent_flush
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4032 filtered out; finished in 0.07s
+
+  stderr ───
+    mode=unique, flush=false, second_commit=Err(ConstraintConflict { message: "unique key already committed by a concurrent transaction" }), rows=[Row { columns: ["key", "id"], values: [String("same"), Int(0)] }]
+    mode=unique, flush=true, second_commit=Ok(CommitResult { mutations_committed: 1, rules_promoted: 0, version: 2, started_at_version: 0, wal_lsn: 2, duration: 25.401545ms, rule_promotion_errors: [] }), rows=[Row { columns: ["key", "id"], values: [String("same"), Int(0)] }, Row { columns: ["key", "id"], values: [String("same"), Int(16)] }]
+
+    thread 'review_20261026::review_unique_constraint_must_survive_concurrent_flush' (408) panicked at /tmp/uni-review-regressions.rs:163:5:
+    flush must not allow a duplicate unique key
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.088s] (5/9) uni-db::integration review_20261026::review_empty_label_on_populated_fork_must_stay_empty
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_empty_label_on_populated_fork_must_stay_empty ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_empty_label_on_populated_fork_must_stay_empty
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4032 filtered out; finished in 0.07s
+
+  stderr ───
+
+    thread 'review_20261026::review_empty_label_on_populated_fork_must_stay_empty' (422) panicked at /tmp/uni-review-regressions.rs:44:5:
+    post-fork primary label data leaked: [Row { columns: ["name"], values: [String("primary-later")] }]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.096s] (6/9) uni-db::integration review_20261026::review_fork_cosine_top_one_matches_primary
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_fork_cosine_top_one_matches_primary ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_fork_cosine_top_one_matches_primary
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4032 filtered out; finished in 0.07s
+
+  stderr ───
+
+    thread 'review_20261026::review_fork_cosine_top_one_matches_primary' (421) panicked at /tmp/uni-review-regressions.rs:66:5:
+    assertion `left == right` failed: fork chose wrong candidate: [Row { columns: ["name", "distance"], values: [String("l2-best"), Float(0.00496286153793335)] }]
+      left: "l2-best"
+     right: "cosine-best"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.116s] (7/9) uni-db::integration review_20261026::review_vector_delete_must_refill_disk_candidates
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_vector_delete_must_refill_disk_candidates ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_vector_delete_must_refill_disk_candidates
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4032 filtered out; finished in 0.10s
+
+  stderr ───
+
+    thread 'review_20261026::review_vector_delete_must_refill_disk_candidates' (409) panicked at /tmp/uni-review-regressions.rs:125:5:
+    assertion `left == right` failed: L0 delete must not hide disk runner-up
+      left: "<empty>"
+     right: "b"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.134s] (8/9) uni-db::integration review_20261026::review_vector_update_must_refill_disk_candidates
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_vector_update_must_refill_disk_candidates ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_vector_update_must_refill_disk_candidates
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4032 filtered out; finished in 0.11s
+
+  stderr ───
+
+    thread 'review_20261026::review_vector_update_must_refill_disk_candidates' (415) panicked at /tmp/uni-review-regressions.rs:118:5:
+    assertion `left == right` failed: L0 update must not hide disk runner-up
+      left: "a"
+     right: "b"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.136s] (9/9) uni-db::integration review_20261026::review_vector_label_removal_must_exclude_old_hit
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_vector_label_removal_must_exclude_old_hit ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_vector_label_removal_must_exclude_old_hit
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4032 filtered out; finished in 0.12s
+
+  stderr ───
+
+    thread 'review_20261026::review_vector_label_removal_must_exclude_old_hit' (411) panicked at /tmp/uni-review-regressions.rs:132:5:
+    assertion `left == right` failed: search result must still have requested label
+      left: "a"
+     right: "b"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+────────────
+     Summary [   0.142s] 9 tests run: 0 passed, 9 failed, 4024 skipped
+        FAIL [   0.047s] (1/9) uni-db::integration review_20261026::review_merge_guard_must_survive_concurrent_flush
+        FAIL [   0.067s] (2/9) uni-db::integration review_20261026::review_empty_fork_must_not_see_later_primary_rows
+        FAIL [   0.081s] (3/9) uni-db::integration review_20261026::review_ext_id_guard_must_survive_concurrent_flush
+        FAIL [   0.085s] (4/9) uni-db::integration review_20261026::review_unique_constraint_must_survive_concurrent_flush
+        FAIL [   0.088s] (5/9) uni-db::integration review_20261026::review_empty_label_on_populated_fork_must_stay_empty
+        FAIL [   0.096s] (6/9) uni-db::integration review_20261026::review_fork_cosine_top_one_matches_primary
+        FAIL [   0.116s] (7/9) uni-db::integration review_20261026::review_vector_delete_must_refill_disk_candidates
+        FAIL [   0.134s] (8/9) uni-db::integration review_20261026::review_vector_update_must_refill_disk_candidates
+        FAIL [   0.136s] (9/9) uni-db::integration review_20261026::review_vector_label_removal_must_exclude_old_hit
+error: test run failed

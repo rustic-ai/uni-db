@@ -1,0 +1,290 @@
+    Checking futures-util v0.3.32
+    Checking async-compression v0.4.42
+    Checking arrow-data v58.3.0
+    Checking quick-xml v0.39.4
+    Checking recursive v0.1.1
+   Compiling prost-derive v0.14.4
+    Checking sqlparser v0.62.0
+    Checking quick-xml v0.41.0
+    Checking arrow-array v58.3.0
+   Compiling serde v1.0.228
+    Checking uni-btic v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-btic)
+    Checking uni-sparse-vector v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-sparse-vector)
+    Checking tracing-subscriber v0.3.23
+    Checking spm_precompiled v0.1.4
+    Checking jsonb v0.5.6
+    Checking tokio-util v0.7.18
+    Checking futures-executor v0.3.32
+    Checking h2 v0.4.18
+    Checking tower v0.5.3
+    Checking futures v0.3.32
+    Checking arrow-select v58.3.0
+    Checking tower-http v0.6.11
+    Checking arrow-row v58.3.0
+    Checking arrow-arith v58.3.0
+    Checking arrow-ord v58.3.0
+    Checking arrow-ipc v58.3.0
+    Checking arrow-cast v58.3.0
+    Checking arrow-string v58.3.0
+    Checking hyper v1.10.1
+    Checking datafusion-common-runtime v54.1.0
+    Checking reqsign-core v3.3.1
+    Checking tokio-stream v0.1.18
+    Checking aws-smithy-async v1.2.14
+    Checking opendal-core v0.58.2
+    Checking arrow-json v58.3.0
+    Checking arrow-csv v58.3.0
+    Checking hyper-util v0.1.20
+    Checking aws-smithy-runtime-api v1.12.3
+    Checking arrow v58.3.0
+    Checking moka v0.12.15
+    Checking hyper-rustls v0.27.9
+    Checking hyper-tls v0.6.0
+    Checking reqwest v0.13.4
+    Checking reqwest v0.12.28
+    Checking aws-smithy-schema v0.1.0
+    Checking aws-credential-types v1.2.14
+    Checking aws-smithy-http v0.63.6
+    Checking object_store v0.13.2
+    Checking aws-smithy-http-client v1.1.13
+    Checking aws-smithy-observability v0.2.6
+    Checking reqsign-aws-core v3.1.1
+    Checking reqsign-file-read-tokio v3.0.6
+    Checking lance-arrow v11.0.0
+    Checking aws-smithy-runtime v1.11.3
+    Checking aws-types v1.3.16
+    Checking reqsign-aws-v4 v3.3.0
+    Checking aws-sigv4 v1.4.5
+    Checking reqsign-azure-storage v3.2.1
+    Checking tokenizers v0.22.2
+    Checking aws-runtime v1.7.4
+    Checking opendal-service-azure-common v0.58.2
+    Checking aws-smithy-json v0.62.7
+    Checking tracing-opentelemetry v0.33.0
+    Checking safetensors v0.7.0
+    Checking reqsign-google v3.1.1
+    Checking opendal-layer-retry v0.58.2
+    Checking opendal-service-s3 v0.58.2
+   Compiling prost v0.14.4
+   Compiling prost-types v0.14.4
+    Checking opendal-service-gcs v0.58.2
+    Checking opendal-service-azdls v0.58.2
+    Checking opendal-service-azblob v0.58.2
+    Checking av1-grain v0.2.5
+    Checking opendal-layer-timeout v0.58.2
+    Checking candle-core v0.10.2
+    Checking opendal-layer-logging v0.58.2
+    Checking opendal-layer-concurrent-limit v0.58.2
+    Checking opendal-http-transport-reqwest v0.58.2
+   Compiling prost-build v0.14.4
+    Checking rav1e v0.8.1
+    Checking opendal v0.58.2
+    Checking lance-namespace-reqwest-client v0.11.1
+    Checking parquet v58.3.0
+    Checking uni-common v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-common)
+    Checking candle-nn v0.10.2
+    Checking aws-sdk-sts v1.106.0
+    Checking aws-sdk-sso v1.101.0
+    Checking aws-sdk-ssooidc v1.103.0
+    Checking ravif v0.13.0
+    Checking ureq v2.12.1
+    Checking object_store_opendal v0.58.0
+    Checking image v0.25.10
+    Checking clap v4.6.1
+    Checking aws-config v1.8.18
+    Checking hf-hub v0.4.3
+    Checking datafusion-common v54.1.0
+    Checking fsst v11.0.0
+    Checking toktrie v1.7.6
+    Checking minijinja v2.20.0
+    Checking utoipa v5.5.0
+    Checking tokio-tungstenite v0.28.0
+    Checking tokenizers v0.21.4
+    Checking derivre v0.3.12
+    Checking rust-mcp-schema v0.9.6
+    Checking ureq v3.3.0
+   Compiling lance-encoding v11.0.0
+   Compiling lance-file v11.0.0
+    Checking datafusion-expr-common v54.1.0
+   Compiling lance-datafusion v11.0.0
+    Checking datafusion-physical-expr-common v54.1.0
+    Checking datafusion-functions-window-common v54.1.0
+    Checking datafusion-functions-aggregate-common v54.1.0
+   Compiling lance-table v11.0.0
+    Checking llguidance v1.7.6
+    Checking toktrie_hf_tokenizers v1.7.6
+    Checking datafusion-expr v54.1.0
+   Compiling lance-index v11.0.0
+    Checking bm25 v2.3.2
+    Checking serde-saphyr v0.0.16
+    Checking mistralrs-mcp v0.8.1
+    Checking openai-harmony v0.0.8
+    Checking schemars v1.2.1
+    Checking minijinja-contrib v2.20.0
+   Compiling variantly v0.4.0
+    Checking mistralrs-vision v0.8.1
+    Checking mistralrs-quant v0.8.1
+    Checking lance-arrow-scalar v58.0.0
+    Checking lance-tokenizer v11.0.0
+    Checking lance-arrow-stats v58.0.0
+   Compiling lance v11.0.0
+    Checking tokenizers v0.23.1
+    Checking candle-transformers v0.10.2
+    Checking datafusion-physical-expr v54.1.0
+    Checking datafusion-execution v54.1.0
+    Checking hf-hub v0.5.0
+    Checking datafusion-functions v54.1.0
+   Compiling wasmtime-internal-core v49.0.4
+   Compiling pest_generator v2.8.6
+   Compiling cranelift-bitset v0.136.4
+    Checking datafusion-functions-aggregate v54.1.0
+    Checking datafusion-functions-window v54.1.0
+    Checking datafusion-optimizer v54.1.0
+    Checking mistralrs-core v0.8.1
+   Compiling pulley-macros v49.0.4
+    Checking cranelift-entity v0.136.4
+   Compiling wasmparser v0.258.3
+    Checking datafusion-physical-plan v54.1.0
+    Checking datafusion-physical-expr-adapter v54.1.0
+    Checking datafusion-functions-nested v54.1.0
+   Compiling pest_derive v2.8.6
+    Checking uni-cypher v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cypher)
+    Checking datafusion-sql v54.1.0
+    Checking datafusion-session v54.1.0
+    Checking datafusion-datasource v54.1.0
+    Checking lance-core v11.0.0
+    Checking datafusion-pruning v54.1.0
+    Checking datafusion-catalog v54.1.0
+    Checking datafusion-datasource-parquet v54.1.0
+    Checking datafusion-physical-optimizer v54.1.0
+    Checking datafusion-datasource-json v54.1.0
+    Checking datafusion-datasource-arrow v54.1.0
+    Checking datafusion-datasource-csv v54.1.0
+    Checking lance-namespace v11.0.0
+    Checking lance-io v11.0.0
+    Checking lance-select v11.0.0
+    Checking lance-linalg v11.0.0
+    Checking cobs v0.3.0
+   Compiling wasmtime-internal-versioned-export-macros v49.0.4
+    Checking postcard v1.1.3
+   Compiling pulley-interpreter v49.0.4
+    Checking cranelift-bforest v0.136.4
+    Checking wasm-encoder v0.258.3
+   Compiling cranelift-codegen-meta v0.136.4
+    Checking hyper-timeout v0.5.2
+   Compiling smallvec v1.15.2
+   Compiling thiserror-impl v1.0.69
+    Checking wasmprinter v0.258.3
+    Checking tonic v0.14.6
+    Checking regalloc2 v0.15.2
+    Checking uni-locy v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy)
+    Checking mistralrs v0.8.1
+    Checking wasmtime-environ v49.0.4
+    Checking uni-xervo v0.18.1
+   Compiling wit-parser v0.258.3
+   Compiling cranelift-codegen v0.136.4
+   Compiling wasm-metadata v0.258.3
+   Compiling thiserror v2.0.18
+    Checking tonic-prost v0.14.6
+    Checking opentelemetry_sdk v0.32.1
+    Checking uni-sidecar v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-sidecar)
+   Compiling wit-component v0.258.3
+    Checking opentelemetry-proto v0.32.0
+    Checking tonic-types v0.14.6
+   Compiling wasmtime-internal-fiber v49.0.4
+   Compiling wasmtime-internal-jit-debug v49.0.4
+    Checking opentelemetry-http v0.32.0
+    Checking opentelemetry-otlp v0.32.0
+   Compiling wasmtime-internal-wit-bindgen v49.0.4
+   Compiling thiserror v1.0.69
+   Compiling wasmtime v49.0.4
+    Checking wasm-compose v0.258.3
+    Checking fxprof-processed-profile v0.8.1
+    Checking wasmtime-internal-cache v49.0.4
+   Compiling witx v0.9.1
+    Checking cranelift-frontend v0.136.4
+    Checking wasmtime-internal-unwinder v49.0.4
+    Checking cranelift-native v0.136.4
+    Checking wasmtime-internal-cranelift v49.0.4
+    Checking wasmtime-internal-jit-icache-coherence v49.0.4
+   Compiling wiggle-generate v49.0.4
+   Compiling sealed v0.5.0
+    Checking datafusion-functions-table v54.1.0
+    Checking datafusion-catalog-listing v54.1.0
+   Compiling proc-macro-utils v0.10.0
+   Compiling synthez-core v0.3.1
+   Compiling manyhow-macros v0.11.4
+   Compiling derive_more v0.99.20
+   Compiling peg-macros v0.6.3
+   Compiling wiggle-macro v49.0.4
+   Compiling wasmtime-internal-component-macro v49.0.4
+   Compiling manyhow v0.11.4
+   Compiling synthez-codegen v0.3.1
+   Compiling cbindgen v0.29.3
+   Compiling gherkin v0.14.0
+   Compiling typed-builder-macro v0.15.2
+    Checking peg v0.6.3
+   Compiling synthez v0.3.1
+   Compiling extism-convert-macros v1.41.0
+    Checking datafusion v54.1.0
+   Compiling lazy-regex-proc_macros v3.6.0
+    Checking typed-builder v0.15.2
+    Checking lazy-regex v3.6.0
+    Checking extism-convert v1.41.0
+    Checking uni-plugin-wasm-rt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-wasm-rt)
+    Checking extism-manifest v1.41.0
+   Compiling smart-default v0.7.1
+    Checking rustyline v18.0.0
+   Compiling cucumber-expressions v0.3.0
+    Checking proptest v1.11.0
+   Compiling cucumber-codegen v0.21.1
+ Documenting uni-locy v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy)
+ Documenting uni-locy-oracle v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy-oracle)
+ Documenting uni-cypher v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cypher)
+ Documenting uni-common v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-common)
+ Documenting uni-plugin-wasm-rt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-wasm-rt)
+ Documenting uni-btic v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-btic)
+ Documenting uni-sidecar v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-sidecar)
+ Documenting uni-sparse-vector v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-sparse-vector)
+    Checking wasmtime-wasi-io v49.0.4
+    Checking wiggle v49.0.4
+    Checking wasmtime-wasi v49.0.4
+    Checking cucumber v0.21.1
+   Compiling extism v1.41.0
+    Checking uni-plugin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin)
+    Checking lance-index-core v11.0.0
+ Documenting uni-plugin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin)
+    Checking uni-crdt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-crdt)
+    Checking uni-plugin-custom v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-custom)
+    Checking uni-plugin-apoc-core v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-apoc-core)
+ Documenting uni-plugin-pyo3 v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-pyo3)
+ Documenting uni-plugin-conformance v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-conformance)
+ Documenting uni-plugin-custom v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-custom)
+ Documenting uni-crdt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-crdt)
+ Documenting uni-plugin-apoc-core v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-apoc-core)
+    Checking uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+ Documenting uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+    Checking uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+    Checking uni-query-functions v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query-functions)
+ Documenting uni-query-functions v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query-functions)
+ Documenting uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+    Checking uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+ Documenting uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+    Checking uni-query v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query)
+    Checking uni-plugin-rhai v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-rhai)
+ Documenting uni-query v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query)
+ Documenting uni-plugin-wasm v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-wasm)
+ Documenting uni-plugin-extism v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-extism)
+ Documenting uni-plugin-rhai v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-rhai)
+    Checking uni-plugin-host v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-host)
+    Checking uni-fork v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-fork)
+ Documenting uni-fork v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-fork)
+ Documenting uni-plugin-host v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-host)
+    Checking uni-bulk v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-bulk)
+ Documenting uni-bulk v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-bulk)
+    Checking uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+ Documenting uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+ Documenting uni-cli v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cli)
+ Documenting uni-locy-tck v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy-tck)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 39s
+   Generated /home/rohit/work/dragonscale/uni/target/doc/uni_algo/index.html and 27 other files

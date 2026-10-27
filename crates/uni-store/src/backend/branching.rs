@@ -339,8 +339,7 @@ pub trait ForkBranching: Send + Sync + 'static {
 
     /// Vector kNN against `branch`, fused across the parent chain.
     ///
-    /// No distance metric is passed — the metric is a property of the index
-    /// being queried.
+    /// The requested metric also applies to flat/unindexed branch scans.
     #[allow(clippy::too_many_arguments)]
     async fn vector_search_on_branch(
         &self,
@@ -349,6 +348,7 @@ pub trait ForkBranching: Send + Sync + 'static {
         column: &str,
         query: &[f32],
         k: usize,
+        metric: super::types::DistanceMetric,
         filter: &FilterExpr,
         opts: VectorQueryOpts,
     ) -> Result<Vec<RecordBatch>>;

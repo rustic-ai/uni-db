@@ -251,6 +251,12 @@ async fn capture_fork_point_without_writer(
     let backend = parent.db.storage.backend();
     if let Some(branching) = backend.branching() {
         for name in candidate_datasets {
+            if parent
+                .fork_scope()
+                .is_some_and(|scope| scope.branch_for(name).is_none())
+            {
+                continue;
+            }
             if !branching
                 .table_exists(name)
                 .await
@@ -658,13 +664,9 @@ async fn build_datasets_for_fork(
     let mut attempted: Vec<(String, String)> = Vec::new();
     let build_result: Result<()> = async {
         for dataset_name in candidate_names {
-            if !branching.table_exists(&dataset_name).await.map_err(|e| {
-                UniError::ForkLifecycle {
-                    name: format!("<fork:{fork_id}>"),
-                    stage: "table_exists",
-                    source: e.into(),
-                }
-            })? {
+            // Only datasets present in the captured snapshot may be inherited.
+            // A table materialized on primary after capture is still absent.
+            if !captured_versions.contains_key(&dataset_name) {
                 continue;
             }
 

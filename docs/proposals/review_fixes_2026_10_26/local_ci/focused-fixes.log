@@ -1,0 +1,50 @@
+    Blocking waiting for file lock on build directory
+   Compiling uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+   Compiling uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+   Compiling uni-query-functions v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query-functions)
+   Compiling uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+   Compiling uni-query v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query)
+   Compiling uni-plugin-rhai v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-rhai)
+   Compiling uni-plugin-extism v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-extism)
+   Compiling uni-plugin-wasm v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-wasm)
+   Compiling uni-plugin-host v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-host)
+   Compiling uni-fork v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-fork)
+   Compiling uni-bulk v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-bulk)
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+   Compiling uni-locy-tck v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy-tck)
+   Compiling uni-locy-oracle v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy-oracle)
+   Compiling uni-cli v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6m 38s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 6d3cd75e-9eb2-4e25-a2c9-a8b5dff76621 with nextest profile: default
+    Starting 26 tests across 73 binaries (8749 tests skipped)
+        PASS [   0.031s] ( 1/26) uni-store runtime::occ::key_history_regressions::key_claims_conflict_across_distinct_ids_and_history_truncation
+        PASS [   0.093s] ( 2/26) uni-store::integration storage::extid_index_test::concurrent_commits_same_extid_conflict
+        PASS [   0.096s] ( 3/26) uni-store::integration storage::storage_at_fork::a_fork_scoped_reader_declines_the_cached_count
+        PASS [   0.040s] ( 4/26) uni-store::integration storage::storage_at_fork::at_fork_falls_back_to_primary_for_unrecorded_dataset
+        PASS [   0.136s] ( 5/26) uni-db::integration review_regressions::review_empty_fork_must_not_see_later_primary_rows
+        PASS [   0.139s] ( 6/26) uni-db::integration review_regressions::review_ext_id_guard_must_survive_concurrent_flush
+        PASS [   0.141s] ( 7/26) uni-db::integration review_regressions::review_anonymous_merge_must_deduplicate_within_statement
+        PASS [   0.143s] ( 8/26) uni-db::integration review_regressions::review_unique_constraint_must_survive_concurrent_flush
+        PASS [   0.164s] ( 9/26) uni-db::integration review_regressions::review_empty_label_on_populated_fork_must_stay_empty
+        PASS [   0.030s] (10/26) uni-store::integration storage::storage_at_fork::vertex_row_count_declines_only_for_a_branched_table
+        PASS [   0.165s] (11/26) uni-db::integration review_regressions::review_fork_cosine_top_one_matches_primary
+        PASS [   0.165s] (12/26) uni-db::integration review_regressions::review_merge_guard_must_survive_concurrent_flush
+        PASS [   0.174s] (13/26) uni-db::integration review_regressions::review_anonymous_merge_concurrency_with_and_without_flush
+        PASS [   0.068s] (14/26) uni-store::integration storage::storage_at_fork::at_fork_routes_vertex_reads_through_branch
+        PASS [   0.198s] (15/26) uni-db::integration review_regressions::review_vector_delete_must_refill_disk_candidates
+        PASS [   0.203s] (16/26) uni-db::integration review_regressions::review_persisted_unique_owner_is_enforced_after_reopen
+        PASS [   0.214s] (17/26) uni-db::integration review_regressions::review_vector_label_removal_must_exclude_old_hit
+        PASS [   0.241s] (18/26) uni-db::integration review_regressions::review_vector_update_must_refill_disk_candidates
+        PASS [   0.284s] (19/26) uni-db::integration review_regressions::review_edge_and_node_key_conflicts_survive_flush
+        PASS [   0.318s] (20/26) uni-db::integration review_regressions::review_recursive_frontier_avoids_unrelated_label_rows
+        PASS [   0.350s] (21/26) uni-db::integration cypher_read::constant_in_list_test::constant_in_list_cost_is_linear
+        PASS [   0.357s] (22/26) uni-db::integration review_regressions::review_branch_metrics_for_inherited_and_fork_local_vectors
+        PASS [   0.375s] (23/26) uni-db::integration review_regressions::review_fork_absence_survives_first_write_nesting_and_reopen
+        PASS [   0.392s] (24/26) uni-db::integration review_regressions::review_vector_many_shadowed_candidates_in_private_and_committed_overlays
+        PASS [   1.446s] (25/26) uni-db::integration review_regressions::review_recursive_cte_must_not_succeed_with_truncated_closure
+        PASS [   3.445s] (26/26) uni-db::integration review_regressions::review_recursive_budget_boundary_reports_exhaustion
+────────────
+     Summary [   3.461s] 26 tests run: 26 passed, 8749 skipped

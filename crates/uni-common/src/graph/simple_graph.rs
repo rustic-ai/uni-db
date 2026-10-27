@@ -40,7 +40,7 @@ pub struct SimpleGraph {
     /// Incoming edges per vertex: dst_vid -> [EdgeEntry]
     incoming: FxHashMap<Vid, Vec<EdgeEntry>>,
     /// Direct edge lookup by Eid for O(1) access
-    edge_map: FxHashMap<Eid, EdgeEntry>,
+    edge_map: FxHashMap<Eid, (EdgeEntry, usize, usize)>,
 }
 
 /// Direction for neighbor traversal.
@@ -88,27 +88,14 @@ impl SimpleGraph {
     pub fn remove_vertex(&mut self, vid: Vid) {
         self.vertices.remove(&vid);
 
-        // Remove outgoing edges from this vertex
-        if let Some(edges) = self.outgoing.remove(&vid) {
-            // Also remove from incoming lists of neighbors and edge_map
-            for edge in edges {
-                self.edge_map.remove(&edge.eid);
-                if let Some(incoming_list) = self.incoming.get_mut(&edge.dst_vid) {
-                    incoming_list.retain(|e| e.eid != edge.eid);
-                }
-            }
+        while let Some(edge) = self.outgoing.get(&vid).and_then(|v| v.last()).copied() {
+            self.remove_edge(edge.eid);
         }
-
-        // Remove incoming edges to this vertex
-        if let Some(edges) = self.incoming.remove(&vid) {
-            // Also remove from outgoing lists of neighbors and edge_map
-            for edge in edges {
-                self.edge_map.remove(&edge.eid);
-                if let Some(outgoing_list) = self.outgoing.get_mut(&edge.src_vid) {
-                    outgoing_list.retain(|e| e.eid != edge.eid);
-                }
-            }
+        while let Some(edge) = self.incoming.get(&vid).and_then(|v| v.last()).copied() {
+            self.remove_edge(edge.eid);
         }
+        self.outgoing.remove(&vid);
+        self.incoming.remove(&vid);
     }
 
     /// Checks if a vertex exists in the graph.
@@ -140,33 +127,41 @@ impl SimpleGraph {
             edge_type,
         };
 
-        // Add to outgoing list
-        self.outgoing.entry(src_vid).or_default().push(entry);
-
-        // Add to incoming list
-        self.incoming.entry(dst_vid).or_default().push(entry);
-
-        // Add to edge map for O(1) lookup
-        self.edge_map.insert(eid, entry);
+        // Upserts must retire the old positions before installing new ones.
+        if self.edge_map.contains_key(&eid) {
+            self.remove_edge(eid);
+        }
+        let outgoing = self.outgoing.entry(src_vid).or_default();
+        let out_pos = outgoing.len();
+        outgoing.push(entry);
+        let incoming = self.incoming.entry(dst_vid).or_default();
+        let in_pos = incoming.len();
+        incoming.push(entry);
+        self.edge_map.insert(eid, (entry, out_pos, in_pos));
     }
 
-    /// Removes an edge by its ID. Returns the removed edge entry if found.
-    ///
-    /// Uses O(1) lookup via edge_map, then O(degree) removal from adjacency lists.
+    /// Removes an edge in O(1), updating the positions of swapped entries.
+    /// Adjacency iteration order is unspecified.
     pub fn remove_edge(&mut self, eid: Eid) -> Option<EdgeEntry> {
-        // O(1) lookup via edge_map
-        let entry = self.edge_map.remove(&eid)?;
-
-        // Remove from outgoing list
-        if let Some(outgoing_list) = self.outgoing.get_mut(&entry.src_vid) {
-            outgoing_list.retain(|e| e.eid != eid);
+        let (entry, out_pos, in_pos) = self.edge_map.remove(&eid)?;
+        if let Some(list) = self.outgoing.get_mut(&entry.src_vid) {
+            list.swap_remove(out_pos);
+            if let Some(moved) = list.get(out_pos) {
+                self.edge_map
+                    .get_mut(&moved.eid)
+                    .expect("outgoing edge position")
+                    .1 = out_pos;
+            }
         }
-
-        // Remove from incoming list
-        if let Some(incoming_list) = self.incoming.get_mut(&entry.dst_vid) {
-            incoming_list.retain(|e| e.eid != eid);
+        if let Some(list) = self.incoming.get_mut(&entry.dst_vid) {
+            list.swap_remove(in_pos);
+            if let Some(moved) = list.get(in_pos) {
+                self.edge_map
+                    .get_mut(&moved.eid)
+                    .expect("incoming edge position")
+                    .2 = in_pos;
+            }
         }
-
         Some(entry)
     }
 
@@ -187,7 +182,7 @@ impl SimpleGraph {
 
     /// Returns the edge with the given Eid in O(1) time.
     pub fn edge(&self, eid: Eid) -> Option<&EdgeEntry> {
-        self.edge_map.get(&eid)
+        self.edge_map.get(&eid).map(|(entry, _, _)| entry)
     }
 
     /// Checks if a vertex exists and returns it (identity).
@@ -197,7 +192,7 @@ impl SimpleGraph {
 
     /// Returns the total number of edges in the graph.
     pub fn edge_count(&self) -> usize {
-        self.outgoing.values().map(|v| v.len()).sum()
+        self.edge_map.len()
     }
 
     /// Returns an iterator over all vertices in the graph.
@@ -357,5 +352,45 @@ mod tests {
         g.remove_edge(e1);
         assert!(g.edge(e1).is_none());
         assert!(g.edge(e2).is_some()); // e2 should still exist
+    }
+}
+
+#[cfg(test)]
+mod position_regressions {
+    use super::*;
+
+    #[test]
+    fn mixed_removal_keeps_swapped_positions_and_upserts_consistent() {
+        let mut graph = SimpleGraph::new();
+        for i in 0..128 {
+            graph.add_edge(
+                Vid::new(i % 5),
+                Vid::new((i * 3) % 7),
+                Eid::new(i),
+                (i % 3) as u32,
+            );
+        }
+        // Updating an EID must not leave its former adjacency entry behind.
+        graph.add_edge(Vid::new(8), Vid::new(8), Eid::new(12), 9);
+        assert_eq!(graph.edge_count(), 128);
+        let mut graph = graph.clone();
+        for step in 0..128 {
+            let eid = Eid::new((step * 37) % 128);
+            assert!(graph.remove_edge(eid).is_some());
+            assert!(graph.remove_edge(eid).is_none());
+            assert_eq!(graph.edges().count(), graph.edge_count());
+            for (id, (entry, out, incoming)) in &graph.edge_map {
+                assert_eq!(graph.outgoing[&entry.src_vid][*out].eid, *id);
+                assert_eq!(graph.incoming[&entry.dst_vid][*incoming].eid, *id);
+            }
+        }
+        assert_eq!(graph.edge_count(), 0);
+        // Parallel self loops exercise both adjacency maps on vertex removal.
+        for i in 0..128 {
+            graph.add_edge(Vid::new(1), Vid::new(1), Eid::new(i), 1);
+        }
+        graph.remove_vertex(Vid::new(1));
+        assert_eq!(graph.edge_count(), 0);
+        assert!(graph.incoming[&Vid::new(8)].is_empty());
     }
 }

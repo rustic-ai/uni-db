@@ -1,0 +1,71 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 7b32a203-bf4e-4628-be92-0efd0da72dd6 with nextest profile: default
+    Starting 63 tests across 1 binary (3970 tests skipped)
+        PASS [   0.067s] ( 1/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_leaf_start
+        PASS [   0.076s] ( 2/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_multiple_anchor_roots
+        PASS [   0.076s] ( 3/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_no_recursive_edges
+        PASS [   0.076s] ( 4/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_cycle_terminates
+        PASS [   0.076s] ( 5/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_float_properties
+        PASS [   0.082s] ( 6/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_disconnected_graph
+        PASS [   0.086s] ( 7/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_multi_label_graph
+        PASS [   0.090s] ( 8/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_diamond_deduplication
+        PASS [   0.091s] ( 9/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_self_loop
+        PASS [   0.092s] (10/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_reverse_traversal
+        PASS [   0.100s] (11/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_anchor_no_match
+        PASS [   0.104s] (12/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_mid_chain_start
+        PASS [   0.104s] (13/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_branching_tree
+        PASS [   0.091s] (14/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_linear_chain
+        PASS [   0.106s] (15/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_string_properties
+        PASS [   0.109s] (16/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_with_limit
+        PASS [   0.110s] (17/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_specific_edge_type
+        PASS [   0.111s] (18/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_with_skip
+        PASS [   0.097s] (19/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_with_count
+        PASS [   0.129s] (20/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_deep_chain
+        PASS [   0.062s] (21/63) uni-db::integration ssi_occ_e2e::retry_exhaustion_returns_conflict
+        PASS [   0.064s] (22/63) uni-db::integration ssi_occ_e2e::read_only_transaction_is_not_a_pivot
+        PASS [   0.076s] (23/63) uni-db::integration ssi_occ_e2e::non_retriable_error_surfaces_without_retry
+        PASS [   0.078s] (24/63) uni-db::integration ssi_occ_e2e::edge_read_antidependency_aborts
+        PASS [   0.084s] (25/63) uni-db::integration ssi_occ_e2e::disjoint_writers_both_commit
+        PASS [   0.098s] (26/63) uni-db::integration ssi_occ_e2e::atomic_increment_two_writers_converges
+        PASS [   0.085s] (27/63) uni-db::integration ssi_occ_e2e::scan_read_antidependency_aborts
+        PASS [   0.200s] (28/63) uni-db::integration cypher_read::recursive_cte_execution_test::test_recursive_cte_wide_fan_out
+        PASS [   0.088s] (29/63) uni-db::integration ssi_occ_e2e::scan_read_disjoint_key_no_false_abort
+        PASS [   0.187s] (30/63) uni-db::integration fork::fork_index_vector::fork_local_vector_honors_deleted_filter
+        PASS [   0.105s] (31/63) uni-db::integration ssi_occ_e2e::concurrent_merge_same_key_yields_one_node
+        PASS [   0.142s] (32/63) uni-db::integration fork::fork_schema_evolution::fork_continues_writing_after_primary_schema_grows
+        PASS [   0.095s] (33/63) uni-db::integration ssi_occ_e2e::schemaless_traversal_antidependency_aborts
+        PASS [   0.080s] (34/63) uni-db::integration ssi_occ_e2e::traversal_antidependency_aborts
+        PASS [   0.186s] (35/63) uni-db::integration fork::fork_index_vector::nested_fork_vector_resolves_through_ancestors
+        PASS [   0.190s] (36/63) uni-db::integration fork::fork_schema_evolution::fork_created_after_the_declaration_needs_no_widening
+        PASS [   0.091s] (37/63) uni-db::integration ssi_occ_e2e::vid_lookup_join_records_reads_via_fallback
+        PASS [   0.117s] (38/63) uni-db::integration ssi_occ_e2e::schemaless_traversal_pushdown_ignores_unrelated_vertices
+        PASS [   0.202s] (39/63) uni-db::integration fork::fork_schema_evolution::primary_schema_add_label_does_not_break_v1_fork
+        PASS [   0.237s] (40/63) uni-db::integration fork::fork_index_vector::fork_local_vector_index_returns_fused_results
+        PASS [   0.245s] (41/63) uni-db::integration fork::fork_schema_evolution::cypher_alter_add_property_widens_primary_and_forks
+        PASS [   0.306s] (42/63) uni-db::integration fork::fork_schema_evolution::fork_with_an_existing_branch_accepts_a_property_added_on_primary
+        PASS [   0.305s] (43/63) uni-db::integration fork::fork_schema_evolution::nested_fork_accepts_a_property_added_on_primary
+        PASS [   0.457s] (44/63) uni-db::integration ssi_occ_e2e::read_only_queries_never_abort_under_writes
+        PASS [   0.543s] (45/63) uni-db::integration ssi_occ_e2e::atomic_increment_many_writers_converges
+        PASS [   0.566s] (46/63) uni-db::integration vector_search::vector_predicate_exactness::fork_reads_the_predicate_exactly
+        PASS [   1.001s] (47/63) uni-db::integration vector_search::vector_predicate_exactness::approx_eq_takes_any_constant_query_vector
+        PASS [  11.482s] (48/63) uni-db::integration vector_search::vector_predicate_exactness::ivf_flat_cosine::unflushed
+        PASS [  11.609s] (49/63) uni-db::integration vector_search::vector_predicate_exactness::ivf_flat_l2::flushed
+        PASS [  11.914s] (50/63) uni-db::integration vector_search::vector_predicate_exactness::flat_cosine::unflushed
+        PASS [  12.239s] (51/63) uni-db::integration vector_search::vector_predicate_exactness::hnsw_cosine::flushed
+        PASS [  12.278s] (52/63) uni-db::integration vector_search::vector_predicate_exactness::flat_cosine::flushed
+        PASS [  12.454s] (53/63) uni-db::integration vector_search::vector_predicate_exactness::flat_dot::flushed
+        PASS [  12.465s] (54/63) uni-db::integration vector_search::vector_predicate_exactness::hnsw_dot::unflushed
+        PASS [  12.601s] (55/63) uni-db::integration vector_search::vector_predicate_exactness::flat_dot::unflushed
+        PASS [  12.577s] (56/63) uni-db::integration vector_search::vector_predicate_exactness::ivf_flat_cosine::flushed
+        PASS [  12.790s] (57/63) uni-db::integration vector_search::vector_predicate_exactness::flat_l2::flushed
+        PASS [  13.080s] (58/63) uni-db::integration vector_search::vector_predicate_exactness::ivf_flat_l2::unflushed
+        PASS [  13.120s] (59/63) uni-db::integration vector_search::vector_predicate_exactness::hnsw_dot::flushed
+        PASS [  13.698s] (60/63) uni-db::integration vector_search::vector_predicate_exactness::hnsw_cosine::unflushed
+        PASS [  14.614s] (61/63) uni-db::integration vector_search::vector_predicate_exactness::schemaless::unflushed
+        PASS [  15.549s] (62/63) uni-db::integration vector_search::vector_predicate_exactness::flat_l2::unflushed
+        PASS [  21.045s] (63/63) uni-db::integration vector_search::vector_predicate_exactness::schemaless::flushed
+────────────
+     Summary [  21.355s] 63 tests run: 63 passed, 3970 skipped

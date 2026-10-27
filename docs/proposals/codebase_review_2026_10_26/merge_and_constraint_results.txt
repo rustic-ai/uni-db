@@ -1,0 +1,101 @@
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.62s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 5306002a-0aa7-4ec0-9eee-7d8b0ca840a4 with nextest profile: default
+    Starting 7 tests across 1 binary (4027 tests skipped)
+        PASS [   0.055s] (1/7) uni-db::integration bugs::bug_rc2_merge_phantom_and_atomic_set::atomic_set_without_retry_is_sound_but_needs_retry_to_reach_n
+        PASS [   0.057s] (2/7) uni-db::integration bugs::bug_rc2_merge_phantom_and_atomic_set::concurrent_merge_without_constraint_converges_with_retry
+        FAIL [   0.071s] (3/7) uni-db::integration review_20261026::review_anonymous_merge_must_deduplicate_within_statement
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_anonymous_merge_must_deduplicate_within_statement ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_anonymous_merge_must_deduplicate_within_statement
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4033 filtered out; finished in 0.04s
+
+  stderr ───
+
+    thread 'review_20261026::review_anonymous_merge_must_deduplicate_within_statement' (435) panicked at /tmp/uni-review-regressions.rs:191:9:
+    assertion `left == right` failed: Anonymous MERGE must create only one node for a repeated key
+      left: 3
+     right: 1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.085s] (4/7) uni-db::integration review_20261026::review_merge_guard_must_survive_concurrent_flush
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_merge_guard_must_survive_concurrent_flush ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_merge_guard_must_survive_concurrent_flush
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4033 filtered out; finished in 0.06s
+
+  stderr ───
+    mode=merge, flush=false, second_commit=Err(ConstraintConflict { message: "MERGE key already committed by a concurrent transaction" }), rows=[Row { columns: ["key", "id"], values: [String("same"), Int(0)] }]
+    mode=merge, flush=true, second_commit=Ok(CommitResult { mutations_committed: 1, rules_promoted: 0, version: 2, started_at_version: 0, wal_lsn: 2, duration: 22.977191ms, rule_promotion_errors: [] }), rows=[Row { columns: ["key", "id"], values: [String("same"), Int(0)] }, Row { columns: ["key", "id"], values: [String("same"), Int(16)] }]
+
+    thread 'review_20261026::review_merge_guard_must_survive_concurrent_flush' (433) panicked at /tmp/uni-review-regressions.rs:170:5:
+    flush must not allow duplicate MERGE creates
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.086s] (5/7) uni-db::integration review_20261026::review_ext_id_guard_must_survive_concurrent_flush
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_ext_id_guard_must_survive_concurrent_flush ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_ext_id_guard_must_survive_concurrent_flush
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4033 filtered out; finished in 0.06s
+
+  stderr ───
+    mode=ext_id, flush=false, second_commit=Err(ConstraintConflict { message: "ext_id 'same' already committed by a concurrent transaction" }), rows=[Row { columns: ["key", "id"], values: [String("same"), Int(0)] }]
+    mode=ext_id, flush=true, second_commit=Ok(CommitResult { mutations_committed: 1, rules_promoted: 0, version: 2, started_at_version: 0, wal_lsn: 2, duration: 20.503955ms, rule_promotion_errors: [] }), rows=[Row { columns: ["key", "id"], values: [String("same"), Int(0)] }, Row { columns: ["key", "id"], values: [String("same"), Int(16)] }]
+
+    thread 'review_20261026::review_ext_id_guard_must_survive_concurrent_flush' (436) panicked at /tmp/uni-review-regressions.rs:177:5:
+    flush must not allow duplicate ext_id
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.087s] (6/7) uni-db::integration review_20261026::review_unique_constraint_must_survive_concurrent_flush
+  stdout ───
+
+    running 1 test
+    test review_20261026::review_unique_constraint_must_survive_concurrent_flush ... FAILED
+
+    failures:
+
+    failures:
+        review_20261026::review_unique_constraint_must_survive_concurrent_flush
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4033 filtered out; finished in 0.07s
+
+  stderr ───
+    mode=unique, flush=false, second_commit=Err(ConstraintConflict { message: "unique key already committed by a concurrent transaction" }), rows=[Row { columns: ["key", "id"], values: [String("same"), Int(0)] }]
+    mode=unique, flush=true, second_commit=Ok(CommitResult { mutations_committed: 1, rules_promoted: 0, version: 2, started_at_version: 0, wal_lsn: 2, duration: 23.396369ms, rule_promotion_errors: [] }), rows=[Row { columns: ["key", "id"], values: [String("same"), Int(0)] }, Row { columns: ["key", "id"], values: [String("same"), Int(16)] }]
+
+    thread 'review_20261026::review_unique_constraint_must_survive_concurrent_flush' (406) panicked at /tmp/uni-review-regressions.rs:163:5:
+    flush must not allow a duplicate unique key
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.097s] (7/7) uni-db::integration bugs::bug_rc2_merge_phantom_and_atomic_set::concurrent_merge_without_constraint_no_duplicate
+────────────
+     Summary [   0.104s] 7 tests run: 3 passed, 4 failed, 4027 skipped
+        FAIL [   0.071s] (3/7) uni-db::integration review_20261026::review_anonymous_merge_must_deduplicate_within_statement
+        FAIL [   0.085s] (4/7) uni-db::integration review_20261026::review_merge_guard_must_survive_concurrent_flush
+        FAIL [   0.086s] (5/7) uni-db::integration review_20261026::review_ext_id_guard_must_survive_concurrent_flush
+        FAIL [   0.087s] (6/7) uni-db::integration review_20261026::review_unique_constraint_must_survive_concurrent_flush
+error: test run failed

@@ -66,11 +66,14 @@ export RUST_BACKTRACE=1
 
 ### Ordering / contention
 
-- **All `cargo`/`maturin` commands serialize on the build-dir lock** — run them one at a time.
+- **Run `cargo`/`maturin` commands one at a time.** They share the build-dir lock.
+  `nextest` releases that lock before executing tests, so a queued build can start while its
+  timing assertions are running. Wait for the entire test command to finish before starting
+  the next build; the build lock alone does not provide that isolation.
 - Docker (LocalStack) and pure-Python (`uv`) steps do **not** contend with a cargo build, so they can
   warm up in parallel (e.g. start LocalStack while a build runs).
-- Heavy builds (provider-onnx static link, the notebooks wheel) are best run in the background while you
-  watch a log.
+- Run builds and tests in the foreground at normal OS scheduling priority. Do not lower
+  priority with `nice` or `ionice`; keep competing builds out of timing-sensitive test runs.
 
 ---
 

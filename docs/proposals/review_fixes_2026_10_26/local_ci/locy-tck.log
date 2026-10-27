@@ -1,0 +1,1169 @@
+Running Locy TCK tests in 'schemaless' mode...
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.39s
+────────────
+ Nextest run ID 2fc164a9-a6c5-40ca-9d67-c3c0e289cd8b with nextest profile: default
+    Starting 558 tests across 1 binary
+        PASS [   0.095s] (  1/558) uni-locy-tck::locy_tck assume::Hypothetical::ASSUME THEN with rule evaluation
+        PASS [   0.113s] (  2/558) uni-locy-tck::locy_tck along::PathCarriedValues::ALONG with prev reference
+        PASS [   0.135s] (  3/558) uni-locy-tck::locy_tck along::PathCarriedValues::ALONG combined with FOLD
+        PASS [   0.135s] (  4/558) uni-locy-tck::locy_tck along::PathCarriedValues::Multiple ALONG variables
+        PASS [   0.136s] (  5/558) uni-locy-tck::locy_tck abduce::AbductiveReasoning::ABDUCE NOT syntax parses
+        PASS [   0.137s] (  6/558) uni-locy-tck::locy_tck along::PathCarriedValues::ALONG with arithmetic expression
+        PASS [   0.145s] (  7/558) uni-locy-tck::locy_tck along::PathCarriedValues::ALONG combined with FOLD SUM
+        PASS [   0.152s] (  8/558) uni-locy-tck::locy_tck assume::Hypothetical::ASSUME THEN with Cypher body
+        PASS [   0.157s] (  9/558) uni-locy-tck::locy_tck assume::Hypothetical::ASSUME with CREATE mutation
+        PASS [   0.162s] ( 10/558) uni-locy-tck::locy_tck abduce::AbductiveReasoning::ABDUCE positive syntax parses
+        PASS [   0.164s] ( 11/558) uni-locy-tck::locy_tck along::PathCarriedValues::ALONG on one clause leaves a sibling clause folding the folded value
+        PASS [   0.171s] ( 12/558) uni-locy-tck::locy_tck assume::Hypothetical::ASSUME DELETE is rolled back
+        PASS [   0.172s] ( 13/558) uni-locy-tck::locy_tck assume::Hypothetical::ASSUME mutation is rolled back after evaluation
+        PASS [   0.180s] ( 14/558) uni-locy-tck::locy_tck along::PathCarriedValues::Multiple ALONG variables carried independently
+        PASS [   0.183s] ( 15/558) uni-locy-tck::locy_tck along::PathCarriedValues::ALONG weighted cost accumulates edge weights
+        PASS [   0.184s] ( 16/558) uni-locy-tck::locy_tck along::PathCarriedValues::ALONG hop count accumulates across hops
+        PASS [   0.186s] ( 17/558) uni-locy-tck::locy_tck assume::AssumeBodyResults::A body of rules only returns no results, and its rules' facts as derived
+        PASS [   0.209s] ( 18/558) uni-locy-tck::locy_tck abduce::AbductiveReasoning::ABDUCE positive finds edge addition candidate
+        PASS [   0.211s] ( 19/558) uni-locy-tck::locy_tck abduce::AbductiveReasoning::ABDUCE NOT finds edge removal candidate
+        PASS [   0.224s] ( 20/558) uni-locy-tck::locy_tck along::PathCarriedValues::Recursive ALONG with BEST BY converges on cyclic graph
+        PASS [   0.244s] ( 21/558) uni-locy-tck::locy_tck assume::AssumeBodyResults::QUERY, DERIVE, QUERY and Cypher each return their own result
+        PASS [   0.162s] ( 22/558) uni-locy-tck::locy_tck assume::Hypothetical::ASSUME with rule re-evaluation under hypothesis
+        PASS [   0.146s] ( 23/558) uni-locy-tck::locy_tck bestby::OptimizedSelection::BEST BY ASC selects minimum cost
+        PASS [   0.273s] ( 24/558) uni-locy-tck::locy_tck assume::AssumeBodyResults::A nested ASSUME returns its own results inside the outer one
+        PASS [   0.132s] ( 25/558) uni-locy-tck::locy_tck bestby::OptimizedSelection::BEST BY with monotonic FOLD rejected
+        PASS [   0.143s] ( 26/558) uni-locy-tck::locy_tck bestby::OptimizedSelection::BEST BY MIN syntax parses
+        PASS [   0.151s] ( 27/558) uni-locy-tck::locy_tck bestby::OptimizedSelection::BEST BY with NULL values sorts NULLs last
+        PASS [   0.168s] ( 28/558) uni-locy-tck::locy_tck bestby::OptimizedSelection::BEST BY preserves full winning row
+        PASS [   0.192s] ( 29/558) uni-locy-tck::locy_tck bestby::OptimizedSelection::BEST BY DESC selects maximum value
+        PASS [   0.170s] ( 30/558) uni-locy-tck::locy_tck combinations::AssumeAbduce::ASSUME then ABDUCE on same rule parses
+        PASS [   0.166s] ( 31/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4b-2 ASSUME DELETE removes all causes making IS NOT yield 1.0
+        PASS [   0.175s] ( 32/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4b-1 ASSUME DELETE removes one cause and reduces MNOR then IS NOT complement
+        PASS [   0.194s] ( 33/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4a-3 ASSUME SET edge weight with FOLD MSUM re-evaluation scoped to target
+        PASS [   0.186s] ( 34/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4a-4 ASSUME CREATE new edge with FOLD MNOR adds new cause
+        PASS [   0.190s] ( 35/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4a-5 ASSUME SET with multi-group FOLD MNOR and QUERY
+        PASS [   0.216s] ( 36/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4a-1 ASSUME SET edge probability with FOLD MNOR re-evaluation
+        PASS [   0.215s] ( 37/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4a-2 ASSUME SET edge probability with FOLD MPROD re-evaluation
+        PASS [   0.253s] ( 38/558) uni-locy-tck::locy_tck combinations::AssumeAbduce::ASSUME extends reachability then ABDUCE breaks it
+        PASS [   0.244s] ( 39/558) uni-locy-tck::locy_tck combinations::AssumeAbduce::ASSUME with PROB rules then ABDUCE on same PROB rules
+        PASS [   0.220s] ( 40/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4b-3 ASSUME DELETE edge with FOLD MPROD and boolean IS NOT
+        PASS [   0.226s] ( 41/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4b-4 ASSUME DELETE with FOLD MSUM and IS NOT filter
+        PASS [   0.156s] ( 42/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4d-2 ABDUCE NOT on empty graph with FOLD MNOR yields no modifications
+        PASS [   0.210s] ( 43/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4c-2 ABDUCE NOT on FOLD MPROD rule with composite key
+        PASS [   0.218s] ( 44/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4c-3 ABDUCE NOT on composite-key signal with FOLD MNOR
+        PASS [   0.164s] ( 45/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4d-5 ASSUME CREATE new node and edge with FOLD MSUM and QUERY
+        PASS [   0.215s] ( 46/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4d-1 ASSUME on empty graph with FOLD MNOR returns no rows
+        PASS [   0.129s] ( 47/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::ABDUCE NOT inside ASSUME THEN parses
+        PASS [   0.290s] ( 48/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4b-5 ASSUME DELETE on composite-key with FOLD MNOR and IS NOT
+        PASS [   0.272s] ( 49/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4c-1 ABDUCE NOT on FOLD MNOR rule with single key
+        PASS [   0.244s] ( 50/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4c-4 ABDUCE NOT with ASSUME on same FOLD MNOR composite-key rule
+        PASS [   0.214s] ( 51/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4d-3 ASSUME SET with FOLD MNOR and IS NOT complement combined
+        PASS [   0.264s] ( 52/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4c-5 ABDUCE NOT on FOLD MSUM rule with composite key
+        PASS [   0.180s] ( 53/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::ABDUCE NOT inside ASSUME THEN reads the hypothetical state
+        PASS [   0.197s] ( 54/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::A QUERY inside ASSUME THEN reads the exact probability
+        PASS [   0.223s] ( 55/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4d-4 ASSUME DELETE with FOLD MNOR then ABDUCE NOT on same rule
+        PASS [   0.209s] ( 56/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::A QUERY inside ASSUME THEN reads the independence value without exact_probability
+        PASS [   0.203s] ( 57/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::ABDUCE inside ASSUME THEN validates against the body's own rule
+        PASS [   0.191s] ( 58/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::EXPLAIN RULE inside ASSUME THEN explains the hypothetical facts
+        PASS [   0.218s] ( 59/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::ABDUCE inside a nested ASSUME body reads both mutations
+        PASS [   0.204s] ( 60/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3a-1 Three-stratum chain: base to MNOR to IS NOT complement
+        PASS [   0.220s] ( 61/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::QUERY inside ASSUME THEN with ABDUCE NOT at the top level
+        PASS [   0.190s] ( 62/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3a-3 Three-stratum: transitive closure to FOLD COUNT to filter
+        PASS [   0.184s] ( 63/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3b-1 ALONG cost then FOLD SUM across all paths per source
+        PASS [   0.213s] ( 64/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3a-4 Three-stratum: PROB scores to MPROD joint to IS NOT complement
+        PASS [   0.184s] ( 65/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3b-3 ALONG reliability then FOLD MNOR aggregation across paths
+        PASS [   0.198s] ( 66/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3b-2 ALONG hops then FOLD MAX to find longest path per source
+        PASS [   0.250s] ( 67/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3a-2 Four-stratum pipeline: facts to FOLD to IS NOT to filter
+        PASS [   0.169s] ( 68/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3c-2 BEST BY DESC selects maximum then FOLD COUNT
+        PASS [   0.178s] ( 69/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3c-1 BEST BY ASC selects minimum then FOLD SUM across groups
+        PASS [   0.211s] ( 70/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3b-5 ALONG cost with BEST BY then FOLD SUM of shortest paths
+        PASS [   0.168s] ( 71/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3d-2 similar_to score as PROB with IS NOT complement
+        PASS [   0.200s] ( 72/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3c-4 BEST BY on recursive ALONG then IS NOT complement
+        PASS [   0.206s] ( 73/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3c-3 Shortest path BEST BY then FOLD SUM all shortest costs with QUERY
+        PASS [   0.176s] ( 74/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3d-4 similar_to to MNOR aggregation then QUERY with filter
+        PASS [   0.191s] ( 75/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3d-3 similar_to pairwise then IS NOT known then QUERY novel pairs
+        PASS [   0.247s] ( 76/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3b-4 ALONG with two variables then FOLD COUNT paths
+        PASS [   0.217s] ( 77/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3d-1 similar_to with WHERE filter on score then QUERY
+        PASS [   0.188s] ( 78/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3e-2 Recursive ALONG cost then FOLD SUM then QUERY per source
+        PASS [   0.204s] ( 79/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3d-5 similar_to with WHERE threshold and IS NOT exclusion combined
+        PASS [   0.180s] ( 80/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3e-4 Recursive reachability then FOLD MCOUNT then IS NOT then QUERY
+        PASS [   0.176s] ( 81/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3f-1 WHERE filter on numeric value column from IS-ref
+        PASS [   0.216s] ( 82/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3e-3 Recursive shortest path BEST BY then FOLD MIN then QUERY
+        PASS [   0.141s] ( 83/558) uni-locy-tck::locy_tck combinations::ExplainCombinations::EXPLAIN on IS NOT complement rule parses
+        PASS [   0.243s] ( 84/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3e-1 Recursive transitive closure then FOLD COUNT then QUERY
+        PASS [   0.157s] ( 85/558) uni-locy-tck::locy_tck combinations::ExplainCombinations::EXPLAIN on IS NOT complement rule returns derivation tree
+        PASS [   0.161s] ( 86/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3f-5 WHERE comparison on two IS-ref value columns
+        PASS [   0.155s] ( 87/558) uni-locy-tck::locy_tck combinations::ExplainCombinations::EXPLAIN on MNOR rule parses
+        PASS [   0.151s] ( 88/558) uni-locy-tck::locy_tck combinations::ExplainCombinations::EXPLAIN on MNOR rule returns derivation tree
+        PASS [   0.197s] ( 89/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3f-3 WHERE range filter on IS-ref value column
+        PASS [   0.149s] ( 90/558) uni-locy-tck::locy_tck combinations::ExplainCombinations::EXPLAIN on similar_to rule parses
+        PASS [   0.233s] ( 91/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3f-2 WHERE filter on FOLD value column from IS-ref
+        PASS [   0.164s] ( 92/558) uni-locy-tck::locy_tck combinations::ExplainCombinations::EXPLAIN on similar_to-derived rule returns derivation tree
+        PASS [   0.225s] ( 93/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3f-4 WHERE filter on IS-ref value column with ALONG cost
+        PASS [   0.170s] ( 94/558) uni-locy-tck::locy_tck combinations::FeatureCombinationMatrix::FOLD MNOR penalty then IS NOT complement then QUERY
+        PASS [   0.162s] ( 95/558) uni-locy-tck::locy_tck combinations::FeatureCombinationMatrix::Facts to MNOR to IS NOT PROB complement with QUERY
+        PASS [   0.189s] ( 96/558) uni-locy-tck::locy_tck combinations::FeatureCombinationMatrix::ABDUCE NOT on FOLD MNOR rule finds modification
+        PASS [   0.201s] ( 97/558) uni-locy-tck::locy_tck combinations::FeatureCombinationMatrix::ASSUME mutation with FOLD MNOR re-evaluation
+        PASS [   0.193s] ( 98/558) uni-locy-tck::locy_tck combinations::FeatureCombinationMatrix::WHERE filter on similar_to score from IS-ref
+        PASS [   0.210s] ( 99/558) uni-locy-tck::locy_tck combinations::FeatureCombinationMatrix::FOLD MNOR signal then composite-key IS NOT novel then QUERY
+        PASS [   0.177s] (100/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MCOUNT groups independently across two teams
+        PASS [   0.189s] (101/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MCOUNT derived relation computes correct count
+        PASS [   0.162s] (102/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMAX derived relation computes correct maximum
+        PASS [   0.169s] (103/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MCOUNT via QUERY returns correct value
+        PASS [   0.172s] (104/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMAX and MMIN on same graph yield complementary extremes
+        PASS [   0.188s] (105/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MCOUNT via ASSUME reflects hypothetical member addition
+        PASS [   0.172s] (106/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMIN derived relation computes correct minimum
+        PASS [   0.190s] (107/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMAX via ABDUCE finds modification candidate
+        PASS [   0.197s] (108/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMAX via QUERY returns correct value
+        PASS [   0.262s] (109/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MCOUNT via ABDUCE finds modification candidate
+        PASS [   0.222s] (110/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMAX groups independently across two sensors
+        PASS [   0.176s] (111/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMIN via QUERY returns correct value
+        PASS [   0.205s] (112/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMIN groups independently across two servers
+        PASS [   0.221s] (113/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMAX via ASSUME reflects hypothetical new reading
+        PASS [   0.183s] (114/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MNOR and MPROD coexist as separate rules
+        PASS [   0.181s] (115/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MNOR derived relation computes correct noisy-OR
+        PASS [   0.201s] (116/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MNOR via ABDUCE finds edge removal candidate
+        PASS [   0.173s] (117/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MPROD derived relation computes correct product
+        PASS [   0.174s] (118/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MNOR via QUERY returns correct value
+        PASS [   0.200s] (119/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MNOR via ASSUME reflects hypothetical edge removal
+        PASS [   0.261s] (120/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMIN via ASSUME reflects hypothetical faster measurement
+        PASS [   0.160s] (121/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MPROD via QUERY returns correct value
+        PASS [   0.194s] (122/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MPROD via ASSUME reflects hypothetical edge removal
+        PASS [   0.289s] (123/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMIN via ABDUCE finds modification candidate
+        PASS [   0.173s] (124/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MSUM groups independently across two departments
+        PASS [   0.214s] (125/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MPROD via ABDUCE finds edge removal candidate
+        PASS [   0.186s] (126/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MSUM via ASSUME reflects hypothetical edge addition
+        PASS [   0.231s] (127/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MSUM and MCOUNT on same graph with different rules
+        PASS [   0.233s] (128/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MSUM derived relation computes correct sum
+        PASS [   0.200s] (129/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MSUM via QUERY returns correct value
+        PASS [   0.194s] (130/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2a-4 Boolean IS NOT with FOLD MSUM and QUERY
+        PASS [   0.178s] (131/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2a-5 Boolean IS NOT with empty negated relation passes all to FOLD MNOR
+        PASS [   0.202s] (132/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2a-1 Boolean IS NOT with FOLD MNOR and QUERY
+        PASS [   0.252s] (133/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MSUM via ABDUCE finds modification candidate
+        PASS [   0.175s] (134/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2b-1 PROB complement after FOLD MNOR with QUERY
+        PASS [   0.223s] (135/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2a-3 Boolean IS NOT with FOLD MPROD and QUERY
+        PASS [   0.227s] (136/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2a-2 Boolean IS NOT passes unflagged nodes to FOLD MNOR with QUERY
+        PASS [   0.166s] (137/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2b-3 PROB complement absent key yields 1.0 with FOLD MNOR and QUERY
+        PASS [   0.220s] (138/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2a-6 Boolean IS NOT multi-group FOLD MNOR with QUERY
+        PASS [   0.272s] (139/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::Two independent FOLD rules produce correct values in same program
+        PASS [   0.175s] (140/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2c-2 Composite-key PROB IS NOT complement with FOLD MNOR and QUERY
+        PASS [   0.184s] (141/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2b-5 Double complement recovers original FOLD MNOR probability
+        PASS [   0.183s] (142/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2b-6 PROB complement with FOLD MNOR three causes and QUERY
+        PASS [   0.201s] (143/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2b-2 PROB complement after FOLD MPROD with QUERY
+        PASS [   0.216s] (144/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2b-4 Cross-predicate IS + IS NOT PROB with FOLD MNOR and QUERY
+        PASS [   0.178s] (145/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2c-3 Composite-key IS NOT all pairs known yields empty novel set
+        PASS [   0.198s] (146/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2c-1 Composite-key boolean IS NOT with FOLD MNOR and QUERY
+        PASS [   0.199s] (147/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2c-4 Composite-key IS NOT with multiple drugs and FOLD MNOR QUERY
+        PASS [   0.185s] (148/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2d-1 Boolean IS NOT feeding recursive FOLD MSUM with QUERY
+        PASS [   0.187s] (149/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2d-2 PROB complement IS NOT with recursive MNOR transitive risk and QUERY
+        PASS [   0.146s] (150/558) uni-locy-tck::locy_tck combinations::PathCombinations::ALONG with edge weight then MNOR fold parses
+        PASS [   0.185s] (151/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2d-4 IS NOT PROB complement with FOLD MPROD and chained QUERY
+        PASS [   0.209s] (152/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2d-3 Boolean IS NOT chain with FOLD MSUM at each stage and QUERY
+        PASS [   0.154s] (153/558) uni-locy-tck::locy_tck combinations::ProbAbduceAssume::ABDUCE NOT on MNOR rule parses
+        PASS [   0.171s] (154/558) uni-locy-tck::locy_tck combinations::PathCombinations::similar_to in ALONG accumulator parses
+        PASS [   0.135s] (155/558) uni-locy-tck::locy_tck combinations::ProbAbduceAssume::ASSUME with MNOR rule re-evaluation parses
+        PASS [   0.191s] (156/558) uni-locy-tck::locy_tck combinations::PathCombinations::similar_to carried along citation path
+        PASS [   0.164s] (157/558) uni-locy-tck::locy_tck combinations::SemanticParity::Boolean IS NOT QUERY matches derived
+        PASS [   0.167s] (158/558) uni-locy-tck::locy_tck combinations::SemanticParity::Bare QUERY over a plain rule matches derived key-for-key
+        PASS [   0.242s] (159/558) uni-locy-tck::locy_tck combinations::PathCombinations::ALONG edge reliability aggregated by MNOR across multiple paths
+        PASS [   0.195s] (160/558) uni-locy-tck::locy_tck combinations::ProbAbduceAssume::ASSUME DELETE removes one cause, reduces MNOR probability
+        PASS [   0.232s] (161/558) uni-locy-tck::locy_tck combinations::ProbAbduceAssume::ABDUCE NOT on MNOR rule finds edge removal candidate
+        PASS [   0.227s] (162/558) uni-locy-tck::locy_tck combinations::ProbAbduceAssume::ABDUCE NOT on multi-edge MNOR rule finds edge removal
+        PASS [   0.193s] (163/558) uni-locy-tck::locy_tck combinations::SemanticParity::Bare QUERY over a composite-key rule matches derived key-for-key
+        PASS [   0.167s] (164/558) uni-locy-tck::locy_tck combinations::SemanticParity::IS NOT PROB complement derived relation correctness
+        PASS [   0.192s] (165/558) uni-locy-tck::locy_tck combinations::SemanticParity::FOLD MNOR QUERY matches derived
+        PASS [   0.194s] (166/558) uni-locy-tck::locy_tck combinations::SemanticParity::Composite-key IS NOT QUERY matches derived
+        PASS [   0.281s] (167/558) uni-locy-tck::locy_tck combinations::PathCombinations::ABDUCE NOT on ALONG-derived path rule finds edge removal
+        PASS [   0.215s] (168/558) uni-locy-tck::locy_tck combinations::ProbAbduceAssume::ASSUME and ABDUCE both operate on same MNOR rule
+        PASS [   0.202s] (169/558) uni-locy-tck::locy_tck combinations::SemanticParity::FOLD MPROD QUERY matches derived
+        PASS [   0.153s] (170/558) uni-locy-tck::locy_tck combinations::SemanticParity::Simple non-recursive rule QUERY matches derived
+        PASS [   0.190s] (171/558) uni-locy-tck::locy_tck combinations::SemanticParity::QUERY matches derived for a recursive rule with a fresh binding
+        PASS [   0.156s] (172/558) uni-locy-tck::locy_tck combinations::SimilarToAbduceAssume::ABDUCE NOT on similar_to rule parses
+        PASS [   0.164s] (173/558) uni-locy-tck::locy_tck combinations::SemanticParity::Three-stratum FOLD chain QUERY matches derived
+        PASS [   0.208s] (174/558) uni-locy-tck::locy_tck combinations::SemanticParity::QUERY matches derived when an IS-ref introduces a binding
+        PASS [   0.187s] (175/558) uni-locy-tck::locy_tck combinations::SimilarToAbduceAssume::ABDUCE NOT on similar_to-derived rule finds edge removal
+        PASS [   0.162s] (176/558) uni-locy-tck::locy_tck combinations::SimilarToAbduceAssume::ASSUME with similar_to MNOR rule parses
+        PASS [   0.141s] (177/558) uni-locy-tck::locy_tck combinations::SimilarToProbability::similar_to score in YIELD with MNOR fold parses
+        PASS [   0.155s] (178/558) uni-locy-tck::locy_tck combinations::SimilarToProbability::similar_to score as PROB with IS NOT complement
+        PASS [   0.139s] (179/558) uni-locy-tck::locy_tck combinations::SimilarToProbability::similar_to with MPROD fold parses
+        PASS [   0.142s] (180/558) uni-locy-tck::locy_tck combinations::TripleCombinations::similar_to + MNOR + IS NOT parses
+        PASS [   0.172s] (181/558) uni-locy-tck::locy_tck combinations::SimilarToProbability::similar_to fed into MNOR via two-rule pattern
+        PASS [   0.188s] (182/558) uni-locy-tck::locy_tck combinations::SimilarToProbability::similar_to fed into MPROD via two-rule pattern
+        PASS [   0.164s] (183/558) uni-locy-tck::locy_tck combinations::SimilarToProbability::similar_to score used as YIELD column
+        PASS [   0.153s] (184/558) uni-locy-tck::locy_tck combinations::TripleCombinations::similar_to + PROB + ASSUME parses
+        PASS [   0.225s] (185/558) uni-locy-tck::locy_tck combinations::SimilarToAbduceAssume::ASSUME DELETE removes signal and reduces similar_to MNOR
+        PASS [   0.160s] (186/558) uni-locy-tck::locy_tck compile::FoldMonotonicity::Monotone-but-unbounded COLLECT in self-recursive rule compiles
+        PASS [   0.157s] (187/558) uni-locy-tck::locy_tck compile::FoldMonotonicity::Monotonic MMAX in self-recursive rule compiles
+        PASS [   0.149s] (188/558) uni-locy-tck::locy_tck compile::FoldMonotonicity::Monotonic MNOR in self-recursive rule compiles
+        PASS [   0.171s] (189/558) uni-locy-tck::locy_tck combinations::TripleCombinations::similar_to scores aggregated by MNOR then IS NOT complement
+        PASS [   0.188s] (190/558) uni-locy-tck::locy_tck combinations::TripleCombinations::similar_to MNOR aggregation then ABDUCE finds signal removal
+        PASS [   0.269s] (191/558) uni-locy-tck::locy_tck combinations::SimilarToAbduceAssume::ASSUME CREATE adds signal and ABDUCE operates on same similar_to MNOR rule
+        PASS [   0.191s] (192/558) uni-locy-tck::locy_tck combinations::TripleCombinations::similar_to MNOR threat level reduced under ASSUME DELETE
+        PASS [   0.140s] (193/558) uni-locy-tck::locy_tck compile::FoldMonotonicity::Non-monotonic AVG in self-recursive rule is rejected
+        PASS [   0.147s] (194/558) uni-locy-tck::locy_tck compile::FoldMonotonicity::Non-monotonic SUM in self-recursive rule is rejected
+        PASS [   0.171s] (195/558) uni-locy-tck::locy_tck compile::FoldMonotonicity::Non-monotonic SUM in non-recursive rule compiles
+        PASS [   0.178s] (196/558) uni-locy-tck::locy_tck compile::FoldMonotonicity::Monotonic MSUM in self-recursive rule compiles
+        PASS [   0.152s] (197/558) uni-locy-tck::locy_tck compile::Stratification::Cyclic negation should fail to compile
+        PASS [   0.171s] (198/558) uni-locy-tck::locy_tck compile::Stratification::Program with no rules compiles to zero strata
+        PASS [   0.144s] (199/558) uni-locy-tck::locy_tck compile::Stratification::Single-stratum non-recursive program
+        PASS [   0.159s] (200/558) uni-locy-tck::locy_tck compile::Stratification::Self-recursive rule in single stratum
+        PASS [   0.142s] (201/558) uni-locy-tck::locy_tck compile::Stratification::Two strata with negation dependency
+        PASS [   0.151s] (202/558) uni-locy-tck::locy_tck compile::Stratification::Undefined rule reference should fail to compile
+        PASS [   0.169s] (203/558) uni-locy-tck::locy_tck correlation::CrossGroupCorrelation::Binding each exposed column positionally resolves the read
+        PASS [   0.151s] (204/558) uni-locy-tck::locy_tck correlation::CrossGroupCorrelation::Reading a value column two IS references expose fails to compile
+        PASS [   0.166s] (205/558) uni-locy-tck::locy_tck correlation::CrossGroupCorrelation::Different subjects do not emit CrossPredicateCorrelation
+        PASS [   0.163s] (206/558) uni-locy-tck::locy_tck correlation::CrossGroupCorrelation::WHERE on different subjects does not emit the warning
+        PASS [   0.160s] (207/558) uni-locy-tck::locy_tck correlation::CrossGroupCorrelation::WHERE s IS p, s IS q on PROB rules emits CrossPredicateCorrelation
+        PASS [   0.190s] (208/558) uni-locy-tck::locy_tck correlation::CrossGroupCorrelation::Only one PROB IS-ref does not emit CrossPredicateCorrelation
+        PASS [   0.165s] (209/558) uni-locy-tck::locy_tck correlation::FoldInRecursivePath::Recursive IS-ref + FOLD + ALONG still emits FoldInRecursivePath
+        PASS [   0.170s] (210/558) uni-locy-tck::locy_tck correlation::FoldInRecursivePath::Non-recursive FOLD without ALONG does not warn
+        PASS [   0.189s] (211/558) uni-locy-tck::locy_tck correlation::CrossGroupCorrelation::WHERE s IS p, s IS NOT q emits PositiveComplementCorrelation
+        PASS [   0.165s] (212/558) uni-locy-tck::locy_tck correlation::HavingInRecursivePath::A post-FOLD WHERE without recursion does not warn
+        PASS [   0.167s] (213/558) uni-locy-tck::locy_tck correlation::FoldInRecursivePath::Recursive IS-ref + FOLD + no ALONG emits FoldInRecursivePath
+        PASS [   0.174s] (214/558) uni-locy-tck::locy_tck correlation::HavingInRecursivePath::A self-referencing rule with a post-FOLD WHERE warns
+        PASS [   0.182s] (215/558) uni-locy-tck::locy_tck correlation::HavingInRecursivePath::A recursive FOLD with no post-FOLD WHERE does not warn
+        PASS [   0.158s] (216/558) uni-locy-tck::locy_tck correlation::RequireInRecursion::REQUIRE and the post-FOLD WHERE agree without recursion
+        PASS [   0.167s] (217/558) uni-locy-tck::locy_tck correlation::HavingInRecursivePath::The excluded group still drives the recursion
+        PASS [   0.164s] (218/558) uni-locy-tck::locy_tck correlation::RequireInRecursion::REQUIRE constrains the recursion, so the chain stops at B
+        PASS [   0.141s] (219/558) uni-locy-tck::locy_tck correlation::SharedRetrievalContext::Two similar_to features on same property emits SharedRetrievalContext
+        PASS [   0.157s] (220/558) uni-locy-tck::locy_tck correlation::SharedRetrievalContext::@independent annotation suppresses SharedRetrievalContext
+        PASS [   0.161s] (221/558) uni-locy-tck::locy_tck correlation::RequireInRecursion::the post-FOLD WHERE filters the answer only, so C is still derived
+        PASS [   0.163s] (222/558) uni-locy-tck::locy_tck correlation::SharedRetrievalContext::Retrieval features on different properties do not emit warning
+        PASS [   0.170s] (223/558) uni-locy-tck::locy_tck correlation::RequireInRecursion::a rule using REQUIRE does not warn about HavingInRecursivePath
+        PASS [   0.200s] (224/558) uni-locy-tck::locy_tck correlation::RequireInRecursion::REQUIRE names a fold output that YIELD renames
+        PASS [   0.145s] (225/558) uni-locy-tck::locy_tck derive::DeriveEdges::DERIVE MERGE two nodes
+        PASS [   0.175s] (226/558) uni-locy-tck::locy_tck derive::CommandSequencing::QUERY after DERIVE reads the derived edges
+        PASS [   0.159s] (227/558) uni-locy-tck::locy_tck derive::DeriveEdges::Backward edge derive
+        PASS [   0.211s] (228/558) uni-locy-tck::locy_tck derive::CommandSequencing::A Cypher write is a command, and a later QUERY reads it
+        PASS [   0.158s] (229/558) uni-locy-tck::locy_tck derive::DeriveEdges::DERIVE NEW node
+        PASS [   0.213s] (230/558) uni-locy-tck::locy_tck derive::CommandSequencing::A second DERIVE reads the first DERIVE's edges
+        PASS [   0.198s] (231/558) uni-locy-tck::locy_tck derive::CommandSequencing::QUERY before and after a DERIVE reads each state
+        PASS [   0.146s] (232/558) uni-locy-tck::locy_tck derive::DeriveEdges::Forward edge derive
+        PASS [   0.179s] (233/558) uni-locy-tck::locy_tck derive::DeriveEdges::DERIVE NEW rule compiles successfully
+        PASS [   0.162s] (234/558) uni-locy-tck::locy_tck derive::DeriveEdges::DERIVE edge rule compiles successfully
+        PASS [   0.245s] (235/558) uni-locy-tck::locy_tck derive::CommandSequencing::A recursive rule reads the derived edges
+        PASS [   0.204s] (236/558) uni-locy-tck::locy_tck derive::DeriveEdges::DERIVE NEW creates a Skolem node
+        PASS [   0.199s] (237/558) uni-locy-tck::locy_tck derive::DeriveEdges::DERIVE creates edges in the graph
+        PASS [   0.183s] (238/558) uni-locy-tck::locy_tck derive::DeriveEdges::DERIVE idempotency — re-derive does not duplicate
+        PASS [   0.170s] (239/558) uni-locy-tck::locy_tck derive::DeriveVisibility::DERIVE edges do not persist to graph without tx.apply
+        PASS [   0.199s] (240/558) uni-locy-tck::locy_tck derive::DeriveVisibility::QUERY then DERIVE then trailing Cypher
+        PASS [   0.184s] (241/558) uni-locy-tck::locy_tck derive::DeriveVisibility::Trailing Cypher after DERIVE sees derived edges
+        PASS [   0.172s] (242/558) uni-locy-tck::locy_tck evaluate::AlongWithIsRef::ALONG binding directly as YIELD column with IS-ref
+        PASS [   0.196s] (243/558) uni-locy-tck::locy_tck derive::DeriveVisibility::Trailing Cypher after empty DERIVE returns 0 correctly
+        PASS [   0.222s] (244/558) uni-locy-tck::locy_tck derive::DeriveVisibility::Trailing Cypher count reflects derived edge count
+        PASS [   0.226s] (245/558) uni-locy-tck::locy_tck derive::DeriveVisibility::Trailing Cypher joins derived edges with existing graph
+        PASS [   0.170s] (246/558) uni-locy-tck::locy_tck evaluate::AlongWithIsRef::ALONG binding used in compound YIELD expression with IS-ref
+        PASS [   0.176s] (247/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::datetime() in QUERY RETURN does not error
+        PASS [   0.174s] (248/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::exp() decay pattern in QUERY WHERE models relevance decay
+        PASS [   0.193s] (249/558) uni-locy-tck::locy_tck evaluate::AlongWithIsRef::ALONG binding with alias in YIELD with IS-ref
+        PASS [   0.252s] (250/558) uni-locy-tck::locy_tck derive::DeriveVisibility::Trailing Cypher sees edges from multiple DERIVE commands
+        PASS [   0.164s] (251/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::exp(0) = 1.0 in QUERY RETURN
+        PASS [   0.179s] (252/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::exp() in QUERY WHERE filters correctly
+        PASS [   0.137s] (253/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::Cyclic negation rejected
+        PASS [   0.169s] (254/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::sqrt() in QUERY WHERE filters correctly
+        PASS [   0.181s] (255/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::log() in QUERY WHERE filters correctly
+        PASS [   0.184s] (256/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::toLower() in QUERY WHERE
+        PASS [   0.160s] (257/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::Max iterations exceeded errors by default
+        PASS [   0.130s] (258/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::Undefined rule in IS reference
+        PASS [   0.206s] (259/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::sqrt(4) = 2.0 in QUERY RETURN
+        PASS [   0.130s] (260/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::YIELD schema mismatch rejected
+        PASS [   0.157s] (261/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::Max iterations with allow_partial returns partial results
+        PASS [   0.221s] (262/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::toUpper() in QUERY RETURN
+        PASS [   0.155s] (263/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::prev in base case clause rejected
+        PASS [   0.152s] (264/558) uni-locy-tck::locy_tck evaluate::MultiStratum::Cross-rule IS reference with value binding
+        PASS [   0.168s] (265/558) uni-locy-tck::locy_tck evaluate::MultiStratum::Two-stratum positive dependency
+        PASS [   0.191s] (266/558) uni-locy-tck::locy_tck evaluate::MultiStratum::Three-stratum with negation
+        PASS [   0.157s] (267/558) uni-locy-tck::locy_tck evaluate::NonRecursive::Rule with WHERE condition filters results
+        PASS [   0.163s] (268/558) uni-locy-tck::locy_tck evaluate::NonRecursive::Multiple rules in single program
+        PASS [   0.149s] (269/558) uni-locy-tck::locy_tck evaluate::ParameterBinding::$param in QUERY WHERE filters to matching agent
+        PASS [   0.147s] (270/558) uni-locy-tck::locy_tck evaluate::ParameterBinding::$param in rule MATCH WHERE scopes derived relation
+        PASS [   0.178s] (271/558) uni-locy-tck::locy_tck evaluate::NonRecursive::Empty result when no matching data
+        PASS [   0.193s] (272/558) uni-locy-tck::locy_tck evaluate::NonLinearRecursion::Non-linear transitive closure matches the linear formulation
+        PASS [   0.146s] (273/558) uni-locy-tck::locy_tck evaluate::ParameterBinding::Multiple $params filter on two dimensions
+        PASS [   0.178s] (274/558) uni-locy-tck::locy_tck evaluate::NonRecursive::Simple YIELD rule with graph data
+        PASS [   0.159s] (275/558) uni-locy-tck::locy_tck evaluate::ParameterBinding::Integer $param used in WHERE comparison
+        PASS [   0.182s] (276/558) uni-locy-tck::locy_tck evaluate::ParameterBinding::$param in QUERY WHERE excludes non-matching rows
+        PASS [   0.224s] (277/558) uni-locy-tck::locy_tck evaluate::NonLinearRecursion::Two chained IS-references to another rule in one clause
+        PASS [   0.162s] (278/558) uni-locy-tck::locy_tck evaluate::YieldValueColumns::Computed expression in YIELD
+        PASS [   0.177s] (279/558) uni-locy-tck::locy_tck evaluate::TransitiveClosure::Three-node chain produces transitive closure
+        PASS [   0.149s] (280/558) uni-locy-tck::locy_tck evaluate::YieldValueColumns::KEY property column without FOLD projects its value in QUERY
+        PASS [   0.187s] (281/558) uni-locy-tck::locy_tck evaluate::YieldValueColumns::Edge property access in YIELD
+        PASS [   0.208s] (282/558) uni-locy-tck::locy_tck evaluate::TransitiveClosure::Cycle converges without infinite loop
+        PASS [   0.191s] (283/558) uni-locy-tck::locy_tck evaluate::YieldValueColumns::Literal constant in YIELD
+        PASS [   0.158s] (284/558) uni-locy-tck::locy_tck evaluate::YieldValueColumns::Non-key property access in YIELD via derived relation
+        PASS [   0.187s] (285/558) uni-locy-tck::locy_tck evaluate::YieldValueColumns::Non-key property access in QUERY RETURN
+        PASS [   0.147s] (286/558) uni-locy-tck::locy_tck explain::NeuralProvenanceExplain::EXPLAIN surfaces calibrated_probability and confidence_band
+        PASS [   0.155s] (287/558) uni-locy-tck::locy_tck explain::NeuralProvenanceExplain::EXPLAIN surfaces ALONG-position neural_calls
+        PASS [   0.156s] (288/558) uni-locy-tck::locy_tck explain::NeuralProvenanceExplain::EXPLAIN surfaces FOLD-position neural_calls
+        PASS [   0.165s] (289/558) uni-locy-tck::locy_tck evaluate::YieldValueColumns::String constant in YIELD via QUERY RETURN
+        PASS [   0.154s] (290/558) uni-locy-tck::locy_tck explain::NeuralProvenanceExplain::EXPLAIN surfaces neural_calls on derivations
+        PASS [   0.158s] (291/558) uni-locy-tck::locy_tck explain::ProofTraces::EXPLAIN RULE syntax parses
+        PASS [   0.175s] (292/558) uni-locy-tck::locy_tck fold::Aggregation::A later-stratum consumer folds the published folded value
+        PASS [   0.169s] (293/558) uni-locy-tck::locy_tck fold::Aggregation::BEST BY MIN selects cheapest per group
+        PASS [   0.183s] (294/558) uni-locy-tck::locy_tck explain::ProofTraces::EXPLAIN non-recursive derivation tree
+        PASS [   0.189s] (295/558) uni-locy-tck::locy_tck fold::Aggregation::BEST BY preserves full row including ALONG values
+        PASS [   0.165s] (296/558) uni-locy-tck::locy_tck fold::Aggregation::FOLD COUNT counts matching rows
+        PASS [   0.163s] (297/558) uni-locy-tck::locy_tck fold::Aggregation::FOLD SUM with arithmetic expression on edge properties
+        PASS [   0.165s] (298/558) uni-locy-tck::locy_tck fold::Aggregation::FOLD SUM groups by key correctly
+        PASS [   0.222s] (299/558) uni-locy-tck::locy_tck explain::ProofTraces::EXPLAIN recursive derivation tree has children
+        PASS [   0.152s] (300/558) uni-locy-tck::locy_tck fold::Aggregation::FOLD SUM with computed expression argument
+        PASS [   0.149s] (301/558) uni-locy-tck::locy_tck fold::Aggregation::FOLD with MSUM monotonic aggregate
+        PASS [   0.175s] (302/558) uni-locy-tck::locy_tck fold::Aggregation::FOLD with BEST BY
+        PASS [   0.135s] (303/558) uni-locy-tck::locy_tck fold::Aggregation::FOLD with SUM
+        PASS [   0.221s] (304/558) uni-locy-tck::locy_tck fold::Aggregation::COUNT zero-argument counts all facts
+        PASS [   0.134s] (305/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Block comments should be supported
+        PASS [   0.585s] (306/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::A re-derivation cut by max iterations is reported with allow_partial
+        PASS [   0.142s] (307/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Contextual keywords as property names should parse
+        PASS [   0.132s] (308/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Multiple reserved keywords as property names should parse
+        PASS [   0.148s] (309/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Line comments should be supported
+        PASS [   0.155s] (310/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Inline block comment should be supported
+        PASS [   0.143s] (311/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Normal property names should parse successfully
+        PASS [   0.128s] (312/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Reserved keywords as property names should parse successfully
+        PASS [   0.188s] (313/558) uni-locy-tck::locy_tck fold::Aggregation::MCOUNT zero-argument counts all facts in group
+        PASS [   0.629s] (314/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::A re-derivation cut by max iterations errors by default
+        PASS [   0.136s] (315/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using ABDUCE as a rule name should fail
+        PASS [   0.149s] (316/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using ALONG as a rule name should fail
+        PASS [   0.127s] (317/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using FOLD as a rule name should fail
+        PASS [   0.130s] (318/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using DERIVE as a rule name should fail
+        PASS [   0.133s] (319/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using QUERY as a rule name should fail
+        PASS [   0.154s] (320/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using BEST as a rule name should fail
+        PASS [   0.153s] (321/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using RULE as a rule name should fail
+        PASS [   0.178s] (322/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using ASSUME as a rule name should fail
+        PASS [   0.128s] (323/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Valid CREATE RULE with real syntax should parse
+        PASS [   0.147s] (324/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using prev as a rule name should fail
+        PASS [   0.150s] (325/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Valid DERIVE clause with real syntax should parse
+        PASS [   0.142s] (326/558) uni-locy-tck::locy_tck modules::ModuleComposition::Empty selective import list fails to parse
+        PASS [   0.131s] (327/558) uni-locy-tck::locy_tck modules::ModuleComposition::MODULE with multiple USE imports parses
+        PASS [   0.136s] (328/558) uni-locy-tck::locy_tck modules::ModuleComposition::MODULE declaration parses
+        PASS [   0.160s] (329/558) uni-locy-tck::locy_tck modules::ModuleComposition::Backtick-quoted reserved keyword in import list
+        PASS [   0.128s] (330/558) uni-locy-tck::locy_tck modules::ModuleComposition::USE import parses
+        PASS [   0.141s] (331/558) uni-locy-tck::locy_tck modules::ModuleComposition::Single selective import
+        PASS [   0.169s] (332/558) uni-locy-tck::locy_tck modules::ModuleComposition::Glob import backward compatibility
+        PASS [   0.154s] (333/558) uni-locy-tck::locy_tck modules::ModuleComposition::Selective imports with multiple identifiers
+        PASS [   0.176s] (334/558) uni-locy-tck::locy_tck monotonic::ExactProbability::BDD fallback marks derived facts as approximate
+        PASS [   0.195s] (335/558) uni-locy-tck::locy_tck monotonic::ExactProbability::A negated fact sharing an edge with the positive part is a negated literal in exact mode
+        PASS [   0.213s] (336/558) uni-locy-tck::locy_tck monotonic::ExactProbability::A negated fact sharing an edge with the positive part is an independent factor in default mode
+        PASS [   0.196s] (337/558) uni-locy-tck::locy_tck monotonic::ExactProbability::BDD limit exceeded retains independence value
+        PASS [   0.224s] (338/558) uni-locy-tck::locy_tck monotonic::ExactProbability::BDD limit exceeded emits BddLimitExceeded warning
+        PASS [   0.161s] (339/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Independent groups with exact_probability produce correct probability
+        PASS [   0.188s] (340/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Default mode emits only SharedProbabilisticDependency warning
+        PASS [   0.203s] (341/558) uni-locy-tck::locy_tck monotonic::ExactProbability::BDD mode produces numeric probability for MNOR diamond
+        PASS [   0.205s] (342/558) uni-locy-tck::locy_tck monotonic::ExactProbability::BddLimitExceeded warning carries variable_count and key_group metadata
+        PASS [   0.178s] (343/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Independent groups produce no warnings with exact_probability
+        PASS [   0.181s] (344/558) uni-locy-tck::locy_tck monotonic::ExactProbability::MPROD diamond with exact_probability produces correct probability
+        PASS [   0.171s] (345/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Multi-key disjoint groups do not emit CrossGroupCorrelationNotExact
+        PASS [   0.166s] (346/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Non-fallback exact_probability facts are not marked approximate
+        PASS [   0.184s] (347/558) uni-locy-tck::locy_tck monotonic::ExactProbability::MPROD with shared base facts uses BDD
+        PASS [   0.189s] (348/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Shared hub emits CrossGroupCorrelationNotExact warning
+        PASS [   0.165s] (349/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MNOR edge case one MNOR(1.0) = 1.0
+        PASS [   0.243s] (350/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Default mode produces numeric probability for MNOR diamond
+        PASS [   0.182s] (351/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::IS NOT complement of MNOR(0.3, 0.5) = 1 - 0.65 = 0.35
+        PASS [   0.186s] (352/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::Complement chain evidence * safety with hand-computed values
+        PASS [   0.216s] (353/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Shared-proof diamond with exact_probability produces correct result
+        PASS [   0.216s] (354/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MNOR edge case zero MNOR(0.0) = 0.0
+        PASS [   0.174s] (355/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MNOR single value 0.3
+        PASS [   0.224s] (356/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MNOR five values 1-(0.9)(0.8)(0.7)(0.6)(0.5) = 0.8488
+        PASS [   0.180s] (357/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MNOR three values 1-(0.7)(0.5)(0.3) = 0.895
+        PASS [   0.142s] (358/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MMAX converges to true maximum
+        PASS [   0.160s] (359/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MPROD three values 0.8 * 0.9 * 0.7 = 0.504
+        PASS [   0.180s] (360/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MNOR two values 1-(0.7)(0.5) = 0.65
+        PASS [   0.151s] (361/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR all-ones yields one
+        PASS [   0.157s] (362/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MMIN converges to true minimum
+        PASS [   0.163s] (363/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR converges with correct noisy-OR
+        PASS [   0.157s] (364/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR in non-recursive rule compiles
+        PASS [   0.145s] (365/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR rejected with BEST BY
+        PASS [   0.217s] (366/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MPROD edge case with one 1.0 * 0.5 = 0.5
+        PASS [   0.177s] (367/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR four causes matches spec example
+        PASS [   0.147s] (368/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR syntax parses
+        PASS [   0.210s] (369/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MPROD two values 0.8 * 0.9 = 0.72
+        PASS [   0.229s] (370/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MPROD edge case with zero 0.0 * 0.5 = 0.0
+        PASS [   0.165s] (371/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR spec example (0.7, 0.5) yields 0.85
+        PASS [   0.167s] (372/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR single cause unchanged
+        PASS [   0.170s] (373/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR with certainty yields one
+        PASS [   0.157s] (374/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR with zeros yields zero
+        PASS [   0.213s] (375/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR produces correct noisy-OR value
+        PASS [   0.161s] (376/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR zero does not affect result
+        PASS [   0.161s] (377/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD converges with correct product
+        PASS [   0.153s] (378/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD groups independently
+        PASS [   0.145s] (379/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD rejected with BEST BY
+        PASS [   0.162s] (380/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD in non-recursive rule compiles
+        PASS [   0.149s] (381/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD single requirement unchanged
+        PASS [   0.166s] (382/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD produces correct product value
+        PASS [   0.165s] (383/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD three-value (0.9, 0.8, 0.7) yields 0.504
+        PASS [   0.161s] (384/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD with ones yields one
+        PASS [   0.190s] (385/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD syntax parses
+        PASS [   0.148s] (386/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MSUM syntax parses
+        PASS [   0.151s] (387/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::Non-monotonic SUM in recursive rule rejected
+        PASS [   0.166s] (388/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MSUM in non-recursive rule compiles
+        PASS [   0.169s] (389/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MSUM converges over multi-hop ownership
+        PASS [   0.190s] (390/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD with zero yields zero
+        PASS [   0.165s] (391/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::Recursive MCOUNT counts derivations, not distinct values
+        PASS [   0.172s] (392/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::Recursive MPROD composes across three levels
+        PASS [   0.155s] (393/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::strict rejects MPROD input greater than one
+        PASS [   0.172s] (394/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::Recursive MSUM over a diamond counts both paths to a shared child
+        PASS [   0.142s] (395/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::strict rejects negative MNOR input
+        PASS [   0.204s] (396/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::Recursive MSUM counts each equal-valued child derivation
+        PASS [   0.214s] (397/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::Recursive MPROD composes across two levels with equal-valued siblings
+        PASS [   0.245s] (398/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::Recursive MCOUNT counts children, not leaves
+        PASS [   0.156s] (399/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::Double complement (NOT NOT) recovers original probability
+        PASS [   0.151s] (400/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::IS NOT PROB absent key yields 1.0 in derived relation
+        PASS [   0.180s] (401/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::Composite-key IS NOT with target variable
+        PASS [   0.174s] (402/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::IS NOT complement after non-recursive PROB rule
+        PASS [   0.135s] (403/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::MNOR output is implicitly PROB
+        PASS [   0.159s] (404/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::IS NOT without PROB retains Boolean exclusion
+        PASS [   0.146s] (405/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::Multiple PROB columns should fail to compile
+        PASS [   0.176s] (406/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::IS NOT with PROB rule yields complement (1-p)
+        PASS [   0.154s] (407/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::MNOR with values outside range clamps in non-strict mode
+        PASS [   0.145s] (408/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::PROB annotation parses
+        PASS [   0.145s] (409/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::PROB column across strata via IS reference
+        PASS [   0.236s] (410/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::Absent key yields probability 1.0
+        PASS [   0.216s] (411/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::Cross-predicate IS + IS NOT combines risk * (1-trust)
+        PASS [   0.146s] (412/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::PROB with explicit alias syntax variants
+        PASS [   0.158s] (413/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::QUERY FOLD rule returns node properties after enrichment
+        PASS [   0.157s] (414/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::strict_probability_domain rejects out-of-range MNOR input
+        PASS [   0.176s] (415/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::QUERY IS NOT PROB complement with FOLD MNOR target
+        PASS [   0.184s] (416/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::QUERY returns IS NOT PROB complement rows (non-FOLD target)
+        PASS [   0.173s] (417/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::QUERY with cross-predicate IS + IS NOT PROB
+        PASS [   0.168s] (418/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::MPROD clamps inputs exceeding 1.0
+        PASS [   0.193s] (419/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::ALONG expression feeds MNOR feeds MPROD
+        PASS [   0.175s] (420/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::MNOR with no matching edges yields zero facts
+        PASS [   0.184s] (421/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::BEST BY ASC selects weakest link
+        PASS [   0.204s] (422/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::ASSUME DELETE removes edges visible to Cypher
+        PASS [   0.182s] (423/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::MPROD with 20 near-one factors
+        PASS [   0.155s] (424/558) uni-locy-tck::locy_tck monotonic::SharedProofDetection::Independent parallel paths produce no warning
+        PASS [   0.220s] (425/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::MNOR clamps inputs exceeding 1.0
+        PASS [   0.178s] (426/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::Recursive MNOR combines transitive paths over diamond
+        PASS [   0.191s] (427/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::Overloaded rule clauses combine via MNOR
+        PASS [   0.167s] (428/558) uni-locy-tck::locy_tck monotonic::SharedProofDetection::Edge-disjoint diamond produces no warning
+        PASS [   0.172s] (429/558) uni-locy-tck::locy_tck monotonic::SharedEventDiagnostics::Ordinary mode warns of an overestimate
+        PASS [   0.181s] (430/558) uni-locy-tck::locy_tck monotonic::SharedEventDiagnostics::Exact mode over the variable limit falls back and warns
+        PASS [   0.196s] (431/558) uni-locy-tck::locy_tck monotonic::SharedEventDiagnostics::Exact mode reports the dependency as resolved
+        PASS [   0.203s] (432/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::Three-layer nested aggregation
+        PASS [   0.213s] (433/558) uni-locy-tck::locy_tck monotonic::SharedProofDetection::Diamond graph triggers SharedProbabilisticDependency warning
+        PASS [   0.199s] (434/558) uni-locy-tck::locy_tck monotonic::SharedProofDetection::Non-probabilistic FOLD produces no warning
+        PASS [   0.177s] (435/558) uni-locy-tck::locy_tck monotonic::TopKProofs::Default unlimited retains all proofs — backward compatible
+        PASS [   0.180s] (436/558) uni-locy-tck::locy_tck monotonic::SharedProofDetection::Non-recursive cross-stratum shared proofs trigger warning
+        PASS [   0.182s] (437/558) uni-locy-tck::locy_tck monotonic::TopKProofs::EXPLAIN output includes proof_probability when top_k active
+        PASS [   0.223s] (438/558) uni-locy-tck::locy_tck monotonic::SharedProofDetection::Non-recursive cross-stratum shared proofs are exact with exact_probability
+        PASS [   0.193s] (439/558) uni-locy-tck::locy_tck monotonic::TopKProofs::top_k=1 keeps the heaviest derivation of a fact
+        PASS [   0.172s] (440/558) uni-locy-tck::locy_tck monotonic::TopKProofs::top_k=1 retains only highest-probability proof
+        PASS [   0.179s] (441/558) uni-locy-tck::locy_tck monotonic::TopKProofs::top_k=2 keeps both derivations of a fact
+        PASS [   0.170s] (442/558) uni-locy-tck::locy_tck negation::RecursiveNegation::IS NOT against a cyclic recursive rule excludes every reachable pair
+        PASS [   0.179s] (443/558) uni-locy-tck::locy_tck monotonic::TopKProofs::top_k=5 handles diamond graph identically to unlimited
+        PASS [   0.148s] (444/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT basic syntax parses
+        PASS [   0.179s] (445/558) uni-locy-tck::locy_tck negation::RecursiveNegation::IS NOT excludes the full transitive closure, not just the last delta
+        PASS [   0.150s] (446/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT excludes matching nodes
+        PASS [   0.166s] (447/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT TO-target bound by an earlier positive IS TO compiles
+        PASS [   0.155s] (448/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT subject that is a relationship variable is rejected
+        PASS [   0.154s] (449/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT with empty negated relation passes all
+        PASS [   0.163s] (450/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT subject bound by an earlier positive IS TO target compiles
+        PASS [   0.177s] (451/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT subject bound only by a YIELD alias is rejected
+        PASS [   0.158s] (452/558) uni-locy-tck::locy_tck neural::AlongInvocation::ALONG-position model invocation inside arithmetic
+        PASS [   0.163s] (453/558) uni-locy-tck::locy_tck negation::StratifiedNegation::Multi-stratum negation chain evaluates in correct order
+        PASS [   0.193s] (454/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT creates a higher stratum
+        PASS [   0.162s] (455/558) uni-locy-tck::locy_tck neural::AlongInvocation::FOLD aggregate consuming ALONG with model invocation
+        PASS [   0.171s] (456/558) uni-locy-tck::locy_tck neural::AlongInvocation::Same model invoked in YIELD and ALONG positions
+        PASS [   0.158s] (457/558) uni-locy-tck::locy_tck neural::Calibrate::CALIBRATE on unregistered classifier errors at runtime
+        PASS [   0.161s] (458/558) uni-locy-tck::locy_tck neural::Calibrate::CALIBRATE with METHOD dirichlet parses but errors at fit time
+        PASS [   0.159s] (459/558) uni-locy-tck::locy_tck neural::Calibrate::Invoking an uncalibrated PROB model emits UncalibratedNeuralPredicate
+        PASS [   0.150s] (460/558) uni-locy-tck::locy_tck neural::CandleClassifier::Candle classifier returns sigmoid for low-score input
+        PASS [   0.189s] (461/558) uni-locy-tck::locy_tck neural::Calibrate::Declaring CALIBRATION suppresses UncalibratedNeuralPredicate
+        PASS [   0.155s] (462/558) uni-locy-tck::locy_tck neural::CandleClassifier::Candle classifier returns sigmoid for high-score input
+        PASS [   0.151s] (463/558) uni-locy-tck::locy_tck neural::CandleClassifier::Candle classifier scales over multiple rows in one batch
+        PASS [   0.174s] (464/558) uni-locy-tck::locy_tck neural::Calibrate::Miscalibrated mock classifier reduces ECE via Platt CALIBRATE
+        PASS [   0.161s] (465/558) uni-locy-tck::locy_tck neural::CandleClassifier::Candle classifier with missing feature uses bias-only sigmoid
+        PASS [   0.140s] (466/558) uni-locy-tck::locy_tck neural::CreateModel::CREATE MODEL rejected when neural_predicates_preview is off
+        PASS [   0.156s] (467/558) uni-locy-tck::locy_tck neural::CreateModel::CREATE MODEL coexists with a non-invoking CREATE RULE
+        PASS [   0.162s] (468/558) uni-locy-tck::locy_tck neural::ConformalCalibration::Conformal CALIBRATE with default alpha keyword
+        PASS [   0.173s] (469/558) uni-locy-tck::locy_tck neural::ConformalCalibration::Conformal CALIBRATE produces hand-computed quantile
+        PASS [   0.249s] (470/558) uni-locy-tck::locy_tck neural::Calibrate::CALIBRATE after a Cypher write collects the written samples too
+        PASS [   0.149s] (471/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::avg_neighbor rejects invalid direction string
+        PASS [   0.174s] (472/558) uni-locy-tck::locy_tck neural::CreateModel::CREATE MODEL compiles cleanly under preview flag
+        PASS [   0.145s] (473/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::avg_neighbor with wrong number of args fails compilation
+        PASS [   0.173s] (474/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::avg_neighbor averages a numeric neighbor property
+        PASS [   0.170s] (475/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::avg_neighbor with INCOMING direction
+        PASS [   0.170s] (476/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::avg_neighbor with no neighbors surfaces Null (mock interprets as 0)
+        PASS [   0.161s] (477/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::betweenness_centrality(n) accepted (smoke)
+        PASS [   0.163s] (478/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::degree_centrality with too many arguments fails compilation
+        PASS [   0.177s] (479/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::closeness_centrality(n) populates a Float feature
+        PASS [   0.128s] (480/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::harmonic_centrality(n) accepted (smoke)
+        PASS [   0.160s] (481/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::eigenvector_centrality(n) accepted (smoke)
+        PASS [   0.181s] (482/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::degree_centrality(n) feeds the classifier with the node's out-degree
+        PASS [   0.160s] (483/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::katz_centrality(n) accepted (smoke)
+        PASS [   0.160s] (484/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::pagerank_score(n) populates a Float feature in [0, 1]
+        PASS [   0.168s] (485/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::max_neighbor returns the largest neighbor property
+        PASS [   0.128s] (486/558) uni-locy-tck::locy_tck neural::NeuralFollowups::Arithmetic feature expression rejected at compile time
+        PASS [   0.155s] (487/558) uni-locy-tck::locy_tck neural::InvokeModel::Constant mock classifier produces uniform PROB output
+        PASS [   0.154s] (488/558) uni-locy-tck::locy_tck neural::InvokeModel::MNOR over a neural-output rule combines probabilities
+        PASS [   0.143s] (489/558) uni-locy-tck::locy_tck neural::NeuralFollowups::Memoization deduplicates identical classifier inputs
+        PASS [   0.194s] (490/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::sum_neighbor totals the neighbor property
+        PASS [   0.163s] (491/558) uni-locy-tck::locy_tck neural::ModelRelationComposition::A model-scored relation consumed through IS
+        PASS [   0.192s] (492/558) uni-locy-tck::locy_tck neural::IntegratedExample::§16 supplier risk + supply path + part + assembly availability
+        PASS [   0.183s] (493/558) uni-locy-tck::locy_tck neural::InvokeModel::Invoking an unregistered model errors at runtime
+        PASS [   0.198s] (494/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::sum_neighbor with BOTH direction totals over both directions
+        PASS [   0.151s] (495/558) uni-locy-tck::locy_tck neural::NeuralFollowups::Property-access with missing property surfaces Null to the classifier
+        PASS [   0.176s] (496/558) uni-locy-tck::locy_tck neural::ModelRelationComposition::Two rules consume one model-scored relation
+        PASS [   0.153s] (497/558) uni-locy-tck::locy_tck neural::NeuralFollowups::Property-access feature expr is materialized end-to-end
+        PASS [   0.134s] (498/558) uni-locy-tck::locy_tck neural::NeuralFollowups::WHERE-position model invocation errors at compile time
+        PASS [   0.210s] (499/558) uni-locy-tck::locy_tck neural::InvokeModel::Model with OUTPUT PROB auto-flags the YIELD column
+        PASS [   0.164s] (500/558) uni-locy-tck::locy_tck neural::NeuralFollowups::User-visible YIELD of same property coexists with the hidden feature column
+        PASS [   0.149s] (501/558) uni-locy-tck::locy_tck neural::NeuralFollowups::YIELD-position invocations remain supported
+        PASS [   0.139s] (502/558) uni-locy-tck::locy_tck neural::PathContextFeatures::FEATURES FROM unknown_rule fails at compile time
+        PASS [   0.168s] (503/558) uni-locy-tck::locy_tck neural::NoisyOrComposition::MNOR over 3 redundant neural-classified paths
+        PASS [   0.142s] (504/558) uni-locy-tck::locy_tck neural::RetrievalFeatures::semantic_match accepted at compile, errors at runtime
+        PASS [   0.168s] (505/558) uni-locy-tck::locy_tck neural::PathContextFeatures::FEATURES (subject, col) FROM rule feeds classifier with column value
+        PASS [   0.149s] (506/558) uni-locy-tck::locy_tck neural::PathContextFeatures::Subject absent from source rule surfaces FeatureValue__Null
+        PASS [   0.145s] (507/558) uni-locy-tck::locy_tck neural::RetrievalFeatures::similar_to with 1 arg fails at compile time
+        PASS [   0.149s] (508/558) uni-locy-tck::locy_tck neural::RetrievalFeatures::similar_to with orthogonal vectors yields zero feature
+        PASS [   0.147s] (509/558) uni-locy-tck::locy_tck neural::RetrievalFeatures::similar_to(prop, literal) at the call site feeds the classifier
+        PASS [   0.147s] (510/558) uni-locy-tck::locy_tck neural::Validate::VALIDATE on a flipped-prediction rule reports low accuracy
+        PASS [   0.171s] (511/558) uni-locy-tck::locy_tck neural::SharedNeuralInput::F2a fires on shared input variable across two models
+        PASS [   0.133s] (512/558) uni-locy-tck::locy_tck neural::Validate::VALIDATE on unknown rule fails at compile
+        PASS [   0.158s] (513/558) uni-locy-tck::locy_tck neural::Validate::Bare ECE in VALIDATE emits EceBinningBias warning
+        PASS [   0.153s] (514/558) uni-locy-tck::locy_tck neural::Validate::VALIDATE on a perfectly-calibrated rule reports low Brier
+        PASS [   0.170s] (515/558) uni-locy-tck::locy_tck neural::SharedNeuralInput::F2b fires on shared property feature across two models
+        PASS [   0.181s] (516/558) uni-locy-tck::locy_tck neural::SharedNeuralInput::F2a suppressed when both models carry @independent
+        PASS [   0.169s] (517/558) uni-locy-tck::locy_tck neural::SharedNeuralInput::No F2 false positive for single-model MNOR over multiple paths
+        PASS [   0.134s] (518/558) uni-locy-tck::locy_tck priority::PrioritizedRules::Mixed priority across clauses rejected
+        PASS [   0.171s] (519/558) uni-locy-tck::locy_tck priority::PrioritizedRules::Higher priority overrides lower for same key
+        PASS [   0.147s] (520/558) uni-locy-tck::locy_tck priority::PrioritizedRules::PRIORITY clause syntax parses
+        PASS [   0.174s] (521/558) uni-locy-tck::locy_tck priority::PrioritizedRules::Equal priority produces union
+        PASS [   0.161s] (522/558) uni-locy-tck::locy_tck priority::PrioritizedRules::Key matched only by lower priority retains lower
+        PASS [   0.155s] (523/558) uni-locy-tck::locy_tck query::FoldQueryProjection::MNOR fold value projects through plain QUERY RETURN
+        PASS [   0.160s] (524/558) uni-locy-tck::locy_tck query::FoldQueryProjection::MNOR with multiple groups returns all groups via plain QUERY
+        PASS [   0.122s] (525/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY with WHERE and multiple RETURN items
+        PASS [   0.146s] (526/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY returns empty when no match
+        PASS [   0.167s] (527/558) uni-locy-tck::locy_tck query::FoldQueryProjection::MPROD fold value projects through plain QUERY RETURN
+        PASS [   0.136s] (528/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY with WHERE and RETURN
+        PASS [   0.190s] (529/558) uni-locy-tck::locy_tck query::FoldQueryProjection::SUM fold value projects through plain QUERY RETURN
+        PASS [   0.140s] (530/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY without WHERE clause
+        PASS [   0.144s] (531/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY without RETURN
+        PASS [   0.136s] (532/558) uni-locy-tck::locy_tck rules::BasicRules::Binary IS ... TO reference
+        PASS [   0.148s] (533/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY without WHERE but with RETURN
+        PASS [   0.194s] (534/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY terminates on cyclic graph
+        PASS [   0.129s] (535/558) uni-locy-tck::locy_tck rules::BasicRules::Simple YIELD KEY rule
+        PASS [   0.139s] (536/558) uni-locy-tck::locy_tck rules::BasicRules::IS NOT reference in WHERE
+        PASS [   0.138s] (537/558) uni-locy-tck::locy_tck rules::BasicRules::Multi-clause rule with WHERE
+        PASS [   0.139s] (538/558) uni-locy-tck::locy_tck rules::BasicRules::Tuple IS reference
+        PASS [   0.217s] (539/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY filters to matching goal bindings
+        PASS [   0.134s] (540/558) uni-locy-tck::locy_tck rules::RecursiveRules::Rule with mixed WHERE conditions
+        PASS [   0.129s] (541/558) uni-locy-tck::locy_tck rules::RecursiveRules::Self-recursive rule with two clauses
+        PASS [   0.145s] (542/558) uni-locy-tck::locy_tck rules::RecursiveRules::Rule with PRIORITY clause
+        PASS [   0.177s] (543/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY without WHERE returns all facts
+        PASS [   0.155s] (544/558) uni-locy-tck::locy_tck rules::BasicRules::Unary IS reference in WHERE
+        PASS [   0.159s] (545/558) uni-locy-tck::locy_tck semiring::AddMultProbBaseline::MNOR three values under AddMultProb matches default
+        PASS [   0.135s] (546/558) uni-locy-tck::locy_tck semiring::AddMultProbBaseline::MPROD two values under AddMultProb matches default
+        PASS [   0.126s] (547/558) uni-locy-tck::locy_tck semiring::MaxMinProbViterbi::Out-of-range input under MaxMinProb + strict fails fast
+        PASS [   0.150s] (548/558) uni-locy-tck::locy_tck semiring::MaxMinProbViterbi::MPROD under MaxMinProb returns min-of-inputs and warns
+        PASS [   0.151s] (549/558) uni-locy-tck::locy_tck semiring::MaxMinProbViterbi::Non-PROB rule under MaxMinProb does not warn
+        PASS [   0.161s] (550/558) uni-locy-tck::locy_tck semiring::MaxMinProbViterbi::MNOR under MaxMinProb returns max-of-inputs and warns
+        PASS [   0.112s] (551/558) uni-locy-tck::locy_tck semiring::TopKProofs::TopKProofs(0) rejected as incoherent
+        PASS [   0.127s] (552/558) uni-locy-tck::locy_tck semiring::TopKProofs::MNOR under TopKProofs(4) Stage 1 matches AddMultProb output
+        PASS [   0.112s] (553/558) uni-locy-tck::locy_tck semiring::TopKProofs::TopKProofs(8) over a certain shared referenced fact keeps the edges independent
+        PASS [   0.128s] (554/558) uni-locy-tck::locy_tck semiring::TopKProofs::TopKProofs(1) keeps the most probable proof of each fact
+        PASS [   0.132s] (555/558) uni-locy-tck::locy_tck semiring::TopKProofs::MPROD under TopKProofs(4) matches AddMultProb product
+        PASS [   0.127s] (556/558) uni-locy-tck::locy_tck semiring::TopKProofs::TopKProofs(2) on independent proofs emits no CrossedDependency warning
+        PASS [   0.140s] (557/558) uni-locy-tck::locy_tck semiring::MaxMinProbViterbi::Recursive MaxMinProb rule emits Fuzzy warning and suppresses shared-proof
+        PASS [   0.146s] (558/558) uni-locy-tck::locy_tck semiring::TopKProofs::TopKProofs(8) counts an edge shared below referenced facts once
+────────────
+     Summary [   4.563s] 558 tests run: 558 passed, 0 skipped
+
+Aggregating results...
+📊 Aggregating 558 scenario results...
+✅ Wrote /home/rohit/work/dragonscale/uni/target/locy-cucumber/schemaless/results_20261026_152241.json (76 features, 558 scenarios)
+   Passed: 558, Failed: 0, Skipped: 0
+
+Generating report...
+
+📊 Analyzing results_20261026_152241.json...
+📊 Comparing against results_20261023_212337.json...
+✅ Generated: locy_compliance_reports/schemaless/report.md
+
+📈 Summary: 558/558 passed (100.0%), 0 failed
+   ➡️  No change vs previous run
+
+
+Report available at: locy_compliance_reports/schemaless/report.md
+Last run snapshot: locy_compliance_reports/schemaless/last_run_report.md
+
+Running Locy TCK tests in 'sidecar' mode...
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+────────────
+ Nextest run ID 1103d413-defb-4c66-9fd3-9cde33246a48 with nextest profile: default
+    Starting 558 tests across 1 binary
+        PASS [   0.122s] (  1/558) uni-locy-tck::locy_tck abduce::AbductiveReasoning::ABDUCE positive syntax parses
+        PASS [   0.128s] (  2/558) uni-locy-tck::locy_tck along::PathCarriedValues::Multiple ALONG variables
+        PASS [   0.133s] (  3/558) uni-locy-tck::locy_tck assume::Hypothetical::ASSUME with CREATE mutation
+        PASS [   0.134s] (  4/558) uni-locy-tck::locy_tck along::PathCarriedValues::ALONG combined with FOLD
+        PASS [   0.134s] (  5/558) uni-locy-tck::locy_tck along::PathCarriedValues::ALONG with prev reference
+        PASS [   0.141s] (  6/558) uni-locy-tck::locy_tck assume::Hypothetical::ASSUME THEN with Cypher body
+        PASS [   0.141s] (  7/558) uni-locy-tck::locy_tck abduce::AbductiveReasoning::ABDUCE NOT syntax parses
+        PASS [   0.151s] (  8/558) uni-locy-tck::locy_tck along::PathCarriedValues::ALONG combined with FOLD SUM
+        PASS [   0.156s] (  9/558) uni-locy-tck::locy_tck assume::Hypothetical::ASSUME mutation is rolled back after evaluation
+        PASS [   0.155s] ( 10/558) uni-locy-tck::locy_tck assume::Hypothetical::ASSUME THEN with rule evaluation
+        PASS [   0.168s] ( 11/558) uni-locy-tck::locy_tck along::PathCarriedValues::ALONG weighted cost accumulates edge weights
+        PASS [   0.172s] ( 12/558) uni-locy-tck::locy_tck along::PathCarriedValues::ALONG hop count accumulates across hops
+        PASS [   0.173s] ( 13/558) uni-locy-tck::locy_tck along::PathCarriedValues::Multiple ALONG variables carried independently
+        PASS [   0.174s] ( 14/558) uni-locy-tck::locy_tck along::PathCarriedValues::ALONG on one clause leaves a sibling clause folding the folded value
+        PASS [   0.176s] ( 15/558) uni-locy-tck::locy_tck along::PathCarriedValues::ALONG with arithmetic expression
+        PASS [   0.191s] ( 16/558) uni-locy-tck::locy_tck assume::AssumeBodyResults::A body of rules only returns no results, and its rules' facts as derived
+        PASS [   0.214s] ( 17/558) uni-locy-tck::locy_tck along::PathCarriedValues::Recursive ALONG with BEST BY converges on cyclic graph
+        PASS [   0.214s] ( 18/558) uni-locy-tck::locy_tck abduce::AbductiveReasoning::ABDUCE positive finds edge addition candidate
+        PASS [   0.221s] ( 19/558) uni-locy-tck::locy_tck abduce::AbductiveReasoning::ABDUCE NOT finds edge removal candidate
+        PASS [   0.236s] ( 20/558) uni-locy-tck::locy_tck assume::AssumeBodyResults::A nested ASSUME returns its own results inside the outer one
+        PASS [   0.239s] ( 21/558) uni-locy-tck::locy_tck assume::Hypothetical::ASSUME DELETE is rolled back
+        PASS [   0.248s] ( 22/558) uni-locy-tck::locy_tck assume::AssumeBodyResults::QUERY, DERIVE, QUERY and Cypher each return their own result
+        PASS [   0.132s] ( 23/558) uni-locy-tck::locy_tck bestby::OptimizedSelection::BEST BY with monotonic FOLD rejected
+        PASS [   0.140s] ( 24/558) uni-locy-tck::locy_tck bestby::OptimizedSelection::BEST BY preserves full winning row
+        PASS [   0.147s] ( 25/558) uni-locy-tck::locy_tck bestby::OptimizedSelection::BEST BY ASC selects minimum cost
+        PASS [   0.149s] ( 26/558) uni-locy-tck::locy_tck bestby::OptimizedSelection::BEST BY MIN syntax parses
+        PASS [   0.180s] ( 27/558) uni-locy-tck::locy_tck assume::Hypothetical::ASSUME with rule re-evaluation under hypothesis
+        PASS [   0.174s] ( 28/558) uni-locy-tck::locy_tck bestby::OptimizedSelection::BEST BY DESC selects maximum value
+        PASS [   0.173s] ( 29/558) uni-locy-tck::locy_tck bestby::OptimizedSelection::BEST BY with NULL values sorts NULLs last
+        PASS [   0.165s] ( 30/558) uni-locy-tck::locy_tck combinations::AssumeAbduce::ASSUME then ABDUCE on same rule parses
+        PASS [   0.168s] ( 31/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4a-4 ASSUME CREATE new edge with FOLD MNOR adds new cause
+        PASS [   0.192s] ( 32/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4a-3 ASSUME SET edge weight with FOLD MSUM re-evaluation scoped to target
+        PASS [   0.198s] ( 33/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4a-5 ASSUME SET with multi-group FOLD MNOR and QUERY
+        PASS [   0.206s] ( 34/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4a-1 ASSUME SET edge probability with FOLD MNOR re-evaluation
+        PASS [   0.190s] ( 35/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4b-1 ASSUME DELETE removes one cause and reduces MNOR then IS NOT complement
+        PASS [   0.211s] ( 36/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4a-2 ASSUME SET edge probability with FOLD MPROD re-evaluation
+        PASS [   0.239s] ( 37/558) uni-locy-tck::locy_tck combinations::AssumeAbduce::ASSUME with PROB rules then ABDUCE on same PROB rules
+        PASS [   0.255s] ( 38/558) uni-locy-tck::locy_tck combinations::AssumeAbduce::ASSUME extends reachability then ABDUCE breaks it
+        PASS [   0.196s] ( 39/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4b-2 ASSUME DELETE removes all causes making IS NOT yield 1.0
+        PASS [   0.214s] ( 40/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4b-3 ASSUME DELETE edge with FOLD MPROD and boolean IS NOT
+        PASS [   0.159s] ( 41/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4d-1 ASSUME on empty graph with FOLD MNOR returns no rows
+        PASS [   0.150s] ( 42/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4d-2 ABDUCE NOT on empty graph with FOLD MNOR yields no modifications
+        PASS [   0.220s] ( 43/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4c-1 ABDUCE NOT on FOLD MNOR rule with single key
+        PASS [   0.227s] ( 44/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4c-2 ABDUCE NOT on FOLD MPROD rule with composite key
+        PASS [   0.258s] ( 45/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4b-4 ASSUME DELETE with FOLD MSUM and IS NOT filter
+        PASS [   0.121s] ( 46/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::ABDUCE NOT inside ASSUME THEN parses
+        PASS [   0.222s] ( 47/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4c-3 ABDUCE NOT on composite-key signal with FOLD MNOR
+        PASS [   0.238s] ( 48/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4c-4 ABDUCE NOT with ASSUME on same FOLD MNOR composite-key rule
+        PASS [   0.208s] ( 49/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4d-3 ASSUME SET with FOLD MNOR and IS NOT complement combined
+        PASS [   0.242s] ( 50/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4c-5 ABDUCE NOT on FOLD MSUM rule with composite key
+        PASS [   0.283s] ( 51/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4b-5 ASSUME DELETE on composite-key with FOLD MNOR and IS NOT
+        PASS [   0.197s] ( 52/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::A QUERY inside ASSUME THEN reads the exact probability
+        PASS [   0.219s] ( 53/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4d-5 ASSUME CREATE new node and edge with FOLD MSUM and QUERY
+        PASS [   0.231s] ( 54/558) uni-locy-tck::locy_tck combinations::AssumeAbduceExtended::4d-4 ASSUME DELETE with FOLD MNOR then ABDUCE NOT on same rule
+        PASS [   0.193s] ( 55/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::ABDUCE NOT inside ASSUME THEN reads the hypothetical state
+        PASS [   0.172s] ( 56/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3a-1 Three-stratum chain: base to MNOR to IS NOT complement
+        PASS [   0.211s] ( 57/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::ABDUCE inside ASSUME THEN validates against the body's own rule
+        PASS [   0.200s] ( 58/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::EXPLAIN RULE inside ASSUME THEN explains the hypothetical facts
+        PASS [   0.217s] ( 59/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::ABDUCE inside a nested ASSUME body reads both mutations
+        PASS [   0.185s] ( 60/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3a-2 Four-stratum pipeline: facts to FOLD to IS NOT to filter
+        PASS [   0.171s] ( 61/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3a-3 Three-stratum: transitive closure to FOLD COUNT to filter
+        PASS [   0.250s] ( 62/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::A QUERY inside ASSUME THEN reads the independence value without exact_probability
+        PASS [   0.174s] ( 63/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3b-1 ALONG cost then FOLD SUM across all paths per source
+        PASS [   0.244s] ( 64/558) uni-locy-tck::locy_tck combinations::AssumeNestedAbduce::QUERY inside ASSUME THEN with ABDUCE NOT at the top level
+        PASS [   0.177s] ( 65/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3b-4 ALONG with two variables then FOLD COUNT paths
+        PASS [   0.222s] ( 66/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3a-4 Three-stratum: PROB scores to MPROD joint to IS NOT complement
+        PASS [   0.187s] ( 67/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3b-5 ALONG cost with BEST BY then FOLD SUM of shortest paths
+        PASS [   0.186s] ( 68/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3c-2 BEST BY DESC selects maximum then FOLD COUNT
+        PASS [   0.191s] ( 69/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3c-1 BEST BY ASC selects minimum then FOLD SUM across groups
+        PASS [   0.233s] ( 70/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3b-2 ALONG hops then FOLD MAX to find longest path per source
+        PASS [   0.199s] ( 71/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3c-4 BEST BY on recursive ALONG then IS NOT complement
+        PASS [   0.203s] ( 72/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3c-3 Shortest path BEST BY then FOLD SUM all shortest costs with QUERY
+        PASS [   0.243s] ( 73/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3b-3 ALONG reliability then FOLD MNOR aggregation across paths
+        PASS [   0.188s] ( 74/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3d-2 similar_to score as PROB with IS NOT complement
+        PASS [   0.188s] ( 75/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3d-3 similar_to pairwise then IS NOT known then QUERY novel pairs
+        PASS [   0.227s] ( 76/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3d-1 similar_to with WHERE filter on score then QUERY
+        PASS [   0.203s] ( 77/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3d-4 similar_to to MNOR aggregation then QUERY with filter
+        PASS [   0.178s] ( 78/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3e-1 Recursive transitive closure then FOLD COUNT then QUERY
+        PASS [   0.193s] ( 79/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3d-5 similar_to with WHERE threshold and IS NOT exclusion combined
+        PASS [   0.172s] ( 80/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3e-4 Recursive reachability then FOLD MCOUNT then IS NOT then QUERY
+        PASS [   0.180s] ( 81/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3f-2 WHERE filter on FOLD value column from IS-ref
+        PASS [   0.194s] ( 82/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3f-1 WHERE filter on numeric value column from IS-ref
+        PASS [   0.179s] ( 83/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3f-3 WHERE range filter on IS-ref value column
+        PASS [   0.144s] ( 84/558) uni-locy-tck::locy_tck combinations::ExplainCombinations::EXPLAIN on IS NOT complement rule parses
+        PASS [   0.223s] ( 85/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3e-3 Recursive shortest path BEST BY then FOLD MIN then QUERY
+        PASS [   0.229s] ( 86/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3e-2 Recursive ALONG cost then FOLD SUM then QUERY per source
+        PASS [   0.165s] ( 87/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3f-5 WHERE comparison on two IS-ref value columns
+        PASS [   0.143s] ( 88/558) uni-locy-tck::locy_tck combinations::ExplainCombinations::EXPLAIN on MNOR rule parses
+        PASS [   0.163s] ( 89/558) uni-locy-tck::locy_tck combinations::ExplainCombinations::EXPLAIN on IS NOT complement rule returns derivation tree
+        PASS [   0.140s] ( 90/558) uni-locy-tck::locy_tck combinations::ExplainCombinations::EXPLAIN on similar_to rule parses
+        PASS [   0.140s] ( 91/558) uni-locy-tck::locy_tck combinations::ExplainCombinations::EXPLAIN on similar_to-derived rule returns derivation tree
+        PASS [   0.222s] ( 92/558) uni-locy-tck::locy_tck combinations::CompositePatterns::3f-4 WHERE filter on IS-ref value column with ALONG cost
+        PASS [   0.169s] ( 93/558) uni-locy-tck::locy_tck combinations::ExplainCombinations::EXPLAIN on MNOR rule returns derivation tree
+        PASS [   0.174s] ( 94/558) uni-locy-tck::locy_tck combinations::FeatureCombinationMatrix::FOLD MNOR penalty then IS NOT complement then QUERY
+        PASS [   0.194s] ( 95/558) uni-locy-tck::locy_tck combinations::FeatureCombinationMatrix::ASSUME mutation with FOLD MNOR re-evaluation
+        PASS [   0.188s] ( 96/558) uni-locy-tck::locy_tck combinations::FeatureCombinationMatrix::FOLD MNOR signal then composite-key IS NOT novel then QUERY
+        PASS [   0.170s] ( 97/558) uni-locy-tck::locy_tck combinations::FeatureCombinationMatrix::Facts to MNOR to IS NOT PROB complement with QUERY
+        PASS [   0.220s] ( 98/558) uni-locy-tck::locy_tck combinations::FeatureCombinationMatrix::ABDUCE NOT on FOLD MNOR rule finds modification
+        PASS [   0.193s] ( 99/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MCOUNT groups independently across two teams
+        PASS [   0.175s] (100/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MCOUNT via ASSUME reflects hypothetical member addition
+        PASS [   0.213s] (101/558) uni-locy-tck::locy_tck combinations::FeatureCombinationMatrix::WHERE filter on similar_to score from IS-ref
+        PASS [   0.180s] (102/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MCOUNT via QUERY returns correct value
+        PASS [   0.211s] (103/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MCOUNT via ABDUCE finds modification candidate
+        PASS [   0.178s] (104/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMAX groups independently across two sensors
+        PASS [   0.192s] (105/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMAX and MMIN on same graph yield complementary extremes
+        PASS [   0.234s] (106/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MCOUNT derived relation computes correct count
+        PASS [   0.189s] (107/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMAX derived relation computes correct maximum
+        PASS [   0.184s] (108/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMAX via ASSUME reflects hypothetical new reading
+        PASS [   0.180s] (109/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMAX via QUERY returns correct value
+        PASS [   0.218s] (110/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMAX via ABDUCE finds modification candidate
+        PASS [   0.207s] (111/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMIN derived relation computes correct minimum
+        PASS [   0.186s] (112/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMIN via QUERY returns correct value
+        PASS [   0.230s] (113/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMIN groups independently across two servers
+        PASS [   0.170s] (114/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MNOR derived relation computes correct noisy-OR
+        PASS [   0.228s] (115/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMIN via ABDUCE finds modification candidate
+        PASS [   0.185s] (116/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MNOR and MPROD coexist as separate rules
+        PASS [   0.215s] (117/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MMIN via ASSUME reflects hypothetical faster measurement
+        PASS [   0.179s] (118/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MNOR via QUERY returns correct value
+        PASS [   0.208s] (119/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MNOR via ABDUCE finds edge removal candidate
+        PASS [   0.213s] (120/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MNOR via ASSUME reflects hypothetical edge removal
+        PASS [   0.170s] (121/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MPROD via QUERY returns correct value
+        PASS [   0.192s] (122/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MPROD derived relation computes correct product
+        PASS [   0.169s] (123/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MSUM derived relation computes correct sum
+        PASS [   0.175s] (124/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MSUM and MCOUNT on same graph with different rules
+        PASS [   0.209s] (125/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MPROD via ASSUME reflects hypothetical edge removal
+        PASS [   0.203s] (126/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MSUM groups independently across two departments
+        PASS [   0.236s] (127/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MPROD via ABDUCE finds edge removal candidate
+        PASS [   0.204s] (128/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MSUM via ABDUCE finds modification candidate
+        PASS [   0.196s] (129/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MSUM via QUERY returns correct value
+        PASS [   0.178s] (130/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2a-2 Boolean IS NOT passes unflagged nodes to FOLD MNOR with QUERY
+        PASS [   0.189s] (131/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2a-1 Boolean IS NOT with FOLD MNOR and QUERY
+        PASS [   0.243s] (132/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::MSUM via ASSUME reflects hypothetical edge addition
+        PASS [   0.232s] (133/558) uni-locy-tck::locy_tck combinations::FoldExecutionPaths::Two independent FOLD rules produce correct values in same program
+        PASS [   0.180s] (134/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2b-1 PROB complement after FOLD MNOR with QUERY
+        PASS [   0.191s] (135/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2a-5 Boolean IS NOT with empty negated relation passes all to FOLD MNOR
+        PASS [   0.197s] (136/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2b-2 PROB complement after FOLD MPROD with QUERY
+        PASS [   0.230s] (137/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2a-3 Boolean IS NOT with FOLD MPROD and QUERY
+        PASS [   0.222s] (138/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2a-4 Boolean IS NOT with FOLD MSUM and QUERY
+        PASS [   0.218s] (139/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2a-6 Boolean IS NOT multi-group FOLD MNOR with QUERY
+        PASS [   0.182s] (140/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2b-5 Double complement recovers original FOLD MNOR probability
+        PASS [   0.204s] (141/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2b-4 Cross-predicate IS + IS NOT PROB with FOLD MNOR and QUERY
+        PASS [   0.218s] (142/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2b-3 PROB complement absent key yields 1.0 with FOLD MNOR and QUERY
+        PASS [   0.185s] (143/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2c-2 Composite-key PROB IS NOT complement with FOLD MNOR and QUERY
+        PASS [   0.203s] (144/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2b-6 PROB complement with FOLD MNOR three causes and QUERY
+        PASS [   0.194s] (145/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2c-3 Composite-key IS NOT all pairs known yields empty novel set
+        PASS [   0.207s] (146/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2c-1 Composite-key boolean IS NOT with FOLD MNOR and QUERY
+        PASS [   0.173s] (147/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2d-1 Boolean IS NOT feeding recursive FOLD MSUM with QUERY
+        PASS [   0.141s] (148/558) uni-locy-tck::locy_tck combinations::PathCombinations::ALONG with edge weight then MNOR fold parses
+        PASS [   0.177s] (149/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2d-4 IS NOT PROB complement with FOLD MPROD and chained QUERY
+        PASS [   0.203s] (150/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2c-4 Composite-key IS NOT with multiple drugs and FOLD MNOR QUERY
+        PASS [   0.199s] (151/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2d-2 PROB complement IS NOT with recursive MNOR transitive risk and QUERY
+        PASS [   0.142s] (152/558) uni-locy-tck::locy_tck combinations::ProbAbduceAssume::ABDUCE NOT on MNOR rule parses
+        PASS [   0.162s] (153/558) uni-locy-tck::locy_tck combinations::PathCombinations::similar_to in ALONG accumulator parses
+        PASS [   0.212s] (154/558) uni-locy-tck::locy_tck combinations::PathCombinations::ALONG edge reliability aggregated by MNOR across multiple paths
+        PASS [   0.236s] (155/558) uni-locy-tck::locy_tck combinations::IsNotFoldQueryMatrix::2d-3 Boolean IS NOT chain with FOLD MSUM at each stage and QUERY
+        PASS [   0.175s] (156/558) uni-locy-tck::locy_tck combinations::ProbAbduceAssume::ASSUME DELETE removes one cause, reduces MNOR probability
+        PASS [   0.219s] (157/558) uni-locy-tck::locy_tck combinations::PathCombinations::similar_to carried along citation path
+        PASS [   0.146s] (158/558) uni-locy-tck::locy_tck combinations::ProbAbduceAssume::ASSUME with MNOR rule re-evaluation parses
+        PASS [   0.203s] (159/558) uni-locy-tck::locy_tck combinations::ProbAbduceAssume::ABDUCE NOT on MNOR rule finds edge removal candidate
+        PASS [   0.211s] (160/558) uni-locy-tck::locy_tck combinations::ProbAbduceAssume::ABDUCE NOT on multi-edge MNOR rule finds edge removal
+        PASS [   0.293s] (161/558) uni-locy-tck::locy_tck combinations::PathCombinations::ABDUCE NOT on ALONG-derived path rule finds edge removal
+        PASS [   0.224s] (162/558) uni-locy-tck::locy_tck combinations::ProbAbduceAssume::ASSUME and ABDUCE both operate on same MNOR rule
+        PASS [   0.193s] (163/558) uni-locy-tck::locy_tck combinations::SemanticParity::Bare QUERY over a plain rule matches derived key-for-key
+        PASS [   0.178s] (164/558) uni-locy-tck::locy_tck combinations::SemanticParity::Composite-key IS NOT QUERY matches derived
+        PASS [   0.159s] (165/558) uni-locy-tck::locy_tck combinations::SemanticParity::IS NOT PROB complement derived relation correctness
+        PASS [   0.182s] (166/558) uni-locy-tck::locy_tck combinations::SemanticParity::Boolean IS NOT QUERY matches derived
+        PASS [   0.185s] (167/558) uni-locy-tck::locy_tck combinations::SemanticParity::FOLD MPROD QUERY matches derived
+        PASS [   0.225s] (168/558) uni-locy-tck::locy_tck combinations::SemanticParity::Bare QUERY over a composite-key rule matches derived key-for-key
+        PASS [   0.207s] (169/558) uni-locy-tck::locy_tck combinations::SemanticParity::FOLD MNOR QUERY matches derived
+        PASS [   0.182s] (170/558) uni-locy-tck::locy_tck combinations::SemanticParity::QUERY matches derived when an IS-ref introduces a binding
+        PASS [   0.151s] (171/558) uni-locy-tck::locy_tck combinations::SimilarToAbduceAssume::ABDUCE NOT on similar_to rule parses
+        PASS [   0.119s] (172/558) uni-locy-tck::locy_tck combinations::SimilarToAbduceAssume::ASSUME with similar_to MNOR rule parses
+        PASS [   0.201s] (173/558) uni-locy-tck::locy_tck combinations::SemanticParity::Simple non-recursive rule QUERY matches derived
+        PASS [   0.191s] (174/558) uni-locy-tck::locy_tck combinations::SemanticParity::Three-stratum FOLD chain QUERY matches derived
+        PASS [   0.207s] (175/558) uni-locy-tck::locy_tck combinations::SemanticParity::QUERY matches derived for a recursive rule with a fresh binding
+        PASS [   0.131s] (176/558) uni-locy-tck::locy_tck combinations::SimilarToProbability::similar_to score in YIELD with MNOR fold parses
+        PASS [   0.163s] (177/558) uni-locy-tck::locy_tck combinations::SimilarToProbability::similar_to score as PROB with IS NOT complement
+        PASS [   0.215s] (178/558) uni-locy-tck::locy_tck combinations::SimilarToAbduceAssume::ABDUCE NOT on similar_to-derived rule finds edge removal
+        PASS [   0.202s] (179/558) uni-locy-tck::locy_tck combinations::SimilarToAbduceAssume::ASSUME DELETE removes signal and reduces similar_to MNOR
+        PASS [   0.172s] (180/558) uni-locy-tck::locy_tck combinations::SimilarToProbability::similar_to fed into MPROD via two-rule pattern
+        PASS [   0.175s] (181/558) uni-locy-tck::locy_tck combinations::SimilarToProbability::similar_to fed into MNOR via two-rule pattern
+        PASS [   0.132s] (182/558) uni-locy-tck::locy_tck combinations::SimilarToProbability::similar_to with MPROD fold parses
+        PASS [   0.157s] (183/558) uni-locy-tck::locy_tck combinations::SimilarToProbability::similar_to score used as YIELD column
+        PASS [   0.147s] (184/558) uni-locy-tck::locy_tck combinations::TripleCombinations::similar_to + PROB + ASSUME parses
+        PASS [   0.175s] (185/558) uni-locy-tck::locy_tck combinations::TripleCombinations::similar_to + MNOR + IS NOT parses
+        PASS [   0.272s] (186/558) uni-locy-tck::locy_tck combinations::SimilarToAbduceAssume::ASSUME CREATE adds signal and ABDUCE operates on same similar_to MNOR rule
+        PASS [   0.156s] (187/558) uni-locy-tck::locy_tck compile::FoldMonotonicity::Monotonic MSUM in self-recursive rule compiles
+        PASS [   0.194s] (188/558) uni-locy-tck::locy_tck combinations::TripleCombinations::similar_to MNOR aggregation then ABDUCE finds signal removal
+        PASS [   0.140s] (189/558) uni-locy-tck::locy_tck compile::FoldMonotonicity::Non-monotonic AVG in self-recursive rule is rejected
+        PASS [   0.182s] (190/558) uni-locy-tck::locy_tck combinations::TripleCombinations::similar_to scores aggregated by MNOR then IS NOT complement
+        PASS [   0.139s] (191/558) uni-locy-tck::locy_tck compile::FoldMonotonicity::Non-monotonic SUM in self-recursive rule is rejected
+        PASS [   0.180s] (192/558) uni-locy-tck::locy_tck compile::FoldMonotonicity::Monotone-but-unbounded COLLECT in self-recursive rule compiles
+        PASS [   0.142s] (193/558) uni-locy-tck::locy_tck compile::Stratification::Cyclic negation should fail to compile
+        PASS [   0.148s] (194/558) uni-locy-tck::locy_tck compile::FoldMonotonicity::Non-monotonic SUM in non-recursive rule compiles
+        PASS [   0.189s] (195/558) uni-locy-tck::locy_tck compile::FoldMonotonicity::Monotonic MNOR in self-recursive rule compiles
+        PASS [   0.198s] (196/558) uni-locy-tck::locy_tck compile::FoldMonotonicity::Monotonic MMAX in self-recursive rule compiles
+        PASS [   0.148s] (197/558) uni-locy-tck::locy_tck compile::Stratification::Program with no rules compiles to zero strata
+        PASS [   0.239s] (198/558) uni-locy-tck::locy_tck combinations::TripleCombinations::similar_to MNOR threat level reduced under ASSUME DELETE
+        PASS [   0.129s] (199/558) uni-locy-tck::locy_tck compile::Stratification::Undefined rule reference should fail to compile
+        PASS [   0.141s] (200/558) uni-locy-tck::locy_tck compile::Stratification::Two strata with negation dependency
+        PASS [   0.152s] (201/558) uni-locy-tck::locy_tck compile::Stratification::Self-recursive rule in single stratum
+        PASS [   0.170s] (202/558) uni-locy-tck::locy_tck compile::Stratification::Single-stratum non-recursive program
+        PASS [   0.199s] (203/558) uni-locy-tck::locy_tck correlation::CrossGroupCorrelation::Different subjects do not emit CrossPredicateCorrelation
+        PASS [   0.208s] (204/558) uni-locy-tck::locy_tck correlation::CrossGroupCorrelation::Binding each exposed column positionally resolves the read
+        PASS [   0.158s] (205/558) uni-locy-tck::locy_tck correlation::CrossGroupCorrelation::WHERE s IS p, s IS NOT q emits PositiveComplementCorrelation
+        PASS [   0.195s] (206/558) uni-locy-tck::locy_tck correlation::CrossGroupCorrelation::Reading a value column two IS references expose fails to compile
+        PASS [   0.183s] (207/558) uni-locy-tck::locy_tck correlation::CrossGroupCorrelation::WHERE on different subjects does not emit the warning
+        PASS [   0.158s] (208/558) uni-locy-tck::locy_tck correlation::FoldInRecursivePath::Non-recursive FOLD without ALONG does not warn
+        PASS [   0.229s] (209/558) uni-locy-tck::locy_tck correlation::CrossGroupCorrelation::Only one PROB IS-ref does not emit CrossPredicateCorrelation
+        PASS [   0.172s] (210/558) uni-locy-tck::locy_tck correlation::FoldInRecursivePath::Recursive IS-ref + FOLD + no ALONG emits FoldInRecursivePath
+        PASS [   0.172s] (211/558) uni-locy-tck::locy_tck correlation::HavingInRecursivePath::A post-FOLD WHERE without recursion does not warn
+        PASS [   0.181s] (212/558) uni-locy-tck::locy_tck correlation::CrossGroupCorrelation::WHERE s IS p, s IS q on PROB rules emits CrossPredicateCorrelation
+        PASS [   0.153s] (213/558) uni-locy-tck::locy_tck correlation::RequireInRecursion::REQUIRE and the post-FOLD WHERE agree without recursion
+        PASS [   0.178s] (214/558) uni-locy-tck::locy_tck correlation::HavingInRecursivePath::A self-referencing rule with a post-FOLD WHERE warns
+        PASS [   0.193s] (215/558) uni-locy-tck::locy_tck correlation::HavingInRecursivePath::A recursive FOLD with no post-FOLD WHERE does not warn
+        PASS [   0.157s] (216/558) uni-locy-tck::locy_tck correlation::RequireInRecursion::REQUIRE names a fold output that YIELD renames
+        PASS [   0.201s] (217/558) uni-locy-tck::locy_tck correlation::FoldInRecursivePath::Recursive IS-ref + FOLD + ALONG still emits FoldInRecursivePath
+        PASS [   0.158s] (218/558) uni-locy-tck::locy_tck correlation::RequireInRecursion::the post-FOLD WHERE filters the answer only, so C is still derived
+        PASS [   0.168s] (219/558) uni-locy-tck::locy_tck correlation::RequireInRecursion::REQUIRE constrains the recursion, so the chain stops at B
+        PASS [   0.194s] (220/558) uni-locy-tck::locy_tck correlation::HavingInRecursivePath::The excluded group still drives the recursion
+        PASS [   0.162s] (221/558) uni-locy-tck::locy_tck correlation::RequireInRecursion::a rule using REQUIRE does not warn about HavingInRecursivePath
+        PASS [   0.160s] (222/558) uni-locy-tck::locy_tck correlation::SharedRetrievalContext::Retrieval features on different properties do not emit warning
+        PASS [   0.161s] (223/558) uni-locy-tck::locy_tck correlation::SharedRetrievalContext::Two similar_to features on same property emits SharedRetrievalContext
+        PASS [   0.207s] (224/558) uni-locy-tck::locy_tck correlation::SharedRetrievalContext::@independent annotation suppresses SharedRetrievalContext
+        PASS [   0.137s] (225/558) uni-locy-tck::locy_tck derive::DeriveEdges::DERIVE NEW node
+        PASS [   0.143s] (226/558) uni-locy-tck::locy_tck derive::DeriveEdges::DERIVE MERGE two nodes
+        PASS [   0.142s] (227/558) uni-locy-tck::locy_tck derive::DeriveEdges::DERIVE edge rule compiles successfully
+        PASS [   0.172s] (228/558) uni-locy-tck::locy_tck derive::DeriveEdges::Backward edge derive
+        PASS [   0.209s] (229/558) uni-locy-tck::locy_tck derive::CommandSequencing::A Cypher write is a command, and a later QUERY reads it
+        PASS [   0.202s] (230/558) uni-locy-tck::locy_tck derive::CommandSequencing::A second DERIVE reads the first DERIVE's edges
+        PASS [   0.164s] (231/558) uni-locy-tck::locy_tck derive::DeriveEdges::DERIVE NEW rule compiles successfully
+        PASS [   0.145s] (232/558) uni-locy-tck::locy_tck derive::DeriveEdges::Forward edge derive
+        PASS [   0.191s] (233/558) uni-locy-tck::locy_tck derive::CommandSequencing::QUERY before and after a DERIVE reads each state
+        PASS [   0.176s] (234/558) uni-locy-tck::locy_tck derive::DeriveEdges::DERIVE NEW creates a Skolem node
+        PASS [   0.215s] (235/558) uni-locy-tck::locy_tck derive::CommandSequencing::QUERY after DERIVE reads the derived edges
+        PASS [   0.175s] (236/558) uni-locy-tck::locy_tck derive::DeriveEdges::DERIVE idempotency — re-derive does not duplicate
+        PASS [   0.188s] (237/558) uni-locy-tck::locy_tck derive::DeriveVisibility::Trailing Cypher after empty DERIVE returns 0 correctly
+        PASS [   0.267s] (238/558) uni-locy-tck::locy_tck derive::CommandSequencing::A recursive rule reads the derived edges
+        PASS [   0.211s] (239/558) uni-locy-tck::locy_tck derive::DeriveEdges::DERIVE creates edges in the graph
+        PASS [   0.193s] (240/558) uni-locy-tck::locy_tck derive::DeriveVisibility::Trailing Cypher after DERIVE sees derived edges
+        PASS [   0.198s] (241/558) uni-locy-tck::locy_tck derive::DeriveVisibility::DERIVE edges do not persist to graph without tx.apply
+        PASS [   0.206s] (242/558) uni-locy-tck::locy_tck derive::DeriveVisibility::QUERY then DERIVE then trailing Cypher
+        PASS [   0.169s] (243/558) uni-locy-tck::locy_tck evaluate::AlongWithIsRef::ALONG binding directly as YIELD column with IS-ref
+        PASS [   0.225s] (244/558) uni-locy-tck::locy_tck derive::DeriveVisibility::Trailing Cypher joins derived edges with existing graph
+        PASS [   0.206s] (245/558) uni-locy-tck::locy_tck derive::DeriveVisibility::Trailing Cypher sees edges from multiple DERIVE commands
+        PASS [   0.249s] (246/558) uni-locy-tck::locy_tck derive::DeriveVisibility::Trailing Cypher count reflects derived edge count
+        PASS [   0.144s] (247/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::datetime() in QUERY RETURN does not error
+        PASS [   0.173s] (248/558) uni-locy-tck::locy_tck evaluate::AlongWithIsRef::ALONG binding used in compound YIELD expression with IS-ref
+        PASS [   0.168s] (249/558) uni-locy-tck::locy_tck evaluate::AlongWithIsRef::ALONG binding with alias in YIELD with IS-ref
+        PASS [   0.158s] (250/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::exp() decay pattern in QUERY WHERE models relevance decay
+        PASS [   0.166s] (251/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::sqrt() in QUERY WHERE filters correctly
+        PASS [   0.162s] (252/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::toUpper() in QUERY RETURN
+        PASS [   0.198s] (253/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::exp() in QUERY WHERE filters correctly
+        PASS [   0.186s] (254/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::sqrt(4) = 2.0 in QUERY RETURN
+        PASS [   0.182s] (255/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::toLower() in QUERY WHERE
+        PASS [   0.190s] (256/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::log() in QUERY WHERE filters correctly
+        PASS [   0.152s] (257/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::Cyclic negation rejected
+        PASS [   0.204s] (258/558) uni-locy-tck::locy_tck evaluate::CypherFunctions::exp(0) = 1.0 in QUERY RETURN
+        PASS [   0.160s] (259/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::Undefined rule in IS reference
+        PASS [   0.178s] (260/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::Max iterations with allow_partial returns partial results
+        PASS [   0.181s] (261/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::Max iterations exceeded errors by default
+        PASS [   0.160s] (262/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::prev in base case clause rejected
+        PASS [   0.191s] (263/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::YIELD schema mismatch rejected
+        PASS [   0.186s] (264/558) uni-locy-tck::locy_tck evaluate::MultiStratum::Cross-rule IS reference with value binding
+        PASS [   0.159s] (265/558) uni-locy-tck::locy_tck evaluate::NonRecursive::Empty result when no matching data
+        PASS [   0.173s] (266/558) uni-locy-tck::locy_tck evaluate::NonLinearRecursion::Non-linear transitive closure matches the linear formulation
+        PASS [   0.165s] (267/558) uni-locy-tck::locy_tck evaluate::NonRecursive::Multiple rules in single program
+        PASS [   0.154s] (268/558) uni-locy-tck::locy_tck evaluate::NonRecursive::Rule with WHERE condition filters results
+        PASS [   0.224s] (269/558) uni-locy-tck::locy_tck evaluate::MultiStratum::Two-stratum positive dependency
+        PASS [   0.237s] (270/558) uni-locy-tck::locy_tck evaluate::MultiStratum::Three-stratum with negation
+        PASS [   0.204s] (271/558) uni-locy-tck::locy_tck evaluate::NonLinearRecursion::Two chained IS-references to another rule in one clause
+        PASS [   0.152s] (272/558) uni-locy-tck::locy_tck evaluate::ParameterBinding::Multiple $params filter on two dimensions
+        PASS [   0.167s] (273/558) uni-locy-tck::locy_tck evaluate::TransitiveClosure::Cycle converges without infinite loop
+        PASS [   0.183s] (274/558) uni-locy-tck::locy_tck evaluate::ParameterBinding::$param in rule MATCH WHERE scopes derived relation
+        PASS [   0.197s] (275/558) uni-locy-tck::locy_tck evaluate::NonRecursive::Simple YIELD rule with graph data
+        PASS [   0.166s] (276/558) uni-locy-tck::locy_tck evaluate::TransitiveClosure::Three-node chain produces transitive closure
+        PASS [   0.192s] (277/558) uni-locy-tck::locy_tck evaluate::ParameterBinding::$param in QUERY WHERE filters to matching agent
+        PASS [   0.194s] (278/558) uni-locy-tck::locy_tck evaluate::ParameterBinding::Integer $param used in WHERE comparison
+        PASS [   0.198s] (279/558) uni-locy-tck::locy_tck evaluate::YieldValueColumns::Computed expression in YIELD
+        PASS [   0.185s] (280/558) uni-locy-tck::locy_tck evaluate::YieldValueColumns::KEY property column without FOLD projects its value in QUERY
+        PASS [   0.251s] (281/558) uni-locy-tck::locy_tck evaluate::ParameterBinding::$param in QUERY WHERE excludes non-matching rows
+        PASS [   0.219s] (282/558) uni-locy-tck::locy_tck evaluate::YieldValueColumns::Edge property access in YIELD
+        PASS [   0.205s] (283/558) uni-locy-tck::locy_tck evaluate::YieldValueColumns::Literal constant in YIELD
+        PASS [   0.163s] (284/558) uni-locy-tck::locy_tck evaluate::YieldValueColumns::Non-key property access in YIELD via derived relation
+        PASS [   0.174s] (285/558) uni-locy-tck::locy_tck explain::NeuralProvenanceExplain::EXPLAIN surfaces ALONG-position neural_calls
+        PASS [   0.146s] (286/558) uni-locy-tck::locy_tck explain::ProofTraces::EXPLAIN RULE syntax parses
+        PASS [   0.139s] (287/558) uni-locy-tck::locy_tck explain::ProofTraces::EXPLAIN non-recursive derivation tree
+        PASS [   0.156s] (288/558) uni-locy-tck::locy_tck explain::NeuralProvenanceExplain::EXPLAIN surfaces calibrated_probability and confidence_band
+        PASS [   0.207s] (289/558) uni-locy-tck::locy_tck evaluate::YieldValueColumns::Non-key property access in QUERY RETURN
+        PASS [   0.165s] (290/558) uni-locy-tck::locy_tck explain::NeuralProvenanceExplain::EXPLAIN surfaces neural_calls on derivations
+        PASS [   0.221s] (291/558) uni-locy-tck::locy_tck evaluate::YieldValueColumns::String constant in YIELD via QUERY RETURN
+        PASS [   0.203s] (292/558) uni-locy-tck::locy_tck explain::NeuralProvenanceExplain::EXPLAIN surfaces FOLD-position neural_calls
+        PASS [   0.160s] (293/558) uni-locy-tck::locy_tck explain::ProofTraces::EXPLAIN recursive derivation tree has children
+        PASS [   0.165s] (294/558) uni-locy-tck::locy_tck fold::Aggregation::COUNT zero-argument counts all facts
+        PASS [   0.171s] (295/558) uni-locy-tck::locy_tck fold::Aggregation::BEST BY MIN selects cheapest per group
+        PASS [   0.173s] (296/558) uni-locy-tck::locy_tck fold::Aggregation::BEST BY preserves full row including ALONG values
+        PASS [   0.190s] (297/558) uni-locy-tck::locy_tck fold::Aggregation::A later-stratum consumer folds the published folded value
+        PASS [   0.188s] (298/558) uni-locy-tck::locy_tck fold::Aggregation::FOLD COUNT counts matching rows
+        PASS [   0.160s] (299/558) uni-locy-tck::locy_tck fold::Aggregation::FOLD SUM with arithmetic expression on edge properties
+        PASS [   0.156s] (300/558) uni-locy-tck::locy_tck fold::Aggregation::FOLD SUM with computed expression argument
+        PASS [   0.153s] (301/558) uni-locy-tck::locy_tck fold::Aggregation::FOLD with BEST BY
+        PASS [   0.185s] (302/558) uni-locy-tck::locy_tck fold::Aggregation::FOLD SUM groups by key correctly
+        PASS [   0.156s] (303/558) uni-locy-tck::locy_tck fold::Aggregation::FOLD with MSUM monotonic aggregate
+        PASS [   0.152s] (304/558) uni-locy-tck::locy_tck fold::Aggregation::FOLD with SUM
+        PASS [   0.587s] (305/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::A re-derivation cut by max iterations errors by default
+        PASS [   0.136s] (306/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Inline block comment should be supported
+        PASS [   0.135s] (307/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Line comments should be supported
+        PASS [   0.142s] (308/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Multiple reserved keywords as property names should parse
+        PASS [   0.125s] (309/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Normal property names should parse successfully
+        PASS [   0.171s] (310/558) uni-locy-tck::locy_tck fold::Aggregation::MCOUNT zero-argument counts all facts in group
+        PASS [   0.180s] (311/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Block comments should be supported
+        PASS [   0.180s] (312/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Contextual keywords as property names should parse
+        PASS [   0.150s] (313/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using ABDUCE as a rule name should fail
+        PASS [   0.145s] (314/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using ALONG as a rule name should fail
+        PASS [   0.138s] (315/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using BEST as a rule name should fail
+        PASS [   0.166s] (316/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Reserved keywords as property names should parse successfully
+        PASS [   0.156s] (317/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using ASSUME as a rule name should fail
+        PASS [   0.159s] (318/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using DERIVE as a rule name should fail
+        PASS [   0.151s] (319/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using FOLD as a rule name should fail
+        PASS [   0.130s] (320/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using RULE as a rule name should fail
+        PASS [   0.125s] (321/558) uni-locy-tck::locy_tck modules::ModuleComposition::Backtick-quoted reserved keyword in import list
+        PASS [   0.140s] (322/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using prev as a rule name should fail
+        PASS [   0.152s] (323/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Using QUERY as a rule name should fail
+        PASS [   0.129s] (324/558) uni-locy-tck::locy_tck modules::ModuleComposition::Empty selective import list fails to parse
+        PASS [   0.708s] (325/558) uni-locy-tck::locy_tck evaluate::ErrorConditions::A re-derivation cut by max iterations is reported with allow_partial
+        PASS [   0.143s] (326/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Valid CREATE RULE with real syntax should parse
+        PASS [   0.118s] (327/558) uni-locy-tck::locy_tck modules::ModuleComposition::Selective imports with multiple identifiers
+        PASS [   0.155s] (328/558) uni-locy-tck::locy_tck lexical::ReservedKeywords::Valid DERIVE clause with real syntax should parse
+        PASS [   0.142s] (329/558) uni-locy-tck::locy_tck modules::ModuleComposition::MODULE declaration parses
+        PASS [   0.145s] (330/558) uni-locy-tck::locy_tck modules::ModuleComposition::Glob import backward compatibility
+        PASS [   0.152s] (331/558) uni-locy-tck::locy_tck modules::ModuleComposition::MODULE with multiple USE imports parses
+        PASS [   0.131s] (332/558) uni-locy-tck::locy_tck modules::ModuleComposition::USE import parses
+        PASS [   0.161s] (333/558) uni-locy-tck::locy_tck modules::ModuleComposition::Single selective import
+        PASS [   0.203s] (334/558) uni-locy-tck::locy_tck monotonic::ExactProbability::BDD limit exceeded emits BddLimitExceeded warning
+        PASS [   0.224s] (335/558) uni-locy-tck::locy_tck monotonic::ExactProbability::A negated fact sharing an edge with the positive part is a negated literal in exact mode
+        PASS [   0.204s] (336/558) uni-locy-tck::locy_tck monotonic::ExactProbability::BDD fallback marks derived facts as approximate
+        PASS [   0.193s] (337/558) uni-locy-tck::locy_tck monotonic::ExactProbability::BDD mode produces numeric probability for MNOR diamond
+        PASS [   0.175s] (338/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Default mode emits only SharedProbabilisticDependency warning
+        PASS [   0.209s] (339/558) uni-locy-tck::locy_tck monotonic::ExactProbability::BDD limit exceeded retains independence value
+        PASS [   0.163s] (340/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Independent groups produce no warnings with exact_probability
+        PASS [   0.189s] (341/558) uni-locy-tck::locy_tck monotonic::ExactProbability::BddLimitExceeded warning carries variable_count and key_group metadata
+        PASS [   0.166s] (342/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Multi-key disjoint groups do not emit CrossGroupCorrelationNotExact
+        PASS [   0.183s] (343/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Independent groups with exact_probability produce correct probability
+        PASS [   0.160s] (344/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Shared hub emits CrossGroupCorrelationNotExact warning
+        PASS [   0.249s] (345/558) uni-locy-tck::locy_tck monotonic::ExactProbability::A negated fact sharing an edge with the positive part is an independent factor in default mode
+        PASS [   0.188s] (346/558) uni-locy-tck::locy_tck monotonic::ExactProbability::MPROD with shared base facts uses BDD
+        PASS [   0.213s] (347/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Default mode produces numeric probability for MNOR diamond
+        PASS [   0.189s] (348/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Non-fallback exact_probability facts are not marked approximate
+        PASS [   0.175s] (349/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::IS NOT complement of MNOR(0.3, 0.5) = 1 - 0.65 = 0.35
+        PASS [   0.207s] (350/558) uni-locy-tck::locy_tck monotonic::ExactProbability::MPROD diamond with exact_probability produces correct probability
+        PASS [   0.183s] (351/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::Complement chain evidence * safety with hand-computed values
+        PASS [   0.191s] (352/558) uni-locy-tck::locy_tck monotonic::ExactProbability::Shared-proof diamond with exact_probability produces correct result
+        PASS [   0.164s] (353/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MNOR edge case zero MNOR(0.0) = 0.0
+        PASS [   0.173s] (354/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MNOR edge case one MNOR(1.0) = 1.0
+        PASS [   0.175s] (355/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MNOR five values 1-(0.9)(0.8)(0.7)(0.6)(0.5) = 0.8488
+        PASS [   0.158s] (356/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MNOR single value 0.3
+        PASS [   0.163s] (357/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MPROD edge case with zero 0.0 * 0.5 = 0.0
+        PASS [   0.167s] (358/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MNOR three values 1-(0.7)(0.5)(0.3) = 0.895
+        PASS [   0.161s] (359/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MPROD two values 0.8 * 0.9 = 0.72
+        PASS [   0.166s] (360/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MPROD three values 0.8 * 0.9 * 0.7 = 0.504
+        PASS [   0.171s] (361/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MPROD edge case with one 1.0 * 0.5 = 0.5
+        PASS [   0.163s] (362/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MMAX converges to true maximum
+        PASS [   0.178s] (363/558) uni-locy-tck::locy_tck monotonic::MathematicalReference::MNOR two values 1-(0.7)(0.5) = 0.65
+        PASS [   0.158s] (364/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR four causes matches spec example
+        PASS [   0.153s] (365/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR in non-recursive rule compiles
+        PASS [   0.139s] (366/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR rejected with BEST BY
+        PASS [   0.146s] (367/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR single cause unchanged
+        PASS [   0.157s] (368/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR produces correct noisy-OR value
+        PASS [   0.170s] (369/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR converges with correct noisy-OR
+        PASS [   0.184s] (370/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MMIN converges to true minimum
+        PASS [   0.151s] (371/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR syntax parses
+        PASS [   0.183s] (372/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR all-ones yields one
+        PASS [   0.166s] (373/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR with certainty yields one
+        PASS [   0.167s] (374/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR with zeros yields zero
+        PASS [   0.187s] (375/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR spec example (0.7, 0.5) yields 0.85
+        PASS [   0.173s] (376/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MNOR zero does not affect result
+        PASS [   0.163s] (377/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD converges with correct product
+        PASS [   0.140s] (378/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD rejected with BEST BY
+        PASS [   0.148s] (379/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD in non-recursive rule compiles
+        PASS [   0.162s] (380/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD groups independently
+        PASS [   0.152s] (381/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD syntax parses
+        PASS [   0.136s] (382/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::Non-monotonic SUM in recursive rule rejected
+        PASS [   0.166s] (383/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD single requirement unchanged
+        PASS [   0.148s] (384/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MSUM in non-recursive rule compiles
+        PASS [   0.162s] (385/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD three-value (0.9, 0.8, 0.7) yields 0.504
+        PASS [   0.174s] (386/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD produces correct product value
+        PASS [   0.167s] (387/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD with ones yields one
+        PASS [   0.160s] (388/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MSUM syntax parses
+        PASS [   0.182s] (389/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MPROD with zero yields zero
+        PASS [   0.183s] (390/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::MSUM converges over multi-hop ownership
+        PASS [   0.165s] (391/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::Recursive MCOUNT counts derivations, not distinct values
+        PASS [   0.169s] (392/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::Recursive MPROD composes across two levels with equal-valued siblings
+        PASS [   0.189s] (393/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::Recursive MCOUNT counts children, not leaves
+        PASS [   0.134s] (394/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::Absent key yields probability 1.0
+        PASS [   0.184s] (395/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::Recursive MPROD composes across three levels
+        PASS [   0.166s] (396/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::strict rejects MPROD input greater than one
+        PASS [   0.170s] (397/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::strict rejects negative MNOR input
+        PASS [   0.188s] (398/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::Recursive MSUM counts each equal-valued child derivation
+        PASS [   0.182s] (399/558) uni-locy-tck::locy_tck monotonic::MonotonicAggregation::Recursive MSUM over a diamond counts both paths to a shared child
+        PASS [   0.120s] (400/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::Multiple PROB columns should fail to compile
+        PASS [   0.168s] (401/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::Double complement (NOT NOT) recovers original probability
+        PASS [   0.160s] (402/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::IS NOT complement after non-recursive PROB rule
+        PASS [   0.177s] (403/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::IS NOT PROB absent key yields 1.0 in derived relation
+        PASS [   0.162s] (404/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::MNOR with values outside range clamps in non-strict mode
+        PASS [   0.190s] (405/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::Cross-predicate IS + IS NOT combines risk * (1-trust)
+        PASS [   0.195s] (406/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::Composite-key IS NOT with target variable
+        PASS [   0.149s] (407/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::PROB annotation parses
+        PASS [   0.174s] (408/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::IS NOT with PROB rule yields complement (1-p)
+        PASS [   0.175s] (409/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::MNOR output is implicitly PROB
+        PASS [   0.177s] (410/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::IS NOT without PROB retains Boolean exclusion
+        PASS [   0.146s] (411/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::PROB with explicit alias syntax variants
+        PASS [   0.145s] (412/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::strict_probability_domain rejects out-of-range MNOR input
+        PASS [   0.155s] (413/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::QUERY returns IS NOT PROB complement rows (non-FOLD target)
+        PASS [   0.177s] (414/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::PROB column across strata via IS reference
+        PASS [   0.177s] (415/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::QUERY with cross-predicate IS + IS NOT PROB
+        PASS [   0.206s] (416/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::QUERY FOLD rule returns node properties after enrichment
+        PASS [   0.161s] (417/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::MNOR clamps inputs exceeding 1.0
+        PASS [   0.179s] (418/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::ALONG expression feeds MNOR feeds MPROD
+        PASS [   0.180s] (419/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::BEST BY ASC selects weakest link
+        PASS [   0.226s] (420/558) uni-locy-tck::locy_tck monotonic::ProbabilisticComplement::QUERY IS NOT PROB complement with FOLD MNOR target
+        PASS [   0.200s] (421/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::ASSUME DELETE removes edges visible to Cypher
+        PASS [   0.164s] (422/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::MNOR with no matching edges yields zero facts
+        PASS [   0.158s] (423/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::Overloaded rule clauses combine via MNOR
+        PASS [   0.163s] (424/558) uni-locy-tck::locy_tck monotonic::SharedEventDiagnostics::Exact mode reports the dependency as resolved
+        PASS [   0.163s] (425/558) uni-locy-tck::locy_tck monotonic::SharedEventDiagnostics::Ordinary mode warns of an overestimate
+        PASS [   0.169s] (426/558) uni-locy-tck::locy_tck monotonic::SharedEventDiagnostics::Exact mode over the variable limit falls back and warns
+        PASS [   0.169s] (427/558) uni-locy-tck::locy_tck monotonic::SharedProofDetection::Independent parallel paths produce no warning
+        PASS [   0.176s] (428/558) uni-locy-tck::locy_tck monotonic::SharedProofDetection::Diamond graph triggers SharedProbabilisticDependency warning
+        PASS [   0.204s] (429/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::MPROD clamps inputs exceeding 1.0
+        PASS [   0.151s] (430/558) uni-locy-tck::locy_tck monotonic::SharedProofDetection::Non-probabilistic FOLD produces no warning
+        PASS [   0.147s] (431/558) uni-locy-tck::locy_tck monotonic::SharedProofDetection::Non-recursive cross-stratum shared proofs are exact with exact_probability
+        PASS [   0.184s] (432/558) uni-locy-tck::locy_tck monotonic::SharedProofDetection::Edge-disjoint diamond produces no warning
+        PASS [   0.212s] (433/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::MPROD with 20 near-one factors
+        PASS [   0.212s] (434/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::Recursive MNOR combines transitive paths over diamond
+        PASS [   0.217s] (435/558) uni-locy-tck::locy_tck monotonic::ProbabilisticStress::Three-layer nested aggregation
+        PASS [   0.182s] (436/558) uni-locy-tck::locy_tck monotonic::SharedProofDetection::Non-recursive cross-stratum shared proofs trigger warning
+        PASS [   0.172s] (437/558) uni-locy-tck::locy_tck monotonic::TopKProofs::Default unlimited retains all proofs — backward compatible
+        PASS [   0.165s] (438/558) uni-locy-tck::locy_tck monotonic::TopKProofs::EXPLAIN output includes proof_probability when top_k active
+        PASS [   0.146s] (439/558) uni-locy-tck::locy_tck monotonic::TopKProofs::top_k=5 handles diamond graph identically to unlimited
+        PASS [   0.165s] (440/558) uni-locy-tck::locy_tck monotonic::TopKProofs::top_k=1 retains only highest-probability proof
+        PASS [   0.172s] (441/558) uni-locy-tck::locy_tck monotonic::TopKProofs::top_k=1 keeps the heaviest derivation of a fact
+        PASS [   0.170s] (442/558) uni-locy-tck::locy_tck monotonic::TopKProofs::top_k=2 keeps both derivations of a fact
+        PASS [   0.157s] (443/558) uni-locy-tck::locy_tck negation::RecursiveNegation::IS NOT against a cyclic recursive rule excludes every reachable pair
+        PASS [   0.180s] (444/558) uni-locy-tck::locy_tck negation::RecursiveNegation::IS NOT excludes the full transitive closure, not just the last delta
+        PASS [   0.138s] (445/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT basic syntax parses
+        PASS [   0.152s] (446/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT TO-target bound by an earlier positive IS TO compiles
+        PASS [   0.129s] (447/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT subject that is a relationship variable is rejected
+        PASS [   0.156s] (448/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT excludes matching nodes
+        PASS [   0.143s] (449/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT subject bound only by a YIELD alias is rejected
+        PASS [   0.159s] (450/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT subject bound by an earlier positive IS TO target compiles
+        PASS [   0.152s] (451/558) uni-locy-tck::locy_tck neural::AlongInvocation::ALONG-position model invocation inside arithmetic
+        PASS [   0.177s] (452/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT creates a higher stratum
+        PASS [   0.154s] (453/558) uni-locy-tck::locy_tck neural::AlongInvocation::FOLD aggregate consuming ALONG with model invocation
+        PASS [   0.169s] (454/558) uni-locy-tck::locy_tck negation::StratifiedNegation::Multi-stratum negation chain evaluates in correct order
+        PASS [   0.136s] (455/558) uni-locy-tck::locy_tck neural::Calibrate::CALIBRATE on unregistered classifier errors at runtime
+        PASS [   0.180s] (456/558) uni-locy-tck::locy_tck negation::StratifiedNegation::IS NOT with empty negated relation passes all
+        PASS [   0.162s] (457/558) uni-locy-tck::locy_tck neural::AlongInvocation::Same model invoked in YIELD and ALONG positions
+        PASS [   0.150s] (458/558) uni-locy-tck::locy_tck neural::Calibrate::Declaring CALIBRATION suppresses UncalibratedNeuralPredicate
+        PASS [   0.158s] (459/558) uni-locy-tck::locy_tck neural::Calibrate::CALIBRATE with METHOD dirichlet parses but errors at fit time
+        PASS [   0.157s] (460/558) uni-locy-tck::locy_tck neural::Calibrate::Invoking an uncalibrated PROB model emits UncalibratedNeuralPredicate
+        PASS [   0.161s] (461/558) uni-locy-tck::locy_tck neural::Calibrate::Miscalibrated mock classifier reduces ECE via Platt CALIBRATE
+        PASS [   0.141s] (462/558) uni-locy-tck::locy_tck neural::CandleClassifier::Candle classifier scales over multiple rows in one batch
+        PASS [   0.198s] (463/558) uni-locy-tck::locy_tck neural::Calibrate::CALIBRATE after a Cypher write collects the written samples too
+        PASS [   0.173s] (464/558) uni-locy-tck::locy_tck neural::CandleClassifier::Candle classifier returns sigmoid for high-score input
+        PASS [   0.169s] (465/558) uni-locy-tck::locy_tck neural::CandleClassifier::Candle classifier returns sigmoid for low-score input
+        PASS [   0.121s] (466/558) uni-locy-tck::locy_tck neural::CreateModel::CREATE MODEL rejected when neural_predicates_preview is off
+        PASS [   0.159s] (467/558) uni-locy-tck::locy_tck neural::CandleClassifier::Candle classifier with missing feature uses bias-only sigmoid
+        PASS [   0.157s] (468/558) uni-locy-tck::locy_tck neural::ConformalCalibration::Conformal CALIBRATE with default alpha keyword
+        PASS [   0.138s] (469/558) uni-locy-tck::locy_tck neural::CreateModel::CREATE MODEL compiles cleanly under preview flag
+        PASS [   0.157s] (470/558) uni-locy-tck::locy_tck neural::CreateModel::CREATE MODEL coexists with a non-invoking CREATE RULE
+        PASS [   0.134s] (471/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::avg_neighbor with no neighbors surfaces Null (mock interprets as 0)
+        PASS [   0.159s] (472/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::avg_neighbor rejects invalid direction string
+        PASS [   0.150s] (473/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::avg_neighbor with wrong number of args fails compilation
+        PASS [   0.166s] (474/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::avg_neighbor with INCOMING direction
+        PASS [   0.210s] (475/558) uni-locy-tck::locy_tck neural::ConformalCalibration::Conformal CALIBRATE produces hand-computed quantile
+        PASS [   0.172s] (476/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::avg_neighbor averages a numeric neighbor property
+        PASS [   0.172s] (477/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::closeness_centrality(n) populates a Float feature
+        PASS [   0.178s] (478/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::betweenness_centrality(n) accepted (smoke)
+        PASS [   0.169s] (479/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::degree_centrality with too many arguments fails compilation
+        PASS [   0.161s] (480/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::harmonic_centrality(n) accepted (smoke)
+        PASS [   0.171s] (481/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::eigenvector_centrality(n) accepted (smoke)
+        PASS [   0.158s] (482/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::katz_centrality(n) accepted (smoke)
+        PASS [   0.149s] (483/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::sum_neighbor totals the neighbor property
+        PASS [   0.183s] (484/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::pagerank_score(n) populates a Float feature in [0, 1]
+        PASS [   0.142s] (485/558) uni-locy-tck::locy_tck neural::InvokeModel::Invoking an unregistered model errors at runtime
+        PASS [   0.143s] (486/558) uni-locy-tck::locy_tck neural::InvokeModel::Constant mock classifier produces uniform PROB output
+        PASS [   0.216s] (487/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::degree_centrality(n) feeds the classifier with the node's out-degree
+        PASS [   0.198s] (488/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::max_neighbor returns the largest neighbor property
+        PASS [   0.160s] (489/558) uni-locy-tck::locy_tck neural::InvokeModel::MNOR over a neural-output rule combines probabilities
+        PASS [   0.201s] (490/558) uni-locy-tck::locy_tck neural::GraphStructuralFeatures::sum_neighbor with BOTH direction totals over both directions
+        PASS [   0.168s] (491/558) uni-locy-tck::locy_tck neural::InvokeModel::Model with OUTPUT PROB auto-flags the YIELD column
+        PASS [   0.139s] (492/558) uni-locy-tck::locy_tck neural::NeuralFollowups::Arithmetic feature expression rejected at compile time
+        PASS [   0.200s] (493/558) uni-locy-tck::locy_tck neural::IntegratedExample::§16 supplier risk + supply path + part + assembly availability
+        PASS [   0.142s] (494/558) uni-locy-tck::locy_tck neural::NeuralFollowups::Property-access with missing property surfaces Null to the classifier
+        PASS [   0.174s] (495/558) uni-locy-tck::locy_tck neural::ModelRelationComposition::A model-scored relation consumed through IS
+        PASS [   0.137s] (496/558) uni-locy-tck::locy_tck neural::NeuralFollowups::WHERE-position model invocation errors at compile time
+        PASS [   0.162s] (497/558) uni-locy-tck::locy_tck neural::NeuralFollowups::Property-access feature expr is materialized end-to-end
+        PASS [   0.189s] (498/558) uni-locy-tck::locy_tck neural::ModelRelationComposition::Two rules consume one model-scored relation
+        PASS [   0.186s] (499/558) uni-locy-tck::locy_tck neural::NeuralFollowups::Memoization deduplicates identical classifier inputs
+        PASS [   0.171s] (500/558) uni-locy-tck::locy_tck neural::NeuralFollowups::User-visible YIELD of same property coexists with the hidden feature column
+        PASS [   0.138s] (501/558) uni-locy-tck::locy_tck neural::RetrievalFeatures::similar_to with 1 arg fails at compile time
+        PASS [   0.178s] (502/558) uni-locy-tck::locy_tck neural::PathContextFeatures::FEATURES (subject, col) FROM rule feeds classifier with column value
+        PASS [   0.179s] (503/558) uni-locy-tck::locy_tck neural::PathContextFeatures::FEATURES FROM unknown_rule fails at compile time
+        PASS [   0.208s] (504/558) uni-locy-tck::locy_tck neural::NeuralFollowups::YIELD-position invocations remain supported
+        PASS [   0.194s] (505/558) uni-locy-tck::locy_tck neural::PathContextFeatures::Subject absent from source rule surfaces FeatureValue__Null
+        PASS [   0.178s] (506/558) uni-locy-tck::locy_tck neural::RetrievalFeatures::semantic_match accepted at compile, errors at runtime
+        PASS [   0.169s] (507/558) uni-locy-tck::locy_tck neural::RetrievalFeatures::similar_to with orthogonal vectors yields zero feature
+        PASS [   0.215s] (508/558) uni-locy-tck::locy_tck neural::NoisyOrComposition::MNOR over 3 redundant neural-classified paths
+        PASS [   0.173s] (509/558) uni-locy-tck::locy_tck neural::SharedNeuralInput::F2a fires on shared input variable across two models
+        PASS [   0.166s] (510/558) uni-locy-tck::locy_tck neural::SharedNeuralInput::F2a suppressed when both models carry @independent
+        PASS [   0.183s] (511/558) uni-locy-tck::locy_tck neural::RetrievalFeatures::similar_to(prop, literal) at the call site feeds the classifier
+        PASS [   0.143s] (512/558) uni-locy-tck::locy_tck neural::Validate::VALIDATE on unknown rule fails at compile
+        PASS [   0.169s] (513/558) uni-locy-tck::locy_tck neural::Validate::Bare ECE in VALIDATE emits EceBinningBias warning
+        PASS [   0.178s] (514/558) uni-locy-tck::locy_tck neural::SharedNeuralInput::No F2 false positive for single-model MNOR over multiple paths
+        PASS [   0.182s] (515/558) uni-locy-tck::locy_tck neural::Validate::VALIDATE on a flipped-prediction rule reports low accuracy
+        PASS [   0.174s] (516/558) uni-locy-tck::locy_tck neural::Validate::VALIDATE on a perfectly-calibrated rule reports low Brier
+        PASS [   0.174s] (517/558) uni-locy-tck::locy_tck priority::PrioritizedRules::Higher priority overrides lower for same key
+        PASS [   0.142s] (518/558) uni-locy-tck::locy_tck priority::PrioritizedRules::PRIORITY clause syntax parses
+        PASS [   0.190s] (519/558) uni-locy-tck::locy_tck priority::PrioritizedRules::Equal priority produces union
+        PASS [   0.167s] (520/558) uni-locy-tck::locy_tck priority::PrioritizedRules::Mixed priority across clauses rejected
+        PASS [   0.232s] (521/558) uni-locy-tck::locy_tck neural::SharedNeuralInput::F2b fires on shared property feature across two models
+        PASS [   0.176s] (522/558) uni-locy-tck::locy_tck priority::PrioritizedRules::Key matched only by lower priority retains lower
+        PASS [   0.168s] (523/558) uni-locy-tck::locy_tck query::FoldQueryProjection::MNOR fold value projects through plain QUERY RETURN
+        PASS [   0.166s] (524/558) uni-locy-tck::locy_tck query::FoldQueryProjection::MPROD fold value projects through plain QUERY RETURN
+        PASS [   0.139s] (525/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY with WHERE and RETURN
+        PASS [   0.152s] (526/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY with WHERE and multiple RETURN items
+        PASS [   0.162s] (527/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY returns empty when no match
+        PASS [   0.187s] (528/558) uni-locy-tck::locy_tck query::FoldQueryProjection::SUM fold value projects through plain QUERY RETURN
+        PASS [   0.131s] (529/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY without WHERE clause
+        PASS [   0.155s] (530/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY without RETURN
+        PASS [   0.208s] (531/558) uni-locy-tck::locy_tck query::FoldQueryProjection::MNOR with multiple groups returns all groups via plain QUERY
+        PASS [   0.172s] (532/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY without WHERE but with RETURN
+        PASS [   0.142s] (533/558) uni-locy-tck::locy_tck rules::BasicRules::Multi-clause rule with WHERE
+        PASS [   0.209s] (534/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY filters to matching goal bindings
+        PASS [   0.209s] (535/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY terminates on cyclic graph
+        PASS [   0.166s] (536/558) uni-locy-tck::locy_tck rules::BasicRules::Binary IS ... TO reference
+        PASS [   0.137s] (537/558) uni-locy-tck::locy_tck rules::BasicRules::Simple YIELD KEY rule
+        PASS [   0.149s] (538/558) uni-locy-tck::locy_tck rules::BasicRules::Tuple IS reference
+        PASS [   0.169s] (539/558) uni-locy-tck::locy_tck rules::BasicRules::IS NOT reference in WHERE
+        PASS [   0.189s] (540/558) uni-locy-tck::locy_tck query::GoalDirected::QUERY without WHERE returns all facts
+        PASS [   0.141s] (541/558) uni-locy-tck::locy_tck rules::RecursiveRules::Rule with mixed WHERE conditions
+        PASS [   0.142s] (542/558) uni-locy-tck::locy_tck rules::BasicRules::Unary IS reference in WHERE
+        PASS [   0.166s] (543/558) uni-locy-tck::locy_tck rules::RecursiveRules::Rule with PRIORITY clause
+        PASS [   0.178s] (544/558) uni-locy-tck::locy_tck rules::RecursiveRules::Self-recursive rule with two clauses
+        PASS [   0.153s] (545/558) uni-locy-tck::locy_tck semiring::AddMultProbBaseline::MPROD two values under AddMultProb matches default
+        PASS [   0.160s] (546/558) uni-locy-tck::locy_tck semiring::AddMultProbBaseline::MNOR three values under AddMultProb matches default
+        PASS [   0.148s] (547/558) uni-locy-tck::locy_tck semiring::MaxMinProbViterbi::Non-PROB rule under MaxMinProb does not warn
+        PASS [   0.147s] (548/558) uni-locy-tck::locy_tck semiring::MaxMinProbViterbi::Out-of-range input under MaxMinProb + strict fails fast
+        PASS [   0.164s] (549/558) uni-locy-tck::locy_tck semiring::MaxMinProbViterbi::MNOR under MaxMinProb returns max-of-inputs and warns
+        PASS [   0.142s] (550/558) uni-locy-tck::locy_tck semiring::TopKProofs::MNOR under TopKProofs(4) Stage 1 matches AddMultProb output
+        PASS [   0.136s] (551/558) uni-locy-tck::locy_tck semiring::TopKProofs::MPROD under TopKProofs(4) matches AddMultProb product
+        PASS [   0.127s] (552/558) uni-locy-tck::locy_tck semiring::TopKProofs::TopKProofs(0) rejected as incoherent
+        PASS [   0.159s] (553/558) uni-locy-tck::locy_tck semiring::MaxMinProbViterbi::Recursive MaxMinProb rule emits Fuzzy warning and suppresses shared-proof
+        PASS [   0.162s] (554/558) uni-locy-tck::locy_tck semiring::MaxMinProbViterbi::MPROD under MaxMinProb returns min-of-inputs and warns
+        PASS [   0.133s] (555/558) uni-locy-tck::locy_tck semiring::TopKProofs::TopKProofs(2) on independent proofs emits no CrossedDependency warning
+        PASS [   0.139s] (556/558) uni-locy-tck::locy_tck semiring::TopKProofs::TopKProofs(1) keeps the most probable proof of each fact
+        PASS [   0.137s] (557/558) uni-locy-tck::locy_tck semiring::TopKProofs::TopKProofs(8) over a certain shared referenced fact keeps the edges independent
+        PASS [   0.144s] (558/558) uni-locy-tck::locy_tck semiring::TopKProofs::TopKProofs(8) counts an edge shared below referenced facts once
+────────────
+     Summary [   4.610s] 558 tests run: 558 passed, 0 skipped
+
+Aggregating results...
+📊 Aggregating 558 scenario results...
+✅ Wrote /home/rohit/work/dragonscale/uni/target/locy-cucumber/sidecar/results_20261026_152248.json (76 features, 558 scenarios)
+   Passed: 558, Failed: 0, Skipped: 0
+
+Generating report...
+
+📊 Analyzing results_20261026_152248.json...
+📊 Comparing against results_20261023_212344.json...
+✅ Generated: locy_compliance_reports/schema/report.md
+
+📈 Summary: 558/558 passed (100.0%), 0 failed
+   ➡️  No change vs previous run
+
+
+Report available at: locy_compliance_reports/schema/report.md
+Last run snapshot: locy_compliance_reports/schema/last_run_report.md

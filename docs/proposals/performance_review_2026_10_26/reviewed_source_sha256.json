@@ -1,0 +1,11 @@
+{
+  "crates/uni-common/src/graph/simple_graph.rs": "345e2ad875d88e914b80b105ff6d2093b9ef86e1650e4b9c45f1e3cd8856cd18",
+  "crates/uni-common/src/config.rs": "7a6f748f0488f96b338024c59eed54b70850f09183bdaa961664b426cb424771",
+  "crates/uni-store/src/runtime/l0.rs": "e81b33545a4f5af4a3b5ef3be5ce27831bded0af976c9e67e013f09d7fb3b75e",
+  "crates/uni-store/src/runtime/writer.rs": "a0c1c247c4d89e39db5dc766a0d562705e593baee3ba00764e875e047445c51e",
+  "crates/uni-query/src/query/df_graph/recursive_cte.rs": "4e78866a1691fcf22722833bff82c4bf6418a126131daeb198d00877d4938001",
+  "crates/uni-query/src/query/df_graph/common.rs": "d6463f37f621a13965a209fc293d5bf8995b8eb173376a8b427739a792b8aca1",
+  "crates/uni-query/src/query/planner.rs": "41da94bd68801c02a1a5bca989a67edece9837737ccae0a8485aae4a697bad24",
+  ".cargo/config.toml": "9e5e1a22d93976b549f497ce2f0702f0fc8b3a42958fa29f29e0d605c115b8ad",
+  "crates/uni/tests/common/perf/cpu_clock.rs": "d25a06ebc0f60f2b6be096428b65d2156c1ce0c5c941af458b70849ec755b09e"
+}

@@ -1,0 +1,23 @@
+warning[license-not-encountered]: license was not encountered
+   ┌─ /home/rohit/work/dragonscale/uni/deny.toml:90:4
+   │
+90 │   "OpenSSL",
+   │    ━━━━━━━ unmatched license allowance
+
+warning[license-not-encountered]: license was not encountered
+   ┌─ /home/rohit/work/dragonscale/uni/deny.toml:88:4
+   │
+88 │   "Unicode-DFS-2016",
+   │    ━━━━━━━━━━━━━━━━ unmatched license allowance
+
+warning[yanked]: detected yanked crate (try `cargo update -p clipboard-win`)
+    ┌─ /home/rohit/work/dragonscale/uni/Cargo.lock:156:1
+    │
+156 │ clipboard-win 5.4.1 registry+https://github.com/rust-lang/crates.io-index
+    │ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ yanked version
+    │
+    ├ clipboard-win v5.4.1
+      └── rustyline v18.0.0
+          └── uni-cli v4.2.0
+
+advisories ok, bans ok, licenses ok, sources ok

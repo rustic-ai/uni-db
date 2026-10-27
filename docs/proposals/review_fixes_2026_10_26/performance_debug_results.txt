@@ -1,0 +1,195 @@
+    Blocking waiting for file lock on build directory
+   Compiling uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+   Compiling uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+   Compiling uni-query-functions v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query-functions)
+   Compiling uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+   Compiling uni-query v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query)
+   Compiling uni-plugin-rhai v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-rhai)
+   Compiling uni-plugin-host v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-host)
+   Compiling uni-fork v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-fork)
+   Compiling uni-bulk v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-bulk)
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5m 22s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID f515ff77-0074-4035-a41f-1404cabbf150 with nextest profile: default
+    Starting 5 tests across 1 binary (4041 tests skipped)
+        PASS [   0.170s] (1/5) uni-db::integration perf_review_20261026::perf_review_graph_edge_removal
+  stdout ───
+
+    running 1 test
+    test perf_review_20261026::perf_review_graph_edge_removal ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4045 filtered out; finished in 0.15s
+
+  stderr ───
+    PERF case=graph_disjoint_remove_edges n=1000 round=0 wall_ms=0.404 cpu_ms=0.402
+    PERF case=graph_star_remove_edges n=1000 round=0 wall_ms=0.415 cpu_ms=0.411
+    PERF case=graph_disjoint_remove_edges n=4000 round=0 wall_ms=1.114 cpu_ms=1.109
+    PERF case=graph_star_remove_edges n=4000 round=0 wall_ms=1.112 cpu_ms=1.106
+    PERF case=graph_disjoint_remove_edges n=16000 round=0 wall_ms=6.680 cpu_ms=6.660
+    PERF case=graph_star_remove_edges n=16000 round=0 wall_ms=5.654 cpu_ms=5.643
+    PERF case=graph_disjoint_remove_edges n=1000 round=1 wall_ms=0.240 cpu_ms=0.240
+    PERF case=graph_star_remove_edges n=1000 round=1 wall_ms=0.266 cpu_ms=0.265
+    PERF case=graph_disjoint_remove_edges n=4000 round=1 wall_ms=1.080 cpu_ms=1.076
+    PERF case=graph_star_remove_edges n=4000 round=1 wall_ms=1.107 cpu_ms=1.101
+    PERF case=graph_disjoint_remove_edges n=16000 round=1 wall_ms=6.220 cpu_ms=6.205
+    PERF case=graph_star_remove_edges n=16000 round=1 wall_ms=5.304 cpu_ms=5.290
+    PERF case=graph_disjoint_remove_edges n=1000 round=2 wall_ms=0.242 cpu_ms=0.241
+    PERF case=graph_star_remove_edges n=1000 round=2 wall_ms=0.264 cpu_ms=0.262
+    PERF case=graph_disjoint_remove_edges n=4000 round=2 wall_ms=1.073 cpu_ms=1.069
+    PERF case=graph_star_remove_edges n=4000 round=2 wall_ms=1.083 cpu_ms=1.073
+    PERF case=graph_disjoint_remove_edges n=16000 round=2 wall_ms=5.909 cpu_ms=5.889
+    PERF case=graph_star_remove_edges n=16000 round=2 wall_ms=4.858 cpu_ms=4.840
+
+        PASS [   0.672s] (2/5) uni-db::integration perf_review_20261026::perf_review_l0_constraint_deletion
+  stdout ───
+
+    running 1 test
+    test perf_review_20261026::perf_review_l0_constraint_deletion ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4045 filtered out; finished in 0.65s
+
+  stderr ───
+    PERF case=l0_delete_no_keys n=1000 round=0 wall_ms=1.396 cpu_ms=1.387
+    PERF case=l0_delete_unique n=1000 round=0 wall_ms=1.865 cpu_ms=1.861
+    PERF case=l0_delete_no_keys n=4000 round=0 wall_ms=5.119 cpu_ms=5.093
+    PERF case=l0_delete_unique n=4000 round=0 wall_ms=7.868 cpu_ms=7.833
+    PERF case=l0_delete_no_keys n=16000 round=0 wall_ms=23.494 cpu_ms=23.377
+    PERF case=l0_delete_unique n=16000 round=0 wall_ms=34.050 cpu_ms=33.875
+    PERF case=l0_delete_no_keys n=1000 round=1 wall_ms=1.302 cpu_ms=1.301
+    PERF case=l0_delete_unique n=1000 round=1 wall_ms=1.982 cpu_ms=1.972
+    PERF case=l0_delete_no_keys n=4000 round=1 wall_ms=5.317 cpu_ms=5.289
+    PERF case=l0_delete_unique n=4000 round=1 wall_ms=7.789 cpu_ms=7.749
+    PERF case=l0_delete_no_keys n=16000 round=1 wall_ms=22.582 cpu_ms=22.474
+    PERF case=l0_delete_unique n=16000 round=1 wall_ms=35.245 cpu_ms=35.093
+    PERF case=l0_delete_no_keys n=1000 round=2 wall_ms=1.294 cpu_ms=1.292
+    PERF case=l0_delete_unique n=1000 round=2 wall_ms=1.902 cpu_ms=1.890
+    PERF case=l0_delete_no_keys n=4000 round=2 wall_ms=5.263 cpu_ms=5.241
+    PERF case=l0_delete_unique n=4000 round=2 wall_ms=7.694 cpu_ms=7.663
+    PERF case=l0_delete_no_keys n=16000 round=2 wall_ms=23.518 cpu_ms=23.396
+    PERF case=l0_delete_unique n=16000 round=2 wall_ms=32.678 cpu_ms=32.526
+
+        PASS [  14.555s] (3/5) uni-db::integration perf_review_20261026::perf_review_public_delete_star
+  stdout ───
+
+    running 1 test
+    test perf_review_20261026::perf_review_public_delete_star ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4045 filtered out; finished in 14.52s
+
+  stderr ───
+    PERF case=public_delete_edges_execute star=false n=1000 round=0 wall_ms=59.218 cpu_ms=59.058
+    PERF case=public_delete_edges_commit star=false n=1000 round=0 wall_ms=6.134 cpu_ms=6.270
+    PERF case=public_delete_edges_execute star=true n=1000 round=0 wall_ms=48.549 cpu_ms=48.398
+    PERF case=public_delete_edges_commit star=true n=1000 round=0 wall_ms=6.131 cpu_ms=6.121
+    PERF case=public_delete_edges_execute star=false n=4000 round=0 wall_ms=268.638 cpu_ms=267.835
+    PERF case=public_delete_edges_commit star=false n=4000 round=0 wall_ms=25.870 cpu_ms=25.780
+    PERF case=public_delete_edges_execute star=true n=4000 round=0 wall_ms=211.910 cpu_ms=211.199
+    PERF case=public_delete_edges_commit star=true n=4000 round=0 wall_ms=24.486 cpu_ms=24.403
+    PERF case=public_delete_edges_execute star=false n=16000 round=0 wall_ms=1037.445 cpu_ms=1033.299
+    PERF case=public_delete_edges_commit star=false n=16000 round=0 wall_ms=103.742 cpu_ms=103.358
+    PERF case=public_delete_edges_execute star=true n=16000 round=0 wall_ms=864.021 cpu_ms=860.110
+    PERF case=public_delete_edges_commit star=true n=16000 round=0 wall_ms=103.511 cpu_ms=103.175
+    PERF case=public_delete_edges_execute star=false n=1000 round=1 wall_ms=57.321 cpu_ms=57.100
+    PERF case=public_delete_edges_commit star=false n=1000 round=1 wall_ms=5.923 cpu_ms=5.992
+    PERF case=public_delete_edges_execute star=true n=1000 round=1 wall_ms=48.423 cpu_ms=48.345
+    PERF case=public_delete_edges_commit star=true n=1000 round=1 wall_ms=5.961 cpu_ms=5.978
+    PERF case=public_delete_edges_execute star=false n=4000 round=1 wall_ms=235.637 cpu_ms=234.823
+    PERF case=public_delete_edges_commit star=false n=4000 round=1 wall_ms=23.836 cpu_ms=23.867
+    PERF case=public_delete_edges_execute star=true n=4000 round=1 wall_ms=197.304 cpu_ms=196.700
+    PERF case=public_delete_edges_commit star=true n=4000 round=1 wall_ms=23.525 cpu_ms=23.526
+    PERF case=public_delete_edges_execute star=false n=16000 round=1 wall_ms=1042.560 cpu_ms=1038.438
+    PERF case=public_delete_edges_commit star=false n=16000 round=1 wall_ms=104.323 cpu_ms=104.074
+    PERF case=public_delete_edges_execute star=true n=16000 round=1 wall_ms=838.399 cpu_ms=834.877
+    PERF case=public_delete_edges_commit star=true n=16000 round=1 wall_ms=105.427 cpu_ms=105.092
+    PERF case=public_delete_edges_execute star=false n=1000 round=2 wall_ms=63.758 cpu_ms=63.740
+    PERF case=public_delete_edges_commit star=false n=1000 round=2 wall_ms=6.291 cpu_ms=6.199
+    PERF case=public_delete_edges_execute star=true n=1000 round=2 wall_ms=51.710 cpu_ms=51.591
+    PERF case=public_delete_edges_commit star=true n=1000 round=2 wall_ms=6.435 cpu_ms=6.460
+    PERF case=public_delete_edges_execute star=false n=4000 round=2 wall_ms=233.411 cpu_ms=232.607
+    PERF case=public_delete_edges_commit star=false n=4000 round=2 wall_ms=26.175 cpu_ms=26.099
+    PERF case=public_delete_edges_execute star=true n=4000 round=2 wall_ms=195.194 cpu_ms=194.563
+    PERF case=public_delete_edges_commit star=true n=4000 round=2 wall_ms=25.536 cpu_ms=25.486
+    PERF case=public_delete_edges_execute star=false n=16000 round=2 wall_ms=1024.318 cpu_ms=1019.832
+    PERF case=public_delete_edges_commit star=false n=16000 round=2 wall_ms=107.706 cpu_ms=107.488
+    PERF case=public_delete_edges_execute star=true n=16000 round=2 wall_ms=843.462 cpu_ms=840.049
+    PERF case=public_delete_edges_commit star=true n=16000 round=2 wall_ms=100.102 cpu_ms=99.861
+
+        PASS [   8.395s] (4/5) uni-db::integration perf_review_20261026::perf_review_public_delete_unique
+  stdout ───
+
+    running 1 test
+    test perf_review_20261026::perf_review_public_delete_unique ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4045 filtered out; finished in 8.36s
+
+  stderr ───
+    PERF case=public_delete_execute unique=false n=1000 round=0 wall_ms=38.114 cpu_ms=37.972
+    PERF case=public_delete_commit unique=false n=1000 round=0 wall_ms=6.138 cpu_ms=6.380
+    PERF case=public_delete_execute unique=true n=1000 round=0 wall_ms=34.995 cpu_ms=34.817
+    PERF case=public_delete_commit unique=true n=1000 round=0 wall_ms=6.688 cpu_ms=6.688
+    PERF case=public_delete_execute unique=false n=4000 round=0 wall_ms=147.985 cpu_ms=147.241
+    PERF case=public_delete_commit unique=false n=4000 round=0 wall_ms=24.549 cpu_ms=24.491
+    PERF case=public_delete_execute unique=true n=4000 round=0 wall_ms=144.693 cpu_ms=144.057
+    PERF case=public_delete_commit unique=true n=4000 round=0 wall_ms=27.410 cpu_ms=27.472
+    PERF case=public_delete_execute unique=false n=16000 round=0 wall_ms=672.744 cpu_ms=670.028
+    PERF case=public_delete_commit unique=false n=16000 round=0 wall_ms=123.913 cpu_ms=123.764
+    PERF case=public_delete_execute unique=true n=16000 round=0 wall_ms=639.700 cpu_ms=637.093
+    PERF case=public_delete_commit unique=true n=16000 round=0 wall_ms=135.561 cpu_ms=135.339
+    PERF case=public_delete_execute unique=false n=1000 round=1 wall_ms=34.450 cpu_ms=34.306
+    PERF case=public_delete_commit unique=false n=1000 round=1 wall_ms=5.899 cpu_ms=6.042
+    PERF case=public_delete_execute unique=true n=1000 round=1 wall_ms=34.330 cpu_ms=34.163
+    PERF case=public_delete_commit unique=true n=1000 round=1 wall_ms=6.448 cpu_ms=6.575
+    PERF case=public_delete_execute unique=false n=4000 round=1 wall_ms=140.542 cpu_ms=139.933
+    PERF case=public_delete_commit unique=false n=4000 round=1 wall_ms=23.832 cpu_ms=23.913
+    PERF case=public_delete_execute unique=true n=4000 round=1 wall_ms=138.962 cpu_ms=138.338
+    PERF case=public_delete_commit unique=true n=4000 round=1 wall_ms=27.045 cpu_ms=26.992
+    PERF case=public_delete_execute unique=false n=16000 round=1 wall_ms=642.365 cpu_ms=639.654
+    PERF case=public_delete_commit unique=false n=16000 round=1 wall_ms=130.671 cpu_ms=130.470
+    PERF case=public_delete_execute unique=true n=16000 round=1 wall_ms=636.379 cpu_ms=633.652
+    PERF case=public_delete_commit unique=true n=16000 round=1 wall_ms=136.953 cpu_ms=136.529
+    PERF case=public_delete_execute unique=false n=1000 round=2 wall_ms=34.478 cpu_ms=34.328
+    PERF case=public_delete_commit unique=false n=1000 round=2 wall_ms=6.114 cpu_ms=6.162
+    PERF case=public_delete_execute unique=true n=1000 round=2 wall_ms=34.132 cpu_ms=34.008
+    PERF case=public_delete_commit unique=true n=1000 round=2 wall_ms=6.668 cpu_ms=6.671
+    PERF case=public_delete_execute unique=false n=4000 round=2 wall_ms=141.214 cpu_ms=140.629
+    PERF case=public_delete_commit unique=false n=4000 round=2 wall_ms=25.260 cpu_ms=25.263
+    PERF case=public_delete_execute unique=true n=4000 round=2 wall_ms=143.228 cpu_ms=142.666
+    PERF case=public_delete_commit unique=true n=4000 round=2 wall_ms=29.959 cpu_ms=29.940
+    PERF case=public_delete_execute unique=false n=16000 round=2 wall_ms=624.064 cpu_ms=621.623
+    PERF case=public_delete_commit unique=false n=16000 round=2 wall_ms=130.869 cpu_ms=130.476
+    PERF case=public_delete_execute unique=true n=16000 round=2 wall_ms=642.491 cpu_ms=640.010
+    PERF case=public_delete_commit unique=true n=16000 round=2 wall_ms=139.574 cpu_ms=139.088
+
+        PASS [   3.396s] (5/5) uni-db::integration perf_review_20261026::perf_review_recursive_cte
+  stdout ───
+
+    running 1 test
+    test perf_review_20261026::perf_review_recursive_cte ... ok
+
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4045 filtered out; finished in 3.38s
+
+  stderr ───
+    PERF case=cte n=100 round=0 wall_ms=91.920 cpu_ms=91.525 rows_scanned=300 l0_reads=300
+    PERF case=vlp n=100 round=0 wall_ms=4.901 cpu_ms=4.876 rows_scanned=100 l0_reads=100
+    PERF case=vlp n=100 round=1 wall_ms=3.291 cpu_ms=3.277 rows_scanned=100 l0_reads=100
+    PERF case=cte n=100 round=1 wall_ms=83.141 cpu_ms=82.749 rows_scanned=300 l0_reads=300
+    PERF case=cte n=100 round=2 wall_ms=85.632 cpu_ms=85.049 rows_scanned=300 l0_reads=300
+    PERF case=vlp n=100 round=2 wall_ms=4.024 cpu_ms=3.987 rows_scanned=100 l0_reads=100
+    PERF case=cte n=300 round=0 wall_ms=249.963 cpu_ms=248.598 rows_scanned=900 l0_reads=900
+    PERF case=vlp n=300 round=0 wall_ms=7.875 cpu_ms=7.841 rows_scanned=300 l0_reads=300
+    PERF case=vlp n=300 round=1 wall_ms=8.361 cpu_ms=8.307 rows_scanned=300 l0_reads=300
+    PERF case=cte n=300 round=1 wall_ms=253.533 cpu_ms=251.956 rows_scanned=900 l0_reads=900
+    PERF case=cte n=300 round=2 wall_ms=249.063 cpu_ms=247.908 rows_scanned=900 l0_reads=900
+    PERF case=vlp n=300 round=2 wall_ms=6.044 cpu_ms=6.011 rows_scanned=300 l0_reads=300
+    PERF case=cte n=900 round=0 wall_ms=753.639 cpu_ms=749.469 rows_scanned=2700 l0_reads=2700
+    PERF case=vlp n=900 round=0 wall_ms=13.074 cpu_ms=12.984 rows_scanned=900 l0_reads=900
+    PERF case=vlp n=900 round=1 wall_ms=12.416 cpu_ms=12.348 rows_scanned=900 l0_reads=900
+    PERF case=cte n=900 round=1 wall_ms=739.213 cpu_ms=734.814 rows_scanned=2700 l0_reads=2700
+    PERF case=cte n=900 round=2 wall_ms=729.397 cpu_ms=725.052 rows_scanned=2700 l0_reads=2700
+    PERF case=vlp n=900 round=2 wall_ms=10.755 cpu_ms=10.694 rows_scanned=900 l0_reads=900
+
+────────────
+     Summary [  27.195s] 5 tests run: 5 passed, 4041 skipped

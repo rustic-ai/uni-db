@@ -2051,6 +2051,20 @@ impl HybridPhysicalPlanner {
                 if v != variable || prop != "_vid" {
                     return None;
                 }
+                if let Expr::Parameter(name) = list.as_ref()
+                    && let Some(uni_common::Value::List(values)) = params.get(name)
+                {
+                    let mut vids: Vec<u64> = values
+                        .iter()
+                        .map(|v| match v {
+                            uni_common::Value::Int(i) => Some(*i as u64),
+                            _ => v.as_u64(),
+                        })
+                        .collect::<Option<_>>()?;
+                    vids.sort_unstable();
+                    vids.dedup();
+                    return Some(vids);
+                }
                 let Expr::List(items) = list.as_ref() else {
                     return None;
                 };

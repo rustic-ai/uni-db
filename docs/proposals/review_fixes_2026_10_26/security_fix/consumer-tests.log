@@ -1,0 +1,431 @@
+   Compiling serde_json v1.0.150
+   Compiling zstd-safe v8.2.0
+   Compiling h2 v0.4.18
+   Compiling tower v0.5.3
+   Compiling prost-build v0.14.4
+   Compiling zstd v0.14.3
+   Compiling zstd v0.13.3 (/home/rohit/work/dragonscale/uni/compat/zstd)
+   Compiling zstd-safe v7.2.4 (/home/rohit/work/dragonscale/uni/compat/zstd-safe)
+   Compiling compression-codecs v0.4.38
+   Compiling arrow-schema v58.3.0
+   Compiling async-compression v0.4.42
+   Compiling arrow-data v58.3.0
+   Compiling hyper v1.10.1
+   Compiling tower-http v0.6.11
+   Compiling hyper-util v0.1.20
+   Compiling hyper-rustls v0.27.9
+   Compiling hyper-tls v0.6.0
+   Compiling arrow-array v58.3.0
+   Compiling reqwest v0.12.28
+   Compiling reqsign-core v3.3.1
+   Compiling reqwest v0.13.4
+   Compiling opendal-core v0.58.2
+   Compiling object_store v0.13.2
+   Compiling arrow-select v58.3.0
+   Compiling arrow-ord v58.3.0
+   Compiling arrow-cast v58.3.0
+   Compiling arrow-ipc v58.3.0
+   Compiling arrow-row v58.3.0
+   Compiling arrow-json v58.3.0
+   Compiling arrow-csv v58.3.0
+   Compiling arrow-string v58.3.0
+   Compiling arrow-arith v58.3.0
+   Compiling parquet v58.3.0
+   Compiling arrow v58.3.0
+   Compiling jsonb v0.5.6
+   Compiling datafusion-common v54.1.0
+   Compiling reqsign-aws-core v3.1.1
+   Compiling datafusion-expr-common v54.1.0
+   Compiling datafusion-physical-expr-common v54.1.0
+   Compiling datafusion-functions-window-common v54.1.0
+   Compiling datafusion-functions-aggregate-common v54.1.0
+   Compiling lance-arrow v11.0.0
+   Compiling datafusion-expr v54.1.0
+   Compiling reqsign-file-read-tokio v3.0.6
+   Compiling aws-smithy-http-client v1.1.13
+   Compiling reqsign-aws-v4 v3.3.0
+   Compiling datafusion-physical-expr v54.1.0
+   Compiling datafusion-execution v54.1.0
+   Compiling aws-smithy-runtime v1.11.3
+   Compiling datafusion-functions v54.1.0
+   Compiling datafusion-functions-aggregate v54.1.0
+   Compiling reqsign-azure-storage v3.2.1
+   Compiling datafusion-physical-plan v54.1.0
+   Compiling datafusion-physical-expr-adapter v54.1.0
+   Compiling datafusion-functions-nested v54.1.0
+   Compiling datafusion-session v54.1.0
+   Compiling datafusion-datasource v54.1.0
+   Compiling datafusion-sql v54.1.0
+   Compiling datafusion-pruning v54.1.0
+   Compiling datafusion-catalog v54.1.0
+   Compiling lance-core v11.0.0
+   Compiling datafusion-physical-optimizer v54.1.0
+   Compiling datafusion-datasource-parquet v54.1.0
+   Compiling datafusion-datasource-json v54.1.0
+   Compiling datafusion-datasource-arrow v54.1.0
+   Compiling datafusion-datasource-csv v54.1.0
+   Compiling aws-runtime v1.7.4
+   Compiling datafusion-functions-window v54.1.0
+   Compiling datafusion-catalog-listing v54.1.0
+   Compiling datafusion-functions-table v54.1.0
+   Compiling datafusion-optimizer v54.1.0
+   Compiling opendal-service-azure-common v0.58.2
+   Compiling zip v7.2.0
+   Compiling datafusion v54.1.0
+   Compiling reqsign-google v3.1.1
+   Compiling tokenizers v0.22.2
+   Compiling safetensors v0.7.0
+   Compiling candle-core v0.10.2
+   Compiling opendal-layer-retry v0.58.2
+   Compiling opendal-service-gcs v0.58.2
+   Compiling opendal-service-s3 v0.58.2
+   Compiling opendal-service-azdls v0.58.2
+   Compiling opendal-service-azblob v0.58.2
+   Compiling opendal-http-transport-reqwest v0.58.2
+   Compiling opendal-layer-timeout v0.58.2
+   Compiling opendal-layer-logging v0.58.2
+   Compiling opendal-layer-concurrent-limit v0.58.2
+   Compiling lance-namespace-reqwest-client v0.11.1
+   Compiling uni-common v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-common)
+   Compiling opendal v0.58.2
+   Compiling aws-sdk-sts v1.106.0
+   Compiling aws-sdk-sso v1.101.0
+   Compiling aws-sdk-ssooidc v1.103.0
+   Compiling ureq v2.12.1
+   Compiling aws-config v1.8.18
+   Compiling object_store_opendal v0.58.0
+   Compiling lance-namespace v11.0.0
+   Compiling candle-nn v0.10.2
+   Compiling lance-encoding v11.0.0
+   Compiling stop-words v0.9.0
+   Compiling lance-io v11.0.0
+   Compiling hf-hub v0.4.3
+   Compiling fsst v11.0.0
+   Compiling lance-file v11.0.0
+   Compiling stop-words v0.10.0
+   Compiling toktrie v1.7.6
+   Compiling minijinja v2.20.0
+   Compiling uni-plugin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin)
+   Compiling utoipa v5.5.0
+   Compiling tokenizers v0.21.4
+   Compiling cfgrammar v0.14.2
+   Compiling lance-select v11.0.0
+   Compiling lance-table v11.0.0
+   Compiling lance-datafusion v11.0.0
+   Compiling rust-mcp-schema v0.9.6
+   Compiling bm25 v2.3.2
+   Compiling mistralrs-mcp v0.8.1
+   Compiling openai-harmony v0.0.8
+   Compiling schemars v1.2.1
+   Compiling serde-saphyr v0.0.16
+   Compiling ureq v3.3.0
+   Compiling llguidance v1.7.6
+   Compiling lrtable v0.14.2
+   Compiling toktrie_hf_tokenizers v1.7.6
+   Compiling minijinja-contrib v2.20.0
+   Compiling mistralrs-quant v0.8.1
+   Compiling mistralrs-vision v0.8.1
+   Compiling lance-arrow-scalar v58.0.0
+   Compiling lance-index v11.0.0
+   Compiling lance-tokenizer v11.0.0
+   Compiling lance-arrow-stats v58.0.0
+   Compiling mistralrs-core v0.8.1
+   Compiling lance-linalg v11.0.0
+   Compiling lance-index-core v11.0.0
+   Compiling lance v11.0.0
+   Compiling tokenizers v0.23.1
+   Compiling candle-transformers v0.10.2
+   Compiling mistralrs v0.8.1
+   Compiling hf-hub v0.5.0
+   Compiling uni-xervo v0.18.1
+   Compiling uni-crdt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-crdt)
+   Compiling metrics-util v0.20.4
+   Compiling uni-cypher v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-cypher)
+   Compiling hyper-timeout v0.5.2
+   Compiling tonic v0.14.6
+   Compiling tonic-prost v0.14.6
+   Compiling uni-locy v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-locy)
+   Compiling tinytemplate v1.2.1
+   Compiling criterion v0.8.2
+   Compiling opentelemetry-proto v0.32.0
+   Compiling tonic-types v0.14.6
+   Compiling opentelemetry-http v0.32.0
+   Compiling uni-sidecar v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-sidecar)
+   Compiling uni-plugin-custom v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-custom)
+   Compiling opentelemetry-otlp v0.32.0
+   Compiling iai-callgrind-macros v0.6.1
+   Compiling uni-plugin-apoc-core v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-apoc-core)
+   Compiling object v0.40.0
+   Compiling iai-callgrind v0.16.1
+   Compiling wasmtime-environ v49.0.4
+   Compiling wit-parser v0.258.3
+   Compiling thiserror v1.0.69
+   Compiling wast v262.0.0
+   Compiling uni-store v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-store)
+   Compiling wit-component v0.258.3
+   Compiling wasmtime-internal-wit-bindgen v49.0.4
+   Compiling wasmtime-internal-unwinder v49.0.4
+   Compiling wat v1.262.0
+   Compiling fxprof-processed-profile v0.8.1
+   Compiling wasmtime-internal-cranelift v49.0.4
+   Compiling wasmtime-internal-component-macro v49.0.4
+   Compiling wasm-compose v0.258.3
+   Compiling wasmtime-internal-fiber v49.0.4
+   Compiling wasmtime-internal-jit-debug v49.0.4
+   Compiling witx v0.9.1
+   Compiling wasmtime-internal-cache v49.0.4
+   Compiling wasmtime v49.0.4
+   Compiling wiggle-generate v49.0.4
+   Compiling wiggle-macro v49.0.4
+   Compiling wiggle v49.0.4
+   Compiling wasmtime-wasi-io v49.0.4
+   Compiling wasmtime-wasi v49.0.4
+   Compiling uni-plugin-wasm-rt v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-wasm-rt)
+   Compiling cbindgen v0.29.3
+   Compiling uni-algo v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-algo)
+   Compiling uni-plugin-builtin v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-builtin)
+   Compiling uni-query-functions v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query-functions)
+   Compiling extism v1.41.0
+   Compiling extism-convert v1.41.0
+   Compiling extism-manifest v1.41.0
+   Compiling uni-plugin-conformance v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-conformance)
+   Compiling uni-query v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-query)
+   Compiling uni-plugin-rhai v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-rhai)
+   Compiling uni-plugin-extism v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-extism)
+   Compiling uni-plugin-wasm v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-wasm)
+   Compiling uni-plugin-host v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-plugin-host)
+   Compiling uni-bulk v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-bulk)
+   Compiling uni-fork v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni-fork)
+   Compiling uni-db v4.2.0 (/home/rohit/work/dragonscale/uni/crates/uni)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14m 21s
+warning: the following packages contain code that will be rejected by a future version of Rust: proc-macro-error2 v2.0.1
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+────────────
+ Nextest run ID 1bd07fd9-8818-493c-b305-191d3776c5fd with nextest profile: default
+    Starting 224 tests across 14 binaries (4809 tests skipped)
+        PASS [   0.031s] (  1/224) uni-db::integration bugs::test_issue_72_version_recovery::test_wal_has_segments
+        PASS [   0.038s] (  2/224) uni-db::integration auth::auth_session::basic_auth_round_trip
+        PASS [   0.054s] (  3/224) uni-db::integration bugs::issue_93_bytes_round_trip::bytes_with_tag_valued_first_byte_silently_corrupts
+        PASS [   0.055s] (  4/224) uni-db::integration bugs::issue_100_collect_bytes::collect_over_bytes_column_round_trips
+        PASS [   0.057s] (  5/224) uni-db::integration bugs::repro_schema_edge_type_swallow::edge_type_relabel_silently_swallowed
+        PASS [   0.057s] (  6/224) uni-db::integration bugs::issue_100_collect_bytes::scalar_return_of_bytes_column_round_trips
+        PASS [   0.058s] (  7/224) uni-db::integration bugs::issue_100_collect_bytes::collect_over_multiple_bytes_rows_round_trips
+        PASS [   0.059s] (  8/224) uni-db::integration bugs::issue_93_bytes_round_trip::bytes_round_trip_via_return
+        PASS [   0.060s] (  9/224) uni-db::integration bugs::bytes_containers::list_of_bytes_property_round_trips
+        PASS [   0.069s] ( 10/224) uni-db::integration bugs::issue_93_bytes_round_trip::edge_bytes_property_round_trip
+        PASS [   0.070s] ( 11/224) uni-db::integration bugs::bytes_containers::map_of_bytes_property_round_trips
+        PASS [   0.078s] ( 12/224) uni-db::integration bugs::escaped_identifier_round_trip::quoted_variables_and_parameters_bind
+        PASS [   0.095s] ( 13/224) uni-db::integration bugs::test_issue_72_version_recovery::test_wal_without_manifest_fails_loudly
+        PASS [   0.110s] ( 14/224) uni-db::integration bugs::escaped_identifier_round_trip::unstorable_property_names_are_schemaless_only
+        PASS [   0.062s] ( 15/224) uni-db::integration cypher_read::ddl_numeric_width_test::ddl_int_round_trips_64_bit_values
+        PASS [   0.074s] ( 16/224) uni-db::integration cypher_write::create_set_fusion_test::edge_unwind_create_set_fuses_and_round_trips
+        PASS [   0.136s] ( 17/224) uni-db::integration algo::algo_integration::test_random_walk_procedure
+        PASS [   0.066s] ( 18/224) uni-db::integration cypher_write::set_projection_test::f10_set_schemaless_label_round_trips
+        PASS [   0.137s] ( 19/224) uni-db::integration bugs::repro_hybrid_dense_arm_swallow::hybrid_search_propagates_auto_embed_failure
+        PASS [   0.097s] ( 20/224) uni-db::integration cypher_read::datetime_epoch_map_test::epoch_millis_round_trips_a_known_instant
+        PASS [   0.089s] ( 21/224) uni-db::integration cypher_write::set_projection_test::f1a_set_single_property_round_trips
+        PASS [   0.116s] ( 22/224) uni-db::integration cypher_read::cypher_copy::test_parquet_import
+        PASS [   0.069s] ( 23/224) uni-db::integration cypher_write::set_projection_test::f1d_set_edge_property_round_trips
+        PASS [   0.111s] ( 24/224) uni-db::integration cypher_write::point_type_test::geopoint_property_round_trips_through_flush
+        PASS [   0.097s] ( 25/224) uni-db::integration cypher_write::set_projection_test::f1b_set_multi_property_wide_schema_round_trips
+        PASS [   0.060s] ( 26/224) uni-db::integration cypher_write::set_projection_test::f6a_merge_on_match_set_round_trips
+        PASS [   0.060s] ( 27/224) uni-db::integration cypher_write::set_projection_test::f9_set_multi_label_round_trips
+        PASS [   0.076s] ( 28/224) uni-db::integration cypher_write::set_projection_test::f1e_set_traverse_bound_target_round_trips
+        PASS [   0.065s] ( 29/224) uni-db::integration cypher_write::set_projection_test::f6b_merge_on_create_set_round_trips
+        PASS [   0.069s] ( 30/224) uni-db::integration cypher_write::set_projection_test::f_id_in_rhs_round_trips
+        PASS [   0.064s] ( 31/224) uni-db::integration cypher_write::set_projection_test::f_overflow_set_undeclared_property_round_trips
+        PASS [   0.065s] ( 32/224) uni-db::integration cypher_write::set_projection_test::h3a_set_cypher_value_property_round_trips
+        PASS [   0.057s] ( 33/224) uni-db::integration cypher_write::set_projection_test::l2b_call_subquery_create_round_trips
+        PASS [   0.067s] ( 34/224) uni-db::integration cypher_write::set_projection_test::h3b_set_vector_property_directly_round_trips
+        PASS [   0.200s] ( 35/224) uni-db::integration cypher_write::partial_lance_delete_test::b1_delete_via_merge_insert_round_trip
+        PASS [   0.063s] ( 36/224) uni-db::integration cypher_write::set_projection_test::l2c2_call_subquery_merge_on_match_round_trips
+        PASS [   0.059s] ( 37/224) uni-db::integration cypher_write::set_projection_test::l2c_call_subquery_merge_on_create_round_trips
+        PASS [   0.099s] ( 38/224) uni-db::integration cypher_write::set_projection_test::h1a_set_then_flush_round_trips
+        PASS [   0.277s] ( 39/224) uni-db::integration bugs::escaped_identifier_round_trip::quoted_ddl_names_round_trip
+        PASS [   0.096s] ( 40/224) uni-db::integration cypher_write::set_projection_test::l2_call_subquery_set_round_trips
+        PASS [   0.102s] ( 41/224) uni-db::integration cypher_write::set_projection_test::l1_unwind_then_set_round_trips
+        PASS [   0.079s] ( 42/224) uni-db::integration cypher_write::set_projection_test::l2d_call_subquery_delete_round_trips
+        PASS [   0.299s] ( 43/224) uni-db::integration bugs::wal_lsn_after_reopen::wal_lsn_after_reopen_commit_survives_a_crash
+        PASS [   0.066s] ( 44/224) uni-db::integration cypher_write::set_projection_test::l2e_call_subquery_nested_set_round_trips
+        PASS [   0.068s] ( 45/224) uni-db::integration cypher_write::set_projection_test::l2f_call_subquery_edge_set_round_trips
+        PASS [   0.152s] ( 46/224) uni-db::integration cypher_write::set_projection_test::h1b_set_then_flush_then_reopen_round_trips
+        PASS [   0.328s] ( 47/224) uni-db::integration cypher_path::vlp_property_map_oracle::non_constant_map_values_that_must_gate_a_walk_are_refused
+        PASS [   0.070s] ( 48/224) uni-db::integration cypher_write::set_projection_test::l2g_call_subquery_correlated_set_round_trips
+        PASS [   0.073s] ( 49/224) uni-db::integration cypher_write::set_projection_test::l2i_call_subquery_mixed_read_write_round_trips
+        PASS [   0.061s] ( 50/224) uni-db::integration cypher_write::set_projection_test::l2o_call_subquery_return_created_node_round_trips
+        PASS [   0.091s] ( 51/224) uni-db::integration cypher_write::set_projection_test::l2h_call_subquery_multi_input_writes_round_trips
+        PASS [   0.059s] ( 52/224) uni-db::integration cypher_write::set_projection_test::l4_vector_knn_then_set_round_trips
+        PASS [   0.064s] ( 53/224) uni-db::integration cypher_write::set_projection_test::l2q_call_subquery_set_then_return_round_trips
+        PASS [   0.179s] ( 54/224) uni-db::integration cypher_write::set_projection_test::h2_set_with_indexed_property_pushdown_round_trips
+        PASS [   0.072s] ( 55/224) uni-db::integration cypher_write::set_projection_test::l6_bidirectional_pattern_set_round_trips
+        PASS [   0.072s] ( 56/224) uni-db::integration cypher_write::set_projection_test::l7_create_then_set_same_statement_round_trips
+        PASS [   0.063s] ( 57/224) uni-db::integration cypher_write::set_projection_test::l8_multi_edge_type_traverse_set_round_trips
+        PASS [   0.122s] ( 58/224) uni-db::integration cypher_write::set_projection_test::l2n2_recursive_cte_recursive_set_round_trips
+        PASS [   0.121s] ( 59/224) uni-db::integration cypher_write::set_projection_test::l2n_recursive_cte_anchor_set_round_trips
+        PASS [   0.060s] ( 60/224) uni-db::integration cypher_write::set_projection_test::m2_set_and_remove_same_statement_round_trips
+        PASS [   0.059s] ( 61/224) uni-db::integration cypher_write::set_projection_test::m4_with_rebinding_set_round_trips
+        PASS [   0.075s] ( 62/224) uni-db::integration cypher_write::set_projection_test::l9_cross_with_two_sets_round_trips
+        PASS [   0.075s] ( 63/224) uni-db::integration cypher_write::set_projection_test::m1_set_plan_cache_reuse_round_trips
+        PASS [   0.077s] ( 64/224) uni-db::integration cypher_write::set_projection_test::m5_aggregation_then_set_round_trips
+        PASS [   0.072s] ( 65/224) uni-db::integration fork::fork_read_only::list_and_info_round_trip
+        PASS [   0.066s] ( 66/224) uni-db::integration locy::locy_schemaless_property_type_inference::partially_declared_schema_undeclared_label_round_trips
+        PASS [   0.088s] ( 67/224) uni-db::integration graph_algo::graph_compute_pagerank::gcwalks_via_call_emits_walk_sequences_over_l0
+        PASS [   0.102s] ( 68/224) uni-db::integration fork::fork_drop_cleanup::drop_fork_removes_wal_dir_and_id_allocator
+        PASS [   0.077s] ( 69/224) uni-db::integration locy::locy_schemaless_property_type_inference::typed_bytes_property_round_trips_through_derived
+        PASS [   0.108s] ( 70/224) uni-db::integration index::batch_extid_uniqueness::batch_create_rejects_storage_duplicate_ext_id
+        PASS [   0.491s] ( 71/224) uni-db::integration bugs::endpoint_conformance_writer_features::endpoint_conformance_writer_features_unmarked_wal_segment_downgrades
+        PASS [   0.141s] ( 72/224) uni-db::integration e2e::api_sync_test::dropping_a_unisync_persists_its_commits_without_the_wal
+        PASS [   0.158s] ( 73/224) uni-db::integration dense_resilience::dense_corrupt_wal_tail_skipped_on_reopen
+        PASS [   0.133s] ( 74/224) uni-db::integration locy::locy_type_projection_matrix::matrix_bytes_and_vector_round_trip_typed
+        PASS [   0.201s] ( 75/224) uni-db::integration graph_algo::read_only_l0_recovery::read_only_reopen_sees_wal_replayed_rows
+        PASS [   0.122s] ( 76/224) uni-db::integration locy::locy_type_projection_matrix::matrix_s7_large_utf8_expressions_round_trip_on_both_surfaces
+        PASS [   0.248s] ( 77/224) uni-db::integration dense_index::dense_wal_replay_after_reopen_unflushed_delta
+        PASS [   0.154s] ( 78/224) uni-db::integration map_ddl_type::list_of_map_round_trips
+        PASS [   0.092s] ( 79/224) uni-db::integration plugin::plugin_custom_declare::declare_aggregate_round_trip_via_cypher
+        PASS [   0.154s] ( 80/224) uni-db::integration multivector_resilience::multivector_corrupt_wal_tail_skipped_on_reopen
+        PASS [   0.182s] ( 81/224) uni-db::integration locy::locy_type_projection_matrix::matrix_s4_schemaless_key_round_trips_typed_in_derived
+        PASS [   0.193s] ( 82/224) uni-db::integration locy::locy_type_projection_matrix::matrix_s6_schemad_key_round_trips_typed_in_derived
+        PASS [   0.268s] ( 83/224) uni-db::integration locy::locy_type_projection_matrix::matrix_s1_key_no_fold_round_trips_typed
+        PASS [   0.251s] ( 84/224) uni-db::integration locy::locy_type_projection_matrix::matrix_s2_key_with_fold_round_trips_typed
+        PASS [   0.098s] ( 85/224) uni-db::integration plugin::plugin_custom_declare::declare_function_round_trip_via_cypher
+        PASS [   0.244s] ( 86/224) uni-db::integration locy::locy_type_projection_matrix::matrix_s3_value_column_round_trips_typed
+        PASS [   0.637s] ( 87/224) uni-db::integration cypher_read::copy_user_properties::copy_to_then_copy_from_round_trips_properties
+        PASS [   0.111s] ( 88/224) uni-db::integration review_regressions::review_anonymous_merge_must_deduplicate_within_statement
+        PASS [   0.127s] ( 89/224) uni-db::integration review_regressions::review_anonymous_merge_concurrency_with_and_without_flush
+        PASS [   0.129s] ( 90/224) uni-db::integration review_regressions::review_empty_fork_must_not_see_later_primary_rows
+        PASS [   0.117s] ( 91/224) uni-db::integration review_regressions::review_ext_id_guard_must_survive_concurrent_flush
+        PASS [   0.141s] ( 92/224) uni-db::integration review_regressions::review_empty_label_on_populated_fork_must_stay_empty
+        PASS [   0.124s] ( 93/224) uni-db::integration review_regressions::review_merge_guard_must_survive_concurrent_flush
+        PASS [   0.159s] ( 94/224) uni-db::integration review_regressions::review_fork_cosine_top_one_matches_primary
+        PASS [   0.160s] ( 95/224) uni-db::integration review_regressions::review_persisted_unique_owner_is_enforced_after_reopen
+        PASS [   0.057s] ( 96/224) uni-db::integration review_regressions::review_zstd_compressed_arrow_and_parquet_round_trips
+        PASS [   0.172s] ( 97/224) uni-db::integration review_regressions::review_unique_constraint_must_survive_concurrent_flush
+        PASS [   0.212s] ( 98/224) uni-db::integration review_regressions::review_vector_label_removal_must_exclude_old_hit
+        PASS [   0.403s] ( 99/224) uni-db::integration review_regressions::review_edge_and_node_key_conflicts_survive_flush
+        PASS [   0.277s] (100/224) uni-db::integration review_regressions::review_vector_delete_must_refill_disk_candidates
+        PASS [   0.338s] (101/224) uni-db::integration review_regressions::review_recursive_frontier_avoids_unrelated_label_rows
+        PASS [   0.046s] (102/224) uni-db::integration storage::parquet_export_test::test_parquet_export
+        PASS [   0.445s] (103/224) uni-db::integration review_regressions::review_fork_absence_survives_first_write_nesting_and_reopen
+        PASS [   0.191s] (104/224) uni-db::integration sparse_resilience::sparse_corrupt_wal_tail_skipped_on_reopen
+        PASS [   1.087s] (105/224) uni-db::integration cypher_write::partial_lance_vertex_state::d_round_trip
+        PASS [   0.102s] (106/224) uni-db::integration storage::wal_coordination::test_wal_preservation_after_flush
+        PASS [   0.162s] (107/224) uni-db::integration ssi_resilience::corrupt_wal_tail_does_not_block_reopen
+        PASS [   1.134s] (108/224) uni-db::integration cypher_path::vlp_property_map_oracle::vlp_property_map_falls_back_to_the_whole_type_on_a_deep_walk
+        PASS [   0.278s] (109/224) uni-db::integration sparse_index::sparse_wal_replay_after_reopen_unflushed_delta
+        PASS [   0.352s] (110/224) uni-db::integration review_regressions::review_vector_update_must_refill_disk_candidates
+        PASS [   0.562s] (111/224) uni-db::integration review_regressions::review_branch_metrics_for_inherited_and_fork_local_vectors
+        PASS [   0.036s] (112/224) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_hnsw
+        PASS [   0.049s] (113/224) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_flat
+        PASS [   0.090s] (114/224) uni-db::integration value_fidelity::dense_vector_projection_round_trips
+        PASS [   0.035s] (115/224) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_hnsw_flat
+        PASS [   0.094s] (116/224) uni-db::integration value_fidelity::multivector_projection_round_trips
+        PASS [   0.107s] (117/224) uni-db::integration value_fidelity::dense_vector_survives_wal_recovery
+        PASS [   0.125s] (118/224) uni-db::integration value_fidelity::btic_survives_wal_recovery
+        PASS [   0.044s] (119/224) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_hnsw_pq
+        PASS [   0.038s] (120/224) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_hnsw_sq
+        PASS [   0.107s] (121/224) uni-db::integration value_fidelity::multivector_survives_wal_recovery
+        PASS [   0.035s] (122/224) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_ivf_flat
+        PASS [   0.016s] (123/224) uni-plugin-extism host_svc::kms::tests::verify_round_trips_against_sign
+        PASS [   0.017s] (124/224) uni-plugin-extism host_fns::tests::register_and_lookup_round_trip
+        PASS [   0.009s] (125/224) uni-plugin-extism host_svc::tests::hex_round_trips
+        PASS [   0.040s] (126/224) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_ivf_pq
+        PASS [   0.043s] (127/224) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_ivf_rq
+        PASS [   0.014s] (128/224) uni-store backend::eval::tests::apostrophes_round_trip_through_the_single_escaper
+        PASS [   0.038s] (129/224) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_ivf_sq
+        PASS [   0.041s] (130/224) uni-db::integration vector_search::vector_index_options_test::test_schema_round_trip_ivf_rq_4bit
+        PASS [   0.019s] (131/224) uni-store fork::registry::tests::holder_count_round_trips_under_concurrent_register_drop
+        PASS [   0.020s] (132/224) uni-store fork::wal::tests::append_flush_replay_roundtrip_on_fork_wal
+        PASS [   0.015s] (133/224) uni-store fork::wal::tests::prefix_includes_fork_id_under_wal_forks
+        PASS [   0.016s] (134/224) uni-store fork::wal::tests::fork_wal_initialize_yields_zero_lsn_on_empty_dir
+        PASS [   0.019s] (135/224) uni-store runtime::wal::tests::a_restored_mark_needs_no_seal
+        PASS [   0.022s] (136/224) uni-store fork::wal::tests::two_forks_have_independent_wal_prefixes
+        PASS [   0.037s] (137/224) uni-store fork::wal::tests::primary_wal_unaffected_by_fork_wal_writes
+        PASS [   0.034s] (138/224) uni-store runtime::wal::tests::fsync_failure_deletes_segment_no_ghost_commit
+        PASS [   0.036s] (139/224) uni-store runtime::wal::tests::replay_skips_segment_truncated_between_list_and_read
+        PASS [   0.056s] (140/224) uni-store runtime::wal::tests::replay_counts_segments_without_writer_features
+        PASS [   0.038s] (141/224) uni-store runtime::wal::tests::test_find_max_lsn_scalability
+        PASS [   0.058s] (142/224) uni-store runtime::wal::tests::segments_record_commit_spans_and_the_announced_mark
+        PASS [   0.117s] (143/224) uni-plugin-extism::it example_extism_net_e2e::granted_with_egress_round_trips_through_uni_http_get
+        PASS [   0.038s] (144/224) uni-store runtime::wal::tests::test_lsn_gaps_preserved_on_flush_failure
+        PASS [   0.039s] (145/224) uni-store runtime::wal::tests::test_lsn_monotonicity
+        PASS [   0.024s] (146/224) uni-store runtime::wal::tests::test_parse_lsn_from_filename_multibyte_no_panic
+        PASS [   0.039s] (147/224) uni-store runtime::wal::tests::test_lsn_watermark_no_reuse
+        PASS [   0.666s] (148/224) uni-db::integration review_regressions::review_vector_many_shadowed_candidates_in_private_and_committed_overlays
+        PASS [   0.059s] (149/224) uni-store runtime::wal::tests::test_parse_lsn_from_filename
+        PASS [   0.035s] (150/224) uni-store runtime::wal::tests::test_wal_append_replay
+        PASS [   0.034s] (151/224) uni-store runtime::wal::tests::test_wal_backward_compatibility_labels
+        PASS [   0.055s] (152/224) uni-store runtime::wal::tests::test_truncate_scalability
+        PASS [   0.040s] (153/224) uni-store runtime::wal::tests::test_wal_replay_preserves_delete_vertex_labels
+        PASS [   0.037s] (154/224) uni-store runtime::wal::tests::test_wal_replay_preserves_vertex_labels
+        PASS [   0.092s] (155/224) uni-store runtime::wal::tests::test_replay_since_skips_old_segments
+        PASS [   0.035s] (156/224) uni-store runtime::wal::tests::wal_segment_ref_serializes_identically
+        PASS [   0.052s] (157/224) uni-store runtime::wal::tests::truncate_tolerates_segment_deleted_by_concurrent_truncation
+        PASS [   0.063s] (158/224) uni-store runtime::wal::tests::test_wal_replay_preserves_edge_type_name
+        PASS [   0.061s] (159/224) uni-store runtime::writer::tests::test_commit_transaction_wal_failure_rollback
+        PASS [   0.054s] (160/224) uni-store::integration bugs::test_issue_18_150_poisoned_mutex::test_wal_flushed_lsn_returns_result
+        PASS [   0.083s] (161/224) uni-store runtime::writer::tests::test_flush_wal_empty_l0_is_noop
+        PASS [   0.099s] (162/224) uni-store runtime::writer::tests::test_commit_transaction_wal_before_merge
+        PASS [   0.051s] (163/224) uni-store::integration cloud::s3_compatibility_test::test_wal_large_entries
+        PASS [   0.037s] (164/224) uni-store::integration cloud::s3_compatibility_test::test_wal_truncate
+        PASS [   0.025s] (165/224) uni-store::integration crdt::crdt_l0_tests::wal_replay::test_replay_crdt_merge_semantics
+        PASS [   0.043s] (166/224) uni-store::integration cloud::s3_compatibility_test::test_wal_with_object_store
+        PASS [   0.023s] (167/224) uni-store::integration fork_recovery::recovery_fork_wal::primary_wal_unaffected_by_fork_wal_segments
+        PASS [   0.020s] (168/224) uni-store::integration fork_recovery::recovery_fork_wal::replay_with_no_persisted_mutations_is_noop
+        PASS [   0.026s] (169/224) uni-store::integration fork_recovery::recovery_fork_wal::fork_wal_replay_restores_persisted_mutations
+        PASS [   0.023s] (170/224) uni-store::integration storage::extid_index_test::concurrent_commits_same_extid_conflict
+        PASS [   0.026s] (171/224) uni-store::integration storage::extid_index_test::duplicate_extid_rejected
+        PASS [   0.033s] (172/224) uni-store::integration storage::extid_index_test::delete_releases_extid
+        PASS [   0.176s] (173/224) uni-store::integration bugs::repro_15_scan_table_exists_swallow::repro_scan_vertex_table_swallows_transient_list_error
+        PASS [   0.066s] (174/224) uni-store::integration property::property_tests::wal_segment_serde_roundtrip
+        PASS [   0.029s] (175/224) uni-store::integration storage::extid_index_test::extid_uniqueness_survives_wal_recovery
+        PASS [   0.035s] (176/224) uni-store::integration storage::extid_index_test::extid_overwrite_releases_old_value
+        PASS [   0.046s] (177/224) uni-store::integration storage::storage_at_fork::a_fork_scoped_reader_declines_the_cached_count
+        PASS [   0.034s] (178/224) uni-store::integration storage::wal_durability_test::commit_writes_each_mutation_to_wal_exactly_once
+        PASS [   0.053s] (179/224) uni-store::integration storage::storage_at_fork::at_fork_falls_back_to_primary_for_unrecorded_dataset
+        PASS [   0.046s] (180/224) uni-store::integration storage::storage_at_fork::at_fork_routes_vertex_reads_through_branch
+        PASS [   0.034s] (181/224) uni-store::integration storage::wal_durability_test::test_edge_type_name_wal_roundtrip
+        PASS [   0.234s] (182/224) uni-store::integration bugs::repro_233_failed_read_reads_as_absent::failed_extid_probe_does_not_admit_a_duplicate
+        PASS [   0.069s] (183/224) uni-store::integration storage::storage_at_fork::vertex_row_count_declines_only_for_a_branched_table
+        PASS [   0.125s] (184/224) uni-store::integration storage::wal_durability_test::test_replay_restores_vertex_labels
+        PASS [   0.115s] (185/224) uni-store::integration storage::wal_durability_test::test_wal_corrupt_middle_segment_fails_recovery
+        PASS [   0.145s] (186/224) uni-store::integration storage::wal_durability_test::test_replay_delete_preserves_labels_for_flush
+        PASS [   0.145s] (187/224) uni-store::integration storage::wal_durability_test::test_wal_checksum_mismatch_detected
+        PASS [   0.142s] (188/224) uni-store::integration storage::wal_durability_test::test_wal_corrupt_only_segment_is_tolerated_tail
+        PASS [   0.157s] (189/224) uni-store::integration storage::wal_durability_test::test_wal_concurrent_flushes
+        PASS [   0.052s] (190/224) uni-store::integration storage::wal_durability_test::test_wal_delete_vertex_labels_round_trip
+        PASS [   0.058s] (191/224) uni-store::integration storage::wal_durability_test::test_wal_edge_mutations
+        PASS [   0.056s] (192/224) uni-store::integration storage::wal_durability_test::test_wal_empty_flush
+        PASS [   0.078s] (193/224) uni-store::integration storage::wal_durability_test::test_wal_delete_vertex_mutation
+        PASS [   0.044s] (194/224) uni-store::integration storage::wal_durability_test::test_wal_full_truncate
+        PASS [   0.050s] (195/224) uni-store::integration storage::wal_durability_test::test_wal_empty_segment_file_is_corrupt_tail
+        PASS [   0.046s] (196/224) uni-store::integration storage::wal_durability_test::test_wal_flushed_lsn_tracking
+        PASS [   0.023s] (197/224) uni-store::integration storage::wal_durability_test::test_wal_legacy_raw_json_segment_replays
+        PASS [   0.028s] (198/224) uni-store::integration storage::wal_durability_test::test_wal_initialize_from_existing
+        PASS [   0.021s] (199/224) uni-store::integration storage::wal_durability_test::test_wal_lsn_ordering
+        PASS [   0.018s] (200/224) uni-store::integration storage::wal_durability_test::test_wal_serde_backward_compat_missing_edge_type_name
+        PASS [   0.022s] (201/224) uni-store::integration storage::wal_durability_test::test_wal_serde_backward_compat_missing_labels
+        PASS [   0.022s] (202/224) uni-store::integration storage::wal_durability_test::test_wal_replay_since_high_water_mark
+        PASS [   0.020s] (203/224) uni-store::integration storage::wal_durability_test::test_wal_set_vertex_labels_round_trip_replace
+        PASS [   0.022s] (204/224) uni-store::integration storage::wal_durability_test::test_wal_serde_backward_compat_missing_timestamps
+        PASS [   0.022s] (205/224) uni-store::integration storage::wal_durability_test::test_wal_timestamps_round_trip
+        PASS [   0.014s] (206/224) uni-store::integration storage::wal_durability_test::test_wal_truncated_tail_segment_skipped
+        PASS [   0.018s] (207/224) uni-store::integration storage::wal_durability_test::test_wal_truncate_before_high_water_mark
+        PASS [   0.025s] (208/224) uni-store::integration storage::wal_durability_test::unique_constraint_survives_wal_recovery
+        PASS [   0.675s] (209/224) uni-store runtime::wal::tests::replay_still_fails_on_non_notfound_read_error
+        PASS [   0.745s] (210/224) uni-plugin-wasm::it example_wasm_net_e2e::granted_with_egress_round_trips_through_host_net
+        PASS [   1.983s] (211/224) uni-db::integration cypher_write::partial_lance_edge_state::d_round_trip
+        PASS [   1.030s] (212/224) uni-db::integration triggers::wal_recovery_announce_resilience::dropping_a_database_mid_flush_on_a_current_thread_runtime_returns_resilience
+        PASS [   1.127s] (213/224) uni-db::integration triggers::wal_recovery_announce_resilience::a_dropped_database_does_not_announce_its_commits_again_resilience
+        PASS [   1.858s] (214/224) uni-db::integration index::batch_extid_uniqueness::held_ext_id_is_refused_in_every_storage_state
+        PASS [   2.314s] (215/224) uni-db::integration bugs::ext_id_on_labelled_nodes::ext_id_on_labelled_nodes_other_reserved_names_round_trip
+        PASS [   1.231s] (216/224) uni-db::integration triggers::wal_recovery_announce_resilience::a_shut_down_database_does_not_announce_its_commits_again_resilience
+        PASS [   1.696s] (217/224) uni-db::integration review_regressions::review_recursive_cte_must_not_succeed_with_truncated_closure
+        PASS [   2.096s] (218/224) uni-db::integration storage::shutdown_test::dropping_without_shutdown_leaves_the_data_to_the_wal
+        PASS [   2.738s] (219/224) uni-db::integration perf::query_limits_test::the_range_walk_is_skipped_for_a_label_that_fits_one_batch
+        PASS [   2.887s] (220/224) uni-db::integration perf::query_limits_test::a_label_whose_vids_start_late_is_walked_past_the_gap
+        PASS [   3.696s] (221/224) uni-db::integration index::batch_extid_uniqueness::freed_ext_id_can_be_taken_again_in_every_storage_state
+        PASS [   3.622s] (222/224) uni-db::integration review_regressions::review_recursive_budget_boundary_reports_exhaustion
+        PASS [   4.921s] (223/224) uni-db::integration bugs::scan_range_walk_l0_rows::scan_range_walk_reaches_l0_rows_past_a_vid_gap
+        PASS [  10.567s] (224/224) uni-db::integration perf::query_limits_test::a_full_label_scan_does_not_pay_a_round_trip_per_batch
+────────────
+     Summary [  11.063s] 224 tests run: 224 passed, 4809 skipped
