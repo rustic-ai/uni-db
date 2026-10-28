@@ -689,6 +689,8 @@ Returned by `schema.label(name)`.
 The `index_type` parameter can be a string (`"btree"`, `"vector"`, `"fulltext"`, `"inverted"`) or a dict with detailed configuration:
 
 ```python
+builder = db.schema().label("Document")
+
 # Simple index
 builder.index("name", "btree")
 

@@ -6,7 +6,7 @@
 //! Ported from `uni-locy/src/orchestrator/abduce.rs`. Uses `LocyExecutionContext`
 //! for L0 fork/restore, mutations, and strata re-evaluation. Three-phase pipeline:
 //! Phase 1: Build derivation tree via EXPLAIN.
-//! Phase 2: Generate candidate modifications from tree leaves.
+//! Phase 2: Generate candidate modifications from graph evidence at every tree level.
 //! Phase 3: Validate each candidate via ASSUME (fork L0 + mutate + re-eval + restore).
 
 use std::collections::{BTreeMap, HashMap};
@@ -241,8 +241,8 @@ fn extract_removal_candidates(
     anonymous: &[String],
 ) -> Vec<Modification> {
     let mut candidates = Vec::new();
-    collect_leaf_candidates(tree, rule, program, anonymous, &mut candidates);
-    // Two leaves can propose the same edit (one per derivation that reads the
+    collect_evidence_candidates(tree, rule, program, anonymous, &mut candidates);
+    // Two evidence nodes can propose the same edit (one per derivation that reads the
     // same entity); keep the first, so duplicates spend neither the candidate
     // budget nor a validation run.
     let mut distinct: Vec<Modification> = Vec::with_capacity(candidates.len());
@@ -254,21 +254,25 @@ fn extract_removal_candidates(
     distinct
 }
 
-/// Recursively collect candidates from derivation tree leaves.
+/// Recursively collect candidates from every graph-backed derivation node.
 ///
-/// Each leaf node carries a `rule` field naming the rule that produced it —
+/// A rule with IS dependencies still reads its own MATCH edges. Its children
+/// explain referenced facts, not those edges, so restricting collection to
+/// leaves loses parent-rule edits (including joins feeding a FOLD).
+///
+/// Each evidence node carries a `rule` field naming the rule that produced it —
 /// this may differ from the top-level `rule` parameter when IS-ref children
 /// come from a different rule (e.g. a `scored_signal` leaf inside a
 /// `threat_level` derivation).  We always look up the effective rule from
 /// `program` so that `clause.match_pattern` corresponds to the correct rule.
-fn collect_leaf_candidates(
+fn collect_evidence_candidates(
     node: &uni_locy::DerivationNode,
     rule: &CompiledRule,
     program: &CompiledProgram,
     anonymous: &[String],
     candidates: &mut Vec<Modification>,
 ) {
-    if node.children.is_empty() && node.graph_fact.is_some() {
+    if node.graph_fact.is_some() {
         // Use the node's own rule when available; fall back to the caller's rule.
         let effective_rule: &CompiledRule = program.rule_catalog.get(&node.rule).unwrap_or(rule);
 
@@ -321,7 +325,7 @@ fn collect_leaf_candidates(
     }
 
     for child in &node.children {
-        collect_leaf_candidates(child, rule, program, anonymous, candidates);
+        collect_evidence_candidates(child, rule, program, anonymous, candidates);
     }
 }
 

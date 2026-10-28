@@ -28,6 +28,76 @@ class DocumentationContracts(unittest.TestCase):
             ),
         )
 
+    def test_locy_dictionary_keys_match_binding_inventory(self):
+        setup = "from uni_db import Uni\ndb = Uni.temporary()\nsession = db.session()\n"
+        self.assertTrue(
+            guard.typed_call_errors(
+                setup + 'session.locy_with("program").with_config({"timeout_secs": 60})'
+            )
+        )
+        self.assertEqual(
+            [],
+            guard.typed_call_errors(
+                setup + 'session.locy_with("program").with_config({"timeout": 60})'
+            ),
+        )
+        self.assertEqual(
+            [],
+            guard.typed_call_errors(
+                "from uni_db import LocyConfig\nconfig = LocyConfig(timeout_secs=60)"
+            ),
+        )
+        self.assertTrue(
+            guard.typed_call_errors(
+                setup
+                + 'session.locy_with("program").with_config({"invented_key": True})'
+            )
+        )
+
+    def test_named_locy_config_across_notebook_cells(self):
+        env, dicts = {}, {}
+        guard.typed_call_errors(
+            'from uni_db import Uni\ndb = Uni.temporary()\nsession = db.session()\nconfig = {"timeout_secs": 60}',
+            env,
+            dicts,
+        )
+        self.assertTrue(
+            guard.typed_call_errors(
+                'session.locy_with("program").with_config(config)', env, dicts
+            )
+        )
+        guard.typed_call_errors('config = {"timeout": 60}', env, dicts)
+        self.assertEqual(
+            [],
+            guard.typed_call_errors(
+                'session.locy_with("program").with_config(config)', env, dicts
+            ),
+        )
+
+    def test_qualified_module_locy_config(self):
+        code = 'import uni_db as uni\ndb = uni.Uni.temporary()\nsession = db.session()\nsession.locy_with("program").with_config({"timeout_secs": 60})'
+        self.assertTrue(guard.typed_call_errors(code))
+        self.assertEqual(
+            [], guard.typed_call_errors(code.replace('"timeout_secs"', '"timeout"'))
+        )
+
+    def test_semiconductor_notebook_rejects_original_bad_key(self):
+        import json
+
+        path = (
+            guard.ROOT
+            / "website/docs/examples/python/locy_semiconductor_yield_excursion.ipynb"
+        )
+        notebook = json.loads(path.read_text())
+        env, dicts, errors = {}, {}, []
+        for cell in notebook["cells"]:
+            if cell["cell_type"] == "code":
+                original = "".join(cell["source"]).replace(
+                    "'timeout':", "'timeout_secs':"
+                )
+                errors.extend(guard.typed_call_errors(original, env, dicts))
+        self.assertTrue(any("timeout_secs" in error for error in errors))
+
     def test_other_package_is_not_inferred_as_uni(self):
         self.assertEqual(
             [],

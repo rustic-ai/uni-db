@@ -156,7 +156,22 @@ def declared_method_errors(block: str) -> list[str]:
     ]
 
 
-def typed_call_errors(block: str, env: dict[str, str] | None = None) -> list[str]:
+@cache
+def locy_config_keys() -> set[str]:
+    source = (ROOT / "bindings/uni-db/src/convert.rs").read_text()
+    declaration = re.search(
+        r"pub const LOCY_CONFIG_KEYS: &\[&str\] = &\[(.*?)\];", source, re.DOTALL
+    )
+    if declaration is None:
+        raise ValueError("cannot locate Python Locy config key inventory")
+    return set(re.findall(r'"(\w+)"', declaration.group(1)))
+
+
+def typed_call_errors(
+    block: str,
+    env: dict[str, str] | None = None,
+    dicts: dict[str, ast.Dict] | None = None,
+) -> list[str]:
     """Follow explicit uni_db imports and factory returns through call chains."""
     try:
         tree = ast.parse(block)
@@ -165,6 +180,8 @@ def typed_call_errors(block: str, env: dict[str, str] | None = None) -> list[str
     classes = stub_classes()
     if env is None:
         env = {}
+    if dicts is None:
+        dicts = {}
     errors: set[str] = set()
 
     def infer(node):
@@ -172,6 +189,8 @@ def typed_call_errors(block: str, env: dict[str, str] | None = None) -> list[str
             return infer(node.value)
         if isinstance(node, ast.Name):
             return env.get(node.id)
+        if isinstance(node, ast.Attribute) and infer(node.value) == "module:uni_db":
+            return node.attr if node.attr in classes else None
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name):
                 return env.get(node.func.id)  # class construction
@@ -186,6 +205,36 @@ def typed_call_errors(block: str, env: dict[str, str] | None = None) -> list[str
                     f"line {node.lineno}: {owner}.{node.func.attr} is absent from that stub class"
                 )
                 return None
+            if (
+                owner
+                in {
+                    "SessionLocyBuilder",
+                    "TxLocyBuilder",
+                    "AsyncSessionLocyBuilder",
+                    "AsyncTxLocyBuilder",
+                }
+                and node.func.attr == "with_config"
+            ):
+                config = (
+                    node.args[0]
+                    if node.args
+                    else next(
+                        (k.value for k in node.keywords if k.arg == "config"), None
+                    )
+                )
+                if isinstance(config, ast.Name):
+                    config = dicts.get(config.id)
+                if isinstance(config, ast.Dict):
+                    keys = {
+                        key.value
+                        for key in config.keys
+                        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    }
+                    unknown = keys - locy_config_keys()
+                    if unknown:
+                        errors.add(
+                            f"line {node.lineno}: unknown Locy config dictionary keys: {sorted(unknown)}"
+                        )
             positional = [*method.args.posonlyargs, *method.args.args]
             if positional and positional[0].arg in ("self", "cls"):
                 positional = positional[1:]
@@ -222,7 +271,11 @@ def typed_call_errors(block: str, env: dict[str, str] | None = None) -> list[str
     # Walk statements in source order. Imports from other packages never acquire
     # a Uni type just because their variable happens to be named `session`.
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module == "uni_db":
+        if isinstance(node, ast.Import):
+            for item in node.names:
+                if item.name == "uni_db":
+                    env[item.asname or item.name] = "module:uni_db"
+        elif isinstance(node, ast.ImportFrom) and node.module == "uni_db":
             for item in node.names:
                 if item.name in classes:
                     env[item.asname or item.name] = item.name
@@ -231,6 +284,9 @@ def typed_call_errors(block: str, env: dict[str, str] | None = None) -> list[str
             for target in node.targets:
                 if isinstance(target, ast.Name):
                     env.pop(target.id, None)
+                    dicts.pop(target.id, None)
+                    if isinstance(node.value, ast.Dict):
+                        dicts[target.id] = node.value
                     if kind:
                         env[target.id] = kind
         elif isinstance(node, (ast.With, ast.AsyncWith)):
@@ -295,9 +351,12 @@ def main() -> int:
             for error in rust_locy_errors(block):
                 failures.append(f"{path.relative_to(ROOT)}:{start}: {error}")
         env: dict[str, str] = {}
+        dicts: dict[str, ast.Dict] = {}
         for start, block in blocks:
             python_count += 1
-            for error in declared_method_errors(block) + typed_call_errors(block, env):
+            for error in declared_method_errors(block) + typed_call_errors(
+                block, env, dicts
+            ):
                 failures.append(f"{path.relative_to(ROOT)}:{start}: {error}")
             for m in CALL.finditer(block):
                 receiver, method = m.group(1), m.group(2)

@@ -310,3 +310,70 @@ async fn abduce_through_anonymous_middle_node_proposes_both_edges() -> Result<()
     }
     Ok(())
 }
+
+/// IS children explain the referenced rule, not the parent's own MATCH edge.
+#[tokio::test]
+async fn abduce_not_keeps_parent_match_edges_with_is_dependencies() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    seed(
+        &db,
+        "CREATE (:N {name: 'a'})-[:R]->(:N {name: 'b', score: 1})",
+    )
+    .await?;
+    let result = abduce(
+        &db,
+        "CREATE RULE leaf AS MATCH (b:N) WHERE b.name = 'b' YIELD KEY b \n\
+         CREATE RULE target AS MATCH (a:N)-[:R]->(b:N) WHERE b IS leaf YIELD KEY a \n\
+         ABDUCE NOT target WHERE a.name = 'a'",
+    )
+    .await?;
+    assert!(
+        result.modifications.iter().any(|m| m.validated
+            && matches!(
+                &m.modification, Modification::RemoveEdge { edge_type, .. } if edge_type == "R"
+            )),
+        "the single supporting parent edge must be removable: {result:?}"
+    );
+    let rows = db
+        .session()
+        .query("MATCH ()-[r:R]->() RETURN count(r) AS n")
+        .await?;
+    assert_eq!(
+        rows.rows()[0].get::<i64>("n")?,
+        1,
+        "validation must roll back its edit"
+    );
+    Ok(())
+}
+
+/// Aggregate evidence can itself have IS children: the PROTECTS edge still
+/// supports the risk fact even though the control's weakness is a leaf rule.
+#[tokio::test]
+async fn abduce_not_keeps_aggregate_match_edges_with_is_dependencies() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    seed(
+        &db,
+        "CREATE (:Control {effectiveness: 0.2})-[:PROTECTS]->(:System {name: 'target'})",
+    )
+    .await?;
+    let result = abduce(
+        &db,
+        "CREATE RULE weak AS MATCH (c:Control) WHERE c.effectiveness < 0.5 YIELD KEY c \n\
+         CREATE RULE risk AS MATCH (c:Control)-[:PROTECTS]->(s:System)          WHERE c IS weak FOLD total = MNOR(1.0 - c.effectiveness) YIELD KEY s, total \n\
+         CREATE RULE unacceptable AS MATCH (s:System) WHERE s IS risk, total >= 0.5 YIELD KEY s \n\
+         ABDUCE NOT unacceptable WHERE s.name = 'target'",
+    ).await?;
+    assert!(result.modifications.iter().any(|m| m.validated && matches!(
+        &m.modification, Modification::RemoveEdge { edge_type, .. } if edge_type == "PROTECTS"
+    )), "the aggregate's supporting edge must be removable: {result:?}");
+    let rows = db
+        .session()
+        .query("MATCH ()-[r:PROTECTS]->() RETURN count(r) AS n")
+        .await?;
+    assert_eq!(
+        rows.rows()[0].get::<i64>("n")?,
+        1,
+        "validation must roll back its edit"
+    );
+    Ok(())
+}

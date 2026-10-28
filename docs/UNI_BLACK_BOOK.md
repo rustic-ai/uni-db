@@ -10486,7 +10486,13 @@ spaces overlap, which columns hold EIDs comes from the rules
 resolved as a VID binds an unrelated node. Before, a yielded relationship was
 typed as a string and came back NULL, which is the only reason EXPLAIN kept its
 own re-derivation. Mode A classifies KEY columns from the hydrated published
-facts, so an integer KEY stays an integer. ABDUCE always builds its tree from
+facts, so an integer KEY stays an integer. ABDUCE collects negative-goal edits
+from every graph-backed evidence node,
+not just leaves: a rule with IS children still reads its own MATCH edges,
+including edges feeding a FOLD. Candidates remain concrete single-entity edits
+and are deduplicated before validation. Regression coverage:
+`locy_abduce_identity::abduce_not_keeps_*_match_edges_with_is_dependencies`.
+ABDUCE always builds its tree from
 the published facts (Mode B): the causes ABDUCE edits (edges, properties) are
 the evidence rows' bindings, which recorded provenance does not keep. Mode B
 tries a rule's clauses highest PRIORITY first (PRIORITY keeps the rows of

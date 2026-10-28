@@ -140,7 +140,7 @@ ABDUCE NOT reachable WHERE a.name = 'Alice' RETURN b
 **Three-phase pipeline:**
 
 1. **Build derivation tree** via EXPLAIN to identify which facts contribute to the conclusion.
-2. **Extract candidate modifications** — edge removals, property changes, edge additions that could alter the derivation.
+2. **Extract candidate modifications** — for a negative goal, inspect graph evidence at every derivation level, including MATCH edges on rules with IS dependencies; for a positive goal, propose edge additions. Candidate edits still name concrete entities.
 3. **Validate each candidate**: savepoint → apply mutation → re-evaluate all strata → check if conclusion holds → rollback.
 
 Each candidate is one edit — for `ABDUCE NOT`, one edge removed or one numeric
