@@ -50,6 +50,11 @@ GUARDS: list[tuple[str, list[str], str]] = [
         [sys.executable, "scripts/ci/check_version_consistency.py"],
         "derive the version from the workspace Cargo version; never hardcode it",
     ),
+    (
+        "generated Locy notebooks",
+        [sys.executable, "website/scripts/generate_locy_notebooks.py", "--check"],
+        "run `python3 website/scripts/generate_locy_notebooks.py`",
+    ),
     # Documented counts must match what source or the filesystem already
     # asserts: plugin surfaces, graph algorithms, both TCK suites' feature
     # files and scenario totals, and the skill reference pages.
@@ -101,6 +106,11 @@ GUARDS: list[tuple[str, list[str], str]] = [
         "documentation contract negative controls",
         [sys.executable, "scripts/ci/test_doc_symbols.py"],
         "preserve receiver, factory, config and notebook drift detection",
+    ),
+    (
+        "ORT cache preparation checks",
+        [sys.executable, "scripts/ci/test_prepare_ort.py"],
+        "preserve pinned-version verification, resume, checksum and atomic cache publication",
     ),
     (
         "TCK report exit status",

@@ -4,7 +4,7 @@ This document lists every CI job from `.github/workflows/pr.yml` and `.github/wo
 with the **exact command** to run it locally, plus prerequisites, ordering, and the local-only
 gotchas that bite.
 
-> **Source of truth = the workflow YAML.** This runbook mirrors the workflows as of 2026-10-22.
+> **Source of truth = the workflow YAML.** This runbook mirrors the workflows as of 2026-10-27.
 > If a command here disagrees with `.github/workflows/{pr,ci}.yml`, the YAML wins — update this doc.
 > **Bump the date above whenever you add a job or change a command.** The stamp is how drift gets
 > noticed: it sat at 2026-07-26 through four later edits while three PR-blocking jobs went
@@ -63,6 +63,26 @@ export RUSTC_WRAPPER=""
 # Both workflows also set this at workflow level:
 export RUST_BACKTRACE=1
 ```
+
+### ONNX Runtime preparation for the three CPU wheel lanes
+
+The flagship notebooks, Python WASM/Extism loader tests, and release guards
+run `.github/actions/prepare-ort` before any build. That action caches the
+pinned `ort-sys` CPU distribution separately from Cargo artifacts. It resumes
+interrupted downloads, verifies the upstream SHA256 before extraction, and
+publishes only a complete cache entry. Reproduce its preparation locally with:
+
+```bash
+export ORT_CACHE_DIR="${ORT_CACHE_DIR:-/tmp/uni-ort-cpu}"
+python3 scripts/ci/prepare_ort.py --cache-dir "$ORT_CACHE_DIR"
+```
+
+Keep that environment variable exported for the lane's subsequent Cargo and
+maturin commands. This keeps the same statically linked ONNX Runtime 1.24.2;
+preparation does not switch to the Python ONNX Runtime wheel or dynamic linking.
+A changed `ort-sys` version fails preparation until the URL/checksum pin is
+updated from that version's distribution table. The recovery tests use a
+localhost server and do not need internet access.
 
 ### Ordering / contention
 

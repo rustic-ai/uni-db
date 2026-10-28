@@ -173,9 +173,8 @@ def _python_program_lines(program_lines: list[str]) -> list[str]:
 
 
 def _rust_program_lines(program_lines: list[str]) -> list[str]:
-    return [
-        'let program = r#"' + "\n".join(program_lines) + '"#;',
-    ]
+    # Keep one notebook source entry per physical Rust line, like other cells.
+    return ('let program = r#"' + "\n".join(program_lines) + '"#;').splitlines()
 
 
 def _python_eval_lines() -> list[str]:

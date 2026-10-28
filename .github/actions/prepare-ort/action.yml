@@ -1,0 +1,19 @@
+name: Prepare CPU ONNX Runtime
+description: Cache and verify the pinned ort-sys CPU archive with bounded resumable downloads
+runs:
+  using: composite
+  steps:
+    - name: Resolve pinned runtime cache
+      id: runtime
+      shell: bash
+      run: |
+        python3 scripts/ci/prepare_ort.py --cache-dir "$RUNNER_TEMP/uni-ort-cpu" --metadata >> "$GITHUB_OUTPUT"
+        echo "ORT_CACHE_DIR=$RUNNER_TEMP/uni-ort-cpu" >> "$GITHUB_ENV"
+    - name: Cache ONNX Runtime
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.runtime.outputs.cache-path }}
+        key: ${{ steps.runtime.outputs.cache-key }}
+    - name: Prepare verified ONNX Runtime
+      shell: bash
+      run: python3 scripts/ci/prepare_ort.py --cache-dir "$ORT_CACHE_DIR"
