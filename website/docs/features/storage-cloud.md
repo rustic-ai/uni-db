@@ -16,7 +16,7 @@ Uni stores data in Lance tables and can persist to local disk or object storage 
 
     # async fn demo() -> Result<(), uni_db::UniError> {
     let db = Uni::open("./local_meta")
-        .remote_storage("s3://my-bucket/graph-data", CloudStorageConfig::default())
+        .remote_storage("s3://my-bucket/graph-data", CloudStorageConfig::s3_from_env("my-bucket"))
         .build()
         .await?;
     let session = db.session();

@@ -186,7 +186,7 @@ impl fmt::Display for DenseIdx {
     }
 }
 
-/// UniId: 44-character base32 multibase string (SHA3-256)
+/// UniId: 53-character base32 multibase string (SHA3-256).
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UniId([u8; 32]);
 

@@ -558,7 +558,7 @@ Commands execute after all strata converge. They operate on converged derived re
 QUERY rule_name [WHERE expr] [RETURN items [ORDER BY ...] [SKIP n] [LIMIT n]]
 ```
 
-Uses SLG resolution (top-down with tabling) for efficient point lookups without computing the full relation. Returns `CommandResult::Query(Vec<FactRow>)`.
+Returns `CommandResult::Query(Vec<FactRow>)` by filtering/projecting converged rule facts. Default `GoalDirected::Auto` can restrict eligible goals that bind a node KEY; omitted full relations are materialized on first `derived_rules().await?` access (Python: `.derived` or `await .derived_async()`). `Off` evaluates all rules eagerly; `On` leaves pruned rules out; `Shadow` compares goal-directed answers with full evaluation.
 
 ```
 QUERY reachable WHERE a.name = 'Alice' RETURN b.name AS destination
@@ -729,12 +729,12 @@ session.rules().clear();
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `derived` | `HashMap<String, Vec<FactRow>>` | Rule name -> derived facts |
+| `derived_rules().await?` | `&HashMap<String, Vec<FactRow>>` | Full rule facts; async and fallible in Rust. Python exposes `.derived` and `await .derived_async()` |
 | `stats` | `LocyStats` | Execution statistics |
 | `command_results` | `Vec<CommandResult>` | Ordered command outputs |
 | `warnings` | `Vec<RuntimeWarning>` | Runtime warnings |
 | `approximate_groups` | `HashMap<String, Vec<String>>` | Approximate BDD groups |
-| `derived_fact_set` | `Option<DerivedFactSet>` | Collected DERIVE mutations (session-level only) |
+| `derived_fact_set` | `Option<DerivedFactSet>` | Collected session-level writes, including DERIVE and Cypher, in program order |
 
 Convenience: `result.warnings()`, `result.has_warning(code)`.
 
@@ -763,7 +763,7 @@ Convenience: `result.warnings()`, `result.has_warning(code)`.
 | `peak_memory_bytes` | `usize` |
 
 - `total_iterations`: fixpoint iterations across strata. **Non-recursive programs report `>= 1`** (one evaluation pass); recursive programs report the count to convergence.
-- `queries_executed`: counts internal SLG clause evaluations during command resolution — **not** the number of `QUERY` statements (a single `QUERY` over a multi-rule chain reports several).
+- `queries_executed`: counts executed Cypher statements and EXPLAIN graph-pattern queries. `QUERY` reads converged facts and does not increment this counter.
 
 ---
 
@@ -801,10 +801,10 @@ a.b.c.my_rule                -- Deep nesting
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `max_iterations` | `usize` | `1000` | Max fixpoint iterations per recursive stratum |
-| `timeout` | `Duration` | `300s` | Overall evaluation timeout |
+| `timeout` | `Option<Duration>` | `None` | No explicit override: 300s runtime fallback between strata, database query timeout within operators; the builder timeout overrides the evaluation budget |
 | `allow_partial` | `bool` | `false` | Return the partial `LocyResult` (with `incomplete` populated) instead of `UniError::LocyIncomplete` when `timeout` or `max_iterations` is exhausted |
 | `max_explain_depth` | `usize` | `100` | Max recursion depth for EXPLAIN trees |
-| `max_slg_depth` | `usize` | `1000` | Max recursion depth for SLG resolution (QUERY) |
+| `max_slg_depth` | `usize` | `1000` | Deprecated compatibility field; no effect |
 | `max_abduce_candidates` | `usize` | `20` | Max candidates generated during ABDUCE |
 | `max_abduce_results` | `usize` | `10` | Max validated ABDUCE results |
 | `max_derived_bytes` | `usize` | `256 MiB` | Max bytes of derived facts per relation |
@@ -816,6 +816,13 @@ a.b.c.my_rule                -- Deep nesting
 | `top_k_proofs` | `usize` | `0` | Retain at most k proofs per fact (0 = unlimited) |
 | `top_k_proofs_training` | `Option<usize>` | `None` | Override top_k_proofs during training |
 | `params` | `HashMap<String, Value>` | `{}` | Parameter bindings for `$name` references |
+| `goal_directed` | `GoalDirected` | `Auto` | Eligible bound goals use restricted evaluation with deferred full facts |
+| `semiring` | `SemiringKind` | `AddMultProb` | Probability algebra; exact mode requires a coherent semiring |
+| `neural_predicates_preview` | `bool` | `true` | Enables neural syntax during configured compilation/evaluation |
+| `classifier_cache_max` | `usize` | `100_000` | Maximum classifier cache entries |
+| `classifier_registry` | registry | empty | Rust classifier objects; Python uses `.register_classifier(...)` |
+| `classifier_cache` | internal shared handle | `None` | Runtime-managed cache, not a Python config key |
+| `classifier_provenance_store` | internal shared handle | `None` | Runtime-managed provenance, not a Python config key |
 
 Setting configuration:
 

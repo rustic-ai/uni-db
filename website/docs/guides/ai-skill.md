@@ -17,7 +17,7 @@ The skill uses progressive disclosure — a compact quick-reference is always lo
 | Vector & hybrid search | `uni.vector.query`, `similar_to()`, `uni.fts.query`, `uni.search` (RRF/weighted fusion), index configuration (HNSW/IVF-PQ/Flat), auto-embedding |
 | Locy reference | CREATE RULE syntax, IS references, YIELD/KEY/PROB, ALONG, FOLD (MNOR/MPROD), BEST BY, PRIORITY, DERIVE, ASSUME, ABDUCE, EXPLAIN RULE |
 | Schema & indexing | Identity model (ext_id/VID/UniId), complete data type table, CRDT types, all index types, predicate pushdown, schema introspection |
-| Graph algorithms | 36+ algorithms (path, centrality, community, similarity, structural, flow), execution modes, configuration |
+| Graph algorithms | 42 algorithms (path, centrality, community, similarity, structural, flow), execution modes, configuration |
 
 ## Installation
 

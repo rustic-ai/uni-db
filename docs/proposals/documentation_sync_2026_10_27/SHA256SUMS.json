@@ -1,0 +1,13 @@
+{
+  "source-sha256.json": "a8a363554264f72eb9c4f36da693c76c6819c4fdd162c2763e5e65b7182531cd",
+  "uni-doc-audit-harness.rs": "fe52f6253bdc96fbf51ae6caa8341f063b430accf64c352a96047478a2f1161b",
+  "uni-doc-build.log.gz": "c84b241b1460a409960c6e7c269d87408579c0fa13857d34ea8f4b9a71e5f62f",
+  "uni-doc-conversion.log.gz": "89692027ff9c872d18001e4a737b251f275d9d50d24d7a58253a0963c6f7768e",
+  "uni-doc-rust-check.log.gz": "4437f4e20719f1d57e9e0c082e65d8852c7837c28b938fb8b7ea8de861b3e63c",
+  "uni-doc-rust-run.log.gz": "d5677dcbfec50b3ce0a957e1755b3764a12c62043f8285bf5b1becf41235b36a",
+  "uni-doc-rust-verifier.log.gz": "4054598d0a83d62bb69a4512ef06445fb1bb39475b26b31d66f398a6d6b9f415",
+  "uni-doc-skill.log.gz": "b948700e0cfd3ff53a6d4a59966a080c53b11fa824a2fca0c5145f55e2c6891f",
+  "uni-doc-smoke.log.gz": "c6ecf424cdb335b8a143a7c6c00118d3c01cd8c0276f7f37fb9d6ac83f6095fe",
+  "uni-doc-smoke.py": "8c2988dd60871bd495f3c9d67f45f5dd52164f1abc8cc22feaa109ab0289438b",
+  "uni-doc-static.log.gz": "bd87264861cb205829a69b2aafa450774b43176a1d3b777065c672e86b07fb22"
+}

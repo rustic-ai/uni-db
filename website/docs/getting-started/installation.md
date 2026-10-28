@@ -47,7 +47,7 @@ uni-db = "3"
 
 ## Python Package
 
-Install from [PyPI](https://pypi.org/project/uni-db/). The default wheel bundles all 11 providers (candle, mistralrs, ONNX, plus 8 remote APIs) and runs on CPU:
+Install from [PyPI](https://pypi.org/project/uni-db/). The default wheel bundles 12 providers (candle, mistralrs, ONNX, 8 hosted APIs, and the llama.cpp embedding-server adapter) and runs on CPU:
 
 ```bash
 pip install uni-db
@@ -64,7 +64,7 @@ pip install uni-pydantic
 
 ### Wheel variants
 
-`uni-db 2.0.0` ships **6 wheels** modeled on uni-xervo 0.9.0's three-axis capability matrix (provider × linking × acceleration). Pick by hardware first, then by whether you need local LLM inference:
+Uni ships **6 wheel variants** using uni-xervo's three-axis capability matrix (provider × linking × acceleration). Pick by hardware first, then by whether you need local LLM inference:
 
 | Wheel | Local providers | Accelerator |
 |---|---|---|
@@ -272,9 +272,14 @@ cargo build --release
 
 ## Feature Flags
 
-`uni-db` follows uni-xervo 0.9.0's three-axis capability model: **provider** × **ONNX linking** × **acceleration**.
+`uni-db` follows uni-xervo's three-axis capability model: **provider** × **ONNX linking** × **acceleration**.
 
-### Provider features (all opt-in for the Rust crate; default in the Python wheels)
+### Provider features
+
+The Rust crate enables the providers below by default, except the alternative
+`provider-onnx-dynamic` linking mode. Disable defaults and select providers
+explicitly for a smaller build. Standard Python wheels inherit these defaults;
+slim ONNX variants select ONNX and the eight hosted APIs.
 
 | Feature | Backend | Tasks |
 |---|---|---|
@@ -290,6 +295,7 @@ cargo build --release
 | `provider-voyageai` | Voyage AI | Remote embed + rerank |
 | `provider-cohere` | Cohere | Remote embed + rerank + generation |
 | `provider-azure-openai` | Azure OpenAI | Remote embed + generation |
+| `provider-llamacpp` | llama.cpp server (`remote/llamacpp`) | Remote embeddings with tokenizer-aware input truncation |
 
 ### Acceleration features
 
@@ -312,7 +318,7 @@ The previous nine `gpu-*` features (`gpu-tensorrt`, `gpu-rocm`, `gpu-coreml`, `g
 ### Custom build examples
 
 ```bash
-# Default — Lance + remote OpenAI/Gemini providers (current crate default)
+# Default — Lance, built-in plugins, and all default model providers
 cargo build --release
 
 # Slim — no providers at all

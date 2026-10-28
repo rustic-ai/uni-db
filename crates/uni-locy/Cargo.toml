@@ -23,15 +23,13 @@ async-trait = { workspace = true }
 anyhow = { workspace = true }
 # `LocyResult` caches lazily derived rules in an async `OnceCell`.
 tokio = { workspace = true, features = ["sync"] }
-# Phase B A3: real Candle-backed neural classifier. Workspace pins the
-# version; CPU-only build (no CUDA/Metal features) keeps the dep
-# footprint small.
-candle-core = { workspace = true }
-candle-nn = { workspace = true }
+# The built-in linear classifier loads f32 model tensors directly.
+safetensors = { workspace = true }
 
 [dev-dependencies]
 uni-cypher = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [[test]]

@@ -31,7 +31,7 @@ Use Uni when you want:
 - A single embedded database for graph, vector, and document workloads.
 - OpenCypher for graph traversal, combined with vector search or analytics.
 - Local or object-store backed storage without managing a distributed system.
-- Consistent reads with a simple single-writer model.
+- Concurrent reads and transactions with commit-time conflict validation.
 
 ## When Another Database Might Be Better
 

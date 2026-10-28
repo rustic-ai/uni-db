@@ -326,32 +326,21 @@ Serializability comes from the SSI/OCC conflict detection described above — re
 
 ## Write-Ahead Log (WAL)
 
-The WAL ensures durability for uncommitted writes:
+With WAL enabled, a transaction persists its commit's mutations before publishing
+its private L0 buffer. Uncommitted transaction-local writes are not durable.
+Segments live at `wal/{LSN:020}_{uuid}.wal` (forks use `wal_forks/{fork_id}/`).
 
+The format in `crates/uni-store/src/runtime/wal.rs` is:
+
+```text
+UNIWAL2\n<64 hexadecimal BLAKE3 checksum characters>\n<WalSegment JSON payload>
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              WAL STRUCTURE                                   │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│   wal/                                                                      │
-│   ├── 00000000000000000001_<uuid>.wal                                       │
-│   ├── 00000000000000000002_<uuid>.wal                                       │
-│   └── 00000000000000000003_<uuid>.wal (current)                             │
-│                                                                             │
-│   Segment Format:                                                           │
-│   ┌──────────┬──────────┬──────────┬──────────────────────────────────┐    │
-│   │  Length  │   CRC    │   Type   │            Payload               │    │
-│   │ (4 bytes)│ (4 bytes)│ (1 byte) │         (variable)               │    │
-│   └──────────┴──────────┴──────────┴──────────────────────────────────┘    │
-│                                                                             │
-│   Record Types:                                                             │
-│   ├── INSERT_VERTEX { vid, properties }                                    │
-│   ├── DELETE_VERTEX { vid }                                                │
-│   ├── INSERT_EDGE { eid, src_vid, dst_vid, edge_type, properties }         │
-│   └── DELETE_EDGE { eid, src_vid, dst_vid, edge_type }                     │
-│                                                                             │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+
+`WalSegment` carries `lsn`, `mutations`, `writer_features`,
+`announced_through`, and `commits` (commit spans). Mutation variants are
+`InsertVertex`, `DeleteVertex`, `InsertEdge`, `DeleteEdge`, and
+`SetVertexLabels`. Older raw JSON segments remain readable. Recovery verifies
+the checksum and replays segments above the snapshot's WAL high-water mark.
 
 ### Recovery Process
 

@@ -1,0 +1,88 @@
+{
+  "status": "passed",
+  "scope": "issue 302 classifier and minimal dependency graph, targeted validation only",
+  "source_sha256": {
+    "Cargo.toml": "2baf983fa6552bca7fdd4741d0ea261e85a4b316aa1f2ba73b908ccd62b35dc2",
+    "Cargo.lock": "2dbcf9f9215c0338955ccff634dfb8a25d650f0f757fa55af2c3246bce31b9a5",
+    "crates/uni-locy/Cargo.toml": "342e5ebdb2295e0b0e252058c4a8ede35a786d0f76c2a4779879578c442148b2",
+    "crates/uni-locy/src/neural.rs": "fdb980ac3ea70b1d94d667051f04e0117498e69fef8c03bbc2cfadf4534e211f",
+    "crates/uni-locy-tck/Cargo.toml": "199c4250ff2ade975b65217045211b188e6f9b5a843ab29df27742108f20308b",
+    "crates/uni-locy-tck/src/steps/given.rs": "18e318549028570f846a1b8495d55a958d2f1009b87a88beb3913d4a3108bea7",
+    "crates/uni-locy-tck/tck/features/neural/CandleClassifier.feature": "53f77496980fd3dbcce93548eb91fa0b82f4906ed738e033236cb0e63ca62629"
+  },
+  "checks": [
+    {
+      "name": "locy-tests",
+      "command": [
+        "cargo",
+        "nextest",
+        "run",
+        "-p",
+        "uni-locy",
+        "--offline"
+      ],
+      "exit_code": 0,
+      "log": "issue-302-locy-tests.log.gz",
+      "uncompressed_sha256": "2a73b801312916e1a5b9741264e45a44c678edf4d87e009b1215002f212b04bb"
+    },
+    {
+      "name": "locy-tck",
+      "command": [
+        "bash",
+        "scripts/run_locy_tck_with_report.sh",
+        "--both",
+        "~CandleClassifier"
+      ],
+      "exit_code": 0,
+      "log": "issue-302-locy-tck.log.gz",
+      "uncompressed_sha256": "8b5251afef6de3866f03d054a6ffa7461e153dd586bccba82c0489a7eee15a09"
+    },
+    {
+      "name": "format",
+      "command": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "exit_code": 0,
+      "log": "issue-302-format.log.gz",
+      "uncompressed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "static",
+      "command": [
+        "python3",
+        "scripts/ci/static_guards.py"
+      ],
+      "exit_code": 0,
+      "log": "issue-302-static.log.gz",
+      "uncompressed_sha256": "fb3918ec0cbd42307348c9b1c54354a0a75dbd6ea55cecb068360c6d0808a534"
+    },
+    {
+      "name": "clippy",
+      "command": [
+        "cargo",
+        "clippy",
+        "-p",
+        "uni-locy",
+        "-p",
+        "uni-locy-tck",
+        "--all-targets",
+        "--no-deps",
+        "--offline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "exit_code": 0,
+      "log": "issue-302-clippy.log.gz",
+      "uncompressed_sha256": "372e378d9fff5a0482efad48535f56270776b0fe5f83d998138d87dd26978e4d"
+    }
+  ],
+  "fuzz_locked_offline_metadata": "passed; uni-locy is not part of the fuzz dependency graph",
+  "dependency_comparison": "dependency-comparison.json",
+  "compatibility": "public API and f32 model semantics retained; numerical parity within f32 rounding, not bitwise identity",
+  "cold_build_savings_measured": false
+}

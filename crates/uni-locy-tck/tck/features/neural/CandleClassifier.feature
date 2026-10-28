@@ -1,10 +1,9 @@
-Feature: Phase B A3 — Candle-backed neural classifier
+Feature: Phase B A3 — safetensors linear classifier
 
   Validates that a real `CandleLinearClassifier` (single-layer
   logistic regression, weights loaded from safetensors at scenario
-  setup) drives a Locy rule's PROB output end-to-end. Closes the
-  Phase B gate "Real Candle classifier loads + invokes via mock-
-  config TCK harness".
+  setup) drives a Locy rule's PROB output end-to-end. The public
+  historical name is retained; inference no longer requires Candle.
 
   Each scenario uses a deterministic fixture with weight=4.394 and
   bias=-2.197, chosen so that:

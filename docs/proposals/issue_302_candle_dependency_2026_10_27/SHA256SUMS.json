@@ -1,0 +1,12 @@
+{
+  "dependency-comparison.json": "f2710fd0babe1a4c51a3cc413d1e59c7cf1c3eca453a30b3916289130e0af886",
+  "issue-302-candle-reference.log.gz": "2a91c5a55e5660216a4037b9a9c4ed0cb7a05f275ce0be9a0d6e5bb68c552f32",
+  "issue-302-clippy.log.gz": "df5cfd097f9f23f20ab1920694dd19b5c4549dfa8db97def72a6f6f7977a8344",
+  "issue-302-deps-after.txt.gz": "60076ac9ddbbc1eedcb4f99f9786f1027744115cbcb996cc5d51740f91ffba0c",
+  "issue-302-deps-before.txt.gz": "a8928f09590823f838855439fc0774597f548b7a1696660b8f92713c205d6229",
+  "issue-302-format.log.gz": "9ceffb7310338057cfe71a4ae1e2c98d2c485d81cdef906532a801f457a38d64",
+  "issue-302-locy-tck.log.gz": "10440441342cdb516bdeee66197a8075d13d6dbb9551eaba7e24ceebd241a7e7",
+  "issue-302-locy-tests.log.gz": "5e9bbc8b3caa3779702c699523c6053a08ff77fbd237ed46a15a91b03416f38e",
+  "issue-302-static.log.gz": "36c3031cda547c8d3a43a3d72fa8c6f223168d64179f6878e6ecc69d175af67a",
+  "validation.json": "5e5defc6daa7fc49d947bb7b4ccc90c9ad26bc3c44a5883db17c6e2b6335318d"
+}

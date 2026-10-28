@@ -1,6 +1,6 @@
 # Python API Reference
 
-Complete reference for the `uni_db` Python bindings (v3.4.0). All operations go through the **Session** (reads, Locy) or **Transaction** (writes, bulk loading) obtained from a `Uni` instance.
+Complete reference for the `uni_db` Python bindings (v5.0.0). All operations go through the **Session** (reads, Locy) or **Transaction** (writes, bulk loading) obtained from a `Uni` instance.
 
 ## Installation
 
@@ -193,6 +193,121 @@ db = (
     .build()
 )
 ```
+
+---
+
+### Database configuration
+
+`UniBuilder.config({...})` and `AsyncUniBuilder.config({...})` accept every active
+Rust `UniConfig` field. Calls merge, including nested dictionaries; omitted
+settings retain their values, the last setter wins, and a rejected call leaves
+earlier settings intact. `db.config()` returns the same keys and may be passed
+to another builder. Unknown keys raise `ValueError`. The deprecated
+`partial_lance_writes` no-op is deliberately rejected.
+
+Durations accept non-negative, finite seconds or `datetime.timedelta`; readback
+uses seconds. An optional duration or limit accepts `None`. Cloud credentials
+still belong in `.cloud_config(...)`; `object_store` below configures request
+timeouts and retries. Cloud credential dictionaries accept the same optional
+fields as Rust (including `None`) and reject unknown provider-specific keys.
+
+| Config key | Python value |
+|---|---|
+| `cache_size` | non-negative `int` |
+| `parallelism` | non-negative `int` |
+| `batch_size` | non-negative `int` |
+| `execution_batch_size` | `int` or `None` |
+| `max_frontier_size` | non-negative `int` |
+| `auto_flush_threshold` | non-negative `int` |
+| `commit_channel_capacity` | non-negative `int` |
+| `auto_flush_interval` | seconds, `timedelta`, or `None` |
+| `auto_flush_min_mutations` | non-negative `int` |
+| `wal_enabled` | `bool` |
+| `compaction` | nested `dict` (below) |
+| `throttle` | nested `dict` (below) |
+| `file_sandbox` | nested `dict` (below) |
+| `query_timeout` | seconds or `timedelta` |
+| `commit_timeout` | seconds or `timedelta` |
+| `max_query_memory` | non-negative `int` |
+| `regex_backtrack_limit` | non-negative `int` |
+| `max_transaction_memory` | non-negative `int` |
+| `max_compaction_rows` | non-negative `int` |
+| `max_recursive_cte_iterations` | non-negative `int` |
+| `vector_knn_default_k` | non-negative `int` |
+| `lance_metadata_cache_bytes` | `int` or `None` |
+| `lance_index_cache_bytes` | `int` or `None` |
+| `object_store` | nested `dict` (below) |
+| `index_rebuild` | nested `dict` (below) |
+| `strict_schema` | `bool` |
+| `defer_embeddings` | `bool` |
+| `fork_fragment_warn_threshold` | non-negative `int` |
+| `tx_id_reservoir_batch` | non-negative `int` |
+| `async_flush_enabled` | `bool` |
+| `max_pending_flushes` | non-negative `int` |
+| `flush_stream_timeout` | seconds or `timedelta` |
+| `drop_fork_drain_timeout` | seconds or `timedelta` |
+| `flush_drain_timeout` | seconds or `timedelta` |
+| `max_forks` | `int` or `None` |
+| `fork_default_ttl` | seconds, `timedelta`, or `None` |
+| `fork_sweeper_interval` | seconds or `timedelta` |
+| `disable_fork_sweeper` | `bool` |
+| `fork_index_build_threshold` | non-negative `int` |
+| `fork_index_builder_interval` | seconds or `timedelta` |
+| `disable_fork_index_builder` | `bool` |
+| `ssi_enabled` | `bool` |
+| `ec_flush_interval` | seconds or `timedelta` |
+| `ec_flush_threshold` | non-negative `int` |
+
+Nested dictionaries accept only the following fields, merging fields individually:
+
+| Nested config | Fields |
+|---|---|
+| `compaction` | `enabled`, `max_l1_runs`, `max_l1_size_bytes`, `max_l1_age`, `check_interval`, `worker_threads`, `frozen_segments_compact_threshold`, `version_retention` |
+| `throttle` | `soft_limit`, `hard_limit`, `base_delay` |
+| `file_sandbox` | `enabled`, `allowed_paths` |
+| `object_store` | `connect_timeout`, `read_timeout`, `write_timeout`, `max_retries`, `retry_backoff_base`, `retry_backoff_max` |
+| `index_rebuild` | `max_retries`, `retry_delay`, `worker_check_interval`, `growth_trigger_ratio`, `max_index_age`, `auto_rebuild_enabled` |
+
+Disabling `ssi_enabled` is suitable only for single-writer workloads or callers
+that coordinate concurrent read-modify-write operations themselves, matching the
+Rust configuration contract.
+
+```python
+from datetime import timedelta
+
+builder = uni_db.UniBuilder.temporary().config({
+    "commit_timeout": timedelta(seconds=30),
+    "auto_flush_interval": None,
+    "max_recursive_cte_iterations": 256,
+    "object_store": {"read_timeout": 20.0, "max_retries": 3},
+    "index_rebuild": {"auto_rebuild_enabled": True, "max_index_age": 3600.0},
+})
+db = builder.build()
+effective = db.config()
+db.shutdown()
+```
+
+`LocyConfig` and the dictionary passed to `locy_with(...).with_config(...)`
+also accept `classifier_cache_max`, `neural_predicates_preview`, and `semiring`.
+A semiring is `"add_mult_prob"`, `"max_min_prob"`, `"bdd_exact"`, or
+`{"top_k_proofs": k}`. Rust's restrictions on combining semirings with
+`exact_probability` still apply. Dictionary durations use `timeout`; the
+`LocyConfig` constructor retains its existing `timeout_secs` keyword.
+
+`session.compile_locy_with_config(program, config)` applies the same compiler
+configuration as evaluation. Both session flavors expose
+`build_fork_local_index(label, column, kind)` with `scalar_btree`, `sorted`,
+`vid_uid`, `vector`, `full_text`, or `sparse`. Index building flushes and delegates
+to the fork branch; it is refused on a primary session.
+
+`session.execute_with_retry(cypher)` uses Rust's default conflict retry policy.
+For Python callbacks or custom retry settings, use the existing
+`uni_db.transact_with_retry` / `async_transact_with_retry` helpers.
+Transaction execute and Locy builders both accept `.params({...})`.
+
+`db.load_python_plugin(source, module_name, grants=None)` registers for every
+session of that database. `session.load_python_plugin(...)` retains its
+session-local scope. Async database and session methods are awaitable.
 
 ---
 

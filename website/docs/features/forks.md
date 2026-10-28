@@ -18,7 +18,7 @@ primary and fork data.
 
 Forks are **shipped and GA** in both Rust and Python. The full surface is available: writable and nestable forks; lifecycle controls (TTL, budget, Lance tags, parent→child cancellation, pin/refresh on forked sessions); and diff + promotion for write-audit-publish workflows. The Python bindings (`Session.fork`/`fork_schema`, `Uni.list_forks`/`drop_fork`/`drop_fork_cascade`/`tag_fork`/`diff_fork_primary`/`promote_from_fork`) mirror the Rust API one-to-one.
 
-Fork-local indexes and index fusion are **shipped** as a Rust API (see [Fork-local indexes](#fork-local-indexes)); they are not yet exposed in the Python bindings. Fork **compaction** is the remaining planned enhancement, so until it lands, long-lived heavy-write forks should be `drop_fork`-and-recreate to bound fragment accumulation (see [Operational signals](#operational-signals)).
+Fork-local indexes and index fusion are **shipped** in Rust and Python sync/async sessions (see [Fork-local indexes](#fork-local-indexes)). Fork **compaction** is the remaining planned enhancement, so until it lands, long-lived heavy-write forks should be `drop_fork`-and-recreate to bound fragment accumulation (see [Operational signals](#operational-signals)).
 
 ## Quick start
 
@@ -313,20 +313,20 @@ On disk:
 - **Lance compaction honors branch references.** Primary GC will not reclaim fragments that a live fork still references.
 
 :::caution Forks isolate **data**, not **code**
-A fork's isolation is over graph data and schema. Custom functions and
-plugins are registered at the `Uni` (database) level and are **shared** by
-primary and every fork — registering one in any session affects all of
-them. A fork is **not** a code or privilege sandbox. (Registering a UDF
-already requires in-process Rust/Python access, so this is a clarification
-of scope, not a vulnerability.)
+A fork isolates graph data and schema. Database-level plugin registrations are
+shared with forks; session-level registrations are scoped to that session and
+shadow instance entries. A fork is not a code-execution or privilege sandbox:
+loader permissions and capabilities still govern plugin execution.
 :::
 
 ## Fork-local indexes
 
 A fork accumulates its writes on its own Lance branches, so a query on a forked session has to consult both the parent's indexes and the fork-local rows. A **fork-local index** builds a secondary index over just the fork's branch and **fuses** it with the parent index at query time — keeping point lookups, range scans, vector ANN, and full-text search fast on a fork without rebuilding any of primary's indexes.
 
-!!! note "Rust-only today"
-    `build_fork_local_index` is a Rust API; it is not yet exposed in the Python bindings.
+!!! note "Python sync and async support"
+    `fork.build_fork_local_index("Person", "email", "scalar_btree")` is also
+    available in Python; await it on `AsyncSession`. Supported kind strings are
+    `scalar_btree`, `sorted`, `vid_uid`, `vector`, `full_text`, and `sparse`.
 
 ```rust
 use uni_db::store::fork::ForkLocalIndexKind;

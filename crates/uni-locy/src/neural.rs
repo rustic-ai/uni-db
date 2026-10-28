@@ -512,16 +512,12 @@ impl ModelInvocationCache {
     }
 }
 
-// ─── Phase B A3: Candle-backed linear classifier ────────────────────
+// ─── Safetensors linear classifier ─────────────────────────────────
 
-/// Real `NeuralClassifier` backed by a Candle single-layer logistic
-/// regression. Weights and bias are loaded from a `safetensors` file
-/// at construction time; the forward pass runs on CPU. Sufficient to
-/// close the Phase B "Real Candle classifier loads + invokes via
-/// mock-config TCK harness" gate without committing to a specific
-/// production architecture — future slices can swap the inner module
-/// for an MLP, transformer, or `hf-hub`-fetched checkpoint without
-/// touching the `NeuralClassifier` trait surface.
+/// CPU single-layer logistic regression loaded from a `safetensors` file.
+/// The historical name is retained for API compatibility; loading and
+/// inference do not require Candle. Feature encoding and arithmetic remain
+/// f32, with probabilities widened to f64 at the trait boundary.
 ///
 /// **Expected safetensors layout:**
 /// - `"weight"` — shape `[n_features]`, dtype `f32`.
@@ -535,7 +531,7 @@ impl ModelInvocationCache {
 ///   via the djb2 algorithm divided by `i32::MAX` (production
 ///   classifiers should route String features through embedding
 ///   lookups in M3 D1; this is a pragmatic stand-in).
-/// - `FeatureValue::Null` (or missing feature) → `0.0`.
+/// - `FeatureValue::Null`, `Vector` (or missing feature) → `0.0`.
 pub struct CandleLinearClassifier {
     name: String,
     /// Feature names in the order the weight vector expects them.
@@ -544,8 +540,6 @@ pub struct CandleLinearClassifier {
     weight: Vec<f32>,
     /// Scalar bias term.
     bias: f32,
-    /// CPU device handle (cached for tensor construction).
-    device: candle_core::Device,
 }
 
 impl std::fmt::Debug for CandleLinearClassifier {
@@ -570,36 +564,45 @@ impl CandleLinearClassifier {
         feature_order: Vec<String>,
         weights_path: impl AsRef<std::path::Path>,
     ) -> ClassifierResult<Self> {
-        let device = candle_core::Device::Cpu;
         let path = weights_path.as_ref();
-        let tensors = candle_core::safetensors::load(path, &device).map_err(|e| {
-            ClassifierError::Provider(format!(
-                "candle: failed to load safetensors from {path:?}: {e}"
-            ))
+        let data = std::fs::read(path).map_err(|e| {
+            ClassifierError::Provider(format!("linear: failed to read {path:?}: {e}"))
         })?;
-        let weight_t = tensors.get("weight").ok_or_else(|| {
-            ClassifierError::Provider("candle: safetensors missing 'weight' tensor".to_string())
+        let tensors = safetensors::SafeTensors::deserialize(&data).map_err(|e| {
+            ClassifierError::Provider(format!("linear: invalid safetensors in {path:?}: {e}"))
         })?;
-        let bias_t = tensors.get("bias").ok_or_else(|| {
-            ClassifierError::Provider("candle: safetensors missing 'bias' tensor".to_string())
-        })?;
-        let weight: Vec<f32> = weight_t
-            .flatten_all()
-            .and_then(|t| t.to_vec1::<f32>())
-            .map_err(|e| ClassifierError::Provider(format!("candle: weight read: {e}")))?;
-        let bias_vec: Vec<f32> = bias_t
-            .flatten_all()
-            .and_then(|t| t.to_vec1::<f32>())
-            .map_err(|e| ClassifierError::Provider(format!("candle: bias read: {e}")))?;
+        let read_f32 = |name: &str| -> ClassifierResult<Vec<f32>> {
+            let tensor = tensors
+                .tensor(name)
+                .map_err(|e| ClassifierError::Provider(format!("linear: tensor '{name}': {e}")))?;
+            if tensor.dtype() != safetensors::Dtype::F32 {
+                return Err(ClassifierError::Provider(format!(
+                    "linear: '{name}' must have dtype F32; got {:?}",
+                    tensor.dtype()
+                )));
+            }
+            // SafeTensors validates byte lengths. Decode little-endian values
+            // without assuming the file buffer's alignment or host endianness.
+            Ok(tensor
+                .data()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| f32::from_le_bytes(*bytes))
+                .collect())
+        };
+        // Match the former flatten_all behavior, including singleton bias shapes.
+        let weight = read_f32("weight")?;
+        let bias_vec = read_f32("bias")?;
         if bias_vec.len() != 1 {
             return Err(ClassifierError::Provider(format!(
-                "candle: 'bias' must be scalar (shape [1]); got len={}",
+                "linear: 'bias' must be scalar (shape [1]); got len={}",
                 bias_vec.len()
             )));
         }
         if weight.len() != feature_order.len() {
             return Err(ClassifierError::Provider(format!(
-                "candle: weight length {} != feature_order length {}",
+                "linear: weight length {} != feature_order length {}",
                 weight.len(),
                 feature_order.len()
             )));
@@ -609,7 +612,6 @@ impl CandleLinearClassifier {
             feature_order,
             weight,
             bias: bias_vec[0],
-            device,
         })
     }
 
@@ -637,31 +639,19 @@ impl CandleLinearClassifier {
 #[async_trait]
 impl NeuralClassifier for CandleLinearClassifier {
     async fn classify(&self, inputs: &[ClassifyInput]) -> ClassifierResult<Vec<f64>> {
-        if inputs.is_empty() {
-            return Ok(Vec::new());
-        }
-        let n_features = self.weight.len();
-        // Pack inputs into a row-major [batch, n_features] vec.
-        let mut data: Vec<f32> = Vec::with_capacity(inputs.len() * n_features);
-        for inp in inputs {
-            for fname in &self.feature_order {
-                data.push(self.encode_feature(inp.features.get(fname)));
-            }
-        }
-        let x = candle_core::Tensor::from_vec(data, (inputs.len(), n_features), &self.device)
-            .map_err(|e| ClassifierError::Provider(format!("candle: input tensor: {e}")))?;
-        let w = candle_core::Tensor::from_slice(&self.weight, (n_features, 1), &self.device)
-            .map_err(|e| ClassifierError::Provider(format!("candle: weight tensor: {e}")))?;
-        let logits = x
-            .matmul(&w)
-            .and_then(|t| t.broadcast_add(&candle_core::Tensor::new(&[self.bias], &self.device)?))
-            .map_err(|e| ClassifierError::Provider(format!("candle: forward pass: {e}")))?;
-        // Sigmoid; flatten to [batch].
-        let probs = candle_nn::ops::sigmoid(&logits)
-            .and_then(|t| t.flatten_all())
-            .and_then(|t| t.to_vec1::<f32>())
-            .map_err(|e| ClassifierError::Provider(format!("candle: sigmoid: {e}")))?;
-        Ok(probs.into_iter().map(|p| p as f64).collect())
+        Ok(inputs
+            .iter()
+            .map(|input| {
+                let dot: f32 = self
+                    .feature_order
+                    .iter()
+                    .zip(&self.weight)
+                    .map(|(name, weight)| self.encode_feature(input.features.get(name)) * weight)
+                    .sum();
+                let logit = dot + self.bias;
+                (1.0_f32 / (1.0_f32 + (-logit).exp())) as f64
+            })
+            .collect())
     }
 
     fn name(&self) -> &str {
@@ -810,5 +800,161 @@ mod tests {
         assert!(inverse_sigmoid(0.0).is_infinite() && inverse_sigmoid(0.0) < 0.0);
         assert!(inverse_sigmoid(1.0).is_infinite() && inverse_sigmoid(1.0) > 0.0);
         assert!((inverse_sigmoid(0.5) - 0.0).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod linear_classifier_tests {
+    use super::*;
+    use safetensors::tensor::{Dtype, TensorView, serialize_to_file};
+
+    fn fixture(tensors: &[(&str, Dtype, Vec<usize>, Vec<u8>)]) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let views = tensors.iter().map(|(name, dtype, shape, data)| {
+            (*name, TensorView::new(*dtype, shape.clone(), data).unwrap())
+        });
+        serialize_to_file(views, None, file.path()).unwrap();
+        file
+    }
+
+    fn floats(values: &[f32]) -> Vec<u8> {
+        values.iter().flat_map(|x| x.to_le_bytes()).collect()
+    }
+
+    #[tokio::test]
+    async fn matches_candle_reference_for_feature_encoding_and_extreme_logits() {
+        let file = fixture(&[
+            (
+                "weight",
+                Dtype::F32,
+                vec![6],
+                floats(&[0.75, -0.125, 0.5, 1.25, 9.0, 7.0]),
+            ),
+            ("bias", Dtype::F32, vec![1], floats(&[-0.25])),
+        ]);
+        let model = CandleLinearClassifier::load(
+            "reference",
+            ["x", "i", "b", "s", "v", "missing"]
+                .map(String::from)
+                .to_vec(),
+            file.path(),
+        )
+        .unwrap();
+        // Captured from the previous Candle CPU implementation with the same
+        // tensors and rows. Allow f32 rounding differences in dot/exp kernels.
+        let expected: [f64; 9] = [
+            0.0,
+            1.6159972671395084e-33,
+            0.0003335594665259123,
+            0.2217743992805481,
+            0.37628287076950073,
+            0.5608578324317932,
+            0.9990841150283813,
+            1.0,
+            1.0,
+        ];
+        let inputs: Vec<_> = [-1000.0, -100.0, -10.0, -1.0, 0.0, 1.0, 10.0, 100.0, 1000.0]
+            .into_iter()
+            .map(|x| {
+                ClassifyInput::new()
+                    .with("x", FeatureValue::Float(x))
+                    .with("i", FeatureValue::Int(3))
+                    .with("b", FeatureValue::Bool(true))
+                    .with("s", FeatureValue::String("supplier".into()))
+                    .with("v", FeatureValue::Vector(vec![123.0]))
+            })
+            .collect();
+        // Loading owns the weights; inference must not depend on the file.
+        drop(file);
+        let actual = model.classify(&inputs).await.unwrap();
+        for (actual, expected) in actual.iter().zip(expected) {
+            let tolerance = expected.abs() * 2e-6 + 1e-40;
+            assert!(
+                (actual - expected).abs() <= tolerance,
+                "{actual} != {expected}"
+            );
+        }
+        assert_eq!(model.name(), "reference");
+        assert!(model.classify(&[]).await.unwrap().is_empty());
+        for input in &inputs {
+            assert_eq!(
+                model
+                    .classify(std::slice::from_ref(input))
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retains_flattened_shapes_and_bias_only_models() {
+        let file = fixture(&[
+            ("weight", Dtype::F32, vec![1, 2], floats(&[2.0, -1.0])),
+            ("bias", Dtype::F32, vec![], floats(&[0.0])),
+        ]);
+        let model = CandleLinearClassifier::load("flat", vec!["a".into(), "b".into()], file.path())
+            .unwrap();
+        let inputs = [
+            ClassifyInput::new()
+                .with("a", FeatureValue::Int(1))
+                .with("b", FeatureValue::Float(2.0)),
+            ClassifyInput::new()
+                .with("a", FeatureValue::Null)
+                .with("b", FeatureValue::Bool(false)),
+        ];
+        assert_eq!(model.classify(&inputs).await.unwrap(), vec![0.5, 0.5]);
+        let file = fixture(&[
+            ("weight", Dtype::F32, vec![0], vec![]),
+            ("bias", Dtype::F32, vec![1, 1], floats(&[0.0])),
+        ]);
+        let model = CandleLinearClassifier::load("bias", vec![], file.path()).unwrap();
+        assert_eq!(model.classify(&inputs).await.unwrap(), vec![0.5, 0.5]);
+    }
+
+    #[test]
+    fn rejects_invalid_model_files_and_tensor_contracts() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        assert!(CandleLinearClassifier::load("bad", vec![], file.path()).is_err());
+        let path = file.path().to_owned();
+        drop(file);
+        assert!(CandleLinearClassifier::load("missing", vec![], path).is_err());
+        let weight = ("weight", Dtype::F32, vec![1], floats(&[1.0]));
+        let bias = ("bias", Dtype::F32, vec![1], floats(&[0.0]));
+        for tensors in [
+            vec![weight.clone()],
+            vec![bias.clone()],
+            vec![
+                weight.clone(),
+                ("bias", Dtype::F32, vec![2], floats(&[0.0, 1.0])),
+            ],
+            vec![weight.clone(), ("bias", Dtype::F32, vec![0], vec![])],
+            vec![
+                (
+                    "weight",
+                    Dtype::F64,
+                    vec![1],
+                    1.0_f64.to_le_bytes().to_vec(),
+                ),
+                bias.clone(),
+            ],
+            vec![
+                weight.clone(),
+                ("bias", Dtype::F64, vec![1], 0.0_f64.to_le_bytes().to_vec()),
+            ],
+        ] {
+            let file = fixture(&tensors);
+            assert!(matches!(
+                CandleLinearClassifier::load("bad", vec!["x".into()], file.path()),
+                Err(ClassifierError::Provider(_))
+            ));
+        }
+        let file = fixture(&[weight, bias]);
+        assert!(CandleLinearClassifier::load("mismatch", vec![], file.path()).is_err());
+        assert!(
+            CandleLinearClassifier::load("mismatch", vec!["a".into(), "b".into()], file.path())
+                .is_err()
+        );
     }
 }

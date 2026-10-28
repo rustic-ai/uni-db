@@ -755,14 +755,14 @@ Use hybrid mode (local + cloud) for best write latency with cloud durability:
 
 ### Auto-Flush Tuning for Cloud
 
-Optimize flush interval for cloud cost vs. durability:
+Tune L1 flush frequency for request cost and checkpoint latency. With WAL enabled, commits are durable before the L1 flush:
 
 | Cloud Provider | Recommended Interval | Rationale |
 |----------------|---------------------|-----------|
 | S3 | 5-30s | Balance PUT request costs |
 | GCS | 5-30s | Similar to S3 |
 | Azure Blob | 5-30s | Similar to S3 |
-| Local SSD | 1-5s | No cost concern, minimize data at risk |
+| Local SSD | 1-5s | No request charge; reduce L0 backlog |
 
 ```rust
 use uni_db::{Uni, UniConfig};
@@ -774,7 +774,7 @@ config.auto_flush_interval = Some(Duration::from_secs(30));
 config.auto_flush_min_mutations = 100;
 
 let db = Uni::open("./local-meta")
-    .remote_storage("s3://my-bucket/data", CloudStorageConfig::default())
+    .remote_storage("s3://my-bucket/data", CloudStorageConfig::s3_from_env("my-bucket"))
     .config(config)
     .build()
     .await?;

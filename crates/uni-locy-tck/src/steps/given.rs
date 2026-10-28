@@ -185,7 +185,7 @@ fn register_calibrated_mock_classifier(
     world.classifier_registry.insert(name, arc);
 }
 
-/// Phase B A3: register a real Candle-backed
+/// Register the historical Candle API's CPU linear classifier,
 /// `CandleLinearClassifier` with a deterministic single-feature
 /// logistic-regression fixture. Weights are chosen so that an input
 /// of 1.0 produces sigmoid ≈ 0.9 and 0.0 produces sigmoid ≈ 0.1.
@@ -198,8 +198,7 @@ fn register_calibrated_mock_classifier(
 /// classifier receives `features["s"] = Float(<row's score>)`.
 #[given(regex = r#"^a Candle classifier ['"](.+)['"] over Float input binding ['"](.+)['"]$"#)]
 fn register_candle_classifier_float(world: &mut LocyWorld, name: String, binding_name: String) {
-    use candle_core::{Device, Tensor};
-    use std::collections::HashMap;
+    use safetensors::tensor::{serialize_to_file, Dtype, TensorView};
     use uni_locy::CandleLinearClassifier;
 
     // Solve logit(0.9) ≈ 2.197, logit(0.1) ≈ -2.197 for f(1.0)/f(0.0):
@@ -207,28 +206,29 @@ fn register_candle_classifier_float(world: &mut LocyWorld, name: String, binding
     const WEIGHT: f32 = 4.394;
     const BIAS: f32 = -2.197;
 
-    let device = Device::Cpu;
-    let w = Tensor::from_slice(&[WEIGHT], (1,), &device).unwrap();
-    let b = Tensor::from_slice(&[BIAS], (1,), &device).unwrap();
-    let mut tensors: HashMap<String, Tensor> = HashMap::new();
-    tensors.insert("weight".to_string(), w);
-    tensors.insert("bias".to_string(), b);
+    let weight_bytes = WEIGHT.to_le_bytes();
+    let bias_bytes = BIAS.to_le_bytes();
+    let tensors = [
+        (
+            "weight",
+            TensorView::new(Dtype::F32, vec![1], &weight_bytes).unwrap(),
+        ),
+        (
+            "bias",
+            TensorView::new(Dtype::F32, vec![1], &bias_bytes).unwrap(),
+        ),
+    ];
 
     let temp = tempfile::Builder::new()
         .prefix("candle-fixture-")
         .suffix(".safetensors")
         .tempfile()
         .expect("create temp fixture");
-    candle_core::safetensors::save(&tensors, temp.path()).expect("save fixture safetensors");
+    serialize_to_file(tensors, None, temp.path()).expect("save fixture safetensors");
 
     let classifier =
         CandleLinearClassifier::load(format!("candle/{}", name), vec![binding_name], temp.path())
             .expect("load Candle fixture");
-    // Persist the tempfile by leaking the handle — the OS will clean
-    // up the temp dir at process exit. We need the file to outlive
-    // the Given step.
-    let _ = temp.into_temp_path().keep();
-
     let arc: Arc<dyn NeuralClassifier> = Arc::new(classifier);
     world.classifier_registry.insert(name, arc);
 }

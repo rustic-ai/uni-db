@@ -29,8 +29,7 @@ def _builder(tmp_path, name="db"):
     [
         ("quer_timeout", 5.0),  # misspelling of a real key
         ("totally_not_a_real_key", 123),  # nothing like a real key
-        ("ssi_enabled", False),  # a real UniConfig field with no binding
-        ("commit_timeout", 5.0),  # ditto
+        ("partial_lance_writes", True),  # deprecated no-op
     ],
 )
 def test_unknown_config_key_is_refused(tmp_path, key, value):

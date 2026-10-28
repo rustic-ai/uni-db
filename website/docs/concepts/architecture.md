@@ -309,25 +309,18 @@ Lazy-loads vertex/edge properties from storage on demand.
 Coordinates mutations with L0 buffer and WAL.
 
 ```rust
-// Writer coordination flow
-pub struct Writer {
-    l0_manager: Arc<L0Manager>,      // L0 buffer access
-    storage: Arc<StorageManager>,    // Storage layer
-    allocator: Arc<IdAllocator>,     // VID/EID allocation
-    cache: Option<Arc<AdjacencyCache>>, // Cache invalidation
-}
-
-// Insert vertex
-writer.insert_vertex(vid, properties)?; // → L0 + WAL
-writer.check_flush()?;                   // → Maybe L0 → Lance
+// Public write scope: transaction-local buffering, then durable commit.
+let tx = session.tx().await?;
+tx.execute("CREATE (:Person {name: 'Alice'})").await?;
+tx.commit().await?;
 ```
 
 **Write Flow:**
-1. Allocate VID via `IdAllocator`
-2. Write to WAL for durability
-3. Insert into L0 buffer
-4. Return immediately (async durability)
-5. Auto-flush when mutation threshold OR time interval reached
+1. Allocate identifiers and stage mutations in the transaction's private L0.
+2. At commit, acquire the writer lock and validate SSI/OCC conflicts.
+3. With WAL enabled, append and persist the commit's WAL records.
+4. Merge into committed L0 and publish the commit notification.
+5. Flush committed data to Lance L1 when the count or timer threshold fires.
 
 **Auto-Flush Triggers:**
 - **Mutation count** (default: 10,000): Flush when buffer fills

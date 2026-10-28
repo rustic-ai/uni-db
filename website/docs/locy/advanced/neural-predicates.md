@@ -161,6 +161,16 @@ The Python callable must accept `list[dict[str, Any]]` and return `list[float]` 
 
 Without a registered classifier, the program fails at the first invocation with `neural classifier '<name>' not registered; add it to LocyConfig::classifier_registry`.
 
+### Built-in Rust linear classifier
+
+`uni_locy::CandleLinearClassifier::load(name, feature_order, path)` loads a
+CPU logistic-regression model from a safetensors file. The file contains F32
+`weight` values in feature order and one F32 `bias` value. The historical class
+name remains available for compatibility; this classifier no longer requires
+Candle or a model-provider feature. It retains f32 inference and returns f64
+probabilities through `NeuralClassifier`. Optional embedding providers remain
+controlled by their existing features.
+
 ## CALIBRATE
 
 Calibration rescales a classifier's raw outputs so they line up with empirical frequencies. Useful when raw scores are over-confident in the tails (typical of boosted trees and many softmax heads).

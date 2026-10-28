@@ -284,16 +284,25 @@ graph TB
 
 | Crate | Purpose |
 |---|---|
-| `lance` | Columnar storage with versioning, vector indexes, full-text search. Pinned at `7.0.0` in the root `Cargo.toml`. **`lancedb` is not a dependency** — it was dropped; only the `lance` core crate is used |
+| `lance` | Columnar storage with versioning, vector indexes, full-text search. Pinned at `13.0.0` in the root `Cargo.toml`. **`lancedb` is not a dependency** — it was dropped; only the `lance` core crate is used |
 | `arrow` / `arrow-array` | In-memory columnar data format (RecordBatch, Array types) |
 | `datafusion` | Query engine — physical planning, expression evaluation, aggregation |
 | `pest` / `pest_derive` | PEG parser generator powering `uni-cypher`'s Cypher and Locy grammars |
 | `object_store` | S3/GCS/Azure/local filesystem abstraction |
 | `pyo3` | Python bindings (FFI) |
-| `candle-core` / `candle-transformers` | Native Rust ML inference for auto-embedding |
+| `candle-core` / `candle-transformers` | Optional native Rust ML inference for auto-embedding |
+| `safetensors` | Locy CPU linear-classifier model loading without a tensor runtime |
 | `uni-xervo` | Embedding + generation runtime used by auto-embedding and host-side multimodal model calls |
 | `sha3` | SHA3-256 hashing for UniId content addressing |
 | `serde` / `rmp-serde` | MessagePack serialization for CRDTs and CypherValues |
+
+Locy's public `CandleLinearClassifier` keeps its historical name for API
+compatibility but does not depend on Candle. It loads F32 `weight` and `bias`
+tensors directly with `safetensors`, preserves flattened tensor acceptance and
+feature ordering/encoding, and computes dot product plus sigmoid in f32 before
+widening probabilities to f64. The default inverse-sigmoid `classify_logits`
+behavior is unchanged. Optional Xervo providers can still depend on Candle;
+disabling them removes that dependency from minimal Uni builds.
 
 ## Write Path (End-to-End)
 
@@ -466,7 +475,7 @@ A SHA3-256 hash that provides **stable, content-addressed identity** for vertice
 |---|---|
 | **Type** | `[u8; 32]` (256-bit SHA3 hash) |
 | **Encoding** | 53-character Base32Lower multibase string |
-| **Example** | `z3asjk42...` (z prefix = Base32Lower) |
+| **Example** | `baaaaa...` (b prefix = Base32Lower) |
 | **Computation** | `SHA3-256(label ‖ ext_id ‖ sorted_properties)` |
 
 UniId enables:
@@ -2289,13 +2298,13 @@ L0Manager {
 
 ## WAL (Write-Ahead Log)
 
-The WAL ensures durability before flush. Each WAL segment is stored as a JSON file in the object store:
+The WAL ensures durability before flush. Each WAL segment is stored in the object store with a checksummed envelope around its JSON payload (legacy raw JSON remains readable):
 
 | Field | Details |
 |---|---|
 | **Filename** | `{LSN:020}_{uuid}.wal` (zero-padded for lexicographic ordering) |
-| **Format** | JSON-serialized `WalSegment { lsn: u64, mutations: Vec<Mutation> }` |
-| **Mutations** | `InsertVertex`, `DeleteVertex`, `InsertEdge`, `DeleteEdge` |
+| **Format** | `UNIWAL2\n`, 64 hex BLAKE3 checksum characters, newline, then JSON `WalSegment` with `lsn`, `mutations`, `writer_features`, `announced_through`, and `commits` (commit spans) |
+| **Mutations** | `InsertVertex`, `DeleteVertex`, `InsertEdge`, `DeleteEdge`, `SetVertexLabels` |
 | **LSN** | Monotonically increasing Log Sequence Number (starts at 1) |
 | **Replay** | `replay_since(hwm)` fetches segments with LSN > high-water mark |
 
@@ -2426,7 +2435,7 @@ Content-addressed O(1) lookup from UniId (SHA3-256) to VID.
 
 ```cypher
 // UID lookup is O(1) via BTree
-MATCH (n:Person) WHERE n._uid = 'z3asjk42...' RETURN n
+MATCH (n:Person) WHERE n._uid = $uid RETURN n
 ```
 
 ### Scalar Indexes (BTree, Hash, Bitmap)
@@ -4013,7 +4022,7 @@ return a path of any length. Both are now enforced:
 
 ### shortestPath: a pair with no path
 
-Matches openCypher / Neo4j (a breaking change from 4.2.0, where every no-path
+Matches openCypher / Neo4j (a breaking change from the 4.1 series, where every no-path
 pair was kept as a row with a NULL path, in mandatory and OPTIONAL MATCH alike):
 
 - **Mandatory `MATCH`** drops the pair. `GraphShortestPathExec` gets
@@ -5850,7 +5859,7 @@ RETURN componentId, collect(nodeId) AS members
 
 ## Extending the Catalog — GraphView & GraphCompute
 
-The 35 algorithms above are native. **Custom** graph algorithms are authored through the plugin framework's `AlgorithmProvider` surface ([Part XVII](#part-xvii-plugin-framework)), which offers two paths:
+The tables above list a subset of the 42 native algorithms. **Custom** graph algorithms are authored through the plugin framework's `AlgorithmProvider` surface ([Part XVII](#part-xvii-plugin-framework)), which offers two paths:
 
 - **In-process (`GraphView`)** — an algorithm authored in Rust obtains a read-only CSR topology snapshot via `AlgorithmHost::project(&GraphProjectionSpec) -> Arc<dyn GraphView>` and walks it with dense-slot accessors (`out_neighbors` / `out_degree` / `out_weight` / `to_vid` / …). First-party `uni.algo.reachability`, `uni.algo.pagerank`, `uni.algo.sssp`, and `uni.path.expand` are authored purely against this surface. Gated by `Capability::HostQuery`.
 - **Guest-authored (`GraphCompute`)** — the same graph algorithms can be authored in **Rhai, Python, WASM, or Extism**, driving coarse native kernels over opaque handles ("conductor, not worker"). First-party `uni.algo.gcpagerank` / `gcwalks` / `gcoverlap` dogfood it. See [§GraphCompute — Guest-Authorable Graph Algorithms](#graphcompute--guest-authorable-graph-algorithms) for the kernel catalog, determinism guarantees, and budgets.
@@ -7889,7 +7898,7 @@ with session.tx() as tx:
     result = tx.query("MATCH (n:Person) RETURN count(*)")
     tx.commit()
 
-# Flush uncommitted changes to durable storage
+# Flush committed L0 changes into Lance L1 (commit already persisted the WAL)
 db.flush()
 ```
 
@@ -7990,13 +7999,8 @@ result = xervo.generate_text(
     max_tokens=128,
 )
 
-# Rerank documents by relevance to a query
-scored = xervo.rerank(
-    "rerank/minilm",
-    "How do graph databases handle relationships?",
-    ["Graph DBs use edges to model relationships.", "SQL uses foreign keys."],
-)
-# → list[ScoredDoc] with index, score, text
+# Python reranking is exposed through the search procedures' rerank options.
+# Xervo.rerank is a Rust facade method, not a Python binding.
 
 # Prefetch models at startup (best practice for latency-sensitive pipelines)
 xervo.prefetch(["embed/default", "llm/default"])   # specific aliases
@@ -9314,7 +9318,7 @@ HEAD now looks like.
 
 ## Operational Signals
 
-- `uni_fork_l1_flushes{fork=...}` — gauge incremented on every successful fork flush. A proxy for fragment growth on the fork's branches; Phase 5 will add proper fork compaction.
+- `uni_fork_l1_flushes{fork=...}` — gauge incremented on every successful fork flush. A proxy for fragment growth on the fork's branches; dedicated fork compaction remains planned.
 - `tracing::warn!` once per writer when the per-fork flush count crosses `UniConfig::fork_fragment_warn_threshold` (default 256). Mitigation today is drop-and-recreate.
 - `tracing::warn!` from the TTL sweeper when a `drop_fork_cascade` call fails on an expired fork — the next tick retries.
 
@@ -9325,10 +9329,8 @@ Carve-outs that have surfaced in user questions and are explicitly out of scope 
 - **Hypothesis persistence (ASSUME snapshots).** Forks are durable database branches; they are not a hypothesis store for Locy reasoning. Use ASSUME at the Locy layer for that.
 - **Re-parenting.** A fork's parent is fixed at creation. Moving a subtree under a different parent is not planned.
 - **Parallel-edge promotion.** Phase 6b's edge identity is `(src_uid, dst_uid, type)`, so two parallel edges of the same type between the same endpoints with different property bags collapse to one. Multi-edge promotion would require an edge-content hash — deferred to a future phase.
-- **Cypher TCK and Python bindings for diff/promote.** The Rust integration tests cover the contract; the Cypher Gherkin features and `bindings/uni-db` pyo3 wrappers are follow-on work.
-- **Property additions to existing primary labels via `fork_schema()`.** A Lance branch shares its parent dataset's Arrow schema, so adding a typed column on a fork-only basis would either leak to primary or break branch read-merge. The path stays closed until Phase 6 promotion semantics define the migration.
-- **Fork compaction.** Phase 5. Long-lived heavy-write forks accumulate L1 fragments; bound the cost by drop-and-recreate until then.
-- **TTL, tags, watch filtering, hooks/params propagation on forked sessions.** Phase 4.
+- **Fork-local property additions on existing labels via `fork_schema()`.** The overlay builder currently adds labels and edge types, not properties on existing labels. This is an API limitation, not a shared-schema restriction in Lance. Adding a property on primary is supported: primary DDL widens storage and every live fork branch before publishing the catalog change (see schema evolution above).
+- **Fork compaction.** Still planned. Long-lived heavy-write forks accumulate L1 fragments; bound the cost by drop-and-recreate until it lands.
 
 ---
 
@@ -10868,3 +10870,22 @@ Quick reference of all anti-patterns from every chapter:
 
 *The Uni Black Book — Version 2.2.1*
 *Generated from Uni DB codebase analysis*
+
+
+### Python API parity contract
+
+The Python config converters expose all active `UniConfig` fields, including
+compaction, throttle, file-sandbox, object-store request policy, and index-rebuild
+nested structs. Config readback uses the same key set; durations are seconds and
+optional values retain `None`, so readback can be used to configure another
+builder. Config merges clone the prior settings and publish only after successful
+conversion. Cache and parallelism setters use the same config state, so the last
+setter wins. The deprecated `partial_lance_writes` no-op is not exposed.
+
+`scripts/ci/check_rust_python_parity.py` compares 19 facade, builder and result
+types, returned schema/session/metric fields, both Locy configuration entry
+points, and all five nested database config structs. It checks accepted config
+keys against both input conversion and readback; exclusions for native Rust
+handles, callbacks, and language-specific equivalents require explicit reasons.
+Negative-control tests verify new facade methods, fields and missing readback
+keys fail the guard. Runtime sync/async and stub parity tests remain independent.

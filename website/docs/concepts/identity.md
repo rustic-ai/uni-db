@@ -18,9 +18,9 @@ Every entity in Uni has two primary identifiers:
 │  ┌─────────────────────────────────────────────────────────────────────┐   │
 │  │                    Internal (VID)                                    │   │
 │  │                    0x0001_0000_0000_002A                             │   │
-│  │                    Fast array indexing, label-encoded                │   │
+│  │                    Dense id; labels resolved separately                │   │
 │  └───────────────────────────────┬─────────────────────────────────────┘   │
-│                                  │ content-hashes to                       │
+│                                  │ associated provenance                       │
 │  ┌───────────────────────────────▼─────────────────────────────────────┐   │
 │  │                    Provenance (UniId)                                │   │
 │  │                    bafkreihdwdcefgh4dqkjv67uzcmw7o...               │   │
@@ -72,10 +72,8 @@ let vid = Vid::new(42);       // a single u64 id
 assert_eq!(vid.as_u64(), 42);
 ```
 
------------|---------|-----------------|
-| Labels | 65,535 | Typically 10-100 |
-| Vertices per label | 281 trillion | Limited by storage |
-| Total vertices | 18 quintillion | Theoretical max |
+Persisted VIDs use the lower 63 bits; the high bit is reserved for ephemeral
+identities. Capacity is not divided into per-label bit ranges.
 
 ---
 
@@ -106,7 +104,7 @@ The UniId is a content-addressed identifier for distributed systems and provenan
 |----------|-------------|
 | Algorithm | SHA3-256 |
 | Encoding | Multibase (base32) |
-| Length | 44 characters |
+| Length | 53 characters (one prefix + 52 base32 characters) |
 | Determinism | Same content → same UID |
 
 ### Format
@@ -122,36 +120,29 @@ The UniId is a content-addressed identifier for distributed systems and provenan
 │            ─                                                               │
 │            └── multibase prefix                                            │
 │             ────────────────────────────────────────────────────────       │
-│             └── base32 encoded SHA3-256 hash (43 chars)                    │
+│             └── base32 encoded SHA3-256 hash (52 chars)                    │
 │                                                                            │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Generation
 
-UniId is computed from vertex content:
+UniId is computed by `VertexDataset::compute_vertex_uid` in
+`crates/uni-store/src/storage/vertex.rs`: SHA3-256 over the label, optional
+external id, and properties sorted by name, with explicit separators. Hashing
+an arbitrary JSON object's serialization does not reproduce this format.
 
 ```rust
-use uni_db::core::UniId;
-use sha3::{Sha3_256, Digest};
+use std::collections::HashMap;
+use uni_db::{Value, store::storage::vertex::VertexDataset};
 
-// Content to hash
-let content = serde_json::json!({
-    "label": "Paper",
-    "properties": {
-        "title": "Attention Is All You Need",
-        "year": 2017
-    }
-});
-
-// Compute SHA3-256
-let mut hasher = Sha3_256::new();
-hasher.update(content.to_string().as_bytes());
-let hash = hasher.finalize();
-
-// Create UniId
-let uid = UniId::from_bytes(&hash);
-println!("{}", uid.to_multibase());  // bafkrei...
+let properties = HashMap::from([
+    ("title".to_string(), Value::String("Attention Is All You Need".into())),
+    ("year".to_string(), Value::Int(2017)),
+]);
+let uid = VertexDataset::compute_vertex_uid("Paper", None, &properties);
+assert_eq!(uid.to_multibase().len(), 53);
+println!("{}", uid.to_multibase()); // b followed by 52 base32 characters
 ```
 
 ### Use Cases
@@ -169,13 +160,15 @@ println!("{}", uid.to_multibase());  // bafkrei...
 
 ```cypher
 MATCH (p:Paper)
-WHERE p._uid = "bafkreihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku"
+WHERE p._uid = $uid
+RETURN p
 ```
 
 Resolution path:
 1. Query UID index (separate Lance dataset)
 2. Get VID from index
-3. Load vertex data using VID
+3. Load visible vertex data using VID. On primary, verify candidates against
+   primary visibility: the UID index also contains fork entries.
 
 ---
 

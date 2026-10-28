@@ -1,0 +1,12 @@
+{
+  "api-inventory.json": "c47918e8508faac8dc93c334f2fc507a4f6ae9039b519ece5785b32bcb427f36",
+  "uni-python-parity-build-final.log.gz": "8be6cd33efc587294624df265a836990e28c462bb0d5c40010a8f94d02bf1923",
+  "uni-python-parity-clippy.log.gz": "62c252bb773baa6bb66a7939a6522291a7a2daae7643a0e0411f9ef68a220f29",
+  "uni-python-parity-full-final.log.gz": "4e94ee6f9b44fa4b4e98cff0c70339d7c5e7b75059b439ea0968330bbb015856",
+  "uni-python-parity-onnx-check.log.gz": "b57412eb1333c823fedb90a1fd8ac2f4bd82d59b6d8f96d587aab07a9dac454f",
+  "uni-python-parity-ruff-format.log.gz": "a21883470487db8777195c9e37202799c9d3ed0c827d4031c85890649b24b9dd",
+  "uni-python-parity-ruff.log.gz": "f3af4d142827f5aad2eb0c72d556d325488a57fb6219aac10afeb51085667d53",
+  "uni-python-parity-static-final.log.gz": "684b13294c06555687511e4543444719275c457ad00094cb7d987b9759213b39",
+  "uni-python-parity-stubtest.log.gz": "1d3cfd55e89c8c16a171b6fefdd31433fb996e6530ee900dc7985403462ebcd3",
+  "validation.json": "f08f45bda439ad354a620d147bbb0140629944bf7f5799d5cb6956e45f6be054"
+}

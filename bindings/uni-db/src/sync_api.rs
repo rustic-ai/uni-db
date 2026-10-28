@@ -1323,6 +1323,29 @@ impl Database {
     fn write_lease(&self) -> Option<crate::types::PyWriteLease> {
         self.inner.write_lease().map(convert::write_lease_to_py)
     }
+
+    /// Number of tracked background tasks currently attached to the database.
+    fn background_task_count(&self) -> usize {
+        self.inner.background_task_count()
+    }
+
+    /// Register a Python source plugin for all sessions of this database.
+    #[pyo3(signature = (module_src, module_name, grants=None))]
+    fn load_python_plugin(
+        &self,
+        py: Python<'_>,
+        module_src: &str,
+        module_name: &str,
+        grants: Option<Vec<String>>,
+    ) -> PyResult<Py<PyAny>> {
+        let caps = crate::builders::build_capability_set(grants);
+        let loader = uni_plugin_pyo3::PythonPluginLoader::with_default_plugin_id(module_name);
+        let outcome = self
+            .inner
+            .load_python_plugin(py, &loader, module_src, module_name, &caps)
+            .map_err(crate::exceptions::uni_error_to_pyerr)?;
+        crate::builders::load_outcome_to_pydict(py, &outcome)
+    }
 }
 
 // ============================================================================

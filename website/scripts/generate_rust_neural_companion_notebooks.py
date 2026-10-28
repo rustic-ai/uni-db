@@ -163,7 +163,7 @@ def _pdm_notebook() -> dict[str, Any]:
         "  YIELD KEY e, failure_likelihood(e.air_temp) AS risk",
         "\"#;",
         "let result = session.locy_with(program).with_config(config.clone()).run().await?;",
-        "let asset_rows = result.derived().get(\"asset_risk\").map(|v| v.len()).unwrap_or(0);",
+        "let asset_rows = result.derived_rules().await?.get(\"asset_risk\").map(|v| v.len()).unwrap_or(0);",
         "println!(\"Scored {} equipment\", asset_rows);",
     ]))
     cells.append(_md(key, len(cells), ["## 6) CALIBRATE + VALIDATE"]))
@@ -275,7 +275,7 @@ def _adr_notebook() -> dict[str, Any]:
         "  YIELD KEY r, signal_score(r.report_count) AS credibility",
         "\"#;",
         "let result = session.locy_with(program).with_config(config.clone()).run().await?;",
-        "let n = result.derived().get(\"scored_reports\").map(|v| v.len()).unwrap_or(0);",
+        "let n = result.derived_rules().await?.get(\"scored_reports\").map(|v| v.len()).unwrap_or(0);",
         "println!(\"Scored {} reports\", n);",
     ]))
     cells.append(_md(key, len(cells), ["## 5) CALIBRATE Against Held-Out Signal Labels"]))
@@ -382,7 +382,7 @@ def _ddi_notebook() -> dict[str, Any]:
         "  YIELD KEY rec, interaction_score(rec.severity) AS risk",
         "\"#;",
         "let result = session.locy_with(program).with_config(config.clone()).run().await?;",
-        "let n = result.derived().get(\"scored_interactions\").map(|v| v.len()).unwrap_or(0);",
+        "let n = result.derived_rules().await?.get(\"scored_interactions\").map(|v| v.len()).unwrap_or(0);",
         "println!(\"Scored {} interaction pairs\", n);",
     ]))
     cells.append(_md(key, len(cells), ["## 5) CALIBRATE"]))

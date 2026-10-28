@@ -14,11 +14,11 @@ This document provides a comprehensive reference for all Uni configuration optio
 
 ## Configuration Overview
 
-**Status (2.2.1, 2026-06-16):** Configuration is currently applied **programmatically** via the Rust API (`UniConfig`) or the Python builder. Configuration files (`uni.toml`) and `UNI_*` environment overrides are **planned** but not wired into the CLI/server yet.
+**Current configuration model:** Configuration is currently applied **programmatically** via the Rust API (`UniConfig`) or the Python builder. Configuration files (`uni.toml`) and a general `UNI_*` environment-to-config mapping are **planned**; selected operational environment overrides already exist.
 
 Uni can be configured through:
 1. **Rust API** — `UniConfig` (available)
-2. **Environment Variables** — Planned (not yet supported)
+2. **Environment Variables** — Selected operational overrides are supported (for example `UNI_ASYNC_FLUSH` and `UNI_FLUSH_STREAM_TIMEOUT_SECS`); a general `UNI_*` mapping is not implemented
 3. **Configuration File** — Planned (`uni.toml` or JSON)
 
 ```
@@ -149,6 +149,21 @@ pub struct UniConfig {
     /// Maximum number of L0→L1 flushes in flight simultaneously when
     /// `async_flush_enabled` is true (default: 2).
     pub max_pending_flushes: usize,
+
+    /// Per-stream async flush timeout (default: 60s; UNI_FLUSH_STREAM_TIMEOUT_SECS override).
+    pub flush_stream_timeout: Duration,
+
+    /// Maximum time without progress draining async flushes (default: 900s).
+    pub flush_drain_timeout: Duration,
+
+    /// Commit stream broadcast capacity (default: 256).
+    pub commit_channel_capacity: usize,
+
+    /// Eventual-consistency trigger coalescing window (default: 1s).
+    pub ec_flush_interval: Duration,
+
+    /// Rows triggering early coalesced fire (default: 10_000).
+    pub ec_flush_threshold: usize,
 
     /// Maximum time `drop_fork` waits for pending async flushes on that fork
     /// before failing with `PendingFlushTimeout` (default: 10s).
@@ -519,7 +534,7 @@ Hybrid mode stores bulk data in cloud storage while keeping WAL and metadata loc
 use uni_db::Uni;
 
 let db = Uni::open("./local_meta")
-    .remote_storage("s3://my-bucket/graph-data", CloudStorageConfig::default())
+    .remote_storage("s3://my-bucket/graph-data", CloudStorageConfig::s3_from_env("my-bucket"))
     .build()
     .await?;
 ```

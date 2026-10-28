@@ -250,4 +250,4 @@ End-to-end notebooks under `website/docs/examples/python/`:
 | `…/Validate.feature` | VALIDATE command, all metrics |
 | `…/NeuralProvenanceExplain.feature` | EXPLAIN with `NeuralProvenance` |
 | `…/IntegratedExample.feature` | Property features + ALONG + MNOR + MPROD end-to-end |
-| `…/CandleClassifier.feature` | Candle-backed `CandleLinearClassifier` |
+| `…/CandleClassifier.feature` | Safetensors-backed CPU `CandleLinearClassifier` (historical name; no Candle dependency) |

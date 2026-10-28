@@ -15,7 +15,7 @@ description: >-
 
 ## What is uni-db?
 
-uni-db is an **embedded, serverless multi-model graph database** (graph + vector + document + columnar) that runs inside your process with no server required. It supports **OpenCypher** queries with extensions for vector search, full-text search, DDL, and time travel. **Locy** is its Datalog-inspired logic programming language for recursive rules, probabilistic reasoning, abductive inference, and inline neural predicates with calibration (`CREATE MODEL` / `CALIBRATE` / `VALIDATE` / `NeuralProvenance` in `EXPLAIN`). APIs are available in **Python** (sync/async via PyO3) and **Rust** (async/blocking), with a **Pydantic OGM** layer. Built-in capabilities include 8 vector index algorithms (Flat, IVF-Flat/SQ/PQ/RQ, HNSW-Flat/SQ/PQ) with scalar, product, and RaBitQ quantization, 4 scalar index types (BTree, Hash, Bitmap, LabelList), BM25 full-text search, hybrid search with RRF fusion, and 36+ graph algorithms.
+uni-db is an **embedded, serverless multi-model graph database** (graph + vector + document + columnar) that runs inside your process with no server required. It supports **OpenCypher** queries with extensions for vector search, full-text search, DDL, and time travel. **Locy** is its Datalog-inspired logic programming language for recursive rules, probabilistic reasoning, abductive inference, and inline neural predicates with calibration (`CREATE MODEL` / `CALIBRATE` / `VALIDATE` / `NeuralProvenance` in `EXPLAIN`). APIs are available in **Python** (sync/async via PyO3) and **Rust** (async/blocking), with a **Pydantic OGM** layer. Built-in capabilities include 8 single-vector ANN index algorithms (Flat, IVF-Flat/SQ/PQ/RQ, HNSW-Flat/SQ/PQ) with scalar, product, and RaBitQ quantization plus MUVERA for multi-vector columns, 4 scalar index types (BTree, Hash, Bitmap, LabelList), BM25 full-text search, hybrid search with RRF fusion, and 42 graph algorithms.
 
 ---
 
@@ -30,7 +30,7 @@ Uni / AsyncUni (database handle)
   +-- NO direct query or mutation
 
 Session / AsyncSession (read scope)
-  +-- Parameters: set(), get()
+  +-- Parameters: params().set(), params().get()
   +-- Reads: query(), locy()
   +-- Analysis: explain(), profile()
   +-- Factory: tx() -> Transaction
@@ -46,7 +46,7 @@ Transaction / AsyncTransaction (write scope)
 
 **Sync/async duality**: every type has an async counterpart (`Uni` / `AsyncUni`, `Session` / `AsyncSession`, `Transaction` / `AsyncTransaction`). Shared types (results, data classes, exceptions) are the same for both.
 
-**Single-writer, multi-reader**: only one Transaction can be open at a time per Uni instance. Multiple Sessions can read concurrently with snapshot isolation.
+**Concurrent transactions**: transactions use private L0 buffers and execute concurrently. Commits serialize under the writer lock; default SSI/OCC validation rejects conflicting writes. Multiple Sessions can read concurrently.
 
 **Facade accessors** on `Uni` / `AsyncUni`:
 
@@ -135,7 +135,7 @@ async fn main() -> uni_db::Result<()> {
 }
 ```
 
-**Database factory methods** (same in Python and Rust):
+**Python database factory methods** (Rust factories return a `UniBuilder`, finalized with `.build().await?`; Rust has no `Uni::builder()`):
 
 | Method | Behavior |
 |---|---|
@@ -143,7 +143,7 @@ async fn main() -> uni_db::Result<()> {
 | `Uni.create(path)` | Create new database; error if path exists |
 | `Uni.open_existing(path)` | Open existing; error if path does not exist |
 | `Uni.temporary()` | Temp directory, auto-cleaned on drop |
-| `Uni.in_memory()` | Purely in-memory, no persistence |
+| `Uni.in_memory()` | Alias for `temporary()`; uses a temporary filesystem directory |
 | `Uni.builder()` | Advanced configuration via `UniBuilder` |
 
 **Storage backends**: local filesystem, S3 (`s3://bucket/path`), GCS (`gs://bucket/path`), Azure (`az://account/container/path`).
@@ -264,9 +264,9 @@ db.schema() \
         .property("age", DataType.INT64()) \
         .vector("embedding", 384) \
         .index("name", "btree") \
-    .label("Company") \
+    .done().label("Company") \
         .property("name", DataType.STRING()) \
-    .edge_type("WORKS_AT", ["Person"], ["Company"]) \
+    .done().edge_type("WORKS_AT", ["Person"], ["Company"]) \
         .property("since", DataType.DATE()) \
     .apply()
 ```
@@ -364,7 +364,7 @@ MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})
 CREATE (a)-[:KNOWS {since: 2023}]->(b)
 ```
 
-**5. MERGE (upsert) -- requires ext_id:**
+**5. MERGE (upsert) -- match by pattern properties:**
 ```cypher
 MERGE (n:Person {ext_id: 'user-123'})
 ON CREATE SET n.name = 'Alice', n.created = datetime()
@@ -423,13 +423,13 @@ MATCH (a)-[r:KNOWS]->(b) RETURN r, created_at(r), updated_at(r)
 
 ## Critical Gotchas
 
-1. **ext_id is REQUIRED for MERGE** -- Without `ext_id`, `MERGE` always creates new nodes because there is no stable identity to match against. Always include `ext_id` in the MERGE pattern.
+1. **MERGE matches pattern properties** -- `MERGE (n:Person {name: $name})` works without `ext_id`. An optional `ext_id` is a globally unique external key; choose stable keys and index them for repeated upserts.
 
 2. **CREATE creates NEW nodes per expression** -- `CREATE (a:Node), (b:Node)` creates two separate nodes. To reference the same node later in a pattern, use variable binding: `CREATE (a:Node {name: 'X'}), (a)-[:REL]->(b:Other)`.
 
-3. **Single-writer** -- Only one Transaction can be open at a time per Uni instance. Multiple Sessions can read concurrently.
+3. **Handle transaction conflicts** -- Concurrent transactions are allowed. Default SSI/OCC validates at commit; retry the whole transaction on a retryable conflict.
 
-4. **flush() for durability** -- Writes are buffered in L0; call `db.flush()` or rely on auto-flush (threshold: 10k mutations or 5s interval) for persistence to storage.
+4. **Commit durability and L1 flush differ** -- With `wal_enabled: true` (default), commit persists the WAL before publishing mutations. `flush()` moves committed L0 data into Lance L1; defaults trigger it at 10,000 mutations or after 5 seconds with pending mutations. Disabling WAL removes crash recovery for unflushed writes.
 
 5. **VID vs UniId vs ext_id** -- VID is internal (u64 auto-increment), UniId is content-hash (SHA3-256), ext_id is user-supplied string. Use `ext_id` for MERGE and user-facing lookups.
 
@@ -447,9 +447,9 @@ MATCH (a)-[r:KNOWS]->(b) RETURN r, created_at(r), updated_at(r)
 
 12. **Cartesian products from disconnected patterns** -- `MATCH (a:Person), (b:Company)` creates a cross product of all persons and companies. Connect patterns or use WITH to pipeline results.
 
-13. **BulkWriter for initial data loading** -- Always use `tx.bulk_writer()` for loading more than a few thousand records. It bypasses WAL and defers index rebuilds for 10-100x faster throughput.
+13. **BulkWriter for initial data loading** -- `tx.bulk_writer()` bypasses WAL and can defer index rebuilds. Already-flushed batches cannot be rolled back; use ordinary transactions when atomic rollback is required. Measure throughput for your workload.
 
-14. **Context managers for transactions** -- Always use `with session.tx() as tx:` (or `async with`) to guarantee auto-rollback on exceptions. Forgetting to commit or rollback leaks the write lock.
+14. **Context managers for transactions** -- Always use `with session.tx() as tx:` (or `async with`) to guarantee auto-rollback on exceptions. Explicitly commit successful work; leaving the context without committing rolls it back.
 
 15. **Locy DERIVE in a transaction** -- When `locy()` is called on a Transaction, DERIVE commands automatically apply mutations to the transaction. On a Session (read-only), DERIVE returns a `DerivedFactSet` that must be explicitly applied via `tx.apply(derived)`.
 
@@ -469,7 +469,7 @@ Levers (`UniConfig`):
 let config = UniConfig {
     // Suppress the 5-second timer-based flush; rely only on the count
     // threshold (default 10,000 mutations). Useful for benchmark runs
-    // where you don't need fine-grained durability checkpoints.
+    // where you want fewer L1 checkpoints (WAL durability is separate).
     auto_flush_interval: None,
 
     // OR: keep the timer but require more mutations before it fires.
@@ -544,6 +544,7 @@ When the SKILL.md overview is insufficient for the user's task, load the appropr
 | Schema design, data types, indexes, identity (ext_id/VID) | `references/schema-indexing.md` |
 | BTIC temporal intervals, Allen algebra, certainty/granularity | `references/btic.md` |
 | Xervo ML runtime, providers, model catalog, auto-embedding | `references/xervo.md` |
+| Durable or nested forks, diff/promote, fork-local schema and indexes | `references/forks.md` |
 | Graph algorithms (PageRank, WCC, shortest path, etc.); guest-authorable GraphCompute kernels | `references/graph-algorithms.md` |
 
 Load **multiple references** when a task spans domains. Examples:

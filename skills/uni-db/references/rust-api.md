@@ -1,6 +1,6 @@
 # Uni Rust API Reference
 
-**Crate:** `uni-db` | **Source-verified:** March 2026
+**Crate:** `uni-db` | **Target:** current 5.0.0 source; selected API signatures below
 
 ---
 
@@ -68,7 +68,7 @@ impl Uni {
     pub fn open_existing(uri: impl Into<String>) -> UniBuilder;
     pub fn create(uri: impl Into<String>) -> UniBuilder;     // error if exists
     pub fn temporary() -> UniBuilder;                        // auto-cleaned on drop
-    pub fn in_memory() -> UniBuilder;                        // no persistence
+    pub fn in_memory() -> UniBuilder;                        // alias for temporary; uses a temporary directory
 }
 
 impl UniBuilder {
@@ -517,7 +517,10 @@ impl LocyResult {
 }
 // Inner (via Deref)
 impl LocyResult {
-    pub fn derived_facts(&self, rule: &str) -> Option<&Vec<FactRow>>;
+    pub async fn derived_rules(&self) -> Result<&HashMap<String, Vec<FactRow>>>;
+    pub async fn derived_rule(&self, rule: &str) -> Result<Option<&Vec<FactRow>>>;
+    pub fn evaluated_rules(&self) -> &HashMap<String, Vec<FactRow>>;
+    pub fn lazily_derived_rules(&self) -> &[String];
     pub fn rows(&self) -> Option<&Vec<FactRow>>;
     pub fn columns(&self) -> Option<Vec<String>>;
     pub fn stats(&self) -> &LocyStats;
@@ -567,20 +570,57 @@ Fields: `code: RuntimeWarningCode`, `message`, `rule_name`, `variable_count`, `k
 
 ## 13. Configuration
 
+`partial_lance_writes` is a deprecated no-op. Defaults and field semantics are
+documented in `crates/uni-common/src/config.rs` and the website configuration
+reference. `Uni::in_memory()` is an alias for a temporary-directory database.
+
 ```rust
 pub struct UniConfig {
-    pub cache_size: usize,              pub parallelism: usize,
-    pub batch_size: usize,              pub max_frontier_size: usize,
-    pub auto_flush_threshold: usize,    pub auto_flush_interval: Option<Duration>,
+    pub cache_size: usize,
+    pub parallelism: usize,
+    pub batch_size: usize,
+    pub execution_batch_size: Option<usize>,
+    pub max_frontier_size: usize,
+    pub auto_flush_threshold: usize,
+    pub commit_channel_capacity: usize,
+    pub auto_flush_interval: Option<Duration>,
     pub auto_flush_min_mutations: usize,
     pub wal_enabled: bool,
-    pub compaction: CompactionConfig,   pub throttle: WriteThrottleConfig,
+    pub compaction: CompactionConfig,
+    pub throttle: WriteThrottleConfig,
     pub file_sandbox: FileSandboxConfig,
-    pub query_timeout: Duration,        pub max_query_memory: usize,
-    pub max_transaction_memory: usize,  pub max_compaction_rows: usize,
+    pub query_timeout: Duration,
+    pub commit_timeout: Duration,
+    pub max_query_memory: usize,
+    pub regex_backtrack_limit: usize,
+    pub max_transaction_memory: usize,
+    pub max_compaction_rows: usize,
     pub max_recursive_cte_iterations: usize,
+    pub vector_knn_default_k: usize,
+    pub lance_metadata_cache_bytes: Option<usize>,
+    pub lance_index_cache_bytes: Option<usize>,
     pub object_store: ObjectStoreConfig,
     pub index_rebuild: IndexRebuildConfig,
+    pub strict_schema: bool,
+    pub partial_lance_writes: bool,
+    pub defer_embeddings: bool,
+    pub fork_fragment_warn_threshold: usize,
+    pub tx_id_reservoir_batch: usize,
+    pub async_flush_enabled: bool,
+    pub max_pending_flushes: usize,
+    pub flush_stream_timeout: Duration,
+    pub drop_fork_drain_timeout: Duration,
+    pub flush_drain_timeout: Duration,
+    pub max_forks: Option<usize>,
+    pub fork_default_ttl: Option<Duration>,
+    pub fork_sweeper_interval: Duration,
+    pub disable_fork_sweeper: bool,
+    pub fork_index_build_threshold: u64,
+    pub fork_index_builder_interval: Duration,
+    pub disable_fork_index_builder: bool,
+    pub ssi_enabled: bool,
+    pub ec_flush_interval: Duration,
+    pub ec_flush_threshold: usize,
 }
 ```
 
@@ -599,7 +639,7 @@ Convenience: `CloudStorageConfig::s3_from_env(bucket)`, `::gcs_from_env(bucket)`
 
 ## 14. Blocking API
 
-Entry point: `UniSync::new(Uni::open("./db").build_sync()?)` or `UniSync::in_memory()`.
+Entry point: `UniSync::new(Uni::open("./db").build_sync()?)?` or `UniSync::in_memory()`.
 
 | Async | Sync |
 |---|---|
@@ -692,10 +732,12 @@ println!("Inserted {} vertices in {:?}", stats.vertices_inserted, stats.duration
 ```rust
 session.params().set("threshold", 0.8);
 let result = session.locy_with(r#"
-    QUERY similar(x, y, score) :-
-        similar_to(x, y) IS score, score > $threshold.
+    CREATE RULE high_score AS
+        MATCH (n:Product) WHERE n.score > $threshold
+        YIELD KEY n
+    QUERY high_score RETURN n
 "#).timeout(Duration::from_secs(30)).max_iterations(100).run().await?;
 for fact in result.rows().unwrap_or(&vec![]) {
-    println!("{} ~ {} (score: {})", fact["x"], fact["y"], fact["score"]);
+    println!("{:?}", fact["n"]);
 }
 ```

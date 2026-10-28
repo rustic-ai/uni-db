@@ -4,7 +4,7 @@
 
 # Python API — Symbol Reference
 
-Complete symbol surface of the `uni_db` Python bindings, **generated from `bindings/uni-db/uni_db/__init__.pyi`** at version 4.2.0.
+Complete symbol surface of the `uni_db` Python bindings, **generated from `bindings/uni-db/uni_db/__init__.pyi`** at version 5.0.0.
 
 This page is exhaustive and always in sync with the type stubs — it is regenerated in CI. For narrative documentation, worked examples and the recommended patterns, start at the [Python API guide](python-api.md).
 
@@ -269,6 +269,11 @@ An async query session with scoped variables.
 | `scalar_fn(name: str, args: Any, returns: str, vectorized: bool=False, determinism: str='pure') -> Callable[..., Any]` | — |
 | `aggregate_fn(name: str, args: Any, returns: str, determinism: str='pure') -> Callable[..., Any]` | — |
 | `procedure(name: str, args: Any, yields: Any, mode: str='read') -> Callable[..., Any]` | — |
+| `async compile_locy_with_config(program: str, config: LocyConfig | dict[str, Any]) -> CompiledProgram` | — |
+| `async build_fork_local_index(label: str, column: str, kind: str) -> None` | — |
+| `async execute_with_retry(cypher: str) -> ExecuteResult` | — |
+| `async replacement_scans_enabled() -> bool` | — |
+| `async set_replacement_scans(enabled: bool) -> None` | — |
 
 ---
 
@@ -436,6 +441,7 @@ Async fluent builder for mutations within a transaction.
 | `cancellation_token(token: CancellationToken) -> AsyncTxExecuteBuilder` | — |
 | `async run() -> ExecuteResult` | — |
 | `async profile() -> tuple[ExecuteResult, ProfileOutput]` | — |
+| `params(params: dict[str, Any]) -> AsyncTxExecuteBuilder` | — |
 
 ---
 
@@ -453,6 +459,7 @@ Async fluent builder for Locy evaluation within a transaction.
 | `cancellation_token(token: CancellationToken) -> AsyncTxLocyBuilder` | — |
 | `async run() -> LocyResult` | — |
 | `async profile() -> tuple[LocyResult, LocyProfileOutput]` | — |
+| `params(params: dict[str, Any]) -> AsyncTxLocyBuilder` | — |
 
 ---
 
@@ -526,6 +533,8 @@ The main asynchronous Uni database interface.
 | `config() -> dict[str, Any]` | — |
 | `write_lease() -> WriteLease | None` | — |
 | `async shutdown() -> None` | — |
+| `background_task_count() -> int` | — |
+| `async load_python_plugin(module_src: str, module_name: str, grants: list[str] | None=None) -> dict[str, Any]` | — |
 
 ---
 
@@ -1340,6 +1349,9 @@ Configuration for Locy program evaluation.
 | `goal_directed() -> Literal['auto', 'off', 'on', 'shadow']` *(property)* | — |
 | `classifier_aliases() -> list[str]` *(property)* | — |
 | `register_classifier(alias: str, callable: Callable[..., Any]) -> None` | — |
+| `semiring() -> str | dict[str, int]` *(property)* | — |
+| `neural_predicates_preview() -> bool` *(property)* | — |
+| `classifier_cache_max() -> int` *(property)* | — |
 
 ---
 
@@ -1901,6 +1913,11 @@ A query session with scoped variables.
 | `procedure(name: str, args: Any, yields: Any, mode: str='read') -> Callable[..., Any]` | — |
 | `__enter__() -> Session` | — |
 | `__exit__(exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: Any) -> bool` | — |
+| `compile_locy_with_config(program: str, config: LocyConfig | dict[str, Any]) -> CompiledProgram` | — |
+| `build_fork_local_index(label: str, column: str, kind: str) -> None` | — |
+| `execute_with_retry(cypher: str) -> ExecuteResult` | — |
+| `replacement_scans_enabled() -> bool` | — |
+| `set_replacement_scans(enabled: bool) -> None` | — |
 
 ---
 
@@ -2153,6 +2170,7 @@ Fluent builder for mutations within a transaction.
 | `cancellation_token(token: CancellationToken) -> TxExecuteBuilder` | — |
 | `run() -> ExecuteResult` | — |
 | `profile() -> tuple[ExecuteResult, ProfileOutput]` | — |
+| `params(params: dict[str, Any]) -> TxExecuteBuilder` | — |
 
 ---
 
@@ -2170,6 +2188,7 @@ Fluent builder for Locy evaluation within a transaction.
 | `cancellation_token(token: CancellationToken) -> TxLocyBuilder` | — |
 | `run() -> LocyResult` | — |
 | `profile() -> tuple[LocyResult, LocyProfileOutput]` | — |
+| `params(params: dict[str, Any]) -> TxLocyBuilder` | — |
 
 ---
 
@@ -2245,6 +2264,8 @@ The main synchronous Uni database interface.
 | `load_wasm_extism(wasm_bytes: bytes, grants: list[str] | None=None) -> dict[str, Any]` | — |
 | `__enter__() -> Uni` | — |
 | `__exit__(exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: Any) -> bool` | — |
+| `background_task_count() -> int` | — |
+| `load_python_plugin(module_src: str, module_name: str, grants: list[str] | None=None) -> dict[str, Any]` | — |
 
 ---
 

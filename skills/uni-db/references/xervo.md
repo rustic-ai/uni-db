@@ -20,6 +20,7 @@ Run inference on the host machine. No API keys needed.
 
 | Provider ID | Engine | Tasks | Best For |
 |---|---|---|---|
+| `remote/llamacpp` | llama.cpp server | Embed | Tokenizer-aware truncation for server embeddings |
 | `local/candle` | HuggingFace Candle | Embed | Lightweight CPU embeddings (Bert, JinaBert, Gemma) |
 | `local/onnx` | ONNX Runtime | Embed, Rerank, Raw | Fast CPU embeddings (FastEmbed alias strings supported), cross-encoder reranking (BERT-style), and raw tensor execution |
 | `local/mistralrs` | mistral.rs | Embed, Generate | GPU inference, quantized models, multi-modal |
@@ -168,21 +169,21 @@ The Python wheels (since `uni-db 1.2.0`) bundle providers per the wheel matrix â
 | `uni-db-onnx-cuda` | `local/onnx` only | NVIDIA CUDA |
 | `uni-db-onnx-metal` | `local/onnx` only | Apple GPU/ANE |
 
-All 8 remote providers (`remote/openai`, `remote/gemini`, etc.) are bundled in every wheel. The Python API is identical across all six. For Rust consumers, the `uni-db` crate's defaults are minimal â€” opt in via `--features "provider-X,..."`. Acceleration: `gpu-cuda` (NVIDIA), `gpu-metal` (Apple). Other ORT execution providers (TensorRT, ROCm, DirectML, OpenVINO, QNN) are reachable via `provider-onnx-dynamic` + `ORT_DYLIB_PATH`.
+All 8 remote providers (`remote/openai`, `remote/gemini`, etc.) are bundled in every wheel. The Python API is identical across all six. The Rust defaults enable all providers, including `remote/llamacpp`. To reduce dependencies, disable defaults and select `lance-backend` plus the required provider features. Acceleration: `gpu-cuda` (NVIDIA), `gpu-metal` (Apple). Other ORT execution providers (TensorRT, ROCm, DirectML, OpenVINO, QNN) are reachable via `provider-onnx-dynamic` + `ORT_DYLIB_PATH`.
 
 ### Python
 
 ```python
-from uni_db import Uni
+from uni_db import Uni, UniBuilder
 
 # From JSON file
-db = Uni.open("./my_db") \
+db = UniBuilder.open("./my_db") \
     .xervo_catalog_from_file("./catalog.json") \
     .build()
 
 # From JSON string
 catalog_json = '[{"alias": "embed/default", "task": "Embed", ...}]'
-db = Uni.open("./my_db") \
+db = UniBuilder.open("./my_db") \
     .xervo_catalog_from_str(catalog_json) \
     .build()
 ```
@@ -631,7 +632,7 @@ The `EmbeddingCfg` fields are `{alias, source_properties, batch_size, document_p
 ### RAG Pipeline
 
 ```python
-db = Uni.open("./rag_db") \
+db = UniBuilder.open("./rag_db") \
     .xervo_catalog_from_file("./catalog.json") \
     .build()
 
@@ -669,7 +670,7 @@ print(answer.text)
 
 ```python
 # Configure catalog + schema with embedding config
-db = Uni.open("./auto_db") \
+db = UniBuilder.open("./auto_db") \
     .xervo_catalog_from_file("./catalog.json") \
     .build()
 

@@ -34,12 +34,7 @@ ERROR_RS = ROOT / "crates/uni-common/src/api/error.rs"
 EXCEPTIONS_RS = ROOT / "bindings/uni-db/src/exceptions.rs"
 
 # Builder / result parity (third axis).
-RUST_BUILDER_SRC = [
-    ROOT / "crates/uni/src/api/session.rs",
-    ROOT / "crates/uni/src/api/transaction.rs",
-    ROOT / "crates/uni/src/api/locy_builder.rs",
-    # `tx.bulk_writer()` / `tx.appender()` hand out the `uni_bulk` builders
-    # directly (re-exported through `uni::api::{bulk, appender}`).
+RUST_BUILDER_SRC = sorted((ROOT / "crates/uni/src/api").rglob("*.rs")) + [
     ROOT / "crates/uni-bulk/src/bulk.rs",
     ROOT / "crates/uni-bulk/src/appender.rs",
 ]
@@ -52,16 +47,23 @@ RUST_RESULT_SRC = [
     ROOT / "crates/uni/src/api/locy_result.rs",
     ROOT / "crates/uni-locy/src/result.rs",
 ]
-PY_BINDING_SRC = [
-    ROOT / "bindings/uni-db/src/builders.rs",
-    ROOT / "bindings/uni-db/src/sync_api.rs",
-    ROOT / "bindings/uni-db/src/types.rs",
-]
+PY_BINDING_SRC = sorted((ROOT / "bindings/uni-db/src").glob("*.rs"))
 
 # Rust type -> Python (sync) pyclass. The async twin is covered by
 # `test_sync_async_parity.py`, which asserts exact method-set equality against
 # the sync class, so checking both here would only double the allowlist.
 BUILDER_PARITY = {
+    "Uni": "Uni",
+    "UniBuilder": "UniBuilder",
+    "Session": "Session",
+    "Transaction": "Transaction",
+    "TransactionBuilder": "TransactionBuilder",
+    "ExecuteBuilder": "TxExecuteBuilder",
+    "ApplyBuilder": "ApplyBuilder",
+    "PreparedQuery": "PreparedQuery",
+    "PreparedLocy": "PreparedLocy",
+    "SessionTemplate": "SessionTemplate",
+    "SessionTemplateBuilder": "SessionTemplateBuilder",
     "QueryBuilder": "SessionQueryBuilder",
     "TxQueryBuilder": "TxQueryBuilder",
     "LocyBuilder": "SessionLocyBuilder",
@@ -82,6 +84,15 @@ RESULT_PARITY = {
 #
 # Rust type -> (source file, Python pyclass name).
 FIELD_PARITY = {
+    "SessionMetrics": (ROOT / "crates/uni/src/api/session.rs", "SessionMetrics"),
+    "SessionCapabilities": (ROOT / "crates/uni/src/api/session.rs", "SessionCapabilities"),
+    "ApplyResult": (ROOT / "crates/uni/src/api/transaction.rs", "ApplyResult"),
+    "LabelInfo": (ROOT / "crates/uni/src/api/schema.rs", "LabelInfo"),
+    "EdgeTypeInfo": (ROOT / "crates/uni/src/api/schema.rs", "EdgeTypeInfo"),
+    "PropertyInfo": (ROOT / "crates/uni/src/api/schema.rs", "PropertyInfo"),
+    "ConstraintInfo": (ROOT / "crates/uni/src/api/schema.rs", "ConstraintInfo"),
+    "IndexInfo": (ROOT / "crates/uni/src/api/schema.rs", "IndexInfo"),
+
     "QueryMetrics": (ROOT / "crates/uni-query/src/types.rs", "QueryMetrics"),
     "ProfileOutput": (
         ROOT / "crates/uni-query/src/query/executor/core.rs",
@@ -111,59 +122,68 @@ TYPES_RS = ROOT / "bindings/uni-db/src/types.rs"
 # stamp.
 # ---------------------------------------------------------------------------
 CONFIG_NOT_BOUND = {
-    "max_frontier_size": "traversal safety cap; no user has asked to tune it",
-    "auto_flush_threshold": "flush tuning, Rust-embedder concern",
-    "auto_flush_interval": "flush tuning, Rust-embedder concern",
-    "auto_flush_min_mutations": "flush tuning, Rust-embedder concern",
-    "commit_channel_capacity": "internal channel sizing",
-    "commit_timeout": "not bound yet; reachable need, no binding written",
-    "file_sandbox": "nested struct; security policy set by the embedder",
-    "object_store": "nested struct; Python uses cloud_config() instead",
-    "index_rebuild": "nested struct; needs a Python dataclass to bind well",
-    "max_compaction_rows": "compaction OOM guard, Rust-embedder concern",
-    "max_recursive_cte_iterations": "not bound yet",
-    "partial_lance_writes": "deprecated no-op; never bound, so Python rejects the key",
-    "defer_embeddings": "not bound yet",
-    "fork_fragment_warn_threshold": "operational warning threshold",
-    "tx_id_reservoir_batch": "internal id allocation",
-    "async_flush_enabled": "flush tuning, Rust-embedder concern",
-    "max_pending_flushes": "flush tuning, Rust-embedder concern",
-    "flush_stream_timeout": "flush tuning, Rust-embedder concern",
-    "drop_fork_drain_timeout": "fork shutdown tuning",
-    "flush_drain_timeout": "flush tuning, Rust-embedder concern",
-    "fork_index_build_threshold": "fork index auto-builder tuning",
-    "fork_index_builder_interval": "fork index auto-builder tuning",
-    "disable_fork_index_builder": "test-only knob",
-    "ssi_enabled": "not bound yet; defaults on, and turning it off is unsafe",
-    "ec_flush_interval": "eventually-consistent flush tuning",
-    "ec_flush_threshold": "eventually-consistent flush tuning",
+    "partial_lance_writes": "deprecated no-op; Python rejects it instead of implying it changes writes",
 }
 
 ERROR_NO_DEDICATED_EXCEPTION = {
     "TransactionRollbackOnly": "collapses to UniError; no payload to lose",
     "GraphComputeIncomplete": "not bound yet; LocyIncomplete has one, this does not",
-    "TriggerRejected": "triggers are a Rust-side surface",
+    "TriggerRejected": "legacy base exception for declared-trigger rejection; message carries the reason",
     "AuthenticationFailed": "auth is not reachable through the Python entry points",
     "AuthorizationDenied": "auth is not reachable through the Python entry points",
-    "EphemeralWriteAttempt": "scratch sessions are not bound to Python",
+    "EphemeralWriteAttempt": "legacy base exception; transient entity kind/id remain in the message",
     "ForkNameInvalid": "collapses to UniError; message carries the reason",
     "PendingFlushTimeout": "not bound yet; the only fork-lifecycle variant without one",
     "ForkWritesNotYetSupported": "explicitly routed to base UniError",
     "BulkLoadUnsupported": "only a backend that cannot stage raises it; none is reachable from Python",
-    "BulkLoadBlockedByTrigger": "synchronous before-triggers are a Rust-side surface",
+    "BulkLoadBlockedByTrigger": "legacy base exception when declared synchronous before-triggers block a bulk load",
 }
 
 
 # Keyed "RustType.method". Same contract as the two above: a gap has to be
 # written down with a reason, and a stale or phantom entry is reported.
 BUILDER_NOT_BOUND = {
+    'Uni.add_plugin': 'native Plugin trait; Python uses the per-language plugin loaders',
+    'Uni.functions': 'Python register_scalar_function/register_aggregate_function methods',
+    "Uni.periodic_cancel": "native scheduler callback and job-record API; no Python scheduler trait adapter",
+    "Uni.periodic_list": "native scheduler callback and job-record API; no Python scheduler trait adapter",
+    "Uni.periodic_schedule": "native scheduler callback and job-record API; no Python scheduler trait adapter",
+    'Uni.plugin': 'typed native plugin handle, no Python equivalent',
+    'Uni.plugin_registry': 'native registry reference, no Python equivalent',
+    'Uni.plugins': 'native plugin introspection; Python has per-language load outcomes',
+    'Uni.procedure_registry': 'native procedure registry reference; Python uses declared procedures via Cypher',
+    'Uni.reload': 'generic native Plugin replacement; Python loaders use language-specific APIs',
+    'Uni.remove_plugin': 'native QName and plugin handles; no Python lifecycle adapter',
+    'Uni.scheduler_host': 'native scheduler trait handle',
+    'Uni.schema_manager': 'native catalog manager reference; Python schema() is the public view',
+    'Uni.session_with_credentials': 'Rust service-embedder authentication context; no Python principal adapter',
+    'Uni.shutdown_in_place': 'Python shutdown() already delegates to the in-place lifecycle',
+    'Uni.storage': 'feature-gated storage internals',
+    'Uni.writer': 'native storage writer reference',
+    'UniBuilder.build_sync': 'Python build() is the blocking adapter',
+    'UniBuilder.new': 'Python UniBuilder.open/create/temporary choose the open mode',
+    'UniBuilder.plugin_trust': 'native trust-policy trait; Python plugin grants are per loader',
+    'UniBuilder.remote_storage': 'Python hybrid(remote_url).cloud_config(dict)',
+    'UniBuilder.xervo_catalog': 'Python xervo_catalog_from_str/from_file parse the same model catalog',
+    'Session.add_python_plugin': 'native PythonPluginBuilder adapter; Python plugin() decorator performs this',
+    'Session.finalize_python_plugin': 'native PythonPluginBuilder adapter; Python decorator completion performs this',
+    'Session.instance_plugin_registry': 'native plugin registry reference',
+    'Session.plugin_registry': 'native plugin registry reference',
+    'Session.principal': 'Rust service-embedder Principal trait object',
+    'Session.transact_with_retry': 'uni_db.transact_with_retry and async_transact_with_retry own Python callback transactions',
+    'Session.with_principal': 'Rust service-embedder Principal trait object',
+    'Transaction.bulk_insert_edges': 'native typed bulk insert; Python uses bulk_writer and Cypher',
+    'Transaction.bulk_insert_vertices': 'native typed bulk insert; Python uses bulk_writer and Cypher',
+    'Transaction.bulk_insert_vertices_labeled': 'native typed bulk insert; Python uses bulk_writer and Cypher',
+    'Transaction.delete_vertex_by_vid': 'native mutation shortcut; Python uses parameterized Cypher',
+    'Transaction.update_vertex_properties': 'native mutation shortcut; Python uses parameterized Cypher',
+
     # --- Locy builders -------------------------------------------------------
     # Reachable from Python, just not as a chainable method.
     "LocyBuilder.allow_partial": "reachable via with_config(LocyConfig(allow_partial=...))",
     "TxLocyBuilder.allow_partial": "reachable via with_config(LocyConfig(allow_partial=...))",
     "LocyBuilder.params_map": "Rust convenience over `params`; Python `params` already takes a dict",
     "TxLocyBuilder.params_map": "Rust convenience over `params`; Python `params` already takes a dict",
-    "TxLocyBuilder.params": "bulk params is session-only on the Locy arm; not bound yet",
     # --- Bulk builders -------------------------------------------------------
     "BulkWriterBuilder.new_unguarded": "constructor; Python gets the builder from tx.bulk_writer()",
     "AppenderBuilder.new_from_tx": "constructor; Python gets the builder from tx.appender_builder()",
@@ -195,10 +215,7 @@ BUILDER_NOT_BOUND = {
 
 # `LocyConfig` fields absent from the `with_config({...})` dict form.
 LOCY_DICT_NOT_BOUND = {
-    "semiring": "not bound yet; needs a string mapping for SemiringKind",
-    "neural_predicates_preview": "opt-out kill switch for CREATE MODEL; Rust-embedder concern",
     "classifier_cache": "shared Rust-side cache handle; no Python representation",
-    "classifier_cache_max": "not bound yet",
     "classifier_provenance_store": "always set by the binding itself, not by the caller",
 }
 
@@ -211,6 +228,7 @@ LOCY_OBJECT_NOT_BOUND = {
 
 # Keyed "RustType.field".
 FIELD_NOT_BOUND = {
+    "SessionMetrics.active_since": "monotonic Instant represented by active_since_secs elapsed time",
     "ProfileOutput.explain": "bound as `plan_text`; the cost/index detail is session.explain()",
     "ProfileOutput.runtime_stats": "bound as `operators`, a list of dicts",
     "DatabaseMetrics.compaction_status": "bound as `compaction_in_progress`, its one flag",
@@ -246,6 +264,9 @@ def python_config_keys() -> list[str]:
 NESTED_CONFIG = {
     "CompactionConfig": "COMPACTION_CONFIG_KEYS",
     "WriteThrottleConfig": "THROTTLE_CONFIG_KEYS",
+    "FileSandboxConfig": "FILE_SANDBOX_CONFIG_KEYS",
+    "ObjectStoreConfig": "OBJECT_STORE_CONFIG_KEYS",
+    "IndexRebuildConfig": "INDEX_REBUILD_CONFIG_KEYS",
 }
 
 
@@ -327,8 +348,8 @@ def rust_type_methods(name: str) -> list[str]:
     )
     out: list[str] = []
     for body in re.findall(pattern, src, re.S | re.M):
-        out += re.findall(r"^    pub (?:async )?fn ([a-z_0-9]+)", body, re.M)
-    return out
+        out += re.findall(r"^    pub (?:(?:async|const|unsafe) )?fn ([a-z_0-9]+)", body, re.M)
+    return sorted(set(out))
 
 
 def _pyclass_names() -> dict[str, str]:
@@ -411,7 +432,7 @@ def dict_converter_keys(fn_name: str) -> list[str]:
                   re.S | re.M)
     if not m:
         fail([f"could not locate `fn {fn_name}` in {CONVERT_RS}"])
-    return re.findall(r'set_item\(\s*"([a-z_0-9]+)"', m.group(1))
+    return re.findall(r'(?<![a-z_])dict\.set_item\(\s*"([a-z_0-9]+)"', m.group(1)) if fn_name == 'uni_config_to_py' else re.findall(r'set_item\(\s*"([a-z_0-9]+)"', m.group(1))
 
 
 def python_locy_dict_keys() -> list[str]:
@@ -514,6 +535,15 @@ def main() -> int:
         )
 
     problems += check("config", fields, set(keys), CONFIG_NOT_BOUND)
+    readback = set(dict_converter_keys("uni_config_to_py"))
+    if readback != set(keys):
+        problems.append(f"config readback and accepted keys differ: {sorted(readback ^ set(keys))}")
+    config_src = CONVERT_RS.read_text()
+    apply_body = re.search(r"^pub fn apply_uni_config\b(.*?)\n\}", config_src, re.S | re.M).group(1)
+    applied = set(re.findall(r'config.get\(\s*"([a-z_0-9]+)"', apply_body))
+    if applied != set(keys):
+        problems.append(f"config accepted keys and applied keys differ: {sorted(applied ^ set(keys))}")
+
     problems += check("error", variants, mapped, ERROR_NO_DEDICATED_EXCEPTION)
 
     # Third axis: named builders and result types, qualified "Type.method".
@@ -548,7 +578,7 @@ def main() -> int:
     for rust_ty, (path, py_ty) in FIELD_PARITY.items():
         pairs = rust_struct_fields(path, rust_ty)
         members = python_type_members(py_ty)
-        if len(pairs) < 3 or not members:
+        if len(pairs) < 2 or not members:
             fail([
                 f"parity check parsed {len(pairs)} field(s) on Rust `{rust_ty}` "
                 f"and {len(members)} member(s) on Python `{py_ty}`; it would "
@@ -612,11 +642,23 @@ def main() -> int:
             )
         problems += check(kind, locy_fields, bound, allowlist)
 
+    # Cloud credentials are a tagged enum separate from the operational config.
+    config_src = CONFIG_RS.read_text()
+    cloud_enum = re.search(r"pub enum CloudStorageConfig\s*\{(.*?)\n\}", config_src, re.S).group(1)
+    cloud_variants = set(re.findall(r"^    ([A-Z][A-Za-z0-9]*)\s*[{,]", cloud_enum, re.M))
+    if cloud_variants != {"S3", "Gcs", "Azure"}:
+        problems.append(f"cloud variants require Python review: {sorted(cloud_variants)}")
+    for variant, const in [("S3", "CLOUD_S3_KEYS"), ("Gcs", "CLOUD_GCS_KEYS"), ("Azure", "CLOUD_AZURE_KEYS")]:
+        body = re.search(r"    " + variant + r"\s*\{(.*?)\n    \}", cloud_enum, re.S).group(1)
+        cloud_fields = set(re.findall(r"^        ([a-z_0-9]+):", body, re.M)) | {"provider"}
+        if cloud_fields != set(const_str_list(const)):
+            problems.append(f"cloud config {variant} and {const} differ")
+
     # Sixth axis: nested config structs bound as dicts.
     for struct, const in NESTED_CONFIG.items():
         struct_fields = [f for f, _ in rust_struct_fields(CONFIG_RS, struct)]
         accepted_keys = const_str_list(const)
-        if len(struct_fields) < 3:
+        if len(struct_fields) < 2:
             fail([f"parity check parsed {len(struct_fields)} {struct} field(s); "
                   "it would pass vacuously. Fix the parser."])
         if set(struct_fields) != set(accepted_keys):
@@ -637,7 +679,7 @@ def main() -> int:
         f"{len(mapped)}/{len(variants)} UniError variants mapped to a dedicated "
         f"exception ({len(ERROR_NO_DEDICATED_EXCEPTION)} allowlisted); "
         f"{len(bound_members)}/{len(rust_members)} methods on "
-        f"{len(BUILDER_PARITY) + len(RESULT_PARITY)} builder/result types bound "
+        f"{len(BUILDER_PARITY) + len(RESULT_PARITY)} facade/builder/result types bound "
         f"({len(BUILDER_NOT_BOUND)} allowlisted); "
         f"{len(bound_fields)}/{len(rust_fields)} fields on "
         f"{len(FIELD_PARITY)} data structs bound "

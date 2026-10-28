@@ -3390,7 +3390,8 @@ impl PyLocyConfig {
         max_derived_bytes=None, deterministic_best_by=None,
         strict_probability_domain=None, probability_epsilon=None,
         exact_probability=None, max_bdd_variables=None,
-        top_k_proofs=None, top_k_proofs_training=None, goal_directed=None
+        top_k_proofs=None, top_k_proofs_training=None, goal_directed=None,
+        semiring=None, neural_predicates_preview=None, classifier_cache_max=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -3411,13 +3412,16 @@ impl PyLocyConfig {
         top_k_proofs: Option<usize>,
         top_k_proofs_training: Option<usize>,
         goal_directed: Option<&Bound<'_, PyAny>>,
+        semiring: Option<&Bound<'_, PyAny>>,
+        neural_predicates_preview: Option<bool>,
+        classifier_cache_max: Option<usize>,
     ) -> PyResult<Self> {
         let mut cfg = ::uni_locy::LocyConfig::default();
         if let Some(v) = max_iterations {
             cfg.max_iterations = v;
         }
         if let Some(v) = timeout_secs {
-            cfg.timeout = Some(std::time::Duration::from_secs_f64(v));
+            cfg.timeout = Some(crate::convert::duration_from_seconds(v)?);
         }
         if let Some(v) = allow_partial {
             cfg.allow_partial = v;
@@ -3462,6 +3466,15 @@ impl PyLocyConfig {
         cfg.top_k_proofs_training = top_k_proofs_training;
         if let Some(v) = goal_directed {
             cfg.goal_directed = crate::convert::parse_goal_directed(v)?;
+        }
+        if let Some(v) = semiring {
+            cfg.semiring = crate::convert::parse_semiring(v)?;
+        }
+        if let Some(v) = neural_predicates_preview {
+            cfg.neural_predicates_preview = v;
+        }
+        if let Some(v) = classifier_cache_max {
+            cfg.classifier_cache_max = v;
         }
         Ok(Self { inner: cfg })
     }
@@ -3584,6 +3597,34 @@ impl PyLocyConfig {
             self.inner.strict_probability_domain,
             self.inner.classifier_registry.len(),
         )
+    }
+
+    #[getter]
+    fn semiring(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        use uni_locy::types::SemiringKind;
+        match self.inner.semiring {
+            SemiringKind::AddMultProb => "add_mult_prob".into_py_any(py),
+            SemiringKind::MaxMinProb => "max_min_prob".into_py_any(py),
+            SemiringKind::BddExact => "bdd_exact".into_py_any(py),
+            SemiringKind::TopKProofs { k } => {
+                let spec = pyo3::types::PyDict::new(py);
+                spec.set_item("top_k_proofs", k)?;
+                Ok(spec.into())
+            }
+            _ => Err(pyo3::exceptions::PyValueError::new_err(
+                "unsupported semiring variant",
+            )),
+        }
+    }
+
+    #[getter]
+    fn neural_predicates_preview(&self) -> bool {
+        self.inner.neural_predicates_preview
+    }
+
+    #[getter]
+    fn classifier_cache_max(&self) -> usize {
+        self.inner.classifier_cache_max
     }
 }
 

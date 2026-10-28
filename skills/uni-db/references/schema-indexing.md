@@ -9,11 +9,11 @@ Every entity has two identifiers plus an optional user-facing key:
 | **VID** | `u64` auto-increment | 64 | O(1) array indexing, primary key in Lance tables | Local to database |
 | **EID** | `u64` auto-increment | 64 | Uniquely identifies edges (parallel edges allowed) | Local to database |
 | **UniId** | SHA3-256 hash | 256 | Content-addressed lookup, cross-system sync, provenance | Global / distributed |
-| **ext_id** | `String` | Variable | User-provided primary key, unique per label | Per-label unique |
+| **ext_id** | `String` | Variable | Optional user-provided external key | Globally unique across labels |
 
 ### ext_id
 
-User-provided string primary key, unique per label. Most common way to reference vertices.
+Optional user-provided string key, globally unique across labels. MERGE can also match ordinary pattern properties without an `ext_id`.
 
 ```cypher
 CREATE (n:Person {ext_id: 'user-123', name: 'Alice'})
@@ -26,7 +26,7 @@ Dense, sequential, never reused. Serves as `_vid` column in all Lance tables and
 
 ```rust
 use uni_db::core::Vid;
-let vid = Vid::new(1, 42);  // label_id=1, offset=42
+let vid = Vid::new(42);  // dense id; labels are resolved via VidLabelsIndex
 ```
 
 ### UniId
@@ -34,12 +34,12 @@ let vid = Vid::new(1, 42);  // label_id=1, offset=42
 Content-addressed identifier. Lookup index, **not** a uniqueness constraint -- multiple vertices may share a UID.
 
 - **Computation**: `SHA3-256(label || ext_id || sorted_properties)`
-- **Encoding**: 53-character Base32Lower multibase string (z-prefix)
-- **Lookup**: `MATCH (n:Person) WHERE n._uid = 'z3asjk42...' RETURN n`
+- **Encoding**: 53-character Base32Lower multibase string (b-prefix)
+- **Lookup**: `MATCH (n:Person) WHERE n._uid = $uid RETURN n`
 
 ### EID
 
-Same packed `u64` auto-increment as VID. Sentinel: `Eid::INVALID = u64::MAX`.
+Same dense `u64` auto-increment shape as VID; neither encodes a label or edge-type id. Sentinel: `Eid::INVALID = u64::MAX`.
 
 ### When to Use Each
 

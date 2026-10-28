@@ -51,9 +51,9 @@ A full fork creates a Lance branch, a registry 2PC entry, and a per-fork WAL (~1
 ```rust
 // Read-only speculation: pin, scan, refresh — no fork.
 let mut s = db.session();
-s.pin_to_version(&snapshot_id)?;
+s.pin_to_version(&snapshot_id).await?;
 let hits = s.query("MATCH (n:Node) WHERE n.score > 0.9 RETURN n").await?;
-s.refresh()?; // release the pin
+s.refresh().await?; // release the pin
 
 // Mutating speculation: scratch tx, read-your-writes, discard on drop.
 let scratch = session.scratch().await?;

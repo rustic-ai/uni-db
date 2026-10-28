@@ -590,7 +590,7 @@ The `alias` field references a model alias from your Uni-Xervo catalog configura
 | `Voyage AI` | `provider-voyageai` | Remote | Voyage AI embedding API. |
 | `Azure OpenAI` | `provider-azure-openai` | Remote | Azure-hosted OpenAI API. |
 
-**Default wheels vs. custom Rust builds.** The Python wheels bundle providers based on the wheel variant: the default `uni-db` (and its `-cuda` / `-metal` siblings) ship all 11 providers; the slim `uni-db-onnx` (and its GPU siblings) ship ONNX + 8 remote APIs only. For Rust consumers, the `uni-db` crate's default features are minimal (`lance-backend`, `provider-gemini`, `provider-openai`) — opt in to the rest as needed to keep your build tight.
+**Default wheels vs. custom Rust builds.** The Python wheels bundle providers based on the wheel variant: the default `uni-db` (and its `-cuda` / `-metal` siblings) ship 12 providers, including the llama.cpp embedding-server adapter; the slim `uni-db-onnx` (and its GPU siblings) ship ONNX + 8 remote APIs only. The Rust crate also enables these providers by default. Use `default-features = false` with `lance-backend` and the provider features you need for a smaller build.
 
 **Embedding Model Recommendation:**
 For local CPU auto-embedding, point your catalog alias at a lightweight embedding model such as `BGESmallENV15` (384-d, ~130 MB) or `nomic-embed-text-v1.5` (768-d). The `local/onnx` provider supports all 25 FastEmbed alias strings out of the box, runs well on an 8-core laptop, and provides high-quality vectors for RAG tasks. ONNX dispatch handles the cold tokenize → ORT → pool → L2-normalize pipeline; xervo 0.8.0 verified parity with `fastembed-rs v5.13` end-to-end.

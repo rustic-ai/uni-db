@@ -601,7 +601,7 @@ pub struct UniConfig {
     /// to `true` logs one warning per process when a database is opened (see
     /// [`UniConfig::warn_deprecated_options`]).
     #[deprecated(
-        since = "4.2.0",
+        since = "5.0.0",
         note = "no-op: every write is stored as a full row; the partial MergeInsert path was removed"
     )]
     pub partial_lance_writes: bool,

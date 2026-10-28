@@ -1,6 +1,7 @@
 # Rust API Reference
 
-Complete reference for the Uni 2.0.0 embedded graph database Rust API.
+Reference for the current Uni 5.0.0 source API. Consult Rustdoc for the full
+public surface; this page explains the main types and workflows.
 
 ## Quick Start
 
@@ -1247,7 +1248,7 @@ db.shutdown()?;
 | Method | Returns | Description |
 |--------|---------|-------------|
 | `UniSync::new(uni)` | `Result<Self>` | Wrap an existing `Uni` in a blocking runtime. |
-| `UniSync::in_memory()` | `Result<Self>` | Open an in-memory database (blocking). |
+| `UniSync::in_memory()` | `Result<Self>` | Open a temporary-directory database (blocking). |
 | `session()` | `SessionSync` | Create a sync session. |
 | `schema()` | `SchemaBuilderSync` | Access schema builder (sync). |
 | `schema_meta()` | `Arc<Schema>` | Get current schema snapshot. |

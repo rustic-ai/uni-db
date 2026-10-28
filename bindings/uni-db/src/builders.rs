@@ -238,13 +238,17 @@ impl DatabaseBuilder {
 
     /// Set maximum cache size in bytes.
     fn cache_size(mut slf: PyRefMut<'_, Self>, bytes: usize) -> PyRefMut<'_, Self> {
-        slf.cache_size = Some(bytes);
+        slf.uni_config
+            .get_or_insert_with(uni_common::UniConfig::default)
+            .cache_size = bytes;
         slf
     }
 
     /// Set query parallelism (number of worker threads).
     fn parallelism(mut slf: PyRefMut<'_, Self>, n: usize) -> PyRefMut<'_, Self> {
-        slf.parallelism = Some(n);
+        slf.uni_config
+            .get_or_insert_with(uni_common::UniConfig::default)
+            .parallelism = n;
         slf
     }
 
@@ -303,7 +307,7 @@ impl DatabaseBuilder {
         let py = slf.py();
         // Merge, never replace: a dedicated setter may already have written
         // here, and assigning a freshly-defaulted config would discard it.
-        let mut merged = slf.uni_config.take().unwrap_or_default();
+        let mut merged = slf.uni_config.clone().unwrap_or_default();
         convert::apply_uni_config(py, &mut merged, &config)?;
         slf.uni_config = Some(merged);
         Ok(slf)
@@ -1379,6 +1383,58 @@ impl Session {
         self.inner.cancel();
         false
     }
+
+    /// Compile a Locy program using the same configuration as evaluation.
+    fn compile_locy_with_config(
+        &self,
+        program: &str,
+        config: &Bound<'_, PyAny>,
+    ) -> PyResult<crate::types::PyCompiledProgram> {
+        let config = convert::extract_locy_config_value(config)?;
+        let compiled = self
+            .inner
+            .compile_locy_with_config(program, &config)
+            .map_err(crate::exceptions::uni_error_to_pyerr)?;
+        Ok(crate::types::PyCompiledProgram { inner: compiled })
+    }
+
+    /// Build an index on this fork after flushing its pending writes.
+    fn build_fork_local_index(
+        &self,
+        py: Python<'_>,
+        label: &str,
+        column: &str,
+        kind: &str,
+    ) -> PyResult<()> {
+        let kind = convert::parse_fork_index_kind(kind)?;
+        py.detach(|| {
+            pyo3_async_runtimes::tokio::get_runtime()
+                .block_on(self.inner.build_fork_local_index(label, column, kind))
+        })
+        .map_err(crate::exceptions::uni_error_to_pyerr)
+    }
+
+    /// Execute and commit a statement with Rust's default conflict retry policy.
+    fn execute_with_retry(
+        &self,
+        py: Python<'_>,
+        cypher: &str,
+    ) -> PyResult<crate::types::PyExecuteResult> {
+        let result = py
+            .detach(|| {
+                pyo3_async_runtimes::tokio::get_runtime()
+                    .block_on(self.inner.execute_with_retry(cypher))
+            })
+            .map_err(crate::exceptions::uni_error_to_pyerr)?;
+        convert::execute_result_to_py(py, result)
+    }
+
+    fn replacement_scans_enabled(&self) -> bool {
+        self.inner.replacement_scans_enabled()
+    }
+    fn set_replacement_scans(&self, enabled: bool) {
+        self.inner.set_replacement_scans(enabled);
+    }
 }
 
 // ============================================================================
@@ -2016,6 +2072,13 @@ impl PyTxExecuteBuilder {
         let profile_output = convert::profile_output_to_py_class(py, profile)?;
         Ok((exec_result, profile_output))
     }
+    fn params(
+        mut slf: PyRefMut<'_, Self>,
+        params: HashMap<String, Py<PyAny>>,
+    ) -> PyRefMut<'_, Self> {
+        slf.params.extend(params);
+        slf
+    }
 }
 
 /// Builder for Locy evaluation on a Transaction.
@@ -2162,6 +2225,15 @@ impl PyTxLocyBuilder {
             convert::locy_result_to_py_class(py, result)?,
             convert::locy_profile_to_py_class(profile),
         ))
+    }
+
+    /// Bind multiple parameters, retaining existing bindings for other names.
+    fn params(
+        mut slf: PyRefMut<'_, Self>,
+        params: HashMap<String, Py<PyAny>>,
+    ) -> PyRefMut<'_, Self> {
+        slf.params.extend(params);
+        slf
     }
 }
 

@@ -187,7 +187,7 @@ let config = UniConfig {
 | None | - | All unflushed | None | Legacy behavior, WAL-only |
 
 !!! note "WAL Still Provides Crash Recovery"
-    Regardless of flush interval, the Write-Ahead Log ensures no committed data is lost on crash. Time-based flush determines when data reaches L1/cloud storage for query visibility and durability.
+    Regardless of flush interval, the Write-Ahead Log ensures no committed data is lost on crash. Time-based flush determines when committed data reaches Lance L1/cloud storage. Committed L0 writes are already query-visible, and WAL durability is separate.
 
 ### Delta Layer
 
@@ -535,114 +535,32 @@ storage/
 
 ## Write-Ahead Log (WAL)
 
-The WAL ensures durability for uncommitted L0 data.
+With WAL enabled, committed mutations are persisted before their L0 changes
+are published. Uncommitted transaction-local buffers are not durable.
+`db.flush()` subsequently moves committed L0 data into Lance L1.
 
-### WAL Structure
+### WAL Format and Recovery
 
-```rust
-pub struct WriteAheadLog {
-    /// Object store-backed WAL
-    store: Arc<dyn ObjectStore>,
+The implementation is `crates/uni-store/src/runtime/wal.rs`.
+Segments are named `{LSN:020}_{uuid}.wal` and contain:
 
-    /// WAL prefix/path
-    prefix: Path,
-
-    /// In-memory state (buffer + LSN tracking)
-    state: Mutex<WalState>,
-}
-
-struct WalState {
-    buffer: Vec<Mutation>,
-    next_lsn: u64,
-    flushed_lsn: u64,
-}
-
-/// WAL segment with LSN for idempotent recovery
-pub struct WalSegment {
-    pub lsn: u64,
-    pub mutations: Vec<Mutation>,
-}
+```text
+UNIWAL2\n<64 hexadecimal BLAKE3 checksum characters>\n<WalSegment JSON payload>
 ```
 
-### WAL Mutation Types
+The payload contains `lsn`, `mutations`, `writer_features`,
+`announced_through`, and `commits` (commit spans). Legacy raw JSON segments
+are still readable. `decode_segment` rejects corrupted v2 checksums.
+`replay_since(high_water_mark)` reads later segments; the writer's recovery
+path restores mutations and commit announcements.
 
-The WAL records mutations using the following enum:
+Mutation variants are `InsertVertex`, `DeleteVertex`, `InsertEdge`,
+`DeleteEdge`, and `SetVertexLabels`. Insert records preserve properties and
+creation/update timestamps. Vertices carry complete labels; edge records
+carry the edge-type name for replay across schemaless registry changes.
+Labels are resolved explicitly, never decoded from VID bits. Property values
+use the `cv_props` codec to preserve engine types through JSON serialization.
 
-```rust
-pub enum Mutation {
-    /// Insert a new edge
-    InsertEdge {
-        src_vid: Vid,
-        dst_vid: Vid,
-        edge_type: u32,
-        eid: Eid,
-        version: u64,
-    },
-
-    /// Delete an existing edge
-    DeleteEdge {
-        eid: Eid,
-        src_vid: Vid,
-        dst_vid: Vid,
-        edge_type: u32,
-        version: u64,
-    },
-
-    /// Insert a new vertex (labels carried for tombstone flushing)
-    InsertVertex {
-        vid: Vid,
-        properties: Properties,
-        labels: Vec<String>,   // serde(default) for backward compat
-    },
-
-    /// Delete an existing vertex (labels needed for per-label tombstone flushing)
-    DeleteVertex {
-        vid: Vid,
-        labels: Vec<String>,   // serde(default) for backward compat
-    },
-}
-```
-
-Note: The label_id is encoded in the VID, but `labels` is carried explicitly so the flush path can write tombstones to the correct per-label Lance dataset. The `serde(default)` attribute ensures backward compatibility with older WAL entries that omit labels.
-
-### Recovery Process
-
-```rust
-impl Wal {
-    // NOTE: the real type is `WriteAheadLog` (runtime/wal.rs) and the real
-    // entry point is `replay_since(high_water_mark)`. There is no `recover()`
-    // and no `WalReader` — this block is illustrative only.
-    pub async fn replay_since(&self, high_water_mark: u64) -> Result<Vec<Mutation>> {
-        // Find all WAL segments
-        let segments = self.list_segments()?;
-
-        for segment in segments {
-            // (illustrative) segments are read through WriteAheadLog itself
-
-            while let Some(entry) = reader.next_entry()? {
-                // Verify CRC
-                if !entry.verify_crc() {
-                    // Truncate at corruption point
-                    break;
-                }
-
-                // Replay mutation
-                match entry.mutation {
-                    Mutation::InsertVertex { vid, properties, labels } => {
-                        l0.insert_vertex(vid, properties, labels)?;
-                    }
-                    Mutation::InsertEdge { src_vid, dst_vid, edge_type, eid, .. } => {
-                        l0.insert_edge(eid, src_vid, dst_vid, edge_type)?;
-                    }
-                    // ... handle DeleteVertex, DeleteEdge
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-```
 
 ---
 

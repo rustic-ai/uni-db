@@ -108,7 +108,7 @@ The five pillars run on a unified substrate — one process, one data model, one
 - In-process execution — link as a Rust crate or Python package, no network round-trips
 - Object-store backed — S3, GCS, Azure, or local disk with automatic local caching
 - Automatic compaction — semantic compaction in the background, no manual tuning
-- Snapshot isolation — single-writer, multi-reader with no lock contention
+- Concurrent transactions with snapshot isolation and commit-time SSI/OCC conflict validation
 
 [Architecture](concepts/architecture.md) | [Features](features/hybrid-search.md) | [Storage Engine](internals/storage-engine.md)
 

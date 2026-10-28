@@ -1,6 +1,6 @@
 # Real-Time Fraud Detection
 
-Fraud detection requires analyzing complex relationships (graph) and patterns in real-time, often while ingesting high volumes of transaction data. Uni's **single-writer architecture** with **L0 memory buffering** makes it ideal for high-velocity ingest combined with instant "read-your-writes" queries.
+Fraud detection requires analyzing complex relationships (graph) and patterns in real-time, often while ingesting high volumes of transaction data. Uni's **concurrent transactions** with **L0 memory buffering** makes it ideal for high-velocity ingest combined with instant "read-your-writes" queries.
 
 ## Why Uni for Fraud Detection?
 

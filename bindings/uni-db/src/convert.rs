@@ -927,16 +927,96 @@ pub(crate) fn goal_directed_name(mode: ::uni_locy::GoalDirected) -> &'static str
 }
 
 /// Extract a LocyConfig from a Python config dict.
+pub const LOCY_CONFIG_KEYS: &[&str] = &[
+    "max_iterations",
+    "timeout",
+    "allow_partial",
+    "max_explain_depth",
+    "max_slg_depth",
+    "max_abduce_candidates",
+    "max_abduce_results",
+    "max_derived_bytes",
+    "deterministic_best_by",
+    "strict_probability_domain",
+    "probability_epsilon",
+    "exact_probability",
+    "max_bdd_variables",
+    "top_k_proofs",
+    "top_k_proofs_training",
+    "goal_directed",
+    "params",
+    "classifier_registry",
+    "semiring",
+    "neural_predicates_preview",
+    "classifier_cache_max",
+];
+
+pub(crate) fn extract_locy_config_value(
+    config: &Bound<'_, PyAny>,
+) -> PyResult<uni_locy::LocyConfig> {
+    if let Ok(config) = config.extract::<crate::types::PyLocyConfig>() {
+        return Ok(config.inner);
+    }
+    extract_locy_config(config.py(), config.extract()?)
+}
+
+pub(crate) fn parse_fork_index_kind(kind: &str) -> PyResult<uni_store::fork::ForkLocalIndexKind> {
+    use uni_store::fork::ForkLocalIndexKind;
+    match kind {
+        "scalar_btree" => Ok(ForkLocalIndexKind::ScalarBtree),
+        "sorted" => Ok(ForkLocalIndexKind::Sorted),
+        "vid_uid" => Ok(ForkLocalIndexKind::VidUid),
+        "vector" => Ok(ForkLocalIndexKind::Vector),
+        "full_text" => Ok(ForkLocalIndexKind::FullText),
+        "sparse" => Ok(ForkLocalIndexKind::Sparse),
+        _ => Err(pyo3::exceptions::PyValueError::new_err(
+            "kind must be scalar_btree, sorted, vid_uid, vector, full_text, or sparse",
+        )),
+    }
+}
+
+pub(crate) fn parse_semiring(value: &Bound<'_, PyAny>) -> PyResult<uni_locy::types::SemiringKind> {
+    use uni_locy::types::SemiringKind;
+    if let Ok(name) = value.extract::<String>() {
+        return match name.as_str() {
+            "add_mult_prob" => Ok(SemiringKind::AddMultProb),
+            "max_min_prob" => Ok(SemiringKind::MaxMinProb),
+            "bdd_exact" => Ok(SemiringKind::BddExact),
+            _ => Err(pyo3::exceptions::PyValueError::new_err(
+                "semiring must be 'add_mult_prob', 'max_min_prob', 'bdd_exact', or {'top_k_proofs': k}",
+            )),
+        };
+    }
+    let spec: HashMap<String, u32> = value.extract()?;
+    if spec.len() == 1
+        && let Some(k) = spec.get("top_k_proofs")
+    {
+        return Ok(SemiringKind::TopKProofs { k: *k });
+    }
+    Err(pyo3::exceptions::PyValueError::new_err(
+        "semiring dict must contain exactly 'top_k_proofs'",
+    ))
+}
+
 pub fn extract_locy_config(
     py: Python,
     config: HashMap<String, Py<PyAny>>,
 ) -> PyResult<::uni_db::locy::LocyConfig> {
+    if let Some(unknown) = config
+        .keys()
+        .find(|key| !LOCY_CONFIG_KEYS.contains(&key.as_str()))
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown Locy config key '{unknown}'; accepted keys are: {}",
+            LOCY_CONFIG_KEYS.join(", ")
+        )));
+    }
     let mut locy_config = ::uni_db::locy::LocyConfig::default();
     if let Some(v) = config.get("max_iterations") {
         locy_config.max_iterations = v.extract::<usize>(py)?;
     }
     if let Some(v) = config.get("timeout") {
-        locy_config.timeout = Some(std::time::Duration::from_secs_f64(v.extract::<f64>(py)?));
+        locy_config.timeout = py_optional_duration(v.bind(py))?;
     }
     if let Some(v) = config.get("allow_partial") {
         locy_config.allow_partial = v.extract::<bool>(py)?;
@@ -992,6 +1072,15 @@ pub fn extract_locy_config(
         let raw = v.extract::<HashMap<String, Py<PyAny>>>(py)?;
         let registry = crate::classifier::build_classifier_registry(py, raw)?;
         locy_config.classifier_registry = registry;
+    }
+    if let Some(v) = config.get("semiring") {
+        locy_config.semiring = parse_semiring(v.bind(py))?;
+    }
+    if let Some(v) = config.get("neural_predicates_preview") {
+        locy_config.neural_predicates_preview = v.extract(py)?;
+    }
+    if let Some(v) = config.get("classifier_cache_max") {
+        locy_config.classifier_cache_max = v.extract(py)?;
     }
     // Always-on NeuralProvenance side-channel store. Without it, EXPLAIN's
     // neural_calls list comes back empty for Python-registered classifiers
@@ -1609,6 +1698,30 @@ pub fn locy_profile_to_py_class(
 /// Extract a CloudStorageConfig from a Python dict.
 ///
 /// The dict must have a `"provider"` key: `"s3"`, `"gcs"`, or `"azure"`.
+pub const CLOUD_S3_KEYS: &[&str] = &[
+    "provider",
+    "bucket",
+    "region",
+    "endpoint",
+    "access_key_id",
+    "secret_access_key",
+    "session_token",
+    "virtual_hosted_style",
+];
+pub const CLOUD_GCS_KEYS: &[&str] = &[
+    "provider",
+    "bucket",
+    "service_account_path",
+    "service_account_key",
+];
+pub const CLOUD_AZURE_KEYS: &[&str] = &[
+    "provider",
+    "container",
+    "account",
+    "access_key",
+    "sas_token",
+];
+
 pub fn extract_cloud_config(
     py: Python,
     config: &HashMap<String, Py<PyAny>>,
@@ -1622,7 +1735,22 @@ pub fn extract_cloud_config(
         })?
         .extract::<String>(py)?;
 
-    match provider.to_lowercase().as_str() {
+    let provider = provider.to_lowercase();
+    let accepted = match provider.as_str() {
+        "s3" => CLOUD_S3_KEYS,
+        "gcs" => CLOUD_GCS_KEYS,
+        "azure" => CLOUD_AZURE_KEYS,
+        _ => &[],
+    };
+    if !accepted.is_empty()
+        && let Some(key) = config.keys().find(|key| !accepted.contains(&key.as_str()))
+    {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown {provider} cloud config key '{key}'; accepted keys are: {}",
+            accepted.join(", ")
+        )));
+    }
+    match provider.as_str() {
         "s3" => {
             let bucket = config
                 .get("bucket")
@@ -1632,24 +1760,29 @@ pub fn extract_cloud_config(
                 .extract::<String>(py)?;
             let region = config
                 .get("region")
-                .map(|v| v.extract::<String>(py))
-                .transpose()?;
+                .map(|v| v.extract::<Option<String>>(py))
+                .transpose()?
+                .flatten();
             let endpoint = config
                 .get("endpoint")
-                .map(|v| v.extract::<String>(py))
-                .transpose()?;
+                .map(|v| v.extract::<Option<String>>(py))
+                .transpose()?
+                .flatten();
             let access_key_id = config
                 .get("access_key_id")
-                .map(|v| v.extract::<String>(py))
-                .transpose()?;
+                .map(|v| v.extract::<Option<String>>(py))
+                .transpose()?
+                .flatten();
             let secret_access_key = config
                 .get("secret_access_key")
-                .map(|v| v.extract::<String>(py))
-                .transpose()?;
+                .map(|v| v.extract::<Option<String>>(py))
+                .transpose()?
+                .flatten();
             let session_token = config
                 .get("session_token")
-                .map(|v| v.extract::<String>(py))
-                .transpose()?;
+                .map(|v| v.extract::<Option<String>>(py))
+                .transpose()?
+                .flatten();
             let virtual_hosted_style = config
                 .get("virtual_hosted_style")
                 .map(|v| v.extract::<bool>(py))
@@ -1674,12 +1807,14 @@ pub fn extract_cloud_config(
                 .extract::<String>(py)?;
             let service_account_path = config
                 .get("service_account_path")
-                .map(|v| v.extract::<String>(py))
-                .transpose()?;
+                .map(|v| v.extract::<Option<String>>(py))
+                .transpose()?
+                .flatten();
             let service_account_key = config
                 .get("service_account_key")
-                .map(|v| v.extract::<String>(py))
-                .transpose()?;
+                .map(|v| v.extract::<Option<String>>(py))
+                .transpose()?
+                .flatten();
             Ok(uni_common::CloudStorageConfig::Gcs {
                 bucket,
                 service_account_path,
@@ -1705,12 +1840,14 @@ pub fn extract_cloud_config(
                 .extract::<String>(py)?;
             let access_key = config
                 .get("access_key")
-                .map(|v| v.extract::<String>(py))
-                .transpose()?;
+                .map(|v| v.extract::<Option<String>>(py))
+                .transpose()?
+                .flatten();
             let sas_token = config
                 .get("sas_token")
-                .map(|v| v.extract::<String>(py))
-                .transpose()?;
+                .map(|v| v.extract::<Option<String>>(py))
+                .transpose()?
+                .flatten();
             Ok(uni_common::CloudStorageConfig::Azure {
                 container,
                 account,
@@ -1733,32 +1870,52 @@ pub fn extract_cloud_config(
 /// `UniConfig` fields are reachable from Python, so a key added to one and not
 /// the other fails a build rather than going quiet.
 pub const UNI_CONFIG_KEYS: &[&str] = &[
-    "query_timeout",
-    "max_query_memory",
-    "parallelism",
     "cache_size",
-    "max_transaction_memory",
+    "parallelism",
     "batch_size",
     "execution_batch_size",
+    "max_frontier_size",
+    "auto_flush_threshold",
+    "commit_channel_capacity",
+    "auto_flush_interval",
+    "auto_flush_min_mutations",
     "wal_enabled",
+    "compaction",
+    "throttle",
+    "file_sandbox",
+    "query_timeout",
+    "commit_timeout",
+    "max_query_memory",
+    "regex_backtrack_limit",
+    "max_transaction_memory",
+    "max_compaction_rows",
+    "max_recursive_cte_iterations",
+    "vector_knn_default_k",
+    "lance_metadata_cache_bytes",
+    "lance_index_cache_bytes",
+    "object_store",
+    "index_rebuild",
     "strict_schema",
+    "defer_embeddings",
+    "fork_fragment_warn_threshold",
+    "tx_id_reservoir_batch",
+    "async_flush_enabled",
+    "max_pending_flushes",
+    "flush_stream_timeout",
+    "drop_fork_drain_timeout",
+    "flush_drain_timeout",
     "max_forks",
     "fork_default_ttl",
     "fork_sweeper_interval",
     "disable_fork_sweeper",
-    "vector_knn_default_k",
-    "regex_backtrack_limit",
-    "lance_metadata_cache_bytes",
-    "lance_index_cache_bytes",
-    "compaction",
-    "throttle",
+    "fork_index_build_threshold",
+    "fork_index_builder_interval",
+    "disable_fork_index_builder",
+    "ssi_enabled",
+    "ec_flush_interval",
+    "ec_flush_threshold",
 ];
 
-/// Every key the nested `"compaction"` dict of `config({...})` understands,
-/// one per [`uni_common::config::CompactionConfig`] field.
-///
-/// Read by `scripts/ci/check_rust_python_parity.py` like
-/// [`UNI_CONFIG_KEYS`], so a field added to the struct and not here fails it.
 pub const COMPACTION_CONFIG_KEYS: &[&str] = &[
     "enabled",
     "max_l1_runs",
@@ -1770,22 +1927,52 @@ pub const COMPACTION_CONFIG_KEYS: &[&str] = &[
     "version_retention",
 ];
 
-/// Every key the nested `"throttle"` dict of `config({...})` understands, one
-/// per [`uni_common::config::WriteThrottleConfig`] field.
 pub const THROTTLE_CONFIG_KEYS: &[&str] = &["soft_limit", "hard_limit", "base_delay"];
 
+pub const FILE_SANDBOX_CONFIG_KEYS: &[&str] = &["enabled", "allowed_paths"];
+
+pub const OBJECT_STORE_CONFIG_KEYS: &[&str] = &[
+    "connect_timeout",
+    "read_timeout",
+    "write_timeout",
+    "max_retries",
+    "retry_backoff_base",
+    "retry_backoff_max",
+];
+
+pub const INDEX_REBUILD_CONFIG_KEYS: &[&str] = &[
+    "max_retries",
+    "retry_delay",
+    "worker_check_interval",
+    "growth_trigger_ratio",
+    "max_index_age",
+    "auto_rebuild_enabled",
+];
+
 /// A duration given as seconds (a number) or a `datetime.timedelta`.
-fn py_duration(v: &Bound<'_, PyAny>) -> PyResult<std::time::Duration> {
-    if v.hasattr("total_seconds")? {
-        return py_timedelta_to_duration(v);
+pub(crate) fn duration_from_seconds(secs: f64) -> PyResult<std::time::Duration> {
+    std::time::Duration::try_from_secs_f64(secs).map_err(|_| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "a duration must be finite, non-negative and representable in seconds, got {secs}"
+        ))
+    })
+}
+
+pub(crate) fn py_duration(v: &Bound<'_, PyAny>) -> PyResult<std::time::Duration> {
+    let secs: f64 = if v.hasattr("total_seconds")? {
+        v.call_method0("total_seconds")?.extract()?
+    } else {
+        v.extract()?
+    };
+    duration_from_seconds(secs)
+}
+
+fn py_optional_duration(v: &Bound<'_, PyAny>) -> PyResult<Option<std::time::Duration>> {
+    if v.is_none() {
+        Ok(None)
+    } else {
+        py_duration(v).map(Some)
     }
-    let secs: f64 = v.extract()?;
-    if !secs.is_finite() || secs < 0.0 {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "a duration must be a non-negative number of seconds, got {secs}"
-        )));
-    }
-    Ok(std::time::Duration::from_secs_f64(secs))
 }
 
 /// The nested dict under `key`, refusing a key outside `accepted`.
@@ -1834,7 +2021,7 @@ pub fn extract_uni_config(
 /// compose in either order and the last write to a given setting wins.
 ///
 /// **It rejects a key it does not understand.** A misspelled `quer_timeout`, or
-/// a real `UniConfig` field that has no Python binding such as `ssi_enabled`,
+/// a retired setting such as `partial_lance_writes`,
 /// used to be accepted and ignored: the caller asked for a setting, got no
 /// error, and got the default. Silently discarding a request is worse than
 /// refusing it, so an unknown key is now a `ValueError` naming the key and
@@ -1855,97 +2042,200 @@ pub fn apply_uni_config(
             accepted.join(", ")
         )));
     }
-    if let Some(v) = config.get("query_timeout") {
-        uni_config.query_timeout = std::time::Duration::from_secs_f64(v.extract::<f64>(py)?);
-    }
-    if let Some(v) = config.get("max_query_memory") {
-        uni_config.max_query_memory = v.extract::<usize>(py)?;
+    if let Some(v) = config.get("cache_size") {
+        uni_config.cache_size = v.bind(py).extract::<usize>()?;
     }
     if let Some(v) = config.get("parallelism") {
-        uni_config.parallelism = v.extract::<usize>(py)?;
-    }
-    if let Some(v) = config.get("cache_size") {
-        uni_config.cache_size = v.extract::<usize>(py)?;
-    }
-    if let Some(v) = config.get("max_transaction_memory") {
-        uni_config.max_transaction_memory = v.extract::<usize>(py)?;
+        uni_config.parallelism = v.bind(py).extract::<usize>()?;
     }
     if let Some(v) = config.get("batch_size") {
-        uni_config.batch_size = v.extract::<usize>(py)?;
+        uni_config.batch_size = v.bind(py).extract::<usize>()?;
     }
     if let Some(v) = config.get("execution_batch_size") {
-        uni_config.execution_batch_size = v.extract::<Option<usize>>(py)?;
+        uni_config.execution_batch_size = v.bind(py).extract::<Option<usize>>()?;
+    }
+    if let Some(v) = config.get("max_frontier_size") {
+        uni_config.max_frontier_size = v.bind(py).extract::<usize>()?;
+    }
+    if let Some(v) = config.get("auto_flush_threshold") {
+        uni_config.auto_flush_threshold = v.bind(py).extract::<usize>()?;
+    }
+    if let Some(v) = config.get("commit_channel_capacity") {
+        uni_config.commit_channel_capacity = v.bind(py).extract::<usize>()?;
+    }
+    if let Some(v) = config.get("auto_flush_interval") {
+        uni_config.auto_flush_interval = py_optional_duration(v.bind(py))?;
+    }
+    if let Some(v) = config.get("auto_flush_min_mutations") {
+        uni_config.auto_flush_min_mutations = v.bind(py).extract::<usize>()?;
     }
     if let Some(v) = config.get("wal_enabled") {
-        uni_config.wal_enabled = v.extract::<bool>(py)?;
+        uni_config.wal_enabled = v.bind(py).extract::<bool>()?;
     }
-    if let Some(v) = config.get("strict_schema") {
-        uni_config.strict_schema = v.extract::<bool>(py)?;
-    }
-    if let Some(v) = config.get("vector_knn_default_k") {
-        uni_config.vector_knn_default_k = v.extract::<usize>(py)?;
-    }
-    if let Some(v) = config.get("regex_backtrack_limit") {
-        uni_config.regex_backtrack_limit = v.extract::<usize>(py)?;
-    }
-    // `None` keeps Lance's default capacity for that cache.
-    if let Some(v) = config.get("lance_metadata_cache_bytes") {
-        uni_config.lance_metadata_cache_bytes = v.extract::<Option<usize>>(py)?;
-    }
-    if let Some(v) = config.get("lance_index_cache_bytes") {
-        uni_config.lance_index_cache_bytes = v.extract::<Option<usize>>(py)?;
-    }
-    // Phase 4b — fork lifecycle config
-    if let Some(v) = config.get("max_forks") {
-        // Allow None to mean unbounded; otherwise extract as usize.
-        if v.bind(py).is_none() {
-            uni_config.max_forks = None;
-        } else {
-            uni_config.max_forks = Some(v.extract::<usize>(py)?);
-        }
-    }
-    if let Some(v) = config.get("fork_default_ttl") {
-        if v.bind(py).is_none() {
-            uni_config.fork_default_ttl = None;
-        } else {
-            uni_config.fork_default_ttl = Some(py_timedelta_to_duration(v.bind(py))?);
-        }
-    }
-    if let Some(v) = config.get("fork_sweeper_interval") {
-        uni_config.fork_sweeper_interval = py_timedelta_to_duration(v.bind(py))?;
-    }
-    if let Some(v) = config.get("disable_fork_sweeper") {
-        uni_config.disable_fork_sweeper = v.extract::<bool>(py)?;
-    }
-    // Nested structs merge the same way: only the keys given change.
     if let Some(v) = config.get("compaction") {
-        let c = &mut uni_config.compaction;
-        for (k, v) in nested_config(py, "compaction", v, COMPACTION_CONFIG_KEYS)? {
-            match k.as_str() {
-                "enabled" => c.enabled = v.extract()?,
-                "max_l1_runs" => c.max_l1_runs = v.extract()?,
-                "max_l1_size_bytes" => c.max_l1_size_bytes = v.extract()?,
-                "max_l1_age" => c.max_l1_age = py_duration(&v)?,
-                "check_interval" => c.check_interval = py_duration(&v)?,
-                "worker_threads" => c.worker_threads = v.extract()?,
-                "frozen_segments_compact_threshold" => {
-                    c.frozen_segments_compact_threshold = v.extract()?;
+        for (key, v) in nested_config(py, "compaction", v, COMPACTION_CONFIG_KEYS)? {
+            match key.as_str() {
+                "enabled" => uni_config.compaction.enabled = v.extract::<bool>()?,
+                "max_l1_runs" => uni_config.compaction.max_l1_runs = v.extract::<usize>()?,
+                "max_l1_size_bytes" => {
+                    uni_config.compaction.max_l1_size_bytes = v.extract::<u64>()?
                 }
-                "version_retention" => c.version_retention = py_duration(&v)?,
+                "max_l1_age" => uni_config.compaction.max_l1_age = py_duration(&v)?,
+                "check_interval" => uni_config.compaction.check_interval = py_duration(&v)?,
+                "worker_threads" => uni_config.compaction.worker_threads = v.extract::<usize>()?,
+                "frozen_segments_compact_threshold" => {
+                    uni_config.compaction.frozen_segments_compact_threshold =
+                        v.extract::<usize>()?
+                }
+                "version_retention" => uni_config.compaction.version_retention = py_duration(&v)?,
                 _ => unreachable!("nested_config admits only COMPACTION_CONFIG_KEYS"),
             }
         }
     }
     if let Some(v) = config.get("throttle") {
-        let t = &mut uni_config.throttle;
-        for (k, v) in nested_config(py, "throttle", v, THROTTLE_CONFIG_KEYS)? {
-            match k.as_str() {
-                "soft_limit" => t.soft_limit = v.extract()?,
-                "hard_limit" => t.hard_limit = v.extract()?,
-                "base_delay" => t.base_delay = py_duration(&v)?,
+        for (key, v) in nested_config(py, "throttle", v, THROTTLE_CONFIG_KEYS)? {
+            match key.as_str() {
+                "soft_limit" => uni_config.throttle.soft_limit = v.extract::<usize>()?,
+                "hard_limit" => uni_config.throttle.hard_limit = v.extract::<usize>()?,
+                "base_delay" => uni_config.throttle.base_delay = py_duration(&v)?,
                 _ => unreachable!("nested_config admits only THROTTLE_CONFIG_KEYS"),
             }
         }
+    }
+    if let Some(v) = config.get("file_sandbox") {
+        for (key, v) in nested_config(py, "file_sandbox", v, FILE_SANDBOX_CONFIG_KEYS)? {
+            match key.as_str() {
+                "enabled" => uni_config.file_sandbox.enabled = v.extract::<bool>()?,
+                "allowed_paths" => {
+                    uni_config.file_sandbox.allowed_paths =
+                        v.extract::<Vec<std::path::PathBuf>>()?
+                }
+                _ => unreachable!("nested_config admits only FILE_SANDBOX_CONFIG_KEYS"),
+            }
+        }
+    }
+    if let Some(v) = config.get("query_timeout") {
+        uni_config.query_timeout = py_duration(v.bind(py))?;
+    }
+    if let Some(v) = config.get("commit_timeout") {
+        uni_config.commit_timeout = py_duration(v.bind(py))?;
+    }
+    if let Some(v) = config.get("max_query_memory") {
+        uni_config.max_query_memory = v.bind(py).extract::<usize>()?;
+    }
+    if let Some(v) = config.get("regex_backtrack_limit") {
+        uni_config.regex_backtrack_limit = v.bind(py).extract::<usize>()?;
+    }
+    if let Some(v) = config.get("max_transaction_memory") {
+        uni_config.max_transaction_memory = v.bind(py).extract::<usize>()?;
+    }
+    if let Some(v) = config.get("max_compaction_rows") {
+        uni_config.max_compaction_rows = v.bind(py).extract::<usize>()?;
+    }
+    if let Some(v) = config.get("max_recursive_cte_iterations") {
+        uni_config.max_recursive_cte_iterations = v.bind(py).extract::<usize>()?;
+    }
+    if let Some(v) = config.get("vector_knn_default_k") {
+        uni_config.vector_knn_default_k = v.bind(py).extract::<usize>()?;
+    }
+    if let Some(v) = config.get("lance_metadata_cache_bytes") {
+        uni_config.lance_metadata_cache_bytes = v.bind(py).extract::<Option<usize>>()?;
+    }
+    if let Some(v) = config.get("lance_index_cache_bytes") {
+        uni_config.lance_index_cache_bytes = v.bind(py).extract::<Option<usize>>()?;
+    }
+    if let Some(v) = config.get("object_store") {
+        for (key, v) in nested_config(py, "object_store", v, OBJECT_STORE_CONFIG_KEYS)? {
+            match key.as_str() {
+                "connect_timeout" => uni_config.object_store.connect_timeout = py_duration(&v)?,
+                "read_timeout" => uni_config.object_store.read_timeout = py_duration(&v)?,
+                "write_timeout" => uni_config.object_store.write_timeout = py_duration(&v)?,
+                "max_retries" => uni_config.object_store.max_retries = v.extract::<u32>()?,
+                "retry_backoff_base" => {
+                    uni_config.object_store.retry_backoff_base = py_duration(&v)?
+                }
+                "retry_backoff_max" => uni_config.object_store.retry_backoff_max = py_duration(&v)?,
+                _ => unreachable!("nested_config admits only OBJECT_STORE_CONFIG_KEYS"),
+            }
+        }
+    }
+    if let Some(v) = config.get("index_rebuild") {
+        for (key, v) in nested_config(py, "index_rebuild", v, INDEX_REBUILD_CONFIG_KEYS)? {
+            match key.as_str() {
+                "max_retries" => uni_config.index_rebuild.max_retries = v.extract::<u32>()?,
+                "retry_delay" => uni_config.index_rebuild.retry_delay = py_duration(&v)?,
+                "worker_check_interval" => {
+                    uni_config.index_rebuild.worker_check_interval = py_duration(&v)?
+                }
+                "growth_trigger_ratio" => {
+                    uni_config.index_rebuild.growth_trigger_ratio = v.extract::<f64>()?
+                }
+                "max_index_age" => {
+                    uni_config.index_rebuild.max_index_age = py_optional_duration(&v)?
+                }
+                "auto_rebuild_enabled" => {
+                    uni_config.index_rebuild.auto_rebuild_enabled = v.extract::<bool>()?
+                }
+                _ => unreachable!("nested_config admits only INDEX_REBUILD_CONFIG_KEYS"),
+            }
+        }
+    }
+    if let Some(v) = config.get("strict_schema") {
+        uni_config.strict_schema = v.bind(py).extract::<bool>()?;
+    }
+    if let Some(v) = config.get("defer_embeddings") {
+        uni_config.defer_embeddings = v.bind(py).extract::<bool>()?;
+    }
+    if let Some(v) = config.get("fork_fragment_warn_threshold") {
+        uni_config.fork_fragment_warn_threshold = v.bind(py).extract::<usize>()?;
+    }
+    if let Some(v) = config.get("tx_id_reservoir_batch") {
+        uni_config.tx_id_reservoir_batch = v.bind(py).extract::<usize>()?;
+    }
+    if let Some(v) = config.get("async_flush_enabled") {
+        uni_config.async_flush_enabled = v.bind(py).extract::<bool>()?;
+    }
+    if let Some(v) = config.get("max_pending_flushes") {
+        uni_config.max_pending_flushes = v.bind(py).extract::<usize>()?;
+    }
+    if let Some(v) = config.get("flush_stream_timeout") {
+        uni_config.flush_stream_timeout = py_duration(v.bind(py))?;
+    }
+    if let Some(v) = config.get("drop_fork_drain_timeout") {
+        uni_config.drop_fork_drain_timeout = py_duration(v.bind(py))?;
+    }
+    if let Some(v) = config.get("flush_drain_timeout") {
+        uni_config.flush_drain_timeout = py_duration(v.bind(py))?;
+    }
+    if let Some(v) = config.get("max_forks") {
+        uni_config.max_forks = v.bind(py).extract::<Option<usize>>()?;
+    }
+    if let Some(v) = config.get("fork_default_ttl") {
+        uni_config.fork_default_ttl = py_optional_duration(v.bind(py))?;
+    }
+    if let Some(v) = config.get("fork_sweeper_interval") {
+        uni_config.fork_sweeper_interval = py_duration(v.bind(py))?;
+    }
+    if let Some(v) = config.get("disable_fork_sweeper") {
+        uni_config.disable_fork_sweeper = v.bind(py).extract::<bool>()?;
+    }
+    if let Some(v) = config.get("fork_index_build_threshold") {
+        uni_config.fork_index_build_threshold = v.bind(py).extract::<u64>()?;
+    }
+    if let Some(v) = config.get("fork_index_builder_interval") {
+        uni_config.fork_index_builder_interval = py_duration(v.bind(py))?;
+    }
+    if let Some(v) = config.get("disable_fork_index_builder") {
+        uni_config.disable_fork_index_builder = v.bind(py).extract::<bool>()?;
+    }
+    if let Some(v) = config.get("ssi_enabled") {
+        uni_config.ssi_enabled = v.bind(py).extract::<bool>()?;
+    }
+    if let Some(v) = config.get("ec_flush_interval") {
+        uni_config.ec_flush_interval = py_duration(v.bind(py))?;
+    }
+    if let Some(v) = config.get("ec_flush_threshold") {
+        uni_config.ec_flush_threshold = v.bind(py).extract::<usize>()?;
     }
     Ok(())
 }
@@ -2144,22 +2434,136 @@ pub fn uni_config_to_py(py: Python, config: &uni_common::UniConfig) -> PyResult<
     let dict = PyDict::new(py);
     dict.set_item("cache_size", config.cache_size)?;
     dict.set_item("parallelism", config.parallelism)?;
-    dict.set_item("query_timeout", config.query_timeout.as_secs_f64())?;
-    dict.set_item("max_query_memory", config.max_query_memory)?;
-    dict.set_item("max_transaction_memory", config.max_transaction_memory)?;
     dict.set_item("batch_size", config.batch_size)?;
     dict.set_item("execution_batch_size", config.execution_batch_size)?;
+    dict.set_item("max_frontier_size", config.max_frontier_size)?;
     dict.set_item("auto_flush_threshold", config.auto_flush_threshold)?;
+    dict.set_item("commit_channel_capacity", config.commit_channel_capacity)?;
     dict.set_item(
         "auto_flush_interval",
         config.auto_flush_interval.map(|d| d.as_secs_f64()),
     )?;
+    dict.set_item("auto_flush_min_mutations", config.auto_flush_min_mutations)?;
     dict.set_item("wal_enabled", config.wal_enabled)?;
+    let nested = PyDict::new(py);
+    nested.set_item("enabled", config.compaction.enabled)?;
+    nested.set_item("max_l1_runs", config.compaction.max_l1_runs)?;
+    nested.set_item("max_l1_size_bytes", config.compaction.max_l1_size_bytes)?;
+    nested.set_item("max_l1_age", config.compaction.max_l1_age.as_secs_f64())?;
+    nested.set_item(
+        "check_interval",
+        config.compaction.check_interval.as_secs_f64(),
+    )?;
+    nested.set_item("worker_threads", config.compaction.worker_threads)?;
+    nested.set_item(
+        "frozen_segments_compact_threshold",
+        config.compaction.frozen_segments_compact_threshold,
+    )?;
+    nested.set_item(
+        "version_retention",
+        config.compaction.version_retention.as_secs_f64(),
+    )?;
+    dict.set_item("compaction", nested)?;
+    let nested = PyDict::new(py);
+    nested.set_item("soft_limit", config.throttle.soft_limit)?;
+    nested.set_item("hard_limit", config.throttle.hard_limit)?;
+    nested.set_item("base_delay", config.throttle.base_delay.as_secs_f64())?;
+    dict.set_item("throttle", nested)?;
+    let nested = PyDict::new(py);
+    nested.set_item("enabled", config.file_sandbox.enabled)?;
+    nested.set_item(
+        "allowed_paths",
+        config
+            .file_sandbox
+            .allowed_paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>(),
+    )?;
+    dict.set_item("file_sandbox", nested)?;
+    dict.set_item("query_timeout", config.query_timeout.as_secs_f64())?;
+    dict.set_item("commit_timeout", config.commit_timeout.as_secs_f64())?;
+    dict.set_item("max_query_memory", config.max_query_memory)?;
+    dict.set_item("regex_backtrack_limit", config.regex_backtrack_limit)?;
+    dict.set_item("max_transaction_memory", config.max_transaction_memory)?;
+    dict.set_item("max_compaction_rows", config.max_compaction_rows)?;
     dict.set_item(
         "max_recursive_cte_iterations",
         config.max_recursive_cte_iterations,
     )?;
-    // Phase 4b — fork lifecycle config
+    dict.set_item("vector_knn_default_k", config.vector_knn_default_k)?;
+    dict.set_item(
+        "lance_metadata_cache_bytes",
+        config.lance_metadata_cache_bytes,
+    )?;
+    dict.set_item("lance_index_cache_bytes", config.lance_index_cache_bytes)?;
+    let nested = PyDict::new(py);
+    nested.set_item(
+        "connect_timeout",
+        config.object_store.connect_timeout.as_secs_f64(),
+    )?;
+    nested.set_item(
+        "read_timeout",
+        config.object_store.read_timeout.as_secs_f64(),
+    )?;
+    nested.set_item(
+        "write_timeout",
+        config.object_store.write_timeout.as_secs_f64(),
+    )?;
+    nested.set_item("max_retries", config.object_store.max_retries)?;
+    nested.set_item(
+        "retry_backoff_base",
+        config.object_store.retry_backoff_base.as_secs_f64(),
+    )?;
+    nested.set_item(
+        "retry_backoff_max",
+        config.object_store.retry_backoff_max.as_secs_f64(),
+    )?;
+    dict.set_item("object_store", nested)?;
+    let nested = PyDict::new(py);
+    nested.set_item("max_retries", config.index_rebuild.max_retries)?;
+    nested.set_item(
+        "retry_delay",
+        config.index_rebuild.retry_delay.as_secs_f64(),
+    )?;
+    nested.set_item(
+        "worker_check_interval",
+        config.index_rebuild.worker_check_interval.as_secs_f64(),
+    )?;
+    nested.set_item(
+        "growth_trigger_ratio",
+        config.index_rebuild.growth_trigger_ratio,
+    )?;
+    nested.set_item(
+        "max_index_age",
+        config.index_rebuild.max_index_age.map(|d| d.as_secs_f64()),
+    )?;
+    nested.set_item(
+        "auto_rebuild_enabled",
+        config.index_rebuild.auto_rebuild_enabled,
+    )?;
+    dict.set_item("index_rebuild", nested)?;
+    dict.set_item("strict_schema", config.strict_schema)?;
+    dict.set_item("defer_embeddings", config.defer_embeddings)?;
+    dict.set_item(
+        "fork_fragment_warn_threshold",
+        config.fork_fragment_warn_threshold,
+    )?;
+    dict.set_item("tx_id_reservoir_batch", config.tx_id_reservoir_batch)?;
+    dict.set_item("async_flush_enabled", config.async_flush_enabled)?;
+    dict.set_item("max_pending_flushes", config.max_pending_flushes)?;
+    dict.set_item(
+        "flush_stream_timeout",
+        config.flush_stream_timeout.as_secs_f64(),
+    )?;
+    dict.set_item(
+        "drop_fork_drain_timeout",
+        config.drop_fork_drain_timeout.as_secs_f64(),
+    )?;
+    dict.set_item(
+        "flush_drain_timeout",
+        config.flush_drain_timeout.as_secs_f64(),
+    )?;
     dict.set_item("max_forks", config.max_forks)?;
     dict.set_item(
         "fork_default_ttl",
@@ -2170,33 +2574,21 @@ pub fn uni_config_to_py(py: Python, config: &uni_common::UniConfig) -> PyResult<
         config.fork_sweeper_interval.as_secs_f64(),
     )?;
     dict.set_item("disable_fork_sweeper", config.disable_fork_sweeper)?;
-    dict.set_item("vector_knn_default_k", config.vector_knn_default_k)?;
-    dict.set_item("regex_backtrack_limit", config.regex_backtrack_limit)?;
     dict.set_item(
-        "lance_metadata_cache_bytes",
-        config.lance_metadata_cache_bytes,
+        "fork_index_build_threshold",
+        config.fork_index_build_threshold,
     )?;
-    dict.set_item("lance_index_cache_bytes", config.lance_index_cache_bytes)?;
-    let c = &config.compaction;
-    let compaction = PyDict::new(py);
-    compaction.set_item("enabled", c.enabled)?;
-    compaction.set_item("max_l1_runs", c.max_l1_runs)?;
-    compaction.set_item("max_l1_size_bytes", c.max_l1_size_bytes)?;
-    compaction.set_item("max_l1_age", c.max_l1_age.as_secs_f64())?;
-    compaction.set_item("check_interval", c.check_interval.as_secs_f64())?;
-    compaction.set_item("worker_threads", c.worker_threads)?;
-    compaction.set_item(
-        "frozen_segments_compact_threshold",
-        c.frozen_segments_compact_threshold,
+    dict.set_item(
+        "fork_index_builder_interval",
+        config.fork_index_builder_interval.as_secs_f64(),
     )?;
-    compaction.set_item("version_retention", c.version_retention.as_secs_f64())?;
-    dict.set_item("compaction", compaction)?;
-    let t = &config.throttle;
-    let throttle = PyDict::new(py);
-    throttle.set_item("soft_limit", t.soft_limit)?;
-    throttle.set_item("hard_limit", t.hard_limit)?;
-    throttle.set_item("base_delay", t.base_delay.as_secs_f64())?;
-    dict.set_item("throttle", throttle)?;
+    dict.set_item(
+        "disable_fork_index_builder",
+        config.disable_fork_index_builder,
+    )?;
+    dict.set_item("ssi_enabled", config.ssi_enabled)?;
+    dict.set_item("ec_flush_interval", config.ec_flush_interval.as_secs_f64())?;
+    dict.set_item("ec_flush_threshold", config.ec_flush_threshold)?;
     Ok(dict.into())
 }
 

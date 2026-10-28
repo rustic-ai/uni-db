@@ -1798,8 +1798,8 @@ RETURN length(p)
 
 A value that names the path or its relationship variable is refused.
 
-!!! warning "Changed in the next release"
-    Up to 4.2.0 a mandatory `MATCH` kept every no-path pair as a row with a
+!!! warning "Changed in 5.0.0"
+    Before 5.0.0 a mandatory `MATCH` kept every no-path pair as a row with a
     `NULL` path, and an `OPTIONAL MATCH` with an unbound target returned a
     `NULL`-path row for every unreachable target. Queries that relied on that —
     for example counting rows to count candidate pairs — should use `OPTIONAL

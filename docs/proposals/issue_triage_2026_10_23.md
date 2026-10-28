@@ -25,7 +25,7 @@ issue was not reproducible on `main`.
 - **Local follow-up fixes:** virtual-ID comparisons, schemaless FTS scoring,
   and procedure inner-query counters. See `followup_triage_2026_10_25.md` for
   verification and the remaining backlog.
-- **Still open:** #302, #311 (needs a reproduction), and #317. Release status
+- **Still open:** #311 (needs a reproduction), and #317. #302 is fixed locally; see [implementation and validation](issue_302_candle_dependency_2026_10_27.md). Release status
   needs a live publication check; a local version number does not prove shipping.
   The grammar's stale SLG comment has been corrected.
 
@@ -38,7 +38,7 @@ issue was not reproducible on `main`.
 | 312 | Matched node's properties copied into every joined row | **Fixed** `0f9043325` | **P1** (writes fail at 1 GiB) | Release |
 | 314 | Classifier relation consumed through IS: Arrow error | **Fixed** | P2 | Yield typing and transient-column handling landed |
 | 316 | Exact integer aggregation | **Fixed** `d6e455e5e` (bug part) | P1 for the bug part | Release |
-| 302 | uni-locy always depends on candle | Valid | P3 | Open: reimplement the classifier without candle (S) |
+| 302 | uni-locy always depends on candle | Fixed locally, 2026-10-27 | P3 | Safetensors loader and f32 inference retain the public classifier API; see the linked validation report |
 | 307 | QUERY WHERE costs the full fixpoint | **Fixed** | P2 | Auto default and lazy derived facts landed |
 | 305 | Dropped BulkWriter loses committed rows | Fixed on `main` | was P0 in 4.1.1 | Regression test landed; release |
 | 308 | EXPLAIN RULE doesn't expand recursion | Fixed on `main` (#303) | was P2 | Regression test landed; release |
@@ -180,9 +180,12 @@ up to N=20 000 and 36 re-key cycles. All exact, on both `main` and 4.1.1.
 with identical answers. It is off by default because it breaks the `.derived`
 full-relation contract.
 
-**#302.** Candle is used only by `CandleLinearClassifier`, which is a dot
-product plus a sigmoid. Removing it saves 45 crates in minimal builds, and also
-in the slim ONNX wheels.
+**#302.** Fixed locally on 2026-10-27: `CandleLinearClassifier` retains its
+API but loads safetensors directly and computes f32 dot product plus sigmoid.
+The measured minimal Lance-backed normal dependency graph drops by 44 packages
+(629 to 585), with no Candle. Optional embedding providers may still use Candle;
+wheel-size and cold-build savings have not been measured. See the
+[implementation report](issue_302_candle_dependency_2026_10_27.md).
 
 **#315.** Blocked on #313 shipping. The `shared_probabilistic_dependency`
 warning fires even when exact mode resolved the dependency.

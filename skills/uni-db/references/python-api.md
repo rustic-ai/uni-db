@@ -41,6 +41,8 @@ db.shutdown()
 
 ```python
 class Uni:
+    def background_task_count(self) -> int: ...
+    def load_python_plugin(self, module_src: str, module_name: str, grants: list[str] | None=None) -> dict[str, Any]: ...
     @staticmethod
     def open(path: str) -> Uni: ...
     @staticmethod
@@ -89,6 +91,24 @@ class Uni:
 
 ## 4. UniBuilder / AsyncUniBuilder
 
+`.config(dict)` accepts all 44 active `UniConfig` fields, including nested
+`compaction`, `throttle`, `file_sandbox`, `object_store`, and `index_rebuild`.
+Unknown fields and deprecated `partial_lance_writes` raise `ValueError`.
+Durations accept seconds or `datetime.timedelta`; optional durations accept
+`None`. Nested overrides merge and later setters win. `db.config()` returns
+these fields with durations in seconds. Use `.cloud_config(...)` separately
+for S3/GCS/Azure credentials.
+
+Locy `.with_config(...)` accepts a `LocyConfig` or dictionary. Dictionary
+`timeout` uses seconds/timedelta; the object constructor uses `timeout_secs`.
+`semiring` accepts `"add_mult_prob"`, `"max_min_prob"`, `"bdd_exact"`, or
+`{"top_k_proofs": positive_u32}`. `goal_directed` defaults to `"auto"`;
+`neural_predicates_preview` defaults to `True`, and `classifier_cache_max` to
+100,000. Use `.compile_locy_with_config(program, config)` for configured
+compile-only checks; `.compile_locy(program)` disables neural syntax.
+Classifier registration uses `.register_classifier(...)`; internal cache and
+provenance-store handles are not Python config keys.
+
 ```python
 class UniBuilder:
     @staticmethod
@@ -123,23 +143,21 @@ class UniBuilder:
 
 ```python
 class Session:
-    def set(self, key: str, value: Any) -> Session: ...
-    def set_all(self, params: dict[str, Any]) -> None: ...
-    def get(self, key: str) -> Any | None: ...
+    def compile_locy_with_config(self, program: str, config: LocyConfig | dict[str, Any]) -> CompiledProgram: ...
+    def build_fork_local_index(self, label: str, column: str, kind: str) -> None: ...
+    def execute_with_retry(self, cypher: str) -> ExecuteResult: ...
+    def replacement_scans_enabled(self) -> bool: ...
+    def set_replacement_scans(self, enabled: bool) -> None: ...
+    def params(self) -> Params: ...
 
     def query(self, cypher: str, params: dict[str, Any] | None = None) -> QueryResult: ...
     def query_with(self, cypher: str) -> SessionQueryBuilder: ...
-    def query_cursor(self, cypher: str, params: dict[str, Any] | None = None) -> QueryCursor: ...
 
     def locy(self, program: str, params: dict[str, Any] | None = None) -> LocyResult: ...
     def locy_with(self, program: str) -> SessionLocyBuilder: ...
     def rules(self) -> RuleRegistry: ...
     def compile_locy(self, program: str) -> CompiledProgram: ...
 
-    def explain(self, cypher: str) -> ExplainOutput: ...
-    def explain_locy(self, program: str) -> LocyExplainOutput: ...
-    def profile(self, cypher: str) -> tuple[QueryResult, ProfileOutput]: ...
-    def profile_with(self, cypher: str) -> ProfileBuilder: ...
 
     def prepare(self, cypher: str) -> PreparedQuery: ...
     def prepare_locy(self, program: str) -> PreparedLocy: ...
@@ -152,7 +170,6 @@ class Session:
     def refresh(self) -> None: ...
     def is_pinned(self) -> bool: ...
 
-    def register_function(self, name: str, func: Callable[..., Any]) -> None: ...
     def add_hook(self, hook: Any) -> None: ...
     def watch(self) -> CommitStream: ...
     def watch_with(self) -> WatchBuilder: ...
@@ -237,7 +254,7 @@ class Transaction:
 
 ### TxExecuteBuilder (`tx.execute_with(cypher)`)
 
-`.param(name, value)`, `.timeout(seconds)` -> self. Terminals:
+`.param(name, value)`, `.params(dict)`, `.timeout(seconds)` -> self. Terminals:
 - `.run()` -> `ExecuteResult` (mutation counters from the tx's private L0).
 - `.profile()` -> `tuple[ExecuteResult, ProfileOutput]` (counters + per-operator timings/memory). The async variant on `AsyncTxExecuteBuilder.profile()` is awaitable.
 
@@ -245,9 +262,14 @@ class Transaction:
 
 `.timeout(seconds)`, `.isolation(level)` -> self. Terminal: `.start()` -> `Transaction`.
 
-### ProfileBuilder (`session.profile_with(cypher)`)
+### Query analysis
 
-`.param(name, value)`, `.params(dict)` -> self. Terminal: `.run()` -> `tuple[QueryResult, ProfileOutput]`.
+Use `session.query_with(cypher).explain()` or
+`session.query_with(cypher).profile()`. Streaming reads use
+`session.query_with(cypher).cursor()`; Locy compile-only analysis uses
+`session.locy_with(program).explain()`. These are builder terminals, not
+methods directly on Session. Register Python UDFs with `session.scalar_fn(...)`.
+
 
 ---
 
@@ -267,7 +289,7 @@ class Transaction:
 
 ### TxLocyBuilder (`tx.locy_with(program)`)
 
-Same methods as SessionLocyBuilder (minus `.params(dict)`). Terminal: `.run()` -> `LocyResult`.
+Same methods as SessionLocyBuilder, including `.params(dict)`. Terminal: `.run()` -> `LocyResult`.
 
 `.cancellation_token(token)` races the token against the whole evaluation, so a long-running fixpoint is cancellable, not merely at statement boundaries; it raises `UniCancelledError`. `Transaction.cancel()` likewise reaches `tx.locy()` / `tx.locy_with()` and `tx.apply()`, not just the transaction's Cypher statements.
 
@@ -403,6 +425,7 @@ Dict-like: `row["col"]`, `row[0]`, `"col" in row`, `row.to_dict()`, `row.get("co
 
 ```python
 class LocyResult:
+    async def derived_async(self) -> dict[str, list[dict[str, Any]]]: ...
     derived: Any; stats: Any; command_results: Any; warnings: Any
     approximate_groups: Any; derived_fact_set: Any
 
@@ -413,6 +436,11 @@ class LocyResult:
     @property
     def iterations(self) -> int: ...
 ```
+
+`.derived` materializes full rule relations synchronously and can raise an
+execution error; async callers can use `await result.derived_async()`.
+`rows()` and `columns()` are methods. Do not confuse these with the
+`QueryResult.rows` property or with `derived_fact_set`, the mutations for apply.
 
 ### LocyStats
 
@@ -668,7 +696,7 @@ db = Uni.open("./social_db")
 db.schema() \
     .label("Person").property("name", DataType.STRING()).property("age", DataType.INT64()) \
         .index("name", "btree") \
-    .edge_type("KNOWS", ["Person"], ["Person"]).property("since", DataType.INT32()) \
+    .done().edge_type("KNOWS", ["Person"], ["Person"]).property("since", DataType.INT32()) \
     .apply()
 
 session = db.session()

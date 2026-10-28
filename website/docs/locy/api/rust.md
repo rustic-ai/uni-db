@@ -64,7 +64,7 @@ Common fields:
 - `timeout` (`Option<Duration>`; `None` = 300s between strata, database `query_timeout` inside operators)
 - `max_explain_depth`
 - `max_slg_depth` (deprecated, no effect; using it is a deprecation warning)
-- `goal_directed` (`GoalDirected::Off` default, `On`, `Shadow`): magic-sets evaluation of `QUERY ... WHERE`; see [Modules, PRIORITY, QUERY](../advanced/modules-priority-query.md#goal-directed-query)
+- `goal_directed` (`GoalDirected::Auto` default, `Off`, `On`, `Shadow`): magic-sets evaluation of `QUERY ... WHERE`; see [Modules, PRIORITY, QUERY](../advanced/modules-priority-query.md#goal-directed-query)
 - `max_abduce_candidates`
 - `max_abduce_results`
 - `max_derived_bytes`
@@ -82,7 +82,7 @@ Common fields:
 - `command_results: Vec<CommandResult>`
 - `warnings: Vec<RuntimeWarning>`
 - `approximate_groups: HashMap<String, Vec<String>>`
-- `derived_fact_set: DerivedFactSet` — opaque fact set for `tx.apply()` materialization: every write of a session-level program (DERIVE output and Cypher writes), in program order
+- `derived_fact_set: Option<DerivedFactSet>` — opaque fact set for `tx.apply()` materialization: every write of a session-level program (DERIVE output and Cypher writes), in program order
 
 Helpers:
 
@@ -92,7 +92,7 @@ Helpers:
 - `result.warnings()`
 - `result.has_warning(...)`
 - `result.derived_rule(rule_name).await?`
-- `result.iterations`
+- `result.iterations()`
 
 ## Profile Output (`LocyProfileOutput`)
 
@@ -113,7 +113,7 @@ bodies, `operators` lists the steps that run outside a plan, with `actual_rows` 
 
 Note: `result.rows()` returns the rows of the first row-producing command in program order:
 a `QUERY` or a Cypher statement, with an `ASSUME { ... } THEN { ... }` block searched depth
-first through its body's results. The Python `rows` follows the same rule. Use
+first through its body's results. The Python `rows()` method follows the same rule. Use
 `result.command_results()` to reach a specific command's result.
 
 An ASSUME returns `CommandResult::Assume { results, derived }`: `results` holds one

@@ -1526,6 +1526,7 @@ class TxExecuteBuilder:
     def cancellation_token(self, token: CancellationToken) -> TxExecuteBuilder: ...
     def run(self) -> ExecuteResult: ...
     def profile(self) -> tuple[ExecuteResult, ProfileOutput]: ...
+    def params(self, params: dict[str, Any]) -> TxExecuteBuilder: ...
 
 class TxLocyBuilder:
     """Fluent builder for Locy evaluation within a transaction."""
@@ -1538,6 +1539,7 @@ class TxLocyBuilder:
     def cancellation_token(self, token: CancellationToken) -> TxLocyBuilder: ...
     def run(self) -> LocyResult: ...
     def profile(self) -> tuple[LocyResult, LocyProfileOutput]: ...
+    def params(self, params: dict[str, Any]) -> TxLocyBuilder: ...
 
 class ApplyBuilder:
     """Fluent builder for applying derived facts.
@@ -1792,11 +1794,20 @@ class Session:
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: Any,
-    ) -> bool: ...
+    ) -> bool:
+        ...
 
-# =============================================================================
-# Transaction (Sync)
-# =============================================================================
+        # =============================================================================
+        # Transaction (Sync)
+        # =============================================================================
+
+    def compile_locy_with_config(
+        self, program: str, config: LocyConfig | dict[str, Any]
+    ) -> CompiledProgram: ...
+    def build_fork_local_index(self, label: str, column: str, kind: str) -> None: ...
+    def execute_with_retry(self, cypher: str) -> ExecuteResult: ...
+    def replacement_scans_enabled(self) -> bool: ...
+    def set_replacement_scans(self, enabled: bool) -> None: ...
 
 class Transaction:
     """A database transaction with ACID guarantees.
@@ -1911,6 +1922,9 @@ class LocyConfig:
         # "auto" (the default) | "off" | "on" | "shadow", matched
         # case-insensitively; anything else raises ValueError.
         goal_directed: str | None = None,
+        semiring: str | dict[str, int] | None = None,
+        neural_predicates_preview: bool | None = None,
+        classifier_cache_max: int | None = None,
     ) -> None: ...
     @property
     def max_iterations(self) -> int: ...
@@ -1948,11 +1962,19 @@ class LocyConfig:
     # Parameter is named `callable` at runtime (src/classifier.rs). It shadows
     # the builtin, which is presumably why the stub renamed it -- but the stub
     # does not get a vote: `register_classifier(classifier=...)` is a TypeError.
-    def register_classifier(self, alias: str, callable: Callable[..., Any]) -> None: ...
+    def register_classifier(self, alias: str, callable: Callable[..., Any]) -> None:
+        ...
 
-# =============================================================================
-# Schema
-# =============================================================================
+        # =============================================================================
+        # Schema
+        # =============================================================================
+
+    @property
+    def semiring(self) -> str | dict[str, int]: ...
+    @property
+    def neural_predicates_preview(self) -> bool: ...
+    @property
+    def classifier_cache_max(self) -> int: ...
 
 class Schema:
     """A read-only snapshot of the database schema."""
@@ -2180,11 +2202,17 @@ class Uni:
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: Any,
-    ) -> bool: ...
+    ) -> bool:
+        ...
 
-# =============================================================================
-# Async API — Uni Builder
-# =============================================================================
+        # =============================================================================
+        # Async API — Uni Builder
+        # =============================================================================
+
+    def background_task_count(self) -> int: ...
+    def load_python_plugin(
+        self, module_src: str, module_name: str, grants: list[str] | None = None
+    ) -> dict[str, Any]: ...
 
 class AsyncUniBuilder:
     """Async builder for creating and configuring an AsyncUni instance."""
@@ -2330,11 +2358,17 @@ class AsyncUni:
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: Any,
-    ) -> bool: ...
+    ) -> bool:
+        ...
 
-# =============================================================================
-# Async API — Session
-# =============================================================================
+        # =============================================================================
+        # Async API — Session
+        # =============================================================================
+
+    def background_task_count(self) -> int: ...
+    async def load_python_plugin(
+        self, module_src: str, module_name: str, grants: list[str] | None = None
+    ) -> dict[str, Any]: ...
 
 class AsyncSession:
     """An async query session with scoped variables.
@@ -2444,11 +2478,22 @@ class AsyncSession:
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: Any,
-    ) -> bool: ...
+    ) -> bool:
+        ...
 
-# =============================================================================
-# Async API — Transaction
-# =============================================================================
+        # =============================================================================
+        # Async API — Transaction
+        # =============================================================================
+
+    async def compile_locy_with_config(
+        self, program: str, config: LocyConfig | dict[str, Any]
+    ) -> CompiledProgram: ...
+    async def build_fork_local_index(
+        self, label: str, column: str, kind: str
+    ) -> None: ...
+    async def execute_with_retry(self, cypher: str) -> ExecuteResult: ...
+    async def replacement_scans_enabled(self) -> bool: ...
+    async def set_replacement_scans(self, enabled: bool) -> None: ...
 
 class AsyncTransaction:
     """An async database transaction with context manager support.
@@ -2605,6 +2650,7 @@ class AsyncTxExecuteBuilder:
     def cancellation_token(self, token: CancellationToken) -> AsyncTxExecuteBuilder: ...
     async def run(self) -> ExecuteResult: ...
     async def profile(self) -> tuple[ExecuteResult, ProfileOutput]: ...
+    def params(self, params: dict[str, Any]) -> AsyncTxExecuteBuilder: ...
 
 class AsyncTxLocyBuilder:
     """Async fluent builder for Locy evaluation within a transaction."""
@@ -2619,6 +2665,7 @@ class AsyncTxLocyBuilder:
     def cancellation_token(self, token: CancellationToken) -> AsyncTxLocyBuilder: ...
     async def run(self) -> LocyResult: ...
     async def profile(self) -> tuple[LocyResult, LocyProfileOutput]: ...
+    def params(self, params: dict[str, Any]) -> AsyncTxLocyBuilder: ...
 
 class AsyncApplyBuilder:
     """Async fluent builder for applying derived facts.

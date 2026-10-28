@@ -318,7 +318,7 @@ pub struct WriterConfig {
     /// compaction, and a row created and updated in one flush window was
     /// lost. Every write now stores a full row.
     #[deprecated(
-        since = "4.2.0",
+        since = "5.0.0",
         note = "no-op: every write is stored as a full row; the partial MergeInsert path was removed"
     )]
     pub partial_lance_writes: bool,

@@ -174,7 +174,7 @@ def _python_program_lines(program_lines: list[str]) -> list[str]:
 
 def _rust_program_lines(program_lines: list[str]) -> list[str]:
     return [
-        'let program = r#"' + "\\n".join(program_lines) + '"#;',
+        'let program = r#"' + "\n".join(program_lines) + '"#;',
     ]
 
 
@@ -220,10 +220,10 @@ def _rust_eval_lines() -> list[str]:
     return [
         "let session = db.session();",
         "let result = session.locy(program).await?;",
-        'println!("Derived relations: {:?}", result.derived.keys().collect::<Vec<_>>());',
+        'println!("Derived relations: {:?}", result.derived_rules().await?.keys().collect::<Vec<_>>());',
         'println!("Iterations: {}", result.stats().total_iterations);',
         'println!("Queries executed: {}", result.stats().queries_executed);',
-        "for (name, rows) in &result.derived {",
+        "for (name, rows) in result.derived_rules().await? {",
         '    println!("{}: {} row(s)", name, rows.len());',
         "}",
         "",
@@ -731,7 +731,7 @@ def _cases() -> list[LocyUseCase]:
             rust_schema_lines=[
                 '    .label("Account")',
                 '        .property("id", DataType::String)',
-                '        .property("flagged", DataType::Boolean)',
+                '        .property("flagged", DataType::Bool)',
                 '    .edge_type("TRANSFER", &["Account"], &["Account"])',
             ],
             seed_statements=[

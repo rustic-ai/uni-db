@@ -171,7 +171,7 @@ For optimal write performance with cloud durability, use hybrid mode:
     # Local cache with S3 backend
     db = (
         uni_db.UniBuilder.open("./local-cache")
-        .remote_storage("s3://my-bucket/graph-data", CloudStorageConfig::default())
+        .remote_storage("s3://my-bucket/graph-data", CloudStorageConfig::s3_from_env("my-bucket"))
         .build()
     )
     ```

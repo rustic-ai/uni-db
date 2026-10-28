@@ -1,0 +1,124 @@
+{
+  "status": "passed",
+  "scope": "Rust/Python facade and configuration parity; no native Rust API changes",
+  "checks": [
+    {
+      "name": "Python extension build",
+      "command": "VIRTUAL_ENV=bindings/uni-db/.venv RUSTC_WRAPPER= CARGO_BUILD_JOBS=6 maturin develop --skip-install --offline --manifest-path bindings/uni-db/Cargo.toml",
+      "exit_code": 0,
+      "log": "uni-python-parity-build-final.log.gz",
+      "uncompressed_sha256": "26ffa7f96572cd5905217c728400cee69015c7d997201192c9592a54441cc35c"
+    },
+    {
+      "name": "Complete Python suite",
+      "command": "python -m pytest tests -q --tb=short",
+      "exit_code": 0,
+      "log": "uni-python-parity-full-final.log.gz",
+      "uncompressed_sha256": "249544dadbb874ce343d4c4b3089810fce269c5ba5ab67352cea24a386545bd5"
+    },
+    {
+      "name": "Stubtest",
+      "command": "python -m mypy.stubtest uni_db --mypy-config-file stubtest-mypy.ini --allowlist stubtest-allowlist.txt --ignore-unused-allowlist --ignore-positional-only --ignore-disjoint-bases",
+      "exit_code": 0,
+      "log": "uni-python-parity-stubtest.log.gz",
+      "uncompressed_sha256": "65b971eb8ffb25cd875c2d19762cc41b06690f46e610f60fc57a27bcd799553f"
+    },
+    {
+      "name": "Clippy",
+      "command": "RUSTC_WRAPPER= CARGO_BUILD_JOBS=6 cargo clippy -p uni-python --all-targets --offline --no-deps -- -D warnings",
+      "exit_code": 0,
+      "log": "uni-python-parity-clippy.log.gz",
+      "uncompressed_sha256": "3eba901a22aeb1e1e3f4895f87a9c77cf3d6fb6e1502d6b70e83a06f42cc11a8"
+    },
+    {
+      "name": "Slim ONNX compilation",
+      "command": "RUSTC_WRAPPER= CARGO_BUILD_JOBS=6 cargo check -p uni-python-onnx --offline",
+      "exit_code": 0,
+      "log": "uni-python-parity-onnx-check.log.gz",
+      "uncompressed_sha256": "7ae9c175f698f9df29d3cd2c41f2ebba32e1a72de7db04386daf77be464c3897"
+    },
+    {
+      "name": "Ruff",
+      "command": "ruff check bindings/uni-db",
+      "exit_code": 0,
+      "log": "uni-python-parity-ruff.log.gz",
+      "uncompressed_sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18"
+    },
+    {
+      "name": "Python formatting",
+      "command": "ruff format --check bindings/uni-db",
+      "exit_code": 0,
+      "log": "uni-python-parity-ruff-format.log.gz",
+      "uncompressed_sha256": "2fcba2071ad461b6c9a1655f5f7af639c36f5ea07efd65ca7e56a9a0fa53b912"
+    },
+    {
+      "name": "Static guards and fuzz lock",
+      "command": "python3 scripts/ci/static_guards.py --with-fuzz-lock",
+      "exit_code": 0,
+      "log": "uni-python-parity-static-final.log.gz",
+      "uncompressed_sha256": "72f99e37dd05fb01d75461de5cf2727cddc3b3c724d0893a4366106c58c98dfd"
+    }
+  ],
+  "additional_checks": {
+    "rustfmt": "passed: cargo fmt --all -- --check",
+    "generated_reference": "passed: python3 scripts/gen_python_api_reference.py --check",
+    "negative_controls": 7
+  },
+  "python_tests": {
+    "passed": 1189,
+    "skipped": 15,
+    "duration_seconds": 178.82,
+    "cwd": "bindings/uni-db",
+    "host_execution_required": true
+  },
+  "coverage": {
+    "active_database_config_fields_bound": 44,
+    "rust_database_config_fields_total": 45,
+    "excluded_config_field": "partial_lance_writes: deprecated no-op",
+    "facade_builder_result_types": 19,
+    "bound_methods": 206,
+    "reviewed_method_exclusions": 59,
+    "returned_struct_types": 12,
+    "bound_fields": 104,
+    "reviewed_field_aliases": 4,
+    "locy_dict_fields": 21,
+    "locy_object_constructor_fields": 19,
+    "rust_locy_fields": 23,
+    "cloud_variants": 3,
+    "nested_configs": 5
+  },
+  "remaining_differences": "See api-inventory.json; existing base-exception mappings and native-only handles/adapters are explicitly listed.",
+  "source_sha256": {
+    "bindings/uni-db/src/convert.rs": "0474627906d15dcd10adfd6aeee4c4f5253d73e405ce114e4d69a9a1a6d5147e",
+    "bindings/uni-db/src/builders.rs": "0f45485c66d37f0fb27846db51beeb7c886451775c739baa0f60d4156402ac53",
+    "bindings/uni-db/src/sync_api.rs": "20880610a5dedbe271fb06c8acd11a709a7b07e3f559508c3d41678c4c5e62ee",
+    "bindings/uni-db/src/async_api.rs": "a049f88c575ef444a4f6e3dc50ba5e0cea75a297399121ae1d90feb59f4c5f42",
+    "bindings/uni-db/src/types.rs": "b83e7352739669665e899ac50854584b0c9ac2780a57b110eb21d6bb09c25f86",
+    "bindings/uni-db/uni_db/__init__.pyi": "69cc41989f846f5e9aecb6bfe41c718e414b8f47470061fdac3d37d99792355f",
+    "bindings/uni-db/tests/test_config_merge_and_validation.py": "504107383c8db17cc1f304962fbfa3d0d8422ce5761910798c4f21199120b09f",
+    "bindings/uni-db/tests/test_rust_api_config_parity.py": "6d05b79c39c699e8a03c287f30a51f141611bac5787c139dca51a44f5b16519d",
+    "scripts/ci/check_rust_python_parity.py": "3f50d17537e11f21adac5dc7f01129d42e19ef27c98871134637e98fc91ae5ad",
+    "scripts/ci/static_guards.py": "303b728a115fa3de7d4964b9f44d005355b1d26cbd8299afcae1c89504113ddb",
+    "scripts/ci/test_rust_python_parity.py": "f263b92249eebb7fd5aff472a9e54a5024737985a6854c55846a7b1580ef54ac",
+    "docs/UNI_BLACK_BOOK.md": "9c171fea383a902e4c8ab97248b4dc933550b7d2aa1aa2c38908d8d419e38b3a",
+    "docs/release_notes/RELEASE_NOTES_5.0.0.md": "89e0586a5c50d08f3d71e3dca9f46aa7d082d81a2614abce49a8b0aa47114eb6",
+    "website/docs/reference/python-api.md": "9eae01e32c590f1a483216e807bf0761710c20ced7c838c89a47396eb9d6772d",
+    "website/docs/reference/python-api-symbols.md": "1b8f44793e18d01823ddd9b320bdc654b09d6f6f02f39c4f72a991f0607399fe"
+  },
+  "native_module": {
+    "path": "bindings/uni-db/uni_db/_uni_db.abi3.so",
+    "sha256": "f07f59a149633165ac720d827b4300bcb01dca15810054fdb791f5958dc26878"
+  },
+  "not_run": [
+    "GPU wheel builds",
+    "Live cloud-service connections",
+    "Full Rust workspace CI matrix"
+  ],
+  "post_validation_documentation_updates": {
+    "docs/release_notes/RELEASE_NOTES_5.0.0.md": {
+      "previous_sha256": "5787de642b0986efd4b4e25c358726a2099115ccc0904bff8993d540289690cd",
+      "sha256": "89e0586a5c50d08f3d71e3dca9f46aa7d082d81a2614abce49a8b0aa47114eb6",
+      "reason": "Expand the 5.0.0 release notes and migration guidance; tested code is unchanged."
+    }
+  }
+}

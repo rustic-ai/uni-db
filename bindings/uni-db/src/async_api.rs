@@ -815,6 +815,32 @@ impl AsyncDatabase {
             inner: self.inner.clone(),
         }
     }
+
+    fn background_task_count(&self) -> usize {
+        self.inner.background_task_count()
+    }
+
+    #[pyo3(signature = (module_src, module_name, grants=None))]
+    fn load_python_plugin<'py>(
+        &self,
+        py: Python<'py>,
+        module_src: String,
+        module_name: String,
+        grants: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Python::attach(|py| {
+                let caps = crate::builders::build_capability_set(grants);
+                let loader =
+                    uni_plugin_pyo3::PythonPluginLoader::with_default_plugin_id(&module_name);
+                let outcome = inner
+                    .load_python_plugin(py, &loader, &module_src, &module_name, &caps)
+                    .map_err(crate::exceptions::uni_error_to_pyerr)?;
+                crate::builders::load_outcome_to_pydict(py, &outcome)
+            })
+        })
+    }
 }
 
 // ============================================================================
@@ -1141,13 +1167,17 @@ impl AsyncDatabaseBuilder {
 
     /// Set maximum cache size in bytes.
     fn cache_size(mut slf: PyRefMut<'_, Self>, bytes: usize) -> PyRefMut<'_, Self> {
-        slf.cache_size = Some(bytes);
+        slf.uni_config
+            .get_or_insert_with(uni_common::UniConfig::default)
+            .cache_size = bytes;
         slf
     }
 
     /// Set query parallelism.
     fn parallelism(mut slf: PyRefMut<'_, Self>, n: usize) -> PyRefMut<'_, Self> {
-        slf.parallelism = Some(n);
+        slf.uni_config
+            .get_or_insert_with(uni_common::UniConfig::default)
+            .parallelism = n;
         slf
     }
 
@@ -1205,7 +1235,7 @@ impl AsyncDatabaseBuilder {
     ) -> PyResult<PyRefMut<'_, Self>> {
         let py = slf.py();
         // Merge, never replace -- see the sync builder's `config` for why.
-        let mut merged = slf.uni_config.take().unwrap_or_default();
+        let mut merged = slf.uni_config.clone().unwrap_or_default();
         crate::convert::apply_uni_config(py, &mut merged, &config)?;
         slf.uni_config = Some(merged);
         Ok(slf)
@@ -2974,6 +3004,75 @@ impl AsyncSession {
             Ok(false) // Don't suppress exceptions
         })
     }
+
+    fn compile_locy_with_config<'py>(
+        &self,
+        py: Python<'py>,
+        program: String,
+        config: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let config = convert::extract_locy_config_value(config)?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let compiled = guard
+                .compile_locy_with_config(&program, &config)
+                .map_err(crate::exceptions::uni_error_to_pyerr)?;
+            Ok(crate::types::PyCompiledProgram { inner: compiled })
+        })
+    }
+
+    fn build_fork_local_index<'py>(
+        &self,
+        py: Python<'py>,
+        label: String,
+        column: String,
+        kind: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kind = convert::parse_fork_index_kind(kind)?;
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            guard
+                .build_fork_local_index(&label, &column, kind)
+                .await
+                .map_err(crate::exceptions::uni_error_to_pyerr)
+        })
+    }
+
+    fn execute_with_retry<'py>(
+        &self,
+        py: Python<'py>,
+        cypher: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let guard = inner.lock().await;
+            let result = guard
+                .execute_with_retry(&cypher)
+                .await
+                .map_err(crate::exceptions::uni_error_to_pyerr)?;
+            Python::attach(|py| convert::execute_result_to_py(py, result))
+        })
+    }
+
+    fn replacement_scans_enabled<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(inner.lock().await.replacement_scans_enabled())
+        })
+    }
+    fn set_replacement_scans<'py>(
+        &self,
+        py: Python<'py>,
+        enabled: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            inner.lock().await.set_replacement_scans(enabled);
+            Ok(())
+        })
+    }
 }
 
 // ============================================================================
@@ -4226,6 +4325,13 @@ impl AsyncTxExecuteBuilder {
             })
         })
     }
+    fn params(
+        mut slf: PyRefMut<'_, Self>,
+        params: HashMap<String, Py<PyAny>>,
+    ) -> PyRefMut<'_, Self> {
+        slf.params.extend(params);
+        slf
+    }
 }
 
 /// Async builder for Locy evaluation on a Transaction.
@@ -4398,6 +4504,15 @@ impl AsyncTxLocyBuilder {
                 tuple.into_py_any(py)
             })
         })
+    }
+
+    /// Bind multiple parameters, retaining existing bindings for other names.
+    fn params(
+        mut slf: PyRefMut<'_, Self>,
+        params: HashMap<String, Py<PyAny>>,
+    ) -> PyRefMut<'_, Self> {
+        slf.params.extend(params);
+        slf
     }
 }
 

@@ -93,6 +93,16 @@ GUARDS: list[tuple[str, list[str], str]] = [
         "on-demand entry names a test that is gone)",
     ),
     (
+        "Rust/Python drift guard negative controls",
+        [sys.executable, "scripts/ci/test_rust_python_parity.py"],
+        "keep facade methods, config fields and readback gaps detectable",
+    ),
+    (
+        "documentation contract negative controls",
+        [sys.executable, "scripts/ci/test_doc_symbols.py"],
+        "preserve receiver, factory, config and notebook drift detection",
+    ),
+    (
         "TCK report exit status",
         [sys.executable, "scripts/ci/test_tck_report_exit_status.py"],
         "preserve nextest failures while generating TCK reports for both modes",
