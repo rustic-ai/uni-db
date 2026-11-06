@@ -893,3 +893,34 @@ async fn default_sub_vectors_is_dimension_aware_for_wide_embeddings() -> Result<
 
     Ok(())
 }
+
+/// `size()` and `length()` of a stored vector are its dimension count, from L0
+/// and after flush alike. `size()` used to fail on the Arrow `FixedSizeList`
+/// a VECTOR column is read as, and the error printed every element.
+#[tokio::test]
+async fn test_size_and_length_of_a_stored_vector() -> Result<()> {
+    let db = Uni::temporary().build().await?;
+    db.schema()
+        .label("Doc")
+        .property("id", DataType::Int64)
+        .property("embedding", DataType::Vector { dimensions: 3 })
+        .apply()
+        .await?;
+
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:Doc {id: 1, embedding: [0.5, -1.0, 2.0]})")
+        .await?;
+    tx.commit().await?;
+
+    let query = "MATCH (d:Doc) RETURN size(d.embedding) AS s, length(d.embedding) AS l";
+    for stage in ["unflushed", "flushed"] {
+        if stage == "flushed" {
+            db.flush().await?;
+        }
+        let rows = db.session().query(query).await?;
+        assert_eq!(rows.rows().len(), 1, "{stage}");
+        assert_eq!(rows.rows()[0].get::<i64>("s")?, 3, "size(), {stage}");
+        assert_eq!(rows.rows()[0].get::<i64>("l")?, 3, "length(), {stage}");
+    }
+    Ok(())
+}

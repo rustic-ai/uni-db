@@ -1325,13 +1325,16 @@ fn time_with_tz_to_utc_nanos(s: &str) -> Result<i64> {
 fn eval_size(arg: &Value) -> Result<Value> {
     match arg {
         Value::List(arr) => Ok(Value::Int(arr.len() as i64)),
+        // A vector's size is its dimension count, as it is for the list it
+        // reads as, and as `cypher_size_scalar` answers for a VECTOR column.
+        Value::Vector(v) => Ok(Value::Int(v.len() as i64)),
         Value::Map(map) => Ok(Value::Int(map.len() as i64)),
         // Character count, not byte length: Cypher size()/length() count
         // codepoints (matching the DataFusion `cypher_size_scalar` path), so a
         // non-ASCII string like "café" is 4, not 5.
         Value::String(s) => Ok(Value::Int(s.chars().count() as i64)),
         Value::Null => Ok(Value::Null),
-        _ => Err(anyhow!("size() expects a List, Map, or String")),
+        _ => Err(anyhow!("size() expects a List, Vector, Map, or String")),
     }
 }
 
@@ -1429,6 +1432,7 @@ fn eval_last(arg: &Value) -> Result<Value> {
 fn eval_length(arg: &Value) -> Result<Value> {
     match arg {
         Value::List(arr) => Ok(Value::Int(arr.len() as i64)),
+        Value::Vector(v) => Ok(Value::Int(v.len() as i64)),
         // Character count, not byte length: Cypher size()/length() count
         // codepoints (matching the DataFusion `cypher_size_scalar` path), so a
         // non-ASCII string like "café" is 4, not 5.
@@ -1445,7 +1449,7 @@ fn eval_length(arg: &Value) -> Result<Value> {
             Ok(Value::Null)
         }
         Value::Null => Ok(Value::Null),
-        _ => Err(anyhow!("length() expects a List, String, or Path")),
+        _ => Err(anyhow!("length() expects a List, Vector, String, or Path")),
     }
 }
 
@@ -3220,6 +3224,20 @@ mod tests {
             eval_scalar_function("SIZE", &[Value::List(vec![i(1), i(2), i(3)])], None).unwrap(),
             Value::Int(3)
         );
+    }
+
+    /// A vector's size and length are its dimension count, matching the list
+    /// it reads as. Both used to error with "expects a List…".
+    #[test]
+    fn test_scalar_function_size_and_length_of_vector() {
+        let v = Value::Vector(vec![0.5, -1.0, 2.0, 4.0]);
+        for name in ["SIZE", "LENGTH"] {
+            assert_eq!(
+                eval_scalar_function(name, std::slice::from_ref(&v), None).unwrap(),
+                Value::Int(4),
+                "{name}"
+            );
+        }
     }
 
     #[test]
