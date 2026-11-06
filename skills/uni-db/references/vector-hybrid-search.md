@@ -640,7 +640,6 @@ OPTIONS {
 
 | Provider | Type | Feature Flag |
 |---|---|---|
-| MistralRS | Local | `provider-mistralrs` |
 | Candle | Local | `provider-candle` |
 | ONNX (raw / rerank / embed) | Local | `provider-onnx` |
 | OpenAI | Remote | `provider-openai` |
@@ -651,6 +650,7 @@ OPTIONS {
 | Cohere | Remote | `provider-cohere` |
 | Voyage AI | Remote | `provider-voyageai` |
 | Azure OpenAI | Remote | `provider-azure-openai` |
+| llama.cpp server | Remote (self-hosted) | `provider-llamacpp` |
 
 ### Direct Xervo API
 

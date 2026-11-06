@@ -194,21 +194,19 @@ criterion = "0.8"
 url = "2.5"
 proptest = "1.11"
 datafusion = "54.1.0"
-# Floor is 0.18.0, not 0.17.0: `crates/uni` enables `provider-llamacpp` in its
-# default features and that feature does not exist before 0.18.0. Our lock pins
-# 0.18.0 so the workspace never saw it, but the declared range advertised a
-# compatibility that does not hold -- a downstream graph that pinned uni-xervo
-# to 0.17.0 got "uni-xervo does not have these features" at build time, and
-# `cargo outdated` could not resolve the workspace at all.
-uni-xervo = { version = ">=0.18.0, <1.0.0", default-features = false }
+# Floor is 0.19.1, not 0.19.0. 0.19.0 removed `provider-mistralrs`, which
+# uni-db no longer exposes, but it also moved to ort 2.0.0-rc.15, whose
+# Apple Silicon ONNX Runtime always carries CoreML and whose default
+# auto-device policy registers it: CoreML then claimed nodes on CPU-only
+# builds and broke KV-cache decoders (Qwen3-Reranker, Qwen3-Embedding) on
+# every Mac. 0.19.1 pins the policy and adds a load-time probe with CPU
+# fallback. The range must not admit 0.19.0. (Earlier floors existed for the
+# same reason: a range that admits a release lacking a feature `crates/uni`
+# enables breaks downstream graphs that pin the low end.)
+uni-xervo = { version = ">=0.19.1, <1.0.0", default-features = false }
 biodivine-lib-bdd = "0.6"
 safetensors = "0.7"
-candle-core = "0.10"
-candle-nn = "0.10"
-candle-transformers = "0.10"
 tokio-util = { version = "0.7", features = ["rt"] }
-hf-hub = "0.5"
-tokenizers = "0.23"
 
 # Forward older transitive requirements to the patched upstream implementations.
 # See compat/README.md for scope, tests, and removal criteria.

@@ -258,7 +258,6 @@ default = [
     "apoc-core",
     "rhai-plugins",
     "provider-candle",
-    "provider-mistralrs",
     "provider-onnx",
     "provider-openai",
     "provider-gemini",
@@ -299,7 +298,6 @@ storage-internals = []
 # nested-fork branch-point seam in `api/fork.rs`). Test-only.
 failpoints = ["fail/failpoints", "uni-store/failpoints"]
 provider-candle = ["uni-xervo/provider-candle"]
-provider-mistralrs = ["uni-xervo/provider-mistralrs"]
 provider-openai = ["uni-xervo/provider-openai"]
 provider-gemini = ["uni-xervo/provider-gemini"]
 provider-vertexai = ["uni-xervo/provider-vertexai"]

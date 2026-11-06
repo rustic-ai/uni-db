@@ -190,7 +190,7 @@ Beyond auto-embedding, the `Uni::xervo()` facade gives direct access to embeddin
     xervo.prefetch_all().await?;
     ```
 
-Uni-Xervo supports local providers (Candle, mistral.rs, ONNX Runtime — embed/rerank/raw) and remote providers (OpenAI, Gemini, Anthropic, Cohere, Vertex AI, Mistral, Voyage AI, Azure OpenAI). See the [Vector Search Guide](../guides/vector-search.md) for the full provider table and configuration details.
+Uni-Xervo supports local providers (Candle, ONNX Runtime — embed/rerank/raw) and remote providers (OpenAI, Gemini, Anthropic, Cohere, Vertex AI, Mistral, Voyage AI, Azure OpenAI, and a self-hosted llama.cpp server for embeddings, reranking, generation and document extraction). See the [Vector Search Guide](../guides/vector-search.md) for the full provider table and configuration details.
 
 ## Use Cases
 

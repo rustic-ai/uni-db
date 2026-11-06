@@ -1,6 +1,6 @@
 # uni-db-metal
 
-Python bindings for Uni Graph Database with **all 11 providers** (candle, mistralrs, ONNX local + 8 remote APIs) and **Apple GPU/ANE acceleration**: candle/mistralrs run on Metal, the ONNX runtime runs on the CoreML execution provider.
+Python bindings for Uni Graph Database with **all 11 providers** (candle and ONNX local, 8 hosted APIs, and the llama.cpp server adapter) and **Apple GPU/ANE acceleration**: candle runs on Metal, and the ONNX runtime runs on the CoreML execution provider, falling back to CPU at load for models CoreML cannot run.
 
 This is the recommended wheel for Apple Silicon Macs.
 

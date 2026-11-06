@@ -34,7 +34,6 @@ default = ["rhai-plugins-cli"]
 # runtime cost; on by default.
 rhai-plugins-cli = ["dep:uni-plugin-rhai", "uni-db/rhai-plugins"]
 provider-candle = ["uni-db/provider-candle"]
-provider-mistralrs = ["uni-db/provider-mistralrs"]
 provider-onnx = ["uni-db/provider-onnx"]
 provider-onnx-dynamic = ["uni-db/provider-onnx-dynamic"]
 provider-openai = ["uni-db/provider-openai"]

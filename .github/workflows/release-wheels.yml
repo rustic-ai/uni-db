@@ -11,9 +11,9 @@ name: Build and Publish Wheels
 #   - CUDA:           uni-db-cuda, uni-db-onnx-cuda
 #   - Apple GPU/ANE:  uni-db-metal, uni-db-onnx-metal
 #
-# `uni-db` and `uni-db-{cuda,metal}` bundle all 11 providers (candle,
-# mistralrs, ONNX local + 8 remote APIs). The `*-onnx*` variants are slim:
-# ONNX local + 8 remote APIs only, no candle/mistralrs.
+# `uni-db` and `uni-db-{cuda,metal}` bundle all 11 providers (candle and
+# ONNX local, 8 hosted APIs, llama.cpp). The `*-onnx*` variants are slim:
+# ONNX local + 8 hosted APIs + llama.cpp, no candle.
 #
 # uni-pydantic depends on the uni-db *wheel* (not the crate), so it lives here
 # rather than in `release.yml`: its `build-pydantic` job `needs:` the wheel
@@ -240,7 +240,7 @@ jobs:
           path: dist
 
   # macOS arm64 builds with Apple-platform GPU acceleration. xervo 0.9.0's
-  # `gpu-metal` activates candle/mistralrs Metal kernels (compiled to
+  # `gpu-metal` activates candle Metal kernels (compiled to
   # `.metallib` and baked into the binary) AND `ort?/coreml` so ORT models
   # accelerate via the CoreML execution provider. The CoreML EP is
   # statically linked into pyke's macOS bundle — no sidecar `.dylib` ships
@@ -331,10 +331,10 @@ jobs:
   # CUDA-equipped Linux builds for the slim variant. `uni-db-onnx-cuda`
   # doesn't need nvcc — pyke's `ort/download-binaries` fetches a prebuilt
   # CUDA EP sidecar (`libonnxruntime_providers_cuda.so` ~180 MB) at Rust
-  # build time, and the slim variant has no candle/mistralrs CUDA kernels.
+  # build time, and the slim variant has no candle CUDA kernels.
   # Uses the same manylinux_2_28 container as `build-linux`.
   #
-  # The default-everything `uni-db-cuda` variant pulls candle/mistralrs in
+  # The default-everything `uni-db-cuda` variant pulls candle in
   # too — its kernels need nvcc, so it builds in `build-cuda-toolkit-linux`
   # (manylinux_2_34 + CUDA toolkit) below.
   build-cuda-linux:
@@ -423,9 +423,9 @@ jobs:
           name: wheels-${{ matrix.variant }}-linux-x86_64
           path: dist
 
-  # CUDA Linux builds that need `nvcc` (candle/mistralrs per-SM PTX
+  # CUDA Linux builds that need `nvcc` (candle per-SM PTX
   # compilation). Used by `uni-db-cuda` (default-everything + CUDA), which
-  # bundles candle/mistralrs alongside the ORT CUDA path.
+  # bundles candle alongside the ORT CUDA path.
   #
   # Uses manylinux_2_34 (AlmaLinux 9 base) instead of manylinux_2_28
   # because the CUDA 13.0 toolkit is published as RHEL/AlmaLinux 9 RPMs
@@ -478,7 +478,7 @@ jobs:
           # which runs inside the container in the same session as the build —
           # the same mechanism that makes CUDA_COMPUTE_CAP take effect.
           RUSTFLAGS: "-Clink-arg=-static-libstdc++ -Clink-arg=-static-libgcc"
-          # candle/mistralrs CUDA kernels auto-detect the GPU compute
+          # candle CUDA kernels auto-detect the GPU compute
           # capability via nvidia-smi, which doesn't exist on GPU-less build
           # runners. Pin the target arch explicitly (SM 8.0 / Ampere). PTX is
           # forward-compatible, so SM80 runs on Ampere through Hopper/Blackwell
@@ -504,7 +504,7 @@ jobs:
             export PATH="/usr/local/cuda-13.0/bin:$PATH"
             export CUDA_HOME="/usr/local/cuda-13.0"
             # No live GPU in the build container — pin the compute capability
-            # so candle/mistralrs don't try to probe nvidia-smi (see step env).
+            # so candle doesn't try to probe nvidia-smi (see step env).
             export CUDA_COMPUTE_CAP=80
             # Export RUSTFLAGS HERE, not only in the step `env:`. maturin-action
             # does not reliably forward step-level RUSTFLAGS into the

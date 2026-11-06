@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-Xervo is uni-db's built-in ML runtime for embeddings and text generation. It supports local inference (Candle, ONNX Runtime — embed, rerank, raw — and mistral.rs) and remote APIs (OpenAI, Anthropic, Gemini, Mistral, Cohere, Voyage AI, Vertex AI, Azure OpenAI). Models are configured via a **catalog** of alias specs, and accessed through the `db.xervo()` facade.
+Xervo is uni-db's built-in ML runtime for embeddings and text generation. It supports local inference (Candle, ONNX Runtime — embed, rerank, raw), a self-hosted llama.cpp server, and remote APIs (OpenAI, Anthropic, Gemini, Mistral, Cohere, Voyage AI, Vertex AI, Azure OpenAI). Models are configured via a **catalog** of alias specs, and accessed through the `db.xervo()` facade.
 
 **Key concepts:**
 - **Alias**: human-readable model identifier in `task/name` format (e.g., `embed/default`, `llm/gpt4`)
@@ -20,10 +20,9 @@ Run inference on the host machine. No API keys needed.
 
 | Provider ID | Engine | Tasks | Best For |
 |---|---|---|---|
-| `remote/llamacpp` | llama.cpp server | Embed | Tokenizer-aware truncation for server embeddings |
+| `remote/llamacpp` | llama.cpp server (`llama-server` you run) | Embed, Rerank, Generate, Document extract | Private local generation (text + vision), GGUF models, GPU via llama.cpp; one server per model, so one alias per task |
 | `local/candle` | HuggingFace Candle | Embed | Lightweight CPU embeddings (Bert, JinaBert, Gemma) |
 | `local/onnx` | ONNX Runtime | Embed, Rerank, Raw | Fast CPU embeddings (FastEmbed alias strings supported), cross-encoder reranking (BERT-style), and raw tensor execution |
-| `local/mistralrs` | mistral.rs | Embed, Generate | GPU inference, quantized models, multi-modal |
 
 **Local provider options:**
 
@@ -31,20 +30,16 @@ Run inference on the host machine. No API keys needed.
 // candle / onnx
 { "cache_dir": "/path/to/model/cache" }
 
-// mistralrs
-{
-  "isq": "Q4K",                    // in-situ quantization type
-  "force_cpu": false,              // force CPU even if GPU available
-  "dtype": "auto",                 // "auto", "f16", "bf16", "f32"
-  "pipeline": "text",             // "text", "vision", "diffusion", "speech"
-  "paged_attention": true,         // enable paged attention
-  "max_num_seqs": 16,              // max concurrent sequences
-  "embedding_dimensions": 768,     // override output dimensions
-  "chat_template": "/path/to/template",
-  "tokenizer_json": "/path/to/tokenizer.json",
-  "gguf_files": ["model.gguf"]    // for GGUF models
-}
+// onnx: device placement (GPU wheels default to the GPU, then CPU)
+{ "execution_providers": ["coreml", "cpu"] }  // or ["cuda", "cpu"], ["cpu"]
+
+// llamacpp: point the alias at a running llama-server
+{ "base_url": "http://localhost:8080" }
 ```
+
+`local/mistralrs` was removed in uni-xervo 0.19. For local generation, run a `llama-server` and use `remote/llamacpp`; for local embeddings, use `local/onnx` or `local/candle`. Image generation and speech synthesis have no replacement.
+
+On a GPU wheel, an ONNX model that the accelerator cannot run (Qwen3 decoder rerankers and embedders on CoreML, for example) fails a probe at load and falls back to CPU with a warning. A list without `"cpu"`, such as `["coreml"]`, makes that a load error instead.
 
 ### Remote Providers
 
@@ -162,14 +157,14 @@ The Python wheels (since `uni-db 1.2.0`) bundle providers per the wheel matrix �
 
 | Wheel | Local providers | Accelerator |
 |---|---|---|
-| `uni-db` *(default)* | `local/candle` + `local/mistralrs` + `local/onnx` | CPU |
+| `uni-db` *(default)* | `local/candle` + `local/onnx` | CPU |
 | `uni-db-onnx` *(slim)* | `local/onnx` only | CPU |
-| `uni-db-cuda` | `local/candle` + `local/mistralrs` + `local/onnx` | NVIDIA CUDA |
-| `uni-db-metal` | `local/candle` + `local/mistralrs` + `local/onnx` | Apple GPU/ANE |
+| `uni-db-cuda` | `local/candle` + `local/onnx` | NVIDIA CUDA |
+| `uni-db-metal` | `local/candle` + `local/onnx` | Apple GPU/ANE |
 | `uni-db-onnx-cuda` | `local/onnx` only | NVIDIA CUDA |
 | `uni-db-onnx-metal` | `local/onnx` only | Apple GPU/ANE |
 
-All 8 remote providers (`remote/openai`, `remote/gemini`, etc.) are bundled in every wheel. The Python API is identical across all six. The Rust defaults enable all providers, including `remote/llamacpp`. To reduce dependencies, disable defaults and select `lance-backend` plus the required provider features. Acceleration: `gpu-cuda` (NVIDIA), `gpu-metal` (Apple). Other ORT execution providers (TensorRT, ROCm, DirectML, OpenVINO, QNN) are reachable via `provider-onnx-dynamic` + `ORT_DYLIB_PATH`.
+All 8 hosted-API providers (`remote/openai`, `remote/gemini`, etc.) and `remote/llamacpp` are bundled in every wheel. The Python API is identical across all six. The Rust defaults enable all providers, including `remote/llamacpp`. To reduce dependencies, disable defaults and select `lance-backend` plus the required provider features. Acceleration: `gpu-cuda` (NVIDIA), `gpu-metal` (Apple). Other ORT execution providers (TensorRT, ROCm, DirectML, OpenVINO, QNN) are reachable via `provider-onnx-dynamic` + `ORT_DYLIB_PATH`.
 
 ### Python
 
@@ -439,7 +434,7 @@ Automatic instrumentation (when metrics enabled):
 |---|---|---|---|---|
 | **General purpose (local)** | `local/onnx` | `sentence-transformers/all-MiniLM-L6-v2` | 384 | Fast, small, good quality. Best default for local. |
 | **Higher quality (local)** | `local/candle` | `BAAI/bge-base-en-v1.5` | 768 | Better quality, larger model |
-| **Best quality (local)** | `local/mistralrs` | `nomic-ai/nomic-embed-text-v1.5` | 768 | Top-tier open-source embeddings |
+| **Best quality (local)** | `local/onnx` | `Qwen3Embedding06B` (preset) | 1024 | Decoder-style embedder, ~600 MB; heavier than BGE |
 | **Production (remote)** | `remote/openai` | `text-embedding-3-small` | 1536 | Best cost/quality ratio for OpenAI |
 | **Max quality (remote)** | `remote/openai` | `text-embedding-3-large` | 3072 | Highest quality OpenAI embeddings |
 | **Privacy-focused (remote)** | `remote/voyageai` | `voyage-large-2` | 1536 | Strong retrieval, data not used for training |
@@ -454,8 +449,7 @@ Automatic instrumentation (when metrics enabled):
 | **Best quality** | `remote/openai` | `gpt-4o` | Complex reasoning, detailed analysis |
 | **Long context** | `remote/anthropic` | `claude-sonnet-4-6` | 200k context, strong instruction following |
 | **Code generation** | `remote/anthropic` | `claude-sonnet-4-6` | Best for code tasks |
-| **Local (GPU)** | `local/mistralrs` | `mistralai/Mistral-7B-Instruct-v0.3` | Requires GPU, fully private |
-| **Local (quantized)** | `local/mistralrs` | Any GGUF model | CPU-viable with Q4/Q5 quantization |
+| **Local (private)** | `remote/llamacpp` | Any GGUF model loaded in `llama-server` | Fully private; GPU via llama.cpp (CUDA / Metal), CPU-viable with Q4/Q5 quantization. Vision needs the server started with `--mmproj` |
 
 ### Reranking Models
 

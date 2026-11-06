@@ -17,9 +17,9 @@ path = "../uni-db/src/lib.rs"
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 # Default-everything (inherited from uni-db's default — all 11 providers
-# CPU) plus NVIDIA acceleration. xervo 0.9.0's gpu-cuda activates ort/cuda
-# directly and the candle?/cuda + mistralrs?/cuda kernels for the local
-# providers already in the default.
+# CPU) plus NVIDIA acceleration. xervo's gpu-cuda activates ort/cuda
+# directly and the candle?/cuda kernels for provider-candle, already in the
+# default.
 # `pyo3-plugins` is opt-in (not in uni-db's default set) but the shared
 # binding source calls the PyO3 plugin loaders unconditionally, so it must
 # be enabled here. `rhai-plugins` already rides in via default-features.

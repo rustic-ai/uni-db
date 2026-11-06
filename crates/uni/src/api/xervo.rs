@@ -289,11 +289,6 @@ pub async fn build_model_runtime(catalog: Vec<ModelAliasSpec>) -> Result<Arc<Mod
         runtime_builder =
             runtime_builder.register_provider(uni_xervo::provider::RemoteLlamaCppProvider::new());
     }
-    #[cfg(feature = "provider-mistralrs")]
-    {
-        runtime_builder =
-            runtime_builder.register_provider(uni_xervo::provider::LocalMistralRsProvider::new());
-    }
     #[cfg(feature = "provider-onnx")]
     {
         runtime_builder =
