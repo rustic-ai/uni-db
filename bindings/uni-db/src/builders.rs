@@ -686,6 +686,11 @@ impl LabelBuilder {
     ///     "type": "vector", "algorithm": "muvera",
     ///     "k_sim": 4, "reps": 20, "d_proj": 16, "inner": "ivf_pq"
     /// })
+    /// # Auto-embedding through a Xervo catalog alias ("source" also accepted):
+    /// builder.index("embedding", {
+    ///     "type": "vector", "metric": "cosine",
+    ///     "embedding": {"alias": "embed/default", "source_properties": ["title", "body"]}
+    /// })
     /// builder.index("content", {
     ///     "type": "fulltext", "tokenizer": "ngram",
     ///     "ngram_min": 2, "ngram_max": 4

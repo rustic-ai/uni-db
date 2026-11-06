@@ -1433,6 +1433,12 @@ class LabelBuilder:
         ``l2``, or ``dot``. ``"muvera"`` (ColBERT/MaxSim Fixed-Dimensional Encoding over a
         ``list[Vector[N]]`` column) also accepts ``k_sim``, ``reps``, ``d_proj``,
         ``seed``, and ``inner`` (the ANN over the derived FDE column, default ``ivf_pq``).
+
+        ``"embedding"`` turns on auto-embedding through a Xervo catalog alias:
+        ``{"alias": "embed/default", "source_properties": ["title", "body"]}``
+        (``"source"`` is accepted as the Cypher spelling), plus optional
+        ``batch_size`` (default 32), ``document_prefix`` and ``query_prefix``.
+        A malformed config raises instead of creating the index without it.
         """
         ...
     def done(self) -> SchemaBuilder: ...
@@ -2825,6 +2831,12 @@ class AsyncLabelBuilder:
         ``l2``, or ``dot``. ``"muvera"`` (ColBERT/MaxSim Fixed-Dimensional Encoding over a
         ``list[Vector[N]]`` column) also accepts ``k_sim``, ``reps``, ``d_proj``,
         ``seed``, and ``inner`` (the ANN over the derived FDE column, default ``ivf_pq``).
+
+        ``"embedding"`` turns on auto-embedding through a Xervo catalog alias:
+        ``{"alias": "embed/default", "source_properties": ["title", "body"]}``
+        (``"source"`` is accepted as the Cypher spelling), plus optional
+        ``batch_size`` (default 32), ``document_prefix`` and ``query_prefix``.
+        A malformed config raises instead of creating the index without it.
         """
         ...
     def done(self) -> AsyncSchemaBuilder: ...
