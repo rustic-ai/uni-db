@@ -139,7 +139,15 @@ pub enum UniError {
     #[error("GraphCompute invocation incomplete: {detail}")]
     GraphComputeIncomplete { detail: Box<GraphComputeIncomplete> },
 
-    #[error("Type error: expected {expected}, got {actual}")]
+    /// A value had the wrong type.
+    ///
+    /// Two shapes reach this variant. Value conversions fill both fields
+    /// (`expected: "Int32"`, `actual: "Float"`). The query layer instead
+    /// classifies an engine message containing `TypeError:` and carries it
+    /// whole in `expected`, with `actual` empty; that form displays as the
+    /// message alone, rather than `expected <message>, got ` with nothing
+    /// after "got".
+    #[error("{}", type_error_display(expected, actual))]
     Type { expected: String, actual: String },
 
     #[error("Constraint violation: {message}")]
@@ -598,6 +606,15 @@ pub const UNCOMMITTED_WRITES_TAG: &str = "UncommittedWritesInTransaction:";
 /// typed error survives the string boundary between the executor and the API
 /// layer (see [`UniError::reserved_property_from_message`]).
 pub const RESERVED_PROPERTY_TAG: &str = "ReservedPropertyName";
+
+/// `Display` for [`UniError::Type`]: see that variant for the two shapes.
+fn type_error_display(expected: &str, actual: &str) -> String {
+    if actual.is_empty() {
+        format!("Type error: {expected}")
+    } else {
+        format!("Type error: expected {expected}, got {actual}")
+    }
+}
 
 impl UniError {
     /// The rejection of a write whose property is named after a storage column.
@@ -1180,6 +1197,24 @@ impl GraphComputeIncomplete {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn type_error_displays_both_shapes_without_a_dangling_got() {
+        let pair = UniError::Type {
+            expected: "Int32".to_string(),
+            actual: "Float".to_string(),
+        };
+        assert_eq!(pair.to_string(), "Type error: expected Int32, got Float");
+
+        let message = UniError::Type {
+            expected: "TypeError: InvalidArgumentValue - size() is not supported".to_string(),
+            actual: String::new(),
+        };
+        assert_eq!(
+            message.to_string(),
+            "Type error: TypeError: InvalidArgumentValue - size() is not supported"
+        );
+    }
 
     #[test]
     fn write_stalled_round_trips_through_its_message() {
