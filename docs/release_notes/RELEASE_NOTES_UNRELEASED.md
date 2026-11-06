@@ -31,6 +31,41 @@ CPU-only builds are not probed. This fixes Qwen3-Reranker and
 Qwen3-Embedding on Apple Silicon, which failed on every query under
 uni-xervo 0.19.0, on the CPU-only wheels as well as `uni-db-metal`.
 
+**Python: a malformed auto-embedding config now raises instead of being
+dropped.** `LabelBuilder.index(prop, {"type": "vector", "embedding": {...}})`
+parsed the `embedding` dict with an `Option` chain, so any mistake removed it
+without a word. The common case was `"source"`, the key Cypher DDL uses: the
+index was created without auto-embedding, and the first insert failed with
+`Property 'embedding' cannot be null`, which never mentions the config. The
+binding now mirrors the Cypher parser:
+
+- `"source"` is accepted alongside `"source_properties"`; giving both is an
+  error.
+- `alias` and a non-empty source list are required, unknown keys are rejected
+  with the accepted list, and `batch_size` must be a positive integer.
+- The default `batch_size` is 32, matching Cypher DDL, instead of 100.
+
+Each of these raises `ValueError` from `apply()`. A config that was being
+silently ignored before will now fail there instead; with a typo-free config,
+nothing changes apart from the batch-size default.
+
+## Correctness fixes
+
+- **`size()` and `length()` of a vector return its dimension count.** A
+  stored `VECTOR(n)` value is read as an Arrow `FixedSizeList`, which the
+  columnar `size()` did not handle, so `size(d.embedding)` failed, and its error
+  message printed every element of the vector. The row-at-a-time evaluator had
+  the same gap for both functions. Both paths now return `n` (null for a null
+  vector), and an unsupported argument raises a `TypeError` naming the type
+  rather than the value.
+- **Type errors raised during a query no longer end in a dangling "got".**
+  The query layer wraps an engine `TypeError:` message in `UniError::Type`
+  with the whole message as `expected` and an empty `actual`, which displayed
+  as `Type error: expected <message>, got ` (in Python, `UniTypeError` carries
+  the same text). That shape now displays as `Type error: <message>`; type
+  errors that name both types are unchanged. The TCK matcher reads detail codes
+  from both shapes.
+
 ## Dependencies and build requirements
 
 - uni-xervo floor raised to **0.19.1**. 0.19.0 must not be admitted: its ONNX

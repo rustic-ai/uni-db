@@ -417,7 +417,7 @@ LIMIT 10
 Scoring is **metric-aware**: `similar_to()` automatically uses the distance metric configured on the vector index (Cosine, L2, or Dot Product). You don't need to specify the metric — it's resolved from the schema at compile time. If no index is found, it defaults to cosine similarity.
 
 ```
-similar_to(sources, queries [, options]) → FLOAT [0, 1]
+similar_to(sources, queries [, options]) → FLOAT  // range depends on the metric: see Score Conversion
 ```
 
 ### Single Vector Source
@@ -507,7 +507,7 @@ RETURN d.title,
 ORDER BY score DESC
 ```
 
-Adding two separate `similar_to` calls produces raw score addition without normalization — cosine similarity ([0, 1]) and BM25 (unbounded) live on different scales. The multi-source form normalizes BM25 via `score / (score + fts_k)` before fusion.
+Adding two separate `similar_to` calls produces raw score addition without normalization — cosine similarity (`[-1, 1]`) and BM25 (unbounded) live on different scales. The multi-source form normalizes BM25 via `score / (score + fts_k)` before fusion.
 
 ### `~=` Operator vs `similar_to()`
 
@@ -706,7 +706,7 @@ distance = -similarity (negated for ranking)
 
 `similar_to()` resolves the metric from the vector index at compile time. For Cosine, it returns raw cosine similarity; for L2, it normalizes to `(0, 1]`; for Dot Product, it returns the actual dot product value. If no vector index is found for a property, it defaults to cosine similarity.
 
-For Cosine and L2, you can compare scores across queries without worrying about which metric the index uses. Dot product scores are unbounded and should only be compared within the same metric.
+**The two functions agree for L2 but not for cosine.** On a cosine index, `uni.vector.query` and `uni.search` yield `(1 + cos) / 2` while `similar_to()` yields `cos` itself, so the same node scores, say, `0.92` from one and `0.85` from the other. A threshold tuned on one does not carry over: convert with `vector_query_score = (1 + similar_to) / 2`, or `similar_to = 2 * vector_query_score - 1`. Dot product scores are unbounded and should only be compared within the same metric.
 
 ---
 

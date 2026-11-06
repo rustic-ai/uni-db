@@ -19,7 +19,7 @@ YIELD node, score, distance, vector_score, rerank_score, vid
 | `query_vector` | List\<Float\> or String | Yes | Embedding vector, or text string (auto-embedded when index has embedding config) |
 | `k` | Integer | Yes | Number of results |
 | `filter` | String | No | Lance/DataFusion WHERE predicate for **pre-filtering** |
-| `threshold` | Float | No | Minimum similarity score (0-1); results below are excluded |
+| `threshold` | Float | No | Minimum similarity on the yielded `score` scale ([0, 1] for cosine and L2 indexes); results below are excluded |
 | `options` | Map | No | ANN tuning (`nprobes`, `refine_factor`, `ef_search`) plus reranker configuration (see [ANN tuning](#ann-tuning-knobs) and [Section 12](#12-cross-encoder-reranking)) |
 
 | YIELD Column | Type | Description |
@@ -477,7 +477,7 @@ All 8 algorithms available, grouped by architecture:
 | `L2` | [0, inf) (squared Euclidean) | `1 / (1 + d)` | (0, 1] | Raw embeddings, spatial data |
 | `Dot` | (-inf, +inf) (negative dot) | Pass-through | Unbounded | Maximum inner product search |
 
-Score conversion is **metric-aware** and shared across `uni.vector.query`, `uni.search`, and `similar_to()`.
+Score conversion is **metric-aware**. `uni.vector.query` and `uni.search` use the table above. `similar_to()` matches it for L2, returns the actual dot product for Dot, and returns **raw cosine in [-1, 1]** for Cosine, not `(2 - d) / 2`: the same node scores `(1 + cos) / 2` from `uni.vector.query` but `cos` from `similar_to()`. Convert thresholds with `vector_query_score = (1 + similar_to) / 2`.
 
 ---
 
@@ -887,7 +887,7 @@ RETURN node.title, score
 [
   {
     "alias": "rerank/minilm",
-    "task": "Rerank",
+    "task": "rerank",
     "provider_id": "local/onnx",
     "model_id": "cross-encoder/ms-marco-MiniLM-L6-v2"
   }

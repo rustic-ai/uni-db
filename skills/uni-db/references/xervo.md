@@ -94,11 +94,11 @@ The catalog is a JSON array of model alias specs:
 [
   {
     "alias": "embed/default",
-    "task": "Embed",
+    "task": "embed",
     "provider_id": "local/onnx",
-    "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+    "model_id": "all-MiniLM-L6-v2",
     "revision": null,
-    "warmup": "Lazy",
+    "warmup": "lazy",
     "required": false,
     "timeout": null,
     "load_timeout": null,
@@ -107,10 +107,10 @@ The catalog is a JSON array of model alias specs:
   },
   {
     "alias": "llm/default",
-    "task": "Generate",
+    "task": "generate",
     "provider_id": "remote/openai",
     "model_id": "gpt-4o-mini",
-    "warmup": "Lazy",
+    "warmup": "lazy",
     "required": false,
     "timeout": 30,
     "retry": { "max_attempts": 3, "initial_backoff_ms": 200 },
@@ -124,11 +124,11 @@ The catalog is a JSON array of model alias specs:
 | Field | Required | Default | Description |
 |---|---|---|---|
 | `alias` | Yes | — | Identifier in `task/name` format (must contain `/`) |
-| `task` | Yes | — | `"Embed"`, `"Generate"`, or `"Rerank"` |
+| `task` | Yes | — | Lowercase snake_case: `"embed"`, `"generate"`, `"rerank"`, `"embed_sparse"`, `"embed_multi_vector"`, `"embed_hybrid"`, `"raw"`, … (`"Embed"` is rejected with `unknown variant`) |
 | `provider_id` | Yes | — | Provider identifier (e.g., `"remote/openai"`) |
 | `model_id` | Yes | — | HuggingFace repo ID (local) or API model name (remote) |
 | `revision` | No | `null` | HuggingFace branch/tag/commit hash (local only) |
-| `warmup` | No | `"Lazy"` | `"Lazy"`, `"Eager"`, or `"Background"` |
+| `warmup` | No | `"lazy"` | `"lazy"`, `"eager"`, or `"background"` |
 | `required` | No | `false` | If true, failed eager warmup aborts database startup |
 | `timeout` | No | `null` | Per-inference timeout in seconds |
 | `load_timeout` | No | `600` | Model load timeout in seconds |
@@ -177,7 +177,7 @@ db = UniBuilder.open("./my_db") \
     .build()
 
 # From JSON string
-catalog_json = '[{"alias": "embed/default", "task": "Embed", ...}]'
+catalog_json = '[{"alias": "embed/default", "task": "embed", ...}]'
 db = UniBuilder.open("./my_db") \
     .xervo_catalog_from_str(catalog_json) \
     .build()
@@ -304,8 +304,8 @@ db.xervo().prefetch_all().await?;
 
 Both methods are **awaitable** and **fail-fast** — they return when all requested models are fully loaded, or error on the first failure. Models already loaded are skipped.
 
-**When to use `prefetch()` vs `warmup: "Eager"`:**
-- Use **`warmup: "Eager"`** in the catalog when the model is always needed and you want startup to fail if loading fails (`required: true`)
+**When to use `prefetch()` vs `warmup: "eager"`:**
+- Use **`warmup: "eager"`** in the catalog when the model is always needed and you want startup to fail if loading fails (`required: true`)
 - Use **`prefetch()`** after startup when you want programmatic control over which models to load and when (e.g., load models conditionally based on runtime config, or load after other initialization is complete)
 
 ### Availability Check
@@ -350,7 +350,7 @@ db.schema() \
             "metric": "cosine",
             "embedding": {
                 "alias": "embed/default",
-                "source": ["title", "content"],
+                "source_properties": ["title", "content"],
                 "batch_size": 32
             }
         }) \
@@ -376,8 +376,16 @@ OPTIONS {
 | Field | Required | Default | Description |
 |---|---|---|---|
 | `alias` | Yes | — | Model alias from Xervo catalog |
-| `source` | Yes | — | List of text properties to concatenate and embed |
-| `batch_size` | No | `32` | Texts per batch for API calls |
+| `source_properties` (Python, Rust) / `source` (Cypher DDL) | Yes | — | Non-empty list of text properties to concatenate and embed |
+| `batch_size` | No | `32` | Texts per batch for embedding calls |
+| `document_prefix` | No | none | Prepended to text embedded on write, e.g. `"passage: "` for E5-style models |
+| `query_prefix` | No | none | Prepended to query text embedded at query time, e.g. `"query: "` |
+
+**Use `source_properties` in Python.** Cypher DDL reads `source`, and the Python
+binding now accepts either and rejects malformed configs, but released wheels up
+to 5.0.0 silently ignore `source`: the index is created without auto-embedding,
+and the first insert fails with `Property 'embedding' cannot be null`. Those
+wheels also default `batch_size` to 100 rather than 32.
 
 **Behavior:**
 - **On write**: text from `source` properties is concatenated and embedded automatically
@@ -432,7 +440,7 @@ Automatic instrumentation (when metrics enabled):
 
 | Use Case | Provider | Model ID | Dimensions | Notes |
 |---|---|---|---|---|
-| **General purpose (local)** | `local/onnx` | `sentence-transformers/all-MiniLM-L6-v2` | 384 | Fast, small, good quality. Best default for local. |
+| **General purpose (local)** | `local/onnx` | `all-MiniLM-L6-v2` (preset) | 384 | Fast, small, good quality. Best default for local. |
 | **Higher quality (local)** | `local/candle` | `BAAI/bge-base-en-v1.5` | 768 | Better quality, larger model |
 | **Best quality (local)** | `local/onnx` | `Qwen3Embedding06B` (preset) | 1024 | Decoder-style embedder, ~600 MB; heavier than BGE |
 | **Production (remote)** | `remote/openai` | `text-embedding-3-small` | 1536 | Best cost/quality ratio for OpenAI |
@@ -483,9 +491,9 @@ let scored = db.xervo().rerank("rerank/minilm", "query text", &["doc1", "doc2"])
 [
   {
     "alias": "embed/default",
-    "task": "Embed",
+    "task": "embed",
     "provider_id": "local/onnx",
-    "model_id": "sentence-transformers/all-MiniLM-L6-v2"
+    "model_id": "all-MiniLM-L6-v2"
   }
 ]
 ```
@@ -496,16 +504,16 @@ let scored = db.xervo().rerank("rerank/minilm", "query text", &["doc1", "doc2"])
 [
   {
     "alias": "embed/default",
-    "task": "Embed",
+    "task": "embed",
     "provider_id": "remote/openai",
     "model_id": "text-embedding-3-small",
-    "warmup": "Background",
+    "warmup": "background",
     "timeout": 10,
     "retry": { "max_attempts": 3, "initial_backoff_ms": 200 }
   },
   {
     "alias": "llm/default",
-    "task": "Generate",
+    "task": "generate",
     "provider_id": "remote/openai",
     "model_id": "gpt-4o-mini",
     "timeout": 30,
@@ -513,7 +521,7 @@ let scored = db.xervo().rerank("rerank/minilm", "query text", &["doc1", "doc2"])
   },
   {
     "alias": "llm/reasoning",
-    "task": "Generate",
+    "task": "generate",
     "provider_id": "remote/anthropic",
     "model_id": "claude-sonnet-4-6",
     "timeout": 60,
@@ -528,22 +536,22 @@ let scored = db.xervo().rerank("rerank/minilm", "query text", &["doc1", "doc2"])
 [
   {
     "alias": "embed/local",
-    "task": "Embed",
+    "task": "embed",
     "provider_id": "local/onnx",
-    "model_id": "sentence-transformers/all-MiniLM-L6-v2",
-    "warmup": "Eager",
+    "model_id": "all-MiniLM-L6-v2",
+    "warmup": "eager",
     "required": true
   },
   {
     "alias": "embed/remote",
-    "task": "Embed",
+    "task": "embed",
     "provider_id": "remote/openai",
     "model_id": "text-embedding-3-small",
-    "warmup": "Lazy"
+    "warmup": "lazy"
   },
   {
     "alias": "llm/default",
-    "task": "Generate",
+    "task": "generate",
     "provider_id": "remote/openai",
     "model_id": "gpt-4o-mini",
     "timeout": 30
@@ -551,15 +559,15 @@ let scored = db.xervo().rerank("rerank/minilm", "query text", &["doc1", "doc2"])
 ]
 ```
 
-### BGE-M3 Multi-Head Hybrid (EmbedHybrid)
+### BGE-M3 Multi-Head Hybrid (embed_hybrid)
 
-A single catalog alias with task `EmbedHybrid` produces **dense + learned-sparse + multivector/ColBERT** from ONE forward pass.
+A single catalog alias with task `embed_hybrid` (`ModelTask::EmbedHybrid` in Rust) produces **dense + learned-sparse + multivector/ColBERT** from ONE forward pass.
 
 ```json
 [
   {
     "alias": "embed/bge-m3",
-    "task": "EmbedHybrid",
+    "task": "embed_hybrid",
     "provider_id": "local/onnx",
     "model_id": "aapot/bge-m3-onnx"
   }
@@ -597,7 +605,7 @@ The `EmbeddingCfg` fields are `{alias, source_properties, batch_size, document_p
 [
   {
     "alias": "embed/default",
-    "task": "Embed",
+    "task": "embed",
     "provider_id": "remote/azure-openai",
     "model_id": "text-embedding-3-small",
     "options": {
@@ -608,7 +616,7 @@ The `EmbeddingCfg` fields are `{alias, source_properties, batch_size, document_p
   },
   {
     "alias": "llm/default",
-    "task": "Generate",
+    "task": "generate",
     "provider_id": "remote/azure-openai",
     "model_id": "gpt-4o",
     "options": {
@@ -675,7 +683,7 @@ db.schema() \
         .index("embedding", {
             "type": "vector",
             "metric": "cosine",
-            "embedding": {"alias": "embed/default", "source": ["text"]}
+            "embedding": {"alias": "embed/default", "source_properties": ["text"]}
         }) \
     .apply()
 
@@ -703,7 +711,7 @@ results = db.session().query("""
 
 4. **Anthropic is generate-only** -- `remote/anthropic` does not support embeddings. Use a different provider for `Embed` tasks.
 
-5. **Local models download on first use** -- `local/candle` and `local/onnx` download models from HuggingFace on first load. Use `warmup: "Eager"` with `required: true` to catch download failures at startup, or call `xervo.prefetch(["alias"])` after startup to pre-load specific models before first inference.
+5. **Local models download on first use** -- `local/candle` and `local/onnx` download models from HuggingFace on first load. Use `warmup: "eager"` with `required: true` to catch download failures at startup, or call `xervo.prefetch(["alias"])` after startup to pre-load specific models before first inference.
 
 6. **API keys are read at model load time** -- Environment variables are resolved when the model is first loaded (or at startup for eager warmup), not when the database is opened.
 

@@ -265,7 +265,7 @@ of their probabilities.
 
 ## Combining with similar_to
 
-`similar_to()` returns scores in [0, 1], making its output natural probability input for MNOR and MPROD:
+`similar_to()` produces a similarity, which can feed MNOR and MPROD as evidence. Its range depends on the index metric (see [Score Conversion](../../guides/vector-search.md#score-conversion)): `(0, 1]` for L2, but raw cosine in `[-1, 1]` for a cosine index. MNOR and MPROD need probabilities in `[0, 1]`, so a negative cosine is clamped to `0` with a `probability_domain_violation` warning (or is an error under `strict_probability_domain`). Rescale cosine with `(1 + similar_to(...)) / 2` when its negative range should count as weak rather than no evidence:
 
 ```locy
 // Combine semantic relevance signals with noisy-OR
