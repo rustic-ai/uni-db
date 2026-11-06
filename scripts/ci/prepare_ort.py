@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Prepare the pinned Linux x64 CPU ONNX Runtime in ort-sys's native cache.
 
-ort-sys rc.12 streams a single download through extraction, with a fixed 30m
-network timeout and no retry. Separate resumable acquisition from extraction,
-verify its upstream SHA256, and publish only a complete cache entry. No link
-mode, feature or runtime-version changes are made.
+ort-sys rc.15 streams a single download through extraction, with a fixed 30m
+network timeout, retrying only on 5xx and never resuming. Separate resumable
+acquisition from extraction, verify its upstream SHA256, and publish only a
+complete cache entry. No link mode, feature or runtime-version changes are
+made.
 """
 
 import argparse
@@ -22,11 +23,11 @@ from pathlib import Path
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
-ORT_SYS_VERSION = "2.0.0-rc.12"
+ORT_SYS_VERSION = "2.0.0-rc.15"
 TARGET = "x86_64-unknown-linux-gnu"
-# From ort-sys rc.12 build/download/dist.txt: feature set `none`.
-URL = f"https://cdn.pyke.io/0/pyke:ort-rs/ms@1.24.2/{TARGET}.tar.lzma2"
-SHA256 = "acc1cba79c337594ead1d88ca72516147aa60054c84217b53399a31caa5ba671"
+# From ort-sys rc.15 build/download/dist.tsv: feature set `none`.
+URL = f"https://cdn.pyke.io/0/pyke:ort-rs/ms@1.31.0/{TARGET}.tar.lzma2"
+SHA256 = "02aac0d3b4927026292088986d7a377c657c88761b1c068be217a67b35447678"
 LIBRARY = "libonnxruntime.a"
 
 
