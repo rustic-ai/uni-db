@@ -2631,81 +2631,6 @@ pub fn py_timedelta_to_duration(obj: &Bound<'_, PyAny>) -> PyResult<std::time::D
     Ok(std::time::Duration::from_secs_f64(total_secs))
 }
 
-#[cfg(test)]
-mod value_to_py_coverage {
-    use super::*;
-
-    /// A `WriteLease::Custom` must not report to Python as `Local`.
-    ///
-    /// The catch-all used to map it there, so a lease that *is* externally
-    /// coordinated described itself as "no external coordination" — the one
-    /// answer a caller inspecting the lease is trying to avoid. This needs no
-    /// interpreter (see the note below): `write_lease_to_py` returns a plain
-    /// struct, and only reading it from Python would require one.
-    #[test]
-    fn a_custom_write_lease_does_not_report_as_local() {
-        use ::uni_db::api::multi_agent::{LeaseGuard, WriteLease, WriteLeaseProvider};
-
-        struct Dummy;
-        #[async_trait::async_trait]
-        impl WriteLeaseProvider for Dummy {
-            async fn acquire(&self) -> uni_common::Result<LeaseGuard> {
-                unreachable!("the mapping never runs the provider")
-            }
-            async fn heartbeat(&self, _g: &LeaseGuard) -> uni_common::Result<()> {
-                unreachable!()
-            }
-            async fn release(&self, _g: LeaseGuard) -> uni_common::Result<()> {
-                unreachable!()
-            }
-        }
-
-        let custom = write_lease_to_py(&WriteLease::Custom(Box::new(Dummy)));
-        assert!(
-            matches!(custom.variant, crate::types::WriteLeaseVariant::Custom),
-            "a custom lease mapped to {:?}",
-            custom.variant
-        );
-
-        // The two that were already right stay right.
-        assert!(matches!(
-            write_lease_to_py(&WriteLease::Local).variant,
-            crate::types::WriteLeaseVariant::Local
-        ));
-        assert!(matches!(
-            write_lease_to_py(&WriteLease::DynamoDB { table: "t".into() }).variant,
-            crate::types::WriteLeaseVariant::DynamoDB { .. }
-        ));
-    }
-
-    /// A Rust-side exhaustiveness test is not possible here: the crate builds
-    /// with pyo3's `extension-module`, so libpython is not linked and
-    /// `Python::initialize()` is unavailable in a unit test. Coverage of the
-    /// conversion itself lives in `tests/test_value_conversion.py`, which runs
-    /// under a real interpreter.
-    ///
-    /// What is testable without Python is that the new error path stays bounded
-    /// — a vector-shaped variant would otherwise paste kilobytes into the
-    /// exception message.
-    #[test]
-    fn variant_debug_is_truncated() {
-        let big = Value::Vector(vec![1.234_567; 4096]);
-        let rendered = truncated_variant_debug(&big);
-        assert!(
-            rendered.len() < 200,
-            "error text must stay bounded, got {} bytes",
-            rendered.len()
-        );
-        assert!(rendered.contains("bytes total"));
-    }
-
-    #[test]
-    fn short_variant_debug_is_left_alone() {
-        let small = Value::Int(7);
-        assert_eq!(truncated_variant_debug(&small), "Int(7)");
-    }
-}
-
 /// Build the `(input, options)` values for an NLP extraction call from the
 /// Python arguments, so the bindings share the Cypher procedures' parser.
 #[allow(clippy::too_many_arguments)]
@@ -2792,5 +2717,80 @@ pub fn extracted_entity_to_py(
         mention_turns: e.mention_turns,
         model_alias: e.model_alias,
         model_id: e.model_id,
+    }
+}
+
+#[cfg(test)]
+mod value_to_py_coverage {
+    use super::*;
+
+    /// A `WriteLease::Custom` must not report to Python as `Local`.
+    ///
+    /// The catch-all used to map it there, so a lease that *is* externally
+    /// coordinated described itself as "no external coordination" — the one
+    /// answer a caller inspecting the lease is trying to avoid. This needs no
+    /// interpreter (see the note below): `write_lease_to_py` returns a plain
+    /// struct, and only reading it from Python would require one.
+    #[test]
+    fn a_custom_write_lease_does_not_report_as_local() {
+        use ::uni_db::api::multi_agent::{LeaseGuard, WriteLease, WriteLeaseProvider};
+
+        struct Dummy;
+        #[async_trait::async_trait]
+        impl WriteLeaseProvider for Dummy {
+            async fn acquire(&self) -> uni_common::Result<LeaseGuard> {
+                unreachable!("the mapping never runs the provider")
+            }
+            async fn heartbeat(&self, _g: &LeaseGuard) -> uni_common::Result<()> {
+                unreachable!()
+            }
+            async fn release(&self, _g: LeaseGuard) -> uni_common::Result<()> {
+                unreachable!()
+            }
+        }
+
+        let custom = write_lease_to_py(&WriteLease::Custom(Box::new(Dummy)));
+        assert!(
+            matches!(custom.variant, crate::types::WriteLeaseVariant::Custom),
+            "a custom lease mapped to {:?}",
+            custom.variant
+        );
+
+        // The two that were already right stay right.
+        assert!(matches!(
+            write_lease_to_py(&WriteLease::Local).variant,
+            crate::types::WriteLeaseVariant::Local
+        ));
+        assert!(matches!(
+            write_lease_to_py(&WriteLease::DynamoDB { table: "t".into() }).variant,
+            crate::types::WriteLeaseVariant::DynamoDB { .. }
+        ));
+    }
+
+    /// A Rust-side exhaustiveness test is not possible here: the crate builds
+    /// with pyo3's `extension-module`, so libpython is not linked and
+    /// `Python::initialize()` is unavailable in a unit test. Coverage of the
+    /// conversion itself lives in `tests/test_value_conversion.py`, which runs
+    /// under a real interpreter.
+    ///
+    /// What is testable without Python is that the new error path stays bounded
+    /// — a vector-shaped variant would otherwise paste kilobytes into the
+    /// exception message.
+    #[test]
+    fn variant_debug_is_truncated() {
+        let big = Value::Vector(vec![1.234_567; 4096]);
+        let rendered = truncated_variant_debug(&big);
+        assert!(
+            rendered.len() < 200,
+            "error text must stay bounded, got {} bytes",
+            rendered.len()
+        );
+        assert!(rendered.contains("bytes total"));
+    }
+
+    #[test]
+    fn short_variant_debug_is_left_alone() {
+        let small = Value::Int(7);
+        assert_eq!(truncated_variant_debug(&small), "Int(7)");
     }
 }
