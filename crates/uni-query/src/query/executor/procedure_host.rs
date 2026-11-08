@@ -486,6 +486,13 @@ impl QueryProcedureHost {
         if let Some(registry) = &self.procedure_registry {
             executor.set_procedure_registry(Arc::clone(registry));
         }
+        // Model-backed procedures in the inner query (`uni.nlp.*`, query-text
+        // embedding in `uni.vector.query`) resolve through the caller's
+        // runtime. Without it a trigger action or declared procedure body saw
+        // "Uni-Xervo runtime not configured" on a database that has one.
+        if let Some(runtime) = &self.xervo_runtime {
+            executor.set_xervo_runtime(Some(Arc::clone(runtime)));
+        }
 
         // The inner query runs inside the outer one's poll -- and, for a
         // declared procedure, under `block_in_place` -- so the outer
