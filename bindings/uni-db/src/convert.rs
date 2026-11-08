@@ -2712,28 +2712,32 @@ mod value_to_py_coverage {
 pub fn nlp_call_args(
     py: Python,
     input: &Py<PyAny>,
-    alias: &str,
+    alias: Option<String>,
     relations: Option<Py<PyAny>>,
     entity_types: Option<Py<PyAny>>,
     schema: Option<Py<PyAny>>,
-    top_per_pair: Option<usize>,
+    top_per_pair: Option<Py<PyAny>>,
     rel_offsets: Option<Py<PyAny>>,
 ) -> PyResult<(Value, Value)> {
     let input = py_object_to_value(py, input)?;
     let mut options: HashMap<String, Value> = HashMap::new();
-    options.insert("alias".to_string(), Value::String(alias.to_string()));
+    // `alias=None` means the default, which the options parser applies.
+    if let Some(alias) = alias {
+        options.insert("alias".to_string(), Value::String(alias));
+    }
+    // Values go through as given, so the shared options parser reports a bad
+    // one (a negative `top_per_pair`, say) as UniInvalidArgumentError rather
+    // than PyO3 raising a conversion error first.
     for (key, value) in [
         ("relations", relations),
         ("entity_types", entity_types),
         ("schema", schema),
+        ("top_per_pair", top_per_pair),
         ("rel_offsets", rel_offsets),
     ] {
         if let Some(v) = value {
             options.insert(key.to_string(), py_object_to_value(py, &v)?);
         }
-    }
-    if let Some(n) = top_per_pair {
-        options.insert("top_per_pair".to_string(), Value::Int(n as i64));
     }
     Ok((input, Value::Map(options)))
 }

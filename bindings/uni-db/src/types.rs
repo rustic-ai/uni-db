@@ -1490,7 +1490,7 @@ impl PyTokenUsage {
 /// Byte offsets index the input text, or for a conversation the turn named
 /// by ``head_turn`` / ``tail_turn``. Speaker entities have no offsets.
 /// ``confidence`` is ``1 / (1 + e^-margin)``, not a calibrated probability.
-#[pyclass(get_all, name = "ExtractedFact")]
+#[pyclass(get_all, name = "ExtractedFact", skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyExtractedFact {
     pub doc: usize,
@@ -1539,7 +1539,7 @@ impl PyExtractedFact {
 /// ``uni.nlp.entities``). ``mention_starts`` / ``mention_ends`` /
 /// ``mention_turns`` are parallel
 /// to ``mentions``.
-#[pyclass(get_all, name = "ExtractedEntity")]
+#[pyclass(get_all, name = "ExtractedEntity", skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyExtractedEntity {
     pub doc: usize,

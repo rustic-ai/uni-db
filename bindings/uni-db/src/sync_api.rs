@@ -1456,17 +1456,17 @@ impl Xervo {
     /// ``entity_types`` are lists of names or ``{"name", "description"}``
     /// dicts; ``schema="graph"`` (or ``{"labels": [...], "edge_types": [...]}``)
     /// derives them from the declared schema instead.
-    #[pyo3(signature = (input, *, alias="nlp/default", relations=None, entity_types=None, schema=None, top_per_pair=None, rel_offsets=None))]
+    #[pyo3(signature = (input, *, alias=None, relations=None, entity_types=None, schema=None, top_per_pair=None, rel_offsets=None))]
     #[allow(clippy::too_many_arguments)]
     fn extract_facts(
         &self,
         py: Python<'_>,
         input: Py<PyAny>,
-        alias: &str,
+        alias: Option<String>,
         relations: Option<Py<PyAny>>,
         entity_types: Option<Py<PyAny>>,
         schema: Option<Py<PyAny>>,
-        top_per_pair: Option<usize>,
+        top_per_pair: Option<Py<PyAny>>,
         rel_offsets: Option<Py<PyAny>>,
     ) -> PyResult<Vec<crate::types::PyExtractedFact>> {
         let (input, options) = crate::convert::nlp_call_args(
@@ -1497,28 +1497,24 @@ impl Xervo {
     /// Extract typed entities from text with a kniv v7 model: the rows of
     /// ``uni.nlp.entities``. Arguments as for ``extract_facts``, without
     /// ``relations``, ``top_per_pair`` and ``rel_offsets``.
-    #[pyo3(signature = (input, *, alias="nlp/default", relations=None, entity_types=None, schema=None, top_per_pair=None, rel_offsets=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (input, *, alias=None, entity_types=None, schema=None))]
     fn extract_entities(
         &self,
         py: Python<'_>,
         input: Py<PyAny>,
-        alias: &str,
-        relations: Option<Py<PyAny>>,
+        alias: Option<String>,
         entity_types: Option<Py<PyAny>>,
         schema: Option<Py<PyAny>>,
-        top_per_pair: Option<usize>,
-        rel_offsets: Option<Py<PyAny>>,
     ) -> PyResult<Vec<crate::types::PyExtractedEntity>> {
         let (input, options) = crate::convert::nlp_call_args(
             py,
             &input,
             alias,
-            relations,
+            None,
             entity_types,
             schema,
-            top_per_pair,
-            rel_offsets,
+            None,
+            None,
         )?;
         let rows = py
             .detach(|| {

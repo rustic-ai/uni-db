@@ -945,17 +945,17 @@ impl AsyncXervo {
     /// ``entity_types`` are lists of names or ``{"name", "description"}``
     /// dicts; ``schema="graph"`` (or ``{"labels": [...], "edge_types": [...]}``)
     /// derives them from the declared schema instead.
-    #[pyo3(signature = (input, *, alias="nlp/default", relations=None, entity_types=None, schema=None, top_per_pair=None, rel_offsets=None))]
+    #[pyo3(signature = (input, *, alias=None, relations=None, entity_types=None, schema=None, top_per_pair=None, rel_offsets=None))]
     #[allow(clippy::too_many_arguments)]
     fn extract_facts<'py>(
         &self,
         py: Python<'py>,
         input: Py<PyAny>,
-        alias: &str,
+        alias: Option<String>,
         relations: Option<Py<PyAny>>,
         entity_types: Option<Py<PyAny>>,
         schema: Option<Py<PyAny>>,
-        top_per_pair: Option<usize>,
+        top_per_pair: Option<Py<PyAny>>,
         rel_offsets: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let db = self.inner.clone();
@@ -983,29 +983,25 @@ impl AsyncXervo {
     /// Extract typed entities from text with a kniv v7 model (async): the rows of
     /// ``uni.nlp.entities``. Arguments as for ``extract_facts``, without
     /// ``relations``, ``top_per_pair`` and ``rel_offsets``.
-    #[pyo3(signature = (input, *, alias="nlp/default", relations=None, entity_types=None, schema=None, top_per_pair=None, rel_offsets=None))]
-    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (input, *, alias=None, entity_types=None, schema=None))]
     fn extract_entities<'py>(
         &self,
         py: Python<'py>,
         input: Py<PyAny>,
-        alias: &str,
-        relations: Option<Py<PyAny>>,
+        alias: Option<String>,
         entity_types: Option<Py<PyAny>>,
         schema: Option<Py<PyAny>>,
-        top_per_pair: Option<usize>,
-        rel_offsets: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let db = self.inner.clone();
         let (input, options) = crate::convert::nlp_call_args(
             py,
             &input,
             alias,
-            relations,
+            None,
             entity_types,
             schema,
-            top_per_pair,
-            rel_offsets,
+            None,
+            None,
         )?;
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let rows = core::xervo_extract_entities_core(&db, input, options)

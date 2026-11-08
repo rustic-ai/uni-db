@@ -72,9 +72,13 @@ class TestValidation:
         with pytest.raises(uni_db.UniInvalidArgumentError, match="unknown key 'who'"):
             empty_db.xervo().extract_entities([{"who": "user", "text": "hi"}])
 
-    def test_entities_reject_relation_options(self, empty_db):
-        with pytest.raises(uni_db.UniInvalidArgumentError, match="only to uni.nlp.extract"):
+    def test_entities_take_no_relation_options(self, empty_db):
+        with pytest.raises(TypeError, match="relations"):
             empty_db.xervo().extract_entities("text", relations=["r"])
+
+    def test_entities_reject_an_edge_type_subset(self, empty_db):
+        with pytest.raises(uni_db.UniInvalidArgumentError, match="only to uni.nlp.extract"):
+            empty_db.xervo().extract_entities("text", schema={"edge_types": ["LIVES_IN"]})
 
     def test_duplicate_relation(self, empty_db):
         with pytest.raises(uni_db.UniInvalidArgumentError, match="listed twice"):
@@ -84,9 +88,14 @@ class TestValidation:
         with pytest.raises(uni_db.UniInvalidArgumentError, match="option 'schema'"):
             empty_db.xervo().extract_facts("text", schema="everything")
 
-    def test_bad_top_per_pair(self, empty_db):
+    @pytest.mark.parametrize("value", [0, -1, 1.5, "two"])
+    def test_bad_top_per_pair(self, empty_db, value):
         with pytest.raises(uni_db.UniInvalidArgumentError, match="top_per_pair"):
-            empty_db.xervo().extract_facts("text", relations=["r"], top_per_pair=0)
+            empty_db.xervo().extract_facts("text", relations=["r"], top_per_pair=value)
+
+    def test_alias_none_is_the_default(self, empty_db):
+        with pytest.raises(uni_db.UniInternalError, match="not configured"):
+            empty_db.xervo().extract_entities("text", alias=None)
 
 
 class TestAsync:
@@ -96,4 +105,8 @@ class TestAsync:
 
     async def test_extract_entities_validation(self, async_empty_db):
         with pytest.raises(uni_db.UniInvalidArgumentError, match="only to uni.nlp.extract"):
-            await async_empty_db.xervo().extract_entities("text", relations=["r"])
+            await async_empty_db.xervo().extract_entities("text", schema={"edge_types": ["E"]})
+
+    async def test_extract_facts_bad_top_per_pair(self, async_empty_db):
+        with pytest.raises(uni_db.UniInvalidArgumentError, match="top_per_pair"):
+            await async_empty_db.xervo().extract_facts("text", relations=["r"], top_per_pair=-1)

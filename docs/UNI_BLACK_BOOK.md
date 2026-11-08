@@ -5356,17 +5356,30 @@ shape exist once.
 - **v1 guard.** A model whose `supported_tasks()` lacks the requested flag is
   a v1 cascade model; the call fails naming the alias instead of yielding
   nothing.
-- **Byte spans.** `NlpEntity::spans` are window-local word spans. The flat
-  `NlpResult::tokens` of a v7 result are whole words with UTF-8 offsets and a
-  global `word_index`, so a window's word base is the sum of earlier windows'
-  `tokens.len()`. uni-xervo analyses each conversation turn as its own text
-  (offset 0), so spans are turn-relative and the row carries the turn index,
-  recovered from the containing `WindowSentence::unit` and mapped past blank
-  turns, which uni-xervo drops. Speaker entities have no spans.
+- **Byte spans.** `NlpEntity::spans` are window-local, half-open word spans
+  over `NlpWindow::tokens` (words), so a window's word base is the sum of
+  earlier windows' `tokens.len()`. A word's byte range is the union of the
+  flat `NlpResult::tokens` with that `word_index`: v7 emits one token per
+  word, but the trait allows subwords, so the code groups rather than indexes.
+  uni-xervo analyses each conversation turn as its own text (offset 0), so
+  spans are turn-relative and the row carries the turn index, recovered from
+  the containing `WindowSentence::unit` and mapped past blank turns, which
+  uni-xervo drops. Speaker entities get no spans and no mentions (the trait
+  allows speaker `spans` at turn starts; v7 leaves them empty, and they are
+  ignored either way), and keep the type `speaker` even if a label humanizes
+  to it.
+- **Surface text.** `text`, `head_text`, `tail_text` and `mentions` are
+  sliced from the caller's input at the located span. The model's
+  `NlpEntity::text` joins words with spaces (`AT & T`), which would not match
+  the source or what users `MERGE` on; it is only the fallback.
+- **Null input** parses as no documents and yields no rows, so a per-row
+  `CALL` over a node lacking the property does not abort the statement.
 - **`schema: 'graph'`** reads `host.storage().schema_manager().schema()`. On a
   forked session that is the fork's merged schema (`at_fork_with_schema`), so
   fork-local edge types are extracted. Names are humanized for the model
-  (`LIVES_IN` → `"lives in"`) and mapped back in the rows.
+  (`LIVES_IN` → `"lives in"`) and mapped back in the rows. `uni.nlp.entities` reads
+  only the labels, so a clash between humanized edge-type names cannot fail
+  it.
 - **Dispatch.** Both names are in `is_df_eligible_procedure`
   (`executor/read.rs`): the fallback executor's `QueryProcedureHost` is built
   by `from_components` without a Xervo runtime, so a standalone `CALL` must

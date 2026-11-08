@@ -385,14 +385,24 @@ create) into a built-in rule module so users start from a working default.
 
 ### 7.1 Phase 2: facade and Python
 
-- **Rust.** `UniXervo::nlp(alias, requests) -> Result<Vec<NlpResult>>`
-  re-exports uni-xervo's types, alongside a convenience
-  `extract_facts(alias, text, schema)`.
-- **Python.** Matching `Database` and `AsyncDatabase` methods in
-  `bindings/uni-db/src/{sync_api.rs,async_api.rs}`, plus stubs in
-  `uni_db/__init__.pyi`, per the cross-language symmetry contract. Results
-  become dataclasses mirroring the §4.1 columns, not the raw window
-  structure.
+Implemented (rev. 3). The shapes differ from rev. 2's sketch:
+
+- **Rust.** `UniXervo::nlp(alias, requests) -> Result<Vec<NlpResult>>` is the
+  raw passthrough, with uni-xervo's NLP types re-exported from
+  `uni_db::api::xervo`. The conveniences are
+  `extract_facts(&NlpInput, &ExtractOptions) -> Result<Vec<ExtractedFact>>`
+  and `extract_entities(...) -> Result<Vec<ExtractedEntity>>`. The alias and
+  the schema live in `ExtractOptions`, the same options the procedures
+  parse, and the rows are the §4.1 columns. `schema: "graph"` uses primary's
+  schema, since `db.xervo()` is not tied to a session; a fork's merged schema
+  is reached through the procedures on a forked session.
+- **Python.** `extract_facts` / `extract_entities` on `Xervo` and
+  `AsyncXervo` (from `db.xervo()`), next to `embed` and `generate`, rather
+  than on `Database` / `AsyncDatabase`: that is where the other Xervo calls
+  already live, and the symmetry contract is met by the sync/async pair plus
+  the `.pyi` stubs. Rows are `ExtractedFact` / `ExtractedEntity` classes
+  mirroring §4.1. The raw `nlp()` passthrough is Rust-only, because its
+  request types do not map usefully to Python.
 - Phase 1 needs none of this: procedures reach Python through Cypher.
 
 ### 7.2 Phase 2b: linguistic procedures

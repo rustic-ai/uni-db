@@ -19,6 +19,7 @@ use arrow_schema::{DataType, Field, SchemaRef};
 use datafusion::error::{DataFusionError, Result as DFResult};
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::logical_expr::ColumnarValue;
+use datafusion::scalar::ScalarValue;
 use uni_common::Value;
 use uni_plugin::traits::procedure::{
     ProcedureContext, ProcedureMode, ProcedurePlugin, ProcedureSignature,
@@ -30,7 +31,7 @@ use crate::nlp::{
     ExtractKind, ExtractOptions, ExtractRows, ExtractedEntity, ExtractedFact, NlpExtractError,
     NlpInput, run_extract,
 };
-use crate::procedures_plugin::host_args::arg;
+use crate::procedures_plugin::host_args::{arg, arg_with_default};
 use crate::procedures_plugin::vector::run_search_procedure;
 use crate::query::df_graph::procedure_call::build_typed_column;
 use crate::query::executor::procedure_host::QueryProcedureHost;
@@ -67,10 +68,11 @@ fn args() -> Vec<uni_plugin::traits::procedure::NamedArgType> {
             "Text to analyse: a string, a list of strings (one document each), \
              or a list of {speaker, text} maps (one conversation).",
         ),
-        arg(
+        arg_with_default(
             "options",
             ArgType::CypherValue,
-            "Options map: `alias`, `relations`, `entity_types`, `schema` \
+            ScalarValue::Null,
+            "Options map (optional): `alias`, `relations`, `entity_types`, `schema` \
              ('graph' or {labels, edge_types}), `top_per_pair`, `rel_offsets`.",
         ),
     ]

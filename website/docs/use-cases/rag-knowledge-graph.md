@@ -133,6 +133,26 @@ uni import support-bot \
   --citations relations.jsonl
 ```
 
+### Linking chunks to entities
+
+The expansion query below follows `MENTIONS` edges, so something has to
+create them. Rather than call an LLM outside the database, you can extract
+entities in-process with kniv v7 and `uni.nlp.entities` (see
+[NLP Extraction](../features/nlp-extraction.md) for the catalog entry):
+
+```cypher
+MATCH (c:Chunk)
+CALL uni.nlp.entities(c.text, {entity_types: ['function', 'class', 'error code']})
+YIELD text, entity_type
+MERGE (e:Entity {name: text, type: entity_type})
+MERGE (c)-[:MENTIONS]->(e)
+```
+
+To extract only the chunks a write adds, run the same statement from a
+declared trigger; [NLP Extraction](../features/nlp-extraction.md) shows how.
+`uni.nlp.extract` goes one step further and yields typed facts between the
+entities, which can become `RELATED_TO` edges.
+
 ### 4. Querying (GraphRAG)
 
 This single query performs the entire retrieval pipeline:

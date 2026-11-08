@@ -23,6 +23,8 @@ in your text.
   document each, analysed in one batched call), or a list of
   `{speaker, text}` maps (one conversation). In a conversation each speaker
   becomes an entity, so "I live in Lisbon" is a fact *about that speaker*.
+  A `null` input yields no rows, so `MATCH (d:Doc) CALL uni.nlp.extract(d.text, …)`
+  skips a node that has no `text` instead of failing the statement.
 - **`schema: 'graph'`**: derive relations from your declared edge types and
   entity types from your labels, using their descriptions. Results come back
   under the schema names (`LIVES_IN`, `Person`), ready to `MERGE`. On a
@@ -135,8 +137,10 @@ with an error naming the alias.
 | `top_per_pair` | int | model's calibrated value | Facts kept per entity pair. |
 | `rel_offsets` | map | — | Relation → keep-threshold offset. A fact is kept when its raw margin exceeds `-offset`, so a **lower** offset is a **higher** bar. |
 
-Unknown keys are rejected. `uni.nlp.entities` takes `alias`, `entity_types`
-and `schema` only, and skips the relation pass entirely.
+Unknown keys are rejected. `options` may be omitted for `uni.nlp.entities`,
+which takes `alias`, `entity_types` and `schema` only and skips the relation
+pass entirely. Under `schema`, `uni.nlp.entities` reads only the labels; an
+`edge_types` slice is rejected there.
 
 Write relation descriptions that say which side is the head (`"the place
 where the head resides"`), avoid near-synonyms in one schema (they split the
@@ -151,8 +155,8 @@ decision), and prefer specific relations over a generic `related to`. With
 |---|---|
 | `doc`, `window` | Input document index, and the window of whole sentences (≤ 512 words) within it. |
 | `head`, `tail` | Window-local entity indexes; join with `uni.nlp.entities` on `(doc, window, entity)`. |
-| `head_text`, `head_type`, `head_speaker` | First mention's text (or the speaker name), type, and whether it is a conversation participant. Same for `tail_*`. |
-| `head_start`, `head_end`, `head_turn` | UTF-8 byte span of the first mention. For a conversation, offsets are within the turn named by `head_turn`. Null for speakers. Same for `tail_*`. |
+| `head_text`, `head_type`, `head_speaker` | First mention's text as written in the input (or the speaker name), type, and whether it is a conversation participant. A speaker's type is always `speaker`. Same for `tail_*`. |
+| `head_start`, `head_end`, `head_turn` | UTF-8 **byte** span of the first mention. For a conversation, offsets are within the turn named by `head_turn`. Null for speakers. Same for `tail_*`. Cypher's `substring()` and Python's `str` slicing count characters, so for non-ASCII text slice bytes (in Python, `text.encode()[start:end].decode()`). |
 | `relation` | As you named it, or the edge type name under `schema: 'graph'`. |
 | `polarity` | `positive` or `negative`. |
 | `modality` | `asserted`, `reported`, `planned`, `desired`, `questioned` or `hypothetical`. |
@@ -162,7 +166,8 @@ decision), and prefer specific relations over a generic `related to`. With
 | `model_alias`, `model_id` | Which model produced the row, for provenance. |
 
 `uni.nlp.entities` yields `doc, window, entity, text, entity_type, speaker`,
-`mentions` (list), `mention_starts`, `mention_ends`, `mention_turns` (lists
+`mentions` (list, each as written in the input), `mention_starts`,
+`mention_ends`, `mention_turns` (lists
 parallel to `mentions`; not `starts` / `ends`, which Cypher reads as the
 `STARTS WITH` / `ENDS WITH` keywords),
 and `model_alias, model_id`.

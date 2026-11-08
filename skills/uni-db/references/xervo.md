@@ -351,12 +351,14 @@ YIELD entity, text, entity_type, mentions, mention_starts, mention_ends RETURN *
 - **Options:** `alias`, `relations`, `entity_types`, `schema` (`'graph'` or
   `{labels, edge_types}`, exclusive with the previous two), `top_per_pair`,
   `rel_offsets` (relation → offset; lower is a higher bar). Unknown keys are
-  rejected. `uni.nlp.extract` needs `relations` or `schema`.
+  rejected. `uni.nlp.extract` needs `relations` or `schema`; `options` may be
+  omitted for `uni.nlp.entities`. A `null` input yields no rows.
 - **Only `asserted` / `reported` facts are claims about the world**; `planned`,
   `desired`, `questioned`, `hypothetical` are not. `negative` polarity is
   evidence against the same triple.
 - **Spans** are UTF-8 byte offsets into the text, or into the turn named by
-  `head_turn` / `tail_turn` for a conversation. Speakers have none.
+  `head_turn` / `tail_turn` for a conversation. Speakers have none. Text
+  columns are sliced from the input, so `AT&T` stays `AT&T`.
 - **`confidence`** is `sigmoid(margin)`, not a calibrated probability — use
   Locy `CALIBRATE` against labels.
 - A v1 `kniv-deberta-nlp-*` model is refused: it has no fact extraction.

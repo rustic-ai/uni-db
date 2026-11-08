@@ -1739,9 +1739,9 @@ class Xervo:
         self,
         input: str | list[str] | list[dict[str, str]],
         *,
-        alias: str = "nlp/default",
-        relations: list[str | dict[str, str]] | None = None,
-        entity_types: list[str | dict[str, str]] | None = None,
+        alias: str | None = None,
+        relations: list[str | dict[str, str | None]] | None = None,
+        entity_types: list[str | dict[str, str | None]] | None = None,
         schema: str | dict[str, list[str]] | None = None,
         top_per_pair: int | None = None,
         rel_offsets: dict[str, float] | None = None,
@@ -1751,16 +1751,21 @@ class Xervo:
         ``input`` is a string, a list of strings (one document each), or a
         list of ``{"speaker", "text"}`` dicts (one conversation).
         ``schema="graph"`` derives relations and entity types from the
-        declared schema. Raises ``UniInvalidArgumentError`` for malformed
-        arguments before any model call.
+        declared schema. ``alias=None`` uses ``"nlp/default"``. Raises
+        ``UniInvalidArgumentError`` for malformed arguments before any model
+        call.
+
+        Span offsets are UTF-8 *byte* offsets, as in Rust and Cypher. For
+        non-ASCII text slice the encoded string:
+        ``text.encode()[f.head_start:f.head_end].decode()``.
         """
         ...
     def extract_entities(
         self,
         input: str | list[str] | list[dict[str, str]],
         *,
-        alias: str = "nlp/default",
-        entity_types: list[str | dict[str, str]] | None = None,
+        alias: str | None = None,
+        entity_types: list[str | dict[str, str | None]] | None = None,
         schema: str | dict[str, list[str]] | None = None,
     ) -> list[ExtractedEntity]:
         """Extract typed entities with a kniv v7 model (the rows of ``uni.nlp.entities``)."""
@@ -2970,9 +2975,9 @@ class AsyncXervo:
         self,
         input: str | list[str] | list[dict[str, str]],
         *,
-        alias: str = "nlp/default",
-        relations: list[str | dict[str, str]] | None = None,
-        entity_types: list[str | dict[str, str]] | None = None,
+        alias: str | None = None,
+        relations: list[str | dict[str, str | None]] | None = None,
+        entity_types: list[str | dict[str, str | None]] | None = None,
         schema: str | dict[str, list[str]] | None = None,
         top_per_pair: int | None = None,
         rel_offsets: dict[str, float] | None = None,
@@ -2982,16 +2987,21 @@ class AsyncXervo:
         ``input`` is a string, a list of strings (one document each), or a
         list of ``{"speaker", "text"}`` dicts (one conversation).
         ``schema="graph"`` derives relations and entity types from the
-        declared schema. Raises ``UniInvalidArgumentError`` for malformed
-        arguments before any model call.
+        declared schema. ``alias=None`` uses ``"nlp/default"``. Raises
+        ``UniInvalidArgumentError`` for malformed arguments before any model
+        call.
+
+        Span offsets are UTF-8 *byte* offsets, as in Rust and Cypher. For
+        non-ASCII text slice the encoded string:
+        ``text.encode()[f.head_start:f.head_end].decode()``.
         """
         ...
     async def extract_entities(
         self,
         input: str | list[str] | list[dict[str, str]],
         *,
-        alias: str = "nlp/default",
-        entity_types: list[str | dict[str, str]] | None = None,
+        alias: str | None = None,
+        entity_types: list[str | dict[str, str | None]] | None = None,
         schema: str | dict[str, list[str]] | None = None,
     ) -> list[ExtractedEntity]:
         """Extract typed entities with a kniv v7 model (the rows of ``uni.nlp.entities``)."""

@@ -13,6 +13,7 @@
 //! One `#[ignore]`d test runs the real `kniv-v7-xlarge-u-en` model (a ~2 GB
 //! download); the nightly ignored-sweep runs it.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -61,7 +62,11 @@ fn words(text: &str) -> Vec<(String, usize)> {
     out
 }
 
-fn analyse(units: &[(Option<&str>, &str)], schema: Option<&ExtractionSchema>) -> NlpResult {
+fn analyse(
+    units: &[(Option<&str>, &str)],
+    schema: Option<&ExtractionSchema>,
+    offsets: Option<&HashMap<String, f32>>,
+) -> NlpResult {
     let entity_type = schema
         .and_then(|s| s.entity_types.as_ref())
         .and_then(|t| t.first())
@@ -109,7 +114,11 @@ fn analyse(units: &[(Option<&str>, &str)], schema: Option<&ExtractionSchema>) ->
         f.head = 0;
         f.tail = 1;
         f.relation = relation.name.clone();
-        f.margin = 1.0;
+        // An offset for the relation comes back as the margin, so tests can
+        // see `rel_offsets` reach the model under the name it scores.
+        f.margin = offsets
+            .and_then(|o| o.get(&relation.name).copied())
+            .unwrap_or(1.0);
         window.facts.push(f);
     }
     result.windows.push(window);
@@ -133,7 +142,11 @@ impl NlpModel for MockKniv {
                     .collect(),
                 None => vec![(None, req.text)],
             };
-            out.push(analyse(&units, req.schema));
+            out.push(analyse(
+                &units,
+                req.schema,
+                req.calibration.map(|c| &c.rel_offsets),
+            ));
         }
         Ok(out)
     }
@@ -265,6 +278,8 @@ async fn extract_runs_per_row_after_match_and_feeds_merge() -> Result<()> {
         .await?;
     tx.execute("CREATE (:Doc {id: 2, text: 'no entities here'})")
         .await?;
+    // No `text`: the call yields nothing for this row rather than failing.
+    tx.execute("CREATE (:Doc {id: 3})").await?;
     tx.commit().await?;
 
     let tx = session.tx().await?;
@@ -292,6 +307,113 @@ async fn extract_runs_per_row_after_match_and_feeds_merge() -> Result<()> {
         ("Bob".into(), "near".into(), "Rome".into())
     );
     assert_eq!(r.get::<i64>("doc")?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn options_reach_the_model_and_may_be_omitted() -> Result<()> {
+    let (db, seen) = db_with_mock().await?;
+    let session = db.session();
+
+    // `options` is optional for entities.
+    let rows = session
+        .query("CALL uni.nlp.entities('saw Bob near Rome') YIELD text RETURN text")
+        .await?;
+    assert_eq!(rows.len(), 2);
+
+    // `top_per_pair` lands in the schema; a `rel_offsets` entry keyed by the
+    // edge type reaches the model under the humanized name it scores.
+    db.schema()
+        .label("Person")
+        .done()
+        .edge_type("NEAR_TO", &["Person"], &["Person"])
+        .description("the place the head is near")
+        .done()
+        .apply()
+        .await?;
+    let rows = session
+        .query(
+            "CALL uni.nlp.extract('saw Bob near Rome', \
+               {schema: 'graph', top_per_pair: 2, rel_offsets: {NEAR_TO: 0.25}}) \
+             YIELD relation, margin RETURN relation, margin",
+        )
+        .await?;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(str_col(&rows.rows()[0], "relation"), "NEAR_TO");
+    assert_eq!(rows.rows()[0].get::<f64>("margin")?, 0.25);
+    assert_eq!(seen.lock().unwrap().as_ref().unwrap().top_per_pair, Some(2));
+    Ok(())
+}
+
+/// Entities read only the labels, so edge types whose names clash (and
+/// would fail `uni.nlp.extract` under the whole schema) do not matter.
+#[tokio::test]
+async fn graph_schema_entities_ignore_edge_types() -> Result<()> {
+    let (db, seen) = db_with_mock().await?;
+    db.schema()
+        .label("Person")
+        .done()
+        .edge_type("LIVES_IN", &["Person"], &["Person"])
+        .done()
+        .edge_type("LivesIn", &["Person"], &["Person"])
+        .done()
+        .apply()
+        .await?;
+    let session = db.session();
+    let err = error_of(
+        &db,
+        "CALL uni.nlp.extract('saw Bob near Rome', {schema: 'graph'}) YIELD head RETURN head",
+    )
+    .await;
+    assert!(err.contains("both read as 'lives in'"), "{err}");
+
+    let rows = session
+        .query(
+            "CALL uni.nlp.entities('saw Bob near Rome', {schema: 'graph'}) \
+             YIELD entity_type RETURN entity_type",
+        )
+        .await?;
+    assert_eq!(str_col(&rows.rows()[0], "entity_type"), "Person");
+    let schema = seen.lock().unwrap().clone().unwrap();
+    assert!(schema.relations.is_empty());
+    Ok(())
+}
+
+/// The statement `use-cases/rag-knowledge-graph.md` documents.
+#[tokio::test]
+async fn entities_link_chunks_to_shared_entity_nodes() -> Result<()> {
+    let (db, _) = db_with_mock().await?;
+    let session = db.session();
+    let tx = session.tx().await?;
+    tx.execute("CREATE (:Chunk {id: 1, text: 'saw Bob near Rome'})")
+        .await?;
+    tx.execute("CREATE (:Chunk {id: 2, text: 'later Bob left'})")
+        .await?;
+    tx.commit().await?;
+
+    let tx = session.tx().await?;
+    tx.execute(
+        "MATCH (c:Chunk) \
+         CALL uni.nlp.entities(c.text, {entity_types: ['person', 'place']}) \
+         YIELD text, entity_type \
+         MERGE (e:Entity {name: text, type: entity_type}) \
+         MERGE (c)-[:MENTIONS]->(e)",
+    )
+    .await?;
+    tx.commit().await?;
+
+    let rows = session
+        .query(
+            "MATCH (c:Chunk)-[:MENTIONS]->(e:Entity) \
+             RETURN e.name AS name, count(c) AS chunks ORDER BY name",
+        )
+        .await?;
+    let got: Vec<(String, i64)> = rows
+        .rows()
+        .iter()
+        .map(|r| (str_col(r, "name"), r.get::<i64>("chunks").unwrap()))
+        .collect();
+    assert_eq!(got, vec![("Bob".into(), 2), ("Rome".into(), 1)]);
     Ok(())
 }
 

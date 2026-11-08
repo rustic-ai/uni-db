@@ -29,7 +29,7 @@ use uni_common::core::schema::{Schema, SchemaElementState};
 use uni_xervo::runtime::ModelRuntime;
 use uni_xervo::traits::{
     ExtractionSchema, LabelSpec, NlpCalibrationOverrides, NlpModel, NlpRequest, NlpResult,
-    NlpTasks, NlpToken, NlpWindow, Turn,
+    NlpTasks, NlpWindow, Turn,
 };
 
 /// The catalog alias used when the caller names none.
@@ -103,7 +103,8 @@ pub enum NlpInput {
 
 impl NlpInput {
     /// Parse the Cypher form: a string, a list of strings, or a list of
-    /// `{speaker, text}` maps.
+    /// `{speaker, text}` maps. `null` is no input and yields no rows, so a
+    /// per-row `CALL` over a node without the property skips that row.
     ///
     /// # Errors
     ///
@@ -112,6 +113,7 @@ impl NlpInput {
         const SHAPE: &str = "input must be a string, a list of strings, or a list of \
                              {speaker, text} maps";
         match value {
+            Value::Null => Ok(Self::Texts(Vec::new())),
             Value::String(s) => Ok(Self::Text(s.clone())),
             Value::List(items) => {
                 if items.iter().all(|v| matches!(v, Value::String(_))) {
@@ -333,6 +335,15 @@ impl ExtractOptions {
                 }
             }
             ExtractKind::Entities => {
+                if let Some(SchemaSource::Subset {
+                    edge_types: Some(_),
+                    ..
+                }) = &self.schema
+                {
+                    return Err(invalid(format!(
+                        "{proc}: option 'schema.edge_types' applies only to uni.nlp.extract"
+                    )));
+                }
                 for (set, key) in [
                     (!self.relations.is_empty(), "relations"),
                     (self.top_per_pair.is_some(), "top_per_pair"),
@@ -690,22 +701,68 @@ struct Located {
     turn: Option<usize>,
 }
 
+/// The caller's text, for locating results in it.
+enum Sources<'a> {
+    /// One text per document.
+    Texts(&'a [&'a str]),
+    /// One conversation.
+    Turns {
+        /// Index among non-blank turns → original turn index.
+        turn_of_unit: &'a [usize],
+        /// Every turn's text, by original turn index.
+        texts: &'a [&'a str],
+    },
+}
+
 /// Per-document context for locating window-local word spans.
 struct DocLocator<'a> {
     result: &'a NlpResult,
-    /// For a conversation: index among non-blank turns → original turn index.
-    turn_of_unit: Option<&'a [usize]>,
+    /// Byte range of each word, by global `word_index`. Built from the flat
+    /// tokens rather than indexing them, since the trait allows several
+    /// tokens per word.
+    words: Vec<Option<(usize, usize)>>,
+    /// The document text, for prose.
+    text: Option<&'a str>,
+    /// For a conversation: non-blank turn index → original turn index, and
+    /// the turns' texts.
+    turns: Option<(&'a [usize], &'a [&'a str])>,
 }
 
-impl DocLocator<'_> {
+impl<'a> DocLocator<'a> {
+    fn new(result: &'a NlpResult, sources: &Sources<'a>, doc: usize) -> Self {
+        let mut words: Vec<Option<(usize, usize)>> = Vec::new();
+        for tok in &result.tokens {
+            if words.len() <= tok.word_index {
+                words.resize(tok.word_index + 1, None);
+            }
+            let slot = &mut words[tok.word_index];
+            *slot = Some(match *slot {
+                Some((s, e)) => (s.min(tok.start), e.max(tok.end)),
+                None => (tok.start, tok.end),
+            });
+        }
+        let (text, turns) = match sources {
+            Sources::Texts(texts) => (texts.get(doc).copied(), None),
+            Sources::Turns {
+                turn_of_unit,
+                texts,
+            } => (None, Some((*turn_of_unit, *texts))),
+        };
+        Self {
+            result,
+            words,
+            text,
+            turns,
+        }
+    }
+
     fn locate(&self, window_idx: usize, base: usize, span: (usize, usize)) -> Located {
         let (s, e) = span;
         if e <= s {
             return Located::default();
         }
-        let first: Option<&NlpToken> = self.result.tokens.get(base + s);
-        let last: Option<&NlpToken> = self.result.tokens.get(base + e - 1);
-        let turn = self.turn_of_unit.and_then(|map| {
+        let word = |i: usize| self.words.get(i).copied().flatten();
+        let turn = self.turns.and_then(|(map, _)| {
             let window: &NlpWindow = self.result.windows.get(window_idx)?;
             let sentence = window
                 .sentences
@@ -714,10 +771,41 @@ impl DocLocator<'_> {
             map.get(sentence.unit).copied()
         });
         Located {
-            start: first.map(|t| t.start),
-            end: last.map(|t| t.end),
+            start: word(base + s).map(|w| w.0),
+            end: word(base + e - 1).map(|w| w.1),
             turn,
         }
+    }
+
+    /// The caller's text at `at`: the surface as written, where the model's
+    /// `text` joins words with spaces (`AT & T` for `AT&T`).
+    fn surface(&self, at: &Located) -> Option<&'a str> {
+        let text = match (self.turns, at.turn) {
+            (Some((_, texts)), Some(t)) => texts.get(t).copied()?,
+            (Some(_), None) => return None,
+            (None, _) => self.text?,
+        };
+        text.get(at.start?..at.end?)
+    }
+
+    /// An entity's located mentions; none for a speaker, whose `spans`
+    /// uni-xervo does not populate as mentions.
+    fn mentions(&self, w: usize, base: usize, e: &uni_xervo::traits::NlpEntity) -> Vec<Located> {
+        if e.speaker {
+            return Vec::new();
+        }
+        e.spans
+            .iter()
+            .map(|&span| self.locate(w, base, span))
+            .collect()
+    }
+
+    /// Surface text of an entity's first mention, else the model's text.
+    fn entity_text(&self, located: &[Located], e: &uni_xervo::traits::NlpEntity) -> String {
+        located
+            .first()
+            .and_then(|l| self.surface(l))
+            .map_or_else(|| e.text.clone(), str::to_owned)
     }
 }
 
@@ -745,7 +833,22 @@ pub async fn run_extract(
     let mut entity_type_names: HashMap<String, String> = HashMap::new();
     let extraction = match &opts.schema {
         Some(source) => {
-            let specs = graph_schema_specs(schema, source)?;
+            // Entities need only the labels; reading the edge types would let
+            // an edge-type name clash fail a call that never uses them.
+            let source = match (kind, source) {
+                (ExtractKind::Facts, s) => s.clone(),
+                (ExtractKind::Entities, SchemaSource::Graph) => SchemaSource::Subset {
+                    labels: None,
+                    edge_types: Some(Vec::new()),
+                },
+                (ExtractKind::Entities, SchemaSource::Subset { labels, .. }) => {
+                    SchemaSource::Subset {
+                        labels: labels.clone(),
+                        edge_types: Some(Vec::new()),
+                    }
+                }
+            };
+            let specs = graph_schema_specs(schema, &source)?;
             if kind == ExtractKind::Facts && specs.relations.is_empty() {
                 return Err(invalid(format!(
                     "{}: the selected schema has no active edge types to extract",
@@ -879,18 +982,20 @@ pub async fn run_extract(
         alias: &opts.alias,
         model_id: model.model_id(),
     };
-    let conversation = !turns.is_empty();
+    let turn_texts: Vec<&str> = turns.iter().map(|t| t.text).collect();
+    let sources = if turns.is_empty() {
+        Sources::Texts(&texts)
+    } else {
+        Sources::Turns {
+            turn_of_unit: &turn_of_unit,
+            texts: &turn_texts,
+        }
+    };
     Ok(match kind {
-        ExtractKind::Facts => ExtractRows::Facts(flatten_facts(
-            &results,
-            conversation.then_some(turn_of_unit.as_slice()),
-            &names,
-        )),
-        ExtractKind::Entities => ExtractRows::Entities(flatten_entities(
-            &results,
-            conversation.then_some(turn_of_unit.as_slice()),
-            &names,
-        )),
+        ExtractKind::Facts => ExtractRows::Facts(flatten_facts(&results, &sources, &names)),
+        ExtractKind::Entities => {
+            ExtractRows::Entities(flatten_entities(&results, &sources, &names))
+        }
     })
 }
 
@@ -910,7 +1015,13 @@ impl ResultNames<'_> {
             .unwrap_or_else(|| name.to_owned())
     }
 
-    fn entity_type(&self, name: &str) -> String {
+    fn entity_type(&self, e: &uni_xervo::traits::NlpEntity) -> String {
+        let name = e.ty.as_str();
+        // A participant's type is uni-xervo's fixed "speaker", never a label,
+        // even when a label happens to read as "speaker".
+        if e.speaker {
+            return name.to_owned();
+        }
         self.entity_types
             .get(name)
             .cloned()
@@ -938,16 +1049,13 @@ fn sigmoid(x: f64) -> f64 {
 
 fn flatten_facts(
     results: &[NlpResult],
-    turn_of_unit: Option<&[usize]>,
+    sources: &Sources<'_>,
     names: &ResultNames<'_>,
 ) -> Vec<ExtractedFact> {
     warn_truncated(results);
     let mut rows = Vec::new();
     for (doc, result) in results.iter().enumerate() {
-        let locator = DocLocator {
-            result,
-            turn_of_unit,
-        };
+        let locator = DocLocator::new(result, sources, doc);
         let mut base = 0usize;
         for (w, window) in result.windows.iter().enumerate() {
             for fact in &window.facts {
@@ -957,28 +1065,29 @@ fn flatten_facts(
                 ) else {
                     continue;
                 };
-                let at = |e: &uni_xervo::traits::NlpEntity| {
-                    e.spans
-                        .first()
-                        .map(|&span| locator.locate(w, base, span))
-                        .unwrap_or_default()
-                };
-                let (h, t) = (at(head), at(tail));
+                let (hm, tm) = (
+                    locator.mentions(w, base, head),
+                    locator.mentions(w, base, tail),
+                );
+                let (h, t) = (
+                    hm.first().copied().unwrap_or_default(),
+                    tm.first().copied().unwrap_or_default(),
+                );
                 let margin = f64::from(fact.margin);
                 rows.push(ExtractedFact {
                     doc,
                     window: w,
                     head: fact.head,
-                    head_text: head.text.clone(),
-                    head_type: names.entity_type(&head.ty),
+                    head_text: locator.entity_text(&hm, head),
+                    head_type: names.entity_type(head),
                     head_speaker: head.speaker,
                     head_start: h.start,
                     head_end: h.end,
                     head_turn: h.turn,
                     relation: names.relation(&fact.relation),
                     tail: fact.tail,
-                    tail_text: tail.text.clone(),
-                    tail_type: names.entity_type(&tail.ty),
+                    tail_text: locator.entity_text(&tm, tail),
+                    tail_type: names.entity_type(tail),
                     tail_speaker: tail.speaker,
                     tail_start: t.start,
                     tail_end: t.end,
@@ -1001,32 +1110,37 @@ fn flatten_facts(
 
 fn flatten_entities(
     results: &[NlpResult],
-    turn_of_unit: Option<&[usize]>,
+    sources: &Sources<'_>,
     names: &ResultNames<'_>,
 ) -> Vec<ExtractedEntity> {
     warn_truncated(results);
     let mut rows = Vec::new();
     for (doc, result) in results.iter().enumerate() {
-        let locator = DocLocator {
-            result,
-            turn_of_unit,
-        };
+        let locator = DocLocator::new(result, sources, doc);
         let mut base = 0usize;
         for (w, window) in result.windows.iter().enumerate() {
             for (i, entity) in window.entities.iter().enumerate() {
-                let located: Vec<Located> = entity
-                    .spans
+                let located = locator.mentions(w, base, entity);
+                // Each mention as written, falling back to the model's text
+                // where a span cannot be located.
+                let mentions: Vec<String> = located
                     .iter()
-                    .map(|&span| locator.locate(w, base, span))
+                    .enumerate()
+                    .map(|(m, l)| {
+                        locator.surface(l).map_or_else(
+                            || entity.mentions.get(m).unwrap_or(&entity.text).clone(),
+                            str::to_owned,
+                        )
+                    })
                     .collect();
                 rows.push(ExtractedEntity {
                     doc,
                     window: w,
                     entity: i,
-                    text: entity.text.clone(),
-                    entity_type: names.entity_type(&entity.ty),
+                    text: locator.entity_text(&located, entity),
+                    entity_type: names.entity_type(entity),
                     speaker: entity.speaker,
-                    mentions: entity.mentions.clone(),
+                    mentions,
                     mention_starts: located.iter().map(|l| l.start).collect(),
                     mention_ends: located.iter().map(|l| l.end).collect(),
                     mention_turns: located.iter().map(|l| l.turn).collect(),
@@ -1085,6 +1199,11 @@ mod tests {
             NlpInput::Turns(vec![("user".into(), "hello".into())])
         );
         assert!(NlpInput::from_value(&Value::Int(3)).is_err());
+        // A missing property is no input, not an error.
+        assert_eq!(
+            NlpInput::from_value(&Value::Null).unwrap(),
+            NlpInput::Texts(Vec::new())
+        );
         let bad = Value::List(vec![map(&[("who", s("user")), ("text", s("x"))])]);
         assert!(
             NlpInput::from_value(&bad)
@@ -1161,6 +1280,12 @@ mod tests {
             "schema",
             map(&[("edge_types", Value::List(vec![s("LIVES_IN")]))]),
         )]);
+        assert!(
+            ExtractOptions::from_value(&subset, ExtractKind::Entities)
+                .unwrap_err()
+                .to_string()
+                .contains("'schema.edge_types' applies only")
+        );
         let o = ExtractOptions::from_value(&subset, ExtractKind::Facts).unwrap();
         assert_eq!(
             o.schema,
@@ -1202,8 +1327,10 @@ mod tests {
         let words1 = [("Ada", 0), ("lives", 4), ("in", 10), ("London", 13)];
         let words2 = [("She", 21), ("joined", 25), ("IBM", 32)];
         let mut r = NlpResult::default();
-        for (w, o) in words1.iter().chain(words2.iter()) {
-            r.tokens.push(token(w, *o));
+        for (i, (w, o)) in words1.iter().chain(words2.iter()).enumerate() {
+            let mut t = token(w, *o);
+            t.word_index = i;
+            r.tokens.push(t);
         }
         let mut w1 = NlpWindow::default();
         w1.tokens = words1.iter().map(|(w, _)| (*w).to_owned()).collect();
@@ -1240,6 +1367,13 @@ mod tests {
         r
     }
 
+    const PROSE: &str = "Ada lives in London. She joined IBM";
+
+    fn prose() -> Sources<'static> {
+        static TEXTS: [&str; 1] = [PROSE];
+        Sources::Texts(&TEXTS)
+    }
+
     fn names<'a>(
         rel: &'a HashMap<String, String>,
         ty: &'a HashMap<String, String>,
@@ -1255,7 +1389,7 @@ mod tests {
     #[test]
     fn facts_carry_byte_spans_across_windows() {
         let empty = HashMap::new();
-        let rows = flatten_facts(&[two_window_prose()], None, &names(&empty, &empty));
+        let rows = flatten_facts(&[two_window_prose()], &prose(), &names(&empty, &empty));
         assert_eq!(rows.len(), 2);
         let a = &rows[0];
         assert_eq!(
@@ -1291,7 +1425,7 @@ mod tests {
     fn graph_names_map_back_to_schema_names() {
         let rel = HashMap::from([("lives in".to_owned(), "LIVES_IN".to_owned())]);
         let ty = HashMap::from([("person".to_owned(), "Person".to_owned())]);
-        let rows = flatten_facts(&[two_window_prose()], None, &names(&rel, &ty));
+        let rows = flatten_facts(&[two_window_prose()], &prose(), &names(&rel, &ty));
         assert_eq!(rows[0].relation, "LIVES_IN");
         assert_eq!(rows[0].head_type, "Person");
         // Names outside the maps pass through.
@@ -1304,8 +1438,13 @@ mod tests {
         // Turns: 0 "user: I live in Lisbon", 1 blank (dropped by the model),
         // 2 "bob: ok". Word offsets are turn-relative.
         let mut r = NlpResult::default();
-        for (w, o) in [("I", 0), ("live", 2), ("in", 7), ("Lisbon", 10), ("ok", 0)] {
-            r.tokens.push(token(w, o));
+        for (i, (w, o)) in [("I", 0), ("live", 2), ("in", 7), ("Lisbon", 10), ("ok", 0)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut t = token(w, o);
+            t.word_index = i;
+            r.tokens.push(t);
         }
         let mut w = NlpWindow::default();
         w.tokens = ["I", "live", "in", "Lisbon", "ok"]
@@ -1330,7 +1469,12 @@ mod tests {
 
         let empty = HashMap::new();
         let map = [0usize, 2];
-        let facts = flatten_facts(std::slice::from_ref(&r), Some(&map), &names(&empty, &empty));
+        let turn_texts = ["I live in Lisbon", "  ", "ok"];
+        let sources = Sources::Turns {
+            turn_of_unit: &map,
+            texts: &turn_texts,
+        };
+        let facts = flatten_facts(std::slice::from_ref(&r), &sources, &names(&empty, &empty));
         let fact = &facts[0];
         assert!(fact.head_speaker);
         assert_eq!(
@@ -1342,13 +1486,71 @@ mod tests {
             (Some(10), Some(16), Some(0))
         );
 
-        let ents = flatten_entities(&[r], Some(&map), &names(&empty, &empty));
+        assert_eq!(fact.tail_text, "Lisbon");
+
+        // A label that reads as "speaker" does not retype participants.
+        let ty = HashMap::from([("speaker".to_owned(), "Speaker".to_owned())]);
+        let ents = flatten_entities(&[r], &sources, &names(&empty, &ty));
         assert_eq!(ents.len(), 3);
         assert!(ents[0].speaker && ents[0].mention_starts.is_empty());
+        assert!(ents[0].mentions.is_empty());
+        assert_eq!(
+            (ents[0].text.as_str(), ents[0].entity_type.as_str()),
+            ("user", "speaker")
+        );
+        assert_eq!(ents[2].mentions, vec!["ok".to_owned()]);
         assert_eq!(ents[2].mention_turns, vec![Some(2)]);
         assert_eq!(
             (ents[2].mention_starts.clone(), ents[2].mention_ends.clone()),
             (vec![Some(0)], vec![Some(2)])
+        );
+    }
+
+    /// The model's `text` joins words with spaces and its flat tokens may be
+    /// subwords; rows take the surface from the input and the span from the
+    /// word's whole token range.
+    #[test]
+    fn surfaces_come_from_the_input_and_subword_tokens_group_by_word() {
+        let text = "joined AT&T today";
+        let mut r = NlpResult::default();
+        // "AT&T" is three words (AT, &, T); "today" is two subword tokens.
+        for (t, start, end, word) in [
+            ("joined", 0, 6, 0),
+            ("AT", 7, 9, 1),
+            ("&", 9, 10, 2),
+            ("T", 10, 11, 3),
+            ("to", 12, 14, 4),
+            ("day", 14, 17, 4),
+        ] {
+            let mut tok = token(t, start);
+            tok.end = end;
+            tok.word_index = word;
+            r.tokens.push(tok);
+        }
+        let mut w = NlpWindow::default();
+        w.tokens = ["joined", "AT", "&", "T", "today"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        w.analysed_words = 5;
+        w.sentences = vec![sentence(0, 5, 0)];
+        let mut org = entity("organization", "AT & T", vec![(1, 4)], false);
+        org.mentions = vec!["AT & T".into()];
+        w.entities = vec![org, entity("date", "today", vec![(4, 5)], false)];
+        r.windows = vec![w];
+
+        let texts = [text];
+        let empty = HashMap::new();
+        let ents = flatten_entities(&[r], &Sources::Texts(&texts), &names(&empty, &empty));
+        assert_eq!(ents[0].text, "AT&T");
+        assert_eq!(ents[0].mentions, vec!["AT&T".to_owned()]);
+        assert_eq!(
+            (ents[0].mention_starts.clone(), ents[0].mention_ends.clone()),
+            (vec![Some(7)], vec![Some(11)])
+        );
+        assert_eq!(
+            (ents[1].text.as_str(), ents[1].mention_ends.clone()),
+            ("today", vec![Some(17)])
         );
     }
 
