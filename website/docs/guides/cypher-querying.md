@@ -1096,6 +1096,26 @@ WHERE distance < 0.2
 RETURN node.title, distance
 ```
 
+### NLP Extraction
+
+With a kniv v7 model in the Xervo catalog, extract facts and entities from
+text. See [NLP Extraction](../features/nlp-extraction.md).
+
+<!-- doctest: skip -->
+```cypher
+// Facts, with relations taken from the declared edge types
+MATCH (d:Document)
+CALL uni.nlp.extract(d.text, {schema: 'graph'})
+YIELD head_text, relation, tail_text, polarity, modality
+WHERE modality IN ['asserted', 'reported']
+RETURN d.id, head_text, relation, tail_text, polarity
+
+// Entities, grouped across their mentions
+CALL uni.nlp.entities('Ada Lovelace met Charles Babbage.', {entity_types: ['person']})
+YIELD text, entity_type, mentions
+RETURN text, entity_type, mentions
+```
+
 ### Schema Introspection
 
 ```cypher

@@ -118,7 +118,7 @@ with uni_db.Uni.open("./my_graph") as db:
 | `db.session_template()` | `SessionTemplateBuilder` | Create a reusable session factory |
 | `db.schema()` | `SchemaBuilder` | Start a fluent schema definition |
 | `db.rules()` | `RuleRegistry` | Access the database-level Locy rule registry |
-| `db.xervo()` | `Xervo` | Access embedding and generation operations |
+| `db.xervo()` | `Xervo` | Access embedding, generation and NLP extraction operations |
 | `db.indexes()` | `Indexes` | Access index management |
 | `db.compaction()` | `Compaction` | Access compaction operations |
 | `db.metrics()` | `DatabaseMetrics` | Database-wide metrics snapshot |
@@ -1123,6 +1123,41 @@ if xervo.is_available():
     xervo.prefetch(["embed/default", "llm/default"])   # specific aliases
     xervo.prefetch_all()                                # everything in catalog
 ```
+
+### NLP Extraction
+
+With a kniv v7 model under an `nlp` alias, `extract_facts()` and
+`extract_entities()` return the same rows as the `uni.nlp.extract` and
+`uni.nlp.entities` procedures, as `ExtractedFact` / `ExtractedEntity` objects.
+See [NLP Extraction](../features/nlp-extraction.md) for the attributes and
+their meaning.
+
+```python
+xervo = db.xervo()
+
+facts = xervo.extract_facts(
+    "Ada Lovelace lived in London.",           # str, list[str], or [{"speaker", "text"}]
+    relations=[{"name": "lives in", "description": "the place where the head resides"}],
+    entity_types=["person", "location"],
+    # alias="nlp/default", schema="graph", top_per_pair=None, rel_offsets={"lives in": -0.5}
+)
+for f in facts:
+    print(f.head_text, f.relation, f.tail_text, f.polarity, f.modality, f.margin,
+          f.tail_start, f.tail_end)
+
+entities = xervo.extract_entities("Ada Lovelace met Charles Babbage.")
+for e in entities:
+    print(e.text, e.entity_type, e.mentions, e.mention_starts, e.mention_ends)
+```
+
+| Method | Returns | Notes |
+|---|---|---|
+| `extract_facts(input, *, alias, relations, entity_types, schema, top_per_pair, rel_offsets)` | `list[ExtractedFact]` | Needs `relations` or `schema` |
+| `extract_entities(input, *, alias, entity_types, schema)` | `list[ExtractedEntity]` | Skips the relation pass |
+
+Malformed arguments raise `UniInvalidArgumentError` before any model call; a
+database without a Xervo runtime raises `UniInternalError`. `AsyncXervo` has
+the same methods as coroutines.
 
 ### Prefetch (Best Practice)
 

@@ -27,6 +27,7 @@ nav:
       - Schema & Indexing: features/schema-indexing.md
       - Graph Algorithms: features/graph-algorithms.md
       - Neural Predicates: features/neural-predicates.md
+      - NLP Extraction: features/nlp-extraction.md
       - Transactions & Consistency: features/transactions-consistency.md
       - Triggers & CDC: features/triggers-cdc.md
       - Snapshots & Time Travel: features/snapshots-time-travel.md

@@ -335,6 +335,53 @@ pub async fn xervo_generate_core(
     xervo.generate(alias, &rust_messages, opts).await
 }
 
+/// Parse NLP extraction arguments with the same rules as `uni.nlp.*`.
+fn nlp_extract_args(
+    input: &Value,
+    options: &Value,
+    kind: ::uni_db::api::xervo::ExtractKind,
+) -> Result<
+    (
+        ::uni_db::api::xervo::NlpInput,
+        ::uni_db::api::xervo::ExtractOptions,
+    ),
+    UniError,
+> {
+    use ::uni_db::api::xervo::{ExtractOptions, NlpInput};
+    let invalid = |arg: &str, err: &dyn std::fmt::Display| UniError::InvalidArgument {
+        arg: arg.to_string(),
+        message: err.to_string(),
+    };
+    let input = NlpInput::from_value(input).map_err(|e| invalid("input", &e))?;
+    let options = ExtractOptions::from_value(options, kind).map_err(|e| invalid("options", &e))?;
+    Ok((input, options))
+}
+
+/// Extract facts from text with a kniv v7 model (`uni.nlp.extract` rows).
+pub async fn xervo_extract_facts_core(
+    db: &Uni,
+    input: Value,
+    options: Value,
+) -> Result<Vec<::uni_db::api::xervo::ExtractedFact>, UniError> {
+    let (input, options) =
+        nlp_extract_args(&input, &options, ::uni_db::api::xervo::ExtractKind::Facts)?;
+    db.xervo().extract_facts(&input, &options).await
+}
+
+/// Extract entities from text with a kniv v7 model (`uni.nlp.entities` rows).
+pub async fn xervo_extract_entities_core(
+    db: &Uni,
+    input: Value,
+    options: Value,
+) -> Result<Vec<::uni_db::api::xervo::ExtractedEntity>, UniError> {
+    let (input, options) = nlp_extract_args(
+        &input,
+        &options,
+        ::uni_db::api::xervo::ExtractKind::Entities,
+    )?;
+    db.xervo().extract_entities(&input, &options).await
+}
+
 /// Pre-load and cache specific Xervo model aliases.
 pub async fn xervo_prefetch_core(db: &Uni, aliases: Vec<String>) -> Result<(), UniError> {
     let xervo = db.xervo();

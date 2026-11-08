@@ -1232,6 +1232,60 @@ class GenerationResult:
     text: str
     usage: TokenUsage | None
 
+class ExtractedFact:
+    """One fact from ``Xervo.extract_facts``: the rows of ``uni.nlp.extract``.
+
+    Byte offsets index the input text, or for a conversation the turn named
+    by ``head_turn`` / ``tail_turn``; speaker entities have no offsets.
+    ``confidence`` is ``1 / (1 + e^-margin)``, not a calibrated probability.
+    """
+
+    doc: int
+    window: int
+    head: int
+    head_text: str
+    head_type: str
+    head_speaker: bool
+    head_start: int | None
+    head_end: int | None
+    head_turn: int | None
+    relation: str
+    tail: int
+    tail_text: str
+    tail_type: str
+    tail_speaker: bool
+    tail_start: int | None
+    tail_end: int | None
+    tail_turn: int | None
+    polarity: str
+    modality: str
+    holder: int | None
+    time: int | None
+    margin: float
+    confidence: float
+    model_alias: str
+    model_id: str
+
+class ExtractedEntity:
+    """One entity from ``Xervo.extract_entities``: the rows of ``uni.nlp.entities``.
+
+    ``mention_starts``, ``mention_ends`` and ``mention_turns`` are parallel to
+    ``mentions``.
+    """
+
+    doc: int
+    window: int
+    entity: int
+    text: str
+    entity_type: str
+    speaker: bool
+    mentions: list[str]
+    mention_starts: list[int | None]
+    mention_ends: list[int | None]
+    mention_turns: list[int | None]
+    model_alias: str
+    model_id: str
+
 # =============================================================================
 # Data Classes — Notifications & Coordination
 # =============================================================================
@@ -1681,6 +1735,36 @@ class Xervo:
         temperature: float | None = None,
         top_p: float | None = None,
     ) -> GenerationResult: ...
+    def extract_facts(
+        self,
+        input: str | list[str] | list[dict[str, str]],
+        *,
+        alias: str = "nlp/default",
+        relations: list[str | dict[str, str]] | None = None,
+        entity_types: list[str | dict[str, str]] | None = None,
+        schema: str | dict[str, list[str]] | None = None,
+        top_per_pair: int | None = None,
+        rel_offsets: dict[str, float] | None = None,
+    ) -> list[ExtractedFact]:
+        """Extract facts with a kniv v7 model (the rows of ``uni.nlp.extract``).
+
+        ``input`` is a string, a list of strings (one document each), or a
+        list of ``{"speaker", "text"}`` dicts (one conversation).
+        ``schema="graph"`` derives relations and entity types from the
+        declared schema. Raises ``UniInvalidArgumentError`` for malformed
+        arguments before any model call.
+        """
+        ...
+    def extract_entities(
+        self,
+        input: str | list[str] | list[dict[str, str]],
+        *,
+        alias: str = "nlp/default",
+        entity_types: list[str | dict[str, str]] | None = None,
+        schema: str | dict[str, list[str]] | None = None,
+    ) -> list[ExtractedEntity]:
+        """Extract typed entities with a kniv v7 model (the rows of ``uni.nlp.entities``)."""
+        ...
 
 # =============================================================================
 # Session (Sync)
@@ -2882,6 +2966,36 @@ class AsyncXervo:
         temperature: float | None = None,
         top_p: float | None = None,
     ) -> GenerationResult: ...
+    async def extract_facts(
+        self,
+        input: str | list[str] | list[dict[str, str]],
+        *,
+        alias: str = "nlp/default",
+        relations: list[str | dict[str, str]] | None = None,
+        entity_types: list[str | dict[str, str]] | None = None,
+        schema: str | dict[str, list[str]] | None = None,
+        top_per_pair: int | None = None,
+        rel_offsets: dict[str, float] | None = None,
+    ) -> list[ExtractedFact]:
+        """Extract facts with a kniv v7 model (the rows of ``uni.nlp.extract``).
+
+        ``input`` is a string, a list of strings (one document each), or a
+        list of ``{"speaker", "text"}`` dicts (one conversation).
+        ``schema="graph"`` derives relations and entity types from the
+        declared schema. Raises ``UniInvalidArgumentError`` for malformed
+        arguments before any model call.
+        """
+        ...
+    async def extract_entities(
+        self,
+        input: str | list[str] | list[dict[str, str]],
+        *,
+        alias: str = "nlp/default",
+        entity_types: list[str | dict[str, str]] | None = None,
+        schema: str | dict[str, list[str]] | None = None,
+    ) -> list[ExtractedEntity]:
+        """Extract typed entities with a kniv v7 model (the rows of ``uni.nlp.entities``)."""
+        ...
 
 # =============================================================================
 # Forks (Phase 4b)

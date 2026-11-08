@@ -937,6 +937,87 @@ impl AsyncXervo {
         })
     }
 
+    /// Extract facts from text with a kniv v7 model (async): the rows of
+    /// ``uni.nlp.extract``.
+    ///
+    /// ``input`` is a string, a list of strings (one document each), or a list
+    /// of ``{"speaker", "text"}`` dicts (one conversation). ``relations`` and
+    /// ``entity_types`` are lists of names or ``{"name", "description"}``
+    /// dicts; ``schema="graph"`` (or ``{"labels": [...], "edge_types": [...]}``)
+    /// derives them from the declared schema instead.
+    #[pyo3(signature = (input, *, alias="nlp/default", relations=None, entity_types=None, schema=None, top_per_pair=None, rel_offsets=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn extract_facts<'py>(
+        &self,
+        py: Python<'py>,
+        input: Py<PyAny>,
+        alias: &str,
+        relations: Option<Py<PyAny>>,
+        entity_types: Option<Py<PyAny>>,
+        schema: Option<Py<PyAny>>,
+        top_per_pair: Option<usize>,
+        rel_offsets: Option<Py<PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        let (input, options) = crate::convert::nlp_call_args(
+            py,
+            &input,
+            alias,
+            relations,
+            entity_types,
+            schema,
+            top_per_pair,
+            rel_offsets,
+        )?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let rows = core::xervo_extract_facts_core(&db, input, options)
+                .await
+                .map_err(crate::exceptions::uni_error_to_pyerr)?;
+            Ok(rows
+                .into_iter()
+                .map(crate::convert::extracted_fact_to_py)
+                .collect::<Vec<_>>())
+        })
+    }
+
+    /// Extract typed entities from text with a kniv v7 model (async): the rows of
+    /// ``uni.nlp.entities``. Arguments as for ``extract_facts``, without
+    /// ``relations``, ``top_per_pair`` and ``rel_offsets``.
+    #[pyo3(signature = (input, *, alias="nlp/default", relations=None, entity_types=None, schema=None, top_per_pair=None, rel_offsets=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn extract_entities<'py>(
+        &self,
+        py: Python<'py>,
+        input: Py<PyAny>,
+        alias: &str,
+        relations: Option<Py<PyAny>>,
+        entity_types: Option<Py<PyAny>>,
+        schema: Option<Py<PyAny>>,
+        top_per_pair: Option<usize>,
+        rel_offsets: Option<Py<PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        let (input, options) = crate::convert::nlp_call_args(
+            py,
+            &input,
+            alias,
+            relations,
+            entity_types,
+            schema,
+            top_per_pair,
+            rel_offsets,
+        )?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let rows = core::xervo_extract_entities_core(&db, input, options)
+                .await
+                .map_err(crate::exceptions::uni_error_to_pyerr)?;
+            Ok(rows
+                .into_iter()
+                .map(crate::convert::extracted_entity_to_py)
+                .collect::<Vec<_>>())
+        })
+    }
+
     /// Pre-load and cache specific model aliases so first inference is instant.
     fn prefetch<'py>(&self, py: Python<'py>, aliases: Vec<String>) -> PyResult<Bound<'py, PyAny>> {
         let db = self.inner.clone();

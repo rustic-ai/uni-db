@@ -190,6 +190,8 @@ mod multivector_maxsim;
 mod multivector_muvera;
 #[path = "common/multivector_snapshot.rs"]
 mod multivector_snapshot;
+#[path = "common/nlp_extract.rs"]
+mod nlp_extract;
 #[path = "common/recovery_index_no_rebuild.rs"]
 mod recovery_index_no_rebuild;
 #[path = "common/schemaless_multihop_intermediate_props.rs"]

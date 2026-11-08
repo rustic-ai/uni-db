@@ -27,6 +27,7 @@ pub mod create;
 pub mod fts;
 pub mod graph;
 mod host_args;
+pub mod nlp;
 pub mod schema;
 pub mod search;
 pub mod sparse;
@@ -80,6 +81,7 @@ pub fn register_into(
     search::register_into(r)?;
     graph::register_into(r)?;
     create::register_into(r)?;
+    nlp::register_into(r)?;
     if let Some(algo) = algo_registry {
         algo::register_into(r, algo)?;
     }

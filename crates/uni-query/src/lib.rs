@@ -22,6 +22,7 @@
 
 #![recursion_limit = "256"]
 
+pub mod nlp;
 pub mod procedures_plugin;
 pub mod projection_store;
 pub mod query;

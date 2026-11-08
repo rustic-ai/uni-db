@@ -73,9 +73,11 @@ pub use api::template::{SessionTemplate, SessionTemplateBuilder};
 pub use api::transaction::{
     ApplyBuilder, ApplyResult, CommitResult, ExecuteBuilder, IsolationLevel, Transaction,
 };
+pub use api::xervo::{
+    ExtractOptions, ExtractedEntity, ExtractedFact, NlpInput, RerankerModel, ScoredDoc, UniXervo,
+};
 #[cfg(feature = "provider-onnx")]
 pub use api::xervo::{RawTensorModel, TensorBatch, TensorSpec, TensorValue};
-pub use api::xervo::{RerankerModel, ScoredDoc, UniXervo};
 pub use uni_bulk::{AppenderBuilder, StreamingAppender};
 pub use uni_bulk::{
     BulkPhase, BulkProgress, BulkStats, BulkWriter, BulkWriterBuilder, EdgeData, IntoArrow,
