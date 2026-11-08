@@ -157,6 +157,10 @@ fn extract_detail_code(message: &str) -> Option<String> {
         text = rest.trim();
     } else if let Some(rest) = text.strip_prefix("Type error: expected ") {
         text = rest.trim();
+    } else if let Some(rest) = text.strip_prefix("Type error: ") {
+        // `UniError::Type` carrying a whole engine message (empty `actual`)
+        // displays as `Type error: <message>`.
+        text = rest.trim();
     }
 
     for prefix in [
@@ -358,6 +362,27 @@ mod tests {
         assert_eq!(
             extract_detail_code(msg).as_deref(),
             Some("UndefinedVariable")
+        );
+    }
+
+    /// Both `UniError::Type` display shapes yield the detail code.
+    #[test]
+    fn test_extract_detail_code_from_type_error_display() {
+        let message = UniError::Type {
+            expected: "TypeError: InvalidArgumentValue - size() is not supported".to_string(),
+            actual: String::new(),
+        };
+        assert_eq!(
+            extract_detail_code(&message.to_string()).as_deref(),
+            Some("InvalidArgumentValue")
+        );
+        let pair = UniError::Type {
+            expected: "TypeError: InvalidArgumentType - wanted a list".to_string(),
+            actual: "String".to_string(),
+        };
+        assert_eq!(
+            extract_detail_code(&pair.to_string()).as_deref(),
+            Some("InvalidArgumentType")
         );
     }
 

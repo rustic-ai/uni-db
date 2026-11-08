@@ -4948,6 +4948,18 @@ cypher_scalar_udf! {
             let result = cypher_size_scalar(scalar)?;
             Ok(ColumnarValue::Scalar(result))
         }
+        // A VECTOR(n) column is a FixedSizeList: every non-null row measures n,
+        // so answer the whole batch from the width, without a per-row scalar.
+        ColumnarValue::Array(arr) if matches!(arr.data_type(), DataType::FixedSizeList(..)) => {
+            let width = match arr.data_type() {
+                DataType::FixedSizeList(_, n) => i64::from(*n),
+                _ => unreachable!("guarded by the match arm"),
+            };
+            let sizes: arrow_array::Int64Array = (0..arr.len())
+                .map(|i| (!arr.is_null(i)).then_some(width))
+                .collect();
+            Ok(ColumnarValue::Array(Arc::new(sizes)))
+        }
         ColumnarValue::Array(arr) => {
             let mut results: Vec<Option<i64>> = Vec::with_capacity(arr.len());
             for i in 0..arr.len() {
@@ -4988,6 +5000,14 @@ fn cypher_size_scalar(scalar: &ScalarValue) -> DFResult<ScalarValue> {
                 Ok(ScalarValue::Int64(None))
             } else {
                 Ok(ScalarValue::Int64(Some(arr.value(0).len() as i64)))
+            }
+        }
+        // FixedSizeList — a VECTOR(n) value; its size is the dimension count.
+        ScalarValue::FixedSizeList(arr) => {
+            if arr.is_empty() || arr.is_null(0) {
+                Ok(ScalarValue::Int64(None))
+            } else {
+                Ok(ScalarValue::Int64(Some(i64::from(arr.value_length()))))
             }
         }
         // LargeBinary (CypherValue) — decode and check type
@@ -5105,8 +5125,11 @@ fn cypher_size_scalar(scalar: &ScalarValue) -> DFResult<ScalarValue> {
         | ScalarValue::Utf8(None)
         | ScalarValue::LargeUtf8(None)
         | ScalarValue::LargeBinary(None) => Ok(ScalarValue::Int64(None)),
+        // Name the type, never the value: `{other:?}` printed the whole value,
+        // which for a 1024-dim vector buried the message under 1024 floats.
         other => Err(datafusion::error::DataFusionError::Execution(format!(
-            "_cypher_size(): unsupported type {other:?}"
+            "TypeError: InvalidArgumentValue - size() is not supported for values of type {}",
+            other.data_type()
         ))),
     }
 }
@@ -8852,5 +8875,80 @@ mod tests {
             }
             other => panic!("expected TemporalValue::Date, got {other:?}"),
         }
+    }
+
+    /// `[[0.5, -1.0, 2.0], NULL, [0.0, 0.0, 0.0]]`, the Arrow shape of a
+    /// `VECTOR(3)` column.
+    fn vector_column() -> ArrayRef {
+        use arrow::datatypes::Float32Type;
+        Arc::new(arrow_array::FixedSizeListArray::from_iter_primitive::<
+            Float32Type,
+            _,
+            _,
+        >(
+            vec![
+                Some(vec![Some(0.5), Some(-1.0), Some(2.0)]),
+                None,
+                Some(vec![Some(0.0), Some(0.0), Some(0.0)]),
+            ],
+            3,
+        ))
+    }
+
+    fn invoke_size(arg: ColumnarValue, field_type: DataType) -> DFResult<ColumnarValue> {
+        use arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+        let number_rows = match &arg {
+            ColumnarValue::Array(a) => a.len(),
+            ColumnarValue::Scalar(_) => 1,
+        };
+        create_cypher_size_udf().invoke_with_args(ScalarFunctionArgs {
+            args: vec![arg],
+            arg_fields: vec![Arc::new(Field::new("v", field_type, true))],
+            number_rows,
+            return_field: Arc::new(Field::new("size", DataType::Int64, true)),
+            config_options: Arc::new(ConfigOptions::default()),
+        })
+    }
+
+    /// `size()` of a VECTOR column is its dimension count, null for a null
+    /// row. It used to fall to the catch-all and error.
+    #[test]
+    fn size_of_a_vector_column_is_its_dimension() {
+        let col = vector_column();
+        let ColumnarValue::Array(out) =
+            invoke_size(ColumnarValue::Array(col.clone()), col.data_type().clone()).unwrap()
+        else {
+            panic!("an array argument must give an array result");
+        };
+        let out = out.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(out.iter().collect::<Vec<_>>(), vec![Some(3), None, Some(3)]);
+    }
+
+    #[test]
+    fn size_of_a_vector_scalar_is_its_dimension() {
+        let col = vector_column();
+        for (row, expected) in [(0, Some(3)), (1, None)] {
+            let scalar = ScalarValue::try_from_array(&col, row).unwrap();
+            assert_eq!(
+                cypher_size_scalar(&scalar).unwrap(),
+                ScalarValue::Int64(expected),
+                "row {row}"
+            );
+        }
+    }
+
+    /// The unsupported-type error names the type and never prints the value:
+    /// `{other:?}` used to dump every element into the message.
+    #[test]
+    fn size_error_names_the_type_not_the_value() {
+        let err = cypher_size_scalar(&ScalarValue::Float64(Some(123_456.789))).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("size() is not supported"), "{msg}");
+        assert!(msg.contains("Float64"), "{msg}");
+        assert!(
+            !msg.contains("123456"),
+            "value leaked into the message: {msg}"
+        );
     }
 }

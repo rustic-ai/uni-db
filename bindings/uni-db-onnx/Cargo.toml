@@ -1,6 +1,6 @@
 [package]
 name = "uni-python-onnx"
-description = "Python bindings for Uni graph database (ONNX + remote-API variant; no candle/mistralrs)"
+description = "Python bindings for Uni graph database (ONNX + remote-API variant; no candle)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -17,8 +17,8 @@ path = "../uni-db/src/lib.rs"
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 # Slim variant: ONNX local provider (raw, rerank, embed tasks via the
-# unified xervo 0.9.0 local/onnx) plus all 8 remote API providers. Opts
-# out of uni-db's default-everything to exclude candle and mistralrs;
+# unified xervo 0.9.0 local/onnx) plus the 8 hosted APIs and llama.cpp. Opts
+# out of uni-db's default-everything to exclude candle;
 # keeps wheel size down for users who only need embeddings/reranking +
 # remote LLMs.
 uni-db = { workspace = true, default-features = false, features = [

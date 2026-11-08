@@ -94,16 +94,6 @@ ON_DEMAND: dict[str, str] = {
         "asserts behaviour that is unsupported by design (decided 2026-09-15; "
         "see Uni::list_forks), so it fails today; kept as the specification"
     ),
-    "uni-db::integration storage::embedding_stack_overflow_test::mistralrs_tests::"
-    "test_mistralrs_embeddinggemma_auto_embed": (
-        "google/embeddinggemma-300m is a gated model: downloading it needs an "
-        "HF_TOKEN whose account accepted the Gemma license (HTTP 401 without)"
-    ),
-    "uni-db::integration storage::embedding_stack_overflow_test::mistralrs_tests::"
-    "test_mistralrs_embeddinggemma_vector_search": (
-        "google/embeddinggemma-300m is a gated model: downloading it needs an "
-        "HF_TOKEN whose account accepted the Gemma license (HTTP 401 without)"
-    ),
     "uni-db::reranker_integration test_real_onnx_cross_encoder_reranks_by_relevance": (
         "its model is served only through a xet-bridge redirect that hf-hub 0.5 "
         "refuses; ci.yml's reranker lane filters it out for the same reason"

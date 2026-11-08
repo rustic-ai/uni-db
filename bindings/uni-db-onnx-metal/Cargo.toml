@@ -1,6 +1,6 @@
 [package]
 name = "uni-python-onnx-metal"
-description = "Python bindings for Uni graph database (ONNX + remote-API + Apple GPU/ANE variant; no candle/mistralrs)"
+description = "Python bindings for Uni graph database (ONNX + remote-API + Apple GPU/ANE variant; no candle)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -17,7 +17,7 @@ path = "../uni-db/src/lib.rs"
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 # Slim variant + Apple acceleration. Opts out of uni-db's
-# default-everything to exclude candle and mistralrs. xervo 0.9.0's
+# default-everything to exclude candle. xervo 0.9.0's
 # gpu-metal activates ort?/coreml so the ORT CoreML EP reaches Apple
 # GPU/ANE; provider-onnx is listed explicitly because gpu-metal alone
 # does not enable the optional ort crate (the `?` in `ort?/coreml`

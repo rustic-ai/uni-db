@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "uni-db-onnx"
 dynamic = ["version"]
-description = "Python bindings for Uni Graph Database (slim — ONNX + remote APIs, no candle/mistralrs)"
+description = "Python bindings for Uni Graph Database (slim — ONNX + remote APIs, no candle)"
 authors = [
     { name = "Dragonscale Industries Inc.", email = "dev@dragonscale.ai" }
 ]

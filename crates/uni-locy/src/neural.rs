@@ -172,7 +172,7 @@ pub trait NeuralClassifier: Send + Sync + std::fmt::Debug {
 
     /// Return pre-sigmoid logits. The default implementation calls
     /// [`NeuralClassifier::classify`] and applies inverse-sigmoid; bespoke providers
-    /// (Candle, MistralRS) override to expose raw logits cheaply.
+    /// (Candle, for one) override to expose raw logits cheaply.
     async fn classify_logits(&self, inputs: &[ClassifyInput]) -> ClassifierResult<Vec<f64>> {
         let probs = self.classify(inputs).await?;
         Ok(probs.into_iter().map(inverse_sigmoid).collect())

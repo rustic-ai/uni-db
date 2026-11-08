@@ -745,13 +745,128 @@ pub fn create_index_definition(
     }
 }
 
+/// Keys accepted inside a vector index's `"embedding"` config.
+const EMBEDDING_CONFIG_KEYS: &[&str] = &[
+    "alias",
+    "source_properties",
+    "source",
+    "batch_size",
+    "document_prefix",
+    "query_prefix",
+];
+
+/// Parse a vector index's `"embedding"` (auto-embed) config.
+///
+/// Mirrors the Cypher DDL parser (`CREATE VECTOR INDEX … OPTIONS {embedding: …}`
+/// in uni-query's planner) so the two surfaces accept the same configs: `alias`
+/// and a non-empty source list are required, and `batch_size` defaults to 32.
+/// The source list is `source_properties` (the Rust field name), with `source`
+/// — the Cypher spelling — accepted too.
+///
+/// Every malformed config is an error. This used to be an `Option` chain, so a
+/// config with `"source"` (the key Cypher uses) or any other mistake was dropped
+/// without a word: the index was created without auto-embedding, and the first
+/// insert failed with "Property 'embedding' cannot be null" — an error that
+/// never mentions the config.
+fn parse_embedding_config(value: &serde_json::Value) -> Result<EmbeddingConfig, String> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "vector index 'embedding' config must be a dict".to_string())?;
+
+    if let Some(unknown) = obj
+        .keys()
+        .find(|k| !EMBEDDING_CONFIG_KEYS.contains(&k.as_str()))
+    {
+        return Err(format!(
+            "unknown key '{unknown}' in vector index 'embedding' config; accepted keys are: {}",
+            EMBEDDING_CONFIG_KEYS.join(", ")
+        ));
+    }
+
+    let alias = obj
+        .get("alias")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            "vector index 'embedding' config requires 'alias', a Xervo catalog alias \
+             such as 'embed/default'"
+                .to_string()
+        })?
+        .to_string();
+
+    let source_key = match (
+        obj.contains_key("source_properties"),
+        obj.contains_key("source"),
+    ) {
+        (true, true) => {
+            return Err(
+                "vector index 'embedding' config has both 'source_properties' and \
+                        'source'; they are the same setting, give one"
+                    .to_string(),
+            );
+        }
+        (true, false) => "source_properties",
+        (false, true) => "source",
+        (false, false) => {
+            return Err(
+                "vector index 'embedding' config requires 'source_properties' \
+                        (or 'source'): the list of text properties to embed"
+                    .to_string(),
+            );
+        }
+    };
+    let source_properties = obj[source_key]
+        .as_array()
+        .ok_or_else(|| format!("embedding '{source_key}' must be a list of property names"))?
+        .iter()
+        .map(|v| {
+            v.as_str().map(str::to_string).ok_or_else(|| {
+                format!("embedding '{source_key}' must contain only property names (strings)")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if source_properties.is_empty() {
+        return Err(format!(
+            "embedding '{source_key}' must name at least one property"
+        ));
+    }
+
+    let batch_size = match obj.get("batch_size") {
+        None => 32,
+        Some(v) => v
+            .as_u64()
+            .filter(|n| *n > 0)
+            .ok_or_else(|| "embedding 'batch_size' must be a positive integer".to_string())?
+            as usize,
+    };
+
+    let prefix = |key: &str| -> Result<Option<String>, String> {
+        obj.get(key)
+            .map(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("embedding '{key}' must be a string"))
+            })
+            .transpose()
+    };
+
+    Ok(EmbeddingConfig {
+        alias,
+        source_properties,
+        batch_size,
+        document_prefix: prefix("document_prefix")?,
+        query_prefix: prefix("query_prefix")?,
+    })
+}
+
 /// Create an index definition from a rich configuration dict.
 ///
 /// The config dict must have a `"type"` key. Supported types:
 /// - `"vector"`: optional `algorithm` (`flat`, `ivf_flat`, `ivf_pq` (default),
 ///   `ivf_sq`, `ivf_rq`, `hnsw_flat`, `hnsw_sq`, `hnsw_pq`, `muvera`), `metric`
 ///   (`cosine` (default), `l2`, `dot`), `partitions`, `m`, `ef_construction`,
-///   `sub_vectors`, `embedding`. For `algorithm: "muvera"` (ColBERT/MaxSim FDE over a
+///   `sub_vectors`, `embedding` (auto-embed: see [`parse_embedding_config`]). For
+///   `algorithm: "muvera"` (ColBERT/MaxSim FDE over a
 ///   multi-vector column): also `k_sim`, `reps`, `d_proj`, `seed`, `inner`. The MUVERA
 ///   defaults (`k_sim=4, reps=20, d_proj=16`) are starting points, not corpus-validated;
 ///   recall is corpus-dependent, so tune per corpus (the exact MaxSim re-rank keeps results
@@ -802,30 +917,10 @@ pub fn create_index_definition_from_config(
                 },
             );
 
-            let embedding_config = config.get("embedding").and_then(|v| {
-                let obj = v.as_object()?;
-                Some(EmbeddingConfig {
-                    alias: obj.get("alias")?.as_str()?.to_string(),
-                    source_properties: obj
-                        .get("source_properties")?
-                        .as_array()?
-                        .iter()
-                        .filter_map(|s| s.as_str().map(|s| s.to_string()))
-                        .collect(),
-                    batch_size: obj
-                        .get("batch_size")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(100) as usize,
-                    document_prefix: obj
-                        .get("document_prefix")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                    query_prefix: obj
-                        .get("query_prefix")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string()),
-                })
-            });
+            let embedding_config = config
+                .get("embedding")
+                .map(parse_embedding_config)
+                .transpose()?;
 
             Ok(IndexDefinition::Vector(VectorIndexConfig {
                 name: format!("idx_{}_{}_vec", label, property),

@@ -417,7 +417,7 @@ LIMIT 10
 Scoring is **metric-aware**: `similar_to()` automatically uses the distance metric configured on the vector index (Cosine, L2, or Dot Product). You don't need to specify the metric — it's resolved from the schema at compile time. If no index is found, it defaults to cosine similarity.
 
 ```
-similar_to(sources, queries [, options]) → FLOAT [0, 1]
+similar_to(sources, queries [, options]) → FLOAT  // range depends on the metric: see Score Conversion
 ```
 
 ### Single Vector Source
@@ -507,7 +507,7 @@ RETURN d.title,
 ORDER BY score DESC
 ```
 
-Adding two separate `similar_to` calls produces raw score addition without normalization — cosine similarity ([0, 1]) and BM25 (unbounded) live on different scales. The multi-source form normalizes BM25 via `score / (score + fts_k)` before fusion.
+Adding two separate `similar_to` calls produces raw score addition without normalization — cosine similarity (`[-1, 1]`) and BM25 (unbounded) live on different scales. The multi-source form normalizes BM25 via `score / (score + fts_k)` before fusion.
 
 ### `~=` Operator vs `similar_to()`
 
@@ -578,7 +578,6 @@ The `alias` field references a model alias from your Uni-Xervo catalog configura
 
 | Provider | Feature flag | Type | Description |
 |----------|-------------|------|-------------|
-| `MistralRS` | `provider-mistralrs` | Local | CPU/GPU local inference via mistral.rs (text, vision, diffusion, speech). Bundled in the default `uni-db` wheel. |
 | `Candle` | `provider-candle` | Local | Native HuggingFace Candle models (optional, pulls in `tokenizers` + `candle` crates). |
 | `ONNX` | `provider-onnx` | Local | ONNX Runtime — raw tensor execution, cross-encoder rerank, dense embeddings. Replaces the retired `provider-fastembed`; the same FastEmbed alias strings still work via the `local/onnx` Embed task. |
 | `OpenAI` | `provider-openai` | Remote | OpenAI embedding and generation APIs (configure via `OPENAI_API_KEY`). |
@@ -589,8 +588,9 @@ The `alias` field references a model alias from your Uni-Xervo catalog configura
 | `Cohere` | `provider-cohere` | Remote | Cohere embedding and generation APIs. |
 | `Voyage AI` | `provider-voyageai` | Remote | Voyage AI embedding API. |
 | `Azure OpenAI` | `provider-azure-openai` | Remote | Azure-hosted OpenAI API. |
+| `llama.cpp` | `provider-llamacpp` | Remote (self-hosted) | A `llama-server` you run: embeddings, cross-encoder rerank, text + vision generation, document extraction. Replaces the removed `local/mistralrs` for local generation. |
 
-**Default wheels vs. custom Rust builds.** The Python wheels bundle providers based on the wheel variant: the default `uni-db` (and its `-cuda` / `-metal` siblings) ship 12 providers, including the llama.cpp embedding-server adapter; the slim `uni-db-onnx` (and its GPU siblings) ship ONNX + 8 remote APIs only. The Rust crate also enables these providers by default. Use `default-features = false` with `lance-backend` and the provider features you need for a smaller build.
+**Default wheels vs. custom Rust builds.** The Python wheels bundle providers based on the wheel variant: the default `uni-db` (and its `-cuda` / `-metal` siblings) ship 11 providers: Candle, ONNX, the 8 hosted APIs and the llama.cpp server adapter; the slim `uni-db-onnx` (and its GPU siblings) drop Candle and ship 10. The Rust crate also enables these providers by default. Use `default-features = false` with `lance-backend` and the provider features you need for a smaller build.
 
 **Embedding Model Recommendation:**
 For local CPU auto-embedding, point your catalog alias at a lightweight embedding model such as `BGESmallENV15` (384-d, ~130 MB) or `nomic-embed-text-v1.5` (768-d). The `local/onnx` provider supports all 25 FastEmbed alias strings out of the box, runs well on an 8-core laptop, and provides high-quality vectors for RAG tasks. ONNX dispatch handles the cold tokenize → ORT → pool → L2-normalize pipeline; xervo 0.8.0 verified parity with `fastembed-rs v5.13` end-to-end.
@@ -706,7 +706,7 @@ distance = -similarity (negated for ranking)
 
 `similar_to()` resolves the metric from the vector index at compile time. For Cosine, it returns raw cosine similarity; for L2, it normalizes to `(0, 1]`; for Dot Product, it returns the actual dot product value. If no vector index is found for a property, it defaults to cosine similarity.
 
-For Cosine and L2, you can compare scores across queries without worrying about which metric the index uses. Dot product scores are unbounded and should only be compared within the same metric.
+**The two functions agree for L2 but not for cosine.** On a cosine index, `uni.vector.query` and `uni.search` yield `(1 + cos) / 2` while `similar_to()` yields `cos` itself, so the same node scores, say, `0.92` from one and `0.85` from the other. A threshold tuned on one does not carry over: convert with `vector_query_score = (1 + similar_to) / 2`, or `similar_to = 2 * vector_query_score - 1`. Dot product scores are unbounded and should only be compared within the same metric.
 
 ---
 

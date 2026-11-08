@@ -47,7 +47,7 @@ uni-db = "3"
 
 ## Python Package
 
-Install from [PyPI](https://pypi.org/project/uni-db/). The default wheel bundles 12 providers (candle, mistralrs, ONNX, 8 hosted APIs, and the llama.cpp embedding-server adapter) and runs on CPU:
+Install from [PyPI](https://pypi.org/project/uni-db/). The default wheel bundles 11 providers (candle, ONNX, 8 hosted APIs, and the llama.cpp server adapter) and runs on CPU:
 
 ```bash
 pip install uni-db
@@ -64,21 +64,21 @@ pip install uni-pydantic
 
 ### Wheel variants
 
-Uni ships **6 wheel variants** using uni-xervo's three-axis capability matrix (provider × linking × acceleration). Pick by hardware first, then by whether you need local LLM inference:
+Uni ships **6 wheel variants** using uni-xervo's three-axis capability matrix (provider × linking × acceleration). Pick by hardware first, then by whether you need the Candle backend:
 
 | Wheel | Local providers | Accelerator |
 |---|---|---|
-| `uni-db` *(default)* | candle + mistralrs + ONNX | CPU |
+| `uni-db` *(default)* | candle + ONNX | CPU |
 | `uni-db-onnx` *(slim)* | ONNX only | CPU |
-| `uni-db-cuda` | candle + mistralrs + ONNX | NVIDIA CUDA |
-| `uni-db-metal` | candle + mistralrs + ONNX | Apple GPU/ANE (Apple Silicon) |
+| `uni-db-cuda` | candle + ONNX | NVIDIA CUDA |
+| `uni-db-metal` | candle + ONNX | Apple GPU/ANE (Apple Silicon) |
 | `uni-db-onnx-cuda` | ONNX only | NVIDIA CUDA |
 | `uni-db-onnx-metal` | ONNX only | Apple GPU/ANE |
 
 ```bash
 pip install uni-db-cuda          # Linux/Windows + NVIDIA GPU
 pip install uni-db-metal         # Apple Silicon Mac
-pip install uni-db-onnx          # smaller wheel — drops candle/mistralrs
+pip install uni-db-onnx          # smaller wheel — drops candle
 ```
 
 The Python API is identical across all six. Programmatic recommendation:
@@ -279,12 +279,11 @@ cargo build --release
 The Rust crate enables the providers below by default, except the alternative
 `provider-onnx-dynamic` linking mode. Disable defaults and select providers
 explicitly for a smaller build. Standard Python wheels inherit these defaults;
-slim ONNX variants select ONNX and the eight hosted APIs.
+slim ONNX variants select ONNX, the eight hosted APIs and llama.cpp.
 
 | Feature | Backend | Tasks |
 |---|---|---|
 | `provider-candle` | HuggingFace Candle | Local embeddings |
-| `provider-mistralrs` | mistral.rs | Local generation, multimodal, embeddings |
 | `provider-onnx` | ONNX Runtime (bundled, statically linked) | Local embed, rerank, raw tensor |
 | `provider-onnx-dynamic` | ONNX Runtime (BYO, `dlopen` at runtime via `ORT_DYLIB_PATH`) | Same as `provider-onnx`, mutually exclusive |
 | `provider-openai` | OpenAI | Remote embed + generation |
@@ -295,14 +294,14 @@ slim ONNX variants select ONNX and the eight hosted APIs.
 | `provider-voyageai` | Voyage AI | Remote embed + rerank |
 | `provider-cohere` | Cohere | Remote embed + rerank + generation |
 | `provider-azure-openai` | Azure OpenAI | Remote embed + generation |
-| `provider-llamacpp` | llama.cpp server (`remote/llamacpp`) | Remote embeddings with tokenizer-aware input truncation |
+| `provider-llamacpp` | llama.cpp server (`remote/llamacpp`) | Self-hosted embed (tokenizer-aware truncation), rerank, text + vision generation, document extraction |
 
 ### Acceleration features
 
 | Feature | Hardware |
 |---|---|
-| `gpu-cuda` | NVIDIA CUDA (Linux + Windows). Activates ORT CUDA EP and the `candle?/cuda` and `mistralrs?/cuda` kernels for any local provider also enabled. |
-| `gpu-metal` | Apple GPU/ANE (macOS). Activates the ORT CoreML EP and the `candle?/metal` and `mistralrs?/metal` kernels. |
+| `gpu-cuda` | NVIDIA CUDA (Linux + Windows). Activates the ORT CUDA EP and the `candle?/cuda` kernels if `provider-candle` is also enabled. |
+| `gpu-metal` | Apple GPU/ANE (macOS). Activates the ORT CoreML EP and the `candle?/metal` kernels. ONNX models are probed at load and fall back to CPU when CoreML cannot run them (Qwen3 decoder rerankers and embedders among them). |
 
 The previous nine `gpu-*` features (`gpu-tensorrt`, `gpu-rocm`, `gpu-coreml`, `gpu-directml`, `gpu-openvino`, `gpu-qnn`, `gpu-wgpu`, plus the two above) collapsed to two in `uni-db 2.0.0`. The retired EPs remain reachable via `provider-onnx-dynamic` plus a vendor-supplied ORT shared library at runtime (`ORT_DYLIB_PATH`).
 
@@ -326,15 +325,17 @@ cargo build --release --no-default-features --features lance-backend
 
 # Everything-CPU (matches the default `uni-db` wheel)
 cargo build --release \
-  --features "provider-candle,provider-mistralrs,provider-onnx,\
+  --features "provider-candle,provider-onnx,\
 provider-openai,provider-gemini,provider-vertexai,provider-mistral,\
-provider-anthropic,provider-voyageai,provider-cohere,provider-azure-openai"
+provider-anthropic,provider-voyageai,provider-cohere,provider-azure-openai,\
+provider-llamacpp"
 
 # Everything + NVIDIA CUDA (matches the `uni-db-cuda` wheel)
 cargo build --release \
-  --features "provider-candle,provider-mistralrs,gpu-cuda,\
+  --features "provider-candle,gpu-cuda,\
 provider-openai,provider-gemini,provider-vertexai,provider-mistral,\
-provider-anthropic,provider-voyageai,provider-cohere,provider-azure-openai"
+provider-anthropic,provider-voyageai,provider-cohere,provider-azure-openai,\
+provider-llamacpp"
 
 # BYO ORT (e.g. AMD ROCm, Intel OpenVINO, DirectML)
 cargo build --release \

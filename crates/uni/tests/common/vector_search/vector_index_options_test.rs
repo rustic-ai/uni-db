@@ -6,18 +6,18 @@ use uni_common::core::schema::{DataType, IndexDefinition, VectorIndexType};
 use uni_db::Uni;
 use uni_db::api::schema::{EmbeddingCfg, IndexType, VectorAlgo, VectorIndexCfg, VectorMetric};
 
-#[cfg(feature = "provider-mistralrs")]
+#[cfg(feature = "provider-candle")]
 use serde_json::json;
-#[cfg(feature = "provider-mistralrs")]
+#[cfg(feature = "provider-candle")]
 use uni_xervo::api::{ModelAliasSpec, ModelTask, WarmupPolicy};
 
-#[cfg(feature = "provider-mistralrs")]
-fn mistral_embed_alias(alias: &str) -> ModelAliasSpec {
+#[cfg(feature = "provider-candle")]
+fn candle_embed_alias(alias: &str) -> ModelAliasSpec {
     ModelAliasSpec {
         alias: alias.to_string(),
         task: ModelTask::Embed,
-        provider_id: "local/mistralrs".to_string(),
-        model_id: "nomic-embed-text-v1.5".to_string(),
+        provider_id: "local/candle".to_string(),
+        model_id: "all-MiniLM-L6-v2".to_string(),
         revision: None,
         warmup: WarmupPolicy::Lazy,
         required: false,
@@ -302,10 +302,10 @@ async fn test_vector_match_operator_with_embedding_alias_config() -> Result<()> 
 }
 
 #[tokio::test]
-#[cfg(feature = "provider-mistralrs")]
+#[cfg(feature = "provider-candle")]
 async fn test_uni_xervo_facade_exposed_when_catalog_configured() -> Result<()> {
     let db = Uni::temporary()
-        .xervo_catalog(vec![mistral_embed_alias("embed/default")])
+        .xervo_catalog(vec![candle_embed_alias("embed/default")])
         .build()
         .await?;
     assert!(db.xervo().is_available());
@@ -891,5 +891,36 @@ async fn default_sub_vectors_is_dimension_aware_for_wide_embeddings() -> Result<
         cfg.default_refine_factor
     );
 
+    Ok(())
+}
+
+/// `size()` and `length()` of a stored vector are its dimension count, from L0
+/// and after flush alike. `size()` used to fail on the Arrow `FixedSizeList`
+/// a VECTOR column is read as, and the error printed every element.
+#[tokio::test]
+async fn test_size_and_length_of_a_stored_vector() -> Result<()> {
+    let db = Uni::temporary().build().await?;
+    db.schema()
+        .label("Doc")
+        .property("id", DataType::Int64)
+        .property("embedding", DataType::Vector { dimensions: 3 })
+        .apply()
+        .await?;
+
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:Doc {id: 1, embedding: [0.5, -1.0, 2.0]})")
+        .await?;
+    tx.commit().await?;
+
+    let query = "MATCH (d:Doc) RETURN size(d.embedding) AS s, length(d.embedding) AS l";
+    for stage in ["unflushed", "flushed"] {
+        if stage == "flushed" {
+            db.flush().await?;
+        }
+        let rows = db.session().query(query).await?;
+        assert_eq!(rows.rows().len(), 1, "{stage}");
+        assert_eq!(rows.rows()[0].get::<i64>("s")?, 3, "size(), {stage}");
+        assert_eq!(rows.rows()[0].get::<i64>("l")?, 3, "length(), {stage}");
+    }
     Ok(())
 }

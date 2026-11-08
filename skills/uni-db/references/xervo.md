@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-Xervo is uni-db's built-in ML runtime for embeddings and text generation. It supports local inference (Candle, ONNX Runtime — embed, rerank, raw — and mistral.rs) and remote APIs (OpenAI, Anthropic, Gemini, Mistral, Cohere, Voyage AI, Vertex AI, Azure OpenAI). Models are configured via a **catalog** of alias specs, and accessed through the `db.xervo()` facade.
+Xervo is uni-db's built-in ML runtime for embeddings and text generation. It supports local inference (Candle, ONNX Runtime — embed, rerank, raw), a self-hosted llama.cpp server, and remote APIs (OpenAI, Anthropic, Gemini, Mistral, Cohere, Voyage AI, Vertex AI, Azure OpenAI). Models are configured via a **catalog** of alias specs, and accessed through the `db.xervo()` facade.
 
 **Key concepts:**
 - **Alias**: human-readable model identifier in `task/name` format (e.g., `embed/default`, `llm/gpt4`)
@@ -20,10 +20,9 @@ Run inference on the host machine. No API keys needed.
 
 | Provider ID | Engine | Tasks | Best For |
 |---|---|---|---|
-| `remote/llamacpp` | llama.cpp server | Embed | Tokenizer-aware truncation for server embeddings |
+| `remote/llamacpp` | llama.cpp server (`llama-server` you run) | Embed, Rerank, Generate, Document extract | Private local generation (text + vision), GGUF models, GPU via llama.cpp; one server per model, so one alias per task |
 | `local/candle` | HuggingFace Candle | Embed | Lightweight CPU embeddings (Bert, JinaBert, Gemma) |
 | `local/onnx` | ONNX Runtime | Embed, Rerank, Raw | Fast CPU embeddings (FastEmbed alias strings supported), cross-encoder reranking (BERT-style), and raw tensor execution |
-| `local/mistralrs` | mistral.rs | Embed, Generate | GPU inference, quantized models, multi-modal |
 
 **Local provider options:**
 
@@ -31,20 +30,16 @@ Run inference on the host machine. No API keys needed.
 // candle / onnx
 { "cache_dir": "/path/to/model/cache" }
 
-// mistralrs
-{
-  "isq": "Q4K",                    // in-situ quantization type
-  "force_cpu": false,              // force CPU even if GPU available
-  "dtype": "auto",                 // "auto", "f16", "bf16", "f32"
-  "pipeline": "text",             // "text", "vision", "diffusion", "speech"
-  "paged_attention": true,         // enable paged attention
-  "max_num_seqs": 16,              // max concurrent sequences
-  "embedding_dimensions": 768,     // override output dimensions
-  "chat_template": "/path/to/template",
-  "tokenizer_json": "/path/to/tokenizer.json",
-  "gguf_files": ["model.gguf"]    // for GGUF models
-}
+// onnx: device placement (GPU wheels default to the GPU, then CPU)
+{ "execution_providers": ["coreml", "cpu"] }  // or ["cuda", "cpu"], ["cpu"]
+
+// llamacpp: point the alias at a running llama-server
+{ "base_url": "http://localhost:8080" }
 ```
+
+`local/mistralrs` was removed in uni-xervo 0.19. For local generation, run a `llama-server` and use `remote/llamacpp`; for local embeddings, use `local/onnx` or `local/candle`. Image generation and speech synthesis have no replacement.
+
+On a GPU wheel, an ONNX model that the accelerator cannot run (Qwen3 decoder rerankers and embedders on CoreML, for example) fails a probe at load and falls back to CPU with a warning. A list without `"cpu"`, such as `["coreml"]`, makes that a load error instead.
 
 ### Remote Providers
 
@@ -99,11 +94,11 @@ The catalog is a JSON array of model alias specs:
 [
   {
     "alias": "embed/default",
-    "task": "Embed",
+    "task": "embed",
     "provider_id": "local/onnx",
-    "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+    "model_id": "all-MiniLM-L6-v2",
     "revision": null,
-    "warmup": "Lazy",
+    "warmup": "lazy",
     "required": false,
     "timeout": null,
     "load_timeout": null,
@@ -112,10 +107,10 @@ The catalog is a JSON array of model alias specs:
   },
   {
     "alias": "llm/default",
-    "task": "Generate",
+    "task": "generate",
     "provider_id": "remote/openai",
     "model_id": "gpt-4o-mini",
-    "warmup": "Lazy",
+    "warmup": "lazy",
     "required": false,
     "timeout": 30,
     "retry": { "max_attempts": 3, "initial_backoff_ms": 200 },
@@ -129,11 +124,11 @@ The catalog is a JSON array of model alias specs:
 | Field | Required | Default | Description |
 |---|---|---|---|
 | `alias` | Yes | — | Identifier in `task/name` format (must contain `/`) |
-| `task` | Yes | — | `"Embed"`, `"Generate"`, or `"Rerank"` |
+| `task` | Yes | — | Lowercase snake_case: `"embed"`, `"generate"`, `"rerank"`, `"embed_sparse"`, `"embed_multi_vector"`, `"embed_hybrid"`, `"raw"`, … (`"Embed"` is rejected with `unknown variant`) |
 | `provider_id` | Yes | — | Provider identifier (e.g., `"remote/openai"`) |
 | `model_id` | Yes | — | HuggingFace repo ID (local) or API model name (remote) |
 | `revision` | No | `null` | HuggingFace branch/tag/commit hash (local only) |
-| `warmup` | No | `"Lazy"` | `"Lazy"`, `"Eager"`, or `"Background"` |
+| `warmup` | No | `"lazy"` | `"lazy"`, `"eager"`, or `"background"` |
 | `required` | No | `false` | If true, failed eager warmup aborts database startup |
 | `timeout` | No | `null` | Per-inference timeout in seconds |
 | `load_timeout` | No | `600` | Model load timeout in seconds |
@@ -162,14 +157,14 @@ The Python wheels (since `uni-db 1.2.0`) bundle providers per the wheel matrix �
 
 | Wheel | Local providers | Accelerator |
 |---|---|---|
-| `uni-db` *(default)* | `local/candle` + `local/mistralrs` + `local/onnx` | CPU |
+| `uni-db` *(default)* | `local/candle` + `local/onnx` | CPU |
 | `uni-db-onnx` *(slim)* | `local/onnx` only | CPU |
-| `uni-db-cuda` | `local/candle` + `local/mistralrs` + `local/onnx` | NVIDIA CUDA |
-| `uni-db-metal` | `local/candle` + `local/mistralrs` + `local/onnx` | Apple GPU/ANE |
+| `uni-db-cuda` | `local/candle` + `local/onnx` | NVIDIA CUDA |
+| `uni-db-metal` | `local/candle` + `local/onnx` | Apple GPU/ANE |
 | `uni-db-onnx-cuda` | `local/onnx` only | NVIDIA CUDA |
 | `uni-db-onnx-metal` | `local/onnx` only | Apple GPU/ANE |
 
-All 8 remote providers (`remote/openai`, `remote/gemini`, etc.) are bundled in every wheel. The Python API is identical across all six. The Rust defaults enable all providers, including `remote/llamacpp`. To reduce dependencies, disable defaults and select `lance-backend` plus the required provider features. Acceleration: `gpu-cuda` (NVIDIA), `gpu-metal` (Apple). Other ORT execution providers (TensorRT, ROCm, DirectML, OpenVINO, QNN) are reachable via `provider-onnx-dynamic` + `ORT_DYLIB_PATH`.
+All 8 hosted-API providers (`remote/openai`, `remote/gemini`, etc.) and `remote/llamacpp` are bundled in every wheel. The Python API is identical across all six. The Rust defaults enable all providers, including `remote/llamacpp`. To reduce dependencies, disable defaults and select `lance-backend` plus the required provider features. Acceleration: `gpu-cuda` (NVIDIA), `gpu-metal` (Apple). Other ORT execution providers (TensorRT, ROCm, DirectML, OpenVINO, QNN) are reachable via `provider-onnx-dynamic` + `ORT_DYLIB_PATH`.
 
 ### Python
 
@@ -182,7 +177,7 @@ db = UniBuilder.open("./my_db") \
     .build()
 
 # From JSON string
-catalog_json = '[{"alias": "embed/default", "task": "Embed", ...}]'
+catalog_json = '[{"alias": "embed/default", "task": "embed", ...}]'
 db = UniBuilder.open("./my_db") \
     .xervo_catalog_from_str(catalog_json) \
     .build()
@@ -309,8 +304,8 @@ db.xervo().prefetch_all().await?;
 
 Both methods are **awaitable** and **fail-fast** — they return when all requested models are fully loaded, or error on the first failure. Models already loaded are skipped.
 
-**When to use `prefetch()` vs `warmup: "Eager"`:**
-- Use **`warmup: "Eager"`** in the catalog when the model is always needed and you want startup to fail if loading fails (`required: true`)
+**When to use `prefetch()` vs `warmup: "eager"`:**
+- Use **`warmup: "eager"`** in the catalog when the model is always needed and you want startup to fail if loading fails (`required: true`)
 - Use **`prefetch()`** after startup when you want programmatic control over which models to load and when (e.g., load models conditionally based on runtime config, or load after other initialization is complete)
 
 ### Availability Check
@@ -355,7 +350,7 @@ db.schema() \
             "metric": "cosine",
             "embedding": {
                 "alias": "embed/default",
-                "source": ["title", "content"],
+                "source_properties": ["title", "content"],
                 "batch_size": 32
             }
         }) \
@@ -381,8 +376,16 @@ OPTIONS {
 | Field | Required | Default | Description |
 |---|---|---|---|
 | `alias` | Yes | — | Model alias from Xervo catalog |
-| `source` | Yes | — | List of text properties to concatenate and embed |
-| `batch_size` | No | `32` | Texts per batch for API calls |
+| `source_properties` (Python, Rust) / `source` (Cypher DDL) | Yes | — | Non-empty list of text properties to concatenate and embed |
+| `batch_size` | No | `32` | Texts per batch for embedding calls |
+| `document_prefix` | No | none | Prepended to text embedded on write, e.g. `"passage: "` for E5-style models |
+| `query_prefix` | No | none | Prepended to query text embedded at query time, e.g. `"query: "` |
+
+**Use `source_properties` in Python.** Cypher DDL reads `source`, and the Python
+binding now accepts either and rejects malformed configs, but released wheels up
+to 5.0.0 silently ignore `source`: the index is created without auto-embedding,
+and the first insert fails with `Property 'embedding' cannot be null`. Those
+wheels also default `batch_size` to 100 rather than 32.
 
 **Behavior:**
 - **On write**: text from `source` properties is concatenated and embedded automatically
@@ -437,9 +440,9 @@ Automatic instrumentation (when metrics enabled):
 
 | Use Case | Provider | Model ID | Dimensions | Notes |
 |---|---|---|---|---|
-| **General purpose (local)** | `local/onnx` | `sentence-transformers/all-MiniLM-L6-v2` | 384 | Fast, small, good quality. Best default for local. |
+| **General purpose (local)** | `local/onnx` | `all-MiniLM-L6-v2` (preset) | 384 | Fast, small, good quality. Best default for local. |
 | **Higher quality (local)** | `local/candle` | `BAAI/bge-base-en-v1.5` | 768 | Better quality, larger model |
-| **Best quality (local)** | `local/mistralrs` | `nomic-ai/nomic-embed-text-v1.5` | 768 | Top-tier open-source embeddings |
+| **Best quality (local)** | `local/onnx` | `Qwen3Embedding06B` (preset) | 1024 | Decoder-style embedder, ~600 MB; heavier than BGE |
 | **Production (remote)** | `remote/openai` | `text-embedding-3-small` | 1536 | Best cost/quality ratio for OpenAI |
 | **Max quality (remote)** | `remote/openai` | `text-embedding-3-large` | 3072 | Highest quality OpenAI embeddings |
 | **Privacy-focused (remote)** | `remote/voyageai` | `voyage-large-2` | 1536 | Strong retrieval, data not used for training |
@@ -454,8 +457,7 @@ Automatic instrumentation (when metrics enabled):
 | **Best quality** | `remote/openai` | `gpt-4o` | Complex reasoning, detailed analysis |
 | **Long context** | `remote/anthropic` | `claude-sonnet-4-6` | 200k context, strong instruction following |
 | **Code generation** | `remote/anthropic` | `claude-sonnet-4-6` | Best for code tasks |
-| **Local (GPU)** | `local/mistralrs` | `mistralai/Mistral-7B-Instruct-v0.3` | Requires GPU, fully private |
-| **Local (quantized)** | `local/mistralrs` | Any GGUF model | CPU-viable with Q4/Q5 quantization |
+| **Local (private)** | `remote/llamacpp` | Any GGUF model loaded in `llama-server` | Fully private; GPU via llama.cpp (CUDA / Metal), CPU-viable with Q4/Q5 quantization. Vision needs the server started with `--mmproj` |
 
 ### Reranking Models
 
@@ -489,9 +491,9 @@ let scored = db.xervo().rerank("rerank/minilm", "query text", &["doc1", "doc2"])
 [
   {
     "alias": "embed/default",
-    "task": "Embed",
+    "task": "embed",
     "provider_id": "local/onnx",
-    "model_id": "sentence-transformers/all-MiniLM-L6-v2"
+    "model_id": "all-MiniLM-L6-v2"
   }
 ]
 ```
@@ -502,16 +504,16 @@ let scored = db.xervo().rerank("rerank/minilm", "query text", &["doc1", "doc2"])
 [
   {
     "alias": "embed/default",
-    "task": "Embed",
+    "task": "embed",
     "provider_id": "remote/openai",
     "model_id": "text-embedding-3-small",
-    "warmup": "Background",
+    "warmup": "background",
     "timeout": 10,
     "retry": { "max_attempts": 3, "initial_backoff_ms": 200 }
   },
   {
     "alias": "llm/default",
-    "task": "Generate",
+    "task": "generate",
     "provider_id": "remote/openai",
     "model_id": "gpt-4o-mini",
     "timeout": 30,
@@ -519,7 +521,7 @@ let scored = db.xervo().rerank("rerank/minilm", "query text", &["doc1", "doc2"])
   },
   {
     "alias": "llm/reasoning",
-    "task": "Generate",
+    "task": "generate",
     "provider_id": "remote/anthropic",
     "model_id": "claude-sonnet-4-6",
     "timeout": 60,
@@ -534,22 +536,22 @@ let scored = db.xervo().rerank("rerank/minilm", "query text", &["doc1", "doc2"])
 [
   {
     "alias": "embed/local",
-    "task": "Embed",
+    "task": "embed",
     "provider_id": "local/onnx",
-    "model_id": "sentence-transformers/all-MiniLM-L6-v2",
-    "warmup": "Eager",
+    "model_id": "all-MiniLM-L6-v2",
+    "warmup": "eager",
     "required": true
   },
   {
     "alias": "embed/remote",
-    "task": "Embed",
+    "task": "embed",
     "provider_id": "remote/openai",
     "model_id": "text-embedding-3-small",
-    "warmup": "Lazy"
+    "warmup": "lazy"
   },
   {
     "alias": "llm/default",
-    "task": "Generate",
+    "task": "generate",
     "provider_id": "remote/openai",
     "model_id": "gpt-4o-mini",
     "timeout": 30
@@ -557,15 +559,15 @@ let scored = db.xervo().rerank("rerank/minilm", "query text", &["doc1", "doc2"])
 ]
 ```
 
-### BGE-M3 Multi-Head Hybrid (EmbedHybrid)
+### BGE-M3 Multi-Head Hybrid (embed_hybrid)
 
-A single catalog alias with task `EmbedHybrid` produces **dense + learned-sparse + multivector/ColBERT** from ONE forward pass.
+A single catalog alias with task `embed_hybrid` (`ModelTask::EmbedHybrid` in Rust) produces **dense + learned-sparse + multivector/ColBERT** from ONE forward pass.
 
 ```json
 [
   {
     "alias": "embed/bge-m3",
-    "task": "EmbedHybrid",
+    "task": "embed_hybrid",
     "provider_id": "local/onnx",
     "model_id": "aapot/bge-m3-onnx"
   }
@@ -603,7 +605,7 @@ The `EmbeddingCfg` fields are `{alias, source_properties, batch_size, document_p
 [
   {
     "alias": "embed/default",
-    "task": "Embed",
+    "task": "embed",
     "provider_id": "remote/azure-openai",
     "model_id": "text-embedding-3-small",
     "options": {
@@ -614,7 +616,7 @@ The `EmbeddingCfg` fields are `{alias, source_properties, batch_size, document_p
   },
   {
     "alias": "llm/default",
-    "task": "Generate",
+    "task": "generate",
     "provider_id": "remote/azure-openai",
     "model_id": "gpt-4o",
     "options": {
@@ -681,7 +683,7 @@ db.schema() \
         .index("embedding", {
             "type": "vector",
             "metric": "cosine",
-            "embedding": {"alias": "embed/default", "source": ["text"]}
+            "embedding": {"alias": "embed/default", "source_properties": ["text"]}
         }) \
     .apply()
 
@@ -709,7 +711,7 @@ results = db.session().query("""
 
 4. **Anthropic is generate-only** -- `remote/anthropic` does not support embeddings. Use a different provider for `Embed` tasks.
 
-5. **Local models download on first use** -- `local/candle` and `local/onnx` download models from HuggingFace on first load. Use `warmup: "Eager"` with `required: true` to catch download failures at startup, or call `xervo.prefetch(["alias"])` after startup to pre-load specific models before first inference.
+5. **Local models download on first use** -- `local/candle` and `local/onnx` download models from HuggingFace on first load. Use `warmup: "eager"` with `required: true` to catch download failures at startup, or call `xervo.prefetch(["alias"])` after startup to pre-load specific models before first inference.
 
 6. **API keys are read at model load time** -- Environment variables are resolved when the model is first loaded (or at startup for eager warmup), not when the database is opened.
 

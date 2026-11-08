@@ -25,7 +25,7 @@ Uni provides native vector search over embedding properties with 8 single-vector
 ## What It Provides
 
 - Vector properties stored alongside graph data.
-- ANN indexes with cosine, L2, or dot distance — scores are automatically converted to [0, 1] similarity regardless of metric.
+- ANN indexes with cosine, L2, or dot distance — distances are converted to similarity scores (higher is better): `[0, 1]` for cosine and L2, the raw dot product for dot. See [Score Conversion](../guides/vector-search.md#score-conversion), including how `similar_to()` differs for cosine.
 - `CALL uni.vector.query(...)` for KNN retrieval.
 - `similar_to()` expression function for point-scoring bound nodes in `WHERE`, `RETURN`, and Locy rules.
 - **Auto-embedding**: Pass text directly and let Uni embed it using the index's configured embedding model.
@@ -190,7 +190,7 @@ Beyond auto-embedding, the `Uni::xervo()` facade gives direct access to embeddin
     xervo.prefetch_all().await?;
     ```
 
-Uni-Xervo supports local providers (Candle, mistral.rs, ONNX Runtime — embed/rerank/raw) and remote providers (OpenAI, Gemini, Anthropic, Cohere, Vertex AI, Mistral, Voyage AI, Azure OpenAI). See the [Vector Search Guide](../guides/vector-search.md) for the full provider table and configuration details.
+Uni-Xervo supports local providers (Candle, ONNX Runtime — embed/rerank/raw) and remote providers (OpenAI, Gemini, Anthropic, Cohere, Vertex AI, Mistral, Voyage AI, Azure OpenAI, and a self-hosted llama.cpp server for embeddings, reranking, generation and document extraction). See the [Vector Search Guide](../guides/vector-search.md) for the full provider table and configuration details.
 
 ## Use Cases
 

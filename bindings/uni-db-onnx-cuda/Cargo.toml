@@ -1,6 +1,6 @@
 [package]
 name = "uni-python-onnx-cuda"
-description = "Python bindings for Uni graph database (ONNX + remote-API + CUDA variant; no candle/mistralrs)"
+description = "Python bindings for Uni graph database (ONNX + remote-API + CUDA variant; no candle)"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -17,10 +17,9 @@ path = "../uni-db/src/lib.rs"
 pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"] }
 pyo3-async-runtimes = { version = "0.29", features = ["tokio-runtime"] }
 # Slim variant + NVIDIA acceleration. Opts out of uni-db's
-# default-everything to exclude candle and mistralrs. xervo 0.9.0's
-# gpu-cuda already pulls in provider-onnx, ort/cuda, and the
-# candle?/mistralrs?/cuda kernels for whichever local providers are
-# enabled; here only the ORT CUDA EP fires.
+# default-everything to exclude candle. xervo's gpu-cuda already pulls
+# in provider-onnx, ort/cuda, and the candle?/cuda kernels when
+# provider-candle is enabled; here only the ORT CUDA EP fires.
 uni-db = { workspace = true, default-features = false, features = [
     "lance-backend",
     "mimalloc",

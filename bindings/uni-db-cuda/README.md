@@ -1,6 +1,6 @@
 # uni-db-cuda
 
-Python bindings for Uni Graph Database with **all 11 providers** (candle, mistralrs, ONNX local + 8 remote APIs) and **NVIDIA CUDA acceleration** for the local providers.
+Python bindings for Uni Graph Database with **all 11 providers** (candle and ONNX local, 8 hosted APIs, and the llama.cpp server adapter) and **NVIDIA CUDA acceleration** for the local providers.
 
 This is the recommended wheel for Linux/Windows hosts with an NVIDIA GPU.
 

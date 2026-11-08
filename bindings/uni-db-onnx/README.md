@@ -1,6 +1,6 @@
 # uni-db-onnx
 
-Python bindings for Uni Graph Database — **slim variant**: the unified xervo `local/onnx` provider (raw, rerank, embed) plus all 8 remote API providers, **without** candle or mistralrs. Smaller wheel, faster cold start; suitable when local LLM inference isn't needed.
+Python bindings for Uni Graph Database — **slim variant**: the unified xervo `local/onnx` provider (raw, rerank, embed) plus the 8 hosted-API providers and the llama.cpp server adapter, **without** candle. Smaller wheel, faster cold start; suitable when local LLM inference isn't needed.
 
 ORT is statically linked (CPU); no `ORT_DYLIB_PATH` setup required.
 

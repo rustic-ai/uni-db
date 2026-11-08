@@ -257,7 +257,7 @@ RETURN d.title,
 ORDER BY score DESC
 ```
 
-Adding two separate `similar_to` calls produces raw score addition without normalization — cosine similarity scores ([0, 1]) and BM25 scores (unbounded) live on different scales. The multi-source form normalizes BM25 via a saturation function (`score / (score + fts_k)`) before fusion.
+Adding two separate `similar_to` calls produces raw score addition without normalization — cosine similarity scores (`[-1, 1]`) and BM25 scores (unbounded) live on different scales. The multi-source form normalizes BM25 via a saturation function (`score / (score + fts_k)`) before fusion.
 
 See the [Vector Search guide](../guides/vector-search.md#similar_to-expression-function) for full documentation.
 
