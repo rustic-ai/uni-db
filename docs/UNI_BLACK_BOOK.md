@@ -5356,11 +5356,15 @@ shape exist once.
 - **v1 guard.** A model whose `supported_tasks()` lacks the requested flag is
   a v1 cascade model; the call fails naming the alias instead of yielding
   nothing.
-- **Byte spans.** `NlpEntity::spans` are window-local, half-open word spans
+- **Character spans.** `NlpEntity::spans` are window-local, half-open word spans
   over `NlpWindow::tokens` (words), so a window's word base is the sum of
   earlier windows' `tokens.len()`. A word's byte range is the union of the
   flat `NlpResult::tokens` with that `word_index`: v7 emits one token per
   word, but the trait allows subwords, so the code groups rather than indexes.
+  Rows then convert those UTF-8 byte offsets to character (Unicode scalar)
+  offsets, by binary search over each text's `char_indices`, because Cypher's
+  `substring()` (`eval_substring` slices `chars()`) and Python's `str` index
+  by character; bytes stay internal, for slicing the surface text.
   uni-xervo analyses each conversation turn as its own text (offset 0), so
   spans are turn-relative and the row carries the turn index, recovered from
   the containing `WindowSentence::unit` and mapped past blank turns, which

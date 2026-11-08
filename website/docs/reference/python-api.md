@@ -1155,8 +1155,8 @@ for e in entities:
 | `extract_facts(input, *, alias, relations, entity_types, schema, top_per_pair, rel_offsets)` | `list[ExtractedFact]` | Needs `relations` or `schema` |
 | `extract_entities(input, *, alias, entity_types, schema)` | `list[ExtractedEntity]` | Skips the relation pass |
 
-`alias=None` (the default) uses `"nlp/default"`. Span offsets are UTF-8 byte
-offsets; slice `text.encode()` with them for non-ASCII text.
+`alias=None` (the default) uses `"nlp/default"`. Span offsets count
+characters, so `text[f.head_start:f.head_end]` is the mention.
 Malformed arguments raise `UniInvalidArgumentError` before any model call; a
 database without a Xervo runtime raises `UniInternalError`. `AsyncXervo` has
 the same methods as coroutines.

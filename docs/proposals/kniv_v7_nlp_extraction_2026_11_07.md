@@ -1,7 +1,12 @@
 # Proposal: text-to-graph extraction with kniv v7 (`uni.nlp.*`)
 
-Status: **Phases 1–2 implemented** (rev. 3); phases 3–5 proposed.
-Date: 2026-11-07 (rev. 2 and rev. 3: 2026-11-08)
+Status: **Phases 1–2 implemented** (rev. 4); phases 3–5 proposed.
+Date: 2026-11-07 (rev. 2, 3 and 4: 2026-11-08)
+
+Revision 4: span offsets count **characters** (Unicode scalar values), not
+UTF-8 bytes. Cypher's `substring()` and Python's `str` index by character,
+so byte offsets sliced the wrong text for any non-ASCII input. Rust callers
+map back with `char_indices`.
 Scope: `uni-query` (new procedures), `uni` (Xervo facade), `bindings/uni-db`
 (Python), docs. Later phases reach `uni-query`'s Locy operators and the
 trigger surface.
@@ -168,10 +173,10 @@ maps become opaque `LargeBinary` CypherValue columns (see
 | `head_text`, `tail_text`, `text` | string | `NlpEntity::text`, the first mention's surface form. |
 | `head_type`, `tail_type`, `entity_type` | string | `NlpEntity::ty`. Rev. 3: `entity_type` on entity rows, matching the Rust and Python field. |
 | `head_speaker`, `tail_speaker`, `speaker` | bool | `NlpEntity::speaker`. |
-| `head_start`, `head_end`, `tail_start`, `tail_end` | int | UTF-8 byte offsets of the **first mention** in the input text, or in its turn for a conversation. Null for a speaker entity. See §4.2 on derivation. |
+| `head_start`, `head_end`, `tail_start`, `tail_end` | int | Character offsets (rev. 4; UTF-8 bytes before) of the **first mention** in the input text, or in its turn for a conversation. Null for a speaker entity. See §4.2 on derivation. |
 | `head_turn`, `tail_turn` | int | Index of the turn the first mention is in (rev. 3). Null for prose and for speakers. |
 | `mentions` | list<string> | `NlpEntity::mentions`. |
-| `mention_starts`, `mention_ends`, `mention_turns` | list<int> | Byte offsets and turn of every mention, parallel to `mentions`. Rev. 3: not `starts` / `ends`, which Cypher reads as the `STARTS WITH` / `ENDS WITH` keywords in `RETURN`. |
+| `mention_starts`, `mention_ends`, `mention_turns` | list<int> | Character offsets and turn of every mention, parallel to `mentions`. Rev. 3: not `starts` / `ends`, which Cypher reads as the `STARTS WITH` / `ENDS WITH` keywords in `RETURN`. |
 | `relation` | string | The relation **as the caller named it**; under `schema: "graph"`, the edge type name (§4.3). |
 | `polarity` | string | `FactPolarity::as_str()`: `positive` or `negative`. |
 | `modality` | string | `FactModality::as_str()`. |
@@ -208,7 +213,8 @@ document.
   (`nlp_v7.rs::projection_indexes_tokens_globally_across_windows`). The
   global word index of a window-local word is the window's token base plus
   the local index; the span's byte range is the first token's `start` to the
-  last token's `end` for that word range. For conversation input, verify
+  last token's `end` for that word range; rev. 4 converts that byte range to
+  character offsets for the rows. For conversation input, verify
   during implementation which text the offsets are relative to. Rev. 3:
   uni-xervo analyses each turn as its own text with offset 0, so offsets are
   turn-relative; the turn is the containing `WindowSentence::unit`, mapped

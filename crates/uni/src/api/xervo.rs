@@ -186,7 +186,7 @@ impl UniXervo {
     ///
     /// This is the full uni-xervo surface: per-window POS, lemmas,
     /// dependencies, SRL, coreference, entities and facts. For flat fact or
-    /// entity rows with byte spans, use [`extract_facts`](Self::extract_facts)
+    /// entity rows with character spans, use [`extract_facts`](Self::extract_facts)
     /// or [`extract_entities`](Self::extract_entities).
     ///
     /// # Errors

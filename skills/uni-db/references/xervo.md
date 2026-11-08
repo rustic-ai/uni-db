@@ -356,7 +356,7 @@ YIELD entity, text, entity_type, mentions, mention_starts, mention_ends RETURN *
 - **Only `asserted` / `reported` facts are claims about the world**; `planned`,
   `desired`, `questioned`, `hypothetical` are not. `negative` polarity is
   evidence against the same triple.
-- **Spans** are UTF-8 byte offsets into the text, or into the turn named by
+- **Spans** are character offsets (as `substring()` counts) into the text, or into the turn named by
   `head_turn` / `tail_turn` for a conversation. Speakers have none. Text
   columns are sliced from the input, so `AT&T` stays `AT&T`.
 - **`confidence`** is `sigmoid(margin)`, not a calibrated probability — use

@@ -1487,8 +1487,9 @@ impl PyTokenUsage {
 /// One fact extracted by ``Xervo.extract_facts`` (the rows of
 /// ``uni.nlp.extract``).
 ///
-/// Byte offsets index the input text, or for a conversation the turn named
-/// by ``head_turn`` / ``tail_turn``. Speaker entities have no offsets.
+/// Character offsets (as ``str`` indexes) into the input text, or for a
+/// conversation the turn named by ``head_turn`` / ``tail_turn``, so
+/// ``text[f.head_start:f.head_end]`` is the mention. Speakers have no offsets.
 /// ``confidence`` is ``1 / (1 + e^-margin)``, not a calibrated probability.
 #[pyclass(get_all, name = "ExtractedFact", skip_from_py_object)]
 #[derive(Debug, Clone)]

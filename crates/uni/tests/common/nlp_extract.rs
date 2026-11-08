@@ -379,6 +379,30 @@ async fn graph_schema_entities_ignore_edge_types() -> Result<()> {
     Ok(())
 }
 
+/// Spans index characters, so Cypher's `substring()` recovers the mention
+/// from non-ASCII text (byte offsets would land past it).
+#[tokio::test]
+async fn spans_slice_with_cypher_substring_in_non_ascii_text() -> Result<()> {
+    let (db, _) = db_with_mock().await?;
+    let rows = db
+        .session()
+        .query(
+            "WITH 'le café de Zoë près de São' AS t \
+             CALL uni.nlp.extract(t, {relations: ['near']}) \
+             YIELD head_text, head_start, head_end, tail_text, tail_start, tail_end \
+             RETURN head_text, substring(t, head_start, head_end - head_start) AS h, \
+                    tail_text, substring(t, tail_start, tail_end - tail_start) AS tl",
+        )
+        .await?;
+    assert_eq!(rows.len(), 1);
+    let r = &rows.rows()[0];
+    assert_eq!(str_col(r, "head_text"), "Zoë");
+    assert_eq!(str_col(r, "h"), "Zoë");
+    assert_eq!(str_col(r, "tail_text"), "São");
+    assert_eq!(str_col(r, "tl"), "São");
+    Ok(())
+}
+
 /// The statement `use-cases/rag-knowledge-graph.md` documents.
 #[tokio::test]
 async fn entities_link_chunks_to_shared_entity_nodes() -> Result<()> {
@@ -803,7 +827,7 @@ async fn real_kniv_v7_extracts_the_conversation_example() -> Result<()> {
         .iter()
         .find(|r| str_col(r, "tail_text") == "Lisbon")
         .unwrap();
-    // "I moved to Lisbon": Lisbon is bytes 11..17 of turn 0.
+    // "I moved to Lisbon": Lisbon is characters 11..17 of turn 0.
     assert_eq!(lisbon.get::<i64>("tail_start")?, 11);
     assert_eq!(lisbon.get::<i64>("tail_end")?, 17);
     assert_eq!(lisbon.get::<i64>("tail_turn")?, 0);

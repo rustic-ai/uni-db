@@ -9,14 +9,14 @@ description**, so a schema the model never saw needs no fine-tuning.
 Every fact carries the signals reasoning needs: whether it is asserted or
 denied (**polarity**), whether it is a claim about the world or a plan, wish,
 question or hypothetical (**modality**), **who holds** the belief, an optional
-**time**, and a calibrated **margin**, plus the byte offsets of each mention
+**time**, and a calibrated **margin**, plus the character offsets of each mention
 in your text.
 
 ## What It Provides
 
 - **`CALL uni.nlp.extract(input, options)`**: one row per fact,
   `head --relation--> tail`, with polarity, modality, holder, time, margin,
-  byte spans and model provenance.
+  character spans and model provenance.
 - **`CALL uni.nlp.entities(input, options)`**: one row per entity, grouped
   across its mentions, with each mention's span.
 - **Prose or conversations.** `input` is a string, a list of strings (one
@@ -156,7 +156,7 @@ decision), and prefer specific relations over a generic `related to`. With
 | `doc`, `window` | Input document index, and the window of whole sentences (≤ 512 words) within it. |
 | `head`, `tail` | Window-local entity indexes; join with `uni.nlp.entities` on `(doc, window, entity)`. |
 | `head_text`, `head_type`, `head_speaker` | First mention's text as written in the input (or the speaker name), type, and whether it is a conversation participant. A speaker's type is always `speaker`. Same for `tail_*`. |
-| `head_start`, `head_end`, `head_turn` | UTF-8 **byte** span of the first mention. For a conversation, offsets are within the turn named by `head_turn`. Null for speakers. Same for `tail_*`. Cypher's `substring()` and Python's `str` slicing count characters, so for non-ASCII text slice bytes (in Python, `text.encode()[start:end].decode()`). |
+| `head_start`, `head_end`, `head_turn` | Character span of the first mention (counted as Cypher's `substring()` and Python's `str` count), so `substring(t, head_start, head_end - head_start)` is the mention. For a conversation, offsets are within the turn named by `head_turn`. Null for speakers. Same for `tail_*`. |
 | `relation` | As you named it, or the edge type name under `schema: 'graph'`. |
 | `polarity` | `positive` or `negative`. |
 | `modality` | `asserted`, `reported`, `planned`, `desired`, `questioned` or `hypothetical`. |

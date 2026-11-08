@@ -1235,8 +1235,9 @@ class GenerationResult:
 class ExtractedFact:
     """One fact from ``Xervo.extract_facts``: the rows of ``uni.nlp.extract``.
 
-    Byte offsets index the input text, or for a conversation the turn named
-    by ``head_turn`` / ``tail_turn``; speaker entities have no offsets.
+    Character offsets (as ``str`` indexes) into the input text, or for a
+    conversation the turn named by ``head_turn`` / ``tail_turn``, so
+    ``text[f.head_start:f.head_end]`` is the mention; speakers have no offsets.
     ``confidence`` is ``1 / (1 + e^-margin)``, not a calibrated probability.
     """
 
@@ -1755,9 +1756,8 @@ class Xervo:
         ``UniInvalidArgumentError`` for malformed arguments before any model
         call.
 
-        Span offsets are UTF-8 *byte* offsets, as in Rust and Cypher. For
-        non-ASCII text slice the encoded string:
-        ``text.encode()[f.head_start:f.head_end].decode()``.
+        Span offsets are character offsets, so ``text[f.head_start:f.head_end]``
+        is the mention.
         """
         ...
     def extract_entities(
@@ -2991,9 +2991,8 @@ class AsyncXervo:
         ``UniInvalidArgumentError`` for malformed arguments before any model
         call.
 
-        Span offsets are UTF-8 *byte* offsets, as in Rust and Cypher. For
-        non-ASCII text slice the encoded string:
-        ``text.encode()[f.head_start:f.head_end].decode()``.
+        Span offsets are character offsets, so ``text[f.head_start:f.head_end]``
+        is the mention.
         """
         ...
     async def extract_entities(

@@ -10,10 +10,12 @@
 //! request. This module turns a caller's input and options into
 //! [`NlpRequest`]s, runs them in one `analyze` call, and flattens the
 //! per-window results into one row per fact ([`ExtractedFact`]) or per
-//! entity ([`ExtractedEntity`]), with UTF-8 byte spans into the caller's
+//! entity ([`ExtractedEntity`]), with character spans into the caller's
 //! text and the model's identity for provenance.
 //!
-//! Offsets: for prose they index the input string. For a conversation
+//! Offsets count characters (Unicode scalar values), as Cypher's
+//! `substring()` and Python's `str` do; in Rust, map them back with
+//! `char_indices`. For prose they index the input string. For a conversation
 //! uni-xervo analyses each turn as its own text, so offsets index the turn
 //! named by the row's `*_turn` column. Speaker entities have no mention in
 //! the text and carry no span.
@@ -611,9 +613,9 @@ pub struct ExtractedFact {
     pub head_type: String,
     /// Whether the head is a conversation participant.
     pub head_speaker: bool,
-    /// UTF-8 byte offset where the head's first mention starts.
+    /// Character offset where the head's first mention starts.
     pub head_start: Option<usize>,
-    /// UTF-8 byte offset where the head's first mention ends (exclusive).
+    /// Character offset where the head's first mention ends (exclusive).
     pub head_end: Option<usize>,
     /// Turn the head's first mention is in (conversations only).
     pub head_turn: Option<usize>,
@@ -628,9 +630,9 @@ pub struct ExtractedFact {
     pub tail_type: String,
     /// Whether the tail is a conversation participant.
     pub tail_speaker: bool,
-    /// UTF-8 byte offset where the tail's first mention starts.
+    /// Character offset where the tail's first mention starts.
     pub tail_start: Option<usize>,
-    /// UTF-8 byte offset where the tail's first mention ends (exclusive).
+    /// Character offset where the tail's first mention ends (exclusive).
     pub tail_end: Option<usize>,
     /// Turn the tail's first mention is in (conversations only).
     pub tail_turn: Option<usize>,
@@ -672,9 +674,9 @@ pub struct ExtractedEntity {
     pub speaker: bool,
     /// Surface text of each mention.
     pub mentions: Vec<String>,
-    /// UTF-8 byte start of each mention, parallel to `mentions`.
+    /// Character start of each mention, parallel to `mentions`.
     pub mention_starts: Vec<Option<usize>>,
-    /// UTF-8 byte end of each mention (exclusive), parallel to `mentions`.
+    /// Character end of each mention (exclusive), parallel to `mentions`.
     pub mention_ends: Vec<Option<usize>>,
     /// Turn of each mention (conversations only), parallel to `mentions`.
     pub mention_turns: Vec<Option<usize>>,
@@ -693,7 +695,9 @@ pub enum ExtractRows {
     Entities(Vec<ExtractedEntity>),
 }
 
-/// Where a window-local mention sits in the caller's text.
+/// Where a window-local mention sits in the caller's text. Inside the
+/// locator offsets are UTF-8 bytes (what the model reports, and what slicing
+/// needs); [`DocLocator::in_chars`] converts them for the rows.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Located {
     start: Option<usize>,
@@ -726,6 +730,9 @@ struct DocLocator<'a> {
     /// For a conversation: non-blank turn index → original turn index, and
     /// the turns' texts.
     turns: Option<(&'a [usize], &'a [&'a str])>,
+    /// Byte offset of every character, per text (the document, or each turn
+    /// by original index), for converting byte offsets to character offsets.
+    char_starts: Vec<Vec<usize>>,
 }
 
 impl<'a> DocLocator<'a> {
@@ -748,11 +755,57 @@ impl<'a> DocLocator<'a> {
                 texts,
             } => (None, Some((*turn_of_unit, *texts))),
         };
+        let char_starts_of = |t: &str| t.char_indices().map(|(b, _)| b).collect::<Vec<_>>();
+        let char_starts = match (text, turns) {
+            (Some(t), _) => vec![char_starts_of(t)],
+            (None, Some((_, texts))) => texts.iter().map(|t| char_starts_of(t)).collect(),
+            (None, None) => Vec::new(),
+        };
         Self {
             result,
             words,
             text,
             turns,
+            char_starts,
+        }
+    }
+
+    /// The text a located mention is in: the document, or its turn.
+    fn text_of(&self, at: &Located) -> Option<(&'a str, &[usize])> {
+        let idx = match (self.turns, at.turn) {
+            (Some(_), Some(t)) => t,
+            (Some(_), None) => return None,
+            (None, _) => 0,
+        };
+        let text = match self.turns {
+            Some((_, texts)) => texts.get(idx).copied()?,
+            None => self.text?,
+        };
+        Some((text, self.char_starts.get(idx)?))
+    }
+
+    /// `at` with its byte offsets converted to character (Unicode scalar)
+    /// offsets, which is what Cypher's `substring()` and Python's `str`
+    /// index by. Offsets that are not character boundaries of the text are
+    /// dropped rather than guessed.
+    fn in_chars(&self, at: &Located) -> Located {
+        let Some((text, starts)) = self.text_of(at) else {
+            return Located {
+                turn: at.turn,
+                ..Located::default()
+            };
+        };
+        let to_char = |b: usize| {
+            if b == text.len() {
+                Some(starts.len())
+            } else {
+                starts.binary_search(&b).ok()
+            }
+        };
+        Located {
+            start: at.start.and_then(to_char),
+            end: at.end.and_then(to_char),
+            turn: at.turn,
         }
     }
 
@@ -780,11 +833,7 @@ impl<'a> DocLocator<'a> {
     /// The caller's text at `at`: the surface as written, where the model's
     /// `text` joins words with spaces (`AT & T` for `AT&T`).
     fn surface(&self, at: &Located) -> Option<&'a str> {
-        let text = match (self.turns, at.turn) {
-            (Some((_, texts)), Some(t)) => texts.get(t).copied()?,
-            (Some(_), None) => return None,
-            (None, _) => self.text?,
-        };
+        let (text, _) = self.text_of(at)?;
         text.get(at.start?..at.end?)
     }
 
@@ -1070,8 +1119,8 @@ fn flatten_facts(
                     locator.mentions(w, base, tail),
                 );
                 let (h, t) = (
-                    hm.first().copied().unwrap_or_default(),
-                    tm.first().copied().unwrap_or_default(),
+                    hm.first().map(|l| locator.in_chars(l)).unwrap_or_default(),
+                    tm.first().map(|l| locator.in_chars(l)).unwrap_or_default(),
                 );
                 let margin = f64::from(fact.margin);
                 rows.push(ExtractedFact {
@@ -1121,6 +1170,7 @@ fn flatten_entities(
         for (w, window) in result.windows.iter().enumerate() {
             for (i, entity) in window.entities.iter().enumerate() {
                 let located = locator.mentions(w, base, entity);
+                let chars: Vec<Located> = located.iter().map(|l| locator.in_chars(l)).collect();
                 // Each mention as written, falling back to the model's text
                 // where a span cannot be located.
                 let mentions: Vec<String> = located
@@ -1141,9 +1191,9 @@ fn flatten_entities(
                     entity_type: names.entity_type(entity),
                     speaker: entity.speaker,
                     mentions,
-                    mention_starts: located.iter().map(|l| l.start).collect(),
-                    mention_ends: located.iter().map(|l| l.end).collect(),
-                    mention_turns: located.iter().map(|l| l.turn).collect(),
+                    mention_starts: chars.iter().map(|l| l.start).collect(),
+                    mention_ends: chars.iter().map(|l| l.end).collect(),
+                    mention_turns: chars.iter().map(|l| l.turn).collect(),
                     model_alias: names.alias.to_owned(),
                     model_id: names.model_id.to_owned(),
                 });
@@ -1551,6 +1601,58 @@ mod tests {
         assert_eq!(
             (ents[1].text.as_str(), ents[1].mention_ends.clone()),
             ("today", vec![Some(17)])
+        );
+    }
+
+    /// Offsets count characters, not bytes: "é", "ã" and the emoji are
+    /// several UTF-8 bytes each but one character.
+    #[test]
+    fn offsets_count_characters_in_non_ascii_text() {
+        let text = "José 🎉 visited São Paulo";
+        let mut r = NlpResult::default();
+        let mut w = NlpWindow::default();
+        for (i, word) in text.split(' ').enumerate() {
+            let start = text.match_indices(word).next().unwrap().0;
+            let mut t = token(word, start);
+            t.word_index = i;
+            r.tokens.push(t);
+            w.tokens.push(word.to_owned());
+        }
+        w.analysed_words = w.tokens.len();
+        w.sentences = vec![sentence(0, w.tokens.len(), 0)];
+        w.entities = vec![
+            entity("person", "José", vec![(0, 1)], false),
+            entity("location", "São Paulo", vec![(3, 5)], false),
+        ];
+        let mut f = NlpFact::default();
+        f.head = 0;
+        f.tail = 1;
+        f.relation = "visited".into();
+        w.facts = vec![f];
+        r.windows = vec![w];
+
+        let texts = [text];
+        let empty = HashMap::new();
+        let facts = flatten_facts(
+            std::slice::from_ref(&r),
+            &Sources::Texts(&texts),
+            &names(&empty, &empty),
+        );
+        let chars: Vec<char> = text.chars().collect();
+        let slice = |a: Option<usize>, b: Option<usize>| -> String {
+            chars[a.unwrap()..b.unwrap()].iter().collect()
+        };
+        let f = &facts[0];
+        assert_eq!((f.head_start, f.head_end), (Some(0), Some(4)));
+        // Bytes would be 18..28; characters are 15..24.
+        assert_eq!((f.tail_start, f.tail_end), (Some(15), Some(24)));
+        assert_eq!(slice(f.tail_start, f.tail_end), "São Paulo");
+        assert_eq!(f.tail_text, "São Paulo");
+
+        let ents = flatten_entities(&[r], &Sources::Texts(&texts), &names(&empty, &empty));
+        assert_eq!(
+            slice(ents[0].mention_starts[0], ents[0].mention_ends[0]),
+            "José"
         );
     }
 

@@ -58,7 +58,7 @@ nothing changes apart from the batch-size default.
   entity types are given per call by name and description, or derived from
   the declared schema with `schema: 'graph'` (a forked session uses its own
   merged schema). Each fact carries polarity, modality, holder, time, a
-  calibrated margin, UTF-8 byte spans of its mentions (turn-relative for a
+  calibrated margin, character spans of its mentions (turn-relative for a
   conversation, with the turn index) and the model alias and id. Input can
   be one text, several documents, or a conversation of `{speaker, text}`
   turns, where each speaker becomes an entity. Unknown options are rejected,
