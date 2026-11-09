@@ -391,11 +391,21 @@ What running it settled, against the rev. 2 sketch:
   labelled rows by `KEY`, so `VALIDATE same_as … TARGET e.name = m.gold`
   measures the policy. It sees only pairs above the threshold, so recall is
   measured by validating with a lower one.
-- **Speakers** resolve the same way once they are stored as mentions; the
-  program needs no special case.
-- **Forks.** Running resolution in a fork and reviewing the `diff` before
-  `promote` remains the curation path for low-confidence merges; it falls out
-  of the existing promote path and is not separately tested.
+- **Claims go through mentions.** §5.1's claim node points `HEAD` / `TAIL`
+  at `:Mention`s keyed by where they occur (a speaker, which has no span,
+  gets -1), so the program resolves claim endpoints too and a claim reaches
+  entities through `REFERS_TO`. Rev. 2's store `MERGE`d entities by name and
+  bypassed resolution.
+- **Speakers** resolve the same way: kniv types them `speaker`, so one
+  speaker across conversations is one entity and the type clause keeps it
+  apart from a `person` of the same name.
+- **Forks.** Running resolution in a fork, reviewing the `diff` and
+  promoting `Entity` + `REFERS_TO` is the curation path for low-confidence
+  merges. Testing it found two engine bugs, both fixed: a fork's writer had
+  no Xervo runtime, so writes to auto-embedded labels failed in a fork; and
+  auto-embed stored vectors as float lists, so the content UID registered at
+  flush never matched the stored row and promote duplicated auto-embedded
+  vertices and dropped edges to them.
 
 Tests: `crates/uni/tests/common/nlp_resolve.rs` runs the program over
 mentions extracted by the mock kniv v7 model and embedded by a trigram mock,
@@ -404,7 +414,18 @@ previous run created, that the best of two candidates wins and types must
 agree, that weak evidence makes a new entity, that case and surname
 variants of a new name in one batch make one entity, that `EXPLAIN RULE` lists the
 two clauses behind a merge, and that `VALIDATE` scores `same_as` and stored
-`confidence` against labels.
+`confidence` against labels. It also stores claims from prose and two
+conversations and checks they meet at resolved entities (speaker included),
+runs resolution in a fork and promotes it, and, `#[ignore]`d, runs the
+claims path on the real `kniv-v7-xlarge-u-en` model. A Python test runs the
+program read from the docs page. `autoembed_parity.rs` covers promote of
+auto-embedded vertices (dense and multi-vector, eager and deferred).
+A scale test resolves 300 mentions against 300 entities. Measuring it
+found the third engine fix: the DERIVE re-joined its clause over the
+cartesian product of its MATCH and timed out; it now narrows the MATCH to
+the facts' nodes. The program's own cost is still mentions × entities: at
+1,000 × 1,000 the similarity rule exceeds the default Locy timeout, and
+fixing that needs a nearest-neighbour generator over the vector index.
 
 Not done: a built-in rule module with this program as a default. Locy has no
 mechanism for shipping a module with the engine, and the program is short

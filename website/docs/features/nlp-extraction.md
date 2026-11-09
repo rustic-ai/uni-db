@@ -190,37 +190,50 @@ and `model_alias, model_id`.
 ## Storing Facts
 
 Holder and time point at other entities, and an edge property can't point at
-a node, so a faithful store makes each fact a claim node with its provenance:
+a node, so a faithful store makes each fact a claim node with its provenance.
+Point the claim at the **mentions** it was extracted from, not straight at
+entities, so the resolution program below decides which entity each one
+names:
 
 ```cypher
 MATCH (d:Document {id: $doc})
 CALL uni.nlp.extract(d.text, {schema: 'graph'})
-YIELD head_text, head_type, relation, tail_text, tail_type, polarity, modality,
-      margin, head_start, head_end, tail_start, tail_end, model_alias, model_id
+YIELD head_text, head_type, head_start, head_turn, relation,
+      tail_text, tail_type, tail_start, tail_turn, polarity, modality, margin,
+      model_alias, model_id
 WHERE modality IN ['asserted', 'reported']
-MERGE (h:Entity {name: head_text, type: head_type})
-MERGE (t:Entity {name: tail_text, type: tail_type})
+// A mention is keyed by where it occurs. A speaker has no span: -1.
+MERGE (h:Mention {doc: d.id, turn: coalesce(head_turn, -1),
+                  start: coalesce(head_start, -1), text: head_text, type: head_type})
+MERGE (t:Mention {doc: d.id, turn: coalesce(tail_turn, -1),
+                  start: coalesce(tail_start, -1), text: tail_text, type: tail_type})
 CREATE (c:Claim {relation: relation, polarity: polarity, modality: modality,
-                 margin: margin, model_alias: model_alias, model_id: model_id,
-                 head_start: head_start, head_end: head_end,
-                 tail_start: tail_start, tail_end: tail_end})
+                 margin: margin, model_alias: model_alias, model_id: model_id})
 CREATE (c)-[:HEAD]->(h), (c)-[:TAIL]->(t), (c)-[:FROM]->(d)
 ```
 
-A plain `(h)-[:LIVES_IN {margin: margin}]->(t)` edge is enough when you don't
-need the holder, time or spans.
+Once mentions are resolved, a claim reaches its entities through them:
 
-The `MERGE` on name and type above only joins identical spellings.
-Entities are grouped **within one window**: "Ada Lovelace" in one document
-and "Lovelace" in another come back as unrelated entities. Resolving them is
-the next step.
+```cypher
+MATCH (c:Claim)-[:HEAD]->(:Mention)-[:REFERS_TO]->(h:Entity),
+      (c)-[:TAIL]->(:Mention)-[:REFERS_TO]->(t:Entity)
+RETURN h.name, c.relation, t.name
+```
+
+A plain `MERGE (h:Entity {name: head_text})` with a
+`(h)-[:LIVES_IN {margin: margin}]->(t)` edge is enough when you don't need
+the holder, time or spans and every source spells names the same way.
+Entities are grouped **within one window**: "Charles Babbage" in a letter
+and "Babbage" in a conversation come back as unrelated entities. Resolving
+them is the next step.
 
 ## Resolving Entities
 
 Resolution decides which extracted mention names which existing node. Here
 it is a Locy program, so the matching policy is a few rules you can read,
-version and explain, rather than code. Store each mention as a node first,
-with its name embedded on write:
+version and explain, rather than code. It works on `:Mention` nodes whose
+name is embedded on write, however they were made: the claims above, or
+every entity in a chunk:
 
 ```cypher
 // Schema: :Mention {text, type, embedding} and :Entity {name, type, embedding},
@@ -319,6 +332,9 @@ How it behaves:
   would if they arrived in separate batches. The surname "Hopper" still
   needs enough evidence to clear the threshold; if it has too little, it
   gets an entity of its own.
+- **Speakers resolve like any name.** kniv types a conversation's speaker
+  `speaker`, so "ada" in two conversations is one entity, kept apart from a
+  `person` called "Ada Lovelace" by the type clause.
 - **Every merge is explainable.** `EXPLAIN RULE same_as WHERE m.text =
   'Lovelace'` lists the evidence rows behind each pair, one per clause that
   fired, with their weights.
@@ -337,9 +353,14 @@ METRICS brier_score, accuracy
 
 `VALIDATE` scores only the pairs `same_as` derives, so it shows wrong merges
 above the threshold, not matches the threshold missed: lower the threshold
-while validating to see those. Every evidence clause pairs each unresolved mention with each
-entity of its type, so resolve in batches rather than over a whole backlog,
-and add type-specific signals (an e-mail, a ticker) as more clauses. To
+while validating to see those.
+
+Every evidence clause pairs each unresolved mention with each entity of its
+type, so the cost grows with mentions × entities. A few hundred new mentions
+against a few hundred entities take seconds; a thousand against a thousand
+exceed the default Locy timeout. Resolve after each extraction batch rather
+than over a whole backlog, keep entity types narrow, and add type-specific
+signals (an e-mail, a ticker) as more clauses. To
 review merges before they land, run the program in a [fork](forks.md) and
 `promote` what you accept.
 

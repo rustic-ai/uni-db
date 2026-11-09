@@ -837,6 +837,14 @@ impl UniInner {
         )
         .await
         .map_err(UniError::Internal)?;
+        // As on the primary, before replay: without it every fork write to a
+        // label with an auto-embedding index failed with "runtime not
+        // configured", though reads on the same fork session had the runtime.
+        if let Some(runtime) = &self.xervo_runtime {
+            forked_writer
+                .set_xervo_runtime(runtime.clone())
+                .map_err(UniError::Internal)?;
+        }
 
         // Phase 2 Day 6: replay any persisted WAL entries for this
         // fork into the freshly-built L0. Without this, a process

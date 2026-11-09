@@ -8,7 +8,10 @@
 
 use std::collections::HashMap;
 
+use arrow::array::{Array, BooleanArray, RecordBatch, UInt64Array};
+use arrow::compute::filter_record_batch;
 use uni_common::Value;
+use uni_common::value::EntityRef;
 use uni_cypher::ast::Expr;
 use uni_cypher::locy_ast::RuleCondition;
 use uni_locy::binding_plan::{BindingStep, ClauseBindingPlan, Exposure, PositionAction, VarSource};
@@ -72,11 +75,87 @@ pub fn extract_cypher_conditions(conditions: &[RuleCondition]) -> Vec<Expr> {
 /// column)` pair: the row's value of the variable equals the fact's value of
 /// the column. A variable absent from the row compares as `Null`.
 fn key_matches(base_row: &FactRow, derived_fact: &FactRow, pairs: &[(String, String)]) -> bool {
+    // Compared in place: the values are often whole nodes, and cloning two
+    // per comparison dominated large joins.
+    let null = Value::Null;
     pairs.iter().all(|(variable, column)| {
-        let base_val = base_row.get(variable).cloned().unwrap_or(Value::Null);
-        let fact_val = derived_fact.get(column).cloned().unwrap_or(Value::Null);
-        values_equal_for_join(&base_val, &fact_val)
+        let base_val = base_row.get(variable).unwrap_or(&null);
+        let fact_val = derived_fact.get(column).unwrap_or(&null);
+        values_equal_for_join(base_val, fact_val)
     })
+}
+
+/// Derived facts, indexed for the joins below when one compared column holds
+/// an entity in every fact.
+///
+/// Join equality on entities is identity ([`values_equal_for_join`]), and a
+/// non-entity never equals an entity, so a base row can only match the facts
+/// whose entity in that column is the row's own. Indexing by that identity
+/// turns a nested loop over rows × facts into a lookup; the candidates are
+/// still checked with [`key_matches`] on every pair, in fact order, so the
+/// result is the nested loop's. Without such a column it falls back to
+/// scanning every fact.
+enum FactIndex {
+    Scan(usize),
+    ByEntity {
+        variable: String,
+        facts: HashMap<EntityRef, Vec<usize>>,
+    },
+}
+
+impl FactIndex {
+    fn build(derived_facts: &[FactRow], pairs: &[(String, String)]) -> Self {
+        for (variable, column) in pairs {
+            let mut facts: HashMap<EntityRef, Vec<usize>> = HashMap::new();
+            let all_entities = derived_facts.iter().enumerate().all(|(i, fact)| {
+                match fact.get(column).and_then(Value::entity_ref) {
+                    Some(entity) => {
+                        facts.entry(entity).or_default().push(i);
+                        true
+                    }
+                    None => false,
+                }
+            });
+            if all_entities {
+                return Self::ByEntity {
+                    variable: variable.clone(),
+                    facts,
+                };
+            }
+        }
+        Self::Scan(derived_facts.len())
+    }
+
+    /// The indices of the facts that may match `base_row`, in fact order.
+    fn candidates<'a>(&'a self, base_row: &FactRow) -> Candidates<'a> {
+        match self {
+            Self::Scan(len) => Candidates::All(0..*len),
+            Self::ByEntity { variable, facts } => Candidates::Some(
+                base_row
+                    .get(variable)
+                    .and_then(Value::entity_ref)
+                    .and_then(|entity| facts.get(&entity))
+                    .map_or(&[][..], Vec::as_slice)
+                    .iter(),
+            ),
+        }
+    }
+}
+
+enum Candidates<'a> {
+    All(std::ops::Range<usize>),
+    Some(std::slice::Iter<'a, usize>),
+}
+
+impl Iterator for Candidates<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        match self {
+            Self::All(range) => range.next(),
+            Self::Some(iter) => iter.next().copied(),
+        }
+    }
 }
 
 /// Positive IS semi-join for reference `r` of `plan`: for each base row,
@@ -127,9 +206,11 @@ fn semi_join_is_ref(
         .collect();
     let stash_prev = plan.prev_ref == Some(r);
 
+    let index = FactIndex::build(derived_facts, &tests);
     let mut result = Vec::new();
     for base_row in base_rows {
-        for derived_fact in derived_facts {
+        for i in index.candidates(base_row) {
+            let derived_fact = &derived_facts[i];
             if !key_matches(base_row, derived_fact, &tests) {
                 continue;
             }
@@ -178,12 +259,13 @@ fn anti_join_is_ref(
     derived_facts: &[FactRow],
     pairs: &[(String, String)],
 ) -> Vec<FactRow> {
+    let index = FactIndex::build(derived_facts, pairs);
     base_rows
         .iter()
         .filter(|base_row| {
-            !derived_facts
-                .iter()
-                .any(|df| key_matches(base_row, df, pairs))
+            !index
+                .candidates(base_row)
+                .any(|i| key_matches(base_row, &derived_facts[i], pairs))
         })
         .cloned()
         .collect()
@@ -205,12 +287,14 @@ fn prob_complement_is_ref(
     target_prob_col: &str,
     complement_col_name: &str,
 ) -> Vec<FactRow> {
+    let index = FactIndex::build(derived_facts, pairs);
     base_rows
         .iter()
         .map(|base_row| {
             // Find all matching derived facts and combine via noisy-OR.
             let mut combined_p = 0.0_f64;
-            for df in derived_facts {
+            for i in index.candidates(base_row) {
+                let df = &derived_facts[i];
                 if key_matches(base_row, df, pairs) {
                     let p = df
                         .get(target_prob_col)
@@ -247,6 +331,123 @@ pub fn multiply_prob_factors_rows(
         }
         let current = row.get(prob_col).and_then(|v| v.as_f64()).unwrap_or(1.0);
         row.insert(prob_col.to_string(), Value::Float(current * factor));
+    }
+}
+
+/// What a positive IS reference requires of the MATCH nodes it tests: the
+/// vertex tuples its facts hold at those nodes.
+///
+/// The semi-join keeps only base rows that some fact matches, and a fact
+/// matches a row only where each tested entity is the row's own (identity
+/// equality), so a row whose tested nodes are not one fact's could never
+/// survive: filtering on these tuples before the join is exact. It lets a
+/// clause such as `MATCH (m), (e) WHERE (m, e) IS r` convert only the pairs
+/// `r` holds, not the cartesian product, whose conversion to rows was most of
+/// the time a DERIVE took. A reference whose facts hold anything other than
+/// a vertex at a tested node constrains nothing.
+struct SemiJoinPrefilter {
+    variables: Vec<String>,
+    tuples: std::collections::HashSet<Vec<u64>>,
+}
+
+impl SemiJoinPrefilter {
+    fn for_plan<'a>(
+        plan: &ClauseBindingPlan,
+        facts_of: impl Fn(&str) -> Option<&'a [FactRow]>,
+    ) -> Vec<Self> {
+        let mut prefilters = Vec::new();
+        for step in &plan.steps {
+            let BindingStep::Ref(r) = *step else { continue };
+            let binding = &plan.refs[r];
+            let tested: Vec<_> = binding
+                .positions
+                .iter()
+                .filter(|p| {
+                    p.action == PositionAction::TestNode
+                        && matches!(plan.scope.get(&p.variable), Some(VarSource::Match(_)))
+                })
+                .collect();
+            if tested.is_empty() {
+                continue;
+            }
+            let facts = facts_of(&binding.rule).unwrap_or(&[]);
+            let tuples: Option<std::collections::HashSet<Vec<u64>>> = facts
+                .iter()
+                .map(|fact| {
+                    tested
+                        .iter()
+                        .map(|p| match fact.get(&p.column).and_then(Value::entity_ref) {
+                            Some(EntityRef::Vertex(vid)) => Some(vid.as_u64()),
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .collect();
+            if let Some(tuples) = tuples {
+                prefilters.push(Self {
+                    variables: tested.iter().map(|p| p.variable.clone()).collect(),
+                    tuples,
+                });
+            }
+        }
+        prefilters
+    }
+
+    /// `id(v) IN [...]` for each tested node, so the MATCH itself narrows.
+    fn match_filters(&self) -> Vec<Expr> {
+        use uni_cypher::ast::CypherLiteral;
+        (0..self.variables.len())
+            .map(|i| {
+                let vids: std::collections::BTreeSet<u64> =
+                    self.tuples.iter().map(|tuple| tuple[i]).collect();
+                Expr::In {
+                    expr: Box::new(Expr::FunctionCall {
+                        name: "id".to_string(),
+                        args: vec![Expr::Variable(self.variables[i].clone())],
+                        distinct: false,
+                        window_spec: None,
+                    }),
+                    list: Box::new(Expr::List(
+                        vids.into_iter()
+                            .map(|vid| Expr::Literal(CypherLiteral::Integer(vid as i64)))
+                            .collect(),
+                    )),
+                }
+            })
+            .collect()
+    }
+
+    /// `batch` without the rows whose tested nodes form no fact's tuple.
+    /// A batch lacking a tested node's `{var}._vid` column is kept whole.
+    fn apply(&self, batch: &RecordBatch) -> Result<RecordBatch, LocyError> {
+        let columns: Option<Vec<&UInt64Array>> = self
+            .variables
+            .iter()
+            .map(|v| {
+                batch
+                    .column_by_name(&format!("{v}._vid"))
+                    .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+            })
+            .collect();
+        let Some(columns) = columns else {
+            return Ok(batch.clone());
+        };
+        let mut tuple = Vec::with_capacity(columns.len());
+        let keep: BooleanArray = (0..batch.num_rows())
+            .map(|row| {
+                tuple.clear();
+                for column in &columns {
+                    if column.is_null(row) {
+                        return Some(false);
+                    }
+                    tuple.push(column.value(row));
+                }
+                Some(self.tuples.contains(&tuple))
+            })
+            .collect();
+        filter_record_batch(batch, &keep).map_err(|e| LocyError::EvaluationError {
+            message: format!("filtering a clause's MATCH rows: {e}"),
+        })
     }
 }
 
@@ -294,17 +495,30 @@ pub async fn resolve_clause_with_is_refs(
         .iter()
         .map(|&index| condition(index).cloned())
         .collect::<Result<Vec<Expr>, LocyError>>()?;
-    let raw_batches = fact_source
-        .execute_pattern(&clause.match_pattern, &match_safe)
-        .await?;
-    let mut rows = record_batches_to_locy_rows(&raw_batches);
-
     let facts_of = |rule_name: &str| -> Vec<FactRow> {
         derived_store
             .get(rule_name)
             .map(|relation| relation.rows.clone())
             .unwrap_or_default()
     };
+
+    let prefilters = SemiJoinPrefilter::for_plan(plan, |rule| {
+        derived_store
+            .get(rule)
+            .map(|relation| relation.rows.as_slice())
+    });
+    let mut match_safe = match_safe;
+    match_safe.extend(prefilters.iter().flat_map(SemiJoinPrefilter::match_filters));
+    let mut raw_batches = fact_source
+        .execute_pattern(&clause.match_pattern, &match_safe)
+        .await?;
+    for prefilter in &prefilters {
+        raw_batches = raw_batches
+            .iter()
+            .map(|batch| prefilter.apply(batch))
+            .collect::<Result<_, _>>()?;
+    }
+    let mut rows = record_batches_to_locy_rows(&raw_batches);
 
     for step in &plan.steps {
         match *step {
@@ -478,6 +692,83 @@ mod tests {
         );
         let safety = rows[0].get("safety").unwrap().as_f64().unwrap();
         assert!((safety - 0.3).abs() < 1e-10, "expected 0.3, got {safety}");
+    }
+
+    fn node(vid: u64, text: &str) -> Value {
+        Value::Node(uni_common::Node {
+            vid: uni_common::Vid::new(vid),
+            labels: vec!["N".into()],
+            properties: [("text".to_string(), Value::String(text.into()))].into(),
+        })
+    }
+
+    fn row_nodes(pairs: &[(&str, Value)]) -> FactRow {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn indexed_joins_compare_entities_by_identity() {
+        // The fact holds the same vertices hydrated differently: identity,
+        // not the property map, decides the match.
+        let base = vec![
+            row_nodes(&[("m", node(1, "a")), ("e", node(10, "x"))]),
+            row_nodes(&[("m", node(1, "a")), ("e", node(11, "y"))]),
+            row_nodes(&[("m", node(2, "b")), ("e", node(10, "x"))]),
+            row_nodes(&[("m", Value::Int(1)), ("e", node(10, "x"))]),
+        ];
+        let facts = vec![
+            row_nodes(&[
+                ("m", node(1, "other")),
+                ("e", node(10, "")),
+                ("p", Value::Float(0.5)),
+            ]),
+            row_nodes(&[
+                ("m", node(1, "")),
+                ("e", node(10, "")),
+                ("p", Value::Float(0.5)),
+            ]),
+        ];
+        let pairs = vec![
+            ("m".to_string(), "m".to_string()),
+            ("e".to_string(), "e".to_string()),
+        ];
+        assert!(matches!(
+            FactIndex::build(&facts, &pairs),
+            FactIndex::ByEntity { .. }
+        ));
+
+        let kept = anti_join_is_ref(&base, &facts, &pairs);
+        assert_eq!(kept.len(), 3, "only the (1, 10) row is excluded");
+
+        let complemented = prob_complement_is_ref(&base, &facts, &pairs, "p", "__c");
+        let c: Vec<f64> = complemented
+            .iter()
+            .map(|r| r.get("__c").unwrap().as_f64().unwrap())
+            .collect();
+        // Both facts match the first row: 1 - (1 - (1-0.5)(1-0.5)) = 0.25.
+        assert_eq!(c, vec![0.25, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_column_holding_a_non_entity_falls_back_to_scanning() {
+        let facts = vec![
+            row_nodes(&[("m", node(1, ""))]),
+            row_nodes(&[("m", Value::Int(1))]),
+        ];
+        let pairs = vec![("m".to_string(), "m".to_string())];
+        assert!(matches!(
+            FactIndex::build(&facts, &pairs),
+            FactIndex::Scan(2)
+        ));
+        let base = vec![
+            row_nodes(&[("m", Value::Int(1))]),
+            row_nodes(&[("m", node(1, "a"))]),
+        ];
+        // Each base row matches the fact of its own kind; nothing is kept.
+        assert!(anti_join_is_ref(&base, &facts, &pairs).is_empty());
     }
 
     #[test]

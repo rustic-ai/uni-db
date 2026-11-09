@@ -4863,6 +4863,8 @@ All `MATCH ... WHERE` and `YIELD` expressions — whether in standalone Cypher o
 1. **Strata evaluation** (DataFusion): Plans and executes rules via `LocyProgramExec` → fixpoint iteration → converged facts stored in `DerivedStore` as `RecordBatch`es.
 2. **Command dispatch** (row-level): Takes the facts of the current state as `Vec<Row>` and applies commands in sequence — DERIVE generates mutations, ABDUCE does hypothetical reasoning with savepoints, ASSUME tests hypothetical mutations. These are not queries; they're fact-application operations that iterate over rows.
 
+**A DERIVE re-joins its clause on the row path.** For a rule whose output is a DERIVE, `lookup_derived_enriched` re-resolves each clause with `resolve_clause_with_is_refs` (`locy_delta.rs`): it runs the clause's MATCH, converts the batches to rows, then semi-joins each positive `IS` reference in memory. Two things keep that from being quadratic. `SemiJoinPrefilter` takes, for each positive reference, the vertex tuples its facts hold at the MATCH nodes it tests, adds `id(v) IN [...]` per node to the MATCH and drops batch rows whose `{v}._vid` tuple is none of them before conversion. And the joins (`semi_join_is_ref`, `anti_join_is_ref`, `prob_complement_is_ref`) index the facts with `FactIndex` by the identity of one column that holds an entity in every fact, and compare without cloning. Both are exact, because join equality on entities is identity (`values_equal_for_join`) and a non-entity never equals one; a column holding anything else falls back to the scan. Before them, `MATCH (m:Mention), (e:Entity) WHERE (m, e) IS resolved` materialised the whole cartesian product, cloning both nodes for every row × fact comparison: 300 mentions against 300 entities timed out at 30 s, and now take tens of milliseconds (`nlp_resolve::hundreds_of_mentions_resolve_within_the_default_timeout`).
+
 The `GraphExecutionContext` and `SessionContext` are available in `NativeExecutionAdapter` at command dispatch time but are not currently threaded through to `eval_function()`. This is a known limitation, not a fundamental constraint.
 
 | Context | Execution Path | Vector | Auto-Embed | FTS | Multi-Source |
@@ -5432,9 +5434,42 @@ two together. Its shape follows from Locy constraints worth knowing:
 - **Measured with `VALIDATE`, not fitted.** `VALIDATE` joins a `PROB` rule's
   facts to labelled rows by `KEY` (`locy_validate.rs`), so it scores
   `same_as` directly; it sees only pairs above the threshold.
+- **Claims go through mentions.** The documented claim store points a
+  `:Claim`'s `HEAD` / `TAIL` at `:Mention`s keyed by `(doc, turn, start,
+  text, type)`, with -1 for a speaker's missing span, so the same program
+  resolves claims' endpoints; a claim reaches entities via
+  `-[:HEAD]->()-[:REFERS_TO]->`. Speakers carry kniv's `speaker` type, so the
+  type clause keeps them apart from people of the same name.
+- **Cost is mentions × entities of a type.** Each evidence clause is a
+  cartesian MATCH filtered per pair, and the similarity clause scores every
+  pair. 300 new mentions against 300 entities resolve in about 5 s in a
+  debug build; 1,000 against 1,000 exceeds the default Locy timeout in the
+  similarity rule. The fix is a nearest-neighbour generator over the vector
+  index (a Locy generator plugin with storage access), which does not exist
+  yet.
 - **No trigger path yet.** A declared trigger's action is Cypher, and no
   procedure runs Locy from Cypher, so resolution runs from the application
   after each extraction batch.
+- **Reviewing in a fork works end to end** (resolution in a fork, `diff`,
+  `promote` of `Entity` + `REFERS_TO`, idempotent re-run on primary). Making
+  it work needed two engine fixes: a fork's writer now receives the Xervo
+  runtime (`UniInner::at_fork`), so auto-embedded labels accept fork writes;
+  and auto-embed stores its vectors in the declared form (see
+  *Auto-embedding values are stored in declared form*).
+
+### Auto-embedding values are stored in declared form
+
+The writer fills an auto-embedded column as `Value::Vector` (dense) or a
+list of `Value::Vector` (multi-vector), the form `to_declared_form` gives a
+value written through Cypher. It used to insert lists of `Float`s. Reads
+convert to the declared form, so nothing looked wrong, but the flush hashes
+the L0 property map into the content UID registered in the `UidIndex`
+(`compute_vertex_uid`, which renders a `Vector` as its width and a `List` as
+its numbers). Every auto-embedded vertex was registered under a UID its own
+stored row did not hash to, so `batch_resolve_primary_vids` never confirmed
+it: fork promote re-inserted such vertices and skipped edges to them as
+`edges_skipped_no_endpoint`. Vertices flushed before the fix keep their
+stale UID-index entries until rewritten.
 
 ## Admin Procedures
 

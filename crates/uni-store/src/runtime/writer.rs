@@ -40,12 +40,13 @@ use uni_xervo::traits::hybrid::{HeadSet, HybridEmbedResult};
 use uuid::Uuid;
 
 /// Convert per-token embedding vectors into the stored `List<Vector>` representation:
-/// a `Value::List` whose elements are each a `Value::List<Float>` (one token vector).
+/// a `Value::List` of `Value::Vector`s (one per token), the declared form. Float lists
+/// here would hash into a content UID the stored row never matches.
 fn multivec_to_value(tokens: &[Vec<f32>]) -> Value {
     Value::List(
         tokens
             .iter()
-            .map(|tok| Value::List(tok.iter().map(|f| Value::Float(*f as f64)).collect()))
+            .map(|tok| Value::Vector(tok.clone()))
             .collect(),
     )
 }
@@ -5603,10 +5604,9 @@ impl Writer {
 
             for (i, &row) in needs.iter().enumerate() {
                 if let Some(vec) = dense.as_ref().and_then(|d| d.get(i)) {
-                    let vals: Vec<Value> = vec.iter().map(|f| Value::Float(*f as f64)).collect();
                     for t in &group.dense {
                         if !properties_batch[row].contains_key(t) {
-                            properties_batch[row].insert(t.clone(), Value::List(vals.clone()));
+                            properties_batch[row].insert(t.clone(), Value::Vector(vec.clone()));
                         }
                     }
                 }
@@ -5701,10 +5701,9 @@ impl Writer {
             if let Some(vec) = dense.as_ref().and_then(|d| d.first()) {
                 // Alias-naming guard for the schema/model width mismatch (issue #137).
                 Self::check_dense_embed_dims(&schema, label, alias, &group.dense, vec.len())?;
-                let vals: Vec<Value> = vec.iter().map(|f| Value::Float(*f as f64)).collect();
                 for t in &group.dense {
                     if !properties.contains_key(t) {
-                        properties.insert(t.clone(), Value::List(vals.clone()));
+                        properties.insert(t.clone(), Value::Vector(vec.clone()));
                     }
                 }
             }

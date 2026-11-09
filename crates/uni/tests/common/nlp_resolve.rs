@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use async_trait::async_trait;
+use uni_db::api::fork_diff::PromotePattern;
 use uni_db::locy::CommandResult;
 use uni_db::{
     DataType, EmbeddingCfg, IndexType, ModelAliasSpec, ModelTask, Uni, Value, VectorAlgo,
@@ -91,6 +92,33 @@ MATCH (m:Mention) WHERE NOT (m)-[:REFERS_TO]->()
 MERGE (e:Entity {name: m.text, type: m.type})
 CREATE (m)-[:REFERS_TO]->(e)
 "#;
+
+/// Stores each extracted fact as a `:Claim` whose head and tail are
+/// `:Mention`s, so resolution links claims to entities. The docs page shows
+/// the same statement with `schema: 'graph'`. A mention is keyed by where it
+/// occurs; a speaker has no span, so its offsets are stored as -1.
+const STORE_CLAIMS: &str = "
+MATCH (d:Document {id: $doc})
+CALL uni.nlp.extract($input, $options)
+YIELD head_text, head_type, head_start, head_turn, relation,
+      tail_text, tail_type, tail_start, tail_turn, polarity, modality, margin,
+      model_alias, model_id
+WHERE modality IN ['asserted', 'reported']
+MERGE (h:Mention {doc: d.id, turn: coalesce(head_turn, -1),
+                  start: coalesce(head_start, -1), text: head_text, type: head_type})
+MERGE (t:Mention {doc: d.id, turn: coalesce(tail_turn, -1),
+                  start: coalesce(tail_start, -1), text: tail_text, type: tail_type})
+CREATE (c:Claim {relation: relation, polarity: polarity, modality: modality,
+                 margin: margin, model_alias: model_alias, model_id: model_id})
+CREATE (c)-[:HEAD]->(h), (c)-[:TAIL]->(t), (c)-[:FROM]->(d)
+";
+
+/// Claims over resolved entities, as `head relation tail`, sorted.
+const RESOLVED_CLAIMS: &str = "
+MATCH (c:Claim)-[:HEAD]->(:Mention)-[:REFERS_TO]->(h:Entity),
+      (c)-[:TAIL]->(:Mention)-[:REFERS_TO]->(t:Entity)
+RETURN h.name + ' ' + c.relation + ' ' + t.name AS claim ORDER BY claim
+";
 
 const DIM: usize = 64;
 
@@ -200,7 +228,12 @@ async fn db_with_models() -> Result<Uni> {
         .catalog(vec![spec("nlp/default", "mock-v7"), embed_spec()])
         .build()
         .await?;
-    let db = Uni::temporary().xervo_runtime(runtime).build().await?;
+    with_resolution_schema(Uni::temporary().xervo_runtime(runtime).build().await?).await
+}
+
+/// The `Entity` / `Mention` / `Document` / `Chunk` schema the docs use,
+/// names embedded on write by the `embed/names` alias.
+async fn with_resolution_schema(db: Uni) -> Result<Uni> {
     db.schema()
         .label("Entity")
         .property("name", DataType::String)
@@ -211,8 +244,14 @@ async fn db_with_models() -> Result<Uni> {
         .label("Mention")
         .property("text", DataType::String)
         .property("type", DataType::String)
+        .property_nullable("doc", DataType::String)
+        .property_nullable("turn", DataType::Int64)
+        .property_nullable("start", DataType::Int64)
         .vector("embedding", DIM)
         .index("embedding", name_index("text"))
+        .done()
+        .label("Document")
+        .property("id", DataType::String)
         .done()
         .label("Chunk")
         .property("text", DataType::String)
@@ -593,5 +632,378 @@ async fn variants_of_a_new_name_in_one_batch_make_one_entity() -> Result<()> {
     );
     resolve(&db).await?;
     assert_eq!(links(&db).await?, expected);
+    Ok(())
+}
+
+fn turns(speaker: &str, text: &str) -> Value {
+    let turn: HashMap<String, Value> = [
+        ("speaker".to_owned(), Value::String(speaker.to_owned())),
+        ("text".to_owned(), Value::String(text.to_owned())),
+    ]
+    .into_iter()
+    .collect();
+    Value::List(vec![Value::Map(turn)])
+}
+
+/// Extraction options as a Cypher value: relation names and entity types.
+fn options(relations: &[&str], entity_types: &[&str]) -> Value {
+    let strings =
+        |xs: &[&str]| Value::List(xs.iter().map(|x| Value::String((*x).to_owned())).collect());
+    Value::Map(
+        [
+            ("relations".to_owned(), strings(relations)),
+            ("entity_types".to_owned(), strings(entity_types)),
+        ]
+        .into_iter()
+        .collect(),
+    )
+}
+
+async fn store_claims(db: &Uni, doc: &str, input: Value) -> Result<()> {
+    store_claims_with(db, doc, input, options(&["knows"], &["person"])).await
+}
+
+async fn store_claims_with(db: &Uni, doc: &str, input: Value, options: Value) -> Result<()> {
+    let tx = db.session().tx().await?;
+    tx.execute_with(&format!("CREATE (:Document {{id: '{doc}'}})"))
+        .run()
+        .await?;
+    tx.execute_with(STORE_CLAIMS)
+        .param("doc", Value::String(doc.to_owned()))
+        .param("input", input)
+        .param("options", options)
+        .run()
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn resolved_claims(db: &Uni) -> Result<Vec<String>> {
+    let rows = db.session().query(RESOLVED_CLAIMS).await?;
+    rows.rows()
+        .iter()
+        .map(|r| Ok(r.get::<String>("claim")?))
+        .collect()
+}
+
+#[tokio::test]
+async fn claims_from_documents_and_conversations_meet_at_resolved_entities() -> Result<()> {
+    let db = db_with_models().await?;
+    let tx = db.session().tx().await?;
+    tx.execute(
+        "CREATE (:Entity {name: 'Ada Lovelace', type: 'person'}), \
+                (:Entity {name: 'Charles Babbage', type: 'person'})",
+    )
+    .await?;
+    tx.commit().await?;
+
+    // Prose names people by surname; conversations add a speaker, whom the
+    // model types `speaker` and gives no span.
+    store_claims(
+        &db,
+        "letter",
+        Value::String("from Lovelace to Babbage".into()),
+    )
+    .await?;
+    store_claims(&db, "chat-1", turns("ada", "I wrote to Babbage")).await?;
+    store_claims(&db, "chat-2", turns("ada", "then Hopper called")).await?;
+    assert_eq!(count(&db, "MATCH (c:Claim) RETURN count(c) AS n").await?, 3);
+    // Before resolution no claim reaches an entity.
+    assert!(resolved_claims(&db).await?.is_empty());
+
+    resolve(&db).await?;
+    assert_eq!(
+        resolved_claims(&db).await?,
+        vec![
+            "Ada Lovelace knows Charles Babbage",
+            "ada knows Charles Babbage",
+            "ada knows Hopper",
+        ]
+    );
+    // The speaker of both conversations is one entity, typed apart from
+    // people, so it never merges with "Ada Lovelace".
+    assert_eq!(
+        count(
+            &db,
+            "MATCH (e:Entity {name: 'ada', type: 'speaker'}) RETURN count(e) AS n"
+        )
+        .await?,
+        1
+    );
+    assert_eq!(
+        count(&db, "MATCH (e:Entity) RETURN count(e) AS n").await?,
+        4
+    );
+    // Every mention resolved exactly once.
+    assert_eq!(
+        count(
+            &db,
+            "MATCH (m:Mention) WHERE NOT (m)-[:REFERS_TO]->() RETURN count(m) AS n"
+        )
+        .await?,
+        0
+    );
+    assert_eq!(
+        count(
+            &db,
+            "MATCH (:Mention)-[r:REFERS_TO]->() RETURN count(r) AS n"
+        )
+        .await?,
+        6
+    );
+
+    // A later document joins the entities earlier runs created.
+    store_claims(&db, "chat-3", turns("ada", "met Hopper again")).await?;
+    resolve(&db).await?;
+    assert_eq!(
+        resolved_claims(&db).await?,
+        vec![
+            "Ada Lovelace knows Charles Babbage",
+            "ada knows Charles Babbage",
+            "ada knows Hopper",
+            "ada knows Hopper",
+        ]
+    );
+    assert_eq!(
+        count(&db, "MATCH (e:Entity) RETURN count(e) AS n").await?,
+        4
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resolution_in_a_fork_is_reviewed_then_promoted() -> Result<()> {
+    let db = db_with_models().await?;
+    let tx = db.session().tx().await?;
+    tx.execute(
+        "CREATE (:Entity {name: 'Ada Lovelace', type: 'person'}), \
+                (:Mention {text: 'Lovelace', type: 'person'}), \
+                (:Mention {text: 'Hopper', type: 'person'})",
+    )
+    .await?;
+    tx.commit().await?;
+    db.flush().await?;
+
+    {
+        let fork = db.session().fork("review").await?;
+        let tx = fork.tx().await?;
+        tx.locy(RESOLVE).await?;
+        tx.commit().await?;
+        let rows = fork
+            .query(
+                "MATCH (m:Mention)-[:REFERS_TO]->(e:Entity) \
+                 RETURN m.text + '->' + e.name AS l ORDER BY l",
+            )
+            .await?;
+        let in_fork: Vec<String> = rows
+            .rows()
+            .iter()
+            .map(|r| r.get::<String>("l"))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(in_fork, vec!["Hopper->Hopper", "Lovelace->Ada Lovelace"]);
+    }
+    // Primary is untouched until the merges are accepted.
+    assert!(links(&db).await?.is_empty());
+    assert_eq!(
+        count(&db, "MATCH (e:Entity) RETURN count(e) AS n").await?,
+        1
+    );
+
+    // The diff is what a reviewer reads: one new entity, two links.
+    let diff = db.diff_fork_primary("review").await?;
+    let new_entities: Vec<&str> = diff
+        .vertices
+        .added
+        .iter()
+        .filter(|v| v.label == "Entity")
+        .filter_map(|v| v.properties.get("name").and_then(Value::as_str))
+        .collect();
+    assert_eq!(new_entities, vec!["Hopper"]);
+    assert_eq!(
+        diff.edges
+            .added
+            .iter()
+            .filter(|e| e.edge_type == "REFERS_TO")
+            .count(),
+        2
+    );
+
+    let report = db
+        .promote_from_fork(
+            "review",
+            &[
+                PromotePattern::label("Entity"),
+                PromotePattern::edge_type("REFERS_TO"),
+            ],
+        )
+        .await?;
+    assert_eq!(report.vertices_inserted, 1);
+    assert_eq!(report.edges_inserted, 2);
+    let expected = vec![
+        ("Hopper".to_owned(), "Hopper".to_owned()),
+        ("Lovelace".to_owned(), "Ada Lovelace".to_owned()),
+    ];
+    assert_eq!(links(&db).await?, expected);
+
+    // Promoted links count as resolved: re-running on primary adds nothing.
+    resolve(&db).await?;
+    assert_eq!(links(&db).await?, expected);
+    assert_eq!(
+        count(&db, "MATCH (e:Entity) RETURN count(e) AS n").await?,
+        2
+    );
+    Ok(())
+}
+
+/// The claims-to-entities path on the real kniv v7 model: a letter names
+/// Babbage in full, a conversation by surname, and both claims reach one
+/// entity. Names are embedded by the trigram mock. Downloads ~2 GB from the
+/// Hugging Face Hub on first run.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "downloads the ~2 GB kniv-v7-xlarge-u-en model"]
+async fn real_kniv_v7_claims_resolve_across_documents() -> Result<()> {
+    let mut catalog = uni_db::xervo_catalog_from_str(
+        r#"[{
+            "alias": "nlp/default",
+            "task": "nlp",
+            "provider_id": "local/onnx",
+            "model_id": "dragonscale-ai/kniv-v7-xlarge-u-en",
+            "warmup": "lazy",
+            "options": {"variant": "int8,fp16", "execution_providers": ["cpu"]}
+        }]"#,
+    )?;
+    catalog.push(embed_spec());
+    let runtime = ModelRuntime::builder()
+        .register_provider(uni_xervo::provider::LocalOnnxProvider::new())
+        .register_provider(TrigramProvider)
+        .catalog(catalog)
+        .build()
+        .await?;
+    let db = with_resolution_schema(Uni::temporary().xervo_runtime(runtime).build().await?).await?;
+    // Loading (and on first run downloading) the model takes longer than the
+    // default query timeout.
+    db.xervo().prefetch(&["nlp/default"]).await?;
+    let opts = || {
+        options(
+            &["lives in", "employer"],
+            &["location", "organization", "person"],
+        )
+    };
+    store_claims_with(
+        &db,
+        "letter",
+        Value::String("Charles Babbage lives in London and works for the Royal Society.".into()),
+        opts(),
+    )
+    .await?;
+    store_claims_with(
+        &db,
+        "chat",
+        turns("ada", "Babbage still lives in London."),
+        opts(),
+    )
+    .await?;
+    let mentions = db
+        .session()
+        .query("MATCH (m:Mention) RETURN m.doc + ':' + m.text AS m ORDER BY m")
+        .await?;
+    let mentions: Vec<String> = mentions
+        .rows()
+        .iter()
+        .map(|r| r.get::<String>("m"))
+        .collect::<Result<_, _>>()?;
+    assert!(
+        mentions.contains(&"letter:Charles Babbage".to_owned())
+            && mentions.contains(&"chat:Babbage".to_owned()),
+        "the model's extraction changed: {mentions:?}"
+    );
+
+    resolve(&db).await?;
+    assert_eq!(
+        count(
+            &db,
+            "MATCH (m:Mention) WHERE NOT (m)-[:REFERS_TO]->() RETURN count(m) AS n"
+        )
+        .await?,
+        0
+    );
+    // Both claims, one from each source, are about the same two entities.
+    assert_eq!(
+        resolved_claims(&db).await?,
+        vec![
+            "Charles Babbage lives in London",
+            "Charles Babbage lives in London"
+        ],
+        "{:?}",
+        links(&db).await?
+    );
+    assert_eq!(
+        count(
+            &db,
+            "MATCH (e:Entity) WHERE e.name IN ['Charles Babbage', 'London'] RETURN count(e) AS n"
+        )
+        .await?,
+        2
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn hundreds_of_mentions_resolve_within_the_default_timeout() -> Result<()> {
+    // 300 mentions against 300 entities: half are surnames of existing
+    // entities, half are new names. `DERIVE refers_to` used to re-join its
+    // clause by materialising the 90,000-pair cartesian product of the
+    // MATCH and scanning the facts for each pair, and timed out at 30 s;
+    // it now narrows the MATCH to the pairs `resolved` holds.
+    const N: usize = 300;
+    let db = db_with_models().await?;
+    let entities: Vec<String> = (0..N).map(|i| format!("'Known{i} Person{i}'")).collect();
+    let mentions: Vec<String> = (0..N)
+        .map(|i| {
+            if i % 2 == 0 {
+                format!("'Person{i}'")
+            } else {
+                format!("'New{i} Name{i}'")
+            }
+        })
+        .collect();
+    let tx = db.session().tx().await?;
+    tx.execute(&format!(
+        "UNWIND [{}] AS name CREATE (:Entity {{name: name, type: 'person'}})",
+        entities.join(", ")
+    ))
+    .await?;
+    tx.execute(&format!(
+        "UNWIND [{}] AS text CREATE (:Mention {{text: text, type: 'person'}})",
+        mentions.join(", ")
+    ))
+    .await?;
+    tx.commit().await?;
+
+    resolve(&db).await?;
+    assert_eq!(
+        count(
+            &db,
+            "MATCH (m:Mention)-[:REFERS_TO]->(e:Entity) \
+             WHERE e.name ENDS WITH ' ' + m.text RETURN count(m) AS n"
+        )
+        .await?,
+        (N / 2) as i64,
+        "every surname reaches its entity"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "MATCH (m:Mention)-[:REFERS_TO]->(e:Entity) \
+             WHERE e.name = m.text RETURN count(m) AS n"
+        )
+        .await?,
+        (N / 2) as i64,
+        "every new name gets an entity of its own"
+    );
+    assert_eq!(
+        count(&db, "MATCH (e:Entity) RETURN count(e) AS n").await?,
+        (N + N / 2) as i64
+    );
     Ok(())
 }
