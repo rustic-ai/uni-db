@@ -148,8 +148,11 @@ MERGE (e:Entity {name: text, type: entity_type})
 MERGE (c)-[:MENTIONS]->(e)
 ```
 
-To extract only the chunks a write adds, run the same statement from a
-declared trigger; [NLP Extraction](../features/nlp-extraction.md) shows how.
+`MERGE` on name joins only identical spellings; to link "verify" and
+"verify()" to one entity, see
+[Resolving Entities](../features/nlp-extraction.md#resolving-entities). To
+extract only the chunks a write adds, run the same statement from a declared
+trigger; [NLP Extraction](../features/nlp-extraction.md) shows how.
 `uni.nlp.extract` goes one step further and yields typed facts between the
 entities, which can become `RELATED_TO` edges.
 

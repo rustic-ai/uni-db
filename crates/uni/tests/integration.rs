@@ -192,6 +192,8 @@ mod multivector_muvera;
 mod multivector_snapshot;
 #[path = "common/nlp_extract.rs"]
 mod nlp_extract;
+#[path = "common/nlp_resolve.rs"]
+mod nlp_resolve;
 #[path = "common/recovery_index_no_rebuild.rs"]
 mod recovery_index_no_rebuild;
 #[path = "common/schemaless_multihop_intermediate_props.rs"]

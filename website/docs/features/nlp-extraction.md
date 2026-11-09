@@ -181,8 +181,11 @@ and `model_alias, model_id`.
 - **`negative`** polarity is evidence *against* the same
   `(head, relation, tail)`, not a separate fact.
 - Tune a relation that fires too eagerly with `rel_offsets`, not by filtering
-  on `margin`. To turn margins into probabilities, label a sample and use
-  Locy's `CALIBRATE` / `VALIDATE` ([Neural Predicates](neural-predicates.md)).
+  on `margin`. `confidence` is not a calibrated probability: to see how far
+  it is from one, yield it `AS PROB` from a rule and score that rule against
+  a labelled sample with Locy's `VALIDATE`
+  ([Neural Predicates](../locy/advanced/neural-predicates.md#validate)).
+  `CALIBRATE` fits only `CREATE MODEL` predicates, not stored values.
 
 ## Storing Facts
 
@@ -207,12 +210,121 @@ CREATE (c)-[:HEAD]->(h), (c)-[:TAIL]->(t), (c)-[:FROM]->(d)
 A plain `(h)-[:LIVES_IN {margin: margin}]->(t)` edge is enough when you don't
 need the holder, time or spans.
 
-Entities are only grouped **within one window**: "Ada Lovelace" in two
-documents comes back as two entities. Matching them to existing nodes (by
-normalised name, then `uni.vector.query` over an embedded name property) is
-up to you for now. A rule-based approach in Locy, with `same_as … AS PROB`
-calibrated against known matches, is described in the
-[design proposal](https://github.com/rustic-ai/uni-db/blob/main/docs/proposals/kniv_v7_nlp_extraction_2026_11_07.md).
+The `MERGE` on name and type above only joins identical spellings.
+Entities are grouped **within one window**: "Ada Lovelace" in one document
+and "Lovelace" in another come back as unrelated entities. Resolving them is
+the next step.
+
+## Resolving Entities
+
+Resolution decides which extracted mention names which existing node. Here
+it is a Locy program, so the matching policy is a few rules you can read,
+version and explain, rather than code. Store each mention as a node first,
+with its name embedded on write:
+
+```cypher
+// Schema: :Mention {text, type, embedding} and :Entity {name, type, embedding},
+// each embedding index auto-embedding the name ('text' / 'name').
+MATCH (c:Chunk)
+CALL uni.nlp.entities(c.text, {entity_types: ['person', 'organization']})
+YIELD text, entity_type
+CREATE (c)-[:MENTIONS]->(:Mention {text: text, type: entity_type})
+```
+
+Then run the program in a transaction:
+
+```locy
+// One clause per signal that mention m names entity e, each with a weight.
+CREATE RULE match_evidence AS
+MATCH (m:Mention), (e:Entity)
+WHERE NOT (m)-[:REFERS_TO]->() AND m.type = e.type
+  AND toLower(m.text) = toLower(e.name)
+YIELD KEY m, KEY e, 0.9 AS p
+
+CREATE RULE match_evidence AS              // a surname: "Lovelace"
+MATCH (m:Mention), (e:Entity)
+WHERE NOT (m)-[:REFERS_TO]->() AND m.type = e.type
+  AND toLower(e.name) ENDS WITH ' ' + toLower(m.text)
+YIELD KEY m, KEY e, 0.7 AS p
+
+CREATE RULE match_evidence AS              // a similar name
+MATCH (m:Mention), (e:Entity)
+WHERE NOT (m)-[:REFERS_TO]->() AND m.type = e.type
+  AND similar_to(m.embedding, e.embedding) >= 0.5
+YIELD KEY m, KEY e, similar_to(m.embedding, e.embedding) * 0.8 AS p
+
+// Combine a pair's signals with noisy-OR; keep pairs above the threshold.
+CREATE RULE same_as AS
+MATCH (m:Mention), (e:Entity)
+WHERE (m, e, p) IS match_evidence
+FOLD prob = MNOR(p)
+WHERE prob >= 0.75
+YIELD KEY m, KEY e, prob AS PROB
+
+// The best match per mention.
+CREATE RULE resolved AS
+MATCH (m:Mention), (e:Entity)
+WHERE (m, e, prob) IS same_as
+BEST BY prob DESC
+YIELD KEY m, e, prob
+
+CREATE RULE refers_to AS
+MATCH (m:Mention), (e:Entity)
+WHERE (m, e) IS resolved
+DERIVE (m)-[:REFERS_TO]->(e)
+
+DERIVE refers_to
+
+// A mention nothing matched names a new entity.
+MATCH (m:Mention) WHERE NOT (m)-[:REFERS_TO]->()
+MERGE (e:Entity {name: m.text, type: m.type})
+CREATE (m)-[:REFERS_TO]->(e)
+```
+
+```python
+with session.tx() as tx:
+    tx.locy(RESOLVE)
+    tx.commit()
+```
+
+How it behaves:
+
+- **Signals add up.** "Lovelace" against "Ada Lovelace" gets 0.7 from the
+  surname clause and, at a name similarity of 0.75, 0.6 from the similarity
+  clause, so `MNOR = 1 − 0.3 × 0.4 = 0.88` clears the 0.75 threshold.
+  Neither signal would on its own.
+- **Types must agree.** A mention typed `person` never resolves to a
+  `location`, however similar the names.
+- **Re-running is safe.** `DERIVE` creates an edge every time it runs, as
+  Cypher `CREATE` does, so every evidence clause skips mentions that already
+  have a `REFERS_TO`. Run the program after each batch of extraction, and it
+  only resolves what is new.
+- **New names are created once.** Two unmatched mentions of "Grace Hopper" in
+  one batch `MERGE` to one entity, and a later "Hopper" joins it through the
+  surname clause.
+- **Every merge is explainable.** `EXPLAIN RULE same_as WHERE m.text =
+  'Lovelace'` lists the evidence rows behind each pair, one per clause that
+  fired, with their weights.
+
+The weights and the threshold are policy: change them in the program, not in
+code. They are hand-set, not learned (`CALIBRATE` fits only
+[neural predicates](../locy/advanced/neural-predicates.md)), but you can
+measure them. Give a sample of mentions the name of the entity each really
+refers to, and score `same_as` against it:
+
+```locy
+VALIDATE same_as ON MATCH (m:Mention), (e:Entity)
+TARGET e.name = m.gold
+METRICS brier_score, accuracy
+```
+
+`VALIDATE` scores only the pairs `same_as` derives, so it shows wrong merges
+above the threshold, not matches the threshold missed: lower the threshold
+while validating to see those. Every evidence clause pairs each unresolved mention with each
+entity of its type, so resolve in batches rather than over a whole backlog,
+and add type-specific signals (an e-mail, a ticker) as more clauses. To
+review merges before they land, run the program in a [fork](forks.md) and
+`promote` what you accept.
 
 ## Extracting on Write
 
@@ -253,7 +365,7 @@ is the curation path for low-confidence results.
 | Runs | in-process, CPU, no network | remote API or `llama-server` |
 | Cost at volume | fixed, ~0.5 s per 200-word window | per token |
 | Repeatability | deterministic for a model, schema and calibration | sampling-dependent |
-| Tuning | `rel_offsets`, `CALIBRATE` against labels | prompt edits |
+| Tuning | `rel_offsets`, `VALIDATE` against labels | prompt edits |
 | Languages | English only | many |
 | Complex or implicit relations | what the window states | stronger |
 | Privacy | text never leaves the process | depends on the provider |

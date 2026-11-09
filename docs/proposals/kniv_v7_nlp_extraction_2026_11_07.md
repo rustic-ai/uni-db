@@ -1,7 +1,16 @@
 # Proposal: text-to-graph extraction with kniv v7 (`uni.nlp.*`)
 
-Status: **Phases 1–2 implemented** (rev. 4); phases 3–5 proposed.
-Date: 2026-11-07 (rev. 2, 3 and 4: 2026-11-08)
+Status: **Phases 1–3 implemented** (rev. 5); phases 4–5 proposed.
+Date: 2026-11-07 (rev. 2, 3 and 4: 2026-11-08; rev. 5: 2026-11-08)
+
+Revision 5: phase 3 ships as a tested Locy program (§6), not engine code.
+Running the rev. 2 sketch corrected it in four places: `MNOR` is a `FOLD`
+over evidence clauses, not a function of two scores; `BEST BY` cannot share
+a rule with `MNOR`, so the best match is its own rule; `DERIVE` creates an
+edge on every run, so evidence skips resolved mentions; and `CALIBRATE` fits
+only `CREATE MODEL` predicates, so a rule's threshold is measured with
+`VALIDATE` instead. The last also corrects what §4.1 and §10 said about
+calibrating `confidence`.
 
 Revision 4: span offsets count **characters** (Unicode scalar values), not
 UTF-8 bytes. Cypher's `substring()` and Python's `str` index by character,
@@ -157,8 +166,8 @@ list. `uni.nlp.entities` accepts no relations and requests only
 `NlpTasks::ENTITIES`, which skips the relation pass entirely.
 
 There is deliberately **no `min_confidence`**. The model's documented tuning
-path is `rel_offsets`, and Locy already has `CALIBRATE` and `VALIDATE` for
-turning scores into probabilities against labelled data. A second threshold
+path is `rel_offsets`, and Locy's `VALIDATE` already measures a score
+against labelled data. A second threshold
 knob would duplicate both and contradict "simplicity over generality".
 
 Yield columns. Built-in procedures yield **flat scalar columns**; lists and
@@ -180,7 +189,7 @@ maps become opaque `LargeBinary` CypherValue columns (see
 | `relation` | string | The relation **as the caller named it**; under `schema: "graph"`, the edge type name (§4.3). |
 | `polarity` | string | `FactPolarity::as_str()`: `positive` or `negative`. |
 | `modality` | string | `FactModality::as_str()`. |
-| `margin` | float | Raw calibrated margin, always > 0. The value to feed `CALIBRATE`. |
+| `margin` | float | Raw calibrated margin, always > 0. |
 | `confidence` | float | `1 / (1 + e^-margin)`. A monotone convenience for rules that want a [0, 1] input without a sigmoid in Cypher. **Not a calibrated probability**; the docs must say so and point at `CALIBRATE`. |
 | `model_alias`, `model_id` | string | The catalog alias and the model's id, for provenance (§5.2). The resolved revision is not available (rev. 3). |
 
@@ -341,51 +350,61 @@ is what phase 5 automates.
 
 ## 6. Phase 3: entity resolution in Locy
 
-Entities and coreference links hold **within one window**: "Ada Lovelace" in
-two documents comes back as two unrelated entities. Resolution is where
-Graphiti and Neo4j's pipeline do real work, with LLM-based deduplication.
-uni-db can do it **declaratively**, which no competitor offers, and
-`EXPLAIN RULE` then shows why two mentions were merged.
+Implemented (rev. 5) as a Locy program, with no engine change. Entities and
+coreference links hold **within one window**: "Ada Lovelace" in two
+documents comes back as two unrelated entities. Graphiti and Neo4j's
+pipeline resolve them with LLM-based deduplication; here the policy is rules
+the user can read, version and explain, and `EXPLAIN RULE` shows why two
+mentions were merged.
 
-Sketch (syntax to be validated against a running database):
+Extraction stores each mention as a `:Mention {text, type}` node whose name
+is auto-embedded, next to `:Entity {name, type}` nodes embedded the same
+way. The program (`website/docs/features/nlp-extraction.md#resolving-entities`,
+kept in step with `RESOLVE` in `crates/uni/tests/common/nlp_resolve.rs`):
 
-```locy
-// Candidate extracted mentions land as :Mention nodes with text, type, and
-// an auto-embedded name vector.
-CREATE RULE same_as AS
-MATCH (m:Mention), (n:Person)
-WHERE m.type = 'person'
-FOLD p = MNOR(
-  CASE WHEN lower(m.text) = lower(n.name) THEN 0.95 ELSE 0.0 END,
-  similar_to(m.name_vec, n.name_vec) * 0.8)
-YIELD KEY m, KEY n, p AS PROB
+- **`match_evidence`**, one clause per signal, each yielding a weight `p` for
+  a `(mention, entity)` pair of the same type: exact name (0.9), surname
+  (0.7) and name similarity (`similar_to × 0.8`, from 0.5 up).
+- **`same_as`** folds a pair's evidence with `MNOR` and keeps pairs at or
+  above 0.75, yielding the result `AS PROB`.
+- **`resolved`** keeps each mention's best match with `BEST BY prob DESC`.
+- **`refers_to`** `DERIVE`s `(m)-[:REFERS_TO]->(e)`, run by a `DERIVE`
+  command.
+- A final Cypher command `MERGE`s an entity for every mention still
+  unmatched, so repeated new names in one batch share one entity.
 
-CREATE RULE resolved AS
-MATCH (m:Mention)
-WHERE m IS same_as
-BEST BY same_as.p
-YIELD KEY m, same_as.n AS node
-```
+What running it settled, against the rev. 2 sketch:
 
-Points this design settles:
+- **`MNOR` is a fold, not a function.** `MNOR(a, b)` over two scores is not
+  Locy; one clause per signal into a rule that folds them is, and it reads
+  better: a new signal is a new clause.
+- **`BEST BY` and `MNOR` cannot share a rule** (`BestByWithMonotonicFold`),
+  hence `same_as` and `resolved` as two rules.
+- **`DERIVE` is not idempotent.** It creates an edge each time it runs, as
+  Cypher `CREATE` does, so every evidence clause starts with
+  `NOT (m)-[:REFERS_TO]->()`: re-running resolves only new mentions.
+- **No `CALIBRATE` for rules.** `CALIBRATE` fits `CREATE MODEL` predicates.
+  `VALIDATE` does take a rule with a `PROB` column, joining its facts to
+  labelled rows by `KEY`, so `VALIDATE same_as … TARGET e.name = m.gold`
+  measures the policy. It sees only pairs above the threshold, so recall is
+  measured by validating with a lower one.
+- **Speakers** resolve the same way once they are stored as mentions; the
+  program needs no special case.
+- **Forks.** Running resolution in a fork and reviewing the `diff` before
+  `promote` remains the curation path for low-confidence merges; it falls out
+  of the existing promote path and is not separately tested.
 
-- **Policy is a rule, not code.** Exact-name weight, similarity weight, type
-  agreement and a merge threshold are all in the program and version
-  controlled. The threshold is the `PROB` cut the consuming rule applies.
-- **Calibration applies.** `CALIBRATE same_as` against a labelled sample of
-  known matches turns the ad-hoc weights into a calibrated probability, and
-  `VALIDATE` reports Brier and ECE. This is the same machinery neural
-  predicates use.
-- **Speakers** resolve by name to whatever node the application uses for
-  participants, through the same rule with `m.speaker = true`.
-- **No match** means a new node. The consuming Cypher does
-  `MERGE` on the resolved node or `CREATE` when `resolved` has no row.
-- **Forks.** Running resolution and claim creation inside a fork, then
-  reviewing the `diff` before `promote`, is the curation path for
-  low-confidence merges.
+Tests: `crates/uni/tests/common/nlp_resolve.rs` runs the program over
+mentions extracted by the mock kniv v7 model and embedded by a trigram mock,
+checks re-running is idempotent and that a later mention joins an entity a
+previous run created, that the best of two candidates wins and types must
+agree, that weak evidence makes a new entity, that `EXPLAIN RULE` lists the
+two clauses behind a merge, and that `VALIDATE` scores `same_as` and stored
+`confidence` against labels.
 
-A later phase may move the common case (exact name, then vector, then
-create) into a built-in rule module so users start from a working default.
+Not done: a built-in rule module with this program as a default. Locy has no
+mechanism for shipping a module with the engine, and the program is short
+enough to copy and adjust; revisit if users ask for one.
 
 ## 7. Later phases
 
@@ -463,8 +482,11 @@ Open items, none of which block shipping the pattern as documentation:
 
 - **Idempotency.** `UPDATE ON :Document` must delete the document's old
   claims and insert the new ones in the trigger's transaction (§5.3).
-- **Resolution.** The action can call the §6 rules through `QUERY`, once the
-  syntax is validated.
+- **Resolution.** A trigger action is Cypher, and no procedure runs a Locy
+  program from Cypher, so the action cannot run §6 itself (rev. 5). Run the
+  §6 program after each extraction batch from the application, which is
+  safe because it is idempotent; a `uni.locy.run`-style procedure would close
+  the gap.
 - **Deferral.** A trigger action that fails (model not loaded yet) should use
   `TriggerDeferral::after` rather than drop the document; verify that the
   declared-trigger path exposes it.
@@ -484,7 +506,7 @@ facts. The right answer is both, and the docs should say which to use when:
 | Runs | in-process, CPU, no network | remote API or `llama-server` |
 | Cost at volume | fixed, ~0.5 s per 200-word window | per token |
 | Repeatability | deterministic for a given model, schema and calibration | sampling-dependent |
-| Tuning | `rel_offsets`, `CALIBRATE` against labels | prompt edits |
+| Tuning | `rel_offsets`, `VALIDATE` against labels | prompt edits |
 | Attributes | polarity, modality, holder, time extracted as signals | whatever the prompt asks, judged by the model |
 | Languages | English only | many |
 | Complex or implicit relations | limited to what the window states | stronger |
@@ -520,8 +542,9 @@ Risks:
 - **Latency.** Quadratic in entities per window. Long entity-type lists are
   the usual cause of slow calls; schema subsets (§4.3) are the mitigation.
 - **`confidence` is not calibrated.** It is a sigmoid of a margin. Rules
-  that need a probability should calibrate (`CALIBRATE`) rather than trust
-  it.
+  that need a probability should measure it with `VALIDATE` rather than
+  trust it. (Rev. 5: earlier revisions said `CALIBRATE`, which fits only
+  `CREATE MODEL` predicates.)
 - **Schema wording dominates results.** Near-synonym relations split the
   decision between them, and generic relations (`related to`) attract
   everything. The docs page must carry uni-xervo's naming guidance.

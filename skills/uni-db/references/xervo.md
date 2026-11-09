@@ -359,9 +359,14 @@ YIELD entity, text, entity_type, mentions, mention_starts, mention_ends RETURN *
 - **Spans** are character offsets (as `substring()` counts) into the text, or into the turn named by
   `head_turn` / `tail_turn` for a conversation. Speakers have none. Text
   columns are sliced from the input, so `AT&T` stays `AT&T`.
-- **`confidence`** is `sigmoid(margin)`, not a calibrated probability — use
-  Locy `CALIBRATE` against labels.
+- **`confidence`** is `sigmoid(margin)`, not a calibrated probability —
+  measure it with Locy `VALIDATE` on a rule that yields it `AS PROB`
+  (`CALIBRATE` fits only `CREATE MODEL` predicates).
 - A v1 `kniv-deberta-nlp-*` model is refused: it has no fact extraction.
+- **Resolution** of mentions to existing entities is a Locy program on the
+  NLP extraction docs page (evidence clauses → `MNOR` → `BEST BY` →
+  `DERIVE`). Every evidence clause must skip mentions that already have a
+  `REFERS_TO`: `DERIVE` creates an edge on every run.
 - **Prefetch first.** Loading the ~2 GB model on the first query exceeds the
   default query timeout; call `db.xervo().prefetch(["nlp/default"])` or use
   `"warmup": "eager"` / `"background"`.

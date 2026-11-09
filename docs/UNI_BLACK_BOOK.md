@@ -5397,9 +5397,37 @@ shape exist once.
 - **Provenance.** Rows carry `model_alias` and `model_id`. The resolved model
   revision is not available: `ModelInfo` exposes only `model_id` and the
   runtime cannot return a spec by alias.
-- **`confidence`** is `sigmoid(margin)`, a monotone convenience. Calibration
-  belongs to Locy's `CALIBRATE`, and per-relation thresholds to
-  `rel_offsets` (`NlpCalibrationOverrides::rel_offsets`).
+- **`confidence`** is `sigmoid(margin)`, a monotone convenience. Per-relation
+  thresholds belong to `rel_offsets` (`NlpCalibrationOverrides::rel_offsets`).
+  Locy's `VALIDATE` measures a rule's `PROB` column against labels, so it
+  can score `confidence` yielded `AS PROB`; `CALIBRATE` fits only
+  `CREATE MODEL` predicates and cannot rescale a stored value.
+
+### Entity resolution (a Locy program, not engine code)
+
+Extraction groups mentions only within a window, so matching a mention to an
+existing node is a separate step. It ships as a documented Locy program
+(`website/docs/features/nlp-extraction.md#resolving-entities`), tested
+verbatim as `RESOLVE` in `crates/uni/tests/common/nlp_resolve.rs`; change the
+two together. Its shape follows from Locy constraints worth knowing:
+
+- **One clause per signal.** `match_evidence` has a clause per signal (exact
+  name, surname, `similar_to` over auto-embedded names), each yielding a
+  weight for a same-type `(mention, entity)` pair. `same_as` folds them with
+  `MNOR` under a post-FOLD threshold and yields `AS PROB`.
+- **Best match is its own rule.** `BEST BY` and a lattice fold such as `MNOR`
+  cannot share a rule (`BestByWithMonotonicFold`), so `resolved` takes
+  `BEST BY prob DESC` over `same_as`.
+- **`DERIVE` creates, every run.** It has Cypher `CREATE` semantics, so each
+  evidence clause starts with `NOT (m)-[:REFERS_TO]->()`; that guard is what
+  makes the program idempotent. The trailing Cypher command `MERGE`s an
+  entity per unmatched mention.
+- **Measured with `VALIDATE`, not fitted.** `VALIDATE` joins a `PROB` rule's
+  facts to labelled rows by `KEY` (`locy_validate.rs`), so it scores
+  `same_as` directly; it sees only pairs above the threshold.
+- **No trigger path yet.** A declared trigger's action is Cypher, and no
+  procedure runs Locy from Cypher, so resolution runs from the application
+  after each extraction batch.
 
 ## Admin Procedures
 

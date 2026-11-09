@@ -29,7 +29,7 @@ use uni_xervo::traits::{
 };
 
 /// The schema the mock last received.
-type Seen = Arc<Mutex<Option<ExtractionSchema>>>;
+pub(crate) type Seen = Arc<Mutex<Option<ExtractionSchema>>>;
 
 struct MockKniv {
     seen: Seen,
@@ -156,8 +156,8 @@ impl NlpModel for MockKniv {
     }
 }
 
-struct MockProvider {
-    seen: Seen,
+pub(crate) struct MockProvider {
+    pub(crate) seen: Seen,
 }
 
 #[async_trait]
@@ -191,7 +191,7 @@ impl ModelProvider for MockProvider {
     }
 }
 
-fn spec(alias: &str, model_id: &str) -> ModelAliasSpec {
+pub(crate) fn spec(alias: &str, model_id: &str) -> ModelAliasSpec {
     ModelAliasSpec {
         alias: alias.into(),
         task: ModelTask::Nlp,
