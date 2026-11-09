@@ -1,7 +1,12 @@
 # Proposal: text-to-graph extraction with kniv v7 (`uni.nlp.*`)
 
-Status: **Phases 1–3 implemented** (rev. 6); phases 4–5 proposed.
-Date: 2026-11-07 (rev. 2, 3 and 4: 2026-11-08; rev. 5: 2026-11-08; rev. 6: 2026-11-09)
+Status: **Phases 1–3 and 2b implemented** (rev. 7); phases 4–5 proposed.
+Date: 2026-11-07 (rev. 2, 3 and 4: 2026-11-08; rev. 5: 2026-11-08; rev. 6 and 7: 2026-11-09)
+
+Revision 7: phase 2b ships as two procedures, `uni.nlp.words` and
+`uni.nlp.sentences`, not one `uni.nlp.analyze`: words and sentences are
+different row grains, and one procedure would repeat every sentence column
+on each of its words (§7.2).
 
 Revision 6: claims are stored against `:Mention`s, so resolution reaches
 them (§5.1, §6), and testing the full path (claims, speakers, a fork review,
@@ -469,10 +474,23 @@ Implemented (rev. 3). The shapes differ from rev. 2's sketch:
 
 ### 7.2 Phase 2b: linguistic procedures
 
-`uni.nlp.analyze` would yield per-word POS, lemma and dependency rows, and
-per-sentence sentiment and dialogue acts. It is useful for lemma-normalised
-search terms and conversation analytics. It is a separate procedure because
-its row grain (words) differs from facts.
+Implemented (rev. 7) as two procedures, because words and sentences are
+different row grains:
+
+- `uni.nlp.words(input, options)`: one row per word, with UD part of speech,
+  morphology, lemma, and dependency head and relation. Word, sentence and
+  head indices count across the document (every window), so `head` joins to
+  another row's `word`; a root has `head` null.
+- `uni.nlp.sentences(input, options)`: one row per sentence, with sentiment,
+  the dialogue acts above threshold (a list) and every act's probability
+  (a map built from `label_maps().cls`, which `cls_scores` is parallel to).
+
+`input` is as for extraction; `options` takes only `alias`. Each requests
+only its own heads (`POS | MORPH | LEMMA | DEP`, or `CLS | SENTIMENT`), and
+a model lacking them (a v1 cascade model has no lemmas or sentiment) is
+refused. The facade is `analyze_words` / `analyze_sentences` in Rust and
+Python. Code: `crates/uni-query/src/nlp/analyze.rs`. SRL frames, coreference
+clusters and OntoNotes NER spans remain unexposed.
 
 ### 7.3 Phase 4: Locy extraction operator
 

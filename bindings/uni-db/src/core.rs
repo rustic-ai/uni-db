@@ -382,6 +382,49 @@ pub async fn xervo_extract_entities_core(
     db.xervo().extract_entities(&input, &options).await
 }
 
+/// Parse NLP analysis arguments with the same rules as `uni.nlp.words` /
+/// `uni.nlp.sentences`.
+fn nlp_analyze_args(
+    input: &Value,
+    options: &Value,
+) -> Result<
+    (
+        ::uni_db::api::xervo::NlpInput,
+        ::uni_db::api::xervo::AnalyzeOptions,
+    ),
+    UniError,
+> {
+    use ::uni_db::api::xervo::{AnalyzeOptions, NlpInput};
+    let invalid = |arg: &str, err: &dyn std::fmt::Display| UniError::InvalidArgument {
+        arg: arg.to_string(),
+        message: err.to_string(),
+    };
+    let input = NlpInput::from_value(input).map_err(|e| invalid("input", &e))?;
+    let options = AnalyzeOptions::from_value(options).map_err(|e| invalid("options", &e))?;
+    Ok((input, options))
+}
+
+/// Analyse text word by word with a kniv v7 model (`uni.nlp.words` rows).
+pub async fn xervo_analyze_words_core(
+    db: &Uni,
+    input: Value,
+    options: Value,
+) -> Result<Vec<::uni_db::api::xervo::AnalyzedWord>, UniError> {
+    let (input, options) = nlp_analyze_args(&input, &options)?;
+    db.xervo().analyze_words(&input, &options).await
+}
+
+/// Analyse text sentence by sentence with a kniv v7 model (`uni.nlp.sentences`
+/// rows).
+pub async fn xervo_analyze_sentences_core(
+    db: &Uni,
+    input: Value,
+    options: Value,
+) -> Result<Vec<::uni_db::api::xervo::AnalyzedSentence>, UniError> {
+    let (input, options) = nlp_analyze_args(&input, &options)?;
+    db.xervo().analyze_sentences(&input, &options).await
+}
+
 /// Pre-load and cache specific Xervo model aliases.
 pub async fn xervo_prefetch_core(db: &Uni, aliases: Vec<String>) -> Result<(), UniError> {
     let xervo = db.xervo();

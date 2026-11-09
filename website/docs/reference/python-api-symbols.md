@@ -8,7 +8,7 @@ Complete symbol surface of the `uni_db` Python bindings, **generated from `bindi
 
 This page is exhaustive and always in sync with the type stubs — it is regenerated in CI. For narrative documentation, worked examples and the recommended patterns, start at the [Python API guide](python-api.md).
 
-**197 classes.**
+**199 classes.**
 
 ---
 
@@ -21,6 +21,58 @@ Result from a Locy ABDUCE command.
 | `command_type() -> str` *(property)* | — |
 | `modifications() -> list[dict[str, Any]]` *(property)* | — |
 | `__getitem__(key: str) -> Any` | — |
+
+---
+
+## `AnalyzedSentence`
+
+One sentence from ``Xervo.analyze_sentences``: the rows of ``uni.nlp.sentences``.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `doc` | `int` |
+| `window` | `int` |
+| `sentence` | `int` |
+| `text` | `str` |
+| `start` | `int | None` |
+| `end` | `int | None` |
+| `turn` | `int | None` |
+| `speaker` | `str | None` |
+| `sentiment` | `str | None` |
+| `acts` | `list[str]` |
+| `act_scores` | `dict[str, float]` |
+| `whole` | `bool` |
+| `model_alias` | `str` |
+| `model_id` | `str` |
+
+---
+
+## `AnalyzedWord`
+
+One word from ``Xervo.analyze_words``: the rows of ``uni.nlp.words``.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `doc` | `int` |
+| `window` | `int` |
+| `sentence` | `int | None` |
+| `word` | `int` |
+| `text` | `str` |
+| `start` | `int | None` |
+| `end` | `int | None` |
+| `turn` | `int | None` |
+| `speaker` | `str | None` |
+| `pos` | `str | None` |
+| `morph` | `str | None` |
+| `lemma` | `str | None` |
+| `head` | `int | None` |
+| `deprel` | `str | None` |
+| `model_alias` | `str` |
+| `model_id` | `str` |
 
 ---
 
@@ -587,6 +639,8 @@ Async facade for embedding and text generation.
 | `async generate_text(alias: str, prompt: str, max_tokens: int | None=None, temperature: float | None=None, top_p: float | None=None) -> GenerationResult` | — |
 | `async extract_facts(input: str | list[str] | list[dict[str, str]], *, alias: str | None=None, relations: list[str | dict[str, str | None]] | None=None, entity_types: list[str | dict[str, str | None]] | None=None, schema: str | dict[str, list[str]] | None=None, top_per_pair: int | None=None, rel_offsets: dict[str, float] | None=None) -> list[ExtractedFact]` | Extract facts with a kniv v7 model (the rows of ``uni.nlp.extract``). |
 | `async extract_entities(input: str | list[str] | list[dict[str, str]], *, alias: str | None=None, entity_types: list[str | dict[str, str | None]] | None=None, schema: str | dict[str, list[str]] | None=None) -> list[ExtractedEntity]` | Extract typed entities with a kniv v7 model (the rows of ``uni.nlp.entities``). |
+| `async analyze_words(input: str | list[str] | list[dict[str, str]], *, alias: str | None=None) -> list[AnalyzedWord]` | Analyse text word by word with a kniv v7 model (the rows of ``uni.nlp.words``). |
+| `async analyze_sentences(input: str | list[str] | list[dict[str, str]], *, alias: str | None=None) -> list[AnalyzedSentence]` | Analyse text sentence by sentence with a kniv v7 model (the rows of ``uni.nlp.sentences``). |
 
 ---
 
@@ -2963,6 +3017,8 @@ Synchronous facade for embedding and text generation.
 | `generate_text(alias: str, prompt: str, max_tokens: int | None=None, temperature: float | None=None, top_p: float | None=None) -> GenerationResult` | — |
 | `extract_facts(input: str | list[str] | list[dict[str, str]], *, alias: str | None=None, relations: list[str | dict[str, str | None]] | None=None, entity_types: list[str | dict[str, str | None]] | None=None, schema: str | dict[str, list[str]] | None=None, top_per_pair: int | None=None, rel_offsets: dict[str, float] | None=None) -> list[ExtractedFact]` | Extract facts with a kniv v7 model (the rows of ``uni.nlp.extract``). |
 | `extract_entities(input: str | list[str] | list[dict[str, str]], *, alias: str | None=None, entity_types: list[str | dict[str, str | None]] | None=None, schema: str | dict[str, list[str]] | None=None) -> list[ExtractedEntity]` | Extract typed entities with a kniv v7 model (the rows of ``uni.nlp.entities``). |
+| `analyze_words(input: str | list[str] | list[dict[str, str]], *, alias: str | None=None) -> list[AnalyzedWord]` | Analyse text word by word with a kniv v7 model (the rows of ``uni.nlp.words``). |
+| `analyze_sentences(input: str | list[str] | list[dict[str, str]], *, alias: str | None=None) -> list[AnalyzedSentence]` | Analyse text sentence by sentence with a kniv v7 model (the rows of ``uni.nlp.sentences``). |
 
 ---
 

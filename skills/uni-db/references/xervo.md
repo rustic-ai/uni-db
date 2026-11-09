@@ -346,6 +346,12 @@ RETURN *
 
 CALL uni.nlp.entities($text, {entity_types: ['person']})
 YIELD entity, text, entity_type, mentions, mention_starts, mention_ends RETURN *
+
+CALL uni.nlp.words($text)            // one row per word
+YIELD sentence, word, text, pos, morph, lemma, head, deprel RETURN *
+
+CALL uni.nlp.sentences($text)        // one row per sentence
+YIELD sentence, text, speaker, sentiment, acts, act_scores, whole RETURN *
 ```
 
 - **Options:** `alias`, `relations`, `entity_types`, `schema` (`'graph'` or
@@ -362,7 +368,16 @@ YIELD entity, text, entity_type, mentions, mention_starts, mention_ends RETURN *
 - **`confidence`** is `sigmoid(margin)`, not a calibrated probability —
   measure it with Locy `VALIDATE` on a rule that yields it `AS PROB`
   (`CALIBRATE` fits only `CREATE MODEL` predicates).
-- A v1 `kniv-deberta-nlp-*` model is refused: it has no fact extraction.
+- **Words and sentences:** `uni.nlp.words` / `uni.nlp.sentences` (and
+  `analyze_words()` / `analyze_sentences()` in Python and Rust) take the same
+  `input` and only `alias`. `word`, `sentence` and `head` count across the
+  whole document, so `head` joins to another row's `word`; a sentence root
+  has `head` null and `deprel` `root`. `pos`/`morph`/`deprel` are Universal
+  Dependencies. `acts` is a list (kniv v7: `Commissive`, `Directive`,
+  `Feedback`, `Inform`, `Question`, `Social`); `act_scores` maps each to a
+  probability. Punctuation is its own word.
+- A v1 `kniv-deberta-nlp-*` model is refused: it has no fact extraction,
+  lemmas or sentiment.
 - **Resolution** of mentions to existing entities is a Locy program on the
   NLP extraction docs page (evidence clauses → `MNOR` → `BEST BY` →
   `DERIVE`). Every evidence clause must skip mentions that already have a

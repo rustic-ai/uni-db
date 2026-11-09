@@ -3,7 +3,8 @@
 
 //! Text-to-graph extraction with a kniv v7 model, shared by the
 //! `uni.nlp.extract` / `uni.nlp.entities` procedures and the
-//! `UniXervo::extract_facts` / `extract_entities` facade.
+//! `UniXervo::extract_facts` / `extract_entities` facade. Per-word and
+//! per-sentence linguistic analysis lives in [`analyze`].
 //!
 //! The model analyses windows of whole sentences and reports typed entities
 //! and the facts between them, under an extraction schema supplied per
@@ -32,6 +33,12 @@ use uni_xervo::runtime::ModelRuntime;
 use uni_xervo::traits::{
     ExtractionSchema, LabelSpec, NlpCalibrationOverrides, NlpModel, NlpRequest, NlpResult,
     NlpTasks, NlpWindow, Turn,
+};
+
+pub mod analyze;
+
+pub use analyze::{
+    AnalyzeKind, AnalyzeOptions, AnalyzeRows, AnalyzedSentence, AnalyzedWord, run_analyze,
 };
 
 /// The catalog alias used when the caller names none.

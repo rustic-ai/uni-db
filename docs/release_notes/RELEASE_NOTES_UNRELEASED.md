@@ -70,6 +70,16 @@ nothing changes apart from the batch-size default.
   `ExtractedFact` / `ExtractedEntity` data classes). Rust also gains
   `db.xervo().nlp(alias, requests)`, the raw per-window uni-xervo analysis.
   See `website/docs/features/nlp-extraction.md`.
+- **Word and sentence analysis: `uni.nlp.words` and `uni.nlp.sentences`.**
+  The same kniv v7 model analyses text word by word (Universal Dependencies
+  part of speech, morphology, lemma, dependency head and relation) and
+  sentence by sentence (sentiment, dialogue acts and each act's
+  probability). Word, sentence and head indices count across the whole
+  document, so a word's `head` joins to another row's `word`. Input is the
+  same as for extraction, including conversations, where each row carries
+  its turn and speaker; `options` takes only `alias`. Rust and Python get
+  `db.xervo().analyze_words(...)` / `analyze_sentences(...)`, returning
+  `AnalyzedWord` / `AnalyzedSentence`.
 - **Resolving extracted entities with Locy.** The NLP extraction page now
   documents a tested Locy program that links each extracted mention to an
   existing entity: weighted evidence (exact name, surname, embedding

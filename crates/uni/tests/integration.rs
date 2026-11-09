@@ -190,6 +190,8 @@ mod multivector_maxsim;
 mod multivector_muvera;
 #[path = "common/multivector_snapshot.rs"]
 mod multivector_snapshot;
+#[path = "common/nlp_analyze.rs"]
+mod nlp_analyze;
 #[path = "common/nlp_extract.rs"]
 mod nlp_extract;
 #[path = "common/nlp_resolve.rs"]

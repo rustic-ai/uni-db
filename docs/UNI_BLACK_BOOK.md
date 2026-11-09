@@ -4557,7 +4557,7 @@ graph TB
         UNI[uni.*] --> VEC[uni.vector.*<br/>Vector search]
         UNI --> FTS[uni.fts.*<br/>Full-text search]
         UNI --> SEARCH[uni.search<br/>Hybrid search]
-        UNI --> NLP[uni.nlp.*<br/>Entity & fact extraction]
+        UNI --> NLP[uni.nlp.*<br/>Extraction, words & sentences]
         UNI --> ADMIN[uni.admin.*<br/>Administration]
         UNI --> SCHEMA[uni.schema.*<br/>Schema introspection]
         UNI --> ALGO[algo.*<br/>Graph algorithms]
@@ -5343,6 +5343,8 @@ When reranking is active, `score` reflects the reranker score and `rerank_score`
 
 ## NLP Extraction (`uni.nlp.*`)
 
+`uni.nlp.words` / `uni.nlp.sentences` (linguistic analysis) are covered
+[below](#word-and-sentence-analysis-uninlpwords-uninlpsentences).
 `uni.nlp.extract(input, options)` and `uni.nlp.entities(input, options)` run
 a kniv v7 model from the Xervo `nlp` task and emit one row per fact or per
 entity. The procedures live in `crates/uni-query/src/procedures_plugin/nlp.rs`
@@ -5404,6 +5406,31 @@ shape exist once.
   Locy's `VALIDATE` measures a rule's `PROB` column against labels, so it
   can score `confidence` yielded `AS PROB`; `CALIBRATE` fits only
   `CREATE MODEL` predicates and cannot rescale a stored value.
+
+### Word and sentence analysis (`uni.nlp.words`, `uni.nlp.sentences`)
+
+`crates/uni-query/src/nlp/analyze.rs` exposes kniv v7's linguistic heads at
+two row grains, one procedure each, with the `UniXervo::analyze_words` /
+`analyze_sentences` facade over the same `run_analyze`. It reuses the parent
+module's `NlpInput`, `DocLocator` (spans, turns, character offsets) and
+truncation warning.
+
+- **Heads requested.** Words ask for `POS | MORPH | LEMMA | DEP`, sentences
+  for `CLS | SENTIMENT`, so each skips the other's decoding. The guard is
+  `supported_tasks().contains(...)`: a v1 cascade model has `CLS` and `DEP`
+  but not `LEMMA` or `SENTIMENT`, and has no windows, so it is refused.
+- **Document-wide indices.** `NlpWindow` indices are window-local, and
+  `WordAnalysis::head` is 1-based within the window with 0 for the root. The
+  rows add the window's word base (as extraction does for spans) and a
+  running sentence base, so `word`, `sentence` and `head` count across the
+  document and `head` joins to another row's `word`.
+- **Truncation.** Words past `NlpWindow::analysed_words` still get a row,
+  with null analysis; `WindowSentence::whole` is yielded as `whole`.
+- **Act scores.** `WindowSentence::cls_scores` is parallel to
+  `NlpModel::label_maps().cls`; the rows zip them into `act_scores` (a map,
+  dynamic-value encoded) only when the lengths match, else leave it empty.
+- **Dispatch.** Both names are in `is_df_eligible_procedure`, for the same
+  reason as extraction.
 
 ### Entity resolution (a Locy program, not engine code)
 

@@ -1,9 +1,11 @@
-"""Tests for the Xervo NLP extraction facade (``extract_facts`` / ``extract_entities``).
+"""Tests for the Xervo NLP facade: extraction (``extract_facts`` /
+``extract_entities``) and analysis (``analyze_words`` / ``analyze_sentences``).
 
 No offline NLP provider is compiled into the wheels, so these tests cover the
 API shape, argument validation (which runs before any model call and raises
-``UniInvalidArgumentError``) and the not-configured error. Extraction itself
-is covered by the Rust integration tests against a mock kniv v7 model.
+``UniInvalidArgumentError``) and the not-configured error. Extraction and
+analysis themselves are covered by the Rust integration tests against a mock
+kniv v7 model.
 """
 
 import pytest
@@ -20,11 +22,15 @@ class TestTypes:
     def test_data_classes_are_exported(self):
         assert uni_db.ExtractedFact.__name__ == "ExtractedFact"
         assert uni_db.ExtractedEntity.__name__ == "ExtractedEntity"
+        assert uni_db.AnalyzedWord.__name__ == "AnalyzedWord"
+        assert uni_db.AnalyzedSentence.__name__ == "AnalyzedSentence"
 
     def test_methods_exist(self, empty_db):
         xervo = empty_db.xervo()
         assert callable(xervo.extract_facts)
         assert callable(xervo.extract_entities)
+        assert callable(xervo.analyze_words)
+        assert callable(xervo.analyze_sentences)
 
 
 class TestNotConfigured:
@@ -126,3 +132,35 @@ class TestAsync:
             await async_empty_db.xervo().extract_facts(
                 "text", relations=["r"], top_per_pair=-1
             )
+
+
+class TestAnalyze:
+    def test_words_without_runtime(self, empty_db):
+        with pytest.raises(uni_db.UniInternalError, match="not configured"):
+            empty_db.xervo().analyze_words("Ada wrote the notes.")
+
+    def test_sentences_without_runtime(self, empty_db):
+        with pytest.raises(uni_db.UniInternalError, match="not configured"):
+            empty_db.xervo().analyze_sentences(CONVERSATION, alias="nlp/default")
+
+    def test_every_input_shape_is_accepted(self, empty_db):
+        xervo = empty_db.xervo()
+        for value in ("one text", ["a", "b"], CONVERSATION):
+            with pytest.raises(uni_db.UniInternalError, match="not configured"):
+                xervo.analyze_words(value)
+
+    def test_bad_input_shape(self, empty_db):
+        with pytest.raises(uni_db.UniInvalidArgumentError, match="input must be"):
+            empty_db.xervo().analyze_sentences(42)
+
+    def test_takes_no_extraction_options(self, empty_db):
+        with pytest.raises(TypeError, match="relations"):
+            empty_db.xervo().analyze_words("text", relations=["r"])
+
+    async def test_async_words_without_runtime(self, async_empty_db):
+        with pytest.raises(uni_db.UniInternalError, match="not configured"):
+            await async_empty_db.xervo().analyze_words("Ada wrote.")
+
+    async def test_async_sentences_bad_input(self, async_empty_db):
+        with pytest.raises(uni_db.UniInvalidArgumentError, match="unknown key 'who'"):
+            await async_empty_db.xervo().analyze_sentences([{"who": "u", "text": "hi"}])

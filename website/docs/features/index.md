@@ -17,7 +17,7 @@ Uni is an embedded, multi-model graph database that unifies graph, vector, docum
 | [Schema & Indexing](schema-indexing.md) | Typed properties, constraints, and indexes | Performance, governance, stability |
 | [Graph Algorithms](graph-algorithms.md) | Built-in centrality, clustering, pathing | Insights, scoring, routing |
 | [Neural Predicates](neural-predicates.md) | Inline `CREATE MODEL` in Locy with calibration + audit-grade `EXPLAIN` | Learned scoring composed with graph rules |
-| [NLP Extraction](nlp-extraction.md) | Local entity and fact extraction from text with polarity, modality and spans | Agent memory, knowledge graphs from documents |
+| [NLP Extraction](nlp-extraction.md) | Local entity and fact extraction from text with polarity, modality and spans; per-word and per-sentence analysis (POS, lemma, dependencies, sentiment, dialogue acts) | Agent memory, knowledge graphs from documents, conversation analytics |
 | [Transactions & Consistency](transactions-consistency.md) | Serializable snapshot isolation, optimistic concurrency | Predictable reads, safe writes |
 | [Triggers & CDC](triggers-cdc.md) | Commit-time triggers with pre-images, checkpointed change streams | Audit, validation, downstream sync |
 | [Snapshots & Time Travel](snapshots-time-travel.md) | Point-in-time snapshots + `AS OF` queries | Auditing, reproducible analytics |

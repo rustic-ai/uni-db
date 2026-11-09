@@ -1287,6 +1287,57 @@ class ExtractedEntity:
     model_alias: str
     model_id: str
 
+class AnalyzedWord:
+    """One word from ``Xervo.analyze_words``: the rows of ``uni.nlp.words``.
+
+    ``word`` and ``head`` index words across the whole document, so ``head``
+    names another row's ``word``; it is ``None`` for a sentence root.
+    ``start`` / ``end`` are character offsets into the input text, or for a
+    conversation into turn ``turn``. Words past the encoder's limit carry no
+    analysis.
+    """
+
+    doc: int
+    window: int
+    sentence: int | None
+    word: int
+    text: str
+    start: int | None
+    end: int | None
+    turn: int | None
+    speaker: str | None
+    pos: str | None
+    morph: str | None
+    lemma: str | None
+    head: int | None
+    deprel: str | None
+    model_alias: str
+    model_id: str
+
+class AnalyzedSentence:
+    """One sentence from ``Xervo.analyze_sentences``: the rows of ``uni.nlp.sentences``.
+
+    ``acts`` are the dialogue acts above the model's threshold (possibly
+    several, or none); ``act_scores`` maps every act the model knows to its
+    probability. ``whole`` is ``False`` when the sentence ran past the
+    encoder's limit.
+    """
+
+    doc: int
+    window: int
+    sentence: int
+    text: str
+    start: int | None
+    end: int | None
+    turn: int | None
+    speaker: str | None
+    sentiment: str | None
+    acts: list[str]
+    act_scores: dict[str, float]
+    whole: bool
+    model_alias: str
+    model_id: str
+
 # =============================================================================
 # Data Classes — Notifications & Coordination
 # =============================================================================
@@ -1769,6 +1820,30 @@ class Xervo:
         schema: str | dict[str, list[str]] | None = None,
     ) -> list[ExtractedEntity]:
         """Extract typed entities with a kniv v7 model (the rows of ``uni.nlp.entities``)."""
+        ...
+    def analyze_words(
+        self,
+        input: str | list[str] | list[dict[str, str]],
+        *,
+        alias: str | None = None,
+    ) -> list[AnalyzedWord]:
+        """Analyse text word by word with a kniv v7 model (the rows of ``uni.nlp.words``).
+
+        Part of speech, morphology, lemma, and dependency head and relation.
+        ``input`` is as for ``extract_facts``; ``alias=None`` uses
+        ``"nlp/default"``.
+        """
+        ...
+    def analyze_sentences(
+        self,
+        input: str | list[str] | list[dict[str, str]],
+        *,
+        alias: str | None = None,
+    ) -> list[AnalyzedSentence]:
+        """Analyse text sentence by sentence with a kniv v7 model (the rows of ``uni.nlp.sentences``).
+
+        Sentiment and dialogue acts. ``input`` is as for ``extract_facts``.
+        """
         ...
 
 # =============================================================================
@@ -3004,6 +3079,30 @@ class AsyncXervo:
         schema: str | dict[str, list[str]] | None = None,
     ) -> list[ExtractedEntity]:
         """Extract typed entities with a kniv v7 model (the rows of ``uni.nlp.entities``)."""
+        ...
+    async def analyze_words(
+        self,
+        input: str | list[str] | list[dict[str, str]],
+        *,
+        alias: str | None = None,
+    ) -> list[AnalyzedWord]:
+        """Analyse text word by word with a kniv v7 model (the rows of ``uni.nlp.words``).
+
+        Part of speech, morphology, lemma, and dependency head and relation.
+        ``input`` is as for ``extract_facts``; ``alias=None`` uses
+        ``"nlp/default"``.
+        """
+        ...
+    async def analyze_sentences(
+        self,
+        input: str | list[str] | list[dict[str, str]],
+        *,
+        alias: str | None = None,
+    ) -> list[AnalyzedSentence]:
+        """Analyse text sentence by sentence with a kniv v7 model (the rows of ``uni.nlp.sentences``).
+
+        Sentiment and dialogue acts. ``input`` is as for ``extract_facts``.
+        """
         ...
 
 # =============================================================================

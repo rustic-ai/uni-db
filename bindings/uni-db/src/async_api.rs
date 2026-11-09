@@ -1014,6 +1014,50 @@ impl AsyncXervo {
         })
     }
 
+    /// Analyse text word by word with a kniv v7 model (async): the rows of
+    /// ``uni.nlp.words``. ``input`` is as for ``extract_facts``.
+    #[pyo3(signature = (input, *, alias=None))]
+    fn analyze_words<'py>(
+        &self,
+        py: Python<'py>,
+        input: Py<PyAny>,
+        alias: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        let (input, options) = crate::convert::nlp_analyze_args(py, &input, alias)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let rows = core::xervo_analyze_words_core(&db, input, options)
+                .await
+                .map_err(crate::exceptions::uni_error_to_pyerr)?;
+            Ok(rows
+                .into_iter()
+                .map(crate::convert::analyzed_word_to_py)
+                .collect::<Vec<_>>())
+        })
+    }
+
+    /// Analyse text sentence by sentence with a kniv v7 model (async): the
+    /// rows of ``uni.nlp.sentences``. ``input`` is as for ``extract_facts``.
+    #[pyo3(signature = (input, *, alias=None))]
+    fn analyze_sentences<'py>(
+        &self,
+        py: Python<'py>,
+        input: Py<PyAny>,
+        alias: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let db = self.inner.clone();
+        let (input, options) = crate::convert::nlp_analyze_args(py, &input, alias)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let rows = core::xervo_analyze_sentences_core(&db, input, options)
+                .await
+                .map_err(crate::exceptions::uni_error_to_pyerr)?;
+            Ok(rows
+                .into_iter()
+                .map(crate::convert::analyzed_sentence_to_py)
+                .collect::<Vec<_>>())
+        })
+    }
+
     /// Pre-load and cache specific model aliases so first inference is instant.
     fn prefetch<'py>(&self, py: Python<'py>, aliases: Vec<String>) -> PyResult<Bound<'py, PyAny>> {
         let db = self.inner.clone();

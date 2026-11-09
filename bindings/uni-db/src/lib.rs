@@ -150,6 +150,8 @@ fn _uni_db(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<types::PyGenerationResult>()?;
     m.add_class::<types::PyExtractedFact>()?;
     m.add_class::<types::PyExtractedEntity>()?;
+    m.add_class::<types::PyAnalyzedWord>()?;
+    m.add_class::<types::PyAnalyzedSentence>()?;
 
     // Fork types (Phase 4b)
     m.add_class::<types::PyForkId>()?;

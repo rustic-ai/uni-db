@@ -6,6 +6,10 @@ Uni-Xervo runtime. There's no LLM call and no network once the model is
 loaded, and the relations and entity types are given **per call, by name and
 description**, so a schema the model never saw needs no fine-tuning.
 
+The same model also analyses text **word by word** (part of speech,
+morphology, lemma, dependency parse) and **sentence by sentence**
+(sentiment, dialogue acts); see [Words and Sentences](#words-and-sentences).
+
 Every fact carries the signals reasoning needs: whether it is asserted or
 denied (**polarity**), whether it is a claim about the world or a plan, wish,
 question or hypothetical (**modality**), **who holds** the belief, an optional
@@ -19,6 +23,10 @@ in your text.
   character spans and model provenance.
 - **`CALL uni.nlp.entities(input, options)`**: one row per entity, grouped
   across its mentions, with each mention's span.
+- **`CALL uni.nlp.words(input, options)`** and
+  **`CALL uni.nlp.sentences(input, options)`**: one row per word (UD part of
+  speech, morphology, lemma, dependency head and relation) or per sentence
+  (sentiment, dialogue acts and their scores).
 - **Prose or conversations.** `input` is a string, a list of strings (one
   document each, analysed in one batched call), or a list of
   `{speaker, text}` maps (one conversation). In a conversation each speaker
@@ -29,8 +37,8 @@ in your text.
   entity types from your labels, using their descriptions. Results come back
   under the schema names (`LIVES_IN`, `Person`), ready to `MERGE`. On a
   forked session this is the fork's merged schema.
-- **The same rows from Rust and Python**: `db.xervo().extract_facts(...)` and
-  `extract_entities(...)`.
+- **The same rows from Rust and Python**: `db.xervo().extract_facts(...)`,
+  `extract_entities(...)`, `analyze_words(...)` and `analyze_sentences(...)`.
 
 ## Setup
 
@@ -61,8 +69,8 @@ which takes longer than the default query timeout. Load it before the first
 query: `db.xervo().prefetch(["nlp/default"])`, or `"warmup": "eager"` /
 `"background"` in the catalog entry. On a GPU use
 `"variant": "fp16"`. A v1 model (`kniv-deberta-nlp-base-en-*`) serves the same
-`nlp` task but has no entity or fact extraction; the procedures refuse it
-with an error naming the alias.
+`nlp` task but has no entity or fact extraction, and no lemmas or sentiment;
+the procedures refuse it with an error naming the alias.
 
 ## Minimal Example
 
@@ -186,6 +194,100 @@ and `model_alias, model_id`.
   a labelled sample with Locy's `VALIDATE`
   ([Neural Predicates](../locy/advanced/neural-predicates.md#validate)).
   `CALIBRATE` fits only `CREATE MODEL` predicates, not stored values.
+
+## Words and Sentences
+
+`uni.nlp.words` and `uni.nlp.sentences` expose the model's linguistic heads.
+They take the same `input` as extraction, and `options` accepts only `alias`.
+Each runs one model pass and decodes only the heads its rows need.
+
+```cypher
+CALL uni.nlp.words('Ada Lovelace wrote the first program.')
+YIELD word, text, pos, lemma, head, deprel
+RETURN word, text, pos, lemma, head, deprel
+```
+
+| word | text | pos | lemma | head | deprel |
+|---|---|---|---|---|---|
+| 0 | Ada | PROPN | Ada | 2 | nsubj |
+| 1 | Lovelace | PROPN | Lovelace | 0 | flat |
+| 2 | wrote | VERB | write | null | root |
+| 3 | the | DET | the | 5 | det |
+| 4 | first | ADJ | first | 5 | amod |
+| 5 | program | NOUN | program | 2 | obj |
+| 6 | . | PUNCT | . | 2 | punct |
+
+`uni.nlp.words` yields:
+
+| Column | Meaning |
+|---|---|
+| `doc`, `window` | As for extraction. |
+| `sentence`, `word` | Indexes counted across the whole document, not the window, so `sentence` joins to `uni.nlp.sentences` on `(doc, sentence)`. |
+| `text`, `start`, `end`, `turn` | The word as written, and its character span (in the turn `turn`, for a conversation). Punctuation is a word of its own. |
+| `speaker` | The turn's speaker, for a conversation. |
+| `pos` | Universal Dependencies part of speech (`NOUN`, `VERB`, `PROPN`, …). |
+| `morph` | UD morphological features, such as `Mood=Ind\|Number=Sing\|Person=3\|Tense=Past\|VerbForm=Fin`; `_` when the word has none. |
+| `lemma` | The dictionary form: `wrote` → `write`, `Did` → `do`. |
+| `head`, `deprel` | The `word` this one depends on, and the UD relation to it (`nsubj`, `obj`, `amod`, …). The root of a sentence has `head` null and `deprel` `root`. |
+| `model_alias`, `model_id` | Provenance. |
+
+```cypher
+CALL uni.nlp.sentences([
+  {speaker: 'user', text: 'I love it! Did Babbage build the engine?'}])
+YIELD sentence, text, turn, speaker, sentiment, acts, act_scores
+RETURN sentence, text, sentiment, acts
+```
+
+| sentence | text | sentiment | acts |
+|---|---|---|---|
+| 0 | I love it! | positive | [Inform] |
+| 1 | Did Babbage build the engine? | neutral | [Question] |
+
+`uni.nlp.sentences` yields `doc, window, sentence, text, start, end, turn,
+speaker` as above, and:
+
+| Column | Meaning |
+|---|---|
+| `sentiment` | `positive`, `negative` or `neutral`. |
+| `acts` | Dialogue acts above the model's threshold: a list, since a sentence can be several acts or none. kniv v7's are `Commissive`, `Directive`, `Feedback`, `Inform`, `Question` and `Social`. |
+| `act_scores` | Map from every act to its probability. |
+| `whole` | `false` when the sentence ran past the encoder's limit; its words from there on have null analysis. |
+| `model_alias`, `model_id` | Provenance. |
+
+Typical uses:
+
+- **Lemma-normalised terms.** Index or match on `lemma` rather than the word,
+  so "wrote", "writes" and "written" meet at `write`.
+- **Conversation analytics.** Count a user's questions and negative
+  sentences per conversation, with turns stored as `:Turn` nodes and
+  collected into the `{speaker, text}` list `input` takes:
+
+```cypher
+MATCH (t:Turn)
+WITH t ORDER BY t.conversation, t.idx
+WITH t.conversation AS conversation,
+     collect({speaker: t.speaker, text: t.text}) AS turns
+CALL uni.nlp.sentences(turns) YIELD speaker, sentiment, acts
+WITH conversation, speaker, sentiment, acts WHERE speaker = 'user'
+RETURN conversation,
+       count(CASE WHEN 'Question' IN acts THEN 1 END) AS questions,
+       count(CASE WHEN sentiment = 'negative' THEN 1 END) AS negative
+```
+
+- **Subject–verb–object triples** without a schema, by joining each word to
+  its head:
+
+```cypher
+CALL uni.nlp.words($text) YIELD word, lemma, head, deprel
+WITH collect({word: word, lemma: lemma, head: head, deprel: deprel}) AS ws
+UNWIND ws AS subj
+UNWIND ws AS obj
+WITH ws, subj, obj
+WHERE subj.deprel = 'nsubj' AND obj.deprel = 'obj' AND subj.head = obj.head
+UNWIND ws AS verb
+WITH subj, verb, obj WHERE verb.word = subj.head
+RETURN subj.lemma AS subject, verb.lemma AS verb, obj.lemma AS object
+```
 
 ## Storing Facts
 
