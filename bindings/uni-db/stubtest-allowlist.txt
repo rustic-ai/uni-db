@@ -9,10 +9,10 @@
 #     --ignore-positional-only --ignore-disjoint-bases --generate-allowlist
 #
 # ---------------------------------------------------------------------------
-# 1. @final (138 entries) -- NOISE, no action needed.
+# 1. @final (140 entries) -- NOISE, no action needed.
 # A PyO3 #[pyclass] cannot be subclassed from Python unless it opts in with
 # `subclass`. stubtest is right that the stub could say @final, but adding it to
-# 138 classes is churn that buys nothing: nobody can subclass them either way.
+# 140 classes is churn that buys nothing: nobody can subclass them either way.
 # ---------------------------------------------------------------------------
 uni_db.AbduceCommandResult
 uni_db.ApplyBuilder
@@ -78,6 +78,8 @@ uni_db.Eid
 uni_db.ExecuteResult
 uni_db.ExplainCommandResult
 uni_db.ExplainOutput
+uni_db.ExtractedEntity
+uni_db.ExtractedFact
 uni_db.ForkBuilder
 uni_db.ForkDiff
 uni_db.ForkId

@@ -1659,6 +1659,9 @@ impl Executor {
                 | "uni.fts.query"
                 | "uni.sparse.query"
                 | "uni.search"
+                // Need the DataFusion host: it carries the Xervo runtime.
+                | "uni.nlp.extract"
+                | "uni.nlp.entities"
                 // M5g — `uni.create.vNode` produces a typed Node yield
                 // via the planner-level node-shape expansion in
                 // `GraphProcedureCallExec`; only the DataFusion path

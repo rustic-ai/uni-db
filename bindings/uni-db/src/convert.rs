@@ -2631,6 +2631,95 @@ pub fn py_timedelta_to_duration(obj: &Bound<'_, PyAny>) -> PyResult<std::time::D
     Ok(std::time::Duration::from_secs_f64(total_secs))
 }
 
+/// Build the `(input, options)` values for an NLP extraction call from the
+/// Python arguments, so the bindings share the Cypher procedures' parser.
+#[allow(clippy::too_many_arguments)]
+pub fn nlp_call_args(
+    py: Python,
+    input: &Py<PyAny>,
+    alias: Option<String>,
+    relations: Option<Py<PyAny>>,
+    entity_types: Option<Py<PyAny>>,
+    schema: Option<Py<PyAny>>,
+    top_per_pair: Option<Py<PyAny>>,
+    rel_offsets: Option<Py<PyAny>>,
+) -> PyResult<(Value, Value)> {
+    let input = py_object_to_value(py, input)?;
+    let mut options: HashMap<String, Value> = HashMap::new();
+    // `alias=None` means the default, which the options parser applies.
+    if let Some(alias) = alias {
+        options.insert("alias".to_string(), Value::String(alias));
+    }
+    // Values go through as given, so the shared options parser reports a bad
+    // one (a negative `top_per_pair`, say) as UniInvalidArgumentError rather
+    // than PyO3 raising a conversion error first.
+    for (key, value) in [
+        ("relations", relations),
+        ("entity_types", entity_types),
+        ("schema", schema),
+        ("top_per_pair", top_per_pair),
+        ("rel_offsets", rel_offsets),
+    ] {
+        if let Some(v) = value {
+            options.insert(key.to_string(), py_object_to_value(py, &v)?);
+        }
+    }
+    Ok((input, Value::Map(options)))
+}
+
+/// Convert an extracted fact into its Python data class.
+pub fn extracted_fact_to_py(
+    f: ::uni_db::api::xervo::ExtractedFact,
+) -> crate::types::PyExtractedFact {
+    crate::types::PyExtractedFact {
+        doc: f.doc,
+        window: f.window,
+        head: f.head,
+        head_text: f.head_text,
+        head_type: f.head_type,
+        head_speaker: f.head_speaker,
+        head_start: f.head_start,
+        head_end: f.head_end,
+        head_turn: f.head_turn,
+        relation: f.relation,
+        tail: f.tail,
+        tail_text: f.tail_text,
+        tail_type: f.tail_type,
+        tail_speaker: f.tail_speaker,
+        tail_start: f.tail_start,
+        tail_end: f.tail_end,
+        tail_turn: f.tail_turn,
+        polarity: f.polarity,
+        modality: f.modality,
+        holder: f.holder,
+        time: f.time,
+        margin: f.margin,
+        confidence: f.confidence,
+        model_alias: f.model_alias,
+        model_id: f.model_id,
+    }
+}
+
+/// Convert an extracted entity into its Python data class.
+pub fn extracted_entity_to_py(
+    e: ::uni_db::api::xervo::ExtractedEntity,
+) -> crate::types::PyExtractedEntity {
+    crate::types::PyExtractedEntity {
+        doc: e.doc,
+        window: e.window,
+        entity: e.entity,
+        text: e.text,
+        entity_type: e.entity_type,
+        speaker: e.speaker,
+        mentions: e.mentions,
+        mention_starts: e.mention_starts,
+        mention_ends: e.mention_ends,
+        mention_turns: e.mention_turns,
+        model_alias: e.model_alias,
+        model_id: e.model_id,
+    }
+}
+
 #[cfg(test)]
 mod value_to_py_coverage {
     use super::*;

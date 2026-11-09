@@ -292,7 +292,7 @@ graph TB
 | `pyo3` | Python bindings (FFI) |
 | `candle-core` / `candle-transformers` | Optional native Rust ML inference for auto-embedding |
 | `safetensors` | Locy CPU linear-classifier model loading without a tensor runtime |
-| `uni-xervo` | Embedding + generation runtime used by auto-embedding and host-side multimodal model calls |
+| `uni-xervo` | Embedding, reranking, generation and structured-NLP runtime used by auto-embedding, `uni.nlp.*` and host-side multimodal model calls |
 | `sha3` | SHA3-256 hashing for UniId content addressing |
 | `serde` / `rmp-serde` | MessagePack serialization for CRDTs and CypherValues |
 
@@ -4557,6 +4557,7 @@ graph TB
         UNI[uni.*] --> VEC[uni.vector.*<br/>Vector search]
         UNI --> FTS[uni.fts.*<br/>Full-text search]
         UNI --> SEARCH[uni.search<br/>Hybrid search]
+        UNI --> NLP[uni.nlp.*<br/>Entity & fact extraction]
         UNI --> ADMIN[uni.admin.*<br/>Administration]
         UNI --> SCHEMA[uni.schema.*<br/>Schema introspection]
         UNI --> ALGO[algo.*<br/>Graph algorithms]
@@ -5337,6 +5338,68 @@ When reranking is active, `score` reflects the reranker score and `rerank_score`
 ### Reranking Does Not Apply to `similar_to()`
 
 `similar_to()` is a per-row scalar expression with no bounded candidate set. Cross-encoders are only effective on small candidate sets, so reranking is limited to the three search procedures.
+
+## NLP Extraction (`uni.nlp.*`)
+
+`uni.nlp.extract(input, options)` and `uni.nlp.entities(input, options)` run
+a kniv v7 model from the Xervo `nlp` task and emit one row per fact or per
+entity. The procedures live in `crates/uni-query/src/procedures_plugin/nlp.rs`
+and are thin adapters over `crates/uni-query/src/nlp.rs`, which the
+`UniXervo::extract_facts` / `extract_entities` facade (and through it the
+Python bindings) also calls, so option parsing, schema mapping and the row
+shape exist once.
+
+- **Request shape.** One `NlpRequest` per input document (`NlpRequest::new`)
+  or one per conversation (`NlpRequest::from_turns`), all in one `analyze`
+  call. Tasks are `FACTS` (implies `ENTITIES`) or `ENTITIES` alone, never
+  `ALL`, because each head is a graph pass.
+- **v1 guard.** A model whose `supported_tasks()` lacks the requested flag is
+  a v1 cascade model; the call fails naming the alias instead of yielding
+  nothing.
+- **Character spans.** `NlpEntity::spans` are window-local, half-open word spans
+  over `NlpWindow::tokens` (words), so a window's word base is the sum of
+  earlier windows' `tokens.len()`. A word's byte range is the union of the
+  flat `NlpResult::tokens` with that `word_index`: v7 emits one token per
+  word, but the trait allows subwords, so the code groups rather than indexes.
+  Rows then convert those UTF-8 byte offsets to character (Unicode scalar)
+  offsets, by binary search over each text's `char_indices`, because Cypher's
+  `substring()` (`eval_substring` slices `chars()`) and Python's `str` index
+  by character; bytes stay internal, for slicing the surface text.
+  uni-xervo analyses each conversation turn as its own text (offset 0), so
+  spans are turn-relative and the row carries the turn index, recovered from
+  the containing `WindowSentence::unit` and mapped past blank turns, which
+  uni-xervo drops. Speaker entities get no spans and no mentions (the trait
+  allows speaker `spans` at turn starts; v7 leaves them empty, and they are
+  ignored either way), and keep the type `speaker` even if a label humanizes
+  to it.
+- **Surface text.** `text`, `head_text`, `tail_text` and `mentions` are
+  sliced from the caller's input at the located span. The model's
+  `NlpEntity::text` joins words with spaces (`AT & T`), which would not match
+  the source or what users `MERGE` on; it is only the fallback.
+- **Null input** parses as no documents and yields no rows, so a per-row
+  `CALL` over a node lacking the property does not abort the statement.
+- **`schema: 'graph'`** reads `host.storage().schema_manager().schema()`. On a
+  forked session that is the fork's merged schema (`at_fork_with_schema`), so
+  fork-local edge types are extracted. Names are humanized for the model
+  (`LIVES_IN` → `"lives in"`) and mapped back in the rows. `uni.nlp.entities` reads
+  only the labels, so a clash between humanized edge-type names cannot fail
+  it.
+- **Dispatch.** Both names are in `is_df_eligible_procedure`
+  (`executor/read.rs`): the fallback executor's `QueryProcedureHost` is built
+  by `from_components` without a Xervo runtime, so a standalone `CALL` must
+  take the DataFusion path.
+- **Inner queries.** `QueryProcedureHost::execute_inner_query` passes its
+  Xervo runtime to the executor it builds, so a declared trigger action or
+  declared procedure body can call `uni.nlp.*` (or embed a query text).
+- **Reserved names.** List yields are `mention_starts` / `mention_ends` /
+  `mention_turns`: a bare `starts` or `ends` in `RETURN` parses as the
+  `STARTS WITH` / `ENDS WITH` keyword.
+- **Provenance.** Rows carry `model_alias` and `model_id`. The resolved model
+  revision is not available: `ModelInfo` exposes only `model_id` and the
+  runtime cannot return a spec by alias.
+- **`confidence`** is `sigmoid(margin)`, a monotone convenience. Calibration
+  belongs to Locy's `CALIBRATE`, and per-relation thresholds to
+  `rel_offsets` (`NlpCalibrationOverrides::rel_offsets`).
 
 ## Admin Procedures
 

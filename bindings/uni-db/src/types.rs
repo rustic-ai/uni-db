@@ -1484,6 +1484,91 @@ impl PyTokenUsage {
     }
 }
 
+/// One fact extracted by ``Xervo.extract_facts`` (the rows of
+/// ``uni.nlp.extract``).
+///
+/// Character offsets (as ``str`` indexes) into the input text, or for a
+/// conversation the turn named by ``head_turn`` / ``tail_turn``, so
+/// ``text[f.head_start:f.head_end]`` is the mention. Speakers have no offsets.
+/// ``confidence`` is ``1 / (1 + e^-margin)``, not a calibrated probability.
+#[pyclass(get_all, name = "ExtractedFact", skip_from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyExtractedFact {
+    pub doc: usize,
+    pub window: usize,
+    pub head: usize,
+    pub head_text: String,
+    pub head_type: String,
+    pub head_speaker: bool,
+    pub head_start: Option<usize>,
+    pub head_end: Option<usize>,
+    pub head_turn: Option<usize>,
+    pub relation: String,
+    pub tail: usize,
+    pub tail_text: String,
+    pub tail_type: String,
+    pub tail_speaker: bool,
+    pub tail_start: Option<usize>,
+    pub tail_end: Option<usize>,
+    pub tail_turn: Option<usize>,
+    pub polarity: String,
+    pub modality: String,
+    pub holder: Option<usize>,
+    pub time: Option<usize>,
+    pub margin: f64,
+    pub confidence: f64,
+    pub model_alias: String,
+    pub model_id: String,
+}
+
+#[pymethods]
+impl PyExtractedFact {
+    fn __repr__(&self) -> String {
+        format!(
+            "ExtractedFact({:?} --{}--> {:?}, {}, {}, margin={:.3})",
+            self.head_text,
+            self.relation,
+            self.tail_text,
+            self.polarity,
+            self.modality,
+            self.margin
+        )
+    }
+}
+
+/// One entity extracted by ``Xervo.extract_entities`` (the rows of
+/// ``uni.nlp.entities``). ``mention_starts`` / ``mention_ends`` /
+/// ``mention_turns`` are parallel
+/// to ``mentions``.
+#[pyclass(get_all, name = "ExtractedEntity", skip_from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyExtractedEntity {
+    pub doc: usize,
+    pub window: usize,
+    pub entity: usize,
+    pub text: String,
+    pub entity_type: String,
+    pub speaker: bool,
+    pub mentions: Vec<String>,
+    pub mention_starts: Vec<Option<usize>>,
+    pub mention_ends: Vec<Option<usize>>,
+    pub mention_turns: Vec<Option<usize>>,
+    pub model_alias: String,
+    pub model_id: String,
+}
+
+#[pymethods]
+impl PyExtractedEntity {
+    fn __repr__(&self) -> String {
+        format!(
+            "ExtractedEntity({:?}, type={:?}, mentions={})",
+            self.text,
+            self.entity_type,
+            self.mentions.len()
+        )
+    }
+}
+
 /// Result of a Xervo generation call.
 #[pyclass(get_all, name = "GenerationResult")]
 #[derive(Debug)]

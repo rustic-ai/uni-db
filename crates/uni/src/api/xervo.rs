@@ -5,11 +5,21 @@ use std::sync::Arc;
 
 use crate::api::Uni;
 use uni_common::{Result, UniError};
+pub use uni_query::nlp::{
+    DEFAULT_NLP_ALIAS, ExtractKind, ExtractOptions, ExtractedEntity, ExtractedFact, NlpInput,
+    SchemaSource,
+};
+use uni_query::nlp::{ExtractRows, NlpExtractError};
 use uni_xervo::api::ModelAliasSpec;
 pub use uni_xervo::runtime::ModelRuntime;
 pub use uni_xervo::traits::{
     AudioOutput, ContentBlock, GeneratedImage, GenerationOptions, GenerationResult, ImageInput,
     Message, MessageRole, RerankerModel, ScoredDoc, TokenUsage,
+};
+pub use uni_xervo::traits::{
+    ExtractionSchema, FactModality, FactPolarity, LabelSpec, NlpCalibration,
+    NlpCalibrationOverrides, NlpEntity, NlpFact, NlpModel, NlpRequest, NlpResult, NlpTasks,
+    NlpWindow, Turn,
 };
 #[cfg(feature = "provider-onnx")]
 pub use uni_xervo::traits::{RawTensorModel, TensorBatch, TensorSpec, TensorValue};
@@ -22,6 +32,17 @@ fn not_configured() -> UniError {
     UniError::Internal(anyhow::anyhow!("Uni-Xervo runtime is not configured"))
 }
 
+fn nlp_error(err: NlpExtractError) -> UniError {
+    match err {
+        NlpExtractError::InvalidArgument(message) => UniError::InvalidArgument {
+            arg: "nlp".to_owned(),
+            message,
+        },
+        NlpExtractError::NotConfigured => not_configured(),
+        NlpExtractError::Model(message) => UniError::Internal(anyhow::anyhow!(message)),
+    }
+}
+
 /// Facade for using Uni-Xervo runtime from the Uni API surface.
 ///
 /// Returned by [`Uni::xervo()`]. When no Xervo catalog was configured at
@@ -31,6 +52,7 @@ fn not_configured() -> UniError {
 #[derive(Clone)]
 pub struct UniXervo {
     runtime: Option<Arc<ModelRuntime>>,
+    schema: Arc<uni_common::core::schema::SchemaManager>,
 }
 
 impl UniXervo {
@@ -160,6 +182,76 @@ impl UniXervo {
             .map_err(into_uni_error)
     }
 
+    /// Run raw NLP analysis requests against a configured `nlp` alias.
+    ///
+    /// This is the full uni-xervo surface: per-window POS, lemmas,
+    /// dependencies, SRL, coreference, entities and facts. For flat fact or
+    /// entity rows with character spans, use [`extract_facts`](Self::extract_facts)
+    /// or [`extract_entities`](Self::extract_entities).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UniError`] if the runtime is not configured, the alias
+    /// is not registered, or inference fails.
+    pub async fn nlp(&self, alias: &str, requests: Vec<NlpRequest<'_>>) -> Result<Vec<NlpResult>> {
+        let runtime = self.runtime.as_ref().ok_or_else(not_configured)?;
+        let model = runtime.nlp_model(alias).await.map_err(into_uni_error)?;
+        model.analyze(requests).await.map_err(into_uni_error)
+    }
+
+    /// Extract facts (`head --relation--> tail`, with polarity, modality,
+    /// holder, time and margin) from text with a kniv v7 model.
+    ///
+    /// The same rows `CALL uni.nlp.extract(...)` yields. A graph-derived
+    /// schema ([`ExtractOptions::graph_schema`]) uses the primary schema.
+    ///
+    /// # Errors
+    ///
+    /// [`UniError::InvalidArgument`] for malformed options;
+    /// [`UniError::Internal`] when the runtime is not configured, the alias
+    /// does not resolve to a kniv v7 model, or inference fails.
+    pub async fn extract_facts(
+        &self,
+        input: &NlpInput,
+        options: &ExtractOptions,
+    ) -> Result<Vec<ExtractedFact>> {
+        match self.extract(input, options, ExtractKind::Facts).await? {
+            ExtractRows::Facts(rows) => Ok(rows),
+            ExtractRows::Entities(_) => unreachable!("facts requested"),
+        }
+    }
+
+    /// Extract typed entities, grouped across their mentions, from text with
+    /// a kniv v7 model. The same rows `CALL uni.nlp.entities(...)` yields.
+    ///
+    /// # Errors
+    ///
+    /// As for [`extract_facts`](Self::extract_facts).
+    pub async fn extract_entities(
+        &self,
+        input: &NlpInput,
+        options: &ExtractOptions,
+    ) -> Result<Vec<ExtractedEntity>> {
+        match self.extract(input, options, ExtractKind::Entities).await? {
+            ExtractRows::Entities(rows) => Ok(rows),
+            ExtractRows::Facts(_) => unreachable!("entities requested"),
+        }
+    }
+
+    async fn extract(
+        &self,
+        input: &NlpInput,
+        options: &ExtractOptions,
+        kind: ExtractKind,
+    ) -> Result<ExtractRows> {
+        options.validate(kind).map_err(nlp_error)?;
+        let runtime = self.runtime.as_ref().ok_or_else(not_configured)?;
+        let schema = self.schema.schema();
+        uni_query::nlp::run_extract(runtime, &schema, input, options, kind)
+            .await
+            .map_err(nlp_error)
+    }
+
     /// Pre-load and cache every model in the Xervo catalog.
     ///
     /// Models already loaded are skipped. Fails fast on the first error.
@@ -194,6 +286,7 @@ impl Uni {
     pub fn xervo(&self) -> UniXervo {
         UniXervo {
             runtime: self.inner.xervo_runtime.clone(),
+            schema: self.inner.schema.clone(),
         }
     }
 }

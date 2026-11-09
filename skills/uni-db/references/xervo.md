@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-Xervo is uni-db's built-in ML runtime for embeddings and text generation. It supports local inference (Candle, ONNX Runtime — embed, rerank, raw), a self-hosted llama.cpp server, and remote APIs (OpenAI, Anthropic, Gemini, Mistral, Cohere, Voyage AI, Vertex AI, Azure OpenAI). Models are configured via a **catalog** of alias specs, and accessed through the `db.xervo()` facade.
+Xervo is uni-db's built-in ML runtime for embeddings, reranking, text generation and structured NLP (entity and fact extraction). It supports local inference (Candle, ONNX Runtime — embed, rerank, raw, nlp), a self-hosted llama.cpp server, and remote APIs (OpenAI, Anthropic, Gemini, Mistral, Cohere, Voyage AI, Vertex AI, Azure OpenAI). Models are configured via a **catalog** of alias specs, and accessed through the `db.xervo()` facade.
 
 **Key concepts:**
 - **Alias**: human-readable model identifier in `task/name` format (e.g., `embed/default`, `llm/gpt4`)
@@ -22,7 +22,7 @@ Run inference on the host machine. No API keys needed.
 |---|---|---|---|
 | `remote/llamacpp` | llama.cpp server (`llama-server` you run) | Embed, Rerank, Generate, Document extract | Private local generation (text + vision), GGUF models, GPU via llama.cpp; one server per model, so one alias per task |
 | `local/candle` | HuggingFace Candle | Embed | Lightweight CPU embeddings (Bert, JinaBert, Gemma) |
-| `local/onnx` | ONNX Runtime | Embed, Rerank, Raw | Fast CPU embeddings (FastEmbed alias strings supported), cross-encoder reranking (BERT-style), and raw tensor execution |
+| `local/onnx` | ONNX Runtime | Embed, Rerank, Raw, Nlp | Fast CPU embeddings (FastEmbed alias strings supported), cross-encoder reranking (BERT-style), raw tensor execution, and kniv v7 entity/fact extraction (`uni.nlp.*`) |
 
 **Local provider options:**
 
@@ -124,7 +124,7 @@ The catalog is a JSON array of model alias specs:
 | Field | Required | Default | Description |
 |---|---|---|---|
 | `alias` | Yes | — | Identifier in `task/name` format (must contain `/`) |
-| `task` | Yes | — | Lowercase snake_case: `"embed"`, `"generate"`, `"rerank"`, `"embed_sparse"`, `"embed_multi_vector"`, `"embed_hybrid"`, `"raw"`, … (`"Embed"` is rejected with `unknown variant`) |
+| `task` | Yes | — | Lowercase snake_case: `"embed"`, `"generate"`, `"rerank"`, `"embed_sparse"`, `"embed_multi_vector"`, `"embed_hybrid"`, `"raw"`, `"nlp"`, … (`"Embed"` is rejected with `unknown variant`) |
 | `provider_id` | Yes | — | Provider identifier (e.g., `"remote/openai"`) |
 | `model_id` | Yes | — | HuggingFace repo ID (local) or API model name (remote) |
 | `revision` | No | `null` | HuggingFace branch/tag/commit hash (local only) |
@@ -318,6 +318,56 @@ else:
     pass
 ```
 
+### NLP Extraction
+
+A kniv v7 model under an `nlp` alias (default `nlp/default`) extracts typed
+entities and the facts between them, locally, with no LLM. Relations and
+entity types are given per call by name and description.
+
+```python
+facts = db.xervo().extract_facts(
+    [{"speaker": "user", "text": "I moved to Lisbon last year."}],   # or a str / list[str]
+    relations=[{"name": "lives in", "description": "the place where the head resides"}],
+    entity_types=["location", "organization"],
+)
+for f in facts:
+    print(f.head_text, f.relation, f.tail_text, f.polarity, f.modality, f.margin)
+
+entities = db.xervo().extract_entities("Ada Lovelace met Babbage in London.")
+```
+
+Same rows from Cypher (they reach Python through `session.query` too):
+
+```cypher
+CALL uni.nlp.extract($text, {schema: 'graph'})          // relations from declared edge types
+YIELD head_text, relation, tail_text, polarity, modality, margin, tail_start, tail_end
+WHERE modality IN ['asserted', 'reported']
+RETURN *
+
+CALL uni.nlp.entities($text, {entity_types: ['person']})
+YIELD entity, text, entity_type, mentions, mention_starts, mention_ends RETURN *
+```
+
+- **Options:** `alias`, `relations`, `entity_types`, `schema` (`'graph'` or
+  `{labels, edge_types}`, exclusive with the previous two), `top_per_pair`,
+  `rel_offsets` (relation → offset; lower is a higher bar). Unknown keys are
+  rejected. `uni.nlp.extract` needs `relations` or `schema`; `options` may be
+  omitted for `uni.nlp.entities`. A `null` input yields no rows.
+- **Only `asserted` / `reported` facts are claims about the world**; `planned`,
+  `desired`, `questioned`, `hypothetical` are not. `negative` polarity is
+  evidence against the same triple.
+- **Spans** are character offsets (as `substring()` counts) into the text, or into the turn named by
+  `head_turn` / `tail_turn` for a conversation. Speakers have none. Text
+  columns are sliced from the input, so `AT&T` stays `AT&T`.
+- **`confidence`** is `sigmoid(margin)`, not a calibrated probability — use
+  Locy `CALIBRATE` against labels.
+- A v1 `kniv-deberta-nlp-*` model is refused: it has no fact extraction.
+- **Prefetch first.** Loading the ~2 GB model on the first query exceeds the
+  default query timeout; call `db.xervo().prefetch(["nlp/default"])` or use
+  `"warmup": "eager"` / `"background"`.
+- Rust: `db.xervo().extract_facts(&NlpInput::Text(..), &ExtractOptions::new().relation(..))`;
+  `db.xervo().nlp(alias, requests)` is the raw per-window uni-xervo surface.
+
 ### Result Types
 
 ```python
@@ -329,6 +379,22 @@ class TokenUsage:
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+
+class ExtractedFact:             # rows of uni.nlp.extract
+    doc: int; window: int
+    head: int; head_text: str; head_type: str; head_speaker: bool
+    head_start: int | None; head_end: int | None; head_turn: int | None
+    relation: str
+    tail: int; tail_text: str; tail_type: str; tail_speaker: bool
+    tail_start: int | None; tail_end: int | None; tail_turn: int | None
+    polarity: str; modality: str; holder: int | None; time: int | None
+    margin: float; confidence: float; model_alias: str; model_id: str
+
+class ExtractedEntity:           # rows of uni.nlp.entities
+    doc: int; window: int; entity: int; text: str; entity_type: str; speaker: bool
+    mentions: list[str]; mention_starts: list[int | None]; mention_ends: list[int | None]
+    mention_turns: list[int | None]
+    model_alias: str; model_id: str
 ```
 
 ---
@@ -479,6 +545,21 @@ let scored = db.xervo().rerank("rerank/minilm", "query text", &["doc1", "doc2"])
 // Via search procedures (see vector-hybrid-search.md Section 11)
 // Add reranker options to any CALL procedure:
 // {reranker: 'rerank/minilm', reranker_property: 'content'}
+```
+
+### NLP Extraction Models
+
+| Use Case | Provider | Model ID | Notes |
+|---|---|---|---|
+| **Agent memory, zero-shot types, long inputs** | `local/onnx` | `dragonscale-ai/kniv-v7-xlarge-u-en` | UltraBERT; ~0.47 s per 200-word window INT8, ~2 GB resident |
+| **Parsing, fixed-schema relations, plans vs assertions** | `local/onnx` | `dragonscale-ai/kniv-v7-xlarge-d-en` | DeBERTa; ~0.58 s, ~3 GB resident |
+
+Use `"options": {"variant": "int8,fp16"}` on CPU and `"fp16"` on a GPU. English only. Cost grows with the square of the entities in a window, so keep entity-type lists narrow.
+
+```json
+{"alias": "nlp/default", "task": "nlp", "provider_id": "local/onnx",
+ "model_id": "dragonscale-ai/kniv-v7-xlarge-u-en", "warmup": "lazy",
+ "options": {"variant": "int8,fp16", "execution_providers": ["cpu"]}}
 ```
 
 ---

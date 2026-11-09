@@ -8,7 +8,7 @@ Complete symbol surface of the `uni_db` Python bindings, **generated from `bindi
 
 This page is exhaustive and always in sync with the type stubs — it is regenerated in CI. For narrative documentation, worked examples and the recommended patterns, start at the [Python API guide](python-api.md).
 
-**195 classes.**
+**197 classes.**
 
 ---
 
@@ -585,6 +585,8 @@ Async facade for embedding and text generation.
 | `async embed(alias: str, texts: list[str]) -> list[list[float]]` | — |
 | `async generate(alias: str, messages: list[Message | dict[str, Any]], max_tokens: int | None=None, temperature: float | None=None, top_p: float | None=None) -> GenerationResult` | — |
 | `async generate_text(alias: str, prompt: str, max_tokens: int | None=None, temperature: float | None=None, top_p: float | None=None) -> GenerationResult` | — |
+| `async extract_facts(input: str | list[str] | list[dict[str, str]], *, alias: str | None=None, relations: list[str | dict[str, str | None]] | None=None, entity_types: list[str | dict[str, str | None]] | None=None, schema: str | dict[str, list[str]] | None=None, top_per_pair: int | None=None, rel_offsets: dict[str, float] | None=None) -> list[ExtractedFact]` | Extract facts with a kniv v7 model (the rows of ``uni.nlp.extract``). |
+| `async extract_entities(input: str | list[str] | list[dict[str, str]], *, alias: str | None=None, entity_types: list[str | dict[str, str | None]] | None=None, schema: str | dict[str, list[str]] | None=None) -> list[ExtractedEntity]` | Extract typed entities with a kniv v7 model (the rows of ``uni.nlp.entities``). |
 
 ---
 
@@ -1122,6 +1124,65 @@ Typed output from ``session.explain()``.
 | `cost_estimates` | `Any` |
 | `index_usage` | `Any` |
 | `suggestions` | `Any` |
+
+---
+
+## `ExtractedEntity`
+
+One entity from ``Xervo.extract_entities``: the rows of ``uni.nlp.entities``.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `doc` | `int` |
+| `window` | `int` |
+| `entity` | `int` |
+| `text` | `str` |
+| `entity_type` | `str` |
+| `speaker` | `bool` |
+| `mentions` | `list[str]` |
+| `mention_starts` | `list[int | None]` |
+| `mention_ends` | `list[int | None]` |
+| `mention_turns` | `list[int | None]` |
+| `model_alias` | `str` |
+| `model_id` | `str` |
+
+---
+
+## `ExtractedFact`
+
+One fact from ``Xervo.extract_facts``: the rows of ``uni.nlp.extract``.
+
+**Attributes**
+
+| Name | Type |
+|---|---|
+| `doc` | `int` |
+| `window` | `int` |
+| `head` | `int` |
+| `head_text` | `str` |
+| `head_type` | `str` |
+| `head_speaker` | `bool` |
+| `head_start` | `int | None` |
+| `head_end` | `int | None` |
+| `head_turn` | `int | None` |
+| `relation` | `str` |
+| `tail` | `int` |
+| `tail_text` | `str` |
+| `tail_type` | `str` |
+| `tail_speaker` | `bool` |
+| `tail_start` | `int | None` |
+| `tail_end` | `int | None` |
+| `tail_turn` | `int | None` |
+| `polarity` | `str` |
+| `modality` | `str` |
+| `holder` | `int | None` |
+| `time` | `int | None` |
+| `margin` | `float` |
+| `confidence` | `float` |
+| `model_alias` | `str` |
+| `model_id` | `str` |
 
 ---
 
@@ -2900,6 +2961,8 @@ Synchronous facade for embedding and text generation.
 | `embed(alias: str, texts: list[str]) -> list[list[float]]` | — |
 | `generate(alias: str, messages: list[Message | dict[str, Any]], max_tokens: int | None=None, temperature: float | None=None, top_p: float | None=None) -> GenerationResult` | — |
 | `generate_text(alias: str, prompt: str, max_tokens: int | None=None, temperature: float | None=None, top_p: float | None=None) -> GenerationResult` | — |
+| `extract_facts(input: str | list[str] | list[dict[str, str]], *, alias: str | None=None, relations: list[str | dict[str, str | None]] | None=None, entity_types: list[str | dict[str, str | None]] | None=None, schema: str | dict[str, list[str]] | None=None, top_per_pair: int | None=None, rel_offsets: dict[str, float] | None=None) -> list[ExtractedFact]` | Extract facts with a kniv v7 model (the rows of ``uni.nlp.extract``). |
+| `extract_entities(input: str | list[str] | list[dict[str, str]], *, alias: str | None=None, entity_types: list[str | dict[str, str | None]] | None=None, schema: str | dict[str, list[str]] | None=None) -> list[ExtractedEntity]` | Extract typed entities with a kniv v7 model (the rows of ``uni.nlp.entities``). |
 
 ---
 

@@ -49,8 +49,37 @@ Each of these raises `ValueError` from `apply()`. A config that was being
 silently ignored before will now fail there instead; with a typo-free config,
 nothing changes apart from the batch-size default.
 
+## New features
+
+- **Entity and fact extraction from text: `uni.nlp.extract` and
+  `uni.nlp.entities`.** With a kniv v7 model (`dragonscale-ai/kniv-v7-xlarge-u-en`
+  or `-d-en`) under an `nlp` catalog alias, the procedures extract typed
+  entities and the facts between them, in-process with no LLM. Relations and
+  entity types are given per call by name and description, or derived from
+  the declared schema with `schema: 'graph'` (a forked session uses its own
+  merged schema). Each fact carries polarity, modality, holder, time, a
+  calibrated margin, character spans of its mentions (turn-relative for a
+  conversation, with the turn index) and the model alias and id. Input can
+  be one text, several documents, or a conversation of `{speaker, text}`
+  turns, where each speaker becomes an entity. Unknown options are rejected,
+  and a v1 kniv model, which has no fact extraction, is refused with an
+  error naming the alias.
+- **`db.xervo().extract_facts(...)` / `extract_entities(...)`** return the
+  same rows from Rust (`ExtractedFact`, `ExtractedEntity`, with `NlpInput`
+  and `ExtractOptions`) and from Python (`Xervo` and `AsyncXervo`, with the
+  `ExtractedFact` / `ExtractedEntity` data classes). Rust also gains
+  `db.xervo().nlp(alias, requests)`, the raw per-window uni-xervo analysis.
+  See `website/docs/features/nlp-extraction.md`.
+
 ## Correctness fixes
 
+- **Model-backed procedures now work inside trigger actions and declared
+  procedures.** The executor that runs an inner query (a
+  `uni.plugin.declareTrigger` action, a declared procedure's body) was built
+  without the database's Uni-Xervo runtime, so a `uni.nlp.*` call there
+  failed with "Uni-Xervo runtime is not configured", and so did
+  `uni.vector.query` with a text query, on a database that had one. The inner
+  executor now inherits the caller's runtime.
 - **`size()` and `length()` of a vector return its dimension count.** A
   stored `VECTOR(n)` value is read as an Arrow `FixedSizeList`, which the
   columnar `size()` did not handle, so `size(d.embedding)` failed, and its error
