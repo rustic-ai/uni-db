@@ -30,7 +30,9 @@ class TestTypes:
 class TestNotConfigured:
     def test_extract_facts_without_runtime(self, empty_db):
         with pytest.raises(uni_db.UniInternalError, match="not configured"):
-            empty_db.xervo().extract_facts("Ada lives in London.", relations=["lives in"])
+            empty_db.xervo().extract_facts(
+                "Ada lives in London.", relations=["lives in"]
+            )
 
     def test_extract_entities_without_runtime(self, empty_db):
         with pytest.raises(uni_db.UniInternalError, match="not configured"):
@@ -42,7 +44,9 @@ class TestNotConfigured:
             with pytest.raises(uni_db.UniInternalError):
                 xervo.extract_facts(
                     value,
-                    relations=[{"name": "lives in", "description": "where the head resides"}],
+                    relations=[
+                        {"name": "lives in", "description": "where the head resides"}
+                    ],
                     entity_types=["location"],
                     top_per_pair=2,
                     rel_offsets={"lives in": -0.5},
@@ -77,8 +81,12 @@ class TestValidation:
             empty_db.xervo().extract_entities("text", relations=["r"])
 
     def test_entities_reject_an_edge_type_subset(self, empty_db):
-        with pytest.raises(uni_db.UniInvalidArgumentError, match="only to uni.nlp.extract"):
-            empty_db.xervo().extract_entities("text", schema={"edge_types": ["LIVES_IN"]})
+        with pytest.raises(
+            uni_db.UniInvalidArgumentError, match="only to uni.nlp.extract"
+        ):
+            empty_db.xervo().extract_entities(
+                "text", schema={"edge_types": ["LIVES_IN"]}
+            )
 
     def test_duplicate_relation(self, empty_db):
         with pytest.raises(uni_db.UniInvalidArgumentError, match="listed twice"):
@@ -101,12 +109,20 @@ class TestValidation:
 class TestAsync:
     async def test_extract_facts_without_runtime(self, async_empty_db):
         with pytest.raises(uni_db.UniInternalError, match="not configured"):
-            await async_empty_db.xervo().extract_facts(CONVERSATION, relations=["lives in"])
+            await async_empty_db.xervo().extract_facts(
+                CONVERSATION, relations=["lives in"]
+            )
 
     async def test_extract_entities_validation(self, async_empty_db):
-        with pytest.raises(uni_db.UniInvalidArgumentError, match="only to uni.nlp.extract"):
-            await async_empty_db.xervo().extract_entities("text", schema={"edge_types": ["E"]})
+        with pytest.raises(
+            uni_db.UniInvalidArgumentError, match="only to uni.nlp.extract"
+        ):
+            await async_empty_db.xervo().extract_entities(
+                "text", schema={"edge_types": ["E"]}
+            )
 
     async def test_extract_facts_bad_top_per_pair(self, async_empty_db):
         with pytest.raises(uni_db.UniInvalidArgumentError, match="top_per_pair"):
-            await async_empty_db.xervo().extract_facts("text", relations=["r"], top_per_pair=-1)
+            await async_empty_db.xervo().extract_facts(
+                "text", relations=["r"], top_per_pair=-1
+            )
