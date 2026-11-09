@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use crate::api::Uni;
 use uni_common::{Result, UniError};
+use uni_query::nlp::{AnalyzeKind, AnalyzeRows, ExtractRows, NlpExtractError};
 pub use uni_query::nlp::{
-    DEFAULT_NLP_ALIAS, ExtractKind, ExtractOptions, ExtractedEntity, ExtractedFact, NlpInput,
-    SchemaSource,
+    AnalyzeOptions, AnalyzedSentence, AnalyzedWord, DEFAULT_NLP_ALIAS, ExtractKind, ExtractOptions,
+    ExtractedEntity, ExtractedFact, NlpInput, SchemaSource,
 };
-use uni_query::nlp::{ExtractRows, NlpExtractError};
 use uni_xervo::api::ModelAliasSpec;
 pub use uni_xervo::runtime::ModelRuntime;
 pub use uni_xervo::traits::{
@@ -187,7 +187,9 @@ impl UniXervo {
     /// This is the full uni-xervo surface: per-window POS, lemmas,
     /// dependencies, SRL, coreference, entities and facts. For flat fact or
     /// entity rows with character spans, use [`extract_facts`](Self::extract_facts)
-    /// or [`extract_entities`](Self::extract_entities).
+    /// or [`extract_entities`](Self::extract_entities); for flat word or
+    /// sentence rows, [`analyze_words`](Self::analyze_words) or
+    /// [`analyze_sentences`](Self::analyze_sentences).
     ///
     /// # Errors
     ///
@@ -248,6 +250,54 @@ impl UniXervo {
         let runtime = self.runtime.as_ref().ok_or_else(not_configured)?;
         let schema = self.schema.schema();
         uni_query::nlp::run_extract(runtime, &schema, input, options, kind)
+            .await
+            .map_err(nlp_error)
+    }
+
+    /// Analyse text word by word with a kniv v7 model: part of speech,
+    /// morphology, lemma, and dependency head and relation. The same rows
+    /// `CALL uni.nlp.words(...)` yields.
+    ///
+    /// # Errors
+    ///
+    /// [`UniError::Internal`] when the runtime is not configured, the alias
+    /// does not resolve to a kniv v7 model, or inference fails.
+    pub async fn analyze_words(
+        &self,
+        input: &NlpInput,
+        options: &AnalyzeOptions,
+    ) -> Result<Vec<AnalyzedWord>> {
+        match self.analyze(input, options, AnalyzeKind::Words).await? {
+            AnalyzeRows::Words(rows) => Ok(rows),
+            AnalyzeRows::Sentences(_) => unreachable!("words requested"),
+        }
+    }
+
+    /// Analyse text sentence by sentence with a kniv v7 model: sentiment and
+    /// dialogue acts. The same rows `CALL uni.nlp.sentences(...)` yields.
+    ///
+    /// # Errors
+    ///
+    /// As for [`analyze_words`](Self::analyze_words).
+    pub async fn analyze_sentences(
+        &self,
+        input: &NlpInput,
+        options: &AnalyzeOptions,
+    ) -> Result<Vec<AnalyzedSentence>> {
+        match self.analyze(input, options, AnalyzeKind::Sentences).await? {
+            AnalyzeRows::Sentences(rows) => Ok(rows),
+            AnalyzeRows::Words(_) => unreachable!("sentences requested"),
+        }
+    }
+
+    async fn analyze(
+        &self,
+        input: &NlpInput,
+        options: &AnalyzeOptions,
+        kind: AnalyzeKind,
+    ) -> Result<AnalyzeRows> {
+        let runtime = self.runtime.as_ref().ok_or_else(not_configured)?;
+        uni_query::nlp::run_analyze(runtime, input, options, kind)
             .await
             .map_err(nlp_error)
     }

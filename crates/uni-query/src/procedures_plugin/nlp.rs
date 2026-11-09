@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2024-2026 Dragonscale Team
 
-//! `uni.nlp.extract` and `uni.nlp.entities` — entity and fact extraction
-//! with a kniv v7 model from the Uni-Xervo runtime.
+//! The `uni.nlp.*` procedures, over a kniv v7 model from the Uni-Xervo
+//! runtime:
 //!
-//! Both procedures are thin adapters over [`crate::nlp::run_extract`]: they
-//! decode the `input` and `options` arguments, run the extraction against
-//! the session's schema (a forked session's merged schema included), and
-//! emit one row per fact or per entity.
+//! - `uni.nlp.extract` / `uni.nlp.entities`: fact and entity extraction,
+//!   thin adapters over [`crate::nlp::run_extract`] that run against the
+//!   session's schema (a forked session's merged schema included).
+//! - `uni.nlp.words` / `uni.nlp.sentences`: per-word and per-sentence
+//!   linguistic analysis, over [`crate::nlp::run_analyze`].
+//!
+//! Each decodes its `input` and `options` arguments and emits one row per
+//! fact, entity, word or sentence.
 
 // Rust guideline compliant
 
@@ -28,15 +32,16 @@ use uni_plugin::traits::scalar::ArgType;
 use uni_plugin::{FnError, PluginError, PluginRegistrar, QName, SideEffects};
 
 use crate::nlp::{
-    ExtractKind, ExtractOptions, ExtractRows, ExtractedEntity, ExtractedFact, NlpExtractError,
-    NlpInput, run_extract,
+    AnalyzeKind, AnalyzeOptions, AnalyzeRows, AnalyzedSentence, AnalyzedWord, ExtractKind,
+    ExtractOptions, ExtractRows, ExtractedEntity, ExtractedFact, NlpExtractError, NlpInput,
+    run_analyze, run_extract,
 };
 use crate::procedures_plugin::host_args::{arg, arg_with_default};
 use crate::procedures_plugin::vector::run_search_procedure;
 use crate::query::df_graph::procedure_call::build_typed_column;
 use crate::query::executor::procedure_host::QueryProcedureHost;
 
-/// A dynamic-value (list) yield column, as list yields are elsewhere.
+/// A dynamic-value (list or map) yield column, as list yields are elsewhere.
 fn list_field(name: &str) -> Field {
     Field::new(name.to_owned(), DataType::LargeBinary, true).with_metadata(HashMap::from([(
         "cv_encoded".to_owned(),
@@ -147,6 +152,85 @@ fn entities_signature() -> &'static ProcedureSignature {
     })
 }
 
+fn analyze_args() -> Vec<uni_plugin::traits::procedure::NamedArgType> {
+    vec![
+        arg(
+            "input",
+            ArgType::CypherValue,
+            "Text to analyse: a string, a list of strings (one document each), \
+             or a list of {speaker, text} maps (one conversation).",
+        ),
+        arg_with_default(
+            "options",
+            ArgType::CypherValue,
+            ScalarValue::Null,
+            "Options map (optional): `alias`.",
+        ),
+    ]
+}
+
+fn words_signature() -> &'static ProcedureSignature {
+    static SIG: OnceLock<ProcedureSignature> = OnceLock::new();
+    SIG.get_or_init(|| ProcedureSignature {
+        args: analyze_args(),
+        yields: vec![
+            int("doc"),
+            int("window"),
+            int("sentence"),
+            int("word"),
+            text("text"),
+            int("start"),
+            int("end"),
+            int("turn"),
+            text("speaker"),
+            text("pos"),
+            text("morph"),
+            text("lemma"),
+            int("head"),
+            text("deprel"),
+            text("model_alias"),
+            text("model_id"),
+        ],
+        mode: ProcedureMode::Read,
+        side_effects: SideEffects::ReadOnly,
+        retry_contract: None,
+        batch_input: None,
+        docs: "Analyse text word by word with a kniv v7 model: part of speech, \
+               morphology, lemma, and dependency head and relation."
+            .to_owned(),
+    })
+}
+
+fn sentences_signature() -> &'static ProcedureSignature {
+    static SIG: OnceLock<ProcedureSignature> = OnceLock::new();
+    SIG.get_or_init(|| ProcedureSignature {
+        args: analyze_args(),
+        yields: vec![
+            int("doc"),
+            int("window"),
+            int("sentence"),
+            text("text"),
+            int("start"),
+            int("end"),
+            int("turn"),
+            text("speaker"),
+            text("sentiment"),
+            list_field("acts"),
+            list_field("act_scores"),
+            flag("whole"),
+            text("model_alias"),
+            text("model_id"),
+        ],
+        mode: ProcedureMode::Read,
+        side_effects: SideEffects::ReadOnly,
+        retry_contract: None,
+        batch_input: None,
+        docs: "Analyse text sentence by sentence with a kniv v7 model: sentiment and \
+               dialogue acts."
+            .to_owned(),
+    })
+}
+
 fn opt_int(v: Option<usize>) -> Value {
     v.map_or(Value::Null, |n| Value::Int(n as i64))
 }
@@ -203,6 +287,57 @@ fn entity_value(row: &ExtractedEntity, column: &str) -> Value {
         "mention_starts" => int_list(&row.mention_starts),
         "mention_ends" => int_list(&row.mention_ends),
         "mention_turns" => int_list(&row.mention_turns),
+        "model_alias" => Value::String(row.model_alias.clone()),
+        "model_id" => Value::String(row.model_id.clone()),
+        _ => Value::Null,
+    }
+}
+
+fn opt_text(v: Option<&String>) -> Value {
+    v.map_or(Value::Null, |s| Value::String(s.clone()))
+}
+
+fn word_value(row: &AnalyzedWord, column: &str) -> Value {
+    match column {
+        "doc" => Value::Int(row.doc as i64),
+        "window" => Value::Int(row.window as i64),
+        "sentence" => opt_int(row.sentence),
+        "word" => Value::Int(row.word as i64),
+        "text" => Value::String(row.text.clone()),
+        "start" => opt_int(row.start),
+        "end" => opt_int(row.end),
+        "turn" => opt_int(row.turn),
+        "speaker" => opt_text(row.speaker.as_ref()),
+        "pos" => opt_text(row.pos.as_ref()),
+        "morph" => opt_text(row.morph.as_ref()),
+        "lemma" => opt_text(row.lemma.as_ref()),
+        "head" => opt_int(row.head),
+        "deprel" => opt_text(row.deprel.as_ref()),
+        "model_alias" => Value::String(row.model_alias.clone()),
+        "model_id" => Value::String(row.model_id.clone()),
+        _ => Value::Null,
+    }
+}
+
+fn sentence_value(row: &AnalyzedSentence, column: &str) -> Value {
+    match column {
+        "doc" => Value::Int(row.doc as i64),
+        "window" => Value::Int(row.window as i64),
+        "sentence" => Value::Int(row.sentence as i64),
+        "text" => Value::String(row.text.clone()),
+        "start" => opt_int(row.start),
+        "end" => opt_int(row.end),
+        "turn" => opt_int(row.turn),
+        "speaker" => opt_text(row.speaker.as_ref()),
+        "sentiment" => opt_text(row.sentiment.as_ref()),
+        "acts" => Value::List(row.acts.iter().map(|a| Value::String(a.clone())).collect()),
+        "act_scores" => Value::Map(
+            row.act_scores
+                .iter()
+                .map(|(act, p)| (act.clone(), Value::Float(*p)))
+                .collect(),
+        ),
+        "whole" => Value::Bool(row.whole),
         "model_alias" => Value::String(row.model_alias.clone()),
         "model_id" => Value::String(row.model_id.clone()),
         _ => Value::Null,
@@ -274,6 +409,32 @@ async fn run(
     Ok(Some(batch))
 }
 
+async fn run_analysis(
+    proc_name: &'static str,
+    kind: AnalyzeKind,
+    host: QueryProcedureHost,
+    uni_args: Vec<Value>,
+    yield_items: Vec<(String, Option<String>)>,
+    schema: SchemaRef,
+) -> DFResult<Option<RecordBatch>> {
+    let input_value = uni_args.first().cloned().unwrap_or(Value::Null);
+    let options_value = uni_args.get(1).cloned().unwrap_or(Value::Null);
+    let input = NlpInput::from_value(&input_value).map_err(|e| to_df_error(proc_name, e))?;
+    let opts = AnalyzeOptions::from_value(&options_value).map_err(|e| to_df_error(proc_name, e))?;
+    let runtime = host
+        .xervo_runtime()
+        .cloned()
+        .ok_or_else(|| to_df_error(proc_name, NlpExtractError::NotConfigured))?;
+    let rows = run_analyze(&runtime, &input, &opts, kind)
+        .await
+        .map_err(|e| to_df_error(proc_name, e))?;
+    let batch = match rows {
+        AnalyzeRows::Words(rows) => build_batch(&rows, &yield_items, &schema, word_value)?,
+        AnalyzeRows::Sentences(rows) => build_batch(&rows, &yield_items, &schema, sentence_value)?,
+    };
+    Ok(Some(batch))
+}
+
 #[derive(Debug)]
 struct NlpExtractProc;
 
@@ -338,7 +499,71 @@ impl ProcedurePlugin for NlpEntitiesProc {
     }
 }
 
-/// Register `uni.nlp.extract` and `uni.nlp.entities` into `r`.
+#[derive(Debug)]
+struct NlpWordsProc;
+
+impl ProcedurePlugin for NlpWordsProc {
+    fn signature(&self) -> &ProcedureSignature {
+        words_signature()
+    }
+
+    fn invoke(
+        &self,
+        ctx: ProcedureContext<'_>,
+        args: &[ColumnarValue],
+    ) -> Result<SendableRecordBatchStream, FnError> {
+        run_search_procedure(
+            "uni.nlp.words",
+            &ctx,
+            args,
+            words_signature(),
+            |host, uni_args, yield_items, schema| {
+                run_analysis(
+                    "uni.nlp.words",
+                    AnalyzeKind::Words,
+                    host,
+                    uni_args,
+                    yield_items,
+                    schema,
+                )
+            },
+        )
+    }
+}
+
+#[derive(Debug)]
+struct NlpSentencesProc;
+
+impl ProcedurePlugin for NlpSentencesProc {
+    fn signature(&self) -> &ProcedureSignature {
+        sentences_signature()
+    }
+
+    fn invoke(
+        &self,
+        ctx: ProcedureContext<'_>,
+        args: &[ColumnarValue],
+    ) -> Result<SendableRecordBatchStream, FnError> {
+        run_search_procedure(
+            "uni.nlp.sentences",
+            &ctx,
+            args,
+            sentences_signature(),
+            |host, uni_args, yield_items, schema| {
+                run_analysis(
+                    "uni.nlp.sentences",
+                    AnalyzeKind::Sentences,
+                    host,
+                    uni_args,
+                    yield_items,
+                    schema,
+                )
+            },
+        )
+    }
+}
+
+/// Register the `uni.nlp.*` procedures into `r`.
 ///
 /// # Errors
 ///
@@ -353,6 +578,16 @@ pub fn register_into(r: &mut PluginRegistrar<'_>) -> Result<(), PluginError> {
         QName::new("uni", "nlp.entities"),
         entities_signature().clone(),
         Arc::new(NlpEntitiesProc),
+    )?;
+    r.procedure(
+        QName::new("uni", "nlp.words"),
+        words_signature().clone(),
+        Arc::new(NlpWordsProc),
+    )?;
+    r.procedure(
+        QName::new("uni", "nlp.sentences"),
+        sentences_signature().clone(),
+        Arc::new(NlpSentencesProc),
     )?;
     Ok(())
 }

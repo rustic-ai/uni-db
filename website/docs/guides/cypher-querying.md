@@ -1099,7 +1099,8 @@ RETURN node.title, distance
 ### NLP Extraction
 
 With a kniv v7 model in the Xervo catalog, extract facts and entities from
-text. See [NLP Extraction](../features/nlp-extraction.md).
+text, or analyse it word by word and sentence by sentence. See
+[NLP Extraction](../features/nlp-extraction.md).
 
 <!-- doctest: skip -->
 ```cypher
@@ -1114,6 +1115,16 @@ RETURN d.id, head_text, relation, tail_text, polarity
 CALL uni.nlp.entities('Ada Lovelace met Charles Babbage.', {entity_types: ['person']})
 YIELD text, entity_type, mentions
 RETURN text, entity_type, mentions
+
+// Words: part of speech, lemma, dependency head and relation
+CALL uni.nlp.words('Ada Lovelace wrote the first program.')
+YIELD word, text, pos, lemma, head, deprel
+RETURN word, text, pos, lemma, head, deprel
+
+// Sentences: sentiment and dialogue acts
+CALL uni.nlp.sentences('I love it! Did Babbage build the engine?')
+YIELD sentence, text, sentiment, acts
+RETURN sentence, text, sentiment, acts
 ```
 
 ### Schema Introspection

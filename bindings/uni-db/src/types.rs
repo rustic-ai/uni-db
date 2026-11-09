@@ -1569,6 +1569,79 @@ impl PyExtractedEntity {
     }
 }
 
+/// One word analysed by ``Xervo.analyze_words`` (the rows of
+/// ``uni.nlp.words``).
+///
+/// ``word`` and ``head`` index words across the whole document, so ``head``
+/// names another row's ``word``; it is ``None`` for a sentence root.
+/// ``start`` / ``end`` are character offsets into the input text, or for a
+/// conversation into turn ``turn``.
+#[pyclass(get_all, name = "AnalyzedWord", skip_from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyAnalyzedWord {
+    pub doc: usize,
+    pub window: usize,
+    pub sentence: Option<usize>,
+    pub word: usize,
+    pub text: String,
+    pub start: Option<usize>,
+    pub end: Option<usize>,
+    pub turn: Option<usize>,
+    pub speaker: Option<String>,
+    pub pos: Option<String>,
+    pub morph: Option<String>,
+    pub lemma: Option<String>,
+    pub head: Option<usize>,
+    pub deprel: Option<String>,
+    pub model_alias: String,
+    pub model_id: String,
+}
+
+#[pymethods]
+impl PyAnalyzedWord {
+    fn __repr__(&self) -> String {
+        format!(
+            "AnalyzedWord({:?}, pos={:?}, lemma={:?}, head={:?}, deprel={:?})",
+            self.text, self.pos, self.lemma, self.head, self.deprel
+        )
+    }
+}
+
+/// One sentence analysed by ``Xervo.analyze_sentences`` (the rows of
+/// ``uni.nlp.sentences``). ``acts`` are the dialogue acts above the model's
+/// threshold; ``act_scores`` maps every act the model knows to its
+/// probability.
+#[pyclass(get_all, name = "AnalyzedSentence", skip_from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyAnalyzedSentence {
+    pub doc: usize,
+    pub window: usize,
+    pub sentence: usize,
+    pub text: String,
+    pub start: Option<usize>,
+    pub end: Option<usize>,
+    pub turn: Option<usize>,
+    pub speaker: Option<String>,
+    pub sentiment: Option<String>,
+    pub acts: Vec<String>,
+    pub act_scores: std::collections::BTreeMap<String, f64>,
+    pub whole: bool,
+    pub model_alias: String,
+    pub model_id: String,
+}
+
+#[pymethods]
+impl PyAnalyzedSentence {
+    fn __repr__(&self) -> String {
+        format!(
+            "AnalyzedSentence({:?}, sentiment={:?}, acts={:?})",
+            self.text.chars().take(40).collect::<String>(),
+            self.sentiment,
+            self.acts
+        )
+    }
+}
+
 /// Result of a Xervo generation call.
 #[pyclass(get_all, name = "GenerationResult")]
 #[derive(Debug)]

@@ -1161,6 +1161,23 @@ Malformed arguments raise `UniInvalidArgumentError` before any model call; a
 database without a Xervo runtime raises `UniInternalError`. `AsyncXervo` has
 the same methods as coroutines.
 
+`analyze_words()` and `analyze_sentences()` return the rows of
+`uni.nlp.words` and `uni.nlp.sentences`, as `AnalyzedWord` /
+`AnalyzedSentence` objects. They take the same `input` and only `alias`.
+
+```python
+for w in xervo.analyze_words("Ada Lovelace wrote the first program."):
+    print(w.word, w.text, w.pos, w.lemma, w.head, w.deprel, w.morph)
+
+for s in xervo.analyze_sentences("I love it! Did Babbage build the engine?"):
+    print(s.sentence, s.text, s.sentiment, s.acts, s.act_scores)
+```
+
+| Method | Returns | Notes |
+|---|---|---|
+| `analyze_words(input, *, alias)` | `list[AnalyzedWord]` | `head` is another word's `word`; `None` for a sentence root |
+| `analyze_sentences(input, *, alias)` | `list[AnalyzedSentence]` | `act_scores` maps every dialogue act to its probability |
+
 ### Prefetch (Best Practice)
 
 Pre-load models at startup to avoid cold-start latency on first inference. Without prefetch, the first call to `embed()`, `generate()`, or `rerank()` pays the full model load cost (download, session init, warmup).

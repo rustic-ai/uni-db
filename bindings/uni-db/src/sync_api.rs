@@ -1529,6 +1529,54 @@ impl Xervo {
             .collect())
     }
 
+    /// Analyse text word by word with a kniv v7 model: the rows of
+    /// ``uni.nlp.words``. ``input`` is as for ``extract_facts``.
+    #[pyo3(signature = (input, *, alias=None))]
+    fn analyze_words(
+        &self,
+        py: Python<'_>,
+        input: Py<PyAny>,
+        alias: Option<String>,
+    ) -> PyResult<Vec<crate::types::PyAnalyzedWord>> {
+        let (input, options) = crate::convert::nlp_analyze_args(py, &input, alias)?;
+        let rows = py
+            .detach(|| {
+                pyo3_async_runtimes::tokio::get_runtime().block_on(core::xervo_analyze_words_core(
+                    &self.inner,
+                    input,
+                    options,
+                ))
+            })
+            .map_err(crate::exceptions::uni_error_to_pyerr)?;
+        Ok(rows
+            .into_iter()
+            .map(crate::convert::analyzed_word_to_py)
+            .collect())
+    }
+
+    /// Analyse text sentence by sentence with a kniv v7 model: the rows of
+    /// ``uni.nlp.sentences``. ``input`` is as for ``extract_facts``.
+    #[pyo3(signature = (input, *, alias=None))]
+    fn analyze_sentences(
+        &self,
+        py: Python<'_>,
+        input: Py<PyAny>,
+        alias: Option<String>,
+    ) -> PyResult<Vec<crate::types::PyAnalyzedSentence>> {
+        let (input, options) = crate::convert::nlp_analyze_args(py, &input, alias)?;
+        let rows = py
+            .detach(|| {
+                pyo3_async_runtimes::tokio::get_runtime().block_on(
+                    core::xervo_analyze_sentences_core(&self.inner, input, options),
+                )
+            })
+            .map_err(crate::exceptions::uni_error_to_pyerr)?;
+        Ok(rows
+            .into_iter()
+            .map(crate::convert::analyzed_sentence_to_py)
+            .collect())
+    }
+
     /// Pre-load and cache specific model aliases so first inference is instant.
     fn prefetch(&self, py: Python<'_>, aliases: Vec<String>) -> PyResult<()> {
         py.detach(|| {

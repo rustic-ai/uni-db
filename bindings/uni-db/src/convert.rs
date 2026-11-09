@@ -2667,6 +2667,64 @@ pub fn nlp_call_args(
     Ok((input, Value::Map(options)))
 }
 
+/// The `uni.nlp.words` / `uni.nlp.sentences` arguments as Cypher values.
+pub fn nlp_analyze_args(
+    py: Python,
+    input: &Py<PyAny>,
+    alias: Option<String>,
+) -> PyResult<(Value, Value)> {
+    let input = py_object_to_value(py, input)?;
+    let mut options: HashMap<String, Value> = HashMap::new();
+    if let Some(alias) = alias {
+        options.insert("alias".to_string(), Value::String(alias));
+    }
+    Ok((input, Value::Map(options)))
+}
+
+/// Convert an analysed word into its Python data class.
+pub fn analyzed_word_to_py(w: ::uni_db::api::xervo::AnalyzedWord) -> crate::types::PyAnalyzedWord {
+    crate::types::PyAnalyzedWord {
+        doc: w.doc,
+        window: w.window,
+        sentence: w.sentence,
+        word: w.word,
+        text: w.text,
+        start: w.start,
+        end: w.end,
+        turn: w.turn,
+        speaker: w.speaker,
+        pos: w.pos,
+        morph: w.morph,
+        lemma: w.lemma,
+        head: w.head,
+        deprel: w.deprel,
+        model_alias: w.model_alias,
+        model_id: w.model_id,
+    }
+}
+
+/// Convert an analysed sentence into its Python data class.
+pub fn analyzed_sentence_to_py(
+    s: ::uni_db::api::xervo::AnalyzedSentence,
+) -> crate::types::PyAnalyzedSentence {
+    crate::types::PyAnalyzedSentence {
+        doc: s.doc,
+        window: s.window,
+        sentence: s.sentence,
+        text: s.text,
+        start: s.start,
+        end: s.end,
+        turn: s.turn,
+        speaker: s.speaker,
+        sentiment: s.sentiment,
+        acts: s.acts,
+        act_scores: s.act_scores,
+        whole: s.whole,
+        model_alias: s.model_alias,
+        model_id: s.model_id,
+    }
+}
+
 /// Convert an extracted fact into its Python data class.
 pub fn extracted_fact_to_py(
     f: ::uni_db::api::xervo::ExtractedFact,

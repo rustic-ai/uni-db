@@ -1,7 +1,26 @@
 # Proposal: text-to-graph extraction with kniv v7 (`uni.nlp.*`)
 
-Status: **Phases 1–2 implemented** (rev. 4); phases 3–5 proposed.
-Date: 2026-11-07 (rev. 2, 3 and 4: 2026-11-08)
+Status: **Phases 1–3 and 2b implemented** (rev. 7); phases 4–5 proposed.
+Date: 2026-11-07 (rev. 2, 3 and 4: 2026-11-08; rev. 5: 2026-11-08; rev. 6 and 7: 2026-11-09)
+
+Revision 7: phase 2b ships as two procedures, `uni.nlp.words` and
+`uni.nlp.sentences`, not one `uni.nlp.analyze`: words and sentences are
+different row grains, and one procedure would repeat every sentence column
+on each of its words (§7.2).
+
+Revision 6: claims are stored against `:Mention`s, so resolution reaches
+them (§5.1, §6), and testing the full path (claims, speakers, a fork review,
+300 × 300 scale) needed three engine fixes, listed in §6. Phase 3 is still a
+Locy program; the fixes are general bugs it exposed.
+
+Revision 5: phase 3 ships as a tested Locy program (§6), not engine code.
+Running the rev. 2 sketch corrected it in four places: `MNOR` is a `FOLD`
+over evidence clauses, not a function of two scores; `BEST BY` cannot share
+a rule with `MNOR`, so the best match is its own rule; `DERIVE` creates an
+edge on every run, so evidence skips resolved mentions; and `CALIBRATE` fits
+only `CREATE MODEL` predicates, so a rule's threshold is measured with
+`VALIDATE` instead. The last also corrects what §4.1 and §10 said about
+calibrating `confidence`.
 
 Revision 4: span offsets count **characters** (Unicode scalar values), not
 UTF-8 bytes. Cypher's `substring()` and Python's `str` index by character,
@@ -157,8 +176,8 @@ list. `uni.nlp.entities` accepts no relations and requests only
 `NlpTasks::ENTITIES`, which skips the relation pass entirely.
 
 There is deliberately **no `min_confidence`**. The model's documented tuning
-path is `rel_offsets`, and Locy already has `CALIBRATE` and `VALIDATE` for
-turning scores into probabilities against labelled data. A second threshold
+path is `rel_offsets`, and Locy's `VALIDATE` already measures a score
+against labelled data. A second threshold
 knob would duplicate both and contradict "simplicity over generality".
 
 Yield columns. Built-in procedures yield **flat scalar columns**; lists and
@@ -180,7 +199,7 @@ maps become opaque `LargeBinary` CypherValue columns (see
 | `relation` | string | The relation **as the caller named it**; under `schema: "graph"`, the edge type name (§4.3). |
 | `polarity` | string | `FactPolarity::as_str()`: `positive` or `negative`. |
 | `modality` | string | `FactModality::as_str()`. |
-| `margin` | float | Raw calibrated margin, always > 0. The value to feed `CALIBRATE`. |
+| `margin` | float | Raw calibrated margin, always > 0. |
 | `confidence` | float | `1 / (1 + e^-margin)`. A monotone convenience for rules that want a [0, 1] input without a sigmoid in Cypher. **Not a calibrated probability**; the docs must say so and point at `CALIBRATE`. |
 | `model_alias`, `model_id` | string | The catalog alias and the model's id, for provenance (§5.2). The resolved revision is not available (rev. 3). |
 
@@ -314,13 +333,17 @@ node, so a faithful store reifies each fact as a claim node:
 (:Claim {relation, polarity, modality, margin, confidence,
          model_alias, model_id, doc_id, window,
          head_start, head_end, tail_start, tail_end, extracted_at})
-  -[:HEAD]->(head) -[:TAIL]->(tail)
+  -[:HEAD]->(:Mention) -[:TAIL]->(:Mention)
   -[:HELD_BY]->(holder)? -[:AT]->(time)? -[:FROM]->(:Document)
 ```
 
 A plain `(head)-[:REL]->(tail)` edge with the attributes as properties is
 fine when the holder and time can be dropped or kept as text, and when no
 rule needs provenance below the document.
+
+Rev. 6: `HEAD` and `TAIL` point at the `:Mention`s the fact was extracted
+from, not at entities, so the §6 program resolves them; a claim reaches its
+entities through `-[:HEAD]->()-[:REFERS_TO]->`.
 
 ### 5.2 Provenance
 
@@ -341,51 +364,89 @@ is what phase 5 automates.
 
 ## 6. Phase 3: entity resolution in Locy
 
-Entities and coreference links hold **within one window**: "Ada Lovelace" in
-two documents comes back as two unrelated entities. Resolution is where
-Graphiti and Neo4j's pipeline do real work, with LLM-based deduplication.
-uni-db can do it **declaratively**, which no competitor offers, and
-`EXPLAIN RULE` then shows why two mentions were merged.
+Implemented (rev. 5) as a Locy program. Rev. 6 adds claims, speakers,
+forks and scale to it, and fixes three engine bugs that testing them found
+(below). Entities and
+coreference links hold **within one window**: "Ada Lovelace" in two
+documents comes back as two unrelated entities. Graphiti and Neo4j's
+pipeline resolve them with LLM-based deduplication; here the policy is rules
+the user can read, version and explain, and `EXPLAIN RULE` shows why two
+mentions were merged.
 
-Sketch (syntax to be validated against a running database):
+Extraction stores each mention as a `:Mention {text, type}` node (claims add
+`doc`, `turn` and `start`, which key it by where it occurs) whose name is
+auto-embedded, next to `:Entity {name, type}` nodes embedded the same
+way. The program (`website/docs/features/nlp-extraction.md#resolving-entities`,
+kept in step with `RESOLVE` in `crates/uni/tests/common/nlp_resolve.rs`):
 
-```locy
-// Candidate extracted mentions land as :Mention nodes with text, type, and
-// an auto-embedded name vector.
-CREATE RULE same_as AS
-MATCH (m:Mention), (n:Person)
-WHERE m.type = 'person'
-FOLD p = MNOR(
-  CASE WHEN lower(m.text) = lower(n.name) THEN 0.95 ELSE 0.0 END,
-  similar_to(m.name_vec, n.name_vec) * 0.8)
-YIELD KEY m, KEY n, p AS PROB
+- **`match_evidence`**, one clause per signal, each yielding a weight `p` for
+  a `(mention, entity)` pair of the same type: exact name (0.9), surname
+  (0.7) and name similarity (`similar_to × 0.8`, from 0.5 up).
+- **`same_as`** folds a pair's evidence with `MNOR` and keeps pairs at or
+  above 0.75, yielding the result `AS PROB`.
+- **`resolved`** keeps each mention's best match with `BEST BY prob DESC`.
+- **`refers_to`** `DERIVE`s `(m)-[:REFERS_TO]->(e)`, run by a `DERIVE`
+  command.
+- Mentions still unmatched then seed new entities (one per name ignoring
+  case, none for a surname of a longer unmatched name), a second `DERIVE`
+  links the rest to them, and a last command gives anything left its own
+  entity. So variants of a new name in one batch resolve as they would
+  across batches.
 
-CREATE RULE resolved AS
-MATCH (m:Mention)
-WHERE m IS same_as
-BEST BY same_as.p
-YIELD KEY m, same_as.n AS node
-```
+What running it settled, against the rev. 2 sketch:
 
-Points this design settles:
+- **`MNOR` is a fold, not a function.** `MNOR(a, b)` over two scores is not
+  Locy; one clause per signal into a rule that folds them is, and it reads
+  better: a new signal is a new clause.
+- **`BEST BY` and `MNOR` cannot share a rule** (`BestByWithMonotonicFold`),
+  hence `same_as` and `resolved` as two rules.
+- **`DERIVE` is not idempotent.** It creates an edge each time it runs, as
+  Cypher `CREATE` does, so every evidence clause starts with
+  `NOT (m)-[:REFERS_TO]->()`: re-running resolves only new mentions.
+- **No `CALIBRATE` for rules.** `CALIBRATE` fits `CREATE MODEL` predicates.
+  `VALIDATE` does take a rule with a `PROB` column, joining its facts to
+  labelled rows by `KEY`, so `VALIDATE same_as … TARGET e.name = m.gold`
+  measures the policy. It sees only pairs above the threshold, so recall is
+  measured by validating with a lower one.
+- **Claims go through mentions.** §5.1's claim node points `HEAD` / `TAIL`
+  at `:Mention`s keyed by where they occur (a speaker, which has no span,
+  gets -1), so the program resolves claim endpoints too and a claim reaches
+  entities through `REFERS_TO`. Rev. 2's store `MERGE`d entities by name and
+  bypassed resolution.
+- **Speakers** resolve the same way: kniv types them `speaker`, so one
+  speaker across conversations is one entity and the type clause keeps it
+  apart from a `person` of the same name.
+- **Forks.** Running resolution in a fork, reviewing the `diff` and
+  promoting `Entity` + `REFERS_TO` is the curation path for low-confidence
+  merges. Testing it found two engine bugs, both fixed: a fork's writer had
+  no Xervo runtime, so writes to auto-embedded labels failed in a fork; and
+  auto-embed stored vectors as float lists, so the content UID registered at
+  flush never matched the stored row and promote duplicated auto-embedded
+  vertices and dropped edges to them.
 
-- **Policy is a rule, not code.** Exact-name weight, similarity weight, type
-  agreement and a merge threshold are all in the program and version
-  controlled. The threshold is the `PROB` cut the consuming rule applies.
-- **Calibration applies.** `CALIBRATE same_as` against a labelled sample of
-  known matches turns the ad-hoc weights into a calibrated probability, and
-  `VALIDATE` reports Brier and ECE. This is the same machinery neural
-  predicates use.
-- **Speakers** resolve by name to whatever node the application uses for
-  participants, through the same rule with `m.speaker = true`.
-- **No match** means a new node. The consuming Cypher does
-  `MERGE` on the resolved node or `CREATE` when `resolved` has no row.
-- **Forks.** Running resolution and claim creation inside a fork, then
-  reviewing the `diff` before `promote`, is the curation path for
-  low-confidence merges.
+Tests: `crates/uni/tests/common/nlp_resolve.rs` runs the program over
+mentions extracted by the mock kniv v7 model and embedded by a trigram mock,
+checks re-running is idempotent and that a later mention joins an entity a
+previous run created, that the best of two candidates wins and types must
+agree, that weak evidence makes a new entity, that case and surname
+variants of a new name in one batch make one entity, that `EXPLAIN RULE` lists the
+two clauses behind a merge, and that `VALIDATE` scores `same_as` and stored
+`confidence` against labels. It also stores claims from prose and two
+conversations and checks they meet at resolved entities (speaker included),
+runs resolution in a fork and promotes it, and, `#[ignore]`d, runs the
+claims path on the real `kniv-v7-xlarge-u-en` model. A Python test runs the
+program read from the docs page. `autoembed_parity.rs` covers promote of
+auto-embedded vertices (dense and multi-vector, eager and deferred).
+A scale test resolves 300 mentions against 300 entities. Measuring it
+found the third engine fix: the DERIVE re-joined its clause over the
+cartesian product of its MATCH and timed out; it now narrows the MATCH to
+the facts' nodes. The program's own cost is still mentions × entities: at
+1,000 × 1,000 the similarity rule exceeds the default Locy timeout, and
+fixing that needs a nearest-neighbour generator over the vector index.
 
-A later phase may move the common case (exact name, then vector, then
-create) into a built-in rule module so users start from a working default.
+Not done: a built-in rule module with this program as a default. Locy has no
+mechanism for shipping a module with the engine, and the program is short
+enough to copy and adjust; revisit if users ask for one.
 
 ## 7. Later phases
 
@@ -413,10 +474,23 @@ Implemented (rev. 3). The shapes differ from rev. 2's sketch:
 
 ### 7.2 Phase 2b: linguistic procedures
 
-`uni.nlp.analyze` would yield per-word POS, lemma and dependency rows, and
-per-sentence sentiment and dialogue acts. It is useful for lemma-normalised
-search terms and conversation analytics. It is a separate procedure because
-its row grain (words) differs from facts.
+Implemented (rev. 7) as two procedures, because words and sentences are
+different row grains:
+
+- `uni.nlp.words(input, options)`: one row per word, with UD part of speech,
+  morphology, lemma, and dependency head and relation. Word, sentence and
+  head indices count across the document (every window), so `head` joins to
+  another row's `word`; a root has `head` null.
+- `uni.nlp.sentences(input, options)`: one row per sentence, with sentiment,
+  the dialogue acts above threshold (a list) and every act's probability
+  (a map built from `label_maps().cls`, which `cls_scores` is parallel to).
+
+`input` is as for extraction; `options` takes only `alias`. Each requests
+only its own heads (`POS | MORPH | LEMMA | DEP`, or `CLS | SENTIMENT`), and
+a model lacking them (a v1 cascade model has no lemmas or sentiment) is
+refused. The facade is `analyze_words` / `analyze_sentences` in Rust and
+Python. Code: `crates/uni-query/src/nlp/analyze.rs`. SRL frames, coreference
+clusters and OntoNotes NER spans remain unexposed.
 
 ### 7.3 Phase 4: Locy extraction operator
 
@@ -463,8 +537,11 @@ Open items, none of which block shipping the pattern as documentation:
 
 - **Idempotency.** `UPDATE ON :Document` must delete the document's old
   claims and insert the new ones in the trigger's transaction (§5.3).
-- **Resolution.** The action can call the §6 rules through `QUERY`, once the
-  syntax is validated.
+- **Resolution.** A trigger action is Cypher, and no procedure runs a Locy
+  program from Cypher, so the action cannot run §6 itself (rev. 5). Run the
+  §6 program after each extraction batch from the application, which is
+  safe because it is idempotent; a `uni.locy.run`-style procedure would close
+  the gap.
 - **Deferral.** A trigger action that fails (model not loaded yet) should use
   `TriggerDeferral::after` rather than drop the document; verify that the
   declared-trigger path exposes it.
@@ -484,7 +561,7 @@ facts. The right answer is both, and the docs should say which to use when:
 | Runs | in-process, CPU, no network | remote API or `llama-server` |
 | Cost at volume | fixed, ~0.5 s per 200-word window | per token |
 | Repeatability | deterministic for a given model, schema and calibration | sampling-dependent |
-| Tuning | `rel_offsets`, `CALIBRATE` against labels | prompt edits |
+| Tuning | `rel_offsets`, `VALIDATE` against labels | prompt edits |
 | Attributes | polarity, modality, holder, time extracted as signals | whatever the prompt asks, judged by the model |
 | Languages | English only | many |
 | Complex or implicit relations | limited to what the window states | stronger |
@@ -520,8 +597,9 @@ Risks:
 - **Latency.** Quadratic in entities per window. Long entity-type lists are
   the usual cause of slow calls; schema subsets (§4.3) are the mitigation.
 - **`confidence` is not calibrated.** It is a sigmoid of a margin. Rules
-  that need a probability should calibrate (`CALIBRATE`) rather than trust
-  it.
+  that need a probability should measure it with `VALIDATE` rather than
+  trust it. (Rev. 5: earlier revisions said `CALIBRATE`, which fits only
+  `CREATE MODEL` predicates.)
 - **Schema wording dominates results.** Near-synonym relations split the
   decision between them, and generic relations (`related to`) attract
   everything. The docs page must carry uni-xervo's naming guidance.

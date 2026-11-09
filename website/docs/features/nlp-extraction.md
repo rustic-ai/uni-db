@@ -6,6 +6,10 @@ Uni-Xervo runtime. There's no LLM call and no network once the model is
 loaded, and the relations and entity types are given **per call, by name and
 description**, so a schema the model never saw needs no fine-tuning.
 
+The same model also analyses text **word by word** (part of speech,
+morphology, lemma, dependency parse) and **sentence by sentence**
+(sentiment, dialogue acts); see [Words and Sentences](#words-and-sentences).
+
 Every fact carries the signals reasoning needs: whether it is asserted or
 denied (**polarity**), whether it is a claim about the world or a plan, wish,
 question or hypothetical (**modality**), **who holds** the belief, an optional
@@ -19,6 +23,10 @@ in your text.
   character spans and model provenance.
 - **`CALL uni.nlp.entities(input, options)`**: one row per entity, grouped
   across its mentions, with each mention's span.
+- **`CALL uni.nlp.words(input, options)`** and
+  **`CALL uni.nlp.sentences(input, options)`**: one row per word (UD part of
+  speech, morphology, lemma, dependency head and relation) or per sentence
+  (sentiment, dialogue acts and their scores).
 - **Prose or conversations.** `input` is a string, a list of strings (one
   document each, analysed in one batched call), or a list of
   `{speaker, text}` maps (one conversation). In a conversation each speaker
@@ -29,8 +37,8 @@ in your text.
   entity types from your labels, using their descriptions. Results come back
   under the schema names (`LIVES_IN`, `Person`), ready to `MERGE`. On a
   forked session this is the fork's merged schema.
-- **The same rows from Rust and Python**: `db.xervo().extract_facts(...)` and
-  `extract_entities(...)`.
+- **The same rows from Rust and Python**: `db.xervo().extract_facts(...)`,
+  `extract_entities(...)`, `analyze_words(...)` and `analyze_sentences(...)`.
 
 ## Setup
 
@@ -61,8 +69,8 @@ which takes longer than the default query timeout. Load it before the first
 query: `db.xervo().prefetch(["nlp/default"])`, or `"warmup": "eager"` /
 `"background"` in the catalog entry. On a GPU use
 `"variant": "fp16"`. A v1 model (`kniv-deberta-nlp-base-en-*`) serves the same
-`nlp` task but has no entity or fact extraction; the procedures refuse it
-with an error naming the alias.
+`nlp` task but has no entity or fact extraction, and no lemmas or sentiment;
+the procedures refuse it with an error naming the alias.
 
 ## Minimal Example
 
@@ -181,38 +189,282 @@ and `model_alias, model_id`.
 - **`negative`** polarity is evidence *against* the same
   `(head, relation, tail)`, not a separate fact.
 - Tune a relation that fires too eagerly with `rel_offsets`, not by filtering
-  on `margin`. To turn margins into probabilities, label a sample and use
-  Locy's `CALIBRATE` / `VALIDATE` ([Neural Predicates](neural-predicates.md)).
+  on `margin`. `confidence` is not a calibrated probability: to see how far
+  it is from one, yield it `AS PROB` from a rule and score that rule against
+  a labelled sample with Locy's `VALIDATE`
+  ([Neural Predicates](../locy/advanced/neural-predicates.md#validate)).
+  `CALIBRATE` fits only `CREATE MODEL` predicates, not stored values.
+
+## Words and Sentences
+
+`uni.nlp.words` and `uni.nlp.sentences` expose the model's linguistic heads.
+They take the same `input` as extraction, and `options` accepts only `alias`.
+Each runs one model pass and decodes only the heads its rows need.
+
+```cypher
+CALL uni.nlp.words('Ada Lovelace wrote the first program.')
+YIELD word, text, pos, lemma, head, deprel
+RETURN word, text, pos, lemma, head, deprel
+```
+
+| word | text | pos | lemma | head | deprel |
+|---|---|---|---|---|---|
+| 0 | Ada | PROPN | Ada | 2 | nsubj |
+| 1 | Lovelace | PROPN | Lovelace | 0 | flat |
+| 2 | wrote | VERB | write | null | root |
+| 3 | the | DET | the | 5 | det |
+| 4 | first | ADJ | first | 5 | amod |
+| 5 | program | NOUN | program | 2 | obj |
+| 6 | . | PUNCT | . | 2 | punct |
+
+`uni.nlp.words` yields:
+
+| Column | Meaning |
+|---|---|
+| `doc`, `window` | As for extraction. |
+| `sentence`, `word` | Indexes counted across the whole document, not the window, so `sentence` joins to `uni.nlp.sentences` on `(doc, sentence)`. |
+| `text`, `start`, `end`, `turn` | The word as written, and its character span (in the turn `turn`, for a conversation). Punctuation is a word of its own. |
+| `speaker` | The turn's speaker, for a conversation. |
+| `pos` | Universal Dependencies part of speech (`NOUN`, `VERB`, `PROPN`, …). |
+| `morph` | UD morphological features, such as `Mood=Ind\|Number=Sing\|Person=3\|Tense=Past\|VerbForm=Fin`; `_` when the word has none. |
+| `lemma` | The dictionary form: `wrote` → `write`, `Did` → `do`. |
+| `head`, `deprel` | The `word` this one depends on, and the UD relation to it (`nsubj`, `obj`, `amod`, …). The root of a sentence has `head` null and `deprel` `root`. |
+| `model_alias`, `model_id` | Provenance. |
+
+```cypher
+CALL uni.nlp.sentences([
+  {speaker: 'user', text: 'I love it! Did Babbage build the engine?'}])
+YIELD sentence, text, turn, speaker, sentiment, acts, act_scores
+RETURN sentence, text, sentiment, acts
+```
+
+| sentence | text | sentiment | acts |
+|---|---|---|---|
+| 0 | I love it! | positive | [Inform] |
+| 1 | Did Babbage build the engine? | neutral | [Question] |
+
+`uni.nlp.sentences` yields `doc, window, sentence, text, start, end, turn,
+speaker` as above, and:
+
+| Column | Meaning |
+|---|---|
+| `sentiment` | `positive`, `negative` or `neutral`. |
+| `acts` | Dialogue acts above the model's threshold: a list, since a sentence can be several acts or none. kniv v7's are `Commissive`, `Directive`, `Feedback`, `Inform`, `Question` and `Social`. |
+| `act_scores` | Map from every act to its probability. |
+| `whole` | `false` when the sentence ran past the encoder's limit; its words from there on have null analysis. |
+| `model_alias`, `model_id` | Provenance. |
+
+Typical uses:
+
+- **Lemma-normalised terms.** Index or match on `lemma` rather than the word,
+  so "wrote", "writes" and "written" meet at `write`.
+- **Conversation analytics.** Count a user's questions and negative
+  sentences per conversation, with turns stored as `:Turn` nodes and
+  collected into the `{speaker, text}` list `input` takes:
+
+```cypher
+MATCH (t:Turn)
+WITH t ORDER BY t.conversation, t.idx
+WITH t.conversation AS conversation,
+     collect({speaker: t.speaker, text: t.text}) AS turns
+CALL uni.nlp.sentences(turns) YIELD speaker, sentiment, acts
+WITH conversation, speaker, sentiment, acts WHERE speaker = 'user'
+RETURN conversation,
+       count(CASE WHEN 'Question' IN acts THEN 1 END) AS questions,
+       count(CASE WHEN sentiment = 'negative' THEN 1 END) AS negative
+```
+
+- **Subject–verb–object triples** without a schema, by joining each word to
+  its head:
+
+```cypher
+CALL uni.nlp.words($text) YIELD word, lemma, head, deprel
+WITH collect({word: word, lemma: lemma, head: head, deprel: deprel}) AS ws
+UNWIND ws AS subj
+UNWIND ws AS obj
+WITH ws, subj, obj
+WHERE subj.deprel = 'nsubj' AND obj.deprel = 'obj' AND subj.head = obj.head
+UNWIND ws AS verb
+WITH subj, verb, obj WHERE verb.word = subj.head
+RETURN subj.lemma AS subject, verb.lemma AS verb, obj.lemma AS object
+```
 
 ## Storing Facts
 
 Holder and time point at other entities, and an edge property can't point at
-a node, so a faithful store makes each fact a claim node with its provenance:
+a node, so a faithful store makes each fact a claim node with its provenance.
+Point the claim at the **mentions** it was extracted from, not straight at
+entities, so the resolution program below decides which entity each one
+names:
 
 ```cypher
 MATCH (d:Document {id: $doc})
 CALL uni.nlp.extract(d.text, {schema: 'graph'})
-YIELD head_text, head_type, relation, tail_text, tail_type, polarity, modality,
-      margin, head_start, head_end, tail_start, tail_end, model_alias, model_id
+YIELD head_text, head_type, head_start, head_turn, relation,
+      tail_text, tail_type, tail_start, tail_turn, polarity, modality, margin,
+      model_alias, model_id
 WHERE modality IN ['asserted', 'reported']
-MERGE (h:Entity {name: head_text, type: head_type})
-MERGE (t:Entity {name: tail_text, type: tail_type})
+// A mention is keyed by where it occurs. A speaker has no span: -1.
+MERGE (h:Mention {doc: d.id, turn: coalesce(head_turn, -1),
+                  start: coalesce(head_start, -1), text: head_text, type: head_type})
+MERGE (t:Mention {doc: d.id, turn: coalesce(tail_turn, -1),
+                  start: coalesce(tail_start, -1), text: tail_text, type: tail_type})
 CREATE (c:Claim {relation: relation, polarity: polarity, modality: modality,
-                 margin: margin, model_alias: model_alias, model_id: model_id,
-                 head_start: head_start, head_end: head_end,
-                 tail_start: tail_start, tail_end: tail_end})
+                 margin: margin, model_alias: model_alias, model_id: model_id})
 CREATE (c)-[:HEAD]->(h), (c)-[:TAIL]->(t), (c)-[:FROM]->(d)
 ```
 
-A plain `(h)-[:LIVES_IN {margin: margin}]->(t)` edge is enough when you don't
-need the holder, time or spans.
+Once mentions are resolved, a claim reaches its entities through them:
 
-Entities are only grouped **within one window**: "Ada Lovelace" in two
-documents comes back as two entities. Matching them to existing nodes (by
-normalised name, then `uni.vector.query` over an embedded name property) is
-up to you for now. A rule-based approach in Locy, with `same_as … AS PROB`
-calibrated against known matches, is described in the
-[design proposal](https://github.com/rustic-ai/uni-db/blob/main/docs/proposals/kniv_v7_nlp_extraction_2026_11_07.md).
+```cypher
+MATCH (c:Claim)-[:HEAD]->(:Mention)-[:REFERS_TO]->(h:Entity),
+      (c)-[:TAIL]->(:Mention)-[:REFERS_TO]->(t:Entity)
+RETURN h.name, c.relation, t.name
+```
+
+A plain `MERGE (h:Entity {name: head_text})` with a
+`(h)-[:LIVES_IN {margin: margin}]->(t)` edge is enough when you don't need
+the holder, time or spans and every source spells names the same way.
+Entities are grouped **within one window**: "Charles Babbage" in a letter
+and "Babbage" in a conversation come back as unrelated entities. Resolving
+them is the next step.
+
+## Resolving Entities
+
+Resolution decides which extracted mention names which existing node. Here
+it is a Locy program, so the matching policy is a few rules you can read,
+version and explain, rather than code. It works on `:Mention` nodes whose
+name is embedded on write, however they were made: the claims above, or
+every entity in a chunk:
+
+```cypher
+// Schema: :Mention {text, type, embedding} and :Entity {name, type, embedding},
+// each embedding index auto-embedding the name ('text' / 'name').
+MATCH (c:Chunk)
+CALL uni.nlp.entities(c.text, {entity_types: ['person', 'organization']})
+YIELD text, entity_type
+CREATE (c)-[:MENTIONS]->(:Mention {text: text, type: entity_type})
+```
+
+Then run the program in a transaction:
+
+```locy
+// One clause per signal that mention m names entity e, each with a weight.
+CREATE RULE match_evidence AS
+MATCH (m:Mention), (e:Entity)
+WHERE NOT (m)-[:REFERS_TO]->() AND m.type = e.type
+  AND toLower(m.text) = toLower(e.name)
+YIELD KEY m, KEY e, 0.9 AS p
+
+CREATE RULE match_evidence AS              // a surname: "Lovelace"
+MATCH (m:Mention), (e:Entity)
+WHERE NOT (m)-[:REFERS_TO]->() AND m.type = e.type
+  AND toLower(e.name) ENDS WITH ' ' + toLower(m.text)
+YIELD KEY m, KEY e, 0.7 AS p
+
+CREATE RULE match_evidence AS              // a similar name
+MATCH (m:Mention), (e:Entity)
+WHERE NOT (m)-[:REFERS_TO]->() AND m.type = e.type
+  AND similar_to(m.embedding, e.embedding) >= 0.5
+YIELD KEY m, KEY e, similar_to(m.embedding, e.embedding) * 0.8 AS p
+
+// Combine a pair's signals with noisy-OR; keep pairs above the threshold.
+CREATE RULE same_as AS
+MATCH (m:Mention), (e:Entity)
+WHERE (m, e, p) IS match_evidence
+FOLD prob = MNOR(p)
+WHERE prob >= 0.75
+YIELD KEY m, KEY e, prob AS PROB
+
+// The best match per mention.
+CREATE RULE resolved AS
+MATCH (m:Mention), (e:Entity)
+WHERE (m, e, prob) IS same_as
+BEST BY prob DESC
+YIELD KEY m, e, prob
+
+CREATE RULE refers_to AS
+MATCH (m:Mention), (e:Entity)
+WHERE (m, e) IS resolved
+DERIVE (m)-[:REFERS_TO]->(e)
+
+DERIVE refers_to
+
+// Mentions nothing matched name new entities: one per name, ignoring case,
+// and none for a surname of a longer unmatched name ("Hopper").
+MATCH (m:Mention) WHERE NOT (m)-[:REFERS_TO]->()
+  AND NOT EXISTS {
+    MATCH (o:Mention) WHERE NOT (o)-[:REFERS_TO]->() AND o.type = m.type
+      AND (toLower(o.text) ENDS WITH ' ' + toLower(m.text)
+           OR (toLower(o.text) = toLower(m.text) AND o.text < m.text))
+  }
+MERGE (e:Entity {name: m.text, type: m.type})
+
+// Link the remaining mentions to those entities, as any later batch would.
+DERIVE refers_to
+
+// Whatever still has no match names an entity of its own.
+MATCH (m:Mention) WHERE NOT (m)-[:REFERS_TO]->()
+MERGE (e:Entity {name: m.text, type: m.type})
+CREATE (m)-[:REFERS_TO]->(e)
+```
+
+```python
+with session.tx() as tx:
+    tx.locy(RESOLVE)
+    tx.commit()
+```
+
+How it behaves:
+
+- **Signals add up.** "Lovelace" against "Ada Lovelace" gets 0.7 from the
+  surname clause and, at a name similarity of 0.75, 0.6 from the similarity
+  clause, so `MNOR = 1 − 0.3 × 0.4 = 0.88` clears the 0.75 threshold.
+  Neither signal would on its own.
+- **Types must agree.** A mention typed `person` never resolves to a
+  `location`, however similar the names.
+- **Re-running is safe.** `DERIVE` creates an edge every time it runs, as
+  Cypher `CREATE` does, so every evidence clause skips mentions that already
+  have a `REFERS_TO`. Run the program after each batch of extraction, and it
+  only resolves what is new.
+- **New names are created once.** Mentions that match nothing create
+  entities first, one per name ignoring case, and the second `DERIVE` links
+  every remaining mention to them through the same rules. So "Grace Hopper",
+  "grace hopper" and "Hopper" in one batch end up as one entity, as they
+  would if they arrived in separate batches. The surname "Hopper" still
+  needs enough evidence to clear the threshold; if it has too little, it
+  gets an entity of its own.
+- **Speakers resolve like any name.** kniv types a conversation's speaker
+  `speaker`, so "ada" in two conversations is one entity, kept apart from a
+  `person` called "Ada Lovelace" by the type clause.
+- **Every merge is explainable.** `EXPLAIN RULE same_as WHERE m.text =
+  'Lovelace'` lists the evidence rows behind each pair, one per clause that
+  fired, with their weights.
+
+The weights and the threshold are policy: change them in the program, not in
+code. They are hand-set, not learned (`CALIBRATE` fits only
+[neural predicates](../locy/advanced/neural-predicates.md)), but you can
+measure them. Give a sample of mentions the name of the entity each really
+refers to, and score `same_as` against it:
+
+```locy
+VALIDATE same_as ON MATCH (m:Mention), (e:Entity)
+TARGET e.name = m.gold
+METRICS brier_score, accuracy
+```
+
+`VALIDATE` scores only the pairs `same_as` derives, so it shows wrong merges
+above the threshold, not matches the threshold missed: lower the threshold
+while validating to see those.
+
+Every evidence clause pairs each unresolved mention with each entity of its
+type, so the cost grows with mentions × entities. A few hundred new mentions
+against a few hundred entities take seconds; a thousand against a thousand
+exceed the default Locy timeout. Resolve after each extraction batch rather
+than over a whole backlog, keep entity types narrow, and add type-specific
+signals (an e-mail, a ticker) as more clauses. To
+review merges before they land, run the program in a [fork](forks.md) and
+`promote` what you accept.
 
 ## Extracting on Write
 
@@ -253,7 +505,7 @@ is the curation path for low-confidence results.
 | Runs | in-process, CPU, no network | remote API or `llama-server` |
 | Cost at volume | fixed, ~0.5 s per 200-word window | per token |
 | Repeatability | deterministic for a model, schema and calibration | sampling-dependent |
-| Tuning | `rel_offsets`, `CALIBRATE` against labels | prompt edits |
+| Tuning | `rel_offsets`, `VALIDATE` against labels | prompt edits |
 | Languages | English only | many |
 | Complex or implicit relations | what the window states | stronger |
 | Privacy | text never leaves the process | depends on the provider |

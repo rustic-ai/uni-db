@@ -966,3 +966,95 @@ async fn multi_autoembed_batches_one_inference() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+// ─────────────────────────── FORK PROMOTE ───────────────────────────
+//
+// An embedding the writer fills in must be stored in L0 in the column's
+// declared form (`Vector`, or a list of `Vector`s), as a value written through
+// Cypher is (`to_declared_form`). Auto-embed used to put lists of floats there,
+// and the flush hashes the L0 map into the vertex's content UID: a `List`
+// hashes its numbers, a `Vector` only its width. Reads convert to the declared
+// form, so nothing looked wrong, but the registered UID differed from the one
+// the stored row hashes to: fork promote re-inserted auto-embedded vertices
+// already on primary, and skipped edges to them as having no endpoint.
+
+#[tokio::test(flavor = "multi_thread")]
+async fn promote_matches_auto_embedded_vertices_on_primary() -> anyhow::Result<()> {
+    use uni_db::api::fork_diff::PromotePattern;
+    for (multi_vector, defer) in [(false, false), (true, false), (false, true), (true, true)] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cfg = UniConfig {
+            defer_embeddings: defer,
+            ..UniConfig::default()
+        };
+        let db = if multi_vector {
+            let db = Uni::temporary()
+                .config(cfg)
+                .xervo_runtime(multi_runtime(calls).await)
+                .build()
+                .await?;
+            multi_schema(&db, Some(emb_cfg("m/mock", &["content"], None))).await?;
+            db
+        } else {
+            let db = Uni::temporary()
+                .config(cfg)
+                .xervo_runtime(dense_runtime(calls).await)
+                .build()
+                .await?;
+            dense_schema(&db, Some(emb_cfg("d/mock", &["content"], None))).await?;
+            db
+        };
+        let tx = db.session().tx().await?;
+        tx.execute("CREATE (:Doc {title: 'a', content: 'x y'})")
+            .await?;
+        tx.commit().await?;
+        db.flush().await?;
+        {
+            let fork = db.session().fork("f").await?;
+            let tx = fork.tx().await?;
+            tx.execute(
+                "MATCH (a:Doc {title: 'a'}) \
+                 CREATE (a)-[:CITES]->(:Doc {title: 'b', content: 'z'})",
+            )
+            .await?;
+            tx.commit().await?;
+        }
+        let report = db
+            .promote_from_fork(
+                "f",
+                &[
+                    PromotePattern::label("Doc"),
+                    PromotePattern::edge_type("CITES"),
+                ],
+            )
+            .await?;
+        // `a` is already on primary; only `b` and the edge are new.
+        let what = format!(
+            "{}{}",
+            if multi_vector {
+                "multi-vector"
+            } else {
+                "dense"
+            },
+            if defer { ", deferred" } else { "" }
+        );
+        assert_eq!(report.vertices_inserted, 1, "{what}");
+        assert_eq!(report.edges_inserted, 1, "{what}");
+        assert_eq!(report.edges_skipped_no_endpoint, 0, "{what}");
+        let rows = db
+            .session()
+            .query("MATCH (a:Doc)-[:CITES]->(b:Doc) RETURN a.title + b.title AS p")
+            .await?;
+        assert_eq!(rows.rows()[0].get::<String>("p")?, "ab", "{what}");
+        assert_eq!(
+            db.session()
+                .query("MATCH (d:Doc) RETURN count(d) AS n")
+                .await?
+                .rows()[0]
+                .get::<i64>("n")?,
+            2,
+            "{what}"
+        );
+    }
+    Ok(())
+}

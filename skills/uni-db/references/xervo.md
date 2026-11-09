@@ -346,6 +346,12 @@ RETURN *
 
 CALL uni.nlp.entities($text, {entity_types: ['person']})
 YIELD entity, text, entity_type, mentions, mention_starts, mention_ends RETURN *
+
+CALL uni.nlp.words($text)            // one row per word
+YIELD sentence, word, text, pos, morph, lemma, head, deprel RETURN *
+
+CALL uni.nlp.sentences($text)        // one row per sentence
+YIELD sentence, text, speaker, sentiment, acts, act_scores, whole RETURN *
 ```
 
 - **Options:** `alias`, `relations`, `entity_types`, `schema` (`'graph'` or
@@ -359,9 +365,28 @@ YIELD entity, text, entity_type, mentions, mention_starts, mention_ends RETURN *
 - **Spans** are character offsets (as `substring()` counts) into the text, or into the turn named by
   `head_turn` / `tail_turn` for a conversation. Speakers have none. Text
   columns are sliced from the input, so `AT&T` stays `AT&T`.
-- **`confidence`** is `sigmoid(margin)`, not a calibrated probability — use
-  Locy `CALIBRATE` against labels.
-- A v1 `kniv-deberta-nlp-*` model is refused: it has no fact extraction.
+- **`confidence`** is `sigmoid(margin)`, not a calibrated probability —
+  measure it with Locy `VALIDATE` on a rule that yields it `AS PROB`
+  (`CALIBRATE` fits only `CREATE MODEL` predicates).
+- **Words and sentences:** `uni.nlp.words` / `uni.nlp.sentences` (and
+  `analyze_words()` / `analyze_sentences()` in Python and Rust) take the same
+  `input` and only `alias`. `word`, `sentence` and `head` count across the
+  whole document, so `head` joins to another row's `word`; a sentence root
+  has `head` null and `deprel` `root`. `pos`/`morph`/`deprel` are Universal
+  Dependencies. `acts` is a list (kniv v7: `Commissive`, `Directive`,
+  `Feedback`, `Inform`, `Question`, `Social`); `act_scores` maps each to a
+  probability. Punctuation is its own word.
+- A v1 `kniv-deberta-nlp-*` model is refused: it has no fact extraction,
+  lemmas or sentiment.
+- **Resolution** of mentions to existing entities is a Locy program on the
+  NLP extraction docs page (evidence clauses → `MNOR` → `BEST BY` →
+  `DERIVE`). Every evidence clause must skip mentions that already have a
+  `REFERS_TO`: `DERIVE` creates an edge on every run. Store claims with
+  `HEAD` / `TAIL` pointing at `:Mention`s so the program resolves them too.
+  Cost grows with mentions × entities of a type: resolve after each batch
+  (a few hundred × a few hundred takes seconds; 1,000 × 1,000 exceeds the
+  default Locy timeout). To review merges first, run it in a fork and
+  `promote_from_fork` `Entity` + `REFERS_TO`.
 - **Prefetch first.** Loading the ~2 GB model on the first query exceeds the
   default query timeout; call `db.xervo().prefetch(["nlp/default"])` or use
   `"warmup": "eager"` / `"background"`.

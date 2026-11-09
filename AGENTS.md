@@ -193,6 +193,18 @@ from each phase for deeper context.
   Starting at the fork point alone let a reopened fork stamp a write at or
   below a version it had already flushed, so a delete or update of a
   fork-flushed row lost to the older row (declared and schemaless alike).
+- **A fork's writer gets the Xervo runtime, as primary's does.**
+  `UniInner::at_fork` calls `set_xervo_runtime` on the fork writer before
+  its WAL replay. Without it, fork writes to an auto-embedded label fail
+  with "runtime not configured" while fork reads work.
+- **Values a writer fills in must be in their declared form.** The flush
+  hashes the L0 property map into the content UID it registers, and
+  `compute_vertex_uid` renders a `Vector` as its width but a `List` as its
+  numbers. A path that inserts a property itself (auto-embed, derived
+  columns) must insert `Value::Vector` / a list of `Value::Vector`, not
+  float lists, as `to_declared_form` does for Cypher writes; otherwise the
+  UID never matches the stored row and promote duplicates the vertex and
+  skips edges to it.
 
 ## Fork invariants (Phase 2)
 - **Registry edits go through `ForkRegistryHandle`.** Never write `catalog/fork_registry.json`, `catalog/fork_schemas/*`, `catalog/fork_tombstones/*`, or `catalog/forks/{fork_id}/id_allocator.json` directly — the 2PC state machine assumes single-writer access through the handle.
