@@ -366,7 +366,12 @@ YIELD entity, text, entity_type, mentions, mention_starts, mention_ends RETURN *
 - **Resolution** of mentions to existing entities is a Locy program on the
   NLP extraction docs page (evidence clauses → `MNOR` → `BEST BY` →
   `DERIVE`). Every evidence clause must skip mentions that already have a
-  `REFERS_TO`: `DERIVE` creates an edge on every run.
+  `REFERS_TO`: `DERIVE` creates an edge on every run. Store claims with
+  `HEAD` / `TAIL` pointing at `:Mention`s so the program resolves them too.
+  Cost grows with mentions × entities of a type: resolve after each batch
+  (a few hundred × a few hundred takes seconds; 1,000 × 1,000 exceeds the
+  default Locy timeout). To review merges first, run it in a fork and
+  `promote_from_fork` `Entity` + `REFERS_TO`.
 - **Prefetch first.** Loading the ~2 GB model on the first query exceeds the
   default query timeout; call `db.xervo().prefetch(["nlp/default"])` or use
   `"warmup": "eager"` / `"background"`.

@@ -198,6 +198,13 @@ println!(
 
 All inserts run inside a single primary transaction that commits at the end — partial-failure semantics are atomic across patterns. Edge endpoints must already exist on primary (or be promoted earlier in the same call by a vertex pattern); otherwise the edge is counted in `edges_skipped_no_endpoint` and skipped.
 
+!!! note "Auto-embedded labels"
+    Promote matches vertices by content UID. Before this release, vertices of
+    an auto-embedded label were registered under a UID their stored row did
+    not hash to, so promote inserted a second copy of each one the fork had
+    inherited and skipped edges to it. Vertices written from this release on
+    match correctly; ones flushed earlier keep the old entry until rewritten.
+
 Three counters report work that completed but could **not be verified against
 primary**, because a lookup against primary failed rather than returning an
 answer. They are not errors — the promote still committed — but a nonzero value

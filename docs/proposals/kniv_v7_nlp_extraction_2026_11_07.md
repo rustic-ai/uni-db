@@ -1,7 +1,12 @@
 # Proposal: text-to-graph extraction with kniv v7 (`uni.nlp.*`)
 
-Status: **Phases 1–3 implemented** (rev. 5); phases 4–5 proposed.
-Date: 2026-11-07 (rev. 2, 3 and 4: 2026-11-08; rev. 5: 2026-11-08)
+Status: **Phases 1–3 implemented** (rev. 6); phases 4–5 proposed.
+Date: 2026-11-07 (rev. 2, 3 and 4: 2026-11-08; rev. 5: 2026-11-08; rev. 6: 2026-11-09)
+
+Revision 6: claims are stored against `:Mention`s, so resolution reaches
+them (§5.1, §6), and testing the full path (claims, speakers, a fork review,
+300 × 300 scale) needed three engine fixes, listed in §6. Phase 3 is still a
+Locy program; the fixes are general bugs it exposed.
 
 Revision 5: phase 3 ships as a tested Locy program (§6), not engine code.
 Running the rev. 2 sketch corrected it in four places: `MNOR` is a `FOLD`
@@ -323,13 +328,17 @@ node, so a faithful store reifies each fact as a claim node:
 (:Claim {relation, polarity, modality, margin, confidence,
          model_alias, model_id, doc_id, window,
          head_start, head_end, tail_start, tail_end, extracted_at})
-  -[:HEAD]->(head) -[:TAIL]->(tail)
+  -[:HEAD]->(:Mention) -[:TAIL]->(:Mention)
   -[:HELD_BY]->(holder)? -[:AT]->(time)? -[:FROM]->(:Document)
 ```
 
 A plain `(head)-[:REL]->(tail)` edge with the attributes as properties is
 fine when the holder and time can be dropped or kept as text, and when no
 rule needs provenance below the document.
+
+Rev. 6: `HEAD` and `TAIL` point at the `:Mention`s the fact was extracted
+from, not at entities, so the §6 program resolves them; a claim reaches its
+entities through `-[:HEAD]->()-[:REFERS_TO]->`.
 
 ### 5.2 Provenance
 
@@ -350,15 +359,18 @@ is what phase 5 automates.
 
 ## 6. Phase 3: entity resolution in Locy
 
-Implemented (rev. 5) as a Locy program, with no engine change. Entities and
+Implemented (rev. 5) as a Locy program. Rev. 6 adds claims, speakers,
+forks and scale to it, and fixes three engine bugs that testing them found
+(below). Entities and
 coreference links hold **within one window**: "Ada Lovelace" in two
 documents comes back as two unrelated entities. Graphiti and Neo4j's
 pipeline resolve them with LLM-based deduplication; here the policy is rules
 the user can read, version and explain, and `EXPLAIN RULE` shows why two
 mentions were merged.
 
-Extraction stores each mention as a `:Mention {text, type}` node whose name
-is auto-embedded, next to `:Entity {name, type}` nodes embedded the same
+Extraction stores each mention as a `:Mention {text, type}` node (claims add
+`doc`, `turn` and `start`, which key it by where it occurs) whose name is
+auto-embedded, next to `:Entity {name, type}` nodes embedded the same
 way. The program (`website/docs/features/nlp-extraction.md#resolving-entities`,
 kept in step with `RESOLVE` in `crates/uni/tests/common/nlp_resolve.rs`):
 
