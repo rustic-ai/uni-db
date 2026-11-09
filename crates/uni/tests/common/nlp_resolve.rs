@@ -8,8 +8,10 @@
 //! keep the two in step. Each `match_evidence` clause is one signal that a
 //! mention names an existing entity; `same_as` combines a pair's signals with
 //! noisy-OR and applies the merge threshold; `resolved` keeps each mention's
-//! best match; `refers_to` writes it as an edge; and the Cypher command at the
-//! end gives every mention left unmatched an entity of its own.
+//! best match; `refers_to` writes it as an edge. Mentions left unmatched then
+//! name new entities, one per name ignoring case and none for a surname of a
+//! longer unmatched name; a second `DERIVE` links them, and a last command
+//! gives anything still unmatched an entity of its own.
 //!
 //! The end-to-end test runs extraction through the mock kniv v7 model of
 //! `nlp_extract` (capitalised words are entities) and embeds names with a mock
@@ -35,7 +37,7 @@ use uni_xervo::traits::{
 
 use crate::nlp_extract::{MockProvider, spec};
 
-/// The resolution program: the rules, then the two commands that write.
+/// The resolution program: the rules, then the commands that write.
 const RESOLVE: &str = r#"
 CREATE RULE match_evidence AS
 MATCH (m:Mention), (e:Entity)
@@ -72,6 +74,16 @@ CREATE RULE refers_to AS
 MATCH (m:Mention), (e:Entity)
 WHERE (m, e) IS resolved
 DERIVE (m)-[:REFERS_TO]->(e)
+
+DERIVE refers_to
+
+MATCH (m:Mention) WHERE NOT (m)-[:REFERS_TO]->()
+  AND NOT EXISTS {
+    MATCH (o:Mention) WHERE NOT (o)-[:REFERS_TO]->() AND o.type = m.type
+      AND (toLower(o.text) ENDS WITH ' ' + toLower(m.text)
+           OR (toLower(o.text) = toLower(m.text) AND o.text < m.text))
+  }
+MERGE (e:Entity {name: m.text, type: m.type})
 
 DERIVE refers_to
 
@@ -551,5 +563,35 @@ async fn validate_measures_stored_extraction_confidence() -> Result<()> {
         .expect("brier_score");
     // ((1 - 0.9)^2 + 0.8^2) / 2
     assert!((brier - 0.325).abs() < 1e-6, "brier {brier}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn variants_of_a_new_name_in_one_batch_make_one_entity() -> Result<()> {
+    // Nothing exists yet, so the first pass matches nothing. The new-entity
+    // step must not give each spelling its own entity: across batches they
+    // would all resolve to one, so within a batch they must too.
+    let db = db_with_models().await?;
+    let tx = db.session().tx().await?;
+    tx.execute(
+        "CREATE (:Mention {text: 'Grace Hopper', type: 'person'}), \
+                (:Mention {text: 'grace hopper', type: 'person'}), \
+                (:Mention {text: 'Hopper', type: 'person'})",
+    )
+    .await?;
+    tx.commit().await?;
+    resolve(&db).await?;
+    let expected = vec![
+        ("Grace Hopper".to_owned(), "Grace Hopper".to_owned()),
+        ("Hopper".to_owned(), "Grace Hopper".to_owned()),
+        ("grace hopper".to_owned(), "Grace Hopper".to_owned()),
+    ];
+    assert_eq!(links(&db).await?, expected);
+    assert_eq!(
+        count(&db, "MATCH (e:Entity) RETURN count(e) AS n").await?,
+        1
+    );
+    resolve(&db).await?;
+    assert_eq!(links(&db).await?, expected);
     Ok(())
 }

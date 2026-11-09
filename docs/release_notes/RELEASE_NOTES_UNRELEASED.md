@@ -74,7 +74,8 @@ nothing changes apart from the batch-size default.
   documents a tested Locy program that links each extracted mention to an
   existing entity: weighted evidence (exact name, surname, embedding
   similarity), combined with `MNOR` under a merge threshold, the best match
-  per mention, and a new entity for each mention nothing matched. It is
+  per mention, and new entities for mentions nothing matched, with case and
+  surname variants of a new name in one batch sharing one. It is
   idempotent, `EXPLAIN RULE` shows the evidence behind each merge, and
   `VALIDATE` scores the policy against labelled mentions. Earlier docs said
   extraction `confidence` could be calibrated with `CALIBRATE`; that command

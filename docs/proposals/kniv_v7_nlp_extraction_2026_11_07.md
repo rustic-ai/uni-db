@@ -370,8 +370,11 @@ kept in step with `RESOLVE` in `crates/uni/tests/common/nlp_resolve.rs`):
 - **`resolved`** keeps each mention's best match with `BEST BY prob DESC`.
 - **`refers_to`** `DERIVE`s `(m)-[:REFERS_TO]->(e)`, run by a `DERIVE`
   command.
-- A final Cypher command `MERGE`s an entity for every mention still
-  unmatched, so repeated new names in one batch share one entity.
+- Mentions still unmatched then seed new entities (one per name ignoring
+  case, none for a surname of a longer unmatched name), a second `DERIVE`
+  links the rest to them, and a last command gives anything left its own
+  entity. So variants of a new name in one batch resolve as they would
+  across batches.
 
 What running it settled, against the rev. 2 sketch:
 
@@ -398,7 +401,8 @@ Tests: `crates/uni/tests/common/nlp_resolve.rs` runs the program over
 mentions extracted by the mock kniv v7 model and embedded by a trigram mock,
 checks re-running is idempotent and that a later mention joins an entity a
 previous run created, that the best of two candidates wins and types must
-agree, that weak evidence makes a new entity, that `EXPLAIN RULE` lists the
+agree, that weak evidence makes a new entity, that case and surname
+variants of a new name in one batch make one entity, that `EXPLAIN RULE` lists the
 two clauses behind a merge, and that `VALIDATE` scores `same_as` and stored
 `confidence` against labels.
 

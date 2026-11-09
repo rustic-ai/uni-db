@@ -5420,8 +5420,15 @@ two together. Its shape follows from Locy constraints worth knowing:
   `BEST BY prob DESC` over `same_as`.
 - **`DERIVE` creates, every run.** It has Cypher `CREATE` semantics, so each
   evidence clause starts with `NOT (m)-[:REFERS_TO]->()`; that guard is what
-  makes the program idempotent. The trailing Cypher command `MERGE`s an
-  entity per unmatched mention.
+  makes the program idempotent.
+- **New entities are seeded, then resolved.** Mentions that match nothing
+  `MERGE` an entity, one per name ignoring case and none for a name that
+  ends a longer unmatched one. A second `DERIVE refers_to` then links every
+  remaining mention through the same rules, and a last command gives the
+  rest their own entity. A single create-and-link step would split
+  "Grace Hopper", "grace hopper" and "Hopper" in one batch into three
+  entities that separate batches would have merged, and the guard means a
+  re-run never reconciles them.
 - **Measured with `VALIDATE`, not fitted.** `VALIDATE` joins a `PROB` rule's
   facts to labelled rows by `KEY` (`locy_validate.rs`), so it scores
   `same_as` directly; it sees only pairs above the threshold.

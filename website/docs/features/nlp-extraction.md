@@ -275,7 +275,20 @@ DERIVE (m)-[:REFERS_TO]->(e)
 
 DERIVE refers_to
 
-// A mention nothing matched names a new entity.
+// Mentions nothing matched name new entities: one per name, ignoring case,
+// and none for a surname of a longer unmatched name ("Hopper").
+MATCH (m:Mention) WHERE NOT (m)-[:REFERS_TO]->()
+  AND NOT EXISTS {
+    MATCH (o:Mention) WHERE NOT (o)-[:REFERS_TO]->() AND o.type = m.type
+      AND (toLower(o.text) ENDS WITH ' ' + toLower(m.text)
+           OR (toLower(o.text) = toLower(m.text) AND o.text < m.text))
+  }
+MERGE (e:Entity {name: m.text, type: m.type})
+
+// Link the remaining mentions to those entities, as any later batch would.
+DERIVE refers_to
+
+// Whatever still has no match names an entity of its own.
 MATCH (m:Mention) WHERE NOT (m)-[:REFERS_TO]->()
 MERGE (e:Entity {name: m.text, type: m.type})
 CREATE (m)-[:REFERS_TO]->(e)
@@ -299,9 +312,13 @@ How it behaves:
   Cypher `CREATE` does, so every evidence clause skips mentions that already
   have a `REFERS_TO`. Run the program after each batch of extraction, and it
   only resolves what is new.
-- **New names are created once.** Two unmatched mentions of "Grace Hopper" in
-  one batch `MERGE` to one entity, and a later "Hopper" joins it through the
-  surname clause.
+- **New names are created once.** Mentions that match nothing create
+  entities first, one per name ignoring case, and the second `DERIVE` links
+  every remaining mention to them through the same rules. So "Grace Hopper",
+  "grace hopper" and "Hopper" in one batch end up as one entity, as they
+  would if they arrived in separate batches. The surname "Hopper" still
+  needs enough evidence to clear the threshold; if it has too little, it
+  gets an entity of its own.
 - **Every merge is explainable.** `EXPLAIN RULE same_as WHERE m.text =
   'Lovelace'` lists the evidence rows behind each pair, one per clause that
   fired, with their weights.
