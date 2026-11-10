@@ -485,6 +485,17 @@ CALL uni.plugin.declareTrigger(
 )
 ```
 
+A trigger action is Cypher, so it does not run the Locy resolution program.
+Run resolution from the application instead, after extraction has
+committed: the program is idempotent, so running it on a schedule or after a
+batch of documents links whatever is new.
+
+```python
+with session.tx() as tx:
+    tx.locy(RESOLVE)
+    tx.commit()
+```
+
 Extracting into a [fork](forks.md) and reviewing the `diff` before `promote`
 is the curation path for low-confidence results.
 

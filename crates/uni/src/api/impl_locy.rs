@@ -782,6 +782,14 @@ impl<'a> LocyEngine<'a> {
             .await
     }
 
+    /// The mode a registered procedure is declared with, by name.
+    fn registered_procedure_mode(
+        &self,
+        name: &str,
+    ) -> Option<uni_plugin::traits::procedure::ProcedureMode> {
+        crate::api::plugins::registered_procedure_mode(&self.db.plugin_registry, name)
+    }
+
     /// Evaluate an already-compiled Locy program with custom config.
     ///
     /// This is the core execution path: it takes a `CompiledProgram` (with any
@@ -856,10 +864,7 @@ impl<'a> LocyEngine<'a> {
         // ASSUME failed to fork, and its Cypher write went straight to the
         // shared graph.
         refuse_undeferrable_procedures(&compiled.commands, self.collect_derive, false, |name| {
-            uni_plugin::QName::parse(name)
-                .ok()
-                .and_then(|q| self.db.plugin_registry.procedure(&q))
-                .map(|e| e.signature.mode)
+            self.registered_procedure_mode(name)
         })?;
         if self.collect_derive
             && self.locy_l0.is_none()

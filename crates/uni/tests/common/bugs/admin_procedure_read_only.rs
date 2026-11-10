@@ -403,3 +403,35 @@ async fn admin_procedure_read_only_prepared_refuses_registered_write_procedure()
     assert_eq!(markers, 0);
     Ok(())
 }
+
+/// Plugin `WRITE` procedures are not reads either.
+///
+/// The read-only gate and the authorization verbs looked a procedure up by
+/// splitting its name at the last dot (`uni.plugin` + `declareTrigger`). The
+/// built-in plugins register first-dot names (`uni` + `nlp.extract`) or names
+/// reached through the `uni.` prefix (`custom` + `plugin.declareTrigger`), so
+/// the lookup found none of them and a read-only query ran write procedures:
+/// here, declaring a trigger.
+#[tokio::test]
+async fn admin_procedure_read_only_refuses_dotted_plugin_write_procedure() -> Result<()> {
+    let db = Uni::in_memory().build().await?;
+    let before = db.plugin_registry().triggers().len();
+    let err = db
+        .session()
+        .query(
+            "CALL uni.plugin.declareTrigger('test.sneaky', 'CREATE ON :X', 'CREATE (:Y)') \
+             YIELD registered RETURN registered",
+        )
+        .await
+        .expect_err("declareTrigger is a WRITE procedure");
+    assert!(
+        err.to_string().to_lowercase().contains("read"),
+        "a read-only refusal, got: {err}"
+    );
+    assert_eq!(
+        db.plugin_registry().triggers().len(),
+        before,
+        "nothing was declared"
+    );
+    Ok(())
+}

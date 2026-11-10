@@ -100,6 +100,33 @@ pub(crate) fn with_loading_registrar<T>(
     Ok(outcome)
 }
 
+/// The mode the procedure `name` is registered with in `registry`, or `None`
+/// when it is not registered there.
+///
+/// Resolved as dispatch resolves it (`ProcedureRegistry::resolve_user_procedure`):
+/// every namespace split ([`uni_plugin::QName::candidate_splits`]), then the
+/// name without its `uni.` prefix under each built-in plugin's namespace.
+/// The built-in plugins register first-dot names (`uni` + `nlp.extract`) or
+/// names reached only through that prefix (`custom` + `plugin.declareTrigger`,
+/// called as `uni.plugin.declareTrigger`), and a last-dot `QName::parse`
+/// finds none of them. The read-only gate and the authorization verbs used
+/// `parse`, so they classified every such procedure as unregistered, and a
+/// read-only query ran the write ones.
+pub(crate) fn registered_procedure_mode(
+    registry: &uni_plugin::PluginRegistry,
+    name: &str,
+) -> Option<uni_plugin::traits::procedure::ProcedureMode> {
+    let stripped = name.strip_prefix("uni.").unwrap_or(name);
+    uni_plugin::QName::candidate_splits(name)
+        .find_map(|q| registry.procedure(&q))
+        .or_else(|| {
+            ["uni", "builtin", "apoc-core", "custom"]
+                .iter()
+                .find_map(|ns| registry.procedure(&uni_plugin::QName::new(*ns, stripped)))
+        })
+        .map(|e| e.signature.mode)
+}
+
 /// Register the framework-wide built-in plugins into a fresh
 /// `PluginRegistry`. Called once at `Uni::build()` time.
 ///

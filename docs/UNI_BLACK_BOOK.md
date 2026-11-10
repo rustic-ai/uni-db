@@ -5534,6 +5534,15 @@ registry lookup cannot classify them. Their modes live in one table,
   principal captured at prepare time. A cursor executes after its builder
   returns, so `build_guarded_cursor` captures the principal and session plugin
   registry at build time and re-installs them around every poll.
+- Plugin procedures: the read-only predicate and the authorization verbs
+  look a registered procedure's mode up with
+  `plugins::registered_procedure_mode`, which resolves a name as dispatch does
+  (`ProcedureRegistry::resolve_user_procedure`): every namespace split, then
+  the name without `uni.` under the built-in plugin namespaces. They used a
+  last-dot `QName::parse`, which finds no first-dot registration
+  (`uni` + `nlp.extract`, `custom` + `plugin.declareTrigger`), so every such
+  procedure counted as a read and `Session::query` ran
+  `uni.plugin.declareTrigger`.
 - Dispatch: `execute_procedure` reaches its built-in arms only for a name in
   the table, so a new built-in without a mode is not callable rather than
   silently read-only; a unit test scans the dispatch `match` for unclassified

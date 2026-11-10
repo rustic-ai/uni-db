@@ -2210,8 +2210,7 @@ fn registered_mode(
     registry: &uni_plugin::PluginRegistry,
     name: &str,
 ) -> Option<uni_plugin::traits::procedure::ProcedureMode> {
-    let qname = uni_plugin::QName::parse(name).ok()?;
-    registry.procedure(&qname).map(|e| e.signature.mode)
+    crate::api::plugins::registered_procedure_mode(registry, name)
 }
 
 pub(crate) fn authorize_query(

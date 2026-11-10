@@ -113,10 +113,7 @@ pub(crate) fn authorize_replay(
 
 /// Mode of a registered (non-built-in) procedure, from the db-level registry.
 fn registered_mode(db: &UniInner, name: &str) -> Option<ProcedureMode> {
-    uni_plugin::QName::parse(name)
-        .ok()
-        .and_then(|q| db.plugin_registry.procedure(&q))
-        .map(|e| e.signature.mode)
+    crate::api::plugins::registered_procedure_mode(&db.plugin_registry, name)
 }
 
 /// The authorization requests a program needs, gathered before any is made.
