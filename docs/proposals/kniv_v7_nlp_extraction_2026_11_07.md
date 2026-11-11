@@ -559,6 +559,36 @@ Open items, none of which block shipping the pattern as documentation:
 A dedicated index-style config remains an option for a later convenience
 layer, but it is no longer the proposed mechanism.
 
+### 7.5 Flagship example (parked, 2026-11-10)
+
+A Locy-flagship notebook (overview, `prepare_*` / `generate_*` / `verify_*`
+scripts, executed by `deploy-docs.yml`) for due diligence over news and
+analyst notes was scoped and parked. Probing a ten-document synthetic corpus
+found:
+
+- **Model size.** The smaller v7 students load through `local/onnx`
+  unchanged; `kniv-v7-small-en` is ~190 MB as INT8, small enough for the docs
+  deploy to run live (pin `revision` in the catalog so a re-release cannot
+  move results). It extracts the corpus in ~0.5 s after a ~20 s load;
+  `xlarge-u` takes ~2.8 s after ~130 s.
+- **What small does reliably:** entities, including short forms, and the
+  calibrated built-in relations (`employer`, `headquarters location`).
+  Custom org-to-org relations (`supplier of`, `acquired`) appear only with
+  raised `rel_offsets`, mixed with type-violating facts; `sued` never
+  appears. Medium behaves the same; xlarge finds more org-to-org facts.
+- **Polarity and modality are not dependable on any size** for plain
+  negation ("did not acquire", "no longer works for") or hedging ("might",
+  "plans to", "denied"): facts come back `positive` / `asserted`. The
+  reference fixtures in uni-xervo agree (one negative fact in 34, margin
+  0.05), so this is the model, not the port.
+
+The proposed design, if resumed: run small with lowered offsets, store every
+candidate claim with its span and confidence, and let Locy vet them (type
+signatures per relation, corroboration across sources via `MNOR`), resolve
+mentions, derive a related-party red flag (an executive of the target holds
+a stake in its supplier), and review a new batch in a fork before promote.
+Contradictions and denials come from structured inputs, not polarity.
+
 ## 8. Why not an LLM?
 
 uni-db already has `generate`, and an LLM with a JSON schema can extract
