@@ -161,6 +161,13 @@ nothing changes apart from the batch-size default.
 
 ## Dependencies and build requirements
 
+- **macOS wheels link clang's runtime library.** ONNX Runtime 1.31's CoreML
+  objects call `__isPlatformVersionAtLeast`, which lives in
+  `libclang_rt.osx.a`; rustc links with `-nodefaultlibs`, so a wheel built
+  as the release workflow builds it (`maturin build --target
+  aarch64-apple-darwin`) left the symbol unresolved and `import uni_db`
+  failed. A build script in `bindings/uni-db`, shared by the variant
+  packages, now links the archive on macOS. 5.0.0 wheels were not affected.
 - uni-xervo floor raised to **0.19.1**. 0.19.0 must not be admitted: its ONNX
   Runtime let CoreML claim nodes on CPU-only macOS builds (see above).
 - candle 0.10 → 0.11.1, hf-hub 0.5 → 1.0, ort 2.0.0-rc.12 → rc.15 (ONNX
