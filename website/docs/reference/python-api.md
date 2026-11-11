@@ -1,6 +1,6 @@
 # Python API Reference
 
-Complete reference for the `uni_db` Python bindings (v5.0.0). All operations go through the **Session** (reads, Locy) or **Transaction** (writes, bulk loading) obtained from a `Uni` instance.
+Complete reference for the `uni_db` Python bindings (v5.1.0). All operations go through the **Session** (reads, Locy) or **Transaction** (writes, bulk loading) obtained from a `Uni` instance.
 
 ## Installation
 

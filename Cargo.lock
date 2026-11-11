@@ -10435,7 +10435,7 @@ checksum = "eaea85b334db583fe3274d12b4cd1880032beab409c0d774be044d4480ab9a94"
 
 [[package]]
 name = "uni-algo"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -10455,7 +10455,7 @@ dependencies = [
 
 [[package]]
 name = "uni-btic"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "chrono",
  "proptest",
@@ -10465,7 +10465,7 @@ dependencies = [
 
 [[package]]
 name = "uni-bulk"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -10490,7 +10490,7 @@ dependencies = [
 
 [[package]]
 name = "uni-cli"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -10510,7 +10510,7 @@ dependencies = [
 
 [[package]]
 name = "uni-common"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow-schema",
@@ -10534,7 +10534,7 @@ dependencies = [
 
 [[package]]
 name = "uni-crdt"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "proptest",
  "rmp-serde",
@@ -10549,7 +10549,7 @@ dependencies = [
 
 [[package]]
 name = "uni-cypher"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "pest",
  "pest_derive",
@@ -10561,7 +10561,7 @@ dependencies = [
 
 [[package]]
 name = "uni-db"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -10632,7 +10632,7 @@ dependencies = [
 
 [[package]]
 name = "uni-fork"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -10652,7 +10652,7 @@ dependencies = [
 
 [[package]]
 name = "uni-locy"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10669,7 +10669,7 @@ dependencies = [
 
 [[package]]
 name = "uni-locy-oracle"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "proptest",
@@ -10680,7 +10680,7 @@ dependencies = [
 
 [[package]]
 name = "uni-locy-tck"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10707,7 +10707,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "arc-swap",
  "arrow",
@@ -10745,7 +10745,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-apoc-core"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10766,7 +10766,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-builtin"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -10795,7 +10795,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-conformance"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "semver",
  "serde",
@@ -10807,7 +10807,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-custom"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10830,7 +10830,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-extism"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10858,7 +10858,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-host"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -10895,7 +10895,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-pyo3"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10921,7 +10921,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-rhai"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10953,7 +10953,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-wasm"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -10983,7 +10983,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin-wasm-rt"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -10996,7 +10996,7 @@ dependencies = [
 
 [[package]]
 name = "uni-python"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -11022,7 +11022,7 @@ dependencies = [
 
 [[package]]
 name = "uni-python-cuda"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -11045,7 +11045,7 @@ dependencies = [
 
 [[package]]
 name = "uni-python-metal"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -11068,7 +11068,7 @@ dependencies = [
 
 [[package]]
 name = "uni-python-onnx"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -11091,7 +11091,7 @@ dependencies = [
 
 [[package]]
 name = "uni-python-onnx-cuda"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -11114,7 +11114,7 @@ dependencies = [
 
 [[package]]
 name = "uni-python-onnx-metal"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -11137,7 +11137,7 @@ dependencies = [
 
 [[package]]
 name = "uni-query"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -11187,7 +11187,7 @@ dependencies = [
 
 [[package]]
 name = "uni-query-functions"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -11222,7 +11222,7 @@ dependencies = [
 
 [[package]]
 name = "uni-sidecar"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -11232,7 +11232,7 @@ dependencies = [
 
 [[package]]
 name = "uni-sparse-vector"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "proptest",
  "serde",
@@ -11241,7 +11241,7 @@ dependencies = [
 
 [[package]]
 name = "uni-store"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -11287,7 +11287,7 @@ dependencies = [
 
 [[package]]
 name = "uni-tck"
-version = "5.0.0"
+version = "5.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
