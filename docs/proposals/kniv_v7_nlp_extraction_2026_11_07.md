@@ -1,7 +1,13 @@
 # Proposal: text-to-graph extraction with kniv v7 (`uni.nlp.*`)
 
 Status: **Phases 1–3 and 2b implemented** (rev. 7); phases 4–5 proposed.
-Date: 2026-11-07 (rev. 2, 3 and 4: 2026-11-08; rev. 5: 2026-11-08; rev. 6 and 7: 2026-11-09)
+Date: 2026-11-07 (rev. 2, 3 and 4: 2026-11-08; rev. 5: 2026-11-08; rev. 6, 7 and 8: 2026-11-09)
+
+Revision 8: the declared-trigger path is confirmed not to expose
+`TriggerDeferral` (§10, question 4). Resolution from a trigger action (§7.4,
+#329) stays open: a `uni.locy.run` Cypher procedure was built and dropped as
+too indirect (a trigger running Cypher running Locy running Cypher), and
+resolution runs from the application.
 
 Revision 7: phase 2b ships as two procedures, `uni.nlp.words` and
 `uni.nlp.sentences`, not one `uni.nlp.analyze`: words and sentences are
@@ -537,14 +543,16 @@ Open items, none of which block shipping the pattern as documentation:
 
 - **Idempotency.** `UPDATE ON :Document` must delete the document's old
   claims and insert the new ones in the trigger's transaction (§5.3).
-- **Resolution.** A trigger action is Cypher, and no procedure runs a Locy
-  program from Cypher, so the action cannot run §6 itself (rev. 5). Run the
-  §6 program after each extraction batch from the application, which is
-  safe because it is idempotent; a `uni.locy.run`-style procedure would close
-  the gap.
-- **Deferral.** A trigger action that fails (model not loaded yet) should use
-  `TriggerDeferral::after` rather than drop the document; verify that the
-  declared-trigger path exposes it.
+- **Resolution.** A trigger action is Cypher and cannot run the Locy
+  resolution program (#329), so resolution runs from the application after
+  extraction commits; the program is idempotent. Rev. 8 built and dropped a
+  `uni.locy.run` Cypher procedure for this as too indirect. A trigger whose
+  action is a Locy program, or incrementally maintained rules, would be the
+  direct forms.
+- **Deferral.** Rev. 8: not exposed. A declared trigger's `fire` always
+  returns `TriggerOutcome::Continue`, so an action that fails (model not
+  loaded yet) is logged and the document is not retried. Only a Rust
+  `TriggerPlugin` can return `TriggerDeferral`.
 - **Forks.** Extracting into a fork and promoting after review falls out of
   the existing promote path; test it deliberately.
 
@@ -615,7 +623,7 @@ Open questions:
    `SideEffects::ExternalIo`, since a first call may download a model?
 3. ~~For conversation input, are byte offsets relative to the turn or the
    joined text (§4.2)?~~ Rev. 3: the turn.
-4. Does the declared-trigger path expose `TriggerDeferral` (§7.4)?
+4. ~~Does the declared-trigger path expose `TriggerDeferral` (§7.4)?~~ Rev. 8: no.
 
 ## 11. References
 

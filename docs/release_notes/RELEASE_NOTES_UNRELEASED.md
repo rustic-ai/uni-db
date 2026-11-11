@@ -96,6 +96,15 @@ nothing changes apart from the batch-size default.
 
 ## Correctness fixes
 
+- **A read-only query no longer runs write procedures registered by the
+  built-in plugins.** The read-only gate, and the authorization verbs for
+  Cypher and Locy, looked a procedure's mode up by splitting its name at
+  the last dot (`uni.plugin` + `declareTrigger`), while the built-in plugins
+  register first-dot names (`uni` + `nlp.extract`) or names reached through
+  the `uni.` prefix (`custom` + `plugin.declareTrigger`). They found no
+  mode, treated the procedure as a read, and `session.query` could declare
+  a trigger or call any other such `WRITE` procedure. The lookup now tries
+  every split, as dispatch does.
 - **`DERIVE` over a rule that joins an `IS` reference no longer times out
   on a few hundred nodes.** Before writing, a DERIVE re-joins its rule's
   clause: it ran the clause's whole MATCH (for `MATCH (m), (e) WHERE (m, e)

@@ -712,10 +712,7 @@ impl Transaction {
         &self,
         name: &str,
     ) -> Option<uni_plugin::traits::procedure::ProcedureMode> {
-        uni_plugin::QName::parse(name)
-            .ok()
-            .and_then(|q| self.db.plugin_registry.procedure(&q))
-            .map(|e| e.signature.mode)
+        crate::api::plugins::registered_procedure_mode(&self.db.plugin_registry, name)
     }
 
     /// Authorization verb for a statement run as a write: [`statement_verb`]
@@ -1794,9 +1791,6 @@ impl Transaction {
                         Some(Arc::clone(&self.db.procedure_registry)),
                         self.db.xervo_runtime.clone(),
                         l0_ctx,
-                        // Top-level commit runs declared-trigger actions
-                        // at depth 0; the synthetic-trigger re-entrancy
-                        // guard caps the chain.
                         0,
                     )
                     .with_writer(Arc::clone(writer_arc)),
