@@ -50,6 +50,90 @@ use super::types::BackendCacheUsage;
 
 /// Keep newly created or rebuilt Uni datasets on the Lance 11 stable format.
 /// Appends inherit the existing dataset's format, including older databases.
+/// A cloud directory's base URI and its storage options.
+type DirectoryOptions = (String, HashMap<String, String>);
+
+/// The storage options of every cloud directory this process connected to,
+/// by base URI.
+///
+/// A dataset under a directory is not always opened through it. The fork
+/// branch helpers, the UID, JSON, inverted and sparse index datasets under
+/// `indexes/`, and the snapshot code address a dataset by URI alone, and a
+/// bare `Dataset::open(uri)` carries no storage options: the endpoint and
+/// credentials given in the cloud configuration never reached it, so it
+/// worked only where the same values were also in the environment
+/// (`AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, …) and otherwise reached for the
+/// provider's default endpoint ("Bucket not found"). Those call sites take a
+/// URI because their callers hold nothing else, so the options are looked up
+/// by the URI's directory instead of being threaded through each of them.
+///
+/// Local directories are not recorded: they have no options, and a bare open
+/// is exactly right for them. Two connections to one base URI with different
+/// options share the entry of the later one.
+static CLOUD_STORAGE_OPTIONS: std::sync::LazyLock<std::sync::RwLock<Vec<DirectoryOptions>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Records `options` as those of the cloud directory at `base_uri`.
+fn remember_storage_options(base_uri: &str, options: &HashMap<String, String>) {
+    let base = base_uri.trim_end_matches('/').to_string();
+    let mut stores = CLOUD_STORAGE_OPTIONS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    stores.retain(|(known, _)| *known != base);
+    stores.push((base, options.clone()));
+}
+
+/// The storage options of the cloud directory `uri` lies in: the longest
+/// recorded base URI that is `uri` or a path prefix of it. `None` for a
+/// local path or a store this process did not connect to.
+pub(crate) fn storage_options_for(uri: &str) -> Option<HashMap<String, String>> {
+    let stores = CLOUD_STORAGE_OPTIONS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    stores
+        .iter()
+        .filter(|(base, _)| {
+            uri.strip_prefix(base.as_str())
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+        .max_by_key(|(base, _)| base.len())
+        .map(|(_, options)| options.clone())
+}
+
+/// A [`DatasetBuilder`] for the dataset at `uri`, carrying the storage
+/// options of the cloud directory it lies in (see
+/// [`CLOUD_STORAGE_OPTIONS`]). Use this wherever a dataset is opened by URI.
+pub(crate) fn dataset_builder(uri: &str) -> DatasetBuilder {
+    let builder = DatasetBuilder::from_uri(uri);
+    match storage_options_for(uri) {
+        Some(options) => builder.with_storage_options(options),
+        None => builder,
+    }
+}
+
+/// Opens the dataset at `uri` with the storage options of its directory.
+///
+/// # Errors
+///
+/// Whatever Lance reports: the dataset does not exist or cannot be read.
+pub(crate) async fn open_dataset_uri(uri: &str) -> lance::Result<Dataset> {
+    dataset_builder(uri).load().await
+}
+
+/// `params` with the storage options of the directory `uri` lies in, for a
+/// write addressed by URI. Parameters that already carry a store are kept.
+pub(crate) fn with_store_params(uri: &str, mut params: WriteParams) -> WriteParams {
+    if params.store_params.is_none() {
+        params.store_params = storage_options_for(uri).map(|options| ObjectStoreParams {
+            storage_options_accessor: Some(Arc::new(StorageOptionsAccessor::with_static_options(
+                options,
+            ))),
+            ..Default::default()
+        });
+    }
+    params
+}
+
 pub(crate) fn write_params(mode: WriteMode) -> WriteParams {
     WriteParams {
         mode,
@@ -195,6 +279,9 @@ impl LanceDirectory {
             CacheSpec::Backend(metadata_cache.clone()),
             Arc::new(ObjectStoreRegistry::default()),
         );
+        if let Some(options) = &storage_options {
+            remember_storage_options(base_uri, options);
+        }
         Ok(Self {
             base_uri: base_uri.to_string(),
             store,
@@ -289,7 +376,7 @@ impl LanceDirectory {
     /// and for the flush that would recreate it, and with the WAL on it made
     /// the store refuse to open at all: the issue #72 guard saw WAL segments, a
     /// table and no snapshot manifest.
-    async fn is_committed(&self, table: &str) -> Result<bool> {
+    pub(crate) async fn is_committed(&self, table: &str) -> Result<bool> {
         let versions = self
             .base_path
             .clone()
@@ -411,4 +498,53 @@ fn is_not_found(e: &lance::Error) -> bool {
         lance::Error::NotFound { .. } | lance::Error::DatasetNotFound { .. }
     ) || e.to_string().contains("No such file or directory")
         || e.to_string().contains("NotFound")
+}
+
+#[cfg(test)]
+mod storage_options_tests {
+    use super::*;
+
+    /// A dataset opened by URI gets the options of the cloud directory it
+    /// lies in: the directory itself, a table, an index dataset beneath it.
+    /// Not a sibling whose name merely starts the same way, not a local
+    /// path, and the deeper of two nested directories wins.
+    #[test]
+    fn options_are_found_by_the_directory_a_uri_lies_in() {
+        let options =
+            |endpoint: &str| HashMap::from([("endpoint".to_string(), endpoint.to_string())]);
+        remember_storage_options("s3://opts-test/db/", &options("outer"));
+        remember_storage_options("s3://opts-test/db/nested", &options("inner"));
+
+        let endpoint = |uri: &str| storage_options_for(uri).map(|o| o["endpoint"].clone());
+        assert_eq!(endpoint("s3://opts-test/db"), Some("outer".to_string()));
+        assert_eq!(
+            endpoint("s3://opts-test/db/vertices_Person.lance"),
+            Some("outer".to_string())
+        );
+        assert_eq!(
+            endpoint("s3://opts-test/db/indexes/uni_id_to_vid/Person/index.lance"),
+            Some("outer".to_string())
+        );
+        assert_eq!(
+            endpoint("s3://opts-test/db/nested/t.lance"),
+            Some("inner".to_string())
+        );
+        assert_eq!(endpoint("s3://opts-test/db2/t.lance"), None);
+        assert_eq!(endpoint("s3://other-bucket/db/t.lance"), None);
+        assert_eq!(endpoint("/var/lib/uni/t.lance"), None);
+
+        // Connecting again replaces the directory's options.
+        remember_storage_options("s3://opts-test/db", &options("replaced"));
+        assert_eq!(
+            endpoint("s3://opts-test/db/t.lance"),
+            Some("replaced".to_string())
+        );
+
+        // A write by URI carries them; one that already names a store keeps it.
+        let params =
+            with_store_params("s3://opts-test/db/t.lance", write_params(WriteMode::Create));
+        assert!(params.store_params.is_some());
+        let local = with_store_params("/var/lib/uni/t.lance", write_params(WriteMode::Create));
+        assert!(local.store_params.is_none());
+    }
 }

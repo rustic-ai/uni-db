@@ -392,8 +392,11 @@ pub(crate) async fn write_dataset_with_lance_conflict_retry(
         let batches = batches.clone();
         Box::pin(async move {
             let reader = arrow_array::RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
-            let mut params = crate::backend::lance_directory::write_params(mode);
-            let destination = match lance::Dataset::open(uri).await {
+            let mut params = crate::backend::lance_directory::with_store_params(
+                uri,
+                crate::backend::lance_directory::write_params(mode),
+            );
+            let destination = match crate::backend::lance_directory::open_dataset_uri(uri).await {
                 Ok(dataset) => {
                     params.data_storage_version = None;
                     lance::dataset::WriteDestination::Dataset(Arc::new(dataset))

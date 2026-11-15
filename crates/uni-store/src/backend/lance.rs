@@ -1412,8 +1412,8 @@ impl StorageBackend for LanceDbBackend {
     }
 
     fn branching(&self) -> Option<Arc<dyn crate::backend::branching::ForkBranching>> {
-        Some(Arc::new(super::lance_branch::LanceBranching::new(
-            self.base_uri.clone(),
+        Some(Arc::new(super::lance_branch::LanceBranching::over(
+            self.directory.clone(),
         )))
     }
 

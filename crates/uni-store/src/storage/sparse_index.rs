@@ -225,7 +225,7 @@ impl SparseVectorIndex {
         // #233 Tier 1: see `inverted_index.rs` — `.ok()` made a broken index
         // indistinguishable from an unbuilt one, so a sparse search returned
         // zero hits instead of surfacing the failure.
-        let dataset = match Dataset::open(&path).await {
+        let dataset = match crate::backend::lance_directory::open_dataset_uri(&path).await {
             Ok(ds) => Some(ds),
             Err(e) => {
                 let err = anyhow::Error::from(e);

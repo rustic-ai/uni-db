@@ -80,7 +80,7 @@ impl InvertedIndex {
         // search reports as zero hits. Only a genuinely absent dataset means
         // the index has not been built yet. Same discrimination as
         // `storage/index.rs::get_vid`.
-        let dataset = match Dataset::open(&path).await {
+        let dataset = match crate::backend::lance_directory::open_dataset_uri(&path).await {
             Ok(ds) => Some(ds),
             Err(e) => {
                 let err = anyhow::Error::from(e);

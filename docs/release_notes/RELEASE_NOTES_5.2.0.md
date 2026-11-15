@@ -102,6 +102,16 @@ vector index from a rule is tracked as #335.
 
 ## Correctness fixes
 
+- **Forks work on cloud storage.** Creating a fork on a database whose data
+  is on S3, GCS or Azure failed with "open lance dataset at s3://…" as soon
+  as a table that had not been created yet was a candidate, typically an
+  edge type's adjacency table before its first compaction: on an object
+  store every candidate was taken to exist.
+- **The cloud configuration's endpoint and credentials reach every dataset.**
+  Index datasets, fork branches and snapshots were opened without them and
+  worked only when the same values were also in the environment
+  (`AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, …). With the credentials in
+  `cloud_config` alone, a flush failed with "Bucket not found".
 - **A string function of an untyped NULL is NULL.** `toLower`, `toUpper`,
   `trim`, `lTrim` and `rTrim` of a NULL literal failed with "Unsupported
   data type NULL for function lower". The literal could come from the query

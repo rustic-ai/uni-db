@@ -468,7 +468,6 @@ mod index_datasets {
 
     use anyhow::{Context, Result};
     use futures::TryStreamExt;
-    use lance::dataset::builder::DatasetBuilder;
     use object_store::ObjectStoreExt;
     use object_store::path::Path as ObjectStorePath;
 
@@ -508,7 +507,7 @@ mod index_datasets {
         let mut out = BTreeMap::new();
         for rel in list(storage).await? {
             let uri = uri(storage, &rel);
-            let dataset = lance::Dataset::open(&uri)
+            let dataset = crate::backend::lance_directory::open_dataset_uri(&uri)
                 .await
                 .with_context(|| format!("open index dataset {uri}"))?;
             let version = dataset.version().version;
@@ -530,7 +529,7 @@ mod index_datasets {
                 continue;
             }
             let uri = uri(storage, rel);
-            let dataset = lance::Dataset::open(&uri)
+            let dataset = crate::backend::lance_directory::open_dataset_uri(&uri)
                 .await
                 .with_context(|| format!("open index dataset {uri}"))?;
             match dataset.tags().delete(&point.tag).await {
@@ -551,13 +550,13 @@ mod index_datasets {
             let uri = uri(storage, &rel);
             match point.index_datasets.get(&rel) {
                 Some(&version) => {
-                    let current = lance::Dataset::open(&uri)
+                    let current = crate::backend::lance_directory::open_dataset_uri(&uri)
                         .await
                         .with_context(|| format!("open index dataset {uri}"))?;
                     if current.version().version == version {
                         continue;
                     }
-                    let mut at = DatasetBuilder::from_uri(&uri)
+                    let mut at = crate::backend::lance_directory::dataset_builder(&uri)
                         .with_version(version)
                         .load()
                         .await

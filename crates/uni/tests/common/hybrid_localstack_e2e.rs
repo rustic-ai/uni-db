@@ -116,6 +116,118 @@ async fn test_hybrid_localstack_from_zero_e2e() -> Result<()> {
     Ok(())
 }
 
+/// A fork, and a fork of it, on a database whose data is on S3.
+///
+/// A fork is a Lance branch on each of the primary's datasets. The branch
+/// code opened those datasets by URI alone, without the storage options the
+/// cloud configuration supplies, so creating a fork failed with "open lance
+/// dataset at s3://…" wherever the store needed its configured endpoint or
+/// credentials. Two things were wrong: the existence check answered "yes" for
+/// every dataset on an object store, so a table not created yet (an edge
+/// type's adjacency table before its first compaction) was branched and the
+/// open failed; and datasets opened by URI alone never received the cloud
+/// configuration's endpoint and credentials.
+///
+/// Run it with `UNI_LOCALSTACK_CONFIG_ONLY=1` as well, which leaves the
+/// endpoint and credentials to the cloud configuration (see
+/// [`configure_localstack_env`]).
+///
+/// Multi-threaded on purpose. Dropping a fork session seals the fork's WAL,
+/// which is on the remote store, from the process-wide IO runtime; the S3
+/// client's pooled connection is driven by this test's runtime, and a
+/// single-threaded one is blocked in that very drop, so the request waits out
+/// its 30 s timeout before retrying on a fresh connection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Requires LocalStack running on localhost:4566"]
+async fn test_hybrid_localstack_forks_e2e() -> Result<()> {
+    configure_localstack_env();
+
+    let temp_dir = tempdir()?;
+    let local_meta = temp_dir.path().join("meta");
+    std::fs::create_dir_all(&local_meta)?;
+    let bucket = format!("hybrid-fork-{}", std::process::id());
+    create_localstack_bucket(&bucket).await?;
+    let cloud_cfg = localstack_cloud_config(&bucket);
+    let remote_url = format!("s3://{}", bucket);
+    let open = || async {
+        Uni::open(local_meta.to_string_lossy().to_string())
+            .remote_storage(&remote_url, cloud_cfg.clone())
+            .build()
+            .await
+    };
+    let people = |session: uni_db::Session| async move {
+        let rows = session
+            .query("MATCH (p:Person) RETURN p.name AS name ORDER BY name")
+            .await?;
+        rows.rows()
+            .iter()
+            .map(|r| r.get::<String>("name"))
+            .collect::<std::result::Result<Vec<_>, _>>()
+    };
+
+    let db = open().await?;
+    db.schema()
+        .label("Person")
+        .property("name", DataType::String)
+        .edge_type("KNOWS", &["Person"], &["Person"])
+        .property("since", DataType::Int64)
+        .apply()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute(
+        "CREATE (a:Person {name: 'Alice'})-[:KNOWS {since: 2024}]->(b:Person {name: 'Bob'})",
+    )
+    .await?;
+    tx.commit().await?;
+    db.flush().await?;
+
+    let primary = db.session();
+    let fork = primary
+        .fork("f1")
+        .await
+        .map_err(|e| anyhow::anyhow!("create fork on S3: {e:#}"))?;
+    let tx = fork.tx().await?;
+    tx.execute("CREATE (:Person {name: 'Fork'})").await?;
+    tx.commit().await?;
+    fork.flush().await?;
+    let child = fork
+        .fork("f2")
+        .await
+        .map_err(|e| anyhow::anyhow!("create nested fork on S3: {e:#}"))?;
+    let tx = child.tx().await?;
+    tx.execute("CREATE (:Person {name: 'Child'})").await?;
+    tx.commit().await?;
+    child.flush().await?;
+
+    // The primary keeps moving after the forks were taken.
+    let tx = primary.tx().await?;
+    tx.execute("CREATE (:Person {name: 'Later'})").await?;
+    tx.commit().await?;
+    db.flush().await?;
+
+    assert_eq!(people(db.session()).await?, ["Alice", "Bob", "Later"]);
+    assert_eq!(people(fork).await?, ["Alice", "Bob", "Fork"]);
+    assert_eq!(people(child).await?, ["Alice", "Bob", "Child", "Fork"]);
+    drop(db);
+
+    // Reopened from S3, each fork still reads its own branch.
+    let db = open().await?;
+    let fork = db.session().fork("f1").await?;
+    let child = fork.fork("f2").await?;
+    assert_eq!(people(fork).await?, ["Alice", "Bob", "Fork"]);
+    assert_eq!(people(child).await?, ["Alice", "Bob", "Child", "Fork"]);
+    let edge = db
+        .session()
+        .query("MATCH (a:Person)-[k:KNOWS]->(b:Person) RETURN a.name AS a, b.name AS b")
+        .await?;
+    assert_eq!(edge.len(), 1);
+
+    db.drop_fork_cascade("f1").await?;
+    assert!(db.list_forks().await.is_empty());
+    assert_eq!(people(db.session()).await?, ["Alice", "Bob", "Later"]);
+    Ok(())
+}
+
 fn localstack_cloud_config(bucket: &str) -> CloudStorageConfig {
     CloudStorageConfig::S3 {
         bucket: bucket.to_string(),
@@ -129,6 +241,25 @@ fn localstack_cloud_config(bucket: &str) -> CloudStorageConfig {
 }
 
 fn configure_localstack_env() {
+    // `UNI_LOCALSTACK_CONFIG_ONLY=1`: leave the endpoint and credentials to
+    // the cloud configuration alone, as a deployment that passes them
+    // explicitly does. Only the plain-HTTP allowance, which the
+    // configuration cannot express, comes from the environment.
+    if std::env::var_os("UNI_LOCALSTACK_CONFIG_ONLY").is_some() {
+        // SAFETY: as below.
+        unsafe {
+            for name in [
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_REGION",
+                "AWS_ENDPOINT_URL",
+            ] {
+                std::env::remove_var(name);
+            }
+            std::env::set_var("AWS_ALLOW_HTTP", "true");
+        }
+        return;
+    }
     // SAFETY: Integration test mutates process env before creating stores.
     unsafe {
         std::env::set_var("AWS_ACCESS_KEY_ID", "test");

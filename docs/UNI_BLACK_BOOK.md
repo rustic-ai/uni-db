@@ -1875,6 +1875,31 @@ No call site changed signature. Three things did need handling:
   It is unchanged in 14; `staged_record_keeps_its_stored_form` pins its
   fields.
 
+**A dataset opened by URI gets its directory's storage options.** Tables are
+opened through `LanceDirectory`, which carries the cloud configuration's
+endpoint and credentials. The fork branch helpers (`lance_branch.rs`), the
+index datasets under `indexes/` (UID, JSON, inverted, sparse) and the
+snapshot code address a dataset by URI alone, and a bare `Dataset::open(uri)`
+carries nothing: it worked only where the same values were also in the
+environment, and otherwise reached for the provider's default endpoint
+("Bucket not found"), for a primary flush as much as for a fork.
+`lance_directory` records the options of every cloud directory the process
+connects to (`CLOUD_STORAGE_OPTIONS`, by base URI; local directories are not
+recorded) and `open_dataset_uri`, `dataset_builder` and `with_store_params`
+apply those of the directory a URI lies in. Open a dataset by URI through
+them, never with a bare `Dataset::open`. Two connections to one base URI
+with different options share the later one's.
+
+**`ForkBranching::table_exists` is exact on an object store.** Fork creation
+asks it in order to skip a candidate dataset that does not exist yet (an edge
+type's adjacency table before its first compaction, a label never flushed).
+`LanceBranching` used to answer `true` for any `scheme://` URI, so on a cloud
+store such a candidate was branched and its open failed the whole fork. Built
+from the backend (`LanceBranching::over`), it asks
+`LanceDirectory::is_committed`, which lists `_versions/` through the object
+store. Guard: `hybrid_localstack_e2e::test_hybrid_localstack_forks_e2e`
+(LocalStack; also with `UNI_LOCALSTACK_CONFIG_ONLY=1`).
+
 Verified against a database written by Lance 13 (declared and schemaless
 vertices, edges, BTree, vector and full-text indexes, a fork and a nested
 fork, a tag and a snapshot): Lance 14 reads it, writes on primary and both

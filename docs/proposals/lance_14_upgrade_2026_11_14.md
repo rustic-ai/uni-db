@@ -394,14 +394,33 @@ An emulator, not live S3.
   snapshot, an update and a delete, compaction, then a reopen from S3 with
   every answer and the pinned snapshot checked again. So Lance 14's S3
   commits, the `copy_if_not_exists` default included, work on this path.
-- **Forks do not work on S3 with an explicit cloud config, on Lance 13 and
-  14 alike.** `session.fork(..).build()` fails with "open lance dataset at
-  s3://…/adjacency_KNOWS_fwd.lance". The branch helpers in `lance_branch.rs`
-  open datasets with a bare `Dataset::open(uri)`: no storage options and no
-  shared session, so the endpoint and credentials given in the cloud config
-  never reach them. Not a regression and not fixed here. The same bare opens
-  are in `storage/index.rs`, `json_index.rs`, `inverted_index.rs` and
-  `sparse_index.rs`.
+- **Forks did not work on S3, on Lance 13 and 14 alike**; fixed afterwards.
+  `session.fork(..)` failed with "open lance dataset at
+  s3://…/adjacency_KNOWS_fwd.lance". Two causes:
+  - `LanceBranching::table_exists` answered `true` for every dataset on an
+    object store, so a candidate not created yet (an edge type's adjacency
+    table before its first compaction) was branched and its open failed. It
+    now asks the directory, which lists `_versions/` through the object
+    store.
+  - Datasets opened by URI alone (the branch helpers, the index datasets
+    under `indexes/`, the snapshot code) got no storage options, so the
+    endpoint and credentials of the cloud configuration never reached them:
+    they worked only where the same values were also in the environment.
+    With them in the configuration alone, even a primary flush failed
+    ("Bucket not found"). `lance_directory` now records each cloud
+    directory's options and `open_dataset_uri` / `with_store_params` apply
+    them by the URI's directory.
+
+  Test: `hybrid_localstack_e2e::test_hybrid_localstack_forks_e2e`, run with
+  the credentials in the environment and, with
+  `UNI_LOCALSTACK_CONFIG_ONLY=1`, in the cloud configuration alone.
+- **Still open: dropping a fork session on a remote store stalls 30 s on a
+  single-threaded runtime.** The drop seals the fork's WAL, which is on the
+  remote store, from the process-wide IO runtime, while the S3 client's
+  pooled connection is driven by the caller's runtime; a `current_thread`
+  runtime is blocked in that drop, so the request waits out its timeout and
+  then retries on a fresh connection. It succeeds, and a multi-threaded
+  runtime is unaffected (1.9 s against 32 s for the test above).
 
 ### Not done
 
