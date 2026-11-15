@@ -1,6 +1,6 @@
 # zstd security compatibility facades
 
-Arrow IPC/Parquet 58, Lance 11, compression-codecs and Wasmtime 49 require
+Arrow IPC/Parquet 58, compression-codecs and Wasmtime 49 require
 `zstd` 0.13; compression-codecs also requires `zstd-safe` 7. Updating only the
 lockfile cannot select the patched 0.14 / 8 releases for those requirements.
 

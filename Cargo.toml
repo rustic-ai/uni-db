@@ -79,7 +79,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "5.1.0"
+version = "5.2.0"
 edition = "2024"
 # Floor is set by our deps, not by the edition: `lance` declares
 # `rust-version = "1.91.0"` and `datafusion` declares `1.88.0`, so 1.91 is the
@@ -101,32 +101,32 @@ keywords = ["graph", "database", "cypher", "vector", "embedded"]
 categories = ["database", "data-structures"]
 
 [workspace.dependencies]
-uni-common = { path = "crates/uni-common", version = "5.1.0" }
-uni-store = { path = "crates/uni-store", version = "5.1.0" }
-uni-algo = { path = "crates/uni-algo", version = "5.1.0" }
-uni-query = { path = "crates/uni-query", version = "5.1.0" }
-uni-query-functions = { path = "crates/uni-query-functions", version = "5.1.0" }
-uni-cli = { path = "crates/uni-cli", version = "5.1.0" }
-uni-db = { path = "crates/uni", version = "5.1.0", default-features = false }
-uni-crdt = { path = "crates/uni-crdt", version = "5.1.0" }
-uni-cypher = { path = "crates/uni-cypher", version = "5.1.0" }
-uni-locy = { path = "crates/uni-locy", version = "5.1.0" }
-uni-btic = { path = "crates/uni-btic", version = "5.1.0" }
-uni-sparse-vector = { path = "crates/uni-sparse-vector", version = "5.1.0" }
-uni-plugin = { path = "crates/uni-plugin", version = "5.1.0" }
-uni-plugin-builtin = { path = "crates/uni-plugin-builtin", version = "5.1.0" }
-uni-plugin-apoc-core = { path = "crates/uni-plugin-apoc-core", version = "5.1.0" }
-uni-plugin-wasm = { path = "crates/uni-plugin-wasm", version = "5.1.0" }
-uni-plugin-wasm-rt = { path = "crates/uni-plugin-wasm-rt", version = "5.1.0" }
-uni-plugin-extism = { path = "crates/uni-plugin-extism", version = "5.1.0" }
-uni-plugin-rhai = { path = "crates/uni-plugin-rhai", version = "5.1.0" }
-uni-plugin-pyo3 = { path = "crates/uni-plugin-pyo3", version = "5.1.0" }
-uni-plugin-custom = { path = "crates/uni-plugin-custom", version = "5.1.0" }
-uni-plugin-conformance = { path = "crates/uni-plugin-conformance", version = "5.1.0" }
-uni-plugin-host = { path = "crates/uni-plugin-host", version = "5.1.0" }
-uni-sidecar = { path = "crates/uni-sidecar", version = "5.1.0" }
-uni-bulk = { path = "crates/uni-bulk", version = "5.1.0" }
-uni-fork = { path = "crates/uni-fork", version = "5.1.0" }
+uni-common = { path = "crates/uni-common", version = "5.2.0" }
+uni-store = { path = "crates/uni-store", version = "5.2.0" }
+uni-algo = { path = "crates/uni-algo", version = "5.2.0" }
+uni-query = { path = "crates/uni-query", version = "5.2.0" }
+uni-query-functions = { path = "crates/uni-query-functions", version = "5.2.0" }
+uni-cli = { path = "crates/uni-cli", version = "5.2.0" }
+uni-db = { path = "crates/uni", version = "5.2.0", default-features = false }
+uni-crdt = { path = "crates/uni-crdt", version = "5.2.0" }
+uni-cypher = { path = "crates/uni-cypher", version = "5.2.0" }
+uni-locy = { path = "crates/uni-locy", version = "5.2.0" }
+uni-btic = { path = "crates/uni-btic", version = "5.2.0" }
+uni-sparse-vector = { path = "crates/uni-sparse-vector", version = "5.2.0" }
+uni-plugin = { path = "crates/uni-plugin", version = "5.2.0" }
+uni-plugin-builtin = { path = "crates/uni-plugin-builtin", version = "5.2.0" }
+uni-plugin-apoc-core = { path = "crates/uni-plugin-apoc-core", version = "5.2.0" }
+uni-plugin-wasm = { path = "crates/uni-plugin-wasm", version = "5.2.0" }
+uni-plugin-wasm-rt = { path = "crates/uni-plugin-wasm-rt", version = "5.2.0" }
+uni-plugin-extism = { path = "crates/uni-plugin-extism", version = "5.2.0" }
+uni-plugin-rhai = { path = "crates/uni-plugin-rhai", version = "5.2.0" }
+uni-plugin-pyo3 = { path = "crates/uni-plugin-pyo3", version = "5.2.0" }
+uni-plugin-custom = { path = "crates/uni-plugin-custom", version = "5.2.0" }
+uni-plugin-conformance = { path = "crates/uni-plugin-conformance", version = "5.2.0" }
+uni-plugin-host = { path = "crates/uni-plugin-host", version = "5.2.0" }
+uni-sidecar = { path = "crates/uni-sidecar", version = "5.2.0" }
+uni-bulk = { path = "crates/uni-bulk", version = "5.2.0" }
+uni-fork = { path = "crates/uni-fork", version = "5.2.0" }
 
 # LOCK PIN (transitive, not listed here): `time` is held at =0.3.47 in
 # Cargo.lock — time 0.3.48 adds `impl From<X> for <X as ModifierValue>::Type`
@@ -142,15 +142,15 @@ arrow = { version = "58.4.1", features = ["prettyprint"] }
 arrow-array = "58.4.1"
 arrow-schema = "58.4.1"
 arrow-row = "58.4.1"
-lance = { version = "13.0.0", default-features = false, features = ["aws", "azure", "gcp"] }
+lance = { version = "14.0.2", default-features = false, features = ["aws", "azure", "gcp"] }
 # Pinned here, not in the crate that uses them: `lance-index` and `lance-linalg`
 # must move in lockstep with `lance`. Left as bare version strings in
 # `crates/uni-store/Cargo.toml` they resolve independently, and a bump of `lance`
 # alone still produces a clean lockfile carrying TWO complete lance trees (and
 # two datafusions, since lance pins datafusion exactly). That surfaces as
 # "expected `RecordBatch`, found `RecordBatch`", never as a version error.
-lance-index = { version = "13.0.0" }
-lance-linalg = { version = "13.0.0" }
+lance-index = { version = "14.0.2" }
+lance-linalg = { version = "14.0.2" }
 futures = "0.3"
 async-trait = "0.1"
 tracing = "0.1"
@@ -203,7 +203,7 @@ datafusion = "54.1.0"
 # fallback. The range must not admit 0.19.0. (Earlier floors existed for the
 # same reason: a range that admits a release lacking a feature `crates/uni`
 # enables breaks downstream graphs that pin the low end.)
-uni-xervo = { version = ">=0.19.1, <1.0.0", default-features = false }
+uni-xervo = { version = ">=0.19.2, <1.0.0", default-features = false }
 biodivine-lib-bdd = "0.6"
 safetensors = "0.7"
 tokio-util = { version = "0.7", features = ["rt"] }

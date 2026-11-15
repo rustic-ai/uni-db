@@ -404,8 +404,11 @@ impl LanceDirectory {
 fn is_not_found(e: &lance::Error) -> bool {
     // Lance wraps the object_store error; match on both its own NotFound and
     // the rendered message, since the wrapping layer varies by scheme.
-    matches!(e, lance::Error::NotFound { .. })
-        || matches!(e, lance::Error::DatasetNotFound { .. })
-        || e.to_string().contains("No such file or directory")
+    // `find_root` looks beneath `Error::Shared`, which Lance 14 wraps around
+    // an error several readers share.
+    matches!(
+        e.find_root(),
+        lance::Error::NotFound { .. } | lance::Error::DatasetNotFound { .. }
+    ) || e.to_string().contains("No such file or directory")
         || e.to_string().contains("NotFound")
 }

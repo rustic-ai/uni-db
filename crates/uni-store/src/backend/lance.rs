@@ -1206,7 +1206,8 @@ impl StorageBackend for LanceDbBackend {
         }
         let dataset = self.directory.open(table_name).await?;
         match dataset.tags().delete(tag).await {
-            Ok(()) | Err(lance::Error::RefNotFound { .. }) => Ok(()),
+            Ok(()) => Ok(()),
+            Err(e) if matches!(e.find_root(), lance::Error::RefNotFound { .. }) => Ok(()),
             Err(e) => Err(anyhow!(
                 "Failed to remove tag '{}' from '{}': {}",
                 tag,
@@ -2272,6 +2273,74 @@ mod tests {
     /// earlier publish, still after compaction rewrote its fragments and
     /// version cleanup pruned every version that referenced its files; and a
     /// record whose storage is only partly present is refused, not guessed.
+    /// The record of a staged append is Lance's serde form of its fragments,
+    /// kept in a bulk-load marker on disk until the load is published. A
+    /// marker written by one Lance version is published by the next, so the
+    /// form is a compatibility contract: this pins the fields of a record as
+    /// Lance 13 and 14 both write it, and that such a record still publishes.
+    #[tokio::test]
+    async fn staged_record_keeps_its_stored_form() {
+        use crate::backend::traits::RecordedPublish;
+
+        let (_dir, backend) = create_test_backend().await;
+        backend
+            .create_table("t", vec![test_batch(vec![1], vec![1])])
+            .await
+            .unwrap();
+        let before = backend.get_table_version("t").await.unwrap();
+        let staged = backend
+            .stage_append("t", vec![test_batch(vec![2, 3], vec![2, 3])])
+            .await
+            .unwrap();
+        let record = backend
+            .staged_record("t", std::slice::from_ref(&staged))
+            .unwrap()
+            .expect("pending rows have a record");
+        drop(staged);
+
+        let keys = |value: &serde_json::Value| -> Vec<String> {
+            let mut keys: Vec<String> = value
+                .as_object()
+                .expect("an object")
+                .keys()
+                .cloned()
+                .collect();
+            keys.sort();
+            keys
+        };
+        let fragment = &record.as_array().expect("a list of fragments")[0];
+        assert_eq!(
+            keys(fragment),
+            ["files", "id", "physical_rows"],
+            "{fragment}"
+        );
+        assert_eq!(
+            keys(&fragment["files"][0]),
+            [
+                "base_id",
+                "column_indices",
+                "fields",
+                "file_major_version",
+                "file_minor_version",
+                "file_size_bytes",
+                "path"
+            ],
+            "{fragment}"
+        );
+
+        // The record as stored, with nothing but its JSON, still publishes.
+        let stored: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
+        assert_eq!(
+            backend
+                .publish_staged_record("t", &stored, before)
+                .await
+                .unwrap(),
+            RecordedPublish::Published
+        );
+        assert_eq!(backend.count_rows("t", None).await.unwrap(), 3);
+    }
+
     #[tokio::test]
     async fn staged_record_publishes_exactly_once() {
         use crate::backend::traits::RecordedPublish;

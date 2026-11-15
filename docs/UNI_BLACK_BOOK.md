@@ -1820,13 +1820,13 @@ Stored as a Lance table (`adjacency_{edge_type}_{direction}`) with row-per-verte
 
 ## Lance dependency and file-format policy
 
-Uni uses Lance, lance-index and lance-linalg 13.0.0 with Arrow/Parquet
+Uni uses Lance, lance-index and lance-linalg 14.0.2 with Arrow/Parquet
 58.4.1 and DataFusion 54.1.0. Lance uses object_store 0.14 while DataFusion
 and Uni's WAL/catalog stores use 0.13. The optional `lance-object-store`
 alias in uni-store supplies the adapter's path type without changing the
 object-store types exposed elsewhere.
 
-Lance 13's stable file format is 2.2. Uni explicitly creates datasets in
+Lance's stable file format is 2.2 (in 13 and 14 alike). Uni explicitly creates datasets in
 2.1, preserving the previous default independently of the dependency bump.
 The primary backend and auxiliary-index writer resolve an existing dataset
 once and pass it to `InsertBuilder`, leaving `data_storage_version` unset
@@ -1839,6 +1839,48 @@ preserves the directory's credentials and shared session cache.
 The fork 2PC recovery rules, staged-file cleanup holds, scalar-index branch
 fallbacks and stable IO runtime remain in place. A newer Lance release is
 not evidence that those workarounds can be removed.
+
+**What the 13 → 14 upgrade changed** (`docs/proposals/lance_14_upgrade_2026_11_14.md`).
+No call site changed signature. Three things did need handling:
+
+- *A shared error hides its cause.* Lance 14 can return an error several
+  readers share as `Error::Shared { source }`. It is not reachable through
+  `anyhow`'s chain as a `lance::Error` (the source is an `Arc`), so a match
+  on the variant alone misses it. Every classifier matches
+  `Error::find_root()`: the commit-conflict retry (`is_lance_conflict`,
+  `storage/manager.rs`), the not-found checks (`lance_directory.rs`,
+  `store_utils.rs`) and the tolerated `RefNotFound` on tag delete
+  (`lance.rs`, `snapshot/restore.rs`). A missed conflict would stop a retry;
+  a missed not-found would turn "absent" into a failure.
+- *Built-in stop-word lists were revised.* Every tokenizer but n-grams drops
+  English stop words by default (`InvertedIndexParams::default()`), and
+  Lance 14 replaced the lists: English lost its 49 negations and
+  contractions (`no`, `not`, `nor`, `don't`, …), which are now indexed. An
+  index built before holds no postings for them, while a query now searches
+  for them, so old rows are not found by those words (as before the upgrade)
+  and new rows are. `IndexMetadata::analysis_revision` records the
+  `FTS_ANALYSIS_REVISION` an index was built under (`0` when absent);
+  `IndexDefinition::built_under_outdated_analysis` is true for a built
+  full-text index under an older revision whose tokenizer
+  `uses_builtin_stop_words`. Such an index is a rebuild trigger
+  (`RebuildTriggerChecker::labels_needing_rebuild`), and at open it is
+  queued when `index_rebuild.auto_rebuild_enabled` is set, or named in a
+  `warn!` when it is not (the default). Every build outcome stamps the
+  current revision, so an index is rebuilt once. Fork-local full-text
+  indexes are not in the schema and are not tracked: rebuild them with
+  `Session::build_fork_local_index`. Bump the constant whenever a dependency
+  changes the terms an unchanged configuration produces.
+- *A staged bulk load stores Lance's `Fragment` as JSON* in its marker until
+  it is published, so the form is an on-disk contract across Lance versions.
+  It is unchanged in 14; `staged_record_keeps_its_stored_form` pins its
+  fields.
+
+Verified against a database written by Lance 13 (declared and schemaless
+vertices, edges, BTree, vector and full-text indexes, a fork and a nested
+fork, a tag and a snapshot): Lance 14 reads it, writes on primary and both
+forks, compacts and rebuilds; Lance 13 then reads the result, the pinned
+snapshot included. The branch code is identical in 13 and 14; three upstream
+branch data-loss fixes exist only in the unreleased 15.
 
 ## Dataset Opens and the Lance Session Cache
 

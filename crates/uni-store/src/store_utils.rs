@@ -162,8 +162,9 @@ pub fn is_dataset_not_found(err: &anyhow::Error) -> bool {
     {
         err.chain().any(|cause| {
             cause.downcast_ref::<lance::Error>().is_some_and(|e| {
+                // Beneath `Error::Shared`, should Lance have wrapped it.
                 matches!(
-                    e,
+                    e.find_root(),
                     lance::Error::DatasetNotFound { .. } | lance::Error::NotFound { .. }
                 )
             })

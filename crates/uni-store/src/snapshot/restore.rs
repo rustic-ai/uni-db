@@ -534,7 +534,8 @@ mod index_datasets {
                 .await
                 .with_context(|| format!("open index dataset {uri}"))?;
             match dataset.tags().delete(&point.tag).await {
-                Ok(()) | Err(lance::Error::RefNotFound { .. }) => {}
+                Ok(()) => {}
+                Err(e) if matches!(e.find_root(), lance::Error::RefNotFound { .. }) => {}
                 Err(e) => {
                     return Err(anyhow::Error::new(e))
                         .with_context(|| format!("unpin index dataset {uri}"));
