@@ -314,6 +314,7 @@ is out of scope until a measurement asks for it.
 
 ## 7. Step 3 (deferred): an opt-in top-k generator
 
+<!-- doctest: skip -->
 ```locy
 MATCH (m:Mention)
 WHERE nearest(m.embedding, 'Entity', 'embedding', 10) -> (e, score)
