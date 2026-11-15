@@ -4,7 +4,7 @@
 
 # Python API — Symbol Reference
 
-Complete symbol surface of the `uni_db` Python bindings, **generated from `bindings/uni-db/uni_db/__init__.pyi`** at version 5.1.0.
+Complete symbol surface of the `uni_db` Python bindings, **generated from `bindings/uni-db/uni_db/__init__.pyi`** at version 5.2.0.
 
 This page is exhaustive and always in sync with the type stubs — it is regenerated in CI. For narrative documentation, worked examples and the recommended patterns, start at the [Python API guide](python-api.md).
 
@@ -1462,6 +1462,7 @@ Configuration for Locy program evaluation.
 | `top_k_proofs() -> int` *(property)* | — |
 | `top_k_proofs_training() -> int | None` *(property)* | — |
 | `goal_directed() -> Literal['auto', 'off', 'on', 'shadow']` *(property)* | — |
+| `returned_rules() -> Literal['all', 'none'] | list[str]` *(property)* | — |
 | `classifier_aliases() -> list[str]` *(property)* | — |
 | `register_classifier(alias: str, callable: Callable[..., Any]) -> None` | — |
 | `semiring() -> str | dict[str, int]` *(property)* | — |
@@ -1499,6 +1500,8 @@ Structured execution profile from ``session.locy_with(...).profile()``.
 | `peak_memory_bytes` | `int` |
 | `plan_text` | `str` |
 | `strata` | `list[dict[str, Any]]` |
+| `phases` | `list[dict[str, Any]]` |
+| `commands` | `list[dict[str, Any]]` |
 
 ---
 
