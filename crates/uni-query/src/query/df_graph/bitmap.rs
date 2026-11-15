@@ -94,12 +94,16 @@ macro_rules! define_id_filter {
 
 define_id_filter!(
     /// Bitmap filter for edge IDs — preselects which edges pass a property predicate.
-    EidFilter, Eid, from_eids
+    EidFilter,
+    Eid,
+    from_eids
 );
 
 define_id_filter!(
     /// Bitmap filter for vertex IDs — preselects which target vertices pass a property predicate.
-    VidFilter, Vid, from_vids
+    VidFilter,
+    Vid,
+    from_vids
 );
 
 #[cfg(test)]

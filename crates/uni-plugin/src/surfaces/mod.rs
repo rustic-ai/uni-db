@@ -279,56 +279,100 @@ macro_rules! marker {
 }
 
 // Named-unique markers (7).
-marker!(/// Marker for the Scalar surface. See [`NamedUniqueSurface`].
-ScalarSurface);
-marker!(/// Marker for the Aggregate surface. See [`NamedUniqueSurface`].
-AggregateSurface);
-marker!(/// Marker for the Window surface. See [`NamedUniqueSurface`].
-WindowSurface);
-marker!(/// Marker for the LocyAggregate surface. See [`NamedUniqueSurface`].
-LocyAggregateSurface);
-marker!(/// Marker for the LocyPredicate surface. See [`NamedUniqueSurface`].
-LocyPredicateSurface);
-marker!(/// Marker for the LocyGenerator surface. See [`NamedUniqueSurface`].
-LocyGeneratorSurface);
-marker!(/// Marker for the Algorithm surface. See [`NamedUniqueSurface`].
-AlgorithmSurface);
+marker!(
+    /// Marker for the Scalar surface. See [`NamedUniqueSurface`].
+    ScalarSurface
+);
+marker!(
+    /// Marker for the Aggregate surface. See [`NamedUniqueSurface`].
+    AggregateSurface
+);
+marker!(
+    /// Marker for the Window surface. See [`NamedUniqueSurface`].
+    WindowSurface
+);
+marker!(
+    /// Marker for the LocyAggregate surface. See [`NamedUniqueSurface`].
+    LocyAggregateSurface
+);
+marker!(
+    /// Marker for the LocyPredicate surface. See [`NamedUniqueSurface`].
+    LocyPredicateSurface
+);
+marker!(
+    /// Marker for the LocyGenerator surface. See [`NamedUniqueSurface`].
+    LocyGeneratorSurface
+);
+marker!(
+    /// Marker for the Algorithm surface. See [`NamedUniqueSurface`].
+    AlgorithmSurface
+);
 
 // Versioned markers (1).
-marker!(/// Marker for the Procedure surface. See [`VersionedSurface`].
-ProcedureSurface);
+marker!(
+    /// Marker for the Procedure surface. See [`VersionedSurface`].
+    ProcedureSurface
+);
 
 // Keyed-unique markers (7).
-marker!(/// Marker for the IndexKind surface. See [`KeyedUniqueSurface`].
-IndexKindSurface);
-marker!(/// Marker for the LabelStorage surface. See [`KeyedUniqueSurface`].
-LabelStorageSurface);
-marker!(/// Marker for the Crdt surface. See [`KeyedUniqueSurface`].
-CrdtSurface);
-marker!(/// Marker for the LogicalType surface. See [`KeyedUniqueSurface`].
-LogicalTypeSurface);
-marker!(/// Marker for the Collation surface. See [`KeyedUniqueSurface`].
-CollationSurface);
-marker!(/// Marker for the Cdc surface. See [`KeyedUniqueSurface`].
-CdcSurface);
-marker!(/// Marker for the Catalog surface. See [`KeyedUniqueSurface`].
-CatalogSurface);
+marker!(
+    /// Marker for the IndexKind surface. See [`KeyedUniqueSurface`].
+    IndexKindSurface
+);
+marker!(
+    /// Marker for the LabelStorage surface. See [`KeyedUniqueSurface`].
+    LabelStorageSurface
+);
+marker!(
+    /// Marker for the Crdt surface. See [`KeyedUniqueSurface`].
+    CrdtSurface
+);
+marker!(
+    /// Marker for the LogicalType surface. See [`KeyedUniqueSurface`].
+    LogicalTypeSurface
+);
+marker!(
+    /// Marker for the Collation surface. See [`KeyedUniqueSurface`].
+    CollationSurface
+);
+marker!(
+    /// Marker for the Cdc surface. See [`KeyedUniqueSurface`].
+    CdcSurface
+);
+marker!(
+    /// Marker for the Catalog surface. See [`KeyedUniqueSurface`].
+    CatalogSurface
+);
 
 // Append markers (7).
-marker!(/// Marker for the OptimizerRule surface. See [`AppendSurface`].
-OptimizerRuleSurface);
-marker!(/// Marker for the Hook surface. See [`AppendSurface`].
-HookSurface);
-marker!(/// Marker for the Auth surface. See [`AppendSurface`].
-AuthSurface);
-marker!(/// Marker for the Authz surface. See [`AppendSurface`].
-AuthzSurface);
-marker!(/// Marker for the Trigger surface. See [`AppendSurface`].
-TriggerSurface);
-marker!(/// Marker for the ReplacementScan surface. See [`AppendSurface`].
-ReplacementScanSurface);
-marker!(/// Marker for the BackgroundJob surface. See [`AppendSurface`].
-BackgroundJobSurface);
+marker!(
+    /// Marker for the OptimizerRule surface. See [`AppendSurface`].
+    OptimizerRuleSurface
+);
+marker!(
+    /// Marker for the Hook surface. See [`AppendSurface`].
+    HookSurface
+);
+marker!(
+    /// Marker for the Auth surface. See [`AppendSurface`].
+    AuthSurface
+);
+marker!(
+    /// Marker for the Authz surface. See [`AppendSurface`].
+    AuthzSurface
+);
+marker!(
+    /// Marker for the Trigger surface. See [`AppendSurface`].
+    TriggerSurface
+);
+marker!(
+    /// Marker for the ReplacementScan surface. See [`AppendSurface`].
+    ReplacementScanSurface
+);
+marker!(
+    /// Marker for the BackgroundJob surface. See [`AppendSurface`].
+    BackgroundJobSurface
+);
 
 // ── Named-unique impls ────────────────────────────────────────────────
 
