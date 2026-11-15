@@ -40,7 +40,7 @@ impl UidIndex {
     /// index's own scan. Consumers get domain methods
     /// ([`Self::resolve_uids`], [`Self::resolve_all_vids`]) instead.
     async fn open(&self) -> Result<Arc<Dataset>> {
-        let ds = Dataset::open(&self.uri).await?;
+        let ds = crate::backend::lance_directory::open_dataset_uri(&self.uri).await?;
         Ok(Arc::new(ds))
     }
 
@@ -148,7 +148,7 @@ impl UidIndex {
     /// or already migrated. The BTree `_uid_hex` index is recreated by the
     /// `ensure_uid_hex_index` call that follows the append in the write path.
     async fn migrate_schema_if_legacy(&self) -> Result<()> {
-        let ds = match Dataset::open(&self.uri).await {
+        let ds = match crate::backend::lance_directory::open_dataset_uri(&self.uri).await {
             Ok(ds) => ds,
             Err(_) => return Ok(()), // doesn't exist yet — created fresh with the new schema
         };
@@ -207,7 +207,7 @@ impl UidIndex {
     /// or IO used to reach the same `Ok(())`, which is the fail-open shape this
     /// class is about — the same distinction `get_vid` below already draws.
     pub async fn ensure_uid_hex_index(&self) -> Result<()> {
-        let mut ds = match Dataset::open(&self.uri).await {
+        let mut ds = match crate::backend::lance_directory::open_dataset_uri(&self.uri).await {
             Ok(ds) => ds,
             Err(e) => {
                 let err = anyhow::Error::from(e);

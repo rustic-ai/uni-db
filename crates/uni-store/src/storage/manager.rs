@@ -282,7 +282,7 @@ impl Drop for FlushInProgressGuard {
 /// resolve. These fire under async-flush when ≥2 streams concurrently try
 /// to create the same table OR when an Append races with a still-in-progress
 /// Overwrite (create_table). See the Lance commit-conflict-resolver in
-/// `lance-3.0.1/src/io/commit/conflict_resolver.rs`.
+/// Lance's `io/commit/conflict_resolver.rs`.
 fn is_lance_conflict(err: &anyhow::Error) -> bool {
     // Match the typed error, not its message. The message is Lance's to
     // reword, and matching it got this wrong twice in the same way: the
@@ -295,8 +295,10 @@ fn is_lance_conflict(err: &anyhow::Error) -> bool {
     for cause in err.chain() {
         if let Some(lance_err) = cause.downcast_ref::<lance::Error>() {
             saw_lance_error = true;
+            // Lance 14 can hand back an error shared between readers as
+            // `Error::Shared { source }`; the conflict is the error beneath.
             if matches!(
-                lance_err,
+                lance_err.find_root(),
                 lance::Error::CommitConflict { .. }
                     | lance::Error::RetryableCommitConflict { .. }
                     | lance::Error::IncompatibleTransaction { .. }
@@ -390,8 +392,11 @@ pub(crate) async fn write_dataset_with_lance_conflict_retry(
         let batches = batches.clone();
         Box::pin(async move {
             let reader = arrow_array::RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
-            let mut params = crate::backend::lance_directory::write_params(mode);
-            let destination = match lance::Dataset::open(uri).await {
+            let mut params = crate::backend::lance_directory::with_store_params(
+                uri,
+                crate::backend::lance_directory::write_params(mode),
+            );
+            let destination = match crate::backend::lance_directory::open_dataset_uri(uri).await {
                 Ok(dataset) => {
                     params.data_storage_version = None;
                     lance::dataset::WriteDestination::Dataset(Arc::new(dataset))
@@ -6325,6 +6330,25 @@ mod conflict_classification_tests {
     // would mean a dev-dependency on `lance-core` for a single `matches!` arm.
     // It is covered by `stringified_conflicts_still_match_via_the_fallback`
     // instead, which pins the message; the typed arm is unexercised.
+
+    /// Lance 14 shares one error between the readers waiting on it as
+    /// `Error::Shared { source }`. The conflict is the error beneath, and a
+    /// match on the wrapper alone would stop the retry.
+    #[test]
+    fn a_shared_conflict_is_still_a_conflict() {
+        let conflict = lance::Error::dataset_already_exists("s3://bucket/t.lance".to_string());
+        let shared = lance::Error::Shared {
+            source: std::sync::Arc::new(conflict),
+        };
+        assert!(is_lance_conflict(&anyhow::Error::new(shared)));
+
+        let unrelated = lance::Error::Shared {
+            source: std::sync::Arc::new(lance::Error::io_source(
+                "disk quota exceeded".to_string().into(),
+            )),
+        };
+        assert!(!is_lance_conflict(&anyhow::Error::new(unrelated)));
+    }
 
     /// A non-conflict Lance error must not be retried, and must not reach the
     /// string fallback -- which would match any message mentioning a conflict.

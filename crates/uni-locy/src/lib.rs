@@ -38,7 +38,7 @@ pub use compiler::compile_with_oracle_and_config;
 pub use compiler::errors::LocyCompileError;
 pub use compiler::modules::ModuleContext;
 pub use compiler::{MonotonicityOracle, default_monotonicity_oracle};
-pub use config::{ClassifierRegistry, ConfigError, LocyConfig};
+pub use config::{ClassifierRegistry, ConfigError, LocyConfig, ReturnedRules};
 pub use dependency_dnf::{BaseRv, BaseRvSet, DependencyDnf};
 pub use errors::LocyError;
 #[doc(inline)]

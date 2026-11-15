@@ -246,3 +246,8 @@ pub mod unwind_entity_attribute_functions;
 pub mod issue_305_dropped_bulk_writer;
 // #310: FTS scores must not collapse to 0.5 before the index is built.
 pub mod issue_310_fts_score_constant_before_index;
+// #330: a Locy similarity rule over a cartesian MATCH reads every pair.
+pub mod locy_similarity_cross_join_scale;
+// #330: a pattern predicate on one side of a join ran once per joined pair.
+pub mod exists_join;
+pub mod pattern_predicate_join_side;

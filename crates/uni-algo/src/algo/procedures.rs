@@ -57,9 +57,8 @@ impl ProcedureSignature {
         }
 
         // Validate provided optional args and fill defaults for missing ones
-        for i in 0..self.optional_args.len() {
+        for (i, (name, ty, default)) in self.optional_args.iter().enumerate() {
             let idx = req_count + i;
-            let (name, ty, default) = &self.optional_args[i];
 
             if idx < args.len() {
                 if !ty.matches(&args[idx]) {

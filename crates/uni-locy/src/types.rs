@@ -30,7 +30,10 @@ impl CompiledProgram {
     /// `ASSUME` body, its own rules and commands included, at any depth.
     /// The runtime attaches a tracker exactly when this holds, to the
     /// program's own run and to every re-evaluation of it (after a write, in
-    /// a hypothetical state), and then reuses no stratum across states: the
+    /// a hypothetical state), unless the planned program shows it has nothing
+    /// to record (no `EXPLAIN RULE`, no fact that can share a proof, default
+    /// inference: `uni_query`'s `program_can_share_proofs`), and with a
+    /// tracker reuses no stratum across states: the
     /// tracker can change `PROB` values (shared-proof BDD), and a reused
     /// stratum would carry no provenance. So `hypothetical_strata_reused` is
     /// always zero for such a program.
@@ -50,6 +53,39 @@ impl CompiledProgram {
             })
         });
         has_prob_fold || commands_need_provenance_tracker(&self.commands)
+    }
+
+    /// Whether something in this program reads recorded derivations: an
+    /// `EXPLAIN RULE` at the top level or in an `ASSUME` body, at any depth.
+    ///
+    /// Narrower than [`Self::needs_provenance_tracker`], which is also true
+    /// for a probabilistic fold. The fold needs its lineage analysed, not its
+    /// derivations kept, and only when its rows can share a proof.
+    #[must_use]
+    pub fn reads_derivations(&self) -> bool {
+        fn any_explain(commands: &[CompiledCommand]) -> bool {
+            commands.iter().any(|c| match c {
+                CompiledCommand::ExplainRule(_) => true,
+                CompiledCommand::Assume(ca) => any_explain(&ca.body_commands),
+                _ => false,
+            })
+        }
+        any_explain(&self.commands)
+    }
+
+    /// Whether an `ASSUME` body, at any depth, declares rules of its own that
+    /// need a provenance tracker.
+    #[must_use]
+    pub fn assume_body_needs_provenance_tracker(&self) -> bool {
+        fn any_body(commands: &[CompiledCommand]) -> bool {
+            commands.iter().any(|c| match c {
+                CompiledCommand::Assume(ca) => {
+                    ca.body_program.needs_provenance_tracker() || any_body(&ca.body_commands)
+                }
+                _ => false,
+            })
+        }
+        any_body(&self.commands)
     }
 }
 

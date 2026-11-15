@@ -231,6 +231,20 @@ impl std::fmt::Display for LocyProfileOutput {
                 }
             }
         }
+        for p in &self.profile.phases {
+            writeln!(
+                f,
+                "  {} {}  {} rules  {} facts  {:.3} ms",
+                p.pass, p.kind, p.rules, p.facts, p.elapsed_ms,
+            )?;
+        }
+        for c in &self.profile.commands {
+            writeln!(
+                f,
+                "  command {} {}  {:.3} ms  {} facts written  strata {} evaluated / {} reused",
+                c.index, c.kind, c.elapsed_ms, c.facts_written, c.strata_evaluated, c.strata_reused,
+            )?;
+        }
         Ok(())
     }
 }

@@ -9,8 +9,8 @@
 
 use crate::query::df_graph::GraphExecutionContext;
 use crate::query::similar_to::{
-    FusionMethod, SimilarToOptions, fuse_scores, normalize_bm25, parse_options, score_vectors,
-    validate_options, value_to_f32_vec,
+    F32Rows, FusionMethod, SimilarToOptions, fuse_scores, normalize_bm25, parse_options,
+    score_vectors, validate_options, value_to_f32_vec,
 };
 use crate::types::QueryWarning;
 use arrow_array::builder::Float64Builder;
@@ -302,6 +302,19 @@ impl PhysicalExpr for SimilarToExecExpr {
             .iter()
             .map(|c| c.evaluate(batch))
             .collect::<datafusion::error::Result<Vec<_>>>()?;
+
+        // Two stored vectors and no options: score from the Arrow buffers.
+        if num_sources == 1
+            && self.options_child.is_none()
+            && let Some(scores) = score_fixed_size_lists(
+                &source_cvs[0],
+                &query_cvs[0],
+                self.source_metrics.first().and_then(|m| m.as_ref()),
+                num_rows,
+            )
+        {
+            return scores.map(ColumnarValue::Array);
+        }
 
         // 2. Parse options from the options child (if present)
         let opts = if let Some(ref opts_child) = self.options_child {
@@ -633,6 +646,43 @@ fn determine_scoring_mode(
     }
 }
 
+/// Scores `source` against `query` row by row without leaving Arrow.
+///
+/// `None` unless both are `FixedSizeList<Float32>` of one width, which is what
+/// two declared vector properties evaluate to; every other shape takes the
+/// `Value` path. A row with a NULL on either side scores NULL. Each score is
+/// [`score_vectors`] on the same numbers the `Value` path would hand it, so
+/// the two paths return the same bits. With one source and no options there
+/// is nothing to fuse, embed or look up.
+fn score_fixed_size_lists(
+    source: &ColumnarValue,
+    query: &ColumnarValue,
+    metric: Option<&DistanceMetric>,
+    num_rows: usize,
+) -> Option<datafusion::error::Result<arrow_array::ArrayRef>> {
+    let (source, query) = (F32Rows::try_new(source)?, F32Rows::try_new(query)?);
+    if source.width() != query.width() {
+        return None;
+    }
+    // The default `determine_scoring_mode` applies.
+    let metric = metric.cloned().unwrap_or(DistanceMetric::Cosine);
+    let mut builder = Float64Builder::with_capacity(num_rows);
+    for row in 0..num_rows {
+        match (source.row(row), query.row(row)) {
+            (Some(a), Some(b)) => match score_vectors(a, b, &metric) {
+                Ok(score) => builder.append_value(score as f64),
+                Err(e) => {
+                    return Some(Err(datafusion::error::DataFusionError::Execution(format!(
+                        "similar_to vector: {e}"
+                    ))));
+                }
+            },
+            _ => builder.append_null(),
+        }
+    }
+    Some(Ok(Arc::new(builder.finish())))
+}
+
 fn score_vectors_from_values(
     source: &Value,
     query: &Value,
@@ -809,4 +859,168 @@ fn find_fts_property_from_ctx(graph_ctx: &GraphExecutionContext, label: &str) ->
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::types::Float32Type;
+    use arrow_array::{ArrayRef, FixedSizeListArray, Float64Array};
+    use datafusion::scalar::ScalarValue;
+
+    const WIDTH: usize = 5;
+
+    /// Rows of `WIDTH` components from a fixed sequence, with the cases the
+    /// fast path must not get wrong: a NULL row, a zero vector, a NaN and an
+    /// infinite component.
+    fn rows(seed: u64, len: usize) -> Vec<Option<Vec<f32>>> {
+        let mut state = seed;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as f32 / (1u64 << 31) as f32) * 2.0 - 1.0
+        };
+        (0..len)
+            .map(|i| match i % 11 {
+                3 => None,
+                5 => Some(vec![0.0; WIDTH]),
+                7 => Some(vec![f32::NAN, next(), next(), next(), next()]),
+                9 => Some(vec![f32::INFINITY, next(), next(), next(), next()]),
+                _ => Some((0..WIDTH).map(|_| next()).collect()),
+            })
+            .collect()
+    }
+
+    fn column(rows: &[Option<Vec<f32>>]) -> ArrayRef {
+        Arc::new(
+            FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+                rows.iter().map(|r| {
+                    r.as_ref()
+                        .map(|v| v.iter().copied().map(Some).collect::<Vec<_>>())
+                }),
+                WIDTH as i32,
+            ),
+        )
+    }
+
+    fn scalar(row: Option<Vec<f32>>) -> ColumnarValue {
+        let list = column(&[row]);
+        ColumnarValue::Scalar(ScalarValue::FixedSizeList(Arc::new(
+            list.as_any()
+                .downcast_ref::<FixedSizeListArray>()
+                .unwrap()
+                .clone(),
+        )))
+    }
+
+    /// What the `Value` path of `evaluate` returns for one row.
+    fn by_value(
+        source: &ColumnarValue,
+        query: &ColumnarValue,
+        metric: &DistanceMetric,
+        row: usize,
+    ) -> Option<f64> {
+        let batch = arrow_array::RecordBatch::new_empty(Arc::new(Schema::empty()));
+        let s = columnar_value_to_value(source, &batch, row);
+        let q = columnar_value_to_value(query, &batch, row);
+        if matches!(s, Value::Null) || matches!(q, Value::Null) {
+            return None;
+        }
+        Some(score_vectors_from_values(&s, &q, metric).unwrap() as f64)
+    }
+
+    /// Asserts the fast path returns, bit for bit, what the `Value` path does.
+    fn assert_same(source: &ColumnarValue, query: &ColumnarValue, len: usize, what: &str) {
+        for metric in [
+            DistanceMetric::Cosine,
+            DistanceMetric::Dot,
+            DistanceMetric::L2,
+            DistanceMetric::L1,
+        ] {
+            let fast = score_fixed_size_lists(source, query, Some(&metric), len)
+                .expect("two FixedSizeList<Float32> values take the fast path")
+                .unwrap();
+            let fast = fast.as_any().downcast_ref::<Float64Array>().unwrap();
+            assert_eq!(fast.len(), len);
+            for row in 0..len {
+                let got = fast.is_valid(row).then(|| fast.value(row).to_bits());
+                let want = by_value(source, query, &metric, row).map(f64::to_bits);
+                assert_eq!(got, want, "{what}, {metric:?}, row {row}");
+            }
+        }
+    }
+
+    #[test]
+    fn two_columns_score_as_the_value_path_does() {
+        let (a, b) = (rows(1, 64), rows(2, 64));
+        // Offset `b`'s special rows from `a`'s, so each meets an ordinary row.
+        let b: Vec<_> = b.into_iter().cycle().skip(1).take(64).collect();
+        assert_same(
+            &ColumnarValue::Array(column(&a)),
+            &ColumnarValue::Array(column(&b)),
+            64,
+            "array, array",
+        );
+    }
+
+    #[test]
+    fn a_sliced_column_scores_its_own_rows() {
+        let (a, b) = (column(&rows(3, 64)), column(&rows(4, 64)));
+        assert_same(
+            &ColumnarValue::Array(a.slice(13, 40)),
+            &ColumnarValue::Array(b.slice(7, 40)),
+            40,
+            "sliced arrays",
+        );
+    }
+
+    #[test]
+    fn a_scalar_on_either_side_scores_against_every_row() {
+        let a = ColumnarValue::Array(column(&rows(5, 33)));
+        for (what, one) in [
+            ("a vector", Some(vec![0.25, -0.5, 1.0, 0.0, 2.0])),
+            ("a zero vector", Some(vec![0.0; WIDTH])),
+            ("NULL", None),
+        ] {
+            assert_same(
+                &a,
+                &scalar(one.clone()),
+                33,
+                &format!("array, scalar {what}"),
+            );
+            assert_same(&scalar(one), &a, 33, &format!("scalar {what}, array"));
+        }
+    }
+
+    #[test]
+    fn no_metric_means_cosine() {
+        let a = ColumnarValue::Array(column(&rows(6, 16)));
+        let b = ColumnarValue::Array(column(&rows(7, 16)));
+        let unset = score_fixed_size_lists(&a, &b, None, 16).unwrap().unwrap();
+        let cosine = score_fixed_size_lists(&a, &b, Some(&DistanceMetric::Cosine), 16)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unset.to_data(), cosine.to_data());
+    }
+
+    #[test]
+    fn other_shapes_keep_the_value_path() {
+        let vectors = ColumnarValue::Array(column(&rows(8, 4)));
+        // A literal or parameter query vector: a `List<Float64>` scalar.
+        let list = ColumnarValue::Scalar(ScalarValue::List(ScalarValue::new_list(
+            &vec![ScalarValue::Float64(Some(1.0)); WIDTH],
+            &DataType::Float64,
+            true,
+        )));
+        assert!(score_fixed_size_lists(&vectors, &list, None, 4).is_none());
+        // Another width: the `Value` path reports the mismatch.
+        let narrow: ArrayRef = Arc::new(
+            FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+                vec![Some(vec![Some(1.0), Some(0.0)]); 4],
+                2,
+            ),
+        );
+        assert!(score_fixed_size_lists(&vectors, &ColumnarValue::Array(narrow), None, 4).is_none());
+    }
 }

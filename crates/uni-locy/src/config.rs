@@ -187,6 +187,41 @@ pub struct LocyConfig {
     /// cannot prove answer-preserving fall back to full evaluation. See
     /// [`crate::magic`].
     pub goal_directed: GoalDirected,
+    /// Which rules' facts the result carries in its derived facts
+    /// (`LocyResult::derived_rules`).
+    ///
+    /// Defaults to [`ReturnedRules::All`]. Every returned fact is converted
+    /// to a row and its node and edge ids replaced by the full entities, so a
+    /// program that derives many facts only to write a few of them (a
+    /// `DERIVE` over the last rule of a chain) pays for the rest only if they
+    /// are returned. Commands are answered the same whatever is returned.
+    pub returned_rules: ReturnedRules,
+}
+
+/// The rules whose facts a Locy result carries; see
+/// [`LocyConfig::returned_rules`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ReturnedRules {
+    /// Every rule the program evaluated.
+    #[default]
+    All,
+    /// No rule: the result carries command results and statistics only.
+    Nothing,
+    /// The named rules. A name matches a rule as a `QUERY` names one: bare,
+    /// or qualified by its module.
+    Only(Vec<String>),
+}
+
+impl ReturnedRules {
+    /// Whether the facts of the rule keyed `rule` are returned.
+    #[must_use]
+    pub fn includes(&self, rule: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Nothing => false,
+            Self::Only(names) => names.iter().any(|n| crate::names::name_matches(rule, n)),
+        }
+    }
 }
 
 impl LocyConfig {
@@ -280,6 +315,7 @@ impl Default for LocyConfig {
             classifier_provenance_store: None,
             params: HashMap::new(),
             goal_directed: GoalDirected::Auto,
+            returned_rules: ReturnedRules::All,
         }
     }
 }

@@ -7663,6 +7663,9 @@ fn invoke_similarity_udf(
     min_args: usize,
     args: ScalarFunctionArgs,
 ) -> DFResult<ColumnarValue> {
+    if let Some(scores) = stored_vector_similarity(&args) {
+        return scores;
+    }
     let output_type = DataType::Float64;
     invoke_cypher_udf(args, &output_type, |val_args| {
         if val_args.len() < min_args {
@@ -7674,6 +7677,39 @@ fn invoke_similarity_udf(
         crate::similar_to::eval_similar_to_pure(&val_args[0], &val_args[1])
             .map_err(|e| datafusion::error::DataFusionError::Execution(e.to_string()))
     })
+}
+
+/// The cosine of two stored vectors, read straight from their Arrow buffers.
+///
+/// `None` unless both arguments are `FixedSizeList<Float32>` of one width and
+/// at least one is an array; every other call takes the `Value` path. The
+/// arithmetic is the branch of `eval_similar_to_pure` that two `Value::Vector`
+/// operands take, so the scores are the same: f64, never narrowed.
+fn stored_vector_similarity(args: &ScalarFunctionArgs) -> Option<DFResult<ColumnarValue>> {
+    use crate::similar_to::{F32Rows, cosine_similarity_inner};
+
+    let [left, right] = args.args.as_slice() else {
+        return None;
+    };
+    let (left, right) = (F32Rows::try_new(left)?, F32Rows::try_new(right)?);
+    if left.width() != right.width() || !(left.is_array() || right.is_array()) {
+        return None;
+    }
+    let mut scores = arrow_array::builder::Float64Builder::with_capacity(args.number_rows);
+    for row in 0..args.number_rows {
+        match (left.row(row), right.row(row)) {
+            (Some(a), Some(b)) => match cosine_similarity_inner(a, b) {
+                Ok(score) => scores.append_value(score),
+                Err(e) => {
+                    return Some(Err(datafusion::error::DataFusionError::Execution(
+                        e.to_string(),
+                    )));
+                }
+            },
+            _ => scores.append_null(),
+        }
+    }
+    Some(Ok(ColumnarValue::Array(Arc::new(scores.finish()))))
 }
 
 cypher_scalar_udf! {
@@ -8950,5 +8986,123 @@ mod tests {
             !msg.contains("123456"),
             "value leaked into the message: {msg}"
         );
+    }
+
+    fn invoke_vector_similarity(
+        left: ColumnarValue,
+        right: ColumnarValue,
+        rows: usize,
+    ) -> ArrayRef {
+        use arrow::datatypes::Field;
+        use datafusion::config::ConfigOptions;
+        let arg_fields = [&left, &right]
+            .iter()
+            .map(|a| Arc::new(Field::new("v", a.data_type(), true)))
+            .collect();
+        let out = create_vector_similarity_udf()
+            .invoke_with_args(ScalarFunctionArgs {
+                args: vec![left, right],
+                arg_fields,
+                number_rows: rows,
+                return_field: Arc::new(Field::new("score", DataType::Float64, true)),
+                config_options: Arc::new(ConfigOptions::default()),
+            })
+            .unwrap();
+        match out {
+            ColumnarValue::Array(a) => a,
+            ColumnarValue::Scalar(s) => s.to_array_of_size(rows).unwrap(),
+        }
+    }
+
+    /// Two stored vectors are scored from their Arrow buffers. The scores are
+    /// the ones `eval_similar_to_pure` gives the same vectors as `Value`s, bit
+    /// for bit: NULL for a NULL row, 0.0 for a zero vector, and an f64 that is
+    /// never narrowed.
+    #[test]
+    fn vector_similarity_of_stored_vectors_matches_the_value_path() {
+        use arrow::datatypes::Float32Type;
+        let rows: Vec<Option<Vec<f32>>> = vec![
+            Some(vec![0.5, -1.0, 2.0]),
+            None,
+            Some(vec![0.0, 0.0, 0.0]),
+            Some(vec![3.0, 4.0, 0.0]),
+            Some(vec![f32::NAN, 1.0, 0.0]),
+            Some(vec![f32::INFINITY, 1.0, 0.0]),
+            Some(vec![0.1, 0.2, 0.3]),
+        ];
+        let column = |rows: &[Option<Vec<f32>>]| -> ArrayRef {
+            Arc::new(arrow_array::FixedSizeListArray::from_iter_primitive::<
+                Float32Type,
+                _,
+                _,
+            >(
+                rows.iter().map(|r| {
+                    r.as_ref()
+                        .map(|v| v.iter().copied().map(Some).collect::<Vec<_>>())
+                }),
+                3,
+            ))
+        };
+        let to_value = |r: &Option<Vec<f32>>| r.clone().map_or(Value::Null, Value::Vector);
+        let want = |a: &Option<Vec<f32>>, b: &Option<Vec<f32>>| {
+            match crate::similar_to::eval_similar_to_pure(&to_value(a), &to_value(b)).unwrap() {
+                Value::Null => None,
+                Value::Float(f) => Some(f.to_bits()),
+                other => panic!("unexpected score {other:?}"),
+            }
+        };
+        let bits = |out: &ArrayRef| -> Vec<Option<u64>> {
+            let out = out.as_any().downcast_ref::<Float64Array>().unwrap();
+            out.iter().map(|s| s.map(f64::to_bits)).collect()
+        };
+        let n = rows.len();
+        let rotated: Vec<_> = rows.iter().cycle().skip(3).take(n).cloned().collect();
+
+        // Array against array.
+        let out = invoke_vector_similarity(
+            ColumnarValue::Array(column(&rows)),
+            ColumnarValue::Array(column(&rotated)),
+            n,
+        );
+        let expected: Vec<_> = rows.iter().zip(&rotated).map(|(a, b)| want(a, b)).collect();
+        assert_eq!(bits(&out), expected);
+
+        // A sliced array: its rows, not the parent's.
+        let out = invoke_vector_similarity(
+            ColumnarValue::Array(column(&rows).slice(2, 4)),
+            ColumnarValue::Array(column(&rotated).slice(1, 4)),
+            4,
+        );
+        let expected: Vec<_> = (0..4)
+            .map(|i| want(&rows[2 + i], &rotated[1 + i]))
+            .collect();
+        assert_eq!(bits(&out), expected);
+
+        // A scalar on either side, NULL included.
+        for one in [Some(vec![0.0f32, 1.0, 0.0]), None] {
+            let scalar = || {
+                let list = column(std::slice::from_ref(&one));
+                ColumnarValue::Scalar(ScalarValue::FixedSizeList(Arc::new(
+                    list.as_any()
+                        .downcast_ref::<arrow_array::FixedSizeListArray>()
+                        .unwrap()
+                        .clone(),
+                )))
+            };
+            let out = invoke_vector_similarity(ColumnarValue::Array(column(&rows)), scalar(), n);
+            let expected: Vec<_> = rows.iter().map(|a| want(a, &one)).collect();
+            assert_eq!(bits(&out), expected, "array, scalar {one:?}");
+            let out = invoke_vector_similarity(scalar(), ColumnarValue::Array(column(&rows)), n);
+            let expected: Vec<_> = rows.iter().map(|a| want(&one, a)).collect();
+            assert_eq!(bits(&out), expected, "scalar {one:?}, array");
+        }
+
+        // [3, 4, 0] against [0, 1, 0] is exactly 0.8, which `> 0.8` must reject.
+        let out = invoke_vector_similarity(
+            ColumnarValue::Array(column(&[Some(vec![3.0, 4.0, 0.0])])),
+            ColumnarValue::Array(column(&[Some(vec![0.0, 1.0, 0.0])])),
+            1,
+        );
+        assert_eq!(bits(&out), vec![Some(0.8f64.to_bits())]);
     }
 }

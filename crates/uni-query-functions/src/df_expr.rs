@@ -1535,6 +1535,21 @@ fn first_arg(df_args: &[DfExpr]) -> DfExpr {
     df_args[0].clone()
 }
 
+/// The first argument of a string function, with an untyped NULL literal
+/// made a NULL string.
+///
+/// `lower`, `upper` and the trims have no signature for the `Null` type and
+/// fail to plan ("Unsupported data type NULL for function lower"), where
+/// Cypher's answer is NULL. A NULL literal reaches them from the query text
+/// (`toLower(null)`) and from a parameter or an outer value of a subquery
+/// that is NULL for this row.
+fn first_string_arg(df_args: &[DfExpr]) -> DfExpr {
+    match &df_args[0] {
+        DfExpr::Literal(ScalarValue::Null, _) => lit(ScalarValue::Utf8(None)),
+        other => other.clone(),
+    }
+}
+
 /// Create a cast expression to the specified data type.
 pub fn cast_expr(expr: DfExpr, data_type: datafusion::arrow::datatypes::DataType) -> DfExpr {
     // `Cast` carries a `FieldRef`, not a bare `DataType`, as of DataFusion 54.
@@ -2094,13 +2109,13 @@ fn translate_string_function(name_upper: &str, df_args: &[DfExpr]) -> Option<Res
         "UPPER" | "TOUPPER" => {
             check_args!(1, df_args, "upper");
             Some(Ok(datafusion::functions::string::expr_fn::upper(
-                first_arg(df_args),
+                first_string_arg(df_args),
             )))
         }
         "LOWER" | "TOLOWER" => {
             check_args!(1, df_args, "lower");
             Some(Ok(datafusion::functions::string::expr_fn::lower(
-                first_arg(df_args),
+                first_string_arg(df_args),
             )))
         }
         "SUBSTRING" => {
@@ -2110,19 +2125,19 @@ fn translate_string_function(name_upper: &str, df_args: &[DfExpr]) -> Option<Res
         "TRIM" => {
             check_args!(1, df_args, "TRIM");
             Some(Ok(datafusion::functions::string::expr_fn::btrim(vec![
-                first_arg(df_args),
+                first_string_arg(df_args),
             ])))
         }
         "LTRIM" => {
             check_args!(1, df_args, "LTRIM");
             Some(Ok(datafusion::functions::string::expr_fn::ltrim(vec![
-                first_arg(df_args),
+                first_string_arg(df_args),
             ])))
         }
         "RTRIM" => {
             check_args!(1, df_args, "RTRIM");
             Some(Ok(datafusion::functions::string::expr_fn::rtrim(vec![
-                first_arg(df_args),
+                first_string_arg(df_args),
             ])))
         }
         "LEFT" => {

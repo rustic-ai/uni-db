@@ -183,10 +183,11 @@ pub mod locy {
     pub use uni_locy::magic;
     pub use uni_locy::{
         CommandResult, CompiledProgram, DerivedEdge, DerivedFactSet, FactRow, GoalDirected,
-        GoalDirectedReport, LazyDerived, LocyCompileError, LocyConfig, LocyError, RuleFacts,
-        rewrite_goal_directed,
+        GoalDirectedReport, LazyDerived, LocyCompileError, LocyConfig, LocyError, ReturnedRules,
+        RuleFacts, rewrite_goal_directed,
     };
     pub use uni_query::{
-        LocyExecProfile, LocyIterationProfile, LocyRuleProfile, LocyStratumProfile,
+        LocyCommandProfile, LocyExecProfile, LocyIterationProfile, LocyPhaseProfile,
+        LocyRuleProfile, LocyStratumProfile,
     };
 }

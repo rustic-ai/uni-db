@@ -73,12 +73,185 @@ pub async fn derive_command_footprint(
 ) -> Result<(usize, MutationFootprint), LocyError> {
     let collected = collect_derive_facts_inner(dc, program, ctx, derived_store).await?;
     let mut footprint = MutationFootprint::default();
-    for query in collected.queries {
-        footprint.extend(&query_footprint(&query));
-        ctx.execute_mutation(query, HashMap::new()).await?;
-        stats.mutations_executed += 1;
+    for query in &collected.queries {
+        footprint.extend(&query_footprint(query));
+    }
+    for statement in batch_derive_statements(collected.queries) {
+        ctx.execute_mutation(statement.query, statement.params)
+            .await?;
+        // One per derived fact, however many statements wrote them.
+        stats.mutations_executed += statement.facts;
     }
     Ok((collected.affected, footprint))
+}
+
+/// The parameter a batched DERIVE statement unwinds, and the variable it
+/// unwinds each fact's ids into.
+const DERIVE_FACTS_PARAM: &str = "__derive_facts";
+const DERIVE_FACT_VAR: &str = "__derive_fact";
+
+/// The most facts one batched statement carries: beyond the `UNWIND` list
+/// size the planner turns into an id filter on the scans, a statement would
+/// scan its labels whole.
+const DERIVE_BATCH_SIZE: usize = 10_000;
+
+/// A statement writing one or more DERIVE facts.
+struct DeriveStatement {
+    query: Query,
+    params: HashMap<String, uni_common::Value>,
+    /// The facts the statement writes.
+    facts: usize,
+}
+
+/// Writes DERIVE facts that differ only in the nodes they connect with one
+/// statement, not one each.
+///
+/// A fact between existing nodes is written by
+/// `MATCH (a), (b) WHERE id(a) = X AND id(b) = Y CREATE (a)-[:T]->(b)`
+/// (`build_create_from_derive_pattern`). A thousand facts were a thousand
+/// such statements, each planned and run on its own. Statements equal up to
+/// the ids are grouped and run as
+/// `UNWIND $__derive_facts AS f MATCH (a), (b) WHERE id(a) = f.a AND id(b) = f.b CREATE …`,
+/// in the order their first fact appeared. A statement of any other shape
+/// (a `NEW` node, `DERIVE MERGE`), and a group of one, runs as it was built.
+fn batch_derive_statements(queries: Vec<Query>) -> Vec<DeriveStatement> {
+    use uni_common::Value;
+
+    enum Group {
+        Single(Query),
+        Batch {
+            template: Query,
+            first: Query,
+            rows: Vec<Value>,
+        },
+    }
+    let mut groups: Vec<Group> = Vec::new();
+    for query in queries {
+        let Some((template, row)) = lift_fact_ids(&query) else {
+            groups.push(Group::Single(query));
+            continue;
+        };
+        let existing = groups.iter_mut().find_map(|g| match g {
+            Group::Batch {
+                template: t, rows, ..
+            } if *t == template => Some(rows),
+            _ => None,
+        });
+        match existing {
+            Some(rows) => rows.push(row),
+            None => groups.push(Group::Batch {
+                template,
+                first: query,
+                rows: vec![row],
+            }),
+        }
+    }
+
+    let mut statements = Vec::new();
+    for group in groups {
+        match group {
+            Group::Single(query) => statements.push(DeriveStatement {
+                query,
+                params: HashMap::new(),
+                facts: 1,
+            }),
+            Group::Batch { first, rows, .. } if rows.len() == 1 => {
+                statements.push(DeriveStatement {
+                    query: first,
+                    params: HashMap::new(),
+                    facts: 1,
+                });
+            }
+            Group::Batch { template, rows, .. } => {
+                for chunk in rows.chunks(DERIVE_BATCH_SIZE) {
+                    statements.push(DeriveStatement {
+                        query: template.clone(),
+                        params: HashMap::from([(
+                            DERIVE_FACTS_PARAM.to_string(),
+                            Value::List(chunk.to_vec()),
+                        )]),
+                        facts: chunk.len(),
+                    });
+                }
+            }
+        }
+    }
+    statements
+}
+
+/// `query` with the node ids it names lifted into a row of the unwound
+/// parameter: the statement every fact of its shape shares, and this fact's
+/// row. `None` unless `query` is `MATCH … WHERE id(v) = <int> [AND …] CREATE …`
+/// with nothing else in its `WHERE`.
+fn lift_fact_ids(query: &Query) -> Option<(Query, uni_common::Value)> {
+    use uni_common::Value;
+    use uni_cypher::ast::{
+        BinaryOp, Clause, CypherLiteral, Expr, MatchClause, Statement, UnwindClause,
+    };
+
+    fn lift(expr: &Expr, row: &mut HashMap<String, Value>) -> Option<Expr> {
+        match expr {
+            Expr::BinaryOp {
+                left,
+                op: BinaryOp::And,
+                right,
+            } => Some(Expr::BinaryOp {
+                left: Box::new(lift(left, row)?),
+                op: BinaryOp::And,
+                right: Box::new(lift(right, row)?),
+            }),
+            Expr::BinaryOp {
+                left,
+                op: BinaryOp::Eq,
+                right,
+            } => {
+                let Expr::FunctionCall { name, args, .. } = left.as_ref() else {
+                    return None;
+                };
+                let [Expr::Variable(variable)] = args.as_slice() else {
+                    return None;
+                };
+                let Expr::Literal(CypherLiteral::Integer(id)) = right.as_ref() else {
+                    return None;
+                };
+                if name != "id" || row.insert(variable.clone(), Value::Int(*id)).is_some() {
+                    return None;
+                }
+                Some(Expr::BinaryOp {
+                    left: left.clone(),
+                    op: BinaryOp::Eq,
+                    right: Box::new(Expr::Property(
+                        Box::new(Expr::Variable(DERIVE_FACT_VAR.to_string())),
+                        variable.clone(),
+                    )),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    let Query::Single(statement) = query else {
+        return None;
+    };
+    let [Clause::Match(m), create @ Clause::Create(_)] = statement.clauses.as_slice() else {
+        return None;
+    };
+    let mut row = HashMap::new();
+    let where_clause = lift(m.where_clause.as_ref()?, &mut row)?;
+    let template = Query::Single(Statement {
+        clauses: vec![
+            Clause::Unwind(UnwindClause {
+                expr: Expr::Parameter(DERIVE_FACTS_PARAM.to_string()),
+                variable: DERIVE_FACT_VAR.to_string(),
+            }),
+            Clause::Match(MatchClause {
+                where_clause: Some(where_clause),
+                ..m.clone()
+            }),
+            create.clone(),
+        ],
+    });
+    Some((template, Value::Map(row)))
 }
 
 /// Collect derived facts without executing mutations (collect mode).

@@ -1145,6 +1145,33 @@ fn derivation_discriminator_columns(
     columns
 }
 
+/// Whether any fact of a planned program can share a proof with another row or
+/// fact: some clause's rows carry a row event, or name a referenced
+/// probabilistic fact, positive or negated, in a lineage column.
+///
+/// When this is false every derivation row is its own independent event and
+/// reads no probabilistic fact, so the lineage analysis has nothing to find:
+/// in the default (approximate, non-top-k) mode it would return every value
+/// unchanged and warn of nothing. `plan` must have been built
+/// [`LocyPlanBuilder::with_provenance`], or a rule without a fold reports no
+/// lineage columns.
+pub fn program_can_share_proofs(plan: &LogicalPlan) -> bool {
+    let LogicalPlan::LocyProgram { strata, .. } = plan else {
+        return true;
+    };
+    strata
+        .iter()
+        .flat_map(|s| &s.rules)
+        .flat_map(|r| &r.clauses)
+        .any(|c| {
+            c.row_event
+                || c.is_refs.iter().any(|r| {
+                    r.negated_lineage.is_some()
+                        || r.prob_ref.as_ref().is_some_and(|p| p.key_column.is_some())
+                })
+        })
+}
+
 /// A reference, from a clause of a rule with a PROB column, to a rule that has
 /// one too. A positive reference's probability flows into the calling row's
 /// PROB value (see [`ProbRead`]); a negated one's complement does.
@@ -3536,6 +3563,7 @@ impl<'a> LocyPlanBuilder<'a> {
 
         // The row event of a lineage rule (see `DERIV_EVENT_COL`): every
         // clause projects it, NULL when the row is its own event.
+        let mut row_event = false;
         if let Some(prob_column) = ctx.lineage_prob_column {
             let event = projections
                 .iter()
@@ -3548,8 +3576,9 @@ impl<'a> LocyPlanBuilder<'a> {
                         Some(NameSource::Entity(column)) => Some(column),
                         _ => None,
                     })
-                })
-                .unwrap_or(Expr::Literal(CypherLiteral::Null));
+                });
+            row_event = event.is_some();
+            let event = event.unwrap_or(Expr::Literal(CypherLiteral::Null));
             let event_column = if ctx.transient_lineage {
                 LIN_EVENT_COL
             } else {
@@ -3908,6 +3937,7 @@ impl<'a> LocyPlanBuilder<'a> {
             priority: clause.priority,
             model_invocations: clause.model_invocations.clone(),
             stratum_scans,
+            row_event,
         })
     }
 

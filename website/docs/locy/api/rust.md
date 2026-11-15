@@ -65,6 +65,7 @@ Common fields:
 - `max_explain_depth`
 - `max_slg_depth` (deprecated, no effect; using it is a deprecation warning)
 - `goal_directed` (`GoalDirected::Auto` default, `Off`, `On`, `Shadow`): magic-sets evaluation of `QUERY ... WHERE`; see [Modules, PRIORITY, QUERY](../advanced/modules-priority-query.md#goal-directed-query)
+- `returned_rules` (`ReturnedRules::All` default, `Nothing`, `Only(names)`): which rules' facts the result carries in `derived_rules()`. A rule left out is neither converted to rows nor hydrated for the result; commands are answered the same. A program that derives many facts only to `DERIVE` a few should pass `Nothing`
 - `max_abduce_candidates`
 - `max_abduce_results`
 - `max_derived_bytes`
@@ -108,6 +109,14 @@ bodies, `operators` lists the steps that run outside a plan, with `actual_rows` 
 
 - `LocyIsNotAntiJoin` (or `LocyIsNotComplement` under PROB) — one per `IS NOT` reference applied
 - `LocyFactDedup`, `LocyBestByMerge` or `LocyFoldMerge` — the fact merge, once per pass
+- `LocyProvenance`, `LocyLineage` — proof annotations and shared-proof analysis, when the program records them (an `EXPLAIN RULE`, top-k proofs, exact inference, or a fold whose proofs can share an event)
+
+`profile.profile.phases` lists the work done on the derived facts outside the strata, in
+the order it ran: `pass` (`initial`, `re_evaluation`, `result`), `kind` (`strata`,
+`convert`, `hydrate`), the `rules` and `facts` covered, and `elapsed_ms`.
+`profile.profile.commands` lists each dispatched command: `kind`, `elapsed_ms` (a
+re-evaluation it caused included), `facts_written` for a `DERIVE`, and the strata
+evaluated and reused before it read its facts.
 
 `result.metrics().physical_plans` counts every physical plan the program built.
 

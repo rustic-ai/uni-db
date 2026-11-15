@@ -341,6 +341,44 @@ struct WalSegmentRef<'a> {
     commits: &'a [CommitSpan],
 }
 
+/// Seals handed to a runtime to finish in the background, by log (see
+/// [`WriteAheadLog::announce_pending_seal`]).
+static PENDING_SEALS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<String, Vec<SealWatch>>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// Reports `true` once a pending seal has finished or been given up.
+type SealWatch = tokio::sync::watch::Receiver<bool>;
+
+/// A seal of a log that is still to run, in a task its owner spawned.
+///
+/// While it lives, opening the same log waits for it
+/// ([`WriteAheadLog::initialize`]), so a reopen in the same process neither
+/// misses the mark the seal records nor allocates the LSN it is writing.
+/// Dropping it (the task finished, or its runtime went away and dropped the
+/// task unrun) releases the waiters.
+#[must_use = "the seal is pending only while this is held"]
+pub struct PendingSeal {
+    key: String,
+    done: tokio::sync::watch::Sender<bool>,
+    watch: SealWatch,
+}
+
+impl Drop for PendingSeal {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = PENDING_SEALS.lock()
+            && let Some(seals) = pending.get_mut(&self.key)
+        {
+            seals.retain(|other| !other.same_channel(&self.watch));
+            if seals.is_empty() {
+                pending.remove(&self.key);
+            }
+        }
+        // No receiver left is fine: nobody was waiting.
+        let _ = self.done.send(true);
+    }
+}
+
 pub struct WriteAheadLog {
     store: Arc<dyn ObjectStore>,
     prefix: Path,
@@ -406,8 +444,45 @@ impl WriteAheadLog {
         self
     }
 
+    /// Whether the log is on a store other than the local filesystem, where
+    /// a write is a network request.
+    #[must_use]
+    pub fn is_remote(&self) -> bool {
+        self.local_root.is_none()
+    }
+
+    /// Identifies the log across instances: its store and prefix.
+    fn pending_key(&self) -> String {
+        format!("{}|{}", self.store, self.prefix)
+    }
+
+    /// Marks a seal of this log as pending until the returned guard is
+    /// dropped. Hold the guard in the task that runs the seal.
+    pub fn announce_pending_seal(&self) -> PendingSeal {
+        let (done, watch) = tokio::sync::watch::channel(false);
+        let key = self.pending_key();
+        if let Ok(mut pending) = PENDING_SEALS.lock() {
+            pending.entry(key.clone()).or_default().push(watch.clone());
+        }
+        PendingSeal { key, done, watch }
+    }
+
+    /// Waits for every pending seal of this log (see [`PendingSeal`]).
+    async fn wait_for_pending_seals(&self) {
+        let seals: Vec<SealWatch> = PENDING_SEALS
+            .lock()
+            .ok()
+            .and_then(|pending| pending.get(&self.pending_key()).cloned())
+            .unwrap_or_default();
+        for mut seal in seals {
+            // An error means the guard is gone, which is "finished" too.
+            let _ = seal.wait_for(|done| *done).await;
+        }
+    }
+
     /// Initialize WAL state from existing segments (called on startup)
     pub async fn initialize(&self) -> Result<u64> {
+        self.wait_for_pending_seals().await;
         let max_lsn = self.find_max_lsn().await?;
         {
             let mut state = acquire_mutex(&self.state, "wal_state")?;
@@ -751,6 +826,7 @@ impl WriteAheadLog {
     /// As [`Self::replay_since`].
     #[instrument(skip(self), level = "debug")]
     pub async fn replay_segments_since(&self, high_water_mark: u64) -> Result<WalSegmentReplay> {
+        self.wait_for_pending_seals().await;
         let start = std::time::Instant::now();
         debug!(high_water_mark, "Replaying WAL segments");
         let metas = list_with_timeout(&self.store, Some(&self.prefix), DEFAULT_TIMEOUT).await?;
@@ -971,6 +1047,47 @@ mod tests {
     use object_store::local::LocalFileSystem;
     use std::collections::HashMap;
     use tempfile::tempdir;
+
+    /// Opening a log waits for a seal of it still pending in a task, and no
+    /// longer once the task is done or was dropped unrun. A seal of another
+    /// log does not hold it up.
+    #[tokio::test]
+    async fn opening_a_log_waits_for_its_pending_seal() -> Result<()> {
+        use std::time::Duration;
+        let dir = tempdir()?;
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(dir.path())?);
+        let log = |prefix: &str| WriteAheadLog::new(store.clone(), Path::from(prefix));
+
+        let sealing = log("wal_forks/a");
+        let pending = sealing.announce_pending_seal();
+        let reopened = log("wal_forks/a");
+        let other = log("wal_forks/b");
+
+        // Another log opens at once.
+        tokio::time::timeout(Duration::from_secs(5), other.initialize()).await??;
+        // The same log waits while the seal is pending.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), reopened.initialize())
+                .await
+                .is_err(),
+            "the open must wait for the pending seal"
+        );
+        // And proceeds when the guard goes, however that happens.
+        drop(pending);
+        tokio::time::timeout(Duration::from_secs(5), reopened.initialize()).await??;
+        tokio::time::timeout(Duration::from_secs(5), reopened.replay_segments_since(0)).await??;
+
+        // A second seal, dropped in a task that never ran, releases it too.
+        let pending = sealing.announce_pending_seal();
+        let task = tokio::spawn(async move {
+            let _pending = pending;
+            std::future::pending::<()>().await;
+        });
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(Duration::from_secs(5), reopened.initialize()).await??;
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_wal_append_replay() -> Result<()> {

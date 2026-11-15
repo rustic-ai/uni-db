@@ -100,6 +100,9 @@ pub struct ProvenanceStore {
     /// The lineage of every `MNOR`/`MPROD` rule evaluated in this run, which
     /// exact inference and shared-proof detection read.
     lineage: super::locy_lineage::LineageStore,
+    /// Whether derivations are recorded in `entries`; false when the run
+    /// keeps a tracker for its lineage alone.
+    annotations: bool,
 }
 
 impl ProvenanceStore {
@@ -107,6 +110,30 @@ impl ProvenanceStore {
         Self {
             entries: RwLock::new(HashMap::new()),
             lineage: super::locy_lineage::LineageStore::new(),
+            annotations: true,
+        }
+    }
+
+    /// A store that keeps lineage but records no derivation: for a program
+    /// whose derivations nothing reads (no `EXPLAIN RULE`, no top-k proof
+    /// retention).
+    pub fn lineage_only() -> Self {
+        Self {
+            annotations: false,
+            ..Self::new()
+        }
+    }
+
+    /// Whether this store records derivations.
+    pub fn records_annotations(&self) -> bool {
+        self.annotations
+    }
+
+    /// A fresh store recording what this one does.
+    pub fn fresh_like(&self) -> Self {
+        Self {
+            annotations: self.annotations,
+            ..Self::new()
         }
     }
 

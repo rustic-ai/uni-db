@@ -977,44 +977,71 @@ impl<'a> LocyEngine<'a> {
         let plan_start = Instant::now();
         let schema = self.db.schema.schema();
         let query_planner = uni_query::QueryPlanner::new(schema);
+        let semiring_kind = config
+            .resolve()
+            .map_err(|e| UniError::Query {
+                message: format!("LocyConfigError: {e}"),
+                query: None,
+            })?
+            .kind;
+        let classifier_cache = config.classifier_cache.clone().or_else(|| {
+            Some(std::sync::Arc::new(uni_locy::ModelInvocationCache::new(
+                config.classifier_cache_max,
+            )))
+        });
+        let classifier_provenance_store = config
+            .classifier_provenance_store
+            .clone()
+            .or_else(|| Some(std::sync::Arc::new(uni_locy::NeuralProvenanceStore::new())));
         // A run with a provenance tracker (step 4) plans the transient
         // provenance and lineage columns too.
-        let plan_builder = uni_query::query::locy_planner::LocyPlanBuilder::new(&query_planner)
-            .with_provenance(compiled.needs_provenance_tracker());
-        let logical = plan_builder
-            .build_program_plan_with_full_neural(
-                &compiled,
-                config.max_iterations,
-                config.effective_timeout(),
-                config.max_derived_bytes,
-                config.deterministic_best_by,
-                config.strict_probability_domain,
-                config.probability_epsilon,
-                config.exact_probability,
-                config.max_bdd_variables,
-                config.top_k_proofs,
-                config
-                    .resolve()
-                    .map_err(|e| UniError::Query {
-                        message: format!("LocyConfigError: {e}"),
-                        query: None,
-                    })?
-                    .kind,
-                std::sync::Arc::new(config.classifier_registry.clone()),
-                config.classifier_cache.clone().or_else(|| {
-                    Some(std::sync::Arc::new(uni_locy::ModelInvocationCache::new(
-                        config.classifier_cache_max,
-                    )))
-                }),
-                config
-                    .classifier_provenance_store
-                    .clone()
-                    .or_else(|| Some(std::sync::Arc::new(uni_locy::NeuralProvenanceStore::new()))),
-            )
-            .map_err(|e| UniError::Query {
-                message: format!("LocyPlanBuildError: {e:#}"),
-                query: None,
-            })?;
+        let build_plan = |provenance: bool| {
+            uni_query::query::locy_planner::LocyPlanBuilder::new(&query_planner)
+                .with_provenance(provenance)
+                .build_program_plan_with_full_neural(
+                    &compiled,
+                    config.max_iterations,
+                    config.effective_timeout(),
+                    config.max_derived_bytes,
+                    config.deterministic_best_by,
+                    config.strict_probability_domain,
+                    config.probability_epsilon,
+                    config.exact_probability,
+                    config.max_bdd_variables,
+                    config.top_k_proofs,
+                    semiring_kind,
+                    std::sync::Arc::new(config.classifier_registry.clone()),
+                    classifier_cache.clone(),
+                    classifier_provenance_store.clone(),
+                )
+                .map_err(|e| UniError::Query {
+                    message: format!("LocyPlanBuildError: {e:#}"),
+                    query: None,
+                })
+        };
+        // What the run records. Derivations (annotations) are read only by an
+        // `EXPLAIN RULE` of this program, and kept for top-k proof retention.
+        // Lineage is analysed for a probabilistic fold, but under default
+        // inference the analysis can change or report nothing unless some
+        // fact can share a proof, which the plan shows: such a program runs
+        // without a tracker, as a program with no fold does.
+        let records_annotations = compiled.reads_derivations() || config.top_k_proofs > 0;
+        let mut needs_tracker = compiled.needs_provenance_tracker();
+        let mut logical = build_plan(needs_tracker)?;
+        let default_inference = !config.exact_probability
+            && matches!(
+                semiring_kind,
+                uni_locy::SemiringKind::AddMultProb | uni_locy::SemiringKind::MaxMinProb
+            );
+        if needs_tracker
+            && !records_annotations
+            && default_inference
+            && !compiled.assume_body_needs_provenance_tracker()
+            && !uni_query::query::locy_planner::program_can_share_proofs(&logical)
+        {
+            needs_tracker = false;
+            logical = build_plan(false)?;
+        }
         let plan_time = plan_start.elapsed();
 
         // 2. Create executor + physical planner
@@ -1064,12 +1091,14 @@ impl<'a> LocyEngine<'a> {
             .map_err(|e| map_native_df_error(e, limits))?;
 
         // 4. Create tracker for EXPLAIN commands or shared-proof detection
-        let needs_tracker = compiled.needs_provenance_tracker();
-        let tracker: Option<Arc<uni_query::query::df_graph::ProvenanceStore>> = if needs_tracker {
-            Some(Arc::new(uni_query::query::df_graph::ProvenanceStore::new()))
-        } else {
-            None
-        };
+        let tracker: Option<Arc<uni_query::query::df_graph::ProvenanceStore>> =
+            needs_tracker.then(|| {
+                Arc::new(if records_annotations {
+                    uni_query::query::df_graph::ProvenanceStore::new()
+                } else {
+                    uni_query::query::df_graph::ProvenanceStore::lineage_only()
+                })
+            });
 
         let (
             derived_store_slot,
@@ -1179,17 +1208,48 @@ impl<'a> LocyEngine<'a> {
         // it would raise afterwards anyway. Under `allow_partial` the facts
         // are returned complete (and hydrated), as documented.
         let strict_deadline = (!config.allow_partial).then_some(deadline);
-        let mut orch_store = native_store_to_row_store(&native_store, &compiled, strict_deadline)
-            .map_err(|DeadlinePassed| budget_spent(limits))?;
+        // Phase timings, for `profile()` only.
+        let phase_log = profile_capture.map(|_| Arc::new(uni_query::LocyPhaseLog::default()));
+        let commands_may_write = compiled.commands.iter().any(command_may_write);
+        // The commands read rows of the rules they name, and only those are
+        // converted and hydrated for them, when the rest would not be reused
+        // as they are: the returned facts are built again after a write, and
+        // are not built at all for a rule the caller left out.
+        let read_rules = command_read_rules(&compiled)
+            .filter(|_| commands_may_write || config.returned_rules != uni_locy::ReturnedRules::All)
+            .map(Arc::new);
+        let phase_started = Instant::now();
+        let mut orch_store = native_store_to_row_store(
+            &native_store,
+            &compiled,
+            strict_deadline,
+            read_rules.as_deref(),
+        )
+        .map_err(|DeadlinePassed| budget_spent(limits))?;
+        if let Some(log) = &phase_log {
+            let facts = orch_store.values().map(|r| r.rows.len()).sum();
+            log.record(
+                "initial",
+                "convert",
+                orch_store.len(),
+                facts,
+                phase_started.elapsed(),
+            );
+        }
 
         // 7b. Enrich VID / EID integers → Node / Edge objects so commands can access
         //     node properties (d.name etc.) and IS-ref joins work correctly
         //     across FOLD-rule boundaries.
         {
+            let phase_started = Instant::now();
             let orch_rows: HashMap<String, Vec<FactRow>> = orch_store
                 .iter()
                 .map(|(k, v)| (k.clone(), v.rows.clone()))
                 .collect();
+            let (hydrated_rules, hydrated_facts) = (
+                orch_rows.len(),
+                orch_rows.values().map(Vec::len).sum::<usize>(),
+            );
             let (enriched_rows, hydration_warnings) = enrich_vids_with_nodes(
                 &native_store,
                 &compiled.rule_catalog,
@@ -1210,6 +1270,15 @@ impl<'a> LocyEngine<'a> {
                     rel.rows = rows;
                 }
             }
+            if let Some(log) = &phase_log {
+                log.record(
+                    "initial",
+                    "hydrate",
+                    hydrated_rules,
+                    hydrated_facts,
+                    phase_started.elapsed(),
+                );
+            }
         }
 
         // Commands run in sequence: a command that writes (DERIVE, a Cypher
@@ -1219,7 +1288,6 @@ impl<'a> LocyEngine<'a> {
         // Each state's store is shared by reference, so a command that only
         // reads cannot change what a later one reads
         // (`locy_command_noninterference`).
-        let commands_may_write = compiled.commands.iter().any(command_may_write);
         // ASSUME / ABDUCE may reuse these facts for the strata their mutations
         // cannot affect. Not when a provenance tracker ran: it can change PROB
         // values (shared-proof BDD) in ways a hypothetical re-evaluation,
@@ -1252,7 +1320,11 @@ impl<'a> LocyEngine<'a> {
         *native_ctx.sequenced_tracker.lock().unwrap() = tracker.clone();
         // Every later evaluation of the program records provenance when its
         // own run did, and shares what remains of its budget.
-        let native_ctx = native_ctx.with_budget(tracker.is_some(), start, limits.timeout);
+        let mut native_ctx = native_ctx.with_budget(tracker.is_some(), start, limits.timeout);
+        native_ctx.records_annotations = records_annotations;
+        native_ctx.read_rules = read_rules.clone();
+        native_ctx.phase_log = phase_log.clone();
+        let mut command_profiles: Vec<uni_query::LocyCommandProfile> = Vec::new();
         let mut top_level_baseline = false;
         if hypothetical
             && offer_baseline
@@ -1325,6 +1397,8 @@ impl<'a> LocyEngine<'a> {
                     );
                     break;
                 }
+                let command_started = Instant::now();
+                let stats_before = locy_stats.clone();
                 let facts = if reads_facts(cmd) {
                     sequence
                         .facts(&native_ctx, config, &mut locy_stats)
@@ -1394,6 +1468,19 @@ impl<'a> LocyEngine<'a> {
                 if native_ctx.is_cut_short() {
                     break;
                 }
+                if phase_log.is_some() {
+                    command_profiles.push(uni_query::LocyCommandProfile {
+                        index: cmd_idx,
+                        kind: command_kind(cmd).to_string(),
+                        elapsed_ms: command_started.elapsed().as_secs_f64() * 1000.0,
+                        facts_written: locy_stats.mutations_executed
+                            - stats_before.mutations_executed,
+                        strata_evaluated: locy_stats.sequenced_strata_evaluated
+                            - stats_before.sequenced_strata_evaluated,
+                        strata_reused: locy_stats.sequenced_strata_reused
+                            - stats_before.sequenced_strata_reused,
+                    });
+                }
                 command_results.push(outcome.result);
                 if let Some(written) = outcome.written {
                     sequence.record_write(written);
@@ -1457,22 +1544,90 @@ impl<'a> LocyEngine<'a> {
         // their state after the commands, so hydration runs again, as it
         // always did. (ASSUME and ABDUCE write only to a hypothetical overlay
         // that is discarded before this point.)
+        //
+        // `LocyConfig::returned_rules` narrows the map to the rules the
+        // caller asked for; the rest are neither converted nor hydrated.
+        let phase_started = Instant::now();
+        let returned = &config.returned_rules;
+        let convert = |name: &str| {
+            native_store
+                .get(name)
+                .map(|batches| (name.to_string(), record_batches_to_locy_rows(batches)))
+        };
+        // Rules returned but not in the command store, which holds only what
+        // the commands read: converted here, and hydrated below.
+        let mut hydrate_result = commands_may_write;
         let mut base_derived: HashMap<String, Vec<FactRow>> = if commands_may_write {
             native_store
                 .rule_names()
-                .filter_map(|name| {
-                    native_store
-                        .get(name)
-                        .map(|batches| (name.to_string(), record_batches_to_locy_rows(batches)))
-                })
+                .filter(|name| returned.includes(name))
+                .filter_map(convert)
                 .collect()
         } else {
-            Arc::try_unwrap(orch_store.into_store())
+            let mut rows: HashMap<String, Vec<FactRow>> = Arc::try_unwrap(orch_store.into_store())
                 .unwrap_or_else(|shared| (*shared).clone())
                 .into_iter()
+                .filter(|(name, _)| returned.includes(name))
                 .map(|(name, relation)| (name, relation.rows))
-                .collect()
+                .collect();
+            let missing: Vec<(String, Vec<FactRow>)> = native_store
+                .rule_names()
+                .filter(|name| returned.includes(name) && !rows.contains_key(*name))
+                .filter_map(convert)
+                .collect();
+            if !missing.is_empty() {
+                // Nothing wrote, so these are hydrated in the state the
+                // command store's rows were. Hydrating the whole map again
+                // would be correct too, and is what happens: it holds only
+                // these rules unless a command read some of the returned
+                // ones.
+                let hydrated: HashMap<String, Vec<FactRow>> = std::mem::take(&mut rows);
+                rows.extend(missing);
+                let (enriched, hydration_warnings) = enrich_vids_with_nodes(
+                    &native_store,
+                    &compiled.rule_catalog,
+                    rows,
+                    planner.graph_ctx(),
+                    planner.session_ctx(),
+                    strict_deadline,
+                )
+                .await
+                .map_err(|DeadlinePassed| budget_spent(limits))?;
+                if !hydration_warnings.is_empty()
+                    && let Ok(mut w) = warnings_slot.write()
+                {
+                    w.extend(hydration_warnings);
+                }
+                rows = enriched;
+                rows.extend(hydrated);
+                hydrate_result = false;
+            }
+            rows
         };
+        // Every fact the program derived, returned or not.
+        let derived_facts: usize = native_store
+            .rule_names()
+            .filter(|name| !uni_locy::magic::is_goal_directed_rule(name))
+            .filter_map(|name| native_store.get(name))
+            .flat_map(|batches| batches.iter())
+            .map(|b| b.num_rows())
+            .sum();
+
+        let (result_rules, result_facts) = (
+            base_derived.len(),
+            base_derived.values().map(Vec::len).sum::<usize>(),
+        );
+        if let Some(log) = &phase_log
+            && hydrate_result
+        {
+            log.record(
+                "result",
+                "convert",
+                result_rules,
+                result_facts,
+                phase_started.elapsed(),
+            );
+        }
 
         // Stamp _approximate on facts in rules that had BDD fallback groups.
         let approximate_groups = approximate_slot
@@ -1489,7 +1644,8 @@ impl<'a> LocyEngine<'a> {
             }
         }
 
-        let enriched_derived = if commands_may_write {
+        let enriched_derived = if hydrate_result {
+            let phase_started = Instant::now();
             let (enriched, hydration_warnings) = enrich_vids_with_nodes(
                 &native_store,
                 &compiled.rule_catalog,
@@ -1505,10 +1661,27 @@ impl<'a> LocyEngine<'a> {
             {
                 w.extend(hydration_warnings);
             }
+            if let Some(log) = &phase_log {
+                log.record(
+                    "result",
+                    "hydrate",
+                    result_rules,
+                    result_facts,
+                    phase_started.elapsed(),
+                );
+            }
             enriched
         } else {
             base_derived
         };
+
+        // The profile handed back at 5b covers the strata; add what ran since.
+        if let (Some(capture), Some(log)) = (profile_capture, &phase_log)
+            && let Some(profile) = capture.lock().unwrap_or_else(|e| e.into_inner()).as_mut()
+        {
+            profile.phases = log.take();
+            profile.commands = command_profiles;
+        }
 
         // 10. Build DerivedFactSet from collected derives (session path only)
         let derived_fact_set = if !collected_derives.is_empty() {
@@ -1571,6 +1744,8 @@ impl<'a> LocyEngine<'a> {
                     config: LocyConfig {
                         goal_directed: uni_locy::GoalDirected::Off,
                         allow_partial: false,
+                        // The materializer reads the rules it derives.
+                        returned_rules: uni_locy::ReturnedRules::All,
                         ..config.clone()
                     },
                     read_snapshot: read_snapshot.clone(),
@@ -1599,6 +1774,7 @@ impl<'a> LocyEngine<'a> {
             incomplete,
             self.counters.snapshot(),
             lazy,
+            derived_facts,
         ))
     }
 
@@ -1979,6 +2155,9 @@ struct NativeExecutionAdapter<'a> {
     /// then records it too, a hypothetical one included, since exact
     /// probabilities and EXPLAIN both depend on it, and reuses no stratum.
     records_provenance: bool,
+    /// Whether a tracker of this program records derivations, or lineage
+    /// alone (`ProvenanceStore::lineage_only`).
+    records_annotations: bool,
     /// When the program's budget runs out: its start plus its timeout.
     /// Every re-evaluation runs with what remains, not a fresh timeout.
     deadline: Option<Instant>,
@@ -1988,6 +2167,12 @@ struct NativeExecutionAdapter<'a> {
     /// The re-evaluations cut short under `allow_partial`, merged; reported
     /// with the program's result.
     rederivation_incomplete: std::sync::Mutex<Option<uni_common::LocyIncomplete>>,
+    /// Where conversion, hydration and re-evaluation times go when the
+    /// program is profiled.
+    phase_log: Option<Arc<uni_query::LocyPhaseLog>>,
+    /// The rules whose rows the program's commands read, when only those are
+    /// converted and hydrated (see `command_read_rules`); `None` for all.
+    read_rules: Option<Arc<HashSet<String>>>,
 }
 
 impl<'a> NativeExecutionAdapter<'a> {
@@ -2030,6 +2215,9 @@ impl<'a> NativeExecutionAdapter<'a> {
             deadline: None,
             budget: None,
             rederivation_incomplete: std::sync::Mutex::new(None),
+            phase_log: None,
+            records_annotations: true,
+            read_rules: None,
         }
     }
 
@@ -2512,9 +2700,13 @@ impl LocyExecutionContext for NativeExecutionAdapter<'_> {
         // the same QUERY at the top level read exactly, and a body EXPLAIN
         // had no derivations to show. A reused stratum carries no
         // provenance, so nothing is reused then.
-        let tracker = self
-            .records_provenance
-            .then(|| Arc::new(ProvenanceStore::new()));
+        let tracker = self.records_provenance.then(|| {
+            Arc::new(if self.records_annotations {
+                ProvenanceStore::new()
+            } else {
+                ProvenanceStore::lineage_only()
+            })
+        });
         let reused = if tracker.is_some() { None } else { reused };
         let (evaluation, run_warnings) = self
             .re_evaluate_with(program, config, reused, tracker)
@@ -2535,8 +2727,13 @@ impl LocyExecutionContext for NativeExecutionAdapter<'_> {
         // too, so EXPLAIN after a write reads the derivations of the facts it
         // explains. A reused stratum would carry no provenance, so nothing is
         // reused then.
-        let had_tracker = self.sequenced_tracker.lock().unwrap().is_some();
-        let tracker = had_tracker.then(|| Arc::new(ProvenanceStore::new()));
+        let tracker = self
+            .sequenced_tracker
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|t| Arc::new(t.fresh_like()));
+        let had_tracker = tracker.is_some();
         let reused = if had_tracker { None } else { reused };
         let (evaluation, run_warnings) = self
             .re_evaluate_with(program, config, reused, tracker.clone())
@@ -2689,6 +2886,7 @@ impl NativeExecutionAdapter<'_> {
             }
             None => config,
         };
+        let phase_started = Instant::now();
         let StrataRun {
             store: native_store,
             plan_time,
@@ -2699,6 +2897,22 @@ impl NativeExecutionAdapter<'_> {
             .run_strata_native(&strata_only, config, reused, tracker.clone())
             .await
             .map_err(uni_error_to_locy)?;
+        if let Some(log) = &self.phase_log {
+            let rules = native_store.rule_names().count();
+            let facts = native_store
+                .rule_names()
+                .filter_map(|n| native_store.get(n))
+                .flat_map(|b| b.iter())
+                .map(|b| b.num_rows())
+                .sum();
+            log.record(
+                "re_evaluation",
+                "strata",
+                rules,
+                facts,
+                phase_started.elapsed(),
+            );
+        }
         if let Some(cut) = incomplete {
             // `run_strata_native` returns a cut-short run only under
             // `allow_partial`.
@@ -2712,8 +2926,24 @@ impl NativeExecutionAdapter<'_> {
         // when partial facts may not be returned.
         let strict_deadline = self.deadline.filter(|_| !config.allow_partial);
         let spent = |DeadlinePassed| self.timeout_error();
-        let mut store =
-            native_store_to_row_store(&native_store, program, strict_deadline).map_err(spent)?;
+        let phase_started = Instant::now();
+        let mut store = native_store_to_row_store(
+            &native_store,
+            program,
+            strict_deadline,
+            self.read_rules.as_deref(),
+        )
+        .map_err(spent)?;
+        if let Some(log) = &self.phase_log {
+            let facts = store.values().map(|r| r.rows.len()).sum();
+            log.record(
+                "re_evaluation",
+                "convert",
+                store.len(),
+                facts,
+                phase_started.elapsed(),
+            );
+        }
 
         // Enrich VID / EID integers → Node / Edge objects so QUERY inside
         // ASSUME/ABDUCE can access node properties and IS-ref joins work.
@@ -2733,6 +2963,11 @@ impl NativeExecutionAdapter<'_> {
         // silently drops the row. Rebuild an overlay-aware context mirroring the
         // command-dispatch path (`dispatch`/`execute_pattern`).
         let enrich_ctx = self.state_ctx();
+        let phase_started = Instant::now();
+        let (hydrated_rules, hydrated_facts) = (
+            store_rows.len(),
+            store_rows.values().map(Vec::len).sum::<usize>(),
+        );
         let (enriched, hydration_warnings) = enrich_vids_with_nodes(
             &native_store,
             &program.rule_catalog,
@@ -2750,6 +2985,15 @@ impl NativeExecutionAdapter<'_> {
             }
         }
         store.extend(rehydrate_free);
+        if let Some(log) = &self.phase_log {
+            log.record(
+                "re_evaluation",
+                "hydrate",
+                hydrated_rules,
+                hydrated_facts,
+                phase_started.elapsed(),
+            );
+        }
 
         Ok((
             uni_query::query::df_graph::ReEvaluation {
@@ -2824,6 +3068,64 @@ fn command_may_write(cmd: &CompiledCommand) -> bool {
         CompiledCommand::DeriveCommand(_) => true,
         CompiledCommand::Cypher(q) => uni_locy::incremental::query_may_write(q),
         _ => false,
+    }
+}
+
+/// The catalog keys of the rules whose rows `program`'s commands read, or
+/// `None` when that is every rule.
+///
+/// A `QUERY` reads the rule it names. A `DERIVE` re-runs its rule's body
+/// against the rows of the rules that body references directly, negated
+/// references included (`resolve_clause_with_is_refs`), and reads its own
+/// rule's rows when that rule is not a `DERIVE` rule. `VALIDATE` reads the
+/// fact batches, not rows; a Cypher command and `CALIBRATE` read no facts.
+///
+/// `ASSUME`, `ABDUCE` and `EXPLAIN RULE` read more than they name: an
+/// explanation follows references transitively, a hypothetical state reuses
+/// and returns every rule. A program holding one reads everything, as does
+/// one naming a rule the catalog does not resolve.
+fn command_read_rules(program: &CompiledProgram) -> Option<HashSet<String>> {
+    let resolve = |reference: &str| {
+        uni_locy::names::resolve_unique(program.rule_catalog.keys().map(String::as_str), reference)
+            .map(str::to_string)
+    };
+    let mut rules = HashSet::new();
+    for command in &program.commands {
+        match command {
+            CompiledCommand::GoalQuery(q) => {
+                rules.insert(resolve(&q.rule_name.to_string())?);
+            }
+            CompiledCommand::DeriveCommand(dc) => {
+                let key = resolve(&dc.rule_name.to_string())?;
+                for clause in &program.rule_catalog.get(&key)?.clauses {
+                    for reference in &clause.binding.plan()?.refs {
+                        rules.insert(resolve(&reference.rule)?);
+                    }
+                }
+                rules.insert(key);
+            }
+            CompiledCommand::Validate(_)
+            | CompiledCommand::Cypher(_)
+            | CompiledCommand::Calibrate(_) => {}
+            CompiledCommand::Assume(_)
+            | CompiledCommand::Abduce(_)
+            | CompiledCommand::ExplainRule(_) => return None,
+        }
+    }
+    Some(rules)
+}
+
+/// A command's kind, as the profile names it.
+fn command_kind(cmd: &CompiledCommand) -> &'static str {
+    match cmd {
+        CompiledCommand::GoalQuery(_) => "QUERY",
+        CompiledCommand::Assume(_) => "ASSUME",
+        CompiledCommand::Abduce(_) => "ABDUCE",
+        CompiledCommand::ExplainRule(_) => "EXPLAIN RULE",
+        CompiledCommand::DeriveCommand(_) => "DERIVE",
+        CompiledCommand::Cypher(_) => "CYPHER",
+        CompiledCommand::Calibrate(_) => "CALIBRATE",
+        CompiledCommand::Validate(_) => "VALIDATE",
     }
 }
 
@@ -3686,6 +3988,7 @@ fn build_locy_result(
     incomplete: Option<uni_common::LocyIncomplete>,
     counters: uni_store::CounterSnapshot,
     lazy: Option<uni_locy::LazyDerived>,
+    derived_facts: usize,
 ) -> LocyResult {
     // The goal-directed rewrite's copies and magic rules are evaluation
     // detail, not rules of the program.
@@ -3697,7 +4000,8 @@ fn build_locy_result(
     orchestrator_stats.strata_evaluated = incomplete
         .as_ref()
         .map_or(compiled.strata.len(), |d| d.completed_strata);
-    orchestrator_stats.derived_nodes = total_facts;
+    // Every derived fact counts, whether `returned_rules` returns it or not.
+    orchestrator_stats.derived_nodes = derived_facts;
     orchestrator_stats.evaluation_time = evaluation_time;
 
     let mut inner = uni_locy::LocyResult::with_derived(derived);
@@ -3740,13 +4044,20 @@ struct DeadlinePassed;
 /// program then fails with `Timeout` anyway, so finishing the conversion
 /// first only made it fail late. Under `allow_partial` the facts are
 /// returned complete, as documented, so no deadline is given.
+///
+/// `only` restricts the conversion to the named rules; the others are absent
+/// from the store.
 fn native_store_to_row_store(
     native: &uni_query::query::df_graph::DerivedStore,
     compiled: &CompiledProgram,
     deadline: Option<Instant>,
+    only: Option<&HashSet<String>>,
 ) -> std::result::Result<RowStore, DeadlinePassed> {
     let mut result = RowStore::new();
     for name in native.rule_names() {
+        if only.is_some_and(|rules| !rules.contains(name)) {
+            continue;
+        }
         if let Some(batches) = native.get(name) {
             let mut rows = Vec::new();
             for batch in batches {

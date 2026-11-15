@@ -24,7 +24,7 @@ impl JsonPathIndex {
     }
 
     pub async fn open(&self) -> Result<Arc<Dataset>> {
-        let ds = Dataset::open(&self.uri).await?;
+        let ds = crate::backend::lance_directory::open_dataset_uri(&self.uri).await?;
         Ok(Arc::new(ds))
     }
 

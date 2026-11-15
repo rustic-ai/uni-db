@@ -447,8 +447,9 @@ A scale test resolves 300 mentions against 300 entities. Measuring it
 found the third engine fix: the DERIVE re-joined its clause over the
 cartesian product of its MATCH and timed out; it now narrows the MATCH to
 the facts' nodes. The program's own cost is still mentions × entities: at
-1,000 × 1,000 the similarity rule exceeds the default Locy timeout, and
-fixing that needs a nearest-neighbour generator over the vector index.
+1,000 × 1,000 the similarity rule exceeds the default Locy timeout. #330
+measured where that time goes and what to do about it:
+`docs/proposals/locy_similarity_join_330.md`.
 
 Not done: a built-in rule module with this program as a default. Locy has no
 mechanism for shipping a module with the engine, and the program is short

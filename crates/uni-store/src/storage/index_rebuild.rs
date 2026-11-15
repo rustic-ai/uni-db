@@ -91,6 +91,14 @@ impl RebuildTriggerChecker {
                 continue;
             }
 
+            // Analysis trigger: a full-text index built before the analysis
+            // of its configuration changed (a built-in stop-word list was
+            // revised) holds terms a query is no longer analyzed into.
+            if idx.built_under_outdated_analysis() {
+                labels.insert(label.to_string());
+                continue;
+            }
+
             // Growth trigger: current count exceeds row_count_at_build * (1 + ratio)
             if self.config.growth_trigger_ratio > 0.0
                 && let Some(built_count) = meta.row_count_at_build
@@ -581,6 +589,7 @@ impl IndexRebuildManager {
                     m.status = status.clone();
                     if let Some(ts) = last_built_at {
                         m.last_built_at = Some(ts);
+                        m.analysis_revision = uni_common::core::schema::FTS_ANALYSIS_REVISION;
                     }
                     if let Some(count) = row_count {
                         m.row_count_at_build = Some(count);
@@ -805,6 +814,58 @@ mod tests {
 
         let labels = checker.labels_needing_rebuild(&manifest, &indexes);
         assert_eq!(labels.len(), 1);
+    }
+
+    /// A full-text index built before the built-in analysis changed holds
+    /// terms a query is no longer analyzed into (Lance 14 revised its
+    /// stop-word lists), so it is rebuilt whatever its growth or age. The
+    /// controls: an index built under the current revision, one whose
+    /// tokenizer the revision does not affect, and one never built.
+    #[test]
+    fn test_trigger_fires_on_outdated_fulltext_analysis() {
+        use uni_common::core::schema::{
+            FTS_ANALYSIS_REVISION, FullTextIndexConfig, TokenizerConfig,
+        };
+        let checker = RebuildTriggerChecker::new(IndexRebuildConfig {
+            growth_trigger_ratio: 0.0,
+            max_index_age: None,
+            ..Default::default()
+        });
+        let manifest = make_test_manifest("Doc", 100);
+        let index = |tokenizer: TokenizerConfig, built: bool, analysis_revision: u32| {
+            IndexDefinition::FullText(FullTextIndexConfig {
+                name: "doc_text".to_string(),
+                label: "Doc".to_string(),
+                properties: vec!["text".to_string()],
+                tokenizer,
+                with_positions: false,
+                metadata: IndexMetadata {
+                    row_count_at_build: Some(100),
+                    last_built_at: built.then(Utc::now),
+                    analysis_revision,
+                    ..Default::default()
+                },
+            })
+        };
+        let needs = |index: IndexDefinition| {
+            !checker
+                .labels_needing_rebuild(&manifest, &[index])
+                .is_empty()
+        };
+
+        assert!(needs(index(TokenizerConfig::Standard, true, 0)));
+        assert!(needs(index(TokenizerConfig::Whitespace, true, 0)));
+        assert!(!needs(index(
+            TokenizerConfig::Standard,
+            true,
+            FTS_ANALYSIS_REVISION
+        )));
+        assert!(!needs(index(
+            TokenizerConfig::Ngram { min: 2, max: 3 },
+            true,
+            0
+        )));
+        assert!(!needs(index(TokenizerConfig::Standard, false, 0)));
     }
 
     /// A `Stale` index is rebuilt because it is stale, not by coincidence.

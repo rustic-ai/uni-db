@@ -2229,6 +2229,20 @@ pub fn build_l0_vertex_batch(
     let mut vid_created_at: HashMap<u64, i64> = HashMap::new();
     let mut vid_updated_at: HashMap<u64, i64> = HashMap::new();
 
+    // Only the properties a column below reads are copied out of the buffers:
+    // a scan projected to two columns otherwise cloned every property of
+    // every row, an embedding included, to drop them again. `overflow_json`
+    // and `_all_props` read every property, so they keep them all.
+    let wanted: Option<HashSet<&str>> = {
+        let names: HashSet<&str> = lance_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
+        (!names.contains("overflow_json") && !names.contains("_all_props")).then_some(names)
+    };
+    let is_wanted = |name: &str| wanted.as_ref().is_none_or(|w| w.contains(name));
+
     for l0 in l0_ctx.iter_l0_buffers() {
         let guard = l0.read();
         // Collect tombstones
@@ -2294,7 +2308,9 @@ pub fn build_l0_vertex_batch(
             // Merge properties (later L0 overwrites)
             if let Some(props) = guard.vertex_properties.get(&vid) {
                 for (k, v) in props {
-                    entry.0.insert(k.clone(), v.clone());
+                    if is_wanted(k) {
+                        entry.0.insert(k.clone(), v.clone());
+                    }
                 }
             }
             // Take the highest version
@@ -2329,7 +2345,11 @@ pub fn build_l0_vertex_batch(
     // properties, at the relabel's version (see `label_only_l0_base_props`).
     for (vid, (base, version)) in label_only {
         if let Some(entry) = vid_data.get_mut(vid) {
-            entry.0 = base.clone();
+            entry.0 = base
+                .iter()
+                .filter(|(k, _)| is_wanted(k))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             entry.1 = entry.1.max(*version);
         }
     }
@@ -2346,6 +2366,15 @@ pub fn build_l0_vertex_batch(
     // Sort VIDs for deterministic output
     let mut vids: Vec<u64> = vid_data.keys().copied().collect();
     vids.sort_unstable();
+    // Split once into what the columns below read, so a property column does
+    // not copy every row's properties again.
+    let vid_keys: Vec<Vid> = vids.iter().map(|v| Vid::from(*v)).collect();
+    let mut versions: HashMap<u64, u64> = HashMap::with_capacity(vid_data.len());
+    let mut props_by_vid: HashMap<Vid, Properties> = HashMap::with_capacity(vid_data.len());
+    for (vid, (props, version)) in vid_data {
+        versions.insert(vid, version);
+        props_by_vid.insert(Vid::from(vid), props);
+    }
 
     let num_rows = vids.len();
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(lance_schema.fields().len());
@@ -2367,7 +2396,7 @@ pub fn build_l0_vertex_batch(
                 columns.push(Arc::new(arrow_array::BooleanArray::from(vals)));
             }
             "_version" => {
-                let vals: Vec<u64> = vids.iter().map(|v| vid_data[v].1).collect();
+                let vals: Vec<u64> = vids.iter().map(|v| versions[v]).collect();
                 columns.push(Arc::new(UInt64Array::from(vals)));
             }
             "_created_at" => {
@@ -2395,8 +2424,8 @@ pub fn build_l0_vertex_batch(
             "overflow_json" => {
                 // Collect non-schema properties as CypherValue
                 let mut builder = arrow_array::builder::LargeBinaryBuilder::new();
-                for vid_u64 in &vids {
-                    let (props, _) = &vid_data[vid_u64];
+                for vid in &vid_keys {
+                    let props = &props_by_vid[vid];
                     let mut overflow: HashMap<String, Value> = HashMap::new();
                     for (k, v) in props {
                         if stored_in_ext_id_column(k, v) || is_reserved_property_name(k) {
@@ -2439,8 +2468,8 @@ pub fn build_l0_vertex_batch(
                 // The flush-shaped split: a string `ext_id` here, anything
                 // else in `overflow_json` above (`stored_in_ext_id_column`).
                 let mut builder = StringBuilder::new();
-                for vid_u64 in &vids {
-                    match vid_data[vid_u64].0.get(EXT_ID_COLUMN) {
+                for vid in &vid_keys {
+                    match props_by_vid[vid].get(EXT_ID_COLUMN) {
                         Some(Value::String(s)) => builder.append_value(s),
                         _ => builder.append_null(),
                     }
@@ -2449,7 +2478,12 @@ pub fn build_l0_vertex_batch(
             }
             _ => {
                 // Schema property column: convert L0 Value → Arrow typed value
-                let col = build_l0_property_column(&vids, &vid_data, col_name, field.data_type())?;
+                let col = build_property_column_static(
+                    &vid_keys,
+                    &props_by_vid,
+                    col_name,
+                    field.data_type(),
+                )?;
                 columns.push(col);
             }
         }

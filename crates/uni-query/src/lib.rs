@@ -29,7 +29,8 @@ pub mod query;
 pub mod types;
 
 pub use query::df_graph::locy_profile::{
-    LocyExecProfile, LocyIterationProfile, LocyRuleProfile, LocyStratumProfile,
+    LocyCommandProfile, LocyExecProfile, LocyIterationProfile, LocyPhaseLog, LocyPhaseProfile,
+    LocyRuleProfile, LocyStratumProfile,
 };
 pub use query::executor::core::{OperatorStats, ProfileOutput};
 pub use query::executor::plan_shape;

@@ -799,6 +799,13 @@ class LocyProfileOutput:
     (snake_case keys; operators carry ``operator``, ``actual_rows``, ``time_ms``).
     Each iteration dict also carries ``planning_ms`` (physical planning time for
     that rule in that iteration) and ``plans`` (physical plans built)."""
+    phases: list[dict[str, Any]]
+    """Work on the derived facts outside the strata, in the order it ran: dicts
+    with ``pass`` (``initial``, ``re_evaluation``, ``result``), ``kind``
+    (``strata``, ``convert``, ``hydrate``), ``rules``, ``facts``, ``elapsed_ms``."""
+    commands: list[dict[str, Any]]
+    """One dict per dispatched command, in program order: ``index``, ``kind``,
+    ``elapsed_ms``, ``facts_written``, ``strata_evaluated``, ``strata_reused``."""
     def __str__(self) -> str: ...
     def __repr__(self) -> str: ...
 
@@ -2095,6 +2102,9 @@ class LocyConfig:
         semiring: str | dict[str, int] | None = None,
         neural_predicates_preview: bool | None = None,
         classifier_cache_max: int | None = None,
+        # "all" (the default) | "none" | a list of rule names: the rules
+        # whose facts the result carries. Commands are answered the same.
+        returned_rules: str | list[str] | None = None,
     ) -> None: ...
     @property
     def max_iterations(self) -> int: ...
@@ -2127,6 +2137,8 @@ class LocyConfig:
     def top_k_proofs_training(self) -> int | None: ...
     @property
     def goal_directed(self) -> Literal["auto", "off", "on", "shadow"]: ...
+    @property
+    def returned_rules(self) -> Literal["all", "none"] | list[str]: ...
     @property
     def classifier_aliases(self) -> list[str]: ...
     # Parameter is named `callable` at runtime (src/classifier.rs). It shadows

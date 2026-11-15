@@ -63,6 +63,63 @@ pub struct IndexMetadata {
     /// Row count of the dataset when the index was last built.
     #[serde(default)]
     pub row_count_at_build: Option<u64>,
+    /// The [`FTS_ANALYSIS_REVISION`] the index was last built under; `0` for
+    /// an index built before the revision was recorded.
+    ///
+    /// A full-text index stores the terms its analyzer produced when it was
+    /// built. When the analysis of an unchanged configuration changes — a
+    /// built-in stop-word list is revised — the stored terms no longer match
+    /// what a query is analyzed into, with no error: only missed matches. An
+    /// index built under an older revision is rebuilt (see
+    /// [`IndexDefinition::built_under_outdated_analysis`]).
+    #[serde(default)]
+    pub analysis_revision: u32,
+}
+
+/// The current revision of built-in full-text analysis.
+///
+/// Bump it when the terms a built-in analyzer produces for an unchanged
+/// configuration change, so that existing indexes are rebuilt.
+///
+/// - `1`: Lance 14 replaced the built-in stop-word lists. English lost its 49
+///   negations and contractions (`no`, `not`, `nor`, `don't`, ...), which are
+///   now indexed and searchable; several other languages changed too.
+pub const FTS_ANALYSIS_REVISION: u32 = 1;
+
+impl TokenizerConfig {
+    /// Whether the tokenizer drops words from a built-in stop-word list, so
+    /// that a revision of that list changes the terms an index stores.
+    ///
+    /// Every configuration but n-grams removes English stop words by default;
+    /// an analyzer does unless it turns removal off or supplies its own list.
+    #[must_use]
+    pub fn uses_builtin_stop_words(&self) -> bool {
+        match self {
+            Self::Ngram { .. } => false,
+            Self::Analyzer(a) => {
+                a.remove_stop_words
+                    && a.custom_stop_words.is_none()
+                    && !matches!(a.base, BaseTokenizer::Ngram { .. })
+            }
+            _ => true,
+        }
+    }
+}
+
+impl IndexDefinition {
+    /// Whether this is a full-text index that was built, and built under an
+    /// analysis revision older than [`FTS_ANALYSIS_REVISION`], with a
+    /// tokenizer the revision affects. Such an index holds stale terms and
+    /// needs a rebuild.
+    #[must_use]
+    pub fn built_under_outdated_analysis(&self) -> bool {
+        let Self::FullText(config) = self else {
+            return false;
+        };
+        config.metadata.last_built_at.is_some()
+            && config.metadata.analysis_revision < FTS_ANALYSIS_REVISION
+            && config.tokenizer.uses_builtin_stop_words()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

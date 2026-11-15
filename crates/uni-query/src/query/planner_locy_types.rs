@@ -93,6 +93,10 @@ pub struct LocyClausePlan {
     /// first-use order, one per distinct handle (P5). A clause with two or
     /// more holds only exclusive handles, which the fixpoint feeds per pass.
     pub stratum_scans: Vec<usize>,
+    /// Whether the clause's rows carry a row event (see [`DERIV_EVENT_COL`]):
+    /// two rows resting on the same node or relationship property are then
+    /// one event, so a fact's rows can share a proof.
+    pub row_event: bool,
 }
 
 /// An IS-reference from a clause body to another derived relation.

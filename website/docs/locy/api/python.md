@@ -59,10 +59,17 @@ out = (
         "top_k_proofs": 100,
         # Goal-directed QUERY evaluation: "auto" (default), "off", "on" or "shadow"
         "goal_directed": "on",
+        # Rules whose facts result.derived carries: "all" (default), "none" or a list
+        "returned_rules": ["reachable"],
     })
     .run()
 )
 ```
+
+`returned_rules` takes `"all"`, `"none"` or a list of rule names. Every
+returned fact is converted to a row with its nodes and edges filled in, so a
+program that derives many facts and only writes a few (`DERIVE`) is faster
+with `"none"`. Commands are answered the same whatever is returned.
 
 `goal_directed` takes `"auto"`, `"off"`, `"on"` or `"shadow"`
 (case-insensitive; any other string raises `ValueError`). The same option is

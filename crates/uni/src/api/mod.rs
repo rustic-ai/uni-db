@@ -1772,6 +1772,17 @@ impl UniInner {
         if self._temp_dir.is_some() || !writer.wal_needs_seal() {
             return;
         }
+        // On the thread of a `current_thread` runtime, a remote WAL cannot be
+        // sealed by blocking: the store's connections are driven by that
+        // runtime, which this would hold up, so the request waited out its
+        // 30 s timeout before retrying. Leave the seal to the runtime.
+        if writer.wal_is_remote()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+            && runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread
+        {
+            writer.spawn_wal_seal(&runtime);
+            return;
+        }
         // Never wait for `flush_lock` here: this blocks the dropping thread,
         // and the lock's holder may be a flush that only that thread can drive
         // (a `current_thread` runtime). Waiting deadlocked such a drop.
@@ -2597,6 +2608,49 @@ impl UniBuilder {
                 .set_index_rebuild_manager(Arc::clone(&rebuild_manager))
                 .map_err(UniError::Internal)?;
             auto_rebuild_manager = Some(rebuild_manager);
+        }
+
+        // Full-text indexes built before the built-in analysis changed (a
+        // dependency upgrade revised the stop-word lists) hold terms a query
+        // is no longer analyzed into: a word that stopped being a stop word
+        // is searched for and is not in the index. Nothing errors, so say so.
+        // With automatic rebuilds on they are queued now, not at the next
+        // flush that happens to check; otherwise the rebuild is the user's.
+        if !self.read_only {
+            let schema = schema_manager.schema();
+            let mut outdated: Vec<(&str, &str)> = schema
+                .indexes
+                .iter()
+                .filter(|index| index.built_under_outdated_analysis())
+                .map(|index| (index.name(), index.label()))
+                .collect();
+            outdated.sort_unstable();
+            if !outdated.is_empty() {
+                let names: Vec<&str> = outdated.iter().map(|(name, _)| *name).collect();
+                let mut labels: Vec<String> = outdated
+                    .iter()
+                    .map(|(_, label)| (*label).to_string())
+                    .collect();
+                labels.dedup();
+                match &auto_rebuild_manager {
+                    Some(manager) => {
+                        tracing::info!(
+                            indexes = ?names,
+                            "full-text indexes were built under an older analysis revision; \
+                             queuing a rebuild"
+                        );
+                        manager.enqueue(labels);
+                    }
+                    None => tracing::warn!(
+                        indexes = ?names,
+                        labels = ?labels,
+                        "full-text indexes were built under an older analysis revision and \
+                         may miss matches for words that are no longer stop words; rebuild \
+                         them (`db.indexes().rebuild(label)`) or enable \
+                         `index_rebuild.auto_rebuild_enabled`"
+                    ),
+                }
+            }
         }
 
         // Start background flush checker for time-based auto-flush

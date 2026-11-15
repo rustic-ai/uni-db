@@ -2497,7 +2497,9 @@ async fn run_fixpoint_loop(
             if changed {
                 any_changed = true;
                 // Record provenance for newly derived facts when tracker is present.
-                if let Some(ref tracker) = derivation_tracker {
+                if let Some(ref tracker) = derivation_tracker
+                    && tracker.records_annotations()
+                {
                     record_provenance(
                         ProvenanceCtx {
                             tracker,

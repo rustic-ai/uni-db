@@ -784,6 +784,25 @@ impl PyLocyProfile {
         crate::convert::json_value_to_py(py, &json)
     }
 
+    /// Work on the derived facts outside the strata, in the order it ran:
+    /// dicts with `pass` (`initial`, `re_evaluation`, `result`), `kind`
+    /// (`strata`, `convert`, `hydrate`), `rules`, `facts` and `elapsed_ms`.
+    #[getter]
+    fn phases(&self, py: Python) -> PyResult<Py<PyAny>> {
+        let json = serde_json::to_value(&self.inner.profile.phases)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        crate::convert::json_value_to_py(py, &json)
+    }
+
+    /// One dict per dispatched command, in program order: `index`, `kind`,
+    /// `elapsed_ms`, `facts_written`, `strata_evaluated`, `strata_reused`.
+    #[getter]
+    fn commands(&self, py: Python) -> PyResult<Py<PyAny>> {
+        let json = serde_json::to_value(&self.inner.profile.commands)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        crate::convert::json_value_to_py(py, &json)
+    }
+
     fn __str__(&self) -> String {
         format!("{}", self.inner)
     }
@@ -3549,7 +3568,8 @@ impl PyLocyConfig {
         strict_probability_domain=None, probability_epsilon=None,
         exact_probability=None, max_bdd_variables=None,
         top_k_proofs=None, top_k_proofs_training=None, goal_directed=None,
-        semiring=None, neural_predicates_preview=None, classifier_cache_max=None
+        semiring=None, neural_predicates_preview=None, classifier_cache_max=None,
+        returned_rules=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -3573,6 +3593,7 @@ impl PyLocyConfig {
         semiring: Option<&Bound<'_, PyAny>>,
         neural_predicates_preview: Option<bool>,
         classifier_cache_max: Option<usize>,
+        returned_rules: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let mut cfg = ::uni_locy::LocyConfig::default();
         if let Some(v) = max_iterations {
@@ -3624,6 +3645,9 @@ impl PyLocyConfig {
         cfg.top_k_proofs_training = top_k_proofs_training;
         if let Some(v) = goal_directed {
             cfg.goal_directed = crate::convert::parse_goal_directed(v)?;
+        }
+        if let Some(v) = returned_rules {
+            cfg.returned_rules = crate::convert::parse_returned_rules(v)?;
         }
         if let Some(v) = semiring {
             cfg.semiring = crate::convert::parse_semiring(v)?;
@@ -3700,6 +3724,12 @@ impl PyLocyConfig {
     #[getter]
     fn goal_directed(&self) -> &'static str {
         crate::convert::goal_directed_name(self.inner.goal_directed)
+    }
+    /// The rules whose facts a result carries: `"all"` (the default),
+    /// `"none"`, or a list of rule names.
+    #[getter]
+    fn returned_rules(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        crate::convert::returned_rules_to_py(py, &self.inner.returned_rules)
     }
 
     /// Register a Python callable as the neural classifier for `alias`.

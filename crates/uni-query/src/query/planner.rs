@@ -8772,14 +8772,58 @@ impl QueryPlanner {
 
         // 5. Add Filter node for any remaining predicates
         if !current_predicate.is_true_literal() {
-            plan = LogicalPlan::Filter {
-                input: Box::new(plan),
-                predicate: current_predicate,
-                optional_variables: optional_vars,
-            };
+            // A subquery (`EXISTS { }`, `COUNT { }`, `COLLECT { }`) runs once
+            // per row it is evaluated for, so it is evaluated last: only for
+            // the rows every other conjunct keeps. One `AND` leaves that to
+            // the expression evaluator, which runs the right side on the
+            // rows the left kept only when those are a fifth or fewer.
+            // Conjunct order is not observable. A pattern predicate stays
+            // below: it is evaluated over the whole batch at once, and a
+            // one-sided one is pushed beneath a join from there.
+            let (subqueries, plain): (Vec<Expr>, Vec<Expr>) =
+                Self::split_and_conjuncts(&current_predicate)
+                    .into_iter()
+                    .partition(Self::holds_row_subquery);
+            if optional_vars.is_empty() && !subqueries.is_empty() && !plain.is_empty() {
+                for predicate in [plain, subqueries]
+                    .into_iter()
+                    .filter_map(Self::combine_predicates)
+                {
+                    plan = LogicalPlan::Filter {
+                        input: Box::new(plan),
+                        predicate,
+                        optional_variables: HashSet::new(),
+                    };
+                }
+            } else {
+                plan = LogicalPlan::Filter {
+                    input: Box::new(plan),
+                    predicate: current_predicate,
+                    optional_variables: optional_vars,
+                };
+            }
         }
 
         Ok(plan)
+    }
+
+    /// Whether `expr` holds a subquery that is executed once per row: an
+    /// `EXISTS { }` written as a subquery, a `COUNT { }` or a `COLLECT { }`.
+    /// A pattern predicate (`(a)-[:R]->()`) is not one.
+    fn holds_row_subquery(expr: &Expr) -> bool {
+        if matches!(
+            expr,
+            Expr::Exists {
+                from_pattern_predicate: false,
+                ..
+            } | Expr::CountSubquery(_)
+                | Expr::CollectSubquery(_)
+        ) {
+            return true;
+        }
+        let mut found = false;
+        expr.for_each_child(&mut |child| found = found || Self::holds_row_subquery(child));
+        found
     }
 
     fn rewrite_predicates_using_indexes(

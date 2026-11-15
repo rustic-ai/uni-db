@@ -167,6 +167,12 @@ The query layer translates OpenCypher text into a streaming execution plan:
 
 A correlated pattern (`UNWIND $rows AS r MATCH (a:E {uid: r.a})`, two MATCH patterns sharing a predicate, WITH-then-MATCH) reaches the physical planner as `Filter(CrossJoin(L, R), pred)`. `HybridPhysicalPlanner::try_plan_cross_join_as_hash_join` (`uni-query/src/query/df_planner.rs`) splits `pred` into equi-pairs (`l = r`, each side over one subtree's variables), single-side conjuncts (pushed below the join), and a residual. Each equi-pair becomes a pair of hash keys through `unify_join_key_types`; if any pair cannot be keyed, the whole rewrite falls back to `FilterExec` over `CrossJoinExec` (N × V rows).
 
+A pattern predicate is a single-side conjunct when its pattern names variables of one side only: `NOT (m)-[:REFERS_TO]->()` reads `m`. `conjunct_variables` lists a conjunct's variables with those of any pattern predicate in it (through `NOT`, `AND` and `OR`); before it, the classification did not look inside a pattern predicate, took the conjunct for a constant and left it in the residual, one adjacency lookup per joined pair. A pattern with a property map or an inline `WHERE` is not classified and stays in the residual, since those hold expressions that could read the other side. A single-side conjunct holding a subquery cannot be merged into the scan's own filter, which goes through the DataFusion expression translator; `filter_join_side` keeps it as a `Filter` over the side, compiled by the physical expression compiler. Without an equi-pair nothing is pushed: the plan stays `FilterExec` over `CrossJoinExec` with every conjunct above the join.
+
+**`[NOT] EXISTS` tied to the outer row by its `WHERE` is a join.** `EXISTS { MATCH (o:L) WHERE p }` runs once per outer row (`ExistsExecExpr`: a physical plan and a scan of `L` each time), so "no other row like this one" over N rows was N scans of N rows. `HybridPhysicalPlanner::try_plan_exists_as_join`, tried first in `plan_filter`, plans a top-level `AND` conjunct of that shape, or its `NOT`, as a `RightSemi` / `RightAnti` join with the body as the build side: the input streams through in order and the body is scanned once. Accepted (`exists_join_shape`): a body of one `MATCH` of plain nodes binding only new variables (no relationship, property map or inline `WHERE`), each `WHERE` conjunct reading a body variable. Conjuncts reading only body variables filter the body through `QueryPlanner::plan_where_clause`, pushdown included; the others, at least one, are the join condition, classified by `classify_join_predicate`: cross-side equalities become hash keys (`HashJoinExec`), with none it is a `NestedLoopJoinExec`, and everything else, plus an equality only bucketed by its key, is the `JoinFilter` (`build_recheck_join_filter`, compiled over both sides' columns). Declined, and left to the per-row path: an `EXISTS` under `OR` or in a projection, `COUNT { }` / `COLLECT { }`, an uncorrelated body, a body naming an outer variable (the per-source path serves that), a conjunct reading only outer variables (it must decide the row once, not per pair), a join-condition conjunct holding a subquery, and any column name both sides share. `EXISTS` is never NULL: keys compare `NullEqualsNothing` and a condition that is not `true` is no match, for both kinds; the anti-join is not null-aware. The body's scans record the read set once, with the rows they recorded per execution. `UNI_EXISTS_JOIN=0` keeps every subquery on the per-row path, for comparing the two. Measured on the entity-resolution program's new-entity `MERGE` at 1,000 mentions (debug): 4.5 s to 0.14 s. Guards: `bugs::exists_join` (answers against the `COUNT { }` form, which is never rewritten, and against hand-computed sets; NULL keys and filters; uncommitted rows; plan shape with its negative twin).
+
+**Subquery conjuncts are evaluated last.** `plan_where_clause` emits a `WHERE`'s `EXISTS { }` / `COUNT { }` / `COLLECT { }` conjuncts as a second `Filter` above the rest (`holds_row_subquery`; not under OPTIONAL MATCH, and not pattern predicates, which are vectorised and may move beneath a join). In one `AND` the expression evaluator runs the right side on the rows the left kept only when those are a fifth or fewer, so `cheap AND EXISTS { }` ran the subquery for every row whenever the cheap conjunct kept more than 20%.
+
 Key lowering, by the dtypes of the two compiled sides:
 
 | Pairing | Keys | Re-check |
@@ -1814,13 +1820,13 @@ Stored as a Lance table (`adjacency_{edge_type}_{direction}`) with row-per-verte
 
 ## Lance dependency and file-format policy
 
-Uni uses Lance, lance-index and lance-linalg 13.0.0 with Arrow/Parquet
+Uni uses Lance, lance-index and lance-linalg 14.0.2 with Arrow/Parquet
 58.4.1 and DataFusion 54.1.0. Lance uses object_store 0.14 while DataFusion
 and Uni's WAL/catalog stores use 0.13. The optional `lance-object-store`
 alias in uni-store supplies the adapter's path type without changing the
 object-store types exposed elsewhere.
 
-Lance 13's stable file format is 2.2. Uni explicitly creates datasets in
+Lance's stable file format is 2.2 (in 13 and 14 alike). Uni explicitly creates datasets in
 2.1, preserving the previous default independently of the dependency bump.
 The primary backend and auxiliary-index writer resolve an existing dataset
 once and pass it to `InsertBuilder`, leaving `data_storage_version` unset
@@ -1833,6 +1839,93 @@ preserves the directory's credentials and shared session cache.
 The fork 2PC recovery rules, staged-file cleanup holds, scalar-index branch
 fallbacks and stable IO runtime remain in place. A newer Lance release is
 not evidence that those workarounds can be removed.
+
+**What the 13 → 14 upgrade changed** (`docs/proposals/lance_14_upgrade_2026_11_14.md`).
+No call site changed signature. Three things did need handling:
+
+- *A shared error hides its cause.* Lance 14 can return an error several
+  readers share as `Error::Shared { source }`. It is not reachable through
+  `anyhow`'s chain as a `lance::Error` (the source is an `Arc`), so a match
+  on the variant alone misses it. Every classifier matches
+  `Error::find_root()`: the commit-conflict retry (`is_lance_conflict`,
+  `storage/manager.rs`), the not-found checks (`lance_directory.rs`,
+  `store_utils.rs`) and the tolerated `RefNotFound` on tag delete
+  (`lance.rs`, `snapshot/restore.rs`). A missed conflict would stop a retry;
+  a missed not-found would turn "absent" into a failure.
+- *Built-in stop-word lists were revised.* Every tokenizer but n-grams drops
+  English stop words by default (`InvertedIndexParams::default()`), and
+  Lance 14 replaced the lists: English lost its 49 negations and
+  contractions (`no`, `not`, `nor`, `don't`, …), which are now indexed. An
+  index built before holds no postings for them, while a query now searches
+  for them, so old rows are not found by those words (as before the upgrade)
+  and new rows are. `IndexMetadata::analysis_revision` records the
+  `FTS_ANALYSIS_REVISION` an index was built under (`0` when absent);
+  `IndexDefinition::built_under_outdated_analysis` is true for a built
+  full-text index under an older revision whose tokenizer
+  `uses_builtin_stop_words`. Such an index is a rebuild trigger
+  (`RebuildTriggerChecker::labels_needing_rebuild`), and at open it is
+  queued when `index_rebuild.auto_rebuild_enabled` is set, or named in a
+  `warn!` when it is not (the default). Every build outcome stamps the
+  current revision, so an index is rebuilt once. Fork-local full-text
+  indexes are not in the schema and are not tracked: rebuild them with
+  `Session::build_fork_local_index`. Bump the constant whenever a dependency
+  changes the terms an unchanged configuration produces.
+- *A staged bulk load stores Lance's `Fragment` as JSON* in its marker until
+  it is published, so the form is an on-disk contract across Lance versions.
+  It is unchanged in 14; `staged_record_keeps_its_stored_form` pins its
+  fields.
+
+**A dataset opened by URI gets its directory's storage options.** Tables are
+opened through `LanceDirectory`, which carries the cloud configuration's
+endpoint and credentials. The fork branch helpers (`lance_branch.rs`), the
+index datasets under `indexes/` (UID, JSON, inverted, sparse) and the
+snapshot code address a dataset by URI alone, and a bare `Dataset::open(uri)`
+carries nothing: it worked only where the same values were also in the
+environment, and otherwise reached for the provider's default endpoint
+("Bucket not found"), for a primary flush as much as for a fork.
+`lance_directory` records the options of every cloud directory the process
+connects to (`CLOUD_STORAGE_OPTIONS`, by base URI; local directories are not
+recorded) and `open_dataset_uri`, `dataset_builder` and `with_store_params`
+apply those of the directory a URI lies in. Open a dataset by URI through
+them, never with a bare `Dataset::open`. Two connections to one base URI
+with different options share the later one's.
+
+**A remote WAL is not sealed by blocking a single-threaded runtime.** When a
+database handle is dropped, `UniInner::seal_wal_on_drop` records the WAL's
+announced mark, blocking the dropping thread on the process-wide IO runtime.
+A fork's WAL is on the data store, so on cloud storage that write is a
+network request, and the store's pooled connections are driven by tasks of
+the runtime that made them. Dropped on the thread of a `current_thread`
+runtime, the request could not be driven: it waited out the 30 s request
+timeout and then retried on a fresh connection. When the WAL is remote
+(`WriteAheadLog::is_remote`: no local root) and the drop runs on a
+`current_thread` runtime, the seal is spawned on that runtime instead
+(`Writer::spawn_wal_seal`) and runs once the drop returns. A `PendingSeal`
+guard marks it, and `WriteAheadLog::initialize` / `replay_segments_since`
+wait for the pending seals of the same store and prefix, so a reopen in the
+process neither misses the mark nor allocates the LSN being written. A local
+WAL and a multi-threaded runtime keep the blocking seal, which is complete
+when the drop returns. A runtime dropped before the task runs loses the
+seal; the next open then announces the latest commits again, as after a
+crash. The same runtime-bound-connection hazard is why full-text search runs
+on the IO runtime (#290).
+
+**`ForkBranching::table_exists` is exact on an object store.** Fork creation
+asks it in order to skip a candidate dataset that does not exist yet (an edge
+type's adjacency table before its first compaction, a label never flushed).
+`LanceBranching` used to answer `true` for any `scheme://` URI, so on a cloud
+store such a candidate was branched and its open failed the whole fork. Built
+from the backend (`LanceBranching::over`), it asks
+`LanceDirectory::is_committed`, which lists `_versions/` through the object
+store. Guard: `hybrid_localstack_e2e::test_hybrid_localstack_forks_e2e`
+(LocalStack; also with `UNI_LOCALSTACK_CONFIG_ONLY=1`).
+
+Verified against a database written by Lance 13 (declared and schemaless
+vertices, edges, BTree, vector and full-text indexes, a fork and a nested
+fork, a tag and a snapshot): Lance 14 reads it, writes on primary and both
+forks, compacts and rebuilds; Lance 13 then reads the result, the pinned
+snapshot included. The branch code is identical in 13 and 14; three upstream
+branch data-loss fixes exist only in the unreleased 15.
 
 ## Dataset Opens and the Lance Session Cache
 
@@ -4817,6 +4910,7 @@ Adding raw scores mixes incompatible scales (cosine similarity [0, 1] vs unbound
 Key optimizations:
 - **FTS pre-computed per-batch**: Calls `storage.fts_search()` once per RecordBatch, builds `HashMap<Vid, f32>` for O(1) per-row lookups
 - **Auto-embed per-batch**: Embeds query string once per batch, then cosine per-row
+- **Stored vectors scored in place**: with one source, no options map and both arguments evaluating to `FixedSizeList<Float32>` of one width (two declared vector properties, as columns or scalars), `score_fixed_size_lists` reads each row as a `&[f32]` slice of the values buffer (`F32Rows`, `uni-query-functions/src/similar_to.rs`) and calls `score_vectors` on it: no `Value`, no allocation per row, and no precomputation thread. A NULL row scores NULL, checked on the validity bit because a NULL slot's components are zeros. The scores are bit-identical to the `Value` path's, which every other shape still takes — a list of sources, an options map, a text query, and a literal or parameter query vector, which compiles to a `List<Float64>` scalar (`LargeBinary` when it mixes integers and floats). The `vector_similarity` UDF has the same shape of fast path (`stored_vector_similarity`, `df_udfs.rs`) over its own arithmetic, the f64 cosine of `eval_similar_to_pure`; the two functions return different low digits by design and do not share a scorer. See `docs/proposals/locy_similarity_join_330.md`.
 - **Async-in-sync**: Drives async storage calls from the sync `PhysicalExpr::evaluate()` on a scoped thread through the process-wide `uni-io` runtime — never a runtime built per call (see [Runtime Affinity](#runtime-affinity-the-uni-io-runtime))
 
 ### Execution Paths
@@ -5018,6 +5112,14 @@ search gives after a flush:
   the Lance backend answers with Lance's own filter planner. A vertex that fails
   is dropped like a tombstone. Lance's planner is used, not DataFusion's alone,
   because the two disagree on `"col"`: Lance reads it as a string literal.
+- **The L0 batch copies only the properties its schema names.**
+  `build_l0_vertex_batch` used to clone every property of every unflushed row
+  of the label, an embedding included, into a map and then build the projected
+  columns from it, and each property column cloned the whole map again. It now
+  copies a property only when a column reads it (all of them when the schema
+  holds `overflow_json` or `_all_props`) and builds every column from one map.
+  A scan of unflushed rows projected to two columns no longer pays for the
+  others; a per-row subquery over an unflushed label paid it once per row.
 - **Full-text scores come from the backend, split as Lance splits them.**
   Unflushed rows used to score the share of query words their text holds,
   split on whitespace. That is not BM25 and ignores the index's tokenizer, so
@@ -6588,6 +6690,9 @@ Work that runs outside any physical plan is reported in the same per-iteration o
 
 - `LocyIsNotAntiJoin` / `LocyIsNotComplement` — one per negated `IS NOT` reference applied to a clause's rows (`locy_complement::apply_negated_is_refs`, shared by the recursive and non-recursive loops): the probe, with the rows that survived it. `LocyIsNotBuild` — one per build of the banned-key set or probability map, `actual_rows` = negated facts read. In a recursive stratum it appears once per fixpoint (R5); a non-recursive clause runs once and builds once.
 - `LocyFactDedup` (row dedup: `merge_delta` in a recursive stratum, `dedup_fact_rows` in a non-recursive one), `LocyBestByMerge`, `LocyFoldMerge` — one per rule per iteration.
+- `LocyProvenance` (proof annotations, `record_provenance_nonrecursive`) and `LocyLineage` (`LineageStore::record_rule` + `correct`) — per non-recursive rule, when the run records them; `actual_rows` is the rows read.
+
+Outside the strata, `LocyExecProfile::phases` lists the work done on the derived facts in the order it ran — `pass` (`initial`, `re_evaluation`, `result`) × `kind` (`strata` for a re-evaluation's rule evaluation, `convert` for batches to rows, `hydrate` for ids to entities), with the rules and facts covered — and `commands` lists each dispatched command with its time (a re-evaluation it caused included), the facts a `DERIVE` wrote, and the strata evaluated and reused before it read its facts. `LocyPhaseLog` collects the phases across the program's own evaluation and its re-evaluations (`NativeExecutionAdapter::phase_log`). The profile handed back after the strata is completed with both at the end of `evaluate_compiled_capturing_inner`. Python: `LocyProfileOutput.phases` / `.commands`.
 
 Each `LocyIterationProfile` also carries `planning_ms` and `plans`: the difference of the query's planning counters across that rule's evaluation, so it includes every clause body re-planned that pass and any sub-plan built while it ran (R6). The program-level logical plan and its top-level physical plan are built in `impl_locy.rs` before the program runs; the physical one is in `LocyResult::metrics().physical_plans`, the logical one is not measured yet.
 
@@ -6689,6 +6794,7 @@ Executes within a savepoint: applies mutations, re-evaluates the strata in the m
 
 **ABDUCE and EXPLAIN RULE in an ASSUME body (Wave P1).** Both run against the hypothetical state; the compile-time ban (`AssumeBodyCommandNotAllowed`, 4.2-unreleased) is gone. Three pieces make them answer as the same command does at the top level in a transaction that applied the mutations:
 - *Provenance in every evaluation.* `CompiledProgram::needs_provenance_tracker` looks inside ASSUME bodies (their commands and their own rules, recursively). When it holds, the adapter (`NativeExecutionAdapter::records_provenance`) gives every hypothetical re-evaluation (`re_evaluate_strata_reusing`) a fresh `ProvenanceStore` and reuses no stratum, as the top-level sequenced re-derivation already did. `ReEvaluation` and `CommandFacts` carry the state's tracker and approximate groups, and a body `EXPLAIN RULE` passes them to `explain_rule`, so it takes Mode A from the hypothetical derivations. The same tracker is what `exact_probability`'s shared-proof correction runs on: without it a body `QUERY` read the independence value (0.484375 against the exact 0.46875 for the five-edge diamond in `locy_assume_explain_abduce`), a silent wrong answer.
+- *Provenance by need.* `needs_provenance_tracker` is the compile-time upper bound, not the decision. `evaluate_compiled_capturing_inner` plans the program with provenance and then drops the tracker, re-planning without it, when nothing can use one: no `EXPLAIN RULE` anywhere (`CompiledProgram::reads_derivations`), `top_k_proofs == 0`, default inference (`exact_probability` off and an `AddMultProb` / `MaxMinProb` semiring), no ASSUME body with rules of its own that need a tracker, and `locy_planner::program_can_share_proofs(plan)` false — no clause carries a row event (`LocyClausePlan::row_event`: its fold factor reads a node or relationship property, so two rows can rest on one event) and no reference names a probabilistic fact in a lineage column (`PositiveProbRef::key_column`, `NegatedLineageRef`). Every derivation row is then its own independent event reading no probabilistic fact, and `LineageStore::correct` would return every value unchanged and warn of nothing. Such a program runs as one without a fold does, stratum reuse included. When a tracker is kept only for lineage it is `ProvenanceStore::lineage_only()`: `record_provenance` / `record_provenance_nonrecursive` are skipped (`records_annotations`), since only `EXPLAIN RULE` Mode A reads the annotations and top-k retention prunes them; re-evaluations create the same kind (`fresh_like`). On the entity-resolution program (`MNOR` over a rule without a `PROB` column, 209,757 pre-fold facts) the first pass's rule evaluation went 7.4 s to 2.0 s (debug). Guards: `locy_cost_by_need`.
 - *Entity lookups read the current state.* `NativeExecutionAdapter::state_ctx` is the one context for reads of the current state (active Locy L0, the hypothetical overlay inside ASSUME/ABDUCE, over the pinned snapshot), used by `execute_pattern`, the re-evaluation's hydration, and `lookup_ctx` (EXPLAIN's annotation hydration). `lookup_ctx` used the fixpoint context's L0, so an entity a hypothetical mutation created stayed a raw id, a body EXPLAIN's WHERE naming it matched nothing, and the tree fell back to Mode B.
 - *ABDUCE validates against the body's programs.* `locy_abduce::evaluate_abduce_with` takes a `SequencePrograms` (the parent's strata, and the body's program when the body has rules); `validate_modification` re-derives with `derive_command_facts` when there is a body program, so a body rule is validated as derived, not found empty in every candidate state. `evaluate_abduce` is the top-level wrapper (`body: None`, the previous path).
 
@@ -10724,6 +10830,30 @@ equality against Cypher across session, transaction with its own edge writes
 and deletes, pinned snapshot, fork, QUERY, EXPLAIN, ASSUME, ABDUCE and DERIVE,
 including parallel, property-less and schemaless relationships).
 
+**The commands' store holds the rules the commands read; the result holds the
+rules the caller asked for.** `command_read_rules` lists what a program's
+commands read rows of: a `QUERY`'s rule, a `DERIVE` rule and the rules its
+body references directly (what `resolve_clause_with_is_refs` reads). `VALIDATE`
+reads batches, a Cypher command and `CALIBRATE` nothing. A program holding an
+`ASSUME`, `ABDUCE` or `EXPLAIN RULE` reads everything: an explanation follows
+references transitively, a hypothetical state reuses and returns every rule.
+When the set is known and the store would not be reused for the result as it
+is — a command may write, so the result is hydrated again anyway, or
+`LocyConfig::returned_rules` is not `All` — step 7, step 7b and
+`re_evaluate_with` convert and hydrate only those rules
+(`native_store_to_row_store`'s `only`, `NativeExecutionAdapter::read_rules`).
+`returned_rules` (`All` by default, `Nothing`, `Only(names)`; Python
+`returned_rules="all" | "none" | [names]`) narrows `LocyResult`'s derived
+facts: a rule left out is neither converted nor hydrated for the result.
+Commands are answered the same, `stats.derived_nodes` still counts every fact,
+and the lazy materializer of goal-directed evaluation always returns what it
+derives. With the default and no write command nothing changes: the store
+holds every rule and is reused. On the entity-resolution program the commands
+read 500 of 210,757 facts; with `Nothing` the three hydrations (3.4 s of 20.6
+s, debug) become two of 500 facts. Guards: `locy_cost_by_need`
+(`returned_rules_narrow_the_result_not_the_commands`),
+`locy_entity_hydration`, `locy_command_noninterference`.
+
 **DERIVE re-runs a DERIVE rule's whole body against the command's store.** The
 fixpoint does not evaluate DERIVE rules, so `lookup_derived_enriched` re-runs
 the body when DERIVE executes. It ran the MATCH with its WHERE expressions only
@@ -10740,6 +10870,21 @@ DERIVE path hydrates from the pre-ASSUME base context any more. Guards:
 `locy_entity_hydration_derive_honours_is_references` and
 `locy_entity_hydration_derive_inside_assume_reads_the_overlay` (ASSUME vs the
 same mutation applied in a rolled-back transaction).
+
+**A DERIVE's facts between existing nodes are written by one statement.** Each
+fact is built as `MATCH (a), (b) WHERE id(a) = X AND id(b) = Y CREATE
+(a)-[:T]->(b)`, and the transaction path ran each on its own: a plan and an
+execution per fact. `batch_derive_statements` (`locy_derive.rs`) groups the
+statements equal up to those ids (`lift_fact_ids`) and runs each group as
+`UNWIND $__derive_facts AS __derive_fact MATCH … WHERE id(a) = __derive_fact.a
+AND id(b) = __derive_fact.b CREATE …`, in chunks of 10,000 (the `UNWIND` list
+size the planner still turns into an id filter on the scans). A statement of
+any other shape (a `NEW` node, `DERIVE MERGE`) and a group of one run as
+built. `mutations_executed` and the command's `affected` still count facts, and
+the footprint is still the union of every fact's statement. The session path
+is unchanged: it publishes its statements in `DerivedFactSet::mutation_queries`
+for `tx.apply`, one per fact. 500 edges: 429 ms to 53 ms for the writes alone
+(debug). Guard: `locy_cost_by_need::derive_writes_its_facts_in_one_statement`.
 
 **The compiler hands on resolved rule names.** Inside a `MODULE`, IS
 references and the rule a command names are rewritten to the catalog key

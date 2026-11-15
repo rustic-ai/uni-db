@@ -37,7 +37,7 @@ use lance::Dataset;
 ///
 /// Returns an error if the dataset does not exist or cannot be opened.
 pub async fn open_dataset(uri: &str) -> Result<Dataset> {
-    Dataset::open(uri)
+    super::lance_directory::open_dataset_uri(uri)
         .await
         .with_context(|| format!("open lance dataset at {uri}"))
 }
@@ -577,7 +577,10 @@ pub async fn delete_branch(uri: &str, branch: &str) -> Result<()> {
         // Probe the shallow-clone path to catch zombies that have no
         // BranchContents but still occupy `tree/{branch}`.
         let zombie_uri = format!("{uri}/tree/{branch}");
-        if Dataset::open(&zombie_uri).await.is_err() {
+        if super::lance_directory::open_dataset_uri(&zombie_uri)
+            .await
+            .is_err()
+        {
             return Ok(());
         }
     }
@@ -660,10 +663,13 @@ pub async fn stage_on_branch(
     let on_branch = open_branch(uri, branch)
         .await
         .with_context(|| format!("open branch {branch} on {uri} to stage rows"))?;
-    let params = lance::dataset::WriteParams {
-        mode: lance::dataset::WriteMode::Append,
-        ..Default::default()
-    };
+    let params = super::lance_directory::with_store_params(
+        uri,
+        lance::dataset::WriteParams {
+            mode: lance::dataset::WriteMode::Append,
+            ..Default::default()
+        },
+    );
     let transaction = lance::dataset::InsertBuilder::new(Arc::new(on_branch))
         .with_params(&params)
         .execute_uncommitted(batches)
@@ -1066,8 +1072,9 @@ where
     Dataset::write(
         initial_batches,
         uri,
-        Some(super::lance_directory::write_params(
-            lance::dataset::WriteMode::Create,
+        Some(super::lance_directory::with_store_params(
+            uri,
+            super::lance_directory::write_params(lance::dataset::WriteMode::Create),
         )),
     )
     .await
@@ -1089,6 +1096,10 @@ where
 #[derive(Debug, Clone)]
 pub struct LanceBranching {
     base_uri: String,
+    /// The backend's directory over `base_uri`, when the adapter was built
+    /// from one: it answers whether a table exists on any store, where
+    /// [`has_committed_manifest`] can only look at a local filesystem.
+    directory: Option<super::lance_directory::LanceDirectory>,
 }
 
 /// Whether the local dataset at `dataset` has a committed version.
@@ -1111,6 +1122,16 @@ impl LanceBranching {
     pub fn new(base_uri: impl Into<String>) -> Self {
         Self {
             base_uri: base_uri.into(),
+            directory: None,
+        }
+    }
+
+    /// Adapter over the datasets of `directory`, which also answers
+    /// [`ForkBranching::table_exists`] for an object store.
+    pub(crate) fn over(directory: super::lance_directory::LanceDirectory) -> Self {
+        Self {
+            base_uri: directory.base_uri().to_string(),
+            directory: Some(directory),
         }
     }
 
@@ -1199,10 +1220,18 @@ impl ForkBranching for LanceBranching {
     }
 
     async fn table_exists(&self, table: &str) -> Result<bool> {
+        // The directory lists the table's `_versions/` through its object
+        // store, so the answer is right on S3, GCS and Azure too. Without
+        // one, an object-store URI used to be answered `true`, "so the caller
+        // proceeds to a real open". But the caller is fork creation, which
+        // asks precisely to skip a candidate that is not there yet — an edge
+        // type's adjacency table before its first compaction, a label never
+        // flushed — and the open then failed the whole fork: on a cloud store
+        // no fork could be created once such a table was a candidate.
+        if let Some(directory) = &self.directory {
+            return directory.is_committed(table).await;
+        }
         let uri = self.dataset_uri(table);
-        // Local-fs heuristic, matching `BranchedBackend::dataset_path_exists`:
-        // for object stores we answer `true` so the caller proceeds to a real
-        // open, which surfaces the accurate error if the table is missing.
         if uri.contains("://") {
             return Ok(true);
         }

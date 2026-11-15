@@ -30,6 +30,85 @@ pub struct LocyExecProfile {
     pub peak_memory_bytes: usize,
     /// One entry per evaluated stratum, in evaluation order.
     pub strata: Vec<LocyStratumProfile>,
+    /// Work done on the derived facts outside the strata: turning them into
+    /// rows, hydrating their entity ids, and deriving them again after a
+    /// write. In the order it ran.
+    #[serde(default)]
+    pub phases: Vec<LocyPhaseProfile>,
+    /// One entry per command the program dispatched, in program order.
+    /// Commands answered inline while the strata ran are not listed.
+    #[serde(default)]
+    pub commands: Vec<LocyCommandProfile>,
+}
+
+/// One step of work on a program's derived facts, outside its strata.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LocyPhaseProfile {
+    /// Which evaluation the step belongs to: `initial` (the program's own
+    /// run), `re_evaluation` (the facts derived again for a command) or
+    /// `result` (building the returned facts).
+    pub pass: String,
+    /// What the step did: `strata` (a re-evaluation's rule evaluation),
+    /// `convert` (batches to rows) or `hydrate` (ids to nodes and edges).
+    pub kind: String,
+    /// Rules the step covered.
+    pub rules: usize,
+    /// Facts the step covered.
+    pub facts: usize,
+    /// Wall-clock time, in milliseconds.
+    pub elapsed_ms: f64,
+}
+
+/// One dispatched command of a program.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LocyCommandProfile {
+    /// Position of the command in the program.
+    pub index: usize,
+    /// The command's kind: `QUERY`, `DERIVE`, `CYPHER`, ...
+    pub kind: String,
+    /// Wall-clock time, in milliseconds, a re-evaluation it caused included.
+    pub elapsed_ms: f64,
+    /// Facts a `DERIVE` wrote, however many statements wrote them.
+    pub facts_written: usize,
+    /// Strata evaluated again before the command read its facts.
+    pub strata_evaluated: usize,
+    /// Strata reused, not evaluated again, before the command read its facts.
+    pub strata_reused: usize,
+}
+
+/// Collects [`LocyPhaseProfile`] rows while a program runs; shared by the
+/// program's own evaluation and its re-evaluations.
+#[derive(Debug, Default)]
+pub struct LocyPhaseLog {
+    phases: Mutex<Vec<LocyPhaseProfile>>,
+}
+
+impl LocyPhaseLog {
+    /// Records one step.
+    pub fn record(
+        &self,
+        pass: &str,
+        kind: &str,
+        rules: usize,
+        facts: usize,
+        elapsed: std::time::Duration,
+    ) {
+        self.phases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(LocyPhaseProfile {
+                pass: pass.to_string(),
+                kind: kind.to_string(),
+                rules,
+                facts,
+                elapsed_ms: elapsed.as_secs_f64() * 1000.0,
+            });
+    }
+
+    /// The steps recorded so far, in order.
+    pub fn take(&self) -> Vec<LocyPhaseProfile> {
+        std::mem::take(&mut *self.phases.lock().unwrap_or_else(|e| e.into_inner()))
+    }
 }
 
 /// Per-stratum slice of a [`LocyExecProfile`].
@@ -93,7 +172,9 @@ pub struct LocyIterationProfile {
     /// entries built by [`synthetic_operator`]: `LocyIsNotAntiJoin` (one per
     /// negated `IS NOT` reference applied to a clause's rows) and the fact
     /// merge — `LocyFactDedup`, `LocyBestByMerge` or `LocyFoldMerge`. Their
-    /// `actual_rows` is the rows that survived the step.
+    /// `actual_rows` is the rows that survived the step. `LocyProvenance`
+    /// (proof annotations) and `LocyLineage` (shared-proof analysis) appear
+    /// when the program records them; their `actual_rows` is the rows read.
     pub operators: Vec<OperatorStats>,
     /// Physical planning time for this rule in this iteration, in
     /// milliseconds: every clause body is re-planned on every pass, and any

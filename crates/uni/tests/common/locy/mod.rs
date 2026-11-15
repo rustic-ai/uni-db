@@ -3,6 +3,7 @@ pub mod locy_abduce_identity;
 pub mod locy_assume_incremental;
 pub mod locy_assume_module_context;
 pub mod locy_assume_params;
+pub mod locy_cost_by_need;
 pub mod locy_derive_visibility;
 pub mod locy_entity_hydration;
 pub mod locy_fold_having;

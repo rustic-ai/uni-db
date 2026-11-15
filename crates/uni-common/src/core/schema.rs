@@ -3327,6 +3327,7 @@ mod tests {
                 status: IndexStatus::Building,
                 last_built_at: Some(now),
                 row_count_at_build: Some(42),
+                analysis_revision: FTS_ANALYSIS_REVISION,
             },
         });
 

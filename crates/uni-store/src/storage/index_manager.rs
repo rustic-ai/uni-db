@@ -116,7 +116,9 @@ impl BuildOutcome {
         self,
         row_count: Option<u64>,
     ) -> uni_common::core::schema::IndexMetadata {
-        use uni_common::core::schema::{IndexMetadata, IndexStatus};
+        use uni_common::core::schema::{FTS_ANALYSIS_REVISION, IndexMetadata, IndexStatus};
+        // Whatever the outcome, the index now reflects this build's analysis.
+        let analysis_revision = FTS_ANALYSIS_REVISION;
         match self {
             BuildOutcome::Built => IndexMetadata {
                 status: IndexStatus::Online,
@@ -127,6 +129,7 @@ impl BuildOutcome {
                 // did — and the growth trigger that reads it silently never
                 // fired for anything built here.
                 row_count_at_build: row_count,
+                analysis_revision,
             },
             // Online, but with no `last_built_at`: nothing was built, and
             // claiming a build timestamp would be the same lie in a new field.
@@ -139,11 +142,13 @@ impl BuildOutcome {
                 status: IndexStatus::Online,
                 last_built_at: None,
                 row_count_at_build: None,
+                analysis_revision,
             },
             BuildOutcome::Failed => IndexMetadata {
                 status: IndexStatus::Stale,
                 last_built_at: None,
                 row_count_at_build: None,
+                analysis_revision,
             },
         }
     }

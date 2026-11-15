@@ -167,6 +167,48 @@ def test_multi_rule_program(social_db_populated):
     assert len(popular_rows) >= 1
 
 
+def test_returned_rules(social_db_populated):
+    """returned_rules narrows result.derived, as a dict key and as a kwarg."""
+    session = social_db_populated.session()
+    everything = session.locy(MULTI_RULE_PROGRAM)
+    assert set(everything.derived) == {"friends", "popular"}
+
+    one = (
+        session.locy_with(MULTI_RULE_PROGRAM)
+        .with_config({"returned_rules": ["popular"]})
+        .run()
+    )
+    assert set(one.derived) == {"popular"}
+    assert one.derived["popular"] == everything.derived["popular"]
+
+    none = (
+        session.locy_with(MULTI_RULE_PROGRAM)
+        .with_config(uni_db.LocyConfig(returned_rules="none"))
+        .run()
+    )
+    assert none.derived == {}
+    # Every fact still counts, returned or not.
+    assert none.stats.derived_nodes == everything.stats.derived_nodes
+
+    assert uni_db.LocyConfig().returned_rules == "all"
+    assert uni_db.LocyConfig(returned_rules="NONE").returned_rules == "none"
+    assert uni_db.LocyConfig(returned_rules=["a", "b"]).returned_rules == ["a", "b"]
+    with pytest.raises(ValueError):
+        uni_db.LocyConfig(returned_rules="some")
+
+
+def test_profile_phases_and_commands(social_db_populated):
+    """The profile lists the work on the facts outside the strata."""
+    session = social_db_populated.session()
+    program = FRIENDS_PROGRAM + "QUERY friends RETURN a.name AS a"
+    _, profile = session.locy_with(program).profile()
+    phases = profile.phases
+    assert {p["kind"] for p in phases} >= {"convert", "hydrate"}
+    assert all(p["pass"] in ("initial", "re_evaluation", "result") for p in phases)
+    assert [c["kind"] for c in profile.commands] == ["QUERY"]
+    assert profile.commands[0]["facts_written"] == 0
+
+
 def test_config_override(social_db_populated):
     """Custom config is respected (max_iterations)."""
     db = social_db_populated

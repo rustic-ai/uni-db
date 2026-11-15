@@ -12,6 +12,11 @@
 //! Locy rule bodies.
 
 use anyhow::Result;
+use arrow_array::types::Float32Type;
+use arrow_array::{Array, FixedSizeListArray, cast::AsArray};
+use arrow_schema::DataType;
+use datafusion::logical_expr::ColumnarValue;
+use datafusion::scalar::ScalarValue;
 use uni_common::Value;
 use uni_common::core::schema::{DistanceMetric, Schema};
 
@@ -233,14 +238,74 @@ pub fn score_vectors(a: &[f32], b: &[f32], metric: &DistanceMetric) -> Result<f3
             b: b.len(),
         });
     }
-    let distance = metric.compute_distance(a, b);
     match metric {
+        // The cosine does not go through `compute_distance`.
         DistanceMetric::Cosine => cosine_similarity(a, b),
         // compute_distance returns -dot (LanceDB convention: lower = more similar).
         // Negate to recover the actual dot product as a similarity score.
-        DistanceMetric::Dot => Ok(-distance),
+        DistanceMetric::Dot => Ok(-metric.compute_distance(a, b)),
         // L2 and all other metrics (#[non_exhaustive]): normalise via calculate_score.
-        _ => Ok(calculate_score(distance, metric)),
+        // `compute_distance` panics for the binary metrics (Hamming, Jaccard).
+        _ => Ok(calculate_score(metric.compute_distance(a, b), metric)),
+    }
+}
+
+/// The rows of a `FixedSizeList<Float32>` value, read as `&[f32]` slices of its
+/// values buffer: the Arrow shape of a declared vector property.
+///
+/// A scalar answers every row with its one vector. Scoring a pair this way
+/// converts and allocates nothing, where going through [`Value`] costs several
+/// allocations per row.
+pub struct F32Rows {
+    list: FixedSizeListArray,
+    values: arrow::buffer::ScalarBuffer<f32>,
+    width: usize,
+    scalar: bool,
+}
+
+impl F32Rows {
+    /// `None` unless `value` is a `FixedSizeList<Float32>` array or scalar.
+    pub fn try_new(value: &ColumnarValue) -> Option<Self> {
+        let (list, scalar) = match value {
+            ColumnarValue::Array(array) => (array.as_fixed_size_list_opt()?.clone(), false),
+            ColumnarValue::Scalar(ScalarValue::FixedSizeList(list)) if list.len() == 1 => {
+                (list.as_ref().clone(), true)
+            }
+            ColumnarValue::Scalar(_) => return None,
+        };
+        if list.values().data_type() != &DataType::Float32 {
+            return None;
+        }
+        let values = list.values().as_primitive::<Float32Type>().values().clone();
+        let width = usize::try_from(list.value_length()).ok()?;
+        Some(Self {
+            list,
+            values,
+            width,
+            scalar,
+        })
+    }
+
+    /// The number of components in every row.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Whether this is an array, with one vector per row, and not a scalar.
+    pub fn is_array(&self) -> bool {
+        !self.scalar
+    }
+
+    /// The vector at `row`, or `None` where the row is NULL. A NULL row's
+    /// components are stored as zeros, which would otherwise score as a zero
+    /// vector.
+    pub fn row(&self, row: usize) -> Option<&[f32]> {
+        let row = if self.scalar { 0 } else { row };
+        if self.list.is_null(row) {
+            return None;
+        }
+        let start = usize::try_from(self.list.value_offset(row)).ok()?;
+        Some(&self.values[start..start + self.width])
     }
 }
 
@@ -433,7 +498,10 @@ fn value_to_sparse(v: &Value) -> Result<uni_sparse_vector::SparseVector> {
 ///
 /// Generic over the element type so both the f32 and f64 callers share one body;
 /// arithmetic is always performed in f64 to preserve precision.
-fn cosine_similarity_inner<T: Copy + Into<f64>>(a: &[T], b: &[T]) -> Result<f64, SimilarToError> {
+pub(crate) fn cosine_similarity_inner<T: Copy + Into<f64>>(
+    a: &[T],
+    b: &[T],
+) -> Result<f64, SimilarToError> {
     if a.len() != b.len() {
         return Err(SimilarToError::DimensionMismatch {
             a: a.len(),
@@ -889,5 +957,76 @@ mod tests {
         let a = vec![1.0, 0.0];
         let b = vec![1.0, 0.0, 0.0];
         assert!(score_vectors(&a, &b, &DistanceMetric::Cosine).is_err());
+    }
+
+    /// The binary metrics have no float distance. `score_vectors` reaches the
+    /// panic in `compute_distance` for them, and must go on doing so.
+    #[test]
+    #[should_panic(expected = "binary-vector metric")]
+    fn test_score_vectors_binary_metric_panics() {
+        let _ = score_vectors(&[1.0, 0.0], &[1.0, 0.0], &DistanceMetric::Hamming);
+    }
+
+    fn f32_column(rows: Vec<Option<Vec<f32>>>, width: i32) -> arrow_array::ArrayRef {
+        std::sync::Arc::new(
+            FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+                rows.into_iter()
+                    .map(|r| r.map(|v| v.into_iter().map(Some).collect::<Vec<_>>())),
+                width,
+            ),
+        )
+    }
+
+    #[test]
+    fn f32_rows_reads_a_column_in_place() {
+        let column = f32_column(
+            vec![
+                Some(vec![1.0, 2.0]),
+                None,
+                Some(vec![3.0, 4.0]),
+                Some(vec![5.0, 6.0]),
+            ],
+            2,
+        );
+        let rows = F32Rows::try_new(&ColumnarValue::Array(column.clone())).unwrap();
+        assert!(rows.is_array());
+        assert_eq!(rows.width(), 2);
+        assert_eq!(rows.row(0), Some(&[1.0, 2.0][..]));
+        assert_eq!(rows.row(1), None);
+        assert_eq!(rows.row(3), Some(&[5.0, 6.0][..]));
+
+        // A slice keeps the parent's buffer; its rows are its own.
+        let sliced = F32Rows::try_new(&ColumnarValue::Array(column.slice(1, 3))).unwrap();
+        assert_eq!(sliced.row(0), None);
+        assert_eq!(sliced.row(1), Some(&[3.0, 4.0][..]));
+        assert_eq!(sliced.row(2), Some(&[5.0, 6.0][..]));
+    }
+
+    #[test]
+    fn f32_rows_scalar_answers_every_row() {
+        let column = f32_column(vec![Some(vec![7.0, 8.0])], 2);
+        let scalar =
+            ScalarValue::FixedSizeList(std::sync::Arc::new(column.as_fixed_size_list().clone()));
+        let rows = F32Rows::try_new(&ColumnarValue::Scalar(scalar)).unwrap();
+        assert!(!rows.is_array());
+        assert_eq!(rows.row(0), Some(&[7.0, 8.0][..]));
+        assert_eq!(rows.row(41), Some(&[7.0, 8.0][..]));
+    }
+
+    #[test]
+    fn f32_rows_takes_only_float32_vectors() {
+        let floats: arrow_array::ArrayRef =
+            std::sync::Arc::new(arrow_array::Float64Array::from(vec![1.0, 2.0]));
+        assert!(F32Rows::try_new(&ColumnarValue::Array(floats)).is_none());
+        let wide: arrow_array::ArrayRef =
+            std::sync::Arc::new(FixedSizeListArray::from_iter_primitive::<
+                arrow_array::types::Float64Type,
+                _,
+                _,
+            >(vec![Some(vec![Some(1.0), Some(2.0)])], 2));
+        assert!(F32Rows::try_new(&ColumnarValue::Array(wide)).is_none());
+        assert!(
+            F32Rows::try_new(&ColumnarValue::Scalar(ScalarValue::Float64(Some(1.0)))).is_none()
+        );
     }
 }

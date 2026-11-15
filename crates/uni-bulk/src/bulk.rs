@@ -2047,6 +2047,7 @@ impl BulkWriter {
                     if let Err(e) = self.backend.schema.update_index_metadata(idx.name(), |m| {
                         m.status = uni_common::core::schema::IndexStatus::Online;
                         m.last_built_at = Some(now);
+                        m.analysis_revision = uni_common::core::schema::FTS_ANALYSIS_REVISION;
                         if let Some(count) = row_count {
                             m.row_count_at_build = Some(count);
                         }

@@ -827,8 +827,8 @@ impl PatternComprehensionExecExpr {
             );
 
             // Append target node for each step
-            for step_idx in 0..num_steps {
-                let target_vid = Vid::from(expansion.step_target_vids[step_idx][row_idx]);
+            for step_targets in expansion.step_target_vids.iter().take(num_steps) {
+                let target_vid = Vid::from(step_targets[row_idx]);
                 super::common::append_node_to_struct_with(
                     nodes_builder.values(),
                     target_vid,

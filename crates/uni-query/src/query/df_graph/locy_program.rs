@@ -1230,24 +1230,39 @@ async fn run_program(
                 }
 
                 // Record provenance (EXPLAIN, top-k proofs) for non-recursive rules.
+                let provenance_started = Instant::now();
                 if let Some(ref tracker) = derivation_tracker {
-                    super::locy_fixpoint::record_provenance_nonrecursive(
-                        fp_rule,
-                        &tagged_clause_facts,
-                        tracker,
-                        &warnings_slot,
-                        top_k_proofs,
-                        super::locy_fixpoint::ClassifierRefs {
-                            registry: &classifier_registry,
-                            cache: classifier_cache.as_ref(),
-                            provenance_store: classifier_provenance_store.as_ref(),
-                        },
-                    )
-                    .await?;
+                    if tracker.records_annotations() {
+                        super::locy_fixpoint::record_provenance_nonrecursive(
+                            fp_rule,
+                            &tagged_clause_facts,
+                            tracker,
+                            &warnings_slot,
+                            top_k_proofs,
+                            super::locy_fixpoint::ClassifierRefs {
+                                registry: &classifier_registry,
+                                cache: classifier_cache.as_ref(),
+                                provenance_store: classifier_provenance_store.as_ref(),
+                            },
+                        )
+                        .await?;
+                    }
                     // A PROB rule without a fold: its derivation rows, read
                     // before the transient columns carrying them go.
                     for (_, batches) in &tagged_clause_facts {
                         tracker.lineage().record_rows(fp_rule, batches)?;
+                    }
+                    if collector.is_some() && tracker.records_annotations() {
+                        let rows = tagged_clause_facts
+                            .iter()
+                            .flat_map(|(_, b)| b)
+                            .map(RecordBatch::num_rows)
+                            .sum();
+                        iter_ops.push(synthetic_operator(
+                            "LocyProvenance",
+                            rows,
+                            provenance_started.elapsed(),
+                        ));
                     }
                 }
 
@@ -1267,6 +1282,9 @@ async fn run_program(
                 // proofs don't double-count — skip the (misleading) warning.
                 super::locy_lineage::warn_opaque_prob_reads(fp_rule, &warnings_slot);
                 if let Some(ref tracker) = derivation_tracker {
+                    let lineage_started = Instant::now();
+                    let lineage_rows: usize =
+                        all_clause_facts.iter().map(RecordBatch::num_rows).sum();
                     tracker.lineage().record_rule(fp_rule, &all_clause_facts)?;
                     if semiring_kind != SemiringKind::MaxMinProb {
                         let (corrected, _) = tracker.lineage().correct(
@@ -1281,6 +1299,13 @@ async fn run_program(
                             },
                         )?;
                         all_clause_facts = corrected;
+                    }
+                    if collector.is_some() {
+                        iter_ops.push(synthetic_operator(
+                            "LocyLineage",
+                            lineage_rows,
+                            lineage_started.elapsed(),
+                        ));
                     }
                 }
 
@@ -1474,6 +1499,8 @@ async fn run_program(
             total_elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
             peak_memory_bytes: peak_bytes,
             strata: std::mem::take(&mut stratum_profiles),
+            phases: Vec::new(),
+            commands: Vec::new(),
         });
     }
 

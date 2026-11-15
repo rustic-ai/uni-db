@@ -956,54 +956,219 @@ async fn hundreds_of_mentions_resolve_within_the_default_timeout() -> Result<()>
     // MATCH and scanning the facts for each pair, and timed out at 30 s;
     // it now narrows the MATCH to the pairs `resolved` holds.
     const N: usize = 300;
+    let db = scale_db(N).await?;
+    resolve(&db).await?;
+    assert_scale_resolved(&db, N).await
+}
+
+/// `n` entities and `n` mentions of one type: every even mention is the
+/// surname of an existing entity, every odd one a new name.
+async fn scale_db(n: usize) -> Result<Uni> {
+    scale_db_of(n, 1, false).await
+}
+
+/// [`scale_db`] with the mentions and entities spread over `types` entity
+/// types (mention `i` and entity `i` share one, so the links are the same),
+/// and flushed to storage when `flush`.
+async fn scale_db_of(n: usize, types: usize, flush: bool) -> Result<Uni> {
     let db = db_with_models().await?;
-    let entities: Vec<String> = (0..N).map(|i| format!("'Known{i} Person{i}'")).collect();
-    let mentions: Vec<String> = (0..N)
+    let kind = |i: usize| {
+        if types == 1 {
+            "person".to_string()
+        } else {
+            format!("kind{}", i % types)
+        }
+    };
+    let entities: Vec<String> = (0..n)
+        .map(|i| format!("['Known{i} Person{i}', '{}']", kind(i)))
+        .collect();
+    let mentions: Vec<String> = (0..n)
         .map(|i| {
             if i % 2 == 0 {
-                format!("'Person{i}'")
+                format!("['Person{i}', '{}']", kind(i))
             } else {
-                format!("'New{i} Name{i}'")
+                format!("['New{i} Name{i}', '{}']", kind(i))
             }
         })
         .collect();
     let tx = db.session().tx().await?;
     tx.execute(&format!(
-        "UNWIND [{}] AS name CREATE (:Entity {{name: name, type: 'person'}})",
+        "UNWIND [{}] AS row CREATE (:Entity {{name: row[0], type: row[1]}})",
         entities.join(", ")
     ))
     .await?;
     tx.execute(&format!(
-        "UNWIND [{}] AS text CREATE (:Mention {{text: text, type: 'person'}})",
+        "UNWIND [{}] AS row CREATE (:Mention {{text: row[0], type: row[1]}})",
         mentions.join(", ")
     ))
     .await?;
     tx.commit().await?;
+    if flush {
+        db.flush().await?;
+    }
+    Ok(db)
+}
 
-    resolve(&db).await?;
+/// What resolving [`scale_db`] must leave.
+async fn assert_scale_resolved(db: &Uni, n: usize) -> Result<()> {
     assert_eq!(
         count(
-            &db,
+            db,
             "MATCH (m:Mention)-[:REFERS_TO]->(e:Entity) \
              WHERE e.name ENDS WITH ' ' + m.text RETURN count(m) AS n"
         )
         .await?,
-        (N / 2) as i64,
+        (n / 2) as i64,
         "every surname reaches its entity"
     );
     assert_eq!(
         count(
-            &db,
+            db,
             "MATCH (m:Mention)-[:REFERS_TO]->(e:Entity) \
              WHERE e.name = m.text RETURN count(m) AS n"
         )
         .await?,
-        (N / 2) as i64,
+        (n / 2) as i64,
         "every new name gets an entity of its own"
     );
     assert_eq!(
-        count(&db, "MATCH (e:Entity) RETURN count(e) AS n").await?,
-        (N + N / 2) as i64
+        count(db, "MATCH (e:Entity) RETURN count(e) AS n").await?,
+        (n + n / 2) as i64
     );
+    Ok(())
+}
+
+/// The rules of [`RESOLVE`], without its commands.
+fn resolve_rules() -> &'static str {
+    let end = RESOLVE
+        .find("\nDERIVE refers_to")
+        .expect("the first command");
+    &RESOLVE[..end]
+}
+
+/// Not a pass/fail check: where the resolution program's time goes at
+/// 300 × 300 and 1,000 × 1,000 (#330). Runs [`RESOLVE`]'s steps one at a
+/// time in one transaction, so each can be timed: the rules with each
+/// `DERIVE refers_to`, profiled per rule, and the two Cypher commands between
+/// them. Then the whole program at once on a fresh database, with the timeout
+/// lifted, for the figure to hold against the default 30 s.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "timing probe: prints where the resolution program's time goes at 1,000 x 1,000; \
+            asserts only the links"]
+async fn resolution_program_stage_times() -> Result<()> {
+    use std::time::{Duration, Instant};
+    const NO_LIMIT: Duration = Duration::from_secs(3600);
+    let commands: Vec<&str> = RESOLVE[resolve_rules().len()..]
+        .split("DERIVE refers_to")
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .collect();
+    let [new_entities, leftovers] = commands.as_slice() else {
+        anyhow::bail!("expected two Cypher commands, got {}", commands.len());
+    };
+    let derive = format!("{}\nDERIVE refers_to", resolve_rules());
+
+    // `UNI_PROBE_PROGRAM_ONLY=1` skips the staged steps and the small size;
+    // `UNI_PROBE_TOP_K=1` keeps one proof per fact, which makes the program
+    // record provenance as every `MNOR` program once did.
+    // `UNI_PROBE_FLUSH=1` flushes the data before resolving it, and
+    // `UNI_PROBE_TYPES=k` spreads it over `k` entity types.
+    let program_only = std::env::var_os("UNI_PROBE_PROGRAM_ONLY").is_some();
+    let flush = std::env::var_os("UNI_PROBE_FLUSH").is_some();
+    let types: usize = std::env::var("UNI_PROBE_TYPES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let top_k = std::env::var_os("UNI_PROBE_TOP_K").is_some();
+    for n in [300, 1000] {
+        if program_only && n != 1000 {
+            continue;
+        }
+        println!("--- {n} mentions x {n} entities ---");
+        let db = scale_db_of(n, types, flush).await?;
+        let tx = db.session().tx().await?;
+        for (step, cypher) in [
+            ("first DERIVE refers_to", None),
+            ("MERGE new entities", Some(new_entities)),
+            ("second DERIVE refers_to", None),
+            ("MERGE leftovers", Some(leftovers)),
+        ] {
+            if program_only {
+                continue;
+            }
+            let started = Instant::now();
+            let Some(cypher) = cypher else {
+                let (_, profile) = tx.locy_with(&derive).timeout(NO_LIMIT).profile().await?;
+                println!("{step}: {:.2?}", started.elapsed());
+                for stratum in &profile.profile.strata {
+                    for rule in &stratum.rules {
+                        let ms: f64 = rule.iterations.iter().map(|i| i.elapsed_ms).sum();
+                        println!(
+                            "    rule {:<15} {:>8} facts {ms:>10.1} ms",
+                            rule.name, rule.facts
+                        );
+                        let mut slow: Vec<_> =
+                            rule.iterations.iter().flat_map(|i| &i.operators).collect();
+                        slow.sort_by(|a, b| b.time_ms.total_cmp(&a.time_ms));
+                        for o in slow.iter().take(4) {
+                            println!(
+                                "        {:>9} rows {:>10.1} ms  {}",
+                                o.actual_rows, o.time_ms, o.operator
+                            );
+                        }
+                    }
+                }
+                let strata: f64 = profile.profile.strata.iter().map(|s| s.elapsed_ms).sum();
+                println!(
+                    "    strata {strata:.1} ms of {:.1} ms",
+                    profile.profile.total_elapsed_ms
+                );
+                continue;
+            };
+            tx.execute(cypher).await?;
+            println!("{step}: {:.2?}", started.elapsed());
+        }
+        tx.commit().await?;
+        if !program_only {
+            assert_scale_resolved(&db, n).await?;
+        }
+
+        let db = scale_db_of(n, types, flush).await?;
+        let tx = db.session().tx().await?;
+        let started = Instant::now();
+        // `UNI_PROBE_RETURN_ALL=1` returns every rule's facts, the default;
+        // the program only writes, so the probe asks for none.
+        let returned_rules = if std::env::var_os("UNI_PROBE_RETURN_ALL").is_some() {
+            uni_db::locy::ReturnedRules::All
+        } else {
+            uni_db::locy::ReturnedRules::Nothing
+        };
+        let config = uni_db::locy::LocyConfig {
+            top_k_proofs: usize::from(top_k),
+            timeout: Some(NO_LIMIT),
+            returned_rules,
+            ..Default::default()
+        };
+        let (_, profile) = tx.locy_with(RESOLVE).with_config(config).profile().await?;
+        let strata: f64 = profile.profile.strata.iter().map(|s| s.elapsed_ms).sum();
+        println!(
+            "the whole program: {:.2?} (its first evaluation of the strata: {strata:.1} ms)",
+            started.elapsed()
+        );
+        for p in &profile.profile.phases {
+            println!(
+                "    {:<14} {:<8} {:>2} rules {:>8} facts {:>10.1} ms",
+                p.pass, p.kind, p.rules, p.facts, p.elapsed_ms
+            );
+        }
+        for c in &profile.profile.commands {
+            println!(
+                "    command {} {:<7} {:>10.1} ms  {} facts written, strata {} evaluated / {} reused",
+                c.index, c.kind, c.elapsed_ms, c.facts_written, c.strata_evaluated, c.strata_reused
+            );
+        }
+        tx.commit().await?;
+        assert_scale_resolved(&db, n).await?;
+    }
     Ok(())
 }

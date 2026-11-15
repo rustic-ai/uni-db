@@ -916,6 +916,38 @@ pub(crate) fn parse_goal_directed(v: &Bound<'_, PyAny>) -> PyResult<::uni_locy::
     }
 }
 
+/// Parse the Python spelling of [`uni_locy::ReturnedRules`]: `"all"` (the
+/// default), `"none"`, or a list of rule names.
+///
+/// A string other than those two is a `ValueError`, not a one-rule list, so
+/// a misspelt mode cannot silently return nothing.
+pub(crate) fn parse_returned_rules(v: &Bound<'_, PyAny>) -> PyResult<::uni_locy::ReturnedRules> {
+    if let Ok(raw) = v.extract::<String>() {
+        return match raw.to_ascii_lowercase().as_str() {
+            "all" => Ok(::uni_locy::ReturnedRules::All),
+            "none" => Ok(::uni_locy::ReturnedRules::Nothing),
+            _ => Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid returned_rules '{raw}'; expected 'all', 'none' or a list of rule names"
+            ))),
+        };
+    }
+    Ok(::uni_locy::ReturnedRules::Only(v.extract::<Vec<String>>()?))
+}
+
+/// The Python value of a [`uni_locy::ReturnedRules`]: `"all"`, `"none"` or
+/// the list of rule names.
+pub(crate) fn returned_rules_to_py(
+    py: Python<'_>,
+    rules: &::uni_locy::ReturnedRules,
+) -> PyResult<Py<PyAny>> {
+    use pyo3::IntoPyObjectExt;
+    match rules {
+        ::uni_locy::ReturnedRules::All => "all".into_py_any(py),
+        ::uni_locy::ReturnedRules::Nothing => "none".into_py_any(py),
+        ::uni_locy::ReturnedRules::Only(names) => names.clone().into_py_any(py),
+    }
+}
+
 /// The Python spelling of a [`uni_locy::GoalDirected`] mode.
 pub(crate) fn goal_directed_name(mode: ::uni_locy::GoalDirected) -> &'static str {
     match mode {
@@ -944,6 +976,7 @@ pub const LOCY_CONFIG_KEYS: &[&str] = &[
     "top_k_proofs",
     "top_k_proofs_training",
     "goal_directed",
+    "returned_rules",
     "params",
     "classifier_registry",
     "semiring",
@@ -1063,6 +1096,9 @@ pub fn extract_locy_config(
     }
     if let Some(v) = config.get("goal_directed") {
         locy_config.goal_directed = parse_goal_directed(v.bind(py))?;
+    }
+    if let Some(v) = config.get("returned_rules") {
+        locy_config.returned_rules = parse_returned_rules(v.bind(py))?;
     }
     if let Some(v) = config.get("params") {
         let params_map = v.extract::<HashMap<String, Py<PyAny>>>(py)?;

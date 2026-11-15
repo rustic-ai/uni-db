@@ -94,6 +94,11 @@ ON_DEMAND: dict[str, str] = {
         "asserts behaviour that is unsupported by design (decided 2026-09-15; "
         "see Uni::list_forks), so it fails today; kept as the specification"
     ),
+    "uni-db::integration bugs::locy_similarity_cross_join_scale::"
+    "similarity_rule_does_not_pair_every_mention_with_every_entity": (
+        "repro for #335 (a Locy similarity rule reads every pair), so it "
+        "fails until a rule can reach the vector index; kept as the specification"
+    ),
     "uni-db::reranker_integration test_real_onnx_cross_encoder_reranks_by_relevance": (
         "its model is served only through a xet-bridge redirect that hf-hub 0.5 "
         "refuses; ci.yml's reranker lane filters it out for the same reason"

@@ -5039,6 +5039,11 @@ impl HybridPhysicalPlanner {
         // OPTIONAL MATCH (LeftOuter/RightOuter HashJoin) when the predicate is
         // a pure equi-join — see try_plan_cross_join_as_hash_join for the
         // safety conditions.
+        if let Some(plan) =
+            self.try_plan_exists_as_join(input, predicate, optional_variables, all_properties)?
+        {
+            return Ok(plan);
+        }
         if let LogicalPlan::CrossJoin { left, right } = input
             && let Some(plan) = self.try_plan_cross_join_as_hash_join(
                 left,
@@ -5193,8 +5198,8 @@ impl HybridPhysicalPlanner {
 
         let left_filters: Vec<Expr> = cls.left_only.clone();
         let right_filters: Vec<Expr> = cls.right_only.clone();
-        let left_with_filter = wrap_with_filter(left.clone(), &left_filters);
-        let right_with_filter = wrap_with_filter(right.clone(), &right_filters);
+        let left_with_filter = filter_join_side(left.clone(), &left_filters);
+        let right_with_filter = filter_join_side(right.clone(), &right_filters);
         let left_plan = self.plan_internal(&left_with_filter, all_properties)?;
         let right_plan = self.plan_internal(&right_with_filter, all_properties)?;
 
@@ -5372,6 +5377,208 @@ impl HybridPhysicalPlanner {
             )?)));
         }
 
+        Ok(Some(join))
+    }
+
+    /// Plans a filter holding `[NOT] EXISTS { MATCH pattern WHERE p }` as a
+    /// semi- or anti-join of the filter's input with the pattern, when `p`
+    /// alone ties the two together.
+    ///
+    /// The subquery otherwise runs once per input row, scanning the pattern's
+    /// labels each time (`ExistsExecExpr`): a "no other row like this one"
+    /// test over N rows is N scans of N rows. As a join the pattern is scanned
+    /// once.
+    ///
+    /// Accepted: a top-level `AND` conjunct that is such an `EXISTS` or its
+    /// `NOT`, whose body is one `MATCH` of plain nodes (no relationship, no
+    /// property map, no inline `WHERE`) binding only new variables, and whose
+    /// `WHERE` conjuncts each read a body variable: those reading only body
+    /// variables filter the body, the rest (at least one) form the join
+    /// condition. A join-condition conjunct holding a subquery, and a
+    /// conjunct reading no body variable, are declined: the first needs the
+    /// per-row machinery, the second would be evaluated per pair where it
+    /// must decide the row once. Everything declined keeps the per-row path,
+    /// so `Ok(None)` is never an error.
+    ///
+    /// Semantics held: `EXISTS` is never NULL. A NULL join key matches
+    /// nothing (`NullEqualsNothing`) and a join condition that is not `true`
+    /// is no match, for both kinds; the anti-join is not null-aware.
+    ///
+    /// The pattern is the build side and the input the probe side
+    /// (`RightSemi` / `RightAnti`), so input rows stream through in order and
+    /// only the pattern's rows are held.
+    ///
+    /// # Errors
+    ///
+    /// Planning either side, or compiling the join condition, once the shape
+    /// is accepted.
+    fn try_plan_exists_as_join(
+        &self,
+        input: &LogicalPlan,
+        predicate: &Expr,
+        optional_variables: &HashSet<String>,
+        all_properties: &HashMap<String, HashSet<String>>,
+    ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
+        use crate::query::planner::{QueryPlanner, WhereScope};
+        use datafusion::common::NullEquality;
+        use datafusion::physical_plan::joins::{HashJoinExec, NestedLoopJoinExec, PartitionMode};
+
+        if !optional_variables.is_empty() || !exists_join_enabled() {
+            return Ok(None);
+        }
+        let conjuncts = split_and_conjuncts(predicate);
+        let outer_vars = collect_plan_variables(input);
+        let Some((position, shape)) = conjuncts
+            .iter()
+            .enumerate()
+            .find_map(|(i, c)| exists_join_shape(c, &outer_vars).map(|s| (i, s)))
+        else {
+            return Ok(None);
+        };
+
+        // The body: its pattern, filtered by the conjuncts that read it alone.
+        let planner = QueryPlanner::new(Arc::clone(&self.schema));
+        let mut body_scope = Vec::new();
+        let Ok(body) =
+            planner.plan_pattern_scoped(shape.pattern, &[], &mut body_scope, &HashMap::new())
+        else {
+            return Ok(None);
+        };
+        let body = match and_combine(shape.body_only.clone()) {
+            Some(own) => {
+                match planner.plan_where_clause(&own, body, &body_scope, WhereScope::Mandatory) {
+                    Ok(filtered) => filtered,
+                    Err(_) => return Ok(None),
+                }
+            }
+            None => body,
+        };
+        let body_vars = collect_plan_variables(&body);
+        if !body_vars.is_disjoint(&outer_vars) {
+            return Ok(None);
+        }
+        let condition = and_combine(shape.condition.clone()).expect("a join condition");
+
+        // The body's scans read what the join condition names of them.
+        let mut properties = all_properties.clone();
+        let reads = crate::query::planner::collect_properties_from_plan(&LogicalPlan::Filter {
+            input: Box::new(body.clone()),
+            predicate: condition.clone(),
+            optional_variables: HashSet::new(),
+        });
+        for (variable, names) in reads {
+            properties.entry(variable).or_default().extend(names);
+        }
+
+        // The input, under the filter's other conjuncts.
+        let rest: Vec<Expr> = conjuncts
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != position)
+            .map(|(_, c)| c.clone())
+            .collect();
+        let (outer_logical, outer_plan) = match and_combine(rest) {
+            Some(rest) => (
+                LogicalPlan::Filter {
+                    input: Box::new(input.clone()),
+                    predicate: rest.clone(),
+                    optional_variables: HashSet::new(),
+                },
+                self.plan_filter(input, &rest, optional_variables, all_properties)?,
+            ),
+            None => (input.clone(), self.plan_internal(input, all_properties)?),
+        };
+        let body_plan = self.plan_internal(&body, &properties)?;
+        let body_schema = body_plan.schema();
+        let outer_schema = outer_plan.schema();
+        // The join condition is compiled over both sides' columns by name.
+        if body_schema
+            .fields()
+            .iter()
+            .any(|f| outer_schema.field_with_name(f.name()).is_ok())
+        {
+            return Ok(None);
+        }
+
+        // Hash keys from the cross-side equalities; the rest of the condition,
+        // and any equality only bucketed by its key, is the join filter.
+        let cls = classify_join_predicate(&condition, &body_vars, &outer_vars);
+        let mut filters: Vec<Expr> = cls.left_only.clone();
+        filters.extend(cls.right_only.clone());
+        filters.extend(cls.residual.clone());
+        let body_ctx = self.translation_context_for_plan(&body);
+        let outer_ctx = self.translation_context_for_plan(&outer_logical);
+        let mut on: Vec<(
+            Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+            Arc<dyn datafusion::physical_plan::PhysicalExpr>,
+        )> = Vec::new();
+        {
+            let session = self.session_ctx.read();
+            let state = session.state();
+            let body_compiler = self.expr_compiler(&state, Some(&body_ctx));
+            let outer_compiler = self.expr_compiler(&state, Some(&outer_ctx));
+            for (b_expr, o_expr) in &cls.equi_pairs {
+                let equality = || Expr::BinaryOp {
+                    left: Box::new(b_expr.clone()),
+                    op: uni_cypher::ast::BinaryOp::Eq,
+                    right: Box::new(o_expr.clone()),
+                };
+                let rewritten = identity_join_key(b_expr, o_expr, &body_ctx, &outer_ctx);
+                let (b_key, o_key) = match &rewritten {
+                    Some((b, o)) => (b, o),
+                    None => (b_expr, o_expr),
+                };
+                let compiled = body_compiler
+                    .compile(b_key, &body_schema)
+                    .and_then(|b| Ok((b, outer_compiler.compile(o_key, &outer_schema)?)));
+                let key = compiled
+                    .ok()
+                    .and_then(|(b, o)| unify_join_key_types(b, o, &body_schema, &outer_schema));
+                match key {
+                    Some(key) => {
+                        if key.needs_recheck {
+                            filters.push(equality());
+                        }
+                        on.push((key.left, key.right));
+                    }
+                    // Not hashable as a key: tested per candidate pair.
+                    None => filters.push(equality()),
+                }
+            }
+        }
+        let filter = if filters.is_empty() {
+            None
+        } else {
+            Some(self.build_recheck_join_filter(
+                &filters,
+                &body_plan,
+                &outer_plan,
+                &body,
+                &outer_logical,
+            )?)
+        };
+        let join_type = if shape.anti {
+            JoinType::RightAnti
+        } else {
+            JoinType::RightSemi
+        };
+        let join: Arc<dyn ExecutionPlan> = if on.is_empty() {
+            Arc::new(NestedLoopJoinExec::try_new(
+                body_plan, outer_plan, filter, &join_type, None,
+            )?)
+        } else {
+            Arc::new(HashJoinExec::try_new(
+                body_plan,
+                outer_plan,
+                on,
+                filter,
+                &join_type,
+                None,
+                PartitionMode::CollectLeft,
+                NullEquality::NullEqualsNothing,
+                false,
+            )?)
+        };
         Ok(Some(join))
     }
 
@@ -9959,6 +10166,186 @@ fn collect_expr_variables_into(expr: &Expr, out: &mut HashSet<String>) {
     }
 }
 
+/// The variables a join conjunct reads, pattern predicates included.
+///
+/// [`collect_expr_variables_set`] does not look inside a pattern predicate, so
+/// `NOT (m)-[:R]->()` used to read no variable at all, was classified as a
+/// constant and stayed in the filter above the join, evaluated once per joined
+/// pair although it depends on `m` alone (#330). Here a pattern predicate
+/// reads the variables its pattern names.
+///
+/// `None` when a pattern predicate's variables cannot be listed with
+/// certainty; the conjunct must then stay above the join, where every
+/// variable is in scope.
+fn conjunct_variables(conjunct: &Expr) -> Option<HashSet<String>> {
+    fn walk(expr: &Expr, out: &mut HashSet<String>) -> Option<()> {
+        match expr {
+            Expr::Exists {
+                query,
+                from_pattern_predicate: true,
+            } => out.extend(pattern_predicate_variables(query)?),
+            Expr::UnaryOp { expr, .. } => walk(expr, out)?,
+            Expr::BinaryOp { left, right, .. } => {
+                walk(left, out)?;
+                walk(right, out)?;
+            }
+            other => collect_expr_variables_into(other, out),
+        }
+        Some(())
+    }
+    let mut out = HashSet::new();
+    walk(conjunct, &mut out)?;
+    Some(out)
+}
+
+/// Whether `[NOT] EXISTS` may be planned as a join
+/// (`HybridPhysicalPlanner::try_plan_exists_as_join`). On unless
+/// `UNI_EXISTS_JOIN=0`, which keeps every subquery on the per-row path: a
+/// switch for comparing the two, not a tuning knob.
+fn exists_join_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("UNI_EXISTS_JOIN").map_or(true, |v| v != "0"))
+}
+
+/// A conjunct `[NOT] EXISTS { MATCH pattern WHERE p }` that can be a join.
+struct ExistsJoinShape<'a> {
+    /// The body's pattern: plain nodes binding new variables.
+    pattern: &'a uni_cypher::ast::Pattern,
+    /// The conjuncts of `p` reading body variables only.
+    body_only: Vec<Expr>,
+    /// The conjuncts of `p` reading both a body and an outer variable.
+    condition: Vec<Expr>,
+    /// Whether the conjunct is negated.
+    anti: bool,
+}
+
+/// `conjunct` as an [`ExistsJoinShape`], `outer` being the variables in scope
+/// around it; `None` when it is not one (see
+/// `HybridPhysicalPlanner::try_plan_exists_as_join` for what is accepted).
+fn exists_join_shape<'a>(
+    conjunct: &'a Expr,
+    outer: &HashSet<String>,
+) -> Option<ExistsJoinShape<'a>> {
+    use uni_cypher::ast::{Clause, Query, UnaryOp};
+    fn holds_subquery(expr: &Expr) -> bool {
+        if matches!(
+            expr,
+            Expr::Exists { .. } | Expr::CountSubquery(_) | Expr::CollectSubquery(_)
+        ) {
+            return true;
+        }
+        let mut found = false;
+        expr.for_each_child(&mut |child| found = found || holds_subquery(child));
+        found
+    }
+    let (exists, anti) = match conjunct {
+        Expr::UnaryOp {
+            op: UnaryOp::Not,
+            expr,
+        } => (expr.as_ref(), true),
+        other => (other, false),
+    };
+    let Expr::Exists {
+        query,
+        from_pattern_predicate: false,
+    } = exists
+    else {
+        return None;
+    };
+    let Query::Single(statement) = query.as_ref() else {
+        return None;
+    };
+    let [Clause::Match(m)] = statement.clauses.as_slice() else {
+        return None;
+    };
+    if m.optional {
+        return None;
+    }
+    let predicate = m.where_clause.as_ref()?;
+    let mut body: HashSet<String> = HashSet::new();
+    for path in &m.pattern.paths {
+        if path.variable.is_some() || path.shortest_path_mode.is_some() {
+            return None;
+        }
+        let [PatternElement::Node(node)] = path.elements.as_slice() else {
+            return None;
+        };
+        if node.properties.is_some() || node.where_clause.is_some() {
+            return None;
+        }
+        let variable = node.variable.as_ref()?;
+        if outer.contains(variable) || !body.insert(variable.clone()) {
+            return None;
+        }
+    }
+    let mut body_only = Vec::new();
+    let mut condition = Vec::new();
+    for conjunct in split_and_conjuncts(predicate) {
+        let variables = conjunct_variables(&conjunct)?;
+        if !variables
+            .iter()
+            .all(|v| body.contains(v) || outer.contains(v))
+        {
+            return None;
+        }
+        if variables.is_subset(&body) {
+            if variables.is_empty() {
+                return None;
+            }
+            body_only.push(conjunct);
+        } else if variables.is_disjoint(&body) || holds_subquery(&conjunct) {
+            return None;
+        } else {
+            condition.push(conjunct);
+        }
+    }
+    if condition.is_empty() {
+        return None;
+    }
+    Some(ExistsJoinShape {
+        pattern: &m.pattern,
+        body_only,
+        condition,
+        anti,
+    })
+}
+
+/// The variables a pattern predicate's pattern names: its nodes, relationships
+/// and paths. A pattern predicate binds nothing new, so each is a variable of
+/// the enclosing scope.
+///
+/// `None` for anything but one plain `MATCH` of nodes and relationships with
+/// no property map and no inline `WHERE`: those hold expressions, which could
+/// read further variables.
+fn pattern_predicate_variables(query: &uni_cypher::ast::Query) -> Option<HashSet<String>> {
+    use uni_cypher::ast::{Clause, Query};
+    let Query::Single(statement) = query else {
+        return None;
+    };
+    let [Clause::Match(m)] = statement.clauses.as_slice() else {
+        return None;
+    };
+    if m.where_clause.is_some() {
+        return None;
+    }
+    let mut out = HashSet::new();
+    for path in &m.pattern.paths {
+        out.extend(path.variable.clone());
+        for element in &path.elements {
+            let (variable, properties, filter) = match element {
+                PatternElement::Node(n) => (&n.variable, &n.properties, &n.where_clause),
+                PatternElement::Relationship(r) => (&r.variable, &r.properties, &r.where_clause),
+                PatternElement::Parenthesized { .. } => return None,
+            };
+            if properties.is_some() || filter.is_some() {
+                return None;
+            }
+            out.extend(variable.clone());
+        }
+    }
+    Some(out)
+}
+
 /// Split a predicate at top-level AND-conjuncts.
 fn split_and_conjuncts(predicate: &Expr) -> Vec<Expr> {
     use uni_cypher::ast::BinaryOp;
@@ -10032,7 +10419,11 @@ fn classify_join_predicate(
         }
 
         // Not an equi-join — classify by which sides its variables belong to.
-        let vars = collect_expr_variables_set(&conjunct);
+        // A conjunct whose variables cannot all be named stays above the join.
+        let Some(vars) = conjunct_variables(&conjunct) else {
+            residual_parts.push(conjunct);
+            continue;
+        };
         let touches_left = vars.iter().any(|v| left_vars.contains(v));
         let touches_right = vars.iter().any(|v| right_vars.contains(v));
         match (touches_left, touches_right) {
@@ -10415,6 +10806,38 @@ fn expr_is_vid_property(expr: &Expr) -> bool {
         Expr::Property(inner, prop)
             if prop == "_vid" && matches!(inner.as_ref(), Expr::Variable(_))
     )
+}
+
+/// Applies a join side's own conjuncts beneath the join.
+///
+/// Those a scan can take are merged into it by [`wrap_with_filter`]. A
+/// conjunct holding a subquery (a pattern predicate, `EXISTS`, `COUNT {}`)
+/// cannot be: a scan's filter goes through the DataFusion expression
+/// translator, which has no subqueries. It becomes a `Filter` over the side,
+/// which `plan_filter` compiles with the physical expression compiler.
+fn filter_join_side(plan: LogicalPlan, filters: &[Expr]) -> LogicalPlan {
+    fn has_subquery(expr: &Expr) -> bool {
+        if matches!(
+            expr,
+            Expr::Exists { .. } | Expr::CountSubquery(_) | Expr::CollectSubquery(_)
+        ) {
+            return true;
+        }
+        let mut found = false;
+        expr.for_each_child(&mut |child| found = found || has_subquery(child));
+        found
+    }
+    let (subqueries, plain): (Vec<Expr>, Vec<Expr>) =
+        filters.iter().cloned().partition(has_subquery);
+    let plan = wrap_with_filter(plan, &plain);
+    match and_combine(subqueries) {
+        Some(predicate) => LogicalPlan::Filter {
+            input: Box::new(plan),
+            predicate,
+            optional_variables: HashSet::new(),
+        },
+        None => plan,
+    }
 }
 
 fn wrap_with_filter(plan: LogicalPlan, filters: &[Expr]) -> LogicalPlan {
