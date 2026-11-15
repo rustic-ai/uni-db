@@ -1332,6 +1332,50 @@ impl Writer {
         Ok(true)
     }
 
+    /// Whether the WAL is on a remote store (see `WriteAheadLog::is_remote`).
+    /// `false` without a WAL.
+    #[must_use]
+    pub fn wal_is_remote(&self) -> bool {
+        self.l0_manager
+            .get_current()
+            .read()
+            .wal
+            .as_ref()
+            .is_some_and(|wal| wal.is_remote())
+    }
+
+    /// [`Self::try_seal_wal`] as a task on `runtime`, not awaited.
+    ///
+    /// For a synchronous `Drop` on the thread of a `current_thread` runtime
+    /// when the WAL is remote. Blocking that thread on the seal starves it:
+    /// the store's pooled connections are driven by tasks of that runtime,
+    /// so the request sits until its timeout (30 s) and only then retries on
+    /// a fresh connection. As a task of the same runtime the seal runs as
+    /// soon as the drop returns. Opening the log again waits for it
+    /// (`WriteAheadLog::announce_pending_seal`). If the runtime is dropped
+    /// first the seal is lost, which costs what a crash costs: the next open
+    /// announces the latest commits again.
+    pub fn spawn_wal_seal(self: &Arc<Self>, runtime: &tokio::runtime::Handle) {
+        let Some(wal) = self.l0_manager.get_current().read().wal.clone() else {
+            return;
+        };
+        let pending = wal.announce_pending_seal();
+        let writer = Arc::clone(self);
+        runtime.spawn(async move {
+            let _pending = pending;
+            let error = match writer.try_seal_wal().await {
+                Ok(true) => return,
+                Ok(false) => "a flush holds the WAL".to_owned(),
+                Err(e) => e.to_string(),
+            };
+            tracing::warn!(
+                error,
+                "could not record the WAL's announced mark as the database closed; the next \
+                 open announces the latest commits again",
+            );
+        });
+    }
+
     async fn seal_wal_locked(&self) -> Result<()> {
         let wal = self.l0_manager.get_current().read().wal.clone();
         if let Some(wal) = wal {

@@ -1772,6 +1772,17 @@ impl UniInner {
         if self._temp_dir.is_some() || !writer.wal_needs_seal() {
             return;
         }
+        // On the thread of a `current_thread` runtime, a remote WAL cannot be
+        // sealed by blocking: the store's connections are driven by that
+        // runtime, which this would hold up, so the request waited out its
+        // 30 s timeout before retrying. Leave the seal to the runtime.
+        if writer.wal_is_remote()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+            && runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread
+        {
+            writer.spawn_wal_seal(&runtime);
+            return;
+        }
         // Never wait for `flush_lock` here: this blocks the dropping thread,
         // and the lock's holder may be a flush that only that thread can drive
         // (a `current_thread` runtime). Waiting deadlocked such a drop.

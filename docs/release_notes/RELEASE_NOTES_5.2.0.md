@@ -112,6 +112,10 @@ vector index from a rule is tracked as #335.
   worked only when the same values were also in the environment
   (`AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, …). With the credentials in
   `cloud_config` alone, a flush failed with "Bucket not found".
+- **Dropping a fork session on cloud storage no longer stalls for 30
+  seconds on a single-threaded runtime** (`#[tokio::test]`, a
+  `current_thread` runtime). The drop wrote the fork's last WAL record by
+  blocking the only thread that could drive the request.
 - **A string function of an untyped NULL is NULL.** `toLower`, `toUpper`,
   `trim`, `lTrim` and `rTrim` of a NULL literal failed with "Unsupported
   data type NULL for function lower". The literal could come from the query

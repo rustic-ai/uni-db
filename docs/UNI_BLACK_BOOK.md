@@ -1890,6 +1890,26 @@ apply those of the directory a URI lies in. Open a dataset by URI through
 them, never with a bare `Dataset::open`. Two connections to one base URI
 with different options share the later one's.
 
+**A remote WAL is not sealed by blocking a single-threaded runtime.** When a
+database handle is dropped, `UniInner::seal_wal_on_drop` records the WAL's
+announced mark, blocking the dropping thread on the process-wide IO runtime.
+A fork's WAL is on the data store, so on cloud storage that write is a
+network request, and the store's pooled connections are driven by tasks of
+the runtime that made them. Dropped on the thread of a `current_thread`
+runtime, the request could not be driven: it waited out the 30 s request
+timeout and then retried on a fresh connection. When the WAL is remote
+(`WriteAheadLog::is_remote`: no local root) and the drop runs on a
+`current_thread` runtime, the seal is spawned on that runtime instead
+(`Writer::spawn_wal_seal`) and runs once the drop returns. A `PendingSeal`
+guard marks it, and `WriteAheadLog::initialize` / `replay_segments_since`
+wait for the pending seals of the same store and prefix, so a reopen in the
+process neither misses the mark nor allocates the LSN being written. A local
+WAL and a multi-threaded runtime keep the blocking seal, which is complete
+when the drop returns. A runtime dropped before the task runs loses the
+seal; the next open then announces the latest commits again, as after a
+crash. The same runtime-bound-connection hazard is why full-text search runs
+on the IO runtime (#290).
+
 **`ForkBranching::table_exists` is exact on an object store.** Fork creation
 asks it in order to skip a candidate dataset that does not exist yet (an edge
 type's adjacency table before its first compaction, a label never flushed).

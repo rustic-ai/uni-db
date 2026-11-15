@@ -414,13 +414,20 @@ An emulator, not live S3.
   Test: `hybrid_localstack_e2e::test_hybrid_localstack_forks_e2e`, run with
   the credentials in the environment and, with
   `UNI_LOCALSTACK_CONFIG_ONLY=1`, in the cloud configuration alone.
-- **Still open: dropping a fork session on a remote store stalls 30 s on a
-  single-threaded runtime.** The drop seals the fork's WAL, which is on the
-  remote store, from the process-wide IO runtime, while the S3 client's
-  pooled connection is driven by the caller's runtime; a `current_thread`
-  runtime is blocked in that drop, so the request waits out its timeout and
-  then retries on a fresh connection. It succeeds, and a multi-threaded
-  runtime is unaffected (1.9 s against 32 s for the test above).
+- **Dropping a fork session on a remote store stalled 30 s on a
+  single-threaded runtime**; fixed afterwards. The drop seals the fork's
+  WAL, which is on the remote store, and blocked its thread to do it. On a
+  `current_thread` runtime that thread is the one driving the store's pooled
+  connections, so the request waited out its timeout and only then retried
+  on a fresh connection. In that case (`current_thread`, remote WAL) the
+  drop now hands the seal to the runtime as a task
+  (`Writer::spawn_wal_seal`), and opening the same log waits for a seal
+  still pending (`WriteAheadLog::announce_pending_seal`). A local WAL and a
+  multi-threaded runtime keep the blocking seal. If the runtime is dropped
+  before the task runs, the seal is lost, which costs what a crash costs:
+  the next open announces the latest commits again. Test:
+  `test_hybrid_localstack_fork_drop_does_not_stall` (2 s; 30.1 s with the
+  fix disabled).
 
 ### Not done
 

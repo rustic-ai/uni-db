@@ -228,6 +228,74 @@ async fn test_hybrid_localstack_forks_e2e() -> Result<()> {
     Ok(())
 }
 
+/// Dropping a fork session on a single-threaded runtime does not stall.
+///
+/// The drop records the fork WAL's announced mark, and a fork's WAL is on
+/// the remote store. Blocking this runtime's only thread on that write
+/// starved it: the store's pooled connections are driven by tasks of this
+/// runtime, so the request waited out its 30 s timeout before retrying on a
+/// fresh connection. The seal is now left to the runtime, and reopening the
+/// fork waits for it.
+#[tokio::test]
+#[ignore = "Requires LocalStack running on localhost:4566"]
+async fn test_hybrid_localstack_fork_drop_does_not_stall() -> Result<()> {
+    configure_localstack_env();
+
+    let temp_dir = tempdir()?;
+    let local_meta = temp_dir.path().join("meta");
+    std::fs::create_dir_all(&local_meta)?;
+    let bucket = format!("hybrid-drop-{}", std::process::id());
+    create_localstack_bucket(&bucket).await?;
+    let db = Uni::open(local_meta.to_string_lossy().to_string())
+        .remote_storage(&format!("s3://{bucket}"), localstack_cloud_config(&bucket))
+        .build()
+        .await?;
+    db.schema()
+        .label("Person")
+        .property("name", DataType::String)
+        .apply()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:Person {name: 'Alice'})").await?;
+    tx.commit().await?;
+    db.flush().await?;
+
+    let names = |session: uni_db::Session| async move {
+        let rows = session
+            .query("MATCH (p:Person) RETURN p.name AS name ORDER BY name")
+            .await?;
+        rows.rows()
+            .iter()
+            .map(|r| r.get::<String>("name"))
+            .collect::<std::result::Result<Vec<_>, _>>()
+    };
+
+    // Committed, not flushed: the fork's WAL has an announced mark to seal.
+    let fork = db.session().fork("f1").await?;
+    let tx = fork.tx().await?;
+    tx.execute("CREATE (:Person {name: 'Fork'})").await?;
+    tx.commit().await?;
+    let started = std::time::Instant::now();
+    drop(fork);
+    let dropped = started.elapsed();
+    assert!(
+        dropped < std::time::Duration::from_secs(5),
+        "dropping the fork session took {dropped:?}"
+    );
+
+    // Reopened at once, the fork has its commit, replayed from its WAL.
+    let started = std::time::Instant::now();
+    let fork = db.session().fork("f1").await?;
+    assert_eq!(names(fork).await?, ["Alice", "Fork"]);
+    let reopened = started.elapsed();
+    assert!(
+        reopened < std::time::Duration::from_secs(10),
+        "reopening and reading the fork took {reopened:?}"
+    );
+    assert_eq!(names(db.session()).await?, ["Alice"]);
+    Ok(())
+}
+
 fn localstack_cloud_config(bucket: &str) -> CloudStorageConfig {
     CloudStorageConfig::S3 {
         bucket: bucket.to_string(),
