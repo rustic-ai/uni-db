@@ -115,8 +115,16 @@ pub(crate) static FAIL_NEXT_FSYNC: std::sync::atomic::AtomicBool =
 ///
 /// `pub(crate)` so the snapshot durability barrier (review C4) can reuse the
 /// exact same file+parent fsync the WAL uses for its own segments.
+///
+/// The file is opened for writing because Windows needs it: `sync_all` there
+/// is `FlushFileBuffers`, which fails with `ERROR_ACCESS_DENIED` on a
+/// read-only handle such as `File::open` returns. POSIX `fsync` accepts
+/// either, so this changes nothing on Unix.
 pub(crate) fn sync_file_and_parent(path: &std::path::Path) -> std::io::Result<()> {
-    std::fs::File::open(path)?.sync_all()?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .sync_all()?;
     #[cfg(unix)]
     if let Some(dir) = path.parent() {
         std::fs::File::open(dir)?.sync_all()?;
@@ -1047,6 +1055,19 @@ mod tests {
     use object_store::local::LocalFileSystem;
     use std::collections::HashMap;
     use tempfile::tempdir;
+
+    /// A freshly written file can be made durable. On Windows this failed with
+    /// `Access is denied. (os error 5)` while the file was reopened read-only
+    /// for `sync_all`, so the first write to any store failed there.
+    #[test]
+    fn sync_file_and_parent_syncs_a_written_file() -> std::io::Result<()> {
+        let dir = tempdir()?;
+        let file = dir.path().join("segment.wal");
+        std::fs::write(&file, b"entry")?;
+        sync_file_and_parent(&file)?;
+        assert_eq!(std::fs::read(&file)?, b"entry");
+        Ok(())
+    }
 
     /// Opening a log waits for a seal of it still pending in a task, and no
     /// longer once the task is done or was dropped unrun. A seal of another
