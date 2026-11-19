@@ -5309,9 +5309,12 @@ impl StorageManager {
     /// by the backend's own rules (`StorageBackend::filter_batch`), so a row
     /// passes before a flush exactly when it would after one.
     ///
+    /// Public for searches that union unflushed rows above this layer (the
+    /// uni-query multi-vector re-rank), which must drop these vids themselves.
+    ///
     /// # Errors
     /// Propagates a filter the backend cannot evaluate, and read failures.
-    async fn l0_rows_failing_filter(
+    pub async fn l0_rows_failing_filter(
         &self,
         label: &str,
         filter: Option<&str>,

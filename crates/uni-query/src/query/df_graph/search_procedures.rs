@@ -453,16 +453,26 @@ pub(crate) async fn multivector_rerank(
     // 2. Live L0 candidates (and tombstones) for the label.
     let (l0_live, tombstoned) = uni_store::collect_l0_label_candidates(query_ctx, label);
 
-    // 3. Union(Lance, L0) minus tombstoned, deduped, capped.
+    //    The filter in step 1 reached flushed rows only. Unflushed rows whose
+    //    current values fail it are dropped from both sides of the union: the
+    //    L0 side so an excluded row cannot take a top-k slot, and the Lance
+    //    side so a flushed row that an unflushed update moved out of the filter
+    //    stops matching (#343).
+    let excluded = storage
+        .l0_rows_failing_filter(label, filter, query_ctx)
+        .await
+        .map_err(exec_err)?;
+
+    // 3. Union(Lance, L0) minus tombstoned and filtered-out, deduped, capped.
     let mut seen: std::collections::HashSet<Vid> = std::collections::HashSet::new();
     let mut candidates: Vec<Vid> = Vec::new();
     for (vid, _) in &lance_hits {
-        if !tombstoned.contains(vid) && seen.insert(*vid) {
+        if !tombstoned.contains(vid) && !excluded.contains(vid) && seen.insert(*vid) {
             candidates.push(*vid);
         }
     }
     for vid in l0_live {
-        if !tombstoned.contains(&vid) && seen.insert(vid) {
+        if !tombstoned.contains(&vid) && !excluded.contains(&vid) && seen.insert(vid) {
             candidates.push(vid);
         }
     }
