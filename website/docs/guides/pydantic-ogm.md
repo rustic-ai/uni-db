@@ -281,6 +281,18 @@ hits = (
 )
 ```
 
+`pre_filter` scopes a vector or sparse search **before** the top-`k` cut: only rows that pass it
+are ranked. It is a predicate over the model's stored columns by bare name. `.filter()` is
+different: it trims the `k` rows the search already returned, so it can leave fewer than `k`.
+
+```python
+adults = (
+    session.query(Document)
+    .vector_search("embedding", query_vec, k=5, pre_filter="year >= 2020")
+    .all()
+)
+```
+
 Every result from these three methods carries a `.search_scores` sidecar:
 
 ```python

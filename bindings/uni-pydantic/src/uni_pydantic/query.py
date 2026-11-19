@@ -507,7 +507,13 @@ class _QueryBuilderBase(Generic[NodeT]):
         threshold: float | None = None,
         pre_filter: str | None = None,
     ) -> SelfT:
-        """Perform vector similarity search. Returns a new builder."""
+        """Perform vector similarity search. Returns a new builder.
+
+        ``pre_filter`` scopes the search before the top-``k`` cut: only rows
+        that pass it are ranked. It is a predicate over the label's columns by
+        bare name (``"age >= 18"``, not ``"n.age >= 18"``). ``.filter()``, by
+        contrast, trims the ``k`` rows the search already chose.
+        """
         new = self._clone()
         name = prop._property_name if isinstance(prop, PropertyProxy) else prop
         _validate_property(name)
@@ -533,6 +539,9 @@ class _QueryBuilderBase(Generic[NodeT]):
         ``query`` may be a ``SparseVector``, a ``dict[int, float]`` of
         term id -> weight, or an ``(indices, values)`` pair. Returns a new
         builder. ``threshold`` filters on the dot-product score (``score >= t``).
+
+        ``pre_filter`` scopes the search before the top-``k`` cut, as in
+        :meth:`vector_search`.
         """
         new = self._clone()
         name = prop._property_name if isinstance(prop, PropertyProxy) else prop
@@ -761,11 +770,19 @@ class _QueryBuilderBase(Generic[NodeT]):
         vs = self._vector_search
         assert vs is not None
 
-        params = {"query_vec": vs.query_vector}
+        params: dict[str, Any] = {"query_vec": vs.query_vector}
+
+        # The pre-filter is the procedure's fifth argument, bound as a parameter:
+        # it scopes the candidates before the top-k cut, unlike the trailing
+        # WHERE below, which only trims rows already chosen.
+        filter_arg = ""
+        if vs.pre_filter is not None:
+            params["pre_filter"] = vs.pre_filter
+            filter_arg = ", $pre_filter"
 
         cypher = (
             f"CALL uni.vector.query('{label}', '{vs.property_name}', "
-            f"$query_vec, {vs.k})"
+            f"$query_vec, {vs.k}{filter_arg})"
         )
         cypher += " YIELD node, distance, score"
 
@@ -808,8 +825,16 @@ class _QueryBuilderBase(Generic[NodeT]):
             "sparse_q": {"indices": ss.query_indices, "values": ss.query_values}
         }
 
+        # See ``_build_vector_search_cypher``: the pre-filter scopes candidates
+        # before the top-k cut.
+        filter_arg = ""
+        if ss.pre_filter is not None:
+            params["pre_filter"] = ss.pre_filter
+            filter_arg = ", $pre_filter"
+
         cypher = (
-            f"CALL uni.sparse.query('{label}', '{ss.property_name}', $sparse_q, {ss.k})"
+            f"CALL uni.sparse.query('{label}', '{ss.property_name}', "
+            f"$sparse_q, {ss.k}{filter_arg})"
         )
         cypher += " YIELD node, score"
 
