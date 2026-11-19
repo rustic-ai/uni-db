@@ -13,7 +13,8 @@
 # on -- each with a named blocker, so the entry can be re-tested rather than
 # rotting into permanent silence.
 #
-# `unmaintained` and `yanked` WARN. Seven of the original 24 were unmaintained
+# `yanked` WARNS, and `unmaintained` is checked for workspace-direct crates
+# only (`unmaintained = "workspace"`). Seven of the original 24 were unmaintained
 # crates (bincode, bitmaps, fxhash, im-rc, number_prefix, paste,
 # proc-macro-error2). Six were transitive and not actionable here; fxhash was
 # the exception — ours, declared directly — and has since been migrated to
