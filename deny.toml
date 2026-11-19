@@ -36,6 +36,16 @@ ignore = [
   { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.38.4 via lance-io->opendal-core; needs >=0.41.0, opendal-pinned. Namespace-allocation DoS, same reachability." },
   { id = "RUSTSEC-2023-0071", reason = "rsa 0.9.10 via lance-io->opendal->reqsign-azure-storage. Marvin timing attack; upstream states NO safe upgrade exists. Only reachable on Azure blob auth." },
 
+  # ---- chrono / chrono-tz, unmaintained (#341) ----
+  # Both are workspace-direct, so `unmaintained = "workspace"` above reports
+  # them. No patched version exists. Moving off them changes the public API
+  # (`Value::to_date` / `to_time`, `Session::pin_to_timestamp`), so it waits for
+  # the next major version; arrow, parquet, datafusion, lance and object_store
+  # depend on chrono directly and keep it in the tree until they migrate.
+  # Re-test on every arrow/datafusion/lance upgrade.
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no patched version. Workspace-direct and in the public API; replacement is a breaking change tracked in #341. Also pulled in by arrow/datafusion/lance." },
+  { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained, no patched version. Used by uni-query and uni-query-functions for time-zone conversion; goes with chrono (#341)." },
+
   # The candle-core 0.10 -> zip 7.2 block (RUSTSEC-2026-0367/0368/0369) was
   # here and is gone: uni-xervo 0.19 dropped mistralrs and moved to
   # candle-core 0.11.1, which requires zip ^9.1.3, past the 9.0.0 fix for all
