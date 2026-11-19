@@ -511,12 +511,23 @@ impl SparseVectorIndex {
     /// accumulate per-vid dot products, then drain a bounded min-heap. No
     /// MVCC/tombstone filtering happens here — the orchestration layer applies
     /// it, mirroring the dense `vector_search` path.
-    pub async fn query_topk(&self, query: &[(u32, f32)], k: usize) -> Result<Vec<(Vid, f32)>> {
+    ///
+    /// `allowed`, when given, restricts scoring to those vids: a posting for
+    /// any other vid is skipped before it is accumulated, so the top `k` is
+    /// ranked among the allowed vids rather than cut from the unrestricted top
+    /// `k` (#344). Scores come from the stored weights, which are quantized
+    /// unless the index says otherwise.
+    pub async fn query_topk(
+        &self,
+        query: &[(u32, f32)],
+        k: usize,
+        allowed: Option<&HashSet<u64>>,
+    ) -> Result<Vec<(Vid, f32)>> {
         let Some(ds) = &self.dataset else {
             debug!("Sparse index not initialized, returning empty result");
             return Ok(Vec::new());
         };
-        if query.is_empty() || k == 0 {
+        if query.is_empty() || k == 0 || allowed.is_some_and(HashSet::is_empty) {
             return Ok(Vec::new());
         }
 
@@ -574,7 +585,11 @@ impl SparseVectorIndex {
                     if vids.is_null(j) {
                         continue;
                     }
-                    *scores.entry(vids.value(j)).or_insert(0.0) += qw * weights.get(j);
+                    let vid = vids.value(j);
+                    if allowed.is_some_and(|a| !a.contains(&vid)) {
+                        continue;
+                    }
+                    *scores.entry(vid).or_insert(0.0) += qw * weights.get(j);
                 }
             }
         }

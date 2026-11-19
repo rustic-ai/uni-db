@@ -101,6 +101,11 @@ async fn search_filter_on_unflushed_updates() -> Result<()> {
     db.flush().await?;
     run(&db, "MATCH (d:Doc {id: 2}) SET d.id = 20").await?;
     check(&db, "updated", "id = 2", &[]).await?;
+    // Flushing the update leaves the old row version in the table, where the
+    // search index still matches it; only the vertex's latest row counts.
+    db.flush().await?;
+    check(&db, "updated and flushed", "id = 2", &[]).await?;
+    check(&db, "updated and flushed", "id = 20", &[20]).await?;
     Ok(())
 }
 
