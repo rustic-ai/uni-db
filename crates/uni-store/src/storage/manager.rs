@@ -4748,6 +4748,7 @@ impl StorageManager {
         // Merge L0 buffer vertices into results for visibility of unflushed data.
         if let Some(qctx) = ctx {
             let excluded = self.l0_rows_failing_filter(label, filter, qctx).await?;
+            let joined = self.l0_label_joined_props(label, qctx).await?;
             merge_l0_into_vector_results(
                 &mut results,
                 qctx,
@@ -4757,6 +4758,7 @@ impl StorageManager {
                 k,
                 &metric,
                 &excluded,
+                &joined,
             )?;
         }
 
@@ -4806,26 +4808,27 @@ impl StorageManager {
             return Ok(Vec::new());
         }
 
+        let hwm = ctx.and(self.version_high_water_mark());
         let mut filter_parts = vec![Self::build_active_filter(filter)];
-        if let Some(visible) = self
-            .visibility_at(ctx.and(self.version_high_water_mark()))
-            .filter()
-        {
+        if let Some(visible) = self.visibility_at(hwm).filter() {
             filter_parts.push(visible);
         }
         let combined_filter = FilterExpr::all(filter_parts);
 
-        let batches = backend
-            .vector_search(
-                &name,
-                fde_column,
-                fde_query,
-                k,
-                BackendMetric::Dot,
-                combined_filter,
-                opts,
-                ctx.and_then(|c| c.counters.clone()),
-            )
+        let counters = ctx.and_then(|c| c.counters.clone());
+        let batches = self
+            .search_latest_row_versions(&name, k, hwm, ctx, |fetch| {
+                backend.vector_search(
+                    &name,
+                    fde_column,
+                    fde_query,
+                    fetch,
+                    BackendMetric::Dot,
+                    combined_filter.clone(),
+                    opts,
+                    counters.clone(),
+                )
+            })
             .await?;
         extract_vid_score_pairs(&batches, "_vid", "_distance")
     }
@@ -4892,6 +4895,17 @@ impl StorageManager {
             if !backend.table_exists(&name).await? {
                 return Ok(Vec::new());
             }
+            // With a filter only a vertex's latest row may admit it: an older
+            // row version that still passes would otherwise return a vertex
+            // whose current values do not (#343).
+            if let Some(filter) = filter {
+                return Ok(self
+                    .flushed_vids_passing_filter(&name, filter, ctx)
+                    .await?
+                    .into_iter()
+                    .map(|vid| (Vid::from(vid), 0.0_f32))
+                    .collect());
+            }
             let mut filter_parts = vec![Self::build_active_filter(filter)];
             if let Some(visible) = self
                 .visibility_at(ctx.and(self.version_high_water_mark()))
@@ -4928,26 +4942,27 @@ impl StorageManager {
                 _ => BackendMetric::Cosine,
             };
 
+            let hwm = ctx.and(self.version_high_water_mark());
             let mut filter_parts = vec![Self::build_active_filter(filter)];
-            if let Some(visible) = self
-                .visibility_at(ctx.and(self.version_high_water_mark()))
-                .filter()
-            {
+            if let Some(visible) = self.visibility_at(hwm).filter() {
                 filter_parts.push(visible);
             }
             let combined_filter = FilterExpr::all(filter_parts);
 
-            let batches = backend
-                .multivector_search(
-                    &name,
-                    property,
-                    query,
-                    k,
-                    backend_metric,
-                    combined_filter,
-                    opts,
-                    ctx.and_then(|c| c.counters.clone()),
-                )
+            let counters = ctx.and_then(|c| c.counters.clone());
+            let batches = self
+                .search_latest_row_versions(&name, k, hwm, ctx, |fetch| {
+                    backend.multivector_search(
+                        &name,
+                        property,
+                        query,
+                        fetch,
+                        backend_metric,
+                        combined_filter.clone(),
+                        opts,
+                        counters.clone(),
+                    )
+                })
                 .await?;
             results = extract_vid_score_pairs(&batches, "_vid", "_distance")?;
         }
@@ -4955,18 +4970,6 @@ impl StorageManager {
         Ok(results)
     }
 
-    /// Flushed-data candidate generation for scored sparse-vector retrieval.
-    ///
-    /// Loads the registered sparse index and returns its top-`k`
-    /// `(vid, prelim_score)` by dot product over the flushed postings. Like
-    /// [`Self::multivector_search`], this is **flushed-only** and the prelim
-    /// score is advisory: the uni-query `sparse_rerank` helper unions live L0
-    /// rows and re-scores *every* candidate exactly and MVCC-aware via
-    /// `sparse_dot`, so callers wanting recent-write visibility must go through
-    /// that path. Returns empty if no sparse index is registered for the
-    /// property. On a fork/branch there is no per-branch sparse index, so this
-    /// brute-force enumerates the branch's candidate vids (Approach A — see the
-    /// branched arm) for the re-score path.
     /// Rescale a sparse query's weights by inverse document frequency, when the
     /// index asks for it (#120).
     ///
@@ -5040,15 +5043,47 @@ impl StorageManager {
             .collect())
     }
 
+    /// Flushed-data candidate generation for scored sparse-vector retrieval.
+    ///
+    /// Loads the registered sparse index and returns its top-`k`
+    /// `(vid, prelim_score)` by dot product over the flushed postings. Like
+    /// [`Self::multivector_search`], this is **flushed-only** and the prelim
+    /// score is advisory: the uni-query `sparse_rerank` helper unions live L0
+    /// rows and re-scores *every* candidate exactly and MVCC-aware via
+    /// `sparse_dot`, so callers wanting recent-write visibility must go through
+    /// that path. Returns empty if no sparse index is registered for the
+    /// property. On a fork/branch there is no per-branch sparse index, so this
+    /// brute-force enumerates the branch's candidate vids (Approach A — see the
+    /// branched arm) for the re-score path.
+    ///
+    /// `filter` scopes the candidates to flushed rows that pass it. The sparse
+    /// index holds postings only and cannot evaluate a predicate, so the filter
+    /// is resolved against the label's table to a set of vids first and the
+    /// index ranks only those, rather than cutting an unfiltered top `k` down
+    /// afterwards (#344). On a fork with a branch for the table every passing
+    /// vid is returned and `k` is not applied. Resolving the filter reads the
+    /// table twice (the filtered scan and the latest-version lookup), at a cost
+    /// that grows with the rows passing it. Unflushed rows are the caller's to
+    /// filter, as they are its to union.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a filter on a schemaless property, a filter the
+    /// backend cannot evaluate, or an index that exists and cannot be read.
     pub async fn sparse_search(
         &self,
         label: &str,
         property: &str,
         query: &[(u32, f32)],
         k: usize,
+        filter: Option<&str>,
+        ctx: Option<&QueryContext>,
     ) -> Result<Vec<(Vid, f32)>> {
         #[cfg(feature = "lance-backend")]
         {
+            if filter.is_some() && self.is_schemaless_property(label, property) {
+                reject_schemaless_filter(label, property, filter)?;
+            }
             let name = table_names::vertex_table_name(label);
             let branched = self
                 .fork_scope
@@ -5082,6 +5117,17 @@ impl StorageManager {
                 if !backend.table_exists(&name).await? {
                     return Ok(Vec::new());
                 }
+                // With a filter the scan has to return each vertex's latest
+                // row only: an older row version that still passes would
+                // otherwise admit a vertex whose current values do not.
+                if let Some(filter) = filter {
+                    return Ok(self
+                        .flushed_vids_passing_filter(&name, filter, ctx)
+                        .await?
+                        .into_iter()
+                        .map(|vid| (Vid::from(vid), 0.0_f32))
+                        .collect());
+                }
                 let request = ScanRequest::all(&name)
                     .with_filter(Self::build_active_filter(None))
                     .with_columns(vec!["_vid".to_string()]);
@@ -5100,22 +5146,37 @@ impl StorageManager {
                 }
                 return Ok(results);
             }
-            match self
+            // Nothing to score: skip resolving the filter, which reads the
+            // label's table.
+            if query.is_empty() || k == 0 {
+                return Ok(Vec::new());
+            }
+            let idx = match self
                 .index_manager()
                 .sparse_vector_index(label, property)
                 .await
             {
-                Ok(idx) => idx.query_topk(query, k).await,
+                Ok(idx) => idx,
                 // No index for this label/property is an empty result; an index
                 // that exists and cannot be opened is a failure, and returning
                 // zero hits for it made a broken index look like a miss (#233).
-                Err(e) if crate::store_utils::is_dataset_not_found(&e) => Ok(Vec::new()),
-                Err(e) => Err(e),
-            }
+                Err(e) if crate::store_utils::is_dataset_not_found(&e) => return Ok(Vec::new()),
+                Err(e) => return Err(e),
+            };
+            let allowed = match filter {
+                Some(filter) => {
+                    if !self.backend.table_exists(&name).await? {
+                        return Ok(Vec::new());
+                    }
+                    Some(self.flushed_vids_passing_filter(&name, filter, ctx).await?)
+                }
+                None => None,
+            };
+            idx.query_topk(query, k, allowed.as_ref()).await
         }
         #[cfg(not(feature = "lance-backend"))]
         {
-            let _ = (label, property, query, k);
+            let _ = (label, property, query, k, filter, ctx);
             Ok(Vec::new())
         }
     }
@@ -5157,7 +5218,16 @@ impl StorageManager {
         let unflushed = match ctx {
             Some(qctx) => {
                 let excluded = self.l0_rows_failing_filter(label, filter, qctx).await?;
-                let l0 = collect_l0_texts(qctx, label, property)?;
+                let mut l0 = collect_l0_texts(qctx, label, property)?;
+                // A vertex an unflushed relabel put under the label has no L0
+                // property row; its text is its flushed one.
+                for (vid, props) in self.l0_label_joined_props(label, qctx).await? {
+                    if let Some(value) = props.get(property) {
+                        l0.texts
+                            .entry(vid)
+                            .or_insert_with(|| value.as_str().map(str::to_string));
+                    }
+                }
                 Some((excluded, l0))
             }
             None => None,
@@ -5299,6 +5369,77 @@ impl StorageManager {
         Ok(results)
     }
 
+    /// Vids of `table`'s flushed vertices whose latest row passes `filter`.
+    ///
+    /// For a search whose index cannot evaluate a predicate (the sparse
+    /// postings): the filter is resolved here to the vids it allows. Only a
+    /// vertex's latest row counts, within the pinned snapshot's ceiling when
+    /// `ctx` carries one; a superseded row that still passes does not admit a
+    /// vertex whose current values fail, and a deleted vertex is never allowed.
+    ///
+    /// # Errors
+    /// Propagates a filter the backend cannot evaluate, and read failures.
+    async fn flushed_vids_passing_filter(
+        &self,
+        table: &str,
+        filter: &str,
+        ctx: Option<&QueryContext>,
+    ) -> Result<HashSet<u64>> {
+        let hwm = ctx.and(self.version_high_water_mark());
+        let mut parts = vec![Self::build_active_filter(Some(filter))];
+        if let Some(visible) = self.visibility_at(hwm).filter() {
+            parts.push(visible);
+        }
+        let mut request = ScanRequest::all(table)
+            .with_columns(vec!["_vid".to_string(), "_version".to_string()])
+            .with_filter(FilterExpr::all(parts));
+        request.counters = ctx.and_then(|c| c.counters.clone());
+        let batches = self.backend.scan(request).await?;
+        let (latest, _) = self.keep_latest_row_versions(table, batches, hwm).await?;
+        let mut vids = HashSet::new();
+        for batch in &latest {
+            let col = batch
+                .column_by_name("_vid")
+                .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+                .ok_or_else(|| anyhow!("filtered rows have no _vid column"))?;
+            vids.extend(col.iter().flatten());
+        }
+        Ok(vids)
+    }
+
+    /// Flushed properties of the vertices an unflushed label change alone put
+    /// under `label`.
+    ///
+    /// `SET n:L` on a flushed vertex leaves L0 holding its new labels and no
+    /// property row, and its flushed row sits under its old labels. A search of
+    /// `L` then found it on neither side until the next flush. These are the
+    /// vertices a search has to add to its unflushed candidates, with the
+    /// properties to score them by; the scan path reads the same set
+    /// (`label_only_l0_base_props`). A vertex that left the label needs no
+    /// lookup and is handled where the L0 buffers are walked.
+    ///
+    /// # Errors
+    /// Propagates the main-table read's failures.
+    pub async fn l0_label_joined_props(
+        &self,
+        label: &str,
+        ctx: &QueryContext,
+    ) -> Result<HashMap<Vid, uni_common::Properties>> {
+        let l0_ctx = crate::runtime::l0_visibility::L0Context::from_query_context(ctx);
+        let joined = crate::runtime::columnar_scan::label_only_l0_base_props(
+            self,
+            &l0_ctx,
+            label,
+            |_| true,
+            ctx.counters.as_ref(),
+        )
+        .await?;
+        Ok(joined
+            .into_iter()
+            .map(|(vid, (props, _))| (Vid::new(vid), props))
+            .collect())
+    }
+
     /// Vids of `label`'s unflushed rows whose current values fail `filter`.
     ///
     /// A search's `filter` reaches only the backend scan of flushed rows. The
@@ -5309,9 +5450,12 @@ impl StorageManager {
     /// by the backend's own rules (`StorageBackend::filter_batch`), so a row
     /// passes before a flush exactly when it would after one.
     ///
+    /// Public for searches that union unflushed rows above this layer (the
+    /// uni-query multi-vector re-rank), which must drop these vids themselves.
+    ///
     /// # Errors
     /// Propagates a filter the backend cannot evaluate, and read failures.
-    async fn l0_rows_failing_filter(
+    pub async fn l0_rows_failing_filter(
         &self,
         label: &str,
         filter: Option<&str>,
@@ -5409,6 +5553,46 @@ impl StorageManager {
         .await
     }
 
+    /// The hits of `search(fetch)` that are their vertex's latest row version,
+    /// widening `fetch` when superseded hits left the answer short of `k`.
+    ///
+    /// A search index matches every row version a vertex has, so a hit can be
+    /// a row the vertex no longer has: with a filter, an old version that
+    /// still passes returned a vertex whose current values fail (#343).
+    /// Superseded hits are dropped; when that happened, fewer than `k` remain
+    /// and the backend returned a full page, the search is repeated with twice
+    /// the fetch. The same loop `vector_search` runs inline.
+    ///
+    /// # Errors
+    /// Propagates search and version-lookup failures and a query timeout.
+    async fn search_latest_row_versions<F, Fut>(
+        &self,
+        table: &str,
+        k: usize,
+        hwm: Option<u64>,
+        ctx: Option<&QueryContext>,
+        mut search: F,
+    ) -> Result<Vec<arrow_array::RecordBatch>>
+    where
+        F: FnMut(usize) -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<arrow_array::RecordBatch>>>,
+    {
+        let mut fetch = k;
+        loop {
+            let raw = search(fetch).await?;
+            let returned: usize = raw.iter().map(|b| b.num_rows()).sum();
+            let (kept, dropped) = self.keep_latest_row_versions(table, raw, hwm).await?;
+            let kept_rows: usize = kept.iter().map(|b| b.num_rows()).sum();
+            if dropped == 0 || kept_rows >= k || returned < fetch || fetch == usize::MAX {
+                return Ok(kept);
+            }
+            if let Some(ctx) = ctx {
+                ctx.check_timeout()?;
+            }
+            fetch = fetch.saturating_mul(2);
+        }
+    }
+
     /// `batches` narrowed to rows that are their vertex's latest version.
     ///
     /// Vertex tables are append-only: an update writes a new row and leaves
@@ -5448,10 +5632,20 @@ impl StorageManager {
         if hit_vids.is_empty() {
             return Ok((batches, 0));
         }
-        let mut parts = vec![FilterExpr::one_of(
-            "_vid",
-            hit_vids.iter().map(|v| Scalar::UInt(*v)),
-        )];
+        // The version lookup is an indexed `_vid IN (...)` read (`_vid` has a
+        // default BTree index). Only when the hits are a large share of the
+        // table is reading the two columns whole the cheaper plan; a fixed
+        // threshold made a large-`k` search over a big table read all of it.
+        const VID_LIST_MIN: usize = 8192;
+        let by_vid_list = hit_vids.len() <= VID_LIST_MIN
+            || hit_vids.len().saturating_mul(4) < self.backend.count_rows(table, None).await?;
+        let mut parts = Vec::new();
+        if by_vid_list {
+            parts.push(FilterExpr::one_of(
+                "_vid",
+                hit_vids.iter().map(|v| Scalar::UInt(*v)),
+            ));
+        }
         if let Some(visible) = self.visibility_at(hwm).filter() {
             parts.push(visible);
         }
@@ -5466,7 +5660,9 @@ impl StorageManager {
         let mut latest: HashMap<u64, u64> = HashMap::new();
         for (vid, version) in rows.iter().filter_map(columns) {
             for (vid, version) in vid.iter().zip(version.iter()) {
-                if let (Some(vid), Some(version)) = (vid, version) {
+                if let (Some(vid), Some(version)) = (vid, version)
+                    && hit_vids.contains(&vid)
+                {
                     let slot = latest.entry(vid).or_insert(version);
                     *slot = (*slot).max(version);
                 }
@@ -5908,6 +6104,7 @@ fn merge_l0_into_vector_results(
     k: usize,
     metric: &DistanceMetric,
     excluded: &HashSet<Vid>,
+    joined: &HashMap<Vid, uni_common::Properties>,
 ) -> Result<()> {
     let buffers = l0_buffers_in_precedence(ctx);
     let mut deadline = DeadlineTicker::new(ctx);
@@ -5966,6 +6163,17 @@ fn merge_l0_into_vector_results(
                 // If re-created in a later L0, remove from tombstones.
                 tombstoned.remove(&vid);
             }
+        }
+    }
+
+    // A vertex an unflushed relabel put under the label has no L0 property row
+    // to be found by above; it is scored by its flushed properties.
+    for (vid, props) in joined {
+        if !l0_candidates.contains_key(vid)
+            && let Some(emb) = extract_embedding_from_props(props, property)
+            && emb.len() == query.len()
+        {
+            l0_candidates.insert(*vid, metric.compute_distance(&emb, query));
         }
     }
 
@@ -6060,13 +6268,19 @@ impl<'a> DeadlineTicker<'a> {
     }
 }
 
-/// Collects the live L0 vids carrying `label`, plus the set of vids tombstoned,
-/// across the 3-tier L0 chain (pending flush → main → transaction).
+/// Collects the live L0 vids carrying `label`, plus the set of vids a search
+/// must drop, across the 3-tier L0 chain (pending flush → main → transaction).
 ///
 /// Walks the buffers in precedence order (last writer wins): a vid created in a
 /// later buffer clears an earlier tombstone, and a vid tombstoned in a later
 /// buffer is removed from the live set. The returned `live` set therefore
 /// excludes anything currently tombstoned.
+///
+/// An unflushed label change counts too. A vertex whose newest relabel no
+/// longer includes `label` is returned with the tombstoned vids, so its flushed
+/// hit is dropped; one a relabel put under `label` is live although L0 holds no
+/// property row for it (its properties are the flushed ones, see
+/// [`StorageManager::l0_label_joined_props`]).
 ///
 /// This mirrors the L0 traversal in `merge_l0_into_vector_results` but returns
 /// membership only — it does not score — so callers that re-score candidates
@@ -6078,6 +6292,8 @@ pub fn collect_l0_label_candidates(ctx: &QueryContext, label: &str) -> (Vec<Vid>
 
     let mut live: HashSet<Vid> = HashSet::new();
     let mut tombstoned: HashSet<Vid> = HashSet::new();
+    // Whether each relabeled vid still carries the label, newest buffer last.
+    let mut label_membership: HashMap<Vid, bool> = HashMap::new();
 
     for buf_arc in &buffers {
         let buf = buf_arc.read();
@@ -6086,6 +6302,15 @@ pub fn collect_l0_label_candidates(ctx: &QueryContext, label: &str) -> (Vec<Vid>
         for &vid in &buf.vertex_tombstones {
             tombstoned.insert(vid);
             live.remove(&vid);
+        }
+
+        for vid in &buf.vertex_label_overwrites {
+            label_membership.insert(
+                *vid,
+                buf.vertex_labels
+                    .get(vid)
+                    .is_some_and(|labels| labels.iter().any(|l| l == label)),
+            );
         }
 
         // A (re-)creation with the target label in this buffer wins over an
@@ -6098,6 +6323,15 @@ pub fn collect_l0_label_candidates(ctx: &QueryContext, label: &str) -> (Vec<Vid>
                 live.insert(vid);
                 tombstoned.remove(&vid);
             }
+        }
+    }
+
+    for (vid, member) in label_membership {
+        if !member {
+            live.remove(&vid);
+            tombstoned.insert(vid);
+        } else if !tombstoned.contains(&vid) {
+            live.insert(vid);
         }
     }
 
@@ -6162,9 +6396,19 @@ struct L0Texts {
 fn collect_l0_texts(ctx: &QueryContext, label: &str, property: &str) -> Result<L0Texts> {
     let mut deadline = DeadlineTicker::new(ctx);
     let mut out = L0Texts::default();
+    // Whether each relabeled vid still carries the label, newest buffer last.
+    let mut label_membership: HashMap<Vid, bool> = HashMap::new();
     for buf_arc in &l0_buffers_in_precedence(ctx) {
         let buf = buf_arc.read();
         out.tombstoned.extend(buf.vertex_tombstones.iter().copied());
+        for vid in &buf.vertex_label_overwrites {
+            label_membership.insert(
+                *vid,
+                buf.vertex_labels
+                    .get(vid)
+                    .is_some_and(|labels| labels.iter().any(|l| l == label)),
+            );
+        }
         for (&vid, labels) in &buf.vertex_labels {
             deadline.tick()?;
             if !labels.iter().any(|l| l == label) {
@@ -6180,6 +6424,14 @@ fn collect_l0_texts(ctx: &QueryContext, label: &str, property: &str) -> Result<L
             out.texts.insert(vid, text);
             // A re-creation in a later buffer clears an earlier tombstone.
             out.tombstoned.remove(&vid);
+        }
+    }
+    // A vertex an unflushed relabel took out of the label is dropped like a
+    // tombstone, however its flushed row matched.
+    for (vid, member) in label_membership {
+        if !member {
+            out.texts.remove(&vid);
+            out.tombstoned.insert(vid);
         }
     }
     Ok(out)
@@ -6430,6 +6682,7 @@ mod l0_merge_tests {
             10,
             &DistanceMetric::L2,
             &HashSet::new(),
+            &HashMap::new(),
         )
         .expect_err("the deadline has passed");
         assert!(err.to_string().contains("timed out"), "{err}");
@@ -6462,6 +6715,7 @@ mod l0_merge_tests {
             3,
             &DistanceMetric::L2,
             &HashSet::new(),
+            &HashMap::new(),
         )
         .unwrap();
         let vids: Vec<u64> = results.iter().map(|(v, _)| v.as_u64()).collect();

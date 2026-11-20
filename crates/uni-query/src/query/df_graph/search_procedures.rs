@@ -362,6 +362,19 @@ async fn rerank_candidates(
     ))
 }
 
+/// How many flushed search hits the label's unflushed rows can displace: the
+/// distinct vids that are live in L0, tombstoned there, or fail the filter.
+fn shadow_count(
+    l0_live: &[Vid],
+    tombstoned: &std::collections::HashSet<Vid>,
+    excluded: &std::collections::HashSet<Vid>,
+) -> usize {
+    let mut vids: std::collections::HashSet<Vid> = l0_live.iter().copied().collect();
+    vids.extend(tombstoned.iter().copied());
+    vids.extend(excluded.iter().copied());
+    vids.len()
+}
+
 /// Default Lance candidate over-fetch multiplier for native multi-vector
 /// (ColBERT / MaxSim) first-stage retrieval. Lance ANN over the flushed set is
 /// only a *candidate generator*; the exact MaxSim re-rank picks the true top-k,
@@ -400,7 +413,35 @@ pub(crate) async fn multivector_rerank(
     opts: uni_store::VectorQueryOpts,
     metric: &DistanceMetric,
 ) -> DFResult<(Vec<(Vid, f32)>, HashMap<Vid, uni_common::Properties>)> {
-    // 1. Candidate generation over flushed/indexed data.
+    // 1. Live L0 candidates (and tombstones) for the label, and the unflushed
+    //    rows whose current values fail `filter`. The filter in step 2 reaches
+    //    flushed rows only; these are dropped from both sides of the union: the
+    //    L0 side so an excluded row cannot take a top-k slot, and the Lance
+    //    side so a flushed row that an unflushed update moved out of the filter
+    //    stops matching (#343).
+    let (l0_live, tombstoned) = uni_store::collect_l0_label_candidates(query_ctx, label);
+    let excluded = storage
+        .l0_rows_failing_filter(label, filter, query_ctx)
+        .await
+        .map_err(exec_err)?;
+
+    //    Each unflushed vid can displace at most one flushed hit — dropped as
+    //    tombstoned or filtered out, or re-scored lower against its new
+    //    tokens. Fetching that many more keeps `retrieval_k` unaffected flushed
+    //    candidates; a fixed over-fetch returned too few rows, or none, when
+    //    the best matches had unflushed changes. The widening stops at the cap
+    //    on flushed candidates below.
+    let fetch_k = {
+        let shadow = shadow_count(&l0_live, &tombstoned, &excluded);
+        let widened = retrieval_k.saturating_add(shadow);
+        if storage.fork_scope().is_none() {
+            widened.min(retrieval_k.max(MULTIVECTOR_MAX_CANDIDATES))
+        } else {
+            widened
+        }
+    };
+
+    // 2. Candidate generation over flushed/indexed data.
     //
     //    MUVERA fast path (main line only): if the property has a MUVERA index, encode
     //    the query into a Fixed-Dimensional Encoding and run the single-vector ANN over
@@ -427,7 +468,7 @@ pub(crate) async fn multivector_rerank(
                         label,
                         &spec.derived_col,
                         &fde_q,
-                        retrieval_k,
+                        fetch_k,
                         filter,
                         opts,
                         Some(query_ctx),
@@ -440,7 +481,7 @@ pub(crate) async fn multivector_rerank(
                     label,
                     property,
                     query,
-                    retrieval_k,
+                    fetch_k,
                     filter,
                     opts,
                     Some(query_ctx),
@@ -450,44 +491,58 @@ pub(crate) async fn multivector_rerank(
         }
     };
 
-    // 2. Live L0 candidates (and tombstones) for the label.
-    let (l0_live, tombstoned) = uni_store::collect_l0_label_candidates(query_ctx, label);
-
-    // 3. Union(Lance, L0) minus tombstoned, deduped, capped.
+    // 3. Union(Lance, L0) minus tombstoned and filtered-out, deduped.
     let mut seen: std::collections::HashSet<Vid> = std::collections::HashSet::new();
     let mut candidates: Vec<Vid> = Vec::new();
     for (vid, _) in &lance_hits {
-        if !tombstoned.contains(vid) && seen.insert(*vid) {
+        if !tombstoned.contains(vid) && !excluded.contains(vid) && seen.insert(*vid) {
             candidates.push(*vid);
         }
     }
-    for vid in l0_live {
-        if !tombstoned.contains(&vid) && seen.insert(vid) {
-            candidates.push(vid);
-        }
-    }
+    // The cap bounds the flushed candidates only, and before the L0 rows are
+    // added. Lance returns its hits best first, so truncating them sheds the
+    // weakest; the L0 rows are unranked until the re-score below, and capping
+    // the union dropped an arbitrary share of them — the best matches
+    // included — once a label had about a thousand unflushed rows. The dense
+    // and sparse paths score every unflushed row too.
+    //
     // On a fork the candidate set is the full branch scan (incl. inherited
     // rows) unordered, so truncating would silently drop recall — score them
-    // all (brute-force). On the main path Lance pre-limits to `retrieval_k`, so
-    // the cap is just a safety net.
+    // all (brute-force).
     if storage.fork_scope().is_none() && candidates.len() > MULTIVECTOR_MAX_CANDIDATES {
-        // Reaching here means the "Lance pre-limits to retrieval_k" assumption
-        // above did not hold, and the cap stopped being a safety net and became
-        // the thing deciding the answer: every candidate past the bound is
-        // dropped before the exact re-rank ever sees it, silently costing recall.
-        // Count what was dropped so the assumption is falsifiable in production
-        // rather than only in review (#233).
+        // The fetch above is clamped to the cap, so this is reached only when
+        // the caller's own `retrieval_k` exceeds it. Count what was dropped so
+        // that is visible in production rather than only in review (#233).
         metrics::counter!("uni_multivector_candidates_truncated_total")
             .increment((candidates.len() - MULTIVECTOR_MAX_CANDIDATES) as u64);
-        candidates.truncate(MULTIVECTOR_MAX_CANDIDATES);
+        for vid in candidates.drain(MULTIVECTOR_MAX_CANDIDATES..) {
+            seen.remove(&vid);
+        }
+    }
+    for vid in l0_live {
+        if !tombstoned.contains(&vid) && !excluded.contains(&vid) && seen.insert(vid) {
+            candidates.push(vid);
+        }
     }
 
     // 4. Fetch token properties for all candidates (L0 + Lance merged, tombstone
     //    aware).
-    let props_map = property_manager
+    let mut props_map = property_manager
         .get_batch_vertex_props_for_label(&candidates, label, Some(query_ctx))
         .await
         .map_err(exec_err)?;
+    // A vertex an unflushed relabel put under the label has no L0 property row
+    // and no flushed row under this label; it is scored by its flushed
+    // properties.
+    for (vid, props) in storage
+        .l0_label_joined_props(label, query_ctx)
+        .await
+        .map_err(exec_err)?
+    {
+        if seen.contains(&vid) {
+            props_map.insert(vid, props);
+        }
+    }
 
     // 5. Exact in-process MaxSim re-score. A vid absent from `props_map` is not
     //    visible (filtered by tombstone / version) and is dropped; a vid present
@@ -541,8 +596,25 @@ pub(crate) async fn sparse_rerank(
     query: &uni_sparse_vector::SparseVector,
     k: usize,
     retrieval_k: usize,
+    filter: Option<&str>,
 ) -> DFResult<(Vec<(Vid, f32)>, HashMap<Vid, uni_common::Properties>)> {
-    // 1. Flushed candidate generation via the sparse index (term-matching vids).
+    // 1. Live L0 candidates (and tombstones) for the label, and the unflushed
+    //    rows whose current values fail `filter`. The filter in step 2 reaches
+    //    flushed rows only; these are dropped from both sides of the union: the
+    //    L0 side so an excluded row cannot take a top-k slot, and the flushed
+    //    side so a row that an unflushed update moved out of the filter stops
+    //    matching (#344).
+    let (l0_live, tombstoned) = uni_store::collect_l0_label_candidates(query_ctx, label);
+    let excluded = storage
+        .l0_rows_failing_filter(label, filter, query_ctx)
+        .await
+        .map_err(exec_err)?;
+    //    See `multivector_rerank`: each unflushed vid can displace at most one
+    //    flushed hit, so that many more are fetched.
+    let fetch_k = retrieval_k.saturating_add(shadow_count(&l0_live, &tombstoned, &excluded));
+
+    // 2. Flushed candidate generation via the sparse index (term-matching vids),
+    //    scoped to the flushed rows `filter` allows.
     //
     // The IDF modifier, when the index asks for it, rescales the query's
     // weights once here (#120). Both the index scan below and the exact
@@ -563,33 +635,49 @@ pub(crate) async fn sparse_rerank(
     let scoring_query = scaled_query.as_ref().unwrap_or(query);
 
     let flushed = storage
-        .sparse_search(label, property, &query_pairs, retrieval_k)
+        .sparse_search(
+            label,
+            property,
+            &query_pairs,
+            fetch_k,
+            filter,
+            Some(query_ctx),
+        )
         .await
         .map_err(exec_err)?;
 
-    // 2. Live L0 candidates (and tombstones) for the label.
-    let (l0_live, tombstoned) = uni_store::collect_l0_label_candidates(query_ctx, label);
-
-    // 3. Union(flushed, L0) minus tombstoned, deduped.
+    // 3. Union(flushed, L0) minus tombstoned and filtered-out, deduped.
     let mut seen: std::collections::HashSet<Vid> = std::collections::HashSet::new();
     let mut candidates: Vec<Vid> = Vec::new();
     for (vid, _) in &flushed {
-        if !tombstoned.contains(vid) && seen.insert(*vid) {
+        if !tombstoned.contains(vid) && !excluded.contains(vid) && seen.insert(*vid) {
             candidates.push(*vid);
         }
     }
     for vid in l0_live {
-        if !tombstoned.contains(&vid) && seen.insert(vid) {
+        if !tombstoned.contains(&vid) && !excluded.contains(&vid) && seen.insert(vid) {
             candidates.push(vid);
         }
     }
 
     // 4. Fetch properties for all candidates (MVCC/tombstone aware: a vid that
     //    is not visible under this snapshot is absent from `props_map`).
-    let props_map = property_manager
+    let mut props_map = property_manager
         .get_batch_vertex_props_for_label(&candidates, label, Some(query_ctx))
         .await
         .map_err(exec_err)?;
+    // A vertex an unflushed relabel put under the label has no L0 property row
+    // and no flushed row under this label; it is scored by its flushed
+    // properties.
+    for (vid, props) in storage
+        .l0_label_joined_props(label, query_ctx)
+        .await
+        .map_err(exec_err)?
+    {
+        if seen.contains(&vid) {
+            props_map.insert(vid, props);
+        }
+    }
 
     // 5. Exact dot re-score. Absent vid → not visible → dropped. Present but
     //    missing the property → no document terms → score 0. The fetched
@@ -713,19 +801,7 @@ pub(crate) async fn run_sparse_query(
         other => extract_sparse_query(other)?,
     };
     let k = require_int_arg(args, 3, "uni.sparse.query: fourth argument (k)")?;
-    // `filter` is accepted for API symmetry; MVCC/tombstone visibility is
-    // already enforced by the property fetch in `sparse_rerank`.
-    // `uni.sparse.query` does not yet scope candidates by a user predicate (only MVCC /
-    // tombstone visibility from the property fetch applies). Reject a non-null `filter`
-    // explicitly rather than silently ignoring it, so a caller is not misled into
-    // believing results are constrained (issue #95; the filtered/hybrid surface is #114).
-    if extract_optional_filter(args, 4).is_some() {
-        return Err(datafusion::error::DataFusionError::Execution(
-            "uni.sparse.query: the `filter` argument is not yet supported — results are not \
-             scoped by it. Omit it, or pre-filter via a hybrid/Cypher query."
-                .to_string(),
-        ));
-    }
+    let filter = extract_optional_filter(args, 4);
     let threshold = extract_optional_threshold(args, 5);
     let options_map = args
         .get(6)
@@ -754,6 +830,7 @@ pub(crate) async fn run_sparse_query(
         &query,
         k,
         retrieval_k,
+        filter.as_deref(),
     )
     .await?;
 
@@ -1820,8 +1897,8 @@ pub(crate) async fn run_hybrid_search(
 
     // Sparse arm: opt-in via a `sparse` property plus an `options.sparse_query`
     // (a `SparseVector` or `{indices, values}` map). Reuse `sparse_rerank` so the
-    // arm inherits the same flushed∪L0 / MVCC / tombstone correctness as
-    // `uni.sparse.query`. Absent ⇒ `sparse_results` stays empty ⇒ fusion below is
+    // arm inherits the same flushed∪L0 / MVCC / tombstone / filter correctness
+    // as `uni.sparse.query`. Absent ⇒ `sparse_results` stays empty ⇒ fusion below is
     // a no-op for the sparse source and the two-way result is byte-identical.
     let mut sparse_results: Vec<(Vid, f32)> = Vec::new();
     if let Some(ref sparse_prop) = sparse_prop {
@@ -1842,6 +1919,7 @@ pub(crate) async fn run_hybrid_search(
                 &sparse_query,
                 effective_retrieval_k,
                 effective_retrieval_k,
+                filter.as_deref(),
             )
             .await?;
             sparse_results = scored;

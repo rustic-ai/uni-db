@@ -52,10 +52,12 @@ pub mod issue_57_match_label_hash_index;
 pub mod issue_68_type_mismatch;
 pub mod issue_93_bytes_round_trip;
 pub mod locy_is_not_complement_recursion;
+pub mod multivector_search_filter;
 pub mod pattern_exists_unbound_param;
 pub mod relationship_uniqueness_invariant;
 pub mod repro_233_periodic_cancel_durability;
 pub mod repro_edge_export;
+pub mod search_unflushed_label_changes;
 pub mod underscore_property_reads;
 // Correctness-scan Wave 0 repros.
 pub mod repro_fork_sweeper_shutdown;
@@ -180,6 +182,7 @@ pub mod repro_stream_error_loses_abort_type;
 pub mod scan_range_walk_l0_rows;
 pub mod schemaless_search_after_flush;
 pub mod search_filter_on_unflushed;
+pub mod sparse_search_filter;
 pub mod sum_of_nothing_is_zero;
 pub mod typed_values_survive_rewrites;
 // sum/avg take numbers or durations; a string is a type error.

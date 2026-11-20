@@ -5058,6 +5058,8 @@ ORDER BY score DESC
 
 The query is **MVCC- and L0-aware**: candidates retrieved from the index are exact-rescored against the live row state, so freshly written or updated sparse vectors that have not yet been flushed into the index are scored correctly rather than served stale.
 
+**`filter` is resolved before scoring, not applied after it.** The sparse index is a postings dataset keyed by term; it holds no vertex properties and cannot evaluate a predicate. `StorageManager::sparse_search` therefore scans the label's table for the vids whose latest row passes the filter (`flushed_vids_passing_filter`) and hands that set to `SparseVectorIndex::query_topk`, which skips every other posting while accumulating. The index therefore ranks only allowed rows, rather than cutting an unfiltered top `k` down afterwards. Its ranking is by the stored weights, 8-bit quantized by default; `sparse_rerank` re-scores the `retrieval_k` candidates it returns exactly, so the final order is exact among those candidates. Resolving the filter costs two reads of the label's table per query: the filtered `_vid`/`_version` scan, and the latest-version lookup in `keep_latest_row_versions`. Both grow with the number of rows that pass the filter, not with `k`, so a filter most of a large table passes is slow; a selective one, such as a `_vid IN (…)` allow-list, is served by the `_vid` index. A query with no terms, `k = 0` or no sparse index returns before the filter is resolved. Unflushed rows are handled one layer up in `sparse_rerank`: rows failing the filter (`l0_rows_failing_filter`) are removed from both the flushed candidates and the L0 union, so an unflushed update that moves a row out of the filter takes effect immediately. On a fork that has a branch for the label's table the candidates already come from a branch scan, and the filter joins that scan (latest row versions only); a fork with no branch for the table reads primary's index as above. The sparse arm of `uni.search` goes through the same helper and receives the call's `filter`, like the dense and full-text arms.
+
 ### Best Practices
 
 - **Pair sparse with dense, don't choose.** Sparse retrieval recovers exact-term matches that dense embeddings miss; the two are most effective fused through [Hybrid Search](#hybrid-search), not used in isolation.
@@ -5112,6 +5114,41 @@ search gives after a flush:
   the Lance backend answers with Lance's own filter planner. A vertex that fails
   is dropped like a tombstone. Lance's planner is used, not DataFusion's alone,
   because the two disagree on `"col"`: Lance reads it as a string literal.
+  The multi-vector and sparse searches union unflushed rows one layer up, in
+  uni-query's `multivector_rerank` and `sparse_rerank`, so those call
+  `l0_rows_failing_filter` themselves and drop the failing vids from both the
+  flushed candidates and the L0 union (#343, #344).
+- **Only a vertex's latest flushed row can match.** Vertex tables are
+  append-only, and a search index matches every row version a vertex has. A
+  hit on a superseded version is dropped by `keep_latest_row_versions`; without
+  that, a filter matched a flushed vertex through a value it no longer has.
+  Dense and full-text search apply it in `vector_search` / `fts_search`,
+  multi-vector and MUVERA through `search_latest_row_versions` (which also
+  widens the fetch when dropped hits leave the answer short), and sparse
+  through `flushed_vids_passing_filter`. The version lookup is an indexed
+  `_vid IN (…)` read unless the hits are at least a quarter of the table, when
+  the two columns are read whole.
+- **Unflushed rows widen the flushed fetch.** Each unflushed vid of the label —
+  live, tombstoned, or failing the filter — can displace one flushed hit: it is
+  dropped, or re-scored against its new value. Dense search fetches
+  `k + shadowed`; the two re-rank helpers fetch `retrieval_k +` the same count
+  (`shadow_count`). With a fixed over-fetch a search returned fewer than `k`
+  rows, or none, when its best matches had unflushed updates or deletes. The
+  multi-vector fetch stops at `MULTIVECTOR_MAX_CANDIDATES`.
+- **`MULTIVECTOR_MAX_CANDIDATES` caps the flushed candidates, not the union.**
+  Lance returns its hits best first, so truncating them sheds the weakest. The
+  unflushed rows are unranked until the exact re-score; capping the union
+  dropped an arbitrary share of them once a label had about a thousand
+  unflushed rows. Every unflushed row of the label is scored, as in dense and
+  sparse search, so the re-rank's cost is bounded by the size of L0.
+- **An unflushed label change is followed.** `SET n:L` / `REMOVE n:L` on a
+  flushed vertex leaves L0 holding its new labels and no property row. A vertex
+  that left the label is dropped like a tombstone wherever the L0 buffers are
+  walked (`merge_l0_into_vector_results`, `collect_l0_texts`,
+  `collect_l0_label_candidates`), newest relabel winning. A vertex that joined
+  it is added to the unflushed candidates and scored by its flushed properties,
+  which `StorageManager::l0_label_joined_props` reads from the main table: the
+  same set the scan path builds with `label_only_l0_base_props`.
 - **The L0 batch copies only the properties its schema names.**
   `build_l0_vertex_batch` used to clone every property of every unflushed row
   of the label, an embedding included, into a map and then build the projected

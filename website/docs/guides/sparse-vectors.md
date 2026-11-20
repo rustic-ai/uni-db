@@ -159,6 +159,10 @@ ORDER BY score DESC
 LIMIT 10
 ```
 
+The filter is applied **before** the top-`k` cut: documents the filter excludes are never ranked, so they cannot take the place of ones it allows, and documents written since the last flush are filtered the same way. A filter of the form `_vid IN (…)` scopes the search to a known set of vertices. The same holds for the `filter` argument of `uni.search` when it has a sparse arm.
+
+The filter is resolved against the label's table before the index is consulted, so its cost grows with the number of rows that pass it. A selective filter is cheap; one that most of a large table passes is not.
+
 ### Joining Back to the Graph
 
 `vid` is the vertex id, so you can join the results into a normal `MATCH`:

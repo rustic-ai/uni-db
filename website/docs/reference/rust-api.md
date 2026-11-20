@@ -1,6 +1,6 @@
 # Rust API Reference
 
-Reference for the current Uni 5.2.1 source API. Consult Rustdoc for the full
+Reference for the current Uni 5.3.0 source API. Consult Rustdoc for the full
 public surface; this page explains the main types and workflows.
 
 ## Quick Start

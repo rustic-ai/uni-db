@@ -2252,7 +2252,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -2339,7 +2339,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3997,9 +3997,9 @@ dependencies = [
 
 [[package]]
 name = "libsais-rs"
-version = "0.2.2"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00777f770949ecbe5524eb6630699a501c9c27e4d18493705a7dad49c9bdfbd1"
+checksum = "ec55b7be74ed721889b8bc62d53e6a032d2b3b9bb60a4942b45b1e8362e64583"
 dependencies = [
  "rayon",
 ]
@@ -4324,7 +4324,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5855,7 +5855,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5913,7 +5913,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6365,7 +6365,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6434,7 +6434,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "psm",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -6534,7 +6534,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6907,7 +6907,7 @@ dependencies = [
 
 [[package]]
 name = "uni-btic"
-version = "5.2.1"
+version = "5.3.0"
 dependencies = [
  "chrono",
  "serde",
@@ -6916,7 +6916,7 @@ dependencies = [
 
 [[package]]
 name = "uni-common"
-version = "5.2.1"
+version = "5.3.0"
 dependencies = [
  "anyhow",
  "arrow-schema",
@@ -6939,7 +6939,7 @@ dependencies = [
 
 [[package]]
 name = "uni-crdt"
-version = "5.2.1"
+version = "5.3.0"
 dependencies = [
  "rmp-serde",
  "rustc-hash",
@@ -6953,7 +6953,7 @@ dependencies = [
 
 [[package]]
 name = "uni-cypher"
-version = "5.2.1"
+version = "5.3.0"
 dependencies = [
  "pest",
  "pest_derive",
@@ -6975,7 +6975,7 @@ dependencies = [
 
 [[package]]
 name = "uni-plugin"
-version = "5.2.1"
+version = "5.3.0"
 dependencies = [
  "arc-swap",
  "arrow",
@@ -7006,7 +7006,7 @@ dependencies = [
 
 [[package]]
 name = "uni-sparse-vector"
-version = "5.2.1"
+version = "5.3.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -7014,7 +7014,7 @@ dependencies = [
 
 [[package]]
 name = "uni-store"
-version = "5.2.1"
+version = "5.3.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7056,9 +7056,9 @@ dependencies = [
 
 [[package]]
 name = "uni-xervo"
-version = "0.19.2"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a754c6566e43c332b4c6c832f8d90aa364c8a0159ba6fb9b78cce3d26b9047f"
+checksum = "83395d1380abbbc735e7aed4d31a88c1ceb2a53fa3a698b1c9183a582f03eb96"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7383,7 +7383,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

@@ -310,6 +310,38 @@ class TestQueryBuilderCypherGeneration:
         # Sparse score is a dot product → threshold is a lower bound.
         assert "score >= 0.5" in cypher
 
+    def test_vector_search_pre_filter_is_passed_to_the_procedure(self):
+        q = self._make_builder().vector_search(
+            "embedding", [1.0, 2.0], k=5, pre_filter="age >= 18"
+        )
+        cypher, params = q._build_cypher()
+        assert (
+            "uni.vector.query('Person', 'embedding', $query_vec, 5, $pre_filter)"
+            in cypher
+        )
+        assert params["pre_filter"] == "age >= 18"
+
+    def test_sparse_search_pre_filter_is_passed_to_the_procedure(self):
+        q = self._make_builder().sparse_search(
+            "emb", {1: 1.0}, k=5, pre_filter="age >= 18"
+        )
+        cypher, params = q._build_cypher()
+        assert "uni.sparse.query('Person', 'emb', $sparse_q, 5, $pre_filter)" in cypher
+        assert params["pre_filter"] == "age >= 18"
+
+    def test_search_without_pre_filter_passes_no_filter_argument(self):
+        cypher, params = (
+            self._make_builder().sparse_search("emb", {1: 1.0}, k=5)._build_cypher()
+        )
+        assert "uni.sparse.query('Person', 'emb', $sparse_q, 5)" in cypher
+        assert "pre_filter" not in params
+
+        cypher, params = (
+            self._make_builder().vector_search("embedding", [1.0], k=5)._build_cypher()
+        )
+        assert "uni.vector.query('Person', 'embedding', $query_vec, 5)" in cypher
+        assert "pre_filter" not in params
+
     def test_vector_search_rejects_bad_property(self):
         with pytest.raises(CypherInjectionError):
             self._make_builder().vector_search("bad;name", [1.0])
