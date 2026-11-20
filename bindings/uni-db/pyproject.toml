@@ -76,6 +76,18 @@ dev = [
     "hypothesis>=6.100",
 ]
 
+[tool.uv]
+# Temporary cap, for this project's own lock only (it does not reach the
+# published `notebook-runtime` extra). Microsoft's `agent-framework` releases
+# on PyPI were replaced with a credential stealer on 2026-11-17 and the
+# `microsoft/onnxruntime` repository was taken offline while Microsoft
+# investigates. No report says `onnxruntime` is affected, but 1.32.0 was
+# uploaded on 2026-11-13, four days earlier and through the same publisher.
+# With the cap the lock settles on 1.24.3 (uploaded 2026-03-05) for every
+# Python version; that is the release the Python 3.10 lock already used.
+# Remove this once Microsoft publishes its findings.
+constraint-dependencies = ["onnxruntime<1.32"]
+
 [tool.black]
 line-length = 88
 target-version = ['py310']

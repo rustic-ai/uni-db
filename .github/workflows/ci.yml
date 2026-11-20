@@ -135,6 +135,18 @@ jobs:
         # `--no-default-features` is required: defaults include `provider-onnx`
         # (bundled), and the two ONNX modes are mutually exclusive at the `ort`
         # crate level.
+        #
+        # DISABLED 2026-11-20. Microsoft took the `microsoft/onnxruntime`
+        # repository offline while it investigates malicious content (its
+        # `agent-framework` PyPI releases were replaced with a credential
+        # stealer on 2026-11-17), so the release tarball below returns 404 and
+        # this step failed every push to main. The other sources of a shared
+        # `libonnxruntime.so` are Microsoft-published too (the PyPI wheel), and
+        # pyke's CDN ships only the static archive the step above links.
+        # Rather than run a Microsoft binary in CI during the investigation,
+        # the step is off. Re-enable it, with `curl -f` and a pinned checksum,
+        # once Microsoft publishes its findings and a trusted download exists.
+        if: false
         run: |
           curl -sSL -o /tmp/ort.tgz https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
           tar xzf /tmp/ort.tgz -C /tmp

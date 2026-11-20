@@ -459,6 +459,9 @@ cargo nextest run -p uni-db --features provider-onnx --test reranker_integration
 
 # Load-dynamic ONNX — needs the ORT shared lib at runtime; --no-default-features is required
 # (default `provider-onnx` and `provider-onnx-dynamic` are mutually exclusive at the `ort` level).
+# DISABLED in CI since 2026-11-20: Microsoft took `microsoft/onnxruntime` offline, so the download
+# below returns 404. See the comment on the step in `.github/workflows/ci.yml`. Skip this block
+# until that step is re-enabled.
 curl -sSL -o /tmp/ort.tgz \
   https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-linux-x64-1.20.1.tgz
 tar xzf /tmp/ort.tgz -C /tmp
