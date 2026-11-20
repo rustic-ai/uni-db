@@ -72,9 +72,15 @@ jobs:
       # Runtime deps for the flagship neural-predicate notebooks executed below
       # (the `notebook-runtime` extra in bindings/uni-db/pyproject.toml). Kept
       # in sync with the same install in ci.yml / pr.yml.
+      #
+      # `onnxruntime` is held at 1.24.3, the version `bindings/uni-db/uv.lock`
+      # resolves to under its temporary cap (see `[tool.uv]` in that
+      # pyproject.toml for the reason). An open range here installed whatever
+      # Microsoft published last, in a job that can write to Pages. Lift the
+      # pin together with that cap.
       - name: Install flagship notebook runtime dependencies
         run: |
-          pip install "numpy>=1.26" "pyarrow>=16" "onnxruntime>=1.18"
+          pip install "numpy>=1.26" "pyarrow>=16" "onnxruntime==1.24.3"
 
       - name: Execute flagship Locy notebook (semiconductor)
         run: python website/scripts/verify_semiconductor_flagship_notebook.py
