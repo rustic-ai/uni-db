@@ -153,7 +153,12 @@ jobs:
     if: github.repository == 'rustic-ai/uni-db'
     name: Fuzz Smoke (parsers & codecs)
     runs-on: ubuntu-xlarge
-    timeout-minutes: 30
+    # Sized for a cold build cache, not a warm one. The cache key includes the
+    # Rust version and this lane uses a floating nightly, so the cache misses
+    # whenever the toolchain rolls. Warm, the step takes 21 to 24 minutes;
+    # cold, building the dependencies adds about 13 more, which the earlier
+    # 30-minute limit cancelled mid-compile with no target having failed.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
 
