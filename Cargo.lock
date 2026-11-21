@@ -11266,6 +11266,7 @@ dependencies = [
  "uni-sparse-vector",
  "uni-store",
  "uni-xervo",
+ "url",
 ]
 
 [[package]]
@@ -11332,6 +11333,10 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-types",
  "base64 0.22.1",
  "blake3",
  "bytes",

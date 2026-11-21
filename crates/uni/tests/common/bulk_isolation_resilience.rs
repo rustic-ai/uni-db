@@ -2244,3 +2244,63 @@ async fn ceilings_captured_mid_publish_exclude_the_load_resilience() -> Result<(
     );
     Ok(())
 }
+
+/// A bulk load larger than an ID batch is interrupted mid-publish, and the ID
+/// allocator's file is lost before the reopen that rolls the load forward.
+/// The manifest that roll-forward publishes is saved before the allocator
+/// exists, so it still carries the ID marks from before the load; the
+/// reopened store must nevertheless start allocating above the load's VIDs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rolled_forward_bulk_load_ids_survive_losing_the_allocator_file_resilience() -> Result<()> {
+    const BIG: i64 = 2500;
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().to_str().unwrap().to_string();
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    let seed = seed(&db).await?;
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    {
+        let hits = Arc::clone(&hits);
+        fail::cfg_callback(PUBLISH_SEAM, move || {
+            if hits.fetch_add(1, Ordering::SeqCst) == 1 {
+                panic!("injected crash while publishing a delta table");
+            }
+        })
+        .unwrap();
+    }
+    let tx = db.session().tx().await?;
+    let mut bulk = tx.bulk_writer().batch_size(500).build()?;
+    let vertices: Vec<HashMap<String, Value>> = (0..BIG)
+        .map(|i| HashMap::from([("k".to_string(), Value::Int(10_000 + i))]))
+        .collect();
+    bulk.insert_vertices("P", vertices).await?;
+    bulk.insert_edges("E", LOAD_A.edges(&seed)).await?;
+    let crashed = std::panic::AssertUnwindSafe(bulk.commit())
+        .catch_unwind()
+        .await
+        .is_err();
+    fail::remove(PUBLISH_SEAM);
+    assert!(
+        crashed,
+        "premise: the injected crash must interrupt the commit"
+    );
+    drop(tx);
+    drop(db);
+    std::fs::remove_file(dir.path().join("id_allocator.json"))?;
+
+    let db = Uni::open(&path).config(config(false)).build().await?;
+    let loaded = count(&db, "MATCH (n:P) WHERE n.k >= 10000 RETURN count(n) AS c").await?;
+    assert_eq!(loaded, BIG, "premise: the reopen rolls the load forward");
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:P {k: -1})").await?;
+    tx.commit().await?;
+    db.flush().await?;
+    let total = SEED as i64 + BIG + 1;
+    assert_eq!(
+        count(&db, "MATCH (n:P) RETURN count(DISTINCT n.k) AS c").await?,
+        total,
+        "a new vertex reused a VID of the rolled-forward load"
+    );
+    assert_eq!(count(&db, "MATCH (n:P) RETURN count(n) AS c").await?, total);
+    Ok(())
+}

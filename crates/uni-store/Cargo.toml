@@ -72,6 +72,12 @@ object_store = { workspace = true }
 # Lance 13 uses 0.14; DataFusion 54 and Uni retain 0.13. Keep the boundary local.
 lance-object-store = { package = "object_store", version = "0.14", default-features = false, optional = true }
 url = { workspace = true }
+# AWS named profiles (`AWS_PROFILE`) for uni's own S3 client; already in the
+# dependency graph through Lance.
+aws-config = "1.8"
+aws-credential-types = "1.2"
+aws-types = "1.3"
+aws-runtime = "1.7"
 sha3 = "0.12"
 tokio-util = { workspace = true }
 # Commit-path fault injection for crash-recovery tests. Macros are no-ops (and

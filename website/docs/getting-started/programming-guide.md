@@ -158,7 +158,7 @@ Open databases directly from cloud object stores:
     )
     ```
 
-Credentials and endpoints come from the environment (`AWS_*` including web identity and container credentials — named profiles are not read, `GOOGLE_*` / `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_*`). A typed configuration (`cloud_storage` in Rust, `cloud_config` in Python) overrides the environment, and raw storage options override both. Each store keeps everything it writes under its own prefix, so several stores can share a bucket. See [Storage & Cloud Durability](../features/storage-cloud.md) for the layout and the full precedence rules.
+Credentials and endpoints come from the environment (`AWS_*` including web identity, container credentials and a named profile through `AWS_PROFILE`, `GOOGLE_*` / `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_*`). A typed configuration (`cloud_storage` in Rust, `cloud_config` in Python) overrides the environment, and raw storage options override both. Each store keeps everything it writes under its own prefix, so several stores can share a bucket. See [Storage & Cloud Durability](../features/storage-cloud.md) for the layout and the full precedence rules.
 
 ### Hybrid Mode (Local + Cloud)
 

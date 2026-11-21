@@ -1019,7 +1019,7 @@ Cloud credentials come from the environment, a typed `CloudStorageConfig`, or ra
 
 | Provider | Environment Variables | Config Files |
 |----------|----------------------|--------------|
-| AWS S3 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL(_S3)`, web identity, container credentials | none (named profiles are not read) |
+| AWS S3 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL(_S3)`, web identity, container credentials, `AWS_PROFILE` | `~/.aws/config` and `~/.aws/credentials` only for the profile `AWS_PROFILE` names (or `AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE`) |
 | GCS | `GOOGLE_APPLICATION_CREDENTIALS` | Application Default Credentials |
 | Azure | `AZURE_STORAGE_ACCOUNT(_NAME)`, `AZURE_STORAGE_ACCOUNT_KEY`, `AZURE_STORAGE_SAS_TOKEN`, client-secret/federated/MSI keys | Azure CLI only with `azure_use_azure_cli=true` |
 

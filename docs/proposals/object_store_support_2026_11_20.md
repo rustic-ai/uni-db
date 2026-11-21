@@ -33,6 +33,9 @@ Finished after the first commit:
 - A remote store's resilience layer keeps its timeouts and circuit breaker but no longer retries on top of the client, which retries with the same settings.
 - Unlocked compaction on an object store logs a warning, once per store.
 - `WriteLease` is documented as recorded-only, and a non-`Local` strategy logs a warning.
+- BACKUP is rebuilt on `StoreLocation` (most of Phase E). Before, a backup to an object store copied no tables yet reported success, and a local backup could not be opened. That was reproduced on LocalStack.
+- AWS named profiles are supported for uni's client.
+- When `id_allocator.json` is missing and a manifest exists, the ID floor is the higher of the manifest's marks and a scan of the tables. A manifest published by bulk-load recovery carries the marks from before the load (reproduced with a failpoint).
 
 **Behaviour and API changes for release notes:**
 
@@ -50,8 +53,10 @@ Finished after the first commit:
 - `uni_db::CloudStorageConfig` is now re-exported.
 - On an object store without conditional writes, ID reservation fails instead of overwriting the counter file.
 - Without an endpoint, a region lookup failure fails the open. It used to fall back silently to `us-east-1`.
-- BACKUP and COPY URLs are configured from the environment only.
-- Named AWS profiles (`AWS_PROFILE`) are not read by uni's client, which uses `object_store` 0.13.
+- BACKUP and COPY URLs of the database's own provider inherit its endpoint and credentials.
+- uni's client now reads a named AWS profile (`AWS_PROFILE`), as Lance already did.
+- `BACKUP` writes a standard-layout store that `Uni::open` reads, instead of a flat copy (local) or a copy without tables (object store). It is refused in a fork session, and for a destination holding any of a store. An interrupted copy is refused at open. Forks are not backed up. `file://` destinations are sandbox-checked. The result row adds `objects` and `bytes`.
+- With `AWS_PROFILE` set, uni's client reads that profile. An undefined profile is ignored.
 - A new remote store keeps its tables under `R/storage/`. Bucket-root stores written before 5.4 open as `flat`. Prefixed stores written before 5.4 are refused until their catalog is copied under the prefix.
 
 **Follow-ups not in Phase A:**
@@ -59,11 +64,10 @@ Finished after the first commit:
 - Phases B–E.
 - Fork allocator bootstrap seeds from the primary's cursor, not its reserved batch end (`fork.rs`, review note).
 - Fork snapshot managers do not stamp ID marks.
+- BACKUP is not snapshot-consistent: it copies the live store. Pinning the copy to the manifest's versions needs Phase D's real `lance_version`s.
+- BACKUP leaves forks out.
 - Fork allocators still allow an unconditional put on remote stores.
-- A bulk-load roll-forward during open saves its manifest before the allocator is attached, so it carries the previous ID marks.
 - `CLOUD_STORAGE_OPTIONS` in `lance_directory.rs` is keyed by base URI: while two databases are open at one URI with different credentials, datasets opened by URI use the later one's. Entries now go away when their database closes.
-- BACKUP and COPY should resolve against the open database's location (Phase E).
-- AWS profile support for uni's client needs `aws-config` or an `object_store` upgrade.
 
 ## 1. Summary
 

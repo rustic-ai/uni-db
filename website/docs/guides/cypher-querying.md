@@ -2159,6 +2159,8 @@ BACKUP TO './backups/backup_2026_01_17'
 BACKUP TO 's3://my-bucket/backups/backup_2026_01_17'
 ```
 
+A backup is itself a store: open it with `Uni::open("./backups/backup_2026_01_17")` (or the S3 URI) to read or restore from it. It holds the primary's data, indexes, schema, Locy rules, snapshot history and declared plugins; forks are not included. BACKUP flushes first and returns `status`, `snapshot_id`, `objects` and `bytes`. It fails in a fork session, and for a destination that already holds a store. A URL with the same scheme as the database's object store uses its endpoint and credentials. Local paths and `file://` URIs are checked against the file sandbox. A backup interrupted part way is refused at open: delete it and back up again. The copy is of the live store, so run it while writes are quiet.
+
 ### CHECKPOINT
 
 Flush L0 to L1 so recent writes become part of a durable snapshot boundary.

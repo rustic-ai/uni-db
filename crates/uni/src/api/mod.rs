@@ -2268,6 +2268,9 @@ impl UniBuilder {
         )
         .await
         .map_err(UniError::Internal)?;
+        if let Some(local) = &local_store_opt {
+            storage.set_local_store(Arc::clone(local));
+        }
 
         // Stamp the registry onto the owned StorageManager (before it is
         // shared) so compaction and L0 flush route custom CRDT merges through
@@ -2460,30 +2463,34 @@ impl UniBuilder {
         // its file is gone (a hybrid store's lost local directory): the
         // manifest records how far it had reserved, and a manifest from
         // before that was recorded falls back to the tables themselves.
-        let id_floor = match recovered_manifest
+        let marks = recovered_manifest
             .as_ref()
             .and_then(|m| Some((m.next_vid?, m.next_eid?)))
+            .unwrap_or((0, 0));
+        let allocator_file_missing = matches!(
+            id_store
+                .head(&object_store::path::Path::from("id_allocator.json"))
+                .await,
+            Err(object_store::Error::NotFound { .. })
+        );
+        // With the counter file, it and the marks bound every id in use.
+        // Without it, the marks alone may not: a manifest from before they
+        // were recorded has none, and one published by bulk-load recovery
+        // above (before the allocator existed) carries the marks from before
+        // the load. The tables are the ground truth then.
+        // A read-only handle allocates nothing, so it skips the scan.
+        let id_floor = if allocator_file_missing && recovered_manifest.is_some() && !self.read_only
         {
-            Some(marks) => marks,
-            // A manifest from before the marks: the counter file, when it
-            // exists, is still authoritative; only its loss needs the scan.
-            None if recovered_manifest.is_some()
-                && matches!(
-                    id_store
-                        .head(&object_store::path::Path::from("id_allocator.json"))
-                        .await,
-                    Err(object_store::Error::NotFound { .. })
-                ) =>
-            {
-                let floor = storage.scan_id_floor().await.map_err(UniError::Internal)?;
-                tracing::info!(
-                    vid = floor.0,
-                    eid = floor.1,
-                    "Snapshot manifest predates ID marks; ID allocation floor taken from the tables"
-                );
-                floor
-            }
-            None => (0, 0),
+            let scanned = storage.scan_id_floor().await.map_err(UniError::Internal)?;
+            let floor = (marks.0.max(scanned.0), marks.1.max(scanned.1));
+            tracing::info!(
+                vid = floor.0,
+                eid = floor.1,
+                "ID allocator file missing; allocation resumes above the ids in the tables"
+            );
+            floor
+        } else {
+            marks
         };
         let allocator = Arc::new(
             IdAllocator::open(

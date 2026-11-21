@@ -797,3 +797,298 @@ async fn deprecated_remote_storage_still_configures_hybrid_mode() {
     let builder = Uni::open(dir.path().to_str().unwrap()).remote_storage("s3://bucket/p", cfg);
     assert_used_endpoint(builder.config(fail_fast()).build().await, "127.0.0.1:1");
 }
+
+// ---- BACKUP produces a store that opens -----------------------------------
+
+async fn backup(db: &Uni, dest: &str) -> Result<String> {
+    let rows = db.session().run(&format!("BACKUP TO '{dest}'")).await?;
+    let row = rows.rows().first().expect("BACKUP returns a row");
+    assert_eq!(
+        row.value("status"),
+        Some(&uni_db::Value::String("Backup completed".into()))
+    );
+    Ok(row.get::<String>("snapshot_id")?)
+}
+
+async fn backup_source(uri: &str) -> Result<Uni> {
+    let db = person_store(uri, &["Alice", "Bob"]).await?;
+    let tx = db.session().tx().await?;
+    tx.execute(
+        "MATCH (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'}) CREATE (a)-[:KNOWS]->(b)",
+    )
+    .await?;
+    tx.commit().await?;
+    db.flush().await?;
+    // A fork, which a backup leaves out: its branches name the source.
+    let fork = db.session().fork("not-backed-up").await?;
+    let tx = fork.tx().await?;
+    tx.execute("CREATE (:Person {name: 'OnlyInFork'})").await?;
+    tx.commit().await?;
+    fork.flush().await?;
+    drop(fork);
+    // Committed after the last flush: in the WAL until the backup flushes.
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:Person {name: 'Carol'})").await?;
+    tx.commit().await?;
+    Ok(db)
+}
+
+async fn assert_backup_opens(uri: &str) -> Result<()> {
+    let restored = Uni::open(uri).build().await?;
+    assert_eq!(people(&restored).await?, ["Alice", "Bob", "Carol"]);
+    let edges = restored
+        .session()
+        .query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS a, b.name AS b")
+        .await?;
+    assert_eq!(edges.len(), 1);
+    assert!(
+        restored.list_forks().await.is_empty(),
+        "a fork was backed up"
+    );
+    // New writes to the restored store do not reuse ids.
+    let tx = restored.session().tx().await?;
+    tx.execute("MATCH (c:Person {name: 'Carol'}) CREATE (c)-[:KNOWS]->(:Person {name: 'Dave'})")
+        .await?;
+    tx.commit().await?;
+    restored.flush().await?;
+    assert_eq!(people(&restored).await?, ["Alice", "Bob", "Carol", "Dave"]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backup_to_a_local_directory_opens_as_a_store() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = backup_source(dir.path().join("db").to_str().unwrap()).await?;
+    let dest = dir.path().join("backup");
+    backup(&db, dest.to_str().unwrap()).await?;
+    assert!(dest.join("catalog/schema.json").is_file());
+    assert!(dest.join("storage/catalog/latest").is_file());
+    assert_eq!(
+        read_json(&dest.join("catalog/layout.json"))["layout"],
+        serde_json::json!("standard")
+    );
+    assert!(
+        files_under(&dest).iter().all(|f| !f.contains("/tree/")),
+        "fork branches were copied"
+    );
+    drop(db);
+    assert_backup_opens(dest.to_str().unwrap()).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backup_under_a_prefix_stays_under_it_and_opens() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let bucket = dir.path().join("bucket");
+    // Source: a `file://` store, laid out as an object store would be.
+    let db = backup_source(&file_uri(&dir.path().join("src"))).await?;
+    let dest = file_uri(&bucket.join("backups/b1"));
+    backup(&db, &dest).await?;
+    drop(db);
+    let stray: Vec<String> = files_under(&bucket)
+        .into_iter()
+        .filter(|f| !f.starts_with("backups/b1/"))
+        .collect();
+    assert!(stray.is_empty(), "{stray:?}");
+    assert_backup_opens(&dest).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backup_refuses_a_destination_that_holds_a_store() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = person_store(dir.path().join("db").to_str().unwrap(), &["Alice"]).await?;
+    let dest = dir.path().join("taken");
+    drop(person_store(dest.to_str().unwrap(), &["Someone"]).await?);
+    let err = match db
+        .session()
+        .run(&format!("BACKUP TO '{}'", dest.display()))
+        .await
+    {
+        Ok(_) => panic!("backed up over an existing store"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("already holds"), "{err}");
+    let other = Uni::open(dest.to_str().unwrap()).build().await?;
+    assert_eq!(people(&other).await?, ["Someone"]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_file_uri_backup_destination_is_sandboxed() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let allowed = dir.path().join("allowed");
+    std::fs::create_dir_all(&allowed)?;
+    let mut config = UniConfig::default();
+    config.file_sandbox.enabled = true;
+    config.file_sandbox.allowed_paths = vec![allowed.canonicalize()?];
+    let db = Uni::open(dir.path().join("db").to_str().unwrap())
+        .config(config)
+        .build()
+        .await?;
+    db.schema()
+        .label("Person")
+        .property("name", DataType::String)
+        .apply()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:Person {name: 'Alice'})").await?;
+    tx.commit().await?;
+    db.flush().await?;
+    let outside = dir.path().join("outside");
+    for dest in [file_uri(&outside), outside.display().to_string()] {
+        let result = db.session().run(&format!("BACKUP TO '{dest}'")).await;
+        assert!(result.is_err(), "BACKUP TO {dest} escaped the sandbox");
+    }
+    assert!(
+        !outside.exists(),
+        "the sandbox let a backup write outside it"
+    );
+    // Inside the sandbox, a file URI works.
+    backup(&db, &file_uri(&allowed.join("bk"))).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backup_carries_no_fork_refs_and_the_restored_store_can_fork() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = backup_source(dir.path().join("db").to_str().unwrap()).await?;
+    let dest = dir.path().join("backup");
+    backup(&db, dest.to_str().unwrap()).await?;
+    drop(db);
+    let refs: Vec<String> = files_under(&dest)
+        .into_iter()
+        .filter(|f| f.contains("_refs/branches/") || f.contains("_refs/tags/fork_"))
+        .collect();
+    assert!(refs.is_empty(), "fork refs were copied: {refs:?}");
+    // The fork's name is free in the restored store.
+    let restored = Uni::open(dest.to_str().unwrap()).build().await?;
+    let fork = restored.session().fork("not-backed-up").await?;
+    let tx = fork.tx().await?;
+    tx.execute("CREATE (:Person {name: 'NewFork'})").await?;
+    tx.commit().await?;
+    let n = fork.query("MATCH (p:Person) RETURN count(p) AS c").await?;
+    assert_eq!(n.rows()[0].get::<i64>("c")?, 4);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unfinished_backup_does_not_open() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = backup_source(dir.path().join("db").to_str().unwrap()).await?;
+    let dest = dir.path().join("backup");
+    backup(&db, dest.to_str().unwrap()).await?;
+    drop(db);
+    // What an interrupted copy leaves: the in-progress marker still there.
+    std::fs::write(dest.join("catalog/backup_in_progress"), b"{}")?;
+    let err = match Uni::open(dest.to_str().unwrap()).build().await {
+        Ok(_) => panic!("an unfinished backup opened"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("unfinished backup"), "{err}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backup_from_a_fork_session_is_refused() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = person_store(dir.path().join("db").to_str().unwrap(), &["Alice"]).await?;
+    let fork = db.session().fork("f").await?;
+    let dest = dir.path().join("backup");
+    let err = match fork.run(&format!("BACKUP TO '{}'", dest.display())).await {
+        Ok(_) => panic!("a fork session backed up"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("primary"), "{err}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backup_of_a_hybrid_store_carries_its_local_state() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let bucket = dir.path().join("bucket");
+    let local = dir.path().join("local");
+    let db = Uni::open(local.to_str().unwrap())
+        .hybrid(&file_uri(&bucket.join("g")))
+        .storage_option(
+            uni_db::store::location::FILE_BUCKET_ROOT_OPTION,
+            bucket.display().to_string(),
+        )
+        .build()
+        .await?;
+    db.schema()
+        .label("Person")
+        .property("name", DataType::String)
+        .edge_type("KNOWS", &["Person"], &["Person"])
+        .apply()
+        .await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:Person {name: 'Alice'})-[:KNOWS]->(:Person {name: 'Bob'})")
+        .await?;
+    tx.commit().await?;
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:Person {name: 'Carol'})").await?;
+    tx.commit().await?;
+    let dest = dir.path().join("backup");
+    backup(&db, dest.to_str().unwrap()).await?;
+    drop(db);
+    assert!(
+        dest.join("id_allocator.json").is_file(),
+        "the local allocator was not copied"
+    );
+    for f in files_under(&local.join("_system")) {
+        assert!(
+            dest.join("_system").join(&f).is_file(),
+            "sidecar {f} not copied"
+        );
+    }
+    let restored = Uni::open(dest.to_str().unwrap()).build().await?;
+    assert_eq!(people(&restored).await?, ["Alice", "Bob", "Carol"]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backup_of_a_flat_store_is_standard() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("flat");
+    let uri = file_uri(&root);
+    drop(person_store(&uri, &["Alice", "Bob"]).await?);
+    flatten(&root);
+    let db = Uni::open(&uri).build().await?;
+    let dest = dir.path().join("backup");
+    backup(&db, dest.to_str().unwrap()).await?;
+    drop(db);
+    assert_eq!(
+        read_json(&dest.join("catalog/layout.json"))["layout"],
+        serde_json::json!("standard")
+    );
+    for misplaced in [
+        "storage/wal",
+        "storage/catalog/schema.json",
+        "storage/id_allocator.json",
+    ] {
+        assert!(
+            !dest.join(misplaced).exists(),
+            "{misplaced} copied under storage/"
+        );
+    }
+    let restored = Uni::open(dest.to_str().unwrap()).build().await?;
+    assert_eq!(people(&restored).await?, ["Alice", "Bob"]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backup_refuses_a_destination_with_any_store_data() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let db = person_store(dir.path().join("db").to_str().unwrap(), &["Alice"]).await?;
+    let dest = dir.path().join("partial");
+    std::fs::create_dir_all(dest.join("storage/vertices.lance"))?;
+    std::fs::write(dest.join("storage/vertices.lance/x"), b"x")?;
+    let result = db
+        .session()
+        .run(&format!("BACKUP TO '{}'", dest.display()))
+        .await;
+    assert!(
+        result.is_err(),
+        "backed up into a destination holding tables"
+    );
+    Ok(())
+}

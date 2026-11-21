@@ -37,6 +37,10 @@ use uni_common::config::ObjectStoreConfig;
 /// Path of the layout marker, relative to the store root.
 pub const LAYOUT_MARKER_PATH: &str = "catalog/layout.json";
 
+/// Present at a backup destination while `BACKUP` is copying into it; a
+/// store holding it is refused at open.
+pub const IN_PROGRESS_MARKER: &str = "catalog/backup_in_progress";
+
 /// Storage option naming the directory a `file://` location treats as its
 /// bucket root. Only consulted for legacy-layout detection; meant for tests
 /// that reproduce an object-store bucket on the local filesystem.
@@ -504,7 +508,10 @@ async fn resolve_options(
     spec: &LocationSpec,
     env: &dyn EnvSource,
     net: &ObjectStoreConfig,
-) -> Result<BTreeMap<String, String>> {
+) -> Result<(
+    BTreeMap<String, String>,
+    Option<object_store::aws::AwsCredentialProvider>,
+)> {
     let mut o = OptionLayers::new(scheme);
     o.env(env);
 
@@ -601,6 +608,13 @@ async fn resolve_options(
         o.set(k, v.clone());
     }
 
+    // A named AWS profile fills what every layer above left unset, as the
+    // AWS SDKs order it: environment variables beat the profile.
+    let aws_credentials = match env.get("AWS_PROFILE").filter(|p| !p.is_empty()) {
+        Some(profile) if scheme == Scheme::S3 => apply_aws_profile(&mut o, &profile, env).await?,
+        _ => None,
+    };
+
     if scheme == Scheme::S3 {
         // An endpoint chosen above the environment beats an inherited
         // `AWS_ENDPOINT_URL_S3`, which both clients would otherwise prefer.
@@ -664,7 +678,176 @@ async fn resolve_options(
         .entry("timeout".into())
         .or_insert_with(|| duration_option(net.read_timeout.max(net.write_timeout)));
 
-    Ok(o.map)
+    Ok((o.map, aws_credentials))
+}
+
+/// Applies the named AWS profile `profile`: its region and endpoint where no
+/// layer set them, and a credential provider when no static keys were given.
+/// The provider resolves the profile's credentials as the AWS SDKs do
+/// (static keys, SSO, an assumed role, `credential_process`).
+async fn apply_aws_profile(
+    o: &mut OptionLayers,
+    profile: &str,
+    env: &dyn EnvSource,
+) -> Result<Option<object_store::aws::AwsCredentialProvider>> {
+    use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
+    // A file named by `AWS_CONFIG_FILE` / `AWS_SHARED_CREDENTIALS_FILE`
+    // replaces the default one; like the AWS SDKs, `~` is the home directory
+    // and a named file that does not exist is skipped rather than an error.
+    let home = env.get("HOME").or_else(|| env.get("USERPROFILE"));
+    let mut files = EnvConfigFiles::builder();
+    for (var, kind) in [
+        ("AWS_CONFIG_FILE", EnvConfigFileKind::Config),
+        (
+            "AWS_SHARED_CREDENTIALS_FILE",
+            EnvConfigFileKind::Credentials,
+        ),
+    ] {
+        let default = match env.get(var) {
+            Some(path) => {
+                let path = match (path.strip_prefix("~/"), &home) {
+                    (Some(rest), Some(home)) => std::path::Path::new(home).join(rest),
+                    _ => std::path::PathBuf::from(&path),
+                };
+                if path.exists() {
+                    files = files.with_file(kind, path);
+                }
+                false
+            }
+            None => true,
+        };
+        files = match kind {
+            EnvConfigFileKind::Config => files.include_default_config_file(default),
+            _ => files.include_default_credentials_file(default),
+        };
+    }
+    let files = files.build();
+
+    let vars = env.vars();
+    let pairs: Vec<(&str, &str)> = vars.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let shim_env = aws_types::os_shim_internal::Env::from_slice(&pairs);
+    let set = aws_config::profile::load(
+        &aws_types::os_shim_internal::Fs::real(),
+        &shim_env,
+        &files,
+        Some(std::borrow::Cow::Owned(profile.to_string())),
+    )
+    .await
+    .map_err(|e| anyhow!("Read the AWS config files for profile '{profile}': {e}"))?;
+    // An undefined profile is not an error, as for the AWS SDKs and Lance:
+    // `AWS_PROFILE=default` with no AWS files is common in containers.
+    let Some(section) = set.get_profile(profile) else {
+        tracing::debug!(
+            profile,
+            "AWS_PROFILE names a profile that is not defined; ignored"
+        );
+        return Ok(None);
+    };
+
+    if o.get("aws_region").is_none()
+        && o.get("aws_default_region").is_none()
+        && let Some(region) = section.get("region")
+    {
+        o.map.insert("aws_region".into(), region.to_string());
+    }
+    let ignore_endpoints = env
+        .get("AWS_IGNORE_CONFIGURED_ENDPOINT_URLS")
+        .or_else(|| {
+            section
+                .get("ignore_configured_endpoint_urls")
+                .map(str::to_string)
+        })
+        .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+    if !ignore_endpoints
+        && o.get("aws_endpoint").is_none()
+        && o.get("aws_endpoint_url_s3").is_none()
+        && let Some(endpoint) = section.get("endpoint_url")
+    {
+        o.map.insert("aws_endpoint".into(), endpoint.to_string());
+    }
+    if o.get("aws_access_key_id").is_some() && o.get("aws_secret_access_key").is_some() {
+        return Ok(None);
+    }
+    // A profile with no credential source of its own (only a region, say)
+    // leaves the rest of the chain to apply: instance metadata, containers,
+    // web identity.
+    const CREDENTIAL_SOURCES: &[&str] = &[
+        "aws_access_key_id",
+        "role_arn",
+        "credential_process",
+        "sso_session",
+        "sso_start_url",
+        "sso_account_id",
+        "web_identity_token_file",
+        "login_session",
+    ];
+    if !CREDENTIAL_SOURCES.iter().any(|k| section.get(k).is_some()) {
+        return Ok(None);
+    }
+    // Assumed roles and web identity call STS, which needs a region.
+    let region = o
+        .get("aws_region")
+        .or_else(|| o.get("aws_default_region"))
+        .cloned()
+        .map(aws_types::region::Region::new);
+    let provider_config =
+        aws_config::provider_config::ProviderConfig::without_region().with_region(region);
+    let provider = aws_config::profile::ProfileFileCredentialsProvider::builder()
+        .configure(&provider_config)
+        .profile_files(files)
+        .profile_name(profile)
+        .build();
+    Ok(Some(Arc::new(ProfileCredentials {
+        provider: aws_credential_types::provider::SharedCredentialsProvider::new(provider),
+        cached: tokio::sync::Mutex::new(None),
+    })))
+}
+
+/// An AWS SDK credential provider as `object_store` credentials, cached until
+/// shortly before they expire.
+#[derive(Debug)]
+struct ProfileCredentials {
+    provider: aws_credential_types::provider::SharedCredentialsProvider,
+    cached: tokio::sync::Mutex<
+        Option<(
+            Arc<object_store::aws::AwsCredential>,
+            Option<std::time::SystemTime>,
+        )>,
+    >,
+}
+
+#[async_trait::async_trait]
+impl object_store::CredentialProvider for ProfileCredentials {
+    type Credential = object_store::aws::AwsCredential;
+
+    async fn get_credential(&self) -> object_store::Result<Arc<Self::Credential>> {
+        use aws_credential_types::provider::ProvideCredentials;
+        let mut cached = self.cached.lock().await;
+        // Refreshed a minute before they expire, as Lance does.
+        let margin = std::time::Duration::from_secs(60);
+        if let Some((credential, expiry)) = cached.as_ref() {
+            let fresh = expiry.is_none_or(|at| {
+                at.duration_since(std::time::SystemTime::now())
+                    .is_ok_and(|left| left > margin)
+            });
+            if fresh {
+                return Ok(Arc::clone(credential));
+            }
+        }
+        let got = self.provider.provide_credentials().await.map_err(|e| {
+            object_store::Error::Generic {
+                store: "S3",
+                source: Box::new(e),
+            }
+        })?;
+        let credential = Arc::new(object_store::aws::AwsCredential {
+            key_id: got.access_key_id().to_string(),
+            secret_key: got.secret_access_key().to_string(),
+            token: got.session_token().map(str::to_string),
+        });
+        *cached = Some((Arc::clone(&credential), got.expiry()));
+        Ok(credential)
+    }
 }
 
 fn retry_config(net: &ObjectStoreConfig) -> object_store::RetryConfig {
@@ -684,6 +867,7 @@ fn retry_config(net: &ObjectStoreConfig) -> object_store::RetryConfig {
 fn build_bucket_store(
     scheme: Scheme,
     options: &BTreeMap<String, String>,
+    aws_credentials: Option<object_store::aws::AwsCredentialProvider>,
     net: &ObjectStoreConfig,
 ) -> Result<Arc<dyn ObjectStore>> {
     use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey};
@@ -698,6 +882,9 @@ fn build_bucket_store(
                     Ok(key) => b = b.with_config(key, v),
                     Err(_) => lance_only(k),
                 }
+            }
+            if let Some(credentials) = aws_credentials {
+                b = b.with_credentials(credentials);
             }
             Arc::new(b.with_retry(retry_config(net)).build()?)
         }
@@ -733,12 +920,28 @@ fn prefixed(store: Arc<dyn ObjectStore>, prefix: &str) -> Arc<dyn ObjectStore> {
     }
 }
 
+/// The object-store provider a URI names, or `None` for a local path or an
+/// unsupported scheme.
+#[must_use]
+pub fn scheme_of(uri: &str) -> Option<Scheme> {
+    let (scheme, _) = uri.split_once("://")?;
+    match scheme {
+        "s3" | "s3a" => Some(Scheme::S3),
+        "gs" | "gcs" => Some(Scheme::Gcs),
+        "az" | "azure" | "abfs" | "abfss" => Some(Scheme::Azure),
+        "file" => Some(Scheme::File),
+        _ => None,
+    }
+}
+
 /// A resolved store location. See the module docs.
 #[derive(Clone)]
 pub struct StoreLocation {
     kind: LocationKind,
     root_uri: String,
     options: StorageOptions,
+    /// Credentials from a named AWS profile, when no static keys were given.
+    aws_credentials: Option<object_store::aws::AwsCredentialProvider>,
     meta: Arc<dyn ObjectStore>,
     bucket_root: Option<Arc<dyn ObjectStore>>,
     fs_root: Option<PathBuf>,
@@ -792,6 +995,7 @@ impl StoreLocation {
                     root_uri: dir.display().to_string(),
                     kind: LocationKind::Local { dir: dir.clone() },
                     options: StorageOptions::default(),
+                    aws_credentials: None,
                     meta,
                     bucket_root: None,
                     fs_root: Some(dir),
@@ -844,6 +1048,7 @@ impl StoreLocation {
                     },
                     root_uri,
                     options: StorageOptions::default(),
+                    aws_credentials: None,
                     meta: prefixed(Arc::clone(&bucket_store), &rel),
                     bucket_root: bucket_root.then_some(bucket_store),
                     fs_root: Some(path),
@@ -854,14 +1059,15 @@ impl StoreLocation {
                 bucket,
                 prefix,
             } => {
-                let mut options =
+                let (mut options, aws_credentials) =
                     resolve_options(scheme, &bucket, parsed.account.as_deref(), spec, env, net)
                         .await?;
                 options
                     .entry("client_max_retries".into())
                     .or_insert_with(|| net.max_retries.to_string());
-                let bucket_store = build_bucket_store(scheme, &options, net)
-                    .map_err(|e| anyhow!("Build the object store client for '{uri}': {e:#}"))?;
+                let bucket_store =
+                    build_bucket_store(scheme, &options, aws_credentials.clone(), net)
+                        .map_err(|e| anyhow!("Build the object store client for '{uri}': {e:#}"))?;
                 let mut url = url::Url::parse(&format!("{}://{bucket}/", scheme.canonical()))
                     .map_err(|e| anyhow!("Invalid store URI '{uri}': {e}"))?;
                 url.set_path(&prefix);
@@ -874,6 +1080,7 @@ impl StoreLocation {
                     },
                     root_uri,
                     options: StorageOptions(options),
+                    aws_credentials,
                     meta: prefixed(Arc::clone(&bucket_store), &prefix),
                     bucket_root: Some(bucket_store),
                     fs_root: None,
@@ -919,10 +1126,74 @@ impl StoreLocation {
         &self.root_uri
     }
 
+    /// Credentials from a named AWS profile (`AWS_PROFILE`), when the
+    /// location has no static keys and the profile supplies them.
+    #[must_use]
+    pub fn aws_credentials(&self) -> Option<&object_store::aws::AwsCredentialProvider> {
+        self.aws_credentials.as_ref()
+    }
+
     /// The resolved option map.
     #[must_use]
     pub fn options(&self) -> &StorageOptions {
         &self.options
+    }
+
+    /// This location's options that carry over to `dest`, when it names the
+    /// same provider (and, for Azure, the same account): endpoint,
+    /// credentials, network settings. Empty otherwise.
+    #[must_use]
+    pub fn inheritable_options_for(&self, dest: &str) -> BTreeMap<String, String> {
+        let LocationKind::Remote { scheme, .. } = &self.kind else {
+            return BTreeMap::new();
+        };
+        if !self.is_remote() || scheme_of(dest) != Some(*scheme) {
+            return BTreeMap::new();
+        }
+        if *scheme == Scheme::Azure {
+            // An account named in the destination URI must be this store's:
+            // its key or SAS would otherwise be sent to, or the write land
+            // in, the wrong account.
+            let dest_account = parse_uri(dest, None, None).ok().and_then(|p| p.account);
+            if let Some(account) = dest_account
+                && self.options.get("azure_storage_account_name") != Some(account.as_str())
+            {
+                return BTreeMap::new();
+            }
+        }
+        self.inheritable_options()
+    }
+
+    /// This location's options that carry over to another location of the
+    /// same provider: endpoint, credentials, network settings. The bucket or
+    /// container does not, and neither does the region of a bucket on the
+    /// provider's own service, which another bucket may not share.
+    #[must_use]
+    pub fn inheritable_options(&self) -> BTreeMap<String, String> {
+        let custom_endpoint = ["aws_endpoint", "aws_endpoint_url_s3"]
+            .iter()
+            .any(|k| self.options.0.contains_key(*k));
+        self.options
+            .0
+            .iter()
+            .filter(|(k, _)| {
+                !matches!(
+                    k.as_str(),
+                    "aws_bucket" | "google_bucket" | "azure_container_name"
+                ) && !(k.as_str() == "aws_region" && !custom_endpoint)
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// The bucket-rooted store and the path of this location's root in it,
+    /// for addressing `R` itself as one object (a COPY source or target).
+    #[must_use]
+    pub fn object_handle(&self) -> (Arc<dyn ObjectStore>, ObjPath) {
+        match &self.bucket_root {
+            Some(bucket) => (Arc::clone(bucket), ObjPath::from(self.prefix())),
+            None => (self.meta_store(), ObjPath::from("")),
+        }
     }
 
     /// uni's store handle rooted at `R`.
@@ -1007,6 +1278,16 @@ impl StoreLocation {
     /// # Errors
     /// The store cannot be listed or read.
     pub async fn probe_layout(&self) -> Result<LayoutProbe> {
+        if get_optional(&self.meta, IN_PROGRESS_MARKER)
+            .await?
+            .is_some()
+        {
+            bail!(
+                "{} holds an unfinished backup: BACKUP was interrupted while copying into it. \
+                 Delete it and back up again.",
+                self.root_uri
+            );
+        }
         if let Some(bytes) = get_optional(&self.meta, LAYOUT_MARKER_PATH).await? {
             let marker: LayoutMarker = serde_json::from_slice(&bytes)
                 .map_err(|e| anyhow!("Invalid {LAYOUT_MARKER_PATH} in {}: {e}", self.root_uri))?;
@@ -1706,5 +1987,206 @@ mod tests {
             loc.probe_layout().await.unwrap(),
             LayoutProbe::Inferred(StoreLayout::Flat)
         );
+    }
+
+    // ---- AWS named profiles ----------------------------------------------
+
+    fn profile_files(dir: &std::path::Path) -> std::path::PathBuf {
+        let config = dir.join("config");
+        std::fs::write(
+            &config,
+            "[profile uni-test]\n\
+             region = eu-central-1\n\
+             endpoint_url = http://127.0.0.1:1\n\
+             aws_access_key_id = AKIDPROFILE\n\
+             aws_secret_access_key = profilesecret\n",
+        )
+        .unwrap();
+        config
+    }
+
+    #[tokio::test]
+    async fn a_named_profile_supplies_region_endpoint_and_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = profile_files(dir.path());
+        let e = env(&[
+            ("AWS_PROFILE", "uni-test"),
+            ("AWS_CONFIG_FILE", config.to_str().unwrap()),
+            ("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent/credentials"),
+        ]);
+        let loc = resolve(&spec("s3://b/p"), &e).await;
+        assert_eq!(loc.options().get("aws_region"), Some("eu-central-1"));
+        assert_eq!(
+            loc.options().get("aws_endpoint"),
+            Some("http://127.0.0.1:1")
+        );
+        let creds = loc
+            .aws_credentials()
+            .expect("the profile's credentials")
+            .get_credential()
+            .await
+            .unwrap();
+        assert_eq!(creds.key_id, "AKIDPROFILE");
+        assert_eq!(creds.secret_key, "profilesecret");
+        // The secret is not in the option map, so Debug cannot print it.
+        assert!(!format!("{loc:?}").contains("profilesecret"));
+    }
+
+    #[tokio::test]
+    async fn explicit_settings_beat_the_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = profile_files(dir.path());
+        let mut e = env(&[
+            ("AWS_PROFILE", "uni-test"),
+            ("AWS_CONFIG_FILE", config.to_str().unwrap()),
+            ("AWS_REGION", "us-west-2"),
+        ]);
+        let mut s = spec("s3://b/p");
+        s.options = BTreeMap::from([("aws_endpoint".into(), "http://opt:9".into())]);
+        let loc = resolve(&s, &e).await;
+        assert_eq!(loc.options().get("aws_region"), Some("us-west-2"));
+        assert_eq!(loc.options().get("aws_endpoint"), Some("http://opt:9"));
+        // Static keys from a higher layer: the profile's credentials are not used.
+        e.insert("AWS_ACCESS_KEY_ID".into(), "AKIDENV".into());
+        e.insert("AWS_SECRET_ACCESS_KEY".into(), "envsecret".into());
+        let loc = resolve(&s, &e).await;
+        assert!(loc.aws_credentials().is_none());
+        assert_eq!(loc.options().get("aws_access_key_id"), Some("AKIDENV"));
+    }
+
+    #[tokio::test]
+    async fn an_undefined_profile_does_not_fail_the_open() {
+        // `AWS_PROFILE=default` with no AWS files is common in containers;
+        // the SDKs and Lance carry on with the rest of the chain.
+        let dir = tempfile::tempdir().unwrap();
+        let config = profile_files(dir.path());
+        let e = env(&[
+            ("AWS_PROFILE", "default"),
+            ("AWS_CONFIG_FILE", config.to_str().unwrap()),
+            ("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent/credentials"),
+            ("AWS_REGION", "us-east-1"),
+            ("AWS_ACCESS_KEY_ID", "AKIDENV"),
+            ("AWS_SECRET_ACCESS_KEY", "envsecret"),
+        ]);
+        let loc = resolve(&spec("s3://b/p"), &e).await;
+        assert!(loc.aws_credentials().is_none());
+        assert_eq!(loc.options().get("aws_access_key_id"), Some("AKIDENV"));
+    }
+
+    #[tokio::test]
+    async fn a_profile_without_credentials_installs_no_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::write(&config, "[profile region-only]\nregion = ap-south-1\n").unwrap();
+        let e = env(&[
+            ("AWS_PROFILE", "region-only"),
+            ("AWS_CONFIG_FILE", config.to_str().unwrap()),
+            ("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent/credentials"),
+        ]);
+        let loc = resolve(&spec("s3://b/p"), &e).await;
+        assert_eq!(loc.options().get("aws_region"), Some("ap-south-1"));
+        // The rest of the credential chain (IMDS, ECS, web identity) applies.
+        assert!(loc.aws_credentials().is_none());
+    }
+
+    #[tokio::test]
+    async fn environment_region_and_endpoint_beat_the_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = profile_files(dir.path());
+        let e = env(&[
+            ("AWS_PROFILE", "uni-test"),
+            ("AWS_CONFIG_FILE", config.to_str().unwrap()),
+            ("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent/credentials"),
+            ("AWS_DEFAULT_REGION", "sa-east-1"),
+            ("AWS_ENDPOINT_URL_S3", "http://env-s3:2"),
+        ]);
+        let loc = resolve(&spec("s3://b/p"), &e).await;
+        assert_eq!(loc.options().get("aws_region"), Some("sa-east-1"));
+        assert_eq!(
+            loc.options().get("aws_endpoint_url_s3"),
+            Some("http://env-s3:2")
+        );
+        assert_eq!(loc.options().get("aws_endpoint"), None);
+    }
+
+    #[tokio::test]
+    async fn a_profile_file_path_may_start_with_a_tilde() {
+        let dir = tempfile::tempdir().unwrap();
+        let aws = dir.path().join(".aws");
+        std::fs::create_dir_all(&aws).unwrap();
+        let config = profile_files(&aws);
+        let _ = config;
+        let e = env(&[
+            ("HOME", dir.path().to_str().unwrap()),
+            ("AWS_PROFILE", "uni-test"),
+            ("AWS_CONFIG_FILE", "~/.aws/config"),
+            ("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent/credentials"),
+        ]);
+        let loc = resolve(&spec("s3://b/p"), &e).await;
+        assert_eq!(loc.options().get("aws_region"), Some("eu-central-1"));
+    }
+
+    #[tokio::test]
+    async fn profile_credentials_are_cached_until_shortly_before_expiry() {
+        use aws_credential_types::Credentials;
+        use aws_credential_types::provider::{ProvideCredentials, future};
+        use object_store::CredentialProvider;
+        #[derive(Debug)]
+        struct Counting(std::sync::atomic::AtomicUsize, Option<std::time::Duration>);
+        impl ProvideCredentials for Counting {
+            fn provide_credentials<'a>(&'a self) -> future::ProvideCredentials<'a>
+            where
+                Self: 'a,
+            {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let expiry = self.1.map(|d| std::time::SystemTime::now() + d);
+                future::ProvideCredentials::ready(Ok(Credentials::new(
+                    "AKID", "secret", None, expiry, "test",
+                )))
+            }
+        }
+        for (ttl, fetches) in [
+            (None, 1),
+            (Some(std::time::Duration::from_secs(3600)), 1),
+            (Some(std::time::Duration::from_secs(30)), 2),
+        ] {
+            let counting = Arc::new(Counting(Default::default(), ttl));
+            let creds = ProfileCredentials {
+                provider: aws_credential_types::provider::SharedCredentialsProvider::new(
+                    Arc::clone(&counting) as Arc<dyn ProvideCredentials>,
+                ),
+                cached: tokio::sync::Mutex::new(None),
+            };
+            creds.get_credential().await.unwrap();
+            creds.get_credential().await.unwrap();
+            assert_eq!(
+                counting.0.load(std::sync::atomic::Ordering::SeqCst),
+                fetches,
+                "ttl {ttl:?}"
+            );
+        }
+    }
+
+    // ---- inheriting a store's settings ------------------------------------
+
+    #[tokio::test]
+    async fn another_azure_account_inherits_nothing() {
+        let e = env(&[("AZURE_STORAGE_ACCOUNT_NAME", "src")]);
+        let mut s = spec("az://cont/p");
+        s.options = BTreeMap::from([("azure_storage_account_key".into(), "c3JjLWtleQ==".into())]);
+        let loc = resolve(&s, &e).await;
+        assert!(
+            loc.inheritable_options_for("abfss://bk@otheracct.dfs.core.windows.net/x")
+                .is_empty(),
+            "the source account's key would be used for another account"
+        );
+        let same = loc.inheritable_options_for("abfss://bk@src.dfs.core.windows.net/x");
+        assert_eq!(
+            same.get("azure_storage_account_key").map(String::as_str),
+            Some("c3JjLWtleQ==")
+        );
+        assert!(!same.contains_key("azure_container_name"));
+        // A different provider inherits nothing either.
+        assert!(loc.inheritable_options_for("s3://b/x").is_empty());
     }
 }

@@ -505,7 +505,7 @@ Apart from `UNI_ASYNC_FLUSH` and `UNI_FLUSH_STREAM_TIMEOUT_SECS`, Uni reads no `
 | Variable | Used For |
 |----------|----------|
 | `RUST_LOG` | Log level filter |
-| `AWS_*` (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_S3`, `AWS_ALLOW_HTTP`, `AWS_WEB_IDENTITY_TOKEN_FILE`, …; named profiles are not read) | Every S3 store's client, below the typed configuration and storage options |
+| `AWS_*` (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_S3`, `AWS_ALLOW_HTTP`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_PROFILE`, `AWS_CONFIG_FILE`, `AWS_SHARED_CREDENTIALS_FILE`, …) | Every S3 store's client, below the typed configuration and storage options |
 | `GOOGLE_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `SERVICE_ACCOUNT` | Every GCS store's client |
 | `AZURE_*` (`AZURE_STORAGE_ACCOUNT_NAME`, `AZURE_STORAGE_ACCOUNT_KEY`, …), `IDENTITY_ENDPOINT` | Every Azure store's client |
 
@@ -651,7 +651,7 @@ Managed identity, workload identity and client-secret credentials are configured
 
 ### Cloud Storage with BACKUP/COPY
 
-BACKUP and COPY commands support cloud URLs. These URLs are configured from the environment only: the `cloud_storage` and `storage_option` settings of the open database do not apply to them.
+BACKUP and COPY commands support cloud URLs. A URL with the same scheme as a database on an object store inherits its endpoint, credentials and network settings, but not its bucket, nor its region unless the endpoint is custom (an Azure URL naming another account inherits nothing). Other URLs, and URLs from a local database, are configured from the environment. Local paths and `file://` URIs are checked against the file sandbox.
 
 ```cypher
 // Backup to S3

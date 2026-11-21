@@ -39,7 +39,7 @@ use arrow_array::{Array, ArrayRef, RecordBatch, UInt64Array};
 use arrow_schema::{Field, Schema as ArrowSchema};
 use uni_common::core::id::{Eid, Vid};
 use uni_common::core::schema::{DataType, PropertyMeta, is_reserved_property_name};
-use uni_store::cloud::{build_store_from_url, is_cloud_url};
+use uni_store::cloud::is_cloud_url;
 use uni_store::runtime::property_manager::PropertyManager;
 use uni_store::storage::arrow_convert::{self, PropertyExtractor};
 
@@ -429,7 +429,11 @@ impl Executor {
     async fn write_copy_destination(&self, dest: &str, bytes: Vec<u8>) -> Result<()> {
         if is_cloud_url(dest) {
             use object_store::ObjectStoreExt;
-            let (store, path) = build_store_from_url(dest).await?;
+            let (store, path) = self
+                .storage
+                .resolve_foreign_location(dest)
+                .await?
+                .object_handle();
             store.put(&path, bytes::Bytes::from(bytes).into()).await?;
         } else {
             std::fs::write(self.validate_path(dest)?, bytes)?;
@@ -441,7 +445,11 @@ impl Executor {
     async fn read_copy_source(&self, source: &str) -> Result<bytes::Bytes> {
         if is_cloud_url(source) {
             use object_store::ObjectStoreExt;
-            let (store, path) = build_store_from_url(source).await?;
+            let (store, path) = self
+                .storage
+                .resolve_foreign_location(source)
+                .await?
+                .object_handle();
             Ok(store.get(&path).await?.bytes().await?)
         } else {
             Ok(bytes::Bytes::from(std::fs::read(

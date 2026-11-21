@@ -181,10 +181,7 @@ pub async fn build_store_from_url(url: &str) -> Result<(Arc<dyn ObjectStore>, Pa
         &uni_common::config::ObjectStoreConfig::default(),
     )
     .await?;
-    match location.bucket_root() {
-        Some(bucket) => Ok((bucket, Path::from(location.prefix()))),
-        None => Ok((location.meta_store(), Path::from(""))),
-    }
+    Ok(location.object_handle())
 }
 
 /// Copies all objects from a source prefix to a destination prefix.

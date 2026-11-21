@@ -137,8 +137,22 @@ impl Drop for CompactionMerge {
     }
 }
 
+/// Where a [`StorageManager`]'s store lives, beyond its table root: what a
+/// backup of the whole store needs.
+#[derive(Clone)]
+pub struct StoreOrigin {
+    /// The resolved location.
+    pub location: Arc<crate::location::StoreLocation>,
+    /// How tables are placed under it.
+    pub layout: crate::location::StoreLayout,
+    /// A hybrid store's local directory, holding its WAL and ID allocator.
+    pub local: Option<Arc<dyn ObjectStore>>,
+}
+
 pub struct StorageManager {
     base_uri: String,
+    /// Set when the manager was built from a [`StoreLocation`](crate::location::StoreLocation).
+    origin: Option<StoreOrigin>,
     /// Local directory behind `base_uri`, when there is one: a plain path or
     /// a `file://` URI. Enables fsync and the compaction lock.
     fs_root: Option<std::path::PathBuf>,
@@ -908,6 +922,7 @@ impl StorageManager {
         let mut sm = Self {
             requires_adjacency_revalidation: false,
             fs_root: (!base_uri.contains("://")).then(|| std::path::PathBuf::from(base_uri)),
+            origin: None,
             base_uri: base_uri.to_string(),
             store: resilient_store,
             schema_manager,
@@ -1034,7 +1049,51 @@ impl StorageManager {
         )
         .await?;
         sm.fs_root = location.table_fs_root(layout);
+        sm.origin = Some(StoreOrigin {
+            location: Arc::new(location.clone()),
+            layout,
+            local: None,
+        });
         Ok(sm)
+    }
+
+    /// Records a hybrid store's local directory (its WAL and ID allocator).
+    pub fn set_local_store(&mut self, local: Arc<dyn ObjectStore>) {
+        if let Some(origin) = &mut self.origin {
+            origin.local = Some(local);
+        }
+    }
+
+    /// Where this store lives, when it was opened from a resolved location.
+    pub fn origin(&self) -> Option<&StoreOrigin> {
+        self.origin.as_ref()
+    }
+
+    /// Resolves another URI (a BACKUP or COPY target) against this store:
+    /// when it uses the same object-store provider, it inherits this store's
+    /// endpoint and credentials, so a store configured explicitly can reach
+    /// its own bucket. The environment and the URI still apply as usual.
+    ///
+    /// # Errors
+    /// See [`StoreLocation::resolve`](crate::location::StoreLocation::resolve).
+    pub async fn resolve_foreign_location(
+        &self,
+        uri: &str,
+    ) -> Result<crate::location::StoreLocation> {
+        let options = self
+            .origin
+            .as_ref()
+            .map(|o| o.location.inheritable_options_for(uri))
+            .unwrap_or_default();
+        crate::location::StoreLocation::resolve_from_env(
+            &crate::location::LocationSpec {
+                uri: uri.to_string(),
+                cloud: None,
+                options,
+            },
+            &self.config.object_store,
+        )
+        .await
     }
 
     /// Create a new StorageManager using an already-constructed object store.
@@ -1167,49 +1226,51 @@ impl StorageManager {
     /// A table exists but cannot be scanned.
     pub async fn scan_id_floor(&self) -> Result<(u64, u64)> {
         use arrow_array::UInt64Array;
+        use futures::TryStreamExt;
         const EPHEMERAL: u64 = 1 << 63;
-        let max_of = |batches: &[arrow_array::RecordBatch], column: &str| -> Option<u64> {
-            batches
-                .iter()
-                .filter_map(|b| b.column_by_name(column))
-                .filter_map(|c| c.as_any().downcast_ref::<UInt64Array>().cloned())
-                .flat_map(|a| a.iter().flatten().collect::<Vec<u64>>())
-                .filter(|v| v & EPHEMERAL == 0)
-                .max()
-        };
-        let mut vid_floor = 0u64;
-        let mut eid_floor = 0u64;
-        let vertices = table_names::main_vertex_table_name();
-        if self.backend.table_exists(vertices).await? {
-            let batches = self
-                .backend
-                .scan(ScanRequest::all(vertices).with_columns(vec!["_vid".to_string()]))
-                .await?;
-            if let Some(m) = max_of(&batches, "_vid") {
-                vid_floor = vid_floor.max(m + 1);
+        /// One above the largest real id in `column` of `table`, streamed.
+        async fn floor_of(
+            backend: &dyn StorageBackend,
+            table: &str,
+            columns: &[&str],
+        ) -> Result<Vec<u64>> {
+            let mut floors = vec![0u64; columns.len()];
+            if !backend.table_exists(table).await? {
+                return Ok(floors);
             }
-        }
-        let edges = table_names::main_edge_table_name();
-        if self.backend.table_exists(edges).await? {
-            let columns = vec![
-                "_eid".to_string(),
-                "src_vid".to_string(),
-                "dst_vid".to_string(),
-            ];
-            let batches = self
-                .backend
-                .scan(ScanRequest::all(edges).with_columns(columns))
-                .await?;
-            if let Some(m) = max_of(&batches, "_eid") {
-                eid_floor = eid_floor.max(m + 1);
-            }
-            for c in ["src_vid", "dst_vid"] {
-                if let Some(m) = max_of(&batches, c) {
-                    vid_floor = vid_floor.max(m + 1);
+            let request = ScanRequest::all(table)
+                .with_columns(columns.iter().map(|c| (*c).to_string()).collect());
+            let mut stream = backend.scan_stream(request).await?;
+            while let Some(batch) = stream.try_next().await? {
+                for (i, column) in columns.iter().enumerate() {
+                    let Some(array) = batch
+                        .column_by_name(column)
+                        .and_then(|c| c.as_any().downcast_ref::<UInt64Array>())
+                    else {
+                        continue;
+                    };
+                    for v in array.iter().flatten() {
+                        if v & EPHEMERAL == 0 {
+                            floors[i] = floors[i].max(v.saturating_add(1));
+                        }
+                    }
                 }
             }
+            Ok(floors)
         }
-        Ok((vid_floor, eid_floor))
+        let vertices = floor_of(
+            self.backend.as_ref(),
+            table_names::main_vertex_table_name(),
+            &["_vid"],
+        )
+        .await?;
+        let edges = floor_of(
+            self.backend.as_ref(),
+            table_names::main_edge_table_name(),
+            &["_eid", "src_vid", "dst_vid"],
+        )
+        .await?;
+        Ok((vertices[0].max(edges[1]).max(edges[2]), edges[0]))
     }
 
     pub fn pinned(&self, snapshot: SnapshotManifest) -> Self {
@@ -1229,6 +1290,7 @@ impl StorageManager {
             requires_adjacency_revalidation: self.requires_adjacency_revalidation,
             base_uri: self.base_uri.clone(),
             fs_root: self.fs_root.clone(),
+            origin: self.origin.clone(),
             store: self.store.clone(),
             schema_manager: self.schema_manager.clone(),
             snapshot_manager: self.snapshot_manager.clone(),
@@ -1341,6 +1403,7 @@ impl StorageManager {
             requires_adjacency_revalidation: self.requires_adjacency_revalidation,
             base_uri: self.base_uri.clone(),
             fs_root: self.fs_root.clone(),
+            origin: self.origin.clone(),
             store: self.store.clone(),
             schema_manager: self.schema_manager.clone(),
             snapshot_manager: self.snapshot_manager.clone(),
@@ -1422,6 +1485,7 @@ impl StorageManager {
             requires_adjacency_revalidation: self.requires_adjacency_revalidation,
             base_uri: self.base_uri.clone(),
             fs_root: self.fs_root.clone(),
+            origin: self.origin.clone(),
             store: self.store.clone(),
             schema_manager: merged_schema,
             snapshot_manager,

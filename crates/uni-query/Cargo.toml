@@ -10,6 +10,7 @@ repository.workspace = true
 autotests = false
 
 [dependencies]
+url = { workspace = true }
 uni-common = { workspace = true }
 uni-btic = { workspace = true }
 uni-sparse-vector = { workspace = true }
