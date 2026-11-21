@@ -846,6 +846,24 @@ fn label_backfill_marker_path(label: &str) -> object_store::path::Path {
     object_store::path::Path::from(format!("{LABEL_BACKFILL_MARKER_DIR}/{name}"))
 }
 
+/// Logs, once per store, that compaction on an object store runs unlocked.
+///
+/// A local store's compaction takes a file lock, so a second handle on the
+/// same directory waits instead of overwriting appends it made concurrently.
+/// An object store has no such lock yet (a store lease is planned), so two
+/// writable handles compacting one store can lose writes.
+fn warn_unlocked_compaction(base_uri: &str) {
+    static WARNED: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(Default::default);
+    if WARNED.lock().insert(base_uri.to_string()) {
+        warn!(
+            store = base_uri,
+            "Compaction on an object store takes no lock: open this store with at most one \
+             writable handle at a time, or concurrent compactions can drop each other's writes"
+        );
+    }
+}
+
 impl StorageManager {
     /// Create a new StorageManager with a pre-configured backend.
     pub async fn new_with_backend(
@@ -855,10 +873,26 @@ impl StorageManager {
         schema_manager: Arc<SchemaManager>,
         config: UniConfig,
     ) -> Result<Self> {
-        let resilient_store: Arc<dyn ObjectStore> = Arc::new(ResilientObjectStore::new(
-            store,
-            config.object_store.clone(),
-        ));
+        Self::new_with_backend_retrying(base_uri, store, backend, schema_manager, config, false)
+            .await
+    }
+
+    /// [`Self::new_with_backend`]; `client_retries` says `store` is an
+    /// object-store client that retries on its own, so the resilience layer
+    /// adds timeouts and a circuit breaker but no retries of its own.
+    async fn new_with_backend_retrying(
+        base_uri: &str,
+        store: Arc<dyn ObjectStore>,
+        backend: Arc<dyn StorageBackend>,
+        schema_manager: Arc<SchemaManager>,
+        config: UniConfig,
+        client_retries: bool,
+    ) -> Result<Self> {
+        let resilient_store: Arc<dyn ObjectStore> = Arc::new(if client_retries {
+            ResilientObjectStore::without_retries(store, config.object_store.clone())
+        } else {
+            ResilientObjectStore::new(store, config.object_store.clone())
+        });
 
         let snapshot_manager = Arc::new(SnapshotManager::new(resilient_store.clone()));
 
@@ -987,12 +1021,16 @@ impl StorageManager {
     ) -> Result<Self> {
         let base_uri = location.table_uri(layout);
         let store = location.table_store(layout)?;
-        let mut sm = Self::new_with_store_and_storage_options(
+        // A remote store's client retries with the configured settings
+        // (`StoreLocation` builds it with them), so its resilience layer does
+        // not retry again.
+        let mut sm = Self::new_with_store_options_retrying(
             &base_uri,
             store,
             schema_manager,
             config,
             location.lance_storage_options(),
+            location.is_remote(),
         )
         .await?;
         sm.fs_root = location.table_fs_root(layout);
@@ -1020,6 +1058,26 @@ impl StorageManager {
         config: UniConfig,
         lancedb_storage_options: Option<HashMap<String, String>>,
     ) -> Result<Self> {
+        Self::new_with_store_options_retrying(
+            base_uri,
+            store,
+            schema_manager,
+            config,
+            lancedb_storage_options,
+            false,
+        )
+        .await
+    }
+
+    #[cfg(feature = "lance-backend")]
+    async fn new_with_store_options_retrying(
+        base_uri: &str,
+        store: Arc<dyn ObjectStore>,
+        schema_manager: Arc<SchemaManager>,
+        config: UniConfig,
+        lancedb_storage_options: Option<HashMap<String, String>>,
+        client_retries: bool,
+    ) -> Result<Self> {
         let cache_sizes = crate::backend::lance_directory::LanceCacheSizes {
             index_bytes: config.lance_index_cache_bytes,
             metadata_bytes: config.lance_metadata_cache_bytes,
@@ -1036,7 +1094,15 @@ impl StorageManager {
             )
             .await?,
         );
-        Self::new_with_backend(base_uri, store, backend, schema_manager, config).await
+        Self::new_with_backend_retrying(
+            base_uri,
+            store,
+            backend,
+            schema_manager,
+            config,
+            client_retries,
+        )
+        .await
     }
 
     /// Recover all staging tables for known table patterns.
@@ -2783,7 +2849,9 @@ impl StorageManager {
 
     /// Waits for this directory's compaction lock, then takes it.
     ///
-    /// Returns `Ok(None)` for a remote store, which has no lock.
+    /// Returns `Ok(None)` for a remote store, which has no lock: compaction
+    /// there is safe only with a single writable handle per store, and the
+    /// first such compaction says so in the log.
     ///
     /// # Errors
     ///
@@ -2791,6 +2859,7 @@ impl StorageManager {
     /// lock file's I/O error.
     pub(crate) async fn lock_compaction_dir(&self) -> Result<Option<CompactionDirLock>> {
         let Some(root) = self.local_fs_root() else {
+            warn_unlocked_compaction(&self.base_uri);
             return Ok(None);
         };
         loop {

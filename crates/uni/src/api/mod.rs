@@ -1996,9 +1996,17 @@ impl UniBuilder {
 
     /// Set the write lease strategy for multi-agent access.
     ///
-    /// This configures how write access is coordinated when multiple
-    /// processes share the same database.
+    /// Recorded only: no lease is acquired or enforced yet (see
+    /// [`multi_agent::WriteLease`]), so a non-`Local` strategy logs a warning.
+    /// Open at most one writable handle per store.
     pub fn write_lease(mut self, lease: multi_agent::WriteLease) -> Self {
+        if !matches!(lease, multi_agent::WriteLease::Local) {
+            tracing::warn!(
+                lease = ?lease,
+                "Write leases are not enforced yet: this strategy is recorded but no lease \
+                 is acquired. Open at most one writable handle per store."
+            );
+        }
         self.write_lease = Some(lease);
         self
     }

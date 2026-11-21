@@ -50,8 +50,9 @@ use super::types::BackendCacheUsage;
 
 /// Keep newly created or rebuilt Uni datasets on the Lance 11 stable format.
 /// Appends inherit the existing dataset's format, including older databases.
-/// A cloud directory's base URI and its storage options.
-type DirectoryOptions = (String, HashMap<String, String>);
+/// A cloud directory's base URI, its storage options, and the registration
+/// that owns the entry.
+type DirectoryOptions = (String, HashMap<String, String>, u64);
 
 /// The storage options of every cloud directory this process connected to,
 /// by base URI.
@@ -68,19 +69,41 @@ type DirectoryOptions = (String, HashMap<String, String>);
 /// by the URI's directory instead of being threaded through each of them.
 ///
 /// Local directories are not recorded: they have no options, and a bare open
-/// is exactly right for them. Two connections to one base URI with different
-/// options share the entry of the later one.
+/// is exactly right for them. An entry lives as long as the directory that
+/// registered it ([`OptionsRegistration`]), so credentials do not outlive
+/// their database. While two connections to one base URI with different
+/// options are open at once, opens by URI use the later one's.
 static CLOUD_STORAGE_OPTIONS: std::sync::LazyLock<std::sync::RwLock<Vec<DirectoryOptions>>> =
     std::sync::LazyLock::new(Default::default);
 
-/// Records `options` as those of the cloud directory at `base_uri`.
-fn remember_storage_options(base_uri: &str, options: &HashMap<String, String>) {
+/// Keeps a directory's entry in [`CLOUD_STORAGE_OPTIONS`]; dropping the last
+/// handle removes it.
+#[derive(Debug)]
+pub(crate) struct OptionsRegistration(u64);
+
+impl Drop for OptionsRegistration {
+    fn drop(&mut self) {
+        CLOUD_STORAGE_OPTIONS
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|(_, _, owner)| *owner != self.0);
+    }
+}
+
+/// Records `options` as those of the cloud directory at `base_uri`, for as
+/// long as the returned registration is held.
+fn remember_storage_options(
+    base_uri: &str,
+    options: &HashMap<String, String>,
+) -> Arc<OptionsRegistration> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let owner = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let base = base_uri.trim_end_matches('/').to_string();
-    let mut stores = CLOUD_STORAGE_OPTIONS
+    CLOUD_STORAGE_OPTIONS
         .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    stores.retain(|(known, _)| *known != base);
-    stores.push((base, options.clone()));
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push((base, options.clone(), owner));
+    Arc::new(OptionsRegistration(owner))
 }
 
 /// The storage options of the cloud directory `uri` lies in: the longest
@@ -92,12 +115,13 @@ pub(crate) fn storage_options_for(uri: &str) -> Option<HashMap<String, String>> 
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     stores
         .iter()
-        .filter(|(base, _)| {
+        .filter(|(base, _, _)| {
             uri.strip_prefix(base.as_str())
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
         })
-        .max_by_key(|(base, _)| base.len())
-        .map(|(_, options)| options.clone())
+        // The deepest directory; among connections to it, the latest.
+        .max_by_key(|(base, _, owner)| (base.len(), *owner))
+        .map(|(_, options, _)| options.clone())
 }
 
 /// A [`DatasetBuilder`] for the dataset at `uri`, carrying the storage
@@ -164,6 +188,9 @@ pub struct LanceDirectory {
     base_path: ObjectPath,
     /// Cloud credentials / tuning knobs, re-applied on every dataset open.
     storage_options: Option<HashMap<String, String>>,
+    /// Keeps `storage_options` findable by URI while this directory (or a
+    /// clone) is alive.
+    _options_registration: Option<Arc<OptionsRegistration>>,
     /// Shared Lance session, reused by every dataset open.
     ///
     /// The session owns Lance's index and metadata caches. Without it each
@@ -279,14 +306,15 @@ impl LanceDirectory {
             CacheSpec::Backend(metadata_cache.clone()),
             Arc::new(ObjectStoreRegistry::default()),
         );
-        if let Some(options) = &storage_options {
-            remember_storage_options(base_uri, options);
-        }
+        let options_registration = storage_options
+            .as_ref()
+            .map(|options| remember_storage_options(base_uri, options));
         Ok(Self {
             base_uri: base_uri.to_string(),
             store,
             base_path,
             storage_options,
+            _options_registration: options_registration,
             session: Arc::new(session),
             index_cache,
             metadata_cache,
@@ -512,8 +540,8 @@ mod storage_options_tests {
     fn options_are_found_by_the_directory_a_uri_lies_in() {
         let options =
             |endpoint: &str| HashMap::from([("endpoint".to_string(), endpoint.to_string())]);
-        remember_storage_options("s3://opts-test/db/", &options("outer"));
-        remember_storage_options("s3://opts-test/db/nested", &options("inner"));
+        let _outer = remember_storage_options("s3://opts-test/db/", &options("outer"));
+        let _inner = remember_storage_options("s3://opts-test/db/nested", &options("inner"));
 
         let endpoint = |uri: &str| storage_options_for(uri).map(|o| o["endpoint"].clone());
         assert_eq!(endpoint("s3://opts-test/db"), Some("outer".to_string()));
@@ -533,8 +561,8 @@ mod storage_options_tests {
         assert_eq!(endpoint("s3://other-bucket/db/t.lance"), None);
         assert_eq!(endpoint("/var/lib/uni/t.lance"), None);
 
-        // Connecting again replaces the directory's options.
-        remember_storage_options("s3://opts-test/db", &options("replaced"));
+        // Connecting again shadows the directory's options while it is open.
+        let _again = remember_storage_options("s3://opts-test/db", &options("replaced"));
         assert_eq!(
             endpoint("s3://opts-test/db/t.lance"),
             Some("replaced".to_string())
@@ -546,5 +574,30 @@ mod storage_options_tests {
         assert!(params.store_params.is_some());
         let local = with_store_params("/var/lib/uni/t.lance", write_params(WriteMode::Create));
         assert!(local.store_params.is_none());
+    }
+
+    /// A directory's options live as long as the directory: credentials do
+    /// not outlive the database that supplied them, and an earlier
+    /// connection to the same URI gets its own options back when a later one
+    /// closes.
+    #[test]
+    fn options_are_forgotten_when_their_directory_closes() {
+        let options =
+            |endpoint: &str| HashMap::from([("endpoint".to_string(), endpoint.to_string())]);
+        let endpoint = |uri: &str| storage_options_for(uri).map(|o| o["endpoint"].clone());
+        let first = remember_storage_options("s3://opts-life/db", &options("first"));
+        let second = remember_storage_options("s3://opts-life/db", &options("second"));
+        assert_eq!(endpoint("s3://opts-life/db/t.lance"), Some("second".into()));
+        drop(second);
+        assert_eq!(endpoint("s3://opts-life/db/t.lance"), Some("first".into()));
+        let clone = std::sync::Arc::clone(&first);
+        drop(first);
+        assert_eq!(
+            endpoint("s3://opts-life/db/t.lance"),
+            Some("first".into()),
+            "a clone keeps the registration alive"
+        );
+        drop(clone);
+        assert_eq!(endpoint("s3://opts-life/db/t.lance"), None);
     }
 }

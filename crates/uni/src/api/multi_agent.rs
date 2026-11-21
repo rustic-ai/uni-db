@@ -11,14 +11,20 @@ use uni_common::Result;
 
 /// Write lease strategy for multi-agent access.
 ///
-/// Determines how write access is coordinated across multiple database instances.
+/// **Not enforced yet.** The strategy is recorded and reported (for example
+/// in `Uni::write_lease`), but no lease is acquired, renewed or checked: a
+/// [`WriteLeaseProvider`]'s methods are never called, and nothing stops a
+/// second writable handle on the same store. Run one writable handle per
+/// store. Enforcement (a lease object with fencing on object stores, a
+/// directory lock locally) is planned.
 #[non_exhaustive]
 pub enum WriteLease {
     /// Local single-process lock (default behavior — no external coordination).
     Local,
-    /// DynamoDB-based distributed lease. Stores config but is not yet implemented.
+    /// DynamoDB-based distributed lease. Recorded only: not implemented.
     DynamoDB { table: String },
-    /// Custom lease provider via trait object.
+    /// Custom lease provider via trait object. Recorded only: the provider is
+    /// not called.
     Custom(Box<dyn WriteLeaseProvider>),
 }
 

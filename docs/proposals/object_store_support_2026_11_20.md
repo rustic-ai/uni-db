@@ -27,6 +27,13 @@ Where it lives:
 - Python `storage_options` and `cloud_config` in every mode.
 - CLI `--storage-option` and URL `--path`.
 
+Finished after the first commit:
+
+- Storage options registered for Lance's by-URI opens live only as long as the database that registered them.
+- A remote store's resilience layer keeps its timeouts and circuit breaker but no longer retries on top of the client, which retries with the same settings.
+- Unlocked compaction on an object store logs a warning, once per store.
+- `WriteLease` is documented as recorded-only, and a non-`Local` strategy logs a warning.
+
 **Behaviour and API changes for release notes:**
 
 - `CloudStorageConfig::azure_from_env` returns `anyhow::Result<Self>` instead of panicking.
@@ -54,7 +61,7 @@ Where it lives:
 - Fork snapshot managers do not stamp ID marks.
 - Fork allocators still allow an unconditional put on remote stores.
 - A bulk-load roll-forward during open saves its manifest before the allocator is attached, so it carries the previous ID marks.
-- `CLOUD_STORAGE_OPTIONS` in `lance_directory.rs` is process-global and keyed by base URI: two databases opened at one URI with different credentials share the later set.
+- `CLOUD_STORAGE_OPTIONS` in `lance_directory.rs` is keyed by base URI: while two databases are open at one URI with different credentials, datasets opened by URI use the later one's. Entries now go away when their database closes.
 - BACKUP and COPY should resolve against the open database's location (Phase E).
 - AWS profile support for uni's client needs `aws-config` or an `object_store` upgrade.
 

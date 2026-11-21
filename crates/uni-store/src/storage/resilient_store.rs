@@ -76,6 +76,8 @@ pub struct ResilientObjectStore {
     inner: Arc<dyn ObjectStore>,
     config: ObjectStoreConfig,
     cb: CircuitBreaker,
+    /// Retries this layer adds; 0 over a client that already retries.
+    max_retries: u32,
 }
 
 impl ResilientObjectStore {
@@ -83,7 +85,24 @@ impl ResilientObjectStore {
         let cb = CircuitBreaker::new(5, Duration::from_secs(30)); // Hardcoded defaults for CB for now or use config?
         // We can use config.max_retries * 2 as threshold?
         // Let's use 5 failures and 30s reset.
-        Self { inner, config, cb }
+        let max_retries = config.max_retries;
+        Self {
+            inner,
+            config,
+            cb,
+            max_retries,
+        }
+    }
+
+    /// Timeouts and the circuit breaker, without retries of its own: for a
+    /// client that already retries (an object-store client built with the
+    /// same [`ObjectStoreConfig`]), where retrying here too would multiply
+    /// the attempts and the time before an error surfaces.
+    pub fn without_retries(inner: Arc<dyn ObjectStore>, config: ObjectStoreConfig) -> Self {
+        Self {
+            max_retries: 0,
+            ..Self::new(inner, config)
+        }
     }
 
     async fn retry<F, Fut, T>(&self, mut f: F, op_name: &str) -> StoreResult<T>
@@ -128,7 +147,7 @@ impl ResilientObjectStore {
                     }
 
                     attempt += 1;
-                    if attempt > self.config.max_retries {
+                    if attempt > self.max_retries {
                         self.cb.report_failure();
                         return Err(e);
                     }
@@ -501,5 +520,82 @@ mod tests {
             0,
             "Not-found errors should not count as CB failures"
         );
+    }
+
+    /// Fails every read with a transient error, counting attempts.
+    #[derive(Debug, Default)]
+    struct FlakyReads {
+        inner: InMemory,
+        reads: std::sync::atomic::AtomicU32,
+    }
+
+    impl Display for FlakyReads {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "FlakyReads")
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for FlakyReads {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> StoreResult<PutResult> {
+            self.inner.put_opts(location, payload, opts).await
+        }
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: PutMultipartOptions,
+        ) -> StoreResult<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+        async fn get_opts(&self, _location: &Path, _options: GetOptions) -> StoreResult<GetResult> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            Err(object_store::Error::Generic {
+                store: "FlakyReads",
+                source: Box::new(std::io::Error::other("connection reset")),
+            })
+        }
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, StoreResult<Path>>,
+        ) -> BoxStream<'static, StoreResult<Path>> {
+            self.inner.delete_stream(locations)
+        }
+        fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, StoreResult<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+        async fn list_with_delimiter(&self, prefix: Option<&Path>) -> StoreResult<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+        async fn copy_opts(&self, from: &Path, to: &Path, options: CopyOptions) -> StoreResult<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// Over a client that retries on its own (an object-store client built
+    /// with the same retry settings), the wrapper keeps its timeouts and
+    /// circuit breaker but makes one attempt, so retries do not multiply.
+    #[tokio::test]
+    async fn without_retries_makes_one_attempt() {
+        let config = ObjectStoreConfig {
+            max_retries: 3,
+            retry_backoff_base: Duration::from_millis(1),
+            retry_backoff_max: Duration::from_millis(2),
+            ..Default::default()
+        };
+        let inner = Arc::new(FlakyReads::default());
+        let store = ResilientObjectStore::without_retries(inner.clone(), config.clone());
+        assert!(store.get(&Path::from("k")).await.is_err());
+        assert_eq!(inner.reads.load(Ordering::SeqCst), 1);
+        assert_eq!(store.cb.failures.load(Ordering::Relaxed), 1);
+
+        let inner = Arc::new(FlakyReads::default());
+        let store = ResilientObjectStore::new(inner.clone(), config);
+        assert!(store.get(&Path::from("k")).await.is_err());
+        assert_eq!(inner.reads.load(Ordering::SeqCst), 4);
     }
 }

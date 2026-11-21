@@ -1347,6 +1347,8 @@ R/storage/            *.lance, indexes/, catalog/{manifests,latest,forks/,…}, 
 
 **ID floor.** Every saved manifest records the end of the ID allocator's reserved ranges (`next_vid` / `next_eid`, stamped centrally in `SnapshotManager::save_snapshot`). At open, the allocator starts at `max(id_allocator.json, manifest marks)`. When the manifest predates the marks, it starts above `max(_vid, src_vid, dst_vid)` / `max(_eid)` scanned from the main tables. After WAL replay, it starts above any id in L0. Losing a hybrid store's local directory therefore cannot reuse an id. The allocator's conditional writes create the file only if it is absent, and adopt another creator's batches on `AlreadyExists`. On a store without conditional writes they fall back to a plain put only for a local directory.
 
+**Retries and leases.** For a remote store, `ResilientObjectStore` is built with `without_retries`: it keeps per-call timeouts and the circuit breaker, but the client (built with `UniConfig.object_store`'s retry settings) does the retrying, so attempts do not multiply. Compaction takes no lock on an object store and warns once per store. `WriteLease` is recorded, not enforced. The by-URI storage options Lance's helper opens use (`CLOUD_STORAGE_OPTIONS`) are held by an `OptionsRegistration` and dropped with the last `LanceDirectory` clone.
+
 ### Temporary Databases and Teardown Ordering
 
 `Uni::temporary()` / `Uni::in_memory()` are only in-memory from the caller's

@@ -141,7 +141,7 @@ The WAL and ID allocator live in the local directory, and everything else lives 
 
 ## Concurrency
 
-A store, local or remote, supports **one writable handle at a time**. Uni does not yet take a lock or lease on the store, so run a single writer per store. On an object store, the ID allocator needs conditional writes and detects a concurrent writer through them; a service without them fails the first ID reservation. For an S3-compatible service, set `aws_conditional_put` to the mechanism it supports.
+A store, local or remote, supports **one writable handle at a time**. Uni does not yet take a lock or lease on the store, and a configured `WriteLease` is recorded but not enforced, so run a single writer per store. On an object store, compaction is unlocked too and logs a warning the first time it runs. On an object store, the ID allocator needs conditional writes and detects a concurrent writer through them; a service without them fails the first ID reservation. For an S3-compatible service, set `aws_conditional_put` to the mechanism it supports.
 
 ## Stores written before 5.4
 

@@ -1195,10 +1195,16 @@ Coordinate write access across multiple processes sharing the same database.
 ```rust
 pub enum WriteLease {
     Local,                          // Single-process lock (default)
-    DynamoDB { table: String },     // DynamoDB-based distributed lease
-    Custom(Box<dyn WriteLeaseProvider>),  // Custom provider
+    DynamoDB { table: String },     // DynamoDB-based distributed lease (not implemented)
+    Custom(Box<dyn WriteLeaseProvider>),  // Custom provider (not called yet)
 }
 ```
+
+!!! warning "Write leases are not enforced yet"
+    The strategy is recorded and reported, but no lease is acquired, renewed
+    or checked, and a `WriteLeaseProvider` is never called. Nothing stops a
+    second writable handle on the same store, so run one writer per store.
+    Setting a non-`Local` strategy logs a warning.
 
 ### WriteLeaseProvider Trait
 
