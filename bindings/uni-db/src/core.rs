@@ -572,6 +572,25 @@ pub enum OpenMode {
     Temporary,
 }
 
+/// `path` with `.` components and trailing separators removed, for comparing
+/// two spellings of one directory without touching the filesystem.
+fn lexical_path(path: &str) -> std::path::PathBuf {
+    std::path::Path::new(path)
+        .components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .collect()
+}
+
+/// Storage options whose `Debug` prints keys only: values may be secrets.
+#[derive(Clone, Default)]
+pub(crate) struct RedactedOptions(pub(crate) std::collections::BTreeMap<String, String>);
+
+impl std::fmt::Debug for RedactedOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.0.keys()).finish()
+    }
+}
+
 /// Build and open a Uni database.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_database_core(
@@ -590,6 +609,7 @@ pub async fn build_database_core(
     write_lease: Option<::uni_db::api::multi_agent::WriteLease>,
     skip_invalid_locy_rules: bool,
     xervo_runtime: Option<std::sync::Arc<::uni_db::ModelRuntime>>,
+    storage_options: std::collections::BTreeMap<String, String>,
 ) -> Result<Uni, UniError> {
     let mut builder = match mode {
         OpenMode::Open => Uni::open(uri),
@@ -630,15 +650,26 @@ pub async fn build_database_core(
         builder = builder.xervo_catalog(catalog);
     }
 
-    if let (Some(_local), Some(remote)) = (hybrid_local, hybrid_remote) {
-        if let Some(cc) = cloud_config {
-            builder = builder.remote_storage(remote, cc);
-        } else {
-            // remote_storage requires config; create a minimal one from the URL scheme
+    if let Some(remote) = hybrid_remote {
+        // The WAL and ID allocator go in the directory the builder was opened
+        // at; a different `local_path` would silently be ignored.
+        if let Some(local) = hybrid_local
+            && lexical_path(local) != lexical_path(uri)
+        {
             return Err(UniError::Internal(anyhow::anyhow!(
-                "remote_storage requires a CloudStorageConfig"
+                "hybrid(local_path={local:?}, ...) must name the directory the builder was \
+                 opened at ({uri:?}): that directory holds the WAL and ID allocator"
             )));
         }
+        builder = builder.hybrid(remote);
+    }
+    // Honored for a remote-only store (`open("s3://...")`) as well as for the
+    // remote half of a hybrid store.
+    if let Some(cc) = cloud_config {
+        builder = builder.cloud_storage(cc);
+    }
+    if !storage_options.is_empty() {
+        builder = builder.storage_options(storage_options);
     }
 
     if read_only {

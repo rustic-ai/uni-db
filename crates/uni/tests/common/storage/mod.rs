@@ -18,6 +18,7 @@ pub mod label_declare_backfill_resilience;
 pub mod lance_cache_sizing;
 pub mod manual_compaction_l1_runs;
 pub mod multi_label_delete;
+pub mod object_store_location;
 pub mod overflow_json_e2e;
 pub mod overflow_json_test;
 pub mod parquet_export_test;

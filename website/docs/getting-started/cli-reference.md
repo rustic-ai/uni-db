@@ -82,7 +82,8 @@ uni query <STATEMENT> [--path <PATH>]
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--path <PATH>` | Storage directory path | `./storage` |
+| `--path <PATH>` | Local directory or object-store URI (`s3://`, `gs://`, `az://`, `file://`) | `./storage` |
+| `--storage-option KEY=VALUE` | Object-store option, repeatable; overrides the environment. Prefer the environment for secrets, which would otherwise land in shell history | — |
 
 #### Example
 
@@ -108,7 +109,8 @@ uni
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `--path <PATH>` | Storage directory path | `./storage` |
+| `--path <PATH>` | Local directory or object-store URI (`s3://`, `gs://`, `az://`, `file://`) | `./storage` |
+| `--storage-option KEY=VALUE` | Object-store option, repeatable; overrides the environment. Prefer the environment for secrets, which would otherwise land in shell history | — |
 
 #### Shell Commands
 

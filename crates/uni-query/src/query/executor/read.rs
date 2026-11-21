@@ -4634,7 +4634,7 @@ impl Executor {
         use object_store::local::LocalFileSystem;
         use object_store::path::Path as ObjPath;
 
-        let (dest_store, dest_prefix) = build_store_from_url(dest_url)?;
+        let (dest_store, dest_prefix) = build_store_from_url(dest_url).await?;
         let source_path = std::path::Path::new(self.storage.base_path());
 
         // Create local store for source, coerced to dyn ObjectStore

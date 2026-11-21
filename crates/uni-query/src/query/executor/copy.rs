@@ -429,7 +429,7 @@ impl Executor {
     async fn write_copy_destination(&self, dest: &str, bytes: Vec<u8>) -> Result<()> {
         if is_cloud_url(dest) {
             use object_store::ObjectStoreExt;
-            let (store, path) = build_store_from_url(dest)?;
+            let (store, path) = build_store_from_url(dest).await?;
             store.put(&path, bytes::Bytes::from(bytes).into()).await?;
         } else {
             std::fs::write(self.validate_path(dest)?, bytes)?;
@@ -441,7 +441,7 @@ impl Executor {
     async fn read_copy_source(&self, source: &str) -> Result<bytes::Bytes> {
         if is_cloud_url(source) {
             use object_store::ObjectStoreExt;
-            let (store, path) = build_store_from_url(source)?;
+            let (store, path) = build_store_from_url(source).await?;
             Ok(store.get(&path).await?.bytes().await?)
         } else {
             Ok(bytes::Bytes::from(std::fs::read(

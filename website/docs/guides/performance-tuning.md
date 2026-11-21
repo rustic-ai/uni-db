@@ -680,8 +680,7 @@ Detailed per-component memory stats are not exposed yet. Use OS-level tools (e.g
 Uni supports multiple cloud storage backends with automatic credential resolution:
 
 ```rust
-use uni_db::Uni;
-use uni_common::CloudStorageConfig;
+use uni_db::{CloudStorageConfig, Uni};
 
 // Amazon S3
 let cfg = CloudStorageConfig::S3 {
@@ -694,8 +693,9 @@ let cfg = CloudStorageConfig::S3 {
     virtual_hosted_style: true,
 };
 
-let db = Uni::open("./local-meta")
-    .remote_storage("s3://my-bucket/graph-data", cfg)
+let db = Uni::open("./local-wal")
+    .hybrid("s3://my-bucket/graph-data")
+    .cloud_storage(cfg)
     .build()
     .await?;
 
@@ -706,8 +706,9 @@ let cfg = CloudStorageConfig::Gcs {
     service_account_key: None,
 };
 
-let db = Uni::open("./local-meta")
-    .remote_storage("gs://my-gcs-bucket/graph-data", cfg)
+let db = Uni::open("./local-wal")
+    .hybrid("gs://my-gcs-bucket/graph-data")
+    .cloud_storage(cfg)
     .build()
     .await?;
 
@@ -722,8 +723,9 @@ let cfg = CloudStorageConfig::S3 {
     virtual_hosted_style: false,
 };
 
-let db = Uni::open("./local-meta")
-    .remote_storage("s3://my-bucket/graph-data", cfg)
+let db = Uni::open("./local-wal")
+    .hybrid("s3://my-bucket/graph-data")
+    .cloud_storage(cfg)
     .build()
     .await?;
 ```
@@ -765,6 +767,7 @@ Tune L1 flush frequency for request cost and checkpoint latency. With WAL enable
 | Local SSD | 1-5s | No request charge; reduce L0 backlog |
 
 ```rust
+use std::time::Duration;
 use uni_db::{Uni, UniConfig};
 
 // Cost-optimized for cloud (fewer API calls)
@@ -773,8 +776,8 @@ config.auto_flush_threshold = 50_000;
 config.auto_flush_interval = Some(Duration::from_secs(30));
 config.auto_flush_min_mutations = 100;
 
-let db = Uni::open("./local-meta")
-    .remote_storage("s3://my-bucket/data", CloudStorageConfig::s3_from_env("my-bucket"))
+let db = Uni::open("./local-wal")
+    .hybrid("s3://my-bucket/data") // configured from the environment
     .config(config)
     .build()
     .await?;

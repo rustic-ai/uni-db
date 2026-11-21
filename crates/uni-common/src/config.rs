@@ -926,7 +926,10 @@ impl UniConfig {
 ///     virtual_hosted_style: false,
 /// };
 /// ```
-#[derive(Clone, Debug)]
+///
+/// `Debug` prints the bucket, region and endpoint, and never a key, token or
+/// service-account secret.
+#[derive(Clone)]
 pub enum CloudStorageConfig {
     /// Amazon S3 storage configuration.
     S3 {
@@ -967,61 +970,135 @@ pub enum CloudStorageConfig {
     },
 }
 
+fn redacted(v: &Option<String>) -> Option<&'static str> {
+    v.as_ref().map(|_| "<redacted>")
+}
+
+impl std::fmt::Debug for CloudStorageConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::S3 {
+                bucket,
+                region,
+                endpoint,
+                access_key_id,
+                secret_access_key,
+                session_token,
+                virtual_hosted_style,
+            } => f
+                .debug_struct("S3")
+                .field("bucket", bucket)
+                .field("region", region)
+                .field("endpoint", endpoint)
+                .field("access_key_id", &redacted(access_key_id))
+                .field("secret_access_key", &redacted(secret_access_key))
+                .field("session_token", &redacted(session_token))
+                .field("virtual_hosted_style", virtual_hosted_style)
+                .finish(),
+            Self::Gcs {
+                bucket,
+                service_account_path,
+                service_account_key,
+            } => f
+                .debug_struct("Gcs")
+                .field("bucket", bucket)
+                .field("service_account_path", service_account_path)
+                .field("service_account_key", &redacted(service_account_key))
+                .finish(),
+            Self::Azure {
+                container,
+                account,
+                access_key,
+                sas_token,
+            } => f
+                .debug_struct("Azure")
+                .field("container", container)
+                .field("account", account)
+                .field("access_key", &redacted(access_key))
+                .field("sas_token", &redacted(sas_token))
+                .finish(),
+        }
+    }
+}
+
 impl CloudStorageConfig {
-    /// Creates an S3 configuration using environment variables.
+    /// Creates an S3 configuration from environment variables.
     ///
-    /// Reads credentials from standard AWS environment variables:
-    /// - `AWS_ACCESS_KEY_ID`
-    /// - `AWS_SECRET_ACCESS_KEY`
-    /// - `AWS_SESSION_TOKEN` (optional)
-    /// - `AWS_REGION` or `AWS_DEFAULT_REGION`
-    /// - `AWS_ENDPOINT_URL` (optional, for S3-compatible services)
+    /// Reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
+    /// `AWS_REGION` (or `AWS_DEFAULT_REGION`), `AWS_ENDPOINT_URL_S3` (or
+    /// `AWS_ENDPOINT_URL`) and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`.
+    ///
+    /// Opening a store does not need this: every field left `None` in a
+    /// configuration falls back to the environment anyway, and so does a store
+    /// opened with no configuration at all.
     #[must_use]
     pub fn s3_from_env(bucket: &str) -> Self {
+        Self::s3_from_env_with(bucket, |k| std::env::var(k).ok())
+    }
+
+    #[doc(hidden)]
+    pub fn s3_from_env_with(bucket: &str, get: impl Fn(&str) -> Option<String>) -> Self {
         Self::S3 {
             bucket: bucket.to_string(),
-            region: std::env::var("AWS_REGION")
-                .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
-                .ok(),
-            endpoint: std::env::var("AWS_ENDPOINT_URL").ok(),
-            access_key_id: std::env::var("AWS_ACCESS_KEY_ID").ok(),
-            secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").ok(),
-            session_token: std::env::var("AWS_SESSION_TOKEN").ok(),
-            virtual_hosted_style: false,
+            region: get("AWS_REGION").or_else(|| get("AWS_DEFAULT_REGION")),
+            endpoint: get("AWS_ENDPOINT_URL_S3").or_else(|| get("AWS_ENDPOINT_URL")),
+            access_key_id: get("AWS_ACCESS_KEY_ID"),
+            secret_access_key: get("AWS_SECRET_ACCESS_KEY"),
+            session_token: get("AWS_SESSION_TOKEN"),
+            virtual_hosted_style: get("AWS_VIRTUAL_HOSTED_STYLE_REQUEST")
+                .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1")),
         }
     }
 
-    /// Creates a GCS configuration using environment variables.
+    /// Creates a GCS configuration from environment variables.
     ///
-    /// Reads service account path from `GOOGLE_APPLICATION_CREDENTIALS`.
+    /// Reads the service account path from `GOOGLE_SERVICE_ACCOUNT` (or
+    /// `GOOGLE_SERVICE_ACCOUNT_PATH`). Application-default credentials
+    /// (`GOOGLE_APPLICATION_CREDENTIALS`) are picked up by the store itself.
     #[must_use]
     pub fn gcs_from_env(bucket: &str) -> Self {
+        let get = |k: &str| std::env::var(k).ok();
         Self::Gcs {
             bucket: bucket.to_string(),
-            service_account_path: std::env::var("GOOGLE_APPLICATION_CREDENTIALS").ok(),
-            service_account_key: None,
+            service_account_path: get("GOOGLE_SERVICE_ACCOUNT")
+                .or_else(|| get("GOOGLE_SERVICE_ACCOUNT_PATH")),
+            service_account_key: get("GOOGLE_SERVICE_ACCOUNT_KEY"),
         }
     }
 
-    /// Creates an Azure configuration using environment variables.
+    /// Creates an Azure configuration from environment variables.
     ///
-    /// Reads credentials from Azure environment variables:
-    /// - `AZURE_STORAGE_ACCOUNT`
-    /// - `AZURE_STORAGE_ACCESS_KEY` (optional)
-    /// - `AZURE_STORAGE_SAS_TOKEN` (optional)
+    /// Reads `AZURE_STORAGE_ACCOUNT` (or `AZURE_STORAGE_ACCOUNT_NAME`),
+    /// `AZURE_STORAGE_ACCESS_KEY` (or `AZURE_STORAGE_ACCOUNT_KEY`) and
+    /// `AZURE_STORAGE_SAS_TOKEN`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `AZURE_STORAGE_ACCOUNT` is not set.
-    #[must_use]
-    pub fn azure_from_env(container: &str) -> Self {
-        Self::Azure {
+    /// Neither `AZURE_STORAGE_ACCOUNT` nor `AZURE_STORAGE_ACCOUNT_NAME` is set.
+    pub fn azure_from_env(container: &str) -> anyhow::Result<Self> {
+        Self::azure_from_env_with(container, |k| std::env::var(k).ok())
+    }
+
+    #[doc(hidden)]
+    pub fn azure_from_env_with(
+        container: &str,
+        get: impl Fn(&str) -> Option<String>,
+    ) -> anyhow::Result<Self> {
+        let account = get("AZURE_STORAGE_ACCOUNT")
+            .or_else(|| get("AZURE_STORAGE_ACCOUNT_NAME"))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "AZURE_STORAGE_ACCOUNT (or AZURE_STORAGE_ACCOUNT_NAME) must name the \
+                     storage account"
+                )
+            })?;
+        Ok(Self::Azure {
             container: container.to_string(),
-            account: std::env::var("AZURE_STORAGE_ACCOUNT")
-                .expect("AZURE_STORAGE_ACCOUNT environment variable required"),
-            access_key: std::env::var("AZURE_STORAGE_ACCESS_KEY").ok(),
-            sas_token: std::env::var("AZURE_STORAGE_SAS_TOKEN").ok(),
-        }
+            account,
+            access_key: get("AZURE_STORAGE_ACCESS_KEY")
+                .or_else(|| get("AZURE_STORAGE_ACCOUNT_KEY")),
+            sas_token: get("AZURE_STORAGE_SAS_TOKEN"),
+        })
     }
 
     /// Returns the bucket/container name for this configuration.
@@ -1040,9 +1117,7 @@ impl CloudStorageConfig {
         match self {
             Self::S3 { bucket, .. } => format!("s3://{bucket}"),
             Self::Gcs { bucket, .. } => format!("gs://{bucket}"),
-            Self::Azure {
-                container, account, ..
-            } => format!("az://{account}/{container}"),
+            Self::Azure { container, .. } => format!("az://{container}"),
         }
     }
 }
@@ -1121,5 +1196,111 @@ mod security_tests {
             assert!(server.enabled);
             assert!(!server.allowed_paths.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod cloud_config_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |k| map.get(k).cloned()
+    }
+
+    #[test]
+    fn debug_redacts_every_secret() {
+        let configs = [
+            CloudStorageConfig::S3 {
+                bucket: "b".into(),
+                region: Some("r".into()),
+                endpoint: Some("http://e".into()),
+                access_key_id: Some("AKIDVISIBLE".into()),
+                secret_access_key: Some("s3secretvalue".into()),
+                session_token: Some("s3tokenvalue".into()),
+                virtual_hosted_style: false,
+            },
+            CloudStorageConfig::Gcs {
+                bucket: "g".into(),
+                service_account_path: Some("/sa.json".into()),
+                service_account_key: Some("gcskeyvalue".into()),
+            },
+            CloudStorageConfig::Azure {
+                container: "c".into(),
+                account: "acct".into(),
+                access_key: Some("azkeyvalue".into()),
+                sas_token: Some("sv=1&sig=azsasvalue".into()),
+            },
+        ];
+        for cfg in &configs {
+            let text = format!("{cfg:?}");
+            for secret in [
+                "s3secretvalue",
+                "s3tokenvalue",
+                "gcskeyvalue",
+                "azkeyvalue",
+                "azsasvalue",
+            ] {
+                assert!(!text.contains(secret), "{text}");
+            }
+            assert!(
+                text.contains("\"b\"") || text.contains("\"g\"") || text.contains("\"c\""),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn azure_from_env_errors_instead_of_panicking() {
+        let err = CloudStorageConfig::azure_from_env_with("c", lookup(&[])).unwrap_err();
+        assert!(err.to_string().contains("AZURE_STORAGE_ACCOUNT"), "{err}");
+        let cfg =
+            CloudStorageConfig::azure_from_env_with("c", lookup(&[("AZURE_STORAGE_ACCOUNT", "a")]))
+                .unwrap();
+        assert!(matches!(cfg, CloudStorageConfig::Azure { account, .. } if account == "a"));
+    }
+
+    #[test]
+    fn s3_from_env_prefers_the_s3_specific_endpoint() {
+        let cfg = CloudStorageConfig::s3_from_env_with(
+            "b",
+            lookup(&[
+                ("AWS_ENDPOINT_URL", "http://generic"),
+                ("AWS_ENDPOINT_URL_S3", "http://s3-specific"),
+            ]),
+        );
+        assert!(
+            matches!(&cfg, CloudStorageConfig::S3 { endpoint: Some(e), .. } if e == "http://s3-specific"),
+            "{cfg:?}"
+        );
+        let cfg = CloudStorageConfig::s3_from_env_with(
+            "b",
+            lookup(&[("AWS_VIRTUAL_HOSTED_STYLE_REQUEST", "true")]),
+        );
+        assert!(
+            matches!(
+                &cfg,
+                CloudStorageConfig::S3 {
+                    virtual_hosted_style: true,
+                    ..
+                }
+            ),
+            "{cfg:?}"
+        );
+    }
+
+    #[test]
+    fn to_url_uses_the_object_store_azure_convention() {
+        let cfg = CloudStorageConfig::Azure {
+            container: "cont".into(),
+            account: "acct".into(),
+            access_key: None,
+            sas_token: None,
+        };
+        assert_eq!(cfg.to_url(), "az://cont");
     }
 }

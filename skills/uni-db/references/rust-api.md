@@ -75,7 +75,11 @@ impl UniBuilder {
     pub fn config(mut self, config: UniConfig) -> Self;
     pub fn schema_file(mut self, path: impl AsRef<Path>) -> Self;
     pub fn xervo_catalog(mut self, catalog: Vec<ModelAliasSpec>) -> Self;
-    pub fn remote_storage(mut self, remote_url: &str, config: CloudStorageConfig) -> Self;
+    pub fn cloud_storage(mut self, config: CloudStorageConfig) -> Self;    // remote-only or hybrid
+    pub fn storage_option(mut self, key: impl Into<String>, value: impl Into<String>) -> Self;
+    pub fn storage_options<K, V>(mut self, options: impl IntoIterator<Item = (K, V)>) -> Self;
+    pub fn hybrid(mut self, remote_url: &str) -> Self;        // WAL + IDs local, data remote
+    #[deprecated] pub fn remote_storage(self, remote_url: &str, config: CloudStorageConfig) -> Self;
     pub fn read_only(mut self) -> Self;
     pub fn write_lease(mut self, lease: WriteLease) -> Self;
     pub async fn build(self) -> Result<Uni>;
@@ -633,7 +637,7 @@ pub struct UniConfig {
 | `FileSandboxConfig` | `enabled`, `allowed_paths: Vec<PathBuf>` |
 | `CloudStorageConfig` | `S3 { bucket, region, endpoint, ... }`, `Gcs { bucket, ... }`, `Azure { container, account, ... }` |
 
-Convenience: `CloudStorageConfig::s3_from_env(bucket)`, `::gcs_from_env(bucket)`, `::azure_from_env(container)`.
+Convenience: `CloudStorageConfig::s3_from_env(bucket)`, `::gcs_from_env(bucket)`, `::azure_from_env(container) -> anyhow::Result<Self>`. None is needed to open a store: unset fields fall back to the environment.
 
 ---
 

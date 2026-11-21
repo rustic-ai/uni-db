@@ -146,7 +146,7 @@ async fn main() -> uni_db::Result<()> {
 | `Uni.in_memory()` | Alias for `temporary()`; uses a temporary filesystem directory |
 | `Uni.builder()` | Advanced configuration via `UniBuilder` |
 
-**Storage backends**: local filesystem, S3 (`s3://bucket/path`), GCS (`gs://bucket/path`), Azure (`az://account/container/path`).
+**Storage backends**: local filesystem, S3 (`s3://bucket/path`), GCS (`gs://bucket/path`), Azure (`az://container/path`, account from config/env, or `abfss://container@account.dfs.core.windows.net/path`).
 
 ---
 

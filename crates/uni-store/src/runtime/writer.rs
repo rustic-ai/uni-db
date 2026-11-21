@@ -1332,6 +1332,46 @@ impl Writer {
         Ok(true)
     }
 
+    /// Raises the ID allocator above every VID and EID in L0.
+    ///
+    /// WAL replay restores mutations with the ids they were committed with,
+    /// which can lie above the allocator's floor when its file was lost after
+    /// a batch was reserved but before the next flush recorded it.
+    pub async fn raise_id_floor_from_l0(&self) {
+        const EPHEMERAL: u64 = 1 << 63;
+        let mut vid_floor = 0u64;
+        let mut eid_floor = 0u64;
+        let mut see_vid = |v: Vid| {
+            let v = v.as_u64();
+            if v & EPHEMERAL == 0 {
+                vid_floor = vid_floor.max(v.saturating_add(1));
+            }
+        };
+        let mut eids: Vec<u64> = Vec::new();
+        for buffer in self.l0_manager.get_all_readable() {
+            let l0 = buffer.read();
+            l0.vertex_properties.keys().copied().for_each(&mut see_vid);
+            l0.vertex_versions.keys().copied().for_each(&mut see_vid);
+            l0.vertex_labels.keys().copied().for_each(&mut see_vid);
+            l0.vertex_tombstones.iter().copied().for_each(&mut see_vid);
+            for (eid, (src, dst, _)) in &l0.edge_endpoints {
+                see_vid(*src);
+                see_vid(*dst);
+                eids.push(eid.as_u64());
+            }
+            eids.extend(l0.edge_versions.keys().map(|e| e.as_u64()));
+            eids.extend(l0.tombstones.keys().map(|e| e.as_u64()));
+        }
+        for e in eids {
+            if e & EPHEMERAL == 0 {
+                eid_floor = eid_floor.max(e.saturating_add(1));
+            }
+        }
+        if vid_floor > 0 || eid_floor > 0 {
+            self.allocator.raise_floor(vid_floor, eid_floor).await;
+        }
+    }
+
     /// Whether the WAL is on a remote store (see `WriteAheadLog::is_remote`).
     /// `false` without a WAL.
     #[must_use]

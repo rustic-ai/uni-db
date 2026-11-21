@@ -174,14 +174,15 @@ Fluent builder for advanced database configuration. Exposed as `uni_db.UniBuilde
 | `.xervo_catalog_from_file(path)` | Configure Xervo models from a JSON file |
 | `.xervo_catalog_from_str(json)` | Configure Xervo models from a JSON string |
 | `.xervo_runtime(runtime)` | Reuse an existing `ModelRuntime` instead of building one ([sharing models](#sharing-models-across-databases)) |
-| `.cloud_config(config_dict)` | Cloud storage credentials (`s3`, `gcs`, `azure`) |
+| `.cloud_config(config_dict)` | Cloud storage credentials (`s3`, `gcs`, `azure`). Applies to remote-only and hybrid stores; unset fields fall back to the environment |
+| `.storage_options(dict)` | Raw `object_store` options (`aws_endpoint`, `azure_storage_use_emulator`, …) for both storage clients; override `cloud_config` and the environment |
 | `.config(config_dict)` | Database options (`query_timeout`, `max_query_memory`, `lance_metadata_cache_bytes`, `lance_index_cache_bytes`, etc.) |
 | `.batch_size(n)` | Rows per page a query cursor hands back (default 1024) |
 | `.wal_enabled(bool)` | Enable/disable write-ahead log (default `True`) |
 | `.strict_schema(bool)` | Reject writes with undeclared labels/edge types (default `False`) |
 | `.read_only()` | Open in read-only mode |
 | `.write_lease(lease)` | Multi-agent write coordination |
-| `.hybrid(local_path, remote_url)` | Hybrid storage (local metadata + remote data) |
+| `.hybrid(local_path, remote_url)` | Hybrid storage: WAL and ID allocator in `local_path` (must be the opened path), everything else at `remote_url` |
 | `.build()` | Build and return the `Uni` instance |
 
 ```python

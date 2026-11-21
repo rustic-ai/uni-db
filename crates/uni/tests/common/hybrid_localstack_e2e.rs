@@ -28,7 +28,8 @@ async fn test_hybrid_localstack_from_zero_e2e() -> Result<()> {
 
     // Start from empty remote + empty local metadata directory.
     let db = Uni::open(local_meta.to_string_lossy().to_string())
-        .remote_storage(&remote_url, cloud_cfg.clone())
+        .hybrid(&remote_url)
+        .cloud_storage(cloud_cfg.clone())
         .build()
         .await?;
 
@@ -56,7 +57,8 @@ async fn test_hybrid_localstack_from_zero_e2e() -> Result<()> {
 
     // Reopen and verify graph state survives in hybrid mode.
     let db = Uni::open(local_meta.to_string_lossy().to_string())
-        .remote_storage(&remote_url, cloud_cfg.clone())
+        .hybrid(&remote_url)
+        .cloud_storage(cloud_cfg.clone())
         .build()
         .await?;
 
@@ -83,7 +85,8 @@ async fn test_hybrid_localstack_from_zero_e2e() -> Result<()> {
     drop(db);
 
     let db = Uni::open(local_meta.to_string_lossy().to_string())
-        .remote_storage(&remote_url, cloud_cfg.clone())
+        .hybrid(&remote_url)
+        .cloud_storage(cloud_cfg.clone())
         .build()
         .await?;
 
@@ -151,7 +154,8 @@ async fn test_hybrid_localstack_forks_e2e() -> Result<()> {
     let remote_url = format!("s3://{}", bucket);
     let open = || async {
         Uni::open(local_meta.to_string_lossy().to_string())
-            .remote_storage(&remote_url, cloud_cfg.clone())
+            .hybrid(&remote_url)
+            .cloud_storage(cloud_cfg.clone())
             .build()
             .await
     };
@@ -247,7 +251,8 @@ async fn test_hybrid_localstack_fork_drop_does_not_stall() -> Result<()> {
     let bucket = format!("hybrid-drop-{}", std::process::id());
     create_localstack_bucket(&bucket).await?;
     let db = Uni::open(local_meta.to_string_lossy().to_string())
-        .remote_storage(&format!("s3://{bucket}"), localstack_cloud_config(&bucket))
+        .hybrid(&format!("s3://{bucket}"))
+        .cloud_storage(localstack_cloud_config(&bucket))
         .build()
         .await?;
     db.schema()
@@ -293,6 +298,282 @@ async fn test_hybrid_localstack_fork_drop_does_not_stall() -> Result<()> {
         "reopening and reading the fork took {reopened:?}"
     );
     assert_eq!(names(db.session()).await?, ["Alice"]);
+    Ok(())
+}
+
+// ---- Remote-only stores and prefixes (issues #349, #350) ------------------
+
+fn config_only() -> bool {
+    std::env::var_os("UNI_LOCALSTACK_CONFIG_ONLY").is_some()
+}
+
+async fn bucket_keys(bucket: &str) -> Result<Vec<String>> {
+    let store = build_localstack_store(bucket)?;
+    let mut keys: Vec<String> = store
+        .list(None)
+        .map_ok(|m| m.location.to_string())
+        .try_collect()
+        .await?;
+    keys.retain(|k| k != ".marker");
+    keys.sort();
+    Ok(keys)
+}
+
+async fn names(db: &Uni) -> Result<Vec<String>> {
+    let rows = db
+        .session()
+        .query("MATCH (p:Person) RETURN p.name AS name ORDER BY name")
+        .await?;
+    Ok(rows
+        .rows()
+        .iter()
+        .map(|r| r.get::<String>("name"))
+        .collect::<std::result::Result<Vec<_>, _>>()?)
+}
+
+async fn seed(db: &Uni, people: &[&str]) -> Result<()> {
+    db.schema()
+        .label("Person")
+        .property("name", DataType::String)
+        .edge_type("KNOWS", &["Person"], &["Person"])
+        .apply()
+        .await?;
+    let tx = db.session().tx().await?;
+    for p in people {
+        tx.execute(&format!("CREATE (:Person {{name: '{p}'}})"))
+            .await?;
+    }
+    tx.commit().await?;
+    db.flush().await?;
+    Ok(())
+}
+
+/// #350: `Uni::open("s3://…")` takes its endpoint and credentials from the
+/// environment, as Lance already did.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Requires LocalStack running on localhost:4566"]
+async fn test_remote_only_open_from_the_environment() -> Result<()> {
+    configure_localstack_env();
+    if config_only() {
+        // This one is about the environment; the config-only run covers
+        // `test_remote_only_open_from_a_typed_config`.
+        return Ok(());
+    }
+    let bucket = format!("remote-env-{}", std::process::id());
+    create_localstack_bucket(&bucket).await?;
+    let uri = format!("s3://{bucket}/graph");
+    let db = Uni::open(&uri).build().await?;
+    seed(&db, &["Alice"]).await?;
+    drop(db);
+    let db = Uni::open(&uri).build().await?;
+    assert_eq!(names(&db).await?, ["Alice"]);
+    let keys = bucket_keys(&bucket).await?;
+    assert!(keys.iter().all(|k| k.starts_with("graph/")), "{keys:?}");
+    Ok(())
+}
+
+/// #350: a remote-only store opened with a typed config, without relying on
+/// the environment for its endpoint or credentials.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Requires LocalStack running on localhost:4566"]
+async fn test_remote_only_open_from_a_typed_config() -> Result<()> {
+    configure_localstack_env();
+    let bucket = format!("remote-cfg-{}", std::process::id());
+    create_localstack_bucket(&bucket).await?;
+    let uri = format!("s3://{bucket}/graph");
+    let open = || {
+        Uni::open(&uri)
+            .cloud_storage(localstack_cloud_config(&bucket))
+            .build()
+    };
+    let db = open().await?;
+    seed(&db, &["Alice", "Bob"]).await?;
+    let fork = db.session().fork("f").await?;
+    let tx = fork.tx().await?;
+    tx.execute("CREATE (:Person {name: 'Forked'})").await?;
+    tx.commit().await?;
+    fork.flush().await?;
+    drop(fork);
+    drop(db);
+
+    let db = open().await?;
+    assert_eq!(names(&db).await?, ["Alice", "Bob"]);
+    let fork = db.session().fork("f").await?;
+    let rows = fork.query("MATCH (p:Person) RETURN count(p) AS c").await?;
+    assert_eq!(rows.rows()[0].get::<i64>("c")?, 3);
+    Ok(())
+}
+
+/// #349: two stores under different prefixes of one bucket, remote-only and
+/// hybrid, keep every object under their own prefix and their own schema.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Requires LocalStack running on localhost:4566"]
+async fn test_prefixes_in_one_bucket_are_independent() -> Result<()> {
+    configure_localstack_env();
+    let bucket = format!("prefixes-{}", std::process::id());
+    create_localstack_bucket(&bucket).await?;
+    let cfg = localstack_cloud_config(&bucket);
+
+    let a = Uni::open(format!("s3://{bucket}/a"))
+        .cloud_storage(cfg.clone())
+        .build()
+        .await?;
+    a.schema()
+        .label("OnlyInA")
+        .property("n", DataType::Int64)
+        .apply()
+        .await?;
+    let tx = a.session().tx().await?;
+    tx.execute("CREATE (:OnlyInA {n: 1})").await?;
+    tx.commit().await?;
+    a.flush().await?;
+
+    let local = tempdir()?;
+    let b = Uni::open(local.path().to_string_lossy().to_string())
+        .hybrid(&format!("s3://{bucket}/b"))
+        .cloud_storage(cfg.clone())
+        .build()
+        .await?;
+    let labels: Vec<String> = b.schema().current().labels.keys().cloned().collect();
+    assert!(labels.is_empty(), "b inherited {labels:?}");
+    seed(&b, &["Bob"]).await?;
+    drop((a, b));
+
+    let keys = bucket_keys(&bucket).await?;
+    let stray: Vec<&String> = keys
+        .iter()
+        .filter(|k| !k.starts_with("a/") && !k.starts_with("b/"))
+        .collect();
+    assert!(stray.is_empty(), "objects outside the prefixes: {stray:?}");
+    // The standard layout, under each prefix.
+    for k in [
+        "a/catalog/schema.json",
+        "a/catalog/layout.json",
+        "a/id_allocator.json",
+        "a/storage/catalog/latest",
+        "b/catalog/schema.json",
+        "b/storage/catalog/latest",
+    ] {
+        assert!(keys.iter().any(|x| x == k), "missing {k} in {keys:?}");
+    }
+    // Hybrid keeps its WAL and allocator local.
+    assert!(!keys.iter().any(|k| k.starts_with("b/wal/")), "{keys:?}");
+    assert!(local.path().join("id_allocator.json").exists());
+
+    let a = Uni::open(format!("s3://{bucket}/a"))
+        .cloud_storage(cfg)
+        .build()
+        .await?;
+    let labels: Vec<String> = a.schema().current().labels.keys().cloned().collect();
+    assert_eq!(labels, ["OnlyInA"]);
+    Ok(())
+}
+
+/// Losing a hybrid store's local directory does not reuse VIDs: the
+/// LocalStack reproduction overwrote an existing vertex.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Requires LocalStack running on localhost:4566"]
+async fn test_hybrid_reopen_with_a_fresh_local_dir_reuses_no_vid() -> Result<()> {
+    configure_localstack_env();
+    let bucket = format!("hostloss-{}", std::process::id());
+    create_localstack_bucket(&bucket).await?;
+    let remote = format!("s3://{bucket}/g");
+    let open = |dir: &std::path::Path| {
+        Uni::open(dir.to_string_lossy().to_string())
+            .hybrid(&remote)
+            .cloud_storage(localstack_cloud_config(&bucket))
+            .build()
+    };
+    let first = tempdir()?;
+    let db = open(first.path()).await?;
+    seed(&db, &["Alice", "Bob"]).await?;
+    db.shutdown().await?;
+
+    let second = tempdir()?;
+    let db = open(second.path()).await?;
+    assert_eq!(names(&db).await?, ["Alice", "Bob"]);
+    let tx = db.session().tx().await?;
+    tx.execute("CREATE (:Person {name: 'Carol'})").await?;
+    tx.commit().await?;
+    db.flush().await?;
+    assert_eq!(names(&db).await?, ["Alice", "Bob", "Carol"]);
+    Ok(())
+}
+
+/// A bucket-root store in the flat shape ≤ 5.3.0 wrote keeps working in place,
+/// and a prefixed store whose metadata ≤ 5.3.0 put at the bucket root is
+/// refused rather than opened empty.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "Requires LocalStack running on localhost:4566"]
+async fn test_flat_and_legacy_prefixed_stores_on_s3() -> Result<()> {
+    configure_localstack_env();
+    let bucket = format!("legacy-{}", std::process::id());
+    create_localstack_bucket(&bucket).await?;
+    let cfg = localstack_cloud_config(&bucket);
+    let store = build_localstack_store(&bucket)?;
+
+    // Build a standard store at the bucket root, then move it into the flat
+    // shape: tables and snapshot catalog directly under the root.
+    let root = format!("s3://{bucket}");
+    let db = Uni::open(&root).cloud_storage(cfg.clone()).build().await?;
+    seed(&db, &["Alice"]).await?;
+    db.shutdown().await?;
+    for key in bucket_keys(&bucket).await? {
+        let target = if let Some(rest) = key.strip_prefix("storage/") {
+            rest.to_string()
+        } else if key == "catalog/layout.json" {
+            store.delete(&ObjPath::from(key.as_str())).await?;
+            continue;
+        } else {
+            continue;
+        };
+        store
+            .copy(
+                &ObjPath::from(key.as_str()),
+                &ObjPath::from(target.as_str()),
+            )
+            .await?;
+        store.delete(&ObjPath::from(key.as_str())).await?;
+    }
+    let db = Uni::open(&root).cloud_storage(cfg.clone()).build().await?;
+    assert_eq!(names(&db).await?, ["Alice"]);
+    let fork = db.session().fork("flatfork").await?;
+    let tx = fork.tx().await?;
+    tx.execute("CREATE (:Person {name: 'InFork'})").await?;
+    tx.commit().await?;
+    fork.flush().await?;
+    drop(fork);
+    db.shutdown().await?;
+    let layout = store
+        .get(&ObjPath::from("catalog/layout.json"))
+        .await?
+        .bytes()
+        .await?;
+    assert!(String::from_utf8_lossy(&layout).contains("flat"));
+    assert!(
+        !bucket_keys(&bucket)
+            .await?
+            .iter()
+            .any(|k| k.starts_with("storage/")),
+        "flat store gained a storage/ directory"
+    );
+
+    // ≤ 5.3.0 under a prefix: tables at the prefix, metadata at the root.
+    store
+        .put(
+            &ObjPath::from("p/vertices.lance/_versions/1.manifest"),
+            b"x".to_vec().into(),
+        )
+        .await?;
+    let err = match Uni::open(format!("s3://{bucket}/p"))
+        .cloud_storage(cfg)
+        .build()
+        .await
+    {
+        Ok(_) => anyhow::bail!("legacy prefixed store opened"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("catalog/latest"), "{err}");
     Ok(())
 }
 

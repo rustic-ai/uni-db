@@ -122,8 +122,8 @@ pub use uni_xervo::runtime::ModelRuntime;
 
 // Re-exports from internal crates
 pub use uni_common::{
-    CrdtType, DataType, DeclaredTypeConflict, Eid, LocyIncomplete, LocyIncompleteReason, Result,
-    Schema, UniConfig, UniError, UniId, Vid, unival,
+    CloudStorageConfig, CrdtType, DataType, DeclaredTypeConflict, Eid, LocyIncomplete,
+    LocyIncompleteReason, Result, Schema, UniConfig, UniError, UniId, Vid, unival,
 };
 pub use uni_query::{
     Edge, ExecuteResult, ExplainOutput, FromValue, Node, Path, ProfileOutput, QueryMetrics,

@@ -139,6 +139,9 @@ impl Drop for CompactionMerge {
 
 pub struct StorageManager {
     base_uri: String,
+    /// Local directory behind `base_uri`, when there is one: a plain path or
+    /// a `file://` URI. Enables fsync and the compaction lock.
+    fs_root: Option<std::path::PathBuf>,
     store: Arc<dyn ObjectStore>,
     schema_manager: Arc<SchemaManager>,
     snapshot_manager: Arc<SnapshotManager>,
@@ -862,8 +865,15 @@ impl StorageManager {
         // Perform crash recovery for all known table patterns
         Self::recover_all_staging_tables(backend.as_ref(), &schema_manager).await?;
 
+        // Every table and index URI is `base_uri` joined with a relative
+        // name, so a trailing `/` would put `//` in all of them.
+        let base_uri = match base_uri.trim_end_matches('/') {
+            "" => base_uri,
+            trimmed => trimmed,
+        };
         let mut sm = Self {
             requires_adjacency_revalidation: false,
+            fs_root: (!base_uri.contains("://")).then(|| std::path::PathBuf::from(base_uri)),
             base_uri: base_uri.to_string(),
             store: resilient_store,
             schema_manager,
@@ -931,14 +941,62 @@ impl StorageManager {
     }
 
     /// Create a new StorageManager with custom configuration.
+    ///
+    /// `base_uri` is the table root itself: a local path, or an object-store
+    /// URI resolved against the environment.
     #[cfg(feature = "lance-backend")]
     pub async fn new_with_config(
         base_uri: &str,
         schema_manager: Arc<SchemaManager>,
         config: UniConfig,
     ) -> Result<Self> {
-        let store = Self::build_store_from_uri(base_uri)?;
+        if base_uri.contains("://") {
+            let location = crate::location::StoreLocation::resolve_from_env(
+                &crate::location::LocationSpec {
+                    uri: base_uri.to_string(),
+                    ..Default::default()
+                },
+                &config.object_store,
+            )
+            .await?;
+            return Self::new_with_location(
+                &location,
+                crate::location::StoreLayout::Flat,
+                schema_manager,
+                config,
+            )
+            .await;
+        }
+        std::fs::create_dir_all(base_uri)?;
+        let store: Arc<dyn ObjectStore> = Arc::new(LocalFileSystem::new_with_prefix(base_uri)?);
         Self::new_with_store_and_config(base_uri, store, schema_manager, config).await
+    }
+
+    /// Create a StorageManager over the table root of a resolved location.
+    ///
+    /// Tables, indexes and snapshot manifests live at
+    /// [`StoreLocation::table_uri`](crate::location::StoreLocation::table_uri);
+    /// both uni's client and Lance's are configured from the location's one
+    /// option map.
+    #[cfg(feature = "lance-backend")]
+    pub async fn new_with_location(
+        location: &crate::location::StoreLocation,
+        layout: crate::location::StoreLayout,
+        schema_manager: Arc<SchemaManager>,
+        config: UniConfig,
+    ) -> Result<Self> {
+        let base_uri = location.table_uri(layout);
+        let store = location.table_store(layout)?;
+        let mut sm = Self::new_with_store_and_storage_options(
+            &base_uri,
+            store,
+            schema_manager,
+            config,
+            location.lance_storage_options(),
+        )
+        .await?;
+        sm.fs_root = location.table_fs_root(layout);
+        Ok(sm)
     }
 
     /// Create a new StorageManager using an already-constructed object store.
@@ -965,6 +1023,10 @@ impl StorageManager {
         let cache_sizes = crate::backend::lance_directory::LanceCacheSizes {
             index_bytes: config.lance_index_cache_bytes,
             metadata_bytes: config.lance_metadata_cache_bytes,
+        };
+        let base_uri = match base_uri.trim_end_matches('/') {
+            "" => base_uri,
+            trimmed => trimmed,
         };
         let backend = Arc::new(
             LanceDbBackend::connect_with_cache_sizes(
@@ -1019,31 +1081,69 @@ impl StorageManager {
         Ok(())
     }
 
-    #[cfg(feature = "lance-backend")]
-    fn build_store_from_uri(base_uri: &str) -> Result<Arc<dyn ObjectStore>> {
-        if base_uri.contains("://") {
-            let parsed = url::Url::parse(base_uri).map_err(|e| anyhow!("Invalid base URI: {e}"))?;
-            let (store, _path) = object_store::parse_url(&parsed)
-                .map_err(|e| anyhow!("Failed to parse object store URL: {e}"))?;
-            Ok(Arc::from(store))
-        } else {
-            // If local path, ensure it exists.
-            std::fs::create_dir_all(base_uri)?;
-            Ok(Arc::new(LocalFileSystem::new_with_prefix(base_uri)?))
-        }
+    /// Filesystem root backing this manager's table store, when it is a local
+    /// directory (a plain path or a `file://` URI). Used to fsync WAL segments
+    /// after PUT — `object_store::LocalFileSystem` does not fsync on its own —
+    /// and for the compaction lock. `None` for object stores.
+    pub fn local_fs_root(&self) -> Option<std::path::PathBuf> {
+        self.fs_root.clone()
     }
 
-    /// Filesystem root backing this manager's object store, when the store
-    /// is a local filesystem (the non-`://` branch of
-    /// `build_store_from_uri`). Used to fsync WAL segments after PUT —
-    /// `object_store::LocalFileSystem` does not fsync on its own. `None`
-    /// for remote/URL-based stores.
-    pub fn local_fs_root(&self) -> Option<std::path::PathBuf> {
-        if self.base_uri.contains("://") {
-            None
-        } else {
-            Some(std::path::PathBuf::from(&self.base_uri))
+    /// The lowest `(vid, eid)` no row in the store's tables has reached: one
+    /// above the largest VID (vertex rows and edge endpoints) and EID on the
+    /// main branch. Soft-deleted rows count, since their ids stay taken.
+    ///
+    /// Used at open when neither the ID allocator file nor the snapshot
+    /// manifest says where allocation may resume. A full column scan, so
+    /// only for that case.
+    ///
+    /// # Errors
+    /// A table exists but cannot be scanned.
+    pub async fn scan_id_floor(&self) -> Result<(u64, u64)> {
+        use arrow_array::UInt64Array;
+        const EPHEMERAL: u64 = 1 << 63;
+        let max_of = |batches: &[arrow_array::RecordBatch], column: &str| -> Option<u64> {
+            batches
+                .iter()
+                .filter_map(|b| b.column_by_name(column))
+                .filter_map(|c| c.as_any().downcast_ref::<UInt64Array>().cloned())
+                .flat_map(|a| a.iter().flatten().collect::<Vec<u64>>())
+                .filter(|v| v & EPHEMERAL == 0)
+                .max()
+        };
+        let mut vid_floor = 0u64;
+        let mut eid_floor = 0u64;
+        let vertices = table_names::main_vertex_table_name();
+        if self.backend.table_exists(vertices).await? {
+            let batches = self
+                .backend
+                .scan(ScanRequest::all(vertices).with_columns(vec!["_vid".to_string()]))
+                .await?;
+            if let Some(m) = max_of(&batches, "_vid") {
+                vid_floor = vid_floor.max(m + 1);
+            }
         }
+        let edges = table_names::main_edge_table_name();
+        if self.backend.table_exists(edges).await? {
+            let columns = vec![
+                "_eid".to_string(),
+                "src_vid".to_string(),
+                "dst_vid".to_string(),
+            ];
+            let batches = self
+                .backend
+                .scan(ScanRequest::all(edges).with_columns(columns))
+                .await?;
+            if let Some(m) = max_of(&batches, "_eid") {
+                eid_floor = eid_floor.max(m + 1);
+            }
+            for c in ["src_vid", "dst_vid"] {
+                if let Some(m) = max_of(&batches, c) {
+                    vid_floor = vid_floor.max(m + 1);
+                }
+            }
+        }
+        Ok((vid_floor, eid_floor))
     }
 
     pub fn pinned(&self, snapshot: SnapshotManifest) -> Self {
@@ -1062,6 +1162,7 @@ impl StorageManager {
         Self {
             requires_adjacency_revalidation: self.requires_adjacency_revalidation,
             base_uri: self.base_uri.clone(),
+            fs_root: self.fs_root.clone(),
             store: self.store.clone(),
             schema_manager: self.schema_manager.clone(),
             snapshot_manager: self.snapshot_manager.clone(),
@@ -1173,6 +1274,7 @@ impl StorageManager {
         Self {
             requires_adjacency_revalidation: self.requires_adjacency_revalidation,
             base_uri: self.base_uri.clone(),
+            fs_root: self.fs_root.clone(),
             store: self.store.clone(),
             schema_manager: self.schema_manager.clone(),
             snapshot_manager: self.snapshot_manager.clone(),
@@ -1253,6 +1355,7 @@ impl StorageManager {
         Self {
             requires_adjacency_revalidation: self.requires_adjacency_revalidation,
             base_uri: self.base_uri.clone(),
+            fs_root: self.fs_root.clone(),
             store: self.store.clone(),
             schema_manager: merged_schema,
             snapshot_manager,

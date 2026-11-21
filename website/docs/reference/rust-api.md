@@ -136,7 +136,8 @@ let db = Uni::open("./my-graph")
     .config(UniConfig { /* ... */ })
     .read_only()
     .write_lease(WriteLease::Local)
-    .remote_storage("s3://bucket/data", cloud_config)
+    .hybrid("s3://bucket/data")
+    .cloud_storage(cloud_config)
     .build()
     .await?;
 ```
@@ -149,12 +150,14 @@ let db = Uni::open("./my-graph")
 | `write_lease(lease)` | Set write lease strategy for multi-agent access. |
 | `xervo_catalog(catalog)` | Set Uni-Xervo model catalog. |
 | `xervo_runtime(runtime)` | Set pre-built Xervo `ModelRuntime` directly (for testing or advanced use). |
-| `remote_storage(url, config)` | Configure hybrid local+remote storage. |
+| `cloud_storage(config)` | Typed object-store configuration (endpoint, credentials, region) for a remote-only or hybrid store. |
+| `storage_option(key, value)` / `storage_options(map)` | Raw `object_store` options passed to both storage clients; highest precedence. |
+| `hybrid(remote_url)` | Hybrid mode: data at `remote_url`, WAL and ID allocator in the opened directory. |
+| `remote_storage(url, config)` | Deprecated: `hybrid(url).cloud_storage(config)`. |
 
-!!! note "`remote_storage` is the Rust spelling"
-    The Python builder exposes this as `.hybrid(local, remote)` +
-    `.cloud_config(cfg)`. The Rust builder has neither — `remote_storage` takes
-    both in one call.
+!!! note "Python spelling"
+    The Python builder exposes these as `.hybrid(local, remote)`,
+    `.cloud_config(dict)` and `.storage_options(dict)`.
 
 **Concurrency control — `UniConfig::ssi_enabled`**
 

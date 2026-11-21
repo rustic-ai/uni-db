@@ -1015,25 +1015,22 @@ let db = Uni::open("az://my-container/graph-data").build().await?;
 
 **Credential Resolution:**
 
-Cloud credentials are resolved automatically using standard environment variables and configuration files:
+Cloud credentials come from the environment, a typed `CloudStorageConfig`, or raw storage options (highest precedence); see [Storage & Cloud Durability](../features/storage-cloud.md).
 
 | Provider | Environment Variables | Config Files |
 |----------|----------------------|--------------|
-| AWS S3 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL` | `~/.aws/credentials` |
+| AWS S3 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL(_S3)`, web identity, container credentials | none (named profiles are not read) |
 | GCS | `GOOGLE_APPLICATION_CREDENTIALS` | Application Default Credentials |
-| Azure | `AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_ACCESS_KEY`, `AZURE_STORAGE_SAS_TOKEN` | Azure CLI credentials |
+| Azure | `AZURE_STORAGE_ACCOUNT(_NAME)`, `AZURE_STORAGE_ACCOUNT_KEY`, `AZURE_STORAGE_SAS_TOKEN`, client-secret/federated/MSI keys | Azure CLI only with `azure_use_azure_cli=true` |
 
 ### Hybrid Mode (Local + Cloud)
 
 For optimal performance with cloud storage, use hybrid mode to maintain a local write cache:
 
 ```rust
-use uni_common::CloudStorageConfig;
-
-let cloud = CloudStorageConfig::s3_from_env("my-bucket");
-
-let db = Uni::open("./local-cache")
-    .remote_storage("s3://my-bucket/graph-data", cloud)
+// The remote side is configured from the environment.
+let db = Uni::open("./local-wal")
+    .hybrid("s3://my-bucket/graph-data")
     .build()
     .await?;
 ```

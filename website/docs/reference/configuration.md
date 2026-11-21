@@ -3,13 +3,12 @@
 This document provides a comprehensive reference for all Uni configuration options, environment variables, and tuning parameters.
 
 
-!!! warning "The Rust and Python builders are not the same API"
-    `hybrid(local, remote)` and `cloud_config(cfg)` exist **only on the Python
-    builder** (`bindings/uni-db/src/builders.rs`). The Rust builder has a single
-    `remote_storage(remote_url, CloudStorageConfig)` that does both. Two
-    same-named builders with divergent method sets across the FFI boundary is an
-    easy thing to mis-copy, so check which language a snippet is in before
-    reusing it.
+!!! note "Storage methods in Rust and Python"
+    The Rust builder's `hybrid(remote_url)`, `cloud_storage(cfg)` and
+    `storage_options(map)` are `hybrid(local_path, remote_url)`,
+    `cloud_config(dict)` and `storage_options(dict)` on the Python builder.
+    Python's `hybrid` repeats the local path, which must be the path the
+    builder was opened at.
 
 
 ## Configuration Overview
@@ -501,40 +500,52 @@ Index tuning is **not** controlled by `UniConfig`. Cypher DDL currently selects 
 
 ## Environment Variables
 
-Uni does not currently read any `UNI_*` variables. Environment variables in use today:
+Apart from `UNI_ASYNC_FLUSH` and `UNI_FLUSH_STREAM_TIMEOUT_SECS`, Uni reads no `UNI_*` variables. Environment variables in use today:
 
 | Variable | Used For |
 |----------|----------|
 | `RUST_LOG` | Log level filter |
-| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL` | `CloudStorageConfig::s3_from_env` |
-| `GOOGLE_APPLICATION_CREDENTIALS` | `CloudStorageConfig::gcs_from_env` |
-| `AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_ACCESS_KEY`, `AZURE_STORAGE_SAS_TOKEN` | `CloudStorageConfig::azure_from_env` |
+| `AWS_*` (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_S3`, `AWS_ALLOW_HTTP`, `AWS_WEB_IDENTITY_TOKEN_FILE`, …; named profiles are not read) | Every S3 store's client, below the typed configuration and storage options |
+| `GOOGLE_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `SERVICE_ACCOUNT` | Every GCS store's client |
+| `AZURE_*` (`AZURE_STORAGE_ACCOUNT_NAME`, `AZURE_STORAGE_ACCOUNT_KEY`, …), `IDENTITY_ENDPOINT` | Every Azure store's client |
 
 ---
 
 ## Cloud Storage Configuration
 
-Uni supports cloud storage backends for bulk data storage while keeping metadata and WAL local for low latency.
+A store lives in a local directory or in an object store. In hybrid mode the WAL and ID allocator stay in a local directory and everything else goes to the object store. [Storage & Cloud Durability](../features/storage-cloud.md) covers the layout, and stores written before 5.4.
 
 ### Supported Backends
 
-| Backend | URL Scheme | Status |
-|---------|------------|--------|
-| Local filesystem | `/path` or `file://` | Fully supported |
-| Amazon S3 | `s3://bucket/path` | Supported |
-| Google Cloud Storage | `gs://bucket/path` | Supported |
-| Azure Blob Storage | `az://account/container` | Supported |
-| S3-compatible (MinIO) | `s3://` with custom endpoint | Supported |
+| Backend | URI | Status |
+|---------|-----|--------|
+| Local filesystem | `/path` or `file:///path` | Fully supported |
+| Amazon S3 | `s3://bucket/prefix` (also `s3a://`) | Supported |
+| S3-compatible (MinIO, R2, LocalStack) | `s3://` with an endpoint | Supported |
+| Google Cloud Storage | `gs://bucket/prefix` (also `gcs://`) | Supported |
+| Azure Blob Storage | `az://container/prefix`, `abfss://container@account.dfs.core.windows.net/prefix` | Supported |
+
+### Builder methods
+
+| Method | Effect |
+|---|---|
+| `Uni::open(uri)` | Local directory, or a remote-only store for an object-store URI |
+| `.cloud_storage(CloudStorageConfig)` | Typed endpoint, credentials and region. Unset fields fall back to the environment |
+| `.storage_option(key, value)` / `.storage_options(map)` | Raw `object_store` options for both storage clients. These win over everything else |
+| `.hybrid(remote_uri)` | Hybrid mode: data at `remote_uri`, WAL and ID allocator in the opened directory |
+| `.remote_storage(uri, config)` | Deprecated. Same as `.hybrid(uri).cloud_storage(config)` |
+
+Python mirrors these as `cloud_config(dict)`, `storage_options(dict)` and `hybrid(local_path, remote_uri)`. The CLI takes `--path <uri>` and `--storage-option KEY=VALUE`.
+
+Precedence, lowest first: environment, URI, typed configuration, storage options. A bucket in the URI that differs from the configuration's fails the open.
 
 ### Hybrid Mode
-
-Hybrid mode stores bulk data in cloud storage while keeping WAL and metadata local:
 
 ```rust
 use uni_db::Uni;
 
-let db = Uni::open("./local_meta")
-    .remote_storage("s3://my-bucket/graph-data", CloudStorageConfig::s3_from_env("my-bucket"))
+let db = Uni::open("./local_wal")
+    .hybrid("s3://my-bucket/graph-data")
     .build()
     .await?;
 ```
@@ -544,33 +555,34 @@ let db = Uni::open("./local_meta")
 - Scalable storage via cloud object store
 - Cost-effective for large datasets
 
+A hybrid store has one host. Commits not yet flushed live only in its local WAL.
+
 ### S3 Configuration
 
 ```rust
-use uni_db::Uni;
-use uni_common::CloudStorageConfig;
+use uni_db::{CloudStorageConfig, Uni};
 
-// Using environment variables (recommended)
-let config = CloudStorageConfig::s3_from_env("my-bucket");
+// From the environment (recommended): no configuration needed.
+let db = Uni::open("s3://my-bucket/data").build().await?;
 
-// Or explicit configuration
+// Or explicit configuration; `None` fields fall back to the environment.
 let config = CloudStorageConfig::S3 {
     bucket: "my-bucket".to_string(),
     region: Some("us-west-2".to_string()),
-    endpoint: None,  // Use AWS default
-    access_key_id: None,  // Use env/IAM
+    endpoint: None,           // AWS default
+    access_key_id: None,      // environment / IAM
     secret_access_key: None,
     session_token: None,
     virtual_hosted_style: true,
 };
 
-let db = Uni::open("./local")
-    .remote_storage("s3://my-bucket/data", config)
+let db = Uni::open("s3://my-bucket/data")
+    .cloud_storage(config)
     .build()
     .await?;
 ```
 
-**For S3-compatible services (MinIO, LocalStack):**
+**For S3-compatible services (MinIO, LocalStack, R2):**
 
 ```rust
 let config = CloudStorageConfig::S3 {
@@ -584,13 +596,15 @@ let config = CloudStorageConfig::S3 {
 };
 ```
 
+The ID allocator uses conditional writes. On a service without them, the first ID reservation fails; set the `aws_conditional_put` storage option to the mechanism the service supports.
+
 ### GCS Configuration
 
 ```rust
-use uni_common::CloudStorageConfig;
+use uni_db::CloudStorageConfig;
 
-// Using environment variable (GOOGLE_APPLICATION_CREDENTIALS)
-let config = CloudStorageConfig::gcs_from_env("my-gcs-bucket");
+// From the environment (GOOGLE_APPLICATION_CREDENTIALS, GOOGLE_SERVICE_ACCOUNT, ...)
+let db = Uni::open("gs://my-gcs-bucket/data").build().await?;
 
 // Or explicit configuration
 let config = CloudStorageConfig::Gcs {
@@ -598,15 +612,21 @@ let config = CloudStorageConfig::Gcs {
     service_account_path: Some("/path/to/service-account.json".to_string()),
     service_account_key: None,
 };
+
+// fake-gcs-server or another emulator
+let db = Uni::open("gs://my-gcs-bucket/data")
+    .storage_option("google_base_url", "http://localhost:4443")
+    .build()
+    .await?;
 ```
 
 ### Azure Configuration
 
 ```rust
-use uni_common::CloudStorageConfig;
+use uni_db::CloudStorageConfig;
 
-// Using environment variables
-let config = CloudStorageConfig::azure_from_env("my-container");
+// From the environment; returns an error if no account is set
+let config = CloudStorageConfig::azure_from_env("my-container")?;
 
 // Or explicit configuration
 let config = CloudStorageConfig::Azure {
@@ -615,11 +635,23 @@ let config = CloudStorageConfig::Azure {
     access_key: Some("account-key".to_string()),
     sas_token: None,
 };
+let db = Uni::open("az://my-container/data")
+    .cloud_storage(config)
+    .build()
+    .await?;
+
+// Azurite
+let db = Uni::open("az://my-container/data")
+    .storage_option("azure_storage_use_emulator", "true")
+    .build()
+    .await?;
 ```
+
+Managed identity, workload identity and client-secret credentials are configured with their `object_store` keys (`azure_msi_endpoint`, `azure_federated_token_file`, `azure_storage_client_id`, `azure_storage_client_secret`, `azure_storage_tenant_id`), either as storage options or through the environment.
 
 ### Cloud Storage with BACKUP/COPY
 
-BACKUP and COPY commands support cloud URLs:
+BACKUP and COPY commands support cloud URLs. These URLs are configured from the environment only: the `cloud_storage` and `storage_option` settings of the open database do not apply to them.
 
 ```cypher
 // Backup to S3
@@ -848,7 +880,6 @@ For cloud storage backends where minimizing API calls matters:
 ```rust
 use std::time::Duration;
 use uni_db::{Uni, UniConfig};
-use uni_common::CloudStorageConfig;
 
 let config = UniConfig {
     // Larger batches = fewer PUT operations
@@ -858,10 +889,9 @@ let config = UniConfig {
     ..Default::default()
 };
 
-let cloud = CloudStorageConfig::s3_from_env("my-bucket");
-
-let db = Uni::open("./local-cache")
-    .remote_storage("s3://my-bucket/data", cloud)
+// The remote side is configured from the environment.
+let db = Uni::open("./local-wal")
+    .hybrid("s3://my-bucket/data")
     .config(config)
     .build()
     .await?;

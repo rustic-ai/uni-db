@@ -122,8 +122,16 @@ Open databases directly from cloud object stores:
     // Google Cloud Storage
     let db = Uni::open("gs://my-bucket/graph-data").build().await?;
 
-    // Azure Blob Storage
+    // Azure Blob Storage (account from AZURE_STORAGE_ACCOUNT_NAME or the config)
     let db = Uni::open("az://my-container/graph-data").build().await?;
+
+    // An S3-compatible service with explicit settings
+    let db = Uni::open("s3://my-bucket/graph-data")
+        .storage_option("aws_endpoint", "http://localhost:9000")
+        .storage_option("aws_access_key_id", "minio")
+        .storage_option("aws_secret_access_key", "minio-secret")
+        .build()
+        .await?;
     ```
 
 === "Python"
@@ -137,9 +145,20 @@ Open databases directly from cloud object stores:
 
     # Azure Blob Storage
     db = uni_db.UniBuilder.open("az://my-container/graph-data").build()
+
+    # An S3-compatible service with explicit settings
+    db = (
+        uni_db.UniBuilder.open("s3://my-bucket/graph-data")
+        .storage_options({
+            "aws_endpoint": "http://localhost:9000",
+            "aws_access_key_id": "minio",
+            "aws_secret_access_key": "minio-secret",
+        })
+        .build()
+    )
     ```
 
-Credentials are resolved automatically from environment variables or standard config files (AWS credentials, GCP Application Default Credentials, Azure CLI).
+Credentials and endpoints come from the environment (`AWS_*` including web identity and container credentials — named profiles are not read, `GOOGLE_*` / `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_*`). A typed configuration (`cloud_storage` in Rust, `cloud_config` in Python) overrides the environment, and raw storage options override both. Each store keeps everything it writes under its own prefix, so several stores can share a bucket. See [Storage & Cloud Durability](../features/storage-cloud.md) for the layout and the full precedence rules.
 
 ### Hybrid Mode (Local + Cloud)
 
@@ -148,15 +167,22 @@ For optimal write performance with cloud durability, use hybrid mode:
 === "Rust"
 
     ```rust
-    use uni_common::CloudStorageConfig;
+    use uni_db::CloudStorageConfig;
 
-    // Local cache with S3 backend
-    let db = Uni::open("./local-cache")
-        .remote_storage("s3://my-bucket/graph-data", CloudStorageConfig::S3 {
+    // WAL and ID allocator local, data in S3, configured from the environment
+    let db = Uni::open("./local-wal")
+        .hybrid("s3://my-bucket/graph-data")
+        .build()
+        .await?;
+
+    // ... or with an explicit configuration
+    let db = Uni::open("./local-wal")
+        .hybrid("s3://my-bucket/graph-data")
+        .cloud_storage(CloudStorageConfig::S3 {
             bucket: "my-bucket".to_string(),
             region: Some("us-east-1".to_string()),
             endpoint: None,
-            access_key_id: None,
+            access_key_id: None, // None: from the environment
             secret_access_key: None,
             session_token: None,
             virtual_hosted_style: false,
@@ -168,19 +194,19 @@ For optimal write performance with cloud durability, use hybrid mode:
 === "Python"
 
     ```python
-    # Local cache with S3 backend
     db = (
-        uni_db.UniBuilder.open("./local-cache")
-        .remote_storage("s3://my-bucket/graph-data", CloudStorageConfig::s3_from_env("my-bucket"))
+        uni_db.UniBuilder.open("./local-wal")
+        .hybrid("./local-wal", "s3://my-bucket/graph-data")
         .build()
     )
     ```
 
 In hybrid mode:
 
-- **Writes** go to local WAL + L0 buffer (low latency)
+- **Writes** go to the local WAL + L0 buffer (low latency)
 - **Flushes** persist data to cloud storage (configurable interval, default 5 seconds)
 - **Reads** merge local L0 with cloud storage data
+- A lost local directory loses only commits not yet flushed; the store reopens from the object store with a fresh directory.
 
 ### Auto-Flush Configuration
 

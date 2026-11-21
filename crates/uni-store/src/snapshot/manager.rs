@@ -75,6 +75,9 @@ pub struct SnapshotManager {
     store: Arc<dyn ObjectStore>,
     /// `Some` for a fork-scoped manager; `None` for the primary.
     fork_id: Option<ForkId>,
+    /// The store's ID allocator, whose reserved ranges every saved manifest
+    /// records (`next_vid` / `next_eid`). Set once the allocator exists.
+    id_allocator: std::sync::OnceLock<Arc<crate::runtime::id_allocator::IdAllocator>>,
 }
 
 impl SnapshotManager {
@@ -83,7 +86,15 @@ impl SnapshotManager {
         Self {
             store,
             fork_id: None,
+            id_allocator: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Records `allocator` as the store's ID allocator, so every manifest
+    /// saved from now on carries the end of its reserved ranges. An open
+    /// whose allocator file is gone restarts above them. First call wins.
+    pub fn set_id_allocator(&self, allocator: Arc<crate::runtime::id_allocator::IdAllocator>) {
+        let _ = self.id_allocator.set(allocator);
     }
 
     /// Construct a fork-scoped snapshot manager.
@@ -95,6 +106,7 @@ impl SnapshotManager {
         Self {
             store,
             fork_id: Some(fork_id),
+            id_allocator: std::sync::OnceLock::new(),
         }
     }
 
@@ -135,14 +147,27 @@ impl SnapshotManager {
         // Every manifest this binary writes records its writer features, also
         // one cloned from a manifest an older binary wrote: an open that finds
         // a latest manifest without them knows an older binary flushed last.
-        let json =
-            if manifest.writer_features.as_slice() == uni_common::core::schema::WRITER_FEATURES {
-                serde_json::to_string_pretty(manifest)?
-            } else {
-                let mut stamped = manifest.clone();
-                stamped.writer_features = uni_common::core::schema::current_writer_features();
-                serde_json::to_string_pretty(&stamped)?
-            };
+        //
+        // It also records the end of the ID allocator's reserved ranges, never
+        // lower than what the manifest already carries.
+        let marks = self.id_allocator.get().map(|a| a.reserved_hwm());
+        let needs_marks = marks.is_some_and(|(v, e)| {
+            manifest.next_vid.is_none_or(|m| m < v) || manifest.next_eid.is_none_or(|m| m < e)
+        });
+        let json = if manifest.writer_features.as_slice()
+            == uni_common::core::schema::WRITER_FEATURES
+            && !needs_marks
+        {
+            serde_json::to_string_pretty(manifest)?
+        } else {
+            let mut stamped = manifest.clone();
+            stamped.writer_features = uni_common::core::schema::current_writer_features();
+            if let Some((v, e)) = marks {
+                stamped.next_vid = Some(stamped.next_vid.unwrap_or(0).max(v));
+                stamped.next_eid = Some(stamped.next_eid.unwrap_or(0).max(e));
+            }
+            serde_json::to_string_pretty(&stamped)?
+        };
         tracing::Span::current().record("size_bytes", json.len());
         put_with_timeout(&self.store, &path, Bytes::from(json), DEFAULT_TIMEOUT).await?;
         Ok(())

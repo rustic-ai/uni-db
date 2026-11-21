@@ -86,7 +86,6 @@ use tracing::info;
 use uni_common::core::snapshot::SnapshotManifest;
 use uni_common::{CloudStorageConfig, UniConfig};
 use uni_common::{Result, UniError};
-use uni_store::cloud::build_cloud_store;
 use uni_xervo::api::ModelAliasSpec;
 use uni_xervo::runtime::ModelRuntime;
 
@@ -1843,6 +1842,8 @@ pub struct UniBuilder {
     prebuilt_xervo_runtime: Option<Arc<ModelRuntime>>,
     hybrid_remote_url: Option<String>,
     cloud_config: Option<CloudStorageConfig>,
+    /// Raw `object_store` / Lance storage options; highest precedence.
+    storage_options: std::collections::BTreeMap<String, String>,
     create_if_missing: bool,
     fail_if_exists: bool,
     read_only: bool,
@@ -1865,6 +1866,7 @@ impl UniBuilder {
             prebuilt_xervo_runtime: None,
             hybrid_remote_url: None,
             cloud_config: None,
+            storage_options: std::collections::BTreeMap::new(),
             create_if_missing: true,
             fail_if_exists: false,
             read_only: false,
@@ -1912,32 +1914,74 @@ impl UniBuilder {
         self
     }
 
-    /// Configure remote storage for data, keeping local path for WAL/IDs.
+    /// Typed object-store configuration: endpoint, credentials, region.
+    ///
+    /// Applies to a remote-only store (`Uni::open("s3://bucket/prefix")`)
+    /// and to the remote half of a [`hybrid`](Self::hybrid) store. A field
+    /// left `None` falls back to the environment (`AWS_*`, `GOOGLE_*`,
+    /// `AZURE_*`), and [`storage_option`](Self::storage_option) overrides
+    /// any field.
     ///
     /// # Examples
     ///
     /// ```ignore
-    /// use uni_common::CloudStorageConfig;
-    ///
-    /// let config = CloudStorageConfig::S3 {
-    ///     bucket: "my-bucket".to_string(),
-    ///     region: Some("us-east-1".to_string()),
-    ///     endpoint: None,
-    ///     access_key_id: None,
-    ///     secret_access_key: None,
-    ///     session_token: None,
-    ///     virtual_hosted_style: false,
-    /// };
-    ///
-    /// let db = Uni::open("./local_meta")
-    ///     .remote_storage("s3://my-bucket/graph-data", config)
+    /// let db = Uni::open("s3://my-bucket/graph")
+    ///     .cloud_storage(CloudStorageConfig::S3 {
+    ///         bucket: "my-bucket".into(),
+    ///         region: Some("us-east-1".into()),
+    ///         endpoint: Some("http://localhost:9000".into()),
+    ///         access_key_id: Some("minio".into()),
+    ///         secret_access_key: Some("minio-secret".into()),
+    ///         session_token: None,
+    ///         virtual_hosted_style: false,
+    ///     })
     ///     .build()
     ///     .await?;
     /// ```
-    pub fn remote_storage(mut self, remote_url: &str, config: CloudStorageConfig) -> Self {
-        self.hybrid_remote_url = Some(remote_url.to_string());
+    pub fn cloud_storage(mut self, config: CloudStorageConfig) -> Self {
         self.cloud_config = Some(config);
         self
+    }
+
+    /// Sets one raw storage option, passed to both object-store clients.
+    ///
+    /// Keys are `object_store` configuration keys (`aws_endpoint`,
+    /// `aws_region`, `google_service_account`, `azure_storage_use_emulator`,
+    /// `timeout`, …; aliases such as `endpoint` are accepted). A key only
+    /// Lance understands (`client_max_retries`, `use_opendal`, …) is passed
+    /// to Lance alone. Options win over [`cloud_storage`](Self::cloud_storage)
+    /// and the environment.
+    pub fn storage_option(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.storage_options.insert(key.into(), value.into());
+        self
+    }
+
+    /// Sets several raw storage options. See [`storage_option`](Self::storage_option).
+    pub fn storage_options<K, V>(mut self, options: impl IntoIterator<Item = (K, V)>) -> Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+    {
+        for (k, v) in options {
+            self.storage_options.insert(k.into(), v.into());
+        }
+        self
+    }
+
+    /// Hybrid mode: data in the object store at `remote_url`, the WAL and ID
+    /// allocator in the local directory the builder was opened with.
+    ///
+    /// Configure the remote side with [`cloud_storage`](Self::cloud_storage),
+    /// [`storage_option`](Self::storage_option), or the environment.
+    pub fn hybrid(mut self, remote_url: &str) -> Self {
+        self.hybrid_remote_url = Some(remote_url.to_string());
+        self
+    }
+
+    /// Hybrid mode with a typed configuration.
+    #[deprecated(note = "use `.hybrid(url).cloud_storage(config)`")]
+    pub fn remote_storage(self, remote_url: &str, config: CloudStorageConfig) -> Self {
+        self.hybrid(remote_url).cloud_storage(config)
     }
 
     /// Open the database in read-only mode.
@@ -1987,110 +2031,117 @@ impl UniBuilder {
         // last writer rather than racing it. See `ScratchDir` (issue #167).
         let scratch_dir: Option<Arc<ScratchDir>> =
             self.temp_dir.take().map(|d| Arc::new(ScratchDir::new(d)));
-        let is_remote_uri = uri.contains("://");
+        let primary_is_url = uri.contains("://");
         let is_hybrid = self.hybrid_remote_url.is_some();
 
-        if is_hybrid && is_remote_uri {
+        if is_hybrid && primary_is_url {
             return Err(UniError::Internal(anyhow::anyhow!(
                 "Hybrid mode requires a local path as primary URI, found: {}",
                 uri
             )));
         }
 
-        let (storage_uri, data_store, local_store_opt) = if is_hybrid {
-            let remote_url = self.hybrid_remote_url.as_ref().unwrap();
-
-            // Remote Store (Data) - use explicit cloud_config if provided
-            let remote_store: Arc<dyn ObjectStore> = if let Some(cloud_cfg) = &self.cloud_config {
-                build_cloud_store(cloud_cfg).map_err(UniError::Internal)?
-            } else {
-                let url = url::Url::parse(remote_url).map_err(|e| {
-                    UniError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        e.to_string(),
-                    ))
-                })?;
-                let (os, _path) =
-                    object_store::parse_url(&url).map_err(|e| UniError::Internal(e.into()))?;
-                Arc::from(os)
-            };
-
-            // Local Store (WAL, IDs)
-            let path = PathBuf::from(&uri);
+        // The local directory, for a local store or a hybrid store's WAL and
+        // ID allocator.
+        let ensure_dir = |path: &Path| -> Result<()> {
             if path.exists() {
                 if self.fail_if_exists {
                     return Err(UniError::Internal(anyhow::anyhow!(
                         "Database already exists at {}",
-                        uri
+                        path.display()
                     )));
                 }
             } else {
                 if !self.create_if_missing {
-                    return Err(UniError::NotFound { path: path.clone() });
+                    return Err(UniError::NotFound {
+                        path: path.to_path_buf(),
+                    });
                 }
-                std::fs::create_dir_all(&path).map_err(UniError::Io)?;
+                std::fs::create_dir_all(path).map_err(UniError::Io)?;
             }
+            Ok(())
+        };
+        if !primary_is_url {
+            ensure_dir(Path::new(&uri))?;
+        } else if uri.starts_with("file://") {
+            let path = url::Url::parse(&uri)
+                .ok()
+                .and_then(|u| u.to_file_path().ok())
+                .ok_or_else(|| UniError::Internal(anyhow::anyhow!("Invalid file URI: {}", uri)))?;
+            ensure_dir(&path)?;
+        }
 
-            let local_store = Arc::new(
-                LocalFileSystem::new_with_prefix(&path).map_err(|e| UniError::Io(e.into()))?,
-            );
-
-            // For hybrid, storage_uri is the remote URL (since StorageManager loads datasets from there)
-            // But we must provide the correct store to other components manually.
-            (
-                remote_url.clone(),
-                remote_store,
-                Some(local_store as Arc<dyn ObjectStore>),
+        // One resolved location for everything but a hybrid store's WAL and
+        // ID allocator: the data root `R`, its option map, and the store
+        // handles both object-store clients are built from.
+        let location_spec = uni_store::location::LocationSpec {
+            uri: self
+                .hybrid_remote_url
+                .clone()
+                .unwrap_or_else(|| uri.clone()),
+            cloud: self.cloud_config.clone(),
+            options: self.storage_options.clone(),
+        };
+        let location = uni_store::location::StoreLocation::resolve_from_env(
+            &location_spec,
+            &self.config.object_store,
+        )
+        .await
+        .map_err(UniError::Internal)?;
+        if is_hybrid
+            && matches!(
+                location.kind(),
+                uni_store::location::LocationKind::Local { .. }
             )
-        } else if is_remote_uri {
-            // Remote Only - use explicit cloud_config if provided
-            let remote_store: Arc<dyn ObjectStore> = if let Some(cloud_cfg) = &self.cloud_config {
-                build_cloud_store(cloud_cfg).map_err(UniError::Internal)?
-            } else {
-                let url = url::Url::parse(&uri).map_err(|e| {
-                    UniError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        e.to_string(),
-                    ))
-                })?;
-                let (os, _path) =
-                    object_store::parse_url(&url).map_err(|e| UniError::Internal(e.into()))?;
-                Arc::from(os)
-            };
+        {
+            return Err(UniError::Internal(anyhow::anyhow!(
+                "Hybrid mode needs an object-store URI for the data, found: {}",
+                location_spec.uri
+            )));
+        }
 
-            (uri.clone(), remote_store, None)
+        // Decide the layout before anything writes.
+        let layout = match location.probe_layout().await.map_err(UniError::Internal)? {
+            uni_store::location::LayoutProbe::Recorded(layout) => layout,
+            uni_store::location::LayoutProbe::Inferred(layout) => {
+                if !self.read_only {
+                    location
+                        .write_layout_marker(layout)
+                        .await
+                        .map_err(UniError::Internal)?;
+                }
+                layout
+            }
+            uni_store::location::LayoutProbe::LegacyPrefixed { root_files } => {
+                return Err(UniError::Internal(anyhow::anyhow!(
+                    "The store at {root} looks like one written by uni-db 5.3.0 or older, \
+                     which kept a prefixed store's metadata at the bucket root: its tables \
+                     are under the prefix, but its catalog is not, and the bucket root holds \
+                     {files}. Several prefixes may share those files, so they are not \
+                     adopted automatically. To open this store, copy the bucket root's \
+                     catalog/ (and, for a remote-only store, wal/ and id_allocator.json) \
+                     under the prefix, then open it again. See the storage documentation \
+                     on stores written before 5.4.",
+                    root = location.root_uri(),
+                    files = root_files.join(", "),
+                )));
+            }
+        };
+
+        let data_store = location.meta_store();
+        // The store the WAL and ID allocator use, when it is not `data_store`.
+        let local_store_opt: Option<Arc<dyn ObjectStore>> = if is_hybrid {
+            Some(Arc::new(
+                LocalFileSystem::new_with_prefix(&uri).map_err(|e| UniError::Io(e.into()))?,
+            ))
         } else {
-            // Local Only
-            let path = PathBuf::from(&uri);
-            let storage_path = path.join("storage");
-
-            if path.exists() {
-                if self.fail_if_exists {
-                    return Err(UniError::Internal(anyhow::anyhow!(
-                        "Database already exists at {}",
-                        uri
-                    )));
-                }
-            } else {
-                if !self.create_if_missing {
-                    return Err(UniError::NotFound { path: path.clone() });
-                }
-                std::fs::create_dir_all(&path).map_err(UniError::Io)?;
-            }
-
-            // Ensure storage directory exists
-            if !storage_path.exists() {
-                std::fs::create_dir_all(&storage_path).map_err(UniError::Io)?;
-            }
-
-            let store = Arc::new(
-                LocalFileSystem::new_with_prefix(&path).map_err(|e| UniError::Io(e.into()))?,
-            );
-            (
-                storage_path.to_string_lossy().to_string(),
-                store.clone() as Arc<dyn ObjectStore>,
-                Some(store as Arc<dyn ObjectStore>),
-            )
+            None
+        };
+        // The local directory those live in, when there is one.
+        let wal_fs_root: Option<PathBuf> = if is_hybrid {
+            Some(PathBuf::from(&uri))
+        } else {
+            location.fs_root().map(Path::to_path_buf)
         };
 
         // Canonical schema location in metadata catalog.
@@ -2106,7 +2157,15 @@ impl UniBuilder {
             Err(object_store::Error::NotFound { .. }) => false,
             Err(e) => return Err(UniError::Internal(e.into())),
         };
-        if !has_catalog_schema {
+        // A read-only open writes nothing: it reads the legacy file in place.
+        let mut schema_load_path = schema_obj_path.clone();
+        if !has_catalog_schema && self.read_only {
+            match data_store.head(&legacy_schema_obj_path).await {
+                Ok(_) => schema_load_path = legacy_schema_obj_path.clone(),
+                Err(object_store::Error::NotFound { .. }) => {}
+                Err(e) => return Err(UniError::Internal(e.into())),
+            }
+        } else if !has_catalog_schema {
             match data_store.get(&legacy_schema_obj_path).await {
                 Ok(result) => {
                     let bytes = result
@@ -2131,14 +2190,14 @@ impl UniBuilder {
         // Load schema (SchemaManager::load creates a default if missing)
         // Schema is always in data_store (Remote or Local)
         let schema_manager = Arc::new(
-            SchemaManager::load_from_store(data_store.clone(), &schema_obj_path)
+            SchemaManager::load_from_store(data_store.clone(), &schema_load_path)
                 .await
                 .map_err(UniError::Internal)?,
         );
-        // A local-only store keeps the catalog under the database directory;
-        // a restore syncs it there before clearing its intent.
-        if !is_hybrid && !is_remote_uri {
-            schema_manager.set_local_file(PathBuf::from(&uri).join(schema_obj_path.as_ref()));
+        // A store in a local directory keeps the catalog under it; a restore
+        // syncs it there before clearing its intent.
+        if !is_hybrid && let Some(root) = location.fs_root() {
+            schema_manager.set_local_file(root.join(schema_obj_path.as_ref()));
         }
 
         // Hoisted above the persisted-Locy-rule load below, which needs the
@@ -2163,11 +2222,7 @@ impl UniBuilder {
         // object-store URIs (those containing "://") have no local
         // sidecar root — for those, persistence falls back to
         // `NullPersistence`.
-        let persistence_data_path: Option<std::path::PathBuf> = if is_remote_uri {
-            None
-        } else {
-            Some(std::path::PathBuf::from(&uri))
-        };
+        let persistence_data_path: Option<std::path::PathBuf> = wal_fs_root.clone();
         let custom_persistence_sink =
             register_builtin_plugins(&plugin_registry, persistence_data_path.as_deref()).expect(
                 "BuiltinPlugin / ApocCorePlugin registration must succeed against fresh registry",
@@ -2190,38 +2245,21 @@ impl UniBuilder {
             locy_rules_obj_path,
         ));
 
-        let lancedb_storage_options = self
-            .cloud_config
-            .as_ref()
-            .map(Self::cloud_config_to_lancedb_storage_options);
-
         // Declarations (and the restore and recovery paths that redo their
         // storage half on open) judge the values a property already holds by
         // the write path's rule; see `uni_store::storage::declared_values`.
         uni_store::storage::declared_values::install_coercion(uni_query::coerce_declared_value);
 
-        let mut storage = if is_hybrid || is_remote_uri {
-            // Preserve explicit cloud settings (endpoint, credentials, path style)
-            // by reusing the constructed remote store.
-            StorageManager::new_with_store_and_storage_options(
-                &storage_uri,
-                data_store.clone(),
-                schema_manager.clone(),
-                self.config.clone(),
-                lancedb_storage_options.clone(),
-            )
-            .await
-            .map_err(UniError::Internal)?
-        } else {
-            // Local mode keeps using a storage-path-scoped local store.
-            StorageManager::new_with_config(
-                &storage_uri,
-                schema_manager.clone(),
-                self.config.clone(),
-            )
-            .await
-            .map_err(UniError::Internal)?
-        };
+        // Tables, indexes and snapshot manifests, under the location's table
+        // root, with both object-store clients configured from one map.
+        let mut storage = StorageManager::new_with_location(
+            &location,
+            layout,
+            schema_manager.clone(),
+            self.config.clone(),
+        )
+        .await
+        .map_err(UniError::Internal)?;
 
         // Stamp the registry onto the owned StorageManager (before it is
         // shared) so compaction and L0 flush route custom CRDT merges through
@@ -2300,6 +2338,8 @@ impl UniBuilder {
             .await
             .map_err(UniError::Internal)?;
 
+        // The manifest the store resumes from, for its ID marks.
+        let mut recovered_manifest = latest_snapshot.clone();
         let (start_version, wal_high_water_mark) = if let Some(ref snapshot) = latest_snapshot {
             (
                 snapshot.version_high_water_mark + 1,
@@ -2324,22 +2364,35 @@ impl UniBuilder {
                     .list_snapshots()
                     .await
                     .map_err(UniError::Internal)?;
-                if let Some(last_id) = snapshot_ids.last() {
+                // Snapshot ids are random, so the newest manifest is the one
+                // with the highest version mark, not the last id listed.
+                let mut newest: Option<uni_common::core::snapshot::SnapshotManifest> = None;
+                for id in &snapshot_ids {
                     let manifest = storage
                         .snapshot_manager()
-                        .load_snapshot(last_id)
+                        .load_snapshot(id)
                         .await
                         .map_err(UniError::Internal)?;
+                    let key = |m: &uni_common::core::snapshot::SnapshotManifest| {
+                        (m.version_high_water_mark, m.created_at)
+                    };
+                    if newest.as_ref().is_none_or(|n| key(&manifest) > key(n)) {
+                        newest = Some(manifest);
+                    }
+                }
+                if let Some(manifest) = newest {
                     tracing::warn!(
                         "Latest snapshot pointer missing but found manifest '{}'. \
                          Recovering version {}.",
-                        last_id,
+                        manifest.snapshot_id,
                         manifest.version_high_water_mark
                     );
-                    (
+                    let resume = (
                         manifest.version_high_water_mark + 1,
                         manifest.wal_high_water_mark,
-                    )
+                    );
+                    recovered_manifest = Some(manifest);
+                    resume
                 } else {
                     return Err(UniError::Internal(anyhow::anyhow!(
                         "Snapshot manifests directory exists but contains no valid manifests. \
@@ -2395,15 +2448,53 @@ impl UniBuilder {
             }
         };
 
+        // The allocator never starts below an ID already in use, even when
+        // its file is gone (a hybrid store's lost local directory): the
+        // manifest records how far it had reserved, and a manifest from
+        // before that was recorded falls back to the tables themselves.
+        let id_floor = match recovered_manifest
+            .as_ref()
+            .and_then(|m| Some((m.next_vid?, m.next_eid?)))
+        {
+            Some(marks) => marks,
+            // A manifest from before the marks: the counter file, when it
+            // exists, is still authoritative; only its loss needs the scan.
+            None if recovered_manifest.is_some()
+                && matches!(
+                    id_store
+                        .head(&object_store::path::Path::from("id_allocator.json"))
+                        .await,
+                    Err(object_store::Error::NotFound { .. })
+                ) =>
+            {
+                let floor = storage.scan_id_floor().await.map_err(UniError::Internal)?;
+                tracing::info!(
+                    vid = floor.0,
+                    eid = floor.1,
+                    "Snapshot manifest predates ID marks; ID allocation floor taken from the tables"
+                );
+                floor
+            }
+            None => (0, 0),
+        };
         let allocator = Arc::new(
-            IdAllocator::new(
+            IdAllocator::open(
                 id_store,
                 object_store::path::Path::from("id_allocator.json"),
                 1000,
+                uni_store::runtime::id_allocator::AllocatorOptions {
+                    floor: id_floor,
+                    // Only a local directory has no other writer that a lost
+                    // update could race.
+                    allow_unconditional: wal_fs_root.is_some(),
+                },
             )
             .await
             .map_err(UniError::Internal)?,
         );
+        storage
+            .snapshot_manager()
+            .set_id_allocator(allocator.clone());
 
         // When WAL is enabled the construction is identical for every
         // storage layout (remote-only, hybrid, or local): the only
@@ -2538,6 +2629,7 @@ impl UniBuilder {
             .await?;
             if replayed > 0 {
                 info!("WAL recovery: replayed {} mutations", replayed);
+                writer.raise_id_floor_from_l0().await;
             }
             // Replay re-resolves edge types by name and may intern a
             // schemaless one the catalog never saved (a crash between a
@@ -3154,80 +3246,6 @@ impl UniBuilder {
     pub fn build_sync(self) -> Result<Uni> {
         let rt = uni_store::runtime::io_runtime::io_runtime().map_err(UniError::Io)?;
         rt.block_on(self.build())
-    }
-
-    fn cloud_config_to_lancedb_storage_options(
-        config: &CloudStorageConfig,
-    ) -> std::collections::HashMap<String, String> {
-        let mut opts = std::collections::HashMap::new();
-
-        match config {
-            CloudStorageConfig::S3 {
-                bucket,
-                region,
-                endpoint,
-                access_key_id,
-                secret_access_key,
-                session_token,
-                virtual_hosted_style,
-            } => {
-                opts.insert("bucket".to_string(), bucket.clone());
-                opts.insert(
-                    "virtual_hosted_style_request".to_string(),
-                    virtual_hosted_style.to_string(),
-                );
-
-                if let Some(r) = region {
-                    opts.insert("region".to_string(), r.clone());
-                }
-                if let Some(ep) = endpoint {
-                    opts.insert("endpoint".to_string(), ep.clone());
-                    if ep.starts_with("http://") {
-                        opts.insert("allow_http".to_string(), "true".to_string());
-                    }
-                }
-                if let Some(v) = access_key_id {
-                    opts.insert("access_key_id".to_string(), v.clone());
-                }
-                if let Some(v) = secret_access_key {
-                    opts.insert("secret_access_key".to_string(), v.clone());
-                }
-                if let Some(v) = session_token {
-                    opts.insert("session_token".to_string(), v.clone());
-                }
-            }
-            CloudStorageConfig::Gcs {
-                bucket,
-                service_account_path,
-                service_account_key,
-            } => {
-                opts.insert("bucket".to_string(), bucket.clone());
-                if let Some(v) = service_account_path {
-                    opts.insert("service_account".to_string(), v.clone());
-                    opts.insert("application_credentials".to_string(), v.clone());
-                }
-                if let Some(v) = service_account_key {
-                    opts.insert("service_account_key".to_string(), v.clone());
-                }
-            }
-            CloudStorageConfig::Azure {
-                container,
-                account,
-                access_key,
-                sas_token,
-            } => {
-                opts.insert("account_name".to_string(), account.clone());
-                opts.insert("container_name".to_string(), container.clone());
-                if let Some(v) = access_key {
-                    opts.insert("access_key".to_string(), v.clone());
-                }
-                if let Some(v) = sas_token {
-                    opts.insert("sas_token".to_string(), v.clone());
-                }
-            }
-        }
-
-        opts
     }
 }
 

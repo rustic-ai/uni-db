@@ -1332,9 +1332,20 @@ Inverted:       storage/indexes/{label}_{property}_inverted
 |---|---|---|
 | **Local** | Local filesystem at the URI path | Development, single-machine |
 | **Remote** | S3/GCS/Azure at the URI (e.g., `s3://bucket/path`) | Cloud production |
-| **Hybrid** | WAL + ID allocation local; bulk data in cloud | Low-latency writes + cloud durability |
+| **Hybrid** | WAL + ID allocation local; everything else in the object store | Low-latency writes + cloud durability |
 
-In hybrid mode, the local path contains `wal/` and ID allocation state, while `storage/` tables are in the remote object store.
+**One location, one layout.** `uni_store::location::StoreLocation` resolves the URI once (plain path, `file://`, `s3://`/`s3a://`, `gs://`/`gcs://`, `az://`, `abfss://`). It builds one option map that configures **both** object-store clients — uni's `object_store` 0.13 client (catalog, WAL, ID allocator) and Lance's 0.14 client (tables, indexes). Precedence, lowest first: environment (`AWS_*`, `GOOGLE_*`, `AZURE_*`), the URI, the typed `CloudStorageConfig`, raw `storage_options`. uni's handle is a `PrefixStore` rooted at the store root `R`, never at the bucket. Every store kind has the same layout under `R`:
+
+```text
+R/catalog/            schema.json, locy_rules.json, fork_registry.json, fork_schemas/, fork_tombstones/, layout.json
+R/wal/                primary WAL           (hybrid: local directory)
+R/id_allocator.json                         (hybrid: local directory)
+R/storage/            *.lance, indexes/, catalog/{manifests,latest,forks/,…}, wal_forks/, index_rebuild_state.json
+```
+
+`R/catalog/layout.json` records `standard`, or `flat` for a remote store written before 5.4 at its bucket root with its tables directly under `R`. Flat stores are recognized and never moved, because Lance writes full table URIs into fork `BasePath`s. Before 5.4, a remote store under a prefix kept its metadata at the bucket root. Such a store is refused at open (`LayoutProbe::LegacyPrefixed`) until its catalog is copied under the prefix, since several prefixes may share those root files. Layout detection runs before anything writes, and a read-only open writes no marker.
+
+**ID floor.** Every saved manifest records the end of the ID allocator's reserved ranges (`next_vid` / `next_eid`, stamped centrally in `SnapshotManager::save_snapshot`). At open, the allocator starts at `max(id_allocator.json, manifest marks)`. When the manifest predates the marks, it starts above `max(_vid, src_vid, dst_vid)` / `max(_eid)` scanned from the main tables. After WAL replay, it starts above any id in L0. Losing a hybrid store's local directory therefore cannot reuse an id. The allocator's conditional writes create the file only if it is absent, and adopt another creator's batches on `AlreadyExists`. On a store without conditional writes they fall back to a plain put only for a local directory.
 
 ### Temporary Databases and Teardown Ordering
 
@@ -9105,7 +9116,7 @@ let config = UniConfig {
 
 ### CloudStorageConfig
 
-Configure cloud backends via environment variables or explicit config:
+Configure cloud backends through the environment, a typed `CloudStorageConfig` (`.cloud_storage(cfg)` in Rust, `.cloud_config(dict)` in Python), or raw `object_store` options (`.storage_option(k, v)` / `.storage_options(dict)` / `--storage-option`). A `None` field falls back to the environment, and options win over both. `Debug` redacts keys, tokens and service-account secrets.
 
 #### Amazon S3
 
@@ -9121,7 +9132,7 @@ CloudStorageConfig::S3 {
 }
 ```
 
-Environment: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_DEFAULT_REGION`, `AWS_SESSION_TOKEN`
+Environment: every `AWS_*` variable `object_store` knows (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_S3`, `AWS_ALLOW_HTTP`, web-identity and container credentials). An environment `AWS_SESSION_TOKEN` applies alongside static keys from the configuration (Lance merges every environment key a map lacks, so both clients see it). With an endpoint and no region, `us-east-1` is used. Without either, the bucket's region is looked up.
 
 ```python
 # Python
@@ -9142,7 +9153,7 @@ CloudStorageConfig::Gcs {
 }
 ```
 
-Environment: `GOOGLE_APPLICATION_CREDENTIALS`
+Environment: `GOOGLE_*` (including `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_SERVICE_ACCOUNT`), `SERVICE_ACCOUNT`. An emulator is set with `google_base_url`.
 
 ```python
 db = UniBuilder.open("gs://my-bucket/graph-data").build()
@@ -9159,10 +9170,12 @@ CloudStorageConfig::Azure {
 }
 ```
 
-Environment: `AZURE_STORAGE_ACCOUNT`, `AZURE_STORAGE_ACCESS_KEY`
+Environment: `AZURE_*` (`AZURE_STORAGE_ACCOUNT_NAME`, `AZURE_STORAGE_ACCOUNT_KEY`, client-secret, federated-token and MSI keys), `IDENTITY_ENDPOINT`. Azurite is selected with `azure_storage_use_emulator`. `CloudStorageConfig::azure_from_env` returns an error when no account is set.
+
+URIs follow `object_store`: `az://container/prefix` (account from the config or environment) or `abfss://container@account.dfs.core.windows.net/prefix`. The older `az://account/container/prefix` form is still read, with a deprecation warning, when the configured account (typed config, storage option or environment) is the URI's host. Named AWS profiles are not read by uni's client (object_store 0.13 has no profile support): export their credentials into the environment.
 
 ```python
-db = UniBuilder.open("az://account/container/graph-data").build()
+db = UniBuilder.open("az://container/graph-data").build()
 ```
 
 ### FileSandboxConfig
@@ -9250,7 +9263,7 @@ let db = Uni::open("./dev-graph")
 ### S3 Production
 
 ```rust
-// Uses env vars: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION
+// Configured from the environment: AWS_* variables, IRSA, ECS task roles, ...
 let db = Uni::open("s3://prod-bucket/graph")
     .config(UniConfig {
         cache_size: 4 * 1024 * 1024 * 1024,  // 4 GB
@@ -9276,10 +9289,12 @@ let db = Uni::open("s3://prod-bucket/graph")
 
 ```rust
 let db = Uni::open("./local-wal")
-    .remote_storage("s3://prod-bucket/graph", CloudStorageConfig::s3_from_env("prod-bucket"))
+    .hybrid("s3://prod-bucket/graph")
     .build()
     .await?;
 ```
+
+A hybrid store has one host, and commits not yet flushed live only in its local WAL. Losing the local directory loses those commits but no ids: the reopened store resumes allocation above the manifest's ID marks.
 
 ## Plugin Loading & Trust
 
